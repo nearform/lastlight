@@ -4,7 +4,7 @@ VERDICT: APPROVED
 
 ## Summary
 
-The GitHub OAuth implementation correctly mirrors the existing Slack flow across all seven changed files. All critical security properties are in place: CSRF state cookie (httpOnly, SameSite=Lax, 10-minute TTL), `redirect: "manual"` on the org membership fetch to block silently-followed 302s, `encodeURIComponent` on org and login in the membership URL, and User-Agent header on all GitHub API calls. 247 tests pass (13 new cases covering the full happy/unhappy path matrix including 302 membership rejection).
+The GitHub OAuth implementation faithfully mirrors the existing Slack OAuth flow across all seven changed files. All critical security controls are correctly in place: CSRF state cookie with httpOnly, SameSite=Lax, and 10-minute TTL; `redirect: "manual"` on the org membership fetch to prevent silent 302-following; `encodeURIComponent` on both org slug and login in the membership URL; User-Agent header on all GitHub API calls; and the `GITHUB_ALLOWED_ORG` requirement that prevents accidental "allow anyone" misconfiguration. Tests pass: 247/247 (13 new cases), 0 failures.
 
 ## Issues
 
@@ -18,7 +18,7 @@ None.
 
 ### Suggestions
 
-- `src/admin/routes.ts:398-401` — `userRes.json()` is called without first checking `userRes.ok`. If GitHub's `/user` endpoint returns a non-200 (e.g. a 401 due to a revoked token), the body is a GitHub error object with no `login` field, so the `!userInfo.login` guard at line 399 correctly blocks auth and returns 502. However, the log message "missing login field" obscures the root cause. Consider an explicit status check first:
+- `src/admin/routes.ts:398` — `userRes.json()` is called without first checking `userRes.ok`. A non-200 from GitHub's `/user` endpoint (e.g. 401 revoked token, 429 rate limit with HTML body) will throw a JSON parse error, which is caught by the outer `try/catch` and surfaced as a generic "OAuth exchange failed" 502. The `!userInfo.login` guard at line 399 handles the case where the body parses but has no `login`. Consider an explicit `userRes.ok` check before calling `.json()` to surface a more actionable log message and avoid throwing on non-JSON bodies:
   ```typescript
   if (!userRes.ok) {
     console.error(`GitHub /user returned ${userRes.status}`);
@@ -26,11 +26,13 @@ None.
   }
   ```
 
-- `src/admin/routes.ts:362` — The architect plan specified `["read:user", "read:org"]` as scopes for the org-restriction case. The implementation instead requests only `["read:org"]` (and `[]` for the wildcard case), with a comment noting that `GET /user` does not require a scope to return `login`. This is correct per GitHub's API docs (the `login` field is always present on the authenticated user response without any additional scope), but it is a deviation from the plan worth acknowledging. No functional issue.
+- `src/admin/routes.ts:362` — The implementation requests `["read:org"]` for the org-restriction case and `[]` for the wildcard case. The architect plan specified `["read:user", "read:org"]`. The deviation is correct per GitHub's API docs (`login` is always present on authenticated user responses without a `read:user` scope), but worth noting in a comment for future readers who might assume `read:user` is needed.
 
 ### Nits
 
-- `src/admin/routes.test.ts` — The `mockGithubFetch` helper defaults `orgStatus` to `204` when `undefined`. This default is never exercised in the tests that actually omit `orgStatus` (those tests use `githubAllowedOrg: "*"` and assert that the `/orgs/` URL is never called). A brief comment on the helper would clarify this to future readers.
+- `src/admin/routes.test.ts` (mockGithubFetch helper) — The default `orgStatus: 204` is never actually exercised by tests that omit `orgStatus`; those tests use `githubAllowedOrg: "*"` and assert no `/orgs/` call is made. A short comment would clarify the default is defensive, not load-bearing.
+
+- `src/admin/routes.ts:338-340` — Minor: the Slack callback's outer `catch` logs `"OAuth exchange failed"` while the new GitHub catch logs `"GitHub OAuth exchange failed"`. Consistent, but the Slack version could benefit from the same specificity in a future cleanup (pre-existing, not introduced here).
 
 ## Test Results
 
@@ -39,6 +41,9 @@ None.
 
  Test Files  12 passed (12)
       Tests  247 passed | 1 todo (248)
-   Start at  02:49:33
-   Duration  1.54s (transform 257ms, setup 0ms, import 452ms, tests 218ms, environment 1ms)
+   Start at  03:29:39
+   Duration  1.57s (transform 242ms, setup 0ms, import 444ms, tests 202ms, environment 0ms)
 ```
+
+TypeScript (server): `npx tsc --noEmit` — no errors.
+TypeScript (dashboard): `cd dashboard && npx tsc -b` — no errors.
