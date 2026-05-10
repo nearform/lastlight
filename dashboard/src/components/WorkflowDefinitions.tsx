@@ -15,6 +15,7 @@ import {
   AtSymbolIcon,
   ChatBubbleLeftRightIcon,
   ArrowPathIcon,
+  NoSymbolIcon,
 } from "@heroicons/react/24/outline";
 import { CodeBlock } from "./timeline/CodeBlock";
 import {
@@ -58,6 +59,8 @@ export function WorkflowDefinitions() {
   const [yamlText, setYamlText] = useState<string | null>(null);
   const [yamlError, setYamlError] = useState<string | null>(null);
   const [triggers, setTriggers] = useState<TriggerInfo[]>([]);
+  const [enabled, setEnabled] = useState<boolean>(true);
+  const [toggleBusy, setToggleBusy] = useState(false);
 
   const [selectedPhaseName, setSelectedPhaseName] = useState<string | null>(null);
 
@@ -98,6 +101,7 @@ export function WorkflowDefinitions() {
     setYamlText(null);
     setYamlError(null);
     setTriggers([]);
+    setEnabled(true);
     setSelectedPhaseName(null);
 
     api
@@ -106,6 +110,7 @@ export function WorkflowDefinitions() {
         if (cancelled) return;
         setDefinition(res.workflow);
         setTriggers(res.triggers ?? []);
+        setEnabled(res.enabled ?? true);
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -132,6 +137,23 @@ export function WorkflowDefinitions() {
     return definition.phases.find((p) => p.name === selectedPhaseName) ?? null;
   }, [definition, selectedPhaseName]);
 
+  const handleToggle = useCallback(async () => {
+    if (!selectedName || toggleBusy) return;
+    setToggleBusy(true);
+    try {
+      const res = await api.toggleWorkflow(selectedName);
+      setEnabled(res.enabled);
+      // Mirror into the sidebar so the badge updates without a refetch.
+      setWorkflows((prev) =>
+        prev.map((wf) => (wf.name === res.name ? { ...wf, enabled: res.enabled } : wf)),
+      );
+    } catch (err) {
+      console.error("[workflows] toggle failed", err);
+    } finally {
+      setToggleBusy(false);
+    }
+  }, [selectedName, toggleBusy]);
+
   return (
     <div className="flex flex-1 overflow-hidden">
       {/* List panel */}
@@ -154,7 +176,17 @@ export function WorkflowDefinitions() {
                   )}
                 >
                   <div className="flex items-center gap-2 w-full">
-                    <span className="text-sm font-mono text-base-content/90 truncate">{wf.name}</span>
+                    <span
+                      className={clsx(
+                        "text-sm font-mono truncate",
+                        wf.enabled === false ? "text-base-content/40 line-through" : "text-base-content/90",
+                      )}
+                    >
+                      {wf.name}
+                    </span>
+                    {wf.enabled === false && (
+                      <span className="badge badge-error badge-xs font-mono">disabled</span>
+                    )}
                     <span className="ml-auto badge badge-ghost badge-xs font-mono">{wf.kind}</span>
                   </div>
                   {wf.description && (
@@ -193,9 +225,35 @@ export function WorkflowDefinitions() {
                 {definition && (
                   <span className="badge badge-ghost badge-sm font-mono">{definition.kind}</span>
                 )}
+                {!enabled && (
+                  <span className="badge badge-error badge-sm gap-1">
+                    <NoSymbolIcon className="w-3 h-3" />
+                    disabled
+                  </span>
+                )}
+                <button
+                  onClick={handleToggle}
+                  disabled={toggleBusy}
+                  className={clsx(
+                    "btn btn-xs",
+                    enabled ? "btn-outline btn-error" : "btn-success",
+                  )}
+                  title={
+                    enabled
+                      ? "Disable this workflow — every trigger source (cron, webhooks, mentions, Slack) will be blocked. Persists across restarts."
+                      : "Re-enable this workflow."
+                  }
+                >
+                  {enabled ? "Disable" : "Enable"}
+                </button>
               </div>
               {definition?.description && (
                 <p className="text-sm text-base-content/60 mt-1">{definition.description}</p>
+              )}
+              {!enabled && (
+                <p className="text-2xs text-error/80 mt-1">
+                  All triggers blocked. In-flight runs continue; new dispatches are skipped.
+                </p>
               )}
             </div>
             {triggers.length > 0 && (

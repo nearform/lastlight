@@ -61,6 +61,19 @@ export interface CronOverride {
   updatedBy: string | null;
 }
 
+/**
+ * Per-workflow kill switch persisted to SQLite. When `enabled` is false,
+ * `runSimpleWorkflow` short-circuits and does not create a `workflow_runs`
+ * row — applies to every trigger source (cron, webhooks, mentions, Slack).
+ * No row at all means "enabled" (default).
+ */
+export interface WorkflowOverride {
+  name: string;
+  enabled: boolean;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
 export interface ExecutionRecord {
   id: string;
   triggerType: "webhook" | "cron" | "chat" | "api";
@@ -170,6 +183,13 @@ export class StateDb {
         name TEXT PRIMARY KEY,
         enabled INTEGER NOT NULL DEFAULT 1,
         schedule TEXT,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS workflow_overrides (
+        name TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 1,
         updated_at TEXT NOT NULL,
         updated_by TEXT
       );
@@ -1253,6 +1273,62 @@ export class StateDb {
       name: row.name as string,
       enabled: (row.enabled as number) === 1,
       schedule: (row.schedule as string | null) ?? null,
+      updatedAt: row.updated_at as string,
+      updatedBy: (row.updated_by as string | null) ?? null,
+    };
+  }
+
+  // ── Workflow overrides (kill switch) ───────────────────────────
+
+  /**
+   * Cheap check used by every dispatch path. Returns true unless an explicit
+   * `workflow_overrides` row says otherwise.
+   */
+  isWorkflowEnabled(name: string): boolean {
+    const row = this.db
+      .prepare(`SELECT enabled FROM workflow_overrides WHERE name = ?`)
+      .get(name) as { enabled: number } | undefined;
+    if (!row) return true;
+    return row.enabled === 1;
+  }
+
+  getWorkflowOverride(name: string): WorkflowOverride | null {
+    const row = this.db
+      .prepare(`SELECT name, enabled, updated_at, updated_by FROM workflow_overrides WHERE name = ?`)
+      .get(name) as Record<string, unknown> | undefined;
+    return row ? this.deserializeWorkflowOverride(row) : null;
+  }
+
+  getAllWorkflowOverrides(): Map<string, WorkflowOverride> {
+    const rows = this.db
+      .prepare(`SELECT name, enabled, updated_at, updated_by FROM workflow_overrides`)
+      .all() as Record<string, unknown>[];
+    const map = new Map<string, WorkflowOverride>();
+    for (const row of rows) {
+      const o = this.deserializeWorkflowOverride(row);
+      map.set(o.name, o);
+    }
+    return map;
+  }
+
+  setWorkflowEnabled(name: string, enabled: boolean, updatedBy?: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO workflow_overrides (name, enabled, updated_at, updated_by)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at,
+           updated_by = excluded.updated_by`,
+      )
+      .run(name, enabled ? 1 : 0, now, updatedBy ?? null);
+  }
+
+  private deserializeWorkflowOverride(row: Record<string, unknown>): WorkflowOverride {
+    return {
+      name: row.name as string,
+      enabled: (row.enabled as number) === 1,
       updatedAt: row.updated_at as string,
       updatedBy: (row.updated_by as string | null) ?? null,
     };

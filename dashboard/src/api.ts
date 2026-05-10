@@ -118,6 +118,8 @@ export interface WorkflowSummary {
   phaseCount: number;
   hasDag: boolean;
   triggerKinds: TriggerKind[];
+  /** Per-workflow kill switch. Disabled workflows skip every dispatch path. */
+  enabled: boolean;
 }
 
 /**
@@ -362,8 +364,13 @@ export const api = {
     req<{ workflow: WorkflowDefinition }>(`/workflows/${encodeURIComponent(name)}`),
   workflows: () => req<{ workflows: WorkflowSummary[] }>("/workflows"),
   workflowFull: (name: string) =>
-    req<{ workflow: WorkflowFullDefinition; triggers: TriggerInfo[] }>(
+    req<{ workflow: WorkflowFullDefinition; triggers: TriggerInfo[]; enabled: boolean }>(
       `/workflows/${encodeURIComponent(name)}/full`,
+    ),
+  toggleWorkflow: (name: string) =>
+    req<{ name: string; enabled: boolean }>(
+      `/workflows/${encodeURIComponent(name)}/toggle`,
+      { method: "POST" },
     ),
   workflowYaml: (name: string) => reqText(`/workflows/${encodeURIComponent(name)}/yaml`),
   workflowPrompt: (name: string, path: string) =>

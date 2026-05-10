@@ -83,6 +83,17 @@ export async function runSimpleWorkflow(
   approvalConfig?: ApprovalGateConfig,
   bootstrapLabel = "lastlight:bootstrap",
 ): Promise<WorkflowResult> {
+  // Kill switch — if an admin has disabled this workflow in the dashboard,
+  // skip every trigger source (cron, webhooks, mentions, Slack) without
+  // creating a workflow_runs row. Returning success=true keeps callers
+  // (router, cron tick, etc.) from treating this as an error.
+  if (!db.isWorkflowEnabled(workflowName)) {
+    console.log(
+      `[workflow] skipped "${workflowName}" — disabled in admin dashboard`,
+    );
+    return { success: true, phases: [] };
+  }
+
   const definition = getWorkflow(workflowName);
   const { owner, repo, issueNumber, prNumber } = request;
   const notify = callbacks.postComment || (async () => {});

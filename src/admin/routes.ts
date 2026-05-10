@@ -701,6 +701,7 @@ export function createAdminRoutes(
   // List all agent workflows for the dashboard's Workflows browser.
   app.get("/workflows", (c) => {
     const defs = listAgentWorkflows();
+    const overrides = db.getAllWorkflowOverrides();
     const workflows = defs.map((def) => ({
       name: def.name,
       kind: def.kind,
@@ -709,6 +710,7 @@ export function createAdminRoutes(
       phaseCount: def.phases.length,
       hasDag: def.phases.some((p) => Array.isArray(p.depends_on) && p.depends_on.length > 0),
       triggerKinds: getWorkflowTriggerKinds(def.name),
+      enabled: overrides.get(def.name)?.enabled ?? true,
     }));
     workflows.sort((a, b) => a.name.localeCompare(b.name));
     return c.json({ workflows });
@@ -750,11 +752,30 @@ export function createAdminRoutes(
       return c.json({
         workflow: def,
         triggers: getWorkflowTriggers(name),
+        enabled: db.isWorkflowEnabled(name),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ error: `workflow definition not found: ${name}`, detail: msg }, 404);
     }
+  });
+
+  // Toggle the kill switch. Mirrors POST /crons/:name/toggle. Persisted to
+  // `workflow_overrides`; reads happen on every dispatch in
+  // `runSimpleWorkflow`, so the change applies to in-flight cron ticks and
+  // webhook dispatches without needing a restart.
+  app.post("/workflows/:name/toggle", async (c) => {
+    const name = c.req.param("name");
+    try {
+      // Validate the name actually exists before persisting an override.
+      getWorkflow(name);
+    } catch {
+      return c.json({ error: `unknown workflow: ${name}` }, 404);
+    }
+    const current = db.isWorkflowEnabled(name);
+    const next = !current;
+    db.setWorkflowEnabled(name, next, "admin");
+    return c.json({ name, enabled: next });
   });
 
   // Raw YAML file content — preserves comments and formatting for the
