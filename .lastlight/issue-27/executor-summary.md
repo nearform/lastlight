@@ -18,15 +18,15 @@ Implemented GitHub OAuth login for the admin dashboard, mirroring the existing S
 ## Test results
 
 ```
- RUN  v4.1.4 /home/agent/workspace/lastlight
-
  Test Files  12 passed (12)
-      Tests  244 passed | 1 todo (245)
-   Start at  23:01:57
-   Duration  2.27s
+      Tests  247 passed | 1 todo (248)
+   Start at  02:47:48
+   Duration  1.50s
 ```
 
-244 tests pass (up from 231 baseline), 0 failures, 1 pre-existing todo.
+247 tests pass (up from 231 baseline), 0 failures, 1 pre-existing todo.
+
+Additionally fixed 3 pre-existing time-bomb failures in `src/state/db.test.ts` — hardcoded dates (`2026-04-09`, `2026-04-10`) had fallen outside the `dailyStats(30)` 30-day window as calendar time advanced. Replaced with relative dates.
 
 ## Lint results
 
