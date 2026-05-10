@@ -9,6 +9,10 @@ import type { StateDb, WorkflowRun } from "../state/db.js";
 import { tailJsonl } from "./tail.js";
 import { listRunningContainers, killContainer, getContainerStats } from "./docker.js";
 import { authMiddleware, createToken, verifyToken } from "./auth.js";
+import { Cron } from "croner";
+import type { CronScheduler } from "../cron/scheduler.js";
+import { getCronWorkflows } from "../workflows/loader.js";
+import { MANAGED_REPOS } from "../managed-repos.js";
 
 export interface AdminConfig {
   stateDir: string;
@@ -19,6 +23,12 @@ export interface AdminConfig {
   adminNotifier?: (msg: string) => Promise<void>;
   /** Optional callback to actively resume a paused workflow after dashboard approval */
   resumeWorkflow?: (workflowRun: WorkflowRun, sender: string) => Promise<void>;
+  /**
+   * Cron scheduler. When supplied, the admin Crons tab can list/toggle/edit
+   * registered cron jobs. Optional so the admin routes still mount in
+   * environments where the scheduler isn't running (tests, CLI).
+   */
+  cronScheduler?: CronScheduler;
   /** Slack OAuth config (optional — enables "Login with Slack" on dashboard) */
   slackOAuthClientId?: string;
   slackOAuthClientSecret?: string;
@@ -729,6 +739,145 @@ export function createAdminRoutes(
       });
     }
     return c.json({ status: body.decision });
+  });
+
+  // ── Crons ──────────────────────────────────────────────────────
+
+  // List every cron defined in workflows/cron-*.yaml, merged with the
+  // override row (if any) and the live scheduler state.
+  app.get("/crons", (c) => {
+    const overrides = db.getAllCronOverrides();
+    const liveByName = new Map(
+      (config.cronScheduler?.list() ?? []).map((j) => [j.name, j]),
+    );
+    const defs = getCronWorkflows();
+    const crons = defs.map((def) => {
+      const override = overrides.get(def.name) ?? null;
+      const enabled = override ? override.enabled : true;
+      const live = liveByName.get(def.name) ?? null;
+      const recentFailures = db.consecutiveFailures(def.workflow);
+      // Find the most recent workflow_run for this cron's workflow
+      const recent = db.recentWorkflowRuns(50).find((r) => r.workflowName === def.workflow);
+      return {
+        name: def.name,
+        workflow: def.workflow,
+        schedule: override?.schedule ?? def.schedule,
+        originalSchedule: def.schedule,
+        enabled,
+        registered: !!live,
+        nextRun: live?.nextRun?.toISOString() ?? null,
+        lastRun: recent?.startedAt ?? null,
+        lastStatus: recent?.status ?? null,
+        recentFailures,
+        context: { repos: MANAGED_REPOS, ...def.context },
+        override: override
+          ? {
+              updatedAt: override.updatedAt,
+              updatedBy: override.updatedBy,
+              hasScheduleOverride: override.schedule != null,
+            }
+          : null,
+      };
+    });
+    return c.json({ crons });
+  });
+
+  // Toggle the enabled bit for a cron. Updates the scheduler in lockstep so
+  // the change takes effect immediately (no restart).
+  app.post("/crons/:name/toggle", async (c) => {
+    if (!config.cronScheduler) {
+      return c.json({ error: "cron scheduler not configured" }, 503);
+    }
+    const name = c.req.param("name");
+    const def = getCronWorkflows().find((d) => d.name === name);
+    if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
+    const override = db.getCronOverride(name);
+    const currentlyEnabled = override ? override.enabled : true;
+    const nextEnabled = !currentlyEnabled;
+    db.setCronOverride(name, { enabled: nextEnabled, updatedBy: "admin" });
+    if (nextEnabled) {
+      // Re-register with the (possibly overridden) schedule
+      const schedule = override?.schedule || def.schedule;
+      if (config.cronScheduler.has(name)) {
+        config.cronScheduler.update({
+          name,
+          schedule,
+          workflow: def.workflow,
+          context: { repos: MANAGED_REPOS, ...def.context },
+        });
+      } else {
+        config.cronScheduler.register({
+          name,
+          schedule,
+          workflow: def.workflow,
+          context: { repos: MANAGED_REPOS, ...def.context },
+        });
+      }
+    } else {
+      config.cronScheduler.unregister(name);
+    }
+    return c.json({ name, enabled: nextEnabled });
+  });
+
+  // Persist a schedule override and apply it to the scheduler. Validates the
+  // expression with croner before saving so a bad expression returns 400 and
+  // the live cron isn't disturbed.
+  app.post("/crons/:name/schedule", async (c) => {
+    if (!config.cronScheduler) {
+      return c.json({ error: "cron scheduler not configured" }, 503);
+    }
+    const name = c.req.param("name");
+    const def = getCronWorkflows().find((d) => d.name === name);
+    if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
+    const body = await c.req.json<{ schedule: string }>();
+    const schedule = (body.schedule ?? "").trim();
+    if (!schedule) return c.json({ error: "schedule is required" }, 400);
+    try {
+      // Construct a paused Cron purely to validate the pattern, then dispose.
+      const probe = new Cron(schedule, { paused: true }, () => {});
+      probe.stop();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return c.json({ error: `invalid schedule: ${msg}` }, 400);
+    }
+    db.setCronOverride(name, { schedule, updatedBy: "admin" });
+    const override = db.getCronOverride(name);
+    if (override?.enabled !== false) {
+      config.cronScheduler.update({
+        name,
+        schedule,
+        workflow: def.workflow,
+        context: { repos: MANAGED_REPOS, ...def.context },
+      });
+    }
+    return c.json({ name, schedule });
+  });
+
+  // Drop the override row and re-register the cron at its YAML default.
+  app.delete("/crons/:name/override", (c) => {
+    if (!config.cronScheduler) {
+      return c.json({ error: "cron scheduler not configured" }, 503);
+    }
+    const name = c.req.param("name");
+    const def = getCronWorkflows().find((d) => d.name === name);
+    if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
+    db.clearCronOverride(name);
+    if (config.cronScheduler.has(name)) {
+      config.cronScheduler.update({
+        name,
+        schedule: def.schedule,
+        workflow: def.workflow,
+        context: { repos: MANAGED_REPOS, ...def.context },
+      });
+    } else {
+      config.cronScheduler.register({
+        name,
+        schedule: def.schedule,
+        workflow: def.workflow,
+        context: { repos: MANAGED_REPOS, ...def.context },
+      });
+    }
+    return c.json({ name, schedule: def.schedule, enabled: true });
   });
 
   return app;

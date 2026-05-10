@@ -3,5 +3,4 @@ name: weekly-security-scan
 schedule: "0 10 * * 1"
 workflow: security-review
 context:
-  mode: scan
   deliverSlackSummary: true

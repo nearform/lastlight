@@ -1,6 +1,7 @@
 import type { CronJob } from "./scheduler.js";
 import { MANAGED_REPOS } from "../managed-repos.js";
 import { getCronWorkflows } from "../workflows/loader.js";
+import type { StateDb } from "../state/db.js";
 
 /**
  * Get cron jobs based on configuration.
@@ -10,8 +11,11 @@ import { getCronWorkflows } from "../workflows/loader.js";
  * which is invoked on each tick. When webhooks are enabled
  * (WEBHOOK_SECRET is set), jobs with `condition.unless: webhooksEnabled`
  * are filtered out — those are handled in real-time via webhook events.
+ *
+ * When `db` is supplied, cron_overrides rows applied: disabled jobs are
+ * dropped and schedule overrides replace the YAML schedule.
  */
-export function getJobs(opts?: { webhooksEnabled?: boolean }): CronJob[] {
+export function getJobs(opts?: { webhooksEnabled?: boolean; db?: StateDb }): CronJob[] {
   const jobs: CronJob[] = [];
 
   let cronDefs = getCronWorkflows();
@@ -21,10 +25,14 @@ export function getJobs(opts?: { webhooksEnabled?: boolean }): CronJob[] {
     cronDefs = cronDefs.filter((def) => def.condition?.unless !== "webhooksEnabled");
   }
 
+  const overrides = opts?.db?.getAllCronOverrides() ?? new Map();
+
   for (const def of cronDefs) {
+    const override = overrides.get(def.name);
+    if (override && !override.enabled) continue;
     jobs.push({
       name: def.name,
-      schedule: def.schedule,
+      schedule: override?.schedule || def.schedule,
       workflow: def.workflow,
       // Merge managed repos into the context the workflow receives
       context: { repos: MANAGED_REPOS, ...def.context },

@@ -9,6 +9,14 @@ import { useSessionStream } from "./hooks/useSessionStream";
 import { UsageFooter } from "./components/UsageFooter";
 import { WorkflowList } from "./components/WorkflowList";
 import { HomePage } from "./components/HomePage";
+import { CronsList } from "./components/CronsList";
+import {
+  HomeIcon,
+  RectangleStackIcon,
+  CubeTransparentIcon,
+  ChatBubbleLeftRightIcon,
+  ClockIcon,
+} from "@heroicons/react/24/outline";
 import {
   useUrlState,
   enumParser,
@@ -20,11 +28,11 @@ import {
 } from "./hooks/useUrlState";
 
 type AuthState = "checking" | "required" | "ok";
-type Tab = "home" | "sessions" | "chat-sessions" | "workflows";
+type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "crons";
 
 const PAGE_SIZE = 50;
 
-const TABS = ["home", "workflows", "sessions", "chat-sessions"] as const;
+const TABS = ["home", "workflows", "sessions", "chat-sessions", "crons"] as const;
 
 const SESSION_SOURCE_PATHS: Record<"sessions" | "chat-sessions", string> = {
   sessions: "/admin/api/sessions",
@@ -237,31 +245,32 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         streamStatus={status}
         onLogout={onLogout}
       />
-      <div className="flex border-b border-base-300 bg-base-200/60 px-4 gap-1">
-        <button
-          className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px ${tab === "home" ? "border-primary text-primary" : "border-transparent text-base-content/50 hover:text-base-content/80"}`}
-          onClick={() => setTab("home")}
-        >
-          Home
-        </button>
-        <button
-          className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px ${tab === "workflows" ? "border-primary text-primary" : "border-transparent text-base-content/50 hover:text-base-content/80"}`}
-          onClick={() => setTab("workflows")}
-        >
-          Workflows
-        </button>
-        <button
-          className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px ${tab === "sessions" ? "border-primary text-primary" : "border-transparent text-base-content/50 hover:text-base-content/80"}`}
-          onClick={() => setTab("sessions")}
-        >
-          Sandbox Sessions
-        </button>
-        <button
-          className={`px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px ${tab === "chat-sessions" ? "border-primary text-primary" : "border-transparent text-base-content/50 hover:text-base-content/80"}`}
-          onClick={() => setTab("chat-sessions")}
-        >
-          Chat Sessions
-        </button>
+      <div className="flex border-b border-base-300 bg-base-200/60 px-3 gap-1">
+        {(
+          [
+            { id: "home", label: "Home", Icon: HomeIcon },
+            { id: "workflows", label: "Workflows", Icon: RectangleStackIcon },
+            { id: "sessions", label: "Sandbox Sessions", Icon: CubeTransparentIcon },
+            { id: "chat-sessions", label: "Chat Sessions", Icon: ChatBubbleLeftRightIcon },
+            { id: "crons", label: "Crons", Icon: ClockIcon },
+          ] as const
+        ).map(({ id, label, Icon }) => {
+          const active = tab === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setTab(id as Tab)}
+              className={`relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors border-b-2 -mb-px ${
+                active
+                  ? "border-primary text-primary bg-primary/10"
+                  : "border-transparent text-base-content/70 hover:text-base-content hover:bg-base-300/50"
+              }`}
+            >
+              <Icon className={`h-4 w-4 ${active ? "" : "opacity-70"}`} />
+              <span className={active ? "font-semibold" : ""}>{label}</span>
+            </button>
+          );
+        })}
       </div>
       {tab === "home" ? (
         <HomePage
@@ -308,6 +317,21 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             />
           </div>
         </div>
+      ) : tab === "crons" ? (
+        <CronsList
+          onOpenRuns={(workflow) => {
+            // Widen the time window so an old "last run" (a weekly cron may
+            // not have fired in days) is actually visible — the workflows tab
+            // defaults to the last day.
+            setTimeRange("all");
+            const url = new URL(window.location.href);
+            url.searchParams.set("workflow", workflow);
+            url.searchParams.set("range", "all");
+            url.searchParams.delete("run");
+            window.history.replaceState(null, "", url.toString());
+            setTab("workflows");
+          }}
+        />
       ) : (
         <WorkflowList timeRange={timeRange} query={debouncedQuery} />
       )}

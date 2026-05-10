@@ -52,6 +52,15 @@ export interface WorkflowRun {
   finishedAt?: string;
 }
 
+export interface CronOverride {
+  name: string;
+  enabled: boolean;
+  /** Cron expression overriding the YAML default; null means use the YAML value. */
+  schedule: string | null;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
 export interface ExecutionRecord {
   id: string;
   triggerType: "webhook" | "cron" | "chat" | "api";
@@ -156,6 +165,14 @@ export class StateDb {
       );
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_trigger ON workflow_runs(trigger_id, status);
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+
+      CREATE TABLE IF NOT EXISTS cron_overrides (
+        name TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        schedule TEXT,
+        updated_at TEXT NOT NULL,
+        updated_by TEXT
+      );
 
       CREATE TABLE IF NOT EXISTS workflow_approvals (
         id TEXT PRIMARY KEY,
@@ -1175,6 +1192,70 @@ export class StateDb {
     const statuses = row.node_statuses ? JSON.parse(row.node_statuses) as Record<string, string> : {};
     statuses[nodeName] = status;
     this.db.prepare(`UPDATE workflow_runs SET node_statuses = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(statuses), now, workflowId);
+  }
+
+  // ── Cron overrides ─────────────────────────────────────────────
+
+  /** Get the override row for a single cron, or null if none. */
+  getCronOverride(name: string): CronOverride | null {
+    const row = this.db
+      .prepare(`SELECT name, enabled, schedule, updated_at, updated_by FROM cron_overrides WHERE name = ?`)
+      .get(name) as Record<string, unknown> | undefined;
+    return row ? this.deserializeCronOverride(row) : null;
+  }
+
+  /** All override rows keyed by cron name. */
+  getAllCronOverrides(): Map<string, CronOverride> {
+    const rows = this.db
+      .prepare(`SELECT name, enabled, schedule, updated_at, updated_by FROM cron_overrides`)
+      .all() as Record<string, unknown>[];
+    const map = new Map<string, CronOverride>();
+    for (const row of rows) {
+      const o = this.deserializeCronOverride(row);
+      map.set(o.name, o);
+    }
+    return map;
+  }
+
+  /**
+   * Upsert an override. Pass only the fields you want to change — undefined
+   * fields preserve the existing value (or default to enabled=1, schedule=null
+   * on insert).
+   */
+  setCronOverride(
+    name: string,
+    patch: { enabled?: boolean; schedule?: string | null; updatedBy?: string },
+  ): void {
+    const now = new Date().toISOString();
+    const existing = this.getCronOverride(name);
+    const enabled = patch.enabled ?? existing?.enabled ?? true;
+    const schedule = patch.schedule === undefined ? existing?.schedule ?? null : patch.schedule;
+    this.db
+      .prepare(
+        `INSERT INTO cron_overrides (name, enabled, schedule, updated_at, updated_by)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           enabled = excluded.enabled,
+           schedule = excluded.schedule,
+           updated_at = excluded.updated_at,
+           updated_by = excluded.updated_by`,
+      )
+      .run(name, enabled ? 1 : 0, schedule, now, patch.updatedBy ?? null);
+  }
+
+  /** Remove the override entirely (revert to YAML defaults). */
+  clearCronOverride(name: string): void {
+    this.db.prepare(`DELETE FROM cron_overrides WHERE name = ?`).run(name);
+  }
+
+  private deserializeCronOverride(row: Record<string, unknown>): CronOverride {
+    return {
+      name: row.name as string,
+      enabled: (row.enabled as number) === 1,
+      schedule: (row.schedule as string | null) ?? null,
+      updatedAt: row.updated_at as string,
+      updatedBy: (row.updated_by as string | null) ?? null,
+    };
   }
 
   private deserializeApproval(row: Record<string, unknown>): WorkflowApproval {

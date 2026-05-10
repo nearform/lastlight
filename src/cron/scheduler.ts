@@ -96,6 +96,35 @@ export class CronScheduler {
     console.log(`[cron] Registered: ${job.name} (${job.schedule})`);
   }
 
+  /** Whether a cron with this name is currently registered. */
+  has(name: string): boolean {
+    return this.jobs.has(name);
+  }
+
+  /** Stop and remove a single cron. No-op if not registered. */
+  unregister(name: string): void {
+    const job = this.jobs.get(name);
+    if (!job) return;
+    job.stop();
+    this.jobs.delete(name);
+    console.log(`[cron] Stopped: ${name}`);
+  }
+
+  /** Replace an existing cron with a new schedule/context. Equivalent to unregister + register. */
+  update(job: CronJob): void {
+    this.unregister(job.name);
+    this.register(job);
+  }
+
+  /** Snapshot of registered jobs with the croner-computed next-run timestamp. */
+  list(): Array<{ name: string; schedule: string; nextRun: Date | null }> {
+    return Array.from(this.jobs.entries()).map(([name, cronJob]) => ({
+      name,
+      schedule: cronJob.getPattern() ?? "",
+      nextRun: cronJob.nextRun(),
+    }));
+  }
+
   /** Stop all cron jobs */
   stopAll(): void {
     for (const [name, job] of this.jobs) {

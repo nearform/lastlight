@@ -1,6 +1,8 @@
 # Security Review Skill
 
-Scan the target repository for security vulnerabilities using open-source tools (`npm audit`, `semgrep`, `gitleaks`) plus a Claude code read-pass. File **one summary issue per run**, dated, containing a GitHub task list of all findings — Renovate-style. Honour `SECURITY.md` to suppress accepted risks and false positives.
+Review **what changed in the repo since the last scan** with a security lens, focused on SDLC concerns that GitHub's built-in scanners (Dependabot, Code Scanning, Secret Scanning) and Renovate don't cover. File **one summary issue per run**, dated, containing a GitHub task list of any findings — Renovate-style. Honour `SECURITY.md` to suppress accepted risks and false positives.
+
+This skill is intentionally **not** a general-purpose vulnerability scanner. It does not run `npm audit` (Dependabot does that). It does not run `semgrep --config auto` over the whole tree (GitHub Code Scanning does that). It looks at the diff since the prior scan and surfaces things that humans introduced — workflow/CI hardening, auth changes, secret handling in new code, supply-chain churn.
 
 A maintainer can later comment on the summary issue to break selected findings out into individual issues (see the `security-feedback` skill). The exact issue structure defined in **§ Issue format** below is the contract between the two skills — **if you change it here, update `skills/security-feedback/SKILL.md` in lockstep**.
 
@@ -12,13 +14,29 @@ A maintainer can later comment on the summary issue to break selected findings o
 
 ## Procedure
 
-### 1. Clone and read SECURITY.md
+### 1. Clone, find the prior-scan anchor, read SECURITY.md
 
-Clone the target repo via `mcp_github_clone_repo`. If `SECURITY.md` exists at the repo root, parse:
+1. Clone the target repo via `mcp_github_clone_repo`.
+2. **Find the prior scan anchor.** Query GitHub issues with label `security-scan` (open OR closed), sorted by created descending, and take the most recent. Read its body for the `<!-- lastlight-security-scan-ts: ... -->` HTML comment and use that ISO-8601 timestamp as `priorScanTs`. If no prior scan issue exists, set `priorScanTs = now - 30 days` (bootstrap floor — keeps the first run finite).
+3. Read `SECURITY.md` at the repo root (if present) and parse:
+   - **Tool config** — per-tool severity floors (default: `medium`; skip `low`/`info`)
+   - **Accepted risks table** — fingerprints of findings the maintainer has accepted
+   - **False positives table** — fingerprints classified as not real
 
-- **Tool config** — per-tool severity floors (default: `medium`; skip `low`/`info`)
-- **Accepted risks table** — fingerprints of findings the maintainer has accepted
-- **False positives table** — fingerprints classified as not real
+### 1.5. Compute the changeset
+
+This step decides what gets reviewed. **Most weeks the diff is dominated by Renovate/Dependabot churn — strip that out so the actual scope is what humans wrote.**
+
+1. List commits since the anchor:
+   `git log --since="${priorScanTs}" --pretty=format:'%H|%an|%ae|%s'`
+2. Drop a commit when **any** of these match:
+   - Author email matches `*[bot]@users.noreply.github.com` AND author name is `dependabot[bot]`, `renovate[bot]`, or `github-actions[bot]`.
+   - Commit subject starts with one of: `chore(deps)`, `chore(deps-dev)`, `build(deps)`, `build(deps-dev)`, `fix(deps)`.
+3. For the remaining commits, accumulate changed files via `git diff-tree --no-commit-id --name-only -r ${sha}` into a deduplicated `changedFiles` set.
+4. From `changedFiles`, drop entries that are **only** to lockfiles: `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb`, `Gemfile.lock`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `composer.lock`. Lockfile-only commits are also skipped at step 2 by the dep-prefix filter, but this catches lockfile changes that slipped in via human commits with mixed scope.
+5. Build a short list `commitsReviewed` = the surviving commits with `{ shortSha, subject }` (used in § 9 for the scope note).
+
+**Early exit.** If `changedFiles` is empty after filtering, **stop here**. Do not run any scanner. Do not create an issue. Do not emit a Slack message. Write the run summary file (§ 10) recording "no relevant changes since prior scan" and return.
 
 ### 2. Ensure labels exist
 
@@ -33,19 +51,43 @@ Call `mcp_github_create_label` for each of (idempotent — ignore 422 "already e
 | `p2-medium` | `fbca04` | Severity |
 | `p3-low` | `0e8a16` | Severity |
 
-### 3. Run scanners
+### 3. Run change-scoped scanners
 
-Run only the scanners applicable to the repo:
+Three sources of findings — all narrowed to the changeset. **Do not** run `npm audit` (Dependabot covers that) and **do not** run `semgrep --config auto .` over the whole tree (GitHub Code Scanning covers that and the noise drowns the signal).
 
-- **npm audit**: if `package.json` exists, `npm audit --json`.
-- **semgrep**: `semgrep --config auto --json .` from the repo root.
-- **gitleaks**: `gitleaks detect --no-git --report-format json --report-path /tmp/gitleaks.json .` then read `/tmp/gitleaks.json`.
-- **Claude read-pass**: spot-check auth flows, crypto usage, shell exec (`execSync`, `exec`, `spawn`), env-variable handling, webhook signature verification, secret/token management. Flag:
-  - Unescaped shell exec arguments
-  - Hardcoded secrets or default-empty secret env vars
-  - Auth tokens in URLs or logs
-  - World-writable file/socket permissions
-  - Missing or bypassable webhook signature verification
+- **Gitleaks (commit range)**: scan only commits since the anchor.
+  `gitleaks detect --source . --log-opts="--since=${priorScanTs}" --report-format json --report-path /tmp/gitleaks.json`
+  Catches secrets introduced in the new history. Belt-and-braces with GitHub Secret Scanning, which doesn't detect every key shape and doesn't run on private repos without GHAS.
+
+- **Semgrep (changed files only)**: targeted, not whole-tree.
+  `semgrep --config auto --json $(printf -- '--include=%s ' "${changedFiles[@]}")`
+  Only emits findings for files that actually changed. Far less noise than a full-tree scan; everything reported is in the diff under review.
+
+- **Claude SDLC review** — the unique value-add of this skill. Read the diff (`git diff ${priorScanTs}..HEAD`) plus the current contents of changed files, with this checklist. Each match becomes a finding with `tool: "claude"` and the severity from § 4.
+
+  - **GitHub Actions / CI** (any change under `.github/workflows/*.yml`):
+    - Action references pinned by floating ref (`uses: foo/bar@main`, `@master`, `@v1`) instead of a commit SHA — supply-chain risk if the action is compromised.
+    - `pull_request_target` triggers that check out the PR head ref — well-known privilege-escalation pattern.
+    - Missing top-level or job-level `permissions:` block (GITHUB_TOKEN defaults to write).
+    - `${{ secrets.* }}` interpolation into shell scripts, `run:` blocks, or echo statements where the secret can land in logs.
+    - Untrusted PR body / title / branch name interpolated into a `run:` block (script injection).
+  - **Dockerfile / docker-compose changes**:
+    - Base images on floating tags (`FROM node:latest`, no digest) introduced in this diff.
+    - New `RUN curl … | sh` / `wget … | bash` pipelines.
+    - New `--privileged`, `--cap-add`, `security_opt: []` removals, or `read_only: false` flips on services that previously had hardening.
+    - New ports exposed to the host without an obvious need.
+  - **Auth / authorization surfaces**: any modified middleware, route guard, role check, CORS config, JWT verification, OAuth handler, webhook signature verification (HMAC compare, `crypto.timingSafeEqual` removed/replaced with `===`).
+  - **Secret handling in new code**:
+    - New `process.env.*` reads — flag if the value flows into a log statement or HTTP response.
+    - New code paths that log Authorization headers, cookies, or tokens.
+    - Hardcoded literals matching key/URL shapes that gitleaks missed.
+  - **Shell exec on attacker-influenced args**: new `execSync` / `exec` / `spawn` calls where any argument is non-static (string concatenation, template-literal interpolation, request-derived values).
+  - **Supply-chain churn** (`package.json` diff):
+    - **New** top-level entries in `dependencies` / `devDependencies` (not version bumps — those are filtered out at § 1.5 step 2). Flag the package name + publisher; new typosquat-shaped names get higher severity.
+    - Removed integrity controls: switching `npm ci` → `npm install` in CI, removing `--ignore-scripts`, removing provenance flags.
+  - **Release / publish flows**: changes to publish scripts, `npm publish` invocations, release CI steps, signing keys, or anything that touches what users download.
+
+If the only changes are docs / tests / unrelated config and none of the above categories applied, the run can return **no findings** legitimately — proceed to § 8 (early exit).
 
 ### 4. Normalize findings
 
@@ -114,7 +156,7 @@ Assign `item` numbers 1-based, top-to-bottom, across the **kept** findings (so i
 
 ### 8. Early exit: no findings
 
-If the filtered-and-capped list is empty, **do not** create the summary issue. Write the run summary file (§ 10) and emit the all-clear Slack line (§ 11) if requested.
+If the filtered-and-capped list is empty, **do not** create the summary issue. Write the run summary file (§ 10) recording why (typically "no relevant changes" or "scanners clean") and return **silently** — do not emit a Slack message. The cron is intentionally low-noise: only changes that produce actual findings are surfaced.
 
 ### 9. Compose and create the summary issue
 
@@ -134,14 +176,19 @@ Write `{issueDir}/security-summary.md`:
 # Security Scan Summary — {repo}
 
 **Date**: {YYYY-MM-DD}
+**Prior scan anchor**: {priorScanTs} (issue #{priorScanIssueNumber} or "bootstrap floor")
+**Commits reviewed**: {N} (after filtering Renovate/Dependabot/lockfile-only commits)
+**Changed files**: {nFiles}
 **Summary issue**: #{summaryIssueNumber} (or "none — no findings")
 
-**Scanner raw counts**: npm-audit: {n}, semgrep: {n}, gitleaks: {n}, claude: {n}
+**Scanner raw counts**: gitleaks: {n}, semgrep: {n}, claude: {n}
 **After severity floor**: {n}
 **After SECURITY.md filtering**: {n} (filed)
 **Suppressed**: {n} (accepted: {nA}, false-positive: {nFP})
 {if overflow > 0}: **Overflow**: {overflow} lower-severity findings omitted from the summary issue (cap: ALL critical/high + first 10 medium/low)
 ```
+
+When the run early-exited at § 1.5 (no relevant changes), the file should still be written and should explicitly state `**Early exit**: no human commits since prior scan` so the operator can see in `data/sandboxes/.../.lastlight/` why the cron tick produced no issue.
 
 ### 11. Slack summary (optional)
 
@@ -149,13 +196,11 @@ If `context.deliverSlackSummary` is `true`, output as the final agent response:
 
 - **With findings**:
   ```
-  *Security scan: {repo}* — {n} findings filed in #{summaryIssueNumber}
+  *Security scan: {repo}* — {n} findings filed in #{summaryIssueNumber} ({N} commits since {priorScanDate})
   Critical: {nC} · High: {nH} · Medium: {nM} · Low: {nL}
   ```
-- **No findings**:
-  ```
-  *Security scan: {repo}* — clean (no findings above severity floor).
-  ```
+- **No findings, but the changeset was non-empty** (scanners ran clean): emit nothing to Slack — staying silent matches the cron's low-noise design. The run summary file (§ 10) still records what was reviewed.
+- **Early exit at § 1.5** (no human commits, or only deps/lockfile churn): emit nothing.
 
 Otherwise output the contents of the run summary file as the final response.
 
@@ -177,7 +222,7 @@ Security scan — YYYY-MM-DD
 
 ### Body
 
-The body is assembled from seven blocks, in this exact order, separated by blank lines:
+The body is assembled from eight blocks, in this exact order, separated by blank lines:
 
 ```
 {header comments}
@@ -189,6 +234,8 @@ The body is assembled from seven blocks, in this exact order, separated by blank
 {summary table}
 
 {suppression note}
+
+{scope note}
 
 {overflow note — omitted when overflow == 0}
 
@@ -211,11 +258,13 @@ Three HTML comments, each on its own line, in this exact order:
 
 #### Block 2 — intro paragraph
 
-Exactly one paragraph, verbatim:
+Exactly one paragraph, with the commit count and short-SHA range substituted:
 
 ```
-Automated security scan on YYYY-MM-DD. Each row below is a finding — tick the box once the underlying issue is resolved or recorded in `SECURITY.md`.
+Reviewing {N} commits since {priorScanDate} ({firstShortSha}..{lastShortSha}). Findings here focus on SDLC and workflow changes — Dependabot, GitHub Code Scanning, and Renovate handle the rest. Tick the box once the underlying issue is resolved or recorded in `SECURITY.md`.
 ```
+
+`{N}` is the size of `commitsReviewed` from § 1.5. `{priorScanDate}` is the YYYY-MM-DD of the prior scan (or the bootstrap floor). When `N == 1`, both short SHAs are the same — render as `({onlyShortSha})` rather than `({sha}..{sha})`.
 
 #### Block 3 — how-to-respond section
 
@@ -269,7 +318,17 @@ Suppressed by `SECURITY.md`: {nSuppressed} (accepted: {nA}, false-positives: {nF
 
 Set each count to 0 when N/A. Emit the line unconditionally so the structure is stable.
 
-#### Block 6 — overflow note
+#### Block 6 — scope note
+
+Always emit, immediately after the suppression note. Lists the human (non-bot) commits actually reviewed, so a maintainer can see what diff produced these findings:
+
+```
+> Commits reviewed: {short-sha-1} {subject-1}, {short-sha-2} {subject-2}, …
+```
+
+Cap at 10 entries; if there are more, append ` +{N} more` after the last item. Subjects are truncated to 60 chars with `…` if longer. Renovate/Dependabot commits are filtered out at § 1.5 and never appear here.
+
+#### Block 7 — overflow note
 
 Emit **only** when `overflow > 0`:
 
@@ -277,7 +336,7 @@ Emit **only** when `overflow > 0`:
 > **Note** — {overflow} lower-severity findings are not listed here. The cap is: ALL critical and high, plus the first 10 medium/low (after sort). Tighten `SECURITY.md` severity floors or break out items from this scan, then re-run to surface the rest.
 ```
 
-#### Block 7 — findings sections
+#### Block 8 — findings sections
 
 Four sections, in this **exact order** (Critical → High → Medium → Low). Always emit all four headers, even when a section has zero findings — the feedback skill relies on stable anchors.
 
@@ -379,7 +438,7 @@ A scan with 1 critical + 1 high finding renders like:
 <!-- lastlight-security-scan-date: 2026-04-21 -->
 <!-- lastlight-security-scan-ts: 2026-04-21T10:00:00Z -->
 
-Automated security scan on 2026-04-21. Each row below is a finding — tick the box once the underlying issue is resolved or recorded in `SECURITY.md`.
+Reviewing 3 commits since 2026-04-14 (a1b2c3d..f9e8d7c). Findings here focus on SDLC and workflow changes — Dependabot, GitHub Code Scanning, and Renovate handle the rest. Tick the box once the underlying issue is resolved or recorded in `SECURITY.md`.
 
 ## How to respond
 
@@ -402,6 +461,8 @@ Automated security scan on 2026-04-21. Each row below is a finding — tick the 
 | **Total**| **2** |
 
 Suppressed by `SECURITY.md`: 0 (accepted: 0, false-positives: 0). Below severity floor: 0.
+
+> Commits reviewed: a1b2c3d wire user-supplied repo into git clone, e5f6a7b add admin shell endpoint, f9e8d7c rotate webhook secret
 
 ## Findings
 

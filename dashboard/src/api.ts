@@ -273,4 +273,35 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ decision, reason }),
     }),
+  crons: () => req<{ crons: CronInfo[] }>("/crons"),
+  toggleCron: (name: string) =>
+    req<{ name: string; enabled: boolean }>(`/crons/${encodeURIComponent(name)}/toggle`, {
+      method: "POST",
+    }),
+  setCronSchedule: (name: string, schedule: string) =>
+    req<{ name: string; schedule: string }>(`/crons/${encodeURIComponent(name)}/schedule`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schedule }),
+    }),
+  resetCronOverride: (name: string) =>
+    req<{ name: string; schedule: string; enabled: boolean }>(
+      `/crons/${encodeURIComponent(name)}/override`,
+      { method: "DELETE" },
+    ),
 };
+
+export interface CronInfo {
+  name: string;
+  workflow: string;
+  schedule: string;
+  originalSchedule: string;
+  enabled: boolean;
+  registered: boolean;
+  nextRun: string | null;
+  lastRun: string | null;
+  lastStatus: string | null;
+  recentFailures: number;
+  context: Record<string, unknown>;
+  override: { updatedAt: string; updatedBy: string | null; hasScheduleOverride: boolean } | null;
+}

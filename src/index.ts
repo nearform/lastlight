@@ -357,9 +357,27 @@ async function main() {
     }
   }
 
+  // Construct the cron scheduler before mounting admin so the dashboard can
+  // list/toggle/edit registered cron jobs. Jobs are registered further down
+  // (after we know whether webhooks are enabled). The runner closes over
+  // `dispatchWorkflow`, which is defined earlier in this file.
+  const cron = new CronScheduler(db, async (workflowName, context) => {
+    const { dispatched, failures } = await dispatchCronWorkflow(
+      workflowName,
+      context,
+      dispatchWorkflow,
+    );
+    if (failures > 0) {
+      console.warn(
+        `[cron] ${workflowName}: ${failures}/${dispatched} dispatches failed`,
+      );
+    }
+  });
+
   // Mount admin dashboard (needs an HTTP server — use GitHub connector or create standalone)
   if (githubConnector) {
     mountAdmin(githubConnector.honoApp, db, {
+      cronScheduler: cron,
       stateDir: config.stateDir,
       sessionsDir: resolve(process.env.CLAUDE_HOME_DIR || "./data/claude-home"),
       adminPassword: process.env.ADMIN_PASSWORD ?? "",
@@ -1039,26 +1057,11 @@ async function main() {
     });
   });
 
-  // Set up cron scheduler — each cron tick dispatches an agent workflow by
-  // name. When the job context carries `repos: string[]` (weekly health /
-  // security / polling scans), fan out into one independent dispatch per
-  // repo with bounded concurrency. Each per-repo run becomes its own
-  // workflow_runs row so failures are isolated and resume works unchanged.
-  const cron = new CronScheduler(db, async (workflowName, context) => {
-    const { dispatched, failures } = await dispatchCronWorkflow(
-      workflowName,
-      context,
-      dispatchWorkflow,
-    );
-    if (failures > 0) {
-      console.warn(
-        `[cron] ${workflowName}: ${failures}/${dispatched} dispatches failed`,
-      );
-    }
-  });
-
+  // Cron jobs — fan out from each tick into one workflow run per managed repo
+  // (see dispatchCronWorkflow). The scheduler itself was constructed earlier
+  // so the admin dashboard could be wired with it.
   const webhooksEnabled = !!(config.webhookSecret && config.githubApp);
-  const jobs = getJobs({ webhooksEnabled });
+  const jobs = getJobs({ webhooksEnabled, db });
   for (const job of jobs) {
     cron.register(job);
   }
