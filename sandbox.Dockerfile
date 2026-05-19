@@ -18,27 +18,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root agent user
 RUN useradd -m -s /bin/bash agent
 
-# Install Claude Code CLI (binary goes to ~/.local/bin/)
-# Remove ~/.claude/ after install — entrypoint recreates it at runtime.
-USER agent
-RUN curl -fsSL https://claude.ai/install.sh | bash && rm -rf /home/agent/.claude
-USER root
-ENV PATH="/home/agent/.local/bin:${PATH}"
+# Install OpenCode CLI (pinned; see .spike/PHASE0-FINDINGS.md). Global npm
+# install puts the binary on PATH at /usr/local/bin/opencode for all users.
+RUN npm install -g --no-audit --no-fund opencode-ai@1.15.5
 
 # MCP server (baked at /app/)
 COPY mcp-github-app/package.json /app/mcp-github-app/package.json
 RUN cd /app/mcp-github-app && npm install --prefer-offline --no-audit && npm cache clean --force
 COPY mcp-github-app/ /app/mcp-github-app/
 
-# Skills (baked at /app/ — entrypoint symlinks into ~/.claude/skills/)
-COPY skills/ /app/skills/
-
-# Agent context (baked at /app/ — entrypoint cats into workspace/CLAUDE.md)
+# Agent context (baked at /app/ — entrypoint cats into workspace/AGENTS.md)
 COPY agent-context/ /app/agent-context/
 
-# Entrypoint + MCP config template
+# Entrypoint + OpenCode config template
 COPY deploy/sandbox-entrypoint.sh /app/sandbox-entrypoint.sh
-COPY deploy/mcp-config.tmpl.json /app/mcp-config.tmpl.json
+COPY deploy/opencode-config.tmpl.json /app/opencode-config.tmpl.json
 RUN chmod +x /app/sandbox-entrypoint.sh
 
 # Own app dir for agent user

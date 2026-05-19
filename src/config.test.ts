@@ -4,35 +4,30 @@ import type { ModelConfig } from './config.js';
 
 describe('resolveModel', () => {
   const models: ModelConfig = {
-    default: 'claude-sonnet-4-6',
-    architect: 'claude-opus-4-6',
-    chat: 'claude-haiku-4-5-20251001',
+    default: 'openai/gpt-5.3-codex',
+    architect: 'openai/gpt-5.4',
+    chat: 'openai/gpt-5.4-mini',
   };
 
   it('returns per-type override when present', () => {
-    expect(resolveModel(models, 'architect')).toBe('claude-opus-4-6');
+    expect(resolveModel(models, 'architect')).toBe('openai/gpt-5.4');
   });
 
   it('returns per-type override for chat', () => {
-    expect(resolveModel(models, 'chat')).toBe('claude-haiku-4-5-20251001');
+    expect(resolveModel(models, 'chat')).toBe('openai/gpt-5.4-mini');
   });
 
   it('falls back to default when no override exists', () => {
-    expect(resolveModel(models, 'unknown-type')).toBe('claude-sonnet-4-6');
+    expect(resolveModel(models, 'unknown-type')).toBe('openai/gpt-5.3-codex');
   });
 
   it('falls back to default for empty string type', () => {
-    expect(resolveModel(models, '')).toBe('claude-sonnet-4-6');
+    expect(resolveModel(models, '')).toBe('openai/gpt-5.3-codex');
   });
 });
 
 // For loadConfig tests we must ensure GITHUB_APP_ID is unset so the
 // function doesn't try to require companion GitHub App env vars.
-//
-// (Port resolution tests removed: loadConfig sources ./.env at call time
-// and unconditionally overrides empty stubbed env vars from disk, so any
-// dev machine that has WEBHOOK_PORT in its real .env makes the tests
-// flaky. The behaviour is exercised in dev anyway.)
 
 describe('loadConfig — model resolution', () => {
   beforeEach(() => {
@@ -41,16 +36,16 @@ describe('loadConfig — model resolution', () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it('returns default model claude-sonnet-4-6 when CLAUDE_MODEL not set', () => {
+  it('returns the OpenCode default model when CLAUDE_MODEL not set', () => {
     vi.stubEnv('CLAUDE_MODEL', '');
     const config = loadConfig();
-    expect(config.model).toBe('claude-sonnet-4-6');
+    expect(config.model).toBe('openai/gpt-5.3-codex');
   });
 
   it('uses CLAUDE_MODEL env var when set', () => {
-    vi.stubEnv('CLAUDE_MODEL', 'claude-opus-4-6');
+    vi.stubEnv('CLAUDE_MODEL', 'openai/gpt-5.4');
     const config = loadConfig();
-    expect(config.model).toBe('claude-opus-4-6');
+    expect(config.model).toBe('openai/gpt-5.4');
   });
 });
 
@@ -65,21 +60,21 @@ describe('loadConfig — model overrides via CLAUDE_MODELS', () => {
     vi.stubEnv('CLAUDE_MODELS', '');
     vi.stubEnv('CLAUDE_MODEL', '');
     const config = loadConfig();
-    expect(config.models.default).toBe('claude-sonnet-4-6');
+    expect(config.models.default).toBe('openai/gpt-5.3-codex');
   });
 
   it('parses valid CLAUDE_MODELS JSON and sets per-type overrides', () => {
-    vi.stubEnv('CLAUDE_MODELS', JSON.stringify({ architect: 'claude-opus-4-6', chat: 'claude-haiku-4-5-20251001' }));
+    vi.stubEnv('CLAUDE_MODELS', JSON.stringify({ architect: 'openai/gpt-5.4', chat: 'openai/gpt-5.4-mini' }));
     const config = loadConfig();
-    expect(config.models.architect).toBe('claude-opus-4-6');
-    expect(config.models.chat).toBe('claude-haiku-4-5-20251001');
+    expect(config.models.architect).toBe('openai/gpt-5.4');
+    expect(config.models.chat).toBe('openai/gpt-5.4-mini');
   });
 
   it('gracefully handles invalid CLAUDE_MODELS JSON and falls back to defaults', () => {
     vi.stubEnv('CLAUDE_MODELS', 'not-valid-json');
     vi.stubEnv('CLAUDE_MODEL', '');
     const config = loadConfig();
-    expect(config.models.default).toBe('claude-sonnet-4-6');
+    expect(config.models.default).toBe('openai/gpt-5.3-codex');
   });
 });
 

@@ -1,27 +1,29 @@
 import { readFileSync, readdirSync } from "fs";
 import { join, resolve } from "path";
-import { randomUUID } from "crypto";
-import { createTaskSandbox, type DockerSandbox } from "../sandbox/index.js";
-import { refreshGitAuth, type GitHubTokenPermissions } from "./git-auth.js";
+import type { GitHubTokenPermissions } from "./git-auth.js";
 
-/** Default directory for agent context files (soul, rules, etc.) */
+/**
+ * Default directory for agent context files (soul, rules, etc.). Concatenated
+ * into AGENTS.md inside the sandbox by the entrypoint; the harness only reads
+ * this when assembling a system prompt for non-sandbox paths.
+ */
 const AGENT_CONTEXT_DIR = resolve("agent-context");
 
 /**
- * Configuration for the Agent SDK executor.
+ * Configuration for the executor.
  */
 export interface ExecutorConfig {
-  /** Path to the MCP server config for GitHub tools */
+  /** Path to the MCP server config for GitHub tools (kept for legacy callers). */
   mcpConfigPath: string;
-  /** Working directory for the agent */
+  /** Working directory for the agent (used by the direct-fallback path). */
   cwd?: string;
-  /** Maximum conversation turns */
+  /** Maximum conversation turns. Unused by OpenCode runtime; kept for API stability. */
   maxTurns?: number;
-  /** Model to use */
+  /** Model id passed to the runtime (e.g. "openai/gpt-5.3-codex"). */
   model?: string;
-  /** Path to agent context directory (soul.md, rules.md, etc.) */
+  /** Path to agent context directory. */
   agentContextDir?: string;
-  /** Directory for persistent state (sessions, logs). Mounted as Docker volume. */
+  /** Directory for persistent state. */
   stateDir?: string;
   /** Directory for agent sandboxes (cloned repos). */
   sandboxDir?: string;
@@ -36,9 +38,9 @@ export interface ExecutionResult {
   turns: number;
   error?: string;
   durationMs: number;
-  /** Session id captured from the agent's stream-json `system/init` line. */
+  /** Session id captured from the runtime's stream. */
   sessionId?: string;
-  /** Total USD cost reported by Claude on the result message. */
+  /** Total USD cost reported by the runtime. Zero under OAuth/subscription auth. */
   costUsd?: number;
   /** Tokens billed as fresh input (no cache hit). */
   inputTokens?: number;
@@ -50,7 +52,7 @@ export interface ExecutionResult {
   outputTokens?: number;
   /** API-side duration (excludes orchestrator overhead). */
   apiDurationMs?: number;
-  /** Stop subtype from the result message ("success" / "error_*" / etc.). */
+  /** Mapped stop reason ("success" / "error_*" / etc.). */
   stopReason?: string;
 }
 
@@ -67,7 +69,7 @@ export interface GitSandboxAccess {
   allowMcpAppAuth?: boolean;
 }
 
-const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPermissions> = {
+export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPermissions> = {
   read: {
     contents: "read",
     issues: "read",
@@ -95,10 +97,11 @@ const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPermission
 };
 
 /**
- * Load all .md files from the agent-context directory and concatenate
- * them into a single system prompt string.
+ * Load all .md files from the agent-context directory and concatenate them
+ * into a single string. The sandbox entrypoint does this independently to
+ * produce AGENTS.md; this helper exists for in-process callers (e.g. chat).
  */
-function loadAgentContext(dir?: string): string {
+export function loadAgentContext(dir?: string): string {
   const contextDir = dir || AGENT_CONTEXT_DIR;
   try {
     const files = readdirSync(contextDir)
@@ -113,286 +116,7 @@ function loadAgentContext(dir?: string): string {
   }
 }
 
-/**
- * Execute an agent task.
- *
- * Execution modes (automatic):
- * 1. Docker sandbox — if Docker + sandbox image available, runs `claude --print`
- *    inside an isolated container. Full sandboxing.
- * 2. Direct — runs Agent SDK query() in-process. Local dev fallback.
- */
-export async function executeAgent(
-  prompt: string,
-  config: ExecutorConfig,
-  opts?: {
-    taskId?: string;
-    /**
-     * Fired as soon as the agent's stream-json `system/init` line arrives,
-     * before the run completes. Used by the runner to persist the session id
-     * onto the in-flight DB row so the dashboard can show live logs.
-     */
-    onSessionId?: (sessionId: string) => void;
-    /** Optional per-run GitHub token policy for sandbox tooling. */
-    githubAccess?: GitSandboxAccess;
-  },
-): Promise<ExecutionResult> {
-  const taskId = opts?.taskId || `task-${randomUUID().slice(0, 8)}`;
-  const stateDir = config.stateDir || resolve("data");
-
-  // Generate a fresh GitHub App token for the sandbox so git works immediately
-  const env: Record<string, string> = {};
-  const access = opts?.githubAccess;
-  if (process.env.GITHUB_APP_ID) {
-    const allowMcpAppAuth = access?.allowMcpAppAuth === true;
-    env.ALLOW_APP_PEM = allowMcpAppAuth ? "1" : "0";
-    env.GITHUB_APP_ID = allowMcpAppAuth ? process.env.GITHUB_APP_ID : "";
-    env.GITHUB_APP_INSTALLATION_ID = allowMcpAppAuth
-      ? (process.env.GITHUB_APP_INSTALLATION_ID || "")
-      : "";
-    // sandbox-entrypoint materializes app.pem at this path only when ALLOW_APP_PEM=1
-    env.GITHUB_APP_PRIVATE_KEY_PATH = allowMcpAppAuth ? "/home/agent/.claude/app.pem" : "";
-
-    try {
-      const permissions = access ? GITHUB_PERMISSION_PROFILES[access.profile] : undefined;
-      const repositories = access?.repo ? [access.repo] : undefined;
-      console.log(
-        `[executor] Minting git token: profile=${access?.profile ?? "default"}, ` +
-        `repo=${access?.repo || "(unscoped)"}, permissions=${permissions ? Object.keys(permissions).join(",") : "all"}`,
-      );
-      const { token } = await refreshGitAuth({
-        appId: process.env.GITHUB_APP_ID,
-        privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
-        installationId: process.env.GITHUB_APP_INSTALLATION_ID || "",
-        permissions,
-        repositories,
-      });
-      // Git CLI helper inside the sandbox
-      env.GIT_TOKEN = token;
-      // MCP GitHub server static-token mode
-      env.GITHUB_TOKEN = token;
-    } catch (err: any) {
-      console.warn(
-        `[executor] Could not generate git token (repo=${access?.repo || "none"}, ` +
-        `profile=${access?.profile ?? "default"}): ${err.message}`,
-      );
-    }
-  }
-
-  // Try Docker sandbox first
-  const sbx = await createTaskSandbox({
-    taskId,
-    stateDir,
-    sandboxDir: config.sandboxDir,
-    env,
-  });
-
-  if (sbx) {
-    return executeSandboxed(prompt, config, sbx.sandbox, taskId, sbx.cleanup, opts?.onSessionId);
-  }
-
-  // Direct execution only if explicitly enabled — sandboxing is the default
-  if (process.env.ENABLE_DIRECT_FALLBACK === "true") {
-    console.warn(`  [executor] No sandbox available — falling back to direct execution`);
-    return executeDirect(prompt, config);
-  }
-
-  throw new Error("Docker sandbox not available and ENABLE_DIRECT_FALLBACK is not enabled. Install Docker and build the sandbox image (docker-compose build sandbox), or set ENABLE_DIRECT_FALLBACK=true.");
-}
-
-
-// ── Docker sandbox execution ────────────────────────────────────────
-
-async function executeSandboxed(
-  prompt: string,
-  config: ExecutorConfig,
-  sandbox: DockerSandbox,
-  taskId: string,
-  cleanup: () => Promise<void>,
-  onSessionId?: (sessionId: string) => void,
-): Promise<ExecutionResult> {
-  const startTime = Date.now();
-  console.log(`  [executor] Running in sandbox (task: ${taskId})`);
-
-  // Track whether we've already notified the caller of the session id, so
-  // the parser doesn't fire the callback twice (init line + later result).
-  let notifiedSessionId = false;
-
-  try {
-    const output = await sandbox.runAgent(taskId, prompt, {
-      model: config.model,
-      onLine: (line) => {
-        if (notifiedSessionId || !onSessionId) return;
-        if (!line.startsWith("{")) return;
-        try {
-          const msg = JSON.parse(line);
-          if (
-            msg.type === "system" &&
-            msg.subtype === "init" &&
-            typeof msg.session_id === "string"
-          ) {
-            notifiedSessionId = true;
-            onSessionId(msg.session_id);
-          }
-        } catch { /* not a complete json line yet — ignore */ }
-      },
-    });
-
-    // Parse stream-json for final result, session id, and usage metrics
-    const lines = output.split("\n").filter(l => l.startsWith("{"));
-    let result = "";
-    let turns = 0;
-    let subtype = "unknown";
-    let sessionId: string | undefined;
-    let costUsd: number | undefined;
-    let inputTokens: number | undefined;
-    let cacheCreationInputTokens: number | undefined;
-    let cacheReadInputTokens: number | undefined;
-    let outputTokens: number | undefined;
-    let apiDurationMs: number | undefined;
-    for (const line of lines) {
-      try {
-        const msg = JSON.parse(line);
-        if (msg.type === "system" && msg.subtype === "init" && typeof msg.session_id === "string") {
-          sessionId = msg.session_id;
-        }
-        if (msg.type === "result") {
-          result = msg.result || "";
-          turns = msg.num_turns || 0;
-          subtype = msg.subtype || "unknown";
-          if (typeof msg.total_cost_usd === "number") costUsd = msg.total_cost_usd;
-          if (typeof msg.duration_api_ms === "number") apiDurationMs = msg.duration_api_ms;
-          if (msg.usage) {
-            const u = msg.usage;
-            if (typeof u.input_tokens === "number") inputTokens = u.input_tokens;
-            if (typeof u.cache_creation_input_tokens === "number") cacheCreationInputTokens = u.cache_creation_input_tokens;
-            if (typeof u.cache_read_input_tokens === "number") cacheReadInputTokens = u.cache_read_input_tokens;
-            if (typeof u.output_tokens === "number") outputTokens = u.output_tokens;
-          }
-        }
-      } catch { /* skip */ }
-    }
-
-    const durationMs = Date.now() - startTime;
-    const success = subtype === "success";
-    const costStr = costUsd !== undefined ? `, $${costUsd.toFixed(4)}` : "";
-    console.log(`  [executor] Result: ${subtype} (${turns} turns, ${Math.round(durationMs / 1000)}s${costStr})${sessionId ? ` [session ${sessionId}]` : ""}`);
-
-    if (!success) {
-      console.error(`  [executor] Error: ${result || subtype}`);
-    }
-
-    const metrics = {
-      sessionId,
-      costUsd,
-      inputTokens,
-      cacheCreationInputTokens,
-      cacheReadInputTokens,
-      outputTokens,
-      apiDurationMs,
-      stopReason: subtype,
-    };
-
-    // Detect billing/auth errors
-    const lower = (result || "").toLowerCase();
-    if (lower.includes("credit balance") || lower.includes("rate limit") || lower.includes("unauthorized")) {
-      console.error(`  [executor] Account error: ${result}`);
-      return { success: false, output: result, turns, error: result, durationMs, ...metrics };
-    }
-
-    return { success, output: result, turns, durationMs, ...metrics };
-  } catch (err: any) {
-    console.error(`  [executor] Sandbox error: ${err.message}`);
-    return {
-      success: false,
-      output: "",
-      turns: 0,
-      error: err.message,
-      durationMs: Date.now() - startTime,
-    };
-  } finally {
-    await cleanup();
-  }
-}
-
-// ── Direct Agent SDK execution (fallback) ───────────────────────────
-
-async function executeDirect(
-  prompt: string,
-  config: ExecutorConfig,
-): Promise<ExecutionResult> {
-  const startTime = Date.now();
-  let turns = 0;
-  let output = "";
-
-  console.log(`  [executor] Running directly (no sandbox)`);
-
-  try {
-    const { query } = await import("@anthropic-ai/claude-agent-sdk");
-    const systemPrompt = loadAgentContext(config.agentContextDir);
-
-    const options: Record<string, unknown> = {
-      permissionMode: "bypassPermissions",
-      maxTurns: config.maxTurns || 200,
-      settingSources: [],
-    };
-
-    if (config.cwd) options.cwd = config.cwd;
-    if (systemPrompt) options.systemPrompt = systemPrompt;
-    if (config.model) options.model = config.model;
-
-    if (config.mcpConfigPath) {
-      try {
-        const mcpConfig = JSON.parse(readFileSync(config.mcpConfigPath, "utf-8"));
-        options.mcpServers = mcpConfig.mcpServers;
-      } catch (err) {
-        console.warn(`[executor] Could not load MCP config: ${err}`);
-      }
-    }
-
-    let sessionId = "";
-
-    console.log(`  [executor] Starting agent (model: ${config.model || "default"}, maxTurns: ${options.maxTurns})`);
-
-    for await (const message of query({ prompt, options })) {
-      const msg = message as any;
-
-      if (msg.type === "system" && msg.subtype === "init") {
-        sessionId = msg.session_id || "";
-        if (sessionId) {
-          console.log(`  [executor] Session: ${sessionId}`);
-          console.log(`  [executor] Log: ~/.claude/projects/*/${sessionId}.jsonl`);
-        }
-      }
-
-      if (msg.type === "assistant") turns++;
-
-      if (msg.type === "result") {
-        output = msg.result || msg.subtype || "";
-        const duration = msg.duration_ms ? `${Math.round(msg.duration_ms / 1000)}s` : "";
-        console.log(`  [executor] Result: ${msg.subtype} (${turns} turns, ${duration})`);
-
-        if (msg.subtype !== "success") {
-          console.error(`  [executor] Error: ${msg.error || msg.result || msg.subtype}`);
-        }
-
-        const lower = (output || "").toLowerCase();
-        if (lower.includes("credit balance") || lower.includes("rate limit") || lower.includes("unauthorized")) {
-          console.error(`  [executor] Account error: ${output}`);
-          return { success: false, output, turns, error: output, durationMs: Date.now() - startTime };
-        }
-      }
-    }
-
-    return { success: true, output, turns, durationMs: Date.now() - startTime, sessionId: sessionId || undefined };
-  } catch (err: any) {
-    const errorDetail = err.stderr ? `${err.message}\nstderr: ${err.stderr}` : err.message || String(err);
-    console.error(`  [executor] Error: ${errorDetail}`);
-    return {
-      success: false,
-      output: output || errorDetail,
-      turns,
-      error: output ? `${output} (${errorDetail})` : errorDetail,
-      durationMs: Date.now() - startTime,
-    };
-  }
-}
+// `executeAgent` lives in opencode-executor.ts. Re-exported here so existing
+// imports (`import { executeAgent } from "./executor.js"`) and test mocks
+// (`vi.mock("../engine/executor.js", …)`) keep working unchanged.
+export { executeAgent } from "./opencode-executor.js";

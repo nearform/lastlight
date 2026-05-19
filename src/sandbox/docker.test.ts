@@ -89,14 +89,15 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
     expect(dockerArgs).toContain("-i");
   });
 
-  it("claude command uses --print and does not embed the prompt", async () => {
+  it("opencode command uses --format json and does not embed the prompt", async () => {
     const runPromise = manager.runAgent("task-001", "test prompt");
     process.nextTick(() => fakeChild.emit("close", 0));
     await runPromise;
 
     const dockerArgs = mockSpawn.mock.calls[0][1] as string[];
     const shCmd = dockerArgs[dockerArgs.length - 1];
-    expect(shCmd).toContain("--print");
-    expect(shCmd).not.toMatch(/-p\s+['"]?.+['"]?/);
+    expect(shCmd).toContain("opencode run");
+    expect(shCmd).toContain("--format json");
+    expect(shCmd).not.toContain("test prompt");
   });
 });

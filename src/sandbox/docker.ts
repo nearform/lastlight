@@ -129,8 +129,8 @@ export class DockerSandbox {
   }
 
   /**
-   * Wait for the sandbox entrypoint to finish setup.
-   * Polls for the credentials symlink in the agent's home directory.
+   * Wait for the sandbox entrypoint to finish setup. The entrypoint touches
+   * `$WORKSPACE/.ready` as its last step before exec'ing the agent shell.
    */
   private async waitForReady(containerName: string, timeoutMs = 15000): Promise<void> {
     const start = Date.now();
@@ -138,14 +138,12 @@ export class DockerSandbox {
 
     while (Date.now() - start < timeoutMs) {
       try {
-        const { stdout } = await execFileAsync("docker", [
+        await execFileAsync("docker", [
           "exec", "--user", "agent", containerName,
-          "test", "-f", "/home/agent/.claude/.credentials.json",
+          "test", "-f", `${WORKSPACE_DIR}/.ready`,
         ], { timeout: 5000 });
-        // File exists — entrypoint is done
         return;
       } catch {
-        // Not ready yet — wait and retry
         await new Promise((r) => setTimeout(r, interval));
       }
     }
@@ -154,12 +152,12 @@ export class DockerSandbox {
   }
 
   /**
-   * Run the Claude CLI inside the sandbox with a prompt.
+   * Run the OpenCode CLI inside the sandbox with a prompt.
    *
-   * Streams stdout line-by-line so the caller can react to stream-json events
-   * (e.g. capture the session id from the `system/init` line) before the
-   * agent has finished. The full stdout is also buffered and returned for
-   * post-run parsing of the `result` line.
+   * Streams stdout line-by-line so the caller can react to JSON events
+   * (e.g. capture the top-level `sessionID` field) before the agent has
+   * finished. The full stdout is also buffered and returned for post-run
+   * parsing of `step_finish` accounting.
    */
   async runAgent(
     taskId: string,
@@ -173,19 +171,18 @@ export class DockerSandbox {
     const info = this.activeContainers.get(taskId);
     if (!info) throw new Error(`No sandbox for task ${taskId}`);
 
-    const model = opts?.model || "claude-sonnet-4-6";
+    const model = opts?.model || "openai/gpt-5.3-codex";
     const timeout = this.config.timeoutSeconds || 1800;
 
     const cmd = [
-      "claude",
-      "--print", "--verbose",
+      "opencode", "run",
+      "--format", "json",
+      "-m", model,
       "--dangerously-skip-permissions",
-      "--output-format", "stream-json",
-      "--model", model,
     ].join(" ");
 
-    // Run as agent user — Claude Code blocks --dangerously-skip-permissions as root
-    // -i connects stdin so the prompt can be written to the container process
+    // -i connects stdin so the prompt can be written to the container process.
+    // Run as agent user so workspace writes land with the right ownership.
     const args = ["exec", "-i", "--user", "agent", "-w", WORKSPACE_DIR, info.containerName, "sh", "-c", cmd];
 
     return await new Promise<string>((resolvePromise, reject) => {

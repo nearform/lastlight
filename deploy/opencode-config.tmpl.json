@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "github": {
+      "type": "local",
+      "command": ["node", "/app/mcp-github-app/src/index.js"],
+      "enabled": true,
+      "environment": {
+        "GITHUB_APP_ID": "${GITHUB_APP_ID}",
+        "GITHUB_APP_PRIVATE_KEY_PATH": "${GITHUB_APP_PRIVATE_KEY_PATH}",
+        "GITHUB_APP_INSTALLATION_ID": "${GITHUB_APP_INSTALLATION_ID}",
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "timeout": 30000
+    }
+  }
+}
