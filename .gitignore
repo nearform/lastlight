@@ -85,3 +85,4 @@ hooks/
 bin/
 checkpoints/
 whatsapp/
+.spike/
