@@ -8,6 +8,20 @@ import { isAbsolute, join } from "path";
 import { GitHubAppAuth } from "./auth.js";
 import { GitHubClient } from "./github.js";
 
+/**
+ * Tokens are interpolated into a shell function body used as git's
+ * credential.helper. Reject any value containing characters outside a
+ * conservative alphanumeric set so a malformed/replayed token can't
+ * escape the `echo "password=…"` argument with `"`, `;`, or `$`.
+ * Mirrors the assertion in `src/engine/git-auth.ts` and the bash check
+ * in `deploy/sandbox-entrypoint.sh`.
+ */
+function assertSafeToken(token) {
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]+$/.test(token)) {
+    throw new Error("Refusing to embed a token containing characters outside [A-Za-z0-9_-] into git credential.helper");
+  }
+}
+
 // ── Config from environment ─────────────────────────────────────────
 
 const appId = process.env.GITHUB_APP_ID;
@@ -88,6 +102,7 @@ server.tool(
   async ({ owner, repo, branch, path: clonePath }) => {
     try {
       const token = await auth.getToken();
+      assertSafeToken(token);
       // Resolve relative paths against the sandbox workspace, not the
       // MCP server's inherited cwd. OpenCode spawns MCP tools with cwd
       // `/tmp/opencode/<scratch>` which isn't writable by the agent user,
@@ -132,6 +147,7 @@ server.tool(
   async ({ path: repoPath }) => {
     try {
       const token = await auth.getToken();
+      assertSafeToken(token);
       const credHelper = `!f() { echo "username=x-access-token"; echo "password=${token}"; }; f`;
       execFileSync("git", ["-C", repoPath, "config", "credential.helper", credHelper], { stdio: "pipe" });
       return jsonResult({
