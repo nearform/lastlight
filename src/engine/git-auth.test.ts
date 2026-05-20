@@ -7,7 +7,12 @@ vi.mock("child_process", () => ({
 
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
-  return { ...actual, readFileSync: vi.fn().mockReturnValue("fake-pem") };
+  return {
+    ...actual,
+    readFileSync: vi.fn().mockReturnValue("fake-pem"),
+    writeFileSync: vi.fn(),
+    mkdirSync: vi.fn(),
+  };
 });
 
 vi.mock("crypto", async (importOriginal) => {
@@ -22,6 +27,7 @@ vi.mock("crypto", async (importOriginal) => {
 });
 
 import { execSync, execFileSync } from "child_process";
+import * as fs from "fs";
 import { configureGitAuth, refreshGitAuth } from "./git-auth.js";
 
 const mockExecSync = vi.mocked(execSync);
@@ -89,19 +95,34 @@ describe("git-auth — opt-in global writes use execFileSync safely", () => {
     }
   });
 
-  it("configureGitAuth passes credential.helper token as a separate array element", async () => {
+  it("configureGitAuth writes the token to a 600-mode credentials file (no shell interp)", async () => {
     const token = "ghs_testtoken123";
     mockFetchToken(token);
     await configureGitAuth(baseConfig);
+
+    const writeMock = vi.mocked(fs.writeFileSync);
+    expect(writeMock).toHaveBeenCalled();
+    const [path, contents, opts] = writeMock.mock.calls[0] as [string, string, { mode?: number }];
+    expect(typeof path).toBe("string");
+    expect(contents).toBe(`https://x-access-token:${token}@github.com\n`);
+    expect(opts?.mode).toBe(0o600);
+
     const credHelperCall = mockExecFileSync.mock.calls.find(
       (c) => Array.isArray(c[1]) && (c[1] as string[]).includes("credential.helper")
     );
     expect(credHelperCall).toBeDefined();
     const args = credHelperCall![1] as string[];
     const valueArg = args[args.length - 1];
-    // Value arg must not be shell-quoted
-    expect(valueArg).not.toMatch(/^'/);
-    expect(valueArg).not.toMatch(/'$/);
+    // Helper value is the non-shell `store --file=<path>` form (no `!f`,
+    // no quotes, no interpolation).
+    expect(valueArg).toMatch(/^store --file=/);
+    expect(valueArg).not.toContain("!f()");
+    expect(valueArg).not.toContain(token);
+  });
+
+  it("configureGitAuth refuses tokens containing characters outside [A-Za-z0-9_-]", async () => {
+    mockFetchToken('ghs_evil";rm -rf /;"');
+    await expect(configureGitAuth(baseConfig)).rejects.toThrow(/outside \[A-Za-z0-9_-\]/);
   });
 
   it("refreshGitAuth does not use execSync", async () => {

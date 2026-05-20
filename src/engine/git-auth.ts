@@ -1,7 +1,8 @@
 import { execFileSync } from "child_process";
 import { createSign } from "crypto";
-import { readFileSync } from "fs";
-import { resolve } from "path";
+import { mkdirSync, readFileSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { dirname, join, resolve } from "path";
 
 export type GitHubPermissionLevel = "read" | "write";
 
@@ -39,18 +40,49 @@ function shouldWriteGlobalGitConfig(): boolean {
 }
 
 /**
- * Tokens are interpolated into a shell function body used as git's
- * credential.helper. GitHub App installation tokens are alphanumeric
- * (`ghs_…`) and PATs/fine-grained tokens use the same charset, but a
- * future format change could introduce shell metacharacters and break
- * out of the `echo "password=…"` argument. Hard-assert the shape before
- * embedding. Throws so the caller never silently writes a malformed
- * credential helper.
+ * Conservative shape check on a GitHub installation token. The credentials
+ * file we write contains a single URL of the form
+ * `https://x-access-token:${token}@github.com` — any `@`, `:`, `/`, or
+ * newline in the token would break URL parsing or inject extra entries.
+ * Real GitHub tokens are alphanumeric (plus `_`); this assertion catches
+ * any future format change before we write a malformed credentials file.
  */
 function assertSafeToken(token: string): void {
   if (!/^[A-Za-z0-9_-]+$/.test(token)) {
-    throw new Error("Refusing to embed a token containing characters outside [A-Za-z0-9_-] into git credential.helper");
+    throw new Error("Refusing to embed a token containing characters outside [A-Za-z0-9_-] into git credentials file");
   }
+}
+
+/**
+ * Resolve the path of the shared credentials file used by `credential.helper
+ * store`. Honors `LASTLIGHT_GIT_CREDENTIALS` so the sandbox entrypoint and
+ * the MCP server can agree on a path; falls back to `~/.config/lastlight/
+ * git-credentials` for the opt-in host write.
+ *
+ * Whitespace in the path would break git's helper-arg splitting (the
+ * `store --file=<path>` value is shell-split on spaces, not exec'd), so
+ * reject any whitespace defensively.
+ */
+function credentialsFilePath(): string {
+  const fromEnv = process.env.LASTLIGHT_GIT_CREDENTIALS?.trim();
+  const path = fromEnv || join(homedir(), ".config", "lastlight", "git-credentials");
+  if (/\s/.test(path)) {
+    throw new Error(`LASTLIGHT_GIT_CREDENTIALS contains whitespace; git's helper-arg parsing would break: ${path}`);
+  }
+  return path;
+}
+
+/**
+ * Write the credentials file consumed by `credential.helper store`. One
+ * line: `https://x-access-token:${token}@github.com`. File is mode 600,
+ * parent dir mode 700. Returns the absolute path.
+ */
+function writeCredentialsFile(token: string): string {
+  assertSafeToken(token);
+  const credPath = credentialsFilePath();
+  mkdirSync(dirname(credPath), { recursive: true, mode: 0o700 });
+  writeFileSync(credPath, `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
+  return credPath;
 }
 
 /**
@@ -88,16 +120,18 @@ export async function configureGitAuth(config: {
     return token;
   }
 
-  // Opt-in path: write credential helper + bot identity to ~/.gitconfig
-  assertSafeToken(token.token);
-  const credHelper = `!f() { echo "username=x-access-token"; echo "password=${token.token}"; }; f`;
-  execGit(["config", "--global", "credential.helper", credHelper]);
+  // Opt-in path: write the token to a 600-mode credentials file and point
+  // git's built-in `store` helper at it. No shell interpolation anywhere
+  // along the way — git invokes `credential-store --file=<path>` as
+  // argv-array, not through a shell.
+  const credPath = writeCredentialsFile(token.token);
+  execGit(["config", "--global", "credential.helper", `store --file=${credPath}`]);
 
   const botName = config.botName || "last-light";
   execGit(["config", "--global", "user.name", `${botName}[bot]`]);
   execGit(["config", "--global", "user.email", `${botName}[bot]@users.noreply.github.com`]);
 
-  console.log(`[git-auth] Configured GLOBAL git with GitHub App token (expires: ${token.expiresAt})`);
+  console.log(`[git-auth] Configured GLOBAL git with GitHub App token (file: ${credPath}, expires: ${token.expiresAt})`);
 
   return token;
 }
@@ -126,11 +160,13 @@ export async function refreshGitAuth(config: {
     return token;
   }
 
-  assertSafeToken(token.token);
-  const credHelper = `!f() { echo "username=x-access-token"; echo "password=${token.token}"; }; f`;
-  execGit(["config", "--global", "credential.helper", credHelper]);
+  const credPath = writeCredentialsFile(token.token);
+  // The credential.helper config already points at this path from the
+  // initial configureGitAuth call, but set it again so refreshGitAuth is
+  // safe to call standalone (idempotent).
+  execGit(["config", "--global", "credential.helper", `store --file=${credPath}`]);
 
-  console.log(`[git-auth] Refreshed token in GLOBAL git config (expires: ${token.expiresAt})`);
+  console.log(`[git-auth] Refreshed token in GLOBAL git config (file: ${credPath}, expires: ${token.expiresAt})`);
   return token;
 }
 

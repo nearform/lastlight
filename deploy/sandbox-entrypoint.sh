@@ -10,6 +10,10 @@ WORKSPACE="$AGENT_HOME/workspace"
 # OpenCode's tool scratch dir) can resolve relative paths against the
 # real workspace. Consumed by mcp-github-app's clone_repo.
 export LASTLIGHT_WORKSPACE="$WORKSPACE"
+# Shared credentials file used by `git credential-store`. Written here at
+# boot from $GIT_TOKEN; rewritten by mcp-github-app when it refreshes the
+# token. Single location avoids token interpolation through any shell.
+export LASTLIGHT_GIT_CREDENTIALS="$AGENT_HOME/.lastlight-git-credentials"
 
 # ── Fix workspace ownership (bind-mounts may be root-owned on macOS) ──
 chown -R agent:agent "$WORKSPACE" 2>/dev/null || true
@@ -37,7 +41,7 @@ cat /app/agent-context/*.md > "$WORKSPACE/AGENTS.md" 2>/dev/null || true
 chown agent:agent "$WORKSPACE/AGENTS.md" 2>/dev/null || true
 
 # ── opencode.json — MCP config from template ──
-envsubst '$GITHUB_APP_ID $GITHUB_APP_INSTALLATION_ID $GITHUB_APP_PRIVATE_KEY_PATH $GITHUB_TOKEN $LASTLIGHT_WORKSPACE' \
+envsubst '$GITHUB_APP_ID $GITHUB_APP_INSTALLATION_ID $GITHUB_APP_PRIVATE_KEY_PATH $GITHUB_TOKEN $LASTLIGHT_WORKSPACE $LASTLIGHT_GIT_CREDENTIALS' \
   < /app/opencode-config.tmpl.json > "$WORKSPACE/opencode.json"
 chown agent:agent "$WORKSPACE/opencode.json"
 
@@ -46,15 +50,22 @@ git config --system user.name "last-light[bot]"
 git config --system user.email "last-light[bot]@users.noreply.github.com"
 
 if [ -n "${GIT_TOKEN:-}" ]; then
-  # Refuse to embed a token containing shell metacharacters. GitHub tokens
-  # are alphanumeric today; assert before interpolating into the credential
-  # helper body so a future format change can't escape the echo argument.
+  # Reject tokens containing characters that would break the URL line in
+  # the credentials file (newline, '@', ':', '/', whitespace). Real GitHub
+  # tokens are alphanumeric + underscore — the wider charset here is
+  # defensive against future format changes.
   if ! printf %s "$GIT_TOKEN" | grep -Eq '^[A-Za-z0-9_-]+$'; then
-    echo "ERROR: GIT_TOKEN contains characters outside [A-Za-z0-9_-]; refusing to configure git credential helper" >&2
+    echo "ERROR: GIT_TOKEN contains characters outside [A-Za-z0-9_-]; refusing to write credentials file" >&2
     exit 1
   fi
-  git config --system credential.helper \
-    '!f() { echo "username=x-access-token"; echo "password='"$GIT_TOKEN"'"; }; f'
+  # Write the file as the agent user (mode 600) so the helper can read it
+  # after the entrypoint drops privileges. Path is set by us above; the
+  # `store --file=<path>` value goes into git's config as argv-split (no
+  # shell), so the only constraint is no-whitespace in the path.
+  install -m 600 -o agent -g agent /dev/null "$LASTLIGHT_GIT_CREDENTIALS"
+  printf 'https://x-access-token:%s@github.com\n' "$GIT_TOKEN" > "$LASTLIGHT_GIT_CREDENTIALS"
+  chown agent:agent "$LASTLIGHT_GIT_CREDENTIALS"
+  git config --system credential.helper "store --file=$LASTLIGHT_GIT_CREDENTIALS"
 fi
 
 # ── Sentinel for harness waitForReady() ──
