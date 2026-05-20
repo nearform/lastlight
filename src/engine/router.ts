@@ -347,8 +347,20 @@ export async function routeEvent(
           };
 
         case "build": {
+          // No repo + no issue context → classifier likely over-fired on
+          // an imperative verb ("delete files in X", "clean up my docs").
+          // Fall through to chat rather than nag the user for a repo.
           if (!classifiedRepo) {
-            return { action: "reply", message: "Which repo should I build against? e.g. `build cliftonc/repo#42`" };
+            return {
+              action: "skill",
+              skill: "chat",
+              context: {
+                sessionId: raw?.sessionId,
+                message: slackText,
+                sender: envelope.sender,
+                source: envelope.source,
+              },
+            };
           }
           if (!isManagedRepo(classifiedRepo)) {
             return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };
@@ -390,7 +402,13 @@ export async function routeEvent(
           return {
             action: "skill",
             skill: "pr-review",
-            context: { repo: classifiedRepo, sender: envelope.sender, source: envelope.source },
+            context: {
+              repo: classifiedRepo,
+              prNumber: classifiedIssue,
+              issueNumber: classifiedIssue,
+              sender: envelope.sender,
+              source: envelope.source,
+            },
           };
         }
 

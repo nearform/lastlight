@@ -30,15 +30,70 @@ export async function callLlm(
   opts: CallLlmOptions = {},
 ): Promise<string> {
   const { provider, modelId } = resolveProvider(model);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 30_000);
-  try {
-    if (provider === "anthropic") {
-      return await callAnthropic(modelId, systemPrompt, userPrompt, opts, ctrl.signal);
+  const call = (signal: AbortSignal) =>
+    provider === "anthropic"
+      ? callAnthropic(modelId, systemPrompt, userPrompt, opts, signal)
+      : callOpenai(modelId, systemPrompt, userPrompt, opts, signal);
+  return withRetry(call, opts.timeoutMs ?? 30_000);
+}
+
+/**
+ * Single retry on transient upstream failures. The screener and classifier
+ * call this inline on every incoming event, so a single 429/503 from the
+ * provider would otherwise silently drop the event and break routing.
+ * One retry with a fixed 750ms delay covers the common transient cases at
+ * negligible latency. We don't retry 4xx other than 429 — those are real
+ * errors (bad model id, malformed request) where retry just hides the bug.
+ */
+async function withRetry(
+  call: (signal: AbortSignal) => Promise<string>,
+  timeoutMs: number,
+): Promise<string> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      return await call(ctrl.signal);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const transient = /\b(429|5\d\d)\b/.test(msg);
+      if (attempt === 1 || !transient) throw err;
+      await new Promise((r) => setTimeout(r, 750));
+    } finally {
+      clearTimeout(timer);
     }
-    return await callOpenai(modelId, systemPrompt, userPrompt, opts, ctrl.signal);
-  } finally {
-    clearTimeout(timer);
+  }
+  // Unreachable — loop either returns or throws.
+  throw new Error("callLlm: retry loop fell through");
+}
+
+/**
+ * Resolve the model id for a tiny one-shot helper call (classifier / screener).
+ * Prefers explicit per-task overrides from OPENCODE_MODELS, then a small model
+ * matching whichever provider API key is set — so the helpers work on an
+ * OPENAI-only deployment without crashing on a hardcoded Anthropic id.
+ */
+export function defaultFastModel(taskType?: string): string {
+  if (taskType) {
+    const override = readOpencodeModelOverride(taskType);
+    if (override) return override;
+  }
+  const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
+  const hasOpenai = !!process.env.OPENAI_API_KEY;
+  if (hasAnthropic && !hasOpenai) return "anthropic/claude-haiku-4-5-20251001";
+  if (hasOpenai && !hasAnthropic) return "openai/gpt-5.4-mini";
+  return hasAnthropic ? "anthropic/claude-haiku-4-5-20251001" : "openai/gpt-5.4-mini";
+}
+
+function readOpencodeModelOverride(taskType: string): string | undefined {
+  const raw = process.env.OPENCODE_MODELS;
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const v = parsed?.[taskType];
+    return typeof v === "string" ? v : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -109,7 +164,7 @@ async function callOpenai(
     },
     body: JSON.stringify({
       model: modelId,
-      max_tokens: opts.maxTokens ?? 256,
+      max_completion_tokens: opts.maxTokens ?? 256,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },

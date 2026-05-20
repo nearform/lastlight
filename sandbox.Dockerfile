@@ -20,7 +20,23 @@ RUN useradd -m -s /bin/bash agent
 
 # Install OpenCode CLI (pinned; see .spike/PHASE0-FINDINGS.md). Global npm
 # install puts the binary on PATH at /usr/local/bin/opencode for all users.
-RUN npm install -g --no-audit --no-fund opencode-ai@1.15.5
+# Integrity hash matches the value in the harness package-lock.json — verified
+# explicitly because `npm install -g <name>@<version>` doesn't consult any
+# lockfile, so without this a republished/compromised tarball would land
+# silently. To bump: copy the new `sha512-…` from `package-lock.json`
+# (node_modules/opencode-ai → integrity field) along with the version.
+ARG OPENCODE_VERSION=1.15.5
+ARG OPENCODE_INTEGRITY=sha512-ud/0sYo9h2BJALwLudRrzs551YJoi+rHo66jEsSLdOBv5RJxmN64aqqGaafhWxvgtaHyEOqfKnZPyx9GVKl/UA==
+RUN curl -fsSL "https://registry.npmjs.org/opencode-ai/-/opencode-ai-${OPENCODE_VERSION}.tgz" -o /tmp/opencode-ai.tgz \
+ && actual="sha512-$(node -e "const c=require('crypto'),f=require('fs');process.stdout.write(c.createHash('sha512').update(f.readFileSync('/tmp/opencode-ai.tgz')).digest('base64'))")" \
+ && if [ "$actual" != "$OPENCODE_INTEGRITY" ]; then \
+      echo "opencode-ai tarball integrity mismatch:" >&2; \
+      echo "  expected: $OPENCODE_INTEGRITY" >&2; \
+      echo "  actual:   $actual" >&2; \
+      exit 1; \
+    fi \
+ && npm install -g --no-audit --no-fund /tmp/opencode-ai.tgz \
+ && rm /tmp/opencode-ai.tgz
 
 # MCP server (baked at /app/)
 COPY mcp-github-app/package.json /app/mcp-github-app/package.json

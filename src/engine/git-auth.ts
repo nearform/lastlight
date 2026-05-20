@@ -39,6 +39,21 @@ function shouldWriteGlobalGitConfig(): boolean {
 }
 
 /**
+ * Tokens are interpolated into a shell function body used as git's
+ * credential.helper. GitHub App installation tokens are alphanumeric
+ * (`ghs_…`) and PATs/fine-grained tokens use the same charset, but a
+ * future format change could introduce shell metacharacters and break
+ * out of the `echo "password=…"` argument. Hard-assert the shape before
+ * embedding. Throws so the caller never silently writes a malformed
+ * credential helper.
+ */
+function assertSafeToken(token: string): void {
+  if (!/^[A-Za-z0-9_-]+$/.test(token)) {
+    throw new Error("Refusing to embed a token containing characters outside [A-Za-z0-9_-] into git credential.helper");
+  }
+}
+
+/**
  * Mint a GitHub App installation token; OPTIONALLY also write the bot
  * identity + credential helper to the user's global git config.
  *
@@ -74,6 +89,7 @@ export async function configureGitAuth(config: {
   }
 
   // Opt-in path: write credential helper + bot identity to ~/.gitconfig
+  assertSafeToken(token.token);
   const credHelper = `!f() { echo "username=x-access-token"; echo "password=${token.token}"; }; f`;
   execGit(["config", "--global", "credential.helper", credHelper]);
 
@@ -110,6 +126,7 @@ export async function refreshGitAuth(config: {
     return token;
   }
 
+  assertSafeToken(token.token);
   const credHelper = `!f() { echo "username=x-access-token"; echo "password=${token.token}"; }; f`;
   execGit(["config", "--global", "credential.helper", credHelper]);
 

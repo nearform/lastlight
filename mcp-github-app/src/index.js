@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execFileSync } from "child_process";
+import { isAbsolute, join } from "path";
 import { GitHubAppAuth } from "./auth.js";
 import { GitHubClient } from "./github.js";
 
@@ -87,7 +88,13 @@ server.tool(
   async ({ owner, repo, branch, path: clonePath }) => {
     try {
       const token = await auth.getToken();
-      const dest = clonePath || repo;
+      // Resolve relative paths against the sandbox workspace, not the
+      // MCP server's inherited cwd. OpenCode spawns MCP tools with cwd
+      // `/tmp/opencode/<scratch>` which isn't writable by the agent user,
+      // so a bare `lastlight-pr51` would fail with EACCES.
+      const baseDir = process.env.LASTLIGHT_WORKSPACE || process.cwd();
+      const requested = clonePath || repo;
+      const dest = isAbsolute(requested) ? requested : join(baseDir, requested);
       const url = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
 
       const branchArgs = branch ? ["--branch", branch] : [];
@@ -432,6 +439,22 @@ server.tool(
   { owner: z.string(), repo: z.string(), pull_number: z.number() },
   async ({ owner, repo, pull_number }) =>
     run(() => gh.getPullRequestDiff(owner, repo, pull_number))
+);
+
+server.tool(
+  "list_pull_request_reviews",
+  "List submitted reviews on a pull request (each with state APPROVED/CHANGES_REQUESTED/COMMENTED, reviewer login, body, and commit SHA). Use to check whether the bot has already reviewed this PR, and to learn what prior reviewers flagged.",
+  { owner: z.string(), repo: z.string(), pull_number: z.number() },
+  async ({ owner, repo, pull_number }) =>
+    run(() => gh.listPullRequestReviews(owner, repo, pull_number))
+);
+
+server.tool(
+  "list_pull_request_review_comments",
+  "List line-level review comments on a pull request (each with path, line, body, commit_id, reviewer login). Distinct from issue comments — these are anchored to specific diff lines. Use to avoid duplicating an in-line nit a prior reviewer already raised.",
+  { owner: z.string(), repo: z.string(), pull_number: z.number() },
+  async ({ owner, repo, pull_number }) =>
+    run(() => gh.listPullRequestReviewComments(owner, repo, pull_number))
 );
 
 server.tool(

@@ -37,7 +37,12 @@ export interface SetupConfig {
   WEBHOOK_SECRET: string;
   ADMIN_SECRET: string;
   DOMAIN: string;
-  ANTHROPIC_API_KEY: string;
+  /** OpenCode model id, e.g. "openai/gpt-5.3-codex" or "anthropic/claude-…". */
+  OPENCODE_MODEL: string;
+  /** Set when the chosen model uses an OpenAI-prefixed provider. */
+  OPENAI_API_KEY?: string;
+  /** Set when the chosen model uses an Anthropic-prefixed provider. */
+  ANTHROPIC_API_KEY?: string;
   ADMIN_PASSWORD?: string;
   SLACK_BOT_TOKEN?: string;
   SLACK_APP_TOKEN?: string;
@@ -89,6 +94,16 @@ export function isAnthropicKey(s: string): boolean {
   return s.startsWith("sk-ant-");
 }
 
+export function isOpenaiKey(s: string): boolean {
+  return s.startsWith("sk-") && !s.startsWith("sk-ant-");
+}
+
+/**
+ * Default OpenCode model — kept aligned with `config.ts`'s `OPENCODE_MODEL`
+ * default. Update both in lockstep when the canonical default changes.
+ */
+export const DEFAULT_OPENCODE_MODEL = "openai/gpt-5.3-codex";
+
 export function isSlackBotToken(s: string): boolean {
   return s.startsWith("xoxb-");
 }
@@ -115,13 +130,21 @@ export function buildEnvContent(config: SetupConfig): string {
     "# ── Domain (used by Caddy for TLS) ─────────────────────────────────────",
     `DOMAIN=${config.DOMAIN}`,
     "",
-    "# ── Model provider API key ────────────────────────────────",
+    "# ── Model + provider API key ────────────────────────────────",
+    `OPENCODE_MODEL=${config.OPENCODE_MODEL}`,
     "# Set whichever matches your OPENCODE_MODEL (anthropic/… or openai/…).",
-    `ANTHROPIC_API_KEY=${config.ANTHROPIC_API_KEY}`,
+  ];
+  if (config.OPENAI_API_KEY) {
+    lines.push(`OPENAI_API_KEY=${config.OPENAI_API_KEY}`);
+  }
+  if (config.ANTHROPIC_API_KEY) {
+    lines.push(`ANTHROPIC_API_KEY=${config.ANTHROPIC_API_KEY}`);
+  }
+  lines.push(
     "",
     "# ── Admin Dashboard ────────────────────────────────────────",
     `ADMIN_SECRET=${config.ADMIN_SECRET}`,
-  ];
+  );
 
   if (config.ADMIN_PASSWORD) {
     lines.push(`ADMIN_PASSWORD=${config.ADMIN_PASSWORD}`);
@@ -338,19 +361,162 @@ async function collectDomain(): Promise<{ domain: string; useCaddy: boolean }> {
   return { domain: domain as string, useCaddy: useCaddy as boolean };
 }
 
-async function collectAnthropicKey(): Promise<string> {
-  p.log.step(gold("Anthropic API Key"));
+/**
+ * Resolve the `opencode` binary path. Prefers the project's own
+ * `node_modules/.bin/opencode` so the wizard uses the same pinned version
+ * the runtime uses; falls back to anything on PATH. Returns null when
+ * neither is present.
+ */
+function findOpencodeBinary(): string | null {
+  const local = resolve("node_modules/.bin/opencode");
+  if (existsSync(local)) return local;
+  try {
+    execSync("opencode --version", { stdio: "ignore", timeout: 5_000 });
+    return "opencode";
+  } catch {
+    return null;
+  }
+}
 
-  const key = required(
-    await p.text({
-      message: "ANTHROPIC_API_KEY",
-      placeholder: "sk-ant-...",
-      validate: (v) =>
-        v && isAnthropicKey(v) ? undefined : "Must start with sk-ant-",
-    }),
+/**
+ * Ensure the opencode binary is installed locally. `opencode-ai` is in
+ * devDependencies, so when the wizard runs against a freshly cloned repo
+ * before any `npm install`, the binary isn't on disk yet. Do a targeted
+ * one-package install (no lockfile mutation) rather than forcing a full
+ * `npm install` — it's faster and keeps the wizard's footprint small.
+ */
+function ensureOpencodeAvailable(): string | null {
+  const existing = findOpencodeBinary();
+  if (existing) return existing;
+
+  const s = p.spinner();
+  s.start("Installing opencode locally for model discovery...");
+  try {
+    execSync("npm install --no-save --no-fund --no-audit --silent opencode-ai", {
+      stdio: "pipe",
+      timeout: 120_000,
+    });
+    s.stop("Installed opencode.");
+    return findOpencodeBinary();
+  } catch {
+    s.stop("Couldn't install opencode (offline?). Falling back to a curated list.");
+    return null;
+  }
+}
+
+/**
+ * Ask the installed `opencode` binary for its model catalog. Returns null
+ * when opencode isn't available or the call fails — caller falls back to a
+ * small hardcoded list.
+ */
+function discoverOpencodeModels(): string[] | null {
+  const bin = ensureOpencodeAvailable();
+  if (!bin) return null;
+  try {
+    const out = execSync(`"${bin}" models`, {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 10_000,
+      encoding: "utf-8",
+    });
+    const lines = out
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^[a-z][\w-]*\/[A-Za-z][\w.-]+$/.test(line));
+    return lines.length > 0 ? lines : null;
+  } catch {
+    return null;
+  }
+}
+
+async function collectModelAndKey(): Promise<{
+  model: string;
+  openaiKey?: string;
+  anthropicKey?: string;
+}> {
+  p.log.step(gold("Model provider"));
+  p.log.info(
+    dim("OpenCode is provider-agnostic. Pick the model you want the agent to use; ") +
+    dim("the wizard will ask for the matching API key."),
   );
 
-  return key as string;
+  const discovered = discoverOpencodeModels();
+  const fallback = [
+    DEFAULT_OPENCODE_MODEL,
+    "anthropic/claude-sonnet-4-6-20251015",
+  ];
+  const catalog = discovered ?? fallback;
+  // Surface the configured default at the top, then anything else opencode
+  // reported, then the custom escape hatch. Deduplicate while preserving order.
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const m of [DEFAULT_OPENCODE_MODEL, ...catalog]) {
+    if (!seen.has(m)) { seen.add(m); ordered.push(m); }
+  }
+
+  const choice = required(
+    await p.select({
+      message: discovered
+        ? `OPENCODE_MODEL ${dim(`(${discovered.length} models from \`opencode models\`)`)}`
+        : `OPENCODE_MODEL ${dim("(opencode not yet on PATH — short list shown)")}`,
+      initialValue: DEFAULT_OPENCODE_MODEL,
+      options: [
+        ...ordered.map((m) => ({
+          value: m,
+          label: m === DEFAULT_OPENCODE_MODEL ? `${m} ${dim("(default)")}` : m,
+        })),
+        { value: "__custom__", label: dim("Enter a different provider/model...") },
+      ],
+    }),
+  ) as string;
+
+  let model = choice;
+  if (choice === "__custom__") {
+    model = required(
+      await p.text({
+        message: "provider/model",
+        placeholder: "openai/gpt-5.3-codex or anthropic/claude-…",
+        validate: (v) =>
+          v && /^[a-z][\w-]*\/[A-Za-z][\w.-]+$/.test(v)
+            ? undefined
+            : "Format must be provider/model (e.g. openai/gpt-5.3-codex).",
+      }),
+    ) as string;
+  }
+
+  const provider = model.split("/")[0].toLowerCase();
+  if (provider === "anthropic") {
+    const key = required(
+      await p.text({
+        message: "ANTHROPIC_API_KEY",
+        placeholder: "sk-ant-...",
+        validate: (v) =>
+          v && isAnthropicKey(v) ? undefined : "Must start with sk-ant-",
+      }),
+    ) as string;
+    return { model, anthropicKey: key };
+  }
+  if (provider === "openai") {
+    const key = required(
+      await p.text({
+        message: "OPENAI_API_KEY",
+        placeholder: "sk-...",
+        validate: (v) =>
+          v && isOpenaiKey(v) ? undefined : "Must start with sk- (and not sk-ant-)",
+      }),
+    ) as string;
+    return { model, openaiKey: key };
+  }
+  // Unknown provider — prompt for either key. Validate that at least one is present.
+  p.log.warn(`Provider "${provider}" isn't auto-detected. Enter the API key your model needs.`);
+  const key = required(
+    await p.text({
+      message: "API key",
+      validate: (v) => (v && v.length > 0 ? undefined : "Enter a non-empty key."),
+    }),
+  ) as string;
+  return isAnthropicKey(key)
+    ? { model, anthropicKey: key }
+    : { model, openaiKey: key };
 }
 
 async function collectAdminPassword(): Promise<string | undefined> {
@@ -558,7 +724,7 @@ export async function runSetup(): Promise<void> {
   p.log.success("Secrets auto-generated " + dim("(WEBHOOK_SECRET + ADMIN_SECRET)"));
 
   const { domain, useCaddy } = await collectDomain();
-  const anthropicKey = await collectAnthropicKey();
+  const { model, openaiKey, anthropicKey } = await collectModelAndKey();
   const adminPassword = await collectAdminPassword();
   const { botToken, appToken, deliveryChannel, allowedUsers } = await collectSlack();
 
@@ -568,6 +734,8 @@ export async function runSetup(): Promise<void> {
     WEBHOOK_SECRET: webhookSecret,
     ADMIN_SECRET: adminSecret,
     DOMAIN: domain,
+    OPENCODE_MODEL: model,
+    OPENAI_API_KEY: openaiKey,
     ANTHROPIC_API_KEY: anthropicKey,
     ADMIN_PASSWORD: adminPassword,
     SLACK_BOT_TOKEN: botToken,

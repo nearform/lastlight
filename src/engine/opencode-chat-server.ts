@@ -94,7 +94,13 @@ export class OpencodeChatServer {
   private baseUrl: string | null = null;
   private shouldRun = false;
   private restartCount = 0;
-  private lastStart = 0;
+  /**
+   * Timestamp of the most recent unexpected child exit (set in `handleExit`).
+   * Used to reset `restartCount` when crashes fall outside the rolling window
+   * — see `handleExit` for the reset condition. Initialized to 0 so the first
+   * crash always resets cleanly.
+   */
+  private lastCrash = 0;
   /**
    * Per-session in-flight chain. Guarantees that two `postMessage`
    * calls against the SAME sessionId run sequentially server-side
@@ -267,7 +273,6 @@ export class OpencodeChatServer {
     if (this.cfg.printLogs) args.push("--print-logs");
 
     console.log(`[chat-server] spawning: ${binary} ${args.join(" ")} (cwd: ${this.cfg.workingDir})`);
-    this.lastStart = Date.now();
 
     const child = spawn(binary, args, {
       cwd: this.cfg.workingDir,
@@ -332,9 +337,14 @@ export class OpencodeChatServer {
       return;
     }
     const now = Date.now();
-    if (now - this.lastStart > OpencodeChatServer.RESTART_WINDOW_MS) {
+    // Reset the rolling restart counter when the *previous crash* (not the
+    // previous spawn) was outside the window. This is what "restarted N
+    // times in the last 60s" actually means; using lastStart let restartCount
+    // creep up across an arbitrarily long stable period.
+    if (this.lastCrash !== 0 && now - this.lastCrash > OpencodeChatServer.RESTART_WINDOW_MS) {
       this.restartCount = 0;
     }
+    this.lastCrash = now;
     this.restartCount++;
     if (this.restartCount > OpencodeChatServer.MAX_RESTART_ATTEMPTS) {
       console.error(`[chat-server] exit (code=${code}, signal=${signal}); restart limit reached, giving up`);

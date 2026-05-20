@@ -85,8 +85,13 @@ export class ClaudeJsonlShim {
     if (!sessionId) return;
 
     if (!this.filePath) {
+      // sessionId comes from OpenCode's stdout. Strip any path separators
+      // and require a conservative charset so a hostile/corrupted value
+      // can't traverse out of projects/<slug>/.
+      const safeId = path.basename(sessionId);
+      if (!/^[A-Za-z0-9_-]+$/.test(safeId)) return;
       const dir = path.join(this.opts.homeDir, "projects", this.opts.projectSlug);
-      this.filePath = path.join(dir, `${sessionId}.jsonl`);
+      this.filePath = path.join(dir, `${safeId}.jsonl`);
     }
 
     const ts = isoTimestamp(e.timestamp);

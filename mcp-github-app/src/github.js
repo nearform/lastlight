@@ -244,8 +244,16 @@ export class GitHubClient {
   async listPullRequests(owner, repo, opts = {}) {
     return this._withRetry(async () => {
       const ok = await this.octokit();
+      // GitHub treats empty-string filters (`?head=`, `?base=`) as literal
+      // matches and returns []. Strip empty optional filters so the agent
+      // can't accidentally narrow to nothing by passing `head: ""`.
+      const cleaned = {};
+      for (const [k, v] of Object.entries(opts)) {
+        if (v === "" || v === undefined || v === null) continue;
+        cleaned[k] = v;
+      }
       const { data } = await ok.pulls.list({
-        owner, repo, state: "open", per_page: 30, ...opts,
+        owner, repo, state: "open", per_page: 30, ...cleaned,
       });
       return data;
     });
@@ -271,6 +279,22 @@ export class GitHubClient {
     return this._withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.pulls.listFiles({ owner, repo, pull_number, per_page: 100 });
+      return data;
+    });
+  }
+
+  async listPullRequestReviews(owner, repo, pull_number) {
+    return this._withRetry(async () => {
+      const ok = await this.octokit();
+      const { data } = await ok.pulls.listReviews({ owner, repo, pull_number, per_page: 100 });
+      return data;
+    });
+  }
+
+  async listPullRequestReviewComments(owner, repo, pull_number) {
+    return this._withRetry(async () => {
+      const ok = await this.octokit();
+      const { data } = await ok.pulls.listReviewComments({ owner, repo, pull_number, per_page: 100 });
       return data;
     });
   }

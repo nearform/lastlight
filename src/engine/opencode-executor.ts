@@ -213,6 +213,9 @@ class OpencodeAccumulator {
  * Parse a buffered stream of OpenCode JSON-format output into an accumulator.
  * Skips non-JSON lines defensively.
  */
+export { OpencodeAccumulator as __OpencodeAccumulatorForTest };
+export { parseStream as __parseStreamForTest };
+
 function parseStream(output: string): OpencodeAccumulator {
   const acc = new OpencodeAccumulator();
   for (const raw of output.split("\n")) {

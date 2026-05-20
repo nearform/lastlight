@@ -6,6 +6,7 @@ import {
   isPositiveInt,
   isPemFile,
   isAnthropicKey,
+  isOpenaiKey,
   isSlackBotToken,
   isSlackAppToken,
   buildEnvContent,
@@ -90,6 +91,22 @@ describe("isAnthropicKey", () => {
   });
 });
 
+describe("isOpenaiKey", () => {
+  it("accepts sk- keys that aren't sk-ant-", () => {
+    expect(isOpenaiKey("sk-proj-abc123")).toBe(true);
+    expect(isOpenaiKey("sk-abcdef")).toBe(true);
+  });
+
+  it("rejects sk-ant- (anthropic) keys", () => {
+    expect(isOpenaiKey("sk-ant-foo")).toBe(false);
+  });
+
+  it("rejects non-sk- inputs", () => {
+    expect(isOpenaiKey("")).toBe(false);
+    expect(isOpenaiKey("xoxb-foo")).toBe(false);
+  });
+});
+
 describe("isSlackBotToken", () => {
   it("accepts xoxb- tokens", () => {
     expect(isSlackBotToken("xoxb-12345-67890-abc")).toBe(true);
@@ -123,7 +140,8 @@ describe("buildEnvContent", () => {
     WEBHOOK_SECRET: "deadbeef01234567",
     ADMIN_SECRET: "cafebabe89abcdef",
     DOMAIN: "lastlight.example.com",
-    ANTHROPIC_API_KEY: "sk-ant-api03-test",
+    OPENCODE_MODEL: "openai/gpt-5.3-codex",
+    OPENAI_API_KEY: "sk-test-openai",
     useCaddy: true,
     pemSourcePath: "/tmp/app.pem",
   };
@@ -135,10 +153,25 @@ describe("buildEnvContent", () => {
     expect(content).toContain("WEBHOOK_SECRET=deadbeef01234567");
     expect(content).toContain("ADMIN_SECRET=cafebabe89abcdef");
     expect(content).toContain("DOMAIN=lastlight.example.com");
-    expect(content).toContain("ANTHROPIC_API_KEY=sk-ant-api03-test");
+    expect(content).toContain("OPENCODE_MODEL=openai/gpt-5.3-codex");
+    expect(content).toContain("OPENAI_API_KEY=sk-test-openai");
+    expect(content).not.toMatch(/^ANTHROPIC_API_KEY=/m);
     expect(content).toContain(
       "GITHUB_APP_PRIVATE_KEY_PATH=./secrets/app.pem"
     );
+  });
+
+  it("writes ANTHROPIC_API_KEY only when an anthropic model is chosen", () => {
+    const config: SetupConfig = {
+      ...baseConfig,
+      OPENCODE_MODEL: "anthropic/claude-sonnet-4-6-20251015",
+      OPENAI_API_KEY: undefined,
+      ANTHROPIC_API_KEY: "sk-ant-test",
+    };
+    const content = buildEnvContent(config);
+    expect(content).toContain("OPENCODE_MODEL=anthropic/claude-sonnet-4-6-20251015");
+    expect(content).toContain("ANTHROPIC_API_KEY=sk-ant-test");
+    expect(content).not.toMatch(/^OPENAI_API_KEY=/m);
   });
 
   it("includes optional ADMIN_PASSWORD when provided", () => {

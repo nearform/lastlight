@@ -6,6 +6,10 @@ set -euo pipefail
 
 AGENT_HOME="/home/agent"
 WORKSPACE="$AGENT_HOME/workspace"
+# Exported so child MCP servers (which inherit a non-writable cwd from
+# OpenCode's tool scratch dir) can resolve relative paths against the
+# real workspace. Consumed by mcp-github-app's clone_repo.
+export LASTLIGHT_WORKSPACE="$WORKSPACE"
 
 # ── Fix workspace ownership (bind-mounts may be root-owned on macOS) ──
 chown -R agent:agent "$WORKSPACE" 2>/dev/null || true
@@ -33,7 +37,7 @@ cat /app/agent-context/*.md > "$WORKSPACE/AGENTS.md" 2>/dev/null || true
 chown agent:agent "$WORKSPACE/AGENTS.md" 2>/dev/null || true
 
 # ── opencode.json — MCP config from template ──
-envsubst '$GITHUB_APP_ID $GITHUB_APP_INSTALLATION_ID $GITHUB_APP_PRIVATE_KEY_PATH $GITHUB_TOKEN' \
+envsubst '$GITHUB_APP_ID $GITHUB_APP_INSTALLATION_ID $GITHUB_APP_PRIVATE_KEY_PATH $GITHUB_TOKEN $LASTLIGHT_WORKSPACE' \
   < /app/opencode-config.tmpl.json > "$WORKSPACE/opencode.json"
 chown agent:agent "$WORKSPACE/opencode.json"
 
@@ -42,6 +46,13 @@ git config --system user.name "last-light[bot]"
 git config --system user.email "last-light[bot]@users.noreply.github.com"
 
 if [ -n "${GIT_TOKEN:-}" ]; then
+  # Refuse to embed a token containing shell metacharacters. GitHub tokens
+  # are alphanumeric today; assert before interpolating into the credential
+  # helper body so a future format change can't escape the echo argument.
+  if ! printf %s "$GIT_TOKEN" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+    echo "ERROR: GIT_TOKEN contains characters outside [A-Za-z0-9_-]; refusing to configure git credential helper" >&2
+    exit 1
+  fi
   git config --system credential.helper \
     '!f() { echo "username=x-access-token"; echo "password='"$GIT_TOKEN"'"; }; f'
 fi

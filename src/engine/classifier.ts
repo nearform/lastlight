@@ -40,7 +40,7 @@ const CLASSIFIER_PROMPT = `You are a router for messages directed at a GitHub/Sl
 Classify the user's message into exactly one category, and extract any repository or issue references.
 
 Categories:
-BUILD — The user wants code changes NOW: implement a feature, fix a bug, write code, create/send a PR, resolve an issue with code. They already know what to build.
+BUILD — The user wants code changes NOW in a GitHub repo: implement a feature, fix a bug, create/send a PR, resolve an issue with code. BUILD requires a GitHub target — either an explicit repo reference (owner/name or github.com URL) in the message, OR an ISSUE TITLE context line indicating the comment is a reply on an existing issue/PR. If neither is present, classify as CHAT — local filesystem operations ("delete files in ~/foo", "clean up my downloads"), shell-style commands, or vague "build something" with no target are NOT BUILD.
 EXPLORE — The user has a half-formed idea and wants help thinking it through BEFORE code: "help me think through X", "brainstorm Y", "spec this out", "explore an idea for Z".
 TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
 REVIEW — The user wants to review PRs on a repo: "review cliftonc/repo", "check PRs", "can you review PRs on <repo>?".
@@ -90,7 +90,10 @@ Examples:
 "can you do a security review of https://github.com/cliftonc/lastlight" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
 "could you triage https://github.com/foo/bar?" → INTENT: TRIAGE, REPO: foo/bar, ISSUE: NONE, REASON: NONE
 "please review https://github.com/foo/bar/pull/42" → INTENT: REVIEW, REPO: foo/bar, ISSUE: 42, REASON: NONE
-"scan https://github.com/cliftonc/lastlight for vulnerabilities" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE`;
+"scan https://github.com/cliftonc/lastlight for vulnerabilities" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
+"delete any files in ~/work/lastlight/docs" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
+"can you remove the old docs folder for me" (no ISSUE TITLE, no repo) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
+"build something cool" (no repo, no ISSUE TITLE) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE`;
 
 /**
  * Extract owner/repo and optional issue/PR number from any github.com URL
@@ -140,9 +143,9 @@ export async function classifyComment(
       ? `Classify this comment (replying on an existing ${context.isPullRequest ? "PR" : "issue"}):\n\nISSUE TITLE: ${context.issueTitle}\n\nCOMMENT: ${commentBody}`
       : `Classify this comment:\n\n${commentBody}`;
 
-    const { callLlm } = await import("./llm.js");
+    const { callLlm, defaultFastModel } = await import("./llm.js");
     const output = await callLlm(
-      model || "anthropic/claude-haiku-4-5-20251001",
+      model || defaultFastModel("classifier"),
       CLASSIFIER_PROMPT,
       userPrompt,
       { maxTokens: 128 },

@@ -51,9 +51,9 @@ export async function screenForInjection(
   if (!text || text.length < 60) return { flagged: false };
 
   try {
-    const { callLlm } = await import("./llm.js");
+    const { callLlm, defaultFastModel } = await import("./llm.js");
     const output = await callLlm(
-      model || "anthropic/claude-haiku-4-5-20251001",
+      model || defaultFastModel("screener"),
       SCREENER_PROMPT,
       `Screen this text:\n\n${text}`,
       { maxTokens: 64 },
