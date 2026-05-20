@@ -423,8 +423,8 @@ function numOr0(v: unknown): number {
  *     add_labels / remove_label, update_issue (close/reopen/edit)
  *
  * Denied:
- *   - host-side: bash, edit, webfetch, websearch, task, skill,
- *     todowrite, repo_clone, repo_overview, external_directory
+ *   - host-side: bash, edit, write, patch, webfetch, websearch, task,
+ *     skill, todowrite, repo_clone, repo_overview, external_directory
  *   - github writes that touch code/branches/PRs:
  *     clone_repo, create_branch, push_files, create_or_update_file,
  *     setup_git_auth, refresh_git_auth, merge_pull_request,
@@ -435,9 +435,14 @@ export function buildChatAgentDef(): Record<string, unknown> {
     description: "Last Light messaging chat agent — read repos, manage issues/comments/labels, no host shell, no code changes.",
     mode: "primary",
     permission: {
-      // Host-side tools
+      // Host-side tools. `edit` modifies existing files; `write` creates or
+      // overwrites; `patch` applies diffs. All three are file-mutation paths
+      // and stay denied even though the chat system prompt also forbids
+      // them — prompt-level constraints are weaker than tool-level denies.
       bash: "deny",
       edit: "deny",
+      write: "deny",
+      patch: "deny",
       webfetch: "deny",
       websearch: "deny",
       task: "deny",

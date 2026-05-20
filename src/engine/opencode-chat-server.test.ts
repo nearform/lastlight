@@ -38,7 +38,7 @@ describe("buildChatAgentDef", () => {
   });
 
   it("denies every host-side tool that could touch ~/.gitconfig or the filesystem", () => {
-    for (const t of ["bash", "edit", "webfetch", "websearch", "task", "skill", "todowrite", "repo_clone", "repo_overview", "external_directory"]) {
+    for (const t of ["bash", "edit", "write", "patch", "webfetch", "websearch", "task", "skill", "todowrite", "repo_clone", "repo_overview", "external_directory"]) {
       expect(def.permission[t]).toBe("deny");
     }
   });
