@@ -136,29 +136,17 @@ export async function classifyComment(
   model?: string,
 ): Promise<ClassificationResult> {
   try {
-    const { query } = await import("@anthropic-ai/claude-agent-sdk");
-
     const userPrompt = context?.issueTitle
       ? `Classify this comment (replying on an existing ${context.isPullRequest ? "PR" : "issue"}):\n\nISSUE TITLE: ${context.issueTitle}\n\nCOMMENT: ${commentBody}`
       : `Classify this comment:\n\n${commentBody}`;
 
-    let output = "";
-    for await (const msg of query({
-      prompt: userPrompt,
-      options: {
-        model: model || "claude-haiku-4-5-20251001",
-        systemPrompt: CLASSIFIER_PROMPT,
-        permissionMode: "bypassPermissions" as const,
-        maxTurns: 1,
-        allowedTools: [],
-        settingSources: [],
-      },
-    })) {
-      const m = msg as any;
-      if (m.type === "result") {
-        output = m.result || "";
-      }
-    }
+    const { callLlm } = await import("./llm.js");
+    const output = await callLlm(
+      model || "anthropic/claude-haiku-4-5-20251001",
+      CLASSIFIER_PROMPT,
+      userPrompt,
+      { maxTokens: 128 },
+    );
 
     const upper = output.trim().toUpperCase();
 

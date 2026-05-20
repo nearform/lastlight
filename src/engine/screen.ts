@@ -51,25 +51,13 @@ export async function screenForInjection(
   if (!text || text.length < 60) return { flagged: false };
 
   try {
-    const { query } = await import("@anthropic-ai/claude-agent-sdk");
-
-    let output = "";
-    for await (const msg of query({
-      prompt: `Screen this text:\n\n${text}`,
-      options: {
-        model: model || "claude-haiku-4-5-20251001",
-        systemPrompt: SCREENER_PROMPT,
-        permissionMode: "bypassPermissions" as const,
-        maxTurns: 1,
-        allowedTools: [],
-        settingSources: [],
-      },
-    })) {
-      const m = msg as Record<string, unknown>;
-      if (m.type === "result") {
-        output = (m.result as string) || "";
-      }
-    }
+    const { callLlm } = await import("./llm.js");
+    const output = await callLlm(
+      model || "anthropic/claude-haiku-4-5-20251001",
+      SCREENER_PROMPT,
+      `Screen this text:\n\n${text}`,
+      { maxTokens: 64 },
+    );
 
     const upper = output.trim().toUpperCase();
     const injectionMatch = upper.match(/INJECTION:\s*(YES|NO)/);
