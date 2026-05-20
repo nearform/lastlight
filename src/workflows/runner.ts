@@ -5,8 +5,8 @@ import type {
   ExecutionResult,
   GitAccessProfile,
   GitSandboxAccess,
-} from "../engine/executor.js";
-import { executeAgent } from "../engine/executor.js";
+} from "../engine/profiles.js";
+import { executeAgent } from "../engine/opencode-executor.js";
 import type { StateDb } from "../state/db.js";
 import type { PhaseHistoryEntry } from "../state/db.js";
 import type { ModelConfig } from "../config.js";

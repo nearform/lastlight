@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "fs";
 import { join, resolve } from "path";
 import type { SessionManager } from "../connectors/messaging/session-manager.js";
-import type { ExecutorConfig } from "./executor.js";
+import type { ExecutorConfig } from "./profiles.js";
 import { wrapUntrusted } from "./screen.js";
 import {
   type OpencodeChatServer,

@@ -10,7 +10,7 @@ import type { GitHubTokenPermissions } from "./git-auth.js";
 const AGENT_CONTEXT_DIR = resolve("agent-context");
 
 /**
- * Configuration for the executor.
+ * Configuration for an agent execution (sandbox or direct).
  */
 export interface ExecutorConfig {
   /** Path to the MCP server config for GitHub tools (kept for legacy callers). */
@@ -99,7 +99,7 @@ export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPer
 /**
  * Load all .md files from the agent-context directory and concatenate them
  * into a single string. The sandbox entrypoint does this independently to
- * produce AGENTS.md; this helper exists for in-process callers (e.g. chat).
+ * produce AGENTS.md; this helper exists for in-process callers.
  */
 export function loadAgentContext(dir?: string): string {
   const contextDir = dir || AGENT_CONTEXT_DIR;
@@ -111,12 +111,7 @@ export function loadAgentContext(dir?: string): string {
       .map((f) => readFileSync(join(contextDir, f), "utf-8"))
       .join("\n\n---\n\n");
   } catch {
-    console.warn(`[executor] No agent context found at ${contextDir}`);
+    console.warn(`[profiles] No agent context found at ${contextDir}`);
     return "";
   }
 }
-
-// `executeAgent` lives in opencode-executor.ts. Re-exported here so existing
-// imports (`import { executeAgent } from "./executor.js"`) and test mocks
-// (`vi.mock("../engine/executor.js", …)`) keep working unchanged.
-export { executeAgent } from "./opencode-executor.js";

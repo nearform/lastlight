@@ -8,7 +8,7 @@ import {
   type ExecutorConfig,
   type ExecutionResult,
   type GitSandboxAccess,
-} from "./executor.js";
+} from "./profiles.js";
 import { ClaudeJsonlShim, projectSlugForCwd } from "./opencode-shim.js";
 
 const DEFAULT_MODEL = "openai/gpt-5.3-codex";

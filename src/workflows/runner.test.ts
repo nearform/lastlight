@@ -5,7 +5,7 @@ import type { RunnerCallbacks, ApprovalGateConfig } from "./runner.js";
 import type { StateDb } from "../state/db.js";
 
 // Mock the executor so we don't make real agent calls
-vi.mock("../engine/executor.js", () => ({
+vi.mock("../engine/opencode-executor.js", () => ({
   executeAgent: vi.fn(),
 }));
 
@@ -25,7 +25,7 @@ vi.mock("child_process", () => ({
 }));
 
 import { execSync } from "child_process";
-import { executeAgent } from "../engine/executor.js";
+import { executeAgent } from "../engine/opencode-executor.js";
 import { loadPromptTemplate } from "./loader.js";
 import { runWorkflow, gitAccessProfileForWorkflow } from "./runner.js";
 

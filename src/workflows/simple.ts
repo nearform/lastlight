@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { ExecutorConfig } from "../engine/executor.js";
+import type { ExecutorConfig } from "../engine/profiles.js";
 import type { StateDb, WorkflowRun } from "../state/db.js";
 import type { ModelConfig } from "../config.js";
 import { getWorkflow } from "./loader.js";
