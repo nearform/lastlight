@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Default: read-only.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: lint, build, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # We don't ship ESLint yet; the TypeScript compiler in `--noEmit` mode
+      # is the static-analysis gate. If/when ESLint lands, add it here.
+      - name: Type-check (lint)
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      # Integration tests are LLM-backed (cost real money). They auto-skip
+      # in the runner if OPENAI_API_KEY is empty, so this step is safe to
+      # leave on for every CI run — it becomes a no-op until the secret is
+      # configured in repo settings.
+      #
+      # The sandbox integration test also requires QEMU + a working
+      # accelerator. GitHub-hosted Ubuntu runners may or may not expose
+      # /dev/kvm — the preflight check inside agentic-pi will skip the
+      # sandbox test cleanly if not available. We don't install QEMU on
+      # CI by default (heavy dep) so the sandbox test is expected to skip
+      # on standard runners.
+      - name: Integration tests
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npm run test:integration

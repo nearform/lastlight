@@ -181,6 +181,21 @@ Tests live in `test/` as `*.test.ts` files; integration tests use
 is via `scripts/run-tests.mjs` (a tiny walker — Node's `node --test`
 discovery doesn't pick up `.ts` files automatically).
 
+## CI and releases
+
+Two GitHub Actions workflows ship with the repo:
+
+- `.github/workflows/ci.yml` runs on every push to `main` and every PR:
+  type-check, build, unit tests, integration tests (gated on the
+  `OPENAI_API_KEY` secret — auto-skipped if absent).
+- `.github/workflows/publish.yml` runs on `v*.*.*` tag pushes. It
+  verifies the tag matches `package.json`, then runs `npm publish
+  --provenance --access public` via npm's OIDC trusted-publisher flow
+  (no `NPM_TOKEN` needed in the repo).
+
+To release: bump `package.json`, commit, `git tag vX.Y.Z && git push
+--tags`. Workflow does the rest.
+
 Env vars typically needed (mirror lastlight's `.env` when developing):
 
 ```bash

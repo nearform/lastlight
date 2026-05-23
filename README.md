@@ -376,6 +376,43 @@ which walks `test/` for `*.test.ts`.
 Unit tests run in ~170 ms. Integration tests cost about $0.001 per run on
 `gpt-5.4-nano`.
 
+## Releasing
+
+agentic-pi publishes to npm via a GitHub Actions workflow using **npm
+trusted publishing** (OIDC) — no `NPM_TOKEN` secret is needed in the
+repo.
+
+To cut a release:
+
+1. Bump `version` in `package.json` (e.g. `0.1.0` → `0.2.0`).
+2. Commit the bump.
+3. Tag: `git tag v0.2.0 && git push --tags`.
+4. The `publish.yml` workflow runs: it verifies the tag matches
+   `package.json`, type-checks, builds, runs unit tests, then runs
+   `npm publish --provenance --access public`.
+
+The workflow fails the publish step if the tag and `package.json` version
+don't match — there is no path that publishes a version not represented
+in the repo at that exact commit.
+
+### One-time setup (trusted publisher)
+
+The first publish of a package needs to be done manually; subsequent
+ones go through the workflow. To enable OIDC for this repo's publishes:
+
+1. Visit the package's "Trusted Publishers" page on
+   <https://www.npmjs.com/package/agentic-pi/settings>.
+2. Add a GitHub Actions trusted publisher with:
+   - Organization: `cliftonc`
+   - Repository: `agentic-pi`
+   - Workflow filename: `publish.yml`
+   - Environment: leave empty (the workflow doesn't use one)
+
+After that, every tag push triggers a workflow that mints an OIDC token,
+npm verifies it against the configured publisher, and the publish goes
+through with a [provenance statement](https://docs.npmjs.com/generating-provenance-statements)
+attached.
+
 Project layout:
 
 ```

@@ -3,6 +3,25 @@
   "version": "0.1.0",
   "description": "A drop-in coding-agent harness built on earendil-works/pi, designed to replace opencode in workflow-driven systems like lastlight.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cliftonc/agentic-pi.git"
+  },
+  "homepage": "https://github.com/cliftonc/agentic-pi#readme",
+  "bugs": {
+    "url": "https://github.com/cliftonc/agentic-pi/issues"
+  },
+  "keywords": [
+    "agent",
+    "ai",
+    "coding-agent",
+    "pi",
+    "earendil-works",
+    "opencode",
+    "lastlight",
+    "llm",
+    "workflow"
+  ],
   "type": "module",
   "bin": {
     "agentic-pi": "./dist/cli.js"
