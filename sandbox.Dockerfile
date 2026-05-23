@@ -1,4 +1,7 @@
-# Sandbox image for Last Light agent tasks.
+# Sandbox image for Last Light agent tasks (LASTLIGHT_SANDBOX=docker
+# fallback only — the default production sandbox is gondolin, invoked
+# in-process by agentic-pi without docker).
+#
 # Immutable assets baked at /app/. Entrypoint wires them into the workspace
 # after volumes are mounted, then drops to the runtime user.
 FROM node:20-slim
@@ -9,9 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # fnm + multiple Node versions so repos pinning a specific Node via .nvmrc /
-# package.json#engines just work. System node from the base image stays at /usr/local/bin
-# (used by opencode itself); fnm-managed versions are pre-installed under
-# FNM_DIR and selected per-shell by the bashrc hook below.
+# package.json#engines just work. System node from the base image stays at
+# /usr/local/bin; fnm-managed versions are pre-installed under FNM_DIR and
+# selected per-shell by the bashrc hook below.
 ENV FNM_DIR=/usr/local/share/fnm
 ENV PATH=$FNM_DIR/aliases/default/bin:$PATH
 RUN curl -fsSL https://fnm.vercel.app/install \
@@ -34,8 +37,8 @@ RUN printf '%s\n' \
     '# --shell bash is required: when sourced via BASH_ENV the parent process' \
     '# is not a shell so fnm cannot auto-detect.' \
     'eval "$(fnm env --shell bash --use-on-cd --version-file-strategy=recursive)"' \
-    '# The cd hook fires only on cd. opencode often launches `bash -c "..."`' \
-    '# with cwd already set via the spawn options — no cd happens — so also' \
+    '# The cd hook fires only on cd. Tools often launch `bash -c "..."` with' \
+    '# cwd already set via the spawn options — no cd happens — so also' \
     '# auto-switch on shell start when the cwd has a version file.' \
     'if [ -f "$PWD/.nvmrc" ] || [ -f "$PWD/.node-version" ]; then' \
     '  fnm use --silent-if-unchanged 2>/dev/null \' \
@@ -46,9 +49,9 @@ RUN printf '%s\n' \
  && printf '\n[ -r /etc/bash.bashrc.fnm ] && . /etc/bash.bashrc.fnm\n' >> /etc/bash.bashrc \
  && ln -s /etc/bash.bashrc.fnm /etc/profile.d/fnm.sh
 # Source the fnm file directly — Debian's /etc/bash.bashrc bails early on
-# non-interactive shells (`[ -z "$PS1" ] && return`), so pointing BASH_ENV at
-# it would skip our setup for `bash -c` invocations (which is exactly the
-# path opencode's bash tool uses).
+# non-interactive shells (`[ -z "$PS1" ] && return`), so pointing BASH_ENV
+# at it would skip our setup for `bash -c` invocations (which is the path
+# the agent's bash tool uses).
 ENV BASH_ENV=/etc/bash.bashrc.fnm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -62,37 +65,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root agent user
 RUN useradd -m -s /bin/bash agent
 
-# Install OpenCode CLI (pinned; see .spike/PHASE0-FINDINGS.md). Global npm
-# install puts the binary on PATH at /usr/local/bin/opencode for all users.
-# Integrity hash matches the value in the harness package-lock.json — verified
-# explicitly because `npm install -g <name>@<version>` doesn't consult any
-# lockfile, so without this a republished/compromised tarball would land
-# silently. To bump: copy the new `sha512-…` from `package-lock.json`
-# (node_modules/opencode-ai → integrity field) along with the version.
-ARG OPENCODE_VERSION=1.15.5
-ARG OPENCODE_INTEGRITY=sha512-ud/0sYo9h2BJALwLudRrzs551YJoi+rHo66jEsSLdOBv5RJxmN64aqqGaafhWxvgtaHyEOqfKnZPyx9GVKl/UA==
-RUN curl -fsSL "https://registry.npmjs.org/opencode-ai/-/opencode-ai-${OPENCODE_VERSION}.tgz" -o /tmp/opencode-ai.tgz \
- && actual="sha512-$(node -e "const c=require('crypto'),f=require('fs');process.stdout.write(c.createHash('sha512').update(f.readFileSync('/tmp/opencode-ai.tgz')).digest('base64'))")" \
- && if [ "$actual" != "$OPENCODE_INTEGRITY" ]; then \
-      echo "opencode-ai tarball integrity mismatch:" >&2; \
-      echo "  expected: $OPENCODE_INTEGRITY" >&2; \
-      echo "  actual:   $actual" >&2; \
-      exit 1; \
-    fi \
- && npm install -g --no-audit --no-fund /tmp/opencode-ai.tgz \
- && rm /tmp/opencode-ai.tgz
-
-# MCP server (baked at /app/)
-COPY mcp-github-app/package.json /app/mcp-github-app/package.json
-RUN cd /app/mcp-github-app && npm install --prefer-offline --no-audit && npm cache clean --force
-COPY mcp-github-app/ /app/mcp-github-app/
-
 # Agent context (baked at /app/ — entrypoint cats into workspace/AGENTS.md)
 COPY agent-context/ /app/agent-context/
 
-# Entrypoint + OpenCode config template
+# Entrypoint
 COPY deploy/sandbox-entrypoint.sh /app/sandbox-entrypoint.sh
-COPY deploy/opencode-config.tmpl.json /app/opencode-config.tmpl.json
 RUN chmod +x /app/sandbox-entrypoint.sh
 
 # Own app dir for agent user
@@ -102,8 +79,8 @@ WORKDIR /home/agent/workspace
 
 # Image-level env so every `docker exec` (the entrypoint just runs once at
 # container start) sees these. Exporting them in sandbox-entrypoint.sh only
-# affects PID 1 — subsequent `docker exec opencode run …` calls get a fresh
-# environment and would otherwise miss these paths.
+# affects PID 1 — subsequent `docker exec agentic-pi run …` calls get a
+# fresh environment and would otherwise miss these paths.
 ENV LASTLIGHT_WORKSPACE=/home/agent/workspace
 ENV LASTLIGHT_GIT_CREDENTIALS=/home/agent/.lastlight-git-credentials
 

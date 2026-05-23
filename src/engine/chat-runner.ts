@@ -310,6 +310,7 @@ function pickReasoning(level: string | undefined): ThinkingLevel | undefined {
 /**
  * Octokit is bundled here only because github-tools.ts imports it at module
  * load. Re-export so callers can probe whether the integration is wired
- * without round-tripping through that file.
+ * without round-tripping through that file. Typed as `unknown` to avoid
+ * dragging the Octokit type chain into the published .d.ts.
  */
-export const __octokitForTest = Octokit;
+export const __octokitForTest: unknown = Octokit;

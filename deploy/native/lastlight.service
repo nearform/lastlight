@@ -1,0 +1,50 @@
+[Unit]
+Description=Last Light — GitHub repository maintenance agent
+Documentation=https://github.com/cliftonc/lastlight
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lastlight
+Group=lastlight
+# gondolin needs /dev/kvm — group `kvm` is the standard accessor on Debian/Ubuntu.
+SupplementaryGroups=kvm
+
+WorkingDirectory=/opt/lastlight
+ExecStart=/usr/bin/node /opt/lastlight/dist/index.js
+EnvironmentFile=/etc/lastlight/lastlight.env
+
+# HOME drives where agentic-pi caches the gondolin guest image
+# (~/.cache/agentic-pi/images/). Pin it to the StateDirectory so the cache
+# survives redeploys and isn't recomputed on every restart.
+Environment=HOME=/var/lib/lastlight
+Environment=NODE_ENV=production
+
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+# 2 GB matches the docker-compose limit. Bursts during webhook fan-out +
+# in-process pi-ai chat; per-task gondolin VMs have their own memory budget.
+MemoryMax=2G
+
+# /var/lib/lastlight created with mode 0750, owned by lastlight:lastlight
+StateDirectory=lastlight
+StateDirectoryMode=0750
+LogsDirectory=lastlight
+LogsDirectoryMode=0750
+
+# Security hardening — the harness only writes to its state dir and logs.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/lastlight /var/log/lastlight
+# Explicit /dev/kvm rule — ProtectSystem=strict alone doesn't gate /dev.
+DeviceAllow=/dev/kvm rw
+
+[Install]
+WantedBy=multi-user.target

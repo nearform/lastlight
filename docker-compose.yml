@@ -50,7 +50,7 @@ services:
       - internal
 
 volumes:
-  agent-data:       # contains: lastlight.db, claude-home/, sandboxes/, logs/
+  agent-data:       # contains: lastlight.db, agent-sessions/, sandboxes/, secrets/, logs/
   caddy-data:
   caddy-config:
 

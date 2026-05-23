@@ -10,12 +10,12 @@ import { unwrapLine } from "./sessions.js";
  * the chat path: same public surface (`mountSessionRoutes` works against it
  * unchanged), but listing comes from the executions table grouped by Slack
  * thread, and message reads target the single jsonl file owned by that
- * thread's agent SDK session id — no scanning of unrelated `agent-*.jsonl`
- * sidechain files in `opencode-home/projects/-app/`.
+ * thread's pi-ai session id — no scanning of unrelated `agent-*.jsonl`
+ * sidechain files under `<sessionsDir>/projects/-app/`.
  *
  * Conceptual mapping:
  * - SessionMeta.id      ← messaging_session.id (= Slack thread / executions.trigger_id)
- * - jsonl on disk       ← opencode-home/projects/-app/<agent_session_id>.jsonl
+ * - jsonl on disk       ← <sessionsDir>/projects/-app/<agent_session_id>.jsonl
  *                         (resolved via messaging_sessions.agent_session_id)
  */
 export class ChatSessionReader implements SessionSource {

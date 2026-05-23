@@ -108,8 +108,9 @@ const PhaseDefinitionSchema = z
     model: z.string().optional(),
     /**
      * Reasoning-effort override — can reference template vars like
-     * `{{variants.architect}}`. Maps to OpenCode's `--variant` flag
-     * (provider-agnostic; OpenCode translates per provider).
+     * `{{variants.architect}}`. Maps to agentic-pi's thinking level
+     * (`off | minimal | low | medium | high | xhigh`). pi-ai translates
+     * this into each provider's reasoning-effort API.
      */
     variant: z.string().optional(),
     /** Named approval gate to pause at after this phase */

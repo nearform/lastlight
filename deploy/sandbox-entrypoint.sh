@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Sandbox container entrypoint — runs as root after volumes are mounted.
-# Sets up permissions, OpenCode workspace files (AGENTS.md + opencode.json),
-# git identity, then drops to the agent user via gosu.
+# Used only when LASTLIGHT_SANDBOX=docker (the gondolin sandbox runs in
+# process and doesn't go through this script). Fixes permissions, writes
+# AGENTS.md, sets up git identity, then drops to the agent user via gosu.
 set -euo pipefail
 
 AGENT_HOME="/home/agent"
@@ -15,8 +16,8 @@ WORKSPACE="$AGENT_HOME/workspace"
 chown -R agent:agent "$WORKSPACE" 2>/dev/null || true
 chown agent:agent "$AGENT_HOME"
 
-# OpenCode writes to ~/.config/opencode as the agent user; ensure the parent
-# exists and is agent-owned before any root-side mkdir below claims it.
+# Ensure ~/.config exists and is agent-owned before any root-side mkdir
+# below claims it (some tools write here at startup).
 mkdir -p "$AGENT_HOME/.config"
 chown agent:agent "$AGENT_HOME/.config"
 
@@ -26,7 +27,8 @@ if [ -f /data/secrets/app.pem ]; then
 fi
 
 # Optionally materialize an agent-readable PEM for high-trust runs only.
-# Path is referenced by deploy/opencode-config.tmpl.json via ${GITHUB_APP_PRIVATE_KEY_PATH}.
+# The harness forwards GITHUB_APP_PRIVATE_KEY_PATH into the sandbox env so
+# any tool inside that needs the App key can find it.
 if [ "${ALLOW_APP_PEM:-0}" = "1" ] && [ -f /data/secrets/app.pem ]; then
   cp /data/secrets/app.pem "$AGENT_HOME/.config/app.pem"
   chown agent:agent "$AGENT_HOME/.config/app.pem"
@@ -36,14 +38,10 @@ else
   export GITHUB_APP_PRIVATE_KEY_PATH=""
 fi
 
-# ── AGENTS.md (the OpenCode equivalent of CLAUDE.md, auto-loaded from cwd) ──
+# ── AGENTS.md — agentic-pi auto-loads this from cwd as the agent's
+# system context (same convention as CLAUDE.md). ──
 cat /app/agent-context/*.md > "$WORKSPACE/AGENTS.md" 2>/dev/null || true
 chown agent:agent "$WORKSPACE/AGENTS.md" 2>/dev/null || true
-
-# ── opencode.json — MCP config from template ──
-envsubst '$GITHUB_APP_ID $GITHUB_APP_INSTALLATION_ID $GITHUB_APP_PRIVATE_KEY_PATH $GITHUB_TOKEN $LASTLIGHT_WORKSPACE $LASTLIGHT_GIT_CREDENTIALS' \
-  < /app/opencode-config.tmpl.json > "$WORKSPACE/opencode.json"
-chown agent:agent "$WORKSPACE/opencode.json"
 
 # ── Git identity and auth (system-wide so it applies regardless of exec user) ──
 git config --system user.name "last-light[bot]"

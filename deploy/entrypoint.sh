@@ -23,15 +23,19 @@ for pem in "$SECRETS"/*.pem; do
   fi
 done
 
-# Ensure state directory structure exists and is owned by lastlight
-mkdir -p "$STATE_DIR"/{sessions,logs,sandboxes,secrets,opencode-home}
+# Ensure state directory structure exists and is owned by lastlight.
+# agent-sessions/ is where agentic-pi's event shim writes JSONL envelopes
+# the dashboard reads (path is set by LASTLIGHT_SESSIONS_DIR).
+mkdir -p "$STATE_DIR"/{logs,sandboxes,secrets,agent-sessions}
 chown -R lastlight:lastlight "$STATE_DIR"
 
-# Copy PEM to the data volume so sandbox containers can access it via shared volume.
-# Owner is `lastlight` so the host harness (which exec's via gosu lastlight below)
-# can read it for the in-process MCP github server. Sandbox-entrypoint runs as
-# root before switching to `agent`, so it can still read this 600 file and
-# materialize an agent-readable copy when ALLOW_APP_PEM=1.
+# Copy PEM to the data volume so sandbox containers can access it via shared
+# volume (LASTLIGHT_SANDBOX=docker fallback path only — gondolin doesn't go
+# through this). Owner is `lastlight` so the host harness (which exec's via
+# gosu lastlight below) can read it for in-process GitHub API calls.
+# Sandbox-entrypoint runs as root before switching to `agent`, so it can
+# still read this 600 file and materialize an agent-readable copy when
+# ALLOW_APP_PEM=1.
 for pem in "$SECRETS"/*.pem; do
   if [ -f "$pem" ]; then
     cp "$pem" "$STATE_DIR/secrets/app.pem"
@@ -41,12 +45,6 @@ for pem in "$SECRETS"/*.pem; do
     break
   fi
 done
-
-# Ensure the opencode-home dir exists — harness writes shim envelope jsonl
-# files here (per chat session + per sandbox session). Lives on the state
-# volume so the dashboard's SessionReader sees both fresh and historical runs
-# across harness restarts.
-mkdir -p "$STATE_DIR/opencode-home"
 
 # Source .env if available
 if [ -f "$APP_DIR/.env" ]; then

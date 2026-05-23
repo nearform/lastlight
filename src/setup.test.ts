@@ -158,7 +158,7 @@ describe("buildEnvContent", () => {
     WEBHOOK_SECRET: "deadbeef01234567",
     ADMIN_SECRET: "cafebabe89abcdef",
     DOMAIN: "lastlight.example.com",
-    OPENCODE_MODEL: "openai/gpt-5.3-codex",
+    LASTLIGHT_MODEL: "openai/gpt-5.3-codex",
     OPENAI_API_KEY: "sk-test-openai",
     useCaddy: true,
     pemSourcePath: "/tmp/app.pem",
@@ -171,7 +171,7 @@ describe("buildEnvContent", () => {
     expect(content).toContain("WEBHOOK_SECRET=deadbeef01234567");
     expect(content).toContain("ADMIN_SECRET=cafebabe89abcdef");
     expect(content).toContain("DOMAIN=lastlight.example.com");
-    expect(content).toContain("OPENCODE_MODEL=openai/gpt-5.3-codex");
+    expect(content).toContain("LASTLIGHT_MODEL=openai/gpt-5.3-codex");
     expect(content).toContain("OPENAI_API_KEY=sk-test-openai");
     expect(content).not.toMatch(/^ANTHROPIC_API_KEY=/m);
     expect(content).toContain(
@@ -182,12 +182,12 @@ describe("buildEnvContent", () => {
   it("writes ANTHROPIC_API_KEY only when an anthropic model is chosen", () => {
     const config: SetupConfig = {
       ...baseConfig,
-      OPENCODE_MODEL: "anthropic/claude-sonnet-4-6-20251015",
+      LASTLIGHT_MODEL: "anthropic/claude-sonnet-4-6-20251015",
       OPENAI_API_KEY: undefined,
       ANTHROPIC_API_KEY: "sk-ant-test",
     };
     const content = buildEnvContent(config);
-    expect(content).toContain("OPENCODE_MODEL=anthropic/claude-sonnet-4-6-20251015");
+    expect(content).toContain("LASTLIGHT_MODEL=anthropic/claude-sonnet-4-6-20251015");
     expect(content).toContain("ANTHROPIC_API_KEY=sk-ant-test");
     expect(content).not.toMatch(/^OPENAI_API_KEY=/m);
   });
@@ -195,12 +195,12 @@ describe("buildEnvContent", () => {
   it("writes OPENROUTER_API_KEY only when an openrouter model is chosen", () => {
     const config: SetupConfig = {
       ...baseConfig,
-      OPENCODE_MODEL: "openrouter/anthropic/claude-sonnet-4.5",
+      LASTLIGHT_MODEL: "openrouter/anthropic/claude-sonnet-4.5",
       OPENAI_API_KEY: undefined,
       OPENROUTER_API_KEY: "sk-or-v1-test",
     };
     const content = buildEnvContent(config);
-    expect(content).toContain("OPENCODE_MODEL=openrouter/anthropic/claude-sonnet-4.5");
+    expect(content).toContain("LASTLIGHT_MODEL=openrouter/anthropic/claude-sonnet-4.5");
     expect(content).toContain("OPENROUTER_API_KEY=sk-or-v1-test");
     expect(content).not.toMatch(/^OPENAI_API_KEY=/m);
     expect(content).not.toMatch(/^ANTHROPIC_API_KEY=/m);

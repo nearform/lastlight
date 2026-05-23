@@ -1,28 +1,24 @@
+# Test-only image for the lastlight harness.
+#
+# Production runs lastlight natively under systemd on a KVM-capable Linux
+# host (see deploy/native/). This Dockerfile is kept for local prod-like
+# smoke testing and for the LASTLIGHT_SANDBOX=docker fallback path; it is
+# not the deployed artifact.
 FROM node:22-slim
 
-# System deps: git, ripgrep, docker CLI, gosu, python3/make/g++ (for native modules like better-sqlite3)
+# System deps: git, ripgrep, docker CLI (for the docker-sandbox fallback
+# only), gosu, python3/make/g++ (for native modules like better-sqlite3).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ripgrep curl jq ca-certificates gosu \
     python3 make g++ \
     && curl -fsSL https://get.docker.com | sh \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user. Add to docker group so they can spawn sandbox
-# containers via socket.
+# Create non-root user. Add to docker group so the harness can spawn
+# sibling sandbox containers via socket when LASTLIGHT_SANDBOX=docker.
 RUN useradd -m -s /bin/bash lastlight && usermod -aG docker lastlight
 
 WORKDIR /app
-
-# Make the opencode-ai binary (installed via npm into /app/node_modules)
-# resolvable on PATH for the long-lived `opencode serve` chat supervisor,
-# which spawns plain `opencode` unless OPENCODE_BIN is set.
-ENV PATH="/app/node_modules/.bin:${PATH}"
-
-# MCP server deps — rarely change
-COPY mcp-github-app/package.json mcp-github-app/package.json
-RUN cd mcp-github-app && npm install --prefer-offline --no-audit \
-    && npm cache clean --force
-COPY mcp-github-app/ mcp-github-app/
 
 # Harness deps — change when package.json changes
 COPY package.json package-lock.json* ./
@@ -62,7 +58,7 @@ RUN mkdir -p /app/data/sessions /app/data/logs
 VOLUME ["/app/data", "/app/secrets"]
 
 ENV STATE_DIR=/app/data
-ENV OPENCODE_HOME_DIR=/app/data/opencode-home
+ENV LASTLIGHT_SESSIONS_DIR=/app/data/agent-sessions
 ENV HOME=/home/lastlight
 ENV NODE_ENV=production
 EXPOSE 8644
