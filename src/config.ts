@@ -20,7 +20,10 @@ function loadDotEnv(path: string): void {
         (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    if (!process.env[key]) {
+    // Only fill in vars that are completely unset. Treating empty string
+    // as "unset" would break vitest's vi.stubEnv(key, ''), which is how
+    // tests assert behavior when an env var is not configured.
+    if (!(key in process.env)) {
       process.env[key] = value;
     }
   }
@@ -40,7 +43,7 @@ export interface SlackConfig {
 /**
  * Per-task-type model configuration.
  * Keys are session types (matching admin dashboard labels).
- * Values are OpenCode `provider/model` strings.
+ * Values are `provider/model` strings consumed by agentic-pi (pi-ai).
  */
 export interface ModelConfig {
   /** Default model for all tasks */
@@ -50,21 +53,23 @@ export interface ModelConfig {
 }
 
 /**
- * Per-task-type reasoning-effort ("variant") configuration. Maps to
- * OpenCode's `--variant` flag — a provider-agnostic knob OpenCode
- * translates into each provider's reasoning-effort API (OpenAI's
- * `reasoning_effort`, Anthropic's thinking budget, etc.). Common values:
- * `minimal` / `medium` / `high` / `max`.
+ * Per-task-type reasoning-effort ("thinking level") configuration. Maps
+ * to pi-ai's `ThinkingLevel` (`off | minimal | low | medium | high | xhigh`).
+ * pi-ai translates this into each provider's reasoning-effort API
+ * (OpenAI's `reasoning_effort`, Anthropic's thinking budget, etc.).
  *
  * Keys mirror `ModelConfig`: phase names ("architect", "reviewer", …)
  * or skill types. `default` is the catch-all when no override matches.
  */
 export interface VariantConfig {
-  /** Default variant for all tasks (unset → no `--variant` flag passed) */
+  /** Default thinking level (unset → pi-ai's per-model default) */
   default?: string;
   /** Per-type overrides */
   [taskType: string]: string | undefined;
 }
+
+/** Workflow-phase isolation backend. */
+export type SandboxBackend = "gondolin" | "docker" | "none";
 
 export interface LastLightConfig {
   /** Webhook listener port */
@@ -73,8 +78,6 @@ export interface LastLightConfig {
   webhookSecret: string;
   /** Bot login name (for filtering self-events) */
   botLogin: string;
-  /** Path to MCP server config */
-  mcpConfigPath: string;
   /** SQLite database path */
   dbPath: string;
   /** Directory containing YAML workflow definitions (default: ./workflows) */
@@ -83,20 +86,18 @@ export interface LastLightConfig {
   stateDir: string;
   /** Directory for agent sandboxes (cloned repos per task) */
   sandboxDir: string;
+  /** Where the dashboard reads session JSONL envelopes (`<dir>/projects/<slug>/*.jsonl`). */
+  sessionsDir: string;
   /** Default model id (used when no per-type override exists) */
   model: string;
   /** Per-task-type model overrides */
   models: ModelConfig;
-  /** Per-task-type reasoning-effort overrides (OpenCode `--variant`) */
+  /** Per-task-type reasoning-effort overrides (pi-ai `ThinkingLevel`) */
   variants: VariantConfig;
   /** Max agent turns */
   maxTurns: number;
-  /**
-   * Port for the long-lived `opencode serve` chat process. The harness
-   * spawns one of these on boot to back the messaging chat skill. Bound
-   * to 127.0.0.1 only. Override with `OPENCODE_SERVE_PORT`.
-   */
-  opencodeServePort: number;
+  /** Workflow sandbox backend (gondolin VM / docker / none). */
+  sandbox: SandboxBackend;
   /** GitHub App config (optional — not needed for messaging-only mode) */
   githubApp?: {
     appId: string;
@@ -174,16 +175,18 @@ export function loadConfig(): LastLightConfig {
     port: parseInt(process.env.WEBHOOK_PORT || process.env.PORT || "8644", 10),
     webhookSecret: process.env.WEBHOOK_SECRET || "",
     botLogin: process.env.BOT_LOGIN || "last-light[bot]",
-    mcpConfigPath: process.env.MCP_CONFIG_PATH || resolve("mcp-config.json"),
     stateDir,
     sandboxDir: join(stateDir, "sandboxes"),
+    sessionsDir: resolve(
+      process.env.LASTLIGHT_SESSIONS_DIR || join(stateDir, "agent-sessions"),
+    ),
     dbPath: process.env.DB_PATH || join(stateDir, "lastlight.db"),
     workflowDir: resolve(process.env.WORKFLOW_DIR || "./workflows"),
-    model: process.env.OPENCODE_MODEL || "openai/gpt-5.5",
+    model: resolveDefaultModel(),
     models: parseModelConfig(),
     variants: parseVariantConfig(),
     maxTurns: parseInt(process.env.MAX_TURNS || "200", 10),
-    opencodeServePort: parseInt(process.env.OPENCODE_SERVE_PORT || "4096", 10),
+    sandbox: parseSandbox(),
     githubApp,
     slack,
     approval: parseApprovalGates(),
@@ -192,6 +195,23 @@ export function loadConfig(): LastLightConfig {
     publicUrl: resolvePublicUrl(),
     reviewPostsCheck: parseBool(process.env.REVIEW_POSTS_CHECK),
   };
+}
+
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
+
+function resolveDefaultModel(): string {
+  return process.env.LASTLIGHT_MODEL || process.env.OPENCODE_MODEL || DEFAULT_MODEL;
+}
+
+function parseSandbox(): SandboxBackend {
+  const raw = (process.env.LASTLIGHT_SANDBOX || "").trim().toLowerCase();
+  if (raw === "gondolin" || raw === "docker" || raw === "none") return raw;
+  if (raw) {
+    console.warn(
+      `[config] Unknown LASTLIGHT_SANDBOX value "${raw}" — falling back to gondolin`,
+    );
+  }
+  return "gondolin";
 }
 
 function parseBool(raw: string | undefined): boolean {
@@ -229,20 +249,20 @@ function parseApprovalGates(): Record<string, boolean> {
 }
 
 /**
- * Parse per-task-type model config from OPENCODE_MODELS env var.
+ * Parse per-task-type model config from LASTLIGHT_MODELS (or legacy
+ * OPENCODE_MODELS) env var.
  *
- * Format: JSON object mapping session types to OpenCode model IDs (provider/model).
- * Example: {"architect":"openai/gpt-5.4","chat":"openai/gpt-5.4-mini"}
+ * Format: JSON object mapping session types to `provider/model` strings.
+ * Example: {"architect":"anthropic/claude-opus-4-7","chat":"anthropic/claude-haiku-4-5"}
  *
  * Session types are arbitrary — they match the `name:` of any phase in your
  * workflows (or any key referenced by `resolveModel`). Use `default` as the
  * catch-all when no per-type override matches.
  */
 function parseModelConfig(): ModelConfig {
-  const defaultModel = process.env.OPENCODE_MODEL || "openai/gpt-5.5";
-  const config: ModelConfig = { default: defaultModel };
+  const config: ModelConfig = { default: resolveDefaultModel() };
 
-  const modelsEnv = process.env.OPENCODE_MODELS;
+  const modelsEnv = process.env.LASTLIGHT_MODELS || process.env.OPENCODE_MODELS;
   if (modelsEnv) {
     try {
       const parsed = JSON.parse(modelsEnv);
@@ -254,7 +274,7 @@ function parseModelConfig(): ModelConfig {
         }
       }
     } catch (err: any) {
-      console.warn(`[config] Invalid OPENCODE_MODELS JSON: ${err.message}`);
+      console.warn(`[config] Invalid LASTLIGHT_MODELS JSON: ${err.message}`);
     }
   }
 
@@ -278,17 +298,19 @@ export function resolveModel(models: ModelConfig, taskType: string): string {
 }
 
 /**
- * Parse `OPENCODE_VARIANTS` into a `VariantConfig`. Same JSON shape as
- * `OPENCODE_MODELS` — e.g.
+ * Parse `LASTLIGHT_THINKINGS` (or legacy `OPENCODE_VARIANTS`) into a
+ * `VariantConfig`. JSON shape mirrors the model config — e.g.
  *   {"architect":"high","reviewer":"high","review":"high","triage":"minimal"}
- * The optional `OPENCODE_VARIANT` env var sets the catch-all default.
+ * The optional `LASTLIGHT_THINKING` env var sets the catch-all default.
  */
 function parseVariantConfig(): VariantConfig {
   const config: VariantConfig = {};
-  const defaultVariant = process.env.OPENCODE_VARIANT?.trim();
+  const defaultVariant = (
+    process.env.LASTLIGHT_THINKING || process.env.OPENCODE_VARIANT || ""
+  ).trim();
   if (defaultVariant) config.default = defaultVariant;
 
-  const raw = process.env.OPENCODE_VARIANTS;
+  const raw = process.env.LASTLIGHT_THINKINGS || process.env.OPENCODE_VARIANTS;
   if (raw) {
     try {
       const parsed = JSON.parse(raw);
@@ -300,38 +322,20 @@ function parseVariantConfig(): VariantConfig {
         }
       }
     } catch (err: any) {
-      console.warn(`[config] Invalid OPENCODE_VARIANTS JSON: ${err.message}`);
+      console.warn(`[config] Invalid LASTLIGHT_THINKINGS JSON: ${err.message}`);
     }
   }
   return config;
 }
 
 /**
- * Resolve the variant (reasoning effort) for a given task type.
+ * Resolve the thinking level (reasoning effort) for a given task type.
  * Checks per-type overrides first, then falls back to default. Returns
- * `undefined` when neither is set — callers omit the `--variant` flag.
+ * `undefined` when neither is set — agentic-pi uses the model's default.
  */
-export function resolveVariant(variants: VariantConfig, taskType: string): string | undefined {
+export function resolveVariant(
+  variants: VariantConfig,
+  taskType: string,
+): string | undefined {
   return variants[taskType] || variants.default;
-}
-
-/**
- * Generate MCP config file for the Agent SDK from the GitHub App config.
- */
-export function generateMcpConfig(config: LastLightConfig): object {
-  const mcpServers: Record<string, unknown> = {};
-
-  if (config.githubApp) {
-    mcpServers.github = {
-      command: "node",
-      args: [resolve("mcp-github-app/src/index.js")],
-      env: {
-        GITHUB_APP_ID: config.githubApp.appId,
-        GITHUB_APP_PRIVATE_KEY_PATH: resolve(config.githubApp.privateKeyPath),
-        GITHUB_APP_INSTALLATION_ID: config.githubApp.installationId,
-      },
-    };
-  }
-
-  return { mcpServers };
 }

@@ -152,12 +152,12 @@ export class DockerSandbox {
   }
 
   /**
-   * Run the OpenCode CLI inside the sandbox with a prompt.
+   * Run the agentic-pi CLI inside the sandbox with a prompt.
    *
    * Streams stdout line-by-line so the caller can react to JSON events
-   * (e.g. capture the top-level `sessionID` field) before the agent has
-   * finished. The full stdout is also buffered and returned for post-run
-   * parsing of `step_finish` accounting.
+   * (e.g. capture the top-level `session` record's id) before the agent
+   * has finished. The full stdout is also buffered and returned for
+   * post-run parsing of the usage_snapshot rollup.
    */
   async runAgent(
     taskId: string,
@@ -165,13 +165,18 @@ export class DockerSandbox {
     opts?: {
       model?: string;
       /**
-       * Reasoning-effort variant. Provider-agnostic per OpenCode's
-       * `--variant` flag (translates to OpenAI's `reasoning_effort`,
-       * Anthropic's thinking budget, etc.). Omit to use the model's
-       * default effort. Validated against an allowlist so a bad value
-       * can't smuggle additional CLI args into the opencode invocation.
+       * Pi thinking level: `off | minimal | low | medium | high | xhigh`.
+       * Validated against the closed set before being shell-interpolated.
        */
-      variant?: string;
+      thinking?: string;
+      /** agentic-pi GitHub profile: `read | issues-write | review-write | repo-write`. */
+      profile?: string;
+      /**
+       * Env forwarded INTO the sandboxed run via repeated `--sandbox-env`
+       * flags. Used to inject git identity. Keys / values are charset-asserted
+       * before shell interpolation.
+       */
+      sandboxEnv?: Record<string, string>;
       /** Called for each newline-terminated stdout line as it arrives. */
       onLine?: (line: string) => void;
     },
@@ -179,28 +184,49 @@ export class DockerSandbox {
     const info = this.activeContainers.get(taskId);
     if (!info) throw new Error(`No sandbox for task ${taskId}`);
 
-    const model = opts?.model || "openai/gpt-5.5";
+    const model = opts?.model || "anthropic/claude-sonnet-4-6";
     const timeout = this.config.timeoutSeconds || 1800;
 
     // `cmd` is interpolated into `sh -c <cmd>` below, so any value we
-    // append here is shell-parsed. Assert variant matches a tight
-    // allowlist (lowercase letters / digits / `-`, max 16 chars) before
-    // embedding it — defense in depth in case it ever gets sourced from
-    // user input.
-    const variantArgs: string[] = [];
-    if (opts?.variant) {
-      if (!/^[a-z0-9-]{1,16}$/.test(opts.variant)) {
-        throw new Error(`Refusing to pass variant "${opts.variant}" — must match /^[a-z0-9-]{1,16}$/`);
+    // append here is shell-parsed. Assert each opt-supplied flag against
+    // a tight allowlist before embedding — defense in depth in case any
+    // of these ever gets sourced from user input.
+    const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+    const PROFILES = new Set(["read", "issues-write", "review-write", "repo-write"]);
+
+    const extraArgs: string[] = [];
+    if (opts?.thinking) {
+      if (!THINKING.has(opts.thinking)) {
+        throw new Error(`Refusing to pass thinking "${opts.thinking}" — must be one of ${[...THINKING].join("|")}`);
       }
-      variantArgs.push("--variant", opts.variant);
+      extraArgs.push("--thinking", opts.thinking);
+    }
+    if (opts?.profile) {
+      if (!PROFILES.has(opts.profile)) {
+        throw new Error(`Refusing to pass profile "${opts.profile}" — must be one of ${[...PROFILES].join("|")}`);
+      }
+      extraArgs.push("--profile", opts.profile);
+    }
+    if (!/^[A-Za-z0-9/_.-]+$/.test(model)) {
+      throw new Error(`Refusing to pass model "${model}" — bad charset`);
+    }
+    for (const [k, v] of Object.entries(opts?.sandboxEnv ?? {})) {
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) {
+        throw new Error(`Refusing sandbox-env key "${k}" — must be UPPER_SNAKE`);
+      }
+      // Values are shell-quoted below. Reject newlines and the closing
+      // quote (single-quote) defensively — both would break the `'…'` wrap.
+      if (/[\n\r']/.test(v)) {
+        throw new Error(`Refusing sandbox-env value for "${k}" — contains newline or quote`);
+      }
+      extraArgs.push("--sandbox-env", `${k}='${v}'`);
     }
 
     const cmd = [
-      "opencode", "run",
-      "--format", "json",
-      "-m", model,
-      ...variantArgs,
-      "--dangerously-skip-permissions",
+      "agentic-pi", "run",
+      "--model", model,
+      "--sandbox", "none",
+      ...extraArgs,
     ].join(" ");
 
     // -i connects stdin so the prompt can be written to the container process.

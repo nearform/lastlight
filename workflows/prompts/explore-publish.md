@@ -3,7 +3,7 @@ You are publishing an approved spec that the previous phase wrote to
 
 ## Your task
 
-1. Read the spec file at `/home/agent/workspace/{{repo}}/{{issueDir}}/explore-spec.md`.
+1. Read the spec file at `{{issueDir}}/explore-spec.md` (relative to the cwd).
 2. Decide the destination based on where this explore was triggered from:
 
 ### GitHub-originated (triggered by a comment on an existing issue)

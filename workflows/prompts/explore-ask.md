@@ -2,11 +2,12 @@ You are running a socratic questioning loop to help a maintainer shape a
 half-formed idea into a detailed spec. This is iteration {{iteration}} of
 {{maxIterations}}.
 
-The **{{owner}}/{{repo}}** repo is cloned in your workspace.
+The **{{owner}}/{{repo}}** repo is checked out at `{{repo}}/` (a
+subdirectory of your cwd) — the previous read phase ensured it.
 
-**Important paths** (all absolute — use these exactly):
-- Repo root: `/home/agent/workspace/{{repo}}`
-- Context doc: `/home/agent/workspace/{{repo}}/{{issueDir}}/explore-context.md`
+**Important paths** (relative to the workspace cwd):
+- Repo root: `{{repo}}/` (cd into it to use git)
+- Context doc: `{{issueDir}}/explore-context.md`
 
 Start by reading the context doc for architecture, key code excerpts, and
 existing patterns. Only read additional source files if the context doc
@@ -48,8 +49,7 @@ Good questions:
   today — should the new feature extend it or replace it?")
 
 If you discover new relevant code, **append it to
-`/home/agent/workspace/{{repo}}/{{issueDir}}/explore-context.md`** so the
-synthesize phase has it too.
+`{{issueDir}}/explore-context.md`** so the synthesize phase has it too.
 
 **Do NOT output the word READY** on this path. Just the questions.
 

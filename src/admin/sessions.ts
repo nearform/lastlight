@@ -202,7 +202,7 @@ export function unwrapLine(raw: Record<string, unknown>): JsonlMessage[] {
 }
 
 /**
- * Which on-disk slice of `opencode-home/projects` a SessionReader exposes.
+ * Which on-disk slice of `<sessionsDir>/projects` a SessionReader exposes.
  *
  * - `sandbox`: every project dir EXCEPT `-app`. These are workflow runs that
  *   executed inside a per-task docker sandbox; they're what the "Sessions"

@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { randomUUID } from "crypto";
-import { loadConfig, generateMcpConfig, resolveModel } from "./config.js";
+import { loadConfig, resolveModel, resolveVariant } from "./config.js";
 import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService } from "./connectors/index.js";
 import { routeEvent } from "./engine/router.js";
 import { CHAT_SYSTEM_SUFFIX, handleChatMessage, loadAgentContext } from "./engine/chat.js";
-import { OpencodeChatServer } from "./engine/opencode-chat-server.js";
+import { ChatRunner } from "./engine/chat-runner.js";
 import { configureGitAuth } from "./engine/git-auth.js";
 import { StateDb } from "./state/db.js";
 import { CronScheduler } from "./cron/scheduler.js";
@@ -78,42 +78,29 @@ async function main() {
     mkdirSync(resolve(config.stateDir, sub), { recursive: true });
   }
   console.log(`[state] State dir: ${config.stateDir}`);
+  console.log(`[state] Sessions dir: ${config.sessionsDir}`);
+  console.log(`[config] Sandbox backend: ${config.sandbox}`);
 
-  // Generate MCP config file for the Agent SDK
-  const mcpConfig = generateMcpConfig(config);
-  const mcpConfigPath = resolve(config.mcpConfigPath);
-  writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2));
-  console.log(`[config] MCP config written to: ${mcpConfigPath}`);
+  // Initialize state database first — ChatRunner needs SessionManager
+  // (DB-backed) at construction time.
+  const db = new StateDb(config.dbPath);
+  console.log(`[state] Database: ${config.dbPath}`);
 
-  // Resolve the opencode-home dir once — used by the chat shim writer and
-  // the dashboard reader so they agree on the path.
-  const opencodeHomeDir = resolve(process.env.OPENCODE_HOME_DIR || resolve(config.stateDir, "opencode-home"));
+  // Session manager for messaging connectors (shared across Slack, Discord, etc.)
+  const sessionManager = new SessionManager(db.database);
 
-  // Long-lived `opencode serve` process backing the chat skill. Its
-  // working dir holds the per-process opencode.json (MCP servers) and
-  // AGENTS.md (chat persona). One server, many concurrent sessions —
-  // one per Slack thread.
-  const chatServeWorkingDir = resolve(config.stateDir, "opencode-serve");
-  const chatServer = new OpencodeChatServer({
-    port: config.opencodeServePort,
-    workingDir: chatServeWorkingDir,
-    defaultModel: resolveModel(config.models, "chat"),
-    agentMarkdown: loadAgentContext() + CHAT_SYSTEM_SUFFIX,
-    mcpServers: config.githubApp ? {
-      github: {
-        type: "local",
-        command: ["node", resolve("mcp-github-app/src/index.js")],
-        enabled: true,
-        environment: {
-          GITHUB_APP_ID: config.githubApp.appId,
-          GITHUB_APP_PRIVATE_KEY_PATH: resolve(config.githubApp.privateKeyPath),
-          GITHUB_APP_INSTALLATION_ID: config.githubApp.installationId,
-        },
-        timeout: 30000,
-      },
-    } : undefined,
-    printLogs: process.env.OPENCODE_SERVE_LOGS === "1",
-  });
+  // In-process chat runner backs the messaging chat skill. One pi-ai
+  // conversation per Slack/Discord thread; locked down to read-only
+  // GitHub tools.
+  const chatRunner = new ChatRunner(
+    {
+      model: resolveModel(config.models, "chat"),
+      thinking: resolveVariant(config.variants, "chat"),
+      systemPrompt: loadAgentContext() + CHAT_SYSTEM_SUFFIX,
+      github: config.githubApp,
+    },
+    sessionManager,
+  );
 
   // Configure git with GitHub App credentials — agents can git clone/push natively.
   // Non-fatal: the token is refreshed before each agent execution anyway, so a
@@ -129,10 +116,6 @@ async function main() {
       console.warn(`[git-auth] Initial token mint failed (will retry per-execution): ${err.message}`);
     }
   }
-
-  // Initialize state database
-  const db = new StateDb(config.dbPath);
-  console.log(`[state] Database: ${config.dbPath}`);
 
   // GitHub API client for harness-level operations (posting comments, fetching issues)
   const github = config.githubApp ? new GitHubClient(config.githubApp) : null;
@@ -358,11 +341,12 @@ async function main() {
         workflowName,
         request,
         {
-          mcpConfigPath,
           model: config.model,
           maxTurns: config.maxTurns,
           stateDir: config.stateDir,
           sandboxDir: config.sandboxDir,
+          sessionsDir: config.sessionsDir,
+          sandbox: config.sandbox,
         },
         callbacks,
         db,
@@ -389,9 +373,6 @@ async function main() {
 
   // Set up connector registry
   const registry = new ConnectorRegistry();
-
-  // Session manager for messaging connectors (shared across Slack, Discord, etc.)
-  const sessionManager = new SessionManager(db.database);
 
   // Message delivery service for cron output
   const delivery = new MessageDeliveryService();
@@ -450,7 +431,7 @@ async function main() {
     mountAdmin(githubConnector.honoApp, db, {
       cronScheduler: cron,
       stateDir: config.stateDir,
-      sessionsDir: opencodeHomeDir,
+      sessionsDir: config.sessionsDir,
       adminPassword: process.env.ADMIN_PASSWORD ?? "",
       adminSecret: process.env.ADMIN_SECRET ?? "lastlight-dev-secret",
       slackOAuthClientId: process.env.SLACK_OAUTH_CLIENT_ID,
@@ -615,22 +596,16 @@ async function main() {
           sender,
           sessionManager,
           {
-            chatServer,
-            opencodeHomeDir,
-            mcpServerNames: config.githubApp ? ["github"] : [],
+            chatRunner,
+            sessionsHomeDir: config.sessionsDir,
           },
           {
-            mcpConfigPath,
             model: resolveModel(config.models, "chat"),
             maxTurns: 10,
           },
-          resumeAgentSessionId,
         );
 
-        // Persist the Agent SDK session id on the first turn so the next
-        // turn in this thread can resume into the same jsonl. We always
-        // overwrite — if the SDK rotated the id (e.g. resume failed and it
-        // started a fresh session) we want the latest one.
+        // Persist the agentSessionId — first turn mints, later turns reuse.
         if (result.agentSessionId && result.agentSessionId !== resumeAgentSessionId) {
           sessionManager.setAgentSessionId(messagingSessionId, result.agentSessionId);
         }
@@ -1150,17 +1125,7 @@ async function main() {
   console.log("[main] All connectors started");
   console.log("[main] Cron jobs registered");
 
-  // Boot the long-lived chat server. Slack/Discord chat turns go to it
-  // over HTTP. Non-fatal if it fails — chat will degrade to error
-  // replies until the next restart, but workflows still run.
-  if (config.slack) {
-    try {
-      await chatServer.start();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[chat-server] startup failed: ${msg}`);
-    }
-  }
+  // Chat runs in-process via pi-ai — no long-lived server to boot.
 
   // Boot-time recovery: any workflow_runs left in 'running' state from a
   // previous harness lifetime have already had their sandbox containers
@@ -1172,11 +1137,12 @@ async function main() {
     db,
     github,
     config: {
-      mcpConfigPath,
       model: config.model,
       maxTurns: config.maxTurns,
       stateDir: config.stateDir,
       sandboxDir: config.sandboxDir,
+      sessionsDir: config.sessionsDir,
+      sandbox: config.sandbox,
     },
     models: config.models,
     variants: config.variants,
@@ -1194,10 +1160,6 @@ async function main() {
     console.log("\n[main] Shutting down...");
     cron.stopAll();
     await registry.stopAll();
-    await chatServer.stop().catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[chat-server] stop error: ${msg}`);
-    });
     db.close();
     process.exit(0);
   };

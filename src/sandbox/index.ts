@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process";
-import { mkdirSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { join, resolve, sep } from "path";
 import { DockerSandbox } from "./docker.js";
 
@@ -72,6 +72,38 @@ export function sandboxAvailable(): boolean {
 
 function isWithinDir(parent: string, child: string): boolean {
   return child === parent || child.startsWith(`${parent}${sep}`);
+}
+
+/**
+ * Set up the per-task worktree directory (mkdir + optional pre-clone) without
+ * touching Docker. Used by the non-docker sandbox modes (gondolin / none) where
+ * agentic-pi runs in-process or in a VM rather than a container, but still
+ * wants a per-task workspace cloned from the target branch.
+ */
+export function setupTaskWorktree(opts: {
+  taskId: string;
+  stateDir: string;
+  sandboxDir?: string;
+  prePopulate?: {
+    owner: string;
+    repo: string;
+    branch: string;
+    token: string;
+  };
+}): string {
+  const sandboxBase = resolve(opts.sandboxDir || join(opts.stateDir, "sandboxes"));
+  mkdirSync(sandboxBase, { recursive: true });
+
+  const workDir = resolve(sandboxBase, opts.taskId);
+  if (!isWithinDir(sandboxBase, workDir)) {
+    throw new Error(`Invalid taskId path escape attempt: ${opts.taskId}`);
+  }
+  mkdirSync(workDir, { recursive: true });
+
+  if (opts.prePopulate) {
+    prePopulateWorkspace(workDir, opts.prePopulate);
+  }
+  return workDir;
 }
 
 /**
@@ -153,16 +185,32 @@ function prePopulateWorkspace(
     throw new Error("prePopulate: refusing to embed a token outside [A-Za-z0-9_-]");
   }
   const url = `https://x-access-token:${pre.token}@github.com/${pre.owner}/${pre.repo}.git`;
+  // The agent's cwd is `workDir` (the workspace). The harness writes
+  // `AGENTS.md` there, so cloning into the workDir root would collide.
+  // Instead, clone into a `<repo>/` subdirectory — keeps the layout
+  // consistent regardless of whether the harness or the agent did the
+  // clone, and leaves room for `.lastlight/issue-N/` scratch space at
+  // the workspace root.
+  const repoDir = join(workDir, pre.repo);
+  // Repo dir might already exist from a resumed run — guard against
+  // git clone's "destination not empty" error by skipping when there's
+  // already a .git inside.
+  if (existsSync(join(repoDir, ".git"))) {
+    console.log(
+      `[sandbox] Pre-clone skipped: ${repoDir} already a git repo (resumed run).`,
+    );
+    return;
+  }
   const start = Date.now();
   try {
     execFileSync(
       "git",
-      ["clone", "--branch", pre.branch, "--depth", "50", url, workDir],
+      ["clone", "--branch", pre.branch, "--depth", "50", url, repoDir],
       { stdio: "pipe", timeout: 120_000 },
     );
     const ms = Date.now() - start;
     console.log(
-      `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${workDir} (${ms}ms)`,
+      `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${repoDir} (${ms}ms)`,
     );
   } catch (err: any) {
     // Don't kill the run on a failed pre-clone — fall through to an empty

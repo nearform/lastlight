@@ -3,16 +3,27 @@ any clarifying questions, you need to clone the target repo, explore the
 relevant code, and write a detailed context document that all subsequent
 phases will reference.
 
-## Step 1 — Clone the repo
+## Step 1 — Prepare the workspace
 
-Clone **{{owner}}/{{repo}}** into your workspace and cd into it:
+The repo lives (or will live) in a `{{repo}}/` subdirectory under your
+cwd. Check first:
 
 ```
-git clone https://github.com/{{owner}}/{{repo}}.git && cd {{repo}}
+ls -la
 ```
 
-(Git credentials are already configured — just run the clone.)
-All subsequent commands and file paths are relative to `{{repo}}/`.
+- If you see `{{repo}}/.git/` already, the harness pre-cloned it.
+  `cd {{repo}}` and continue.
+- Otherwise clone it into a `{{repo}}/` subdirectory and cd in:
+
+  ```
+  git clone https://github.com/{{owner}}/{{repo}}.git {{repo}}
+  cd {{repo}}
+  ```
+
+  Git credentials are already configured.
+
+All subsequent file paths in this prompt are relative to the cwd.
 
 {{#if issueNumber}}
 ## Step 2 — Read the issue
@@ -52,15 +63,18 @@ understand everything relevant to the idea. Look at:
 
 ## Step 4 — Write the context document
 
-First create the working directory:
+First create the scratch directory at the WORKSPACE root (alongside
+`{{repo}}/`, not inside it):
 
 ```
-mkdir -p /home/agent/workspace/{{repo}}/{{issueDir}}
+mkdir -p ../{{issueDir}}    # if you're inside the {{repo}}/ subdir
+# OR, if you cd'd back out:
+mkdir -p {{issueDir}}
 ```
 
-Then write a detailed context file to
-**`/home/agent/workspace/{{repo}}/{{issueDir}}/explore-context.md`**
-that captures everything you found. This file is the primary reference for
+Then write a detailed context file to **`{{issueDir}}/explore-context.md`**
+relative to the workspace root (i.e. `../{{issueDir}}/explore-context.md`
+when you're inside the repo subdir). This file is the primary reference for
 all subsequent phases — they should rarely need to re-explore the codebase.
 
 Structure it as:

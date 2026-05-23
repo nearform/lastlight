@@ -14,23 +14,24 @@ When asked to review a pull request, or when triggered by a webhook/cron to chec
 
 ### Workspace setup
 
-For pr-review runs the harness **pre-clones the PR's head ref into
-`/home/agent/workspace`** before this session starts. Inspect the
-workspace with `glob` / `read` directly. Do NOT call `github_clone_repo`
-— that re-downloads the whole repo wastefully.
-
-If you need to confirm or refresh:
+For pr-review runs the harness pre-clones the PR's head ref into a
+`<repo>/` **subdirectory** of your cwd. The cwd itself is the workspace
+root (contains `AGENTS.md`); the cloned repo is one level deeper.
 
 ```
-git -C /home/agent/workspace log -1 --oneline
-# if you need newer commits:
-git -C /home/agent/workspace fetch origin <branch> --depth 50
-git -C /home/agent/workspace reset --hard FETCH_HEAD
+ls -la         # do you see <repo>/.git/ in the listing?
 ```
 
-Only fall back to `github_clone_repo` if the workspace is empty — that
-means the pre-clone failed (look for `[sandbox] Pre-clone … failed` in
-harness logs).
+- If yes — `cd <repo>` and use git directly. To refresh:
+  ```
+  git fetch origin <branch> --depth 50
+  git reset --hard FETCH_HEAD
+  ```
+- If no — the pre-clone failed. Clone into the subdir yourself:
+  ```
+  git clone https://github.com/{{owner}}/{{repo}}.git {{repo}}
+  cd {{repo}}
+  ```
 
 ### Target selection
 

@@ -33,13 +33,17 @@ describe('loadConfig — model resolution', () => {
   beforeEach(() => {
     vi.stubEnv('GITHUB_APP_ID', '');
     vi.stubEnv('SLACK_BOT_TOKEN', '');
+    // The dev .env now sets LASTLIGHT_MODEL — clear it so we test the
+    // built-in default + legacy OPENCODE_MODEL fallback path.
+    vi.stubEnv('LASTLIGHT_MODEL', '');
+    vi.stubEnv('LASTLIGHT_MODELS', '');
   });
   afterEach(() => vi.unstubAllEnvs());
 
   it('returns the OpenCode default model when OPENCODE_MODEL not set', () => {
     vi.stubEnv('OPENCODE_MODEL', '');
     const config = loadConfig();
-    expect(config.model).toBe('openai/gpt-5.5');
+    expect(config.model).toBe('anthropic/claude-sonnet-4-6');
   });
 
   it('uses OPENCODE_MODEL env var when set', () => {
@@ -116,6 +120,8 @@ describe('loadConfig — model overrides via OPENCODE_MODELS', () => {
   beforeEach(() => {
     vi.stubEnv('GITHUB_APP_ID', '');
     vi.stubEnv('SLACK_BOT_TOKEN', '');
+    vi.stubEnv('LASTLIGHT_MODEL', '');
+    vi.stubEnv('LASTLIGHT_MODELS', '');
   });
   afterEach(() => vi.unstubAllEnvs());
 
@@ -123,7 +129,7 @@ describe('loadConfig — model overrides via OPENCODE_MODELS', () => {
     vi.stubEnv('OPENCODE_MODELS', '');
     vi.stubEnv('OPENCODE_MODEL', '');
     const config = loadConfig();
-    expect(config.models.default).toBe('openai/gpt-5.5');
+    expect(config.models.default).toBe('anthropic/claude-sonnet-4-6');
   });
 
   it('parses valid OPENCODE_MODELS JSON and sets per-type overrides', () => {
@@ -137,7 +143,7 @@ describe('loadConfig — model overrides via OPENCODE_MODELS', () => {
     vi.stubEnv('OPENCODE_MODELS', 'not-valid-json');
     vi.stubEnv('OPENCODE_MODEL', '');
     const config = loadConfig();
-    expect(config.models.default).toBe('openai/gpt-5.5');
+    expect(config.models.default).toBe('anthropic/claude-sonnet-4-6');
   });
 });
 

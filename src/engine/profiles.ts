@@ -9,23 +9,22 @@ import type { GitHubTokenPermissions } from "./git-auth.js";
  */
 const AGENT_CONTEXT_DIR = resolve("agent-context");
 
+import type { SandboxBackend } from "../config.js";
+
 /**
- * Configuration for an agent execution (sandbox or direct).
+ * Configuration for an agent execution.
  */
 export interface ExecutorConfig {
-  /** Path to the MCP server config for GitHub tools (kept for legacy callers). */
-  mcpConfigPath: string;
-  /** Working directory for the agent (used by the direct-fallback path). */
+  /** Working directory for the agent (used by the no-sandbox path). */
   cwd?: string;
-  /** Maximum conversation turns. Unused by OpenCode runtime; kept for API stability. */
+  /** Maximum conversation turns. Unused by agentic-pi; kept for API stability. */
   maxTurns?: number;
-  /** Model id passed to the runtime (e.g. "openai/gpt-5.5"). */
+  /** Model id (e.g. "anthropic/claude-sonnet-4-6"). */
   model?: string;
   /**
-   * Reasoning-effort variant passed to the runtime as `--variant`. Maps
-   * to OpenCode's provider-agnostic reasoning effort (e.g. `minimal`,
-   * `medium`, `high`, `max`). When omitted, no `--variant` flag is sent
-   * and the model uses its default effort.
+   * Pi thinking level: `off | minimal | low | medium | high | xhigh`.
+   * Forwarded to agentic-pi as the `thinking` option. When omitted,
+   * agentic-pi uses the model's default.
    */
   variant?: string;
   /** Path to agent context directory. */
@@ -34,6 +33,10 @@ export interface ExecutorConfig {
   stateDir?: string;
   /** Directory for agent sandboxes (cloned repos). */
   sandboxDir?: string;
+  /** Where the shim writes dashboard envelope jsonl. */
+  sessionsDir?: string;
+  /** Workflow sandbox backend (overrides config-level default). */
+  sandbox?: SandboxBackend;
 }
 
 /**
@@ -64,6 +67,18 @@ export interface ExecutionResult {
 }
 
 export type GitAccessProfile = "read" | "issues-write" | "review-write" | "repo-write";
+
+/**
+ * agentic-pi's GitHub extension uses the same four profile names — they
+ * pass through unchanged. Kept as an explicit map so renames on either
+ * side surface as a type error rather than a silent runtime mismatch.
+ */
+export const AGENTIC_PROFILE_FOR: Record<GitAccessProfile, string> = {
+  read: "read",
+  "issues-write": "issues-write",
+  "review-write": "review-write",
+  "repo-write": "repo-write",
+};
 
 export interface GitSandboxAccess {
   owner: string;

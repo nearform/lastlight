@@ -1,12 +1,13 @@
 You are writing the detailed spec for an idea that's been shaped through a
 socratic Q&A loop with a maintainer.
 
-The **{{owner}}/{{repo}}** repo is cloned in your workspace.
+The **{{owner}}/{{repo}}** repo is checked out at `{{repo}}/` (a
+subdirectory of your cwd).
 
-**Important paths** (all absolute — use these exactly):
-- Repo root: `/home/agent/workspace/{{repo}}`
-- Context doc: `/home/agent/workspace/{{repo}}/{{issueDir}}/explore-context.md`
-- Spec output: `/home/agent/workspace/{{repo}}/{{issueDir}}/explore-spec.md`
+**Important paths** (relative to the workspace cwd):
+- Repo root: `{{repo}}/` (cd into it to use git)
+- Context doc: `{{issueDir}}/explore-context.md`
+- Spec output: `{{issueDir}}/explore-spec.md`
 
 Start by reading the context doc — it contains the architecture, key code
 excerpts, and existing patterns captured during the initial read and
@@ -28,8 +29,7 @@ context doc doesn't cover what you need.
 Read the relevant parts of the codebase to ground the spec in reality.
 Then produce a detailed spec document. The structure below is the target —
 hit every heading, even if a section is "none" or "to be decided". Write it
-to `/home/agent/workspace/{{repo}}/{{issueDir}}/explore-spec.md` using the
-Write tool.
+to `{{issueDir}}/explore-spec.md` using the Write tool.
 
 ```
 # <short title summarizing the idea>
@@ -70,7 +70,7 @@ patterns from the codebase. Break into subsections if useful.>
 
 ## Rules
 
-- Write the file to `/home/agent/workspace/{{repo}}/{{issueDir}}/explore-spec.md`
+- Write the file to `{{issueDir}}/explore-spec.md`
   — don't inline it in your reply.
 - Reference actual code paths from the repo, not hypothetical ones.
 - After writing the file, output a short summary (3-6 lines) saying what

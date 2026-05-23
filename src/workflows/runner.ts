@@ -6,7 +6,7 @@ import type {
   GitAccessProfile,
   GitSandboxAccess,
 } from "../engine/profiles.js";
-import { executeAgent } from "../engine/opencode-executor.js";
+import { executeAgent } from "../engine/agent-executor.js";
 import type { StateDb } from "../state/db.js";
 import type { PhaseHistoryEntry } from "../state/db.js";
 import type { ModelConfig, VariantConfig } from "../config.js";

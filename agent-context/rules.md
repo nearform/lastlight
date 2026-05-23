@@ -1,5 +1,48 @@
 # Operational Rules
 
+## Workspace
+
+Your current working directory IS the workspace. Inside the sandbox VM
+it's mounted at `/workspace`; from your perspective, use **relative
+paths** from cwd. Never use absolute paths like `/home/agent/workspace/...`
+or `/home/lastlight/...` — those are stale and won't exist in the guest.
+
+**Workspace layout:**
+
+```
+.                   <- your cwd (the workspace)
+├── AGENTS.md       <- this file, harness-written
+├── <repo>/         <- the target repo, lives in a SUBDIRECTORY named
+│   ├── .git/         after the repo. Always work in here for source
+│   └── ...           edits.
+└── .lastlight/    <- scratch space for cross-phase artifacts (specs,
+    └── issue-N/      context docs). Never goes into the repo.
+```
+
+**Before touching the workspace, check what's already there.** For some
+workflows (pr-review, pr-fix, sometimes build) the harness has already
+cloned the repo into `<repo>/`; for others (triage, explore, repo-health)
+the workspace starts empty except for `AGENTS.md`.
+
+```
+ls -la
+```
+
+- If `<repo>/.git/` is already present, **don't re-clone**. `cd <repo>`
+  and use git directly. To switch branches:
+  `git fetch origin <branch> --depth 50 && git checkout <branch>`.
+- If `<repo>/` doesn't exist, clone INTO that subdirectory (not into the
+  cwd root — that would collide with `AGENTS.md`):
+  ```
+  git clone https://github.com/<owner>/<repo>.git <repo>
+  cd <repo>
+  ```
+  Git credentials and identity are already configured.
+
+Most read-only workflows (triage, health, review of issues) don't need a
+local checkout at all — use the `github_*` tools to read issues, PRs, file
+contents, and commits directly via the API.
+
 ## GitHub-First Coordination
 
 **All work is coordinated through GitHub issues.** Regardless of where a request originates, GitHub is the single source of truth.
@@ -10,10 +53,18 @@
 
 ## Git Authentication
 
-At the start of any task involving git operations:
-1. Call the `github_clone_repo` MCP tool — this clones with authentication, sets up credential helper, and configures bot identity in one step.
-2. `git push`, `git pull`, `git fetch` all work transparently after cloning.
-3. If auth fails after ~1 hour, call `github_refresh_git_auth` with the repo path to get a fresh token.
+When the harness invokes you via a sandboxed workflow, a short-lived
+GitHub installation token is already injected into your VM environment as
+`GITHUB_TOKEN` and `GH_TOKEN`. Git's credential helper is pre-configured
+to use it, and so is the `gh` CLI:
+
+- `git clone https://github.com/<owner>/<repo>.git .` — just works.
+- `git push origin <branch>` — just works.
+- `gh pr create`, `gh pr view`, etc. — just work.
+
+You don't need to mint tokens or call any auth helper. If a request
+fails with 401, the token expired (~1 hour lifetime); just let the
+harness know and it'll start a new run with a fresh token.
 
 ## Managed Repositories
 
