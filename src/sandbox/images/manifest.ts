@@ -28,23 +28,23 @@ export interface ImageManifest {
   };
 }
 
-// Placeholder values — replaced after the first image-v0.1.0 release
-// ships. The loader treats an empty sha256 as "default image not yet
-// published" and falls back to `gondolin-builtin` with a warning, so
-// shipping the npm package before the image release is safe.
+// Pinned to image-v0.1.0 (first published release). Bump in lockstep
+// with new image-v* releases — copy the published manifest.json
+// verbatim. `uncompressedBytes` is informational only; the sha256 is
+// the load-bearing check.
 export const DEFAULT_IMAGE_MANIFEST: ImageManifest = {
   name: "agentic-pi-dev",
-  version: "0.0.0",
+  version: "0.1.0",
   archives: {
     aarch64: {
-      url: "",
-      sha256: "",
-      uncompressedBytes: 0,
+      url: "https://github.com/cliftonc/agentic-pi/releases/download/image-v0.1.0/agentic-pi-dev-aarch64.tar.gz",
+      sha256: "2b5d303cbcdb8753d0b9eb1a15345b0b32140bc517ee07e3e946c6484093481c",
+      uncompressedBytes: 352753267,
     },
     x86_64: {
-      url: "",
-      sha256: "",
-      uncompressedBytes: 0,
+      url: "https://github.com/cliftonc/agentic-pi/releases/download/image-v0.1.0/agentic-pi-dev-x86_64.tar.gz",
+      sha256: "08676e200b8ecd91e3727e67c295408756426447f9390a0f92c2d27d389e72f9",
+      uncompressedBytes: 378160995,
     },
   },
 };
