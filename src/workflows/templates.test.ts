@@ -56,6 +56,27 @@ describe("renderTemplate — simple substitution", () => {
   });
 });
 
+describe("renderTemplate — phaseOutputs fallback", () => {
+  it("resolves single-segment {{varName}} from phaseOutputs when not on ctx", () => {
+    const ctx = {
+      ...BASE_CTX,
+      phaseOutputs: { publishResult: "**Spec published:** https://github.com/a/b/issues/1" },
+    };
+    const result = renderTemplate("{{publishResult}}", ctx as unknown as TemplateContext);
+    expect(result).toBe("**Spec published:** https://github.com/a/b/issues/1");
+  });
+
+  it("prefers top-level ctx over phaseOutputs on name collision", () => {
+    const ctx = {
+      ...BASE_CTX,
+      owner: "ctxOwner",
+      phaseOutputs: { owner: "phaseOwner" },
+    };
+    const result = renderTemplate("{{owner}}", ctx as unknown as TemplateContext);
+    expect(result).toBe("ctxOwner");
+  });
+});
+
 describe("renderTemplate — nested variable (two-level)", () => {
   it("resolves models.architect style vars", () => {
     const ctx = {

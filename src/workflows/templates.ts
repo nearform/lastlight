@@ -111,7 +111,11 @@ export function renderTemplate(template: string, ctx: TemplateContext): string {
   // any missing intermediate.
   const walkKey = (key: string): unknown => {
     const parts = key.split(".");
-    if (parts.length === 1) return ctx[key];
+    if (parts.length === 1) {
+      const val = ctx[key];
+      if (val !== undefined && val !== null) return val;
+      return ctx.phaseOutputs?.[key];
+    }
     let cur: unknown = ctx[parts[0]];
     if (cur === undefined || cur === null) cur = ctx.phaseOutputs?.[parts[0]];
     for (let i = 1; i < parts.length; i++) {
