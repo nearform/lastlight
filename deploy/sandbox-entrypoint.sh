@@ -15,6 +15,11 @@ WORKSPACE="$AGENT_HOME/workspace"
 chown -R agent:agent "$WORKSPACE" 2>/dev/null || true
 chown agent:agent "$AGENT_HOME"
 
+# OpenCode writes to ~/.config/opencode as the agent user; ensure the parent
+# exists and is agent-owned before any root-side mkdir below claims it.
+mkdir -p "$AGENT_HOME/.config"
+chown agent:agent "$AGENT_HOME/.config"
+
 # ── App PEM: keep shared copy unreadable by the agent by default ──
 if [ -f /data/secrets/app.pem ]; then
   chmod 600 /data/secrets/app.pem 2>/dev/null || true
@@ -23,7 +28,6 @@ fi
 # Optionally materialize an agent-readable PEM for high-trust runs only.
 # Path is referenced by deploy/opencode-config.tmpl.json via ${GITHUB_APP_PRIVATE_KEY_PATH}.
 if [ "${ALLOW_APP_PEM:-0}" = "1" ] && [ -f /data/secrets/app.pem ]; then
-  mkdir -p "$AGENT_HOME/.config"
   cp /data/secrets/app.pem "$AGENT_HOME/.config/app.pem"
   chown agent:agent "$AGENT_HOME/.config/app.pem"
   chmod 600 "$AGENT_HOME/.config/app.pem"
