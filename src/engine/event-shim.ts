@@ -283,7 +283,8 @@ export class AgenticShim {
     if (!this.seenToolCalls.has(id)) return [];
 
     const raw = r.result ?? r.output ?? r.error ?? "";
-    const content = typeof raw === "string" ? raw : safeStringify(raw);
+    const rawString = typeof raw === "string" ? raw : safeStringify(raw);
+    const content = truncateForLog(rawString);
     const block: Record<string, unknown> = {
       type: "tool_result",
       tool_use_id: id,
@@ -351,6 +352,28 @@ function safeStringify(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+/**
+ * Cap on the size of a single tool_result content string written to the
+ * envelope jsonl. A `Read` on a multi-megabyte file or a `Bash` with huge
+ * stdout would otherwise bloat both the in-memory write queue and the
+ * on-disk session log. Anything past this is replaced with a marker. The
+ * raw tool result still exists wherever the tool wrote it (workspace file,
+ * sandbox stdout) — we just don't mirror it into the session jsonl.
+ *
+ * 64KB matches the rough rendering budget of the dashboard tool-result
+ * panel; anything larger would have been truncated for display anyway.
+ */
+const TOOL_RESULT_MAX_BYTES = 64 * 1024;
+
+export function truncateForLog(
+  s: string,
+  maxBytes: number = TOOL_RESULT_MAX_BYTES,
+): string {
+  if (s.length <= maxBytes) return s;
+  const dropped = s.length - maxBytes;
+  return `${s.slice(0, maxBytes)}\n…[truncated ${dropped} chars]`;
 }
 
 /**

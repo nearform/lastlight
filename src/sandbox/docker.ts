@@ -180,7 +180,7 @@ export class DockerSandbox {
       /** Called for each newline-terminated stdout line as it arrives. */
       onLine?: (line: string) => void;
     },
-  ): Promise<string> {
+  ): Promise<void> {
     const info = this.activeContainers.get(taskId);
     if (!info) throw new Error(`No sandbox for task ${taskId}`);
 
@@ -233,12 +233,21 @@ export class DockerSandbox {
     // Run as agent user so workspace writes land with the right ownership.
     const args = ["exec", "-i", "--user", "agent", "-w", WORKSPACE_DIR, info.containerName, "sh", "-c", cmd];
 
-    return await new Promise<string>((resolvePromise, reject) => {
+    // The structured event stream is consumed line-by-line via `onLine` and
+    // mirrored to the AgenticShim, which writes envelope jsonl to
+    // `<sessionsDir>/projects/.../` (read by the admin SessionReader).
+    // That is the on-disk log. We deliberately do NOT buffer the full stdout
+    // here — for a "read a large repo" run the stream is hundreds of MB and
+    // accumulating it in a single string is what OOM'd the harness.
+    //
+    // We keep only a small bounded tail of stderr so the error-path message
+    // is still useful.
+    const STDERR_TAIL_BYTES = 8 * 1024;
+    return await new Promise<void>((resolvePromise, reject) => {
       const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
       child.stdin.write(prompt);
       child.stdin.end();
-      let stdout = "";
-      let stderr = "";
+      let stderrTail = "";
       let buf = "";
 
       const timer = setTimeout(() => {
@@ -248,7 +257,6 @@ export class DockerSandbox {
 
       child.stdout.setEncoding("utf-8");
       child.stdout.on("data", (chunk: string) => {
-        stdout += chunk;
         if (!opts?.onLine) return;
         // Emit complete lines to the caller as they arrive — keeps a partial
         // tail in `buf` for the next chunk.
@@ -264,7 +272,12 @@ export class DockerSandbox {
       });
 
       child.stderr.setEncoding("utf-8");
-      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      child.stderr.on("data", (chunk: string) => {
+        stderrTail += chunk;
+        if (stderrTail.length > STDERR_TAIL_BYTES) {
+          stderrTail = stderrTail.slice(-STDERR_TAIL_BYTES);
+        }
+      });
 
       child.on("error", (err) => {
         clearTimeout(timer);
@@ -279,9 +292,9 @@ export class DockerSandbox {
           buf = "";
         }
         if (code === 0) {
-          resolvePromise(stdout);
+          resolvePromise();
         } else {
-          reject(new Error(`Sandbox agent failed (exit ${code}): ${stderr || stdout || "no output"}`));
+          reject(new Error(`Sandbox agent failed (exit ${code}): ${stderrTail || "no output"}`));
         }
       });
     });

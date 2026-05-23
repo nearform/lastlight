@@ -16,7 +16,7 @@ import type { AgentWorkflowDefinition, PhaseDefinition } from "./schema.js";
 import { loadPromptTemplate, loadSkillInstructions } from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
 import { evalUntilExpression } from "./loop-eval.js";
-import { buildDag, getReadyNodes, getNodesToSkip, isComplete, type DagNode } from "./dag.js";
+import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
 
 /**
  * Reject shell commands containing mustache template markers to prevent
@@ -301,22 +301,6 @@ export function nextPhaseAfter(
   return definition.phases[idx + 1].name;
 }
 
-/**
- * Find the phase that owns an approval gate with the given name — either via
- * `phase.approval_gate` or `phase.loop.approval_gate`. Returns `null` when no
- * phase declares that gate. Gate names should be unique within a workflow.
- */
-function findGateOwningPhase(
-  definition: AgentWorkflowDefinition,
-  gateName: string,
-): string | null {
-  for (const p of definition.phases) {
-    if (p.approval_gate === gateName) return p.name;
-    if (p.loop?.approval_gate === gateName) return p.name;
-  }
-  return null;
-}
-
 // ── Main workflow runner ─────────────────────────────────────────────────────
 
 /** Returns true if any phase declares explicit dependencies — triggers DAG execution path. */
@@ -441,7 +425,7 @@ export async function runWorkflow(
 
   if (hasDependencies(definition)) {
     return runDagWorkflow(
-      definition, ctx, config, callbacks, db, models, approvalConfig, workflowId,
+      definition, ctx, config, db, workflowId,
       { phases, phaseOutputs, triggerId, notify, notifyMessage, onStart, onEnd, modelFor, variantFor, renderPrompt, persistPhase, failWorkflow, gateEnabled, githubAccess },
     );
   }
@@ -1068,10 +1052,7 @@ async function runDagWorkflow(
   definition: AgentWorkflowDefinition,
   ctx: TemplateContext,
   config: ExecutorConfig,
-  callbacks: RunnerCallbacks,
   db: StateDb | undefined,
-  models: ModelConfig | undefined,
-  approvalConfig: ApprovalGateConfig | undefined,
   workflowId: string | undefined,
   runnerCtx: DagRunnerCtx,
 ): Promise<WorkflowResult> {
