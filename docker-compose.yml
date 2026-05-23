@@ -13,6 +13,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock   # spawn sandbox containers
     env_file:
       - .env
+    environment:
+      # V8's default old-space cap (~1.5 GB on 64-bit) is well below the 2g
+      # cgroup limit, so Node would OOM before docker did. Raise it close to
+      # the container limit so transient bursts have somewhere to land.
+      - NODE_OPTIONS=--max-old-space-size=1800
     # Steady-state ~150 MB; bursts during webhook fan-out, the in-process
     # chat skill (full Agent SDK), and the dispatch screening call. 2 GB
     # gives headroom for those bursts while still preventing a runaway leak

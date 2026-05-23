@@ -265,6 +265,14 @@ async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Promise<v
  * 'paused' runs are intentionally left alone — they're waiting for human
  * approval and the dashboard / GitHub comment flow will resume them.
  */
+/**
+ * Maximum number of times a single workflow run can be resumed after a
+ * harness restart. Past this we mark the run failed and stop re-dispatching
+ * it, on the theory that a run that crashes the host three times in a row
+ * (agent OOM, infinite loop, etc.) needs a human, not another attempt.
+ */
+const MAX_RESTART_RESUMES = 3;
+
 export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void> {
   const active = opts.db.activeWorkflowRuns();
   const orphans = active.filter((r) => r.status === "running");
@@ -284,6 +292,18 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     );
     if (cleared > 0) {
       console.log(`[resume] Cleared ${cleared} stale execution(s) for ${run.triggerId}`);
+    }
+
+    // Circuit breaker: bump the per-run restart counter, and if we've now
+    // resumed it more than MAX_RESTART_RESUMES times, mark it failed and
+    // move on. This is what stops an OOM-on-restart loop from churning
+    // forever.
+    const attempts = opts.db.incrementWorkflowRunRestartCount(run.id);
+    if (attempts > MAX_RESTART_RESUMES) {
+      const msg = `harness restarted ${attempts - 1}x while this run was active — giving up after ${MAX_RESTART_RESUMES} resume attempts`;
+      console.warn(`[resume] ${run.workflowName} run ${run.id}: ${msg}`);
+      opts.db.finishWorkflowRun(run.id, "failed", msg);
+      continue;
     }
 
     // Dispatch in the background — we don't want one slow resume to block

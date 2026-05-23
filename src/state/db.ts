@@ -47,6 +47,13 @@ export interface WorkflowRun {
    */
   scratch?: Record<string, unknown>;
   nodeStatuses?: Record<string, "pending" | "running" | "succeeded" | "failed" | "skipped">;
+  /**
+   * Number of times `resumeOrphanedWorkflows` has re-dispatched this run
+   * after a harness restart. Bounded by a small limit so a run that
+   * crashes the host (e.g. agent OOM) is marked failed instead of
+   * retried forever.
+   */
+  restartCount?: number;
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -206,6 +213,15 @@ export class StateDb {
     // loop that accumulate data across reply-gate pauses.
     try {
       this.db.exec(`ALTER TABLE workflow_runs ADD COLUMN scratch TEXT`);
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // Restart attempt counter — bumped each time resumeOrphanedWorkflows
+    // re-dispatches a still-'running' row at boot. Acts as a circuit
+    // breaker so an OOM-on-restart loop can't churn forever.
+    try {
+      this.db.exec(`ALTER TABLE workflow_runs ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0`);
     } catch {
       // Column already exists — ignore
     }
@@ -1018,6 +1034,24 @@ export class StateDb {
     `).run(now, id);
   }
 
+  /**
+   * Increment the restart counter and return the new value. Used by
+   * `resumeOrphanedWorkflows` to enforce a retry budget so a run that
+   * crashes the host (agent OOM, etc.) eventually self-terminates instead
+   * of being re-dispatched on every boot.
+   */
+  incrementWorkflowRunRestartCount(id: string): number {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      UPDATE workflow_runs
+      SET restart_count = COALESCE(restart_count, 0) + 1, updated_at = ?
+      WHERE id = ?
+    `).run(now, id);
+    const row = this.db.prepare(`SELECT restart_count FROM workflow_runs WHERE id = ?`)
+      .get(id) as { restart_count: number } | undefined;
+    return row?.restart_count ?? 0;
+  }
+
   // ── Workflow Approvals ─────────────────────────────────────────
 
   /** Create a new pending approval request */
@@ -1286,6 +1320,7 @@ export class StateDb {
       context: row.context ? JSON.parse(row.context as string) as Record<string, unknown> : undefined,
       scratch: row.scratch ? JSON.parse(row.scratch as string) as Record<string, unknown> : undefined,
       nodeStatuses: row.node_statuses ? JSON.parse(row.node_statuses as string) as Record<string, "pending" | "running" | "succeeded" | "failed" | "skipped"> : undefined,
+      restartCount: typeof row.restart_count === "number" ? row.restart_count : 0,
       startedAt: row.started_at as string,
       updatedAt: row.updated_at as string,
       finishedAt: row.finished_at as string | undefined,
