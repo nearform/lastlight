@@ -71,20 +71,29 @@ describe("OpencodeAccumulator", () => {
     toolNoText.feed({ type: "step_finish", part: { reason: "tool-calls" } });
     expect(toolNoText.stopReason()).toBe("error_tool_calls");
 
-    // gpt-5.5 quirk: model emits final text AND finish_reason="tool_calls" in
-    // the same response with no callable tool_use parts. OpenCode terminates
-    // the loop with reason="tool-calls", but the run is actually complete —
-    // treat as success when finalText is non-empty.
+    // gpt-5.5 + sst/opencode#27697: model emits final text AND
+    // finish_reason="tool_calls" in the same response with no callable
+    // tool_use parts. OpenCode terminates the loop with reason="tool-calls",
+    // but the run is actually complete — treat as success when finalText is
+    // non-empty.
     const toolWithText = new Accumulator();
     toolWithText.feed({ type: "text", part: { text: "Here is the answer." } });
     toolWithText.feed({ type: "step_finish", part: { reason: "tool-calls" } });
     expect(toolWithText.stopReason()).toBe("success");
+
+    // sst/opencode#26855: OpenCode exits before draining the final
+    // step_finish event, so lastReason is undefined even though a complete
+    // text response was emitted. We have the answer — trust it.
+    const textNoFinish = new Accumulator();
+    textNoFinish.feed({ type: "text", part: { text: "READY" } });
+    expect(textNoFinish.stopReason()).toBe("success");
 
     const errored = new Accumulator();
     errored.feed({ type: "step_finish", part: { reason: "stop" } });
     errored.feed({ type: "error", error: { name: "x" } });
     expect(errored.stopReason()).toBe("error_api");
 
+    // Silent failure with no text and no events: still surfaces as unknown.
     const blank = new Accumulator();
     expect(blank.stopReason()).toBe("unknown");
   });

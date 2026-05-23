@@ -277,15 +277,15 @@ function chatResultFromTurn(
   _userMessage: string,
   startTime: number,
 ): ChatResultExt {
-  // OpenAI gpt-5 family can return finish="tool-calls" on a response that
-  // also contains a terminal text completion (no callable tool_use parts).
-  // OpenCode passes that finish reason through verbatim. Treat it as success
-  // when the model produced substantive text — otherwise we'd mark genuinely
-  // good replies as failed. Mirrors the same heuristic in
-  // OpencodeAccumulator.stopReason() (src/engine/opencode-executor.ts).
+  // Mirror of OpencodeAccumulator.stopReason() in opencode-executor.ts —
+  // see that comment for the full rationale, including upstream bugs
+  // sst/opencode#26855 (final step_finish dropped before exit) and
+  // sst/opencode#27697 (post-tool-call assistant text dropped). Both
+  // manifest here as turn.finish being something other than "stop" even
+  // though turn.text holds a complete response. Trust the text: any
+  // non-error finish with substantive text is a successful turn.
   const success =
-    turn.finish === "stop" ||
-    (turn.finish === "tool-calls" && (turn.text?.length ?? 0) > 0);
+    turn.finish === "stop" || (turn.text?.length ?? 0) > 0;
   const stopReason = success ? "success" : `error_${turn.finish.replace(/-/g, "_")}`;
   const turns = countSteps(turn.parts);
   return {

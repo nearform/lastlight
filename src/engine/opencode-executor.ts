@@ -211,23 +211,37 @@ class OpencodeAccumulator {
   /**
    * Map OpenCode's final reason → the legacy claude-style stopReason values
    * the dashboard and result-row writers already understand.
+   *
+   * Workarounds for two open upstream bugs in `opencode run --format json`:
+   *   - sst/opencode#26855 — the run loop sees session.status=idle and exits
+   *     before draining the final step_finish event to stdout, so lastReason
+   *     stays undefined even though the model produced a complete response.
+   *   - sst/opencode#27697 — the JSON formatter drops post-tool-call
+   *     assistant text on some model+stream combinations (we hit the gpt-5.5
+   *     variant where step_finish.reason="tool-calls" arrives alongside a
+   *     terminal text completion with no callable tool_use parts).
+   *
+   * Both manifest as "OpenCode exited cleanly with a final text response but
+   * the terminal accounting event never made it through." Until those are
+   * fixed upstream, treat any clean exit with non-empty finalText and no
+   * error events as success — we already have the answer, the missing
+   * step_finish just costs us token/cost accounting for that run.
+   *
+   * Revisit when sst/opencode#26855 and sst/opencode#27697 are resolved.
    */
   stopReason(): string {
     if (this.errors.length > 0) return "error_api";
-    if (!this.lastReason) return "unknown";
     if (this.lastReason === "stop") return "success";
     if (this.lastReason === "max_tokens" || this.lastReason === "length") {
       return "error_max_turns";
     }
-    // OpenAI gpt-5 family can return finish_reason="tool_calls" on a response
-    // that ALSO contains a terminal text completion (no actual tool_use parts
-    // to execute). OpenCode then exits the loop with reason="tool-calls" even
-    // though the model is done. If we have substantive final text and no API
-    // errors, treat it as success. Genuine "tool-call truncation" cases still
-    // surface as error_tool_calls because finalText will be empty.
-    if (this.lastReason === "tool-calls" && this.finalText.length > 0) {
-      return "success";
-    }
+    // Workaround for #26855 + #27697 (and the gpt-5.5 tool-calls quirk):
+    // non-empty final text + no errors = the model finished, regardless of
+    // whether a step_finish ever arrived. Genuine truncation (model wanted
+    // more turns but got cut off) still leaves finalText empty and surfaces
+    // as error_tool_calls / unknown.
+    if (this.finalText.length > 0) return "success";
+    if (!this.lastReason) return "unknown";
     return `error_${this.lastReason.replace(/-/g, "_")}`;
   }
 
