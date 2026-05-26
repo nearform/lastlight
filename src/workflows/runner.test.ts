@@ -388,6 +388,8 @@ function makeMockDb(currentPhase = "phase_0"): StateDb {
     shouldRunPhase: vi.fn(() => "run"),
     recordStart: vi.fn(),
     recordFinish: vi.fn(),
+    recordOutputText: vi.fn(),
+    getExecutionOutput: vi.fn(() => null),
     markStaleAsFailed: vi.fn(),
     markLatestAsFailed: vi.fn(),
     updateWorkflowPhase: vi.fn((_id: string, newPhase: string, entry?: { phase: string; timestamp: string; success: boolean }) => {

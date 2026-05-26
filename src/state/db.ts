@@ -170,6 +170,12 @@ export class StateDb {
       );
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_trigger ON workflow_runs(trigger_id, status);
       CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
+      -- Dashboard's workflow-runs list query is ORDER BY started_at DESC
+      -- LIMIT 20, often with optional workflow_name / status filters and a
+      -- companion COUNT(*). It polls every 5s, so it's worth a covering
+      -- index — without one this is a full-table sort.
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_started_at ON workflow_runs(started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_workflow_runs_name_started ON workflow_runs(workflow_name, started_at DESC);
 
       CREATE TABLE IF NOT EXISTS cron_overrides (
         name TEXT PRIMARY KEY,
@@ -259,6 +265,12 @@ export class StateDb {
       // re-trigger of the same workflow on the same issue creates new
       // executions instead of reusing the old run's rows.
       "workflow_run_id TEXT",
+      // Final assistant text for a phase execution. Populated only for
+      // loop iterations whose output is referenced by `scratch.<key>
+      // .lastOutputExecutionId` — keeps the inlined LLM output out of
+      // `workflow_runs.scratch` (which is read on every list query)
+      // while still being available to the runner's resume path.
+      "output_text TEXT",
     ]) {
       try {
         this.db.exec(`ALTER TABLE executions ADD COLUMN ${col}`);
@@ -298,6 +310,25 @@ export class StateDb {
    */
   recordSessionId(id: string, sessionId: string): void {
     this.db.prepare(`UPDATE executions SET session_id = ? WHERE id = ?`).run(sessionId, id);
+  }
+
+  /**
+   * Persist the final assistant text for a loop-iteration execution.
+   * Used by the runner when a scratch slot would otherwise inline the
+   * full LLM output into `workflow_runs.scratch` — the scratch entry
+   * stores `lastOutputExecutionId` and resolves the text through
+   * `getExecutionOutput` on read.
+   */
+  recordOutputText(id: string, output: string): void {
+    this.db.prepare(`UPDATE executions SET output_text = ? WHERE id = ?`).run(output, id);
+  }
+
+  /** Read the persisted output text for an execution, or null if none. */
+  getExecutionOutput(id: string): string | null {
+    const row = this.db
+      .prepare(`SELECT output_text FROM executions WHERE id = ?`)
+      .get(id) as { output_text: string | null } | undefined;
+    return row?.output_text ?? null;
   }
 
   recordFinish(
@@ -990,9 +1021,22 @@ export class StateDb {
         .get(...params) as { c: number }
     ).c;
 
+    // Explicit column list — the heavy JSON blobs (`context`, `scratch`,
+    // `node_statuses`) can each be many MB on long-running build runs and
+    // the dashboard list view doesn't read them. Returning them turned a
+    // 20-row page into a 14MB payload. The single-row endpoint
+    // (`getWorkflowRun`) still uses `SELECT *` so the detail panel keeps
+    // the full row when the user picks one.
     const rows = this.db
       .prepare(
-        `SELECT * FROM workflow_runs ${whereClause} ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+        `SELECT
+           id, workflow_name, trigger_id, repo, issue_number,
+           current_phase, phase_history, status,
+           restart_count, started_at, updated_at, finished_at
+         FROM workflow_runs
+         ${whereClause}
+         ORDER BY started_at DESC
+         LIMIT ? OFFSET ?`,
       )
       .all(...params, limit, offset) as Record<string, unknown>[];
 

@@ -182,7 +182,11 @@ async function runPhase(
   workflowRunId?: string,
   githubAccess?: GitSandboxAccess,
   variantOverride?: string,
-): Promise<{ result: ExecutionResult; skipped: false } | { skipped: true; reason: "running" | "done" }> {
+): Promise<
+  | { result: ExecutionResult; executionId: string; skipped: false }
+  | { result: ExecutionResult; skipped: false }
+  | { skipped: true; reason: "running" | "done" }
+> {
   const dedupKey = `${workflowName}:${phaseName}`;
   if (db) {
     const status = db.shouldRunPhase(dedupKey, triggerId, workflowRunId);
@@ -243,7 +247,7 @@ async function runPhase(
       stopReason: result.stopReason,
     });
 
-    return { result, skipped: false };
+    return { result, executionId, skipped: false };
   }
 
   const phaseConfig = modelOverride ? { ...config, model: modelOverride } : config;
@@ -681,7 +685,14 @@ export async function runWorkflow(
 
       let iteration = resumeFromIter;
       let complete = false;
-      let previousOutput = (scratchSlot.lastOutput as string | undefined) ?? "";
+      // On resume, `lastOutputExecutionId` points at an `executions` row
+      // whose `output_text` column holds the previous iteration's full
+      // LLM output. The legacy inline `lastOutput` string is honored too
+      // so runs paused on the old code path still resume cleanly.
+      let previousOutput =
+        (scratchSlot.lastOutputExecutionId && db
+          ? db.getExecutionOutput(scratchSlot.lastOutputExecutionId as string) ?? ""
+          : (scratchSlot.lastOutput as string | undefined) ?? "");
 
       while (!complete && iteration < MAX_ITER) {
         iteration++;
@@ -775,18 +786,26 @@ export async function runWorkflow(
           }
         }
 
+        // Persist this iteration's output text on its execution row so
+        // the resume path can resolve `lastOutputExecutionId` through the
+        // DB instead of inlining the full LLM string into scratch.
+        const iterExecutionId = "executionId" in ir ? ir.executionId : undefined;
+        if (iterExecutionId && db) {
+          db.recordOutputText(iterExecutionId, iterOutput);
+        }
+
         if (conditionMet) {
           complete = true;
           if (scratchKey && db && workflowId) {
-            db.updateWorkflowRunScratch(workflowId, {
-              [scratchKey]: { ...scratchSlot, iteration, ready: true, lastOutput: iterOutput },
-            });
-            scratch[scratchKey] = {
-              ...(scratch[scratchKey] as Record<string, unknown> | undefined),
+            const slot: Record<string, unknown> = {
+              ...scratchSlot,
               iteration,
               ready: true,
-              lastOutput: iterOutput,
             };
+            if (iterExecutionId) slot.lastOutputExecutionId = iterExecutionId;
+            delete slot.lastOutput;
+            db.updateWorkflowRunScratch(workflowId, { [scratchKey]: slot });
+            scratch[scratchKey] = slot;
           }
           persistPhase(iterLabel, `iteration ${iteration} — condition met`);
           break;
@@ -799,14 +818,16 @@ export async function runWorkflow(
             ? renderTemplate(loop.gate_message, { ...ctx, phaseOutputs, iteration, maxIterations: MAX_ITER, scratch })
             : `Loop iteration ${iteration}/${MAX_ITER} complete.`;
 
-          // Persist iteration + last output into scratch BEFORE pausing so
-          // the resume path can pick up at N+1 instead of re-running from 1.
+          // Persist iteration + pointer to the last output's execution row
+          // BEFORE pausing so the resume path can pick up at N+1 instead of
+          // re-running from 1.
           if (scratchKey) {
-            const slot = {
+            const slot: Record<string, unknown> = {
               ...(scratch[scratchKey] as Record<string, unknown> | undefined),
               iteration,
-              lastOutput: iterOutput,
             };
+            if (iterExecutionId) slot.lastOutputExecutionId = iterExecutionId;
+            delete slot.lastOutput;
             scratch[scratchKey] = slot;
             db.updateWorkflowRunScratch(workflowId, { [scratchKey]: slot });
           }

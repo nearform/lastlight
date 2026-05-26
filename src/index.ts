@@ -757,12 +757,19 @@ async function main() {
       db.resolveReplyGate(pending.id, replyText, sender);
 
       // Append the QA entry to scratch.socratic.qa. The runner reads this
-      // via {{scratch.socratic.qa}} on the next iteration.
+      // via {{scratch.socratic.qa}} on the next iteration. The bot's last
+      // question lives on the execution row that produced it — resolve
+      // `lastOutputExecutionId` through the DB; legacy rows that still
+      // inline `lastOutput` work too.
       const prevScratch = (run.scratch || {}) as Record<string, unknown>;
       const prevSocratic = (prevScratch.socratic || {}) as Record<string, unknown>;
       const qaList = Array.isArray(prevSocratic.qa) ? [...(prevSocratic.qa as unknown[])] : [];
+      const lastQuestion =
+        (prevSocratic.lastOutputExecutionId
+          ? db.getExecutionOutput(prevSocratic.lastOutputExecutionId as string) ?? ""
+          : (prevSocratic.lastOutput as string | undefined) ?? "");
       qaList.push({
-        question: prevSocratic.lastOutput ?? "",
+        question: lastQuestion,
         answer: replyText,
         sender,
         at: new Date().toISOString(),
