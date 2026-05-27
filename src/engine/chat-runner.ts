@@ -76,7 +76,13 @@ export class ChatRunner {
   private cfg: ChatRunnerConfig;
   private sessionManager: SessionManager;
   private tools: ChatGitHubToolset | undefined;
-  private model: Model<Api>;
+  /**
+   * Resolved lazily on the first chat turn. A bad chat model spec
+   * (unknown id) MUST NOT crash the whole harness — webhooks, crons and
+   * workflows don't depend on it.
+   */
+  private model: Model<Api> | undefined;
+  private modelError: string | undefined;
   private chains = new Map<string, Promise<unknown>>();
 
   constructor(cfg: ChatRunnerConfig, sessionManager: SessionManager) {
@@ -85,7 +91,19 @@ export class ChatRunner {
     if (cfg.github) {
       this.tools = buildChatGitHubTools(cfg.github);
     }
-    this.model = resolveModel(cfg.model);
+  }
+
+  private resolveModelLazy(): Model<Api> | undefined {
+    if (this.model) return this.model;
+    if (this.modelError) return undefined;
+    try {
+      this.model = resolveModel(this.cfg.model);
+      return this.model;
+    } catch (err) {
+      this.modelError = err instanceof Error ? err.message : String(err);
+      console.error(`[chat] ${this.modelError}`);
+      return undefined;
+    }
   }
 
   /**
@@ -118,6 +136,25 @@ export class ChatRunner {
     if (!agentSessionId) {
       agentSessionId = randomUUID();
       this.sessionManager.setAgentSessionId(messagingSessionId, agentSessionId);
+    }
+
+    // Bail with a clear error if the chat model spec is unknown to pi-ai.
+    // Done here rather than in the constructor so a misconfigured chat
+    // model only fails chat turns, not the whole server.
+    const model = this.resolveModelLazy();
+    if (!model) {
+      return {
+        text: "",
+        agentSessionId,
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        costUsd: 0,
+        modelTurns: 0,
+        finish: "error",
+        errors: [this.modelError ?? "chat model not configured"],
+        assistantMessages: [],
+        toolResults: [],
+        modelId: this.cfg.model,
+      };
     }
 
     // Rehydrate conversation context from the DB. Messages were stored
@@ -157,7 +194,7 @@ export class ChatRunner {
       modelTurns++;
       let assistant: AssistantMessage;
       try {
-        assistant = await completeSimple(this.model, context, opts);
+        assistant = await completeSimple(model, context, opts);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         errors.push(msg);
@@ -260,8 +297,21 @@ function resolveModel(spec: string): Model<Api> {
   const provider = spec.slice(0, idx);
   const modelId = spec.slice(idx + 1);
   // pi-ai's getModel is typed against its static registry; at runtime it
-  // accepts arbitrary strings. Cast to bypass the narrowed types.
-  return (getModel as unknown as (p: string, m: string) => Model<Api>)(provider, modelId);
+  // accepts arbitrary strings AND returns undefined for unknown ids rather
+  // than throwing. Without this guard the first chat turn crashes deep in
+  // the provider stack with "Cannot read properties of undefined (reading
+  // 'api')" — surface a clear, actionable error instead.
+  const model = (getModel as unknown as (p: string, m: string) => Model<Api> | undefined)(
+    provider,
+    modelId,
+  );
+  if (!model) {
+    throw new Error(
+      `Unknown chat model '${spec}'. pi-ai's registry has no '${modelId}' for provider '${provider}'. ` +
+      `Set LASTLIGHT_MODELS (or LASTLIGHT_MODEL) to a registered model id.`,
+    );
+  }
+  return model;
 }
 
 function textMessage(role: string, content: string, timestamp: string): Message {
