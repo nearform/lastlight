@@ -205,9 +205,20 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     receives `["*"]` (wildcard allow-all); docker routes through
     `tinyproxy-open`. Use sparingly — for phases that need broad web
     access (e.g. an explore phase searching third-party docs).
-  - **Private-IP floor**: both `strict.conf` and `open.conf` deny RFC1918,
-    loopback, and link-local CIDRs by default. Toggle off with
-    `LASTLIGHT_BLOCK_PRIVATE_IPS=0`.
+  - **Private-IP floor**: `strict.conf` blocks private destinations
+    inherently — anything not in the public-host allowlist is rejected.
+    `open.conf` adds an explicit destination denylist (RFC1918, loopback,
+    link-local IPv4 + IPv6, plus the GCP metadata hostname literals)
+    via tinyproxy `FilterDefaultDeny No` + `filter-open.txt`. Toggle off
+    with `LASTLIGHT_BLOCK_PRIVATE_IPS=0`.
+  - **Caveat (tinyproxy limitation)**: the denylist matches the literal
+    CONNECT target *before* DNS resolution. A hostname like
+    `evil.example.com` whose A record points at `10.0.0.5` slips past
+    these patterns. Catching that requires a resolve-then-check proxy
+    (Envoy with `dns_resolver`, or a custom Go proxy). The current
+    setup defends against the common `curl http://169.254.169.254/`
+    /  metadata-IP-literal cases but is not a complete post-resolve
+    defense.
 
 ## State directory
 
