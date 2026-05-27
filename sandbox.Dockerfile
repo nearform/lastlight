@@ -84,8 +84,22 @@ RUN curl -fsSL "https://registry.npmjs.org/agentic-pi/-/agentic-pi-${AGENTIC_PI_
  && npm install -g --no-audit --no-fund /tmp/agentic-pi.tgz \
  && rm /tmp/agentic-pi.tgz
 
+# undici as a top-level global so deploy/sandbox-proxy-init.mjs can
+# `import("undici")` without depending on agentic-pi's nested node_modules
+# layout. Node's built-in fetch ignores HTTP_PROXY/HTTPS_PROXY env vars by
+# default; the preload below registers EnvHttpProxyAgent as the global
+# dispatcher so OpenAI/Anthropic/etc SDK calls actually route through the
+# sandbox-side tinyproxy.
+RUN npm install -g --no-audit --no-fund undici@^7
+
 # Agent context (baked at /app/ — entrypoint cats into workspace/AGENTS.md)
 COPY agent-context/ /app/agent-context/
+
+# Node preload script that wires fetch up to the HTTPS_PROXY env var.
+# Activated by NODE_OPTIONS='--import file:///app/sandbox-proxy-init.mjs',
+# which the harness sets when spawning a sandbox container with a proxy
+# configured (see src/sandbox/docker.ts).
+COPY deploy/sandbox-proxy-init.mjs /app/sandbox-proxy-init.mjs
 
 # Entrypoint
 COPY deploy/sandbox-entrypoint.sh /app/sandbox-entrypoint.sh

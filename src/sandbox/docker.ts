@@ -118,6 +118,12 @@ export class DockerSandbox {
       proxyEnv.http_proxy = proxyUrl;
       proxyEnv.NO_PROXY = "localhost,127.0.0.1,::1";
       proxyEnv.no_proxy = proxyEnv.NO_PROXY;
+      // Node 22's built-in fetch (undici) doesn't read HTTP_PROXY/HTTPS_PROXY
+      // by default — the OpenAI / Anthropic / pi-ai SDKs all use fetch and
+      // would otherwise dial direct, which on `sandbox-egress` (internal:true)
+      // hits a connection error. Preload sandbox-proxy-init.mjs to register
+      // EnvHttpProxyAgent as the global dispatcher.
+      proxyEnv.NODE_OPTIONS = "--import file:///app/sandbox-proxy-init.mjs";
     }
     const combinedEnv = { ...this.config.env, ...proxyEnv };
     const envFlags = Object.entries(combinedEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
