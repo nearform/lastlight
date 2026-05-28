@@ -20,6 +20,7 @@ phases:
     model: "{{models.explore}}"
     output_var: baseline
     unrestricted_egress: true
+    web_search: true
     messages:
       on_start: "Cloning `{{owner}}/{{repo}}` and reading the codebase..."
 
@@ -28,6 +29,7 @@ phases:
     prompt: prompts/explore-ask.md
     model: "{{models.explore}}"
     unrestricted_egress: true
+    web_search: true
     generic_loop:
       max_iterations: 8
       until: "output.contains('READY')"
@@ -44,6 +46,7 @@ phases:
     model: "{{models.architect}}"
     output_var: spec
     unrestricted_egress: true
+    web_search: true
     messages:
       on_start: "Writing up the spec from our conversation..."
 

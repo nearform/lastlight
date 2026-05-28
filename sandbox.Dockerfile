@@ -66,23 +66,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd -m -s /bin/bash agent
 
 # Install agentic-pi globally so the harness can `docker exec ...
-# agentic-pi run ...` against this container. Pinned + integrity-checked
-# against the lastlight package-lock.json — `npm install -g <name>@<v>`
-# doesn't consult any lockfile, so without this a republished/compromised
-# tarball would land silently. To bump: copy the new `sha512-…` from
-# lastlight's package-lock.json (node_modules/agentic-pi → integrity).
-ARG AGENTIC_PI_VERSION=0.2.2
-ARG AGENTIC_PI_INTEGRITY=sha512-3aSFw9mrK4qvee599tVS8LT0UkDJl519N2mzxac2pe5sMMyDFMEvFSOuJ7HAaMvSoWeMWet/koYr8c69hyaXMg==
-RUN curl -fsSL "https://registry.npmjs.org/agentic-pi/-/agentic-pi-${AGENTIC_PI_VERSION}.tgz" -o /tmp/agentic-pi.tgz \
+# agentic-pi run ...` against this container. The version + integrity
+# come straight from lastlight's `package-lock.json` so `npm i agentic-pi@…`
+# in the harness automatically flows into the sandbox image — no
+# manual Dockerfile bumps. `npm install -g <tarball>` itself doesn't
+# consult a lockfile, hence the explicit integrity verification.
+COPY package-lock.json /tmp/lastlight-lock.json
+RUN node -e "const p=require('/tmp/lastlight-lock.json').packages['node_modules/agentic-pi']; \
+             if(!p) throw new Error('agentic-pi missing from lockfile'); \
+             process.stdout.write(p.version + '\n' + p.integrity + '\n')" > /tmp/agentic-pi.pin \
+ && version=$(sed -n '1p' /tmp/agentic-pi.pin) \
+ && expected=$(sed -n '2p' /tmp/agentic-pi.pin) \
+ && echo "Installing agentic-pi@${version} (${expected})" \
+ && curl -fsSL "https://registry.npmjs.org/agentic-pi/-/agentic-pi-${version}.tgz" -o /tmp/agentic-pi.tgz \
  && actual="sha512-$(node -e "const c=require('crypto'),f=require('fs');process.stdout.write(c.createHash('sha512').update(f.readFileSync('/tmp/agentic-pi.tgz')).digest('base64'))")" \
- && if [ "$actual" != "$AGENTIC_PI_INTEGRITY" ]; then \
+ && if [ "$actual" != "$expected" ]; then \
       echo "agentic-pi tarball integrity mismatch:" >&2; \
-      echo "  expected: $AGENTIC_PI_INTEGRITY" >&2; \
+      echo "  expected: $expected" >&2; \
       echo "  actual:   $actual" >&2; \
       exit 1; \
     fi \
  && npm install -g --no-audit --no-fund /tmp/agentic-pi.tgz \
- && rm /tmp/agentic-pi.tgz
+ && rm /tmp/agentic-pi.tgz /tmp/agentic-pi.pin /tmp/lastlight-lock.json
 
 # Agent context (baked at /app/ — entrypoint cats into workspace/AGENTS.md)
 COPY agent-context/ /app/agent-context/

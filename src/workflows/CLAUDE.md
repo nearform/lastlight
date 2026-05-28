@@ -126,6 +126,15 @@ documentation. The setting is propagated by `phaseConfigFor()` in
 `runner.ts`, which overlays `phase.unrestricted_egress` onto the
 `ExecutorConfig` before each `runPhase` call.
 
+A sibling YAML field, `web_search: true`, opts the phase into
+agentic-pi's `web_search` / `web_fetch` tools. It uses the same
+`phaseConfigFor` overlay and the same opt-in-per-phase convention as
+`unrestricted_egress`. Phases that opt into web search usually also
+want `unrestricted_egress: true` because `web_fetch` against
+third-party docs goes through the same firewall path. See the
+"Environment" section of the top-level `CLAUDE.md` for the required
+provider env vars.
+
 ## Linear vs DAG runner
 
 `runWorkflow` checks `hasDependencies(definition)`. If any phase has

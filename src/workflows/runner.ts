@@ -71,8 +71,17 @@ function buildPhasePrompt(
  * in here so call sites stay uniform.
  */
 function phaseConfigFor(config: ExecutorConfig, phase: PhaseDefinition): ExecutorConfig {
-  if (phase.unrestricted_egress === undefined) return config;
-  return { ...config, unrestrictedEgress: phase.unrestricted_egress };
+  if (phase.unrestricted_egress === undefined && phase.web_search === undefined) {
+    return config;
+  }
+  const next: ExecutorConfig = { ...config };
+  if (phase.unrestricted_egress !== undefined) {
+    next.unrestrictedEgress = phase.unrestricted_egress;
+  }
+  if (phase.web_search !== undefined) {
+    next.webSearch = phase.web_search;
+  }
+  return next;
 }
 
 /**
@@ -159,17 +168,6 @@ export function gitAccessProfileForWorkflow(workflowName: string): GitAccessProf
     default:
       return "read";
   }
-}
-
-/**
- * Whether agentic-pi's web-search extension (`web_search` / `web_fetch`
- * tools) should be enabled for this workflow. Returns `true` only for
- * the explore workflow today — every other workflow gets an explicit
- * `false` downstream, which suppresses agentic-pi's env-var-triggered
- * auto-enable.
- */
-export function webSearchEnabledForWorkflow(workflowName: string): boolean {
-  return workflowName === "explore";
 }
 
 function gitSandboxAccessForWorkflow(

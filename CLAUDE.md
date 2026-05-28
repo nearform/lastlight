@@ -354,18 +354,22 @@ Sandbox egress (docker backend only):
   coredns sidecar passed to `docker run --dns ...` (defaults: `172.30.0.10`
   and `172.30.0.11`, matching the static IPs in docker-compose.yml).
 
-Web search (optional, scoped to the `explore` workflow):
+Web search (optional, opt-in per workflow phase):
 
 - `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `EXA_API_KEY` — set any one
-  to enable agentic-pi's `web_search` and `web_fetch` tools during
-  explore runs. Provider auto-detected from whichever key is present
-  (Tavily > Exa > Brave). Other workflows pass an explicit
-  `webSearch: false` to agentic-pi so they ignore these keys. Explore
-  phases (`read_context`, `socratic`, `synthesize`) declare
-  `unrestricted_egress: true` in `workflows/explore.yaml` so the provider
-  API calls — and any `web_fetch` to third-party docs — flow through the
-  open-mode firewall (coredns-open + nginx-egress-open) rather than the
-  strict allowlist. The `publish` phase stays on the strict allowlist.
+  to enable agentic-pi's `web_search` and `web_fetch` tools for phases
+  that declare `web_search: true` in their YAML. Provider auto-detected
+  from whichever key is present (Tavily > Exa > Brave). Phases without
+  the field pass an explicit `webSearch: false` to agentic-pi so they
+  ignore these keys — important, since agentic-pi otherwise auto-enables
+  whenever any of the three env vars is present in `process.env`.
+- Currently only the `explore` workflow's research phases (`read_context`,
+  `socratic`, `synthesize`) opt in. Those phases also set
+  `unrestricted_egress: true` so provider API calls and any `web_fetch`
+  to third-party docs sites flow through the open-mode firewall
+  (coredns-open + nginx-egress-open). The `publish` phase declares
+  neither — it stays on the strict allowlist for the only repo-write
+  moment of the workflow.
 
 Admin dashboard:
 

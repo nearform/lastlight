@@ -124,6 +124,25 @@ const PhaseDefinitionSchema = z
      * exfil control the allowlist exists to enforce.
      */
     unrestricted_egress: z.boolean().optional(),
+    /**
+     * Enable agentic-pi's web-search extension (`web_search` /
+     * `web_fetch` tools) for this phase. Default: undefined → false.
+     *
+     * Set `true` on phases that should be able to search the web — e.g.
+     * the research phases of the `explore` workflow. The opt-out
+     * default is load-bearing: agentic-pi auto-enables web search
+     * whenever a provider env var (`TAVILY_API_KEY`,
+     * `BRAVE_SEARCH_API_KEY`, `EXA_API_KEY`) is present in
+     * process.env, so we need an explicit `false` for every phase
+     * that should not see the tools.
+     *
+     * Phases that opt in usually also want `unrestricted_egress: true`
+     * so `web_fetch` calls can reach arbitrary docs sites through the
+     * open-mode firewall — `web_search` itself only needs the provider
+     * host (api.tavily.com / api.search.brave.com / api.exa.ai) which
+     * is also covered by the open-mode tunnel.
+     */
+    web_search: z.boolean().optional(),
     /** Named approval gate to pause at after this phase */
     approval_gate: z.string().optional(),
     /** Message template rendered when pausing at this phase's approval gate. */
