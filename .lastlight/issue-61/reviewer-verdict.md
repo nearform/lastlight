@@ -74,3 +74,29 @@ dist/assets/index-DoSZ8ogN.js   1,002.35 kB │ gzip: 306.36 kB
 - Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
 - Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
 ```
+
+## Re-review after Fix Cycle 1
+
+VERDICT: APPROVED
+
+The fix commit addresses the previously requested route configurability issues. PR review check-run creation now keys off PR route metadata, PR-fix/build special orchestration paths preserve enrichment while dispatching the configured route target, and startup asset validation now rejects missing, disabled, or unsafe route targets except for route-specific internal handlers. I did not find new problems in the fix-cycle diff.
+
+## Re-review Test Results
+
+```text
+$ npm test && npm run build && npm run build:dashboard
+
+> lastlight@0.1.15 test
+> vitest run
+
+ Test Files  27 passed (27)
+      Tests  447 passed | 1 todo (448)
+
+> lastlight@0.1.15 build
+> tsc
+
+> lastlight@0.1.15 build:dashboard
+> npm run build -w dashboard
+
+✓ built in 6.10s
+```
