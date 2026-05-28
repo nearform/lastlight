@@ -45,6 +45,7 @@ The runner provides PR context vars. Use them in this order:
 Before reviewing, fetch the full conversation history. **Do not skip this step** — the goal of a review is to advance the discussion, not restart it.
 
 1. `github_get_pull_request` — head SHA, mergeable state, author, base/head refs.
+   - **If `merged` is true, STOP.** This skill only reviews open PRs. The formal-review endpoint (`github_create_pull_request_review`) returns 403 on merged PRs for App installations, and a post-merge review has no gating value. If a maintainer wants commentary on a merged PR, they should use the pr-comment skill instead.
 2. `github_list_pull_request_reviews` — every prior review (APPROVED / CHANGES_REQUESTED / COMMENTED).
    - If a review from `last-light[bot]` exists on the **current head SHA**, STOP — do not post a duplicate. (A re-review is fine if new commits landed since.)
 3. `github_list_issue_comments` — top-level conversation thread on the PR.
