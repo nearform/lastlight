@@ -224,6 +224,15 @@ export class DockerSandbox {
        */
       sandboxEnv?: Record<string, string>;
       /**
+       * Working directory for the agent process inside the container.
+       * Defaults to WORKSPACE_DIR (the workspace root). When the harness
+       * pre-cloned the target repo, the executor passes
+       * `<WORKSPACE_DIR>/<repo>` so the agent starts inside the checked-out
+       * tree. The path is asserted against an allowlist before being passed
+       * to `docker exec -w` to keep it shell-safe.
+       */
+      agentCwd?: string;
+      /**
        * Enable agentic-pi's web-search extension. When false (or omitted),
        * `--no-web-search` is appended to suppress auto-enable. When true,
        * the flag is omitted and agentic-pi auto-detects the provider from
@@ -301,9 +310,18 @@ export class DockerSandbox {
       ...extraArgs,
     ].join(" ");
 
+    // Resolve the agent's cwd. Defaults to the workspace root; callers may
+    // pass a `<WORKSPACE_DIR>/<repo>` subdir when the harness pre-cloned the
+    // target repo. Asserted against an allowlist before going into
+    // `docker exec -w` (which is a separate argv slot, but defensive
+    // narrowing keeps surprise paths out).
+    const workdir = opts?.agentCwd ?? WORKSPACE_DIR;
+    if (!workdir.startsWith(WORKSPACE_DIR) || !/^[A-Za-z0-9/_.-]+$/.test(workdir)) {
+      throw new Error(`Refusing to pass agent cwd "${workdir}" — must live under ${WORKSPACE_DIR}`);
+    }
     // -i connects stdin so the prompt can be written to the container process.
     // Run as agent user so workspace writes land with the right ownership.
-    const args = ["exec", "-i", "--user", "agent", "-w", WORKSPACE_DIR, info.containerName, "sh", "-c", cmd];
+    const args = ["exec", "-i", "--user", "agent", "-w", workdir, info.containerName, "sh", "-c", cmd];
 
     // The structured event stream is consumed line-by-line via `onLine` and
     // mirrored to the AgenticShim, which writes envelope jsonl to

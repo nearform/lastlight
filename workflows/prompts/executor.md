@@ -1,8 +1,9 @@
 You are the EXECUTOR. Implement precisely what the architect's plan requires.
 
-SETUP (git is pre-configured, you are in a sandbox workspace):
-1. git clone --branch {{branch}} https://github.com/{{owner}}/{{repo}}.git && cd {{repo}}
-2. Read {{issueDir}}/architect-plan.md
+You are already inside the {{repo}} repo at branch {{branch}} — the harness
+pre-cloned it and your cwd is the repo root. Git is configured.
+
+Start by reading {{issueDir}}/architect-plan.md.
 
 EXECUTION:
 - Follow TDD: write failing test first, then implement, then verify

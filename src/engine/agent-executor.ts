@@ -196,9 +196,18 @@ async function executeInProcess(
   const thinking = coerceThinking(config.variant);
   const profile = ctx.access ? AGENTIC_PROFILE_FOR[ctx.access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
+  // When the harness pre-cloned the target repo, drop the agent directly
+  // into `<workDir>/<repo>/` so the very first turn is already inside the
+  // checked-out tree. The per-phase prompts can then drop their
+  // `git clone … && cd <repo>` preambles. pi-coding-agent's AGENTS.md
+  // discovery walks up from cwd, so the workspace-root `AGENTS.md` we
+  // wrote a few lines up still gets picked up.
+  const agentCwd = ctx.access?.prePopulateBranch
+    ? join(ctx.workDir, ctx.access.repo)
+    : ctx.workDir;
   const shim = new AgenticShim({
     homeDir: sessionsDir,
-    projectSlug: projectSlugForCwd(ctx.workDir),
+    projectSlug: projectSlugForCwd(agentCwd),
     model,
     initialPrompt: prompt,
   });
@@ -258,7 +267,7 @@ async function executeInProcess(
       profile,
       sandbox: ctx.backend === "gondolin" ? "gondolin" : "none",
       sandboxEnv,
-      cwd: ctx.workDir,
+      cwd: agentCwd,
       noSession: true,
       allowedHttpHosts,
       // Explicit boolean — without it, agentic-pi auto-enables web search
@@ -349,12 +358,17 @@ async function executeDocker(
   const thinking = coerceThinking(config.variant);
   const profile = ctx.access ? AGENTIC_PROFILE_FOR[ctx.access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
-  // The dashboard reads from <sessionsDir>/projects/<slug>/. Inside the
-  // container the agent's cwd is DOCKER_WORKSPACE_DIR — use that for the
-  // slug so live tails land in the right project dir.
+  // Same logic as the in-process path: when the harness pre-cloned the
+  // repo, drop the agent into `<workspace>/<repo>/` rather than the
+  // workspace root, so prompts don't need a `cd <repo>` preamble.
+  const agentCwd = ctx.prePopulate
+    ? `${DOCKER_WORKSPACE_DIR}/${ctx.prePopulate.repo}`
+    : DOCKER_WORKSPACE_DIR;
+  // The dashboard reads from <sessionsDir>/projects/<slug>/. Use the same
+  // resolved cwd for the slug so live tails land in the right project dir.
   const shim = new AgenticShim({
     homeDir: sessionsDir,
-    projectSlug: projectSlugForCwd(DOCKER_WORKSPACE_DIR),
+    projectSlug: projectSlugForCwd(agentCwd),
     model,
     initialPrompt: prompt,
   });
@@ -381,6 +395,7 @@ async function executeDocker(
       thinking,
       profile,
       sandboxEnv,
+      agentCwd,
       webSearch: config.webSearch === true,
       webSearchProvider: config.webSearchProvider,
       onLine: (line) => {

@@ -210,6 +210,8 @@ function prePopulateWorkspace(
     );
     return;
   }
+  const scrub = (s: unknown): string =>
+    typeof s === "string" ? s.replaceAll(pre.token, "[REDACTED-TOKEN]") : "";
   const start = Date.now();
   try {
     execFileSync(
@@ -222,18 +224,48 @@ function prePopulateWorkspace(
       `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${repoDir} (${ms}ms)`,
     );
   } catch (err: any) {
+    const firstError = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
+    const looksLikeMissingBranch = /Remote branch .* not found|not found in upstream/i.test(firstError);
+    if (looksLikeMissingBranch) {
+      // Build-style workflows create a brand-new branch (e.g. `lastlight/N-slug`)
+      // and push it later. The remote doesn't have it yet at pre-clone time —
+      // clone the default branch, then create the target branch locally so
+      // the agent enters a workspace already on the right branch with the
+      // right upstream URL configured.
+      try {
+        execFileSync(
+          "git",
+          ["clone", "--depth", "50", url, repoDir],
+          { stdio: "pipe", timeout: 120_000 },
+        );
+        execFileSync(
+          "git",
+          ["-C", repoDir, "checkout", "-b", pre.branch],
+          { stdio: "pipe", timeout: 30_000 },
+        );
+        const ms = Date.now() - start;
+        console.log(
+          `[sandbox] Pre-cloned ${pre.owner}/${pre.repo} (default branch) into ${repoDir} ` +
+          `and created local branch ${pre.branch} (${ms}ms)`,
+        );
+        return;
+      } catch (err2: any) {
+        const secondError = scrub(err2?.message) || scrub(err2?.stderr?.toString?.()) || "unknown error";
+        console.warn(
+          `[sandbox] Pre-clone fallback of ${pre.owner}/${pre.repo} failed (${secondError}). ` +
+          `Agent will need to clone via MCP.`,
+        );
+        return;
+      }
+    }
     // Don't kill the run on a failed pre-clone — fall through to an empty
     // workspace and let the agent clone via the MCP path as a backup.
     //
     // CRITICAL: execFileSync errors echo the failing command line, which
     // includes the auth URL `https://x-access-token:<token>@github.com/…`.
-    // Scrub the token (and any incidental occurrences in stdout/stderr)
-    // before anything reaches the logs.
-    const scrub = (s: unknown): string =>
-      typeof s === "string" ? s.replaceAll(pre.token, "[REDACTED-TOKEN]") : "";
-    const safeMessage = scrub(err?.message) || scrub(err?.toString?.()) || "unknown error";
+    // The token is scrubbed above before anything reaches the logs.
     console.warn(
-      `[sandbox] Pre-clone of ${pre.owner}/${pre.repo}@${pre.branch} failed (${safeMessage}). ` +
+      `[sandbox] Pre-clone of ${pre.owner}/${pre.repo}@${pre.branch} failed (${firstError}). ` +
       `Agent will need to clone via MCP.`,
     );
   }
