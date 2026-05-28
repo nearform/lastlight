@@ -1,13 +1,10 @@
-import { readFileSync, readdirSync } from "fs";
-import { join, resolve } from "path";
+import { loadAgentContext as loadResolvedAgentContext } from "../workflows/loader.js";
 import type { SessionManager } from "../connectors/messaging/session-manager.js";
 import type { ExecutorConfig } from "./profiles.js";
 import { wrapUntrusted } from "./screen.js";
 import { ChatRunner, type ChatRunnerTurnResult } from "./chat-runner.js";
 import { AgenticShim } from "./event-shim.js";
 import type { EmitterRecord } from "agentic-pi";
-
-const AGENT_CONTEXT_DIR = resolve("agent-context");
 
 /**
  * Chat-specific system prompt appended to the agent context. Composed
@@ -308,20 +305,6 @@ async function writeChatFailureShim(opts: {
   return synthesizedId ?? undefined;
 }
 
-/**
- * Concatenate all `.md` files under `agent-context/`. Used at boot to
- * compose the chat system prompt.
- */
-export function loadAgentContext(dir?: string): string {
-  const target = dir || AGENT_CONTEXT_DIR;
-  try {
-    const files = readdirSync(target)
-      .filter((f) => f.endsWith(".md"))
-      .sort();
-    return files
-      .map((f) => readFileSync(join(target, f), "utf-8"))
-      .join("\n\n---\n\n");
-  } catch {
-    return "";
-  }
+export function loadAgentContext(_dir?: string): string {
+  return loadResolvedAgentContext();
 }

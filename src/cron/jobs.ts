@@ -1,5 +1,5 @@
 import type { CronJob } from "./scheduler.js";
-import { MANAGED_REPOS } from "../managed-repos.js";
+import { getManagedRepos } from "../managed-repos.js";
 import { getCronWorkflows } from "../workflows/loader.js";
 import type { StateDb } from "../state/db.js";
 
@@ -35,7 +35,7 @@ export function getJobs(opts?: { webhooksEnabled?: boolean; db?: StateDb }): Cro
       schedule: override?.schedule || def.schedule,
       workflow: def.workflow,
       // Merge managed repos into the context the workflow receives
-      context: { repos: MANAGED_REPOS, ...def.context },
+      context: { repos: getManagedRepos(), ...def.context },
     });
   }
 

@@ -5,6 +5,7 @@ import { loadConfig, resolveModel, resolveVariant } from "./config.js";
 import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService } from "./connectors/index.js";
 import { routeEvent } from "./engine/router.js";
 import { CHAT_SYSTEM_SUFFIX, handleChatMessage, loadAgentContext } from "./engine/chat.js";
+import { configureWorkflowAssets, validateAssets } from "./workflows/loader.js";
 import { ChatRunner } from "./engine/chat-runner.js";
 import { configureGitAuth } from "./engine/git-auth.js";
 import { StateDb } from "./state/db.js";
@@ -63,6 +64,12 @@ async function main() {
 
   // Load and validate config before starting anything
   const config = loadConfig();
+  configureWorkflowAssets({
+    builtInRoot: config.builtInRoot,
+    overlayRoot: config.overlayDir,
+    disabled: config.disabled,
+  });
+  validateAssets();
   validateConfig(config);
 
   console.log(`[config] Port: ${config.port}, Model: ${config.model}`);
@@ -442,6 +449,7 @@ async function main() {
       sessionsDir: config.sessionsDir,
       adminPassword: process.env.ADMIN_PASSWORD ?? "",
       adminSecret: process.env.ADMIN_SECRET ?? "lastlight-dev-secret",
+      publicConfig: config.publicConfig,
       slackOAuthClientId: process.env.SLACK_OAUTH_CLIENT_ID,
       slackOAuthClientSecret: process.env.SLACK_OAUTH_CLIENT_SECRET,
       slackOAuthRedirectUri: process.env.SLACK_OAUTH_REDIRECT_URI,

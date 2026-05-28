@@ -283,6 +283,7 @@ Legacy `OPENCODE_*` names are still read as fallbacks for the corresponding `LAS
 | `OPENAI_API_KEY` | One of | API key when using `openai/…` models |
 | `ANTHROPIC_API_KEY` | One of | API key when using `anthropic/…` models |
 | `OPENROUTER_API_KEY` | One of | API key when using `openrouter/…` models |
+| `LASTLIGHT_OVERLAY_DIR` | No | Trusted deployment overlay directory. Startup loads `config/default.yaml`, optional `$LASTLIGHT_OVERLAY_DIR/config.yaml`, then env overrides; overlay assets under `workflows/`, `workflows/prompts/`, `skills/`, and `agent-context/` replace built-ins. Restart required after changes. |
 | `LASTLIGHT_MODEL` | No | Default model (default: `anthropic/claude-sonnet-4-6`). Legacy: `OPENCODE_MODEL`. |
 | `LASTLIGHT_MODELS` | No | Per-task model overrides as JSON, e.g. `{"chat":"openai/gpt-5.1-mini","architect":"openai/gpt-5.5"}`. Legacy: `OPENCODE_MODELS`. |
 | `LASTLIGHT_THINKING` | No | Reasoning-effort default (`off` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh`). pi-ai translates per-provider. Legacy: `OPENCODE_VARIANT`. |
@@ -299,24 +300,37 @@ Legacy `OPENCODE_*` names are still read as fallbacks for the corresponding `LAS
 
 ### 3. Managed Repositories
 
-Edit `agent-context/rules.md` to list repositories the bot manages:
+Managed repositories are configured in `config/default.yaml` or by replacing the list in `$LASTLIGHT_OVERLAY_DIR/config.yaml`:
 
-```markdown
-## Managed Repositories
-- your-org/repo-one
-- your-org/repo-two
+```yaml
+managedRepos:
+  - your-org/repo-one
+  - your-org/repo-two
 ```
 
 ### 4. Customize Behaviour
 
+Prefer a trusted overlay instead of editing packaged files. Example layout:
+
+```text
+/etc/lastlight/
+  config.yaml                 # non-secret config overrides only
+  workflows/*.yaml            # add/replace workflows by logical `name`
+  workflows/prompts/*.md      # prompt overrides/fallbacks
+  skills/<name>/SKILL.md      # skill overrides/fallbacks
+  agent-context/*.md          # merged by filename; overlay replaces built-ins
+```
+
+Secrets stay in environment variables. The dashboard Config tab shows Default / Overlay / Merged non-secret config. Overlay files are read at startup only; restart after changes.
+
 | What | Where |
 |------|-------|
-| Bot personality & communication style | `agent-context/soul.md` |
-| Operational rules, review guidelines, triage rules | `agent-context/rules.md` |
-| Skill definitions | `skills/*/SKILL.md` |
-| Workflow phases (Architect/Executor/Reviewer/PR) | `workflows/build.yaml` + `workflows/prompts/` |
-| Event routing rules | `src/engine/router.ts` |
-| Cron job schedules | `workflows/cron-*.yaml` |
+| Managed repos, routes, models, variants, approvals, disables | `config/default.yaml` or overlay `config.yaml` |
+| Bot personality & communication style | `agent-context/soul.md` or overlay `agent-context/` |
+| Operational rules, review guidelines, triage rules | `agent-context/rules.md` or overlay `agent-context/` |
+| Skill definitions | `skills/*/SKILL.md` or overlay `skills/` |
+| Workflow phases (Architect/Executor/Reviewer/PR) | `workflows/*.yaml` + `workflows/prompts/` or overlay equivalents |
+| Cron job schedules | `workflows/cron-*.yaml` or overlay workflows |
 
 ---
 

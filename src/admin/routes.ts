@@ -23,13 +23,15 @@ import {
   getWorkflowTriggers,
   getWorkflowTriggerKinds,
 } from "../workflows/triggers.js";
-import { MANAGED_REPOS } from "../managed-repos.js";
+import { getManagedRepos } from "../managed-repos.js";
+import type { PublicConfigBundle } from "../config.js";
 
 export interface AdminConfig {
   stateDir: string;
   sessionsDir: string;
   adminPassword: string;
   adminSecret: string;
+  publicConfig?: PublicConfigBundle;
   /** Optional callback to actively resume a paused workflow after dashboard approval */
   resumeWorkflow?: (workflowRun: WorkflowRun, sender: string) => Promise<void>;
   /**
@@ -244,6 +246,8 @@ export function createAdminRoutes(
 
   // Auth middleware
   app.use("/*", authMiddleware(config.adminPassword, config.adminSecret));
+
+  app.get("/config", (c) => c.json(config.publicConfig || { default: {}, overlay: null, merged: {} }));
 
   // Auth endpoints
   app.get("/auth-required", (c) => {
@@ -858,7 +862,7 @@ export function createAdminRoutes(
         lastRun: recent?.startedAt ?? null,
         lastStatus: recent?.status ?? null,
         recentFailures,
-        context: { repos: MANAGED_REPOS, ...def.context },
+        context: { repos: getManagedRepos(), ...def.context },
         override: override
           ? {
               updatedAt: override.updatedAt,
@@ -892,14 +896,14 @@ export function createAdminRoutes(
           name,
           schedule,
           workflow: def.workflow,
-          context: { repos: MANAGED_REPOS, ...def.context },
+          context: { repos: getManagedRepos(), ...def.context },
         });
       } else {
         config.cronScheduler.register({
           name,
           schedule,
           workflow: def.workflow,
-          context: { repos: MANAGED_REPOS, ...def.context },
+          context: { repos: getManagedRepos(), ...def.context },
         });
       }
     } else {
@@ -936,7 +940,7 @@ export function createAdminRoutes(
         name,
         schedule,
         workflow: def.workflow,
-        context: { repos: MANAGED_REPOS, ...def.context },
+        context: { repos: getManagedRepos(), ...def.context },
       });
     }
     return c.json({ name, schedule });
@@ -956,14 +960,14 @@ export function createAdminRoutes(
         name,
         schedule: def.schedule,
         workflow: def.workflow,
-        context: { repos: MANAGED_REPOS, ...def.context },
+        context: { repos: getManagedRepos(), ...def.context },
       });
     } else {
       config.cronScheduler.register({
         name,
         schedule: def.schedule,
         workflow: def.workflow,
-        context: { repos: MANAGED_REPOS, ...def.context },
+        context: { repos: getManagedRepos(), ...def.context },
       });
     }
     return c.json({ name, schedule: def.schedule, enabled: true });

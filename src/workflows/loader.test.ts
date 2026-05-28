@@ -199,7 +199,7 @@ phases:
     expect(jobs).toHaveLength(0);
   });
 
-  it("skips invalid cron YAML (logs error, does not throw)", () => {
+  it("throws on invalid cron YAML during fail-fast validation", () => {
     writeFileSync(
       join(dir, "cron-bad.yaml"),
       `
@@ -207,8 +207,7 @@ kind: cron
 name: bad
 `.trim(),
     ); // missing required fields
-    // Should not throw, just log error
-    expect(() => getCronWorkflows()).not.toThrow();
+    expect(() => getCronWorkflows()).toThrow(/Invalid cron workflow/);
   });
 });
 

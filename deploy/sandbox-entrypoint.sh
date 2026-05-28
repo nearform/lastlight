@@ -40,7 +40,9 @@ fi
 
 # ── AGENTS.md — agentic-pi auto-loads this from cwd as the agent's
 # system context (same convention as CLAUDE.md). ──
-cat /app/agent-context/*.md > "$WORKSPACE/AGENTS.md" 2>/dev/null || true
+if [ ! -f "$WORKSPACE/AGENTS.md" ]; then
+  cat /app/agent-context/*.md > "$WORKSPACE/AGENTS.md" 2>/dev/null || true
+fi
 chown agent:agent "$WORKSPACE/AGENTS.md" 2>/dev/null || true
 
 # ── Git identity and auth (system-wide so it applies regardless of exec user) ──

@@ -1,15 +1,6 @@
-import { readFileSync, readdirSync } from "fs";
-import { join, resolve } from "path";
 import type { GitHubTokenPermissions } from "./git-auth.js";
-
-/**
- * Default directory for agent context files (soul, rules, etc.). Concatenated
- * into AGENTS.md inside the sandbox by the entrypoint; the harness only reads
- * this when assembling a system prompt for non-sandbox paths.
- */
-const AGENT_CONTEXT_DIR = resolve("agent-context");
-
 import type { SandboxBackend } from "../config.js";
+import { loadAgentContext as loadResolvedAgentContext } from "../workflows/loader.js";
 
 /**
  * Configuration for an agent execution.
@@ -154,22 +145,6 @@ export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPer
   },
 };
 
-/**
- * Load all .md files from the agent-context directory and concatenate them
- * into a single string. The sandbox entrypoint does this independently to
- * produce AGENTS.md; this helper exists for in-process callers.
- */
-export function loadAgentContext(dir?: string): string {
-  const contextDir = dir || AGENT_CONTEXT_DIR;
-  try {
-    const files = readdirSync(contextDir)
-      .filter((f) => f.endsWith(".md"))
-      .sort();
-    return files
-      .map((f) => readFileSync(join(contextDir, f), "utf-8"))
-      .join("\n\n---\n\n");
-  } catch {
-    console.warn(`[profiles] No agent context found at ${contextDir}`);
-    return "";
-  }
+export function loadAgentContext(_dir?: string): string {
+  return loadResolvedAgentContext();
 }

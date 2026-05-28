@@ -1,0 +1,63 @@
+managedRepos:
+  - cliftonc/drizzle-cube
+  - cliftonc/drizby
+  - cliftonc/lastlight
+
+models:
+  default: anthropic/claude-sonnet-4-6
+
+variants: {}
+
+sandbox:
+  backend: gondolin
+  maxTurns: 200
+
+approval: {}
+
+bootstrap:
+  label: "lastlight:bootstrap"
+
+explore:
+  defaultRepo: null
+
+review:
+  postsCheck: false
+
+disabled:
+  workflows: []
+  crons: []
+  prompts: []
+  skills: []
+  agentContext: []
+
+routes:
+  github:
+    issue_opened: issue-triage
+    issue_reopened: issue-triage
+    pr_opened: pr-review
+    pr_synchronize: pr-review
+    pr_reopened: pr-review
+    approval_response: approval-response
+    security_review: security-review
+    pr_fix: pr-fix
+    pr_comment: pr-comment
+    issue_build: github-orchestrator
+    issue_explore: explore
+    issue_comment: issue-comment
+    security_feedback: security-feedback
+    explore_reply: explore-reply
+  slack:
+    reset: chat-reset
+    status: status-report
+    approve: approval-response
+    reject: approval-response
+    build: github-orchestrator
+    triage: issue-triage
+    review: pr-review
+    security: security-review
+    explore: explore
+    chat: chat
+    explore_reply: explore-reply
+
+cron:
+  webhooksEnabledCondition: true

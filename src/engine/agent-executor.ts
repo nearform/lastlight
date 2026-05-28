@@ -342,6 +342,14 @@ async function executeDocker(
     );
   }
 
+  try {
+    const md = loadAgentContext(config.agentContextDir);
+    if (md) writeFileSync(join(sbx.workDir, "AGENTS.md"), md);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[executor] Could not write docker AGENTS.md: ${msg}`);
+  }
+
   const startTime = Date.now();
   console.log(`  [executor] Running in docker sandbox (task: ${ctx.taskId})`);
 

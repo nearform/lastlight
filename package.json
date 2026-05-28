@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "config",
     "workflows",
     "skills",
     "agent-context",

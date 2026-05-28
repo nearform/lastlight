@@ -55,6 +55,12 @@ export interface PhaseHistoryEntry {
   summary?: string;
 }
 
+export interface ConfigBundle {
+  default: Record<string, unknown>;
+  overlay: Record<string, unknown> | null;
+  merged: Record<string, unknown>;
+}
+
 export interface WorkflowRun {
   id: string;
   workflowName: string;
@@ -391,6 +397,7 @@ export const api = {
       `/crons/${encodeURIComponent(name)}/override`,
       { method: "DELETE" },
     ),
+  config: () => req<ConfigBundle>("/config"),
 };
 
 export interface CronInfo {

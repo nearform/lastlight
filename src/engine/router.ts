@@ -1,7 +1,8 @@
 import type { EventEnvelope } from "../connectors/types.js";
 import { classifyComment } from "./classifier.js";
 import { screenForInjection, flagPrefix } from "./screen.js";
-import { isManagedRepo, MANAGED_REPOS } from "../managed-repos.js";
+import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
+import { getRoutes } from "../config.js";
 import type { StateDb } from "../state/db.js";
 
 /** Skill name that should handle this event */
@@ -19,7 +20,7 @@ export interface RouterDeps {
 function unmanagedRepoReply(repo: string): string {
   return (
     `❌ I'm not configured to work on \`${repo}\`.\n` +
-    `Managed repos: ${MANAGED_REPOS.map((r) => `\`${r}\``).join(", ")}.\n` +
+    `Managed repos: ${getManagedRepos().map((r) => `\`${r}\``).join(", ")}.\n` +
     `Ask cliftonc to add it.`
   );
 }
@@ -38,11 +39,14 @@ export async function routeEvent(
   envelope: EventEnvelope,
   deps: RouterDeps = {},
 ): Promise<RoutingResult> {
+  const routes = getRoutes();
+  const gh = routes.github;
+  const slack = routes.slack;
   switch (envelope.type) {
     case "issue.opened":
       return {
         action: "skill",
-        skill: "issue-triage",
+        skill: gh.issue_opened || "issue-triage",
         context: {
           repo: envelope.repo,
           issueNumber: envelope.issueNumber,
@@ -56,7 +60,7 @@ export async function routeEvent(
     case "issue.reopened":
       return {
         action: "skill",
-        skill: "issue-triage",
+        skill: gh.issue_reopened || "issue-triage",
         context: {
           repo: envelope.repo,
           issueNumber: envelope.issueNumber,
@@ -77,7 +81,7 @@ export async function routeEvent(
       // for every PR-attention event is correct.
       return {
         action: "skill",
-        skill: "pr-review",
+        skill: gh[`pr_${envelope.type.split(".")[1]}`] || "pr-review",
         context: {
           repo: envelope.repo,
           prNumber: envelope.prNumber,
@@ -100,7 +104,7 @@ export async function routeEvent(
         if (pendingReply) {
           return {
             action: "skill",
-            skill: "explore-reply",
+            skill: gh.explore_reply || "explore-reply",
             context: {
               repo: envelope.repo,
               issueNumber: envelope.issueNumber,
@@ -136,7 +140,7 @@ export async function routeEvent(
       if (approveMatch || rejectMatch) {
         return {
           action: "skill",
-          skill: "approval-response",
+          skill: gh.approval_response || "approval-response",
           context: {
             repo: envelope.repo,
             issueNumber: envelope.issueNumber,
@@ -152,7 +156,7 @@ export async function routeEvent(
       if (securityMatch) {
         return {
           action: "skill",
-          skill: "security-review",
+          skill: gh.security_review || "security-review",
           context: { repo: envelope.repo, sender: envelope.sender, source: envelope.source },
         };
       }
@@ -190,7 +194,7 @@ export async function routeEvent(
         // Explore isn't meaningful on PRs since the code already exists.
         return {
           action: "skill",
-          skill: intent === "build" ? "pr-fix" : "pr-comment",
+          skill: intent === "build" ? (gh.pr_fix || "pr-fix") : (gh.pr_comment || "pr-comment"),
           context: {
             repo: envelope.repo,
             prNumber: envelope.prNumber,
@@ -221,7 +225,7 @@ export async function routeEvent(
       if (hasScanSummaryLabel) {
         return {
           action: "skill",
-          skill: "security-feedback",
+          skill: gh.security_feedback || "security-feedback",
           context: {
             repo: envelope.repo,
             issueNumber: envelope.issueNumber,
@@ -233,10 +237,10 @@ export async function routeEvent(
         };
       }
       const issueSkill = intent === "build"
-        ? "github-orchestrator"
+        ? (gh.issue_build || "github-orchestrator")
         : intent === "explore"
-        ? "explore"
-        : "issue-comment";
+        ? (gh.issue_explore || "explore")
+        : (gh.issue_comment || "issue-comment");
       return {
         action: "skill",
         skill: issueSkill,
@@ -274,7 +278,7 @@ export async function routeEvent(
         if (pendingReply) {
           return {
             action: "skill",
-            skill: "explore-reply",
+            skill: slack.explore_reply || "explore-reply",
             context: {
               sender: envelope.sender,
               reply: text,
@@ -316,28 +320,28 @@ export async function routeEvent(
         case "reset":
           return {
             action: "skill",
-            skill: "chat-reset",
+            skill: slack.reset || "chat-reset",
             context: { sessionId: raw?.sessionId, sender: envelope.sender, source: envelope.source },
           };
 
         case "status":
           return {
             action: "skill",
-            skill: "status-report",
+            skill: slack.status || "status-report",
             context: { sender: envelope.sender, source: envelope.source },
           };
 
         case "approve":
           return {
             action: "skill",
-            skill: "approval-response",
+            skill: slack.approve || "approval-response",
             context: { sender: envelope.sender, decision: "approved", source: envelope.source },
           };
 
         case "reject":
           return {
             action: "skill",
-            skill: "approval-response",
+            skill: slack.reject || "approval-response",
             context: {
               sender: envelope.sender,
               decision: "rejected",
@@ -353,7 +357,7 @@ export async function routeEvent(
           if (!classifiedRepo) {
             return {
               action: "skill",
-              skill: "chat",
+              skill: slack.chat || "chat",
               context: {
                 sessionId: raw?.sessionId,
                 message: slackText,
@@ -367,7 +371,7 @@ export async function routeEvent(
           }
           return {
             action: "skill",
-            skill: "github-orchestrator",
+            skill: slack.build || "github-orchestrator",
             context: {
               repo: classifiedRepo,
               issueNumber: classifiedIssue,
@@ -387,7 +391,7 @@ export async function routeEvent(
           }
           return {
             action: "skill",
-            skill: "issue-triage",
+            skill: slack.triage || "issue-triage",
             context: { repo: classifiedRepo, sender: envelope.sender, source: envelope.source },
           };
         }
@@ -401,7 +405,7 @@ export async function routeEvent(
           }
           return {
             action: "skill",
-            skill: "pr-review",
+            skill: slack.review || "pr-review",
             context: {
               repo: classifiedRepo,
               prNumber: classifiedIssue,
@@ -421,7 +425,7 @@ export async function routeEvent(
           }
           return {
             action: "skill",
-            skill: "security-review",
+            skill: slack.security || "security-review",
             context: { repo: classifiedRepo, sender: envelope.sender, source: envelope.source },
           };
         }
@@ -439,7 +443,7 @@ export async function routeEvent(
           }
           return {
             action: "skill",
-            skill: "explore",
+            skill: slack.explore || "explore",
             context: {
               repo: classifiedRepo,
               issueNumber: classifiedIssue,
@@ -457,7 +461,7 @@ export async function routeEvent(
           // chat — conversational reply
           return {
             action: "skill",
-            skill: "chat",
+            skill: slack.chat || "chat",
             context: {
               sessionId: raw?.sessionId,
               message: slackText,

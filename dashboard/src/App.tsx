@@ -10,12 +10,14 @@ import { WorkflowList } from "./components/WorkflowList";
 import { WorkflowDefinitions } from "./components/WorkflowDefinitions";
 import { HomePage } from "./components/HomePage";
 import { CronsList } from "./components/CronsList";
+import { ConfigPage } from "./components/ConfigPage";
 import {
   HomeIcon,
   RectangleStackIcon,
   CubeTransparentIcon,
   ChatBubbleLeftRightIcon,
   ClockIcon,
+  Cog6ToothIcon,
   Squares2X2Icon,
 } from "@heroicons/react/24/outline";
 import {
@@ -29,11 +31,11 @@ import {
 } from "./hooks/useUrlState";
 
 type AuthState = "checking" | "required" | "ok";
-type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "crons";
+type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "crons" | "config";
 
 const PAGE_SIZE = 50;
 
-const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "crons"] as const;
+const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "crons", "config"] as const;
 
 const SESSION_SOURCE_PATHS: Record<"sessions" | "chat-sessions", string> = {
   sessions: "/admin/api/sessions",
@@ -255,6 +257,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             { id: "sessions", label: "Sandbox Sessions", Icon: CubeTransparentIcon },
             { id: "chat-sessions", label: "Chat Sessions", Icon: ChatBubbleLeftRightIcon },
             { id: "crons", label: "Crons", Icon: ClockIcon },
+            { id: "config", label: "Config", Icon: Cog6ToothIcon },
           ] as const
         ).map(({ id, label, Icon }) => {
           const active = tab === id;
@@ -336,6 +339,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         />
       ) : tab === "workflows" ? (
         <WorkflowDefinitions />
+      ) : tab === "config" ? (
+        <ConfigPage />
       ) : (
         <WorkflowList
           timeRange={timeRange}
