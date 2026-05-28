@@ -36,18 +36,22 @@ export interface SandboxConfig {
    * Docker network to attach the sandbox container to. Defaults to
    * `LASTLIGHT_SANDBOX_NETWORK` env var or `lastlight_sandbox-egress`
    * (the `internal: true` network declared in docker-compose.yml). The
-   * sandbox can only reach the public internet through the tinyproxy
-   * sidecars on this network.
+   * sandbox can only reach the public internet through the nginx-egress
+   * firewall sidecars on this network.
    */
   network?: string;
   /**
-   * Hostname:port of the tinyproxy sidecar this sandbox should route
-   * outbound HTTPS through. The harness picks `tinyproxy-strict` for
-   * default-allowlist phases and `tinyproxy-open` when the phase opts
-   * out via `unrestricted_egress: true`. Injected into the sandbox env
-   * as HTTPS_PROXY / HTTP_PROXY.
+   * IP of the coredns sidecar this sandbox uses as its DNS resolver.
+   * `coredns-strict` (172.30.0.10) returns the strict-nginx IP for
+   * allowlisted hosts and NXDOMAIN for everything else; `coredns-open`
+   * (172.30.0.11) returns the open-nginx IP for any hostname (minus a
+   * small SSRF deny set). Passed to `docker run` as `--dns <ip>`.
+   *
+   * No env vars are injected — the sandbox has no idea a firewall is
+   * in front of it. Works for every SDK regardless of whether it
+   * honours HTTP_PROXY / HTTPS_PROXY.
    */
-  proxyHost?: string;
+  dnsIp?: string;
 }
 
 export interface SandboxInfo {
@@ -103,32 +107,12 @@ export class DockerSandbox {
     volumes.push(...gitMounts);
 
     // Env flags — passed to entrypoint for MCP config template expansion.
-    // Proxy env layered on top so the agent's bash + agentic-pi calls route
-    // through tinyproxy when one is configured.
-    const proxyEnv: Record<string, string> = {};
-    if (this.config.proxyHost) {
-      const proxyUrl = `http://${this.config.proxyHost}`;
-      // Lower- and upper-case forms; libraries are inconsistent about which
-      // they honour. NO_PROXY exempts loopback so tooling that talks to
-      // localhost (test runners, dev servers spun up inside the sandbox)
-      // doesn't bounce through the proxy.
-      proxyEnv.HTTPS_PROXY = proxyUrl;
-      proxyEnv.HTTP_PROXY = proxyUrl;
-      proxyEnv.https_proxy = proxyUrl;
-      proxyEnv.http_proxy = proxyUrl;
-      proxyEnv.NO_PROXY = "localhost,127.0.0.1,::1";
-      proxyEnv.no_proxy = proxyEnv.NO_PROXY;
-      // Node's built-in fetch (undici) doesn't honour HTTP_PROXY/HTTPS_PROXY
-      // by default — the OpenAI / Anthropic / pi-ai SDKs all use fetch and
-      // would otherwise dial direct, which on `sandbox-egress` (internal:true)
-      // hits a "Connection error" since the only path off-network is the
-      // tinyproxy sidecar. `NODE_USE_ENV_PROXY=1` (Node 22.21+ / 24.0+)
-      // makes the built-in fetch read the proxy env vars natively — no
-      // preload script, no extra deps.
-      proxyEnv.NODE_USE_ENV_PROXY = "1";
-    }
-    const combinedEnv = { ...this.config.env, ...proxyEnv };
-    const envFlags = Object.entries(combinedEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+    // No proxy env (HTTPS_PROXY etc.) is injected: the sandbox-egress
+    // network has no route to the public internet, and the coredns
+    // sidecar referenced by --dns below sinkholes allowlisted hosts to
+    // the nginx-egress firewall IP. Clients dial real hostnames; the
+    // network routes them transparently. See egress-firewall-config.ts.
+    const envFlags = Object.entries(this.config.env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
 
     // Per-sandbox memory cap. Without this, a runaway agent (or a hot
     // `npm install` / vite build inside the workspace) can OOM the host
@@ -138,15 +122,22 @@ export class DockerSandbox {
 
     // Network attachment. Default is the `internal: true` sandbox-egress
     // network declared in docker-compose.yml, which has no host route —
-    // the only outbound path is through tinyproxy. Override via
-    // LASTLIGHT_SANDBOX_NETWORK for setups (local dev, alt orchestration)
-    // where the harness was started outside docker-compose and the network
-    // hasn't been created.
+    // the only outbound path is through nginx-egress, reached via the
+    // DNS sinkhole. Override via LASTLIGHT_SANDBOX_NETWORK for setups
+    // (local dev, alt orchestration) where the harness was started
+    // outside docker-compose and the network hasn't been created.
     const network =
       this.config.network ||
       process.env.LASTLIGHT_SANDBOX_NETWORK ||
       "lastlight_sandbox-egress";
     const networkArgs = network === "default" ? [] : ["--network", network];
+
+    // DNS resolver. Points at coredns-strict or coredns-open depending on
+    // the phase's egress policy. The whole filtering scheme hinges on
+    // this — every name lookup happens against our sinkhole, and
+    // allowlisted hosts get answered with the nginx-egress IP rather
+    // than the real one.
+    const dnsArgs = this.config.dnsIp ? ["--dns", this.config.dnsIp] : [];
 
     // The entrypoint runs as root to fix permissions, then drops to agent via gosu.
     // No --user flag needed.
@@ -156,6 +147,7 @@ export class DockerSandbox {
       "--memory", memoryLimit,
       "--memory-swap", memoryLimit,
       ...networkArgs,
+      ...dnsArgs,
       ...envFlags,
       ...volumes.flatMap(v => ["-v", v]),
       "-w", WORKSPACE_DIR,

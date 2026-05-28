@@ -113,10 +113,12 @@ GitHub, LLM provider hosts, public package registries. When `true`:
 - **gondolin**: agentic-pi receives `allowedHttpHosts: ["*"]` (wildcard
   allow-all). The QEMU-layer block is bypassed but private-IP rules at
   lower layers still apply.
-- **docker**: `HTTPS_PROXY` is routed to the `tinyproxy-open` sidecar
-  instead of `tinyproxy-strict`. The private-IP floor (RFC1918 +
-  loopback + link-local) is still enforced when
-  `LASTLIGHT_BLOCK_PRIVATE_IPS` is enabled.
+- **docker**: the sandbox container's `--dns` flag points at
+  `coredns-open` (172.30.0.11) instead of `coredns-strict`. That coredns
+  resolves any hostname to `nginx-egress-open`'s IP, which tunnels
+  whatever SNI it sees. Cloud-metadata literals (`169.254.169.254`,
+  `metadata.google.internal`) are still NXDOMAIN'd by coredns-open as
+  a hard SSRF floor.
 
 Use sparingly — this is the exfil control the allowlist exists to enforce.
 Typical use case is an `explore` phase that needs to search third-party

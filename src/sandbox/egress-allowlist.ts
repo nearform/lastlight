@@ -4,13 +4,26 @@
  * Both sandbox backends consume this list:
  *   - gondolin: passed verbatim to `agenticRun({ allowedHttpHosts })` so the
  *     QEMU-layer HTTP interceptor 502s anything off-list.
- *   - docker: `deploy/tinyproxy.strict.conf` is generated from these hosts at
- *     harness boot. The sandbox container's HTTPS_PROXY env points at the
- *     tinyproxy sidecar, which gates CONNECT by destination.
+ *   - docker: nginx-egress + coredns configs are generated from these hosts
+ *     at harness boot. Sandbox containers spawn with `--dns <coredns-ip>`;
+ *     coredns sinkholes allowlisted hostnames to the nginx firewall IP,
+ *     which peeks SNI and tunnels to the real upstream. See
+ *     `src/sandbox/egress-firewall-config.ts` for the full architecture.
  *
  * The lists are intentionally split so callers can compose tighter policies
  * (e.g. a read-only profile that doesn't need package registries). The
  * everyday default is `DEFAULT_ALLOWLIST`.
+ *
+ * ## Wildcard syntax
+ *
+ * A leading dot (`.github.com`) denotes "this domain and any subdomain":
+ *
+ *     "api.github.com"   → matches exactly api.github.com
+ *     ".github.com"      → matches github.com, api.github.com, foo.bar.github.com, …
+ *
+ * The leading-dot convention matches nginx's own `map` directive syntax,
+ * keeps the generated configs minimal, and is unambiguous (a real hostname
+ * can never start with a dot).
  *
  * A workflow phase can declare `unrestricted_egress: true` to bypass the
  * allowlist entirely — see `src/workflows` for the phase schema.
@@ -18,11 +31,11 @@
 
 /** GitHub HTTPS endpoints used by `git`, `gh`, and agentic-pi's github tools. */
 export const GITHUB_HOSTS: readonly string[] = [
-  "github.com",
-  "api.github.com",
-  "codeload.github.com",
-  "objects.githubusercontent.com",
-  "raw.githubusercontent.com",
+  // Leading dot covers github.com plus every subdomain we care about
+  // (api, codeload, raw, objects, gist, …) without listing each one.
+  ".github.com",
+  // *.githubusercontent.com — release artifacts, raw blobs, avatars.
+  ".githubusercontent.com",
 ];
 
 /**
@@ -51,9 +64,7 @@ export const PACKAGE_REGISTRY_HOSTS: readonly string[] = [
   "pypi.org",
   "files.pythonhosted.org",
   // Rust
-  "crates.io",
-  "static.crates.io",
-  "index.crates.io",
+  ".crates.io",
   // Go modules
   "proxy.golang.org",
   "sum.golang.org",
@@ -68,7 +79,10 @@ export const PACKAGE_REGISTRY_HOSTS: readonly string[] = [
 /**
  * Combined allowlist used by both backends when a phase has not opted into
  * unrestricted egress. Order is preserved across imports so generated
- * tinyproxy configs are stable.
+ * configs are stable.
+ *
+ * Entries may be exact hostnames or wildcard patterns with a leading dot
+ * (see the file docstring).
  */
 export const DEFAULT_ALLOWLIST: readonly string[] = [
   ...GITHUB_HOSTS,
@@ -80,7 +94,15 @@ export const DEFAULT_ALLOWLIST: readonly string[] = [
  * Sentinel value recognized by agentic-pi/gondolin (post the `"*"` patch)
  * meaning "allow every host". Used when a phase sets `unrestricted_egress`.
  *
- * On the docker backend, unrestricted egress routes through `tinyproxy-open`
- * instead — this sentinel is for gondolin only.
+ * On the docker backend, unrestricted egress routes through the open
+ * nginx-egress + coredns-open pair — this sentinel is for gondolin only.
  */
 export const ALLOW_ALL_SENTINEL = "*";
+
+/**
+ * Returns true if `entry` is a wildcard match (leading-dot form).
+ * Helper for the egress-firewall config generator.
+ */
+export function isWildcardHost(entry: string): boolean {
+  return entry.startsWith(".");
+}

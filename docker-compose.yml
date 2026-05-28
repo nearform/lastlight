@@ -36,47 +36,64 @@ services:
     profiles:
       - build-only     # never started as a service, just built
 
-  # Egress proxy with destination allowlist (src/sandbox/egress-allowlist.ts).
-  # Sandbox containers route their HTTPS_PROXY here when running with the
-  # default (restricted) egress policy. Tinyproxy filters by CONNECT target —
-  # no TLS interception, so no CA cert plumbing inside the sandbox.
-  tinyproxy-strict:
-    build:
-      context: ./deploy
-      dockerfile: tinyproxy.Dockerfile
-    image: lastlight-tinyproxy:latest
+  # ── Egress firewall (replaces the earlier tinyproxy CONNECT-proxy) ────
+  #
+  # See src/sandbox/egress-firewall-config.ts for the architecture rationale.
+  # Two pairs: (coredns-strict + nginx-egress-strict) and
+  # (coredns-open + nginx-egress-open). Sandbox containers spawn with
+  # `--dns <coredns-ip>` and dial allowlisted hosts directly — coredns
+  # resolves the hostname to the nginx IP, nginx peeks SNI and tunnels.
+  #
+  # The sandbox sees no proxy at all. Works for any SDK regardless of
+  # whether it honours HTTP(S)_PROXY env vars.
+  coredns-strict:
+    image: coredns/coredns:1.11.3
     restart: unless-stopped
-    environment:
-      # The harness writes strict.conf / open.conf / filter.txt into
-      # $STATE_DIR/proxy/ at boot. We mount the agent-data volume and point
-      # tinyproxy at the file inside it. (docker-compose can't bind a
-      # named-volume subpath into /etc/tinyproxy directly.)
-      - TINYPROXY_CONF=/app/data/proxy/strict.conf
+    command: ["-conf", "/app/data/proxy/Corefile.strict"]
     volumes:
       - agent-data:/app/data:ro
-    # Deliberately NOT on `internal`. If the proxies were attached to the
-    # harness network, docker's embedded DNS would resolve compose service
-    # names (`agent`, `caddy`) from the proxy's perspective, and a sandbox
-    # asking the proxy to fetch `http://agent:8644/` would reach the harness.
-    # Splitting ingress (sandbox-egress) and egress (proxy-egress) onto
-    # separate networks that don't include harness services keeps
-    # compose-internal hostnames unresolvable to the proxy.
     networks:
-      - sandbox-egress
-      - proxy-egress
+      sandbox-egress:
+        ipv4_address: 172.30.0.10
 
-  tinyproxy-open:
-    image: lastlight-tinyproxy:latest
+  coredns-open:
+    image: coredns/coredns:1.11.3
     restart: unless-stopped
-    depends_on:
-      - tinyproxy-strict           # so the shared image is built once
-    environment:
-      - TINYPROXY_CONF=/app/data/proxy/open.conf
+    command: ["-conf", "/app/data/proxy/Corefile.open"]
     volumes:
       - agent-data:/app/data:ro
     networks:
-      - sandbox-egress
-      - proxy-egress
+      sandbox-egress:
+        ipv4_address: 172.30.0.11
+
+  nginx-egress-strict:
+    image: nginx:alpine
+    restart: unless-stopped
+    command:
+      ["nginx", "-c", "/app/data/proxy/nginx-strict.conf", "-g", "daemon off;"]
+    volumes:
+      - agent-data:/app/data:ro
+    # Deliberately NOT on `internal`. Splitting ingress (sandbox-egress)
+    # and egress (proxy-egress) onto separate networks that don't include
+    # harness services keeps compose-internal hostnames unresolvable to
+    # the firewall — so an `unrestricted_egress` phase can't ask nginx to
+    # tunnel to `agent:8644` or similar.
+    networks:
+      sandbox-egress:
+        ipv4_address: 172.30.0.20
+      proxy-egress: {}
+
+  nginx-egress-open:
+    image: nginx:alpine
+    restart: unless-stopped
+    command:
+      ["nginx", "-c", "/app/data/proxy/nginx-open.conf", "-g", "daemon off;"]
+    volumes:
+      - agent-data:/app/data:ro
+    networks:
+      sandbox-egress:
+        ipv4_address: 172.30.0.21
+      proxy-egress: {}
 
   caddy:
     image: caddy:2-alpine
@@ -104,16 +121,21 @@ volumes:
 networks:
   internal:
   # Sandbox containers (created dynamically by src/sandbox/docker.ts) attach
-  # to this network only. `internal: true` disables direct host egress, so
-  # the only path to the public internet is through the tinyproxy sidecars,
-  # which receive sandbox traffic on this network.
+  # to this network only with `--dns 172.30.0.10` (or .11 for open mode).
+  # `internal: true` disables direct host egress, so the only path to the
+  # public internet is through the nginx firewalls, which receive sandbox
+  # traffic on this network. Static subnet so the coredns + nginx IPs
+  # baked into the generated configs are stable.
   sandbox-egress:
     internal: true
-  # Egress-only network for the tinyproxy sidecars. Regular bridge (has a
-  # default route to the host's network, so the proxies can reach the public
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  # Egress-only network for the nginx firewalls. Regular bridge (has a
+  # default route to the host's network, so nginx can reach the public
   # internet). Critically: NO other compose services attach here. That way
   # docker's embedded DNS on this network resolves only public names — the
   # harness service names (`agent`, `caddy`) are not reachable from the
-  # proxies' perspective, so an unrestricted sandbox can't ask the proxy to
+  # firewall's perspective, so an unrestricted sandbox can't ask nginx to
   # bridge into the compose-internal services.
   proxy-egress:

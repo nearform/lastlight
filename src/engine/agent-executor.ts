@@ -301,13 +301,15 @@ async function executeDocker(
     onSessionId?: (sessionId: string) => void;
   },
 ): Promise<ExecutionResult> {
-  // HTTP egress routing — docker analog of the gondolin allowlist. Default
-  // routes through tinyproxy-strict (allowlist enforced); a phase that set
-  // `unrestricted_egress: true` routes through tinyproxy-open instead.
-  // The hostnames here match the service names in docker-compose.yml.
-  const proxyHost = config.unrestrictedEgress
-    ? (process.env.LASTLIGHT_PROXY_OPEN || "tinyproxy-open:8888")
-    : (process.env.LASTLIGHT_PROXY_STRICT || "tinyproxy-strict:8888");
+  // HTTP egress routing — docker analog of the gondolin allowlist.
+  // Sandbox is wired to coredns-strict by default (allowlist enforced via
+  // DNS sinkhole + nginx ssl_preread); a phase that set
+  // `unrestricted_egress: true` points at coredns-open instead.
+  // The IPs here match the static assignments in docker-compose.yml
+  // (see src/sandbox/egress-firewall-config.ts for the constants).
+  const dnsIp = config.unrestrictedEgress
+    ? (process.env.LASTLIGHT_DNS_OPEN || "172.30.0.11")
+    : (process.env.LASTLIGHT_DNS_STRICT || "172.30.0.10");
 
   const sbx = await createTaskSandbox({
     taskId: ctx.taskId,
@@ -315,7 +317,7 @@ async function executeDocker(
     sandboxDir: config.sandboxDir,
     env: ctx.env,
     prePopulate: ctx.prePopulate,
-    proxyHost,
+    dnsIp,
   });
   if (!sbx) {
     throw new Error(

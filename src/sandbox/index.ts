@@ -132,12 +132,13 @@ export async function createTaskSandbox(opts: {
     token: string;
   };
   /**
-   * Which tinyproxy sidecar to route the sandbox's outbound HTTPS through.
-   * Format: `host:port`. Defaults to `tinyproxy-strict:8888` (the allowlist
-   * proxy); set `tinyproxy-open:8888` for phases that declared
-   * `unrestricted_egress: true`.
+   * IP of the coredns sidecar to use as the sandbox's DNS resolver.
+   * Selects the egress policy: `172.30.0.10` (coredns-strict) for the
+   * default allowlist, `172.30.0.11` (coredns-open) for phases that
+   * declared `unrestricted_egress: true`. Passed to `docker run` as
+   * `--dns <ip>`. See src/sandbox/egress-firewall-config.ts.
    */
-  proxyHost?: string;
+  dnsIp?: string;
 }): Promise<{ sandbox: DockerSandbox; workDir: string; cleanup: () => Promise<void> } | null> {
   if (!sandboxAvailable()) return null;
 
@@ -159,7 +160,7 @@ export async function createTaskSandbox(opts: {
     imageName: SANDBOX_IMAGE,
     env: opts.env || {},
     memoryLimit: process.env.SANDBOX_MEMORY_LIMIT || undefined,
-    proxyHost: opts.proxyHost,
+    dnsIp: opts.dnsIp,
   });
 
   try {

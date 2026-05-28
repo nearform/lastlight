@@ -100,13 +100,19 @@ src/
                         taskId traversal rejected).
     egress-allowlist.ts Single source of truth for HTTP egress hosts.
                         GITHUB_HOSTS + PROVIDER_HOSTS + PACKAGE_REGISTRY_HOSTS.
-                        Both backends import it: gondolin passes the list to
-                        agentic-pi's `allowedHttpHosts`; docker generates a
-                        tinyproxy filter file from it at boot.
-    tinyproxy-config.ts Generates strict.conf / open.conf / filter.txt under
-                        $STATE_DIR/proxy/ at harness boot. The
-                        tinyproxy-strict / tinyproxy-open services in
-                        docker-compose.yml read those files.
+                        Leading-dot entries (e.g. ".github.com") are
+                        wildcards matching apex + all subdomains. Both
+                        backends import it: gondolin passes the list to
+                        agentic-pi's `allowedHttpHosts`; docker generates
+                        the nginx ssl_preread + coredns sinkhole configs
+                        from it at boot.
+    egress-firewall-config.ts
+                        Generates nginx-strict.conf / nginx-open.conf /
+                        Corefile.strict / Corefile.open under
+                        $STATE_DIR/proxy/ at harness boot. The four
+                        services in docker-compose.yml (coredns-strict,
+                        coredns-open, nginx-egress-strict,
+                        nginx-egress-open) read those files.
   worktree/             Small helper for per-task git worktree setup inside
                         the sandbox. Implementation detail of `sandbox/`.
   admin/                Admin dashboard API (Hono) + SessionReader /
@@ -192,39 +198,44 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
 - **Sandbox HTTP egress allowlist** — both backends apply a default-deny
   HTTP egress policy. The host list lives in `src/sandbox/egress-allowlist.ts`
   (`GITHUB_HOSTS` + `PROVIDER_HOSTS` + `PACKAGE_REGISTRY_HOSTS`).
+  Entries with a leading dot (e.g. `.github.com`) match the apex AND
+  every subdomain.
   - **gondolin**: `agent-executor.ts` passes `allowedHttpHosts` to
     agentic-pi's `run()`. The VM's HTTP interceptor 502s anything off-list.
-  - **docker**: the harness writes `strict.conf` / `open.conf` /
-    `filter-strict.txt` / `filter-open.txt` to `$STATE_DIR/proxy/` at
-    boot from the same source. Sandbox containers attach to the
-    `sandbox-egress` network (declared `internal: true` in
-    docker-compose.yml), and `HTTPS_PROXY` points at the `tinyproxy-strict`
-    (or `tinyproxy-open`) sidecar. Tinyproxy filters by CONNECT target —
-    no TLS interception. The proxies attach to `sandbox-egress` (ingress
-    from sandboxes) + `proxy-egress` (outbound to the public internet)
-    but NOT to `internal` — so docker's embedded DNS won't resolve
-    harness service names (`agent`, `caddy`) from the proxy's
-    perspective and there's no L3 route from the proxy to harness
-    containers. `src/sandbox/docker-compose.test.ts` pins this contract.
+  - **docker** (SNI-peeking firewall, inspired by Vercel Sandbox):
+    The harness writes `nginx-strict.conf` / `nginx-open.conf` /
+    `Corefile.strict` / `Corefile.open` to `$STATE_DIR/proxy/` at boot.
+    Four services in docker-compose.yml — `coredns-strict` (172.30.0.10),
+    `coredns-open` (172.30.0.11), `nginx-egress-strict` (172.30.0.20),
+    `nginx-egress-open` (172.30.0.21) — implement the firewall. Sandbox
+    containers spawn with `--dns <coredns-ip>` and **no proxy env vars
+    at all**. The sandbox dials real hostnames; coredns sinkholes
+    allowlisted ones to the nginx IP; nginx peeks the TLS SNI and
+    tunnels to the real upstream via `proxy-egress`. This works for
+    every SDK regardless of whether it honours `HTTP(S)_PROXY` (the
+    OpenAI/Anthropic SDKs don't, which is why the earlier tinyproxy
+    approach failed). See `src/sandbox/egress-firewall-config.ts` for
+    the full architecture rationale and `docker-compose.test.ts` for
+    the topology contract.
   - **Opting out**: a workflow phase can declare `unrestricted_egress: true`
     in YAML to bypass the allowlist for that phase only. Gondolin then
-    receives `["*"]` (wildcard allow-all); docker routes through
-    `tinyproxy-open`. Use sparingly — for phases that need broad web
-    access (e.g. an explore phase searching third-party docs).
-  - **Private-IP floor**: `strict.conf` blocks private destinations
-    inherently — anything not in the public-host allowlist is rejected.
-    `open.conf` adds an explicit destination denylist (RFC1918, loopback,
-    link-local IPv4 + IPv6, plus the GCP metadata hostname literals)
-    via tinyproxy `FilterDefaultDeny No` + `filter-open.txt`. Toggle off
-    with `LASTLIGHT_BLOCK_PRIVATE_IPS=0`.
-  - **Caveat (tinyproxy limitation)**: the denylist matches the literal
-    CONNECT target *before* DNS resolution. A hostname like
-    `evil.example.com` whose A record points at `10.0.0.5` slips past
-    these patterns. Catching that requires a resolve-then-check proxy
-    (Envoy with `dns_resolver`, or a custom Go proxy). The current
-    setup defends against the common `curl http://169.254.169.254/`
-    /  metadata-IP-literal cases but is not a complete post-resolve
-    defense.
+    receives `["*"]` (wildcard allow-all); docker routes through the
+    `coredns-open` + `nginx-egress-open` pair. Use sparingly — for
+    phases that need broad web access (e.g. an explore phase searching
+    third-party docs).
+  - **SSRF floor**: `coredns-open` hard-NXDOMAINs the cloud-metadata
+    literals (`169.254.169.254`, `metadata.google.internal`) even in
+    unrestricted mode. Strict mode blocks all private destinations
+    inherently — anything not in the allowlist resolves to NXDOMAIN.
+  - **Caveat (no TLS termination)**: we peek SNI without decrypting,
+    so a hostname like `evil.example.com` whose A record points at
+    `10.0.0.5` would not be caught by the strict filter — but it would
+    never resolve in the first place, since coredns-strict only knows
+    the allowlist hosts. In the open mode, the same hostname WOULD
+    resolve (to the nginx-open IP) and nginx would tunnel to the
+    attacker-controlled host. Closing that requires TLS termination
+    (e.g. Envoy + dynamic_forward_proxy with post-resolve IP checks),
+    which we haven't pulled in.
 
 ## State directory
 
@@ -248,10 +259,13 @@ data/
                             live here.
   sandboxes/                Cloned repos per task (one dir per taskId).
   logs/                     Structured harness logs.
-  proxy/                    Generated tinyproxy configs (docker backend).
-                            Regenerated on every harness boot from
+  proxy/                    Generated egress firewall configs (docker
+                            backend): nginx-strict.conf, nginx-open.conf,
+                            Corefile.strict, Corefile.open. Regenerated on
+                            every harness boot from
                             src/sandbox/egress-allowlist.ts. Bind-mounted
-                            read-only into tinyproxy-strict / tinyproxy-open.
+                            read-only into the coredns + nginx firewall
+                            containers.
   secrets/app.pem           Mode-600 copy of the GitHub App PEM. Copied
                             here by deploy/entrypoint.sh so sandbox
                             containers can read it via the shared volume
@@ -332,17 +346,13 @@ Runtime:
 
 Sandbox egress (docker backend only):
 
-- `LASTLIGHT_BLOCK_PRIVATE_IPS` — `0`/`false`/`no` disables the RFC1918 +
-  loopback + link-local Deny rules in both tinyproxy configs (default:
-  enabled).
 - `LASTLIGHT_SANDBOX_NETWORK` — docker network sandbox containers attach
   to (default: `lastlight_sandbox-egress`). Set to `default` to keep
   containers on the default bridge — only useful when running the harness
   outside docker-compose where the sandbox-egress network doesn't exist.
-- `LASTLIGHT_PROXY_STRICT` / `LASTLIGHT_PROXY_OPEN` — override the
-  `host:port` of the strict / open tinyproxy sidecar (defaults match
-  the docker-compose service names: `tinyproxy-strict:8888` and
-  `tinyproxy-open:8888`).
+- `LASTLIGHT_DNS_STRICT` / `LASTLIGHT_DNS_OPEN` — override the IP of the
+  coredns sidecar passed to `docker run --dns ...` (defaults: `172.30.0.10`
+  and `172.30.0.11`, matching the static IPs in docker-compose.yml).
 
 Admin dashboard:
 
