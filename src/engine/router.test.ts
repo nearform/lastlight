@@ -63,6 +63,7 @@ describe('routeEvent — PR events', () => {
     expect(result.action).toBe('skill');
     if (result.action === 'skill') {
       expect(result.skill).toBe('pr-review');
+      expect(result.context._routeKey).toBe('github.pr_opened');
     }
   });
 
@@ -71,6 +72,7 @@ describe('routeEvent — PR events', () => {
     expect(result.action).toBe('skill');
     if (result.action === 'skill') {
       expect(result.skill).toBe('pr-review');
+      expect(result.context._routeKey).toBe('github.pr_synchronize');
     }
   });
 
@@ -134,6 +136,7 @@ describe('routeEvent — comment.created', () => {
     expect(result.action).toBe('skill');
     if (result.action === 'skill') {
       expect(result.skill).toBe('github-orchestrator');
+      expect(result.context._routeKey).toBe('github.issue_build');
     }
   });
 
@@ -162,6 +165,7 @@ describe('routeEvent — comment.created', () => {
     expect(result.action).toBe('skill');
     if (result.action === 'skill') {
       expect(result.skill).toBe('pr-fix');
+      expect(result.context._routeKey).toBe('github.pr_fix');
     }
   });
 
@@ -262,6 +266,7 @@ describe('routeEvent — message events (classifier-driven)', () => {
     expect(result.action).toBe('skill');
     if (result.action === 'skill') {
       expect(result.skill).toBe('github-orchestrator');
+      expect(result.context._routeKey).toBe('slack.build');
       expect(result.context.repo).toBe('cliftonc/drizzle-cube');
       expect(result.context.issueNumber).toBe(42);
     }

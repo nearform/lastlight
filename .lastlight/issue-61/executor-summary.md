@@ -117,3 +117,18 @@ dist/assets/index-DoSZ8ogN.js   1,002.35 kB │ gzip: 306.36 kB
 
 - CLI explicit command-to-workflow mappings remain legacy/manual dispatch, as allowed by the architect plan.
 - Lint is unavailable because no `lint` script exists.
+
+## Fix Cycle 1
+
+Fixed the reviewer-reported route configurability issues:
+
+- Review check-run creation now follows configured PR attention routes (`github.pr_opened`, `github.pr_synchronize`, `github.pr_reopened`) instead of requiring the hard-coded `pr-review` workflow name.
+- PR-fix and build orchestration now preserve their existing enrichment/ack behavior for configured route targets and dispatch the configured workflow target while keeping `github-orchestrator` as the default internal alias for `build`.
+- Startup asset validation now checks configured route targets against enabled workflows and route-specific internal handlers, failing fast for missing, disabled, or unsafe targets.
+- Added route metadata coverage and fail-fast route validation tests.
+
+Guardrails:
+
+- Test: `npm test` — passed (27 files, 447 passed, 1 todo).
+- Lint: not configured; no `lint` script is present (per guardrails report, non-blocking).
+- Typecheck/build: `npm run build` — passed.

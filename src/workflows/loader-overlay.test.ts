@@ -10,6 +10,7 @@ import {
   loadAgentContext,
   loadPromptTemplate,
   loadSkillRaw,
+  validateAssets,
 } from "./loader.js";
 
 function tmp(): string {
@@ -75,5 +76,23 @@ describe("workflow asset overlay", () => {
     writeFileSync(join(builtIn, "workflows", "a.yaml"), wf("same"));
     writeFileSync(join(builtIn, "workflows", "b.yaml"), wf("same"));
     expect(() => listAgentWorkflows()).toThrow(/duplicate workflow/i);
+  });
+
+  it("fails fast when a route targets a missing workflow", () => {
+    mkdirSync(join(builtIn, "workflows"), { recursive: true });
+    writeFileSync(join(builtIn, "workflows", "triage.yaml"), wf("issue-triage"));
+    expect(() => validateAssets({ github: { issue_opened: "missing-workflow" }, slack: {} })).toThrow(/missing workflow/i);
+  });
+
+  it("fails fast when a route targets a disabled workflow", () => {
+    mkdirSync(join(builtIn, "workflows"), { recursive: true });
+    writeFileSync(join(builtIn, "workflows", "triage.yaml"), wf("issue-triage"));
+    configureWorkflowAssets({ builtInRoot: builtIn, overlayRoot: overlay, disabled: { workflows: ["issue-triage"] } });
+    expect(() => validateAssets({ github: { issue_opened: "issue-triage" }, slack: {} })).toThrow(/disabled workflow/i);
+  });
+
+  it("allows configured internal route handlers", () => {
+    mkdirSync(join(builtIn, "workflows"), { recursive: true });
+    expect(() => validateAssets({ github: { issue_build: "github-orchestrator" }, slack: { chat: "chat" } })).not.toThrow();
   });
 });

@@ -83,6 +83,7 @@ export async function routeEvent(
         action: "skill",
         skill: gh[`pr_${envelope.type.split(".")[1]}`] || "pr-review",
         context: {
+          _routeKey: `github.pr_${envelope.type.split(".")[1]}`,
           repo: envelope.repo,
           prNumber: envelope.prNumber,
           title: envelope.title,
@@ -196,6 +197,7 @@ export async function routeEvent(
           action: "skill",
           skill: intent === "build" ? (gh.pr_fix || "pr-fix") : (gh.pr_comment || "pr-comment"),
           context: {
+            _routeKey: intent === "build" ? "github.pr_fix" : "github.pr_comment",
             repo: envelope.repo,
             prNumber: envelope.prNumber,
             issueNumber: envelope.issueNumber,
@@ -245,6 +247,7 @@ export async function routeEvent(
         action: "skill",
         skill: issueSkill,
         context: {
+          _routeKey: intent === "build" ? "github.issue_build" : intent === "explore" ? "github.issue_explore" : "github.issue_comment",
           repo: envelope.repo,
           issueNumber: envelope.issueNumber,
           title: envelope.title,
@@ -373,6 +376,7 @@ export async function routeEvent(
             action: "skill",
             skill: slack.build || "github-orchestrator",
             context: {
+              _routeKey: "slack.build",
               repo: classifiedRepo,
               issueNumber: classifiedIssue,
               sender: envelope.sender,

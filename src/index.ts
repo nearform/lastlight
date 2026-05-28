@@ -69,7 +69,7 @@ async function main() {
     overlayRoot: config.overlayDir,
     disabled: config.disabled,
   });
-  validateAssets();
+  validateAssets(config.routes);
   validateConfig(config);
 
   console.log(`[config] Port: ${config.port}, Model: ${config.model}`);
@@ -581,6 +581,11 @@ async function main() {
     }
 
     const { skill, context } = route;
+    const routeKey = typeof context._routeKey === "string" ? context._routeKey : undefined;
+    const workflowContext = () => {
+      const { _routeKey: _ignored, ...rest } = context;
+      return rest;
+    };
 
     // Chat messages: handle directly (no sandbox, low latency)
     if (skill === "chat") {
@@ -694,7 +699,7 @@ async function main() {
     }
 
     // PR fix: lightweight fix-and-push, no full build cycle
-    if (skill === "pr-fix" && context.prNumber && context.repo) {
+    if ((routeKey === "github.pr_fix" || skill === "pr-fix") && context.prNumber && context.repo) {
       const repoStr = context.repo as string;
       const [owner, repo] = repoStr.includes("/") ? repoStr.split("/") : ["", repoStr];
       const prNumber = context.prNumber as number;
@@ -733,7 +738,7 @@ async function main() {
         ? `CI FAILURES (from GitHub Actions — fix these first):\n${failedChecks}`
         : "";
 
-      dispatchWorkflow("pr-fix", {
+      dispatchWorkflow(skill, {
         repo: repoStr,
         prNumber,
         title: prTitle,
@@ -901,7 +906,7 @@ async function main() {
     }
 
     // Build requests: route to the programmatic orchestrator instead of the SKILL.md
-    if (skill === "github-orchestrator" && context.issueNumber && context.repo) {
+    if ((routeKey === "github.issue_build" || routeKey === "slack.build" || skill === "github-orchestrator") && context.issueNumber && context.repo) {
       const repoStr = context.repo as string;
       const [owner, repo] = repoStr.includes("/") ? repoStr.split("/") : ["", repoStr];
       const issueNumber = context.issueNumber as number;
@@ -958,7 +963,8 @@ async function main() {
         }
       }
 
-      dispatchWorkflow("build", {
+      const buildWorkflow = skill === "github-orchestrator" ? "build" : skill;
+      dispatchWorkflow(buildWorkflow, {
         repo: repoStr,
         issueNumber,
         title: issueTitle || `Issue #${issueNumber}`,
@@ -1005,7 +1011,7 @@ async function main() {
           console.warn(`[event] failed to post run-start ack: ${m}`);
         }
       };
-      dispatchWorkflow(skill, { ...context, _triggerType: "chat" }, onRunStart).then(async (result) => {
+      dispatchWorkflow(skill, { ...workflowContext(), _triggerType: "chat" }, onRunStart).then(async (result) => {
         if (result.paused) {
           // Workflow paused at a gate (approval or reply) — don't say
           // "completed", the workflow itself already posted instructions.
@@ -1039,7 +1045,7 @@ async function main() {
     const wantReviewCheck =
       config.reviewPostsCheck &&
       isPrReviewEvent &&
-      skill === "pr-review" &&
+      (routeKey === "github.pr_opened" || routeKey === "github.pr_synchronize" || routeKey === "github.pr_reopened" || skill === "pr-review") &&
       !!github &&
       !!envelope.repo &&
       typeof envelope.prNumber === "number";
@@ -1075,7 +1081,7 @@ async function main() {
       }
     }
 
-    const workflowPromise = dispatchWorkflow(skill, { ...context, _triggerType: "webhook" });
+    const workflowPromise = dispatchWorkflow(skill, { ...workflowContext(), _triggerType: "webhook" });
 
     if (prCheckRunId !== undefined) {
       // Capture local copies so the closure doesn't depend on the loop

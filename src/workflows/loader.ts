@@ -7,7 +7,7 @@ import {
   type AgentWorkflowDefinition,
   type CronWorkflowDefinition,
 } from "./schema.js";
-import type { DisabledConfig } from "../config.js";
+import type { DisabledConfig, RouteConfig } from "../config.js";
 
 interface AssetLayer {
   name: "built-in" | "overlay" | "legacy";
@@ -277,11 +277,41 @@ export function loadAgentContext(): string {
     .join("\n\n---\n\n");
 }
 
-export function validateAssets(): void {
+const INTERNAL_ROUTE_TARGETS: Record<string, ReadonlySet<string>> = {
+  "github.approval_response": new Set(["approval-response"]),
+  "github.issue_build": new Set(["github-orchestrator"]),
+  "github.explore_reply": new Set(["explore-reply"]),
+  "slack.approve": new Set(["approval-response"]),
+  "slack.reject": new Set(["approval-response"]),
+  "slack.reset": new Set(["chat-reset"]),
+  "slack.status": new Set(["status-report"]),
+  "slack.build": new Set(["github-orchestrator"]),
+  "slack.chat": new Set(["chat"]),
+  "slack.explore_reply": new Set(["explore-reply"]),
+};
+
+function validateRouteTargets(routes?: RouteConfig): void {
+  if (!routes) return;
+  for (const [surface, values] of Object.entries(routes) as Array<[keyof RouteConfig, Record<string, string>]>) {
+    for (const [routeName, target] of Object.entries(values)) {
+      const routeKey = `${surface}.${routeName}`;
+      if (target.includes("/") || target.includes("..")) throw new Error(`Unsafe route target for ${routeKey}: ${target}`);
+      if (INTERNAL_ROUTE_TARGETS[routeKey]?.has(target)) continue;
+      if (agentCache.has(target)) continue;
+      if (disabled.workflows.includes(target)) {
+        throw new Error(`Route ${routeKey} targets disabled workflow: ${target}`);
+      }
+      throw new Error(`Route ${routeKey} targets missing workflow or internal handler: ${target}`);
+    }
+  }
+}
+
+export function validateAssets(routes?: RouteConfig): void {
   populateCache();
   for (const route of ["workflows", "crons"] as const) {
     for (const name of disabled[route]) {
       if (name.includes("/") || name.includes("..")) throw new Error(`Unsafe disabled ${route} entry: ${name}`);
     }
   }
+  validateRouteTargets(routes);
 }
