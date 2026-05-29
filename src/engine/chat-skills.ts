@@ -7,12 +7,13 @@
  * model, we:
  *
  *  1. Load the curated chat skill list from `<repo>/skills/<name>/`
- *     at boot, using `loadSkillsFromDir` to parse the frontmatter the
- *     same way pi-coding-agent does for sandbox phases.
+ *     at boot, parsing the SKILL.md frontmatter inline (we deliberately
+ *     do NOT import from `@earendil-works/pi-coding-agent` here — its
+ *     transitive deps install a non-default undici as Node's global
+ *     fetch dispatcher, which breaks GitHub OAuth response parsing).
  *  2. Format a system-prompt XML block listing each skill's name +
- *     description (matching `formatSkillsForPrompt`'s structure but
- *     keyed by name, not absolute path, so the chat agent can ask for
- *     them by name).
+ *     description (mirrors pi-coding-agent's `formatSkillsForPrompt`
+ *     shape, keyed by name so the chat agent can ask by name).
  *  3. Expose a `read_skill` tool that resolves a name to that skill's
  *     SKILL.md and returns its text — same role as pi-coding-agent's
  *     built-in `read` tool when applied to a discovered SKILL.md.
@@ -20,12 +21,21 @@
  * The curated list is intentionally hard-coded for v1. If chat ever
  * needs configurable skill exposure, lift this into env or settings.
  */
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Type } from "@sinclair/typebox";
-import { loadSkillsFromDir, type Skill } from "@earendil-works/pi-coding-agent";
 import type { Tool, ToolCall } from "@earendil-works/pi-ai";
 import { resolveSkillPaths } from "../workflows/loader.js";
+
+/**
+ * Minimal subset of pi-coding-agent's `Skill` shape — only the fields
+ * the chat catalogue + read tool actually use.
+ */
+export interface ChatSkill {
+  name: string;
+  description: string;
+  filePath: string;
+}
 
 /**
  * Skills exposed to chat threads. `chat` is the always-on persona;
@@ -43,7 +53,7 @@ const SKILLS_ROOT = resolve("skills");
 
 export interface ChatSkillCatalogue {
   /** Skills the chat agent can read on demand, keyed by name. */
-  skills: Skill[];
+  skills: ChatSkill[];
   /**
    * XML block describing each skill (name + description) suitable for
    * prepending to the chat system prompt. Empty string if no skills
@@ -53,20 +63,68 @@ export interface ChatSkillCatalogue {
 }
 
 /**
+ * Parse `name:` and `description:` from the YAML frontmatter of a
+ * SKILL.md. We only need those two fields; pi-coding-agent's full
+ * loader supports more (tags, version, disable-model-invocation) but
+ * importing it here pulls in transitive deps that interfere with
+ * Node's global fetch dispatcher (see file-header comment).
+ *
+ * Frontmatter must be the first thing in the file, opened and closed
+ * by lines containing just `---`. Both `name:` and `description:` are
+ * required to count as a valid skill; either may be quoted or
+ * unquoted single-line strings. Multi-line description values are
+ * supported via YAML's `|` and `>` block scalars.
+ */
+function parseSkillFrontmatter(md: string): { name?: string; description?: string } {
+  const lines = md.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return {};
+  const end = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
+  if (end < 0) return {};
+  const body = lines.slice(1, end);
+
+  const out: { name?: string; description?: string } = {};
+  for (let i = 0; i < body.length; i++) {
+    const m = body[i].match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    if (!m) continue;
+    const key = m[1];
+    const raw = m[2];
+    if (key !== "name" && key !== "description") continue;
+
+    let value: string;
+    if (raw === "|" || raw === ">" || raw === "|-" || raw === ">-") {
+      // Block scalar — collect subsequent indented lines until a
+      // less-indented line or end of block.
+      const collected: string[] = [];
+      let j = i + 1;
+      while (j < body.length && /^\s+/.test(body[j])) {
+        collected.push(body[j].replace(/^\s+/, ""));
+        j++;
+      }
+      value = raw.startsWith(">") ? collected.join(" ") : collected.join("\n");
+      i = j - 1;
+    } else {
+      value = raw.replace(/^['"]|['"]$/g, "").trim();
+    }
+    if (value) out[key] = value;
+  }
+  return out;
+}
+
+/**
  * Load the curated chat skill catalogue from `<repo>/skills/`.
- * Skills missing the `name`/`description` frontmatter are silently
- * dropped by `loadSkillsFromDir`, matching pi-coding-agent's behaviour.
+ * Skills missing `name` or `description` frontmatter are silently
+ * dropped, matching pi-coding-agent's behaviour on the sandbox path.
  */
 export function loadChatSkillCatalogue(): ChatSkillCatalogue {
-  // loadSkillsFromDir scans the whole directory; restrict to our
-  // curated set by intersecting on basename. (Skills outside CHAT_SKILL_NAMES
-  // shouldn't surface to chat even if they're well-formed.)
-  const { skills: all } = loadSkillsFromDir({
-    dir: SKILLS_ROOT,
-    source: "chat",
-  });
-  const wanted = new Set<string>(CHAT_SKILL_NAMES);
-  const skills = all.filter((s) => wanted.has(s.name));
+  const skills: ChatSkill[] = [];
+  for (const name of CHAT_SKILL_NAMES) {
+    const filePath = join(SKILLS_ROOT, name, "SKILL.md");
+    if (!existsSync(filePath)) continue;
+    const md = readFileSync(filePath, "utf-8");
+    const fm = parseSkillFrontmatter(md);
+    if (!fm.name || !fm.description) continue;
+    skills.push({ name: fm.name, description: fm.description, filePath });
+  }
 
   if (skills.length === 0) {
     return { skills, catalogueXml: "" };
@@ -101,7 +159,7 @@ export interface ReadSkillToolset {
   execute(call: ToolCall): { content: string; isError: boolean };
 }
 
-export function buildReadSkillTool(skills: Skill[]): ReadSkillToolset {
+export function buildReadSkillTool(skills: ChatSkill[]): ReadSkillToolset {
   const byName = new Map(skills.map((s) => [s.name, s]));
   const enumNames = skills.map((s) => s.name);
 
