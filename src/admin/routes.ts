@@ -4,7 +4,6 @@ import { timingSafeEqual, randomBytes } from "node:crypto";
 import { streamSSE } from "hono/streaming";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { Slack, GitHub } from "arctic";
-import { withNodeBuiltinFetch } from "../_fetch-capture.js";
 import { unwrapLine, type SessionSource, type SessionMeta } from "./sessions.js";
 import type { StateDb, WorkflowRun } from "../state/db.js";
 import { tailJsonl } from "./tail.js";
@@ -310,29 +309,23 @@ export function createAdminRoutes(
         config.slackOAuthClientSecret!,
         config.slackOAuthRedirectUri ?? "",
       );
-      // pi-coding-agent's bundled undici (installed as globalThis.fetch
-      // when a sandbox phase runs) rejects Slack/GitHub OAuth responses
-      // with `invalid content-length header`. Restore Node's built-in
-      // fetch for the arctic call + the follow-up userInfo lookup.
       // "Sign in with Slack" issues OIDC-scoped tokens (openid + profile),
       // which Slack's classic auth.test endpoint rejects with invalid_auth.
       // Use the OIDC userInfo endpoint instead — it returns a JWT-style
       // payload with claims under namespaced URLs.
-      const userInfo = await withNodeBuiltinFetch(async () => {
-        const tokens = await slack.validateAuthorizationCode(code);
-        const accessToken = tokens.accessToken();
-        const res = await fetch("https://slack.com/api/openid.connect.userInfo", {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        return (await res.json()) as {
-          ok?: boolean;
-          error?: string;
-          sub?: string;
-          "https://slack.com/team_id"?: string;
-          "https://slack.com/team_domain"?: string;
-          "https://slack.com/user_id"?: string;
-        };
+      const tokens = await slack.validateAuthorizationCode(code);
+      const accessToken = tokens.accessToken();
+      const res = await fetch("https://slack.com/api/openid.connect.userInfo", {
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
+      const userInfo = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        sub?: string;
+        "https://slack.com/team_id"?: string;
+        "https://slack.com/team_domain"?: string;
+        "https://slack.com/user_id"?: string;
+      };
       if (userInfo.ok === false) {
         console.error("Slack openid.connect.userInfo failed:", userInfo.error);
         return c.json({ error: "Slack userInfo failed" }, 502);
@@ -416,42 +409,33 @@ export function createAdminRoutes(
         config.githubOAuthClientSecret!,
         config.githubOAuthRedirectUri ?? "",
       );
-      // Restore Node's built-in fetch around the arctic call + GitHub
-      // userInfo / org-membership lookups; see the Slack handler above
-      // for the rationale.
-      const { userInfo, memberStatus } = await withNodeBuiltinFetch(async () => {
-        const tokens = await github.validateAuthorizationCode(code);
-        const accessToken = tokens.accessToken();
-        const res = await fetch("https://api.github.com/user", {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "User-Agent": "lastlight-admin",
-            Accept: "application/vnd.github+json",
-          },
-        });
-        const userInfo = (await res.json()) as { login?: string };
-
-        // Org-membership check (skipped when allowlist is "*"). Run
-        // inside the same restored-fetch scope so its HTTP call goes
-        // through Node's built-in fetch too.
-        let memberStatus: number | undefined;
-        if (userInfo.login && !githubAllowAnyUser) {
-          const org = config.githubAllowedOrg!;
-          const memberRes = await fetch(
-            `https://api.github.com/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(userInfo.login)}`,
-            {
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-                "User-Agent": "lastlight-admin",
-                Accept: "application/vnd.github+json",
-              },
-              redirect: "manual",
-            },
-          );
-          memberStatus = memberRes.status;
-        }
-        return { userInfo, memberStatus };
+      const tokens = await github.validateAuthorizationCode(code);
+      const accessToken = tokens.accessToken();
+      const res = await fetch("https://api.github.com/user", {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "User-Agent": "lastlight-admin",
+          Accept: "application/vnd.github+json",
+        },
       });
+      const userInfo = (await res.json()) as { login?: string };
+
+      let memberStatus: number | undefined;
+      if (userInfo.login && !githubAllowAnyUser) {
+        const org = config.githubAllowedOrg!;
+        const memberRes = await fetch(
+          `https://api.github.com/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(userInfo.login)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "User-Agent": "lastlight-admin",
+              Accept: "application/vnd.github+json",
+            },
+            redirect: "manual",
+          },
+        );
+        memberStatus = memberRes.status;
+      }
       if (!userInfo.login) {
         console.error("GitHub /user failed: missing login field");
         return fail("github_userinfo");

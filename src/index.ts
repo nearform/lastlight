@@ -1,10 +1,3 @@
-// Capture Node's built-in fetch BEFORE any other import — pi-coding-agent
-// (loaded transitively via agentic-pi) installs its own undici as the
-// global fetch, and that copy rejects GitHub's OAuth response with
-// `invalid content-length header`. Keeping a reference here lets the
-// admin OAuth handlers restore the built-in fetch for their request.
-// See src/_fetch-capture.ts.
-import "./_fetch-capture.js";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { randomUUID } from "crypto";

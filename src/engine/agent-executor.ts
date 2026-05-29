@@ -1,7 +1,7 @@
 import { resolve, basename, join } from "path";
 import { cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { randomUUID } from "crypto";
-import { run as agenticRun, type RunResult, type ThinkingLevel } from "agentic-pi";
+import type { run as agenticRunType, RunResult, ThinkingLevel } from "agentic-pi";
 import {
   createTaskSandbox,
   setupTaskWorktree,
@@ -317,6 +317,15 @@ async function executeInProcess(
     const allowedHttpHosts = config.unrestrictedEgress
       ? [ALLOW_ALL_SENTINEL]
       : [...DEFAULT_ALLOWLIST];
+
+    // Loaded lazily: agentic-pi transitively imports pi-coding-agent, whose
+    // bundled undici writes a v8 Agent onto `Symbol.for('undici.globalDispatcher.1')`
+    // the moment its `lib/global.js` evaluates. Node's built-in fetch reads
+    // from the same symbol, so eager-loading here would poison every fetch
+    // in the harness — breaking arctic's OAuth code exchange (strict
+    // content-length validation). Dynamic import keeps the harness on
+    // Node's clean dispatcher unless an in-process sandbox actually runs.
+    const { run: agenticRun }: { run: typeof agenticRunType } = await import("agentic-pi");
 
     result = await agenticRun({
       model,
