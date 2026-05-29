@@ -275,7 +275,7 @@ async function main() {
     // triggering comment, not the issue body — we explicitly fetch the
     // real issue body here so the architect sees both the spec (issue body
     // + thread) and the trigger (commentBody) cleanly separated.
-    const ENRICH_WORKFLOWS = new Set(["build", "pr-fix", "explore"]);
+    const ENRICH_WORKFLOWS = new Set(["build", "pr-fix", "explore", "workflow-author"]);
     if (
       github &&
       ENRICH_WORKFLOWS.has(workflowName) &&

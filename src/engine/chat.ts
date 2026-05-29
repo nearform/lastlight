@@ -53,6 +53,8 @@ output.
   → reply: "run \`/health owner/repo\`"
 - "build this" / "implement this" / "fix this bug" on a specific issue
   → reply: "run \`/build owner/repo#N\` (open the GitHub issue first if needed)"
+- "create a workflow" / "edit workflow <name>" / workflow authoring requests
+  → reply: "run \`/new-workflow owner/repo describe the workflow\` or \`/edit-workflow owner/repo workflow-name describe the change\`"
 
 Only exception: if the user is asking a narrow *question* that you can
 answer with one or two reads (e.g. "what does this file do?", "what labels
@@ -67,7 +69,8 @@ STYLE:
 
 Useful commands you can suggest:
 \`/build owner/repo#N\`, \`/triage owner/repo\`, \`/review owner/repo\`,
-\`/security owner/repo\`, \`/health owner/repo\`, \`/status\`
+\`/security owner/repo\`, \`/health owner/repo\`, \`/new-workflow owner/repo ...\`,
+\`/edit-workflow owner/repo workflow-name ...\`, \`/status\`
 `;
 
 /**

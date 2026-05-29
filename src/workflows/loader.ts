@@ -8,6 +8,52 @@ import {
   type CronWorkflowDefinition,
 } from "./schema.js";
 
+export type AgentWorkflowYamlValidationResult =
+  | { success: true; data: AgentWorkflowDefinition }
+  | { success: false; error: Error };
+
+function formatZodPath(path: PropertyKey[]): string {
+  return path.length > 0 ? path.map(String).join(".") : "<root>";
+}
+
+function formatAgentWorkflowSchemaError(sourceName: string, issues: { path: PropertyKey[]; message: string }[]): Error {
+  const details = issues
+    .map((issue) => `${formatZodPath(issue.path)}: ${issue.message}`)
+    .join("; ");
+  return new Error(`Invalid agent workflow in ${sourceName}: ${details}`);
+}
+
+/**
+ * Parse and validate an agent workflow YAML string against the authoritative
+ * AgentWorkflowSchema. Intended for both loader paths and generated workflow
+ * authoring validation so their behavior cannot drift.
+ */
+export function validateAgentWorkflowYaml(
+  raw: string,
+  sourceName = "<workflow>",
+): AgentWorkflowYamlValidationResult {
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: new Error(`Failed to parse YAML in ${sourceName}: ${msg}`) };
+  }
+
+  const result = AgentWorkflowSchema.safeParse(parsed);
+  if (!result.success) {
+    return { success: false, error: formatAgentWorkflowSchemaError(sourceName, result.error.issues) };
+  }
+  return { success: true, data: result.data };
+}
+
+/** Parse and validate an agent workflow YAML string, throwing on failure. */
+export function parseAgentWorkflowYaml(raw: string, sourceName = "<workflow>"): AgentWorkflowDefinition {
+  const result = validateAgentWorkflowYaml(raw, sourceName);
+  if (!result.success) throw result.error;
+  return result.data;
+}
+
 // Default workflow directory (relative to cwd at startup)
 const DEFAULT_WORKFLOW_DIR = resolve("workflows");
 
@@ -88,9 +134,10 @@ function populateCache(): void {
       }
       cronCache.set(result.data.name, result.data);
     } else {
-      const result = AgentWorkflowSchema.safeParse(raw);
+      const rawText = readFileSync(filePath, "utf-8");
+      const result = validateAgentWorkflowYaml(rawText, file);
       if (!result.success) {
-        console.error(`[loader] Invalid agent workflow in ${file}:`, result.error.format());
+        console.error(`[loader] ${result.error.message}`);
         continue;
       }
       agentCache.set(result.data.name, result.data);
@@ -115,15 +162,10 @@ export function getWorkflow(name: string): AgentWorkflowDefinition {
 
   for (const filePath of candidates) {
     if (existsSync(filePath)) {
-      const raw = loadYamlFile(filePath);
-      const result = AgentWorkflowSchema.safeParse(raw);
-      if (!result.success) {
-        throw new Error(
-          `Invalid workflow "${name}" in ${filePath}: ${JSON.stringify(result.error.format())}`
-        );
-      }
-      agentCache.set(name, result.data);
-      return result.data;
+      const raw = readFileSync(filePath, "utf-8");
+      const workflow = parseAgentWorkflowYaml(raw, filePath);
+      agentCache.set(name, workflow);
+      return workflow;
     }
   }
 

@@ -129,14 +129,15 @@ export async function runSimpleWorkflow(
 
   // Build-style workflows synthesize a new `lastlight/N-slug` branch that
   // doesn't exist on the remote at dispatch time, so the dispatcher leaves
-  // `prePopulateBranch` unset. The harness can still pre-clone — the new
-  // missing-branch fallback in `prePopulateWorkspace` clones the default
-  // branch and creates the target branch locally. With that, every phase of
-  // a build run enters a workspace already at `<repo>/` on the right branch,
-  // and the per-phase prompts no longer need a `git clone … && cd <repo>`
-  // preamble.
+  // `prePopulateBranch` unset. Workflow-author does the same, and its author
+  // phase must start inside a repo checkout so `workflows/*.yaml` exists. The
+  // harness can still pre-clone — the missing-branch fallback in
+  // `prePopulateWorkspace` clones the default branch and creates the target
+  // branch locally. With that, every phase of these runs enters a workspace
+  // already at `<repo>/` on the right branch, and the per-phase prompts no
+  // longer need a `git clone … && cd <repo>` preamble.
   const effectivePrePopulateBranch = request.prePopulateBranch
-    ?? (workflowName === "build" ? branch : undefined);
+    ?? (workflowName === "build" || workflowName === "workflow-author" ? branch : undefined);
 
   // ── Resume handling ────────────────────────────────────────────────────────
   //

@@ -1,12 +1,81 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync } from "fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { setWorkflowDir, clearWorkflowCache, getWorkflow, getCronWorkflows, loadPromptTemplate, resolveSkillPaths } from "./loader.js";
+import {
+  setWorkflowDir,
+  clearWorkflowCache,
+  getWorkflow,
+  getCronWorkflows,
+  loadPromptTemplate,
+  resolveSkillPaths,
+  parseAgentWorkflowYaml,
+  validateAgentWorkflowYaml,
+} from "./loader.js";
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "loader-test-"));
 }
+
+describe("workflow YAML validator helpers", () => {
+  it("parses valid agent workflow YAML", () => {
+    const workflow = parseAgentWorkflowYaml(
+      `
+name: generated-workflow
+kind: agent
+phases:
+  - name: context
+    type: context
+  - name: author
+    skill: workflow-author
+`.trim(),
+      "generated.yaml",
+    );
+
+    expect(workflow.name).toBe("generated-workflow");
+    expect(workflow.phases).toHaveLength(2);
+    expect(workflow.phases[1].skill).toBe("workflow-author");
+  });
+
+  it("returns malformed YAML errors with the source name", () => {
+    const result = validateAgentWorkflowYaml("phases: [{{{{", "broken-generated.yaml");
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toContain("broken-generated.yaml");
+      expect(result.error.message).toMatch(/parse YAML/i);
+    }
+  });
+
+  it("returns schema validation errors with useful field paths", () => {
+    const result = validateAgentWorkflowYaml(
+      `
+name: invalid-generated
+phases:
+  - name: author
+    skill: workflow-author
+    skills: [github-pr-workflow]
+`.trim(),
+      "invalid-generated.yaml",
+    );
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.message).toContain("invalid-generated.yaml");
+      expect(result.error.message).toContain("phases.0");
+      expect(result.error.message).toContain("skill");
+      expect(result.error.message).toContain("skills");
+    }
+  });
+
+  it("parses the checked-in workflow-author workflow", () => {
+    const raw = readFileSync(join(process.cwd(), "workflows", "workflow-author.yaml"), "utf-8");
+    const workflow = parseAgentWorkflowYaml(raw, "workflows/workflow-author.yaml");
+
+    expect(workflow.name).toBe("workflow-author");
+    expect(workflow.phases.some((phase) => phase.skill === "workflow-author" || phase.skills?.includes("workflow-author"))).toBe(true);
+  });
+});
 
 describe("loader — agent workflow", () => {
   let dir: string;

@@ -12,6 +12,7 @@ export type CommentIntent =
   | "triage"
   | "review"
   | "security"
+  | "workflow-author"
   | "approve"
   | "reject"
   | "status"
@@ -45,6 +46,7 @@ EXPLORE — The user has a half-formed idea and wants help thinking it through B
 TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
 REVIEW — The user wants to review PRs on a repo: "review cliftonc/repo", "check PRs", "can you review PRs on <repo>?".
 SECURITY — The user wants a security scan/review of a repo: "security review cliftonc/repo", "scan for vulnerabilities", "check security", "can you do a security review of <repo>?".
+WORKFLOW_AUTHOR — The user wants to create or edit a Last Light workflow definition: "/new-workflow owner/repo ...", "/edit-workflow owner/repo workflow-name ...", "create a workflow that ...", "modify workflow X to ...".
 APPROVE — The user is approving a pending gate: "approve", "go ahead", "looks good, continue", "yes proceed".
 REJECT — The user is rejecting a pending gate: "reject", "abort", "cancel this", "no don't proceed". Extract any reason given.
 STATUS — The user wants to know what's running: "status", "what's running", "any tasks active?".
@@ -73,7 +75,7 @@ The "prefer CHAT when ambiguous" rule does NOT apply when the comment is a
 clear imperative directed at the issue's subject.
 
 Respond in exactly this format (each on its own line, no extra text):
-INTENT: BUILD|EXPLORE|TRIAGE|REVIEW|SECURITY|APPROVE|REJECT|STATUS|RESET|CHAT
+INTENT: BUILD|EXPLORE|TRIAGE|REVIEW|SECURITY|WORKFLOW_AUTHOR|APPROVE|REJECT|STATUS|RESET|CHAT
 REPO: owner/name or NONE
 ISSUE: number or NONE
 REASON: text or NONE
@@ -91,6 +93,10 @@ Examples:
 "could you triage https://github.com/foo/bar?" → INTENT: TRIAGE, REPO: foo/bar, ISSUE: NONE, REASON: NONE
 "please review https://github.com/foo/bar/pull/42" → INTENT: REVIEW, REPO: foo/bar, ISSUE: 42, REASON: NONE
 "scan https://github.com/cliftonc/lastlight for vulnerabilities" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
+"/new-workflow cliftonc/lastlight create a workflow that labels stale issues" → INTENT: WORKFLOW_AUTHOR, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
+"/edit-workflow cliftonc/lastlight issue-triage add approval before labels" → INTENT: WORKFLOW_AUTHOR, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
+"create a workflow in cliftonc/lastlight that triages new issues" → INTENT: WORKFLOW_AUTHOR, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
+"modify workflow issue-triage in cliftonc/lastlight to ask for approval" → INTENT: WORKFLOW_AUTHOR, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
 "delete any files in ~/work/lastlight/docs" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
 "can you remove the old docs folder for me" (no ISSUE TITLE, no repo) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
 "build something cool" (no repo, no ISSUE TITLE) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE`;
@@ -159,6 +165,8 @@ export async function classifyComment(
       TRIAGE: "triage",
       REVIEW: "review",
       SECURITY: "security",
+      WORKFLOW_AUTHOR: "workflow-author",
+      WORKFLOWAUTHOR: "workflow-author",
       APPROVE: "approve",
       REJECT: "reject",
       STATUS: "status",

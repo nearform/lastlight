@@ -24,6 +24,95 @@ function unmanagedRepoReply(repo: string): string {
   );
 }
 
+const REPO_REF = "([\\w-]+/[\\w.-]+)";
+const WORKFLOW_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+
+interface WorkflowAuthorCommand {
+  mode: "new" | "edit";
+  repo?: string;
+  workflowName?: string;
+  request: string;
+  error?: "missing-repo" | "missing-workflow-name";
+}
+
+function missingWorkflowRepoReply(): string {
+  return "Which repo should I author the workflow in? e.g. `/new-workflow owner/repo describe the workflow`";
+}
+
+function missingWorkflowNameReply(): string {
+  return "Which workflow name should I edit? e.g. `/edit-workflow owner/repo issue-triage describe the change`";
+}
+
+function parseSlackWorkflowAuthorCommand(text: string): WorkflowAuthorCommand | undefined {
+  const newMatch = text.match(new RegExp(`^/new-workflow(?:\\s+${REPO_REF})?(?:\\s+([\\s\\S]*))?$`, "i"));
+  if (newMatch) {
+    return {
+      mode: "new",
+      repo: newMatch[1],
+      request: (newMatch[2] || "").trim(),
+      error: newMatch[1] ? undefined : "missing-repo",
+    };
+  }
+
+  const editPrefix = text.match(new RegExp(`^/edit-workflow(?:\\s+${REPO_REF})?(?:\\s+([\\s\\S]*))?$`, "i"));
+  if (!editPrefix) return undefined;
+  if (!editPrefix[1]) {
+    return { mode: "edit", request: (editPrefix[2] || "").trim(), error: "missing-repo" };
+  }
+  const rest = (editPrefix[2] || "").trim();
+  const [workflowName, ...requestParts] = rest.split(/\s+/).filter(Boolean);
+  return {
+    mode: "edit",
+    repo: editPrefix[1],
+    workflowName,
+    request: requestParts.join(" ").trim(),
+    error: workflowName && WORKFLOW_NAME_RE.test(workflowName) ? undefined : "missing-workflow-name",
+  };
+}
+
+function parseIssueWorkflowAuthorCommand(text: string, repo: string): WorkflowAuthorCommand | undefined {
+  const newMatch = text.match(/@last-light\s+new-workflow\b([\s\S]*)/i);
+  if (newMatch) {
+    return { mode: "new", repo, request: newMatch[1].trim() };
+  }
+
+  const editMatch = text.match(/@last-light\s+edit-workflow\b([\s\S]*)/i);
+  if (!editMatch) return undefined;
+  const rest = editMatch[1].trim();
+  const [workflowName, ...requestParts] = rest.split(/\s+/).filter(Boolean);
+  return {
+    mode: "edit",
+    repo,
+    workflowName,
+    request: requestParts.join(" ").trim(),
+    error: workflowName && WORKFLOW_NAME_RE.test(workflowName) ? undefined : "missing-workflow-name",
+  };
+}
+
+function workflowAuthorContext(args: {
+  command: WorkflowAuthorCommand;
+  requestText: string;
+  sender: string;
+  source: string;
+  issueNumber?: number;
+  triggerId?: string;
+  channelId?: string;
+  threadId?: string;
+}): Record<string, unknown> {
+  return {
+    repo: args.command.repo,
+    issueNumber: args.issueNumber,
+    sender: args.sender,
+    source: args.source,
+    workflowMode: args.command.mode,
+    workflowName: args.command.workflowName,
+    workflowRequest: args.requestText,
+    triggerId: args.triggerId,
+    channelId: args.channelId,
+    threadId: args.threadId,
+  };
+}
+
 /** Author associations that can trigger builds via @mention */
 const MAINTAINER_ROLES = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
@@ -157,6 +246,33 @@ export async function routeEvent(
         };
       }
 
+      // Structured workflow authoring commands create/edit workflow YAML via
+      // a repo-write sandbox workflow. Keep this deterministic and above the
+      // generic classifier so command-shaped requests do not fall into chat.
+      const workflowCommand = envelope.repo
+        ? parseIssueWorkflowAuthorCommand(envelope.body, envelope.repo)
+        : undefined;
+      if (workflowCommand) {
+        if (workflowCommand.error === "missing-workflow-name") {
+          return { action: "reply", message: missingWorkflowNameReply() };
+        }
+        const screen = await screenForInjection(envelope.body);
+        const requestText = screen.flagged
+          ? `${flagPrefix(screen.reason)}${workflowCommand.request || envelope.body}`
+          : workflowCommand.request;
+        return {
+          action: "skill",
+          skill: "workflow-author",
+          context: workflowAuthorContext({
+            command: workflowCommand,
+            requestText,
+            sender: envelope.sender,
+            source: envelope.source,
+            issueNumber: envelope.issueNumber,
+          }),
+        };
+      }
+
       // Classify intent + screen for injection in parallel. Both run on the
       // same comment text and have similar latency (single haiku call); doing
       // them in parallel keeps overall router latency at max(classifier, screener)
@@ -232,6 +348,19 @@ export async function routeEvent(
           },
         };
       }
+      if (intent === "workflow-author") {
+        return {
+          action: "skill",
+          skill: "workflow-author",
+          context: workflowAuthorContext({
+            command: { mode: "new", repo: envelope.repo, request: commentBody },
+            requestText: commentBody,
+            sender: envelope.sender,
+            source: envelope.source,
+            issueNumber: envelope.issueNumber,
+          }),
+        };
+      }
       const issueSkill = intent === "build"
         ? "github-orchestrator"
         : intent === "explore"
@@ -288,11 +417,41 @@ export async function routeEvent(
         }
       }
 
-      // Classify all Slack messages via the LLM classifier — no regex
-      // commands. The classifier extracts intent, repo, issue number, and
-      // reject reason from natural language. Screen for injection in parallel
-      // (Slack messages are user-supplied text and reach the chat skill or a
-      // workflow, both of which need the flag annotation).
+      const workflowCommand = parseSlackWorkflowAuthorCommand(text);
+      if (workflowCommand) {
+        if (workflowCommand.error === "missing-repo") {
+          return { action: "reply", message: missingWorkflowRepoReply() };
+        }
+        if (workflowCommand.error === "missing-workflow-name") {
+          return { action: "reply", message: missingWorkflowNameReply() };
+        }
+        if (workflowCommand.repo && !isManagedRepo(workflowCommand.repo)) {
+          return { action: "reply", message: unmanagedRepoReply(workflowCommand.repo) };
+        }
+        const screen = await screenForInjection(text);
+        const requestText = screen.flagged
+          ? `${flagPrefix(screen.reason)}${workflowCommand.request || text}`
+          : workflowCommand.request;
+        return {
+          action: "skill",
+          skill: "workflow-author",
+          context: workflowAuthorContext({
+            command: workflowCommand,
+            requestText,
+            sender: envelope.sender,
+            source: envelope.source,
+            triggerId: slackTriggerId,
+            channelId,
+            threadId,
+          }),
+        };
+      }
+
+      // Classify all Slack messages via the LLM classifier. The classifier
+      // extracts intent, repo, issue number, and reject reason from natural
+      // language. Screen for injection in parallel (Slack messages are
+      // user-supplied text and reach the chat skill or a workflow, both of
+      // which need the flag annotation).
       const [classification, screen] = await Promise.all([
         classifyComment(text),
         screenForInjection(text),
@@ -423,6 +582,28 @@ export async function routeEvent(
             action: "skill",
             skill: "security-review",
             context: { repo: classifiedRepo, sender: envelope.sender, source: envelope.source },
+          };
+        }
+
+        case "workflow-author": {
+          if (!classifiedRepo) {
+            return { action: "reply", message: missingWorkflowRepoReply() };
+          }
+          if (!isManagedRepo(classifiedRepo)) {
+            return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };
+          }
+          return {
+            action: "skill",
+            skill: "workflow-author",
+            context: workflowAuthorContext({
+              command: { mode: "new", repo: classifiedRepo, request: slackText },
+              requestText: slackText,
+              sender: envelope.sender,
+              source: envelope.source,
+              triggerId: slackTriggerId,
+              channelId,
+              threadId,
+            }),
           };
         }
 

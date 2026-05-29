@@ -1,0 +1,29 @@
+kind: workflow-author
+name: workflow-author
+description: "Author or edit Last Light workflow YAML and open a PR"
+trigger: workflow-author
+
+phases:
+  - name: phase_0
+    label: Context
+    type: context
+
+  - name: author
+    label: Author workflow
+    prompt: prompts/workflow-author.md
+    skill: workflow-author
+    model: "{{models.executor}}"
+    variant: "{{variants.executor}}"
+    output_var: authorSummary
+    messages:
+      on_start: "Authoring workflow YAML for `{{owner}}/{{repo}}`..."
+      on_success: "Workflow authoring complete. Creating PR..."
+
+  - name: pr
+    label: PR
+    prompt: prompts/workflow-author-pr.md
+    model: "{{models.pr}}"
+    on_success:
+      set_phase: complete
+    messages:
+      on_start: "Creating workflow authoring PR..."

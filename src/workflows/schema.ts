@@ -237,7 +237,7 @@ export const AgentWorkflowSchema = z.object({
   /** What can trigger this workflow (informational; routing is in code). */
   trigger: z.string().optional(),
   variables: z.record(z.string(), z.string()).optional(),
-  phases: z.array(PhaseDefinitionSchema),
+  phases: z.array(PhaseDefinitionSchema).min(1),
 });
 
 export type AgentWorkflowDefinition = z.infer<typeof AgentWorkflowSchema>;

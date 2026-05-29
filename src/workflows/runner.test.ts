@@ -1134,6 +1134,10 @@ describe("gitAccessProfileForWorkflow — security workflows", () => {
     expect(gitAccessProfileForWorkflow("security-feedback")).toBe("repo-write");
   });
 
+  it("returns repo-write for workflow-author", () => {
+    expect(gitAccessProfileForWorkflow("workflow-author")).toBe("repo-write");
+  });
+
   it("returns read for unknown workflow", () => {
     expect(gitAccessProfileForWorkflow("unknown-workflow")).toBe("read");
   });
