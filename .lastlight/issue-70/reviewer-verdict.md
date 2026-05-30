@@ -1,91 +1,58 @@
-# Reviewer verdict (cycle 1)
+# Reviewer verdict (cycle 2)
 
 Verdict: REQUEST_CHANGES
 
 **Critical**
 
 1. **Unplanned change to `package-lock.json`**  
-   - `package-lock.json:1457`  
-     ```diff
--        "pi-ai": "dist/cli.js"
-+        "pi-ai": "./dist/cli.js"
-     ```  
-     The architect plan is strictly about adding a `truncateMiddle` utility and tests. Modifying the CLI bin path in `package-lock.json` is unrelated and could have runtime/package-publishing implications. This should either be:
-     - Reverted from this PR, or
-     - Explicitly justified and added to the plan/scope (and ideally implemented in `package.json`, not only in `package-lock.json`).
-
-   Because this change goes beyond the agreed scope and may affect behavior, it blocks approval.
+   - File: `package-lock.json`  
+   - Diff: changed the `pi-ai` bin from `"./dist/cli.js"` to `"dist/cli.js"`.  
+   - The architect plan is scoped strictly to adding a new utility and its tests. Modifying the package lock (especially a binary path) is out of scope and may have unintended runtime impact. This should either be reverted or justified in a separate, explicitly scoped change.
 
 **Important**
 
-2. **Potential expectation mismatch: `result.length` should be `<= max`, not strictly `=== max`**  
-   - `src/utils/string.test.ts:14–22`  
-     ```ts
-     const max = 10;
-     const result = truncateMiddle(text, max);
+2. **Missing export integration with existing patterns**  
+   - File: `src/utils/string.ts`  
+   - The plan specifies that the function should be “exported for reuse” and mentions that if the project uses a barrel (e.g., `src/index.ts`), it should be re-exported there.  
+   - I don’t see any changes to a barrel or index file in this diff. If the project commonly re-exports utilities from a central module, this omission makes the function harder to consume and deviates from the plan. This needs verification in the repo; if a barrel exists, `truncateMiddle` should be added there.
 
-     expect(result.length).toBe(max);
-     ```
-     The plan states “The returned string length is `<= max`.” The current test asserts `=== max`. For many inputs the implementation will return exactly `max`, but for edge cases (e.g., when `text.length` is only slightly greater than `max` and the split logic could theoretically yield shorter strings), the more correct contract is `<= max`.  
-     Recommend changing to:
-     ```ts
-     expect(result.length).toBeLessThanOrEqual(max);
-     ```
-     as originally described in the plan.
+**Plan Compliance / Behavior**
 
-**Alignment with Plan (what’s good)**
+3. **Utility location and implementation align with the plan**  
+   - File: `src/utils/string.ts`  
+   - A new string-focused utilities module is created under `src/utils/`, which matches the plan’s fallback when no clear existing utils home is specified.  
+   - Semantics:
+     - `max <= 0` → `""` (matches plan suggestion).  
+     - `text.length <= max` → returns `text` unchanged (matches plan).  
+     - `max === 1` → returns `text[0] ?? ""` (plan allowed returning first character; this is consistent and slightly safer when `text` is empty).  
+     - `max >= 2 && text.length > max`:
+       - Uses `ellipsis = "…"`, `remaining = max - 1`, `prefixLength = ceil(remaining/2)`, `suffixLength = floor(remaining/2)`.  
+       - Returns `start + ellipsis + end`.  
+     - This matches the described algorithm and guarantees length `<= max` and non-empty prefix/suffix when `max >= 3`.
 
-- New utility location:
-  - `src/utils/string.ts` is a reasonable new string utility module consistent with the plan (“create a small string-oriented utility module if a clear location doesn’t exist”).
-- Implementation semantics:
-  - `truncateMiddle(text: string, max: number)` implemented as specified:
-    - `max <= 0` → `""` (`string.ts:9`)
-    - `text.length <= max` → passthrough (`string.ts:10`)
-    - `max === 1` → first character (`string.ts:11`), with a safe fallback to `""` if text is empty.
-    - For `max >= 2` and `text.length > max`, uses:
-      ```ts
-      const ellipsis = "…";
-      const remaining = max - ellipsis.length;
-      const prefixLength = Math.ceil(remaining / 2);
-      const suffixLength = Math.floor(remaining / 2);
-      const start = text.slice(0, prefixLength);
-      const end = text.slice(text.length - suffixLength);
-      return `${start}${ellipsis}${end}`;
-      ```
-      which matches the planned algorithm.
-  - The function is a named export and pure, with no side effects.
-- Tests:
-  - `src/utils/string.test.ts` correctly:
-    - Uses Vitest and matches existing test style (describe/it/expect).
-    - Covers:
-      - Short-string passthrough (`text.length < max`, line 4–6).
-      - Exact-length passthrough (`text.length === max`, line 8–12).
-      - Middle truncation behavior: includes an ellipsis and both non-empty prefix and suffix (line 14–24).
-      - Edge cases: `max <= 0` returning `""` (line 26–30).
-      - `max === 1` returning first character (line 32–34).
-- Behavior guarantees:
-  - For `max >= 2`, the implementation always produces `start.length + 1 + end.length = remaining + 1 = max`, so non-empty prefix and suffix when `max >= 3` are satisfied.
+4. **Tests match the requested coverage**  
+   - File: `src/utils/string.test.ts`  
+   - Covers:
+     - Short string passthrough (`"hello", 10`).  
+     - Exact-length passthrough (`"abcdefghij", 10`).  
+     - Middle truncation:
+       - Asserts `result.length <= max`, contains `"…"`, and both sides of the split are non-empty.  
+     - Edge cases:
+       - `max <= 0` → empty string.  
+       - `max === 1` → first character.  
+   - These align well with the plan’s requested cases and lock in the chosen semantics.
 
-**Suggestions (non-blocking once above are fixed)**
+**Suggestions**
 
-1. **Optional: Barrel re-export if the project uses one**  
-   The plan mentions possibly adding to a barrel (`src/index.ts` or similar). If such a file exists and other utilities are centrally exported, consider adding:
-   ```ts
-   export { truncateMiddle } from "./utils/string";
-   ```
-   to keep usage consistent.
-
-2. **Optional: Narrow truncation assertion a bit more**  
-   You might also assert that exactly one ellipsis is used, e.g.:
-   ```ts
-   expect([...result].filter((c) => c === "…")).toHaveLength(1);
-   ```
-   to lock in that there isn’t more than one ellipsis.
+5. **Optional: additional edge-case tests**  
+   - You might add tests around very small `max` values (e.g., `max = 2`, `max = 3`) to ensure the prefix/suffix split behaves as expected, but this is non-blocking.
 
 **Nits**
 
-- `string.ts:11`:
-  ```ts
-  if (max === 1) return text[0] ?? "";
-  ```
-  The `?? ""` is defensive but practically redundant given the `text.length <= max` early-return above. Not harmful; just a tiny redundancy.
+6. **Consistent string quote style**  
+   - Files: `src/utils/string.ts`, `src/utils/string.test.ts`  
+   - Uses double quotes. If the repo’s convention is single quotes (needs checking against existing files), consider aligning to that, but it’s cosmetic.
+
+To align fully with the architect’s plan and avoid unintended side effects, I recommend:
+- Revert the `package-lock.json` `bin` path change (or move it to a separate, justified PR).
+- Confirm whether a barrel export exists and, if so, re-export `truncateMiddle` there.

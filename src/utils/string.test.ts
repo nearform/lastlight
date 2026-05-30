@@ -16,7 +16,7 @@ describe("truncateMiddle", () => {
     const max = 10;
     const result = truncateMiddle(text, max);
 
-    expect(result.length).toBe(max);
+    expect(result.length).toBeLessThanOrEqual(max);
     expect(result).toContain("…");
 
     const [start, end] = result.split("…");
