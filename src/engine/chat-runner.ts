@@ -32,6 +32,16 @@ import { buildChatGitHubTools, type ChatGitHubAuth, type ChatGitHubToolset } fro
 
 const MAX_TOOL_ROUNDS = 8;
 
+/**
+ * Optional extra toolset merged into the chat agent's tool list
+ * alongside the github tools. Used to register the `read_skill` tool
+ * that exposes the curated chat skill catalogue.
+ */
+export interface ChatExtraToolset {
+  tools: Tool[];
+  execute(call: ToolCall): { content: string; isError: boolean } | Promise<{ content: string; isError: boolean }>;
+}
+
 export interface ChatRunnerConfig {
   /** Default model (pi-ai provider/id). */
   model: string;
@@ -41,6 +51,12 @@ export interface ChatRunnerConfig {
   systemPrompt: string;
   /** Optional GitHub App credentials. When set, read-only github tools are registered. */
   github?: ChatGitHubAuth;
+  /**
+   * Optional extra tools (e.g. `read_skill`) registered in addition to
+   * the github toolset. Both tool lists are concatenated; per-call
+   * dispatch tries github first, then this set.
+   */
+  extraTools?: ChatExtraToolset;
   /** Per-turn timeout (ms). Default: 120s. */
   timeoutMs?: number;
 }
@@ -76,6 +92,9 @@ export class ChatRunner {
   private cfg: ChatRunnerConfig;
   private sessionManager: SessionManager;
   private tools: ChatGitHubToolset | undefined;
+  private extraTools: ChatExtraToolset | undefined;
+  /** Concatenated tool list passed to pi-ai (github + extra). */
+  private mergedTools: Tool[] | undefined;
   /**
    * Resolved lazily on the first chat turn. A bad chat model spec
    * (unknown id) MUST NOT crash the whole harness — webhooks, crons and
@@ -91,6 +110,30 @@ export class ChatRunner {
     if (cfg.github) {
       this.tools = buildChatGitHubTools(cfg.github);
     }
+    this.extraTools = cfg.extraTools;
+    const merged: Tool[] = [
+      ...(this.tools?.tools ?? []),
+      ...(this.extraTools?.tools ?? []),
+    ];
+    this.mergedTools = merged.length > 0 ? merged : undefined;
+  }
+
+  /**
+   * Dispatch a tool call to whichever toolset registered it. Github
+   * tools take precedence (they're registered first); fall back to the
+   * extra toolset for anything not in the github name set.
+   */
+  private async dispatchTool(call: ToolCall): Promise<{ content: string; isError: boolean }> {
+    if (this.tools?.tools.some((t) => t.name === call.name)) {
+      return this.tools.execute(call);
+    }
+    if (this.extraTools?.tools.some((t) => t.name === call.name)) {
+      return this.extraTools.execute(call);
+    }
+    return {
+      content: JSON.stringify({ error: `unknown tool: ${call.name}` }),
+      isError: true,
+    };
   }
 
   private resolveModelLazy(): Model<Api> | undefined {
@@ -170,7 +213,7 @@ export class ChatRunner {
     const context: Context = {
       systemPrompt: this.cfg.systemPrompt,
       messages,
-      tools: this.tools?.tools as Tool[] | undefined,
+      tools: this.mergedTools,
     };
 
     const errors: string[] = [];
@@ -230,7 +273,7 @@ export class ChatRunner {
         break;
       }
 
-      if (!this.tools) {
+      if (!this.mergedTools) {
         // Model emitted a tool call without any tools registered — shouldn't
         // happen, but bail out rather than loop forever.
         errors.push("Model called a tool, but no tools are registered for chat.");
@@ -239,7 +282,7 @@ export class ChatRunner {
       }
 
       for (const call of toolCalls) {
-        const { content, isError } = await this.tools.execute(call);
+        const { content, isError } = await this.dispatchTool(call);
         const tr: ToolResultMessage = {
           role: "toolResult",
           toolCallId: call.id,

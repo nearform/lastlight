@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { setWorkflowDir, clearWorkflowCache, getWorkflow, getCronWorkflows, loadPromptTemplate } from "./loader.js";
+import { setWorkflowDir, clearWorkflowCache, getWorkflow, getCronWorkflows, loadPromptTemplate, resolveSkillPaths } from "./loader.js";
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "loader-test-"));
@@ -96,18 +96,66 @@ phases:
     expect(wf.phases[0].prompt).toBeUndefined();
   });
 
-  it("rejects phases with both prompt and skill set", () => {
+  it("allows phases with both prompt and skill set (prompt wins as user prompt, skill staged)", () => {
     writeFileSync(
-      join(dir, "bad.yaml"),
+      join(dir, "both.yaml"),
       `
-name: bad
+name: both
 phases:
-  - name: bad
-    prompt: prompts/x.md
-    skill: issue-triage
+  - name: review
+    prompt: prompts/reviewer.md
+    skill: pr-review
 `.trim(),
     );
-    expect(() => getWorkflow("bad")).toThrow();
+    const wf = getWorkflow("both");
+    expect(wf.phases[0].prompt).toBe("prompts/reviewer.md");
+    expect(wf.phases[0].skill).toBe("pr-review");
+  });
+
+  it("supports phases with skills: [a, b] for multiple skills", () => {
+    writeFileSync(
+      join(dir, "multi.yaml"),
+      `
+kind: triage
+name: multi
+phases:
+  - name: triage
+    skills: [issue-triage, pr-review]
+`.trim(),
+    );
+    const wf = getWorkflow("multi");
+    expect(wf.phases[0].skills).toEqual(["issue-triage", "pr-review"]);
+    expect(wf.phases[0].skill).toBeUndefined();
+  });
+
+  it("rejects phases with both skill and skills set", () => {
+    writeFileSync(
+      join(dir, "bad-both-skills.yaml"),
+      `
+name: bad-both-skills
+phases:
+  - name: x
+    skill: issue-triage
+    skills: [pr-review]
+`.trim(),
+    );
+    expect(() => getWorkflow("bad-both-skills")).toThrow();
+  });
+
+  it("allows phases with both prompt and skills array", () => {
+    writeFileSync(
+      join(dir, "prompt-plus-skills.yaml"),
+      `
+name: prompt-plus-skills
+phases:
+  - name: x
+    prompt: prompts/x.md
+    skills: [issue-triage, pr-review]
+`.trim(),
+    );
+    const wf = getWorkflow("prompt-plus-skills");
+    expect(wf.phases[0].prompt).toBe("prompts/x.md");
+    expect(wf.phases[0].skills).toEqual(["issue-triage", "pr-review"]);
   });
 
   it("caches the result on second call", () => {
@@ -311,5 +359,22 @@ context:
     expect(jobs[0].name).toBe("weekly-security-scan");
     expect(jobs[0].schedule).toBe("0 10 * * 1");
     expect(jobs[0].workflow).toBe("security-review");
+  });
+});
+
+describe("loader — resolveSkillPaths", () => {
+  it("resolves known skill names to absolute directory paths", () => {
+    const paths = resolveSkillPaths(["issue-triage", "pr-review"]);
+    expect(paths).toHaveLength(2);
+    expect(paths[0]).toMatch(/skills\/issue-triage$/);
+    expect(paths[1]).toMatch(/skills\/pr-review$/);
+  });
+
+  it("throws on unknown skill name", () => {
+    expect(() => resolveSkillPaths(["this-skill-does-not-exist"])).toThrow(/Skill not found/);
+  });
+
+  it("throws on path-traversal in skill name", () => {
+    expect(() => resolveSkillPaths(["../etc/passwd"])).toThrow(/Invalid skill name/);
   });
 });

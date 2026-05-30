@@ -97,13 +97,33 @@ const PhaseDefinitionSchema = z
      */
     prompt: z.string().optional(),
     /**
-     * Name of a skill in skills/<name>/SKILL.md to load as the agent's
-     * instructions. Mutually exclusive with `prompt`. The runner reads the
-     * SKILL.md and renders it the same way the legacy executeSkill did:
-     *     "Follow these skill instructions:\n\n<SKILL.md>\n\nContext:\n<ctx>"
-     * Use this for single-phase skill-style workflows (triage, review, etc.).
+     * Single skill to make available to the phase. Sugar for
+     * `skills: [<name>]`. Mutually exclusive with `skills` (use one or
+     * the other), but may coexist with `prompt`.
      */
     skill: z.string().optional(),
+    /**
+     * Skills to make available to the phase. Each entry names a directory
+     * under `skills/<name>/` (containing SKILL.md plus optional scripts/,
+     * references/, assets/). The first entry is the "primary" skill the
+     * runner directs the agent to use; the rest are available for the
+     * agent to read on demand via pi's progressive-disclosure model.
+     *
+     * Each named skill is staged at `<workspace>/.agents/skills/<name>/`
+     * before the agent runs (symlink in gondolin, bind-mount in docker),
+     * where pi-coding-agent's built-in `.agents/skills/` auto-discovery
+     * picks them up. Phases with no `skills:`/`skill:` field get no
+     * `.agents/skills/` directory — `prompt:`-only phases are unaffected.
+     *
+     * May coexist with `prompt`: when both are set, the prompt template
+     * is the user prompt and `skills:` just stages the catalogue. The
+     * prompt can then reference skills by name ("see the `pr-review`
+     * skill for the structured-feedback format") and the agent can
+     * read them via its built-in `read` tool.
+     *
+     * Mutually exclusive with the singular `skill:` field.
+     */
+    skills: z.array(z.string()).min(1).optional(),
     /** Model override — can reference template vars like {{models.architect}} */
     model: z.string().optional(),
     /**
@@ -177,11 +197,22 @@ const PhaseDefinitionSchema = z
     /** DAG: variable name to store the output of this phase for use in downstream phases */
     output_var: z.string().optional(),
   })
-  .refine((p) => !(p.prompt && p.skill), {
-    message: "phase cannot specify both `prompt` and `skill` — pick one",
+  .refine((p) => !(p.skill && p.skills), {
+    message: "phase cannot specify both `skill` and `skills` — use `skills` for multiple",
   });
 
 export type PhaseDefinition = z.infer<typeof PhaseDefinitionSchema>;
+
+/**
+ * Normalize a phase's skill declaration to a single list of names.
+ * Returns `[]` for phases that have neither `skill` nor `skills`
+ * (e.g. `prompt:`-only or `context:` phases).
+ */
+export function phaseSkillNames(phase: PhaseDefinition): string[] {
+  if (phase.skills?.length) return phase.skills;
+  if (phase.skill) return [phase.skill];
+  return [];
+}
 export type PhaseLoop = z.infer<typeof PhaseLoopSchema>;
 export type GenericLoop = z.infer<typeof GenericLoopSchema>;
 export type OutputRule = z.infer<typeof OutputRuleSchema>;

@@ -89,12 +89,32 @@ Three kinds of phase the runner recognises:
   phase-history entry and moves on. Used for `Context` / `complete` markers
   so the dashboard pipeline shows a checkpoint.
 - **agent** (`type: agent`, default) — runs one agent session via
-  `executeAgent`. `prompt:` and `skill:` are mutually exclusive:
-  - `prompt: prompts/architect.md` renders a template file and passes the
-    result as the user prompt.
-  - `skill: issue-triage` loads `skills/<name>/SKILL.md` and prepends a
-    canonical `"Follow these skill instructions:\n\n<SKILL.md>\n\nContext:\n<ctx>"`
-    wrapper. Used by single-phase skill workflows (triage, review, health).
+  `executeAgent`. The phase supplies a user prompt via `prompt:` and/or
+  a skill catalogue via `skill:`/`skills:`. They can be set
+  independently, together, or both:
+  - `prompt: prompts/architect.md` renders a template file and passes
+    the result as the user prompt.
+  - `skills: [pr-review, issue-triage]` (or sugar `skill: pr-review`
+    for a single skill) makes each named `skills/<name>/` directory
+    available to the agent. Phase setup stages each one at
+    `<workspace>/.agents/skills/<name>/` (symlink in gondolin/none,
+    copy in docker) before the run. pi-coding-agent's built-in
+    `.agents/skills/` auto-discovery surfaces them in the system prompt
+    as an XML `<available_skills>` catalogue; the agent reads each
+    SKILL.md via its `read` tool on demand — pi.dev's progressive-
+    disclosure model. Whole skill *directories* travel along, so any
+    `scripts/` / `references/` / `assets/` next to a SKILL.md are
+    visible at `.agents/skills/<name>/...`.
+  - **When both are set** — the prompt template is the user prompt
+    (skill content is *not* auto-embedded), and the staged catalogue
+    is available alongside. The template can reference skills by name
+    ("see the `pr-review` skill for the structured-feedback format")
+    and the agent reads them on demand.
+  - **When only skills are set** — the runner emits a short
+    auto-generated user prompt nudging the agent to start by reading
+    the primary (first-listed) skill's SKILL.md.
+  - Phases with neither (`type: context`) get no `.agents/skills/`
+    directory staged at all.
 - **loop-phase** — any phase with `loop:` set. Always executes as an
   agent phase internally, but repeated in `reviewer → fix → reviewer`
   pairs up to `max_cycles`. See loop iteration naming below.

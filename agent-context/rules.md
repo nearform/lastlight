@@ -2,46 +2,31 @@
 
 ## Workspace
 
-Your current working directory IS the workspace. Inside the sandbox VM
-it's mounted at `/workspace`; from your perspective, use **relative
-paths** from cwd. Never use absolute paths like `/home/agent/workspace/...`
-or `/home/lastlight/...` — those are stale and won't exist in the guest.
+Your current working directory depends on the workflow:
 
-**Workspace layout:**
+- **Code-writing workflows** (`build`, `pr-fix`, `pr-review`): the harness
+  has already pre-cloned the target repo, and your cwd is the **repo root**
+  (`<workspace>/<repo>/`), already checked out on the right branch. Just
+  start working — no `git clone`, no `cd`. Git credentials and identity
+  are pre-configured.
 
-```
-.                   <- your cwd (the workspace)
-├── AGENTS.md       <- this file, harness-written
-├── <repo>/         <- the target repo, lives in a SUBDIRECTORY named
-│   ├── .git/         after the repo. Always work in here for source
-│   └── ...           edits.
-└── .lastlight/    <- scratch space for cross-phase artifacts (specs,
-    └── issue-N/      context docs). Never goes into the repo.
-```
+- **Read-only / repo-less workflows** (`issue-triage`, `repo-health`,
+  `explore`, etc.): cwd is the workspace root, with no repo pre-cloned.
+  These workflows usually don't need a local checkout — read issues, PRs,
+  files, and commits through the `github_*` tools directly. If you do
+  need source, clone into a `<repo>/` subdirectory and `cd` in.
 
-**Before touching the workspace, check what's already there.** For some
-workflows (pr-review, pr-fix, sometimes build) the harness has already
-cloned the repo into `<repo>/`; for others (triage, explore, repo-health)
-the workspace starts empty except for `AGENTS.md`.
+In both cases the harness drops a concatenated `AGENTS.md` at the
+workspace root (one level above the repo when pre-cloned). Pi auto-loads
+it on the directory walk, so you don't need to read it explicitly.
 
-```
-ls -la
-```
+`.lastlight/issue-N/` is the cross-phase scratch dir. When the repo is
+pre-cloned it lives inside the repo (so commits go in with the rest of
+the work); otherwise it sits at the workspace root.
 
-- If `<repo>/.git/` is already present, **don't re-clone**. `cd <repo>`
-  and use git directly. To switch branches:
-  `git fetch origin <branch> --depth 50 && git checkout <branch>`.
-- If `<repo>/` doesn't exist, clone INTO that subdirectory (not into the
-  cwd root — that would collide with `AGENTS.md`):
-  ```
-  git clone https://github.com/<owner>/<repo>.git <repo>
-  cd <repo>
-  ```
-  Git credentials and identity are already configured.
-
-Most read-only workflows (triage, health, review of issues) don't need a
-local checkout at all — use the `github_*` tools to read issues, PRs, file
-contents, and commits directly via the API.
+Use **relative paths** from cwd. Never write absolute paths like
+`/home/agent/workspace/...` or `/home/lastlight/...` — those are stale
+and won't exist in every backend.
 
 ## GitHub-First Coordination
 

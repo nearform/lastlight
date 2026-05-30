@@ -1,8 +1,8 @@
 You are fixing a PR based on a maintainer's request.
 
-SETUP (git is pre-configured, you are in a sandbox workspace):
-1. git clone --branch {{branch}} https://github.com/{{owner}}/{{repo}}.git && cd {{repo}}
-2. Read CLAUDE.md and AGENTS.md if they exist
+You are already inside the {{repo}} repo at branch {{branch}} — the harness
+pre-cloned the PR's head ref and your cwd is the repo root. Git is configured.
+Read CLAUDE.md (and CONTRIBUTING.md if present) for project-specific guidance.
 
 CONTEXT:
 - PR #{{prNumber}}: {{prTitle}}

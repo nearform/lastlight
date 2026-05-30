@@ -7,6 +7,7 @@ import { routeEvent } from "./engine/router.js";
 import { CHAT_SYSTEM_SUFFIX, handleChatMessage, loadAgentContext } from "./engine/chat.js";
 import { configureWorkflowAssets, validateAssets } from "./workflows/loader.js";
 import { ChatRunner } from "./engine/chat-runner.js";
+import { buildReadSkillTool, loadChatSkillCatalogue } from "./engine/chat-skills.js";
 import { configureGitAuth } from "./engine/git-auth.js";
 import { StateDb } from "./state/db.js";
 import { CronScheduler } from "./cron/scheduler.js";
@@ -106,16 +107,31 @@ async function main() {
 
   // In-process chat runner backs the messaging chat skill. One pi-ai
   // conversation per Slack/Discord thread; locked down to read-only
-  // GitHub tools.
+  // GitHub tools plus a `read_skill` tool that exposes the curated
+  // chat skill catalogue. Skills are listed in the system prompt via
+  // an XML <available_skills> block; the agent pulls full SKILL.md on
+  // demand — same progressive-disclosure model the sandbox phases use.
+  const chatSkills = loadChatSkillCatalogue();
+  const readSkill = buildReadSkillTool(chatSkills.skills);
   const chatRunner = new ChatRunner(
     {
       model: resolveModel(config.models, "chat"),
       thinking: resolveVariant(config.variants, "chat"),
-      systemPrompt: loadAgentContext() + CHAT_SYSTEM_SUFFIX,
+      systemPrompt: loadAgentContext() + CHAT_SYSTEM_SUFFIX + chatSkills.catalogueXml,
       github: config.githubApp,
+      extraTools: chatSkills.skills.length > 0
+        ? { tools: [readSkill.tool], execute: readSkill.execute }
+        : undefined,
     },
     sessionManager,
   );
+  if (chatSkills.skills.length > 0) {
+    console.log(
+      `[chat] Loaded ${chatSkills.skills.length} skill(s): ${chatSkills.skills.map((s) => s.name).join(", ")}`,
+    );
+  } else {
+    console.warn("[chat] No skills loaded — frontmatter missing or no matching SKILL.md found");
+  }
 
   // Configure git with GitHub App credentials — agents can git clone/push natively.
   // Non-fatal: the token is refreshed before each agent execution anyway, so a

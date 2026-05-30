@@ -1,5 +1,15 @@
 # Last Light — Development Guide
 
+> **Architectural reference:** `spec/README.md` is the rebuild-grade
+> specification — twelve pages covering every layer with schemas,
+> invariants, and rebuild notes. Use this CLAUDE.md for day-to-day
+> orientation; use `spec/` when you need the contract.
+>
+> **OpenCode → agentic-pi:** parts of this file still reference OpenCode
+> (the original runtime). The current runtime is `agentic-pi` for
+> sandboxed phases and `pi-ai` for in-process chat. The spec reflects
+> the current state; this guide will be updated in a follow-up pass.
+
 A GitHub repository maintenance agent. It listens for events (GitHub webhooks
 and Slack messages), classifies them, and runs an AI agent against a target
 repo via the **OpenCode** runtime (`sst/opencode`). Everything non-trivial —
@@ -139,9 +149,21 @@ workflows/prompts/      Prompt templates referenced from phases via
                         `prompt: prompts/architect.md` etc. Rendered with
                         the template engine in src/workflows/templates.ts.
 
-skills/                 SKILL.md files loaded when a phase sets `skill:`
-                        instead of `prompt:`. Single-phase workflows
-                        (triage / review / health) use this path.
+skills/                 Skill directories — each contains SKILL.md
+                        (with `name`/`description` frontmatter) plus
+                        optional `scripts/`, `references/`, `assets/`.
+                        Phases declare `skills: [a, b]` (or sugar
+                        `skill: a`); the runner stages each at
+                        `<workspace>/.agents/skills/<name>/` (symlink
+                        for gondolin/none, copy for docker) before the
+                        agent runs. pi-coding-agent's built-in
+                        `.agents/skills/` auto-discovery surfaces them
+                        as an XML system-prompt catalogue and the
+                        agent reads each SKILL.md on demand via its
+                        `read` tool. Chat threads use the same skills
+                        in-process via a `read_skill` tool —
+                        catalogue built at boot from CHAT_SKILL_NAMES
+                        in src/engine/chat-skills.ts.
 agent-context/          *.md files concatenated and prepended as AGENTS.md
                         for every agent session — the bot's "personality"
                         plus hard rules. Sandbox entrypoint cats these into

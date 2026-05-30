@@ -257,6 +257,36 @@ export function loadSkillInstructions(name: string): string {
 }
 
 /**
+ * Resolve a list of skill names to their absolute directory paths.
+ * Each returned path is the skill folder root (containing `SKILL.md`
+ * plus any `scripts/`, `references/`, `assets/`) — not the .md file.
+ * The sandbox staging step in agent-executor uses these to symlink or
+ * bind-mount the whole folder into `<workspace>/.agents/skills/<name>/`.
+ * Layer-aware: overlay skills win over built-ins (same precedence and
+ * disabled-skill handling as `loadSkillRaw`).
+ */
+export function resolveSkillPaths(names: readonly string[]): string[] {
+  return names.map((name) => {
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      throw new Error(`Invalid skill name: ${name}`);
+    }
+    if (disabled.skills.includes(name)) {
+      throw new Error(`Skill is disabled: ${name}`);
+    }
+    for (const layer of [...layers].reverse()) {
+      const bases = [layer.skillRoot, layer.claudeSkillRoot].filter(Boolean) as string[];
+      for (const base of bases) {
+        const dir = join(base, name);
+        const skillFile = join(dir, "SKILL.md");
+        if (!isInside(skillFile, base)) throw new Error(`Skill path escapes skill directory: ${name}`);
+        if (existsSync(skillFile)) return dir;
+      }
+    }
+    throw new Error(`Skill not found: skills/${name}/SKILL.md`);
+  });
+}
+
+/**
  * Concatenate resolved agent-context/*.md with overlay filename replacement.
  * Later layers replace earlier files by basename; disabled.agentContext removes
  * either exact filenames (rules.md) or stem names (rules).

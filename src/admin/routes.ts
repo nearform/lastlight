@@ -313,17 +313,16 @@ export function createAdminRoutes(
         config.slackOAuthClientSecret!,
         config.slackOAuthRedirectUri ?? "",
       );
-      const tokens = await slack.validateAuthorizationCode(code);
-      const accessToken = tokens.accessToken();
-
       // "Sign in with Slack" issues OIDC-scoped tokens (openid + profile),
       // which Slack's classic auth.test endpoint rejects with invalid_auth.
       // Use the OIDC userInfo endpoint instead — it returns a JWT-style
       // payload with claims under namespaced URLs.
-      const userInfoRes = await fetch("https://slack.com/api/openid.connect.userInfo", {
+      const tokens = await slack.validateAuthorizationCode(code);
+      const accessToken = tokens.accessToken();
+      const res = await fetch("https://slack.com/api/openid.connect.userInfo", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
-      const userInfo = (await userInfoRes.json()) as {
+      const userInfo = (await res.json()) as {
         ok?: boolean;
         error?: string;
         sub?: string;
@@ -416,27 +415,20 @@ export function createAdminRoutes(
       );
       const tokens = await github.validateAuthorizationCode(code);
       const accessToken = tokens.accessToken();
-
-      const userRes = await fetch("https://api.github.com/user", {
+      const res = await fetch("https://api.github.com/user", {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "User-Agent": "lastlight-admin",
           Accept: "application/vnd.github+json",
         },
       });
-      const userInfo = (await userRes.json()) as { login?: string };
-      if (!userInfo.login) {
-        console.error("GitHub /user failed: missing login field");
-        return fail("github_userinfo");
-      }
-      const login = userInfo.login;
+      const userInfo = (await res.json()) as { login?: string };
 
-      // Org membership restriction check — skipped when allowlist is "*"
-      // (explicit opt-in for "allow any GitHub user").
-      if (!githubAllowAnyUser) {
+      let memberStatus: number | undefined;
+      if (userInfo.login && !githubAllowAnyUser) {
         const org = config.githubAllowedOrg!;
         const memberRes = await fetch(
-          `https://api.github.com/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(login)}`,
+          `https://api.github.com/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(userInfo.login)}`,
           {
             headers: {
               Authorization: `Bearer ${accessToken}`,
@@ -446,14 +438,21 @@ export function createAdminRoutes(
             redirect: "manual",
           },
         );
-        // Only 204 No Content means confirmed member. 302 means caller lacks
-        // read:org visibility; 404 means not a member. Both cases are rejected.
-        if (memberRes.status !== 204) {
-          console.warn(
-            `[oauth] GitHub login rejected: ${login} not a confirmed member of ${org} (status ${memberRes.status})`,
-          );
-          return fail("github_org");
-        }
+        memberStatus = memberRes.status;
+      }
+      if (!userInfo.login) {
+        console.error("GitHub /user failed: missing login field");
+        return fail("github_userinfo");
+      }
+      const login = userInfo.login;
+
+      // Only 204 No Content means confirmed member. 302 means caller lacks
+      // read:org visibility; 404 means not a member. Both cases are rejected.
+      if (!githubAllowAnyUser && memberStatus !== 204) {
+        console.warn(
+          `[oauth] GitHub login rejected: ${login} not a confirmed member of ${config.githubAllowedOrg!} (status ${memberStatus})`,
+        );
+        return fail("github_org");
       }
 
       const token = createToken(config.adminSecret, "github");

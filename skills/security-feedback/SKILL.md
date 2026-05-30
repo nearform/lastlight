@@ -1,3 +1,8 @@
+---
+name: security-feedback
+description: Process a maintainer's comment on a security-labelled scan-summary issue — either break selected findings out into individual actionable issues or suppress accepted risks.
+---
+
 # Security Feedback Skill
 
 Process a maintainer's comment on a `security`-labelled issue. The triggering issue is almost always a per-run **security scan summary** (one issue per scan, containing a task-list of findings). Based on the comment intent, either:

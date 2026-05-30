@@ -127,6 +127,17 @@ export async function runSimpleWorkflow(
       ? `lastlight/${number}-${slugify(request.issueTitle || `issue-${number}`)}`
       : `lastlight/${workflowName}`);
 
+  // Build-style workflows synthesize a new `lastlight/N-slug` branch that
+  // doesn't exist on the remote at dispatch time, so the dispatcher leaves
+  // `prePopulateBranch` unset. The harness can still pre-clone — the new
+  // missing-branch fallback in `prePopulateWorkspace` clones the default
+  // branch and creates the target branch locally. With that, every phase of
+  // a build run enters a workspace already at `<repo>/` on the right branch,
+  // and the per-phase prompts no longer need a `git clone … && cd <repo>`
+  // preamble.
+  const effectivePrePopulateBranch = request.prePopulateBranch
+    ?? (workflowName === "build" ? branch : undefined);
+
   // ── Resume handling ────────────────────────────────────────────────────────
   //
   // If a workflow_run already exists for this trigger, reuse its id. The
@@ -178,7 +189,7 @@ export async function runSimpleWorkflow(
         branch,
         taskId,
         issueDir,
-        prePopulateBranch: request.prePopulateBranch,
+        prePopulateBranch: effectivePrePopulateBranch,
         models: models as Record<string, unknown> | undefined,
         variants: variants as Record<string, unknown> | undefined,
         ...request.extra,
@@ -252,7 +263,7 @@ export async function runSimpleWorkflow(
     // harness pre-clones this branch into the sandbox workspace before
     // the agent starts. Stored on the workflow_run row above; also lives
     // on ctx so the runner can read it without an extra DB lookup.
-    prePopulateBranch: request.prePopulateBranch,
+    prePopulateBranch: effectivePrePopulateBranch,
     models: models as unknown as Record<string, unknown>,
     // Reasoning-effort overrides per phase. Empty/undefined entries skip
     // the --variant flag (model uses its default effort).

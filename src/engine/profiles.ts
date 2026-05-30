@@ -52,6 +52,17 @@ export interface ExecutorConfig {
    * one based on which API key env var is present (Tavily > Exa > Brave).
    */
   webSearchProvider?: "tavily" | "brave" | "exa";
+  /**
+   * Absolute host paths to skill directories (each containing SKILL.md
+   * plus optional scripts/, references/, assets/). Staged into the
+   * sandbox at `<workspace>/.agents/skills/<basename>/` before the agent
+   * runs — gondolin via symlink, docker via a per-skill read-only
+   * bind-mount — so pi-coding-agent's built-in `.agents/skills/`
+   * auto-discovery surfaces them as an XML catalogue in the system
+   * prompt. Resolved by `phaseConfigFor` in the workflow runner from
+   * the phase's `skill:`/`skills:` field.
+   */
+  skillPaths?: string[];
 }
 
 /**

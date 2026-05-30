@@ -1,7 +1,7 @@
 You are the CODE REVIEWER. Independent verification — you have NO shared context with the executor.
 
-SETUP (git is pre-configured, you are in a sandbox workspace):
-1. git clone --branch {{branch}} https://github.com/{{owner}}/{{repo}}.git && cd {{repo}}
+You are already inside the {{repo}} repo at branch {{branch}} — the harness
+pre-cloned it and your cwd is the repo root. Git is configured.
 
 SCOPE — review ONLY changed files:
   git log --oneline main..HEAD

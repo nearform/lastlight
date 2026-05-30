@@ -1,3 +1,8 @@
+---
+name: security-review
+description: Diff-scoped security review covering SDLC concerns GitHub's built-in scanners miss (workflow/CI hardening, auth changes, secret handling, supply-chain churn). Files one dated summary issue with a task-list of findings.
+---
+
 # Security Review Skill
 
 Review **what changed in the repo since the last scan** with a security lens, focused on SDLC concerns that GitHub's built-in scanners (Dependabot, Code Scanning, Secret Scanning) and Renovate don't cover. File **one summary issue per run**, dated, containing a GitHub task list of any findings — Renovate-style. Honour `SECURITY.md` to suppress accepted risks and false positives.

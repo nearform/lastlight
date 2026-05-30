@@ -13,7 +13,8 @@ import type { ModelConfig, VariantConfig } from "../config.js";
 import { resolveModel, resolveVariant } from "../config.js";
 import { listRunningContainers } from "../admin/docker.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "./schema.js";
-import { loadPromptTemplate, loadSkillInstructions } from "./loader.js";
+import { phaseSkillNames } from "./schema.js";
+import { loadPromptTemplate, resolveSkillPaths } from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
 import { evalUntilExpression } from "./loop-eval.js";
 import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
@@ -30,12 +31,24 @@ function validateShellCommand(cmd: string): void {
 
 /**
  * Build the agent prompt for a phase, handling both `prompt:` (template file)
- * and `skill:` (SKILL.md reference) phase definitions.
+ * and `skill:`/`skills:` (skill references) phase definitions, including
+ * phases that declare both.
  *
- * Skill phases produce the same prompt shape the legacy executeSkill used:
- *     "Follow these skill instructions:\n\n<SKILL.md>\n\nContext:\n<key: value lines>"
- * Template variables ({{owner}}, {{issueNumber}}, etc.) are still rendered in
- * the SKILL.md content so skills can reference workflow context if they want.
+ * Skill content is not embedded in the prompt — instead, the named skills
+ * are staged at `<workspace>/.agents/skills/<name>/` by the executor (see
+ * `phaseConfigFor` → `ExecutorConfig.skillPaths` → agent-executor's
+ * staging step), and pi-coding-agent's built-in auto-discovery surfaces
+ * them in the system prompt as an XML catalogue. The agent reads the
+ * full SKILL.md via its `read` tool on demand.
+ *
+ * Resolution order:
+ *   1. `prompt:` set — render the template as the user prompt. If
+ *      `skills:` is also set, the staged catalogue is available; the
+ *      template can reference skills by name (the staging happens
+ *      regardless of which branch this function takes).
+ *   2. `skills:` only — emit a short auto-generated nudge that points
+ *      the agent at the primary skill and lists the rest.
+ *   3. Neither — throw.
  */
 function buildPhasePrompt(
   phase: PhaseDefinition,
@@ -44,34 +57,60 @@ function buildPhasePrompt(
 ): string {
   const fullCtx = extraCtx ? { ...ctx, ...extraCtx } : ctx;
 
-  if (phase.skill) {
-    const skillContent = loadSkillInstructions(phase.skill);
-    const renderedSkill = renderTemplate(skillContent, fullCtx);
-    // Build a context block from the workflow context — same shape that the
-    // legacy executeSkill produced, so existing skill instructions still work.
-    const contextLines = Object.entries(fullCtx)
-      .filter(([, v]) => v !== undefined && v !== null)
-      .map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`)
-      .join("\n");
-    return `Follow these skill instructions:\n\n${renderedSkill}\n\nContext:\n${contextLines}`;
-  }
-
   if (phase.prompt) {
     const template = loadPromptTemplate(phase.prompt);
     return renderTemplate(template, fullCtx);
   }
 
-  throw new Error(`Phase "${phase.name}" has neither prompt: nor skill: — cannot build prompt`);
+  const skills = phaseSkillNames(phase);
+  if (skills.length) {
+    const [primary, ...rest] = skills;
+    const contextLines = Object.entries(fullCtx)
+      .filter(([, v]) => v !== undefined && v !== null)
+      .map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`)
+      .join("\n");
+    const others = rest.length
+      ? `Other skills available if you need them: ${rest.join(", ")}.`
+      : "";
+    // The staged skill is listed in pi-coding-agent's `<available_skills>`
+    // system-prompt catalogue, and the agent loads SKILL.md on demand —
+    // so we only name the primary skill and pass context. No need to
+    // spell out the file path; that just burns a tool call telling the
+    // agent to do what its progressive-disclosure loop already does.
+    return [
+      `Use the **${primary}** skill to handle this request.`,
+      others,
+      "",
+      "Context:",
+      contextLines,
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
+  }
+
+  throw new Error(`Phase "${phase.name}" has neither prompt: nor skills: — cannot build prompt`);
 }
 
 /**
  * Overlay per-phase executor config fields that live on the YAML phase
- * itself (not on the runner-level config or env). Currently just
- * `unrestricted_egress`; if more phase-only knobs accumulate, fold them
- * in here so call sites stay uniform.
+ * itself (not on the runner-level config or env): `unrestricted_egress`,
+ * `web_search`, and the resolved skill directory paths derived from
+ * `skill:`/`skills:`. The agent-executor then stages each skill at
+ * `<workspace>/.agents/skills/<name>/` for pi-coding-agent's
+ * auto-discovery to find.
+ *
+ * All callers route through here, so loop fix/re-review cycles inherit
+ * the parent phase's skills automatically.
  */
 function phaseConfigFor(config: ExecutorConfig, phase: PhaseDefinition): ExecutorConfig {
-  if (phase.unrestricted_egress === undefined && phase.web_search === undefined) {
+  const skills = phaseSkillNames(phase);
+  const skillPaths = skills.length ? resolveSkillPaths(skills) : undefined;
+
+  if (
+    phase.unrestricted_egress === undefined &&
+    phase.web_search === undefined &&
+    !skillPaths
+  ) {
     return config;
   }
   const next: ExecutorConfig = { ...config };
@@ -80,6 +119,9 @@ function phaseConfigFor(config: ExecutorConfig, phase: PhaseDefinition): Executo
   }
   if (phase.web_search !== undefined) {
     next.webSearch = phase.web_search;
+  }
+  if (skillPaths) {
+    next.skillPaths = skillPaths;
   }
   return next;
 }

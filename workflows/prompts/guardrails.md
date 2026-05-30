@@ -1,9 +1,8 @@
 You are running a PRE-FLIGHT GUARDRAILS CHECK before implementation work begins.
 
-SETUP (git is pre-configured, you are in a sandbox workspace):
-1. Try: git clone --branch {{branch}} https://github.com/{{owner}}/{{repo}}.git && cd {{repo}}
-   If the branch doesn't exist yet: git clone https://github.com/{{owner}}/{{repo}}.git && cd {{repo}} && git checkout -b {{branch}}
-2. Read CLAUDE.md and AGENTS.md if they exist
+You are already inside the {{repo}} repo at branch {{branch}} — the harness
+pre-cloned it and your cwd is the repo root. Read CLAUDE.md (and
+CONTRIBUTING.md if present) for project-specific guidance.
 
 SKIP CHECK — if {{issueDir}}/status.md already exists and contains
 guardrails_status: READY, output "READY — guardrails already verified" and stop.

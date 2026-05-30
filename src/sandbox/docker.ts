@@ -60,6 +60,24 @@ export interface SandboxInfo {
   worktreePath: string;
 }
 
+/**
+ * How `/home/agent/workspace` is materialized inside the sandbox container.
+ *
+ * - `bind`: classic host-path bind mount. Only safe when the host filesystem
+ *   path is identical from the harness's view and the docker daemon's view —
+ *   i.e. local dev where the harness runs directly on the host, or any
+ *   deployment where `SANDBOX_DATA_VOLUME` is a real host path.
+ * - `volume-subpath`: mount a subpath of a named docker volume. Required
+ *   when the harness runs inside a container that holds the data dir via a
+ *   named volume (the standard docker-compose setup). A bare bind would
+ *   resolve `/app/data/sandboxes/<id>` against the host's empty bare-FS
+ *   `/app/data/...` rather than the named volume's `_data/sandboxes/<id>`,
+ *   producing two divergent trees and breaking skill staging.
+ */
+export type WorkspaceMount =
+  | { type: "bind"; hostPath: string }
+  | { type: "volume-subpath"; volume: string; subpath: string };
+
 const WORKSPACE_DIR = "/home/agent/workspace";
 
 export class DockerSandbox {
@@ -76,6 +94,7 @@ export class DockerSandbox {
   async create(opts: {
     taskId: string;
     worktreePath: string;
+    workspaceMount: WorkspaceMount;
   }): Promise<SandboxInfo> {
     const containerName = `lastlight-sandbox-${opts.taskId}-${randomUUID().slice(0, 8)}`;
     const worktreePath = resolve(opts.worktreePath);
@@ -97,14 +116,37 @@ export class DockerSandbox {
       ? resolveHostPath(dataVolumeRaw)  // bind mount → absolute host path
       : dataVolumeRaw;                  // named volume → pass through
 
-    const volumes = [
-      `${dataMount}:/data`,                    // shared state (opencode-home, sessions)
-      `${worktreePath}:${WORKSPACE_DIR}`,      // task worktree
-    ];
+    // /data is the same volume the workspace is carved out of (or the same
+    // host path), so the same -v form covers both — bind for path mode,
+    // named volume for volume mode. The workspace itself needs the more
+    // precise `--mount … volume-subpath=…` form in volume mode so the
+    // sandbox sees the harness's sandboxes/<taskId>/ dir rather than an
+    // empty docker-auto-created bind target on the host filesystem (the
+    // bug that made staged skills invisible — the two paths look identical
+    // but live in different physical locations).
+    const dockerArgs: string[] = ["-v", `${dataMount}:/data`];
+    if (opts.workspaceMount.type === "bind") {
+      dockerArgs.push("-v", `${opts.workspaceMount.hostPath}:${WORKSPACE_DIR}`);
+    } else {
+      const { volume, subpath } = opts.workspaceMount;
+      dockerArgs.push(
+        "--mount",
+        `type=volume,source=${volume},target=${WORKSPACE_DIR},volume-subpath=${subpath}`,
+      );
+    }
 
-    // Resolve git mounts for worktrees (if .git is a file pointing elsewhere)
-    const gitMounts = this.resolveGitMounts(worktreePath);
-    volumes.push(...gitMounts);
+    // Resolve git mounts for worktrees (if .git is a file pointing elsewhere).
+    // In volume-subpath mode these are still emitted as bind mounts; the
+    // gitMounts path is only hit for git worktrees that live alongside the
+    // sandbox in the same data dir, so for the named-volume case the
+    // sources would also be invisible from the daemon's view. The codebase
+    // doesn't currently exercise that combination — pre-clones always
+    // produce a real .git directory inside worktreePath — so leaving the
+    // bind form here keeps the existing path mode working without adding
+    // dead complexity to the named-volume path. If we ever wire a real
+    // git worktree under volume mode this needs the same translation.
+    const gitMounts = this.resolveGitMounts(worktreePath).flatMap((m) => ["-v", m]);
+    dockerArgs.push(...gitMounts);
 
     // Env flags — passed to entrypoint for MCP config template expansion.
     // No proxy env (HTTPS_PROXY etc.) is injected: the sandbox-egress
@@ -149,7 +191,7 @@ export class DockerSandbox {
       ...networkArgs,
       ...dnsArgs,
       ...envFlags,
-      ...volumes.flatMap(v => ["-v", v]),
+      ...dockerArgs,
       "-w", WORKSPACE_DIR,
       this.config.imageName,
     ];
@@ -223,6 +265,15 @@ export class DockerSandbox {
        * before shell interpolation.
        */
       sandboxEnv?: Record<string, string>;
+      /**
+       * Working directory for the agent process inside the container.
+       * Defaults to WORKSPACE_DIR (the workspace root). When the harness
+       * pre-cloned the target repo, the executor passes
+       * `<WORKSPACE_DIR>/<repo>` so the agent starts inside the checked-out
+       * tree. The path is asserted against an allowlist before being passed
+       * to `docker exec -w` to keep it shell-safe.
+       */
+      agentCwd?: string;
       /**
        * Enable agentic-pi's web-search extension. When false (or omitted),
        * `--no-web-search` is appended to suppress auto-enable. When true,
@@ -301,9 +352,18 @@ export class DockerSandbox {
       ...extraArgs,
     ].join(" ");
 
+    // Resolve the agent's cwd. Defaults to the workspace root; callers may
+    // pass a `<WORKSPACE_DIR>/<repo>` subdir when the harness pre-cloned the
+    // target repo. Asserted against an allowlist before going into
+    // `docker exec -w` (which is a separate argv slot, but defensive
+    // narrowing keeps surprise paths out).
+    const workdir = opts?.agentCwd ?? WORKSPACE_DIR;
+    if (!workdir.startsWith(WORKSPACE_DIR) || !/^[A-Za-z0-9/_.-]+$/.test(workdir)) {
+      throw new Error(`Refusing to pass agent cwd "${workdir}" — must live under ${WORKSPACE_DIR}`);
+    }
     // -i connects stdin so the prompt can be written to the container process.
     // Run as agent user so workspace writes land with the right ownership.
-    const args = ["exec", "-i", "--user", "agent", "-w", WORKSPACE_DIR, info.containerName, "sh", "-c", cmd];
+    const args = ["exec", "-i", "--user", "agent", "-w", workdir, info.containerName, "sh", "-c", cmd];
 
     // The structured event stream is consumed line-by-line via `onLine` and
     // mirrored to the AgenticShim, which writes envelope jsonl to
