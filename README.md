@@ -209,7 +209,13 @@ repo-root `.env` is needed**. Merge rules: maps (`models`, `variants`, `routes`,
 `approval`) deep-merge over the public defaults; arrays (`managedRepos`,
 `disabled.*`) replace; environment variables override both. Overlay files are
 read at startup — edit and `docker compose restart agent` to apply, no rebuild.
-The dashboard **Config** tab shows Default / Overlay / Merged (non-secret) config.
+The dashboard **Config** tab shows Default / Overlay / Merged (non-secret) config
+(secret-looking keys are redacted, so a stray secret in `config.yaml` won't leak).
+
+Startup is **fail-fast**: if `LASTLIGHT_OVERLAY_DIR` is set but the folder is
+missing or empty (the common "forgot to populate `instance/`" case), or a cron
+targets a missing workflow, or a phase's prompt/skill can't resolve, the harness
+exits `78` with a clear message instead of booting a broken instance.
 
 ### Expose Webhooks
 

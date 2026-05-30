@@ -63,14 +63,24 @@ async function main() {
   console.log("Last Light v2.0 — Agent SDK Harness");
   console.log("====================================");
 
-  // Load and validate config before starting anything
-  const config = loadConfig();
-  configureWorkflowAssets({
-    builtInRoot: config.builtInRoot,
-    overlayRoot: config.overlayDir,
-    disabled: config.disabled,
-  });
-  validateAssets(config.routes);
+  // Load and validate config + overlay assets before starting anything. These
+  // throw on a broken/empty overlay, a cron targeting a missing workflow, or a
+  // phase whose prompt/skill can't resolve — all unfixable by a restart, so we
+  // exit 78 (EX_CONFIG) to stop Docker's restart policy from looping.
+  let config: ReturnType<typeof loadConfig>;
+  try {
+    config = loadConfig();
+    configureWorkflowAssets({
+      builtInRoot: config.builtInRoot,
+      overlayRoot: config.overlayDir,
+      disabled: config.disabled,
+    });
+    validateAssets(config.routes);
+  } catch (err: unknown) {
+    console.error(`\n[startup] FATAL: ${(err as Error).message}`);
+    console.error("[startup] Fix your config/overlay and restart.\n");
+    process.exit(78); // EX_CONFIG — sysexits.h convention
+  }
   validateConfig(config);
 
   console.log(`[config] Port: ${config.port}, Model: ${config.model}`);

@@ -95,4 +95,43 @@ describe("workflow asset overlay", () => {
     mkdirSync(join(builtIn, "workflows"), { recursive: true });
     expect(() => validateAssets({ github: { issue_build: "github-orchestrator" }, slack: { chat: "chat" } })).not.toThrow();
   });
+
+  it("fails fast when a cron targets a missing workflow", () => {
+    mkdirSync(join(builtIn, "workflows"), { recursive: true });
+    writeFileSync(
+      join(builtIn, "workflows", "nightly.yaml"),
+      `kind: cron\nname: nightly\nschedule: "0 0 * * *"\nworkflow: does-not-exist\n`,
+    );
+    expect(() => validateAssets()).toThrow(/Cron "nightly" targets missing or disabled workflow/i);
+  });
+
+  it("fails fast when a workflow phase references a missing prompt", () => {
+    mkdirSync(join(builtIn, "workflows"), { recursive: true });
+    writeFileSync(
+      join(builtIn, "workflows", "build.yaml"),
+      `name: build\nphases:\n  - name: architect\n    prompt: prompts/missing.md\n`,
+    );
+    expect(() => validateAssets()).toThrow(/phase "architect" prompt "prompts\/missing.md"/i);
+  });
+
+  it("fails fast when a workflow phase references a missing skill", () => {
+    mkdirSync(join(builtIn, "workflows"), { recursive: true });
+    writeFileSync(
+      join(builtIn, "workflows", "review.yaml"),
+      `name: review\nphases:\n  - name: review\n    skill: ghost-skill\n`,
+    );
+    expect(() => validateAssets()).toThrow(/phase "review" skills:.*ghost-skill/i);
+  });
+
+  it("passes when phase prompt and skill resolve (incl. from the overlay)", () => {
+    mkdirSync(join(builtIn, "workflows", "prompts"), { recursive: true });
+    mkdirSync(join(overlay, "skills", "review-skill"), { recursive: true });
+    writeFileSync(join(builtIn, "workflows", "prompts", "architect.md"), "prompt body");
+    writeFileSync(join(overlay, "skills", "review-skill", "SKILL.md"), "skill body");
+    writeFileSync(
+      join(builtIn, "workflows", "build.yaml"),
+      `name: build\nphases:\n  - name: architect\n    prompt: prompts/architect.md\n    skill: review-skill\n`,
+    );
+    expect(() => validateAssets()).not.toThrow();
+  });
 });

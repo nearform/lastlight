@@ -4,6 +4,7 @@ import { parse as parseYaml } from "yaml";
 import {
   AgentWorkflowSchema,
   CronWorkflowSchema,
+  phaseSkillNames,
   type AgentWorkflowDefinition,
   type CronWorkflowDefinition,
 } from "./schema.js";
@@ -343,5 +344,43 @@ export function validateAssets(routes?: RouteConfig): void {
       if (name.includes("/") || name.includes("..")) throw new Error(`Unsafe disabled ${route} entry: ${name}`);
     }
   }
+
+  // Every enabled cron must target a workflow that still exists (and isn't
+  // disabled) — otherwise the cron boots fine and only fails on first tick.
+  for (const [cronName, def] of cronCache) {
+    if (!agentCache.has(def.workflow)) {
+      throw new Error(`Cron "${cronName}" targets missing or disabled workflow: ${def.workflow}`);
+    }
+  }
+
+  // Every enabled workflow's phase asset references (prompt templates and
+  // skills) must resolve now — so a missing/disabled overlay asset fails at
+  // startup instead of on the first event. Skip templated refs (containing
+  // "{{"), which can only be resolved at render time.
+  for (const [wfName, def] of agentCache) {
+    for (const phase of def.phases) {
+      const promptRefs = [
+        phase.prompt,
+        phase.loop?.on_request_changes.fix_prompt,
+        phase.loop?.on_request_changes.re_review_prompt,
+      ].filter((p): p is string => typeof p === "string" && p.length > 0 && !p.includes("{{"));
+      for (const ref of promptRefs) {
+        try {
+          resolvePromptPath(ref);
+        } catch (err: unknown) {
+          throw new Error(`Workflow "${wfName}" phase "${phase.name}" prompt "${ref}": ${(err as Error).message}`);
+        }
+      }
+      const skillNames = phaseSkillNames(phase).filter((n) => !n.includes("{{"));
+      if (skillNames.length) {
+        try {
+          resolveSkillPaths(skillNames);
+        } catch (err: unknown) {
+          throw new Error(`Workflow "${wfName}" phase "${phase.name}" skills: ${(err as Error).message}`);
+        }
+      }
+    }
+  }
+
   validateRouteTargets(routes);
 }

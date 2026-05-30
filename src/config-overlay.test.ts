@@ -48,4 +48,42 @@ describe("loadConfig overlay", () => {
     vi.stubEnv("LASTLIGHT_OVERLAY_DIR", join(tmp(), "missing"));
     expect(() => loadConfig()).toThrow(/overlay directory/i);
   });
+
+  it("fast-exits when LASTLIGHT_OVERLAY_DIR points at an empty (unpopulated) overlay", () => {
+    const overlay = tmp(); // exists but empty — the docker bind-mount footgun
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+    expect(() => loadConfig()).toThrow(/overlay is empty/i);
+  });
+
+  it("accepts a secrets-only overlay (no config.yaml) without erroring", () => {
+    const overlay = tmp();
+    mkdirSync(join(overlay, "secrets"));
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+    expect(() => loadConfig()).not.toThrow();
+  });
+
+  it("redacts secret-looking keys an operator mistakenly put in config.yaml", () => {
+    const overlay = tmp();
+    writeFileSync(
+      join(overlay, "config.yaml"),
+      `managedRepos:\n  - acme/repo\nadminSecret: super-secret-value\nanthropicApiKey: sk-ant-leaked\nnested:\n  authToken: tok-leaked\n`,
+    );
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+    const cfg = loadConfig();
+    const bundle = cfg.publicConfig;
+
+    // None of the secret values should survive anywhere in the public bundle.
+    const serialized = JSON.stringify(bundle);
+    expect(serialized).not.toContain("super-secret-value");
+    expect(serialized).not.toContain("sk-ant-leaked");
+    expect(serialized).not.toContain("tok-leaked");
+
+    // Keys remain (so the mistake is visible) but values are masked.
+    expect((bundle.overlay as Record<string, unknown>).adminSecret).toBe("[redacted]");
+    expect((bundle.merged as Record<string, unknown>).anthropicApiKey).toBe("[redacted]");
+    expect((bundle.merged.nested as Record<string, unknown>).authToken).toBe("[redacted]");
+
+    // Non-secret config is untouched.
+    expect(bundle.merged.managedRepos).toEqual(["acme/repo"]);
+  });
 });

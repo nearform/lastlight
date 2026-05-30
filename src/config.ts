@@ -70,7 +70,6 @@ export interface LastLightConfig {
   webhookSecret: string;
   botLogin: string;
   dbPath: string;
-  workflowDir: string;
   overlayDir?: string;
   builtInRoot: string;
   stateDir: string;
@@ -171,6 +170,28 @@ function clonePublic(obj: Record<string, unknown> | null): Record<string, unknow
 }
 
 /**
+ * Keys whose name looks secret-bearing. Real secrets are env-only and never
+ * read from YAML, so the public config bundle should never legitimately
+ * contain these — but an operator could paste one into config.yaml by mistake.
+ * Redact defensively so the dashboard /config view can't echo it back.
+ */
+const SENSITIVE_KEY_RE =
+  /secret|token|password|passwd|credential|private[-_]?key|signing[-_]?key|api[-_]?key|key[-_]?path|\bpem\b/i;
+
+/** Recursively redact secret-looking keys from a public (non-secret) config tree. */
+function redactPublic<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((v) => redactPublic(v)) as unknown as T;
+  if (isPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = SENSITIVE_KEY_RE.test(k) ? "[redacted]" : redactPublic(v);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
+/**
  * Load configuration from config/default.yaml, optional LASTLIGHT_OVERLAY_DIR/config.yaml,
  * then legacy environment variables. Secrets remain env-only.
  */
@@ -185,7 +206,22 @@ export function loadConfig(): LastLightConfig {
   let overlayRaw: Record<string, unknown> | null = null;
   if (overlayDir) {
     if (!existsSync(overlayDir) || !statSync(overlayDir).isDirectory()) {
-      throw new Error(`LASTLIGHT_OVERLAY_DIR overlay directory does not exist or is not a directory: ${overlayDir}`);
+      throw new Error(
+        `LASTLIGHT_OVERLAY_DIR overlay directory does not exist or is not a directory: ${overlayDir}. ` +
+          `Create or clone your deployment overlay there (e.g. the instance/ folder), or unset LASTLIGHT_OVERLAY_DIR.`,
+      );
+    }
+    // Fast-exit on an unpopulated overlay. The common docker footgun is a bind
+    // mount auto-creating an empty instance/ when the operator forgot to clone
+    // or populate it — better to fail loudly at startup than silently boot a
+    // no-op instance with no managed repos and no secrets.
+    const OVERLAY_MARKERS = ["config.yaml", "secrets", "workflows", "skills", "agent-context"];
+    if (!OVERLAY_MARKERS.some((m) => existsSync(join(overlayDir, m)))) {
+      throw new Error(
+        `LASTLIGHT_OVERLAY_DIR is set to ${overlayDir} but the overlay is empty — ` +
+          `expected at least one of: ${OVERLAY_MARKERS.join(", ")}. ` +
+          `Clone or create your deployment overlay (instance/), or unset LASTLIGHT_OVERLAY_DIR.`,
+      );
     }
     overlayRaw = readYamlFile(join(overlayDir, "config.yaml"), false);
   }
@@ -241,7 +277,6 @@ export function loadConfig(): LastLightConfig {
     sessionsDir: resolve(process.env.LASTLIGHT_SESSIONS_DIR || join(stateDir, "agent-sessions")),
     dbPath: process.env.DB_PATH || join(stateDir, "lastlight.db"),
     builtInRoot,
-    workflowDir: resolve(process.env.WORKFLOW_DIR || join(builtInRoot, "workflows")),
     overlayDir,
     model,
     models,
@@ -252,9 +287,9 @@ export function loadConfig(): LastLightConfig {
     routes: fileCfg.routes,
     disabled: fileCfg.disabled,
     publicConfig: {
-      default: clonePublic(defaultRaw)!,
-      overlay: clonePublic(overlayRaw),
-      merged: effectivePublic,
+      default: redactPublic(clonePublic(defaultRaw)!),
+      overlay: redactPublic(clonePublic(overlayRaw)),
+      merged: redactPublic(effectivePublic),
     },
     githubApp,
     slack,
