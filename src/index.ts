@@ -23,6 +23,7 @@ import { runSimpleWorkflow, type SimpleWorkflowRequest } from "./workflows/simpl
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows } from "./workflows/resume.js";
 import type { EventEnvelope } from "./connectors/types.js";
+import { getWeekDifference } from "./engine/date-utils.js";
 
 /**
  * Pre-flight validation — checks that config is sane before starting any
