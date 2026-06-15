@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, auth, UnauthorizedError } from "./api";
+import { api, auth, onUnauthorized, UnauthorizedError } from "./api";
 import { StatsHeader } from "./components/StatsHeader";
 import { SessionList } from "./components/SessionList";
 import { SessionFilters } from "./components/SessionFilters";
@@ -420,6 +420,16 @@ export default function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // If a token expires while the dashboard is mounted, any API call returns
+  // 401; api.ts clears the token and notifies here so we drop straight to the
+  // login screen instead of leaving a stale view until a manual refresh.
+  useEffect(() => {
+    return onUnauthorized(() => {
+      setLoginError(null);
+      setAuthState("required");
+    });
   }, []);
 
   if (authState === "checking") {

@@ -269,13 +269,31 @@ export const auth = {
   clear: () => localStorage.removeItem(TOKEN_KEY),
 };
 
+/**
+ * Listeners notified whenever any API call returns 401 (e.g. an expired
+ * token while the dashboard is already mounted). Lets the app drop back to
+ * the login screen without a manual hard refresh.
+ */
+const unauthorizedListeners = new Set<() => void>();
+
+export function onUnauthorized(listener: () => void): () => void {
+  unauthorizedListeners.add(listener);
+  return () => unauthorizedListeners.delete(listener);
+}
+
+/** Clear the token and notify listeners that the session is no longer valid. */
+function handleUnauthorized() {
+  auth.clear();
+  for (const listener of unauthorizedListeners) listener();
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = auth.getToken();
   const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
   if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
   if (res.status === 401) {
-    auth.clear();
+    handleUnauthorized();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -289,7 +307,7 @@ async function reqText(path: string, init?: RequestInit): Promise<string> {
   if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(`${BASE}${path}`, { ...init, headers });
   if (res.status === 401) {
-    auth.clear();
+    handleUnauthorized();
     throw new UnauthorizedError();
   }
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
