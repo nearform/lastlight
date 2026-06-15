@@ -11,7 +11,7 @@
   "dependencies": {
     "@heroicons/react": "^2.2.0",
     "@xyflow/react": "^12.10.2",
-    "agentic-pi": "^0.2.0",
+    "agentic-pi": "^0.2.4",
     "ansi-to-html": "^0.7.2",
     "clsx": "^2.1.1",
     "dompurify": "^3.3.4",

@@ -98,6 +98,7 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
     const shCmd = dockerArgs[dockerArgs.length - 1];
     expect(shCmd).toContain("agentic-pi run");
     expect(shCmd).toContain("--sandbox none");
+    expect(shCmd).not.toContain("--no-file-search");
     expect(shCmd).not.toContain("test prompt");
   });
 });
