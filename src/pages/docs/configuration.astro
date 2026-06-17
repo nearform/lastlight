@@ -380,11 +380,91 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</tbody>
 	</table>
 
+	<h2>OpenTelemetry (optional)</h2>
+
+	<p>
+		Telemetry is disabled by default. Set <code>LASTLIGHT_OTEL_ENABLED=true</code> and
+		point the standard <code>OTEL_*</code> exporter vars at your collector. See
+		<a href="/docs/observability">Observability</a> for what's exported, content
+		redaction, and how sandbox telemetry is routed per backend.
+	</p>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_ENABLED</code></td>
+				<td>No</td>
+				<td><code>false</code></td>
+				<td>Master switch. Standard <code>OTEL_*</code> env vars alone do <strong>not</strong> enable telemetry — this must be <code>true</code>.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_SERVICE_NAME</code></td>
+				<td>No</td>
+				<td><code>lastlight</code></td>
+				<td>OTEL service name. Falls back to <code>OTEL_SERVICE_NAME</code> if unset.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_INCLUDE_CONTENT</code></td>
+				<td>No</td>
+				<td><code>false</code></td>
+				<td>Include prompt / message / tool-result content in spans (truncated). Sensitive — only enable with a trusted collector. Default exports metadata only.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_FORWARD_TO_SANDBOX</code></td>
+				<td>No</td>
+				<td><code>true</code></td>
+				<td>Emit telemetry from inside workflow sandboxes too. On the <code>docker</code> backend this routes through an in-network collector; on <code>gondolin</code>/<code>none</code> it forwards <code>OTEL_*</code> env directly. Set <code>false</code> to keep telemetry harness-only.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_STRICT</code></td>
+				<td>No</td>
+				<td><code>false</code></td>
+				<td>Throw on OTEL init/export-setup failure instead of warning and continuing without telemetry.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_COLLECTOR_HOSTS</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Comma-separated collector hostnames added to the strict sandbox egress allowlist. Used only by the <code>gondolin</code> backend — the <code>docker</code> backend reaches its collector internally and ignores this.</td>
+			</tr>
+			<tr>
+				<td><code>OTEL_EXPORTER_OTLP_ENDPOINT</code>, <code>OTEL_EXPORTER_OTLP_*_ENDPOINT</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Standard OTLP/HTTP collector endpoint(s). Used by the harness directly, and as the re-export target for the in-network collector on the <code>docker</code> backend.</td>
+			</tr>
+			<tr>
+				<td><code>OTEL_EXPORTER_OTLP_HEADERS</code>, <code>OTEL_EXPORTER_OTLP_*_HEADERS</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Standard OTLP headers (e.g. an auth token). Secret/env-only — never shown in the dashboard Config tab, and never forwarded into a sandbox on the <code>docker</code> backend.</td>
+			</tr>
+			<tr>
+				<td><code>OTEL_SERVICE_NAME</code>, <code>OTEL_RESOURCE_ATTRIBUTES</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Standard OTEL resource configuration (e.g. <code>deployment.environment=prod</code>).</td>
+			</tr>
+		</tbody>
+	</table>
+
 	<div class="docs-next">
 		<a href="/docs/slack">
 			<span class="label">← Previous</span>
 			<span class="title">Slack integration</span>
 		</a>
-		<span></span>
+		<a href="/docs/observability" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Observability</span>
+		</a>
 	</div>
 </DocsLayout>

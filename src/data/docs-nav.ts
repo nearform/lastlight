@@ -37,6 +37,7 @@ export const docsNav: DocsNavSection[] = [
 		title: 'Reference',
 		items: [
 			{ slug: 'configuration', label: 'Configuration' },
+			{ slug: 'observability', label: 'Observability' },
 		],
 	},
 ];
