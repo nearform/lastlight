@@ -41,7 +41,7 @@ Classify the user's message into exactly one category, and extract any repositor
 
 Categories:
 BUILD — The user wants code changes NOW in a GitHub repo: implement a feature, fix a bug, create/send a PR, resolve an issue with code. BUILD requires a GitHub target — either an explicit repo reference (owner/name or github.com URL) in the message, OR an ISSUE TITLE context line indicating the comment is a reply on an existing issue/PR. If neither is present, classify as CHAT — local filesystem operations ("delete files in ~/foo", "clean up my downloads"), shell-style commands, or vague "build something" with no target are NOT BUILD.
-EXPLORE — The user has a half-formed idea and wants help thinking it through BEFORE code: "help me think through X", "brainstorm Y", "spec this out", "explore an idea for Z".
+EXPLORE — The user wants help shaping an idea BEFORE writing code: "help me think through X", "brainstorm Y", "spec this out", "explore an idea for Z". A bare "explore" / "explore this" / "let's explore" is also EXPLORE — especially as a reply on an existing issue (ISSUE TITLE present), where the implicit object is the issue's idea. EXPLORE = shape the idea / write a spec; BUILD = write the code now.
 TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
 REVIEW — The user wants to review PRs on a repo: "review cliftonc/repo", "check PRs", "can you review PRs on <repo>?".
 SECURITY — The user wants a security scan/review of a repo: "security review cliftonc/repo", "scan for vulnerabilities", "check security", "can you do a security review of <repo>?".
@@ -57,7 +57,7 @@ respectively — not CHAT. The "prefer CHAT when ambiguous" rule only applies wh
 message has no clear action verb. Presence of "security review", "triage", "review PRs",
 "scan for vulnerabilities", etc. makes the intent unambiguous regardless of politeness.
 
-When ambiguous between EXPLORE and CHAT, prefer CHAT. Only pick EXPLORE when the user is explicitly asking for brainstorming / spec-shaping / design exploration.
+When ambiguous between EXPLORE and CHAT, prefer CHAT. Only pick EXPLORE when the user is explicitly asking for brainstorming / spec-shaping / design exploration — OR gives a bare "explore"/"explore this" command (see the issue-reply rule below), which is unambiguous, not chat.
 When ambiguous between BUILD and CHAT, prefer CHAT.
 When ambiguous between APPROVE/REJECT and CHAT, prefer CHAT — only classify as APPROVE/REJECT when the intent is clearly about a pending workflow gate.
 
@@ -66,11 +66,15 @@ a github.com URL, convert it: https://github.com/cliftonc/lastlight → cliftonc
 URL paths like /issues/42 or /pull/5 should populate ISSUE as well.
 
 When the message is a reply on an existing issue/PR, the issue title is provided
-as ISSUE TITLE. Short imperative replies like "lets build this", "build it",
-"go ahead", "ship it", "do it", "implement this", "make it so" classify as
-BUILD when an issue title is present — the implicit object is the issue itself.
-The "prefer CHAT when ambiguous" rule does NOT apply when the comment is a
-clear imperative directed at the issue's subject.
+as ISSUE TITLE. Short imperative replies classify by their verb, with the issue
+as the implicit object — the "prefer CHAT when ambiguous" rule does NOT apply to
+a clear command directed at the issue's subject:
+- "lets build this", "build it", "go ahead", "ship it", "do it", "implement
+  this", "make it so" → BUILD (write the code now).
+- "explore", "explore this", "let's explore", "think this through", "spec this
+  out", "brainstorm this" → EXPLORE (shape the idea / write a spec first).
+A bare command word ("explore", "build") on an existing issue is a clear
+command, NOT ambiguous chat.
 
 Respond in exactly this format (each on its own line, no extra text):
 INTENT: BUILD|EXPLORE|TRIAGE|REVIEW|SECURITY|APPROVE|REJECT|STATUS|RESET|CHAT
@@ -83,6 +87,8 @@ Examples:
 "build cliftonc/drizzle-cube#42" → INTENT: BUILD, REPO: cliftonc/drizzle-cube, ISSUE: 42, REASON: NONE
 "lets build this!" with ISSUE TITLE "Security Review" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE
 "go ahead" with ISSUE TITLE "Add CSV export" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE
+"explore" with ISSUE TITLE "Feature: Allow configuration of otel endpoints" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE
+"explore this" with ISSUE TITLE "Add webhook support" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE
 "approve" → INTENT: APPROVE, REPO: NONE, ISSUE: NONE, REASON: NONE
 "reject, the plan is too complex" → INTENT: REJECT, REPO: NONE, ISSUE: NONE, REASON: the plan is too complex
 "what's running?" → INTENT: STATUS, REPO: NONE, ISSUE: NONE, REASON: NONE
