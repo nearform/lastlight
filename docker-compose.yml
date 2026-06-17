@@ -165,6 +165,13 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector:0.115.0
     restart: unless-stopped
+    # The collector image defaults to non-root UID 10001, but the harness /
+    # egress-init write otel-collector.yaml as root with mode 0600 (it can
+    # carry backend auth headers). Run the collector as root so it can read
+    # that file WITHOUT loosening the 0600 secret protection. Safe here: the
+    # volume is mounted read-only, there's no docker socket, and the container
+    # is off the `internal` network — root buys an attacker nothing over 10001.
+    user: "0:0"
     command: ["--config=/app/data/proxy/otel-collector.yaml"]
     volumes:
       - agent-data:/app/data:ro

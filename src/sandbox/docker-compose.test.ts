@@ -32,6 +32,7 @@ interface ComposeService {
   // Networks can be a short array (`[a, b]`) or a long-form object with
   // per-network config (`{a: {ipv4_address: ...}, b: {}}`).
   networks?: string[] | Record<string, unknown>;
+  user?: string;
 }
 interface ComposeFile {
   services: Record<string, ComposeService>;
@@ -131,6 +132,14 @@ describe("docker-compose egress topology", () => {
 
     it("uses the static IP the harness bakes into the sandbox OTLP endpoint", () => {
       expect(ipv4OnNetwork("otel-collector", "sandbox-egress")).toBe(OTEL_COLLECTOR_IP);
+    });
+
+    it("runs as root so it can read the mode-0600 collector config the (root) harness writes", () => {
+      // The collector image defaults to non-root UID 10001 and could not read
+      // a root-owned 0600 file — it would fail to start and leave sandboxes
+      // pointed at a dead 172.30.0.30:4318. Running as root preserves the 0600
+      // secret protection rather than loosening the file mode.
+      expect(compose.services["otel-collector"]?.user).toBe("0:0");
     });
   });
 
