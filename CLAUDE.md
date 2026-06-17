@@ -448,6 +448,15 @@ Slack (optional):
 
 ## Deployment
 
+> **When changing Docker configs (`Dockerfile`, `docker-compose.yml`,
+> `deploy/entrypoint.sh`, egress/collector generation), verify against the
+> actual runtime — not assumptions.** Notably: the entrypoint runs as root but
+> `exec gosu lastlight`s the harness, so the Node process (and shared-volume
+> files it writes) is owned by `lastlight` (UID-pinned to 10001), not root.
+> Confirm UID/ownership/perms and service start by running the real images
+> (e.g. a throwaway container reproducing the entrypoint chain), since unit
+> tests pass green while the container reality differs.
+
 Production runs on a single host (the production server — connection details
 are kept out of this file; see local agent memory) as a **Docker Compose**
 stack — *not* the native systemd model described in `deploy/native/README.md`
