@@ -19,6 +19,7 @@ import { renderTemplate, type TemplateContext } from "./templates.js";
 import { evalUntilExpression } from "./loop-eval.js";
 import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
 import type { ProgressReporter, StepStatus, ProgressStep } from "../notify/types.js";
+import { collapseDetail } from "../notify/render.js";
 
 /**
  * Reject shell commands containing mustache template markers to prevent
@@ -475,21 +476,6 @@ export async function runWorkflow(
     if (!text.trim()) return;
     if (reporter) await reporter.note(text);
     else await notify(text);
-  };
-
-  /**
-   * Collapse a rendered multi-line message into a compact one-line checklist
-   * detail (first non-empty line, length-capped). The full message is still
-   * available — `notifyMessage`/`note` post it verbatim when a standalone
-   * message is wanted.
-   */
-  const collapseDetail = (s: string): string | undefined => {
-    const first = s
-      .split("\n")
-      .map((l) => l.trim())
-      .find((l) => l.length > 0);
-    if (!first) return undefined;
-    return first.length > 160 ? `${first.slice(0, 159)}…` : first;
   };
 
   /**

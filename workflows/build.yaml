@@ -56,7 +56,7 @@ phases:
     messages:
       # Single-line messages become the one-line detail on the checklist step,
       # so keep them concise and link the artifact on the branch.
-      on_success: "Plan ready — [view plan]({{branchUrl architect-plan.md}})"
+      on_success: "Plan ready — [architect-plan.md]({{branchUrl architect-plan.md}})"
 
   - name: executor
     label: Executor
@@ -66,7 +66,7 @@ phases:
     messages:
       on_start: "implementing the architect's plan…"
       on_skipped_done: "already completed"
-      on_success: "Implemented — [summary]({{branchUrl executor-summary.md}})"
+      on_success: "Implemented — [executor-summary.md]({{branchUrl executor-summary.md}})"
 
   - name: reviewer
     label: Reviewer
@@ -84,7 +84,7 @@ phases:
       approval_gate: post_reviewer
       messages:
         on_cycle_start: "independent verification (cycle {{cycle}})…"
-        on_approved: "Approved — [verdict]({{branchUrl reviewer-verdict.md}})"
+        on_approved: "Approved — [reviewer-verdict.md]({{branchUrl reviewer-verdict.md}})"
         on_request_changes: "**Review: REQUEST_CHANGES** — fixing issues (cycle {{cycle}}/{{maxCycles}})..."
         on_fix_start: "**Starting fix loop** (cycle {{cycle}}/{{maxCycles}}) — addressing reviewer feedback..."
         on_fix_failed: "Fix cycle {{cycle}} failed. Proceeding to PR with known issues."
