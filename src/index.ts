@@ -128,9 +128,13 @@ async function main() {
   // Generate the in-network OTEL collector config (docker backend). Derived
   // from the harness's OTEL_* backend env so the collector re-exports to the
   // same backend the harness uses — with auth headers that stay host-side.
-  // Regenerated unconditionally (cheap; debug-only exporter when no backend).
-  const collectorConfigPath = writeOtelCollectorConfig(config.stateDir);
-  console.log(`[state] OTEL collector config: ${collectorConfigPath}`);
+  // Forwarding is gated on telemetry being active: when disabled (or sandbox
+  // forwarding off) the collector renders an inert debug-only config so the
+  // static collector IP can't be used as a sandbox exfil path.
+  const collectorConfigPath = writeOtelCollectorConfig(config.stateDir, {
+    active: config.otel.enabled && config.otel.forwardToSandbox,
+  });
+  console.log(`[state] OTEL collector config: ${collectorConfigPath} (forwarding ${config.otel.enabled && config.otel.forwardToSandbox ? "active" : "disabled"})`);
 
   // Initialize state database first — ChatRunner needs SessionManager
   // (DB-backed) at construction time.

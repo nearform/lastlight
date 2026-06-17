@@ -71,18 +71,21 @@ services:
   egress-init:
     image: lastlight-agent
     restart: "no"
-    # Reads OTEL_EXPORTER_OTLP_* so the collector config it pre-writes points
-    # at the real backend before the otel-collector service starts. The
-    # harness rewrites the same files at boot (idempotent); this just ensures
-    # they exist for the firewall + collector services' first read.
+    # Mounts the same overlay + secrets the agent does and runs the SAME
+    # config loader, so the collector config it pre-writes is computed from
+    # the effective config (env AND instance/config.yaml) — identical to what
+    # the harness writes at boot. This is what keeps the running collector's
+    # forwarding gate from diverging from the harness when OTEL is enabled via
+    # YAML rather than env.
     env_file:
       - path: ./instance/secrets/.env
         required: false
+    volumes:
+      - ./instance:/app/instance:ro
+      - agent-data:/app/data
     command:
       ["node", "-e",
-       "const m=require('/app/dist/sandbox/egress-firewall-config.js');const d=process.env.STATE_DIR||'/app/data';m.writeEgressFirewallConfigs(d);m.writeOtelCollectorConfig(d)"]
-    volumes:
-      - agent-data:/app/data
+       "const c=require('/app/dist/config.js').loadConfig();const m=require('/app/dist/sandbox/egress-firewall-config.js');const d=c.stateDir;m.writeEgressFirewallConfigs(d);m.writeOtelCollectorConfig(d,{active:c.otel.enabled&&c.otel.forwardToSandbox})"]
     depends_on:
       - agent          # ensures the image has been built when init runs
 

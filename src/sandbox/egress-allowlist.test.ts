@@ -5,7 +5,6 @@ import {
   GITHUB_HOSTS,
   PACKAGE_REGISTRY_HOSTS,
   PROVIDER_HOSTS,
-  collectorHostsFromOtelEnv,
   mergeAllowlist,
   normalizeAllowlistHost,
 } from "./egress-allowlist.js";
@@ -76,14 +75,5 @@ describe("egress-allowlist source of truth", () => {
     ]) {
       expect(normalizeAllowlistHost(host), host).toBeNull();
     }
-  });
-
-  it("derives collector hosts from OTEL endpoint env vars", () => {
-    expect(collectorHostsFromOtelEnv({
-      OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel.example.com:4318",
-      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://traces.example.com/v1/traces",
-      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "not a url.example.org/path",
-      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://169.254.169.254/latest/meta-data",
-    })).toEqual(["otel.example.com", "traces.example.com", "not a url.example.org"]);
   });
 });

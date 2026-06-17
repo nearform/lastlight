@@ -63,11 +63,6 @@ describe("nginx strict config", () => {
     // black-hole default. Pin the contract so it can't regress.
     expect(conf).toMatch(/map\s+\$ssl_preread_server_name\s+\$upstream_target\s*\{\s*\n\s*hostnames;/);
   });
-
-  it("includes extra collector hosts in the strict allowlist", () => {
-    const withCollector = renderNginxStrictConf(["otel.example.com"]);
-    expect(withCollector).toContain(".otel.example.com $ssl_preread_server_name:443;");
-  });
 });
 
 describe("nginx open config", () => {
@@ -107,10 +102,6 @@ describe("coredns strict Corefile", () => {
   it("catches every unmatched query with an NXDOMAIN template", () => {
     expect(conf).toMatch(/template\s+IN\s+ANY\s*\{[\s\S]*rcode\s+NXDOMAIN[\s\S]*\}/);
   });
-
-  it("includes extra collector hosts in strict CoreDNS matches", () => {
-    expect(renderCorefileStrict(["otel.example.com"])).toContain("(^|\\.)otel\\.example\\.com\\.$");
-  });
 });
 
 describe("coredns open Corefile", () => {
@@ -134,21 +125,24 @@ describe("coredns open Corefile", () => {
 });
 
 describe("otel collector config", () => {
+  // Most tests run with forwarding active; the gating tests below cover inactive.
+  const renderActive = (env: NodeJS.ProcessEnv) => parseYaml(renderOtelCollectorConfig({ active: true, env })) as any;
+
   it("sandbox endpoint points at the collector's static IP + OTLP/HTTP port", () => {
     expect(OTEL_COLLECTOR_SANDBOX_ENDPOINT).toBe(`http://${OTEL_COLLECTOR_IP}:${OTEL_COLLECTOR_OTLP_HTTP_PORT}`);
   });
 
   it("receives OTLP on both http and grpc, on all interfaces", () => {
-    const cfg = parseYaml(renderOtelCollectorConfig({})) as any;
+    const cfg = renderActive({});
     expect(cfg.receivers.otlp.protocols.http.endpoint).toBe(`0.0.0.0:${OTEL_COLLECTOR_OTLP_HTTP_PORT}`);
     expect(cfg.receivers.otlp.protocols.grpc.endpoint).toBe(`0.0.0.0:${OTEL_COLLECTOR_OTLP_GRPC_PORT}`);
   });
 
   it("re-exports to the generic endpoint (as a base URL) with parsed auth headers on every signal", () => {
-    const cfg = parseYaml(renderOtelCollectorConfig({
+    const cfg = renderActive({
       OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example.com:4318",
       OTEL_EXPORTER_OTLP_HEADERS: "api-key=secret-123,x-tenant=acme",
-    })) as any;
+    });
     for (const signal of ["traces", "metrics", "logs"]) {
       const exp = cfg.exporters[`otlphttp/${signal}`];
       // Generic endpoint → `endpoint` field (collector appends /v1/<signal>).
@@ -162,10 +156,10 @@ describe("otel collector config", () => {
   it("routes per-signal endpoints to their own pipeline (no fallback-chain misrouting)", () => {
     // The bug the reviewer flagged: separate traces/metrics endpoints must not
     // both export to whichever one won a `||` chain.
-    const cfg = parseYaml(renderOtelCollectorConfig({
+    const cfg = renderActive({
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://traces.example.com/v1/traces",
       OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "https://metrics.example.com/v1/metrics",
-    })) as any;
+    });
     // Signal-specific endpoints are used verbatim via `<signal>_endpoint`.
     expect(cfg.exporters["otlphttp/traces"].traces_endpoint).toBe("https://traces.example.com/v1/traces");
     expect(cfg.exporters["otlphttp/metrics"].metrics_endpoint).toBe("https://metrics.example.com/v1/metrics");
@@ -177,9 +171,9 @@ describe("otel collector config", () => {
   });
 
   it("honours a logs-only endpoint instead of dropping it (the silent-drop case)", () => {
-    const cfg = parseYaml(renderOtelCollectorConfig({
+    const cfg = renderActive({
       OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "https://logs.example.com/v1/logs",
-    })) as any;
+    });
     expect(cfg.exporters["otlphttp/logs"].logs_endpoint).toBe("https://logs.example.com/v1/logs");
     expect(cfg.service.pipelines.logs.exporters).toEqual(["otlphttp/logs"]);
     expect(cfg.service.pipelines.traces.exporters).toEqual(["debug"]);
@@ -187,36 +181,44 @@ describe("otel collector config", () => {
   });
 
   it("lets a signal-specific endpoint override the generic one for just that signal", () => {
-    const cfg = parseYaml(renderOtelCollectorConfig({
+    const cfg = renderActive({
       OTEL_EXPORTER_OTLP_ENDPOINT: "https://generic.example.com",
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://traces.example.com/v1/traces",
-    })) as any;
+    });
     // traces → verbatim specific URL; metrics/logs → generic base.
     expect(cfg.exporters["otlphttp/traces"].traces_endpoint).toBe("https://traces.example.com/v1/traces");
     expect(cfg.exporters["otlphttp/metrics"].endpoint).toBe("https://generic.example.com");
     expect(cfg.exporters["otlphttp/logs"].endpoint).toBe("https://generic.example.com");
   });
 
+  it("applies per-signal header overrides, falling back to generic headers", () => {
+    const cfg = renderActive({
+      OTEL_EXPORTER_OTLP_ENDPOINT: "https://generic.example.com",
+      OTEL_EXPORTER_OTLP_HEADERS: "authorization=generic",
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: "authorization=traces-only",
+    });
+    expect(cfg.exporters["otlphttp/traces"].headers.authorization).toBe("traces-only");
+    expect(cfg.exporters["otlphttp/metrics"].headers.authorization).toBe("generic");
+  });
+
   it("supports a non-443 / custom-port HTTPS backend the strict SNI firewall could not reach", () => {
     // This is the case the reviewer flagged for the old direct-forward path.
     // It now works because the collector dials the backend on its trusted
     // outbound leg, not through ssl_preread.
-    const cfg = parseYaml(renderOtelCollectorConfig({
-      OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel.internal:4318",
-    })) as any;
+    const cfg = renderActive({ OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel.internal:4318" });
     expect(cfg.exporters["otlphttp/traces"].endpoint).toBe("https://otel.internal:4318");
   });
 
   it("preserves '=' inside header values (bearer tokens survive intact)", () => {
-    const cfg = parseYaml(renderOtelCollectorConfig({
+    const cfg = renderActive({
       OTEL_EXPORTER_OTLP_ENDPOINT: "https://b.example.com",
       OTEL_EXPORTER_OTLP_HEADERS: "authorization=Bearer abc=def==",
-    })) as any;
+    });
     expect(cfg.exporters["otlphttp/traces"].headers.authorization).toBe("Bearer abc=def==");
   });
 
-  it("falls back to a debug exporter (no data leaves) when no backend is configured", () => {
-    const cfg = parseYaml(renderOtelCollectorConfig({})) as any;
+  it("falls back to a debug exporter (no data leaves) when active but no backend is configured", () => {
+    const cfg = renderActive({});
     expect(cfg.exporters.debug).toBeDefined();
     expect(cfg.exporters["otlphttp/traces"]).toBeUndefined();
     for (const signal of ["traces", "metrics", "logs"]) {
@@ -227,11 +229,51 @@ describe("otel collector config", () => {
   it("produces valid YAML even with quote/backslash-bearing header values", () => {
     // Crucially, a single quote in a header value no longer fails anything:
     // it lives in the host-side collector config, never a sandbox shell wrap.
-    const cfg = parseYaml(renderOtelCollectorConfig({
+    const cfg = renderActive({
       OTEL_EXPORTER_OTLP_ENDPOINT: "https://b.example.com",
       OTEL_EXPORTER_OTLP_HEADERS: `x-quote=it's "quoted" \\ backslash`,
-    })) as any;
+    });
     expect(cfg.exporters["otlphttp/traces"].headers["x-quote"]).toBe(`it's "quoted" \\ backslash`);
+  });
+
+  it("drops CR/LF-bearing header pairs (no header injection, no broken YAML) but keeps the rest", () => {
+    // A newline in a header value would be header injection on the
+    // collector→backend leg and would also break the YAML scalar.
+    const raw = renderOtelCollectorConfig({
+      active: true,
+      env: {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "https://b.example.com",
+        OTEL_EXPORTER_OTLP_HEADERS: "x-good=ok,x-bad=line1\nline2",
+      },
+    });
+    expect(() => parseYaml(raw)).not.toThrow();
+    const cfg = parseYaml(raw) as any;
+    expect(cfg.exporters["otlphttp/traces"].headers).toEqual({ "x-good": "ok" });
+  });
+
+  describe("forwarding gate (security floor)", () => {
+    it("when inactive, drops every signal to debug and emits no backend endpoint or credential", () => {
+      const raw = renderOtelCollectorConfig({
+        active: false,
+        env: {
+          OTEL_EXPORTER_OTLP_ENDPOINT: "https://real-backend.example.com",
+          OTEL_EXPORTER_OTLP_HEADERS: "authorization=super-secret-token",
+          OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://traces.example.com",
+        },
+      });
+      // No backend URL or secret leaks into the generated file at all.
+      expect(raw).not.toContain("real-backend.example.com");
+      expect(raw).not.toContain("super-secret-token");
+      expect(raw).not.toContain("traces.example.com");
+      expect(raw).not.toContain("otlphttp");
+      const cfg = parseYaml(raw) as any;
+      expect(cfg.exporters.debug).toBeDefined();
+      for (const signal of ["traces", "metrics", "logs"]) {
+        expect(cfg.service.pipelines[signal].exporters).toEqual(["debug"]);
+      }
+      // Receiver still listens so sandboxes don't get connection errors.
+      expect(cfg.receivers.otlp.protocols.http.endpoint).toBe(`0.0.0.0:${OTEL_COLLECTOR_OTLP_HTTP_PORT}`);
+    });
   });
 });
 

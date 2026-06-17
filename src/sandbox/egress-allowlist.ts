@@ -162,12 +162,3 @@ export function mergeAllowlist(base: readonly string[], extra: readonly string[]
   }
   return out;
 }
-
-export function collectorHostsFromOtelEnv(env: NodeJS.ProcessEnv = process.env): string[] {
-  return mergeAllowlist([], [
-    env.OTEL_EXPORTER_OTLP_ENDPOINT,
-    env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
-    env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
-    env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
-  ].filter((v): v is string => typeof v === "string" && v.length > 0));
-}
