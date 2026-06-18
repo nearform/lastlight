@@ -13,8 +13,10 @@ should require **only a YAML file** in `workflows/`, no runner changes.
 | `loader.ts` | Reads `workflows/*.yaml`, validates against the schema, caches parsed definitions. `getWorkflow(name)` is the only lookup the rest of the code uses. |
 | `templates.ts` | Mustache-ish template engine. Handles `{{branch}}`, `{{issueDir}}`, `{{contextSnapshot}}`, `{{models.architect}}`, `{{phaseOutputs.guardrails.output}}`, list iteration, and `unless_*` clauses. |
 | `simple.ts` | Top-of-stack entry: `runSimpleWorkflow(workflowName, request, …)`. Picks the trigger id, builds the template context, creates or reuses a `workflow_runs` row, then calls `runWorkflow`. |
-| `runner.ts` | The actual executor — linear walk over `definition.phases`, dispatches to DAG runner when dependencies are declared, handles loops and approval gates. Contains `runPhase`, `runWorkflow`, `runDagWorkflow`, `nextPhaseAfter`, `isTerminated`. |
+| `runner.ts` | The actual executor — linear walk over `definition.phases`, dispatches to DAG runner when dependencies are declared, handles loops and approval gates. Contains `runPhase`, `runWorkflow`, `runDagWorkflow`, `isTerminated`. |
 | `dag.ts` | Pure graph logic: `buildDag`, `evaluateTriggerRule`, `getReadyNodes`, `topoSort`. No IO. `runDagWorkflow` in `runner.ts` uses it for dependency-aware scheduling. |
+| `phase-ref.ts` | `PhaseRef` value object — the single authority for building loop-iteration labels (`format()`) and resolving them back (`phaseIndexInDefinition`, exact-match first) — plus `nextPhaseAfter`. No IO. |
+| `verdict.ts` | `parseReviewerVerdict(output) → { verdict, viaFallback }` — the one pure parser for a reviewer phase's `VERDICT:` marker (with the fallback heuristic). Both runner verdict sites call it. |
 | `loop-eval.ts` | Expression evaluator for `generic_loop.until` conditions (`output.contains('PASS')`, `verdict == 'APPROVED'`). |
 | `resume.ts` | Startup orphan recovery + approval-gate resume entry point. Called both on harness boot (recover `running` / `paused` runs) and when a user responds to an approval gate. |
 
@@ -181,16 +183,26 @@ rely on predictable phase names for dynamically-created iterations.
 First reviewer pass       → reviewer
   approves                → workflow continues
   requests changes
-    Fix cycle 1           → reviewer_fix_1   (runs the executor with fix_prompt)
-    Re-review             → reviewer_2       (runs reviewer again)
+    Fix cycle 1           → reviewer_fix_1       (runs the executor with fix_prompt)
+    Re-review (cycle 1)   → reviewer_recheck_1   (runs reviewer again)
     …
     Fix cycle 2           → reviewer_fix_2
-    Re-review             → reviewer_3
+    Re-review (cycle 2)   → reviewer_recheck_2
 ```
 
-General rule: `${parentPhaseName}` for the first run, `${parentPhaseName}_${n+1}`
-for the nth re-run, `${parentPhaseName}_fix_${n}` for the nth fix cycle.
-Generic loops use `${parentPhaseName}_iter_${iteration}`.
+All generated labels are built by `PhaseRef.format()` (`phase-ref.ts`) — the
+single authority — and resolved back via `phaseIndexInDefinition` (exact-match
+first). `n` is the 1-based **cycle**; `fix_k` and `recheck_k` pair within a
+cycle:
+
+- `${parentPhaseName}` — the initial run
+- `${parentPhaseName}_fix_${n}` — the nth fix cycle
+- `${parentPhaseName}_recheck_${n}` — the nth re-review
+- `${parentPhaseName}_iter_${n}` — generic-loop iteration n
+
+The legacy bare-numeric re-review form (`reviewer_2`) is **dropped** — it was
+untagged, ambiguous with literal phase names, and inconsistent with the
+`_fix_`/`_iter_` tags. It is neither produced nor recognized on resume.
 
 The dashboard's `WorkflowPipeline.tsx` uses a longest-prefix match to
 group these under the declared parent (`reviewer_fix_1` → belongs to

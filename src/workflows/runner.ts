@@ -17,6 +17,8 @@ import { phaseSkillNames } from "./schema.js";
 import { loadPromptTemplate, resolveSkillPaths } from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
 import { evalUntilExpression } from "./loop-eval.js";
+import { parseReviewerVerdict } from "./verdict.js";
+import { PhaseRef, phaseIndexInDefinition, nextPhaseAfter } from "./phase-ref.js";
 import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
 import type { ProgressReporter, StepStatus, ProgressStep } from "../notify/types.js";
 import { recordError, recordExecutionMetrics, withSpan } from "../telemetry/index.js";
@@ -370,56 +372,6 @@ async function runPhase(
   });
 }
 
-// ── Resume logic ─────────────────────────────────────────────────────────────
-
-/**
- * Resolve a recorded phase name to its index in `definition.phases`.
- * Handles the generated iteration labels the runner writes for looping phases:
- *
- *   `${phase}_iter_${n}` — generic_loop iteration
- *   `${phase}_fix_${n}`  — reviewer-style loop fix cycle
- *   `${phase}_${n}`      — reviewer-style loop re-review cycle
- *
- * Returns -1 when the name doesn't match any phase (unknown/untracked labels
- * like `waiting_approval` or user set_phase values such as `complete`).
- */
-export function phaseIndexInDefinition(
-  definition: AgentWorkflowDefinition,
-  name: string,
-): number {
-  const exact = definition.phases.findIndex((p) => p.name === name);
-  if (exact >= 0) return exact;
-
-  const tryStrip = (re: RegExp): number => {
-    const m = name.match(re);
-    if (!m) return -1;
-    return definition.phases.findIndex((p) => p.name === m[1]);
-  };
-
-  const iterIdx = tryStrip(/^(.*)_iter_\d+$/);
-  if (iterIdx >= 0) return iterIdx;
-  const fixIdx = tryStrip(/^(.*)_fix_\d+$/);
-  if (fixIdx >= 0) return fixIdx;
-  const cycleIdx = tryStrip(/^(.*)_\d+$/);
-  if (cycleIdx >= 0) return cycleIdx;
-
-  return -1;
-}
-
-/**
- * Given the phase the runner last completed, return the name of the phase the
- * runner should run next. Returns `null` when there is no next phase (i.e. the
- * workflow is done).
- */
-export function nextPhaseAfter(
-  definition: AgentWorkflowDefinition,
-  completedPhase: string,
-): string | null {
-  const idx = phaseIndexInDefinition(definition, completedPhase);
-  if (idx < 0 || idx >= definition.phases.length - 1) return null;
-  return definition.phases[idx + 1].name;
-}
-
 // ── Main workflow runner ─────────────────────────────────────────────────────
 
 /** Returns true if any phase declares explicit dependencies — triggers DAG execution path. */
@@ -658,7 +610,10 @@ export async function runWorkflow(
       }
 
       while (!approved && fixCycles <= MAX_CYCLES) {
-        const reviewLabel = fixCycles === 0 ? phaseName : `${phaseName}_${fixCycles + 1}`;
+        const reviewLabel =
+          fixCycles === 0
+            ? PhaseRef.review(phaseName).format()
+            : PhaseRef.recheck(phaseName, fixCycles).format();
 
         if (!shouldRun(phaseName) && fixCycles === 0) {
           approved = true;
@@ -721,16 +676,9 @@ export async function runWorkflow(
 
         // Parse verdict
         const reviewerOutput = (rr.result.output || "").trim();
-        const verdictMarker = reviewerOutput.match(
-          /^\s*VERDICT:\s*(APPROVED|REQUEST_CHANGES)\s*$/im,
-        );
-        let isApproved: boolean;
-        if (verdictMarker) {
-          isApproved = verdictMarker[1].toUpperCase() === "APPROVED";
-        } else {
-          const upper = reviewerOutput.toUpperCase();
-          const hasRequestChanges = /\bREQUEST_CHANGES\b/.test(upper);
-          isApproved = !hasRequestChanges && /^APPROVED\b/.test(upper);
+        const { verdict, viaFallback } = parseReviewerVerdict(reviewerOutput);
+        const isApproved = verdict === "APPROVED";
+        if (viaFallback) {
           console.warn(
             `[runner] Reviewer output missing VERDICT: marker — using fallback detection (isApproved=${isApproved})`,
           );
@@ -782,7 +730,7 @@ export async function runWorkflow(
           });
 
           // Run fix phase
-          const fixLabel = `${phaseName}_fix_${fixCycles}`;
+          const fixLabel = PhaseRef.fix(phaseName, fixCycles).format();
           await onStart(fixLabel);
           await reportStep(
             fixLabel,
@@ -897,7 +845,7 @@ export async function runWorkflow(
 
       while (!complete && iteration < MAX_ITER) {
         iteration++;
-        const iterLabel = `${phaseName}_iter_${iteration}`;
+        const iterLabel = PhaseRef.iter(phaseName, iteration).format();
 
         await onStart(iterLabel);
 
@@ -1038,7 +986,7 @@ export async function runWorkflow(
           db.createApproval({
             id: approvalId,
             workflowRunId: workflowId,
-            gate: `${phaseName}_iter_${iteration}`,
+            gate: iterLabel,
             summary: gateMsg,
             kind: isReply ? "reply" : "approve",
             requestedBy: ctx.sender,
@@ -1048,7 +996,7 @@ export async function runWorkflow(
             phase: "waiting_approval",
             timestamp: new Date().toISOString(),
             success: true,
-            summary: `Waiting for ${isReply ? "reply" : "approval"}: ${phaseName}_iter_${iteration} (${approvalId})`,
+            summary: `Waiting for ${isReply ? "reply" : "approval"}: ${iterLabel} (${approvalId})`,
           });
           db.pauseWorkflowRun(workflowId);
           await reportStep(phaseName, "awaiting");
@@ -1488,7 +1436,10 @@ async function runDagWorkflow(
         let fixCycles = 0;
 
         while (!approved && fixCycles <= MAX_CYCLES) {
-          const reviewLabel = fixCycles === 0 ? node.name : `${node.name}_${fixCycles + 1}`;
+          const reviewLabel =
+            fixCycles === 0
+              ? PhaseRef.review(node.name).format()
+              : PhaseRef.recheck(node.name, fixCycles).format();
           const reviewPrompt =
             fixCycles === 0
               ? buildPhasePrompt(phase, ctx, { phaseOutputs: { ...outputs }, fixCycle: fixCycles })
@@ -1521,16 +1472,19 @@ async function runDagWorkflow(
           await onEnd(reviewLabel, phases[phases.length - 1]);
 
           const reviewerOutput = (rr.result.output || "").trim();
-          const verdictMarker = reviewerOutput.match(/^\s*VERDICT:\s*(APPROVED|REQUEST_CHANGES)\s*$/im);
-          const isApproved = verdictMarker
-            ? verdictMarker[1].toUpperCase() === "APPROVED"
-            : !(/\bREQUEST_CHANGES\b/.test(reviewerOutput.toUpperCase())) && /^APPROVED\b/.test(reviewerOutput.toUpperCase());
+          const { verdict, viaFallback } = parseReviewerVerdict(reviewerOutput);
+          const isApproved = verdict === "APPROVED";
+          if (viaFallback) {
+            console.warn(
+              `[runner] Reviewer output missing VERDICT: marker — using fallback detection (isApproved=${isApproved})`,
+            );
+          }
 
           if (isApproved) {
             approved = true;
           } else if (fixCycles < MAX_CYCLES) {
             fixCycles++;
-            const fixLabel = `${node.name}_fix_${fixCycles}`;
+            const fixLabel = PhaseRef.fix(node.name, fixCycles).format();
             const fixPromptRendered = renderPrompt(loop.on_request_changes.fix_prompt, { phaseOutputs: { ...outputs }, fixCycle: fixCycles });
             const fixModelRaw = loop.on_request_changes.fix_model ? renderTemplate(loop.on_request_changes.fix_model, ctx) : undefined;
             const fixModel = fixModelRaw || modelFor(`${node.name}_fix`) || modelFor(node.name);
@@ -1576,7 +1530,7 @@ async function runDagWorkflow(
 
         while (!complete && iteration < MAX_ITER) {
           iteration++;
-          const iterLabel = `${node.name}_iter_${iteration}`;
+          const iterLabel = PhaseRef.iter(node.name, iteration).format();
           const iterCtx: Partial<TemplateContext> = {
             iteration,
             maxIterations: MAX_ITER,

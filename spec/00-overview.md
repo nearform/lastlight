@@ -48,7 +48,7 @@ The terms used across this spec, in dependency order.
 - **Phase** — a single step in a Workflow. Either a `context` checkpoint
   (no agent invocation), an `agent` phase (one agent session), or a
   `loop` phase (an agent phase that iterates on reviewer feedback, e.g.
-  `reviewer_2`, `reviewer_fix_1`).
+  `reviewer_fix_1`, `reviewer_recheck_1`).
 - **Execution** — one agent session: a single phase running, or a single
   chat turn. One row in the `executions` table with tokens, cost, stop
   reason, and a pointer to the JSONL event log for that session.

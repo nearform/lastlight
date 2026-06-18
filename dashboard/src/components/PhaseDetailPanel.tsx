@@ -77,7 +77,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 export function PhaseDetailPanel({ phaseName, run, definition, execution, totalExecutions }: Props) {
   // Look up the phase in the workflow definition (may be missing for dynamic
-  // phases like reviewer_2 / fix_loop_1 — we still show what we know).
+  // phases like reviewer_recheck_1 / reviewer_fix_1 — we still show what we know).
   const phaseDef: WorkflowPhaseDefinition | undefined = definition?.phases.find(
     (p) => p.name === phaseName,
   );

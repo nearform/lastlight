@@ -90,11 +90,11 @@ const NODE_ROW_HEIGHT = 78;
 const ROW_GAP = 20;
 
 /**
- * Map a dynamic phase name (e.g. "reviewer_fix_1", "reviewer_2") back to the
- * declared phase it iterates on. The runner names loop iterations like
- * `${parent}_${n}` (re-runs) or `${parent}_fix_${n}` (fix iterations), so the
- * parent is the longest declared name `d` such that the dynamic name is
- * `${d}` or starts with `${d}_`.
+ * Map a dynamic phase name (e.g. "reviewer_fix_1", "reviewer_recheck_1") back
+ * to the declared phase it iterates on. The runner names loop iterations like
+ * `${parent}_recheck_${n}` (re-reviews) or `${parent}_fix_${n}` (fix
+ * iterations), so the parent is the longest declared name `d` such that the
+ * dynamic name is `${d}` or starts with `${d}_`.
  */
 function findParentDeclared(name: string, declared: string[]): string | null {
   let best: string | null = null;
@@ -132,8 +132,8 @@ interface Props {
  *
  * Phase visual states are derived from `run.phaseHistory` (completed) and
  * `run.currentPhase` (active). Phases that show up in history but aren't in
- * the definition (e.g. dynamically-named loop iterations like reviewer_2,
- * fix_loop_1) are appended after the definition's phases so they remain
+ * the definition (e.g. dynamically-named loop iterations like
+ * reviewer_recheck_1, reviewer_fix_1) are appended after the definition's phases so they remain
  * visible.
  */
 export function WorkflowPipeline({
@@ -154,7 +154,7 @@ export function WorkflowPipeline({
       historyMap.set(entry.phase, entry);
     }
 
-    // phase → most-recent-execution. Loop iterations (reviewer_2, etc.) get
+    // phase → most-recent-execution. Loop iterations (reviewer_recheck_1, etc.) get
     // their own keys here so each iteration is independently selectable.
     const execByPhase = new Map<string, WorkflowRunExecution>();
     for (const ex of executions ?? []) {
@@ -168,7 +168,7 @@ export function WorkflowPipeline({
     );
 
     // Dynamic phases that don't appear in the YAML — loop iterations like
-    // `reviewer_2` (re-runs) and `reviewer_fix_1` (fix attempts).
+    // `reviewer_recheck_1` (re-reviews) and `reviewer_fix_1` (fix attempts).
     const dynamicNames = Array.from(
       new Set([
         ...run.phaseHistory.map((e) => e.phase),

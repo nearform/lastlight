@@ -5,11 +5,11 @@ import type { ModelConfig, VariantConfig } from "../config.js";
 import { getWorkflow } from "./loader.js";
 import {
   runWorkflow,
-  nextPhaseAfter,
   type ApprovalGateConfig,
   type RunnerCallbacks,
   type WorkflowResult,
 } from "./runner.js";
+import { nextPhaseAfter } from "./phase-ref.js";
 import type { TemplateContext } from "./templates.js";
 import { slugify } from "./templates.js";
 import { wrapUntrusted } from "../engine/screen.js";

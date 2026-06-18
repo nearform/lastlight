@@ -273,7 +273,7 @@ function DetailPanel({ run, approvals, onCancel, onApprovalResponded, onOpenDefi
   }, [run.id, setSelectedPhase]);
 
   // Build the per-phase grouping. For loop phases that produced multiple
-  // executions (reviewer + reviewer_2 / fix_loop_*) we always pick the most
+  // executions (reviewer + reviewer_recheck_* / reviewer_fix_*) we always pick the most
   // recent — the count is shown in PhaseDetailPanel so the user knows.
   const phaseExecutions = useMemo(() => {
     const map = new Map<string, WorkflowRunExecution[]>();

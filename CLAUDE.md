@@ -506,5 +506,19 @@ docker compose restart agent       # restart after an instance/ overlay edit
 ## Sub-folder docs
 
 - `src/workflows/CLAUDE.md` — runner internals: phase types, linear vs DAG,
-  loop iteration naming (`reviewer_2`, `reviewer_fix_1`), approval gates,
+  loop iteration naming (`reviewer_fix_1`, `reviewer_recheck_1`), approval gates,
   resume semantics, taskId scoping, template rendering.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues in `cliftonc/lastlight` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical triage vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
