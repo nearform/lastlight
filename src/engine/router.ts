@@ -5,9 +5,14 @@ import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getRoutes } from "../config.js";
 import type { StateDb } from "../state/db.js";
 
-/** Skill name that should handle this event */
-export type RoutingResult =
-  | { action: "skill"; skill: string; context: Record<string, unknown> }
+/**
+ * A routing decision — the single term for "what should process this event"
+ * is `handler`. It names either an in-process handler (chat, status-report,
+ * approval-response, …) or a workflow (issue-triage, pr-review, build, …);
+ * the dispatcher decides which. The router itself performs no side effects.
+ */
+export type Route =
+  | { action: "handler"; handler: string; context: Record<string, unknown> }
   | { action: "reply"; message: string }
   | { action: "ignore"; reason: string };
 
@@ -25,6 +30,24 @@ function unmanagedRepoReply(repo: string): string {
   );
 }
 
+/**
+ * Managed-repo gate shared by every Slack command that targets a repo.
+ * Returns `{ ok: true, repo }` when the repo is present and managed, or
+ * `{ ok: false, route }` carrying the reply Route to short-circuit with —
+ * a missing-repo prompt or the unmanaged-repo reply. Collapses the guard
+ * that was copy-pasted across triage/review/security/explore.
+ */
+function requireManagedRepo(
+  repo: string | undefined,
+  missingReply: string,
+): { ok: true; repo: string } | { ok: false; route: Route } {
+  if (!repo) return { ok: false, route: { action: "reply", message: missingReply } };
+  if (!isManagedRepo(repo)) {
+    return { ok: false, route: { action: "reply", message: unmanagedRepoReply(repo) } };
+  }
+  return { ok: true, repo };
+}
+
 /** Author associations that can trigger builds via @mention */
 const MAINTAINER_ROLES = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
@@ -33,20 +56,21 @@ const BOT_MENTION = /@last-light\b/i;
 
 /**
  * Event routing — deterministic for most events, LLM-classified for comments.
- * Maps normalized events to the skill that should handle them.
+ * Maps normalized events to the handler that should process them. Returns a
+ * decision only; the dispatcher performs the side effects.
  */
 export async function routeEvent(
   envelope: EventEnvelope,
   deps: RouterDeps = {},
-): Promise<RoutingResult> {
+): Promise<Route> {
   const routes = getRoutes();
   const gh = routes.github;
   const slack = routes.slack;
   switch (envelope.type) {
     case "issue.opened":
       return {
-        action: "skill",
-        skill: gh.issue_opened || "issue-triage",
+        action: "handler",
+        handler: gh.issue_opened || "issue-triage",
         context: {
           repo: envelope.repo,
           issueNumber: envelope.issueNumber,
@@ -59,8 +83,8 @@ export async function routeEvent(
 
     case "issue.reopened":
       return {
-        action: "skill",
-        skill: gh.issue_reopened || "issue-triage",
+        action: "handler",
+        handler: gh.issue_reopened || "issue-triage",
         context: {
           repo: envelope.repo,
           issueNumber: envelope.issueNumber,
@@ -80,8 +104,8 @@ export async function routeEvent(
       // when we already reviewed the resulting SHA), so a stable handler
       // for every PR-attention event is correct.
       return {
-        action: "skill",
-        skill: gh[`pr_${envelope.type.split(".")[1]}`] || "pr-review",
+        action: "handler",
+        handler: gh[`pr_${envelope.type.split(".")[1]}`] || "pr-review",
         context: {
           _routeKey: `github.pr_${envelope.type.split(".")[1]}`,
           repo: envelope.repo,
@@ -104,8 +128,8 @@ export async function routeEvent(
         const pendingReply = deps.db.getPendingReplyGateByTrigger(triggerId);
         if (pendingReply) {
           return {
-            action: "skill",
-            skill: gh.explore_reply || "explore-reply",
+            action: "handler",
+            handler: gh.explore_reply || "explore-reply",
             context: {
               repo: envelope.repo,
               issueNumber: envelope.issueNumber,
@@ -140,8 +164,8 @@ export async function routeEvent(
       const rejectMatch = envelope.body.match(/@last-light\s+reject\b(.*)/i);
       if (approveMatch || rejectMatch) {
         return {
-          action: "skill",
-          skill: gh.approval_response || "approval-response",
+          action: "handler",
+          handler: gh.approval_response || "approval-response",
           context: {
             repo: envelope.repo,
             issueNumber: envelope.issueNumber,
@@ -156,8 +180,8 @@ export async function routeEvent(
       const securityMatch = envelope.body.match(/@last-light\s+security-review\b/i);
       if (securityMatch) {
         return {
-          action: "skill",
-          skill: gh.security_review || "security-review",
+          action: "handler",
+          handler: gh.security_review || "security-review",
           context: { repo: envelope.repo, sender: envelope.sender, source: envelope.source },
         };
       }
@@ -194,8 +218,8 @@ export async function routeEvent(
         //           "does this PR consider X?" with code-cited evidence)
         // Explore isn't meaningful on PRs since the code already exists.
         return {
-          action: "skill",
-          skill: intent === "build" ? (gh.pr_fix || "pr-fix") : (gh.pr_comment || "pr-comment"),
+          action: "handler",
+          handler: intent === "build" ? (gh.pr_fix || "pr-fix") : (gh.pr_comment || "pr-comment"),
           context: {
             _routeKey: intent === "build" ? "github.pr_fix" : "github.pr_comment",
             repo: envelope.repo,
@@ -226,8 +250,8 @@ export async function routeEvent(
       const hasScanSummaryLabel = (envelope.labels || []).includes("security-scan");
       if (hasScanSummaryLabel) {
         return {
-          action: "skill",
-          skill: gh.security_feedback || "security-feedback",
+          action: "handler",
+          handler: gh.security_feedback || "security-feedback",
           context: {
             repo: envelope.repo,
             issueNumber: envelope.issueNumber,
@@ -244,8 +268,8 @@ export async function routeEvent(
         ? (gh.issue_explore || "explore")
         : (gh.issue_comment || "issue-comment");
       return {
-        action: "skill",
-        skill: issueSkill,
+        action: "handler",
+        handler: issueSkill,
         context: {
           _routeKey: intent === "build" ? "github.issue_build" : intent === "explore" ? "github.issue_explore" : "github.issue_comment",
           repo: envelope.repo,
@@ -280,8 +304,8 @@ export async function routeEvent(
         const pendingReply = deps.db.getPendingReplyGateByTrigger(slackTriggerId);
         if (pendingReply) {
           return {
-            action: "skill",
-            skill: slack.explore_reply || "explore-reply",
+            action: "handler",
+            handler: slack.explore_reply || "explore-reply",
             context: {
               sender: envelope.sender,
               reply: text,
@@ -322,29 +346,29 @@ export async function routeEvent(
       switch (intent) {
         case "reset":
           return {
-            action: "skill",
-            skill: slack.reset || "chat-reset",
+            action: "handler",
+            handler: slack.reset || "chat-reset",
             context: { sessionId: raw?.sessionId, sender: envelope.sender, source: envelope.source },
           };
 
         case "status":
           return {
-            action: "skill",
-            skill: slack.status || "status-report",
+            action: "handler",
+            handler: slack.status || "status-report",
             context: { sender: envelope.sender, source: envelope.source },
           };
 
         case "approve":
           return {
-            action: "skill",
-            skill: slack.approve || "approval-response",
+            action: "handler",
+            handler: slack.approve || "approval-response",
             context: { sender: envelope.sender, decision: "approved", source: envelope.source },
           };
 
         case "reject":
           return {
-            action: "skill",
-            skill: slack.reject || "approval-response",
+            action: "handler",
+            handler: slack.reject || "approval-response",
             context: {
               sender: envelope.sender,
               decision: "rejected",
@@ -359,8 +383,8 @@ export async function routeEvent(
           // Fall through to chat rather than nag the user for a repo.
           if (!classifiedRepo) {
             return {
-              action: "skill",
-              skill: slack.chat || "chat",
+              action: "handler",
+              handler: slack.chat || "chat",
               context: {
                 sessionId: raw?.sessionId,
                 message: slackText,
@@ -373,8 +397,8 @@ export async function routeEvent(
             return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };
           }
           return {
-            action: "skill",
-            skill: slack.build || "github-orchestrator",
+            action: "handler",
+            handler: slack.build || "github-orchestrator",
             context: {
               _routeKey: "slack.build",
               repo: classifiedRepo,
@@ -387,31 +411,29 @@ export async function routeEvent(
         }
 
         case "triage": {
-          if (!classifiedRepo) {
-            return { action: "reply", message: "Which repo should I triage? e.g. `triage cliftonc/repo`" };
-          }
-          if (!isManagedRepo(classifiedRepo)) {
-            return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };
-          }
+          const gate = requireManagedRepo(
+            classifiedRepo,
+            "Which repo should I triage? e.g. `triage cliftonc/repo`",
+          );
+          if (!gate.ok) return gate.route;
           return {
-            action: "skill",
-            skill: slack.triage || "issue-triage",
-            context: { repo: classifiedRepo, sender: envelope.sender, source: envelope.source },
+            action: "handler",
+            handler: slack.triage || "issue-triage",
+            context: { repo: gate.repo, sender: envelope.sender, source: envelope.source },
           };
         }
 
         case "review": {
-          if (!classifiedRepo) {
-            return { action: "reply", message: "Which repo should I review PRs for? e.g. `review cliftonc/repo`" };
-          }
-          if (!isManagedRepo(classifiedRepo)) {
-            return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };
-          }
+          const gate = requireManagedRepo(
+            classifiedRepo,
+            "Which repo should I review PRs for? e.g. `review cliftonc/repo`",
+          );
+          if (!gate.ok) return gate.route;
           return {
-            action: "skill",
-            skill: slack.review || "pr-review",
+            action: "handler",
+            handler: slack.review || "pr-review",
             context: {
-              repo: classifiedRepo,
+              repo: gate.repo,
               prNumber: classifiedIssue,
               issueNumber: classifiedIssue,
               sender: envelope.sender,
@@ -421,35 +443,31 @@ export async function routeEvent(
         }
 
         case "security": {
-          if (!classifiedRepo) {
-            return { action: "reply", message: "Which repo should I scan? e.g. `security review cliftonc/repo`" };
-          }
-          if (!isManagedRepo(classifiedRepo)) {
-            return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };
-          }
+          const gate = requireManagedRepo(
+            classifiedRepo,
+            "Which repo should I scan? e.g. `security review cliftonc/repo`",
+          );
+          if (!gate.ok) return gate.route;
           return {
-            action: "skill",
-            skill: slack.security || "security-review",
-            context: { repo: classifiedRepo, sender: envelope.sender, source: envelope.source },
+            action: "handler",
+            handler: slack.security || "security-review",
+            context: { repo: gate.repo, sender: envelope.sender, source: envelope.source },
           };
         }
 
         case "explore": {
-          if (!classifiedRepo || !isManagedRepo(classifiedRepo)) {
-            return {
-              action: "reply",
-              message: classifiedRepo
-                ? unmanagedRepoReply(classifiedRepo)
-                : "I'd love to help explore that idea, but I need to know which repo to work against. " +
-                  "Could you restate your request and include the repo? For example: " +
-                  "\"let's explore adding webhooks to cliftonc/lastlight\"",
-            };
-          }
+          const gate = requireManagedRepo(
+            classifiedRepo,
+            "I'd love to help explore that idea, but I need to know which repo to work against. " +
+              "Could you restate your request and include the repo? For example: " +
+              '"let\'s explore adding webhooks to cliftonc/lastlight"',
+          );
+          if (!gate.ok) return gate.route;
           return {
-            action: "skill",
-            skill: slack.explore || "explore",
+            action: "handler",
+            handler: slack.explore || "explore",
             context: {
-              repo: classifiedRepo,
+              repo: gate.repo,
               issueNumber: classifiedIssue,
               sender: envelope.sender,
               commentBody: slackText,
@@ -464,8 +482,8 @@ export async function routeEvent(
         default:
           // chat — conversational reply
           return {
-            action: "skill",
-            skill: slack.chat || "chat",
+            action: "handler",
+            handler: slack.chat || "chat",
             context: {
               sessionId: raw?.sessionId,
               message: slackText,
