@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { callLlm, defaultFastModel, resolveProvider } from "./llm.js";
+import { callLlm, chat, defaultFastModel, resolveProvider } from "./llm.js";
 
 describe("resolveProvider", () => {
   it("prefers explicit provider prefix", () => {
@@ -60,6 +60,14 @@ describe("defaultFastModel", () => {
     expect(defaultFastModel()).toMatch(/^anthropic\//);
   });
 
+  it("uses the first registry provider when all keys are set", () => {
+    process.env.ANTHROPIC_API_KEY = "k";
+    process.env.OPENAI_API_KEY = "k";
+    process.env.OPENROUTER_API_KEY = "sk-or-k";
+    delete process.env.OPENCODE_MODELS;
+    expect(defaultFastModel()).toMatch(/^anthropic\//);
+  });
+
   it("honors per-task OPENCODE_MODELS overrides", () => {
     process.env.OPENAI_API_KEY = "k";
     process.env.OPENCODE_MODELS = JSON.stringify({ classifier: "openai/custom-mini" });
@@ -75,7 +83,7 @@ describe("defaultFastModel", () => {
   });
 });
 
-describe("callLlm", () => {
+describe("chat", () => {
   const ORIGINAL_ENV = { ...process.env };
 
   afterEach(() => {
@@ -85,11 +93,11 @@ describe("callLlm", () => {
 
   it("throws when the relevant API key is missing", async () => {
     delete process.env.ANTHROPIC_API_KEY;
-    await expect(callLlm("anthropic/claude-haiku-4-5", "sys", "hi")).rejects.toThrow(/ANTHROPIC_API_KEY/);
+    await expect(chat("anthropic/claude-haiku-4-5", [{ role: "system", content: "sys" }, { role: "user", content: "hi" }])).rejects.toThrow(/ANTHROPIC_API_KEY/);
     delete process.env.OPENAI_API_KEY;
-    await expect(callLlm("openai/gpt-4o-mini", "sys", "hi")).rejects.toThrow(/OPENAI_API_KEY/);
+    await expect(chat("openai/gpt-4o-mini", [{ role: "system", content: "sys" }, { role: "user", content: "hi" }])).rejects.toThrow(/OPENAI_API_KEY/);
     delete process.env.OPENROUTER_API_KEY;
-    await expect(callLlm("openrouter/google/gemini-2.5-flash", "sys", "hi")).rejects.toThrow(/OPENROUTER_API_KEY/);
+    await expect(chat("openrouter/google/gemini-2.5-flash", [{ role: "system", content: "sys" }, { role: "user", content: "hi" }])).rejects.toThrow(/OPENROUTER_API_KEY/);
   });
 
   it("hits the Anthropic endpoint and extracts text from content blocks", async () => {
@@ -103,7 +111,7 @@ describe("callLlm", () => {
         ],
       }), { status: 200, headers: { "content-type": "application/json" } }),
     );
-    const out = await callLlm("claude-haiku-4-5", "sys", "user");
+    const out = await chat("claude-haiku-4-5", [{ role: "system", content: "sys" }, { role: "user", content: "user" }]);
     expect(out).toBe("hello world");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
@@ -122,7 +130,7 @@ describe("callLlm", () => {
         choices: [{ message: { content: "ok" } }],
       }), { status: 200, headers: { "content-type": "application/json" } }),
     );
-    const out = await callLlm("openai/gpt-4o-mini", "sys", "user");
+    const out = await chat("openai/gpt-4o-mini", [{ role: "system", content: "sys" }, { role: "user", content: "user" }]);
     expect(out).toBe("ok");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
@@ -145,7 +153,7 @@ describe("callLlm", () => {
         choices: [{ message: { content: "routed" } }],
       }), { status: 200, headers: { "content-type": "application/json" } }),
     );
-    const out = await callLlm("openrouter/anthropic/claude-sonnet-4.5", "sys", "user");
+    const out = await chat("openrouter/anthropic/claude-sonnet-4.5", [{ role: "system", content: "sys" }, { role: "user", content: "user" }]);
     expect(out).toBe("routed");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
@@ -170,7 +178,7 @@ describe("callLlm", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
       .mockResolvedValueOnce(new Response("rate limited", { status: 429 }));
-    await expect(callLlm("openai/gpt-4o-mini", "s", "u")).rejects.toThrow(/429/);
+    await expect(chat("openai/gpt-4o-mini", [{ role: "system", content: "s" }, { role: "user", content: "u" }])).rejects.toThrow(/429/);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -184,7 +192,7 @@ describe("callLlm", () => {
           headers: { "content-type": "application/json" },
         }),
       );
-    const out = await callLlm("openai/gpt-4o-mini", "s", "u");
+    const out = await chat("openai/gpt-4o-mini", [{ role: "system", content: "s" }, { role: "user", content: "u" }]);
     expect(out).toBe("ok");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -194,7 +202,18 @@ describe("callLlm", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response("bad model id", { status: 400 }),
     );
-    await expect(callLlm("openai/gpt-4o-mini", "s", "u")).rejects.toThrow(/400/);
+    await expect(chat("openai/gpt-4o-mini", [{ role: "system", content: "s" }, { role: "user", content: "u" }])).rejects.toThrow(/400/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("callLlm delegates to chat-equivalent behavior", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ choices: [{ message: { content: "delegated" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await expect(callLlm("openai/gpt-4o-mini", "s", "u")).resolves.toBe("delegated");
   });
 });

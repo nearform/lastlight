@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   wrapUntrusted,
   flagPrefix,
@@ -54,12 +54,50 @@ describe("flagPrefix", () => {
 
 describe("screenForInjection — short-circuits", () => {
   it("returns flagged: false for empty text without calling the model", async () => {
-    const r = await screenForInjection("");
+    const chat = vi.fn();
+    const r = await screenForInjection("", { chat });
     expect(r.flagged).toBe(false);
+    expect(chat).not.toHaveBeenCalled();
   });
 
   it("returns flagged: false for text under 60 chars without calling the model", async () => {
-    const r = await screenForInjection("yes please go ahead");
+    const chat = vi.fn();
+    const r = await screenForInjection("yes please go ahead", { chat });
     expect(r.flagged).toBe(false);
+    expect(chat).not.toHaveBeenCalled();
+  });
+});
+
+describe("screenForInjection — injected chat", () => {
+  const longText = "Please analyze this very long message that is comfortably over sixty characters.";
+
+  it("parses positive injection responses", async () => {
+    const chat = vi.fn().mockResolvedValue("INJECTION: YES\nREASON: override attempt");
+    const r = await screenForInjection(longText, { chat, defaultFastModel: () => "openai/test" });
+    expect(r).toEqual({ flagged: true, reason: "override attempt" });
+    expect(chat).toHaveBeenCalledOnce();
+    expect(chat).toHaveBeenCalledWith(
+      "openai/test",
+      expect.arrayContaining([
+        expect.objectContaining({ role: "system" }),
+        expect.objectContaining({ role: "user", content: expect.stringContaining(longText) }),
+      ]),
+      { maxTokens: 64 },
+    );
+  });
+
+  it("parses negative injection responses", async () => {
+    const chat = vi.fn().mockResolvedValue("INJECTION: NO\nREASON: NONE");
+    const r = await screenForInjection(longText, { chat, defaultFastModel: () => "openai/test" });
+    expect(r.flagged).toBe(false);
+  });
+
+  it("fails open when chat rejects", async () => {
+    const chat = vi.fn().mockRejectedValue(new Error("network"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const r = await screenForInjection(longText, { chat, defaultFastModel: () => "openai/test" });
+    expect(r.flagged).toBe(false);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

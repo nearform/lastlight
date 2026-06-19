@@ -6,6 +6,8 @@
  * exploration, or a lightweight action (close, label, question, etc.).
  */
 
+import { chat as realChat, defaultFastModel as realDefaultFastModel, type ChatFunction } from "./llm.js";
+
 export type CommentIntent =
   | "build"
   | "explore"
@@ -34,6 +36,12 @@ export interface ClassifierContext {
   issueTitle?: string;
   /** True when the comment is on a PR rather than an issue. */
   isPullRequest?: boolean;
+}
+
+export interface ClassifierOptions {
+  model?: string;
+  chat?: ChatFunction;
+  defaultFastModel?: (taskType?: string) => string;
 }
 
 const CLASSIFIER_PROMPT = `You are a router for messages directed at a GitHub/Slack bot.
@@ -142,18 +150,22 @@ function cleanRepoName(name: string): string {
 export async function classifyComment(
   commentBody: string,
   context?: ClassifierContext,
-  model?: string,
+  options: string | ClassifierOptions = {},
 ): Promise<ClassificationResult> {
   try {
     const userPrompt = context?.issueTitle
       ? `Classify this comment (replying on an existing ${context.isPullRequest ? "PR" : "issue"}):\n\nISSUE TITLE: ${context.issueTitle}\n\nCOMMENT: ${commentBody}`
       : `Classify this comment:\n\n${commentBody}`;
 
-    const { callLlm, defaultFastModel } = await import("./llm.js");
-    const output = await callLlm(
-      model || defaultFastModel("classifier"),
-      CLASSIFIER_PROMPT,
-      userPrompt,
+    const resolvedOptions = typeof options === "string" ? { model: options } : options;
+    const chat = resolvedOptions.chat ?? realChat;
+    const defaultFastModel = resolvedOptions.defaultFastModel ?? realDefaultFastModel;
+    const output = await chat(
+      resolvedOptions.model ?? defaultFastModel("classifier"),
+      [
+        { role: "system", content: CLASSIFIER_PROMPT },
+        { role: "user", content: userPrompt },
+      ],
       { maxTokens: 128 },
     );
 

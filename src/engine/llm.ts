@@ -1,58 +1,186 @@
 /**
- * Thin one-shot LLM call used by the prompt-injection screener and the
- * intent classifier. Provider is selected by the model id prefix so
- * callers don't need to wire two different code paths:
+ * Thin one-shot LLM chat helper used by the prompt-injection screener and the
+ * intent classifier. Provider is selected by the model id prefix so callers
+ * don't need to wire provider-specific code paths:
  *
  *   "anthropic/claude-…" or unprefixed "claude-…"  →  Anthropic Messages API
  *   "openai/gpt-…"      or unprefixed "gpt-…"     →  OpenAI Chat Completions API
  *   "openrouter/vendor/model"                     →  OpenRouter Chat Completions
  *
  * Scope: this helper supports Anthropic, OpenAI, and OpenRouter. OpenCode
- * workflow phases are provider-agnostic (whatever OpenCode supports), but
- * the screener/classifier path is not — an explicit prefix like
- * `mistral/large` will throw rather than silently route to OpenAI with
- * the wrong model id. Bare ids (no slash) still fall back to OpenAI to
- * keep "gpt-5.5"-style shorthands working.
- *
- * Replaces the `@anthropic-ai/claude-agent-sdk` query() this codebase
- * used pre-Phase 7 for these small calls. The whole SDK was overkill for
- * one HTTP round-trip with no tools and no streaming.
+ * workflow phases are provider-agnostic (whatever OpenCode supports), but the
+ * screener/classifier path is deliberately small and explicit.
  */
 
-export interface CallLlmOptions {
+export type ChatRole = "system" | "user" | "assistant";
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+}
+
+export interface ChatOptions {
   /** Hard cap on output tokens (default: 256 — these calls are tiny). */
   maxTokens?: number;
   /** Per-call timeout (default: 30s). */
   timeoutMs?: number;
 }
 
+export type CallLlmOptions = ChatOptions;
+export type ChatFunction = (model: string, messages: ChatMessage[], opts?: ChatOptions) => Promise<string>;
+type ProviderName = "anthropic" | "openai" | "openrouter";
+
+type ProviderAdapter = {
+  name: ProviderName;
+  prefix: string;
+  envKey: string;
+  defaultModel: string;
+  resolveModelId: (model: string) => string | undefined;
+  buildRequest: (args: {
+    modelId: string;
+    messages: ChatMessage[];
+    opts: ChatOptions;
+    apiKey: string;
+    signal: AbortSignal;
+  }) => { url: string; init: RequestInit };
+  extractText: (data: unknown) => string;
+};
+
+const PROVIDERS: ProviderAdapter[] = [
+  {
+    name: "anthropic",
+    prefix: "anthropic",
+    envKey: "ANTHROPIC_API_KEY",
+    defaultModel: "anthropic/claude-haiku-4-5-20251001",
+    resolveModelId: (model) => (model.toLowerCase().startsWith("claude") ? model : undefined),
+    buildRequest: ({ modelId, messages, opts, apiKey, signal }) => {
+      const system = messages
+        .filter((message) => message.role === "system")
+        .map((message) => message.content)
+        .join("\n");
+      return {
+        url: "https://api.anthropic.com/v1/messages",
+        init: {
+          method: "POST",
+          signal,
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: modelId,
+            max_tokens: opts.maxTokens ?? 256,
+            ...(system ? { system } : {}),
+            messages: messages
+              .filter((message) => message.role !== "system")
+              .map((message) => ({ role: message.role, content: message.content })),
+          }),
+        },
+      };
+    },
+    extractText: (data) => {
+      const content = (data as { content?: Array<{ type?: string; text?: string }> }).content ?? [];
+      return content
+        .filter((block) => block.type === "text" && typeof block.text === "string")
+        .map((block) => block.text as string)
+        .join("");
+    },
+  },
+  {
+    name: "openai",
+    prefix: "openai",
+    envKey: "OPENAI_API_KEY",
+    defaultModel: "openai/gpt-5.4-mini",
+    resolveModelId: (model) => model,
+    buildRequest: ({ modelId, messages, opts, apiKey, signal }) => ({
+      url: "https://api.openai.com/v1/chat/completions",
+      init: {
+        method: "POST",
+        signal,
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: modelId,
+          max_completion_tokens: opts.maxTokens ?? 256,
+          messages,
+        }),
+      },
+    }),
+    extractText: (data) => (data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content ?? "",
+  },
+  {
+    name: "openrouter",
+    prefix: "openrouter",
+    envKey: "OPENROUTER_API_KEY",
+    defaultModel: "openrouter/google/gemini-2.5-flash",
+    resolveModelId: () => undefined,
+    buildRequest: ({ modelId, messages, opts, apiKey, signal }) => ({
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      init: {
+        method: "POST",
+        signal,
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`,
+          "HTTP-Referer": "https://github.com/cliftonc/lastlight",
+          "X-Title": "Last Light",
+        },
+        body: JSON.stringify({
+          model: modelId,
+          max_tokens: opts.maxTokens ?? 256,
+          messages,
+        }),
+      },
+    }),
+    extractText: (data) => (data as { choices?: Array<{ message?: { content?: string } }> }).choices?.[0]?.message?.content ?? "",
+  },
+];
+
 /**
- * Make a single-turn LLM call and return the final assistant text.
+ * Make a provider-agnostic chat call and return the final assistant text.
  *
  * @throws if the relevant API key isn't set or the upstream returns non-2xx
  */
+export async function chat(
+  model: string,
+  messages: ChatMessage[],
+  opts: ChatOptions = {},
+): Promise<string> {
+  const { provider, modelId } = resolveProvider(model);
+  const adapter = adapterFor(provider);
+  return withRetry(async (signal) => {
+    const apiKey = apiKeyFor(adapter);
+    const { url, init } = adapter.buildRequest({ modelId, messages, opts, apiKey, signal });
+    const res = await fetch(url, init);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`${adapter.name} api ${res.status}: ${text}`);
+    }
+    const data = await res.json();
+    return adapter.extractText(data);
+  }, opts.timeoutMs ?? 30_000);
+}
+
+/** Compatibility wrapper for older single-turn call sites. */
 export async function callLlm(
   model: string,
   systemPrompt: string,
   userPrompt: string,
   opts: CallLlmOptions = {},
 ): Promise<string> {
-  const { provider, modelId } = resolveProvider(model);
-  const call = (signal: AbortSignal) => {
-    if (provider === "anthropic") return callAnthropic(modelId, systemPrompt, userPrompt, opts, signal);
-    if (provider === "openrouter") return callOpenrouter(modelId, systemPrompt, userPrompt, opts, signal);
-    return callOpenai(modelId, systemPrompt, userPrompt, opts, signal);
-  };
-  return withRetry(call, opts.timeoutMs ?? 30_000);
+  return chat(model, [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ], opts);
 }
 
 /**
  * Single retry on transient upstream failures. The screener and classifier
  * call this inline on every incoming event, so a single 429/503 from the
  * provider would otherwise silently drop the event and break routing.
- * One retry with a fixed 750ms delay covers the common transient cases at
- * negligible latency. We don't retry 4xx other than 429 — those are real
- * errors (bad model id, malformed request) where retry just hides the bug.
  */
 async function withRetry(
   call: (signal: AbortSignal) => Promise<string>,
@@ -73,35 +201,26 @@ async function withRetry(
     }
   }
   // Unreachable — loop either returns or throws.
-  throw new Error("callLlm: retry loop fell through");
+  throw new Error("chat: retry loop fell through");
 }
 
 /**
  * Resolve the model id for a tiny one-shot helper call (classifier / screener).
- * Prefers explicit per-task overrides from OPENCODE_MODELS, then a small model
- * matching whichever provider API key is set — so the helpers work on an
- * OPENAI-only or OPENROUTER-only deployment without crashing on a hardcoded
- * Anthropic id.
- *
- * Priority when multiple keys are set: anthropic > openai > openrouter.
- * Anthropic/OpenAI go to the source; OpenRouter is only chosen when it's
- * the *only* configured key, to avoid paying OpenRouter's markup when a
- * direct provider key is already available.
+ * Prefers explicit per-task overrides from OPENCODE_MODELS, then the first
+ * configured provider in PROVIDERS order. That registry is the single source
+ * of precedence (currently anthropic > openai > openrouter).
  */
 export function defaultFastModel(taskType?: string): string {
   if (taskType) {
     const override = readOpencodeModelOverride(taskType);
     if (override) return override;
   }
-  const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
-  const hasOpenai = !!process.env.OPENAI_API_KEY;
-  const hasOpenrouter = !!process.env.OPENROUTER_API_KEY;
-  if (hasAnthropic) return "anthropic/claude-haiku-4-5-20251001";
-  if (hasOpenai) return "openai/gpt-5.4-mini";
-  if (hasOpenrouter) return "openrouter/google/gemini-2.5-flash";
-  // No keys set — fall back to the OpenAI default; callOpenai will then
-  // throw a clear "OPENAI_API_KEY not set" error at call time.
-  return "openai/gpt-5.4-mini";
+  for (const adapter of PROVIDERS) {
+    if (process.env[adapter.envKey]) return adapter.defaultModel;
+  }
+  // No keys set — fall back to the OpenAI default; chat() will then throw a
+  // clear "OPENAI_API_KEY not set" error at call time.
+  return adapterFor("openai").defaultModel;
 }
 
 function readOpencodeModelOverride(taskType: string): string | undefined {
@@ -116,140 +235,32 @@ function readOpencodeModelOverride(taskType: string): string | undefined {
   }
 }
 
-export function resolveProvider(model: string): { provider: "anthropic" | "openai" | "openrouter"; modelId: string } {
+export function resolveProvider(model: string): { provider: ProviderName; modelId: string } {
   const slash = model.indexOf("/");
   if (slash > 0) {
     const head = model.slice(0, slash).toLowerCase();
     const tail = model.slice(slash + 1);
-    if (head === "anthropic") return { provider: "anthropic", modelId: tail };
-    if (head === "openai") return { provider: "openai", modelId: tail };
-    // OpenRouter ids are nested: "openrouter/<vendor>/<model>". The
-    // OpenRouter API expects "<vendor>/<model>" in the body, which is
-    // exactly the tail after stripping our prefix.
-    if (head === "openrouter") return { provider: "openrouter", modelId: tail };
-    // An explicit prefix we don't handle — fail loudly so the caller
-    // notices instead of silently sending e.g. `mistral/large-latest`
-    // as an OpenAI model id and getting a confusing 404.
+    const adapter = PROVIDERS.find((candidate) => candidate.prefix === head);
+    if (adapter) return { provider: adapter.name, modelId: tail };
     throw new Error(`llm helper: unsupported provider prefix "${head}" (only "anthropic", "openai", and "openrouter" are supported)`);
   }
-  // Unprefixed — guess from common model name shapes.
-  const lower = model.toLowerCase();
-  if (lower.startsWith("claude")) return { provider: "anthropic", modelId: model };
+
+  for (const adapter of PROVIDERS) {
+    const modelId = adapter.resolveModelId(model);
+    if (modelId) return { provider: adapter.name, modelId };
+  }
+
   return { provider: "openai", modelId: model };
 }
 
-async function callAnthropic(
-  modelId: string,
-  systemPrompt: string,
-  userPrompt: string,
-  opts: CallLlmOptions,
-  signal: AbortSignal,
-): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    signal,
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: modelId,
-      max_tokens: opts.maxTokens ?? 256,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`anthropic api ${res.status}: ${text}`);
-  }
-  const data = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
-  return (data.content ?? [])
-    .filter((c) => c.type === "text" && typeof c.text === "string")
-    .map((c) => c.text as string)
-    .join("");
+function adapterFor(provider: ProviderName): ProviderAdapter {
+  const adapter = PROVIDERS.find((candidate) => candidate.name === provider);
+  if (!adapter) throw new Error(`llm helper: unsupported provider "${provider}"`);
+  return adapter;
 }
 
-async function callOpenai(
-  modelId: string,
-  systemPrompt: string,
-  userPrompt: string,
-  opts: CallLlmOptions,
-  signal: AbortSignal,
-): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY not set");
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    signal,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: modelId,
-      max_completion_tokens: opts.maxTokens ?? 256,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`openai api ${res.status}: ${text}`);
-  }
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  return data.choices?.[0]?.message?.content ?? "";
-}
-
-/**
- * OpenRouter speaks the OpenAI chat-completions schema but routes to many
- * underlying providers, so we use `max_tokens` (the cross-provider field)
- * instead of OpenAI's newer `max_completion_tokens` — the latter isn't
- * forwarded to non-OpenAI backends.
- *
- * `HTTP-Referer` / `X-Title` are optional but OpenRouter recommends them
- * for usage attribution on their dashboard; harmless when omitted.
- */
-async function callOpenrouter(
-  modelId: string,
-  systemPrompt: string,
-  userPrompt: string,
-  opts: CallLlmOptions,
-  signal: AbortSignal,
-): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("OPENROUTER_API_KEY not set");
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    signal,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-      "HTTP-Referer": "https://github.com/cliftonc/lastlight",
-      "X-Title": "Last Light",
-    },
-    body: JSON.stringify({
-      model: modelId,
-      max_tokens: opts.maxTokens ?? 256,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`openrouter api ${res.status}: ${text}`);
-  }
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-  return data.choices?.[0]?.message?.content ?? "";
+function apiKeyFor(adapter: ProviderAdapter): string {
+  const apiKey = process.env[adapter.envKey];
+  if (!apiKey) throw new Error(`${adapter.envKey} not set`);
+  return apiKey;
 }
