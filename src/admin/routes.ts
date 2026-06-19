@@ -861,9 +861,17 @@ export function createAdminRoutes(
       // One transaction: respond 'rejected' + fail the run.
       db.runs.resolveGateAndFail(id, "admin", body.reason);
     } else {
-      // One transaction: respond 'approved' + flip the run back to running.
-      // The long-running re-dispatch happens after the commit.
-      const workflowRun = db.runs.resolveGateAndResume(id, "admin");
+      // Record the approval, then let resumeWorkflow flip the run back to
+      // `running` — but only as part of an actual dispatch. resumeWorkflow
+      // validates the target (GitHub App present, triggerId is an
+      // owner/repo#N issue) and calls setRunning right before dispatching, so
+      // a non-resumable approval (no resumeWorkflow wired, App down, or a
+      // non-issue trigger) leaves the run paused rather than flipping it to
+      // `running` with no worker. We deliberately do NOT use the atomic
+      // resolveGateAndResume here: unlike the GitHub/Slack path, the dashboard
+      // can't prove a dispatch will follow before responding.
+      db.approvals.respond(id, "approved", "admin", body.reason);
+      const workflowRun = db.runs.getRun(approval.workflowRunId);
       if (workflowRun && config.resumeWorkflow) {
         config.resumeWorkflow(workflowRun, "admin").catch((err) => {
           console.error(`[admin] Failed to resume workflow ${workflowRun.id}:`, err);

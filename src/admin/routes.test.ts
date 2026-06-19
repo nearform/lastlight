@@ -668,3 +668,89 @@ describe("GET /sessions — content filter + liveness", () => {
     expect(byId["exec-task-other"]).toBe(false);
   });
 });
+
+describe("POST /approvals/:id/respond", () => {
+  // Build a db whose approval/run sub-stores record the lifecycle mutations
+  // the approval route can issue, so a test can assert which ones fired.
+  function makeApprovalDb(over: { approval?: any; run?: any } = {}) {
+    const calls = {
+      respond: [] as any[],
+      resolveGateAndResume: [] as any[],
+      resolveGateAndFail: [] as any[],
+    };
+    const approval = "approval" in over ? over.approval : { id: "appr-1", status: "pending", workflowRunId: "run-1" };
+    const run = "run" in over ? over.run : { id: "run-1", workflowName: "build", triggerId: "o/r#3", issueNumber: 3 };
+    const db = {
+      ...((mockDb as unknown) as Record<string, unknown>),
+      approvals: {
+        ...((mockDb as unknown as { approvals: Record<string, unknown> }).approvals),
+        getById: vi.fn(() => approval),
+        respond: vi.fn((...args: any[]) => { calls.respond.push(args); }),
+      },
+      runs: {
+        ...((mockDb as unknown as { runs: Record<string, unknown> }).runs),
+        getRun: vi.fn(() => run),
+        resolveGateAndResume: vi.fn((...args: any[]) => { calls.resolveGateAndResume.push(args); return run; }),
+        resolveGateAndFail: vi.fn((...args: any[]) => { calls.resolveGateAndFail.push(args); return run; }),
+      },
+    } as unknown as StateDb;
+    return { db, calls };
+  }
+
+  async function respond(db: StateDb, id: string, payload: object, cfg: Partial<AdminConfig> = {}) {
+    const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "", ...cfg }));
+    return request(app, `/approvals/${id}/respond`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  it("404s when the approval is missing", async () => {
+    const { db } = makeApprovalDb({ approval: null });
+    const res = await respond(db, "nope", { decision: "approved" });
+    expect(res.status).toBe(404);
+  });
+
+  it("400s when the approval is already resolved", async () => {
+    const { db } = makeApprovalDb({ approval: { id: "appr-1", status: "approved", workflowRunId: "run-1" } });
+    const res = await respond(db, "appr-1", { decision: "approved" });
+    expect(res.status).toBe(400);
+  });
+
+  it("approves and dispatches a resume when resumeWorkflow is wired", async () => {
+    const { db, calls } = makeApprovalDb();
+    const resumeWorkflow = vi.fn(async () => {});
+    const res = await respond(db, "appr-1", { decision: "approved" }, { resumeWorkflow });
+    expect(res.status).toBe(200);
+    // The approval is recorded and the resume helper is handed the run...
+    expect(calls.respond).toEqual([["appr-1", "approved", "admin", undefined]]);
+    expect(resumeWorkflow).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "run-1" }),
+      "admin",
+    );
+    // ...and the route does NOT pre-flip the run to running via the atomic op —
+    // resumeWorkflow owns the status flip so it only happens with a dispatch.
+    expect(calls.resolveGateAndResume).toEqual([]);
+  });
+
+  it("records the approval WITHOUT flipping the run to running when no resume can be dispatched", async () => {
+    // Regression (PR #105 review): the atomic approve+resume flipped the run to
+    // `running` even when no worker would be dispatched (no resumeWorkflow
+    // wired, App down, or a non-issue trigger), orphaning the row. The approval
+    // must be recorded, but the run must NOT become `running`.
+    const { db, calls } = makeApprovalDb();
+    const res = await respond(db, "appr-1", { decision: "approved" }); // no resumeWorkflow
+    expect(res.status).toBe(200);
+    expect(calls.respond).toEqual([["appr-1", "approved", "admin", undefined]]);
+    expect(calls.resolveGateAndResume).toEqual([]);
+  });
+
+  it("rejects by failing the run atomically", async () => {
+    const { db, calls } = makeApprovalDb();
+    const res = await respond(db, "appr-1", { decision: "rejected", reason: "too risky" });
+    expect(res.status).toBe(200);
+    expect(calls.resolveGateAndFail).toEqual([["appr-1", "admin", "too risky"]]);
+    expect(calls.respond).toEqual([]);
+  });
+});

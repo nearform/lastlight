@@ -408,8 +408,11 @@ export class WorkflowRunStore {
    * Approve a gate and resume its run, atomically. Reads the approval to find
    * its run, records the `approved` response, and flips the run back to
    * `running` in one transaction; returns the run so the caller can dispatch.
-   * This is the SINGLE `respond('approved')` call for both the GitHub/Slack
-   * path (`index.ts`) and the dashboard path (`admin/routes.ts`).
+   * Used by the GitHub/Slack path (`index.ts`), which validates the dispatch
+   * target BEFORE calling this so the flip to `running` is always followed by a
+   * dispatch. The dashboard path does NOT use this — it can't prove a dispatch
+   * will follow before responding, so it records the approval and lets
+   * `resumeWorkflow` flip the run only as part of an actual dispatch.
    */
   resolveGateAndResume(approvalId: string, responder: string): WorkflowRun | null {
     return this.db.transaction(() => {
