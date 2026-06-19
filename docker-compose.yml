@@ -205,6 +205,13 @@ services:
 
 volumes:
   agent-data:       # contains: lastlight.db, agent-sessions/, sandboxes/, secrets/, logs/, proxy/
+  # Shared package-manager download cache (npm/pnpm/yarn), mounted at /cache in
+  # every dynamically-created sandbox container by src/sandbox/docker.ts so
+  # repeated installs reuse already-fetched tarballs (issue #107). Declared
+  # here so the stack manages its lifecycle; the agent service does not mount
+  # it. Override the name with LASTLIGHT_PKG_CACHE_VOLUME (defaults to the
+  # compose-prefixed `lastlight_pkg-cache`).
+  pkg-cache:
   caddy-data:
   caddy-config:
 

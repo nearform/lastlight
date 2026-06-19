@@ -79,6 +79,8 @@ export type WorkspaceMount =
   | { type: "volume-subpath"; volume: string; subpath: string };
 
 const WORKSPACE_DIR = "/home/agent/workspace";
+/** Shared package-manager download cache mount (issue #107). */
+const PKG_CACHE_DIR = "/cache";
 
 export class DockerSandbox {
   private config: SandboxConfig;
@@ -134,6 +136,31 @@ export class DockerSandbox {
         `type=volume,source=${volume},target=${WORKSPACE_DIR},volume-subpath=${subpath}`,
       );
     }
+
+    // Shared package-manager cache, mounted at /cache and shared across every
+    // sandbox (issue #107). Each ecosystem's download cache is content-
+    // addressed, so sharing across repos is safe and avoids re-fetching the
+    // same tarballs on every run. We point npm / pnpm / yarn at subdirs of it
+    // via env below; the entrypoint chowns them to the agent user. This is the
+    // *download* cache only — per-workspace `node_modules` stays per-workspace
+    // (a shared store can't hardlink across separate container mounts anyway).
+    //
+    // A Docker named volume (auto-created on first use); override the name with
+    // LASTLIGHT_PKG_CACHE_VOLUME. In local path-mode this is still a named
+    // volume — it needs no host-path view, so the volume/bind split that the
+    // workspace mount needs doesn't apply here.
+    const pkgCacheVolume = process.env.LASTLIGHT_PKG_CACHE_VOLUME || "lastlight_pkg-cache";
+    dockerArgs.push("-v", `${pkgCacheVolume}:${PKG_CACHE_DIR}`);
+    // Point each package manager at its shared subdir. npm reads npm_config_cache;
+    // pnpm reads npm-style env config (npm_config_store_dir → store-dir); yarn
+    // (classic + berry) reads YARN_CACHE_FOLDER. The agent already picks the PM
+    // from the repo's lockfile (see skills/pr-review/SKILL.md), so all three are
+    // wired regardless of which one a given repo uses.
+    dockerArgs.push(
+      "-e", `npm_config_cache=${PKG_CACHE_DIR}/npm`,
+      "-e", `npm_config_store_dir=${PKG_CACHE_DIR}/pnpm`,
+      "-e", `YARN_CACHE_FOLDER=${PKG_CACHE_DIR}/yarn`,
+    );
 
     // Resolve git mounts for worktrees (if .git is a file pointing elsewhere).
     // In volume-subpath mode these are still emitted as bind mounts; the

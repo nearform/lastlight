@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { isAbsolute, join, relative, resolve, sep } from "path";
 import { DockerSandbox, type WorkspaceMount } from "./docker.js";
 
@@ -89,6 +89,11 @@ export function setupTaskWorktree(opts: {
     repo: string;
     branch: string;
     token: string;
+    /** Owning run id — stamped into a marker so a reused per-PR workspace
+     * refreshes across runs but is preserved between phases of one run. */
+    runId?: string;
+    /** Clone shallowly (`--depth 1 --single-branch`) for read-only workflows. */
+    shallow?: boolean;
   };
 }): string {
   const sandboxBase = resolve(opts.sandboxDir || join(opts.stateDir, "sandboxes"));
@@ -130,6 +135,11 @@ export async function createTaskSandbox(opts: {
     repo: string;
     branch: string;
     token: string;
+    /** Owning run id — stamped into a marker so a reused per-PR workspace
+     * refreshes across runs but is preserved between phases of one run. */
+    runId?: string;
+    /** Clone shallowly (`--depth 1 --single-branch`) for read-only workflows. */
+    shallow?: boolean;
   };
   /**
    * IP of the coredns sidecar to use as the sandbox's DNS resolver.
@@ -224,16 +234,39 @@ function isPathLike(value: string): boolean {
     value.startsWith("~");
 }
 
+/** Marker file (at the workspace root, outside the repo so `git clean` can't
+ * touch it) recording which run last provisioned this workspace. */
+const RUN_MARKER = ".lastlight-run";
+
+type PrePopulate = {
+  owner: string;
+  repo: string;
+  branch: string;
+  token: string;
+  runId?: string;
+  shallow?: boolean;
+};
+
 /**
- * Shallow-clone the repo into workDir at the given branch. Re-clones if the
- * workDir already contains a .git (cheaper than a full clone the second time
- * via `git fetch`, but rare — sandbox dirs are usually one-shot per taskId).
+ * Clone the repo into `<workDir>/<repo>` at the given branch.
+ *
+ * Three cases:
+ * - **Fresh dir** (no `.git`): clone. `--depth 1 --single-branch` for
+ *   read-only workflows (`pre.shallow`), `--depth 50` otherwise.
+ * - **Same run revisiting the workspace** (`.git` exists, run marker matches
+ *   `pre.runId`): preserve — this is a later phase of the same run reading
+ *   what an earlier phase wrote (architect's `plan.md`, the reviewer's
+ *   checkout). No git ops.
+ * - **A fresh run reusing an old per-PR workspace** (`.git` exists, marker
+ *   differs/absent): fetch + hard-reset to the remote branch + `git clean`
+ *   that **keeps `node_modules`** so the next `npm install` is incremental.
+ *   This is the re-review fast path from issue #107.
  */
 export { prePopulateWorkspace as __prePopulateWorkspaceForTest };
 
 function prePopulateWorkspace(
   workDir: string,
-  pre: { owner: string; repo: string; branch: string; token: string },
+  pre: PrePopulate,
 ): void {
   // Token shape is asserted in src/engine/git-auth.ts before we get here,
   // but re-check the narrow set here too — defense in depth, this string
@@ -249,27 +282,39 @@ function prePopulateWorkspace(
   // clone, and leaves room for `.lastlight/issue-N/` scratch space at
   // the workspace root.
   const repoDir = join(workDir, pre.repo);
-  // Repo dir might already exist from a resumed run — guard against
-  // git clone's "destination not empty" error by skipping when there's
-  // already a .git inside.
+  const markerPath = join(workDir, RUN_MARKER);
+  // Repo dir might already exist — from a later phase of the same run, or a
+  // *different* run reusing a stable per-PR workspace (issue #107).
   if (existsSync(join(repoDir, ".git"))) {
-    console.log(
-      `[sandbox] Pre-clone skipped: ${repoDir} already a git repo (resumed run).`,
-    );
+    const lastRun = readMarker(markerPath);
+    // Same run (or a caller that doesn't track runs): preserve the workspace
+    // exactly — earlier phases may have written uncommitted scratch here.
+    if (!pre.runId || lastRun === pre.runId) {
+      console.log(
+        `[sandbox] Pre-clone skipped: ${repoDir} already a git repo (same run).`,
+      );
+      return;
+    }
+    // Different run reusing this PR's workspace — refresh in place.
+    refreshExistingClone(repoDir, markerPath, pre);
     return;
   }
   const scrub = (s: unknown): string =>
     typeof s === "string" ? s.replaceAll(pre.token, "[REDACTED-TOKEN]") : "";
   const start = Date.now();
+  const depth = pre.shallow ? "1" : "50";
+  const shallowArgs = pre.shallow ? ["--single-branch"] : [];
   try {
     execFileSync(
       "git",
-      ["clone", "--branch", pre.branch, "--depth", "50", url, repoDir],
+      ["clone", "--branch", pre.branch, "--depth", depth, ...shallowArgs, url, repoDir],
       { stdio: "pipe", timeout: 120_000 },
     );
+    writeMarker(markerPath, pre.runId);
     const ms = Date.now() - start;
     console.log(
-      `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${repoDir} (${ms}ms)`,
+      `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${repoDir} ` +
+      `(depth ${depth}, ${ms}ms)`,
     );
   } catch (err: any) {
     const firstError = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
@@ -283,7 +328,7 @@ function prePopulateWorkspace(
       try {
         execFileSync(
           "git",
-          ["clone", "--depth", "50", url, repoDir],
+          ["clone", "--depth", depth, ...shallowArgs, url, repoDir],
           { stdio: "pipe", timeout: 120_000 },
         );
         execFileSync(
@@ -291,6 +336,7 @@ function prePopulateWorkspace(
           ["-C", repoDir, "checkout", "-b", pre.branch],
           { stdio: "pipe", timeout: 30_000 },
         );
+        writeMarker(markerPath, pre.runId);
         const ms = Date.now() - start;
         console.log(
           `[sandbox] Pre-cloned ${pre.owner}/${pre.repo} (default branch) into ${repoDir} ` +
@@ -315,6 +361,85 @@ function prePopulateWorkspace(
     console.warn(
       `[sandbox] Pre-clone of ${pre.owner}/${pre.repo}@${pre.branch} failed (${firstError}). ` +
       `Agent will need to clone via MCP.`,
+    );
+  }
+}
+
+function readMarker(markerPath: string): string | null {
+  try {
+    return readFileSync(markerPath, "utf-8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeMarker(markerPath: string, runId: string | undefined): void {
+  if (!runId) return;
+  try {
+    writeFileSync(markerPath, runId);
+  } catch {
+    // Best-effort — a missing marker just means the next reuse refreshes
+    // (the safe direction), never a wrong-preserve.
+  }
+}
+
+/**
+ * Refresh a reused per-PR workspace in place: fetch the branch, hard-reset the
+ * checkout to it, and `git clean` away stale tracked/untracked build output —
+ * but **keep `node_modules`** (and any nested ones) so the next install is
+ * incremental against a warm tree. The shared package cache (docker backend)
+ * lives on a separate mount and is untouched by `git clean`.
+ *
+ * On any failure we leave the workspace as-is and do NOT advance the marker,
+ * so the next run retries the refresh rather than reviewing a half-reset tree.
+ */
+function refreshExistingClone(
+  repoDir: string,
+  markerPath: string,
+  pre: PrePopulate,
+): void {
+  const scrub = (s: unknown): string =>
+    typeof s === "string" ? s.replaceAll(pre.token, "[REDACTED-TOKEN]") : "";
+  const url = `https://x-access-token:${pre.token}@github.com/${pre.owner}/${pre.repo}.git`;
+  const depth = pre.shallow ? ["--depth", "1"] : ["--depth", "50"];
+  const start = Date.now();
+  try {
+    // Fetch the branch from the authenticated URL directly so we don't depend
+    // on the stored remote (and never persist the token into .git/config).
+    execFileSync(
+      "git",
+      ["-C", repoDir, "fetch", ...depth, url, pre.branch],
+      { stdio: "pipe", timeout: 120_000 },
+    );
+    execFileSync(
+      "git",
+      ["-C", repoDir, "checkout", "-B", pre.branch, "FETCH_HEAD"],
+      { stdio: "pipe", timeout: 30_000 },
+    );
+    execFileSync(
+      "git",
+      ["-C", repoDir, "reset", "--hard", "FETCH_HEAD"],
+      { stdio: "pipe", timeout: 30_000 },
+    );
+    // -x removes ignored files (stale dist/, .turbo, coverage, …); -e keeps the
+    // dependency trees warm so install is incremental. `node_modules` with no
+    // leading slash matches at any depth (monorepos / workspaces).
+    execFileSync(
+      "git",
+      ["-C", repoDir, "clean", "-fdx", "-e", "node_modules"],
+      { stdio: "pipe", timeout: 60_000 },
+    );
+    writeMarker(markerPath, pre.runId);
+    const ms = Date.now() - start;
+    console.log(
+      `[sandbox] Refreshed reused workspace ${repoDir} → ${pre.branch} ` +
+      `(fetch+reset+clean, node_modules kept, ${ms}ms)`,
+    );
+  } catch (err: any) {
+    const reason = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
+    console.warn(
+      `[sandbox] Refresh of reused workspace ${repoDir} failed (${reason}). ` +
+      `Leaving it untouched; agent can re-fetch via MCP.`,
     );
   }
 }

@@ -406,6 +406,32 @@ Sandbox egress (docker backend only):
 - `LASTLIGHT_DNS_STRICT` / `LASTLIGHT_DNS_OPEN` — override the IP of the
   coredns sidecar passed to `docker run --dns ...` (defaults: `172.30.0.10`
   and `172.30.0.11`, matching the static IPs in docker-compose.yml).
+- `LASTLIGHT_PKG_CACHE_VOLUME` — docker named volume mounted at `/cache` in
+  every sandbox as the shared package-manager download cache (issue #107).
+  Default `lastlight_pkg-cache` (declared in docker-compose.yml). The
+  sandbox env points `npm_config_cache` → `/cache/npm`,
+  `npm_config_store_dir` (pnpm) → `/cache/pnpm`, and `YARN_CACHE_FOLDER` →
+  `/cache/yarn`; the agent picks the package manager from the repo's
+  lockfile (see `skills/pr-review/SKILL.md`), so repeated installs reuse
+  already-fetched tarballs regardless of which one a repo uses. This is the
+  *download* cache only — per-workspace `node_modules` stays per-workspace
+  (a shared store can't hardlink across separate container mounts). Disk is
+  bounded instead by per-PR workspace reuse (`PER_TARGET_REUSE_WORKFLOWS`
+  in `src/workflows/simple.ts`) plus #106's reaping.
+
+Sandbox workspace provisioning (issue #107):
+
+- **Shallow clone** — read-only workflows (everything except the
+  `repo-write` profiles `build` / `pr-fix` / `security-feedback`) pre-clone
+  at `--depth 1 --single-branch`; code-pushing workflows keep `--depth 50`.
+  See `gitSandboxAccessForWorkflow` (`src/workflows/runner.ts`) →
+  `prePopulateWorkspace` (`src/sandbox/index.ts`).
+- **Per-PR workspace reuse** — `pr-review` / `pr-fix` workspaces are keyed
+  by (repo, PR) and reused across runs. A `<workDir>/.lastlight-run` marker
+  records the owning run: same run → preserve the checkout for the next
+  phase; a different run reusing the dir → `git fetch` + `reset --hard` +
+  `git clean -fdx -e node_modules` (deps stay warm). See the workflows
+  guide's "taskId scoping" section.
 
 OpenTelemetry (optional):
 

@@ -275,6 +275,21 @@ ${repo}-${issueNumber}-${workflowName}-${runId.slice(0, 8)}
 `resume.ts` reconstructs the taskId from the stored `context.taskId` so
 a resumed run lands in the same sandbox dir the original started in.
 
+**Per-PR reuse exception (issue #107).** The workflows in
+`PER_TARGET_REUSE_WORKFLOWS` (`pr-review`, `pr-fix`) **drop** the run-id
+suffix — their taskId is `${repo}-${prNumber}-${workflowName}`, keyed by
+(repo, PR) rather than per-run. A re-review of the same PR (push →
+`synchronize`, cron PR-review fanout) therefore lands in the **same**
+sandbox dir, so `prePopulateWorkspace` does `git fetch` + `reset --hard` +
+`git clean -fdx -e node_modules` instead of a fresh 1.3G clone + full
+install, and N dirs/PR collapse to 1 (cutting the #106 churn at its
+source). `build` is excluded — it creates a new branch per run and must not
+reuse. Concurrency is held off by the dispatcher's
+`isRunning(skill, triggerId)` guard plus `runs.getByTrigger` reuse; the
+cross-run vs same-run distinction is made by a `<workDir>/.lastlight-run`
+marker stamped with the owning run id (same id → preserve the checkout for
+the next phase; different id → refresh). See `src/sandbox/index.ts`.
+
 ## Templates
 
 `templates.ts` renders phase prompts, approval-gate messages, and

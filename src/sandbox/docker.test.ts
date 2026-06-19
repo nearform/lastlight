@@ -3,7 +3,18 @@ import { EventEmitter } from "events";
 
 vi.mock("child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("child_process")>();
-  return { ...actual, spawn: vi.fn() };
+  return {
+    ...actual,
+    spawn: vi.fn(),
+    // create() runs `docker run` via execFileSync and polls readiness via
+    // execFile (promisified). Stub both so create() can be exercised without a
+    // real docker daemon.
+    execFileSync: vi.fn().mockReturnValue("container-xyz\n"),
+    execFile: vi.fn((_cmd: string, _args: string[], opts: unknown, cb?: unknown) => {
+      const done = (typeof opts === "function" ? opts : cb) as (e: unknown, r: unknown) => void;
+      done(null, { stdout: "", stderr: "" });
+    }),
+  };
 });
 
 vi.mock("fs", async (importOriginal) => {
@@ -11,10 +22,11 @@ vi.mock("fs", async (importOriginal) => {
   return { ...actual, existsSync: vi.fn().mockReturnValue(true), readFileSync: vi.fn().mockReturnValue("{}") };
 });
 
-import { spawn } from "child_process";
+import { spawn, execFileSync } from "child_process";
 import { DockerSandbox } from "./docker.js";
 
 const mockSpawn = vi.mocked(spawn);
+const mockExecFileSync = vi.mocked(execFileSync);
 
 function makeFakeChild() {
   const stdin = { write: vi.fn(), end: vi.fn() };
@@ -100,5 +112,50 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
     expect(shCmd).toContain("--sandbox none");
     expect(shCmd).not.toContain("--no-file-search");
     expect(shCmd).not.toContain("test prompt");
+  });
+});
+
+describe("DockerSandbox.create — shared package cache (issue #107)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue("container-xyz\n");
+  });
+
+  function dockerRunArgv(): string[] {
+    const call = mockExecFileSync.mock.calls.find(
+      (c) => Array.isArray(c[1]) && (c[1] as string[])[0] === "run",
+    );
+    return (call?.[1] as string[]) ?? [];
+  }
+
+  it("mounts the shared cache volume and wires npm/pnpm/yarn env", async () => {
+    const manager = new DockerSandbox({ imageName: "img", env: {} });
+    await manager.create({
+      taskId: "repo-1-pr-review",
+      worktreePath: "/tmp/work",
+      workspaceMount: { type: "bind", hostPath: "/tmp/work" },
+    });
+    const argv = dockerRunArgv();
+    expect(argv).toContain("lastlight_pkg-cache:/cache");
+    expect(argv).toContain("npm_config_cache=/cache/npm");
+    expect(argv).toContain("npm_config_store_dir=/cache/pnpm");
+    expect(argv).toContain("YARN_CACHE_FOLDER=/cache/yarn");
+  });
+
+  it("honours LASTLIGHT_PKG_CACHE_VOLUME override", async () => {
+    const prev = process.env.LASTLIGHT_PKG_CACHE_VOLUME;
+    process.env.LASTLIGHT_PKG_CACHE_VOLUME = "my-cache";
+    try {
+      const manager = new DockerSandbox({ imageName: "img", env: {} });
+      await manager.create({
+        taskId: "t",
+        worktreePath: "/tmp/work",
+        workspaceMount: { type: "bind", hostPath: "/tmp/work" },
+      });
+      expect(dockerRunArgv()).toContain("my-cache:/cache");
+    } finally {
+      if (prev === undefined) delete process.env.LASTLIGHT_PKG_CACHE_VOLUME;
+      else process.env.LASTLIGHT_PKG_CACHE_VOLUME = prev;
+    }
   });
 });

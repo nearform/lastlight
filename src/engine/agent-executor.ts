@@ -190,6 +190,8 @@ export async function executeAgent(
           repo: access.repo,
           branch: access.prePopulateBranch,
           token: mintedToken,
+          runId: access.runId,
+          shallow: access.shallow,
         }
       : undefined;
 
@@ -451,7 +453,7 @@ async function executeDocker(
     taskId: string;
     stateDir: string;
     env: Record<string, string>;
-    prePopulate?: { owner: string; repo: string; branch: string; token: string };
+    prePopulate?: { owner: string; repo: string; branch: string; token: string; runId?: string; shallow?: boolean };
     access?: GitSandboxAccess;
     onSessionId?: (sessionId: string) => void;
   },

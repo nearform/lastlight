@@ -62,12 +62,30 @@ export interface SimpleWorkflowRequest {
   prePopulateBranch?: string;
 }
 
-function workflowScopedTaskId(
+/**
+ * Workflows whose workspace is keyed by **(repo, PR)** rather than per-run.
+ * For these the taskId drops the run-id suffix so re-reviews of the same PR
+ * (push → `synchronize`, cron PR-review fanout) reuse one sandbox dir — a
+ * warm `node_modules` + an incremental `git fetch` instead of a fresh
+ * 1.3G clone + full install each time, and N dirs/PR collapse to 1 (issue
+ * #107, cutting the #106 churn at its source). Concurrency is held off by
+ * the dispatcher's `isRunning(skill, triggerId)` guard plus
+ * `runs.getByTrigger` reuse — two runs never share the dir live; the
+ * cross-run refresh in `prePopulateWorkspace` resets it cleanly between them.
+ * `build` is excluded — it creates a new branch per run and must not reuse.
+ */
+export const PER_TARGET_REUSE_WORKFLOWS = new Set(["pr-review", "pr-fix"]);
+
+export function workflowScopedTaskId(
   repo: string,
   number: number | undefined,
   workflowName: string,
   workflowId: string,
 ): string {
+  // Reusable per-PR workspaces are keyed by (repo, PR) only — no run suffix.
+  if (number !== undefined && PER_TARGET_REUSE_WORKFLOWS.has(workflowName)) {
+    return `${repo}-${number}-${workflowName}`;
+  }
   const suffix = workflowId.slice(0, 8);
   return number !== undefined
     ? `${repo}-${number}-${workflowName}-${suffix}`

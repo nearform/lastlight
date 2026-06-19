@@ -88,6 +88,7 @@ export function gitSandboxAccessForWorkflow(
   owner: string,
   repo: string,
   prePopulateBranch?: string,
+  runId?: string,
 ): GitSandboxAccess {
   const profile = gitAccessProfileForWorkflow(workflowName);
   return {
@@ -100,6 +101,11 @@ export function gitSandboxAccessForWorkflow(
     // entering the sandbox.
     allowMcpAppAuth: false,
     prePopulateBranch,
+    runId,
+    // Read-only workflows never need git history — clone at --depth 1. Only
+    // the code-pushing profiles (build / pr-fix / security-feedback) keep the
+    // deeper clone for rebase/amend headroom.
+    shallow: profile !== "repo-write",
   };
 }
 
@@ -146,7 +152,7 @@ export async function runWorkflow(
   const prePopulateBranch = typeof ctx.prePopulateBranch === "string"
     ? ctx.prePopulateBranch
     : undefined;
-  const githubAccess = gitSandboxAccessForWorkflow(definition.name, ctx.owner, ctx.repo, prePopulateBranch);
+  const githubAccess = gitSandboxAccessForWorkflow(definition.name, ctx.owner, ctx.repo, prePopulateBranch, workflowId);
   const notify = callbacks.postComment || (async () => {});
   const reporter = callbacks.reporter;
   const onStart = callbacks.onPhaseStart || (async () => {});

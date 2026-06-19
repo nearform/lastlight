@@ -21,6 +21,18 @@ chown agent:agent "$AGENT_HOME"
 mkdir -p "$AGENT_HOME/.config"
 chown agent:agent "$AGENT_HOME/.config"
 
+# ── Shared package-manager cache (issue #107) ──
+# /cache is a Docker named volume shared across every sandbox so npm / pnpm /
+# yarn reuse already-downloaded tarballs. A freshly-created volume is root-owned;
+# chown the per-PM subdirs (non-recursive — existing children are already
+# agent-owned from prior runs) so the agent user can write to them.
+if [ -d /cache ]; then
+  for sub in npm pnpm yarn; do
+    mkdir -p "/cache/$sub"
+    chown agent:agent "/cache/$sub" 2>/dev/null || true
+  done
+fi
+
 # ── App PEM: keep shared copy unreadable by the agent by default ──
 if [ -f /data/secrets/app.pem ]; then
   chmod 600 /data/secrets/app.pem 2>/dev/null || true

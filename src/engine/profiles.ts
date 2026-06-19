@@ -164,6 +164,23 @@ export interface GitSandboxAccess {
    * branch fresh.
    */
   prePopulateBranch?: string;
+  /**
+   * The owning workflow run id. Stamped into a `<workDir>/.lastlight-run`
+   * marker by the pre-clone so a reused per-PR workspace (see
+   * `workflowScopedTaskId` for pr-review / pr-fix) can tell "next phase of
+   * the same run" (preserve the checkout — build's plan.md lives here) from
+   * "a fresh run reusing an old PR dir" (fetch + hard-reset + clean, keeping
+   * node_modules warm). Unset for non-workflow callers, which keep the old
+   * skip-if-`.git`-exists behaviour.
+   */
+  runId?: string;
+  /**
+   * Clone shallowly (`--depth 1 --single-branch`). Set for read-only
+   * workflows that never need history; repo-write workflows (build, pr-fix,
+   * security-feedback) keep the deeper `--depth 50` clone so rebases / amends
+   * have headroom.
+   */
+  shallow?: boolean;
 }
 
 export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPermissions> = {
