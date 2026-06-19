@@ -135,12 +135,22 @@ export class ApprovalStore {
     return rows.map((r) => this.deserialize(r));
   }
 
-  /** Record the response to an approval */
-  respond(id: string, status: 'approved' | 'rejected', respondedBy: string, response?: string): void {
+  /**
+   * Record the response to a still-pending approval.
+   *
+   * Returns the number of rows changed so aggregate lifecycle operations can
+   * use this as a compare-and-set guard: if two responders race, only the
+   * first pending row update succeeds and the loser must not resume/fail the
+   * workflow a second time.
+   */
+  respond(id: string, status: 'approved' | 'rejected', respondedBy: string, response?: string): number {
     const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE workflow_approvals SET status = ?, responded_by = ?, response = ?, responded_at = ? WHERE id = ?
+    const result = this.db.prepare(`
+      UPDATE workflow_approvals
+        SET status = ?, responded_by = ?, response = ?, responded_at = ?
+      WHERE id = ? AND status = 'pending'
     `).run(status, respondedBy, response ?? null, now, id);
+    return result.changes;
   }
 
   private deserialize(row: Record<string, unknown>): WorkflowApproval {

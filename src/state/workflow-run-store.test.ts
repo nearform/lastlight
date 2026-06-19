@@ -157,9 +157,45 @@ describe("resolveGateAndResume — approve path", () => {
   it("throws on an unknown approval id", () => {
     expect(() => db.runs.resolveGateAndResume("no-such-approval", "bob")).toThrow();
   });
+
+  it("does not resume a stale approval that was already resolved", () => {
+    const runId = makeRun({ status: "paused" });
+    const approvalId = randomUUID();
+    db.approvals.create({
+      id: approvalId,
+      workflowRunId: runId,
+      gate: "post_architect",
+      summary: "Plan ready",
+      createdAt: new Date().toISOString(),
+    });
+
+    db.runs.resolveGateAndFail(approvalId, "carol", "plan incomplete");
+
+    expect(() => db.runs.resolveGateAndResume(approvalId, "bob")).toThrow("not pending");
+    expect(db.runs.getRun(runId)!.status).toBe("failed");
+    expect(db.approvals.getById(approvalId)!.status).toBe("rejected");
+  });
 });
 
 describe("resolveGateAndFail — reject path", () => {
+  it("does not fail a stale approval that was already approved", () => {
+    const runId = makeRun({ status: "paused" });
+    const approvalId = randomUUID();
+    db.approvals.create({
+      id: approvalId,
+      workflowRunId: runId,
+      gate: "post_architect",
+      summary: "Plan ready",
+      createdAt: new Date().toISOString(),
+    });
+
+    db.runs.resolveGateAndResume(approvalId, "bob");
+
+    expect(() => db.runs.resolveGateAndFail(approvalId, "carol", "too late")).toThrow("not pending");
+    expect(db.runs.getRun(runId)!.status).toBe("running");
+    expect(db.approvals.getById(approvalId)!.status).toBe("approved");
+  });
+
   it("rejects the gate and fails the run", () => {
     const runId = makeRun({ status: "paused" });
     const approvalId = randomUUID();
@@ -179,6 +215,24 @@ describe("resolveGateAndFail — reject path", () => {
     expect(approval!.status).toBe("rejected");
     expect(approval!.respondedBy).toBe("carol");
     expect(approval!.response).toBe("plan incomplete");
+    expect(db.runs.getRun(runId)!.context).toEqual({ error: "Rejected: plan incomplete" });
+  });
+
+  it("records a fallback error annotation when rejection has no reason", () => {
+    const runId = makeRun({ status: "paused" });
+    const approvalId = randomUUID();
+    db.approvals.create({
+      id: approvalId,
+      workflowRunId: runId,
+      gate: "post_architect",
+      summary: "Plan ready",
+      createdAt: new Date().toISOString(),
+    });
+
+    const run = db.runs.resolveGateAndFail(approvalId, "carol");
+
+    expect(run!.status).toBe("failed");
+    expect(run!.context).toEqual({ error: "Rejected: no reason given" });
   });
 });
 

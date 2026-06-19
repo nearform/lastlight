@@ -415,7 +415,10 @@ export class WorkflowRunStore {
     return this.db.transaction(() => {
       const approval = this.approvals.getById(approvalId);
       if (!approval) throw new Error(`approval ${approvalId} not found`);
-      this.approvals.respond(approvalId, "approved", responder);
+      const changed = this.approvals.respond(approvalId, "approved", responder);
+      if (changed !== 1) {
+        throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
+      }
       this.setRunning(approval.workflowRunId);
       return this.getRun(approval.workflowRunId);
     })();
@@ -430,8 +433,11 @@ export class WorkflowRunStore {
     return this.db.transaction(() => {
       const approval = this.approvals.getById(approvalId);
       if (!approval) throw new Error(`approval ${approvalId} not found`);
-      this.approvals.respond(approvalId, "rejected", responder, reason);
-      this.flipFinished(approval.workflowRunId, "failed", reason ? `Rejected: ${reason}` : undefined);
+      const changed = this.approvals.respond(approvalId, "rejected", responder, reason);
+      if (changed !== 1) {
+        throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
+      }
+      this.flipFinished(approval.workflowRunId, "failed", `Rejected: ${reason || "no reason given"}`);
       return this.getRun(approval.workflowRunId);
     })();
   }
