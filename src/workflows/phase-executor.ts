@@ -257,7 +257,7 @@ export async function runPhase(
   };
   return withSpan("lastlight.workflow.phase", attrs, async (span) => {
     if (db) {
-      const status = db.shouldRunPhase(dedupKey, triggerId, workflowRunId);
+      const status = db.executions.shouldRunPhase(dedupKey, triggerId, workflowRunId);
 
       if (status === "running") {
         const alive = await isContainerAlive(taskId);
@@ -267,7 +267,7 @@ export async function runPhase(
           return { skipped: true, reason: "running" };
         }
         console.log(`[runner] Phase ${phaseName} was running but container is dead — cleaning up`);
-        db.markStaleAsFailed(dedupKey, triggerId, workflowRunId);
+        db.executions.markStaleAsFailed(dedupKey, triggerId, workflowRunId);
       } else if (status === "done") {
         console.log(`[runner] Phase ${phaseName} already completed successfully — skipping`);
         span?.addEvent("lastlight.workflow.phase.skipped", { reason: "done" });
@@ -275,7 +275,7 @@ export async function runPhase(
       }
 
       const executionId = randomUUID();
-      db.recordStart({
+      db.executions.recordStart({
         id: executionId,
         triggerType: "webhook",
         triggerId,
@@ -298,14 +298,14 @@ export async function runPhase(
           githubAccess,
           onSessionId: (sessionId) => {
             try {
-              db.recordSessionId(executionId, sessionId);
+              db.executions.recordSessionId(executionId, sessionId);
             } catch (err) {
               console.warn(`[runner] Failed to persist session id mid-run for ${phaseName}:`, err);
             }
           },
         });
 
-        db.recordFinish(executionId, {
+        db.executions.recordFinish(executionId, {
           success: result.success,
           error: result.error,
           turns: result.turns,
@@ -530,7 +530,7 @@ export class PhaseExecutor {
       return "continue";
     }
     if (rule.action === "fail") {
-      this.run.db?.markLatestAsFailed(
+      this.run.db?.executions.markLatestAsFailed(
         `${this.run.definition.name}:${phase.name}`,
         this.run.triggerId,
         rule.message || "BLOCKED",
@@ -544,7 +544,13 @@ export class PhaseExecutor {
     return "continue";
   }
 
-  /** Persist + pause for an approval/reply gate. */
+  /**
+   * Persist + pause for an approval/reply gate, atomically. The approval
+   * insert, the `waiting_approval` phase marker, the optional scratch persist
+   * (loops record their iteration/cycle state here), and the run pause all
+   * happen in one transaction via `db.runs.pauseForApproval` — a partial
+   * failure can't leave the run paused without its gate, or vice versa.
+   */
   private async pauseForApproval(
     stepKey: string,
     gate: string,
@@ -552,26 +558,28 @@ export class PhaseExecutor {
     kind: "approve" | "reply",
     message: string | undefined,
     extraCtx: Partial<TemplateContext>,
+    scratchPatch?: Record<string, unknown>,
   ): Promise<void> {
     const { db, workflowId, ctx } = this.run;
     if (!db || !workflowId) return;
     const approvalId = randomUUID();
-    db.createApproval({
-      id: approvalId,
-      workflowRunId: workflowId,
-      gate,
-      summary,
-      kind,
-      requestedBy: ctx.sender,
-      createdAt: new Date().toISOString(),
-    });
-    db.updateWorkflowPhase(workflowId, "waiting_approval", {
-      phase: "waiting_approval",
-      timestamp: new Date().toISOString(),
-      success: true,
-      summary: `Waiting for ${kind === "reply" ? "reply" : "approval"}: ${gate} (${approvalId})`,
-    });
-    db.pauseWorkflowRun(workflowId);
+    db.runs.pauseForApproval(
+      workflowId,
+      {
+        id: approvalId,
+        workflowRunId: workflowId,
+        gate,
+        summary,
+        kind,
+        requestedBy: ctx.sender,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        phase: "waiting_approval",
+        summary: `Waiting for ${kind === "reply" ? "reply" : "approval"}: ${gate} (${approvalId})`,
+      },
+      scratchPatch,
+    );
     await this.reporter.step(stepKey, "awaiting", message, extraCtx, { alsoNote: true });
   }
 
@@ -631,7 +639,7 @@ export class PhaseExecutor {
           await this.reporter.message(phase.messages?.on_skipped_done);
           return { results, status: "failed", aborted: true };
         }
-        const prevOutput = db?.getPhaseOutput(`${wf}:${reviewLabel}`, triggerId, workflowId) ?? "";
+        const prevOutput = db?.executions.getPhaseOutput(`${wf}:${reviewLabel}`, triggerId, workflowId) ?? "";
         verdict = parseReviewerVerdict(prevOutput).verdict;
         results.push({ phase: reviewLabel, success: true, output: "Already completed" });
       } else {
@@ -647,7 +655,7 @@ export class PhaseExecutor {
         }
         // Persist the review output so a resumed run can re-derive this verdict.
         const execId = "executionId" in rr ? rr.executionId : undefined;
-        if (execId && db) db.recordOutputText(execId, reviewerOutput);
+        if (execId && db) db.executions.recordOutputText(execId, reviewerOutput);
       }
 
       const isApproved = verdict === "APPROVED";
@@ -666,11 +674,10 @@ export class PhaseExecutor {
         // exactly this cycle's gate.
         if (this.resolver.gateEnabled(loop.approval_gate) && db && workflowId) {
           const fixLabel = PhaseRef.fix(phaseName, fixCycles).format();
-          const fixAlreadyDone = db.shouldRunPhase(`${wf}:${fixLabel}`, triggerId, workflowId) === "done";
+          const fixAlreadyDone = db.executions.shouldRunPhase(`${wf}:${fixLabel}`, triggerId, workflowId) === "done";
           const resumingThisGate = pausedAtCycle === fixCycles;
           if (!fixAlreadyDone && !resumingThisGate) {
             scratch[loopKey] = { ...slot, pausedAtCycle: fixCycles };
-            db.updateWorkflowRunScratch(workflowId, { [loopKey]: scratch[loopKey] });
             await this.pauseForApproval(
               reviewLabel,
               loop.approval_gate!,
@@ -678,6 +685,7 @@ export class PhaseExecutor {
               "approve",
               loop.messages?.on_pause_for_approval,
               { cycle: fixCycles, maxCycles: MAX_CYCLES, gateKey: loop.approval_gate },
+              { [loopKey]: scratch[loopKey] },
             );
             return { results, status: "succeeded", paused: true };
           }
@@ -776,7 +784,7 @@ export class PhaseExecutor {
     let complete = false;
     let previousOutput =
       (scratchSlot.lastOutputExecutionId && db
-        ? db.getExecutionOutput(scratchSlot.lastOutputExecutionId as string) ?? ""
+        ? db.executions.getExecutionOutput(scratchSlot.lastOutputExecutionId as string) ?? ""
         : (scratchSlot.lastOutput as string | undefined) ?? "");
 
     await this.reporter.step(phaseName, "running");
@@ -851,7 +859,7 @@ export class PhaseExecutor {
       }
 
       const iterExecutionId = "executionId" in ir ? ir.executionId : undefined;
-      if (iterExecutionId && db) db.recordOutputText(iterExecutionId, iterOutput);
+      if (iterExecutionId && db) db.executions.recordOutputText(iterExecutionId, iterOutput);
 
       if (conditionMet) {
         complete = true;
@@ -859,7 +867,7 @@ export class PhaseExecutor {
           const slot: Record<string, unknown> = { ...scratchSlot, iteration, ready: true };
           if (iterExecutionId) slot.lastOutputExecutionId = iterExecutionId;
           delete slot.lastOutput;
-          db.updateWorkflowRunScratch(workflowId, { [scratchKey]: slot });
+          db.runs.mergeScratch(workflowId, { [scratchKey]: slot });
           scratch[scratchKey] = slot;
         }
         this.reporter.persistPhase(iterLabel, `iteration ${iteration} — condition met`);
@@ -874,6 +882,7 @@ export class PhaseExecutor {
           ? renderTemplate(loop.gate_message, { ...this.run.ctx, phaseOutputs: outputs, iteration, maxIterations: MAX_ITER, scratch })
           : `Loop iteration ${iteration}/${MAX_ITER} complete.`;
 
+        let gateScratchPatch: Record<string, unknown> | undefined;
         if (scratchKey) {
           const slot: Record<string, unknown> = {
             ...(scratch[scratchKey] as Record<string, unknown> | undefined),
@@ -882,26 +891,29 @@ export class PhaseExecutor {
           if (iterExecutionId) slot.lastOutputExecutionId = iterExecutionId;
           delete slot.lastOutput;
           scratch[scratchKey] = slot;
-          db.updateWorkflowRunScratch(workflowId, { [scratchKey]: slot });
+          gateScratchPatch = { [scratchKey]: slot };
         }
 
         const approvalId = randomUUID();
-        db.createApproval({
-          id: approvalId,
-          workflowRunId: workflowId,
-          gate: iterLabel,
-          summary: gateMsg,
-          kind: isReply ? "reply" : "approve",
-          requestedBy: this.run.ctx.sender,
-          createdAt: new Date().toISOString(),
-        });
-        db.updateWorkflowPhase(workflowId, "waiting_approval", {
-          phase: "waiting_approval",
-          timestamp: new Date().toISOString(),
-          success: true,
-          summary: `Waiting for ${isReply ? "reply" : "approval"}: ${iterLabel} (${approvalId})`,
-        });
-        db.pauseWorkflowRun(workflowId);
+        // One transaction: persist the iteration scratch, create the pending
+        // gate, append the waiting_approval marker, and pause the run.
+        db.runs.pauseForApproval(
+          workflowId,
+          {
+            id: approvalId,
+            workflowRunId: workflowId,
+            gate: iterLabel,
+            summary: gateMsg,
+            kind: isReply ? "reply" : "approve",
+            requestedBy: this.run.ctx.sender,
+            createdAt: new Date().toISOString(),
+          },
+          {
+            phase: "waiting_approval",
+            summary: `Waiting for ${isReply ? "reply" : "approval"}: ${iterLabel} (${approvalId})`,
+          },
+          gateScratchPatch,
+        );
         await this.reporter.step(phaseName, "awaiting");
 
         if (isReply) {

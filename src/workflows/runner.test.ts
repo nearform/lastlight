@@ -170,7 +170,7 @@ describe("runWorkflow — basic phase execution", () => {
     expect(result.success).toBe(true);
     // Context phase ran (persistPhase fired) and both agent phases ran.
     expect(result.phases.map((p) => p.phase)).toEqual(["phase_0", "architect", "executor"]);
-    expect(db.updateWorkflowPhase).toHaveBeenCalledWith(
+    expect(db.runs.appendPhase).toHaveBeenCalledWith(
       "wf-fresh-1",
       "phase_0",
       expect.objectContaining({ phase: "phase_0", success: true }),
@@ -388,25 +388,36 @@ function makeMockDb(currentPhase = "phase_0"): StateDb {
     currentPhase !== "phase_0"
       ? [{ phase: currentPhase, timestamp: new Date().toISOString(), success: true }]
       : [];
+  const appendPhase = vi.fn((_id: string, newPhase: string, entry?: { phase: string; timestamp: string; success: boolean }) => {
+    phase = newPhase;
+    if (entry) phaseHistory.push(entry);
+  });
   return {
-    shouldRunPhase: vi.fn(() => "run"),
-    recordStart: vi.fn(),
-    recordFinish: vi.fn(),
-    recordSkippedPhase: vi.fn(),
-    recordOutputText: vi.fn(),
-    getExecutionOutput: vi.fn(() => null),
-    markStaleAsFailed: vi.fn(),
-    markLatestAsFailed: vi.fn(),
-    updateWorkflowPhase: vi.fn((_id: string, newPhase: string, entry?: { phase: string; timestamp: string; success: boolean }) => {
-      phase = newPhase;
-      if (entry) phaseHistory.push(entry);
-    }),
-    pauseWorkflowRun: vi.fn(),
-    resumeWorkflowRun: vi.fn(),
-    finishWorkflowRun: vi.fn(),
-    createApproval: vi.fn(),
-    getWorkflowRun: vi.fn(() => ({ currentPhase: phase, phaseHistory, status: "running" })),
-    getPendingApprovalForWorkflow: vi.fn(() => null),
+    runs: {
+      getRun: vi.fn(() => ({ currentPhase: phase, phaseHistory, status: "running" })),
+      appendPhase,
+      pauseForApproval: vi.fn(),
+      mergeScratch: vi.fn(),
+      finishRun: vi.fn(),
+      setRunning: vi.fn(),
+      setPaused: vi.fn(),
+    },
+    approvals: {
+      create: vi.fn(),
+      getPendingForWorkflow: vi.fn(() => null),
+    },
+    executions: {
+      shouldRunPhase: vi.fn(() => "run"),
+      recordStart: vi.fn(),
+      recordFinish: vi.fn(),
+      recordSkippedPhase: vi.fn(),
+      recordOutputText: vi.fn(),
+      getExecutionOutput: vi.fn(() => null),
+      getPhaseOutput: vi.fn(() => null),
+      recordSessionId: vi.fn(),
+      markStaleAsFailed: vi.fn(),
+      markLatestAsFailed: vi.fn(),
+    },
   } as unknown as StateDb;
 }
 
@@ -443,7 +454,7 @@ describe("runWorkflow — approval gate", () => {
     // Ledger-driven resume: architect's execution row is success=1 ("done"),
     // so runPhase skips it and the gate isn't re-hit — executor + pr run.
     const db = makeMockDb("architect");
-    vi.mocked(db.shouldRunPhase).mockImplementation((skill: string) =>
+    vi.mocked(db.executions.shouldRunPhase).mockImplementation((skill: string) =>
       skill === "gated:architect" ? "done" : "run",
     );
     const approvalConfig: ApprovalGateConfig = { post_architect: true };
@@ -831,8 +842,8 @@ describe("runWorkflow — generic loop node", () => {
 
     expect(result.paused).toBe(true);
     expect(result.success).toBe(true);
-    expect(db.createApproval).toHaveBeenCalled();
-    expect(db.pauseWorkflowRun).toHaveBeenCalled();
+    expect(db.runs.pauseForApproval).toHaveBeenCalled();
+    expect(db.runs.pauseForApproval).toHaveBeenCalled();
     expect(comments.some((c) => c.includes("approval required"))).toBe(true);
   });
 
@@ -1007,7 +1018,7 @@ describe("runWorkflow — DAG parallel execution", () => {
 
     const db = makeMockDb("phase_0");
     const recordSkipped = vi.fn();
-    (db as unknown as { recordSkippedPhase: typeof recordSkipped }).recordSkippedPhase = recordSkipped;
+    (db.executions as unknown as { recordSkippedPhase: typeof recordSkipped }).recordSkippedPhase = recordSkipped;
 
     await runWorkflow(PARALLEL_WORKFLOW, BASE_CTX, {} as never, {}, db, undefined, undefined, "wf-skip-1");
 
@@ -1039,7 +1050,7 @@ describe("runWorkflow — definition-driven resume + YAML messages", () => {
     // completed phases via shouldRunPhase.
     const db = makeMockDb("plan");
     const done = new Set(["custom:discover", "custom:plan"]);
-    vi.mocked(db.shouldRunPhase).mockImplementation((skill: string) =>
+    vi.mocked(db.executions.shouldRunPhase).mockImplementation((skill: string) =>
       done.has(skill) ? "done" : "run",
     );
     mockExecuteAgent
@@ -1050,7 +1061,7 @@ describe("runWorkflow — definition-driven resume + YAML messages", () => {
     expect(result.success).toBe(true);
     // Only implement + ship actually dispatched an agent — discover + plan deduped.
     expect(mockExecuteAgent).toHaveBeenCalledTimes(2);
-    const startedSkills = vi.mocked(db.recordStart).mock.calls.map((c) => c[0].skill);
+    const startedSkills = vi.mocked(db.executions.recordStart).mock.calls.map((c) => c[0].skill);
     expect(startedSkills).toContain("custom:implement");
     expect(startedSkills).toContain("custom:ship");
     expect(startedSkills).not.toContain("custom:discover");
@@ -1095,7 +1106,7 @@ describe("runWorkflow — definition-driven resume + YAML messages", () => {
     };
     mockExecuteAgent.mockResolvedValueOnce(makeSuccessResult("done"));
     const db = makeMockDb("phase_0");
-    const shouldRunPhase = vi.mocked(db.shouldRunPhase);
+    const shouldRunPhase = vi.mocked(db.executions.shouldRunPhase);
     await runWorkflow(workflow, BASE_CTX, {} as never, {}, db, undefined, undefined, "wf-dedup-1");
     expect(shouldRunPhase).toHaveBeenCalledWith(
       "my-custom-workflow:solo",

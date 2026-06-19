@@ -514,7 +514,7 @@ export function createAdminRoutes(
   // Stats — running count uses live Docker containers, not stale DB records
   app.get("/stats", async (c) => {
     const [stats, containers] = await Promise.all([
-      Promise.resolve(db.executionStats()),
+      Promise.resolve(db.executions.executionStats()),
       listRunningContainers(),
     ]);
     stats.running = containers.length;
@@ -525,14 +525,14 @@ export function createAdminRoutes(
   app.get("/stats/daily", (c) => {
     const daysParam = c.req.query("days");
     const days = Math.min(Math.max(1, parseInt(daysParam ?? "30", 10) || 30), 90);
-    return c.json({ daily: db.dailyStats(days) });
+    return c.json({ daily: db.executions.dailyStats(days) });
   });
 
   // Hourly aggregated stats (rolling last N hours, default 24)
   app.get("/stats/hourly", (c) => {
     const hoursParam = c.req.query("hours");
     const hours = Math.min(Math.max(1, parseInt(hoursParam ?? "24", 10) || 24), 168);
-    return c.json({ hourly: db.hourlyStats(hours) });
+    return c.json({ hourly: db.executions.hourlyStats(hours) });
   });
 
   // Running Docker containers
@@ -561,11 +561,11 @@ export function createAdminRoutes(
         const taskId = match[1];
         // Mark any running executions with matching skill as failed. Phase
         // skill keys are `<workflowName>:<phaseName>` — match on the colon.
-        const skills = db.runningExecutions()
+        const skills = db.executions.runningExecutions()
           .filter((e) => e.skill.includes(":") || e.skill === "pr-fix")
           .filter((e) => taskId.includes(e.triggerId?.replace(/[^a-z0-9]/gi, "") || "---"));
         for (const e of skills) {
-          db.recordFinish(e.id, { success: false, error: "terminated via admin dashboard" });
+          db.executions.recordFinish(e.id, { success: false, error: "terminated via admin dashboard" });
         }
       }
       return c.json({ killed: name });
@@ -578,7 +578,7 @@ export function createAdminRoutes(
   app.get("/executions", (c) => {
     const limit = Number(c.req.query("limit") ?? 100);
     const offset = Number(c.req.query("offset") ?? 0);
-    const executions = db.allExecutions(limit, offset);
+    const executions = db.executions.allExecutions(limit, offset);
     return c.json({ executions });
   });
 
@@ -602,7 +602,7 @@ export function createAdminRoutes(
       statuses = statusParam.split(",").filter(Boolean);
     }
 
-    const { runs, total } = db.listWorkflowRuns({
+    const { runs, total } = db.runs.list({
       limit,
       offset,
       sinceIso: since,
@@ -614,12 +614,12 @@ export function createAdminRoutes(
 
   // Distinct workflow names — used to populate the dashboard's filter row.
   app.get("/workflow-names", (c) => {
-    return c.json({ names: db.distinctWorkflowNames() });
+    return c.json({ names: db.runs.distinctNames() });
   });
 
   app.get("/workflow-runs/:id", (c) => {
     const id = c.req.param("id");
-    const run = db.getWorkflowRun(id);
+    const run = db.runs.getRun(id);
     if (!run) return c.json({ error: "workflow run not found" }, 404);
     return c.json({ workflowRun: run });
   });
@@ -629,9 +629,9 @@ export function createAdminRoutes(
   // (and usage metrics) for any phase the user clicks.
   app.get("/workflow-runs/:id/executions", (c) => {
     const id = c.req.param("id");
-    const run = db.getWorkflowRun(id);
+    const run = db.runs.getRun(id);
     if (!run) return c.json({ error: "workflow run not found" }, 404);
-    const rows = db.getExecutionsForWorkflowRun(run.id, run.triggerId, run.workflowName);
+    const rows = db.executions.getExecutionsForWorkflowRun(run.id, run.triggerId, run.workflowName);
     const prefix = `${run.workflowName}:`;
     const executions = rows.map((r) => ({
       id: r.id,
@@ -659,12 +659,12 @@ export function createAdminRoutes(
 
   app.post("/workflow-runs/:id/cancel", async (c) => {
     const id = c.req.param("id");
-    const run = db.getWorkflowRun(id);
+    const run = db.runs.getRun(id);
     if (!run) return c.json({ error: "workflow run not found" }, 404);
     if (run.status !== "running" && run.status !== "paused") {
       return c.json({ error: `cannot cancel a run with status '${run.status}'` }, 400);
     }
-    db.cancelWorkflowRun(id);
+    db.runs.cancelRun(id);
     // Flipping the DB row alone only stops the runner before the NEXT phase.
     // Kill any sandbox container currently executing a phase of this run so
     // the in-flight phase stops too. Container names are
@@ -694,9 +694,9 @@ export function createAdminRoutes(
         // avoids clobbering a sibling run that happens to share the same
         // trigger — e.g. two webhook deliveries for the same PR that
         // raced before dedup closed.
-        for (const e of db.runningExecutions()) {
+        for (const e of db.executions.runningExecutions()) {
           if (e.workflowRunId === id) {
-            db.recordFinish(e.id, { success: false, error: "cancelled via admin dashboard" });
+            db.executions.recordFinish(e.id, { success: false, error: "cancelled via admin dashboard" });
           }
         }
       } catch (err) {
@@ -847,26 +847,43 @@ export function createAdminRoutes(
   // ── Approval Gates ─────────────────────────────────────────────
 
   app.get("/approvals", (c) => {
-    const approvals = db.listPendingApprovals();
+    const approvals = db.approvals.listPending();
     return c.json({ approvals });
   });
 
   app.post("/approvals/:id/respond", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json<{ decision: "approved" | "rejected"; reason?: string }>();
-    const approval = db.getApproval(id);
+    const approval = db.approvals.getById(id);
     if (!approval) return c.json({ error: "approval not found" }, 404);
     if (approval.status !== "pending") return c.json({ error: `already ${approval.status}` }, 400);
-    db.respondToApproval(id, body.decision, "admin", body.reason);
-    const workflowRun = db.getWorkflowRun(approval.workflowRunId);
     if (body.decision === "rejected") {
-      if (workflowRun) {
-        db.finishWorkflowRun(approval.workflowRunId, "failed", `Rejected via dashboard: ${body.reason || "no reason"}`);
+      // One transaction: respond 'rejected' + fail the run.
+      db.runs.resolveGateAndFail(id, "admin", body.reason);
+    } else {
+      // Record the approval, then let resumeWorkflow flip the run back to
+      // `running` — but only as part of an actual dispatch. resumeWorkflow
+      // validates the target (GitHub App present, triggerId is an owner/repo#N
+      // issue) and calls setRunning right before dispatching, so a
+      // non-resumable approval (no resumeWorkflow wired, App down, or a
+      // non-issue trigger) leaves the run paused rather than flipping it to
+      // `running` with no worker. We deliberately do NOT use the atomic
+      // resolveGateAndResume here: unlike the GitHub/Slack path, the dashboard
+      // can't prove a dispatch will follow before responding.
+      //
+      // respond() is a compare-and-set on the still-pending row, so a racing
+      // responder (the status check above is a TOCTOU read) changes 0 rows.
+      // Only the winner resumes — the loser must not dispatch a second time.
+      const changed = db.approvals.respond(id, "approved", "admin", body.reason);
+      if (changed !== 1) {
+        return c.json({ error: "already resolved" }, 409);
       }
-    } else if (body.decision === "approved" && workflowRun && config.resumeWorkflow) {
-      config.resumeWorkflow(workflowRun, "admin").catch((err) => {
-        console.error(`[admin] Failed to resume workflow ${workflowRun.id}:`, err);
-      });
+      const workflowRun = db.runs.getRun(approval.workflowRunId);
+      if (workflowRun && config.resumeWorkflow) {
+        config.resumeWorkflow(workflowRun, "admin").catch((err) => {
+          console.error(`[admin] Failed to resume workflow ${workflowRun.id}:`, err);
+        });
+      }
     }
     return c.json({ status: body.decision });
   });
@@ -885,9 +902,9 @@ export function createAdminRoutes(
       const override = overrides.get(def.name) ?? null;
       const enabled = override ? override.enabled : true;
       const live = liveByName.get(def.name) ?? null;
-      const recentFailures = db.consecutiveFailures(def.workflow);
+      const recentFailures = db.executions.consecutiveFailures(def.workflow);
       // Find the most recent workflow_run for this cron's workflow
-      const recent = db.recentWorkflowRuns(50).find((r) => r.workflowName === def.workflow);
+      const recent = db.runs.listRecent(50).find((r) => r.workflowName === def.workflow);
       return {
         name: def.name,
         workflow: def.workflow,

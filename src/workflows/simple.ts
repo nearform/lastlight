@@ -153,7 +153,7 @@ export async function runSimpleWorkflow(
   let workflowId: string;
   let taskId: string;
   let issueDir: string;
-  const existingRun = db.getWorkflowRunByTrigger(triggerId);
+  const existingRun = db.runs.getByTrigger(triggerId);
   if (existingRun && existingRun.workflowName === workflowName) {
     workflowId = existingRun.id;
     const stored = (existingRun.context || {}) as Record<string, unknown>;
@@ -176,7 +176,7 @@ export async function runSimpleWorkflow(
     issueDir = number !== undefined
       ? `.lastlight/issue-${number}`
       : `.lastlight/${workflowName}-${workflowId.slice(0, 8)}`;
-    db.createWorkflowRun({
+    db.runs.createRun({
       id: workflowId,
       workflowName,
       triggerId,
@@ -319,19 +319,17 @@ export async function runSimpleWorkflow(
     );
 
     if (result.success && !result.paused) {
-      db.finishWorkflowRun(workflowId, "succeeded");
+      db.runs.finishRun(workflowId, "succeeded");
     } else if (!result.success && !result.paused) {
-      db.finishWorkflowRun(
-        workflowId,
-        "failed",
-        result.phases.find((p) => !p.success)?.error || "workflow failed",
-      );
+      db.runs.finishRun(workflowId, "failed", {
+        error: result.phases.find((p) => !p.success)?.error || "workflow failed",
+      });
     }
 
     return result;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    db.finishWorkflowRun(workflowId, "failed", msg);
+    db.runs.finishRun(workflowId, "failed", { error: msg });
     throw err;
   }
 }
@@ -366,7 +364,7 @@ async function handleExistingRun(
 
   // Paused awaiting approval — see if a human has responded.
   if (run.status === "paused" && run.currentPhase === "waiting_approval") {
-    const pendingApproval = db.getPendingApprovalForWorkflow(run.id);
+    const pendingApproval = db.approvals.getPendingForWorkflow(run.id);
     if (pendingApproval?.status === "approved") {
       // Resume is ledger-driven: the runner re-runs from the top and every
       // completed phase skips via `shouldRunPhase` (the executions ledger).
@@ -376,14 +374,14 @@ async function handleExistingRun(
       console.log(
         `[simple] ${pendingApproval.kind === "reply" ? "Reply" : "Approval"} received for gate ${pendingApproval.gate} — resuming ${run.workflowName}`,
       );
-      db.resumeWorkflowRun(run.id);
+      db.runs.setRunning(run.id);
       if (pendingApproval.kind !== "reply") {
         await notify(`**Approval received** — resuming \`${run.workflowName}\`.`);
       }
       return null; // fall through to runWorkflow
     } else if (pendingApproval?.status === "rejected") {
       const reason = pendingApproval.response || "no reason given";
-      db.finishWorkflowRun(run.id, "failed", `Rejected: ${reason}`);
+      db.runs.finishRun(run.id, "failed", { error: `Rejected: ${reason}` });
       await notify(`Workflow \`${run.workflowName}\` was rejected. Reason: ${reason}`);
       return {
         success: false,

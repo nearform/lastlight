@@ -140,7 +140,7 @@ export async function runWorkflow(
   // iteration at the right index and templates can read {{scratch.*}}.
   const scratch: Record<string, unknown> = ctx.scratch
     ? { ...(ctx.scratch as Record<string, unknown>) }
-    : (db && workflowId ? { ...(db.getWorkflowRun(workflowId)?.scratch ?? {}) } : {});
+    : (db && workflowId ? { ...(db.runs.getRun(workflowId)?.scratch ?? {}) } : {});
   ctx.scratch = scratch;
 
   const prePopulateBranch = typeof ctx.prePopulateBranch === "string"
@@ -226,14 +226,14 @@ export async function runWorkflow(
         success: true,
         summary,
       };
-      db.updateWorkflowPhase(workflowId, phase, entry);
+      db.runs.appendPhase(workflowId, phase, entry);
     }
   };
 
   /** Mark the workflow run as failed. */
   const failWorkflow = (errorMsg?: string) => {
     if (db && workflowId) {
-      db.finishWorkflowRun(workflowId, "failed", errorMsg);
+      db.runs.finishRun(workflowId, "failed", { error: errorMsg });
     }
   };
 
@@ -278,7 +278,7 @@ export async function runWorkflow(
   while (!isComplete(dag)) {
     // Honour a cancel that landed during the previous phase's execution.
     if (db && workflowId) {
-      const latest = db.getWorkflowRun(workflowId);
+      const latest = db.runs.getRun(workflowId);
       if (latest?.status === "cancelled") {
         console.log(`[runner] ${definition.name} cancelled — stopping`);
         return { success: false, phases };
@@ -293,7 +293,7 @@ export async function runWorkflow(
     for (const node of toSkip) {
       node.status = "skipped";
       phases.push({ phase: node.name, success: true, output: "Skipped (trigger rule not satisfied)" });
-      db?.recordSkippedPhase(
+      db?.executions.recordSkippedPhase(
         `${definition.name}:${node.name}`,
         triggerId,
         workflowId,
@@ -356,17 +356,17 @@ export async function runWorkflow(
     if (prMatch) prNumber = parseInt(prMatch[1], 10);
     const urlMatch = terminalResult?.output?.match(/https?:\/\/[^\s)]+\/pull\/\d+/);
     if (urlMatch) prUrl = urlMatch[0];
-    if (success && terminalPhase.on_success?.set_phase) {
-      persistPhase(
-        terminalPhase.on_success.set_phase,
-        prNumber ? `PR #${prNumber}` : undefined,
-      );
-    }
   }
 
   if (success) {
     if (db && workflowId) {
-      db.finishWorkflowRun(workflowId, "succeeded");
+      // Fold the `on_success.set_phase` terminal marker into the same
+      // transaction as the status flip so the dashboard never sees one
+      // without the other.
+      const terminalMarker = terminalPhase?.on_success?.set_phase
+        ? { phase: terminalPhase.on_success.set_phase, summary: prNumber ? `PR #${prNumber}` : undefined }
+        : undefined;
+      db.runs.finishRun(workflowId, "succeeded", terminalMarker ? { terminalMarker } : {});
     }
   } else {
     const firstFailure = phases.find((p) => !p.success);

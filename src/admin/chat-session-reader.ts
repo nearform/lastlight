@@ -31,15 +31,15 @@ export class ChatSessionReader implements SessionSource {
   listSessionIds(): string[] {
     // Soft cap at 500 — anything older than that almost certainly won't be
     // surfaced after the dashboard's per-tab filters anyway.
-    return this.db.listChatThreads(500).map((t) => t.triggerId);
+    return this.db.executions.listChatThreads(500).map((t) => t.triggerId);
   }
 
   exists(id: string): boolean {
-    return this.db.getChatThread(id) !== null;
+    return this.db.executions.getChatThread(id) !== null;
   }
 
   async getSessionMeta(id: string): Promise<SessionMeta | null> {
-    const t = this.db.getChatThread(id);
+    const t = this.db.executions.getChatThread(id);
     if (!t) return null;
     const startedAt = new Date(t.firstStartedAt).getTime() / 1000;
     const lastMessageAt = new Date(t.lastActivityAt).getTime() / 1000;
@@ -73,7 +73,7 @@ export class ChatSessionReader implements SessionSource {
    * Agent SDK installation).
    */
   getFilePath(id: string): string | null {
-    const thread = this.db.getChatThread(id);
+    const thread = this.db.executions.getChatThread(id);
     if (!thread || !thread.agentSessionId) return null;
     const file = path.join(
       this.sessionsHomeDir,

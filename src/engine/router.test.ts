@@ -462,15 +462,17 @@ describe('routeEvent — explore intent', () => {
 describe('routeEvent — reply-gate short-circuit', () => {
   it('routes comment on issue with pending reply gate to explore-reply', async () => {
     const mockDb = {
-      getPendingReplyGateByTrigger: vi.fn().mockReturnValue({
-        id: 'gate-1',
-        workflowRunId: 'run-1',
-        gate: 'socratic_iter_1',
-        summary: 'test',
-        status: 'pending',
-        kind: 'reply',
-        createdAt: new Date().toISOString(),
-      }),
+      approvals: {
+        getPendingReplyGateByTrigger: vi.fn().mockReturnValue({
+          id: 'gate-1',
+          workflowRunId: 'run-1',
+          gate: 'socratic_iter_1',
+          summary: 'test',
+          status: 'pending',
+          kind: 'reply',
+          createdAt: new Date().toISOString(),
+        }),
+      },
     };
     const result = await routeEvent(
       makeEnvelope({

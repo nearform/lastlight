@@ -117,20 +117,30 @@ function node(name: string, depends_on: string[] = []): DagNode {
 
 function makeMockDb(): StateDb {
   return {
-    shouldRunPhase: vi.fn(() => "run"),
-    recordStart: vi.fn(),
-    recordFinish: vi.fn(),
-    recordOutputText: vi.fn(),
-    recordSessionId: vi.fn(),
-    getExecutionOutput: vi.fn(() => null),
-    getPhaseOutput: vi.fn(() => null),
-    markStaleAsFailed: vi.fn(),
-    markLatestAsFailed: vi.fn(),
-    updateWorkflowPhase: vi.fn(),
-    pauseWorkflowRun: vi.fn(),
-    createApproval: vi.fn(),
-    updateWorkflowRunScratch: vi.fn(),
-    getWorkflowRun: vi.fn(() => ({ currentPhase: "phase_0", phaseHistory: [], status: "running", scratch: {} })),
+    runs: {
+      getRun: vi.fn(() => ({ currentPhase: "phase_0", phaseHistory: [], status: "running", scratch: {} })),
+      appendPhase: vi.fn(),
+      pauseForApproval: vi.fn(),
+      mergeScratch: vi.fn(),
+      finishRun: vi.fn(),
+      setPaused: vi.fn(),
+      setRunning: vi.fn(),
+    },
+    approvals: {
+      create: vi.fn(),
+      getPendingForWorkflow: vi.fn(() => null),
+    },
+    executions: {
+      shouldRunPhase: vi.fn(() => "run"),
+      recordStart: vi.fn(),
+      recordFinish: vi.fn(),
+      recordOutputText: vi.fn(),
+      recordSessionId: vi.fn(),
+      getExecutionOutput: vi.fn(() => null),
+      getPhaseOutput: vi.fn(() => null),
+      markStaleAsFailed: vi.fn(),
+      markLatestAsFailed: vi.fn(),
+    },
   } as unknown as StateDb;
 }
 
@@ -207,7 +217,7 @@ describe("PhaseExecutor — standard agent phase", () => {
 
   it("aborts (running-skip) when the dedup ledger reports the phase running and the container is alive", async () => {
     const db = makeMockDb();
-    vi.mocked(db.shouldRunPhase).mockReturnValue("running");
+    vi.mocked(db.executions.shouldRunPhase).mockReturnValue("running");
     vi.mocked(listRunningContainers).mockResolvedValueOnce([{ taskId: "widget-42" }] as never);
     const exec = new PhaseExecutor(makeRun(def, db), makeReporter(), makeResolver());
 
@@ -220,7 +230,7 @@ describe("PhaseExecutor — standard agent phase", () => {
 
   it("treats a done dedup row as already-completed (skips the agent)", async () => {
     const db = makeMockDb();
-    vi.mocked(db.shouldRunPhase).mockReturnValue("done");
+    vi.mocked(db.executions.shouldRunPhase).mockReturnValue("done");
     const reporter = makeReporter();
     const exec = new PhaseExecutor(makeRun(def, db), reporter, makeResolver());
 
@@ -258,7 +268,7 @@ describe("PhaseExecutor — on_output BLOCKED", () => {
 
     expect(outcome.status).toBe("failed");
     expect(outcome.results[0]).toMatchObject({ phase: "guardrails", success: false, error: "BLOCKED" });
-    expect(db.markLatestAsFailed).toHaveBeenCalled();
+    expect(db.executions.markLatestAsFailed).toHaveBeenCalled();
     expect(reporter.failed.length).toBeGreaterThan(0);
   });
 
@@ -294,8 +304,8 @@ describe("PhaseExecutor — approval gate", () => {
 
     expect(outcome.paused).toBe(true);
     expect(outcome.status).toBe("succeeded");
-    expect(db.createApproval).toHaveBeenCalled();
-    expect(db.pauseWorkflowRun).toHaveBeenCalled();
+    expect(db.runs.pauseForApproval).toHaveBeenCalled();
+    expect(db.runs.pauseForApproval).toHaveBeenCalled();
   });
 
   it("does not pause when the gate is disabled", async () => {
@@ -306,7 +316,7 @@ describe("PhaseExecutor — approval gate", () => {
     const outcome = await exec.execute(node("architect"), {});
 
     expect(outcome.paused).toBeFalsy();
-    expect(db.createApproval).not.toHaveBeenCalled();
+    expect(db.runs.pauseForApproval).not.toHaveBeenCalled();
   });
 });
 
@@ -379,7 +389,7 @@ describe("PhaseExecutor — reviewer loop", () => {
     const outcome = await exec.execute(node("reviewer"), {});
 
     expect(outcome.paused).toBe(true);
-    expect(db.createApproval).toHaveBeenCalled();
+    expect(db.runs.pauseForApproval).toHaveBeenCalled();
     // Only the first review ran — no fix agent call yet.
     expect(mockExecuteAgent).toHaveBeenCalledTimes(1);
   });
@@ -404,10 +414,10 @@ describe("PhaseExecutor — reviewer loop", () => {
     const db = makeMockDb();
     // Resume state: the initial review already ran and requested changes; the
     // fix for cycle 1 has NOT run yet; we paused at cycle 1's gate.
-    vi.mocked(db.shouldRunPhase).mockImplementation((skill: string) =>
+    vi.mocked(db.executions.shouldRunPhase).mockImplementation((skill: string) =>
       skill === "full:reviewer" ? "done" : "run",
     );
-    vi.mocked(db.getPhaseOutput).mockImplementation((skill: string) =>
+    vi.mocked(db.executions.getPhaseOutput).mockImplementation((skill: string) =>
       skill === "full:reviewer" ? "VERDICT: REQUEST_CHANGES\nfix the bug" : null,
     );
     // fix succeeds, then the re-review approves.
@@ -425,7 +435,7 @@ describe("PhaseExecutor — reviewer loop", () => {
 
     // Must NOT pause again, and must NOT report approved=true with 0 cycles.
     expect(outcome.paused).toBeFalsy();
-    expect(db.createApproval).not.toHaveBeenCalled();
+    expect(db.runs.pauseForApproval).not.toHaveBeenCalled();
     expect(outcome.outputVars).toEqual({ review: { approved: true, cycles: 1 } });
     // The fix + re-review ran (2 agent calls); the initial review was deduped.
     expect(mockExecuteAgent).toHaveBeenCalledTimes(2);

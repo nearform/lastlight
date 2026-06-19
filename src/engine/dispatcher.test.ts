@@ -21,13 +21,60 @@ function makeEnvelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
 }
 
 /**
+ * Build a mock StateDb shaped like the carved sub-stores
+ * (`db.executions` / `db.runs` / `db.approvals`). Pass the leaf mocks by their
+ * (flat) method names and they're routed into the right sub-store, so call
+ * sites read naturally and assertions reach e.g. `db.runs.resolveGateAndResume`.
+ */
+function mockDb(over: Record<string, any> = {}) {
+  const m = {
+    // execution-store
+    isRunning: vi.fn().mockReturnValue(false),
+    runningExecutions: vi.fn().mockReturnValue([]),
+    recordStart: vi.fn(),
+    recordFinish: vi.fn(),
+    getExecutionOutput: vi.fn(),
+    // workflow-run-store
+    getRun: vi.fn(),
+    resolveGateAndResume: vi.fn(),
+    resolveGateAndFail: vi.fn(),
+    resolveReplyGateAndResume: vi.fn(),
+    // approval-store
+    respond: vi.fn(),
+    getPendingByTrigger: vi.fn(),
+    getPendingForWorkflow: vi.fn(),
+    ...over,
+  };
+  return {
+    executions: {
+      isRunning: m.isRunning,
+      runningExecutions: m.runningExecutions,
+      recordStart: m.recordStart,
+      recordFinish: m.recordFinish,
+      getExecutionOutput: m.getExecutionOutput,
+    },
+    runs: {
+      getRun: m.getRun,
+      resolveGateAndResume: m.resolveGateAndResume,
+      resolveGateAndFail: m.resolveGateAndFail,
+      resolveReplyGateAndResume: m.resolveReplyGateAndResume,
+    },
+    approvals: {
+      respond: m.respond,
+      getPendingByTrigger: m.getPendingByTrigger,
+      getPendingForWorkflow: m.getPendingForWorkflow,
+    },
+  };
+}
+
+/**
  * Deps with everything stubbed. `route` is injected so a branch test names the
  * exact Route it wants — no LLM/classifier mocking needed. Individual tests
  * override only the deps the branch under test touches.
  */
 function makeDeps(route: Route, overrides: Partial<DispatchDeps> = {}): DispatchDeps {
   return {
-    db: {} as any,
+    db: mockDb() as any,
     github: null,
     dispatchWorkflow: vi.fn().mockResolvedValue({ success: true }),
     sessionManager: {} as any,
@@ -60,10 +107,7 @@ describe('dispatch — chat handler', () => {
 
   it('runs the chat turn, replies with its text, and returns handled', async () => {
     const envelope = makeEnvelope({ type: 'message' });
-    const db = {
-      recordStart: vi.fn(),
-      recordFinish: vi.fn(),
-    };
+    const db = mockDb();
     const sessionManager = {
       getSession: vi.fn().mockReturnValue(undefined),
       setAgentSessionId: vi.fn(),
@@ -80,9 +124,9 @@ describe('dispatch — chat handler', () => {
     expect(outcome).toEqual({ kind: 'handled', handler: 'chat' });
     expect(runChat).toHaveBeenCalledWith('hi', 'sess-1', 'octocat', undefined);
     expect(envelope.reply).toHaveBeenCalledWith('hello back');
-    expect(db.recordStart).toHaveBeenCalledTimes(1);
-    expect(db.recordFinish).toHaveBeenCalledTimes(1);
-    const finishArg = db.recordFinish.mock.calls[0][1];
+    expect(db.executions.recordStart).toHaveBeenCalledTimes(1);
+    expect(db.executions.recordFinish).toHaveBeenCalledTimes(1);
+    const finishArg = (db.executions.recordFinish as any).mock.calls[0][1];
     expect(finishArg.success).toBe(true);
   });
 
@@ -94,7 +138,7 @@ describe('dispatch — chat handler', () => {
     };
     const runChat = vi.fn().mockResolvedValue(chatResult({ agentSessionId: 'new-sess' }));
     const deps = makeDeps(chatRoute(), {
-      db: { recordStart: vi.fn(), recordFinish: vi.fn() } as any,
+      db: mockDb() as any,
       sessionManager: sessionManager as any,
       runChat,
     });
@@ -109,7 +153,7 @@ describe('dispatch — chat handler', () => {
 
   it('records failure and replies with an apology when the chat turn throws', async () => {
     const envelope = makeEnvelope({ type: 'message' });
-    const db = { recordStart: vi.fn(), recordFinish: vi.fn() };
+    const db = mockDb();
     const runChat = vi.fn().mockRejectedValue(new Error('boom'));
     const deps = makeDeps(chatRoute(), {
       db: db as any,
@@ -120,7 +164,7 @@ describe('dispatch — chat handler', () => {
     const outcome = await dispatch(envelope, deps);
 
     expect(outcome).toEqual({ kind: 'handled', handler: 'chat' });
-    expect(db.recordFinish.mock.calls[0][1].success).toBe(false);
+    expect((db.executions.recordFinish as any).mock.calls[0][1].success).toBe(false);
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/error/i));
   });
 });
@@ -147,7 +191,7 @@ describe('dispatch — status-report handler', () => {
     const envelope = makeEnvelope({ type: 'message' });
     const deps = makeDeps(
       { action: 'handler', handler: 'status-report', context: {} },
-      { db: { runningExecutions: vi.fn().mockReturnValue([]) } as any },
+      { db: mockDb({ runningExecutions: vi.fn().mockReturnValue([]) }) as any },
     );
 
     const outcome = await dispatch(envelope, deps);
@@ -161,11 +205,11 @@ describe('dispatch — status-report handler', () => {
     const deps = makeDeps(
       { action: 'handler', handler: 'status-report', context: {} },
       {
-        db: {
+        db: mockDb({
           runningExecutions: vi.fn().mockReturnValue([
             { skill: 'build', repo: 'cliftonc/lastlight', issueNumber: 12, startedAt: 'now' },
           ]),
-        } as any,
+        }) as any,
       },
     );
 
@@ -185,7 +229,7 @@ describe('dispatch — already-running guard', () => {
     const dispatchWorkflow = vi.fn();
     const deps = makeDeps(
       { action: 'handler', handler: 'pr-review', context: { repo: 'cliftonc/lastlight' } },
-      { db: { isRunning } as any, dispatchWorkflow },
+      { db: mockDb({ isRunning }) as any, dispatchWorkflow },
     );
 
     const outcome = await dispatch(envelope, deps);
@@ -200,7 +244,7 @@ describe('dispatch — already-running guard', () => {
     const envelope = makeEnvelope({ type: 'message', id: 'evt-x' });
     const deps = makeDeps(
       { action: 'handler', handler: 'issue-triage', context: { repo: 'cliftonc/lastlight' } },
-      { db: { isRunning: vi.fn().mockReturnValue(true) } as any },
+      { db: mockDb({ isRunning: vi.fn().mockReturnValue(true) }) as any },
     );
 
     const outcome = await dispatch(envelope, deps);
@@ -217,22 +261,9 @@ describe('dispatch — approval-response handler', () => {
     context: { sender: 'maintainer', ...ctx },
   });
 
-  function approvalDb(over: Record<string, any> = {}) {
-    return {
-      isRunning: vi.fn().mockReturnValue(false),
-      respondToApproval: vi.fn(),
-      resumeWorkflowRun: vi.fn(),
-      finishWorkflowRun: vi.fn(),
-      getPendingApprovalByTrigger: vi.fn(),
-      getPendingApprovalForWorkflow: vi.fn(),
-      getWorkflowRun: vi.fn(),
-      ...over,
-    };
-  }
-
   it('replies when no pending approval is found', async () => {
     const envelope = makeEnvelope({ type: 'comment.created' });
-    const db = approvalDb({ getPendingApprovalByTrigger: vi.fn().mockReturnValue(null) });
+    const db = mockDb({ getPendingByTrigger: vi.fn().mockReturnValue(null) });
     const deps = makeDeps(
       approvalRoute({ decision: 'approved', repo: 'cliftonc/lastlight', issueNumber: 3 }),
       { db: db as any },
@@ -241,16 +272,17 @@ describe('dispatch — approval-response handler', () => {
     const outcome = await dispatch(envelope, deps);
 
     expect(outcome).toEqual({ kind: 'handled', handler: 'approval-response' });
-    expect(db.respondToApproval).not.toHaveBeenCalled();
+    expect(db.approvals.respond).not.toHaveBeenCalled();
+    expect(db.runs.resolveGateAndResume).not.toHaveBeenCalled();
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/no pending approval/i));
   });
 
-  it('approves: records the decision, resumes the run, and re-dispatches the workflow', async () => {
+  it('approves: resolves the gate + resumes the run atomically, and re-dispatches the workflow', async () => {
     const envelope = makeEnvelope({ type: 'comment.created' });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
-    const db = approvalDb({
-      getPendingApprovalByTrigger: vi.fn().mockReturnValue({ id: 'appr-1', workflowRunId: 'run-1' }),
-      getWorkflowRun: vi.fn().mockReturnValue({
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-1', workflowRunId: 'run-1' }),
+      getRun: vi.fn().mockReturnValue({
         id: 'run-1',
         workflowName: 'build',
         triggerId: 'cliftonc/lastlight#3',
@@ -264,8 +296,9 @@ describe('dispatch — approval-response handler', () => {
 
     await dispatch(envelope, deps);
 
-    expect(db.respondToApproval).toHaveBeenCalledWith('appr-1', 'approved', 'maintainer', undefined);
-    expect(db.resumeWorkflowRun).toHaveBeenCalledWith('run-1');
+    // The atomic op is the single respond('approved') + setRunning path.
+    expect(db.runs.resolveGateAndResume).toHaveBeenCalledWith('appr-1', 'maintainer');
+    expect(db.approvals.respond).not.toHaveBeenCalled();
     expect(dispatchWorkflow).toHaveBeenCalledWith(
       'build',
       expect.objectContaining({ repo: 'cliftonc/lastlight', issueNumber: 3, _triggerType: 'approval' }),
@@ -276,9 +309,9 @@ describe('dispatch — approval-response handler', () => {
   it('approves but cannot resume without a GitHub App', async () => {
     const envelope = makeEnvelope({ type: 'comment.created' });
     const dispatchWorkflow = vi.fn();
-    const db = approvalDb({
-      getPendingApprovalByTrigger: vi.fn().mockReturnValue({ id: 'appr-1', workflowRunId: 'run-1' }),
-      getWorkflowRun: vi.fn().mockReturnValue({ id: 'run-1', workflowName: 'build', triggerId: 'x/y#3', issueNumber: 3 }),
+    const db = mockDb({
+      getPendingByTrigger: vi.fn().mockReturnValue({ id: 'appr-1', workflowRunId: 'run-1' }),
+      getRun: vi.fn().mockReturnValue({ id: 'run-1', workflowName: 'build', triggerId: 'x/y#3', issueNumber: 3 }),
     });
     const deps = makeDeps(
       approvalRoute({ decision: 'approved', repo: 'x/y', issueNumber: 3 }),
@@ -287,16 +320,17 @@ describe('dispatch — approval-response handler', () => {
 
     await dispatch(envelope, deps);
 
-    expect(db.respondToApproval).toHaveBeenCalled();
+    // No GitHub App → record the approval without the atomic resume.
+    expect(db.approvals.respond).toHaveBeenCalledWith('appr-1', 'approved', 'maintainer', undefined);
+    expect(db.runs.resolveGateAndResume).not.toHaveBeenCalled();
     expect(dispatchWorkflow).not.toHaveBeenCalled();
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/cannot resume/i));
   });
 
-  it('rejects: finishes the run as failed and confirms', async () => {
+  it('rejects: fails the run atomically and confirms', async () => {
     const envelope = makeEnvelope({ type: 'comment.created' });
-    const db = approvalDb({
-      getPendingApprovalForWorkflow: vi.fn().mockReturnValue({ id: 'appr-2', workflowRunId: 'run-2' }),
-      getWorkflowRun: vi.fn().mockReturnValue({ id: 'run-2', workflowName: 'build' }),
+    const db = mockDb({
+      getPendingForWorkflow: vi.fn().mockReturnValue({ id: 'appr-2', workflowRunId: 'run-2' }),
     });
     const deps = makeDeps(
       approvalRoute({ decision: 'rejected', reason: 'too risky', workflowRunId: 'run-2' }),
@@ -305,8 +339,7 @@ describe('dispatch — approval-response handler', () => {
 
     await dispatch(envelope, deps);
 
-    expect(db.respondToApproval).toHaveBeenCalledWith('appr-2', 'rejected', 'maintainer', 'too risky');
-    expect(db.finishWorkflowRun).toHaveBeenCalledWith('run-2', 'failed', expect.stringMatching(/rejected/i));
+    expect(db.runs.resolveGateAndFail).toHaveBeenCalledWith('appr-2', 'maintainer', 'too risky');
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/rejected/i));
   });
 });
@@ -318,52 +351,39 @@ describe('dispatch — explore-reply handler', () => {
     context: { sender: 'octocat', reply: 'my answer', workflowRunId: 'run-1', ...ctx },
   });
 
-  function replyDb(over: Record<string, any> = {}) {
-    return {
-      isRunning: vi.fn().mockReturnValue(false),
-      getWorkflowRun: vi.fn(),
-      getPendingApprovalForWorkflow: vi.fn(),
-      resolveReplyGate: vi.fn(),
-      getExecutionOutput: vi.fn(),
-      updateWorkflowRunScratch: vi.fn(),
-      resumeWorkflowRun: vi.fn(),
-      ...over,
-    };
-  }
-
   it('no-ops without dispatching when the run is not found', async () => {
     const envelope = makeEnvelope({ type: 'message' });
     const dispatchWorkflow = vi.fn();
-    const db = replyDb({ getWorkflowRun: vi.fn().mockReturnValue(undefined) });
+    const db = mockDb({ getRun: vi.fn().mockReturnValue(undefined) });
     const deps = makeDeps(replyRoute({}), { db: db as any, dispatchWorkflow });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(outcome).toEqual({ kind: 'handled', handler: 'explore-reply' });
-    expect(db.resolveReplyGate).not.toHaveBeenCalled();
+    expect(db.runs.resolveReplyGateAndResume).not.toHaveBeenCalled();
     expect(dispatchWorkflow).not.toHaveBeenCalled();
   });
 
   it('no-ops when there is no pending reply gate', async () => {
     const envelope = makeEnvelope({ type: 'message' });
     const dispatchWorkflow = vi.fn();
-    const db = replyDb({
-      getWorkflowRun: vi.fn().mockReturnValue({ id: 'run-1', triggerId: 'slack:t:c:th' }),
-      getPendingApprovalForWorkflow: vi.fn().mockReturnValue({ id: 'g1', kind: 'approval' }),
+    const db = mockDb({
+      getRun: vi.fn().mockReturnValue({ id: 'run-1', triggerId: 'slack:t:c:th' }),
+      getPendingForWorkflow: vi.fn().mockReturnValue({ id: 'g1', kind: 'approval' }),
     });
     const deps = makeDeps(replyRoute({}), { db: db as any, dispatchWorkflow });
 
     await dispatch(envelope, deps);
 
-    expect(db.resolveReplyGate).not.toHaveBeenCalled();
+    expect(db.runs.resolveReplyGateAndResume).not.toHaveBeenCalled();
     expect(dispatchWorkflow).not.toHaveBeenCalled();
   });
 
   it('resolves the gate, appends the Q&A, resumes and re-dispatches explore (Slack)', async () => {
     const envelope = makeEnvelope({ type: 'message' });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
-    const db = replyDb({
-      getWorkflowRun: vi.fn().mockReturnValue({
+    const db = mockDb({
+      getRun: vi.fn().mockReturnValue({
         id: 'run-1',
         triggerId: 'slack:team:chan:thread',
         repo: 'lastlight',
@@ -371,7 +391,7 @@ describe('dispatch — explore-reply handler', () => {
         context: { owner: 'cliftonc' },
         scratch: { socratic: { lastOutput: 'What problem are we solving?', qa: [] } },
       }),
-      getPendingApprovalForWorkflow: vi.fn().mockReturnValue({ id: 'gate-1', kind: 'reply' }),
+      getPendingForWorkflow: vi.fn().mockReturnValue({ id: 'gate-1', kind: 'reply' }),
     });
     const deps = makeDeps(
       replyRoute({ channelId: 'chan', threadId: 'thread' }),
@@ -380,15 +400,20 @@ describe('dispatch — explore-reply handler', () => {
 
     await dispatch(envelope, deps);
 
-    expect(db.resolveReplyGate).toHaveBeenCalledWith('gate-1', 'my answer', 'octocat');
-    const scratchPatch = db.updateWorkflowRunScratch.mock.calls[0][1];
+    // One atomic call resolves the gate, merges the Q&A scratch patch, and resumes.
+    expect(db.runs.resolveReplyGateAndResume).toHaveBeenCalledTimes(1);
+    const [runId, gateId, replyText, responder, scratchPatch] =
+      (db.runs.resolveReplyGateAndResume as any).mock.calls[0];
+    expect(runId).toBe('run-1');
+    expect(gateId).toBe('gate-1');
+    expect(replyText).toBe('my answer');
+    expect(responder).toBe('octocat');
     expect(scratchPatch.socratic.qa).toHaveLength(1);
     expect(scratchPatch.socratic.qa[0]).toMatchObject({
       question: 'What problem are we solving?',
       answer: 'my answer',
       sender: 'octocat',
     });
-    expect(db.resumeWorkflowRun).toHaveBeenCalledWith('run-1');
     expect(dispatchWorkflow).toHaveBeenCalledWith(
       'explore',
       expect.objectContaining({ triggerId: 'slack:team:chan:thread', channelId: 'chan', threadId: 'thread' }),
@@ -413,21 +438,17 @@ describe('dispatch — build dispatch', () => {
     },
   });
 
-  function buildDb(over: Record<string, any> = {}) {
-    return { isRunning: vi.fn().mockReturnValue(false), recordStart: vi.fn(), recordFinish: vi.fn(), ...over };
-  }
-
   it('dispatches the build workflow and records a build-cycle execution', async () => {
     const envelope = makeEnvelope({ type: 'comment.created', raw: { comment: { id: 999 } } });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
     const github = { reactToComment: vi.fn().mockResolvedValue(undefined) };
-    const db = buildDb();
+    const db = mockDb();
     const deps = makeDeps(buildRoute(), { db: db as any, github: github as any, dispatchWorkflow });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(outcome).toEqual({ kind: 'dispatched', workflow: 'build' });
-    expect(db.recordStart).toHaveBeenCalledWith(expect.objectContaining({ skill: 'build-cycle', issueNumber: 27 }));
+    expect(db.executions.recordStart).toHaveBeenCalledWith(expect.objectContaining({ skill: 'build-cycle', issueNumber: 27 }));
     expect(dispatchWorkflow).toHaveBeenCalledWith(
       'build',
       expect.objectContaining({
@@ -447,7 +468,7 @@ describe('dispatch — build dispatch', () => {
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
     const deps = makeDeps(
       buildRoute({ _routeKey: 'slack.build' }),
-      { db: buildDb() as any, github: null, dispatchWorkflow },
+      { db: mockDb() as any, github: null, dispatchWorkflow },
     );
 
     await dispatch(envelope, deps);
@@ -472,7 +493,7 @@ describe('dispatch — pr-fix dispatch', () => {
       getFailedChecks: vi.fn().mockResolvedValue('test-suite failed'),
     };
     const deps = makeDeps(prFixRoute(), {
-      db: { isRunning: vi.fn().mockReturnValue(false) } as any,
+      db: mockDb() as any,
       github: github as any,
       dispatchWorkflow,
     });
@@ -490,7 +511,7 @@ describe('dispatch — pr-fix dispatch', () => {
     const envelope = makeEnvelope({ type: 'comment.created', prNumber: 5 });
     const dispatchWorkflow = vi.fn();
     const deps = makeDeps(prFixRoute(), {
-      db: { isRunning: vi.fn().mockReturnValue(false) } as any,
+      db: mockDb() as any,
       github: null,
       dispatchWorkflow,
     });
@@ -508,7 +529,7 @@ describe('dispatch — generic messaging dispatch', () => {
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
     const deps = makeDeps(
       { action: 'handler', handler: 'issue-triage', context: { _routeKey: 'x', repo: 'cliftonc/lastlight', sender: 'octocat' } },
-      { db: { isRunning: vi.fn().mockReturnValue(false) } as any, dispatchWorkflow },
+      { db: mockDb() as any, dispatchWorkflow },
     );
 
     const outcome = await dispatch(envelope, deps);
@@ -531,7 +552,7 @@ describe('dispatch — webhook dispatch', () => {
     const github = { createCheckRun: vi.fn() };
     const deps = makeDeps(
       { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: { isRunning: vi.fn().mockReturnValue(false) } as any, github: github as any, dispatchWorkflow, reviewPostsCheck: false },
+      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: false },
     );
 
     const outcome = await dispatch(envelope, deps);
@@ -552,7 +573,7 @@ describe('dispatch — webhook dispatch', () => {
     };
     const deps = makeDeps(
       { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: { isRunning: vi.fn().mockReturnValue(false) } as any, github: github as any, dispatchWorkflow, reviewPostsCheck: true },
+      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: true },
     );
 
     const outcome = await dispatch(envelope, deps);

@@ -56,7 +56,7 @@ export class CronScheduler {
         console.error(`[cron] ${job.name} failed:`, err.message);
 
         // Check consecutive failures (tracked under the workflow name)
-        const failures = this.db.consecutiveFailures(job.workflow);
+        const failures = this.db.executions.consecutiveFailures(job.workflow);
         const max = job.maxFailures || 3;
         if (failures >= max) {
           console.error(`[cron] ALERT: ${job.name} has failed ${failures} times consecutively`);

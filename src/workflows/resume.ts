@@ -161,7 +161,7 @@ async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Promise<v
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[resume] Skipping ${run.id}: workflow definition "${run.workflowName}" not found: ${msg}`);
-    opts.db.finishWorkflowRun(run.id, "failed", `harness restarted; workflow definition not found`);
+    opts.db.runs.finishRun(run.id, "failed", { error: `harness restarted; workflow definition not found` });
     return;
   }
 
@@ -247,8 +247,8 @@ async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Promise<v
       const saved = ((run.scratch?.notifier) ?? {}) as NotifierState;
       const github = opts.github;
       const persist = (patch: Partial<NotifierState>) => {
-        const cur = ((opts.db.getWorkflowRun(run.id)?.scratch?.notifier) ?? {}) as NotifierState;
-        opts.db.updateWorkflowRunScratch(run.id, { notifier: { ...cur, ...patch } });
+        const cur = ((opts.db.runs.getRun(run.id)?.scratch?.notifier) ?? {}) as NotifierState;
+        opts.db.runs.mergeScratch(run.id, { notifier: { ...cur, ...patch } });
       };
       const transport = new GitHubTransport({
         github,
@@ -292,18 +292,16 @@ async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Promise<v
     );
 
     if (result.success) {
-      opts.db.finishWorkflowRun(run.id, "succeeded");
+      opts.db.runs.finishRun(run.id, "succeeded");
     } else if (!result.paused) {
-      opts.db.finishWorkflowRun(
-        run.id,
-        "failed",
-        result.phases.find((p) => !p.success)?.error || "workflow failed during resume",
-      );
+      opts.db.runs.finishRun(run.id, "failed", {
+        error: result.phases.find((p) => !p.success)?.error || "workflow failed during resume",
+      });
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[resume] ${run.workflowName} resume for ${run.id} threw: ${msg}`);
-    opts.db.finishWorkflowRun(run.id, "failed", `resume threw: ${msg}`);
+    opts.db.runs.finishRun(run.id, "failed", { error: `resume threw: ${msg}` });
   }
 }
 
@@ -325,7 +323,7 @@ async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Promise<v
 const MAX_RESTART_RESUMES = 3;
 
 export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void> {
-  const active = opts.db.activeWorkflowRuns();
+  const active = opts.db.runs.listActive();
   const orphans = active.filter((r) => r.status === "running");
 
   if (orphans.length === 0) {
@@ -337,7 +335,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
 
   for (const run of orphans) {
     // Clear any "still running" execution rows so dedup works on resume.
-    const cleared = opts.db.markAllStaleForTrigger(
+    const cleared = opts.db.executions.markAllStaleForTrigger(
       run.triggerId,
       "stale: harness restarted",
     );
@@ -349,11 +347,11 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     // resumed it more than MAX_RESTART_RESUMES times, mark it failed and
     // move on. This is what stops an OOM-on-restart loop from churning
     // forever.
-    const attempts = opts.db.incrementWorkflowRunRestartCount(run.id);
+    const attempts = opts.db.runs.incrementRestartCount(run.id);
     if (attempts > MAX_RESTART_RESUMES) {
       const msg = `harness restarted ${attempts - 1}x while this run was active — giving up after ${MAX_RESTART_RESUMES} resume attempts`;
       console.warn(`[resume] ${run.workflowName} run ${run.id}: ${msg}`);
-      opts.db.finishWorkflowRun(run.id, "failed", msg);
+      opts.db.runs.finishRun(run.id, "failed", { error: msg });
       continue;
     }
 

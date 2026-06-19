@@ -423,10 +423,10 @@ async function main() {
     const notifierOnRunStart = statusChecklist
       ? (runId: string): void => {
           try {
-            const saved = ((db.getWorkflowRun(runId)?.scratch?.notifier) ?? {}) as NotifierState;
+            const saved = ((db.runs.getRun(runId)?.scratch?.notifier) ?? {}) as NotifierState;
             const persist = (patch: Partial<NotifierState>) => {
-              const cur = ((db.getWorkflowRun(runId)?.scratch?.notifier) ?? {}) as NotifierState;
-              db.updateWorkflowRunScratch(runId, { notifier: { ...cur, ...patch } });
+              const cur = ((db.runs.getRun(runId)?.scratch?.notifier) ?? {}) as NotifierState;
+              db.runs.mergeScratch(runId, { notifier: { ...cur, ...patch } });
             };
             const transports: NotifierTransport[] = [];
             if (ghChecklist && github && typeof issueNumber === "number") {
@@ -616,7 +616,7 @@ async function main() {
           console.warn(`[admin] Cannot resume workflow ${workflowRun.id}: missing owner/repo/issueNumber`);
           return;
         }
-        db.resumeWorkflowRun(workflowRun.id);
+        db.runs.setRunning(workflowRun.id);
         console.log(`[admin] Resuming ${workflowRun.workflowName} for ${owner}/${repo}#${issueNumber} after dashboard approval by ${sender}`);
         dispatchWorkflow(workflowRun.workflowName, {
           repo: `${owner}/${repo}`,

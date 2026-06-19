@@ -94,7 +94,7 @@ export async function dispatch(
 
   // Status report: list running executions.
   if (handler === "status-report") {
-    const running = deps.db.runningExecutions();
+    const running = deps.db.executions.runningExecutions();
     if (running.length === 0) {
       await envelope.reply("No tasks currently running.");
     } else {
@@ -110,7 +110,7 @@ export async function dispatch(
   // point is a workflow dispatch (or a resume of one), so a run already in
   // flight for this trigger is a no-op.
   const triggerId = String(envelope.issueNumber || envelope.id);
-  if (deps.db.isRunning(handler, triggerId)) {
+  if (deps.db.executions.isRunning(handler, triggerId)) {
     console.log(`[event] Skipping: ${handler} already running for ${triggerId}`);
     if (envelope.type === "message") {
       await envelope.reply(`That task is already running. Use /status to check progress.`);
@@ -349,7 +349,7 @@ async function handleBuild(
   }
 
   const executionId = randomUUID();
-  deps.db.recordStart({
+  deps.db.executions.recordStart({
     id: executionId,
     triggerType: envelope.type === "message" ? "chat" : "webhook",
     triggerId: String(issueNumber),
@@ -384,7 +384,7 @@ async function handleBuild(
     sender: (context.sender as string) || "unknown",
     _triggerType: envelope.type === "message" ? "chat" : "webhook",
   }).then((result) => {
-    deps.db.recordFinish(executionId, {
+    deps.db.executions.recordFinish(executionId, {
       success: result.success,
       error: result.success ? undefined : "Build cycle failed",
       durationMs: 0,
@@ -394,7 +394,7 @@ async function handleBuild(
     }
   }).catch((err) => {
     console.error(`[event] Build cycle failed:`, err);
-    deps.db.recordFinish(executionId, { success: false, error: err.message, durationMs: 0 });
+    deps.db.executions.recordFinish(executionId, { success: false, error: err.message, durationMs: 0 });
   });
 
   return { kind: "dispatched", workflow: buildWorkflow };
@@ -479,18 +479,16 @@ async function handleExploreReply(
   const replyText = (context.reply as string) || "";
   const sender = (context.sender as string) || "unknown";
 
-  const run = deps.db.getWorkflowRun(workflowRunId);
+  const run = deps.db.runs.getRun(workflowRunId);
   if (!run) {
     console.warn(`[event] explore-reply: run ${workflowRunId} not found`);
     return handled;
   }
-  const pending = deps.db.getPendingApprovalForWorkflow(workflowRunId);
+  const pending = deps.db.approvals.getPendingForWorkflow(workflowRunId);
   if (!pending || pending.kind !== "reply") {
     console.warn(`[event] explore-reply: no pending reply gate on ${workflowRunId}`);
     return handled;
   }
-  deps.db.resolveReplyGate(pending.id, replyText, sender);
-
   // Append the QA entry to scratch.socratic.qa. The runner reads this via
   // {{scratch.socratic.qa}} on the next iteration. The bot's last question
   // lives on the execution row that produced it — resolve
@@ -501,7 +499,7 @@ async function handleExploreReply(
   const qaList = Array.isArray(prevSocratic.qa) ? [...(prevSocratic.qa as unknown[])] : [];
   const lastQuestion =
     (prevSocratic.lastOutputExecutionId
-      ? deps.db.getExecutionOutput(prevSocratic.lastOutputExecutionId as string) ?? ""
+      ? deps.db.executions.getExecutionOutput(prevSocratic.lastOutputExecutionId as string) ?? ""
       : (prevSocratic.lastOutput as string | undefined) ?? "");
   qaList.push({
     question: lastQuestion,
@@ -509,14 +507,23 @@ async function handleExploreReply(
     sender,
     at: new Date().toISOString(),
   });
-  deps.db.updateWorkflowRunScratch(workflowRunId, {
-    socratic: { ...prevSocratic, qa: qaList },
-  });
-
-  // Resume is ledger-driven: the runner re-runs from the top, completed
-  // phases skip via shouldRunPhase, and the generic-loop node picks up from
-  // `scratch.iteration` (persisted when it paused).
-  deps.db.resumeWorkflowRun(workflowRunId);
+  // One transaction: resolve the reply gate (recording the reply text), merge
+  // the QA into scratch, and flip the run back to running. Resume is then
+  // ledger-driven: the runner re-runs from the top, completed phases skip via
+  // shouldRunPhase, and the generic-loop node picks up from `scratch.iteration`
+  // (persisted when it paused). The atomic op's double-reply guard throws on a
+  // racing second reply — bail without a duplicate dispatch.
+  try {
+    deps.db.runs.resolveReplyGateAndResume(workflowRunId, pending.id, replyText, sender, {
+      socratic: { ...prevSocratic, qa: qaList },
+    });
+  } catch (err) {
+    console.warn(
+      `[event] explore-reply: reply gate ${pending.id} already resolved — skipping duplicate resume:`,
+      err,
+    );
+    return handled;
+  }
 
   // Re-dispatch. Use channelId/threadId from the current event context (the
   // router captured them from the reply envelope), not stored workflow
@@ -560,9 +567,9 @@ async function handleApprovalResponse(
     : undefined;
 
   const approval = context.workflowRunId
-    ? deps.db.getPendingApprovalForWorkflow(context.workflowRunId as string)
+    ? deps.db.approvals.getPendingForWorkflow(context.workflowRunId as string)
     : triggerId
-    ? deps.db.getPendingApprovalByTrigger(triggerId)
+    ? deps.db.approvals.getPendingByTrigger(triggerId)
     : null;
 
   if (!approval) {
@@ -570,12 +577,12 @@ async function handleApprovalResponse(
     return handled;
   }
 
-  deps.db.respondToApproval(approval.id, decision, sender, reason);
-
   if (decision === "approved") {
     // Re-trigger the workflow — resume logic picks up from DB state.
-    const workflowRun = deps.db.getWorkflowRun(approval.workflowRunId);
+    const workflowRun = deps.db.runs.getRun(approval.workflowRunId);
     if (workflowRun && !deps.github) {
+      // Record the approval, but we can't resume without the GitHub App.
+      deps.db.approvals.respond(approval.id, "approved", sender, reason);
       await envelope.reply(
         "Approval recorded, but cannot resume: GitHub App is not configured. Configure GITHUB_APP_ID and related env vars to enable build resumption.",
       );
@@ -588,7 +595,9 @@ async function handleApprovalResponse(
         : ["", ""];
       const issueNumber = workflowRun.issueNumber;
       if (owner && repo && issueNumber) {
-        deps.db.resumeWorkflowRun(workflowRun.id);
+        // One transaction: respond 'approved' + flip the run to running. The
+        // long-running re-dispatch happens after the commit.
+        deps.db.runs.resolveGateAndResume(approval.id, sender);
         deps.dispatchWorkflow(workflowRun.workflowName, {
           repo: `${owner}/${repo}`,
           issueNumber,
@@ -597,17 +606,18 @@ async function handleApprovalResponse(
           sender,
           _triggerType: "approval",
         }).catch((err) => console.error(`[approval] Resume failed:`, err));
+      } else {
+        // Can't reconstruct the dispatch target — record without resuming.
+        deps.db.approvals.respond(approval.id, "approved", sender, reason);
       }
+    } else {
+      // No workflow run for this approval — just record the response.
+      deps.db.approvals.respond(approval.id, "approved", sender, reason);
     }
   } else {
-    const workflowRun = deps.db.getWorkflowRun(approval.workflowRunId);
-    if (workflowRun) {
-      deps.db.finishWorkflowRun(
-        approval.workflowRunId,
-        "failed",
-        `Rejected by ${sender}: ${reason || "no reason given"}`,
-      );
-    }
+    // One transaction: respond 'rejected' + fail the run (a no-op if the run
+    // is already gone).
+    deps.db.runs.resolveGateAndFail(approval.id, sender, reason);
     await envelope.reply(
       `Rejected by ${sender}. Build cycle aborted.${reason ? ` Reason: ${reason}` : ""}`,
     );
@@ -637,7 +647,7 @@ async function handleChat(
   // triggerId is the messaging-session id, so a whole Slack thread groups
   // together with `GROUP BY trigger_id`.
   const executionId = randomUUID();
-  deps.db.recordStart({
+  deps.db.executions.recordStart({
     id: executionId,
     triggerType: "chat",
     triggerId: messagingSessionId,
@@ -652,7 +662,7 @@ async function handleChat(
       deps.sessionManager.setAgentSessionId(messagingSessionId, result.agentSessionId);
     }
 
-    deps.db.recordFinish(executionId, {
+    deps.db.executions.recordFinish(executionId, {
       success: result.success,
       error: result.error,
       turns: result.turns,
@@ -672,7 +682,7 @@ async function handleChat(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[dispatch] Chat error:`, msg);
-    deps.db.recordFinish(executionId, { success: false, error: msg, durationMs: 0 });
+    deps.db.executions.recordFinish(executionId, { success: false, error: msg, durationMs: 0 });
     await envelope.reply("Sorry, I encountered an error. Please try again.");
   }
 
