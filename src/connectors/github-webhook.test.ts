@@ -103,3 +103,79 @@ describe("GitHubWebhookConnector — self-review guard", () => {
     expect(json.accepted).toBe(true);
   });
 });
+
+/** POST a signed check_run/check_suite event; capture any emitted envelope. */
+async function postCheckEvent(
+  conn: GitHubWebhookConnector,
+  event: "check_run" | "check_suite",
+  opts: { action: string; prNumber?: number },
+): Promise<{ status: number; json: any; emitted: any | null }> {
+  let emitted: any = null;
+  conn.on("event", (e) => { emitted = e; });
+  const prs = opts.prNumber ? [{ number: opts.prNumber, head: { ref: "feature" } }] : [];
+  const payload = {
+    action: opts.action,
+    repository: { full_name: REPO },
+    sender: { login: "a-human", type: "User" },
+    [event]: { id: 1, head_sha: "abc123", pull_requests: prs },
+  };
+  const body = JSON.stringify(payload);
+  const res = await conn.honoApp.request("/webhooks/github", {
+    method: "POST",
+    headers: {
+      "x-hub-signature-256": sign(body),
+      "x-github-event": event,
+      "x-github-delivery": "test-delivery",
+      "content-type": "application/json",
+    },
+    body,
+  });
+  const json = await res.json();
+  // emission is scheduled via setImmediate — let it flush
+  await new Promise((r) => setImmediate(r));
+  return { status: res.status, json, emitted };
+}
+
+describe("GitHubWebhookConnector — re-run checks", () => {
+  beforeEach(() => {
+    setRuntimeConfig({ managedRepos: [REPO] } as unknown as LastLightConfig);
+  });
+  afterEach(() => resetRuntimeConfigForTests());
+
+  it("maps check_run.rerequested to a pr.synchronize for the associated PR", async () => {
+    const { status, emitted } = await postCheckEvent(connector(), "check_run", {
+      action: "rerequested",
+      prNumber: 42,
+    });
+    expect(status).toBe(202);
+    expect(emitted).not.toBeNull();
+    expect(emitted.type).toBe("pr.synchronize");
+    expect(emitted.prNumber).toBe(42);
+  });
+
+  it("maps check_suite.rerequested to a pr.synchronize", async () => {
+    const { emitted } = await postCheckEvent(connector(), "check_suite", {
+      action: "rerequested",
+      prNumber: 7,
+    });
+    expect(emitted?.type).toBe("pr.synchronize");
+    expect(emitted?.prNumber).toBe(7);
+  });
+
+  it("ignores check_run.completed (only re-runs should trigger)", async () => {
+    const { json, emitted } = await postCheckEvent(connector(), "check_run", {
+      action: "completed",
+      prNumber: 42,
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
+  it("ignores a rerequested check_run with no associated PR", async () => {
+    const { json, emitted } = await postCheckEvent(connector(), "check_run", {
+      action: "rerequested",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+});

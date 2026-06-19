@@ -247,6 +247,31 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         title = payload.pull_request?.title || "";
         if (action === "created") type = "pr_review_comment.created";
         break;
+
+      // "Re-run" / "Re-run all checks" on the PR's Checks tab. GitHub fires
+      // check_run.rerequested (one check) or check_suite.rerequested (all) to
+      // the App that owns the check. Map either to pr.synchronize so the runner
+      // re-reviews the PR's current head — the same path a fresh push takes.
+      // The associated PR comes from the event's `pull_requests[]` (populated
+      // for same-repo PRs). Other check_run/check_suite actions (created /
+      // completed / requested, fired on every check) leave `type` null and are
+      // ignored. NOTE: requires the GitHub App to be subscribed to the "Check
+      // run" / "Check suite" events — without that GitHub never delivers these.
+      case "check_run":
+        if (action === "rerequested" || action === "requested_action") {
+          prNumber = payload.check_run?.pull_requests?.[0]?.number;
+          issueNumber = prNumber;
+          if (prNumber) type = "pr.synchronize";
+        }
+        break;
+
+      case "check_suite":
+        if (action === "rerequested") {
+          prNumber = payload.check_suite?.pull_requests?.[0]?.number;
+          issueNumber = prNumber;
+          if (prNumber) type = "pr.synchronize";
+        }
+        break;
     }
 
     if (!type) return null;
