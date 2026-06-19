@@ -42,8 +42,8 @@ see "Verify by building" in step 2.
 
 The runner provides PR context vars. Use them in this order:
 
-1. If `prNumber` (or `issueNumber`) > 0 is set in the Context block below, that is your target PR. Go straight to `github_get_pull_request` with that number — do NOT call `github_list_pull_requests` first.
-2. Only if no specific PR is provided, list open PRs in the repo and pick the most recent unreviewed one. When calling `github_list_pull_requests`, omit any filter you don't actually want — never pass empty strings like `head: ""` or `base: ""`, those become literal filters that return nothing.
+1. **If `prNumber` (or `issueNumber`) > 0 is set in the Context block below, that IS your target PR — you already know it.** Go straight to `github_get_pull_request` with that number. Do **NOT** call `github_list_pull_requests` to "find" or "confirm" the PR — you are not searching for it, you were handed it. Listing PRs here is pure waste: it returns a large payload that bloats every later turn and tells you nothing you didn't already have.
+2. Only if **no** specific PR is provided (e.g. a repo-wide `mode: scan` run) do you list open PRs and pick the most recent unreviewed one. When calling `github_list_pull_requests`, omit any filter you don't actually want — never pass empty strings like `head: ""` or `base: ""`, those become literal filters that return nothing. **Skip any PR authored by the bot itself** (`last-light[bot]`) — never self-review.
 
 ### 0. Read prior discussion
 
@@ -64,11 +64,28 @@ Build a mental model of what's already been said:
 
 Skip PRs authored by `last-light[bot]` (self-review).
 
-### 1. Fetch PR metadata
+### 1. Get the diff — from your LOCAL checkout, not the API
 
-Using MCP tools:
-- Get the PR title, description, labels, and linked issues (from step 0 you already have most of this)
-- Get the list of changed files (`github_list_pull_request_files`) and the diff (`github_get_pull_request_diff`)
+The PR's code is already checked out at `<repo>/` (see Workspace setup). That
+checkout is the source of truth for the diff and the file contents — use it.
+`github_get_pull_request` (step 0) gave you the base and head refs. From inside
+`<repo>/`:
+
+```
+git fetch origin <baseRef> --depth 50    # base isn't in the shallow head-only clone
+git diff --stat origin/<baseRef>...HEAD  # changed files + churn
+git diff origin/<baseRef>...HEAD         # the full patch
+```
+
+Do **NOT** call `github_list_pull_request_files` or
+`github_get_pull_request_diff`. Pulling the patch over the API duplicates what's
+already on disk and drops a large payload into the context that you then re-read
+on every subsequent turn — it's the single biggest avoidable cost in a review.
+Read each changed file in full from the same local checkout (your `read`/`grep`
+tools operate on it directly), not via `github_get_file_contents`.
+
+You already have the PR title, description, labels, and linked issues from
+step 0 — don't re-fetch them.
 
 ### 2. Analyze the changes
 
@@ -77,7 +94,7 @@ Using MCP tools:
 - Note the PR size (files changed, lines added/removed)
 
 **For complex PRs** (>300 lines changed OR >5 files changed):
-- Clone the repo locally and read changed files in FULL context
+- Read changed files in FULL context from the local checkout (it's already there — don't clone again)
 - Trace data flow through modified functions
 - Check callers of modified functions for regression risk
 - Check if tests cover actual risk areas, not just happy paths
@@ -125,14 +142,18 @@ Use `github_create_pull_request_review` MCP tool. Do NOT post as a regular comme
 
 ## Tool Usage
 
-**Always use the github MCP server tools** (`github_*`) for all GitHub operations. Never use `gh` CLI, `curl`, or raw HTTP requests.
+**Use the github MCP server tools** (`github_*`) for GitHub *API* operations — reading PR metadata/comments and posting the review. Never use `gh` CLI, `curl`, or raw HTTP for those.
+
+The one deliberate exception is the **diff and file contents**: those come from your local `<repo>/` checkout via plain `git`/`read`/`grep` (see step 1), not from `github_*_diff` / `github_list_pull_request_files` / `github_get_file_contents`. Local git on the pre-cloned repo is preferred there because the API patch is a large redundant payload.
 
 ## Pitfalls
+- **You already know the target PR** when `prNumber` is set — never call `github_list_pull_requests` to find or confirm it (step "Target selection").
+- **Use the local checkout for the diff** — don't pull the patch via `github_list_pull_request_files` / `github_get_pull_request_diff` (step 1).
+- **Never self-review.** Skip any PR authored by `last-light[bot]`. (Webhook-triggered runs are already filtered out before they reach you; this guards the `mode: scan` path.)
 - **Never review the same PR twice** at the same commit — always check first
 - Don't nitpick generated files (lock files, compiled assets)
 - Don't repeat what linters/CI already catch
 - Don't block PRs over style preferences alone
-- Skip PRs authored by the bot itself
 
 ## Verification
 - Confirm the review was posted by checking the PR reviews list

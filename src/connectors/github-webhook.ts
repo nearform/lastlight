@@ -121,6 +121,25 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         return c.json({ filtered: true, reason: "bot sender" }, 200);
       }
 
+      // Never review a PR the bot itself authored. The pr-attention exception
+      // above deliberately lets bot *senders* through (a bot fix-commit on a
+      // human's PR is a legitimate re-review signal), but a PR whose **author**
+      // is the bot is a different thing: the App can't submit a formal review
+      // of its own PR (GitHub 422 "Can not approve your own pull request") and
+      // a self-review has no gating value. Filter on the author, not the
+      // sender, so a bot `synchronize` on a human-authored PR still flows
+      // through while the bot's own PRs are dropped before any sandbox spawns.
+      const prAuthor = payload.pull_request?.user?.login || "";
+      const isBotAuthoredPr =
+        isPrAttention &&
+        (prAuthor === this.config.botLogin || prAuthor.endsWith("[bot]"));
+      if (isBotAuthoredPr) {
+        return c.json(
+          { filtered: true, reason: "bot-authored PR (self-review)" },
+          200,
+        );
+      }
+
       // Filter out repos not in the managed allowlist. The GitHub App may be
       // installed on additional repos but we only operate on those we explicitly
       // manage. See src/managed-repos.ts.
