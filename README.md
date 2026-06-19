@@ -303,8 +303,9 @@ If KVM isn't available, fall back to the Docker deploy above with `LASTLIGHT_SAN
    - **Issues**: Read & Write
    - **Pull Requests**: Read & Write
    - **Contents**: Read & Write
+   - **Checks**: Read & Write (post the `last-light/review` check; receive its "Re-run" requests)
    - **Metadata**: Read
-4. Subscribe to **events**: `Issues`, `Pull request`, `Issue comment`
+4. Subscribe to **events**: `Issues`, `Pull request`, `Issue comment`, `Check run`, `Check suite` (the last two enable the GitHub "Re-run checks" buttons to re-trigger a review)
 5. Click **Create GitHub App**
 6. Click **Generate a private key** — save the `.pem` file into the project directory
 7. Note the **App ID** from the app settings page
