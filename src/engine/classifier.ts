@@ -48,7 +48,8 @@ const CLASSIFIER_PROMPT = `You are a router for messages directed at a GitHub/Sl
 Classify the user's message into exactly one category, and extract any repository or issue references.
 
 Categories:
-BUILD — The user wants code changes NOW in a GitHub repo: implement a feature, fix a bug, create/send a PR, resolve an issue with code. BUILD requires a GitHub target — either an explicit repo reference (owner/name or github.com URL) in the message, OR an ISSUE TITLE context line indicating the comment is a reply on an existing issue/PR. If neither is present, classify as CHAT — local filesystem operations ("delete files in ~/foo", "clean up my downloads"), shell-style commands, or vague "build something" with no target are NOT BUILD.
+BUILD — The user is ASKING YOU (the bot) to make code changes NOW in a GitHub repo: implement a feature, fix a bug, create/send a PR, resolve an issue with code. BUILD requires a GitHub target — either an explicit repo reference (owner/name or github.com URL) in the message, OR an ISSUE TITLE context line indicating the comment is a reply on an existing issue/PR. If neither is present, classify as CHAT — local filesystem operations ("delete files in ~/foo", "clean up my downloads"), shell-style commands, or vague "build something" with no target are NOT BUILD.
+  BUILD is a REQUEST for NEW work directed at you. A comment that merely REPORTS work the human has ALREADY done is NOT BUILD — it is CHAT. Tells: past-tense ("fixed", "done", "implemented", "added a test", "pushed a fix", "handled it"), a reference to a commit the human made ("addressed in <sha>", "see commit abc123"), thanking you, or explaining/justifying a change they made in response to your review. These are status reports, not requests — classify them CHAT even when the comment is on a PR and even when it @-mentions you. Only classify BUILD when the human asks you to do NEW work (imperative request: "fix X", "now also handle Y", "can you update Z").
 EXPLORE — The user wants help shaping an idea BEFORE writing code: "help me think through X", "brainstorm Y", "spec this out", "explore an idea for Z". A bare "explore" / "explore this" / "let's explore" is also EXPLORE — especially as a reply on an existing issue (ISSUE TITLE present), where the implicit object is the issue's idea. EXPLORE = shape the idea / write a spec; BUILD = write the code now.
 TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
 REVIEW — The user wants to review PRs on a repo: "review cliftonc/repo", "check PRs", "can you review PRs on <repo>?".
@@ -57,7 +58,7 @@ APPROVE — The user is approving a pending gate: "approve", "go ahead", "looks 
 REJECT — The user is rejecting a pending gate: "reject", "abort", "cancel this", "no don't proceed". Extract any reason given.
 STATUS — The user wants to know what's running: "status", "what's running", "any tasks active?".
 RESET — The user wants to start a fresh session: "new", "reset", "start over", "fresh session".
-CHAT — Anything else: questions, conversation, thanks, general discussion.
+CHAT — Anything else: questions, conversation, thanks, general discussion, and status reports of work the human already did ("thanks, fixed in <sha>", "addressed your comments", "done — added tests").
 
 Polite or question phrasings are still clear intent. "Can you do a security review of X?",
 "could you triage <repo>?", "please review PRs on <repo>" are SECURITY, TRIAGE, REVIEW
@@ -83,6 +84,12 @@ a clear command directed at the issue's subject:
   out", "brainstorm this" → EXPLORE (shape the idea / write a spec first).
 A bare command word ("explore", "build") on an existing issue is a clear
 command, NOT ambiguous chat.
+This verb rule is for IMPERATIVE requests only. A PR/issue reply that REPORTS
+already-completed work or responds to your review — "thanks, fixed in <sha>",
+"addressed in commit abc123", "done, added a regression test", "this is
+intentional, confirmed with the maintainer" — is a status report, NOT a
+command. Classify it CHAT regardless of the ISSUE TITLE or an @mention. Do not
+let words like "fix"/"build"/"add" inside a past-tense report flip it to BUILD.
 
 Respond in exactly this format (each on its own line, no extra text):
 INTENT: BUILD|EXPLORE|TRIAGE|REVIEW|SECURITY|APPROVE|REJECT|STATUS|RESET|CHAT
@@ -95,6 +102,9 @@ Examples:
 "build cliftonc/drizzle-cube#42" → INTENT: BUILD, REPO: cliftonc/drizzle-cube, ISSUE: 42, REASON: NONE
 "lets build this!" with ISSUE TITLE "Security Review" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE
 "go ahead" with ISSUE TITLE "Add CSV export" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE
+"Thanks @last-light — addressed in 49ccadf. Fixed the nested body in the core and added a regression test; point 3 is intentional, confirmed with the maintainer." with ISSUE TITLE "Port fastify/hono/nextjs adapters" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
+"done, pushed a fix for the type error in 1a2b3c4" with ISSUE TITLE "Fix build" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
+"now also handle the GET /sql case please" with ISSUE TITLE "Port adapters" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE
 "explore" with ISSUE TITLE "Feature: Allow configuration of otel endpoints" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE
 "explore this" with ISSUE TITLE "Add webhook support" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE
 "approve" → INTENT: APPROVE, REPO: NONE, ISSUE: NONE, REASON: NONE
