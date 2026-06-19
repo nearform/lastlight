@@ -166,6 +166,7 @@ npm install</code></pre>
 				<li><strong>Issues</strong> — Read & Write</li>
 				<li><strong>Pull Requests</strong> — Read & Write</li>
 				<li><strong>Contents</strong> — Read & Write</li>
+				<li><strong>Checks</strong> — Read & Write</li>
 				<li><strong>Metadata</strong> — Read</li>
 			</ul>
 			<p>Generate a private key, save the <code>.pem</code> file into the lastlight folder, and install the app on your repos.</p>
@@ -210,7 +211,7 @@ npx tsx src/cli.ts health owner/repo      # health report</code></pre>
 				<li><strong>Webhook URL</strong> — <code>https://your-host:8644/webhooks/github</code></li>
 				<li><strong>Secret</strong> — same value as <code>WEBHOOK_SECRET</code> in <code>.env</code></li>
 			</ul>
-			<p>Subscribe to events: <strong>Issues</strong>, <strong>Pull requests</strong>, <strong>Issue comments</strong>, <strong>PR reviews</strong>.</p>
+			<p>Subscribe to events: <strong>Issues</strong>, <strong>Pull requests</strong>, <strong>Issue comments</strong>, <strong>Check runs</strong>, <strong>Check suites</strong> (the last two power the "Re-run checks" buttons), and optionally <strong>PR reviews</strong>.</p>
 			<p>The endpoint must be publicly reachable. Use <a href="https://ngrok.com" target="_blank" rel="noopener">ngrok</a> or <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" target="_blank" rel="noopener">Cloudflare Tunnel</a> for testing, or deploy with the included Caddy reverse proxy for automatic TLS. See <a href="/run-it">Run It for Real</a> for production setup.</p>
 			<p>The deterministic event router handles the logic — <code>issue.opened</code> triggers triage, <code>pr.opened</code> triggers review, <code>@mention</code> from a maintainer triggers the full build cycle. No configuration needed beyond the webhook URL and secret.</p>
 		</div>
