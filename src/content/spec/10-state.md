@@ -22,9 +22,11 @@ into the resume state read by every dashboard query.
 
 ## SQLite tables
 
-`src/state/db.ts` defines six tables. All rows are append-only unless
-marked mutable. Migrations are additive — `CREATE TABLE IF NOT EXISTS`
-plus `ALTER TABLE ADD COLUMN` blocks wrapped in try/catch.
+`src/state/migrate.ts` defines six tables (the per-table stores in
+`src/state/*-store.ts` operate on them; `src/state/db.ts` wires the
+stores together). All rows are append-only unless marked mutable.
+Migrations are additive — `CREATE TABLE IF NOT EXISTS` plus
+`ALTER TABLE ADD COLUMN` blocks wrapped in try/catch.
 
 ### `executions`
 
@@ -301,7 +303,11 @@ session recreation after timeouts.
 
 | Piece | File |
 |---|---|
-| All tables, indexes, accessors | `src/state/db.ts` |
+| `BaseDb` interface, store wiring, shared import surface | `src/state/db.ts` |
+| Schema migrations (`CREATE TABLE`/`INDEX`/`ALTER`) | `src/state/migrate.ts` |
+| `WorkflowRunStore` — `workflow_runs` + atomic lifecycle ops | `src/state/workflow-run-store.ts` |
+| `ExecutionStore` — `executions` table + ops | `src/state/execution-store.ts` |
+| `ApprovalStore` — `workflow_approvals` | `src/state/approval-store.ts` |
 | JSONL writer + envelope translation | `src/engine/event-shim.ts` |
 | Sandbox session reader (dashboard) | `src/admin/SessionReader.ts` |
 | Chat session reader (dashboard, DB-backed) | `src/admin/ChatSessionReader.ts` |
@@ -330,3 +336,9 @@ session recreation after timeouts.
 - **Plan for `restart_count` from day one.** Crash loops are a
   certainty. Cap them at the schema level so a stuck workflow can't
   consume the database.
+- **Split the store per table.** The intended pattern (issue #97) is one
+  store class per table — `WorkflowRunStore`, `ExecutionStore`,
+  `ApprovalStore` — over a shared `BaseDb` interface, with migrations in
+  their own module (`migrate.ts`) and `db.ts` kept as the single import
+  surface that wires them together. The accessor sprawl that grows on a
+  monolithic db file is the thing this avoids.

@@ -72,7 +72,7 @@ verification is disabled. Production deployments must set it.
 | **Normalize** | `MessagingConnector.handleIncomingMessage()` (`base.ts:47–121`). Slack-specific mention stripping via `stripBotMention()` (line 124). Session info (channel id, thread id, platform user id) goes into `envelope.raw`, not into top-level fields. |
 | **Event types** | `message` only. All Slack inbound traffic — DMs and `app_mention` in channels — normalizes to this one type. |
 | **Filtered out** | Bot messages and non-text subtypes (edits, deletes) at `connector.ts:134–139`. Channel messages that aren't mentions or thread replies. |
-| **Reply** | `reply(msg)` calls `sendMessage(channelId, threadId, chunk)` per chunk; long messages are chunked to respect Slack's ~3000-char limit. Replies post into the originating thread when one exists. (`base.ts:89–99`) |
+| **Reply** | `reply(msg)` calls `sendMessage(channelId, threadId, chunk)` per chunk; long messages are chunked to respect Slack's ~3000-char limit. Replies post into the originating thread when one exists. (`base.ts:89–99`) GitHub-Flavored-Markdown tables in replies are converted to aligned monospace code blocks (`src/connectors/slack/mrkdwn.ts`), since Slack mrkdwn has no table syntax. |
 
 The chat skill running on top of Slack messages is *not* a connector
 concern — see [Chat](/spec/11-chat).

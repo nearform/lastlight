@@ -14,7 +14,7 @@ out to the [Sandbox](/spec/09-sandbox) for each agent session, persists
 state to SQLite, and handles every gate and loop the YAML can declare.
 
 Every behaviour in Last Light — build, triage, review, explore, health,
-security — is a YAML file consumed by this engine.
+security, answer — is a YAML file consumed by this engine.
 
 ## Public contract
 
@@ -150,19 +150,25 @@ Two flavours.
       fix_variant: "{{variants.fix}}"
 ```
 
-Iteration naming (`runner.ts:282–284, 513`):
+Iteration naming — built by `PhaseRef.format()` and resolved by
+`phaseIndexInDefinition` (both in `src/workflows/phase-ref.ts`):
 
 ```
 reviewer                    ← first review
 reviewer_fix_1              ← fix cycle 1
-reviewer_2                  ← re-review after fix 1
+reviewer_recheck_1          ← re-review after fix 1
 reviewer_fix_2              ← fix cycle 2
-reviewer_3                  ← re-review after fix 2 (max_cycles)
+reviewer_recheck_2          ← re-review after fix 2 (max_cycles)
 ```
 
+`n` is the 1-based cycle; `fix_k` and `recheck_k` pair within a cycle. The
+legacy bare-numeric re-review form (`reviewer_2`) is dropped — neither
+produced nor recognized on resume.
+
 The runner parses the verdict line — `^\s*VERDICT:\s*(APPROVED|REQUEST_CHANGES)`
-— from the reviewer's output and either advances or enters the next
-fix cycle.
+— from the reviewer's output via the single pure parser
+`parseReviewerVerdict` (`src/workflows/verdict.ts`) and either advances or
+enters the next fix cycle.
 
 ### `generic_loop` — until-condition cycle
 

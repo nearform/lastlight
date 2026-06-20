@@ -199,6 +199,7 @@ is handled in the harness:
 | `explore-reply` | `750–836` — feed comment into paused explore loop |
 | `pr-fix` | `689–744` — lightweight fix-and-push |
 | `github-orchestrator` | `896–976` — full build cycle on an issue |
+| `answer` | `982–1014` — generic `dispatchWorkflow()` for `answer.yaml`; answers a question issue directly (routed via `routes.github.issue_answer` / `routes.slack.answer`) |
 | `pr-review`, `pr-comment`, `issue-triage`, `issue-comment`, `explore`, `security-review`, `security-feedback` | `982–1014` — generic `dispatchWorkflow()` + ack |
 
 The generic-dispatch lane runs the YAML workflow whose name matches

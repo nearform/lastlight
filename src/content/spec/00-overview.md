@@ -39,7 +39,8 @@ The terms used across this spec, in dependency order.
 - **Workflow** — a YAML file under `workflows/*.yaml`. Declares a
   sequence (or DAG) of phases the runner executes. The runner is
   workflow-agnostic: every behaviour (build, triage, review, explore,
-  health) is just another YAML file. Full grammar in
+  health, answer — a question answered directly without a PR) is just
+  another YAML file. Full grammar in
   [Workflow Engine](/spec/06-workflow-engine).
 - **Workflow Run** — one execution of a Workflow against a triggering
   event. Persisted in the `workflow_runs` table with `status` of
@@ -48,7 +49,7 @@ The terms used across this spec, in dependency order.
 - **Phase** — a single step in a Workflow. Either a `context` checkpoint
   (no agent invocation), an `agent` phase (one agent session), or a
   `loop` phase (an agent phase that iterates on reviewer feedback, e.g.
-  `reviewer_2`, `reviewer_fix_1`).
+  `reviewer_fix_1`, `reviewer_recheck_1`).
 - **Execution** — one agent session: a single phase running, or a single
   chat turn. One row in the `executions` table with tokens, cost, stop
   reason, and a pointer to the JSONL event log for that session.

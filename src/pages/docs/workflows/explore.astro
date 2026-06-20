@@ -71,6 +71,8 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		for any free-form reply in the same thread (not just an explicit "approve"
 		command). When you reply, your answer is appended to a Q&A transcript and
 		the next iteration runs with full context of everything discussed so far.
+		Replies feed back into the same paused run via the <code>explore_reply</code>
+		route — there's no separate workflow for the continuation.
 	</p>
 
 	<ol>

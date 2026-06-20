@@ -6,10 +6,15 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	description="Overview of Last Light's default YAML workflows — what each one does, when it triggers, and how they fit together."
 >
 	<p>
-		Last Light ships with seven default workflows. Each is a YAML file in
-		<code>workflows/</code> that the runner executes phase-by-phase. The harness
-		itself knows nothing about "build" or "triage" specifically — it just runs
-		whatever phases a workflow declares.
+		Last Light ships with a roster of default workflows, grouped by family:
+		<strong>build</strong>; <strong>question-answering</strong> (answer,
+		issue-comment, pr-comment); <strong>triage</strong>;
+		<strong>review</strong> (pr-review); <strong>fix</strong> (pr-fix);
+		<strong>reporting</strong> (repo-health); and <strong>security</strong>
+		(security-review, security-feedback) — several with optional cron variants.
+		Each is a YAML file in <code>workflows/</code> that the runner executes
+		phase-by-phase. The harness itself knows nothing about "build" or "triage"
+		specifically — it just runs whatever phases a workflow declares.
 	</p>
 
 	<p>
@@ -75,6 +80,28 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<span class="workflow-card-meta">1 phase &middot; webhook</span>
 		</a>
 
+		<a href="/docs/workflows/answer" class="workflow-card">
+			<div class="workflow-card-header">
+				<span class="workflow-card-icon">
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+				</span>
+				<span class="workflow-card-name">Answer</span>
+			</div>
+			<p>Researches docs + web and posts a single sourced answer when an issue or message is a question.</p>
+			<span class="workflow-card-meta">1 phase &middot; webhook + slack</span>
+		</a>
+
+		<a href="/docs/workflows/pr-comment" class="workflow-card">
+			<div class="workflow-card-header">
+				<span class="workflow-card-icon">
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+				</span>
+				<span class="workflow-card-name">PR comment</span>
+			</div>
+			<p>Answers a maintainer's question about an open PR with concrete, code-cited evidence.</p>
+			<span class="workflow-card-meta">1 phase &middot; webhook</span>
+		</a>
+
 		<a href="/docs/workflows/pr-review" class="workflow-card">
 			<div class="workflow-card-header">
 				<span class="workflow-card-icon">
@@ -106,6 +133,28 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			</div>
 			<p>Weekly health report — open/stale issues, PR velocity, action items.</p>
 			<span class="workflow-card-meta">1 phase &middot; cron</span>
+		</a>
+
+		<a href="/docs/workflows/security-review" class="workflow-card">
+			<div class="workflow-card-header">
+				<span class="workflow-card-icon">
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+				</span>
+				<span class="workflow-card-name">Security review</span>
+			</div>
+			<p>Scans a repo with npm audit, semgrep, gitleaks + AI review and files one grouped summary issue per run.</p>
+			<span class="workflow-card-meta">1 phase &middot; cron + webhook + slack</span>
+		</a>
+
+		<a href="/docs/workflows/security-feedback" class="workflow-card">
+			<div class="workflow-card-header">
+				<span class="workflow-card-icon">
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+				</span>
+				<span class="workflow-card-name">Security feedback</span>
+			</div>
+			<p>Acts on maintainer feedback to a security issue — split into issues, accept risk, false-positive, or reopen.</p>
+			<span class="workflow-card-meta">1 phase &middot; webhook</span>
 		</a>
 	</div>
 
@@ -139,18 +188,18 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		<tbody>
 			<tr>
 				<td><strong>GitHub webhook</strong></td>
-				<td>issue-triage, pr-review, build, pr-fix, issue-comment</td>
-				<td>GitHub App sends events to the harness. The router + LLM classifier decides which workflow to run.</td>
+				<td>issue-triage, pr-review, build, pr-fix, issue-comment, answer, pr-comment, security-feedback</td>
+				<td>GitHub App sends events to the harness. The router + LLM classifier decides which workflow to run. A newly-opened issue classified as a question routes to answer; a comment on a PR routes to pr-comment; an <code>@last-light</code> mention on a security-labelled issue routes to security-feedback.</td>
 			</tr>
 			<tr>
 				<td><strong>Slack message</strong></td>
-				<td>explore, build, triage, review, all others via chat</td>
-				<td>Natural language in DMs or threads. The classifier extracts intent and repo from the message.</td>
+				<td>explore, build, triage, review, answer, security-review, all others via chat</td>
+				<td>Natural language in DMs or threads. The classifier extracts intent and repo from the message. Questions route to answer; "security review owner/repo" runs security-review.</td>
 			</tr>
 			<tr>
 				<td><strong>Cron schedule</strong></td>
-				<td>issue-triage, pr-review, repo-health</td>
-				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured.</td>
+				<td>issue-triage, pr-review, repo-health, security-review</td>
+				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo.</td>
 			</tr>
 			<tr>
 				<td><strong>CLI</strong></td>
@@ -187,13 +236,18 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				<td>Full read/write — can push commits, create branches, open PRs</td>
 			</tr>
 			<tr>
+				<td><strong>repo-write</strong></td>
+				<td>security-feedback</td>
+				<td>Full read/write — updates SECURITY.md via PR and creates issues</td>
+			</tr>
+			<tr>
 				<td><strong>review-write</strong></td>
 				<td>pr-review</td>
 				<td>Can post review comments but not push code</td>
 			</tr>
 			<tr>
 				<td><strong>issues-write</strong></td>
-				<td>issue-triage, issue-comment, explore</td>
+				<td>issue-triage, issue-comment, pr-comment, explore, answer, security-review</td>
 				<td>Can read code, create/edit issues, post comments</td>
 			</tr>
 			<tr>

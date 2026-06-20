@@ -111,6 +111,8 @@ npm run dev:dashboard</code></pre>
 	<p>The CLI is a thin HTTP client — it POSTs to the running server. Open a second terminal:</p>
 
 	<pre><code># Cheap defaults — single agent invocation
+npm run cli -- &lt;github-url&gt;                                # default: triage the issue
+npm run cli -- owner/repo#N                                # shorthand: triage the issue
 npx tsx src/cli.ts owner/repo#42                          # triage one issue
 npx tsx src/cli.ts https://github.com/owner/repo/pull/99  # review one PR
 npx tsx src/cli.ts triage owner/repo                       # scan repo for new issues
