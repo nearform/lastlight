@@ -76,4 +76,58 @@ describe('markdownToSlackMrkdwn', () => {
     const result = markdownToSlackMrkdwn(input);
     expect(result).toBe('<https://img.example.com|alt> and <https://link.example.com|text>');
   });
+
+  describe('GFM tables', () => {
+    it('renders a table as an aligned monospace code block', () => {
+      const input = [
+        '| Feature | Last Light | Eve |',
+        '|---------|-----------|-----|',
+        '| Scope | maintenance agent | framework |',
+        '| Hosting | self-hosted | managed |',
+      ].join('\n');
+      const result = markdownToSlackMrkdwn(input);
+      // Wrapped in a code block so Slack renders it fixed-width.
+      expect(result.startsWith('```')).toBe(true);
+      expect(result.trimEnd().endsWith('```')).toBe(true);
+      // Header present, GFM delimiter pipes gone.
+      expect(result).toContain('Feature');
+      expect(result).toContain('Last Light');
+      expect(result).not.toContain('|');
+      // The header label and the row value below it start at the same column.
+      const lines = result.split('\n');
+      const headerLine = lines.find((l) => l.includes('Last Light'))!;
+      const rowLine = lines.find((l) => l.includes('maintenance agent'))!;
+      expect(rowLine.indexOf('maintenance agent')).toBe(headerLine.indexOf('Last Light'));
+    });
+
+    it('aligns columns to the widest cell', () => {
+      const input = '| A | Bbbbb |\n|---|---|\n| ccccc | d |';
+      const result = markdownToSlackMrkdwn(input);
+      // "A" padded to width of "ccccc"; two-space gutter between columns.
+      expect(result).toContain('A      Bbbbb');
+      expect(result).toContain('ccccc  d');
+    });
+
+    it('strips inline markdown inside cells', () => {
+      const input = '| Name | Link |\n|---|---|\n| **bold** | [docs](https://x.io) |';
+      const result = markdownToSlackMrkdwn(input);
+      expect(result).toContain('bold');
+      expect(result).not.toContain('**bold**');
+      expect(result).toContain('docs (https://x.io)');
+    });
+
+    it('leaves pipe characters inside fenced code blocks alone', () => {
+      const input = '```\n| not | a | table |\n|---|---|---|\n```';
+      const result = markdownToSlackMrkdwn(input);
+      expect(result).toContain('| not | a | table |');
+    });
+
+    it('only converts the table, leaving surrounding prose intact', () => {
+      const input = 'Here is the comparison:\n\n| X | Y |\n|---|---|\n| 1 | 2 |\n\nThanks!';
+      const result = markdownToSlackMrkdwn(input);
+      expect(result).toContain('Here is the comparison:');
+      expect(result).toContain('Thanks!');
+      expect(result).toContain('```');
+    });
+  });
 });
