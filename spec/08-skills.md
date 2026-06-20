@@ -241,8 +241,8 @@ chat runtime:
 | `repo-health` | Weekly health report (open / stale / velocity / labels) | `repo-health.yaml`, `cron-health.yaml`, chat |
 | `security-review` | Diff-based security scan since last review | `security-review.yaml`, `cron-security.yaml` |
 | `security-feedback` | Break out scan findings into individual issues | `security-feedback.yaml` |
-| `building` | Shared craft: install deps + run the test/lint/typecheck gate in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing) | build executor + reviewer, `pr-fix.yaml`, `pr-review.yaml` |
-| `code-review` | Shared review rubric: finding tiers (Critical / Important / Suggestions / Nits) + what to check (correctness, security, edge cases, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
+| `building` | Shared craft: install deps + run the test/lint/typecheck gate in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml`, `pr-review.yaml` |
+| `code-review` | Shared review rubric: finding tiers (Critical / Important / Suggestions / Nits) + what to check (correctness incl. silent-default/dropped-output as a bug, security, edge cases, complexity, duplication, type-safety, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
 | `issue-answer` | Answer a question directly: sourced neutral reply to a GitHub issue or Slack thread; research repo docs + web; label `question` (GitHub only); never write a brief, mark ready-for-agent, or change code | `answer.yaml` |
 | `chat` | Conversational assistant persona | chat (always-on) |
 

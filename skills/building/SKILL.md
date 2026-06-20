@@ -39,6 +39,13 @@ The **only** acceptable "couldn't verify" is when the install or build command
 *itself* fails — quote the exact command and error, and scope your work to what
 you could check. Never cite "deps aren't installed" as the reason: you install them.
 
+**If the repo's only test path needs an external service that won't run in the
+sandbox** (a live database, a cloud API, a running daemon), do **not** report
+that verification "could not run." Add a focused unit or CLI test project that
+exercises your change against in-memory fixtures or fakes, run *that*, and paste
+its output. A change you couldn't execute even once is unverified — building a
+runnable path is part of the work, not an optional extra.
+
 ## The gate
 
 While iterating, run **only the tests covering the files you touched** — not the
@@ -59,3 +66,30 @@ When you are *writing* code (not just verifying a PR): write the **failing test
 first**, watch it go red, then implement until it goes green, then refactor.
 Test behaviour through the public interface, not implementation details. The red
 test is the proof the test can fail — a test that was never red proves nothing.
+
+## Decomposition budget (when implementing)
+
+The gate passing is necessary, not sufficient — a green test does not excuse an
+unmaintainable function. Before you commit, decompose:
+
+- Keep each function under **roughly 15 cyclomatic complexity** (branches +
+  loops + boolean operators). If you're past that, extract helpers.
+- One function = one responsibility. A function that **parses, validates, and
+  emits is three functions** — split it before committing, not "later."
+- The refactor step of red-green-refactor is where this happens. Don't skip it
+  because the tests already pass.
+
+## Type safety — no compiler-silencing assertions
+
+The gate requires `tsc` (or the project's typechecker) to pass — but passing it
+by *suppressing* it is a regression, not a fix. **Never** use `as any`, an
+unchecked `as`-cast, `@ts-ignore`/`@ts-expect-error`, `# type: ignore`, or the
+equivalent to:
+
+- silence a compiler error instead of fixing the underlying type, or
+- bypass a validator/guard the same code path defines (e.g. casting past a Zod
+  schema, a runtime type guard, or a parse function so the value skips the very
+  check that file exists to enforce).
+
+If the types genuinely can't express something, narrow with a real type guard or
+fix the type — don't assert your way past it.

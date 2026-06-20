@@ -19,6 +19,14 @@ write the failing test before implementing (TDD), and run the full
 test/lint/typecheck gate once before committing — all of it must pass before you
 commit or claim done.
 
+Before committing, also honour the building skill's **decomposition budget** and
+**type-safety** rules: keep functions under ~15 cyclomatic complexity (a
+function that parses, validates, and emits is three functions — extract helpers),
+and never use `as any` or other compiler-silencing assertions to pass the gate or
+to skip a validator the same code defines. If the repo's only test path needs an
+unavailable external service, add a runnable unit/CLI test with in-memory
+fixtures rather than declaring the change unverified.
+
 AFTER THE GATE PASSES:
 1. Write {{issueDir}}/executor-summary.md:
    - What was done, files changed

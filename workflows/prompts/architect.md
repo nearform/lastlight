@@ -26,6 +26,11 @@ OUTPUT — write the plan to {{issueDir}}/architect-plan.md:
   guardrails-report.md into the plan so the executor uses them directly.
 - Implementation approach (step-by-step)
 - Risks and edge cases
+  - For every input the design does NOT fully support, specify **warn-and-skip**
+    or **warn-and-surface** behaviour explicitly. A silent default, a silently
+    skipped case, or a dropped output is a correctness bug — never plan for one.
+    If an input can't be handled, the plan must say how the user is told (a
+    warning, a surfaced error), not let it disappear.
 - Test strategy
 - Estimated complexity: simple / medium / complex
 
