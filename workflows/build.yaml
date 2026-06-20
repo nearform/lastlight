@@ -61,6 +61,7 @@ phases:
   - name: executor
     label: Executor
     prompt: prompts/executor.md
+    skill: building
     model: "{{models.executor}}"
     variant: "{{variants.executor}}"
     messages:
@@ -71,6 +72,9 @@ phases:
   - name: reviewer
     label: Reviewer
     prompt: prompts/reviewer.md
+    # code-review: rubric for the review + re-review prompts.
+    # building: the fix cycle (fix.md) runs under this node and needs the gate.
+    skills: [code-review, building]
     model: "{{models.reviewer}}"
     variant: "{{variants.reviewer}}"
     output_var: review

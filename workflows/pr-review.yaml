@@ -13,6 +13,8 @@ description: |
 phases:
   - name: review
     label: Review
-    skill: pr-review
+    # pr-review: the PR procedure (primary). building: install + test gate.
+    # code-review: the finding-tier + what-to-check rubric.
+    skills: [pr-review, building, code-review]
     model: "{{models.review}}"
     variant: "{{variants.review}}"

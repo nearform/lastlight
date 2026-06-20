@@ -9,6 +9,7 @@ phases:
   - name: fix
     label: Fix
     prompt: prompts/pr-fix.md
+    skill: building
     model: "{{models.pr-fix}}"
     messages:
       on_start: "On it — fixing PR #{{prNumber}}..."

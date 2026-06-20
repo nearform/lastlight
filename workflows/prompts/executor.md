@@ -14,24 +14,15 @@ commands:
 - Use the test/lint/typecheck commands the plan copied from the guardrails
   report — no need to re-open guardrails-report.md unless the plan omitted them.
 
-EXECUTION:
-- Follow TDD: write the failing test first, then implement.
-- While iterating, run only the tests covering the files you changed — not the
-  whole suite on every edit.
+Follow the **building** skill for the mechanics: install dependencies first,
+write the failing test before implementing (TDD), and run the full
+test/lint/typecheck gate once before committing — all of it must pass before you
+commit or claim done.
 
-BEFORE COMMITTING — RUN THE FULL GATE ONCE, ALL MUST PASS:
-1. Run the full test command and verify ALL tests pass (zero failures).
-2. Run the lint command (if present) and fix ALL lint errors.
-3. Run the typecheck command (if present) once and fix ALL type errors.
-4. If any guardrail fails, fix it and re-run only what failed until clean.
-DO NOT commit or claim done until the full suite, lint, and typecheck all pass.
-
-AFTER ALL GUARDRAILS PASS:
+AFTER THE GATE PASSES:
 1. Write {{issueDir}}/executor-summary.md:
    - What was done, files changed
-   - Test results (paste actual output)
-   - Lint results (paste actual output)
-   - Typecheck results (paste actual output)
+   - Test / lint / typecheck results (paste actual output)
    - Any deviations from the plan, known issues
 2. Update {{issueDir}}/status.md: current_phase = executor
 3. git add -A && git commit -m "feat: implement #{{issueNumber}}

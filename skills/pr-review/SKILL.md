@@ -1,172 +1,90 @@
 ---
 name: pr-review
-description: Review a GitHub pull request with structured feedback following project guidelines
-version: 2.0.0
+description: Review a GitHub pull request and post one formal review — advance the existing discussion, verify by building, and give tiered feedback. Use when asked to review a PR or on a cron PR scan.
+version: 3.0.0
 tags: [github, review, code-quality]
 ---
 
-# PR Review Skill
+# PR Review
 
-## When to Use
-When asked to review a pull request, or when triggered by a webhook/cron to check for unreviewed PRs.
+Review an open PR and post **one formal review**. Build and test the change for
+real — static reasoning alone is not a review of correctness.
+
+This skill is the PR-specific procedure. It uses two shared skills: the
+**building** skill for installing and running the test/lint/typecheck gate, and
+the **code-review** skill for the finding tiers and what-to-check rubric.
+
+## Workspace
+
+The harness pre-clones the PR's head ref into a `<repo>/` **subdirectory** of
+your cwd (the cwd holds `AGENTS.md`; the repo is one level deeper). `ls -la` —
+if you see `<repo>/.git/`, `cd <repo>` and use git directly. To refresh:
+`git fetch origin <branch> --depth 50 && git reset --hard FETCH_HEAD`. If the
+pre-clone is missing, `git clone https://github.com/{{owner}}/{{repo}}.git {{repo}}`.
+
+**Read code from this local checkout, never the API.** Use `git`/`read`/`grep`
+on disk for the diff and file contents. Do **not** call
+`github_get_pull_request_diff`, `github_list_pull_request_files`, or
+`github_get_file_contents` — the API patch is a large redundant payload that
+re-bloats context every turn. The `github_*` tools are for *API* operations only
+(metadata, comments, posting the review).
 
 ## Procedure
 
-### Workspace setup
+### 1. Confirm the target
 
-For pr-review runs the harness pre-clones the PR's head ref into a
-`<repo>/` **subdirectory** of your cwd. The cwd itself is the workspace
-root (contains `AGENTS.md`); the cloned repo is one level deeper.
+If `prNumber` (or `issueNumber`) is set in the Context block, **that is your
+target** — go straight to `github_get_pull_request` with it. Do **not** call
+`github_list_pull_requests` to "find" or "confirm" it; you were handed it, and
+listing dumps a large payload for nothing. Only when no PR is given (a repo-wide
+`mode: scan`) do you list open PRs and pick the most recent unreviewed one.
 
+**Stop conditions** (check before reviewing):
+- PR authored by `last-light[bot]` → skip. Never self-review.
+- `merged === true` → stop. This skill reviews open PRs only.
+- A `last-light[bot]` review already exists on the **current head SHA** → stop;
+  don't post a duplicate. (A re-review is fine once new commits land.)
+
+### 2. Read the prior discussion
+
+A review advances the conversation, don't restart it. Fetch and absorb:
+`github_list_pull_request_reviews`, `github_list_issue_comments`,
+`github_list_pull_request_review_comments`. Done when you can say: which findings
+were already raised (don't repeat them), which threads the author resolved
+(treat as done unless the fix is wrong), which are still open (surface those —
+higher signal than a fresh nit), and whether a human already approved.
+
+### 3. Get the diff
+
+From inside `<repo>/`:
 ```
-ls -la         # do you see <repo>/.git/ in the listing?
-```
-
-- If yes — `cd <repo>` and use git directly. To refresh:
-  ```
-  git fetch origin <branch> --depth 50
-  git reset --hard FETCH_HEAD
-  ```
-- If no — the pre-clone failed. Clone into the subdir yourself:
-  ```
-  git clone https://github.com/{{owner}}/{{repo}}.git {{repo}}
-  cd {{repo}}
-  ```
-
-**Only the source is pre-cloned — dependencies are NOT installed** (no
-`node_modules` etc.). This is expected. For any code PR you must install them
-yourself and verify by building/testing — a missing `node_modules` is never a
-reason to skip verification. See "Verify by building" in step 2 (only pure
-docs/style PRs skip the build).
-
-### Target selection
-
-The runner provides PR context vars. Use them in this order:
-
-1. **If `prNumber` (or `issueNumber`) > 0 is set in the Context block below, that IS your target PR — you already know it.** Go straight to `github_get_pull_request` with that number. Do **NOT** call `github_list_pull_requests` to "find" or "confirm" the PR — you are not searching for it, you were handed it. Listing PRs here is pure waste: it returns a large payload that bloats every later turn and tells you nothing you didn't already have.
-2. Only if **no** specific PR is provided (e.g. a repo-wide `mode: scan` run) do you list open PRs and pick the most recent unreviewed one. When calling `github_list_pull_requests`, omit any filter you don't actually want — never pass empty strings like `head: ""` or `base: ""`, those become literal filters that return nothing. **Skip any PR authored by the bot itself** (`last-light[bot]`) — never self-review.
-
-### 0. Read prior discussion
-
-Before reviewing, fetch the full conversation history. **Do not skip this step** — the goal of a review is to advance the discussion, not restart it.
-
-1. `github_get_pull_request` — head SHA, mergeable state, author, base/head refs.
-   - **If `merged` is true, STOP.** This skill only reviews open PRs. The formal-review endpoint (`github_create_pull_request_review`) returns 403 on merged PRs for App installations, and a post-merge review has no gating value. If a maintainer wants commentary on a merged PR, they should use the pr-comment skill instead.
-2. `github_list_pull_request_reviews` — every prior review (APPROVED / CHANGES_REQUESTED / COMMENTED).
-   - If a review from `last-light[bot]` exists on the **current head SHA**, STOP — do not post a duplicate. (A re-review is fine if new commits landed since.)
-3. `github_list_issue_comments` — top-level conversation thread on the PR.
-4. `github_list_pull_request_review_comments` — line-level review comments anchored to diff positions.
-
-Build a mental model of what's already been said:
-- Which findings did prior reviewers raise? Don't repeat them.
-- Which threads did the author address (with a follow-up commit or explanation)? Treat as resolved unless their fix is wrong.
-- Which threads are still open / unaddressed? Surface those in your summary — that's higher signal than a fresh-eyes nit.
-- Has a human reviewer already approved? Lower your bar for blocking — APPROVE or COMMENT, don't REQUEST_CHANGES on style.
-
-Skip PRs authored by `last-light[bot]` (self-review).
-
-### 1. Get the diff — from your LOCAL checkout, not the API
-
-The PR's code is already checked out at `<repo>/` (see Workspace setup). That
-checkout is the source of truth for the diff and the file contents — use it.
-`github_get_pull_request` (step 0) gave you the base and head refs. From inside
-`<repo>/`:
-
-```
-git fetch origin <baseRef> --depth 50    # base isn't in the shallow head-only clone
-git diff --stat origin/<baseRef>...HEAD  # changed files + churn
-git diff origin/<baseRef>...HEAD         # the full patch
+git fetch origin <baseRef> --depth 50      # base isn't in the head-only clone
+git diff --stat origin/<baseRef>...HEAD    # churn
+git diff origin/<baseRef>...HEAD           # the patch
 ```
 
-Do **NOT** call `github_list_pull_request_files` or
-`github_get_pull_request_diff`. Pulling the patch over the API duplicates what's
-already on disk and drops a large payload into the context that you then re-read
-on every subsequent turn — it's the single biggest avoidable cost in a review.
-Read each changed file in full from the same local checkout (your `read`/`grep`
-tools operate on it directly), not via `github_get_file_contents`.
+### 4. Verify by building
 
-You already have the PR title, description, labels, and linked issues from
-step 0 — don't re-fetch them.
+Follow the **building** skill: install dependencies (install-first), then run the
+project's build and tests, and cite the real output in your findings. Any PR that
+touches code must be built and tested. The one exception is a pure style/docs PR,
+where building to nitpick formatting is wasted effort — skip it and say so.
 
-### 2. Analyze the changes
+### 5. Assess and submit
 
-- Read each changed file in context (not just the diff)
-- Check against the review guidelines in your agent context
-- Note the PR size (files changed, lines added/removed)
+Apply the **code-review** skill's rubric — read each changed file in context,
+check correctness/edge-cases/security/regression-risk/test-coverage, and
+categorise findings into the tiers. Then write the review:
 
-**For complex PRs** (>300 lines changed OR >5 files changed):
-- Read changed files in FULL context from the local checkout (it's already there — don't clone again)
-- Trace data flow through modified functions
-- Check callers of modified functions for regression risk
-- Check if tests cover actual risk areas, not just happy paths
+- One or two sentences on what the PR does.
+- Findings grouped by tier, each with a `path:line` reference and an inline code
+  suggestion where it helps.
+- For a complex PR, an impact note (affected paths, regression risks).
+- An overall assessment, and thanks to the contributor.
 
-#### Verify by building — install deps, don't bail
-
-For any PR that touches code (anything but pure docs/style/config-comment
-changes), you are expected to **build it and run the relevant tests**, then
-report real results. Static reasoning alone is not a review of correctness.
-
-**`node_modules` is ALWAYS absent when you arrive — that is by design, NOT a
-reason to skip verification.** The single most common failure here is checking
-`test -d node_modules`, seeing it's missing, and writing "I couldn't run the
-tests because dependencies aren't installed." That is wrong: installing them is
-*your job*, and it's the first thing to do. So **install first, then test.**
-
-Install now — detect the package manager from the lockfile and use the
-frozen/CI variant:
-- `package-lock.json` → `npm ci`
-- `pnpm-lock.yaml` → `corepack pnpm install --frozen-lockfile`
-- `yarn.lock` → `corepack yarn install --frozen-lockfile`
-
-(The sandbox has Node via `fnm` + `corepack`; the egress allowlist permits the
-public package registries, so install works. For a monorepo, install at the
-root, then run the changed package's tests.)
-
-Then run the project's own build/test commands (check `package.json` scripts /
-CI config) and cite the actual output in your findings.
-
-The ONLY acceptable "I couldn't verify" is when the **install or build command
-itself fails** — in that case quote the exact command and error, and scope your
-review to what you *could* check. Never imply you verified something you didn't,
-and never use "deps aren't installed" as the reason — you install them.
-
-The one genuine exception: pure style/docs PRs, where installing just to nitpick
-formatting is wasted effort. Skip the build there and say so.
-
-### 3. Categorize findings
-
-- **Critical**: Security issues, data loss, breaking changes — block merge
-- **Important**: Missing tests, perf issues, type errors — should fix
-- **Suggestions**: Clarity, naming, DRY opportunities — nice to have
-- **Nits**: Style, formatting — optional
-
-### 4. Write the review comment
-
-- 1-2 sentence summary of what the PR does
-- Findings grouped by tier, with file:line references
-- Inline code suggestions where helpful
-- For complex PRs: impact analysis (affected code paths, regression risks)
-- Overall assessment: approve, request changes, or comment
-- Thank the contributor
-
-### 5. Submit the review
-
-Use `github_create_pull_request_review` MCP tool. Do NOT post as a regular comment.
-
-## Tool Usage
-
-**Use the github MCP server tools** (`github_*`) for GitHub *API* operations — reading PR metadata/comments and posting the review. Never use `gh` CLI, `curl`, or raw HTTP for those.
-
-The one deliberate exception is the **diff and file contents**: those come from your local `<repo>/` checkout via plain `git`/`read`/`grep` (see step 1), not from `github_*_diff` / `github_list_pull_request_files` / `github_get_file_contents`. Local git on the pre-cloned repo is preferred there because the API patch is a large redundant payload.
-
-## Pitfalls
-- **You already know the target PR** when `prNumber` is set — never call `github_list_pull_requests` to find or confirm it (step "Target selection").
-- **Use the local checkout for the diff** — don't pull the patch via `github_list_pull_request_files` / `github_get_pull_request_diff` (step 1).
-- **Never self-review.** Skip any PR authored by `last-light[bot]`. (Webhook-triggered runs are already filtered out before they reach you; this guards the `mode: scan` path.)
-- **Never review the same PR twice** at the same commit — always check first
-- Don't nitpick generated files (lock files, compiled assets)
-- Don't repeat what linters/CI already catch
-- Don't block PRs over style preferences alone
+Submit with `github_create_pull_request_review` (a **formal** review, not a plain
+issue comment), event `APPROVE` / `REQUEST_CHANGES` / `COMMENT` to match.
 
 ## Verification
-- Confirm the review was posted by checking the PR reviews list
+
+Confirm the review posted by checking the PR's reviews list.

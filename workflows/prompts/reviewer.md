@@ -10,16 +10,14 @@ SCOPE — review ONLY changed files:
 
 Read {{issueDir}}/architect-plan.md and executor-summary.md for context.
 
-CHECK:
-1. Does implementation match the plan?
-2. Tests: the executor already ran the FULL suite and pasted results in
-   executor-summary.md — review that output rather than re-running everything.
-   Independently run only the typecheck command and the tests covering the
-   changed files (your fast, independent signal).
-3. Security concerns?
-4. Logic errors or missed edge cases?
+Apply the **code-review** skill's rubric (finding tiers + what to check), scoped
+to the changed files, and confirm the implementation matches the plan. Do NOT
+review unchanged files or flag pre-existing issues.
 
-DO NOT review unchanged files or flag pre-existing issues.
+Tests: the executor already ran the FULL suite and pasted results in
+executor-summary.md — review that output rather than re-running everything. For
+your own independent signal, follow the **building** skill to run the typecheck
+command and the tests covering the changed files.
 
 AFTER REVIEW:
 1. Write {{issueDir}}/reviewer-verdict.md with the following structure (exact headings):

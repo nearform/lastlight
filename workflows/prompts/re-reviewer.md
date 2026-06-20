@@ -10,14 +10,11 @@ SCOPE — review ONLY what changed in the fix cycle:
 2. Read the "## Fix Cycle {{fixCycle}}" section in {{issueDir}}/executor-summary.md — what was fixed
 3. Diff only the fix commit(s): git log --oneline -3 and git diff HEAD~1
 
-CHECK:
-1. Were the specific issues you raised actually addressed?
-2. Did the fix introduce any new problems?
-3. Tests: the fix cycle already ran the full suite (see its summary section) —
-   don't re-run everything. Independently run the typecheck command and the
-   tests covering the fixed files.
-
-DO NOT re-review the entire changeset. Only verify your previous issues were fixed.
+Verify your previous issues were actually addressed and the fix introduced no new
+problems (apply the **code-review** rubric to the fix). Do NOT re-review the
+entire changeset. Tests: the fix cycle already ran the full suite (see its
+summary section) — for independent signal, follow the **building** skill to run
+the typecheck command and the tests covering the fixed files.
 
 AFTER REVIEW:
 1. APPEND to {{issueDir}}/reviewer-verdict.md under heading "## Re-review after Fix Cycle {{fixCycle}}" (preserve the original verdict above). The new section MUST itself contain a "VERDICT: APPROVED" or "VERDICT: REQUEST_CHANGES" line.
