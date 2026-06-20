@@ -55,6 +55,7 @@ interface RecordedStep {
   key: string;
   status: string;
   template?: string;
+  extraCtx?: Partial<import("./templates.js").TemplateContext>;
 }
 
 function makeReporter(): PhaseReporter & { steps: RecordedStep[]; notes: string[]; persisted: string[]; failed: string[] } {
@@ -69,8 +70,8 @@ function makeReporter(): PhaseReporter & { steps: RecordedStep[]; notes: string[
     failed,
     onStart: vi.fn(async () => {}),
     onEnd: vi.fn(async () => {}),
-    step: vi.fn(async (key, status, template) => {
-      steps.push({ key, status, template });
+    step: vi.fn(async (key, status, template, extraCtx) => {
+      steps.push({ key, status, template, extraCtx });
     }),
     message: vi.fn(async (template) => {
       if (template) notes.push(template);
@@ -190,6 +191,36 @@ describe("PhaseExecutor — standard agent phase", () => {
     expect(outcome.status).toBe("succeeded");
     expect(outcome.results).toEqual([{ phase: "architect", success: true, output: "the plan", error: undefined }]);
     expect(outcome.outputVars).toEqual({ architect: "the plan", plan: "the plan" });
+  });
+
+  it("exposes the phase's own output to its on_success render context", async () => {
+    // Regression: the scheduler only merges outputVars into the shared outputs
+    // map AFTER execute() returns, so a phase referencing its own output_var in
+    // on_success (e.g. answer's `{{answerResult}}`) would render empty unless
+    // execute() injects the just-produced output into the done-step context.
+    const successDef: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "wf",
+      phases: [
+        makePhase({
+          name: "answer",
+          prompt: "prompts/answer.md",
+          output_var: "answerResult",
+          messages: { on_success: "{{answerResult}}" },
+        }),
+      ],
+    };
+    mockExecuteAgent.mockResolvedValue(makeSuccessResult("the full answer text"));
+    const reporter = makeReporter();
+    const exec = new PhaseExecutor(makeRun(successDef), reporter, makeResolver());
+
+    await exec.execute(node("answer"), {});
+
+    const doneStep = reporter.steps.find((s) => s.key === "answer" && s.status === "done");
+    expect(doneStep?.template).toBe("{{answerResult}}");
+    // The merged render context carries this phase's own output, so on_success
+    // resolves to the answer rather than an empty string.
+    expect(doneStep?.extraCtx?.phaseOutputs).toMatchObject({ answerResult: "the full answer text" });
   });
 
   it("returns status=failed and fails the workflow when the agent fails", async () => {

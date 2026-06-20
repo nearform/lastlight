@@ -200,6 +200,36 @@ describe("runWorkflow — basic phase execution", () => {
     expect(result.success).toBe(true);
   });
 
+  it("posts a phase's own output to postComment via on_success", async () => {
+    // Regression: a phase referencing its OWN output_var in on_success (e.g.
+    // the answer workflow's `on_success: "{{answerResult}}"`, which delivers the
+    // answer to a Slack thread / issue comment) must render to the real output,
+    // not an empty string — outputVars are now injected into the done-step
+    // render context rather than only after execute() returns.
+    mockExecuteAgent.mockResolvedValue(makeSuccessResult("the full answer text"));
+    const comments: string[] = [];
+    const def: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "answer",
+      phases: [
+        { name: "phase_0", type: "context" },
+        {
+          name: "answer",
+          type: "agent",
+          prompt: "prompts/answer.md",
+          output_var: "answerResult",
+          messages: { on_success: "{{answerResult}}" },
+        },
+      ],
+    };
+
+    await runWorkflow(def, BASE_CTX, {} as never, {
+      postComment: async (msg) => { comments.push(msg); },
+    });
+
+    expect(comments).toContain("the full answer text");
+  });
+
   it("returns success=false and stops on phase failure", async () => {
     mockExecuteAgent
       .mockResolvedValueOnce(makeSuccessResult("architect done"))

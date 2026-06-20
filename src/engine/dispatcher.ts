@@ -165,8 +165,12 @@ async function handleMessageDispatch(
   deps: DispatchDeps,
 ): Promise<DispatchOutcome> {
   const onRunStart = async (runId: string) => {
+    // The run detail lives on the `runs` tab (WorkflowList reads ?run=…&phase=…);
+    // `workflows` is the definition browser and ignores ?run=, so the deep link
+    // must target `runs`. Shared by every messaging-dispatched workflow
+    // (build / explore / triage / answer / …).
     const link = deps.publicUrl
-      ? `${deps.publicUrl}/admin/?run=${encodeURIComponent(runId)}&tab=workflows`
+      ? `${deps.publicUrl}/admin/?run=${encodeURIComponent(runId)}&tab=runs&wf=${encodeURIComponent(handler)}`
       : undefined;
     const body = link
       ? `Starting *${handler}*... I'll report back when it's done.\n<${link}|Live progress>`

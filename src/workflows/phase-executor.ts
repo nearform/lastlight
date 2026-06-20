@@ -497,7 +497,14 @@ export class PhaseExecutor {
     }
 
     this.reporter.persistPhase(phaseName);
-    await this.reporter.step(phaseName, "done", phase.messages?.on_success);
+    // Make THIS phase's own output available to its on_success message. The
+    // scheduler only merges `outputVars` into the shared outputs map after
+    // execute() returns, so without this a phase referencing its own output
+    // (e.g. answer's `on_success: "{{answerResult}}"`, explore's publishResult)
+    // would render empty. Merge the just-produced vars into the render context.
+    await this.reporter.step(phaseName, "done", phase.messages?.on_success, {
+      phaseOutputs: { ...outputs, ...outputVars },
+    });
     return { results: [result], status: "succeeded", outputVars };
   }
 
