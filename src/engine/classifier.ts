@@ -11,6 +11,7 @@ import { chat as realChat, defaultFastModel as realDefaultFastModel, type ChatFu
 export type CommentIntent =
   | "build"
   | "explore"
+  | "question"
   | "triage"
   | "review"
   | "security"
@@ -51,6 +52,7 @@ Categories:
 BUILD — The user is ASKING YOU (the bot) to make code changes NOW in a GitHub repo: implement a feature, fix a bug, create/send a PR, resolve an issue with code. BUILD requires a GitHub target — either an explicit repo reference (owner/name or github.com URL) in the message, OR an ISSUE TITLE context line indicating the comment is a reply on an existing issue/PR. If neither is present, classify as CHAT — local filesystem operations ("delete files in ~/foo", "clean up my downloads"), shell-style commands, or vague "build something" with no target are NOT BUILD.
   BUILD is a REQUEST for NEW work directed at you. A comment that merely REPORTS work the human has ALREADY done is NOT BUILD — it is CHAT. Tells: past-tense ("fixed", "done", "implemented", "added a test", "pushed a fix", "handled it"), a reference to a commit the human made ("addressed in <sha>", "see commit abc123"), thanking you, or explaining/justifying a change they made in response to your review. These are status reports, not requests — classify them CHAT even when the comment is on a PR and even when it @-mentions you. Only classify BUILD when the human asks you to do NEW work (imperative request: "fix X", "now also handle Y", "can you update Z").
 EXPLORE — The user wants help shaping an idea BEFORE writing code: "help me think through X", "brainstorm Y", "spec this out", "explore an idea for Z". A bare "explore" / "explore this" / "let's explore" is also EXPLORE — especially as a reply on an existing issue (ISSUE TITLE present), where the implicit object is the issue's idea. EXPLORE = shape the idea / write a spec; BUILD = write the code now.
+QUESTION — The user is asking a substantive INFORMATIONAL question that warrants research to answer well: "how does X work?", "what's the difference between X and Y?", "how does <repo> compare to <other tool>?", "is it possible to do Z?", "why does X happen?". The deliverable is an ANSWER, not code and not a spec. QUESTION is for real questions that benefit from reading docs/code or searching the web — NOT casual chat, thanks, or one-word replies (those stay CHAT). EXPLORE shapes a NEW idea into a spec; QUESTION answers an EXISTING question about how something works or compares.
 TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
 REVIEW — The user wants to review PRs on a repo: "review cliftonc/repo", "check PRs", "can you review PRs on <repo>?".
 SECURITY — The user wants a security scan/review of a repo: "security review cliftonc/repo", "scan for vulnerabilities", "check security", "can you do a security review of <repo>?".
@@ -67,6 +69,7 @@ message has no clear action verb. Presence of "security review", "triage", "revi
 "scan for vulnerabilities", etc. makes the intent unambiguous regardless of politeness.
 
 When ambiguous between EXPLORE and CHAT, prefer CHAT. Only pick EXPLORE when the user is explicitly asking for brainstorming / spec-shaping / design exploration — OR gives a bare "explore"/"explore this" command (see the issue-reply rule below), which is unambiguous, not chat.
+When ambiguous between QUESTION and CHAT, prefer CHAT — only pick QUESTION for a substantive informational question that genuinely benefits from research (reading docs/code or a web search). Casual conversation, greetings, thanks, and trivial one-liners stay CHAT.
 When ambiguous between BUILD and CHAT, prefer CHAT.
 When ambiguous between APPROVE/REJECT and CHAT, prefer CHAT — only classify as APPROVE/REJECT when the intent is clearly about a pending workflow gate.
 
@@ -92,13 +95,16 @@ command. Classify it CHAT regardless of the ISSUE TITLE or an @mention. Do not
 let words like "fix"/"build"/"add" inside a past-tense report flip it to BUILD.
 
 Respond in exactly this format (each on its own line, no extra text):
-INTENT: BUILD|EXPLORE|TRIAGE|REVIEW|SECURITY|APPROVE|REJECT|STATUS|RESET|CHAT
+INTENT: BUILD|EXPLORE|QUESTION|TRIAGE|REVIEW|SECURITY|APPROVE|REJECT|STATUS|RESET|CHAT
 REPO: owner/name or NONE
 ISSUE: number or NONE
 REASON: text or NONE
 
 Examples:
 "explore adding webhooks to cliftonc/drizby" → INTENT: EXPLORE, REPO: cliftonc/drizby, ISSUE: NONE, REASON: NONE
+"how does cliftonc/lastlight compare to Vercel's Eve framework?" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
+"what's the difference between a sandbox phase and a chat session in cliftonc/lastlight?" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
+"thanks, that makes sense!" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
 "build cliftonc/drizzle-cube#42" → INTENT: BUILD, REPO: cliftonc/drizzle-cube, ISSUE: 42, REASON: NONE
 "lets build this!" with ISSUE TITLE "Security Review" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE
 "go ahead" with ISSUE TITLE "Add CSV export" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE
@@ -153,6 +159,57 @@ function cleanRepoName(name: string): string {
   return name.replace(/[.,]+$/, "").replace(/\.git$/i, "");
 }
 
+const ISSUE_QUESTION_PROMPT = `You are a router for newly-opened GitHub issues.
+Decide whether the issue is a QUESTION or a WORK item.
+
+QUESTION — the issue asks for information, explanation, comparison, or guidance.
+The reporter wants an ANSWER, not code: "How does X work?", "What's the difference
+between X and Y?", "Is it possible to...?", "Which approach should I use?", "Why
+does X happen?". The deliverable is a written reply.
+
+WORK — the issue requests a code change: a bug report (something is broken and
+should be fixed) or a feature/enhancement request (build or change something).
+The deliverable is a commit or PR.
+
+Decide by the DOMINANT intent. If the issue asks a question AND also requests a
+change ("How do I do X — and could you add it?"), it is WORK: the change is the
+deliverable and triage should handle it. Only pure information requests are QUESTION.
+When genuinely unsure, answer WORK — triage is the safe default.
+
+Respond with exactly one word on its own line: QUESTION or WORK`;
+
+/**
+ * Classify whether a newly-opened issue is a pure question (wants an answer)
+ * versus a work item (wants a code change). Used by the router to send
+ * question issues down the dedicated answer path instead of triage.
+ *
+ * Falls back to `false` (WORK → triage) on any error — triage is the safe
+ * default, and a question that slips through still hits the issue-triage
+ * skill's question safety net.
+ */
+export async function classifyIssueIsQuestion(
+  title: string,
+  body: string,
+  options: ClassifierOptions = {},
+): Promise<boolean> {
+  try {
+    const chat = options.chat ?? realChat;
+    const defaultFastModel = options.defaultFastModel ?? realDefaultFastModel;
+    const output = await chat(
+      options.model ?? defaultFastModel("classifier"),
+      [
+        { role: "system", content: ISSUE_QUESTION_PROMPT },
+        { role: "user", content: `TITLE: ${title}\n\nBODY: ${body}` },
+      ],
+      { maxTokens: 16 },
+    );
+    return /\bQUESTION\b/i.test(output);
+  } catch (err: any) {
+    console.error(`[classifier] Error classifying issue: ${err.message}`);
+    return false;
+  }
+}
+
 /**
  * Classify a GitHub/Slack comment's intent and extract a repo reference.
  * Falls back to intent=action on any error (safe default).
@@ -184,6 +241,7 @@ export async function classifyComment(
     const intentMap: Record<string, CommentIntent> = {
       BUILD: "build",
       EXPLORE: "explore",
+      QUESTION: "question",
       TRIAGE: "triage",
       REVIEW: "review",
       SECURITY: "security",

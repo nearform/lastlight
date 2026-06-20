@@ -4,6 +4,7 @@ import type { EventEnvelope } from '../connectors/types.js';
 // Mock the classifier and screener before importing router
 vi.mock('./classifier.js', () => ({
   classifyComment: vi.fn().mockResolvedValue({ intent: 'chat' }),
+  classifyIssueIsQuestion: vi.fn().mockResolvedValue(false),
 }));
 vi.mock('./screen.js', async () => {
   const actual = await vi.importActual<typeof import('./screen.js')>('./screen.js');
@@ -14,16 +15,20 @@ vi.mock('./screen.js', async () => {
 });
 
 import { routeEvent } from './router.js';
-import { classifyComment } from './classifier.js';
+import { classifyComment, classifyIssueIsQuestion } from './classifier.js';
 import { screenForInjection } from './screen.js';
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from '../config.js';
 
 const mockClassifyComment = vi.mocked(classifyComment);
+const mockClassifyIssue = vi.mocked(classifyIssueIsQuestion);
 const mockScreen = vi.mocked(screenForInjection);
 
 // The router gates on managed repos via runtime config (config/default.yaml ships
 // an empty list). Register the repos these tests target so they're in scope.
 beforeEach(() => {
+  // Default: new issues are work items (→ triage). Question-routing tests
+  // opt in by overriding this per-case.
+  mockClassifyIssue.mockResolvedValue(false);
   setRuntimeConfig({
     managedRepos: ['cliftonc/drizzle-cube', 'cliftonc/drizby', 'cliftonc/lastlight'],
   } as unknown as LastLightConfig);
@@ -48,12 +53,31 @@ function makeEnvelope(overrides: Partial<EventEnvelope>): EventEnvelope {
 }
 
 describe('routeEvent — issue events', () => {
-  it('routes issue.opened to issue-triage', async () => {
+  it('routes issue.opened (work item) to issue-triage', async () => {
+    mockClassifyIssue.mockResolvedValue(false);
     const result = await routeEvent(makeEnvelope({ type: 'issue.opened', issueNumber: 1, title: 'Bug', labels: [] }));
     expect(result.action).toBe('handler');
     if (result.action === 'handler') {
       expect(result.handler).toBe('issue-triage');
       expect(result.context.reopened).toBeUndefined();
+    }
+  });
+
+  it('routes issue.opened (question) to the answer workflow', async () => {
+    mockClassifyIssue.mockResolvedValue(true);
+    const result = await routeEvent(
+      makeEnvelope({
+        type: 'issue.opened',
+        issueNumber: 3,
+        title: 'How is lastlight different to Vercel Eve?',
+        body: 'Keen on a comparison.',
+        labels: [],
+      }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('answer');
+      expect(result.context.issueNumber).toBe(3);
     }
   });
 
@@ -285,6 +309,37 @@ describe('routeEvent — message events (classifier-driven)', () => {
   it('routes build intent with unmanaged repo to reply', async () => {
     mockClassifyComment.mockResolvedValue({ intent: 'build', repo: 'unknown/repo' });
     const result = await routeEvent(makeEnvelope({ type: 'message', body: 'build unknown/repo' }));
+    expect(result.action).toBe('reply');
+    if (result.action === 'reply') {
+      expect(result.message).toContain('unknown/repo');
+    }
+  });
+
+  it('routes question intent with managed repo to the answer workflow', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'question', repo: 'cliftonc/lastlight' });
+    const result = await routeEvent(
+      makeEnvelope({ type: 'message', body: 'how does cliftonc/lastlight compare to Eve?' }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('answer');
+      expect(result.context.repo).toBe('cliftonc/lastlight');
+      expect(result.context.commentBody).toContain('compare to Eve');
+    }
+  });
+
+  it('falls back question intent with no repo to chat (no sandbox for repo-less questions)', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'question' });
+    const result = await routeEvent(makeEnvelope({ type: 'message', body: 'how do webhooks work?' }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('chat');
+    }
+  });
+
+  it('routes question intent with unmanaged repo to reply', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'question', repo: 'unknown/repo' });
+    const result = await routeEvent(makeEnvelope({ type: 'message', body: 'how does unknown/repo work?' }));
     expect(result.action).toBe('reply');
     if (result.action === 'reply') {
       expect(result.message).toContain('unknown/repo');

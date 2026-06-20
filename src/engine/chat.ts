@@ -54,6 +54,12 @@ output.
   → reply: "run \`/health owner/repo\`"
 - "build this" / "implement this" / "fix this bug" on a specific issue
   → reply: "run \`/build owner/repo#N\` (open the GitHub issue first if needed)"
+- a research-heavy QUESTION that needs web search or deep doc reading (e.g.
+  "how does <repo> compare to <other tool>?") → this runs as a sandboxed
+  answer workflow, but only when you name a managed repo. If the user asked
+  such a question without a repo, ask them to include it (e.g. "how does
+  cliftonc/lastlight compare to X?") and the answer will be researched and
+  posted back here. Don't attempt the deep research yourself in-process.
 
 Only exception: if the user is asking a narrow *question* that you can
 answer with one or two reads (e.g. "what does this file do?", "what labels

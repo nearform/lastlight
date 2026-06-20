@@ -1,0 +1,37 @@
+kind: answer
+name: answer
+description: |
+  Answer a question issue directly. Used when a newly-opened issue asks for
+  information, an explanation, or a comparison rather than a code change — the
+  bot researches (repo docs + web search) and posts a single sourced answer
+  comment, labels the issue `question`, and leaves it open. No agent brief, no
+  ready-for-agent, no PR.
+
+  Delivery is uniform: the agent's final message (the answer) is captured as
+  `answerResult` and posted by the harness via `postComment` — as a comment on
+  the originating issue for GitHub-initiated runs, or into the Slack thread for
+  Slack-initiated runs. The skill therefore does NOT post the answer itself; it
+  only applies the `question` label when answering a GitHub issue.
+
+  Triggered by:
+    - issue.opened webhook when the router classifies the issue as a question
+    - a Slack message classified as a question against a managed repo
+    - manual override via routes.github.issue_answer / routes.slack.answer
+
+phases:
+  - name: phase_0
+    label: Context
+    type: context
+
+  - name: answer
+    label: Answer
+    prompt: prompts/answer.md
+    skill: issue-answer
+    model: "{{models.answer}}"
+    web_search: true
+    unrestricted_egress: true
+    output_var: answerResult
+    messages:
+      on_start: "Researching and drafting an answer..."
+      on_success: "{{answerResult}}"
+      on_failure: "I couldn't put together an answer — see the logs for details."

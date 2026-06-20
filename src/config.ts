@@ -416,6 +416,7 @@ function defaultRouteConfig(): RouteConfig {
   return {
     github: {
       issue_opened: "issue-triage",
+      issue_answer: "answer",
       issue_reopened: "issue-triage",
       pr_opened: "pr-review",
       pr_synchronize: "pr-review",
@@ -440,6 +441,7 @@ function defaultRouteConfig(): RouteConfig {
       review: "pr-review",
       security: "security-review",
       explore: "explore",
+      answer: "answer",
       chat: "chat",
       explore_reply: "explore-reply",
     },

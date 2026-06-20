@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { classifyComment, extractGithubRefFromText } from "./classifier.js";
+import { classifyComment, classifyIssueIsQuestion, extractGithubRefFromText } from "./classifier.js";
 
 describe("extractGithubRefFromText", () => {
   it("returns undefined when no github.com URL is present", () => {
@@ -111,6 +111,44 @@ describe("classifyComment — injected chat", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const r = await classifyComment("@last-light can you build this?", {}, { chat, defaultFastModel: () => "openai/test" });
     expect(r).toEqual({ intent: "chat" });
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+});
+
+describe("classifyIssueIsQuestion — injected chat", () => {
+  it("returns true for a question issue", async () => {
+    const chat = vi.fn().mockResolvedValue("QUESTION");
+    const r = await classifyIssueIsQuestion(
+      "How is lastlight different to Vercel Eve?",
+      "Keen on a comparison.",
+      { chat, defaultFastModel: () => "openai/test" },
+    );
+    expect(r).toBe(true);
+    expect(chat).toHaveBeenCalledWith(
+      "openai/test",
+      expect.arrayContaining([
+        expect.objectContaining({ role: "system" }),
+        expect.objectContaining({ role: "user", content: expect.stringContaining("How is lastlight different") }),
+      ]),
+      { maxTokens: 16 },
+    );
+  });
+
+  it("returns false for a work item", async () => {
+    const chat = vi.fn().mockResolvedValue("WORK");
+    const r = await classifyIssueIsQuestion("Crash on startup", "App throws on boot.", {
+      chat,
+      defaultFastModel: () => "openai/test",
+    });
+    expect(r).toBe(false);
+  });
+
+  it("defaults to false (work → triage) when chat rejects", async () => {
+    const chat = vi.fn().mockRejectedValue(new Error("network"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const r = await classifyIssueIsQuestion("Anything", "body", { chat, defaultFastModel: () => "openai/test" });
+    expect(r).toBe(false);
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
   });

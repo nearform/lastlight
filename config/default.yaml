@@ -41,6 +41,7 @@ disabled:
 routes:
   github:
     issue_opened: issue-triage
+    issue_answer: answer
     issue_reopened: issue-triage
     pr_opened: pr-review
     pr_synchronize: pr-review
@@ -64,6 +65,7 @@ routes:
     review: pr-review
     security: security-review
     explore: explore
+    answer: answer
     chat: chat
     explore_reply: explore-reply
 

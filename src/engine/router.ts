@@ -1,5 +1,5 @@
 import type { EventEnvelope } from "../connectors/types.js";
-import { classifyComment } from "./classifier.js";
+import { classifyComment, classifyIssueIsQuestion } from "./classifier.js";
 import { screenForInjection, flagPrefix } from "./screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getRoutes } from "../config.js";
@@ -67,10 +67,24 @@ export async function routeEvent(
   const gh = routes.github;
   const slack = routes.slack;
   switch (envelope.type) {
-    case "issue.opened":
+    case "issue.opened": {
+      // Pure question issues ("how does X work?", "X vs Y?") want an ANSWER,
+      // not a code change — route them to the dedicated answer workflow (web
+      // search + its own model) instead of triage, which would otherwise file
+      // a question as an enhancement and write an agent brief. Classified with
+      // the same cheap model as comments; WORK is the safe default.
+      const isQuestion = await classifyIssueIsQuestion(
+        envelope.title || "",
+        envelope.body || "",
+      );
+      console.log(
+        `[router] New issue ${envelope.repo}#${envelope.issueNumber} classified as: ${isQuestion ? "question" : "work"}`,
+      );
       return {
         action: "handler",
-        handler: gh.issue_opened || "issue-triage",
+        handler: isQuestion
+          ? gh.issue_answer || "answer"
+          : gh.issue_opened || "issue-triage",
         context: {
           repo: envelope.repo,
           issueNumber: envelope.issueNumber,
@@ -80,6 +94,7 @@ export async function routeEvent(
           labels: envelope.labels,
         },
       };
+    }
 
     case "issue.reopened":
       return {
@@ -452,6 +467,42 @@ export async function routeEvent(
             action: "handler",
             handler: slack.security || "security-review",
             context: { repo: gate.repo, sender: envelope.sender, source: envelope.source },
+          };
+        }
+
+        case "question": {
+          // A substantive question targeting a managed repo → run the sandboxed
+          // answer workflow (web search + repo docs), delivered back to this
+          // thread. A repo-less question can't seed a sandbox workspace, so it
+          // falls through to in-process chat for a quick answer (mirrors build).
+          if (!classifiedRepo) {
+            return {
+              action: "handler",
+              handler: slack.chat || "chat",
+              context: {
+                sessionId: raw?.sessionId,
+                message: slackText,
+                sender: envelope.sender,
+                source: envelope.source,
+              },
+            };
+          }
+          if (!isManagedRepo(classifiedRepo)) {
+            return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };
+          }
+          return {
+            action: "handler",
+            handler: slack.answer || "answer",
+            context: {
+              repo: classifiedRepo,
+              issueNumber: classifiedIssue,
+              sender: envelope.sender,
+              commentBody: slackText,
+              source: envelope.source,
+              triggerId: slackTriggerId,
+              channelId,
+              threadId,
+            },
           };
         }
 

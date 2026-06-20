@@ -36,6 +36,7 @@ Before applying any label, create the canonical set idempotently with
 | `ready-for-human` | `1d76db` | state |
 | `wontfix` | `ffffff` | state |
 | `duplicate` | `cfd3d7` | dedupe |
+| `question` | `d876e3` | question |
 
 If label creation is denied (the token lacks the permission), fall back to using
 only the labels that already exist on the repo and skip the rest. Done when the
@@ -48,8 +49,17 @@ labels you need are present or you've confirmed you can't create them.
    (not just keyword). If a `.out-of-scope/` directory exists, read it and note
    any prior rejection this resembles. Done when you know the issue's intent and
    whether it's novel.
-2. **Classify the category** — `bug` or `enhancement`.
+2. **Classify the category** — `bug` or `enhancement`. But first, check whether
+   the issue is a **question** at all (see below) — questions are neither.
 3. **Decide the state and act** (exactly one applies):
+   - **Question** (asks for information, an explanation, or a comparison — wants
+     an answer, not a code change) → add `question` and **stop**. Do **not**
+     write an agent brief or mark it `ready-for-agent`/`ready-for-human` — a
+     pure question is not work. (The router normally sends these to the answer
+     path before triage runs; this is the safety net for ones that slip
+     through, e.g. reopened issues. If you can answer it briefly and factually
+     from the repo itself, do so in one short comment; otherwise just label it
+     and leave it for the answer path or a human.)
    - **Duplicate** → comment linking the original, add `duplicate`, close.
    - **Already implemented** → comment pointing to where it lives, add `wontfix`,
      close. (Factual — safe to close autonomously.)
