@@ -44,8 +44,8 @@
   },
   "dependencies": {
     "@earendil-works/gondolin": "^0.12.0",
-    "@earendil-works/pi-ai": "^0.75.4",
-    "@earendil-works/pi-coding-agent": "^0.75.4",
+    "@earendil-works/pi-ai": "^0.79.8",
+    "@earendil-works/pi-coding-agent": "^0.79.8",
     "@ff-labs/pi-fff": "^0.9.4",
     "@octokit/auth-app": "^7.1.4",
     "@octokit/rest": "^21.0.2",

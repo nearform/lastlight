@@ -85,13 +85,49 @@ outcome programmatically without parsing stderr.
 
 `--model provider/id` (e.g. `anthropic/claude-opus-4-5`, `openai/gpt-4o`).
 Credentials come from environment variables (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`) or Pi's `~/.pi/agent/auth.json`
-if you've logged in interactively. Provider/id mapping is delegated to
-`@earendil-works/pi-ai`'s `getModel()`.
+`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY`, …) or Pi's
+`~/.pi/agent/auth.json` if you've logged in interactively. Provider/id mapping
+is delegated to `@earendil-works/pi-ai`'s `getModel()`.
 
 `--thinking <level>` maps directly to Pi's `thinkingLevel`
 (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`). Per-provider effort is
 handled by Pi.
+
+**Fireworks AI** is supported out of the box — it's a first-class provider in
+`@earendil-works/pi-ai`. Set `FIREWORKS_API_KEY` and select a model with the
+`fireworks/` prefix and Fireworks' fully-qualified id:
+
+```bash
+echo "summarize this repo" | agentic-pi run \
+  --model fireworks/accounts/fireworks/models/glm-5p2 \
+  --no-session
+```
+
+The provider id is everything after the first `/`, so the `accounts/…` path
+(which itself contains slashes) is preserved intact. pi-ai talks to Fireworks
+over its Anthropic-compatible endpoint (`https://api.fireworks.ai/inference`),
+so tool-calling, streaming, and thinking all work as they do for first-party
+Anthropic models.
+
+Models in pi-ai's curated catalog ship with accurate context-window, max-token,
+and cost metadata. At the time of writing that includes (run a recent build for
+the current list):
+
+| Model | `--model` value |
+| --- | --- |
+| GLM 5.2 | `fireworks/accounts/fireworks/models/glm-5p2` |
+| DeepSeek V4 Pro | `fireworks/accounts/fireworks/models/deepseek-v4-pro` |
+| Kimi K2.7 Code | `fireworks/accounts/fireworks/models/kimi-k2p7-code` |
+| MiniMax M3 | `fireworks/accounts/fireworks/models/minimax-m3` |
+| GPT-OSS 120B | `fireworks/accounts/fireworks/models/gpt-oss-120b` |
+
+> The catalog is curated and shifts each pi-ai release (newer models added,
+> retired ones dropped). To use a Fireworks model that isn't curated yet —
+> or to correct its metadata — declare it in `~/.pi/agent/models.json` under a
+> `fireworks` provider (`api: "anthropic-messages"`, `baseUrl:
+> "https://api.fireworks.ai/inference"`, `apiKey: "FIREWORKS_API_KEY"`); see
+> Pi's `docs/models.md`. agentic-pi resolves custom models from there
+> automatically via Pi's `ModelRegistry`.
 
 ### 6. Defaults that match a containerized sandbox
 
@@ -476,10 +512,11 @@ echo "list open PRs on owner/repo" | agentic-pi run \
 Required env (one of):
 
 ```bash
-# Anthropic/OpenAI/OpenRouter — at least one matching your --model
+# Model provider — at least one matching your --model
 ANTHROPIC_API_KEY=sk-ant-…
 OPENAI_API_KEY=sk-…
 OPENROUTER_API_KEY=sk-or-…
+FIREWORKS_API_KEY=fw-…
 
 # GitHub — App credentials preferred over static token
 GITHUB_APP_ID=…
@@ -493,7 +530,7 @@ GITHUB_TOKEN=ghp_…
 
 | Flag | Description |
 | --- | --- |
-| `--model <provider/id>` | Required. e.g. `anthropic/claude-opus-4-5`, `openai/gpt-4o`. |
+| `--model <provider/id>` | Required. e.g. `anthropic/claude-opus-4-5`, `openai/gpt-4o`, `fireworks/accounts/fireworks/models/glm-5p2`. See section 5. |
 | `--thinking <level>` | `off` \| `minimal` \| `low` \| `medium` \| `high` \| `xhigh`. |
 | `--profile <name>` | `read` \| `issues-write` \| `review-write` \| `repo-write`. Omit to disable GitHub tools entirely. |
 | `--cwd <path>` | Working directory for the agent. Default: `$PWD`. |
