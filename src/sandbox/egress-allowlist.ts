@@ -57,6 +57,8 @@ export const PROVIDER_HOSTS: readonly string[] = [
   "anthropic.com",
   "openai.com",
   "openrouter.ai",
+  // Fireworks — api.fireworks.ai is the inference endpoint.
+  "fireworks.ai",
 ];
 
 /**
