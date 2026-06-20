@@ -249,6 +249,7 @@ async function writeChatShim(opts: {
     const content = am.content
       .map((c) => {
         if (c.type === "text") return { type: "text", text: c.text };
+        if (c.type === "thinking") return { type: "thinking", thinking: c.thinking };
         if (c.type === "toolCall") {
           return {
             type: "toolCall",

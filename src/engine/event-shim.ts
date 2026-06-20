@@ -223,6 +223,10 @@ export class AgenticShim {
         return this.translateExtensionStatus(r, ts, sessionId);
       case "skills_status":
         return this.translateSkillsStatus(r, ts, sessionId);
+      case "auto_retry_start":
+        return this.translateAutoRetryStart(r, ts, sessionId);
+      case "auto_retry_end":
+        return this.translateAutoRetryEnd(r, ts, sessionId);
       case "fatal_error":
         return this.translateFatal(r, ts, sessionId);
       default:
@@ -285,6 +289,62 @@ export class AgenticShim {
     ];
   }
 
+  /**
+   * Surface pi-coding-agent's auto-retry pause as a `system` breadcrumb so
+   * rate-limit / transient-error backoffs are visible in the session timeline
+   * (the dashboard renders role-based `system` lines via MetaMessage). Emitted
+   * as a role-based line — unlike `extension_status`'s `type: "system"` shape,
+   * which the reader drops — so it actually renders.
+   */
+  private translateAutoRetryStart(
+    r: EmitterRecord,
+    ts: string,
+    sessionId: string,
+  ): object[] {
+    const attempt = typeof r.attempt === "number" ? r.attempt : undefined;
+    const maxAttempts = typeof r.maxAttempts === "number" ? r.maxAttempts : undefined;
+    const delayMs = typeof r.delayMs === "number" ? r.delayMs : undefined;
+    const reason = typeof r.errorMessage === "string" ? r.errorMessage : "transient error";
+    const attemptLabel =
+      attempt !== undefined ? ` ${attempt}${maxAttempts !== undefined ? `/${maxAttempts}` : ""}` : "";
+    const delayLabel = delayMs !== undefined ? ` in ${Math.round(delayMs / 1000)}s` : "";
+    return [
+      {
+        role: "system",
+        subtype: "auto_retry_start",
+        content: `⏳ Auto-retry${attemptLabel}${delayLabel} after model error: ${shortReason(reason)}`,
+        timestamp: ts,
+        sessionId,
+      },
+    ];
+  }
+
+  /**
+   * Pair to {@link translateAutoRetryStart}: a successful recovery, or a
+   * give-up (when `finalError` is present).
+   */
+  private translateAutoRetryEnd(
+    r: EmitterRecord,
+    ts: string,
+    sessionId: string,
+  ): object[] {
+    const attempt = typeof r.attempt === "number" ? r.attempt : undefined;
+    const finalError = typeof r.finalError === "string" ? r.finalError : undefined;
+    const attemptLabel = attempt !== undefined ? ` ${attempt}` : "";
+    const content = finalError
+      ? `❌ Auto-retry gave up after${attemptLabel} attempt(s): ${shortReason(finalError)}`
+      : `✓ Auto-retry recovered after${attemptLabel} attempt(s).`;
+    return [
+      {
+        role: "system",
+        subtype: "auto_retry_end",
+        content,
+        timestamp: ts,
+        sessionId,
+      },
+    ];
+  }
+
   private translateMessageEnd(
     r: EmitterRecord,
     ts: string,
@@ -299,13 +359,16 @@ export class AgenticShim {
       return [];
     }
 
-    // Pi's content blocks are text / thinking / toolCall. The dashboard
-    // envelope only renders text and tool_use; map toolCall → tool_use
-    // and drop thinking blocks (they're internal reasoning, not chat).
+    // Pi's content blocks are text / thinking / toolCall. Map toolCall →
+    // tool_use, and preserve thinking blocks as `thinking` blocks so the
+    // dashboard's reasoning toggle (session-log.ts → AssistantMessage.tsx)
+    // can surface the model's reasoning. Redacted/empty thinking is skipped.
     const out: Array<Record<string, unknown>> = [];
     for (const c of message.content) {
       if (c.type === "text" && typeof c.text === "string") {
         out.push({ type: "text", text: c.text });
+      } else if (c.type === "thinking" && typeof c.thinking === "string" && c.thinking.length > 0) {
+        out.push({ type: "thinking", thinking: c.thinking });
       } else if (c.type === "toolCall") {
         const id = typeof c.id === "string" ? c.id : null;
         const name = typeof c.name === "string" ? c.name : null;
@@ -462,6 +525,12 @@ export function safeStringify(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+/** Collapse an error string to a single short line for a system breadcrumb. */
+function shortReason(reason: string): string {
+  const oneLine = reason.replace(/\s+/g, " ").trim();
+  return oneLine.length > 200 ? `${oneLine.slice(0, 197)}…` : oneLine;
 }
 
 /**
