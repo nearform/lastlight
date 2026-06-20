@@ -61,6 +61,16 @@ src/
     credentials.ts        git credential-store file writer (mode 600, regex-validated).
     profiles.ts           4 profile names → tool name allowlists.
     tools.ts              ~31 defineTool() registrations, github_ prefix.
+  extensions/skills/
+    index.ts              loadSkillsExtension() — normalizes --skill paths (tilde/
+                          relative → absolute, drops missing). Skills are a Pi-native
+                          RESOURCE, not customTools: the runner feeds the result into
+                          DefaultResourceLoader.additionalSkillPaths / noSkills (same
+                          channel file-search uses for additionalExtensionPaths). Pi
+                          discovers default-location skills on its own.
+                          buildSkillsStatusEvent() synthesizes a gated `skills_status`
+                          JSONL event (Pi emits none) — suppressed on a default run
+                          with zero skills so fixtures stay byte-identical.
   sandbox/
     index.ts              buildSandbox(backend) dispatcher. Returns ok|err.
     preflight.ts          QEMU + accelerator detection. Returns structured result.

@@ -22,7 +22,7 @@ import {
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 import type { RunConfig } from "./args.js";
-import { Emitter, type EmitterSink } from "./emitter.js";
+import { Emitter, type EmitterRecord, type EmitterSink } from "./emitter.js";
 import { loadGitHubExtension, isMisconfigurationSkip } from "./extensions/github/index.js";
 import {
   loadWebSearchExtension,
@@ -32,6 +32,7 @@ import {
   loadFileSearchExtension,
   isMisconfigurationSkip as isFileSearchMisconfig,
 } from "./extensions/file-search/index.js";
+import { loadSkillsExtension, buildSkillsStatusEvent } from "./extensions/skills/index.js";
 import { resolveModel } from "./models.js";
 import { buildSandbox, type ImageDescriptor, type SandboxResult } from "./sandbox/index.js";
 import { ensureImage, ImageLoaderError } from "./sandbox/images/loader.js";
@@ -117,6 +118,16 @@ export async function runOnce(
   if (isFileSearchMisconfig(fileSearch)) {
     warn(`file-search extension disabled (${fileSearch.reason}): ${fileSearch.message ?? ""}`);
   }
+
+  // Agent Skills (https://agentskills.io). Pi discovers skills from default
+  // locations on its own; this only normalizes operator-mapped --skill paths
+  // (tilde/relative → absolute, drop missing) for the resource loader below.
+  const skills = loadSkillsExtension({
+    skillPaths: config.skillPaths,
+    noSkills: config.noSkills,
+    cwd: config.cwd,
+  });
+  for (const w of skills.warnings) warn(`skills: ${w}`);
 
   // Compose the env for the sandbox VM. Order (later wins):
   //   1. Auto-injected GITHUB_TOKEN/GH_TOKEN from a minted installation
@@ -206,6 +217,11 @@ export async function runOnce(
     cwd: config.cwd,
     agentDir,
     additionalExtensionPaths: fileSearch.packageDir ? [fileSearch.packageDir] : [],
+    // Operator-mapped skill folders (e.g. --skill ~/.claude/skills). Additive
+    // even when noSkills is true (Pi semantics): --skill X --no-skills loads
+    // exactly X and nothing from default discovery.
+    additionalSkillPaths: skills.additionalSkillPaths,
+    noSkills: skills.noSkills,
   });
   await resourceLoader.reload();
 
@@ -292,6 +308,21 @@ export async function runOnce(
     mode: fileSearch.mode,
     toolCount: fileSearch.toolNames.length,
   });
+  // Pi emits no skill-specific event, so we synthesize one from the resource
+  // loader's discovery. Gated (status !== "default" OR ≥1 skill discovered) so
+  // a default run in a clean env stays silent and the JSONL fixtures stay valid.
+  const skillsStatus = buildSkillsStatusEvent(
+    skills,
+    resourceLoader.getSkills().skills.map((s) => ({
+      name: s.name,
+      source: s.filePath,
+      modelInvocable: !s.disableModelInvocation,
+    })),
+  );
+  if (skillsStatus) {
+    emitter.event(skillsStatus as unknown as EmitterRecord);
+  }
+
   // Only surfaced when telemetry was actually requested (enabled, or explicitly
   // --no-otel). A silent default run emits nothing here, so the existing JSONL
   // fixtures stay valid (AGENTS.md rule #2).

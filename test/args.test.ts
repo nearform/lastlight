@@ -186,6 +186,33 @@ describe("parseArgs", () => {
     );
   });
 
+  test("skills default: no paths, discovery enabled", () => {
+    const cfg = parseArgs(["--model", "openai/gpt-4"]);
+    assert.equal(cfg.skillPaths, undefined);
+    assert.equal(cfg.noSkills, undefined);
+  });
+
+  test("--skill accumulates repeated paths", () => {
+    const cfg = parseArgs([
+      "--model", "openai/gpt-4",
+      "--skill", "~/.claude/skills",
+      "--skill", "./project-skills",
+    ]);
+    assert.deepEqual(cfg.skillPaths, ["~/.claude/skills", "./project-skills"]);
+  });
+
+  test("--skill requires a non-empty value", () => {
+    assert.throws(
+      () => parseArgs(["--model", "openai/gpt-4", "--skill"]),
+      /requires a value|non-empty/,
+    );
+  });
+
+  test("--no-skills sets the flag", () => {
+    const cfg = parseArgs(["--model", "openai/gpt-4", "--no-skills"]);
+    assert.equal(cfg.noSkills, true);
+  });
+
   test("otel is off (undefined) by default — env decides", () => {
     const cfg = parseArgs(["--model", "openai/gpt-4"]);
     assert.equal(cfg.otel, undefined);

@@ -116,6 +116,20 @@ export interface RunOptions {
    */
   fileSearchMode?: "override" | "tools-only" | "tools-and-ui";
 
+  /**
+   * Extra Agent Skill paths to load, beyond Pi's default discovery
+   * (`~/.pi/agent/skills`, `~/.agents/skills`, `.pi/skills`, `.agents/skills`,
+   * package `skills/`). Each entry is a directory of skills OR a single skill
+   * dir/file. Additive even with `noSkills`. Maps e.g. `~/.claude/skills` into
+   * the agent.
+   */
+  skillPaths?: string[];
+  /**
+   * Disable Pi's default skill discovery. Explicit `skillPaths` still load.
+   * Default: discovery enabled (Pi's default).
+   */
+  noSkills?: boolean;
+
   // ── OpenTelemetry ───────────────────────────────────────────────
   /**
    * Enable OTEL traces + metrics export. Default: `false` (or env
@@ -216,6 +230,18 @@ export interface RunResult {
     toolCount: number;
   };
   /**
+   * Mirror of the `skills_status` line. Present only when skills were
+   * configured (`skillPaths`/`noSkills`) or at least one skill was discovered;
+   * absent on a default run with no skills (matching the gated event).
+   */
+  skills?: {
+    status: "default" | "configured" | "disabled";
+    discovered: number;
+    skills: Array<{ name: string; source: string; modelInvocable: boolean }>;
+    mappedPaths: string[];
+    noSkills: boolean;
+  };
+  /**
    * Mirror of the telemetry `extension_status` line. Present only when OTEL
    * was requested (enabled or explicitly disabled); absent on a default run.
    */
@@ -270,6 +296,8 @@ export async function run(options: RunOptions): Promise<RunResult> {
     webSearchMaxCalls: options.webSearchMaxCalls,
     fileSearch: options.fileSearch ?? true,
     fileSearchMode: options.fileSearchMode,
+    skillPaths: options.skillPaths,
+    noSkills: options.noSkills,
     otel: options.otel,
     otelIncludeContent: options.otelIncludeContent,
     otelServiceName: options.otelServiceName,
@@ -357,6 +385,16 @@ function buildResult(
             includeContent: r.includeContent as boolean | undefined,
           };
         }
+        break;
+
+      case "skills_status":
+        result.skills = {
+          status: r.status as "default" | "configured" | "disabled",
+          discovered: (r.discovered as number) ?? 0,
+          skills: (r.skills as NonNullable<RunResult["skills"]>["skills"]) ?? [],
+          mappedPaths: (r.mappedPaths as string[]) ?? [],
+          noSkills: (r.noSkills as boolean) ?? false,
+        };
         break;
 
       case "message_end": {

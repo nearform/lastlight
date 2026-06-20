@@ -47,6 +47,7 @@ Extensions live in `src/extensions/`, each "safe by default" (skip with an enume
 - `github/` — ~31 native Pi tools (`github_` prefix, registered via `defineTool()`), gated by **profile** (`read` | `issues-write` | `review-write` | `repo-write`). Profile filtering happens at registration time — the LLM never sees disallowed tools. Auth mints a short-lived installation token from a GitHub App JWT.
 - `web-search/` — optional `web_search` / `web_fetch` via Tavily/Brave/Exa providers, with SSRF-safe fetch + rate limiting.
 - `file-search/` — bundles FFF (`@ff-labs/pi-fff`), a Rust-backed fuzzy file/content search, as the **default**. Unlike the others, it contributes no `customTools`; it's a full Pi extension loaded via Pi's resource loader (`PI_FFF_MODE` env).
+- `skills/` — wires the [Agent Skills standard](https://agentskills.io) into the run. Pi discovers `SKILL.md` skills from default locations natively; this module only normalizes operator-mapped `--skill <path>` folders (e.g. `~/.claude/skills`) into `DefaultResourceLoader.additionalSkillPaths` / `noSkills`. Like file-search, it's a Pi-native resource — **not** `customTools`. Pi emits no skill event, so the runner synthesizes a **gated** `skills_status` JSONL event (suppressed on a default run with zero skills, to keep fixtures byte-identical).
 
 `sandbox/` — optional Gondolin micro-VM that routes Pi's `read`/`write`/`edit`/`bash` through a sandbox. **Native-only** (QEMU required); `preflight.ts` refuses to run rather than silently hang. See `SPIKE-gondolin.md`.
 

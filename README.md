@@ -354,6 +354,97 @@ echo "summarize the repo" | OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
   node dist/cli.js run --model openai/gpt-5.4-nano --otel --no-session
 ```
 
+### 11. Agent skills (`SKILL.md`)
+
+Pi natively implements the [Agent Skills standard](https://agentskills.io) — the
+same `SKILL.md`-in-a-folder convention used by Claude Code and Codex — and
+agentic-pi exposes it. A **skill** is a directory containing a `SKILL.md` with YAML
+frontmatter (`name` + `description`) and freeform instructions, plus any helper
+scripts/references it needs:
+
+```
+roll-dice/
+└── SKILL.md
+```
+
+```markdown
+---
+name: roll-dice
+description: Roll an N-sided die. Use when asked to roll a die or dice.
+---
+
+# Roll Dice
+
+Run `echo $((RANDOM % <sides> + 1))`, replacing `<sides>` with the die size.
+```
+
+**Progressive disclosure.** At startup Pi scans the skill locations and puts only
+each skill's `name` + `description` into the system prompt. When a task matches, the
+agent `read`s the full `SKILL.md` on demand, then loads any referenced scripts/assets
+by relative path. This keeps the prompt small while making many skills available.
+
+**Default locations — already discovered, no flag needed.** Drop a skill into any of:
+
+- Global: `~/.pi/agent/skills/`, `~/.agents/skills/`
+- Project (cwd + ancestors to git root): `.pi/skills/`, `.agents/skills/`
+- Packages: a `skills/` directory or `pi.skills` entry in a dependency's `package.json`
+
+**Mapping an existing skills folder via `--skill`.** To use skills you already keep
+elsewhere — e.g. your Claude Code skills, or a directory mounted into a CI container —
+point at it with `--skill <path>` (repeatable; accepts a directory of skills or a
+single skill). It's **additive even with `--no-skills`**:
+
+```bash
+# Map your Claude Code skills directory straight into the agent
+echo "use the roll-dice skill to roll a d20" | node dist/cli.js run \
+  --model openai/gpt-5.4-nano --no-session --skill ~/.claude/skills
+
+# Load ONLY an explicit folder; suppress all default discovery
+... --no-skills --skill ./ci-skills
+
+# Turn skills off entirely
+... --no-skills
+```
+
+Programmatic callers pass `skillPaths: string[]` / `noSkills: boolean` to `run()`.
+
+**Cross-harness reuse via settings.** Instead of a flag on every run, list skill
+directories in a Pi `settings.json` (under the agent dir) so they always load:
+
+```json
+{
+  "skills": ["~/.claude/skills", "~/.codex/skills"]
+}
+```
+
+**One-shot caveat.** agentic-pi has no interactive mode, so Pi's `/skill:name` slash
+command doesn't apply here — skills are **model-invoked** from the catalog. If the
+model doesn't pick up a skill on its own, name it in the prompt ("use the `roll-dice`
+skill …") to nudge it to load the `SKILL.md`.
+
+**Safe by default.** A `--skill` path that doesn't exist is dropped with a warning
+rather than aborting the run. Skills are a Pi-native *resource* (fed to the resource
+loader), not agentic-pi tools, so they don't appear in the `extension_status` events.
+
+**Observability.** Pi emits no skill-specific event, and skill *usage* only shows up
+indirectly — when the agent loads a skill it `read`s the `SKILL.md`, so it surfaces as
+a normal `tool_execution_start`/`_end` whose `args.path` ends in `SKILL.md`. To make
+*discovery* visible, agentic-pi synthesizes a single `skills_status` event at startup:
+
+```jsonl
+{"type":"skills_status","status":"configured","discovered":2,"skills":[{"name":"roll-dice","source":"/abs/roll-dice/SKILL.md","modelInvocable":true}],"mappedPaths":["/abs/skills"],"noSkills":false,"sessionId":"…","timestamp":"…"}
+```
+
+`status` is `default` (no flags), `configured` (`--skill` paths resolved), or
+`disabled` (`--no-skills`). `modelInvocable` is `false` for skills that set
+`disable-model-invocation: true` (present but never auto-loaded). The event is
+**gated**: a default run that discovers no skills emits nothing, so the golden JSONL
+fixtures stay byte-identical. Programmatic callers read the same data from
+`result.skills`.
+
+> **Security:** a skill can instruct the model to take any action and may bundle code
+> the model runs. Only map skill directories you trust.
+
 ## When to use this
 
 - You have an orchestrator that calls a coding agent once per workflow
@@ -418,6 +509,8 @@ GITHUB_TOKEN=ghp_…
 | `--no-web-search` | Disable the web-search extension (no `web_search`/`web_fetch` tools). |
 | `--no-file-search` | Disable the bundled FFF file-search extension; fall back to Pi's built-in `find`/`grep`. |
 | `--file-search-mode <m>` | FFF mode: `override` (default) \| `tools-only` \| `tools-and-ui`. Overridden by the `PI_FFF_MODE` env var. See section 9. |
+| `--skill <path>` | Load Agent Skills from `<path>` (a skills dir or a single skill). Repeatable; additive even with `--no-skills`. Maps e.g. `~/.claude/skills` into the agent. Default-location skills load without this. See section 11. |
+| `--no-skills` | Disable Pi's default skill discovery. Explicit `--skill` paths still load. |
 | `--web-search-max-calls <n>` | Cap combined `web_search` + `web_fetch` calls per run. Default: 30. |
 | `--otel` | Enable OpenTelemetry traces + metrics export. Off by default. Requires an OTLP endpoint via `OTEL_EXPORTER_OTLP_ENDPOINT` (or `--otel-endpoint`). See section 10. |
 | `--no-otel` | Force-disable OTEL even if `AGENTIC_PI_OTEL_ENABLED=1`. |
@@ -436,6 +529,7 @@ Reads the prompt from stdin. Emits JSONL on stdout. Exits 0 on `agent_end`,
 {"type":"extension_status","extension":"github","status":"configured","profile":"read","toolCount":18,"sessionId":"<uuid>","timestamp":"…"}
 {"type":"extension_status","extension":"web-search","status":"configured","provider":"tavily","toolCount":2,"maxCalls":30,"sessionId":"<uuid>","timestamp":"…"}
 {"type":"extension_status","extension":"file-search","status":"configured","mode":"override","toolCount":3,"sessionId":"<uuid>","timestamp":"…"}
+{"type":"skills_status","status":"configured","discovered":1,"skills":[{"name":"roll-dice","source":"…/SKILL.md","modelInvocable":true}],"mappedPaths":["…"],"noSkills":false,"sessionId":"<uuid>","timestamp":"…"}
 {"type":"agent_start","sessionId":"<uuid>","timestamp":"…"}
 {"type":"turn_start","sessionId":"<uuid>","timestamp":"…"}
 {"type":"message_start","message":{…},"sessionId":"<uuid>","timestamp":"…"}
@@ -449,8 +543,10 @@ Reads the prompt from stdin. Emits JSONL on stdout. Exits 0 on `agent_end`,
 ```
 
 `extension_status` is emitted once at startup so downstream logs can confirm
-the GitHub profile (and whether auth succeeded). `usage_snapshot` is always
-the last line in a successful run.
+the GitHub profile (and whether auth succeeded). `skills_status` is emitted once
+at startup too, but **only** when skills were configured or discovered (section 11) —
+a default run with no skills omits it entirely. `usage_snapshot` is always the last
+line in a successful run.
 
 ## Programmatic usage
 
@@ -517,6 +613,7 @@ console.log(result.records.length);      // full event log
 | `github` | `{status, reason, profile, toolCount}` \| `undefined` | Mirror of the GitHub `extension_status` event. |
 | `webSearch` | `{status, reason, provider, toolCount, maxCalls}` \| `undefined` | Mirror of the web-search `extension_status` event. |
 | `fileSearch` | `{status, reason, mode, toolCount}` \| `undefined` | Mirror of the FFF file-search `extension_status` event. |
+| `skills` | `{status, discovered, skills: {name, source, modelInvocable}[], mappedPaths, noSkills}` \| `undefined` | Mirror of the `skills_status` event. Absent when none configured/discovered (section 11). |
 | `records` | `EmitterRecord[]` | Every JSONL record in order. Same shape that the CLI writes. |
 | `warnings` | `string[]` | Warnings that would have gone to stderr in CLI mode. |
 

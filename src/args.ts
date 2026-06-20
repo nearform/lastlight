@@ -89,6 +89,19 @@ export interface RunConfig {
    */
   fileSearchMode?: "override" | "tools-only" | "tools-and-ui";
   /**
+   * Extra Agent Skill paths to load, beyond Pi's default discovery
+   * (~/.pi/agent/skills, ~/.agents/skills, .pi/skills, .agents/skills,
+   * package skills/). Each entry is a directory of skills OR a single skill
+   * dir/file. Set via `--skill <path>` (repeatable). Additive even with
+   * --no-skills.
+   */
+  skillPaths?: string[];
+  /**
+   * Disable Pi's default skill discovery. Explicit --skill paths still load.
+   * Set via `--no-skills`. Default: discovery enabled (Pi's default).
+   */
+  noSkills?: boolean;
+  /**
    * OpenTelemetry traces + metrics export. Tri-state:
    *   - `true`  (`--otel`)    → enabled.
    *   - `false` (`--no-otel`) → force-disabled (wins over env).
@@ -152,6 +165,14 @@ Flags:
   --file-search-mode <m>     FFF mode: override | tools-only | tools-and-ui.
                               Default: override (FFF replaces built-in find/grep
                               under the same names). Overridden by PI_FFF_MODE env.
+  --skill <path>             Load Agent Skills from <path> (a directory of
+                              skills or a single skill). Repeatable. Additive
+                              even with --no-skills. Maps e.g. ~/.claude/skills
+                              into the agent. Skills in Pi's default locations
+                              (.pi/skills, .agents/skills, ~/.pi/agent/skills)
+                              are discovered automatically without this flag.
+  --no-skills                Disable Pi's default skill discovery. Explicit
+                              --skill paths still load.
   --otel                     Enable OpenTelemetry traces + metrics export.
                               Off by default. Requires an OTLP endpoint via
                               OTEL_EXPORTER_OTLP_ENDPOINT (or --otel-endpoint).
@@ -298,6 +319,15 @@ export function parseArgs(argv: string[]): RunConfig {
       }
       case "--no-file-search":
         config.fileSearch = false;
+        break;
+      case "--skill": {
+        const v = next().trim();
+        if (!v) throw new Error("--skill requires a non-empty path");
+        config.skillPaths = [...(config.skillPaths ?? []), v];
+        break;
+      }
+      case "--no-skills":
+        config.noSkills = true;
         break;
       case "--file-search-mode": {
         const v = next();
