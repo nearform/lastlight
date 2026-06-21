@@ -115,6 +115,14 @@ export interface RunConfig {
    */
   retryBaseDelayMs?: number;
   /**
+   * Hard cap on the number of agent steps (Pi "turns" — one LLM call plus its
+   * tool executions). Set via `--max-steps`. When the agent completes this many
+   * turns and still intends to continue (the last turn ran tools), the run is
+   * stopped and a `max_steps_reached` event is emitted. Unset (default) = no
+   * cap; Pi loops until the agent answers with no tool calls. Must be >= 1.
+   */
+  maxSteps?: number;
+  /**
    * OpenTelemetry traces + metrics export. Tri-state:
    *   - `true`  (`--otel`)    → enabled.
    *   - `false` (`--no-otel`) → force-disabled (wins over env).
@@ -193,6 +201,10 @@ Flags:
                               Overrides retry.maxRetries from Pi settings.json.
   --retry-base-delay-ms <n>  Base backoff delay in ms: delay = base*2^(attempt-1).
                               Overrides retry.baseDelayMs from Pi settings.json.
+  --max-steps <n>            Hard cap on agent steps (one LLM turn + its tool
+                              calls). When reached while the agent still wants to
+                              continue, the run stops and emits a
+                              "max_steps_reached" event. Default: no cap.
   --otel                     Enable OpenTelemetry traces + metrics export.
                               Off by default. Requires an OTLP endpoint via
                               OTEL_EXPORTER_OTLP_ENDPOINT (or --otel-endpoint).
@@ -365,6 +377,15 @@ export function parseArgs(argv: string[]): RunConfig {
           throw new Error(`--retry-base-delay-ms must be a positive integer (got '${v}')`);
         }
         config.retryBaseDelayMs = n;
+        break;
+      }
+      case "--max-steps": {
+        const v = next();
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1) {
+          throw new Error(`--max-steps must be a positive integer (got '${v}')`);
+        }
+        config.maxSteps = n;
         break;
       }
       case "--file-search-mode": {

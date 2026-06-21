@@ -363,6 +363,18 @@ export async function runOnce(
   let sawError = false;
   let agentEndSeen = false;
 
+  // Step cap (config.maxSteps). Pi exposes no max-turns / shouldStopAfterTurn
+  // hook through its SDK, so we enforce the cap from the event stream: count
+  // completed turns and, once the agent has run maxSteps turns AND still
+  // intends to continue (the just-finished turn executed tools), stop the loop
+  // by aborting. The loop observes the abort signal and emits a normal
+  // agent_end, so the run still terminates cleanly (exit 0). A gated
+  // max_steps_reached event marks the truncation so consumers can tell a
+  // capped run from a natural finish — suppressed entirely when no cap is hit,
+  // keeping default-run JSONL fixtures byte-identical.
+  let stepCount = 0;
+  let maxStepsHit = false;
+
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     telemetry.onEvent(event);
     emitter.event(event as unknown as Record<string, unknown> & { type: string });
@@ -372,6 +384,32 @@ export async function runOnce(
     }
     if (event.type === "agent_end") {
       agentEndSeen = true;
+    }
+    if (event.type === "turn_end") {
+      stepCount++;
+      // toolResults.length > 0 ⇒ this turn ran tools ⇒ the agent will start
+      // another turn. A turn with no tool calls is the final answer; the loop
+      // is already exiting, so there is nothing to cap (and emitting the event
+      // would be a false positive).
+      if (
+        config.maxSteps !== undefined &&
+        !maxStepsHit &&
+        stepCount >= config.maxSteps &&
+        event.toolResults.length > 0
+      ) {
+        maxStepsHit = true;
+        emitter.event({
+          type: "max_steps_reached",
+          maxSteps: config.maxSteps,
+          steps: stepCount,
+        });
+        // Fire-and-forget: abort() sets the abort signal synchronously (via
+        // agent.abort()) before returning, which is all we need here — the
+        // loop is currently awaiting this very listener, so awaiting abort()'s
+        // waitForIdle() would deadlock. waitForIdle resolves rather than
+        // rejects, but guard the floating promise anyway.
+        void session.abort().catch(() => undefined);
+      }
     }
   });
 

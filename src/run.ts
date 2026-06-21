@@ -144,6 +144,17 @@ export interface RunOptions {
    */
   retryBaseDelayMs?: number;
 
+  /**
+   * Hard cap on the number of agent steps, where a "step" is one Pi turn —
+   * one model call plus the tool executions it triggers. When the agent
+   * completes `maxSteps` turns and still intends to continue (the last turn
+   * ran tools), the run is stopped: a `max_steps_reached` record is emitted,
+   * `result.maxStepsReached` is set, and the agent terminates with a normal
+   * `agent_end`. Unset (default) means no cap — Pi loops until the agent
+   * answers with no tool calls. Must be `>= 1`.
+   */
+  maxSteps?: number;
+
   // ── OpenTelemetry ───────────────────────────────────────────────
   /**
    * Enable OTEL traces + metrics export. Default: `false` (or env
@@ -194,6 +205,13 @@ export interface RunResult {
   agentEnded: boolean;
   /** True iff at least one tool returned an error. */
   toolErrors: boolean;
+  /**
+   * True iff the run was stopped because it hit the `maxSteps` cap — i.e. the
+   * agent completed `maxSteps` turns and still wanted to continue. False when
+   * the agent finished on its own (or no cap was set). Mirrors the
+   * `max_steps_reached` record.
+   */
+  maxStepsReached: boolean;
   /** If a fatal error short-circuited the run, this is set. */
   fatalError?: { name: string; message: string };
 
@@ -314,6 +332,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     noSkills: options.noSkills,
     maxRetries: options.maxRetries,
     retryBaseDelayMs: options.retryBaseDelayMs,
+    maxSteps: options.maxSteps,
     otel: options.otel,
     otelIncludeContent: options.otelIncludeContent,
     otelServiceName: options.otelServiceName,
@@ -346,6 +365,7 @@ function buildResult(
     ok: exitCode === 0,
     agentEnded: false,
     toolErrors: false,
+    maxStepsReached: false,
     finalText: "",
     messages: [],
     records,
@@ -432,6 +452,10 @@ function buildResult(
 
       case "tool_execution_end":
         if (r.isError === true) result.toolErrors = true;
+        break;
+
+      case "max_steps_reached":
+        result.maxStepsReached = true;
         break;
 
       case "agent_end":

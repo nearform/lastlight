@@ -234,6 +234,21 @@ describe("parseArgs", () => {
     assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--retry-base-delay-ms", "0"]), /positive integer/);
   });
 
+  test("--max-steps is unset by default", () => {
+    assert.equal(parseArgs(["--model", "openai/gpt-4"]).maxSteps, undefined);
+  });
+
+  test("--max-steps accepts positive integers", () => {
+    assert.equal(parseArgs(["--model", "openai/gpt-4", "--max-steps", "1"]).maxSteps, 1);
+    assert.equal(parseArgs(["--model", "openai/gpt-4", "--max-steps", "25"]).maxSteps, 25);
+  });
+
+  test("--max-steps rejects 0, negatives, and non-integers", () => {
+    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--max-steps", "0"]), /positive integer/);
+    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--max-steps", "-3"]), /positive integer/);
+    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--max-steps", "2.5"]), /positive integer/);
+  });
+
   test("otel is off (undefined) by default — env decides", () => {
     const cfg = parseArgs(["--model", "openai/gpt-4"]);
     assert.equal(cfg.otel, undefined);

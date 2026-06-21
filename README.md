@@ -573,6 +573,7 @@ GITHUB_TOKEN=ghp_…
 | `--max-retries <n>` | Max auto-retry attempts for transient model errors (429/503/5xx/network). Exponential backoff; `0` disables. Default tuned for per-minute rate-limit windows (e.g. Fireworks TPM). Overrides `retry.maxRetries` in settings.json. See section 5. |
 | `--retry-base-delay-ms <n>` | Backoff base in ms: `delay = base·2^(attempt-1)`. Overrides `retry.baseDelayMs` in settings.json. |
 | `--web-search-max-calls <n>` | Cap combined `web_search` + `web_fetch` calls per run. Default: 30. |
+| `--max-steps <n>` | Hard cap on agent steps (one LLM turn + its tool calls). When reached while the agent still wants to continue, the run stops and emits a `max_steps_reached` event before `agent_end`. Default: no cap. |
 | `--otel` | Enable OpenTelemetry traces + metrics export. Off by default. Requires an OTLP endpoint via `OTEL_EXPORTER_OTLP_ENDPOINT` (or `--otel-endpoint`). See section 10. |
 | `--no-otel` | Force-disable OTEL even if `AGENTIC_PI_OTEL_ENABLED=1`. |
 | `--otel-include-content` | Attach prompt/message/tool content to spans (bounded + truncated). Default: metadata-only. |
@@ -608,6 +609,16 @@ the GitHub profile (and whether auth succeeded). `skills_status` is emitted once
 at startup too, but **only** when skills were configured or discovered (section 11) —
 a default run with no skills omits it entirely. `usage_snapshot` is always the last
 line in a successful run.
+
+When `--max-steps`/`maxSteps` is set and the agent hits the cap (it finished
+that many turns and still wanted to keep going), a `max_steps_reached` event is
+emitted just before `agent_end`, the run is stopped, and `result.maxStepsReached`
+is set. It's never emitted when the agent finishes on its own — so a run that
+stays under the cap (or sets none) keeps the byte-identical default stream above.
+
+```jsonl
+{"type":"max_steps_reached","maxSteps":8,"steps":8,"sessionId":"<uuid>","timestamp":"…"}
+```
 
 ## Programmatic usage
 
@@ -663,6 +674,7 @@ console.log(result.records.length);      // full event log
 | `ok` | `boolean` | `exitCode === 0`. |
 | `agentEnded` | `boolean` | Pi emitted `agent_end`. |
 | `toolErrors` | `boolean` | At least one tool returned an error. |
+| `maxStepsReached` | `boolean` | Run was stopped because it hit the `maxSteps` cap (agent still wanted to continue). `false` when it finished on its own or no cap was set. |
 | `fatalError` | `{name, message}` \| `undefined` | Set if a fatal error short-circuited the run. |
 | `sessionId` | `string` \| `undefined` | Pi session UUID. |
 | `cwd` | `string` \| `undefined` | Working directory the agent ran in. |
