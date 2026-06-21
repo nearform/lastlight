@@ -1,4 +1,4 @@
-import { resolve, basename, join } from "path";
+import { resolve, basename, join, relative } from "path";
 import { cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { randomUUID } from "crypto";
 import type { run as agenticRunType, RunResult, ThinkingLevel } from "agentic-pi";
@@ -27,51 +27,74 @@ import { recordPiEvent } from "../telemetry/pi-events.js";
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 const DOCKER_WORKSPACE_DIR = "/home/agent/workspace";
-const SKILLS_STAGING_SUBPATH = join(".agents", "skills");
+// Per-workspace root holding one skill bundle per phase. Deliberately NOT
+// named `.agents/skills` (pi's auto-discovery path): we map each phase's
+// bundle explicitly via --skill / skillPaths so two phases sharing a
+// workspace — sequential today, parallel via worktrees tomorrow — can never
+// clobber each other's catalogue. It lives at the workspace ROOT, a sibling
+// of any checked-out repo, so it never enters the repo's git tree and the
+// agent never sees or commits it.
+const SKILL_BUNDLE_ROOT = ".lastlight-skills";
 const THINKING_LEVELS: ReadonlySet<string> = new Set([
   "off", "minimal", "low", "medium", "high", "xhigh",
 ]);
 
 /**
- * Stage the named skills under `<workspaceDir>/.agents/skills/<basename>/`
- * so pi-coding-agent's built-in `.agents/skills/` auto-discovery (rooted
- * at the agent's cwd) surfaces them as an XML catalogue in the system
- * prompt. Each skill is a directory containing SKILL.md plus any
- * `scripts/`, `references/`, `assets/` — the whole tree comes along.
+ * Stage this phase's declared skills into a per-phase bundle directory at
+ * `<workspaceRoot>/.lastlight-skills/<phaseKey>/<basename>/` and return the
+ * staged skill dirs, so the caller can point pi at them explicitly (via
+ * `--skill` for docker or `skillPaths` for the in-process backends). Each
+ * skill is a directory containing SKILL.md plus any `scripts/` / `references/`
+ * / `assets/` — the whole tree comes along.
  *
- * `mode` controls how the directory ends up in the workspace:
- *   - "symlink": one symlink per skill pointing at the host directory.
- *     Used for gondolin/none, where pi-coding-agent's tools (including
- *     `read`) run in the harness process and can follow host symlinks.
- *     Zero-copy, zero-duplication.
- *   - "copy": recursive copy. Used for docker, where the agent's tools
- *     run inside the container — symlinks pointing at harness host
- *     paths wouldn't resolve. Piggybacks on the existing workspace
- *     bind-mount: host writes land in the container automatically.
+ * Keyed by phase so concurrent phases in one workspace never touch each
+ * other's bundle: only the phase's own `<phaseKey>` subtree is cleared, so a
+ * clean slate per phase doesn't disturb a sibling phase mid-run.
  *
- * Always clears the staging directory first so each phase gets a clean
- * slate: a phase with no skills sees no `.agents/skills/` at all, even
- * if a previous phase in the same workspace staged some.
+ * `mode` controls how each skill lands:
+ *   - "symlink": one symlink per skill → host source. gondolin/none, where pi
+ *     resolves skill files relative to cwd (the workspace root) and the bundle
+ *     rides the cwd mount. Zero-copy.
+ *   - "copy": recursive copy. docker, where the agent's tools run inside the
+ *     container and host symlink targets wouldn't resolve; the copy lands
+ *     under the bind-mounted workspace.
+ *
+ * Returns `undefined` when the phase declares no skills (after clearing its
+ * bundle), so a phase with no `skills:` gets no catalogue at all.
  */
-function stageSkillsInWorkspace(
-  workspaceDir: string,
+export function stageSkillBundle(
+  workspaceRoot: string,
+  phaseKey: string,
   skillPaths: string[] | undefined,
   mode: "symlink" | "copy",
-): void {
-  const stagingDir = join(workspaceDir, SKILLS_STAGING_SUBPATH);
-  if (existsSync(stagingDir)) {
-    rmSync(stagingDir, { recursive: true, force: true });
+): string[] | undefined {
+  const bundleDir = join(workspaceRoot, SKILL_BUNDLE_ROOT, phaseKey);
+  if (existsSync(bundleDir)) {
+    rmSync(bundleDir, { recursive: true, force: true });
   }
-  if (!skillPaths?.length) return;
-  mkdirSync(stagingDir, { recursive: true });
+  if (!skillPaths?.length) return undefined;
+  mkdirSync(bundleDir, { recursive: true });
+  const staged: string[] = [];
   for (const hostPath of skillPaths) {
-    const dest = join(stagingDir, basename(hostPath));
+    const dest = join(bundleDir, basename(hostPath));
     if (mode === "symlink") {
       symlinkSync(hostPath, dest, "dir");
     } else {
       cpSync(hostPath, dest, { recursive: true, dereference: true });
     }
+    staged.push(dest);
   }
+  return staged;
+}
+
+/**
+ * Sanitized per-phase key for the skill bundle directory. Phase name first
+ * (unique even for loop iterations like `reviewer_fix_1`), then workflow name,
+ * then a constant fallback — so the bundle is always isolated per phase.
+ */
+function skillBundleKey(config: ExecutorConfig): string {
+  const raw = config.telemetry?.phaseName || config.telemetry?.workflowName || "phase";
+  return raw.replace(/[^A-Za-z0-9_-]/g, "_") || "phase";
 }
 
 /**
@@ -275,25 +298,20 @@ async function executeInProcess(
   const thinking = coerceThinking(config.variant);
   const profile = ctx.access ? AGENTIC_PROFILE_FOR[ctx.access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
-  // When the harness pre-cloned the target repo, drop the agent directly
-  // into `<workDir>/<repo>/` so the very first turn is already inside the
-  // checked-out tree. The per-phase prompts can then drop their
-  // `git clone … && cd <repo>` preambles. pi-coding-agent's AGENTS.md
-  // discovery walks up from cwd, so the workspace-root `AGENTS.md` we
-  // wrote a few lines up still gets picked up.
-  const agentCwd = ctx.access?.prePopulateBranch
-    ? join(ctx.workDir, ctx.access.repo)
-    : ctx.workDir;
+  // cwd is the workspace ROOT — the parent of any pre-cloned repo subdir
+  // (`<workDir>/<repo>/`). Keeping the repo a child of cwd lets the per-phase
+  // skill bundle sit as a sibling (under cwd, so gondolin mounts it) without
+  // ever entering the repo's git tree. Repo-write prompts `cd {{repo}}` as
+  // their first step. pi-coding-agent's AGENTS.md discovery finds the
+  // workspace-root `AGENTS.md` directly at cwd.
+  const agentCwd = ctx.workDir;
 
-  // Stage declared skills at <agentCwd>/.agents/skills/ so
-  // pi-coding-agent's auto-discovery picks them up. Always rooted at
-  // cwd (rather than workDir) so the walk-up never crosses a
-  // pre-populated repo's `.git` boundary. Symlinks suffice here —
-  // pi-coding-agent's tools run in the harness process and follow
-  // host paths. Phases without `skills:` get no `.agents/skills/`
-  // directory at all.
+  // Stage this phase's skills into its own bundle dir and point pi at the
+  // staged dirs explicitly via `skillPaths` below. Symlinks suffice — pi
+  // resolves them relative to cwd in the harness process / VM mount.
+  let stagedSkillDirs: string[] | undefined;
   try {
-    stageSkillsInWorkspace(agentCwd, config.skillPaths, "symlink");
+    stagedSkillDirs = stageSkillBundle(agentCwd, skillBundleKey(config), config.skillPaths, "symlink");
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[executor] Could not stage skills: ${msg}`);
@@ -375,6 +393,9 @@ async function executeInProcess(
       sandboxEnv,
       cwd: agentCwd,
       noSession: true,
+      // Explicit per-phase skill bundle (staged above). pi loads these
+      // additively; nothing is written into the repo for the agent to commit.
+      skillPaths: stagedSkillDirs,
       allowedHttpHosts,
       // Explicit boolean — without it, agentic-pi auto-enables web search
       // when any provider key is in process.env. We forwarded those keys
@@ -431,7 +452,7 @@ async function executeInProcess(
   const better = acc.bestStats();
   if (better && (better.tokens?.total ?? 0) > 0) result.stats = better;
 
-  const finalResult = await finalizeFromRunResult(result, prompt, shim, startTime, acc.extensions(), acc.skills(), acc.toolError());
+  const finalResult = await finalizeFromRunResult(result, prompt, shim, startTime, acc.extensions(), acc.skills(), acc.toolError(), acc.endedOnToolCall());
   recordExecutionMetrics("agent", {
     "sandbox.backend": ctx.backend,
     model,
@@ -501,25 +522,23 @@ async function executeDocker(
   const thinking = coerceThinking(config.variant);
   const profile = ctx.access ? AGENTIC_PROFILE_FOR[ctx.access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
-  // Same logic as the in-process path: when the harness pre-cloned the
-  // repo, drop the agent into `<workspace>/<repo>/` rather than the
-  // workspace root, so prompts don't need a `cd <repo>` preamble.
-  const agentCwd = ctx.prePopulate
-    ? `${DOCKER_WORKSPACE_DIR}/${ctx.prePopulate.repo}`
-    : DOCKER_WORKSPACE_DIR;
+  // cwd = workspace root (parent of any pre-cloned `<workspace>/<repo>/`
+  // subdir). See the in-process path for the rationale; repo-write prompts
+  // `cd {{repo}}` as their first step.
+  const agentCwd = DOCKER_WORKSPACE_DIR;
 
-  // Stage declared skills into the workspace before the agent runs.
+  // Stage this phase's skills into its own bundle under the workspace root.
   // The container's bind-mount of `<sbx.workDir>` → `/home/agent/workspace`
-  // is already live, so anything we write to the host workDir appears
-  // inside the container. Copy (not symlink) because the agent's tools
-  // run inside the container and host symlink targets don't resolve
-  // there. Rooted at the host counterpart of the agent's cwd to
-  // mirror what the in-process path does.
-  const hostAgentCwd = ctx.prePopulate
-    ? join(sbx.workDir, ctx.prePopulate.repo)
-    : sbx.workDir;
+  // is already live, so host writes appear in the container. Copy (not
+  // symlink) because the agent's tools run inside the container and host
+  // symlink targets don't resolve there. Map the host dests to their
+  // in-container paths for `--skill` (passed to runAgent below).
+  let skillDirsInContainer: string[] = [];
   try {
-    stageSkillsInWorkspace(hostAgentCwd, config.skillPaths, "copy");
+    const staged = stageSkillBundle(sbx.workDir, skillBundleKey(config), config.skillPaths, "copy");
+    if (staged) {
+      skillDirsInContainer = staged.map((d) => `${DOCKER_WORKSPACE_DIR}/${relative(sbx.workDir, d)}`);
+    }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[executor] Could not stage skills in docker workspace: ${msg}`);
@@ -560,6 +579,7 @@ async function executeDocker(
       profile,
       sandboxEnv,
       agentCwd,
+      skillDirs: skillDirsInContainer,
       webSearch: config.webSearch === true,
       webSearchProvider: config.webSearchProvider,
       onLine: (line) => {
@@ -610,7 +630,7 @@ async function executeDocker(
     };
   }
   await sbx.cleanup();
-  const finalResult = await finalizeFromRunResult(acc.build(0), prompt, shim, startTime, acc.extensions(), acc.skills(), acc.toolError());
+  const finalResult = await finalizeFromRunResult(acc.build(0), prompt, shim, startTime, acc.extensions(), acc.skills(), acc.toolError(), acc.endedOnToolCall());
   recordExecutionMetrics("agent", {
     "sandbox.backend": "docker",
     model,
@@ -648,6 +668,11 @@ export class RunResultAccumulator {
   private agentEnded = false;
   private toolErrors = false;
   private lastToolError?: { tool?: string; message: string };
+  // True iff the last assistant turn ended with a tool call — i.e. the agent
+  // asked for a tool and the loop terminated before it could respond to the
+  // result. That's a truncated run (pi hit its internal step cap mid-task),
+  // not a finished one. See `finalizeFromRunResult`'s truncation guard.
+  private lastAssistantHadToolCall = false;
   private fatalError?: { name: string; message: string };
   private snapshotStats?: RunResult["stats"];
   private messages: unknown[] = [];
@@ -705,7 +730,12 @@ export class RunResultAccumulator {
             .join("");
           if (text) this.finalText = text;
           this.assistantMessages += 1;
-          this.toolCalls += m.content.filter((c) => c.type === "toolCall").length;
+          const toolCallsInTurn = m.content.filter((c) => c.type === "toolCall").length;
+          this.toolCalls += toolCallsInTurn;
+          // Track whether the *latest* assistant turn requested a tool. If the
+          // run ends here (no synthesis turn follows the tool result), the
+          // agent was cut off mid-task.
+          this.lastAssistantHadToolCall = toolCallsInTurn > 0;
           this.accumulateUsage(m.usage);
         } else if (m?.role === "user") {
           this.userMessages += 1;
@@ -869,6 +899,16 @@ export class RunResultAccumulator {
   toolError(): { tool?: string; message: string } | undefined {
     return this.lastToolError;
   }
+
+  /**
+   * True iff the run's final assistant turn ended on a tool call — meaning
+   * the agent intended to keep going but the loop stopped before it could
+   * respond to the tool result and write its answer. The signal a run was
+   * truncated (step-limit) rather than genuinely finished.
+   */
+  endedOnToolCall(): boolean {
+    return this.lastAssistantHadToolCall;
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -881,6 +921,7 @@ function finalizeFromRunResult(
   extensions?: ExtensionStatusMap,
   skills?: SkillsStatus,
   toolError?: { tool?: string; message: string },
+  endedOnToolCall = false,
 ): ExecutionResult {
   const durationMs = Date.now() - startTime;
   const stats = result.stats;
@@ -890,8 +931,22 @@ function finalizeFromRunResult(
   // agent_end. Without this check the run would map to "success" and the
   // workflow would silently advance with no output. See message scan below.
   const agentError = extractAgentError(result);
-  const stopReason = agentError?.stopReason ?? mapStopReason(result);
+  let stopReason = agentError?.stopReason ?? mapStopReason(result);
+
+  // Truncation guard. A run that *would* map to "success" but whose final
+  // assistant turn ended on a tool call was cut off mid-task: the agent
+  // asked for a tool and the loop stopped before it could read the result
+  // and synthesize an answer (pi hit its internal step cap — agentic-pi
+  // v0.2.7 exposes no maxSteps knob to lift it). In that state `finalText`
+  // is the agent's "let me just check X" preamble, NOT an answer. Reclassify
+  // as a failure so the workflow fires `on_failure` instead of delivering
+  // the fragment as if it were the result.
+  const truncated = stopReason === "success" && !agentError && endedOnToolCall;
+  if (truncated) stopReason = "error_truncated";
   const success = stopReason === "success";
+  const truncationMessage =
+    "Agent stopped mid-task before producing a final answer (hit the agent " +
+    "step limit). No answer was delivered.";
 
   // A bare `error_tool` stop reason is useless on its own. Surface the
   // failing tool's actual error text so the executions row and dashboard
@@ -925,7 +980,9 @@ function finalizeFromRunResult(
     cacheCreationInputTokens: cacheWrite,
     stopReason,
     durationMs,
-    apiErrorMessage: agentError?.errorMessage ?? (success ? undefined : toolErrorText),
+    apiErrorMessage:
+      agentError?.errorMessage ??
+      (success ? undefined : (toolErrorText ?? (truncated ? truncationMessage : undefined))),
   });
   void shim.flush();
 
@@ -954,7 +1011,7 @@ function finalizeFromRunResult(
     result.fatalError?.message ||
     agentError?.errorMessage ||
     toolErrorText ||
-    result.finalText ||
+    (truncated ? truncationMessage : result.finalText) ||
     stopReason;
   if (!success || accountError) {
     if (accountError) console.error(`  [executor] Account error: ${errorText}`);

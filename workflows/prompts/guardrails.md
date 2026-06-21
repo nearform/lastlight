@@ -1,7 +1,8 @@
 You are running a PRE-FLIGHT GUARDRAILS CHECK before implementation work begins.
 
-You are already inside the {{repo}} repo at branch {{branch}} — the harness
-pre-cloned it and your cwd is the repo root. Read CLAUDE.md (and
+The harness pre-cloned the {{repo}} repo at branch {{branch}} into a
+`{{repo}}/` subdirectory of your cwd. **`cd {{repo}}` before doing anything
+else** — every path below is relative to the repo root. Read CLAUDE.md (and
 CONTRIBUTING.md if present) for project-specific guidance.
 
 THE ISSUE THIS BUILD WILL IMPLEMENT (use it to judge the escape hatch below):

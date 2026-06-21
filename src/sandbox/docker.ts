@@ -310,6 +310,13 @@ export class DockerSandbox {
       webSearch?: boolean;
       /** Force a specific web-search provider. Validated against a closed set. */
       webSearchProvider?: "tavily" | "brave" | "exa";
+      /**
+       * Per-phase skill directories to load, as absolute in-container paths
+       * under WORKSPACE_DIR (e.g. `/home/agent/workspace/.lastlight-skills/
+       * <phase>/<skill>`). Each becomes a repeated `--skill <dir>` flag.
+       * Charset/prefix-asserted before shell interpolation.
+       */
+      skillDirs?: string[];
       /** Called for each newline-terminated stdout line as it arrives. */
       onLine?: (line: string) => void;
     },
@@ -356,6 +363,15 @@ export class DockerSandbox {
       }
     } else {
       extraArgs.push("--no-web-search");
+    }
+    // Per-phase skill bundles. Each must be an in-container path under the
+    // workspace root; assert the charset + prefix before it's embedded into
+    // the `sh -c` command, mirroring the agentCwd guard below.
+    for (const dir of opts?.skillDirs ?? []) {
+      if (!dir.startsWith(WORKSPACE_DIR) || !/^[A-Za-z0-9/_.-]+$/.test(dir)) {
+        throw new Error(`Refusing to pass skill dir "${dir}" — must live under ${WORKSPACE_DIR}`);
+      }
+      extraArgs.push("--skill", dir);
     }
     if (!/^[A-Za-z0-9/_.-]+$/.test(model)) {
       throw new Error(`Refusing to pass model "${model}" — bad charset`);

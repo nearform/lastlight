@@ -57,9 +57,11 @@ The terms used across this spec, in dependency order.
   (with mandatory `name` + `description` frontmatter) plus optional
   `scripts/` / `references/` / `assets/`. A phase declares
   `skills: [a, b, …]` (or sugar `skill: <name>`); the runner stages
-  each into `<workspace>/.agents/skills/<name>/` and pi-coding-agent's
-  built-in auto-discovery surfaces them as an XML catalogue in the
-  system prompt. The agent reads each SKILL.md on demand via its
+  each into a per-phase bundle at
+  `<workspaceRoot>/.lastlight-skills/<phase>/<name>/` (a sibling of any
+  checked-out repo, never in its git tree) and maps it to the agent via
+  pi's `--skill`/`skillPaths`, which surfaces them as an XML catalogue in
+  the system prompt. The agent reads each SKILL.md on demand via its
   `read` tool — pi's progressive-disclosure model. `prompt:` and
   `skills:` can coexist on the same phase.
 - **Profile** (`GitAccessProfile`) — one of `read`, `issues-write`,
@@ -110,9 +112,10 @@ item links to the page where its full contract lives.
       and resume across process restarts — [Workflow Engine §6.2–§6.5](/spec/06-workflow-engine)
 - [ ] A template engine for phase prompts with phase-output and scratch
       variable resolution — [Phases & Prompts](/spec/07-phases-and-prompts)
-- [ ] A skill staging mechanism — declared skills materialised at
-      `<workspace>/.agents/skills/<name>/` per phase so the agent
-      runtime's auto-discovery surfaces them via progressive
+- [ ] A skill staging mechanism — declared skills materialised into a
+      per-phase bundle at `<workspaceRoot>/.lastlight-skills/<phase>/<name>/`
+      (a sibling of any checked-out repo) and mapped to the agent via
+      `--skill`/`skillPaths` so the runtime surfaces them via progressive
       disclosure — and an agent-context layer (`AGENTS.md` injection) —
       [Skills](/spec/08-skills)
 - [ ] An isolated agent runtime per session with default-deny network

@@ -1,7 +1,8 @@
 You are fixing a PR based on a maintainer's request.
 
-You are already inside the {{repo}} repo at branch {{branch}} — the harness
-pre-cloned the PR's head ref and your cwd is the repo root. Git is configured.
+The harness pre-cloned the {{repo}} PR's head ref at branch {{branch}} into a
+`{{repo}}/` subdirectory of your cwd. **`cd {{repo}}` before doing anything
+else** — every path below is relative to the repo root. Git is configured.
 Read CLAUDE.md (and CONTRIBUTING.md if present) for project-specific guidance.
 
 CONTEXT:

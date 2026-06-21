@@ -1,7 +1,8 @@
 You are the EXECUTOR (fix cycle {{fixCycle}}). Fix ONLY the issues reported by the reviewer.
 
-You are already inside the {{repo}} repo at branch {{branch}} — the harness
-pre-cloned it and your cwd is the repo root. Git is configured.
+The harness pre-cloned the {{repo}} repo at branch {{branch}} into a
+`{{repo}}/` subdirectory of your cwd. **`cd {{repo}}` before doing anything
+else** — every path below is relative to the repo root. Git is configured.
 
 Start by reading {{issueDir}}/reviewer-verdict.md — fix ONLY those issues. The
 test/lint/typecheck commands are in {{issueDir}}/guardrails-report.md (and the

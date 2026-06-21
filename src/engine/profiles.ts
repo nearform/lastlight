@@ -62,13 +62,14 @@ export interface ExecutorConfig {
   };
   /**
    * Absolute host paths to skill directories (each containing SKILL.md
-   * plus optional scripts/, references/, assets/). Staged into the
-   * sandbox at `<workspace>/.agents/skills/<basename>/` before the agent
-   * runs — gondolin via symlink, docker via a per-skill read-only
-   * bind-mount — so pi-coding-agent's built-in `.agents/skills/`
-   * auto-discovery surfaces them as an XML catalogue in the system
-   * prompt. Resolved by `phaseConfigFor` in the workflow runner from
-   * the phase's `skill:`/`skills:` field.
+   * plus optional scripts/, references/, assets/). Staged into a per-phase
+   * bundle at `<workspaceRoot>/.lastlight-skills/<phaseName>/<basename>/`
+   * before the agent runs — gondolin/none via symlink, docker via copy —
+   * and passed to pi explicitly (`--skill` in docker, `skillPaths`
+   * in-process). The bundle is a sibling of any checked-out repo (never in
+   * its git tree) and keyed per phase so parallel phases stay isolated.
+   * Resolved by `phaseConfigFor` in the workflow runner from the phase's
+   * `skill:`/`skills:` field.
    */
   skillPaths?: string[];
 }

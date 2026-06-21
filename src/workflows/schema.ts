@@ -109,11 +109,14 @@ const PhaseDefinitionSchema = z
      * runner directs the agent to use; the rest are available for the
      * agent to read on demand via pi's progressive-disclosure model.
      *
-     * Each named skill is staged at `<workspace>/.agents/skills/<name>/`
-     * before the agent runs (symlink in gondolin, bind-mount in docker),
-     * where pi-coding-agent's built-in `.agents/skills/` auto-discovery
-     * picks them up. Phases with no `skills:`/`skill:` field get no
-     * `.agents/skills/` directory — `prompt:`-only phases are unaffected.
+     * Each named skill is staged into a per-phase bundle at
+     * `<workspaceRoot>/.lastlight-skills/<phaseName>/<name>/` before the
+     * agent runs (symlink in gondolin/none, copy in docker) and mapped to
+     * the agent explicitly via pi's `--skill`/`skillPaths`. The bundle lives
+     * at the workspace root — a sibling of any checked-out repo, never inside
+     * its git tree — and is keyed per phase so concurrent phases can't clobber
+     * each other. Phases with no `skills:`/`skill:` field get no bundle —
+     * `prompt:`-only phases are unaffected.
      *
      * May coexist with `prompt`: when both are set, the prompt template
      * is the user prompt and `skills:` just stages the catalogue. The

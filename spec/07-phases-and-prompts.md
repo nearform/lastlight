@@ -23,7 +23,8 @@ depending on whether it declares `loop:` or `generic_loop:`.
 
 `prompt:` and `skills:` (or sugar `skill:`) may be set together — the
 prompt template is rendered as the user prompt, and the named skills
-are staged at `<workspace>/.agents/skills/<name>/` alongside so the
+are staged into the phase's bundle at
+`<workspaceRoot>/.lastlight-skills/<phase>/<name>/` alongside so the
 agent can pull them via its `read` tool. See [Skills](/spec/08-skills)
 for the full staging mechanism. `skill:` and `skills:` are mutually
 exclusive with each other (sugar collision).
@@ -102,13 +103,16 @@ string":
 7. `buildPhasePrompt(phase, ctx)`:
    - If `prompt:` set — `loadPromptTemplate(path)`, render against ctx.
    - Else if `skills:`/`skill:` set — emit a short auto-generated
-     nudge: `Use the **<primary>** skill … Read \`.agents/skills/<primary>/SKILL.md\` … Other skills available: …` followed by the workflow context as `key: value` lines.
+     nudge: `Use the **<primary>** skill … Other skills available: …` followed by the workflow context as `key: value` lines.
    - Otherwise — error.
-8. `executeAgent()` stages the resolved skill paths under
-   `<agentCwd>/.agents/skills/<name>/` (symlink in gondolin/none,
-   recursive copy in docker), writes `AGENTS.md`, then invokes the
-   [Sandbox](/spec/09-sandbox) with the rendered prompt. The agent's
-   `read` tool pulls SKILL.md content on demand —
+8. `executeAgent()` runs with cwd = the **workspace root** and stages the
+   resolved skill paths into a per-phase bundle at
+   `<workspaceRoot>/.lastlight-skills/<phase>/<name>/` (symlink in
+   gondolin/none, recursive copy in docker) — a sibling of any pre-cloned
+   `<repo>/` subdir, never in its git tree — then maps it to the agent via
+   `--skill` (docker) / `skillPaths` (in-process). It writes `AGENTS.md`,
+   then invokes the [Sandbox](/spec/09-sandbox) with the rendered prompt.
+   The agent's `read` tool pulls SKILL.md content on demand —
    [Skills](/spec/08-skills).
 9. Output is parsed for verdict / status markers and stored in
    `phaseOutputs[phase.name]` (and `phaseOutputs[phase.output_var]` if
@@ -233,7 +237,7 @@ filesystem + `read` tool path.
 | `phaseConfigFor` (resolves skills onto ExecutorConfig) | `src/workflows/runner.ts` |
 | Prompt templates | `workflows/prompts/*.md` |
 | Skill name validation + path resolution | `src/workflows/loader.ts` (`resolveSkillPaths`) |
-| Workspace skill staging | `src/engine/agent-executor.ts` (`stageSkillsInWorkspace`) |
+| Per-phase skill bundle staging | `src/engine/agent-executor.ts` (`stageSkillBundle`) |
 | Variable context assembly | `src/workflows/simple.ts` |
 
 ## Rebuild notes

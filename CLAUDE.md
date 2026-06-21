@@ -157,14 +157,20 @@ skills/                 Skill directories — each contains SKILL.md
                         (with `name`/`description` frontmatter) plus
                         optional `scripts/`, `references/`, `assets/`.
                         Phases declare `skills: [a, b]` (or sugar
-                        `skill: a`); the runner stages each at
-                        `<workspace>/.agents/skills/<name>/` (symlink
-                        for gondolin/none, copy for docker) before the
-                        agent runs. pi-coding-agent's built-in
-                        `.agents/skills/` auto-discovery surfaces them
-                        as an XML system-prompt catalogue and the
-                        agent reads each SKILL.md on demand via its
-                        `read` tool. Chat threads use the same skills
+                        `skill: a`); the runner stages each into a
+                        per-phase bundle at `<workspaceRoot>/
+                        .lastlight-skills/<phase>/<name>/` (symlink for
+                        gondolin/none, copy for docker) before the agent
+                        runs, then maps it to the agent via pi's
+                        `--skill`/`skillPaths`. The bundle sits at the
+                        workspace root — a sibling of any checked-out
+                        repo, never in its git tree — and is keyed per
+                        phase so parallel phases stay isolated. pi
+                        surfaces the mapped skills as an XML system-prompt
+                        catalogue and the agent reads each SKILL.md on
+                        demand via its `read` tool. (Agents run with cwd
+                        = the workspace root; repo-write prompts `cd
+                        {{repo}}` first.) Chat threads use the same skills
                         in-process via a `read_skill` tool —
                         catalogue built at boot from CHAT_SKILL_NAMES
                         in src/engine/chat-skills.ts.

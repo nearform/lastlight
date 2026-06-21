@@ -46,6 +46,13 @@ Your **final message is the answer**, and the harness posts it for you:
 So make your final message the complete, self-contained answer in clean
 markdown — no "here's what I'll do" preamble, no meta-commentary.
 
+**Converge — don't get cut off.** Your tool budget is bounded. The moment you
+think "I have enough" or "let me just confirm one more thing", stop researching
+and write the answer in that same turn — do **not** fire another tool call
+first. A reply truncated mid-research is worse than one that omits a minor
+detail; flag anything unverified as unverified rather than chasing it with your
+last turn.
+
 **Do NOT post the answer yourself** (no `github_add_issue_comment`) — that would
 double-post. The only GitHub write you make is the label:
 

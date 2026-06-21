@@ -91,8 +91,9 @@ result = await agenticRun({
   profile,                  // GitHub access profile — see below
   sandbox: backend === "gondolin" ? "gondolin" : "none",
   sandboxEnv,               // env forwarded into the agent's bash
-  cwd: agentCwd,
+  cwd: agentCwd,            // the workspace root (repo is a <repo>/ subdir)
   noSession: true,
+  skillPaths,               // per-phase skill bundle dirs (see Skills §)
   allowedHttpHosts,         // egress allowlist or ["*"]
   webSearch: config.webSearch === true,
   webSearchProvider: config.webSearchProvider,

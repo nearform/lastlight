@@ -262,7 +262,8 @@ export function loadSkillInstructions(name: string): string {
  * Each returned path is the skill folder root (containing `SKILL.md`
  * plus any `scripts/`, `references/`, `assets/`) — not the .md file.
  * The sandbox staging step in agent-executor uses these to symlink or
- * bind-mount the whole folder into `<workspace>/.agents/skills/<name>/`.
+ * copy the whole folder into the phase's bundle at
+ * `<workspaceRoot>/.lastlight-skills/<phase>/<name>/`.
  * Layer-aware: overlay skills win over built-ins (same precedence and
  * disabled-skill handling as `loadSkillRaw`).
  */

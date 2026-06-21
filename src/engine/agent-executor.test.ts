@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { RunResultAccumulator } from "./agent-executor.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { RunResultAccumulator, stageSkillBundle } from "./agent-executor.js";
 
 /**
  * A pi assistant `message_end` event carrying per-message usage. Mirrors the
@@ -244,5 +247,119 @@ describe("RunResultAccumulator tool errors", () => {
     const acc = new RunResultAccumulator();
     acc.feed({ type: "tool_execution_end", tool: "read", isError: false, result: "ok" });
     expect(acc.toolError()).toBeUndefined();
+  });
+});
+
+describe("RunResultAccumulator truncation detection", () => {
+  it("flags a run whose final assistant turn ended on a tool call", () => {
+    // The prod failure mode: "I have enough. Let me confirm X" + a tool call,
+    // the tool result comes back, and the loop ends before synthesis.
+    const acc = new RunResultAccumulator();
+    acc.feed(assistantMessageEnd({ text: "Let me check the docs.", input: 1, output: 1, cost: 0, toolCalls: 1 }));
+    acc.feed({ type: "tool_execution_end", tool: "bash", isError: false, result: "grep output" });
+    acc.feed({ type: "agent_end", messages: [] });
+    expect(acc.endedOnToolCall()).toBe(true);
+  });
+
+  it("does not flag a run that ended on a text-only synthesis turn", () => {
+    const acc = new RunResultAccumulator();
+    acc.feed(assistantMessageEnd({ text: "Looking...", input: 1, output: 1, cost: 0, toolCalls: 1 }));
+    acc.feed({ type: "tool_execution_end", tool: "bash", isError: false, result: "grep output" });
+    // A final assistant turn with the answer text and no further tool call.
+    acc.feed(assistantMessageEnd({ text: "Here is the answer.", input: 1, output: 1, cost: 0, toolCalls: 0 }));
+    acc.feed({ type: "agent_end", messages: [] });
+    expect(acc.endedOnToolCall()).toBe(false);
+  });
+
+  it("reflects the latest assistant turn, not earlier tool-calling ones", () => {
+    const acc = new RunResultAccumulator();
+    acc.feed(assistantMessageEnd({ text: "step 1", input: 1, output: 1, cost: 0, toolCalls: 2 }));
+    acc.feed(assistantMessageEnd({ text: "done", input: 1, output: 1, cost: 0, toolCalls: 0 }));
+    expect(acc.endedOnToolCall()).toBe(false);
+  });
+
+  it("defaults to false before any assistant turn", () => {
+    const acc = new RunResultAccumulator();
+    expect(acc.endedOnToolCall()).toBe(false);
+  });
+});
+
+describe("stageSkillBundle", () => {
+  function makeSkillSource(root: string, name: string): string {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), `# ${name}\n`);
+    return dir;
+  }
+
+  it("stages skills into a per-phase bundle under .lastlight-skills/<phaseKey>/", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "skillbundle-"));
+    try {
+      const src = makeSkillSource(join(tmp, "sources"), "pr-review");
+      const ws = join(tmp, "workspace");
+      mkdirSync(ws, { recursive: true });
+
+      const staged = stageSkillBundle(ws, "reviewer", [src], "copy");
+
+      const bundle = join(ws, ".lastlight-skills", "reviewer", "pr-review");
+      expect(staged).toEqual([bundle]);
+      expect(existsSync(join(bundle, "SKILL.md"))).toBe(true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("clears only its own phase subtree, leaving sibling phases intact", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "skillbundle-"));
+    try {
+      const src = makeSkillSource(join(tmp, "sources"), "guardrails");
+      const ws = join(tmp, "workspace");
+      mkdirSync(ws, { recursive: true });
+
+      stageSkillBundle(ws, "architect", [src], "copy");
+      stageSkillBundle(ws, "executor", [src], "copy");
+      // Re-staging architect must not disturb executor's bundle — the
+      // isolation that makes parallel phases in one workspace safe.
+      stageSkillBundle(ws, "architect", [src], "copy");
+
+      const skillsRoot = join(ws, ".lastlight-skills");
+      expect(readdirSync(skillsRoot).sort()).toEqual(["architect", "executor"]);
+      expect(existsSync(join(skillsRoot, "executor", "guardrails", "SKILL.md"))).toBe(true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("returns undefined and clears the bundle when the phase has no skills", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "skillbundle-"));
+    try {
+      const src = makeSkillSource(join(tmp, "sources"), "issue-triage");
+      const ws = join(tmp, "workspace");
+      mkdirSync(ws, { recursive: true });
+
+      stageSkillBundle(ws, "triage", [src], "copy");
+      const cleared = stageSkillBundle(ws, "triage", [], "copy");
+
+      expect(cleared).toBeUndefined();
+      expect(existsSync(join(ws, ".lastlight-skills", "triage"))).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("symlinks the skill dir in symlink mode (gondolin/none)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "skillbundle-"));
+    try {
+      const src = makeSkillSource(join(tmp, "sources"), "explore");
+      const ws = join(tmp, "workspace");
+      mkdirSync(ws, { recursive: true });
+
+      const staged = stageSkillBundle(ws, "read_context", [src], "symlink");
+      expect(staged).toHaveLength(1);
+      expect(lstatSync(staged![0]).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(staged![0], "SKILL.md"))).toBe(true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

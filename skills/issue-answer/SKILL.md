@@ -55,6 +55,18 @@ maintainer to `@last-light build` (or `explore`) it — let triage own work item
      (another tool, framework, library, standard, or a "X vs Y" comparison),
      use the `web_search` and `web_fetch` tools to consult current,
      authoritative sources. Prefer official docs and primary sources.
+   - **Budget your research and converge.** You have a bounded number of tool
+     calls before the run ends — research is for grounding the answer, not
+     exhaustive coverage. Front-load the searches you need, then stop looking.
+     **Critical:** the moment you think *"I have enough"* (or *"let me just
+     confirm one more thing"*), do **not** fire another tool call — write the
+     answer **now**, in that same turn. Your reply being cut off mid-research
+     delivers a useless half-sentence to the user, which is worse than an
+     answer that omits a minor detail. If a fact is unverified, state it as
+     unverified in the answer rather than spending your last turn chasing it.
+     For broad/open-ended questions (e.g. "what's missing vs tool X"), gather a
+     representative sample and answer from it — explicitly noting it's a
+     sample, not an exhaustive audit — rather than enumerating everything.
 3. **Label (GitHub issue only).** Apply `question` with `github_add_labels`
    (create it first with `github_create_label`, color `d876e3`; ignore a 422
    "already exists"). If label creation/adding is denied, skip it — the answer

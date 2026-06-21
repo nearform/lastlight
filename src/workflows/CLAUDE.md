@@ -101,15 +101,20 @@ Three kinds of phase the runner recognises:
     the result as the user prompt.
   - `skills: [pr-review, issue-triage]` (or sugar `skill: pr-review`
     for a single skill) makes each named `skills/<name>/` directory
-    available to the agent. Phase setup stages each one at
-    `<workspace>/.agents/skills/<name>/` (symlink in gondolin/none,
-    copy in docker) before the run. pi-coding-agent's built-in
-    `.agents/skills/` auto-discovery surfaces them in the system prompt
-    as an XML `<available_skills>` catalogue; the agent reads each
-    SKILL.md via its `read` tool on demand — pi.dev's progressive-
-    disclosure model. Whole skill *directories* travel along, so any
-    `scripts/` / `references/` / `assets/` next to a SKILL.md are
-    visible at `.agents/skills/<name>/...`.
+    available to the agent. Phase setup stages each one into a
+    **per-phase bundle** at
+    `<workspaceRoot>/.lastlight-skills/<phaseName>/<name>/` (symlink in
+    gondolin/none, copy in docker) before the run, then maps the bundle
+    to the agent explicitly via pi's `--skill`/`skillPaths`. The bundle
+    lives at the **workspace root** — a sibling of any checked-out repo,
+    never inside its git tree (so the agent never sees or commits it) —
+    and is keyed per phase so two phases sharing a workspace (sequential
+    today, parallel via worktrees later) can't clobber each other's
+    catalogue. pi surfaces the mapped skills in the system prompt as an
+    XML `<available_skills>` catalogue; the agent reads each SKILL.md via
+    its `read` tool on demand — pi.dev's progressive-disclosure model.
+    Whole skill *directories* travel along, so any `scripts/` /
+    `references/` / `assets/` next to a SKILL.md come too.
   - **When both are set** — the prompt template is the user prompt
     (skill content is *not* auto-embedded), and the staged catalogue
     is available alongside. The template can reference skills by name
@@ -118,8 +123,16 @@ Three kinds of phase the runner recognises:
   - **When only skills are set** — the runner emits a short
     auto-generated user prompt nudging the agent to start by reading
     the primary (first-listed) skill's SKILL.md.
-  - Phases with neither (`type: context`) get no `.agents/skills/`
-    directory staged at all.
+  - Phases with neither (`type: context`) get no skill bundle staged at
+    all.
+
+  > **cwd convention.** Every phase runs with cwd = the **workspace
+  > root**, with any pre-cloned repo in a `<repo>/` subdirectory (and the
+  > skill bundle as its sibling). Repo-write prompts therefore `cd
+  > {{repo}}` as their first step; read-only prompts already reference the
+  > `{{repo}}/` subdir. This uniformity is what lets the skill bundle be a
+  > sibling of the repo on every backend — gondolin only mounts cwd, so
+  > the bundle must live under it but outside the repo.
 - **loop-phase** — any phase with `loop:` set. Always executes as an
   agent phase internally, but repeated in `reviewer → fix → reviewer`
   pairs up to `max_cycles`. See loop iteration naming below.

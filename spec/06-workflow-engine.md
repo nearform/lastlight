@@ -66,7 +66,7 @@ through — webhook dispatch, CLI, cron, admin resume.
   type?: "context" | "agent";           // default "agent"
   prompt?: string;                      // path to template, e.g. "prompts/architect.md"
   skill?: string;                       // single skill name; sugar for `skills: [<name>]`
-  skills?: string[];                    // skill catalogue staged at <cwd>/.agents/skills/<name>/
+  skills?: string[];                    // per-phase bundle: <workspaceRoot>/.lastlight-skills/<phase>/<name>/
                                         // may coexist with `prompt`; mutually exclusive with `skill`
   model?: string;                       // can be "{{models.architect}}"
   variant?: string;                     // reasoning effort; can be "{{variants.fix}}"
@@ -99,8 +99,10 @@ Two: `context` (no agent), `agent` (one session).
   tokens (`runner.ts:480–491`).
 - **agent** — render the user prompt (from `prompt:` if set, else
   auto-generate a nudge toward the primary skill), stage any declared
-  skills into `<workspace>/.agents/skills/<name>/`, call
-  `executeAgent()` in the [Sandbox](/spec/09-sandbox), capture output.
+  skills into the per-phase bundle
+  `<workspaceRoot>/.lastlight-skills/<phase>/<name>/` (mapped via
+  `--skill`/`skillPaths`), call `executeAgent()` in the
+  [Sandbox](/spec/09-sandbox), capture output.
   Iterates if `loop:` or `generic_loop:` is declared. See
   [Phases & Prompts](/spec/07-phases-and-prompts) and
   [Skills](/spec/08-skills) for the prompt/skill mechanics.
