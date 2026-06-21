@@ -72,7 +72,21 @@ lastlight logs search "could not clone" --scope messages --limit 20
 `--scope errors` (default) matches the executions ledger (error/skill/repo);
 `messages` greps recent session transcripts; `all` does both.
 
-## 5. Approvals & health
+## 5. Raw server / docker logs
+
+When the workflow + session views aren't enough — a crash before any session
+was written, a sidecar misbehaving, harness boot errors — read the actual
+container logs (`docker logs`) over the API:
+
+```bash
+lastlight server list                    # the lastlight-* containers + status
+lastlight server logs                    # the agent harness (default), last 200 lines
+lastlight server logs --tail 500 --since 10m
+lastlight server logs --follow           # live tail (Ctrl-C to stop)
+lastlight server logs coredns-strict     # a specific sidecar by service or container name
+```
+
+## 6. Approvals & health
 
 ```bash
 lastlight approvals list                 # paused gates waiting on a human

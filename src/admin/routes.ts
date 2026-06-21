@@ -7,7 +7,15 @@ import { Slack, GitHub } from "arctic";
 import type { SessionSource, SessionMeta } from "./sessions.js";
 import type { StateDb, WorkflowRun } from "../state/db.js";
 import { tailJsonl } from "./tail.js";
-import { listRunningContainers, killContainer, getContainerStats } from "./docker.js";
+import {
+  listRunningContainers,
+  killContainer,
+  getContainerStats,
+  listServerContainers,
+  resolveServerContainer,
+  getContainerLogs,
+  streamContainerLogs,
+} from "./docker.js";
 import { authMiddleware, createToken, verifyToken } from "./auth.js";
 import { Cron } from "croner";
 import type { CronScheduler } from "../cron/scheduler.js";
@@ -545,6 +553,51 @@ export function createAdminRoutes(
   app.get("/containers/stats", async (c) => {
     const stats = await getContainerStats();
     return c.json({ stats });
+  });
+
+  // ── Server logs ───────────────────────────────────────────────────────────
+  // Raw `docker logs` for the lastlight-* containers (the agent harness + the
+  // egress sidecars + otel-collector). Lets an operator read the actual
+  // server/process logs over the admin API instead of SSHing to the host. The
+  // requested container is resolved against the live container list, so an
+  // arbitrary name can never reach `docker logs`.
+
+  app.get("/server/containers", async (c) => {
+    return c.json({ containers: await listServerContainers() });
+  });
+
+  app.get("/server/logs", async (c) => {
+    const name = await resolveServerContainer(c.req.query("container"));
+    if (!name) return c.json({ error: "no matching lastlight container" }, 404);
+    const tail = Math.min(Math.max(parseInt(c.req.query("tail") ?? "200", 10) || 200, 1), 5000);
+    const since = c.req.query("since") || undefined;
+    try {
+      const lines = await getContainerLogs(name, { tail, since });
+      return c.json({ container: name, lines });
+    } catch (err) {
+      return c.json({ error: `docker logs failed: ${(err as Error).message}` }, 500);
+    }
+  });
+
+  app.get("/server/logs/stream", (c) => {
+    return streamSSE(c, async (stream) => {
+      const name = await resolveServerContainer(c.req.query("container"));
+      if (!name) {
+        await stream.writeSSE({ data: JSON.stringify({ error: "no matching lastlight container" }) });
+        return;
+      }
+      const tail = Math.min(Math.max(parseInt(c.req.query("tail") ?? "100", 10) || 100, 1), 5000);
+      let stopped = false;
+      const stop = streamContainerLogs(name, { tail }, (line) => {
+        if (!stopped) void stream.writeSSE({ data: line });
+      });
+      stream.onAbort(() => { stopped = true; stop(); });
+      // Hold the SSE open until the client disconnects.
+      while (!stopped) {
+        await stream.sleep(15000);
+      }
+      stop();
+    });
   });
 
   // Kill a sandbox container and mark related DB executions as failed

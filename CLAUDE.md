@@ -365,6 +365,8 @@ lastlight workflow list [--status s] [--workflow name] [--limit n]
 lastlight workflow log <id> [--follow]
 lastlight session list|log <id> [--follow]
 lastlight logs search "<text>" [--scope errors|messages|all]
+lastlight server list                  # the lastlight-* docker containers
+lastlight server logs [svc|container] [--tail n] [--since 10m] [--follow]
 lastlight approvals list|approve <id>|reject <id> [--reason "..."]
 lastlight stats [--daily n | --hourly n]
 lastlight setup                        # first-run setup wizard

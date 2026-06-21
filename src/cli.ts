@@ -177,6 +177,8 @@ ${chalk.bold("Debug")} (read the running instance instead of SSH)
   lastlight session list [--limit n]
   lastlight session log <id> [--follow] [--since n]
   lastlight logs search "<text>" [--scope errors|messages|all] [--limit n]
+  lastlight server list                          (the lastlight-* containers)
+  lastlight server logs [service|container] [--tail n] [--since 10m] [--follow]
   lastlight approvals list
   lastlight approvals approve <id> [--reason "..."]
   lastlight approvals reject <id> [--reason "..."]
@@ -329,8 +331,26 @@ async function cmdStatus(): Promise<void> {
 
 // ── debug: workflows ──────────────────────────────────────────────────────────
 
+/** Interactive picker over the recent workflow runs (used when `log` has no id). */
+async function pickWorkflowRun(): Promise<string> {
+  if (!process.stdout.isTTY || JSON_OUT) die("Usage: lastlight workflow log <id> [--follow]");
+  const data = await apiGet(`/admin/api/workflow-runs?limit=${num(flags.limit, 20)}`);
+  const runs = data.workflowRuns as any[];
+  if (runs.length === 0) die("No workflow runs found.");
+  const choice = await p.select({
+    message: "Select a workflow run",
+    options: runs.map((r) => ({
+      value: r.id as string,
+      label: `${r.workflowName}  ${r.status}`,
+      hint: `${r.repo ?? ""} · ${age(r.startedAt)} · ${String(r.id).slice(0, 8)}`,
+    })),
+  });
+  if (p.isCancel(choice)) { p.cancel("Cancelled."); process.exit(1); }
+  return choice as string;
+}
+
 async function cmdWorkflow(): Promise<void> {
-  const sub = positionals[1];
+  const sub = positionals[1] ?? "list";
   if (sub === "list") {
     const params = new URLSearchParams();
     params.set("limit", String(num(flags.limit, 20)));
@@ -358,8 +378,7 @@ async function cmdWorkflow(): Promise<void> {
     return;
   }
   if (sub === "log") {
-    const id = positionals[2];
-    if (!id) die("Usage: lastlight workflow log <id> [--follow]");
+    const id = positionals[2] ?? (await pickWorkflowRun());
     const [runData, execData] = await Promise.all([
       apiGet(`/admin/api/workflow-runs/${id}`),
       apiGet(`/admin/api/workflow-runs/${id}/executions`),
@@ -419,8 +438,26 @@ function printMessage(msg: any): void {
   console.log(`${tag} ${content.slice(0, 2000)}`);
 }
 
+/** Interactive picker over the recent sessions (used when `log` has no id). */
+async function pickSession(): Promise<string> {
+  if (!process.stdout.isTTY || JSON_OUT) die("Usage: lastlight session log <id> [--follow] [--since n]");
+  const data = await apiGet(`/admin/api/sessions?limit=${num(flags.limit, 30)}`);
+  const sessions = data.sessions as any[];
+  if (sessions.length === 0) die("No sessions found.");
+  const choice = await p.select({
+    message: "Select a session",
+    options: sessions.map((s) => ({
+      value: s.id as string,
+      label: `${s.sessionType ?? "agent"}${s.live ? " ●" : ""}`,
+      hint: `${s.message_count ?? 0} msgs · ${age(s.last_message_at ?? s.started_at)} · ${s.id}`,
+    })),
+  });
+  if (p.isCancel(choice)) { p.cancel("Cancelled."); process.exit(1); }
+  return choice as string;
+}
+
 async function cmdSession(): Promise<void> {
-  const sub = positionals[1];
+  const sub = positionals[1] ?? "list";
   if (sub === "list") {
     const data = await apiGet(`/admin/api/sessions?limit=${num(flags.limit, 30)}`);
     if (JSON_OUT) return out("", data);
@@ -444,8 +481,7 @@ async function cmdSession(): Promise<void> {
     return;
   }
   if (sub === "log") {
-    const id = positionals[2];
-    if (!id) die("Usage: lastlight session log <id> [--follow] [--since n]");
+    const id = positionals[2] ?? (await pickSession());
     const since = num(flags.since, -1);
     const data = await apiGet(`/admin/api/sessions/${id}/messages?since=${since}`);
     if (JSON_OUT && !flags.follow) return out("", data);
@@ -484,6 +520,24 @@ async function cmdLogsSearch(query: string | undefined): Promise<void> {
 
 // ── debug: approvals + stats ────────────────────────────────────────────────
 
+/** Interactive picker over pending approvals (used when approve/reject has no id). */
+async function pickApproval(): Promise<string> {
+  if (!process.stdout.isTTY || JSON_OUT) die("Usage: lastlight approvals approve|reject <id> [--reason \"...\"]");
+  const data = await apiGet(`/admin/api/approvals`);
+  const approvals = data.approvals as any[];
+  if (approvals.length === 0) die("No pending approvals.");
+  const choice = await p.select({
+    message: "Select an approval",
+    options: approvals.map((a) => ({
+      value: a.id as string,
+      label: `${a.gate}  ${String(a.summary ?? "").slice(0, 50)}`,
+      hint: `${a.workflowRunId} · ${age(a.createdAt)}`,
+    })),
+  });
+  if (p.isCancel(choice)) { p.cancel("Cancelled."); process.exit(1); }
+  return choice as string;
+}
+
 async function cmdApprovals(): Promise<void> {
   const sub = positionals[1] ?? "list";
   if (sub === "list") {
@@ -508,8 +562,7 @@ async function cmdApprovals(): Promise<void> {
     return;
   }
   if (sub === "approve" || sub === "reject") {
-    const id = positionals[2];
-    if (!id) die(`Usage: lastlight approvals ${sub} <id> [--reason "..."]`);
+    const id = positionals[2] ?? (await pickApproval());
     const decision = sub === "approve" ? "approved" : "rejected";
     const data = await apiPost(`/admin/api/approvals/${id}/respond`, {
       decision,
@@ -558,6 +611,79 @@ async function cmdStats(): Promise<void> {
     { key: "skill", header: "SKILL" }, { key: "count", header: "RUNS" },
     { key: "ok", header: "OK" }, { key: "fail", header: "FAIL" },
   ]));
+}
+
+// ── debug: server logs ────────────────────────────────────────────────────────
+
+/** Interactive picker over the lastlight-* containers (used when `logs` has no
+ *  container). Returns undefined when non-interactive so the server defaults to
+ *  the agent. */
+async function pickServerContainer(): Promise<string | undefined> {
+  if (!process.stdout.isTTY || JSON_OUT) return undefined;
+  const data = await apiGet(`/admin/api/server/containers`);
+  const containers = data.containers as any[];
+  if (containers.length === 0) return undefined;
+  const choice = await p.select({
+    message: "Select a container",
+    options: containers.map((c) => ({
+      value: c.name as string,
+      label: c.service as string,
+      hint: `${c.status} · ${c.name}`,
+    })),
+  });
+  if (p.isCancel(choice)) { p.cancel("Cancelled."); process.exit(1); }
+  return choice as string;
+}
+
+async function cmdServer(): Promise<void> {
+  const sub = positionals[1];
+  if (!sub || sub === "list" || sub === "containers") {
+    const data = await apiGet(`/admin/api/server/containers`);
+    if (JSON_OUT) return out("", data);
+    const rows = (data.containers as any[]).map((c) => ({
+      service: c.service,
+      name: c.name,
+      status: c.status,
+      image: c.image,
+    }));
+    console.log(table(rows, [
+      { key: "service", header: "SERVICE" },
+      { key: "name", header: "CONTAINER" },
+      { key: "status", header: "STATUS" },
+      { key: "image", header: "IMAGE" },
+    ]));
+    console.log(chalk.dim(`\nLogs: lastlight server logs [service|container] [--tail n] [--since 10m] [--follow]`));
+    return;
+  }
+  if (sub === "logs") {
+    // optional; if omitted, prompt (or default to the agent server-side)
+    const container = positionals[2] ?? (await pickServerContainer());
+    const tail = num(flags.tail, 200);
+    if (flags.follow) {
+      const t = target();
+      const u = new URL(`${t.url}/admin/api/server/logs/stream`);
+      if (container) u.searchParams.set("container", container);
+      u.searchParams.set("tail", String(tail));
+      console.log(chalk.dim(`Following ${container ?? "agent"} logs … (Ctrl-C to stop)\n`));
+      await followSSE(u.toString(), t.token, (line) => {
+        try {
+          const obj = JSON.parse(line);
+          if (obj && typeof obj === "object" && "error" in obj) { die(String(obj.error)); }
+        } catch { /* normal log line */ }
+        console.log(line);
+      });
+      return;
+    }
+    const params = new URLSearchParams();
+    if (container) params.set("container", container);
+    params.set("tail", String(tail));
+    if (typeof flags.since === "string") params.set("since", flags.since);
+    const data = await apiGet(`/admin/api/server/logs?${params}`);
+    if (JSON_OUT) return out("", data);
+    for (const line of data.lines as string[]) console.log(line);
+    return;
+  }
+  die("Usage: lastlight server list|logs [service|container] [--tail n] [--since dur] [--follow]");
 }
 
 // ── trigger commands (unchanged contract) ─────────────────────────────────────
@@ -657,6 +783,7 @@ async function main() {
       return;
     }
     case "approvals": return cmdApprovals();
+    case "server": return cmdServer();
     case "stats": return cmdStats();
     case "build": return cmdBuild();
     case "triage":
