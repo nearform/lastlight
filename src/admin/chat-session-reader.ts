@@ -63,6 +63,7 @@ export class ChatSessionReader implements SessionSource {
       conversation_message_count: t.turnCount,
       last_assistant_content: t.lastAssistantContent,
       agentIds: [],
+      platform: t.platform,
     };
   }
 

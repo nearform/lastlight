@@ -14,6 +14,8 @@ export interface Session {
   last_assistant_content: string | null;
   /** Whether this session has an active Docker container */
   live?: boolean;
+  /** Origin platform for chat sessions ("slack" / "cli"). */
+  platform?: string | null;
   // Optional fields from execution correlation
   title?: string | null;
   estimated_cost_usd?: number | null;

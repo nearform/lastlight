@@ -20,6 +20,8 @@ export interface SessionMeta {
   last_assistant_content: string | null;
   /** Agent sub-session IDs that belong to this session */
   agentIds: string[];
+  /** Messaging platform a chat session originated from ("slack" / "cli"). */
+  platform?: string | null;
 }
 
 /**

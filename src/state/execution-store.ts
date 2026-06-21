@@ -234,6 +234,7 @@ export class ExecutionStore {
   listChatThreads(limit: number): {
     triggerId: string;
     agentSessionId: string | null;
+    platform: string | null;
     firstStartedAt: string;
     lastActivityAt: string;
     turnCount: number;
@@ -247,6 +248,7 @@ export class ExecutionStore {
       SELECT
         e.trigger_id              AS triggerId,
         ms.agent_session_id       AS agentSessionId,
+        ms.platform               AS platform,
         MIN(e.started_at)         AS firstStartedAt,
         MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
         COUNT(*)                  AS turnCount,
@@ -278,6 +280,7 @@ export class ExecutionStore {
       outputTokens: number;
       cacheReadTokens: number;
       lastAssistantContent: string | null;
+      platform: string | null;
     }>;
     return rows;
   }
@@ -286,6 +289,7 @@ export class ExecutionStore {
   getChatThread(triggerId: string): {
     triggerId: string;
     agentSessionId: string | null;
+    platform: string | null;
     firstStartedAt: string;
     lastActivityAt: string;
     turnCount: number;
@@ -299,6 +303,7 @@ export class ExecutionStore {
       SELECT
         e.trigger_id              AS triggerId,
         ms.agent_session_id       AS agentSessionId,
+        ms.platform               AS platform,
         MIN(e.started_at)         AS firstStartedAt,
         MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
         COUNT(*)                  AS turnCount,
@@ -320,6 +325,7 @@ export class ExecutionStore {
     `).get(triggerId) as {
       triggerId: string;
       agentSessionId: string | null;
+      platform: string | null;
       firstStartedAt: string;
       lastActivityAt: string;
       turnCount: number;

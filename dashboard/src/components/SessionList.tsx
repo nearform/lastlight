@@ -106,6 +106,14 @@ export function SessionList({
                       </span>
                     );
                   })()}
+                  {s.platform && (
+                    <span
+                      className="px-1.5 rounded bg-base-content/10 text-base-content/60 font-semibold uppercase tracking-wider"
+                      title={`Originated from ${s.platform}`}
+                    >
+                      {s.platform}
+                    </span>
+                  )}
                   {s.live && (
                     <span className="w-2 h-2 rounded-full bg-success animate-pulse" title="Live" />
                   )}
