@@ -205,7 +205,7 @@ function openBrowser(url: string): void {
 
 async function cmdLogin(): Promise<void> {
   const saved = loadConfig();
-  let url = positionals[0];
+  let url = positionals[1]; // positionals[0] is the "login" command itself
   if (!url) {
     const answer = await p.text({
       message: "Last Light instance URL",
@@ -247,7 +247,7 @@ async function cmdLogin(): Promise<void> {
       }
       const gotState = reqUrl.searchParams.get("state");
       const gotToken = reqUrl.searchParams.get("token");
-      res.writeHead(200, { "Content-Type": "text/html" });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       if (gotState !== state || !gotToken) {
         res.end("<html><body><h2>Login failed</h2><p>Invalid state — you can close this tab.</p></body></html>");
         server.close();
