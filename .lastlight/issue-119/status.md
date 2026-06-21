@@ -1,4 +1,3 @@
-current_phase: guardrails
-guardrails_status: READY
+current_phase: architect
 issue: 119
 branch: lastlight/119-slack-commands
