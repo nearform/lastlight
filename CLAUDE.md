@@ -354,6 +354,7 @@ lastlight login [url]                  # browser-handoff auth, save token (~/.la
 lastlight login <url> --password       # headless fallback (POST /admin/api/login)
 lastlight logout                       # clear ~/.lastlight/config.json
 lastlight status                       # instance URL, server health, token validity
+lastlight chat [message]               # chat with the bot (REPL if no message; POST /api/chat)
 # Triggers (POST /api/run, /api/build):
 lastlight <github-url>                 # default: triage the issue (cheap)
 lastlight owner/repo#N                 # shorthand
