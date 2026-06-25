@@ -15,6 +15,8 @@ export type CommentIntent =
   | "triage"
   | "review"
   | "security"
+  | "verify"
+  | "qa-test"
   | "approve"
   | "reject"
   | "status"
@@ -56,6 +58,8 @@ QUESTION — The user is asking a substantive INFORMATIONAL question that warran
 TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
 REVIEW — The user wants to review PRs on a repo: "review cliftonc/repo", "check PRs", "can you review PRs on <repo>?".
 SECURITY — The user wants a security scan/review of a repo: "security review cliftonc/repo", "scan for vulnerabilities", "check security", "can you do a security review of <repo>?".
+VERIFY — The user wants you to TEST whether a specific claim or behaviour is actually true and report the evidence: "verify that the rate limiter blocks", "does this PR really fix the crash?", "confirm X actually works", "check that Y no longer happens", "prove the --fork flag creates a new session". The deliverable is a CONFIRMED/REFUTED verdict backed by RUNNING the code — not a code change and not a code-quality review. Prefer VERIFY over REVIEW when the user wants proof a behaviour works/is fixed, rather than an assessment of the diff.
+QATEST — The user wants you to drive an app or CLI through a flow and report step-level pass/fail: "qa test the signup flow", "run through login and tell me what breaks", "smoke-test the CLI commands", "exercise the checkout flow". The deliverable is a step-by-step QA report. Prefer QATEST over VERIFY when it's a multi-step flow to exercise rather than a single claim to confirm.
 APPROVE — The user is approving a pending gate: "approve", "go ahead", "looks good, continue", "yes proceed".
 REJECT — The user is rejecting a pending gate: "reject", "abort", "cancel this", "no don't proceed". Extract any reason given.
 STATUS — The user wants to know what's running: "status", "what's running", "any tasks active?".
@@ -71,6 +75,7 @@ message has no clear action verb. Presence of "security review", "triage", "revi
 When ambiguous between EXPLORE and CHAT, prefer CHAT. Only pick EXPLORE when the user is explicitly asking for brainstorming / spec-shaping / design exploration — OR gives a bare "explore"/"explore this" command (see the issue-reply rule below), which is unambiguous, not chat.
 When ambiguous between QUESTION and CHAT, prefer CHAT — only pick QUESTION for a substantive informational question that genuinely benefits from research (reading docs/code or a web search). Casual conversation, greetings, thanks, and trivial one-liners stay CHAT.
 When ambiguous between BUILD and CHAT, prefer CHAT.
+When ambiguous between VERIFY/QATEST and REVIEW/CHAT, prefer the existing category — only pick VERIFY or QATEST when the user explicitly asks you to test, run, confirm, or exercise a behaviour/flow.
 When ambiguous between APPROVE/REJECT and CHAT, prefer CHAT — only classify as APPROVE/REJECT when the intent is clearly about a pending workflow gate.
 
 Repo extraction: always emit REPO as "owner/name" (never a URL). If the message contains
@@ -95,7 +100,7 @@ command. Classify it CHAT regardless of the ISSUE TITLE or an @mention. Do not
 let words like "fix"/"build"/"add" inside a past-tense report flip it to BUILD.
 
 Respond in exactly this format (each on its own line, no extra text):
-INTENT: BUILD|EXPLORE|QUESTION|TRIAGE|REVIEW|SECURITY|APPROVE|REJECT|STATUS|RESET|CHAT
+INTENT: BUILD|EXPLORE|QUESTION|TRIAGE|REVIEW|SECURITY|VERIFY|QATEST|APPROVE|REJECT|STATUS|RESET|CHAT
 REPO: owner/name or NONE
 ISSUE: number or NONE
 REASON: text or NONE
@@ -111,6 +116,11 @@ Examples:
 "Thanks @last-light — addressed in 49ccadf. Fixed the nested body in the core and added a regression test; point 3 is intentional, confirmed with the maintainer." with ISSUE TITLE "Port fastify/hono/nextjs adapters" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
 "done, pushed a fix for the type error in 1a2b3c4" with ISSUE TITLE "Fix build" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
 "now also handle the GET /sql case please" with ISSUE TITLE "Port adapters" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE
+"verify that the --fork flag creates a new session in cliftonc/foo#12" → INTENT: VERIFY, REPO: cliftonc/foo, ISSUE: 12, REASON: NONE
+"does this actually fix the crash?" with ISSUE TITLE "Fix null deref on resize" → INTENT: VERIFY, REPO: NONE, ISSUE: NONE, REASON: NONE
+"can you confirm the rate limiter actually blocks at 100 req/s?" with ISSUE TITLE "Add rate limiter" → INTENT: VERIFY, REPO: NONE, ISSUE: NONE, REASON: NONE
+"qa test the login flow on this PR" with ISSUE TITLE "Add login" → INTENT: QATEST, REPO: NONE, ISSUE: NONE, REASON: NONE
+"run through the signup flow and tell me what breaks" with ISSUE TITLE "Signup v2" → INTENT: QATEST, REPO: NONE, ISSUE: NONE, REASON: NONE
 "explore" with ISSUE TITLE "Feature: Allow configuration of otel endpoints" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE
 "explore this" with ISSUE TITLE "Add webhook support" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE
 "approve" → INTENT: APPROVE, REPO: NONE, ISSUE: NONE, REASON: NONE
@@ -245,6 +255,8 @@ export async function classifyComment(
       TRIAGE: "triage",
       REVIEW: "review",
       SECURITY: "security",
+      VERIFY: "verify",
+      QATEST: "qa-test",
       APPROVE: "approve",
       REJECT: "reject",
       STATUS: "status",

@@ -451,6 +451,56 @@ function makeMockDb(currentPhase = "phase_0"): StateDb {
   } as unknown as StateDb;
 }
 
+describe("runWorkflow — requires_sandbox gate", () => {
+  const GATED_WORKFLOW: AgentWorkflowDefinition = {
+    kind: "agent",
+    name: "gated",
+    phases: [
+      { name: "phase_0", type: "context" },
+      {
+        name: "demo",
+        type: "agent",
+        prompt: "prompts/demo.md",
+        requires_sandbox: "docker",
+        messages: { on_skipped_done: "Demo skipped — no docker sandbox here." },
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("skips a docker-gated phase as a non-failing skip on a non-docker backend", async () => {
+    const db = makeMockDb();
+    // No `sandbox` on the config → active backend resolves to gondolin.
+    const result = await runWorkflow(GATED_WORKFLOW, BASE_CTX, {} as never, {}, db);
+
+    // The gated phase never ran...
+    expect(mockExecuteAgent).not.toHaveBeenCalled();
+    // ...the run did not fail...
+    expect(result.success).toBe(true);
+    // ...the phase was recorded as a non-failing skip...
+    const demo = result.phases.find((p) => p.phase === "demo");
+    expect(demo?.success).toBe(true);
+    // ...and it landed in the executions ledger as a skip.
+    expect(db.executions.recordSkippedPhase).toHaveBeenCalledWith(
+      "gated:demo",
+      expect.any(String),
+      undefined,
+      expect.any(String),
+    );
+  });
+
+  it("runs a docker-gated phase when the active backend is docker", async () => {
+    mockExecuteAgent.mockResolvedValue(makeSuccessResult());
+    const result = await runWorkflow(GATED_WORKFLOW, BASE_CTX, { sandbox: "docker" } as never, {});
+
+    expect(mockExecuteAgent).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(true);
+  });
+});
+
 describe("runWorkflow — approval gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();

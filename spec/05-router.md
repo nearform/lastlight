@@ -54,6 +54,8 @@ rule wins.
 | `comment.created` from non-maintainer | `reply: "only maintainers can trigger builds"` | `authorAssociation` not in `MAINTAINER_ROLES` |
 | `comment.created` matching `@last-light approve\|reject [reason]` | `skill: approval-response` | Regex parse, no classifier |
 | `comment.created` matching `@last-light security-review` | `skill: security-review` | |
+| `comment.created` matching `@last-light verify <claim>` | `skill: verify` | Text after the keyword becomes `commentBody`; works on issues + PRs |
+| `comment.created` matching `@last-light qa-test <target>` | `skill: qa-test` | Text after the keyword becomes `commentBody`; works on issues + PRs |
 | `comment.created` on issue with `security-scan` label | `skill: security-feedback` | Overrides classifier — every comment on a scan summary issue is feedback |
 | `message` with pending reply gate on this Slack thread | `skill: explore-reply` | Same short-circuit as GitHub |
 | `pr_review.submitted` / `pr_review_comment.created` | `ignore` | "not yet handled" — placeholder |
@@ -124,13 +126,18 @@ Behaviour:
 
 ## Build-intent classifier
 
-The classifier turns a free-form comment or message into one of ten
+The classifier turns a free-form comment or message into one of thirteen
 discrete intents:
 
 ```
-BUILD | EXPLORE | TRIAGE | REVIEW | SECURITY |
-APPROVE | REJECT | STATUS | RESET | CHAT
+BUILD | EXPLORE | QUESTION | TRIAGE | REVIEW | SECURITY |
+VERIFY | QATEST | APPROVE | REJECT | STATUS | RESET | CHAT
 ```
+
+(`VERIFY` → the `verify` workflow, `QATEST` → `qa-test`. The structured
+`@last-light verify` / `@last-light qa-test` keyword matches above short-circuit
+before the classifier; natural-language requests like "does this actually fix
+the crash?" reach `verify` via this classifier path.)
 
 `classifier.ts:39–96` defines the system prompt. The model must reply
 in exactly four lines:
@@ -200,7 +207,7 @@ is handled in the harness:
 | `pr-fix` | `689–744` — lightweight fix-and-push |
 | `github-orchestrator` | `896–976` — full build cycle on an issue |
 | `answer` | `982–1014` — generic `dispatchWorkflow()` for `answer.yaml`; answers a question issue directly (routed via `routes.github.issue_answer` / `routes.slack.answer`) |
-| `pr-review`, `pr-comment`, `issue-triage`, `issue-comment`, `explore`, `security-review`, `security-feedback` | `982–1014` — generic `dispatchWorkflow()` + ack |
+| `pr-review`, `pr-comment`, `issue-triage`, `issue-comment`, `explore`, `security-review`, `security-feedback`, `verify`, `qa-test` | `982–1014` — generic `dispatchWorkflow()` + ack |
 
 The generic-dispatch lane runs the YAML workflow whose name matches
 the skill string. Anything bespoke (e.g. `github-orchestrator` first

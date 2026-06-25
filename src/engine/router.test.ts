@@ -217,6 +217,68 @@ describe('routeEvent — comment.created', () => {
     }
   });
 
+  it('routes a structured "@last-light verify <claim>" on an issue to verify (no classifier)', async () => {
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light verify the rate limiter blocks at 100 req/s',
+      authorAssociation: 'OWNER',
+      issueNumber: 7,
+    }));
+    expect(result.action).toBe('handler');
+    // The classifier defaults to 'chat' (beforeEach) — which would route to
+    // issue-comment — so a 'verify' handler proves the structured keyword match
+    // fired and short-circuited before classification.
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('verify');
+      expect(result.context.commentBody).toBe('the rate limiter blocks at 100 req/s');
+    }
+  });
+
+  it('routes a structured "@last-light qa-test" on a PR to qa-test, carrying steps', async () => {
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light qa-test -- login, create a project',
+      authorAssociation: 'COLLABORATOR',
+      prNumber: 9,
+    }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('qa-test');
+      expect(result.context.prNumber).toBe(9);
+      expect(result.context.commentBody).toBe('-- login, create a project');
+    }
+  });
+
+  it('routes classifier verify intent on a PR to verify', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'verify' });
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light does this actually fix the crash?',
+      authorAssociation: 'OWNER',
+      prNumber: 5,
+    }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('verify');
+      expect(result.context._routeKey).toBe('github.verify');
+    }
+  });
+
+  it('routes classifier qa-test intent on an issue to qa-test', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'qa-test' });
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light run through the signup flow and tell me what breaks',
+      authorAssociation: 'MEMBER',
+      issueNumber: 10,
+    }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('qa-test');
+      expect(result.context._routeKey).toBe('github.qa_test');
+    }
+  });
+
   it('passes issue title to classifier on comment events', async () => {
     mockClassifyComment.mockResolvedValue({ intent: 'build' });
     await routeEvent(makeEnvelope({

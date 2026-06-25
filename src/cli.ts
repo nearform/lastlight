@@ -173,6 +173,8 @@ ${chalk.bold("Trigger")}
   lastlight build <ref>                 Run the FULL build cycle (architect→PR)
   lastlight triage <owner/repo[#N]>     Triage a repo (scan) or one issue
   lastlight review <owner/repo[#N]>     Review a repo's PRs (scan) or one PR
+  lastlight verify <owner/repo#N> [-- "<claim>"]   Test a claim → CONFIRMED/REFUTED
+  lastlight qa-test <owner/repo#N> [-- "<steps>"]  Drive a flow → step pass/fail
   lastlight health <owner/repo>         Weekly health report
   lastlight security <owner/repo>       Security review
 
@@ -756,14 +758,25 @@ async function cmdSkill(name: string): Promise<void> {
   const target = positionals[1];
   const skillMap: Record<string, string> = {
     triage: "issue-triage", review: "pr-review", health: "repo-health", security: "security-review",
+    verify: "verify", "qa-test": "qa-test",
   };
   const skill = skillMap[name];
   const repoLevelOnly = name === "health" || name === "security";
-  if (!target) die(`Usage: lastlight ${name} <owner/repo>${repoLevelOnly ? "" : " | <owner/repo#N>"}`);
+  // verify / qa-test take a free-text claim/steps argument after the target —
+  // accept it either as trailing positionals or as a quoted `-- "<text>"`
+  // (the arg parser folds the latter into flags[""]).
+  const takesClaim = name === "verify" || name === "qa-test";
+  const claim = takesClaim
+    ? (positionals.slice(2).join(" ") || (typeof flags[""] === "string" ? flags[""] : "")).trim()
+    : "";
+  if (!target) {
+    die(`Usage: lastlight ${name} <owner/repo${repoLevelOnly ? "" : "#N"}>${takesClaim ? ` [-- "<claim or steps>"]` : ""}`);
+  }
   const parsed = repoLevelOnly ? null : parseGitHubRef(target);
   let context: Record<string, unknown>;
   if (parsed) {
     context = { repo: `${parsed.owner}/${parsed.repo}`, issueNumber: parsed.number, sender: "cli" };
+    if (claim) context.commentBody = claim;
     if (!JSON_OUT) console.log(`Triggering ${name} on ${parsed.owner}/${parsed.repo}#${parsed.number}…`);
   } else {
     context = { repos: [target], mode: "scan" };
@@ -831,7 +844,9 @@ async function main() {
     case "triage":
     case "review":
     case "health":
-    case "security": return cmdSkill(cmd);
+    case "security":
+    case "verify":
+    case "qa-test": return cmdSkill(cmd);
     default: return cmdDefaultRef(cmd);
   }
 }

@@ -263,6 +263,8 @@ chat runtime:
 | `building` | Shared craft: install deps + run the test/lint/typecheck gate in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml`, `pr-review.yaml` |
 | `code-review` | Shared review rubric: finding tiers (Critical / Important / Suggestions / Nits) + what to check (correctness incl. silent-default/dropped-output as a bug, security, edge cases, complexity, duplication, type-safety, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
 | `issue-answer` | Answer a question directly: sourced neutral reply to a GitHub issue or Slack thread; research repo docs + web; label `question` (GitHub only); never write a brief, mark ready-for-agent, or change code | `answer.yaml` |
+| `verify` | Test a behaviour claim as an investigator: install + run the code in the sandbox, capture bash/text evidence, report CONFIRMED / REFUTED / INCONCLUSIVE; never fabricate or stage evidence | `verify.yaml` |
+| `qa-test` | Drive a CLI or locally-served app through a flow and report step-level pass/fail with evidence; continue past failures unless one blocks everything | `qa-test.yaml` |
 | `chat` | Conversational assistant persona | chat (always-on) |
 
 `building` and `code-review` are not optional libraries — they're live

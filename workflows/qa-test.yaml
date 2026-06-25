@@ -1,0 +1,36 @@
+kind: qa-test
+name: qa-test
+description: |
+  Run an automated QA flow against a repo's CLI or locally-served app and report
+  step-level pass/fail with evidence. Single agent invocation: it installs and
+  runs the code in the sandbox, exercises a flow (CLI invocations or curl against
+  a dev-server), and posts a per-step QA report. Does not modify code.
+
+  Delivery is uniform with `answer`: the agent's final message (the report) is
+  captured as `qaResult` and posted by the harness via `postComment` — as a
+  comment on the originating issue/PR for GitHub-initiated runs, or into the
+  Slack thread for Slack-initiated runs. The skill therefore does NOT post the
+  report itself.
+
+  Triggered by:
+    - a `@last-light qa-test <target> [-- steps]` comment on an issue/PR
+    - manual CLI: tsx src/cli.ts qa-test owner/repo#N -- "<steps>"
+
+phases:
+  - name: phase_0
+    label: Context
+    type: context
+
+  - name: qa_test
+    label: QA Test
+    prompt: prompts/qa-test.md
+    # qa-test: the flow procedure + report shape (primary).
+    # building: install + run the repo to exercise the flow.
+    skills: [qa-test, building]
+    model: "{{models.qa-test}}"
+    variant: "{{variants.qa-test}}"
+    output_var: qaResult
+    messages:
+      on_start: "Running the QA flow — installing, running, and exercising each step..."
+      on_success: "{{qaResult}}"
+      on_failure: "I couldn't complete the QA run — see the logs for details."

@@ -81,6 +81,7 @@ through — webhook dispatch, CLI, cron, admin resume.
   output_var?: string;                  // alias for {{this.field}} in later phases
   unrestricted_egress?: boolean;        // bypass strict allowlist for this phase
   web_search?: boolean;                 // enable agentic-pi web tools
+  requires_sandbox?: "docker" | "gondolin" | "none";  // skip phase (non-failing) if active backend differs
   loop?: PhaseLoop;                     // reviewer-fix loop
   generic_loop?: GenericLoop;           // until-condition loop
   on_output?: OutputRule[];             // e.g. contains_BLOCKED → fail

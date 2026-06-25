@@ -82,6 +82,10 @@ export function gitAccessProfileForWorkflow(workflowName: string): GitAccessProf
     case "explore":
     case "answer":
     case "security-review":
+    // verify / qa-test read the repo and post a findings comment — they never
+    // push code, so issues-write (contents:read + issues:write) is enough.
+    case "verify":
+    case "qa-test":
       return "issues-write";
     case "security-feedback":
       return "repo-write";
@@ -288,6 +292,12 @@ export async function runWorkflow(
 
   const dag = buildDag(definition.phases, { chainIfNoDeps: true });
 
+  // Phase lookup + the backend this run is actually executing on. Used by the
+  // `requires_sandbox` gate below — config.sandbox is undefined when no backend
+  // override is set, which resolves to gondolin (see agent-executor).
+  const phaseByName = new Map(definition.phases.map((p) => [p.name, p]));
+  const activeBackend = config.sandbox ?? "gondolin";
+
   while (!isComplete(dag)) {
     // Honour a cancel that landed during the previous phase's execution.
     if (db && workflowId) {
@@ -316,6 +326,38 @@ export async function runWorkflow(
     }
 
     const ready = getReadyNodes(dag);
+
+    // Capability gate: skip any ready node whose `requires_sandbox` backend
+    // isn't the one we're running. Safe-by-default graceful degradation — a
+    // gated phase (e.g. a /demo video render that needs the docker image)
+    // silently no-ops on a host without that backend instead of failing the
+    // workflow. Uses the same non-failing skip mechanics as the trigger-rule
+    // skip above, plus the phase's `on_skipped_done` message so the user sees
+    // why it was skipped.
+    const gatedSkip = ready.filter((node) => {
+      const req = phaseByName.get(node.name)?.requires_sandbox;
+      return req !== undefined && req !== activeBackend;
+    });
+    if (gatedSkip.length > 0) {
+      for (const node of gatedSkip) {
+        node.status = "skipped";
+        const phaseDef = phaseByName.get(node.name);
+        phases.push({
+          phase: node.name,
+          success: true,
+          output: `Skipped (requires ${phaseDef?.requires_sandbox} sandbox; running ${activeBackend})`,
+        });
+        db?.executions.recordSkippedPhase(
+          `${definition.name}:${node.name}`,
+          triggerId,
+          workflowId,
+          githubAccess.repo,
+        );
+        await reportStep(node.name, "skipped", phaseDef?.messages?.on_skipped_done);
+      }
+      continue; // re-evaluate the DAG with these nodes now terminal
+    }
+
     if (ready.length === 0) {
       if (toSkip.length === 0) break; // stuck (shouldn't happen in a valid DAG)
       continue; // only had skips — loop to process downstream

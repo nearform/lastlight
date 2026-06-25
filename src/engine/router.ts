@@ -201,6 +201,41 @@ export async function routeEvent(
         };
       }
 
+      // Structured matches for verify / qa-test before LLM classification.
+      // Everything after the command word is the claim (verify) or the
+      // target/steps (qa-test); it flows through as `commentBody`. Both work on
+      // issues and PRs. Maintainer-gated above, like security-review.
+      const verifyMatch = envelope.body.match(/@last-light\s+verify\b([\s\S]*)/i);
+      if (verifyMatch) {
+        return {
+          action: "handler",
+          handler: gh.verify || "verify",
+          context: {
+            repo: envelope.repo,
+            issueNumber: envelope.issueNumber,
+            ...(envelope.prNumber ? { prNumber: envelope.prNumber } : {}),
+            title: envelope.title,
+            sender: envelope.sender,
+            commentBody: verifyMatch[1].trim() || envelope.body,
+          },
+        };
+      }
+      const qaTestMatch = envelope.body.match(/@last-light\s+qa-test\b([\s\S]*)/i);
+      if (qaTestMatch) {
+        return {
+          action: "handler",
+          handler: gh.qa_test || "qa-test",
+          context: {
+            repo: envelope.repo,
+            issueNumber: envelope.issueNumber,
+            ...(envelope.prNumber ? { prNumber: envelope.prNumber } : {}),
+            title: envelope.title,
+            sender: envelope.sender,
+            commentBody: qaTestMatch[1].trim() || envelope.body,
+          },
+        };
+      }
+
       // Classify intent + screen for injection in parallel. Both run on the
       // same comment text and have similar latency (single haiku call); doing
       // them in parallel keeps overall router latency at max(classifier, screener)
@@ -227,16 +262,23 @@ export async function routeEvent(
 
       if (envelope.prNumber) {
         // PR comments:
-        //   build → pr-fix (full Architect→Executor→Reviewer fix loop)
-        //   else  → pr-comment (diff-aware Q&A; the issue-comment skill
-        //           caps at 2 file reads which isn't enough to answer
-        //           "does this PR consider X?" with code-cited evidence)
+        //   build    → pr-fix (full Architect→Executor→Reviewer fix loop)
+        //   verify   → verify (test a behavioural claim against the PR)
+        //   qa-test  → qa-test (drive a flow against the PR, step pass/fail)
+        //   else     → pr-comment (diff-aware Q&A; the issue-comment skill
+        //              caps at 2 file reads which isn't enough to answer
+        //              "does this PR consider X?" with code-cited evidence)
         // Explore isn't meaningful on PRs since the code already exists.
+        const { handler: prHandler, routeKey: prRouteKey } =
+          intent === "build" ? { handler: gh.pr_fix || "pr-fix", routeKey: "github.pr_fix" }
+          : intent === "verify" ? { handler: gh.verify || "verify", routeKey: "github.verify" }
+          : intent === "qa-test" ? { handler: gh.qa_test || "qa-test", routeKey: "github.qa_test" }
+          : { handler: gh.pr_comment || "pr-comment", routeKey: "github.pr_comment" };
         return {
           action: "handler",
-          handler: intent === "build" ? (gh.pr_fix || "pr-fix") : (gh.pr_comment || "pr-comment"),
+          handler: prHandler,
           context: {
-            _routeKey: intent === "build" ? "github.pr_fix" : "github.pr_comment",
+            _routeKey: prRouteKey,
             repo: envelope.repo,
             prNumber: envelope.prNumber,
             issueNumber: envelope.issueNumber,
@@ -277,16 +319,17 @@ export async function routeEvent(
           },
         };
       }
-      const issueSkill = intent === "build"
-        ? (gh.issue_build || "github-orchestrator")
-        : intent === "explore"
-        ? (gh.issue_explore || "explore")
-        : (gh.issue_comment || "issue-comment");
+      const { handler: issueSkill, routeKey: issueRouteKey } =
+        intent === "build" ? { handler: gh.issue_build || "github-orchestrator", routeKey: "github.issue_build" }
+        : intent === "explore" ? { handler: gh.issue_explore || "explore", routeKey: "github.issue_explore" }
+        : intent === "verify" ? { handler: gh.verify || "verify", routeKey: "github.verify" }
+        : intent === "qa-test" ? { handler: gh.qa_test || "qa-test", routeKey: "github.qa_test" }
+        : { handler: gh.issue_comment || "issue-comment", routeKey: "github.issue_comment" };
       return {
         action: "handler",
         handler: issueSkill,
         context: {
-          _routeKey: intent === "build" ? "github.issue_build" : intent === "explore" ? "github.issue_explore" : "github.issue_comment",
+          _routeKey: issueRouteKey,
           repo: envelope.repo,
           issueNumber: envelope.issueNumber,
           title: envelope.title,
@@ -467,6 +510,50 @@ export async function routeEvent(
             action: "handler",
             handler: slack.security || "security-review",
             context: { repo: gate.repo, sender: envelope.sender, source: envelope.source },
+          };
+        }
+
+        case "verify": {
+          const gate = requireManagedRepo(
+            classifiedRepo,
+            "Which repo should I verify? e.g. `verify cliftonc/repo#42 — the fork flag creates a new session`",
+          );
+          if (!gate.ok) return gate.route;
+          return {
+            action: "handler",
+            handler: slack.verify || "verify",
+            context: {
+              repo: gate.repo,
+              issueNumber: classifiedIssue,
+              sender: envelope.sender,
+              commentBody: slackText,
+              source: envelope.source,
+              triggerId: slackTriggerId,
+              channelId,
+              threadId,
+            },
+          };
+        }
+
+        case "qa-test": {
+          const gate = requireManagedRepo(
+            classifiedRepo,
+            "Which repo should I QA-test? e.g. `qa-test cliftonc/repo#42 -- login, create a project`",
+          );
+          if (!gate.ok) return gate.route;
+          return {
+            action: "handler",
+            handler: slack.qa_test || "qa-test",
+            context: {
+              repo: gate.repo,
+              issueNumber: classifiedIssue,
+              sender: envelope.sender,
+              commentBody: slackText,
+              source: envelope.source,
+              triggerId: slackTriggerId,
+              channelId,
+              threadId,
+            },
           };
         }
 

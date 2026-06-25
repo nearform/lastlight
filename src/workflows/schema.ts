@@ -174,6 +174,27 @@ const PhaseDefinitionSchema = z
      * is also covered by the open-mode tunnel.
      */
     web_search: z.boolean().optional(),
+    /**
+     * Capability gate: the sandbox backend this phase needs to run on.
+     *
+     * Default (absent): the phase runs on whatever backend the harness is
+     * configured for. When set, the phase runs only if the **active** backend
+     * matches; otherwise it is **silently skipped** — recorded as a
+     * non-failing skip (like a trigger-rule skip), never a failure. This is
+     * safe-by-default graceful degradation: a phase that depends on tooling
+     * baked only into a specific sandbox image (a `/demo` video render, a
+     * headless-browser QA step) just no-ops on a host that can't provide it
+     * instead of breaking the workflow. E.g. the demo step in `build` declares
+     * `requires_sandbox: docker` so it skips (rather than fails the build) on a
+     * gondolin-only host.
+     *
+     * A skipped node is not `succeeded`, so a downstream phase that depends on
+     * a gated phase via the default `all_success` rule would itself skip. Keep
+     * gated phases **terminal** (nothing depends on them) or give their
+     * dependants `trigger_rule: all_done`. Pair with `messages.on_skipped_done`
+     * to surface why the phase was skipped.
+     */
+    requires_sandbox: z.enum(["docker", "gondolin", "none"]).optional(),
     /** Named approval gate to pause at after this phase */
     approval_gate: z.string().optional(),
     /**

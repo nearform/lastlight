@@ -146,6 +146,24 @@ Three kinds of phase the runner recognises:
 expression (evaluated by `loop-eval.ts`) instead of fixed review/fix
 cycles. Used for custom "retry until X" phases.
 
+## Per-phase sandbox requirement (`requires_sandbox`)
+
+A phase can declare `requires_sandbox: docker | gondolin | none` to gate itself
+on the backend the harness is actually running. If the active backend (the
+run-level `config.sandbox`, defaulting to gondolin) doesn't match, the scheduler
+**silently skips** the phase — recorded as a *non-failing* skip in the
+`executions` ledger, exactly like a trigger-rule skip, and surfaced via the
+phase's `messages.on_skipped_done`. This is safe-by-default graceful
+degradation for phases whose tooling is baked only into a specific sandbox image
+(e.g. a future `/demo` video-render step that needs the docker image): on a
+gondolin-only host the step no-ops instead of failing the workflow.
+
+The gate lives in `runWorkflow`'s scheduling loop (it filters ready nodes before
+execution), not in `phaseConfigFor`. Because a skipped node is not `succeeded`,
+a downstream phase depending on a gated phase via the default `all_success` rule
+would itself skip — keep gated phases **terminal**, or give their dependants
+`trigger_rule: all_done`.
+
 ## Per-phase egress policy
 
 Any phase can declare `unrestricted_egress: true` to bypass the sandbox

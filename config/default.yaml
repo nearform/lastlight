@@ -58,6 +58,8 @@ routes:
     pr_reopened: pr-review
     approval_response: approval-response
     security_review: security-review
+    verify: verify
+    qa_test: qa-test
     pr_fix: pr-fix
     pr_comment: pr-comment
     issue_build: github-orchestrator
@@ -74,6 +76,8 @@ routes:
     triage: issue-triage
     review: pr-review
     security: security-review
+    verify: verify
+    qa_test: qa-test
     explore: explore
     answer: answer
     chat: chat
