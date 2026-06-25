@@ -1043,6 +1043,48 @@ export class RunResultAccumulator {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/** Provider account/billing/auth failures pi may surface as error text. */
+const ACCOUNT_ERROR_MARKERS = [
+  "credit balance",
+  "insufficient_quota",
+  "insufficient quota",
+  "rate limit",
+  "unauthorized",
+  "invalid_api_key",
+];
+
+/**
+ * Detect a provider account error (out of credit, quota, rate-limited, bad key)
+ * that pi may have surfaced as plain text rather than a hard failure.
+ *
+ * Critically, on a **successful** run we scan ONLY the genuine provider-error
+ * channel (`agentErrorMessage`, which `extractAgentError` already turns into a
+ * non-success stopReason when set — so it's empty here). The agent's own output
+ * (`finalText`) and tool results (`fatalError`, `toolError`) are NOT scanned on
+ * success: a legitimate `verify`/`qa-test` report or a `curl` probing a 401
+ * endpoint routinely contains "unauthorized" / "rate limit" as part of the task
+ * itself, and folding that in would wrongly fail a genuinely successful run
+ * (and drop its report). Only on a failed run do we fold those in to label why.
+ */
+export function detectAccountError(opts: {
+  success: boolean;
+  fatalErrorMessage?: string;
+  agentErrorMessage?: string;
+  finalText?: string;
+  toolErrorText?: string;
+}): boolean {
+  const combined = [
+    opts.success ? undefined : opts.fatalErrorMessage,
+    opts.agentErrorMessage,
+    opts.success ? undefined : opts.finalText,
+    opts.success ? undefined : opts.toolErrorText,
+  ]
+    .filter((s): s is string => typeof s === "string" && s.length > 0)
+    .join("\n")
+    .toLowerCase();
+  return ACCOUNT_ERROR_MARKERS.some((m) => combined.includes(m));
+}
+
 function finalizeFromRunResult(
   result: RunResult,
   _prompt: string,
@@ -1116,26 +1158,13 @@ function finalizeFromRunResult(
   });
   void shim.flush();
 
-  // Only fold the tool error into account-error detection on a failed run.
-  // A *successful* run may carry a tool result that legitimately contains
-  // "unauthorized" / "rate limit" (e.g. a curl probing a 401 endpoint as
-  // part of the task) — folding that in would wrongly fail the run.
-  const combined = [
-    result.fatalError?.message,
-    agentError?.errorMessage,
-    result.finalText,
-    success ? undefined : toolErrorText,
-  ]
-    .filter((s): s is string => typeof s === "string" && s.length > 0)
-    .join("\n")
-    .toLowerCase();
-  const accountError =
-    combined.includes("credit balance") ||
-    combined.includes("insufficient_quota") ||
-    combined.includes("insufficient quota") ||
-    combined.includes("rate limit") ||
-    combined.includes("unauthorized") ||
-    combined.includes("invalid_api_key");
+  const accountError = detectAccountError({
+    success,
+    fatalErrorMessage: result.fatalError?.message,
+    agentErrorMessage: agentError?.errorMessage,
+    finalText: result.finalText,
+    toolErrorText,
+  });
 
   const errorText =
     result.fatalError?.message ||

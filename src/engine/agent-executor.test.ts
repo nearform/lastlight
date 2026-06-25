@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { RunResultAccumulator, stageSkillBundle, excludeFromGit } from "./agent-executor.js";
+import { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError } from "./agent-executor.js";
 
 /**
  * A pi assistant `message_end` event carrying per-message usage. Mirrors the
@@ -247,6 +247,50 @@ describe("RunResultAccumulator tool errors", () => {
     const acc = new RunResultAccumulator();
     acc.feed({ type: "tool_execution_end", tool: "read", isError: false, result: "ok" });
     expect(acc.toolError()).toBeUndefined();
+  });
+});
+
+describe("detectAccountError", () => {
+  it("does NOT flag a successful run whose report mentions auth/rate-limit terms", () => {
+    // Regression: `verify` reporting that an endpoint is "Unauthorized", or a
+    // curl probing a 401, must not be mistaken for a provider account error.
+    expect(
+      detectAccountError({
+        success: true,
+        finalText: "## Verify\nThe /admin endpoint returns 401 Unauthorized — no rate limit observed.",
+        toolErrorText: "curl: (7) Failed to connect to 127.0.0.1 port 4173",
+        fatalErrorMessage: "bash failed: Unauthorized",
+      }),
+    ).toBe(false);
+  });
+
+  it("flags a genuine provider account error surfaced via the agent-error channel", () => {
+    expect(
+      detectAccountError({
+        success: false,
+        agentErrorMessage: "insufficient_quota: You exceeded your current quota",
+      }),
+    ).toBe(true);
+  });
+
+  it("on a failed run, folds in tool/output text to label why it failed", () => {
+    expect(
+      detectAccountError({
+        success: false,
+        toolErrorText: "Error: invalid_api_key",
+      }),
+    ).toBe(true);
+    expect(
+      detectAccountError({
+        success: false,
+        finalText: "the provider reported your credit balance is too low",
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when nothing matches", () => {
+    expect(detectAccountError({ success: true, finalText: "all good" })).toBe(false);
+    expect(detectAccountError({ success: false, toolErrorText: "file not found" })).toBe(false);
   });
 });
 
