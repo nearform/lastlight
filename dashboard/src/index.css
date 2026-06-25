@@ -129,3 +129,31 @@ body {
 .ll-prose hr {
   @apply border-base-300 my-3;
 }
+
+/* Editor variant — larger, more comfortable type for the Artifacts editor.
+   Layered after `.ll-prose` so the equal-specificity rules win by source
+   order. Applied alongside `.ll-prose` (not instead of it) so chat message
+   bubbles keep the compact `.ll-prose` sizing. */
+.ll-prose-editor {
+  @apply text-base leading-relaxed;
+}
+.ll-prose-editor h1 {
+  @apply text-2xl;
+}
+.ll-prose-editor h2 {
+  @apply text-xl;
+}
+.ll-prose-editor h3,
+.ll-prose-editor h4 {
+  @apply text-lg;
+}
+.ll-prose-editor code {
+  @apply text-sm;
+}
+.ll-prose-editor pre,
+.ll-prose-editor pre code {
+  @apply text-sm;
+}
+.ll-prose-editor table {
+  @apply text-sm;
+}

@@ -136,6 +136,12 @@ export function ArtifactsPage() {
     setRepo(next);
   }, [repoInput, setRepo, setKey, setDoc]);
 
+  const handleRevert = useCallback(() => {
+    setContent(savedContent);
+    editorRef.current?.setMarkdown(savedContent);
+    setSaveError(null);
+  }, [savedContent]);
+
   const handleSave = useCallback(async () => {
     if (!repo || !repo.includes("/") || !key || !doc) return;
     const [owner, name] = repo.split("/", 2);
@@ -268,6 +274,15 @@ export function ArtifactsPage() {
             ) : savedAt ? (
               <span className="text-[11px] text-success">Saved</span>
             ) : null}
+            {dirty && (
+              <button
+                onClick={handleRevert}
+                disabled={saving}
+                className="rounded border border-base-300 px-3 py-1 text-xs font-medium text-base-content/80 hover:bg-base-300 disabled:opacity-40"
+              >
+                Revert
+              </button>
+            )}
             <button
               onClick={handleSave}
               disabled={!doc || !dirty || saving}
@@ -300,7 +315,7 @@ export function ArtifactsPage() {
               markdown={content}
               onChange={(md) => setContent(md)}
               className="dark-theme"
-              contentEditableClassName="ll-prose"
+              contentEditableClassName="ll-prose ll-prose-editor"
               plugins={[
                 headingsPlugin(),
                 listsPlugin(),
