@@ -56,40 +56,79 @@ function LockIcon() {
   );
 }
 
+/** Status → border/background classes, shared by the phase card and the gate diamond. */
+function statusSurface(status: PhaseStatus): string {
+  return clsx({
+    "border-success/60 bg-success/15": status === "done",
+    "border-error/60 bg-error/15": status === "failed",
+    "border-info/60 bg-info/15": status === "active",
+    "border-warning/60 bg-warning/15": status === "paused",
+    "border-base-300 bg-base-300/70": status === "pending",
+  });
+}
+
+const handleClass = "!bg-base-300/60 !border-none !w-1 !h-1";
+
+/**
+ * Approval gate — rendered as a diamond (the classic flowchart decision shape)
+ * so it reads as a human-in-the-loop checkpoint, not an executed phase. The
+ * gate name + time sit in a caption beneath the diamond; the edge handles hang
+ * off the diamond itself so the pipeline line passes through its centre.
+ */
+function ApprovalDiamondNode({ data }: { data: PhaseNodeData }) {
+  const diamondClass = clsx(
+    "w-9 h-9 rotate-45 rounded-[4px] border-2 shadow-md flex items-center justify-center transition-shadow",
+    statusSurface(data.status),
+    {
+      "animate-pulse": data.pulse,
+      "ring-2 ring-primary ring-offset-2 ring-offset-base-100": data.selected,
+    },
+  );
+  return (
+    <div className="flex flex-col items-center gap-1 cursor-pointer">
+      <div className="relative flex items-center justify-center w-9 h-9">
+        <Handle type="target" position={Position.Left} className={handleClass} />
+        <div className={diamondClass}>
+          {/* counter-rotate the glyph so the lock sits upright in the diamond */}
+          <span className="-rotate-45 text-base-content/55">
+            <LockIcon />
+          </span>
+        </div>
+        <Handle type="source" position={Position.Right} className={handleClass} />
+      </div>
+      <div className="flex flex-col items-center leading-tight">
+        <span className="text-[9px] font-semibold uppercase tracking-wider text-base-content/40">
+          approval
+        </span>
+        <span className="text-xs font-medium font-mono text-base-content/80">{data.label}</span>
+        {data.timestamp && (
+          <span className="text-2xs text-base-content/40 font-mono">{formatTime(data.timestamp)}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
-  const isApproval = data.kind === "approval";
+  if (data.kind === "approval") return <ApprovalDiamondNode data={data} />;
+
   const dotClass = clsx("w-2.5 h-2.5 rounded-full shrink-0", {
     "bg-success": data.status === "done",
     "bg-error": data.status === "failed",
     "bg-info animate-pulse": data.status === "active",
     "bg-warning": data.status === "paused",
     "bg-base-300": data.status === "pending",
-    "animate-pulse": data.pulse,
   });
 
   const containerClass = clsx(
     "flex flex-col items-center gap-1 px-3 py-2 rounded-lg border shadow-md min-w-[80px] text-center cursor-pointer transition-shadow",
-    {
-      "border-success/60 bg-success/15": data.status === "done",
-      "border-error/60 bg-error/15": data.status === "failed",
-      "border-info/60 bg-info/15": data.status === "active",
-      "border-warning/60 bg-warning/15": data.status === "paused",
-      "border-base-300 bg-base-300/70": data.status === "pending",
-      // Approval gates get a dashed border so they read as a decision point,
-      // not an executed phase.
-      "border-dashed": isApproval,
-      "ring-2 ring-primary ring-offset-1 ring-offset-base-100": data.selected,
-    },
+    statusSurface(data.status),
+    { "ring-2 ring-primary ring-offset-1 ring-offset-base-100": data.selected },
   );
 
   return (
     <div className={containerClass}>
-      <Handle type="target" position={Position.Left} className="!bg-base-300/60 !border-none !w-1 !h-1" />
-      {isApproval && (
-        <span className="text-[9px] font-semibold uppercase tracking-wider text-base-content/40 leading-none flex items-center gap-0.5">
-          <LockIcon /> approval
-        </span>
-      )}
+      <Handle type="target" position={Position.Left} className={handleClass} />
       <div className="flex items-center gap-1.5">
         <span className={dotClass} />
         <span className="text-xs font-medium text-base-content/80">{data.label}</span>
@@ -100,7 +139,7 @@ function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
       {data.duration !== undefined && (
         <span className="text-2xs text-base-content/40 font-mono">{formatDuration(data.duration)}</span>
       )}
-      <Handle type="source" position={Position.Right} className="!bg-base-300/60 !border-none !w-1 !h-1" />
+      <Handle type="source" position={Position.Right} className={handleClass} />
     </div>
   );
 }
@@ -293,57 +332,7 @@ export function WorkflowPipeline({
 
     const reactFlowNodes: Node<PhaseNodeData>[] = [];
     const reactFlowEdges: Edge[] = [];
-
-    // Top row: declared phases in declaration order. Iterations stack below.
-    let maxColumnDepth = 0;
-    declaredNames.forEach((name, idx) => {
-      const x = idx * (NODE_WIDTH + NODE_GAP);
-      reactFlowNodes.push(buildNode(name, x, 0));
-
-      const children = childrenByParent.get(name) ?? [];
-      if (children.length > maxColumnDepth) maxColumnDepth = children.length;
-
-      let prevId = name;
-      children.forEach((childName, childIdx) => {
-        const y = (childIdx + 1) * (NODE_ROW_HEIGHT + ROW_GAP);
-        reactFlowNodes.push(buildNode(childName, x, y));
-        reactFlowEdges.push({
-          id: `${prevId}->${childName}`,
-          source: prevId,
-          target: childName,
-          style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
-          animated: false,
-        });
-        prevId = childName;
-      });
-    });
-
-    // Horizontal edges between declared phases (top row).
-    for (let i = 0; i < declaredNames.length - 1; i++) {
-      const a = declaredNames[i]!;
-      const b = declaredNames[i + 1]!;
-      reactFlowEdges.push({
-        id: `${a}->${b}`,
-        source: a,
-        target: b,
-        style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
-        animated: false,
-      });
-    }
-
-    // Orphaned dynamic phases (no matching declared parent) — append after the
-    // last declared column on row 0, chained in chronological (phase_history)
-    // order. The generic `waiting_approval` marker is expanded into one
-    // status-colored gate node per approval (preserving its chronological slot,
-    // e.g. between PR and complete) so the run shows which gate paused it and
-    // how it resolved. If approvals haven't loaded yet, fall back to the raw
-    // marker so the node never vanishes from a paused run.
-    const approvalRows = approvals ?? [];
-    const renderedApprovalIds = new Set<string>();
-    const linkTo = (
-      target: string,
-      prev: string | undefined,
-    ) => {
+    const linkTo = (target: string, prev: string | undefined) => {
       if (!prev) return;
       reactFlowEdges.push({
         id: `${prev}->${target}`,
@@ -354,38 +343,81 @@ export function WorkflowPipeline({
       });
     };
 
-    let col = declaredNames.length;
-    let prevId: string | undefined = declaredNames[declaredNames.length - 1];
-    for (const name of orphans) {
-      if (name === "waiting_approval" && approvalRows.length > 0) {
-        for (const a of approvalRows) {
-          const node = buildApprovalNode(a, col * (NODE_WIDTH + NODE_GAP));
-          reactFlowNodes.push(node);
-          linkTo(node.id, prevId);
-          renderedApprovalIds.add(a.id);
-          prevId = node.id;
-          col++;
-        }
-      } else {
-        const x = col * (NODE_WIDTH + NODE_GAP);
-        reactFlowNodes.push(buildNode(name, x, 0));
-        linkTo(name, prevId);
-        prevId = name;
-        col++;
-      }
+    // Start time of a declared phase (execution row first, else its history
+    // marker) — used to slot each approval gate into its true chronological
+    // position rather than dumping all gates at the tail.
+    const startOf = (name: string): string | undefined =>
+      execByPhase.get(name)?.startedAt ?? historyMap.get(name)?.timestamp;
+
+    // For each approval, the declared phase it should follow: the last declared
+    // phase (in declaration order) that started before the gate was created.
+    // -1 → before the first phase. Robust to non-monotonic start times — it
+    // tracks the highest matching index, not a running count. So a
+    // `post_architect` gate lands right after Architect, not after PR.
+    const approvalRows = approvals ?? [];
+    const approvalsAfterIdx = new Map<number, WorkflowApproval[]>();
+    for (const a of approvalRows) {
+      let afterIdx = -1;
+      declaredNames.forEach((name, idx) => {
+        const s = startOf(name);
+        if (s && s < a.createdAt) afterIdx = idx;
+      });
+      const arr = approvalsAfterIdx.get(afterIdx) ?? [];
+      arr.push(a);
+      approvalsAfterIdx.set(afterIdx, arr);
     }
 
-    // Defensive: any approval whose `waiting_approval` marker isn't in history
-    // yet (race between the approval fetch and phase_history persistence) still
-    // gets a node appended at the tail so it's never silently dropped.
-    for (const a of approvalRows) {
-      if (renderedApprovalIds.has(a.id)) continue;
-      const node = buildApprovalNode(a, col * (NODE_WIDTH + NODE_GAP));
-      reactFlowNodes.push(node);
-      linkTo(node.id, prevId);
-      prevId = node.id;
-      col++;
+    // Ordered top-row slots: declared phases in declaration order, with approval
+    // gates spliced into their chronological slot. The generic `waiting_approval`
+    // marker is suppressed once approvals have loaded (the gate nodes replace
+    // it); if they haven't, it falls back to rendering as a plain orphan so a
+    // paused run never loses the node.
+    type Slot = { kind: "phase"; name: string } | { kind: "approval"; a: WorkflowApproval };
+    const slots: Slot[] = [];
+    for (const a of approvalsAfterIdx.get(-1) ?? []) slots.push({ kind: "approval", a });
+    declaredNames.forEach((name, idx) => {
+      slots.push({ kind: "phase", name });
+      for (const a of approvalsAfterIdx.get(idx) ?? []) slots.push({ kind: "approval", a });
+    });
+    for (const name of orphans) {
+      if (name === "waiting_approval" && approvalRows.length > 0) continue;
+      slots.push({ kind: "phase", name });
     }
+
+    // Lay the slots out left-to-right. Loop iterations stack vertically under
+    // their declared parent's column.
+    let maxColumnDepth = 0;
+    let prevId: string | undefined;
+    slots.forEach((slot, col) => {
+      const x = col * (NODE_WIDTH + NODE_GAP);
+      if (slot.kind === "approval") {
+        const node = buildApprovalNode(slot.a, x);
+        reactFlowNodes.push(node);
+        linkTo(node.id, prevId);
+        prevId = node.id;
+        return;
+      }
+      const name = slot.name;
+      reactFlowNodes.push(buildNode(name, x, 0));
+      linkTo(name, prevId);
+      prevId = name;
+
+      const children = childrenByParent.get(name) ?? [];
+      if (children.length > maxColumnDepth) maxColumnDepth = children.length;
+      let childPrev = name;
+      children.forEach((childName, childIdx) => {
+        const y = (childIdx + 1) * (NODE_ROW_HEIGHT + ROW_GAP);
+        reactFlowNodes.push(buildNode(childName, x, y));
+        reactFlowEdges.push({
+          id: `${childPrev}->${childName}`,
+          source: childPrev,
+          target: childName,
+          style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
+          animated: false,
+        });
+        childPrev = childName;
+      });
+    });
 
     const canvasHeight = (maxColumnDepth + 1) * (NODE_ROW_HEIGHT + ROW_GAP) + 20;
 
