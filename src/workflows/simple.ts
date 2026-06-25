@@ -109,6 +109,56 @@ export function workflowScopedTaskId(
 }
 
 /**
+ * Resolve the `{{branch}}` template var (and the matching sandbox
+ * `prePopulateBranch`) for a dispatch.
+ *
+ * The branch a build-style run creates and pushes is `lastlight/N-<title-slug>`,
+ * derived from the issue title at **first** dispatch. Every later re-entry of the
+ * same run — an approval-gate resume, a retry — comes through `runSimpleWorkflow`
+ * again, but the resume event carries an **empty** issue title, so a naive
+ * recompute collapses to the `lastlight/N-issue-N` fallback. That drifted name
+ * is harmless for phases that `git push origin HEAD` (the persisted workspace is
+ * still on the real branch) but fatal for the PR phase, whose prompt feeds
+ * `{{branch}}` straight into `github_create_pull_request`'s `head` — GitHub 422s
+ * because the fallback ref was never pushed.
+ *
+ * So when reusing an existing run we pin to the branch stored on the run row at
+ * creation, mirroring `resume.ts`'s `stored.branch ?? …` precedence. `stored`
+ * is `undefined` for a fresh run (no row yet).
+ */
+export function resolveRunBranch(args: {
+  stored?: Record<string, unknown>;
+  requestPrePopulateBranch?: string;
+  issueNumber?: number;
+  issueTitle?: string;
+  workflowName: string;
+}): { branch: string; prePopulateBranch: string | undefined } {
+  const { stored, requestPrePopulateBranch, issueNumber, issueTitle, workflowName } = args;
+
+  const storedBranch = typeof stored?.branch === "string" && stored.branch ? stored.branch : undefined;
+  const storedPrePopulate =
+    typeof stored?.prePopulateBranch === "string" && stored.prePopulateBranch
+      ? stored.prePopulateBranch
+      : undefined;
+
+  const branch = storedBranch
+    ?? requestPrePopulateBranch
+    ?? (issueNumber !== undefined
+      ? `lastlight/${issueNumber}-${slugify(issueTitle || `issue-${issueNumber}`)}`
+      : `lastlight/${workflowName}`);
+
+  // Pre-populate (clone into the sandbox, cwd = repo root) for the workflows in
+  // PREPOPULATE_SYNTH_WORKFLOWS even though they synthesize a not-yet-pushed
+  // branch — see that const's doc comment for why (the verify/qa-test harvest
+  // fix in particular).
+  const prePopulateBranch = storedPrePopulate
+    ?? requestPrePopulateBranch
+    ?? (PREPOPULATE_SYNTH_WORKFLOWS.has(workflowName) ? branch : undefined);
+
+  return { branch, prePopulateBranch };
+}
+
+/**
  * Run a named agent workflow against a target.
  *
  * If a workflow_run row already exists for this trigger, we reuse it and let
@@ -157,17 +207,15 @@ export async function runSimpleWorkflow(
   // ref, so the prompt should reflect reality rather than a lastlight/N-slug
   // name that doesn't exist. Build-style workflows still get the synthesized
   // lastlight/N-slug branch they create themselves.
-  const branch = request.prePopulateBranch
-    ?? (number !== undefined
-      ? `lastlight/${number}-${slugify(request.issueTitle || `issue-${number}`)}`
-      : `lastlight/${workflowName}`);
-
-  // Pre-populate (clone into the sandbox, cwd = repo root) for the workflows in
-  // PREPOPULATE_SYNTH_WORKFLOWS even though they synthesize a not-yet-pushed
-  // branch — see that const's doc comment for why (the verify/qa-test harvest
-  // fix in particular).
-  const effectivePrePopulateBranch = request.prePopulateBranch
-    ?? (PREPOPULATE_SYNTH_WORKFLOWS.has(workflowName) ? branch : undefined);
+  // `let`, not `const`: when we reuse an existing run below the resolution is
+  // redone with the run's stored context so the branch can't drift off the
+  // already-pushed name on resume — see `resolveRunBranch`.
+  let { branch, prePopulateBranch: effectivePrePopulateBranch } = resolveRunBranch({
+    requestPrePopulateBranch: request.prePopulateBranch,
+    issueNumber: number,
+    issueTitle: request.issueTitle,
+    workflowName,
+  });
 
   // ── Resume handling ────────────────────────────────────────────────────────
   //
@@ -193,6 +241,19 @@ export async function runSimpleWorkflow(
     // workspace path as the original.
     issueDir = (stored.issueDir as string | undefined)
       || `.lastlight/${buildAssetIssueKey(workflowName, number, workflowId)}`;
+    // Re-resolve the branch with the run's stored context. A resume event (e.g.
+    // an approval response) carries an empty issue title, so the fresh
+    // computation above drifts to the `lastlight/N-issue-N` fallback — but the
+    // executor already pushed under the original title-slug name. Pinning to the
+    // stored branch keeps every re-entered phase's `{{branch}}` correct, most
+    // critically the PR phase's `head:` ref (otherwise GitHub 422s on create).
+    ({ branch, prePopulateBranch: effectivePrePopulateBranch } = resolveRunBranch({
+      stored,
+      requestPrePopulateBranch: request.prePopulateBranch,
+      issueNumber: number,
+      issueTitle: request.issueTitle,
+      workflowName,
+    }));
     const handled = await handleExistingRun(existingRun, definition, notify, db);
     if (handled) return handled;
   } else {
