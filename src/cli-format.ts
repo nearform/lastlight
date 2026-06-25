@@ -4,6 +4,7 @@
  * skipped when the caller passes `--json` (the command prints raw JSON itself).
  */
 import chalk from "chalk";
+import { humanDateDiff } from "./human-time.js";
 
 /** Render an array of records as an aligned text table. */
 export function table(
@@ -32,14 +33,8 @@ export function age(input: string | number | null | undefined): string {
   if (input === null || input === undefined || input === "") return "";
   const ms = typeof input === "number" ? input * 1000 : Date.parse(input);
   if (Number.isNaN(ms)) return String(input);
-  const diff = Date.now() - ms;
-  const sec = Math.round(diff / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 48) return `${hr}h ago`;
-  return `${Math.round(hr / 24)}d ago`;
+  const span = humanDateDiff(ms, Date.now(), { style: "short" });
+  return `${span} ago`;
 }
 
 /** Color a workflow-run / execution status string. */
