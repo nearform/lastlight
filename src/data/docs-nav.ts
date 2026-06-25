@@ -35,6 +35,8 @@ export const docsNav: DocsNavSection[] = [
 			{ slug: 'workflows/repo-health', label: 'Repo health' },
 			{ slug: 'workflows/security-review', label: 'Security review' },
 			{ slug: 'workflows/security-feedback', label: 'Security feedback' },
+			{ slug: 'workflows/verify', label: 'Verify' },
+			{ slug: 'workflows/qa-test', label: 'QA test' },
 		],
 	},
 	{

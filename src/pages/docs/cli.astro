@@ -75,6 +75,8 @@ lastlight triage owner/repo           # scan a repo for issues to triage
 lastlight triage owner/repo#42        # triage one issue
 lastlight review owner/repo           # scan a repo's PRs to review
 lastlight review owner/repo#99        # review one PR
+lastlight verify owner/repo#42 -- "the rate limiter blocks"   # test a claim → CONFIRMED/REFUTED
+lastlight qa-test owner/repo#42 -- "login, create a project"  # drive a flow → step pass/fail
 lastlight health owner/repo           # weekly health report
 lastlight security owner/repo         # security review</code></pre>
 
