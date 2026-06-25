@@ -25,12 +25,12 @@ const FocusedApprovalView = lazy(() =>
 );
 import {
   HomeIcon,
-  RectangleStackIcon,
+  PlayCircleIcon,
   CubeTransparentIcon,
   ChatBubbleLeftRightIcon,
   ClockIcon,
   Cog6ToothIcon,
-  Squares2X2Icon,
+  RectangleGroupIcon,
   DocumentTextIcon,
 } from "@heroicons/react/24/outline";
 import {
@@ -261,36 +261,42 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         streamStatus={status}
         onLogout={onLogout}
       />
-      <div className="flex border-b border-base-300 bg-base-200/60 px-3 gap-1">
-        {(
-          [
-            { id: "home", label: "Home", Icon: HomeIcon },
-            { id: "workflows", label: "Workflows", Icon: Squares2X2Icon },
-            { id: "runs", label: "Workflow Runs", Icon: RectangleStackIcon },
-            { id: "sessions", label: "Sandbox Sessions", Icon: CubeTransparentIcon },
-            { id: "chat-sessions", label: "Chat Sessions", Icon: ChatBubbleLeftRightIcon },
-            { id: "artifacts", label: "Artifacts", Icon: DocumentTextIcon },
-            { id: "crons", label: "Crons", Icon: ClockIcon },
-            { id: "config", label: "Config", Icon: Cog6ToothIcon },
-          ] as const
-        ).map(({ id, label, Icon }) => {
-          const active = tab === id;
-          return (
-            <button
-              key={id}
-              onClick={() => setTab(id as Tab)}
-              className={`relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors border-b-2 -mb-px ${
-                active
-                  ? "border-primary text-primary bg-primary/10"
-                  : "border-transparent text-base-content/70 hover:text-base-content hover:bg-base-300/50"
-              }`}
-            >
-              <Icon className={`h-4 w-4 ${active ? "" : "opacity-70"}`} />
-              <span className={active ? "font-semibold" : ""}>{label}</span>
-            </button>
-          );
-        })}
-      </div>
+      <div className="flex flex-1 overflow-hidden">
+        <nav className="flex flex-col shrink-0 w-14 border-r border-base-300 bg-base-200/60 py-2 gap-1">
+          {(
+            [
+              { id: "home", label: "Home", Icon: HomeIcon },
+              { id: "workflows", label: "Workflows", Icon: RectangleGroupIcon },
+              { id: "runs", label: "Workflow Runs", Icon: PlayCircleIcon },
+              { id: "sessions", label: "Sandbox Sessions", Icon: CubeTransparentIcon },
+              { id: "chat-sessions", label: "Chat Sessions", Icon: ChatBubbleLeftRightIcon },
+              { id: "artifacts", label: "Artifacts", Icon: DocumentTextIcon },
+              { id: "crons", label: "Crons", Icon: ClockIcon },
+              { id: "config", label: "Config", Icon: Cog6ToothIcon },
+            ] as const
+          ).map(({ id, label, Icon }) => {
+            const active = tab === id;
+            return (
+              <button
+                key={id}
+                onClick={() => setTab(id as Tab)}
+                aria-label={label}
+                title={label}
+                className={`group relative flex items-center justify-center mx-2 h-10 rounded-md border-l-2 transition-colors ${
+                  active
+                    ? "border-primary text-primary bg-primary/10"
+                    : "border-transparent text-base-content/70 hover:text-base-content hover:bg-base-300/50"
+                }`}
+              >
+                <Icon className={`h-5 w-5 ${active ? "" : "opacity-70"}`} />
+                <span className="pointer-events-none absolute left-full ml-2 z-20 whitespace-nowrap rounded-md bg-base-300 px-2 py-1 text-xs font-medium text-base-content shadow-lg opacity-0 -translate-x-1 transition-all duration-100 group-hover:opacity-100 group-hover:translate-x-0">
+                  {label}
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="flex flex-col flex-1 overflow-hidden min-w-0">
       {tab === "home" ? (
         <HomePage
           onSelectWorkflow={(id) => {
@@ -375,6 +381,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           }}
         />
       )}
+        </div>
+      </div>
     </div>
   );
 }
