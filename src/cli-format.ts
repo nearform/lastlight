@@ -4,6 +4,7 @@
  * skipped when the caller passes `--json` (the command prints raw JSON itself).
  */
 import chalk from "chalk";
+import { humanTimeDiff } from "./time-diff.js";
 
 /** Render an array of records as an aligned text table. */
 export function table(
@@ -30,16 +31,33 @@ function stripAnsi(s: string): string {
 /** "3m ago" / "2h ago" / "5d ago" from an ISO timestamp or unix-seconds number. */
 export function age(input: string | number | null | undefined): string {
   if (input === null || input === undefined || input === "") return "";
-  const ms = typeof input === "number" ? input * 1000 : Date.parse(input);
+
+  const ms =
+    typeof input === "number" ? input * 1000 : Date.parse(input as string);
+
   if (Number.isNaN(ms)) return String(input);
-  const diff = Date.now() - ms;
-  const sec = Math.round(diff / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 48) return `${hr}h ago`;
-  return `${Math.round(hr / 24)}d ago`;
+
+  const now = Date.now();
+  const { value, unit } = humanTimeDiff(ms, now);
+
+  const suffix = (() => {
+    switch (unit) {
+      case "second":
+        return "s";
+      case "minute":
+        return "m";
+      case "hour":
+        return "h";
+      case "day":
+        return "d";
+      case "week":
+        return "w";
+      default:
+        return "s";
+    }
+  })();
+
+  return `${value}${suffix} ago`;
 }
 
 /** Color a workflow-run / execution status string. */
