@@ -78,8 +78,11 @@ agentic-pi's VM. Container name: `lastlight-sandbox-{taskId}-{uuid}`.
   default. A phase declaring `sandbox_image: qa` runs instead on
   `lastlight-sandbox-qa:latest` (`sandbox-qa.Dockerfile` — `FROM` the base
   plus Playwright + a pinned Chromium baked at build time for the browser-QA
-  path; the egress allowlist never permits the Playwright CDN, so nothing is
-  fetched at runtime). Both image names are fixed constants in
+  path, and `ffmpeg` for the `demo` workflow's video-compositing step
+  (`skills/demo/scripts/compose-demo.sh` transcodes the Playwright screen
+  recording into a titled, size-capped mp4 — all offline); the egress allowlist
+  never permits the Playwright CDN, so nothing is fetched at runtime). Both
+  image names are fixed constants in
   `src/sandbox/images.ts`; `qaImageAvailable()` there lets the runner skip a
   `sandbox_image: qa` phase (a non-failing skip) when that image isn't built,
   so browser QA degrades gracefully on a lean host. Built only when QA is

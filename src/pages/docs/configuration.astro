@@ -255,6 +255,18 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td><code>lastlight:bootstrap</code></td>
 				<td>Label applied to issues that exist solely to set up missing guardrails in a target repo.</td>
 			</tr>
+			<tr>
+				<td><code>LASTLIGHT_HOME</code></td>
+				<td>No</td>
+				<td><code>~/lastlight</code></td>
+				<td>CLI-side only. Working directory for the host-local <code>lastlight server</code> lifecycle commands (checkout + <code>instance/</code> overlay + override symlink). Resolves from <code>--home</code> → this env → saved <code>serverHome</code> → default.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_GIT_SHA</code> / <code>LASTLIGHT_BUILD_DATE</code></td>
+				<td>No</td>
+				<td>empty → "unknown"</td>
+				<td>Core git SHA + build date baked into the agent image (Dockerfile <code>ARG</code>s; <code>lastlight server update</code> stamps them). Surfaced by <code>GET /admin/api/server/info</code> for the dashboard "update available" banner.</td>
+			</tr>
 		</tbody>
 	</table>
 

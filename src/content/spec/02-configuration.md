@@ -207,12 +207,22 @@ appears in the map. Missing names are *implicitly disabled* — there is no
 
 | Var | Purpose | Default |
 |---|---|---|
-| `ADMIN_PASSWORD` | gate dashboard login | empty (no auth) |
+| `ADMIN_PASSWORD` | enable password login | empty |
 | `ADMIN_SECRET` | HMAC secret for session cookies | `lastlight-dev-secret` |
 | `PUBLIC_URL` | absolute base URL for outbound links | derived from `DOMAIN` or unset |
 | `DOMAIN` | TLS domain, used to derive `PUBLIC_URL` as `https://<DOMAIN>` | unset |
 
 `ADMIN_SECRET`'s default is unsafe in production — it must be replaced.
+
+Auth (`authIsEnabled`, `src/admin/auth.ts`) is required when **any** login
+method is configured — `ADMIN_PASSWORD` **or** a working OAuth provider (Slack
+needs client id + secret; GitHub also needs `GITHUB_ALLOWED_ORG`). The same
+gate protects the dashboard and the `/api/*` trigger routes. The dashboard is
+only fully open when *no* method is set. `GET /auth-required` returns
+`{ required, password, slackOAuth, githubOAuth }` so the login screen shows the
+right methods (no dead password box for an OAuth-only gate); `POST /login`
+refuses password auth — never minting an open token — whenever auth is on but
+no password is set.
 
 ### Web search (opt-in per phase)
 
@@ -237,6 +247,8 @@ OpenRouter) are forwarded unconditionally.
 | `REVIEW_POSTS_CHECK` | post a Check Run on PR head SHA after pr-review | `false` |
 | `LASTLIGHT_GIT_CREDENTIALS` | inline credentials for private repos without App access | unset |
 | `LASTLIGHT_WRITE_GLOBAL_GIT` | when `"1"`, configure git globally not just per-repo | `0` |
+| `LASTLIGHT_GIT_SHA` | core git SHA baked into the image (Dockerfile `ARG`); surfaced by `GET /admin/api/server/info` for the dashboard drift banner | empty → "unknown" |
+| `LASTLIGHT_BUILD_DATE` | build date baked alongside `LASTLIGHT_GIT_SHA` | empty |
 
 ### CLI client
 
@@ -246,6 +258,26 @@ The `npm run cli` thin client (`src/cli.ts`) reads its own env:
 |---|---|---|
 | `LASTLIGHT_URL` | server URL | `http://localhost:8644` |
 | `LASTLIGHT_TOKEN` | auth token (checked against `ADMIN_PASSWORD`) | empty |
+| `LASTLIGHT_HOME` | working dir for the host-local `lastlight server` lifecycle commands (checkout + `instance/` overlay + override symlink) | `~/lastlight` (or saved `serverHome`) |
+
+The CLI is also the host control plane: `lastlight server
+setup\|start\|stop\|restart\|update\|status` shell out to `git` + `docker
+compose` in `LASTLIGHT_HOME` (resolved `--home` → env → `serverHome` in
+`~/.lastlight/config.json` → `~/lastlight`). `server update` reproduces the
+production `deploy.sh` flow (pull core + overlay → build → `up -d
+--remove-orphans` → restart egress sidecars → health-check). These run on the
+server, unlike the rest of the CLI which targets a remote instance over HTTP.
+
+`lastlight fork <workflow>` (host-local, `src/fork-cli.ts`) copies a built-in
+workflow YAML plus every prompt and skill its phases reference into the
+`instance/` overlay so they can be edited per-deployment (the overlay wins by
+logical name at startup). `lastlight fork agent-context [file]` does the same
+for the persona files (`soul.md` / `rules.md` / `security.md`). The forked
+assets are then surfaced as overrides: `lastlight server status` prints an
+**Overrides** section (each asset tagged *shadows default* or *added*) and the
+dashboard's Config tab gains an **Overrides** pane reading
+`GET /admin/api/overrides` — both backed by the shared
+`enumerateOverlayAssets` enumerator (`src/overlay-assets.ts`).
 
 ## Secrets layout
 

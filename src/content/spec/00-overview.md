@@ -39,8 +39,8 @@ The terms used across this spec, in dependency order.
 - **Workflow** — a YAML file under `workflows/*.yaml`. Declares a
   sequence (or DAG) of phases the runner executes. The runner is
   workflow-agnostic: every behaviour (build, triage, review, explore,
-  health, answer — a question answered directly without a PR) is just
-  another YAML file. Full grammar in
+  health, answer — a question answered directly without a PR — verify,
+  qa-test, demo) is just another YAML file. Full grammar in
   [Workflow Engine](/spec/06-workflow-engine).
 - **Workflow Run** — one execution of a Workflow against a triggering
   event. Persisted in the `workflow_runs` table with `status` of

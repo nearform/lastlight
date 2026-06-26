@@ -206,6 +206,15 @@ docker compose build agent
 docker compose up -d agent</code></pre>
 
 	<p>
+		Or let the CLI do it. With <code>lastlight</code> installed on the host,
+		<code>lastlight server update</code> pulls the core repo + your overlay,
+		rebuilds, recreates the stack, restarts the egress sidecars, and
+		health-checks — the same flow, with live progress. <code>server
+		start\|stop\|restart\|status</code> cover the rest of the lifecycle, and
+		the dashboard shows an "update available" banner when you're behind.
+	</p>
+
+	<p>
 		Updating <strong>your overlay</strong> (anything in <code>instance/</code> — managed
 		repos, config, agent-context) is just a restart, no rebuild:
 	</p>

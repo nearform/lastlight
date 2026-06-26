@@ -126,8 +126,53 @@ lastlight approvals reject  &lt;id&gt; [--reason "..."]
 lastlight stats                                        # totals + per-skill success/fail
 lastlight stats --daily 14                             # cost / token rollups</code></pre>
 
+	<h2>Server lifecycle (host-local)</h2>
+	<p>
+		Unlike the commands above (which target a remote instance over HTTP), these
+		run <strong>on the server</strong>: they shell out to <code>git</code> and
+		<code>docker compose</code> in a working directory (a full repo checkout +
+		the <code>instance/</code> overlay + the compose override symlink). The
+		working dir resolves from <code>--home</code> → <code>LASTLIGHT_HOME</code> →
+		the saved <code>serverHome</code> → <code>~/lastlight</code>.
+	</p>
+	<pre><code>lastlight server setup                # scaffold/adopt the working dir (clone core + overlay)
+lastlight server start [service]      # docker compose up -d
+lastlight server stop  [service]      # stop one service, or the whole stack (down)
+lastlight server restart [service]    # restart a service (default: agent)
+lastlight server update               # pull core + overlay, build, recreate, restart sidecars, health-check
+lastlight server status               # compose state + core/overlay version drift + forked-asset overrides</code></pre>
+	<p>
+		<code>server update</code> is the CLI equivalent of the production
+		<code>deploy.sh</code>; it accepts <code>--no-core</code>,
+		<code>--no-overlay</code>, <code>--no-build</code>, and <code>--yes</code>.
+		The dashboard shows an "update available" banner when the running instance
+		is behind the latest core or overlay.
+	</p>
+
+	<h2>Forking built-in assets</h2>
+	<p>
+		The <code>instance/</code> overlay can override any built-in workflow,
+		prompt, skill, or persona file — it wins by logical name at startup.
+		<code>lastlight fork</code> (host-local) copies the built-ins you want to
+		customise into the overlay so you can edit them per-deployment, instead of
+		hand-copying files.
+	</p>
+	<pre><code>lastlight fork                        # list forkable workflows + agent-context (marks what's forked)
+lastlight fork &lt;workflow&gt;              # copy a workflow YAML + every prompt &amp; skill its phases reference
+lastlight fork agent-context [file]   # copy soul.md / rules.md / security.md (all, or one named file)</code></pre>
+	<p>
+		It writes into the overlay resolved from <code>--home</code> (else the cwd
+		if it's an overlay or checkout, else the server home); pass
+		<code>--force</code> to overwrite assets already present. Forked assets then
+		show up as <strong>overrides</strong> — in <code>lastlight server status</code>
+		and in the dashboard's Config → Overrides pane — each tagged "shadows
+		default" or "added".
+	</p>
+
 	<h2>Setup wizard</h2>
-	<pre><code>lastlight setup                       # interactive first-run setup (before launching a server)</code></pre>
+	<pre><code>lastlight setup                       # first-run wizard — asks: client (login) or server (stack)
+lastlight setup --client              # skip the prompt: configure this machine as a client
+lastlight setup --server              # skip the prompt: run the full server config wizard</code></pre>
 
 	<h2>Global flags</h2>
 
