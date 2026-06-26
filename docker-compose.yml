@@ -11,9 +11,13 @@ services:
       # Single private deployment folder: overlay config.yaml + asset overrides
       # plus a gitignored secrets/ subdir (.env, *.pem). LASTLIGHT_OVERLAY_DIR
       # points the harness at /app/instance; the entrypoint reads secrets from
-      # /app/instance/secrets. This is the only deployment-specific input, and
-      # the harness reads it at startup — edit it and `docker compose restart
-      # agent` to apply, no image rebuild. Built-in assets (config/, workflows/,
+      # /app/instance/secrets. This is the only deployment-specific input, read
+      # at startup — no image rebuild. To APPLY an edit: `config.yaml` and
+      # adding/changing an `.env` value apply on `docker compose restart agent`
+      # (the entrypoint re-sources .env). REMOVING an `.env` value needs a
+      # RECREATE — `docker compose up -d agent` (or `lastlight server start
+      # agent`) — because compose injects env_file vars at container creation
+      # and a restart can't unset them. Built-in assets (config/, workflows/,
       # skills/, agent-context/) stay baked into the image; they're lastlight
       # source and change via a normal rebuild.
       - ./instance:/app/instance:ro

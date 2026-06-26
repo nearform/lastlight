@@ -218,8 +218,13 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   docker-compose stack the deployment folder is **`instance/`** (mounted
   read-only at `/app/instance`), holding `config.yaml` + asset overrides + a
   gitignored `secrets/` subdir (`.env`, `*.pem`). It's never baked into the
-  image — edit it and `docker compose restart agent` to apply, no rebuild. The
-  dashboard `/config` endpoint surfaces Default / Overlay / Merged (non-secret).
+  image (no rebuild needed). Applying an edit: `config.yaml` and
+  adding/changing an `.env` value take effect on `docker compose restart agent`
+  (the entrypoint re-sources `.env`). **Removing** an `.env` value needs a
+  recreate — `docker compose up -d agent` / `lastlight server start agent` —
+  because compose injects `env_file` vars at container *creation* and a restart
+  can't unset them. The dashboard `/config` endpoint surfaces Default / Overlay
+  / Merged (non-secret).
 - **Two execution modes**:
   - **Sandbox** — workflow phases run inside a Docker sandbox
     (`src/sandbox`) with a minted per-run GitHub token. Each phase invokes
@@ -429,7 +434,8 @@ Runtime:
 - `LASTLIGHT_OVERLAY_DIR` — trusted deployment overlay root (docker-compose
   mounts `instance/` here as `/app/instance`). Layered over
   `config/default.yaml` for config + assets; secrets read from its `secrets/`
-  subdir. Read at startup — restart to apply.
+  subdir. Read at startup — restart to apply (but *removing* an `.env` var needs
+  a recreate, `lastlight server start agent`; see the `instance/` note above).
 - `STATE_DIR` — persistent state dir (default `./data`)
 - `DB_PATH` — override SQLite path
 - `LASTLIGHT_HOME` — working directory for the host-local `lastlight server`
@@ -586,7 +592,9 @@ host.** Code changes (anything under `src/`, `workflows/`, `skills/`,
 `agent-context/`, `config/default.yaml`) need the full `deploy.sh` (image
 rebuild). Deployment-only config (the `instance/` overlay) can instead be
 edited + committed to the `lastlight-instance` repo and applied with just
-`docker compose restart agent` — no image rebuild.
+`docker compose restart agent` — no image rebuild. (Caveat: *removing* an
+`.env` var needs `docker compose up -d agent` / `lastlight server start agent`,
+not a restart — env_file vars are injected at container creation.)
 
 **`lastlight server update` is the CLI equivalent of `deploy.sh`.** Installed
 globally and run on the host (as the `lastlight` user, with
@@ -607,7 +615,8 @@ ssh <production-server>
 cd /home/lastlight/lastlight
 docker compose ps                  # service health
 docker compose logs -f agent       # live harness logs
-docker compose restart agent       # restart after an instance/ overlay edit
+docker compose restart agent       # after a config.yaml or .env add/edit
+docker compose up -d agent         # after REMOVING an .env var (recreate)
 ```
 
 ## Sub-folder docs
