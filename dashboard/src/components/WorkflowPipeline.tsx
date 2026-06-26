@@ -4,14 +4,10 @@ import {
   type Node,
   type Edge,
   type ReactFlowInstance,
-  Position,
-  Handle,
-  type NodeProps,
   Background,
   BackgroundVariant,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import clsx from "clsx";
 import type {
   WorkflowRun,
   WorkflowDefinition,
@@ -19,139 +15,27 @@ import type {
   WorkflowRunExecution,
   WorkflowApproval,
 } from "../api";
+import {
+  pipelineNodeTypes,
+  type PhaseStatus,
+  type PipelineNodeData,
+} from "./pipeline-node";
 
-type PhaseStatus = "pending" | "active" | "paused" | "done" | "failed";
+type PhaseNodeData = PipelineNodeData;
 
-interface PhaseNodeData extends Record<string, unknown> {
-  label: string;
-  status: PhaseStatus;
-  timestamp?: string;
-  duration?: number;
-  selected?: boolean;
-  /** "approval" nodes are human-in-the-loop gates, not executed phases. */
-  kind?: "phase" | "approval";
-  /** Pulse the status dot (a pending gate awaiting a decision). */
-  pulse?: boolean;
-}
-
-function formatDuration(secs: number): string {
-  if (secs < 60) return `${Math.round(secs)}s`;
-  const m = Math.floor(secs / 60);
-  const s = Math.round(secs % 60);
-  return `${m}m${s}s`;
-}
-
-function formatTime(ts: string): string {
-  const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-/** Tiny lock glyph for the approval-gate node header. */
-function LockIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-2 h-2">
-      <rect x="5" y="11" width="14" height="9" rx="1.5" />
-      <path d="M8 11V8a4 4 0 0 1 8 0v3" />
-    </svg>
-  );
-}
-
-/** Status → border/background classes, shared by the phase card and the gate diamond. */
-function statusSurface(status: PhaseStatus): string {
-  return clsx({
-    "border-success/60 bg-success/15": status === "done",
-    "border-error/60 bg-error/15": status === "failed",
-    "border-info/60 bg-info/15": status === "active",
-    "border-warning/60 bg-warning/15": status === "paused",
-    "border-base-300 bg-base-300/70": status === "pending",
-  });
-}
-
-const handleClass = "!bg-base-300/60 !border-none !w-1 !h-1";
-
-/**
- * Approval gate — rendered as a diamond (the classic flowchart decision shape)
- * so it reads as a human-in-the-loop checkpoint, not an executed phase. The
- * gate name + time sit in a caption beneath the diamond; the edge handles hang
- * off the diamond itself so the pipeline line passes through its centre.
- */
-function ApprovalDiamondNode({ data }: { data: PhaseNodeData }) {
-  const diamondClass = clsx(
-    "w-9 h-9 rotate-45 rounded-[4px] border-2 shadow-md flex items-center justify-center transition-shadow",
-    statusSurface(data.status),
-    {
-      "animate-pulse": data.pulse,
-      "ring-2 ring-primary ring-offset-2 ring-offset-base-100": data.selected,
-    },
-  );
-  return (
-    <div className="flex flex-col items-center gap-1 cursor-pointer">
-      <div className="relative flex items-center justify-center w-9 h-9">
-        <Handle type="target" position={Position.Left} className={handleClass} />
-        <div className={diamondClass}>
-          {/* counter-rotate the glyph so the lock sits upright in the diamond */}
-          <span className="-rotate-45 text-base-content/55">
-            <LockIcon />
-          </span>
-        </div>
-        <Handle type="source" position={Position.Right} className={handleClass} />
-      </div>
-      <div className="flex flex-col items-center leading-tight">
-        <span className="text-[9px] font-semibold uppercase tracking-wider text-base-content/40">
-          approval
-        </span>
-        <span className="text-xs font-medium font-mono text-base-content/80">{data.label}</span>
-        {data.timestamp && (
-          <span className="text-2xs text-base-content/40 font-mono">{formatTime(data.timestamp)}</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function PhaseFlowNode({ data }: NodeProps<Node<PhaseNodeData>>) {
-  if (data.kind === "approval") return <ApprovalDiamondNode data={data} />;
-
-  const dotClass = clsx("w-2.5 h-2.5 rounded-full shrink-0", {
-    "bg-success": data.status === "done",
-    "bg-error": data.status === "failed",
-    "bg-info animate-pulse": data.status === "active",
-    "bg-warning": data.status === "paused",
-    "bg-base-300": data.status === "pending",
-  });
-
-  const containerClass = clsx(
-    "flex flex-col items-center gap-1 px-3 py-2 rounded-lg border shadow-md min-w-[80px] text-center cursor-pointer transition-shadow",
-    statusSurface(data.status),
-    { "ring-2 ring-primary ring-offset-1 ring-offset-base-100": data.selected },
-  );
-
-  return (
-    <div className={containerClass}>
-      <Handle type="target" position={Position.Left} className={handleClass} />
-      <div className="flex items-center gap-1.5">
-        <span className={dotClass} />
-        <span className="text-xs font-medium text-base-content/80">{data.label}</span>
-      </div>
-      {data.timestamp && (
-        <span className="text-2xs text-base-content/40 font-mono">{formatTime(data.timestamp)}</span>
-      )}
-      {data.duration !== undefined && (
-        <span className="text-2xs text-base-content/40 font-mono">{formatDuration(data.duration)}</span>
-      )}
-      <Handle type="source" position={Position.Right} className={handleClass} />
-    </div>
-  );
-}
-
-const nodeTypes = { phase: PhaseFlowNode };
+const nodeTypes = pipelineNodeTypes;
 
 const NODE_WIDTH = 110;
 const NODE_GAP = 40;
-// Approximate rendered height of a PhaseFlowNode (label + timestamp + duration
-// + padding). Used to stack loop iterations vertically under their parent.
+// Approximate rendered height of a stacked node (label + timestamp + duration
+// + padding). Sets the vertical pitch between loop iterations + their gates.
 const NODE_ROW_HEIGHT = 78;
 const ROW_GAP = 20;
+// Extra one-time gap below the loop parent only. The parent card is taller than
+// a normal node (wrapped 2-line label + timestamp + duration), so the first
+// iteration needs to start lower to clear it — without spreading the rest of
+// the stack apart.
+const LOOP_PARENT_EXTRA = 34;
 
 /**
  * Map a dynamic phase name (e.g. "reviewer_fix_1", "reviewer_recheck_1") back
@@ -298,6 +182,29 @@ export function WorkflowPipeline({
         status = run.status === "paused" ? "paused" : "active";
       }
 
+      // A declared loop phase (e.g. `socratic`) has no execution of its own —
+      // the work happened in its dynamic iterations. Derive its status + timing
+      // from them so it doesn't render as a perpetually "pending" parent.
+      if (status === "pending") {
+        const kids = childrenByParent.get(name) ?? [];
+        const kidExecs = kids
+          .map((k) => execByPhase.get(k))
+          .filter((e): e is WorkflowRunExecution => !!e);
+        if (kidExecs.length > 0) {
+          const lastExec = execByPhase.get(kids[kids.length - 1]!);
+          if (kidExecs.some((kx) => kx.success === undefined)) status = "active";
+          else if (lastExec?.success === true) status = "done";
+          else if (lastExec?.success === false) status = "failed";
+          // Span the loop: earliest iteration start + summed iteration durations.
+          timestamp = kidExecs.reduce(
+            (min, kx) => (kx.startedAt < min ? kx.startedAt : min),
+            kidExecs[0]!.startedAt,
+          );
+          const totalMs = kidExecs.reduce((sum, kx) => sum + (kx.durationMs ?? 0), 0);
+          if (totalMs > 0) duration = totalMs / 1000;
+        }
+      }
+
       return {
         id: name,
         type: "phase",
@@ -310,14 +217,14 @@ export function WorkflowPipeline({
     // An approval gate, rendered in place of the generic `waiting_approval`
     // history marker. Colored by approval status; a pending gate pulses to
     // signal it's blocking the run.
-    const buildApprovalNode = (a: WorkflowApproval, x: number): Node<PhaseNodeData> => {
+    const buildApprovalNode = (a: WorkflowApproval, x: number, y = 0): Node<PhaseNodeData> => {
       const id = `approval:${a.id}`;
       const status: PhaseStatus =
         a.status === "approved" ? "done" : a.status === "rejected" ? "failed" : "paused";
       return {
         id,
         type: "phase",
-        position: { x, y: 0 },
+        position: { x, y },
         data: {
           label: a.gate,
           status,
@@ -338,6 +245,8 @@ export function WorkflowPipeline({
         id: `${prev}->${target}`,
         source: prev,
         target,
+        sourceHandle: "right",
+        targetHandle: "left",
         style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
         animated: false,
       });
@@ -355,8 +264,24 @@ export function WorkflowPipeline({
     // tracks the highest matching index, not a running count. So a
     // `post_architect` gate lands right after Architect, not after PR.
     const approvalRows = approvals ?? [];
-    const approvalsAfterIdx = new Map<number, WorkflowApproval[]>();
+    // An approval whose gate names a dynamic loop iteration (e.g. the interactive
+    // generic_loop gate `socratic_iter_2`) belongs in that iteration's vertical
+    // stack, not the main horizontal row. Split those out; the rest slot into
+    // the top row by chronological position.
+    const dynamicSet = new Set(dynamicNames);
+    const loopApprovalsByIter = new Map<string, WorkflowApproval[]>();
+    const mainRowApprovals: WorkflowApproval[] = [];
     for (const a of approvalRows) {
+      if (dynamicSet.has(a.gate)) {
+        const arr = loopApprovalsByIter.get(a.gate) ?? [];
+        arr.push(a);
+        loopApprovalsByIter.set(a.gate, arr);
+      } else {
+        mainRowApprovals.push(a);
+      }
+    }
+    const approvalsAfterIdx = new Map<number, WorkflowApproval[]>();
+    for (const a of mainRowApprovals) {
       let afterIdx = -1;
       declaredNames.forEach((name, idx) => {
         const s = startOf(name);
@@ -403,23 +328,43 @@ export function WorkflowPipeline({
       prevId = name;
 
       const children = childrenByParent.get(name) ?? [];
-      if (children.length > maxColumnDepth) maxColumnDepth = children.length;
+      // Weave each iteration's interactive gate in right after the iteration it
+      // belongs to, so the vertical stack reads run → gate → run → gate → run.
+      type StackItem =
+        | { kind: "phase"; name: string }
+        | { kind: "approval"; a: WorkflowApproval };
+      const stackItems: StackItem[] = [];
+      for (const childName of children) {
+        stackItems.push({ kind: "phase", name: childName });
+        for (const a of loopApprovalsByIter.get(childName) ?? []) {
+          stackItems.push({ kind: "approval", a });
+        }
+      }
+      if (stackItems.length > maxColumnDepth) maxColumnDepth = stackItems.length;
       let childPrev = name;
-      children.forEach((childName, childIdx) => {
-        const y = (childIdx + 1) * (NODE_ROW_HEIGHT + ROW_GAP);
-        reactFlowNodes.push(buildNode(childName, x, y));
+      stackItems.forEach((item, idx) => {
+        const y = (idx + 1) * (NODE_ROW_HEIGHT + ROW_GAP) + LOOP_PARENT_EXTRA;
+        const childId = item.kind === "phase" ? item.name : `approval:${item.a.id}`;
+        reactFlowNodes.push(
+          item.kind === "phase" ? buildNode(item.name, x, y) : buildApprovalNode(item.a, x, y),
+        );
         reactFlowEdges.push({
-          id: `${childPrev}->${childName}`,
+          id: `${childPrev}->${childId}`,
           source: childPrev,
-          target: childName,
+          target: childId,
+          sourceHandle: "bottom",
+          targetHandle: "top",
           style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
           animated: false,
         });
-        childPrev = childName;
+        childPrev = childId;
       });
     });
 
-    const canvasHeight = (maxColumnDepth + 1) * (NODE_ROW_HEIGHT + ROW_GAP) + 20;
+    const canvasHeight =
+      maxColumnDepth > 0
+        ? (maxColumnDepth + 1) * (NODE_ROW_HEIGHT + ROW_GAP) + LOOP_PARENT_EXTRA + 20
+        : (NODE_ROW_HEIGHT + ROW_GAP) + 20;
 
     return { nodes: reactFlowNodes, edges: reactFlowEdges, canvasHeight };
   }, [definition, run, executions, approvals, selectedPhase]);

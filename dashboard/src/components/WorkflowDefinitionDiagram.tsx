@@ -4,76 +4,39 @@ import {
   type Node,
   type Edge,
   type ReactFlowInstance,
-  Position,
-  Handle,
-  type NodeProps,
   Background,
   BackgroundVariant,
-  Controls,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import clsx from "clsx";
 import type { WorkflowFullDefinition, WorkflowFullPhase } from "../api";
+import {
+  pipelineNodeTypes,
+  type PipelineNodeData,
+  type PhaseTag,
+} from "./pipeline-node";
 
-interface PhaseNodeData extends Record<string, unknown> {
-  phase: WorkflowFullPhase;
-  selected?: boolean;
-}
+type PhaseNodeData = PipelineNodeData;
+
+const nodeTypes = pipelineNodeTypes;
 
 /**
- * Phase node for the read-only definition diagram. Shows the phase label,
- * a small badge row (skill / prompt / loop / approval gate), and visually
- * differentiates `context` phases (no agent run).
+ * Derive the metadata badges for a definition phase — the run-style card shows
+ * these in place of the timestamp/duration a live run would carry.
  */
-function DefPhaseNode({ data }: NodeProps<Node<PhaseNodeData>>) {
-  const phase = data.phase;
-  const isContext = phase.type === "context";
-  const isSkill = !!phase.skill;
-  const isPrompt = !!phase.prompt;
-  const hasLoop = !!phase.loop || !!phase.generic_loop;
+function phaseTags(phase: WorkflowFullPhase): PhaseTag[] {
+  const tags: PhaseTag[] = [];
+  if (phase.type === "context") tags.push({ label: "context", tone: "ghost" });
+  if (phase.skill) tags.push({ label: `skill: ${phase.skill}`, tone: "info", mono: true });
+  if (phase.prompt) tags.push({ label: "prompt", tone: "info", mono: true });
+  if (phase.loop || phase.generic_loop) tags.push({ label: "loop", tone: "warning" });
   const gate = phase.approval_gate ?? phase.loop?.approval_gate;
-
-  const containerClass = clsx(
-    "flex flex-col items-stretch gap-1.5 px-3 py-2 rounded-lg border shadow-md min-w-[140px] text-left cursor-pointer transition-shadow",
-    {
-      "border-base-300 bg-base-300/70": !isContext,
-      "border-base-300/60 bg-base-200 border-dashed": isContext,
-      "ring-2 ring-primary ring-offset-1 ring-offset-base-100": data.selected,
-    },
-  );
-
-  return (
-    <div className={containerClass}>
-      <Handle type="target" position={Position.Left} className="!bg-base-300 !border-none !w-1.5 !h-1.5" />
-      <div className="flex items-center gap-1.5">
-        <span className="text-xs font-semibold text-base-content/90 truncate">
-          {phase.label ?? phase.name}
-        </span>
-      </div>
-      {phase.name !== (phase.label ?? phase.name) && (
-        <span className="text-2xs text-base-content/50 font-mono truncate">{phase.name}</span>
-      )}
-      <div className="flex flex-wrap gap-1">
-        {isContext && <span className="badge badge-ghost badge-xs">context</span>}
-        {isSkill && (
-          <span className="badge badge-info badge-xs font-mono normal-case">skill: {phase.skill}</span>
-        )}
-        {isPrompt && (
-          <span className="badge badge-info badge-xs font-mono normal-case">prompt</span>
-        )}
-        {hasLoop && <span className="badge badge-warning badge-xs">loop</span>}
-        {gate && <span className="badge badge-error badge-xs">gate</span>}
-      </div>
-      <Handle type="source" position={Position.Right} className="!bg-base-300 !border-none !w-1.5 !h-1.5" />
-    </div>
-  );
+  if (gate) tags.push({ label: "gate", tone: "error" });
+  return tags;
 }
 
-const nodeTypes = { defPhase: DefPhaseNode };
-
-const NODE_WIDTH = 180;
-const NODE_GAP = 60;
-const ROW_HEIGHT = 110;
+const NODE_WIDTH = 150;
+const NODE_GAP = 50;
+const ROW_HEIGHT = 120;
 
 /**
  * Compute layered positions for a DAG. Each phase's column is `1 + max(column
@@ -137,12 +100,22 @@ export function WorkflowDefinitionDiagram({
   const nodes: Node<PhaseNodeData>[] = useMemo(() => {
     return definition.phases.map((phase) => {
       const pos = positions.get(phase.name) ?? { x: 0, y: 0 };
+      const label = phase.label ?? phase.name;
       return {
         id: phase.name,
-        type: "defPhase",
+        type: "phase",
         position: pos,
-        data: { phase, selected: phase.name === selectedPhase },
+        data: {
+          label,
+          status: "pending" as const,
+          accent: "brand" as const,
+          subtitle: phase.name !== label ? phase.name : undefined,
+          tags: phaseTags(phase),
+          loops: !!(phase.loop || phase.generic_loop),
+          selected: phase.name === selectedPhase,
+        },
         draggable: false,
+        style: { width: NODE_WIDTH },
       };
     });
   }, [definition.phases, positions, selectedPhase]);
@@ -156,9 +129,10 @@ export function WorkflowDefinitionDiagram({
             id: `${dep}->${phase.name}`,
             source: dep,
             target: phase.name,
-            type: "smoothstep",
+            sourceHandle: "right",
+            targetHandle: "left",
             animated: false,
-            style: { stroke: "rgb(var(--bc) / 0.25)", strokeWidth: 1.5 },
+            style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
           });
         }
       }
@@ -170,9 +144,10 @@ export function WorkflowDefinitionDiagram({
           id: `${prev}->${cur}`,
           source: prev,
           target: cur,
-          type: "smoothstep",
+          sourceHandle: "right",
+          targetHandle: "left",
           animated: false,
-          style: { stroke: "rgb(var(--bc) / 0.25)", strokeWidth: 1.5 },
+          style: { stroke: "var(--color-base-300, #ccc)", strokeWidth: 1.5 },
         });
       }
     }
@@ -219,24 +194,29 @@ export function WorkflowDefinitionDiagram({
   }, []);
 
   return (
-    <div ref={wrapperRef} style={{ height }} className="rounded border border-base-300 bg-base-200/30">
+    <div ref={wrapperRef} style={{ width: "100%", height }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
         nodesDraggable={false}
         nodesConnectable={false}
-        elementsSelectable={true}
+        elementsSelectable={false}
         fitView
-        fitViewOptions={{ padding: 0.2 }}
+        fitViewOptions={{ padding: 0.2, minZoom: 0.4, maxZoom: 1 }}
+        minZoom={0.3}
+        maxZoom={1.5}
+        panOnDrag
+        zoomOnScroll
+        zoomOnPinch
+        zoomOnDoubleClick={false}
         proOptions={{ hideAttribution: true }}
         onInit={(instance) => {
           flowRef.current = instance;
         }}
         onNodeClick={(_, node) => onPhaseClick(node.id)}
       >
-        <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="rgb(var(--bc) / 0.08)" />
-        <Controls showInteractive={false} />
+        <Background variant={BackgroundVariant.Dots} gap={16} size={0.5} color="var(--color-base-300, #ccc)" />
       </ReactFlow>
     </div>
   );
