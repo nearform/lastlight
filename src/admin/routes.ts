@@ -32,6 +32,7 @@ import {
   getWorkflowTriggerKinds,
 } from "../workflows/triggers.js";
 import { getManagedRepos } from "../managed-repos.js";
+import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
 import type { PublicConfigBundle, BuildAssetsLocation } from "../config.js";
 
@@ -657,6 +658,17 @@ export function createAdminRoutes(
 
   app.get("/server/containers", async (c) => {
     return c.json({ containers: await listServerContainers() });
+  });
+
+  // Version + drift (core/overlay) for the dashboard "update available" banner.
+  // Best-effort: an unreachable remote yields latest=null (behind=false), never
+  // a false positive. The authoritative view is `lastlight server status`.
+  app.get("/server/info", async (c) => {
+    try {
+      return c.json(await getServerVersion());
+    } catch (err) {
+      return c.json({ error: `version lookup failed: ${(err as Error).message}` }, 500);
+    }
   });
 
   app.get("/server/logs", async (c) => {

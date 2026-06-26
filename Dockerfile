@@ -1,9 +1,10 @@
-# Test-only image for the lastlight harness.
+# Agent image for the lastlight harness.
 #
-# Production runs lastlight natively under systemd on a KVM-capable Linux
-# host (see deploy/native/). This Dockerfile is kept for local prod-like
-# smoke testing and for the LASTLIGHT_SANDBOX=docker fallback path; it is
-# not the deployed artifact.
+# This IS the deployed artifact: production runs the docker-compose stack and
+# the `agent` service builds from this Dockerfile (see docker-compose.yml and
+# CLAUDE.md's Deployment section). The aspirational native/systemd model in
+# deploy/native/ is inactive. The same image is also used for local prod-like
+# smoke testing and the LASTLIGHT_SANDBOX=docker fallback path.
 FROM node:22-slim
 
 # System deps: git, ripgrep, docker CLI (for the docker-sandbox fallback
@@ -70,6 +71,17 @@ ENV STATE_DIR=/app/data
 ENV LASTLIGHT_SESSIONS_DIR=/app/data/agent-sessions
 ENV HOME=/home/lastlight
 ENV NODE_ENV=production
+
+# Build-stamp the core git SHA + date so the running harness knows its version
+# (surfaced by GET /admin/api/server/info for the dashboard drift banner).
+# `lastlight server update` passes --build-arg GIT_SHA=$(git rev-parse HEAD);
+# absent the arg these stay empty → "unknown". Declared late so changing the
+# SHA doesn't bust the source/build cache layers above.
+ARG GIT_SHA=""
+ARG BUILD_DATE=""
+ENV LASTLIGHT_GIT_SHA=$GIT_SHA
+ENV LASTLIGHT_BUILD_DATE=$BUILD_DATE
+
 EXPOSE 8644
 
 ENTRYPOINT ["/app/deploy/entrypoint.sh"]

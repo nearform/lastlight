@@ -270,6 +270,19 @@ export interface Health {
   stateDir: string;
 }
 
+export interface RepoVersion {
+  current: string | null;
+  latest: string | null;
+  behind: boolean;
+}
+
+export interface ServerInfo {
+  core: RepoVersion;
+  overlay: RepoVersion;
+  packageVersion: string | null;
+  buildDate: string | null;
+}
+
 export interface WorkflowApproval {
   id: string;
   workflowRunId: string;
@@ -406,6 +419,7 @@ export const api = {
       body: JSON.stringify({ password }),
     }),
   health: () => req<Health>("/health"),
+  serverInfo: () => req<ServerInfo>("/server/info"),
   sessions: (opts: { limit?: number } = {}) => {
     const qs = new URLSearchParams();
     if (opts.limit) qs.set("limit", String(opts.limit));

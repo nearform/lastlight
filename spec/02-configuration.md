@@ -237,6 +237,8 @@ OpenRouter) are forwarded unconditionally.
 | `REVIEW_POSTS_CHECK` | post a Check Run on PR head SHA after pr-review | `false` |
 | `LASTLIGHT_GIT_CREDENTIALS` | inline credentials for private repos without App access | unset |
 | `LASTLIGHT_WRITE_GLOBAL_GIT` | when `"1"`, configure git globally not just per-repo | `0` |
+| `LASTLIGHT_GIT_SHA` | core git SHA baked into the image (Dockerfile `ARG`); surfaced by `GET /admin/api/server/info` for the dashboard drift banner | empty → "unknown" |
+| `LASTLIGHT_BUILD_DATE` | build date baked alongside `LASTLIGHT_GIT_SHA` | empty |
 
 ### CLI client
 
@@ -246,6 +248,15 @@ The `npm run cli` thin client (`src/cli.ts`) reads its own env:
 |---|---|---|
 | `LASTLIGHT_URL` | server URL | `http://localhost:8644` |
 | `LASTLIGHT_TOKEN` | auth token (checked against `ADMIN_PASSWORD`) | empty |
+| `LASTLIGHT_HOME` | working dir for the host-local `lastlight server` lifecycle commands (checkout + `instance/` overlay + override symlink) | `~/lastlight` (or saved `serverHome`) |
+
+The CLI is also the host control plane: `lastlight server
+setup\|start\|stop\|restart\|update\|status` shell out to `git` + `docker
+compose` in `LASTLIGHT_HOME` (resolved `--home` → env → `serverHome` in
+`~/.lastlight/config.json` → `~/lastlight`). `server update` reproduces the
+production `deploy.sh` flow (pull core + overlay → build → `up -d
+--remove-orphans` → restart egress sidecars → health-check). These run on the
+server, unlike the rest of the CLI which targets a remote instance over HTTP.
 
 ## Secrets layout
 

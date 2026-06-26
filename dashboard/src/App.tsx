@@ -12,6 +12,7 @@ import { WorkflowDefinitions } from "./components/WorkflowDefinitions";
 import { HomePage } from "./components/HomePage";
 import { CronsList } from "./components/CronsList";
 import { ConfigPage } from "./components/ConfigPage";
+import { UpdateBanner } from "./components/UpdateBanner";
 // Lazy — the Artifacts editor pulls in MDXEditor (Lexical + CodeMirror, ~1 MB),
 // which would otherwise triple the initial bundle. Code-split so it loads only
 // when the Artifacts tab is opened.
@@ -261,6 +262,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         streamStatus={status}
         onLogout={onLogout}
       />
+      <UpdateBanner />
       <div className="flex flex-1 overflow-hidden">
         <nav className="flex flex-col shrink-0 w-14 border-r border-base-300 bg-base-200/60 py-2 gap-1">
           {(

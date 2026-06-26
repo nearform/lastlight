@@ -35,7 +35,13 @@ import { renderTimeline, renderMessage, renderRaw } from "./cli-timeline.js";
 
 // ── arg parsing ────────────────────────────────────────────────────────────
 
-const BOOLEAN_FLAGS = new Set(["json", "follow", "f", "no-browser", "password", "help", "h", "full"]);
+const BOOLEAN_FLAGS = new Set([
+  "json", "follow", "f", "no-browser", "password", "help", "h", "full",
+  // `server` lifecycle flags
+  "no-core", "no-overlay", "no-build", "yes",
+  // `setup` mode selectors (skip the interactive client/server prompt)
+  "client", "server",
+]);
 
 interface ParsedArgs {
   positionals: string[];
@@ -191,8 +197,19 @@ ${chalk.bold("Debug")} (read the running instance instead of SSH)
   lastlight approvals reject <id> [--reason "..."]
   lastlight stats [--daily n | --hourly n]
 
+${chalk.bold("Server")} (host-local — run on the server; manages the docker stack)
+  lastlight server setup             Scaffold/adopt the working dir (checkout + overlay)
+  lastlight server start [service]   docker compose up -d
+  lastlight server stop [service]    Stop one service, or the whole stack (down)
+  lastlight server restart [service] Restart a service (default: agent)
+  lastlight server update            Pull core + overlay, build, recreate, restart sidecars
+                                     [--no-core] [--no-overlay] [--no-build] [--yes]
+  lastlight server status            Compose state + core/overlay version drift
+  ${chalk.dim("Working dir resolves from --home, then LASTLIGHT_HOME, then ~/.lastlight, then ~/lastlight.")}
+
 ${chalk.bold("Other")}
-  lastlight setup                    Interactive first-run setup wizard
+  lastlight setup                    First-run wizard — asks client (login) or server (stack)
+                                     [--client | --server to skip the prompt]
 
 ${chalk.dim("Global flags: --json (machine output), --url <u>, --token <t>.")}
 ${chalk.dim("Target resolves from --url/--token, then LASTLIGHT_URL/LASTLIGHT_TOKEN, then ~/.lastlight, then " + DEFAULT_URL + ".")}
@@ -685,7 +702,40 @@ async function cmdServer(): Promise<void> {
     for (const line of data.lines as string[]) console.log(line);
     return;
   }
-  die("Usage: lastlight server list|logs [service|container] [--tail n] [--since dur] [--follow]");
+
+  // ── host-local lifecycle (run on the server, not over HTTP) ──────────────
+  // setup | start | stop | restart | update | status operate on the working
+  // directory (checkout + overlay) via git + docker compose. See cli-server.ts.
+  if (sub === "setup" || sub === "start" || sub === "stop" || sub === "restart" || sub === "update" || sub === "status") {
+    const home = typeof flags.home === "string" ? flags.home : undefined;
+    const yes = flags.yes === true;
+    const service = positionals[2];
+    const srv = await import("./cli-server.js");
+    switch (sub) {
+      case "setup":   return srv.serverSetup({ home, yes });
+      case "start":   return srv.serverStart(service, { home });
+      case "stop":    return srv.serverStop(service, { home });
+      case "restart": return srv.serverRestart(service, { home });
+      case "update":  return srv.serverUpdate({
+        home, yes,
+        core: !flags["no-core"],
+        overlay: !flags["no-overlay"],
+        build: !flags["no-build"],
+      });
+      case "status": {
+        const res = await srv.serverStatus({ home });
+        if (JSON_OUT) out("", res);
+        return;
+      }
+    }
+  }
+
+  die(
+    "Usage:\n" +
+      "  lastlight server list|logs [service|container] [--tail n] [--since dur] [--follow]\n" +
+      "  lastlight server setup|start|stop|restart|update|status [service] [--home dir]\n" +
+      "    update flags: --no-core --no-overlay --no-build --yes",
+  );
 }
 
 // ── chat ──────────────────────────────────────────────────────────────────────
@@ -805,6 +855,39 @@ async function cmdDefaultRef(ref: string): Promise<void> {
   out(`Accepted: ${JSON.stringify(data)}`, data);
 }
 
+// ── setup (client vs server) ───────────────────────────────────────────────
+
+/**
+ * `lastlight setup` — onboarding. First choice: is this machine a **client**
+ * (the CLI just talks to a remote instance → login) or a **server** (it runs
+ * the agent + docker stack → the full config wizard)? `--client` / `--server`
+ * skip the prompt for non-interactive use.
+ */
+async function cmdSetup(): Promise<void> {
+  let mode: "client" | "server" | undefined =
+    flags.client === true ? "client" : flags.server === true ? "server" : undefined;
+  if (!mode) {
+    if (!process.stdin.isTTY) {
+      die("setup must run interactively, or pass --client / --server.");
+    }
+    const choice = await p.select({
+      message: "What are you setting up on this machine?",
+      options: [
+        { value: "client", label: "Client", hint: "this CLI talks to a remote Last Light instance" },
+        { value: "server", label: "Server", hint: "this machine runs the agent + docker stack" },
+      ],
+    });
+    if (p.isCancel(choice)) { p.cancel("Cancelled."); process.exit(1); }
+    mode = choice as "client" | "server";
+  }
+  if (mode === "client") return cmdLogin();
+  // Server: the full first-run config wizard (secrets, keys, managed repos).
+  // For a fresh host with no checkout yet, `lastlight server setup` clones the
+  // working dir first; `server start|update|status` then manage the stack.
+  const { runSetup } = await import("./setup.js");
+  await runSetup();
+}
+
 // ── dispatch ─────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -816,11 +899,7 @@ async function main() {
   }
 
   switch (cmd) {
-    case "setup": {
-      const { runSetup } = await import("./setup.js");
-      await runSetup();
-      return;
-    }
+    case "setup": return cmdSetup();
     case "login": return cmdLogin();
     case "logout": clearConfig(); console.log(chalk.green("✓ Logged out (cleared ~/.lastlight/config.json)")); return;
     case "status":

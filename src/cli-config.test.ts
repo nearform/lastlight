@@ -7,6 +7,9 @@ import {
   saveConfig,
   clearConfig,
   resolveTarget,
+  saveServerHome,
+  resolveServerHome,
+  defaultServerHome,
   configPath,
   DEFAULT_URL,
 } from "./cli-config.js";
@@ -70,6 +73,24 @@ describe("cli-config", () => {
     const t = resolveTarget({ url: "https://flag", token: "flag-tok" });
     expect(t.url).toBe("https://flag");
     expect(t.token).toBe("flag-tok");
+  });
+
+  it("saveServerHome persists without clobbering credentials", () => {
+    saveConfig({ url: "https://ll.example.com", token: "tok-123" });
+    saveServerHome("/home/lastlight/lastlight");
+    const cfg = loadConfig();
+    expect(cfg?.token).toBe("tok-123"); // creds preserved
+    expect(cfg?.serverHome).toBe("/home/lastlight/lastlight");
+  });
+
+  it("resolveServerHome: --home > LASTLIGHT_HOME > saved > default", () => {
+    expect(resolveServerHome()).toBe(defaultServerHome());
+    saveServerHome("/saved/home");
+    expect(resolveServerHome()).toBe("/saved/home");
+    process.env.LASTLIGHT_HOME = "/env/home";
+    expect(resolveServerHome()).toBe("/env/home");
+    expect(resolveServerHome("/flag/home")).toBe("/flag/home");
+    delete process.env.LASTLIGHT_HOME;
   });
 
   it("falls back to the default URL and trims trailing slashes", () => {

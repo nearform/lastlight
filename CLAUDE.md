@@ -374,7 +374,17 @@ lastlight server list                  # the lastlight-* docker containers
 lastlight server logs [svc|container] [--tail n] [--since 10m] [--follow]
 lastlight approvals list|approve <id>|reject <id> [--reason "..."]
 lastlight stats [--daily n | --hourly n]
-lastlight setup                        # first-run setup wizard
+lastlight setup                        # first-run wizard (asks: client | server)
+
+# Server lifecycle (HOST-LOCAL — run on the server, not over HTTP). Operate on a
+# working directory (full repo checkout + instance/ overlay + override symlink)
+# resolved from --home → LASTLIGHT_HOME → ~/.lastlight serverHome → ~/lastlight.
+lastlight server setup                 # scaffold/adopt the working dir (clone core + overlay)
+lastlight server start|stop|restart [service]   # docker compose up -d / stop|down / restart
+lastlight server update                # deploy.sh-equivalent: pull core+overlay, build,
+                                        # up -d --remove-orphans, restart sidecars, health-check
+                                        # [--no-core --no-overlay --no-build --yes]
+lastlight server status                # compose ps + core/overlay version drift
 
 # Local dev with Docker sandbox isolation
 ./scripts/dev-local.sh                 # builds opencode.json + secrets
@@ -422,6 +432,16 @@ Runtime:
   subdir. Read at startup — restart to apply.
 - `STATE_DIR` — persistent state dir (default `./data`)
 - `DB_PATH` — override SQLite path
+- `LASTLIGHT_HOME` — working directory for the host-local `lastlight server`
+  lifecycle commands (start/stop/restart/update/status): a full repo checkout +
+  `instance/` overlay + `docker-compose.override.yml` symlink (the docker build
+  context). Resolution: `--home` flag → this env → `serverHome` in
+  `~/.lastlight/config.json` (written by `lastlight server setup`) → `~/lastlight`.
+  CLI-side only — the harness itself doesn't read it.
+- `LASTLIGHT_GIT_SHA` / `LASTLIGHT_BUILD_DATE` — core git SHA + build date baked
+  into the agent image (Dockerfile `ARG`s). `lastlight server update` passes
+  `--build-arg GIT_SHA=$(git rev-parse HEAD)`; surfaced by
+  `GET /admin/api/server/info` for the dashboard drift banner. Empty → "unknown".
 - `LASTLIGHT_BUILD_ASSETS` — `repo` (default) | `server`. In `server` mode the
   per-phase build handoff docs (`architect-plan.md`, `status.md`,
   `executor-summary.md`, `reviewer-verdict.md`, …) are externalized to the
@@ -564,6 +584,18 @@ host.** Code changes (anything under `src/`, `workflows/`, `skills/`,
 rebuild). Deployment-only config (the `instance/` overlay) can instead be
 edited + committed to the `lastlight-instance` repo and applied with just
 `docker compose restart agent` — no image rebuild.
+
+**`lastlight server update` is the CLI equivalent of `deploy.sh`.** Installed
+globally and run on the host (as the `lastlight` user, with
+`LASTLIGHT_HOME=/home/lastlight/lastlight`), it reproduces the same flow — pull
+core + overlay, `docker compose build agent sandbox` (stamping `GIT_SHA`), `up
+-d --remove-orphans`, restart the egress sidecars, health-check — with live
+progress, plus `server start|stop|restart|status` for the rest of the
+lifecycle. The CLI is the control plane (npm-versioned, separate from the
+agent image it builds), so it survives the agent container recreating itself.
+`server status` and the dashboard's drift banner (`GET /server/info`) report
+when core/overlay are behind. `deploy.sh` remains the canonical reference and
+fallback.
 
 ### Operate / debug
 
