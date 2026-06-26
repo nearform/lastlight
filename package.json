@@ -36,9 +36,9 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "build": "tsc",
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
     "build:dashboard": "npm run build -w dashboard",
-    "build:all": "tsc && npm run build -w dashboard",
+    "build:all": "npm run build && npm run build -w dashboard",
     "start": "node dist/index.js",
     "dev": "concurrently -n server,dash -c blue,magenta \"bash scripts/dev-local.sh\" \"npm run dev -w dashboard\"",
     "dev:server": "bash scripts/dev-local.sh",
