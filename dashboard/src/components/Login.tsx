@@ -5,6 +5,9 @@ interface Props {
   onAuthed: () => void;
   slackOAuth?: boolean;
   githubOAuth?: boolean;
+  /** Whether password login is available (ADMIN_PASSWORD set). When false, only
+   *  the OAuth buttons are shown — no dead password box for an OAuth-only gate. */
+  passwordLogin?: boolean;
   initialErrorCode?: string | null;
 }
 
@@ -28,7 +31,7 @@ function oauthErrorMessage(code: string): string {
   }
 }
 
-export function Login({ onAuthed, slackOAuth, githubOAuth, initialErrorCode }: Props) {
+export function Login({ onAuthed, slackOAuth, githubOAuth, passwordLogin = true, initialErrorCode }: Props) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(
     initialErrorCode ? oauthErrorMessage(initialErrorCode) : null,
@@ -99,27 +102,29 @@ export function Login({ onAuthed, slackOAuth, githubOAuth, initialErrorCode }: P
             </button>
           )}
 
-          {(slackOAuth || githubOAuth) && (
+          {passwordLogin && (slackOAuth || githubOAuth) && (
             <div className="divider text-xs text-base-content/40 my-0">or</div>
           )}
 
-          <form onSubmit={submit} className="flex flex-col gap-4">
-            <input
-              type="password"
-              autoFocus
-              className="input input-bordered input-sm w-full"
-              placeholder="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-            <button
-              type="submit"
-              className="btn btn-primary btn-sm"
-              disabled={busy || !password}
-            >
-              {busy ? "..." : "Sign in"}
-            </button>
-          </form>
+          {passwordLogin && (
+            <form onSubmit={submit} className="flex flex-col gap-4">
+              <input
+                type="password"
+                autoFocus
+                className="input input-bordered input-sm w-full"
+                placeholder="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="btn btn-primary btn-sm"
+                disabled={busy || !password}
+              >
+                {busy ? "..." : "Sign in"}
+              </button>
+            </form>
+          )}
         </div>
       </div>
     </div>

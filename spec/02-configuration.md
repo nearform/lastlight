@@ -207,12 +207,22 @@ appears in the map. Missing names are *implicitly disabled* — there is no
 
 | Var | Purpose | Default |
 |---|---|---|
-| `ADMIN_PASSWORD` | gate dashboard login | empty (no auth) |
+| `ADMIN_PASSWORD` | enable password login | empty |
 | `ADMIN_SECRET` | HMAC secret for session cookies | `lastlight-dev-secret` |
 | `PUBLIC_URL` | absolute base URL for outbound links | derived from `DOMAIN` or unset |
 | `DOMAIN` | TLS domain, used to derive `PUBLIC_URL` as `https://<DOMAIN>` | unset |
 
 `ADMIN_SECRET`'s default is unsafe in production — it must be replaced.
+
+Auth (`authIsEnabled`, `src/admin/auth.ts`) is required when **any** login
+method is configured — `ADMIN_PASSWORD` **or** a working OAuth provider (Slack
+needs client id + secret; GitHub also needs `GITHUB_ALLOWED_ORG`). The same
+gate protects the dashboard and the `/api/*` trigger routes. The dashboard is
+only fully open when *no* method is set. `GET /auth-required` returns
+`{ required, password, slackOAuth, githubOAuth }` so the login screen shows the
+right methods (no dead password box for an OAuth-only gate); `POST /login`
+refuses password auth — never minting an open token — whenever auth is on but
+no password is set.
 
 ### Web search (opt-in per phase)
 

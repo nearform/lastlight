@@ -17,7 +17,7 @@ import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
-import { authMiddleware } from "./admin/auth.js";
+import { authMiddleware, authIsEnabled } from "./admin/auth.js";
 import { GitHubClient } from "./engine/github.js";
 import { screenForInjection, flagPrefix } from "./engine/screen.js";
 import { runSimpleWorkflow, type SimpleWorkflowRequest } from "./workflows/simple.js";
@@ -652,11 +652,20 @@ async function main() {
     console.log(`[api] No HTTP server — API endpoints disabled (Slack Socket Mode only)`);
   }
 
-  // Protect API endpoints with auth when ADMIN_PASSWORD is set
+  // Protect API endpoints with auth when any login method is configured
+  // (password OR OAuth) — same gate as the dashboard, via the shared helper.
   const adminPassword = process.env.ADMIN_PASSWORD ?? "";
   const adminSecret = process.env.ADMIN_SECRET ?? "lastlight-dev-secret";
-  if (githubConnector && adminPassword) {
-    githubConnector.honoApp.use("/api/*", authMiddleware(adminPassword, adminSecret));
+  const apiAuthEnabled = authIsEnabled({
+    adminPassword,
+    slackOAuthClientId: process.env.SLACK_OAUTH_CLIENT_ID,
+    slackOAuthClientSecret: process.env.SLACK_OAUTH_CLIENT_SECRET,
+    githubOAuthClientId: process.env.GITHUB_OAUTH_CLIENT_ID,
+    githubOAuthClientSecret: process.env.GITHUB_OAUTH_CLIENT_SECRET,
+    githubAllowedOrg: process.env.GITHUB_ALLOWED_ORG,
+  });
+  if (githubConnector && apiAuthEnabled) {
+    githubConnector.honoApp.use("/api/*", authMiddleware(apiAuthEnabled, adminSecret));
     console.log(`[api] API endpoints protected with auth`);
   }
 

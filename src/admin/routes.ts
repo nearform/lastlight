@@ -383,18 +383,34 @@ export function createAdminRoutes(
   }
   const githubAllowAnyUser = config.githubAllowedOrg === "*";
 
+  // Auth is required when ANY login method is configured — a password OR a
+  // working OAuth provider. Gating on the password alone left the dashboard
+  // fully open whenever ADMIN_PASSWORD was cleared, even with OAuth set up.
+  const authEnabled = Boolean(config.adminPassword) || slackOAuthEnabled || githubOAuthEnabled;
+
   // Auth middleware
-  app.use("/*", authMiddleware(config.adminPassword, config.adminSecret));
+  app.use("/*", authMiddleware(authEnabled, config.adminSecret));
 
   app.get("/config", (c) => c.json(config.publicConfig || { default: {}, overlay: null, merged: {}, sources: {} }));
 
   // Auth endpoints
   app.get("/auth-required", (c) => {
-    return c.json({ required: Boolean(config.adminPassword), slackOAuth: slackOAuthEnabled, githubOAuth: githubOAuthEnabled });
+    return c.json({
+      required: authEnabled,
+      password: Boolean(config.adminPassword),
+      slackOAuth: slackOAuthEnabled,
+      githubOAuth: githubOAuthEnabled,
+    });
   });
 
   app.post("/login", async (c) => {
     if (!config.adminPassword) {
+      // No password set. If OAuth is the active gate, password login is simply
+      // unavailable — never hand out a token here, or anyone could bypass OAuth.
+      // Only mint the open-access token when NO auth method is configured.
+      if (authEnabled) {
+        return c.json({ error: "password login is not configured; use OAuth" }, 400);
+      }
       return c.json({ token: createToken(config.adminSecret), authDisabled: true });
     }
     const body = await c.req.json<{ password?: string }>();

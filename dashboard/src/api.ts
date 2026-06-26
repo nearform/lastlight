@@ -411,7 +411,8 @@ export function isVideoArtifact(name: string): boolean {
 }
 
 export const api = {
-  authRequired: () => req<{ required: boolean; slackOAuth: boolean; githubOAuth: boolean }>("/auth-required"),
+  authRequired: () =>
+    req<{ required: boolean; password: boolean; slackOAuth: boolean; githubOAuth: boolean }>("/auth-required"),
   login: (password: string) =>
     req<{ token: string }>("/login", {
       method: "POST",

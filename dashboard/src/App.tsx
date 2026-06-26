@@ -428,6 +428,7 @@ export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   const [slackOAuth, setSlackOAuth] = useState(false);
   const [githubOAuth, setGithubOAuth] = useState(false);
+  const [passwordLogin, setPasswordLogin] = useState(true);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [cliLogin, setCliLogin] = useState<CliLogin | null>(() => readCliLogin());
   // Focused approval deep link (?approval=<id>). Tracked here so it survives
@@ -478,10 +479,11 @@ export default function App() {
           window.history.replaceState(null, "", newUrl);
         }
 
-        const { required, slackOAuth: oauthEnabled, githubOAuth: githubOauthEnabled } = await api.authRequired();
+        const { required, password: passwordEnabled, slackOAuth: oauthEnabled, githubOAuth: githubOauthEnabled } = await api.authRequired();
         if (cancelled) return;
         if (!cancelled) setSlackOAuth(oauthEnabled);
         if (!cancelled) setGithubOAuth(githubOauthEnabled);
+        if (!cancelled) setPasswordLogin(passwordEnabled);
         if (!required) {
           setAuthState("ok");
           return;
@@ -530,6 +532,7 @@ export default function App() {
         onAuthed={() => setAuthState("ok")}
         slackOAuth={slackOAuth}
         githubOAuth={githubOAuth}
+        passwordLogin={passwordLogin}
         initialErrorCode={loginError}
       />
     );

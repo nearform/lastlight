@@ -32,9 +32,32 @@ export function verifyToken(token: string, secret: string): boolean {
   }
 }
 
-export function authMiddleware(password: string, secret: string) {
-  const enabled = Boolean(password);
+/**
+ * Whether any login method is configured — an admin password OR a working OAuth
+ * provider. The single source of truth for "is auth on", shared by the admin
+ * dashboard and the `/api/*` trigger routes so they can't drift. The GitHub
+ * gate, like the OAuth route, also requires an allowed-org to be set.
+ */
+export function authIsEnabled(opts: {
+  adminPassword?: string;
+  slackOAuthClientId?: string;
+  slackOAuthClientSecret?: string;
+  githubOAuthClientId?: string;
+  githubOAuthClientSecret?: string;
+  githubAllowedOrg?: string;
+}): boolean {
+  const slack = Boolean(opts.slackOAuthClientId && opts.slackOAuthClientSecret);
+  const github = Boolean(opts.githubOAuthClientId && opts.githubOAuthClientSecret && opts.githubAllowedOrg);
+  return Boolean(opts.adminPassword) || slack || github;
+}
 
+/**
+ * Gate the admin API. `enabled` should be true when ANY login method is
+ * configured — an admin password OR a working OAuth provider. Gating only on
+ * the password (the old behaviour) left the dashboard fully open whenever the
+ * password was cleared, even with Slack/GitHub OAuth set up.
+ */
+export function authMiddleware(enabled: boolean, secret: string) {
   return async (c: Context, next: Next) => {
     if (!enabled) return next();
 

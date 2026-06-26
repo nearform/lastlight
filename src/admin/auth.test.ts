@@ -1,7 +1,36 @@
 import { describe, it, expect } from "vitest";
-import { createToken, verifyToken } from "./auth.js";
+import { createToken, verifyToken, authIsEnabled } from "./auth.js";
 
 const SECRET = "test-secret-key";
+
+describe("authIsEnabled", () => {
+  it("is off when nothing is configured", () => {
+    expect(authIsEnabled({})).toBe(false);
+  });
+
+  it("is on with an admin password", () => {
+    expect(authIsEnabled({ adminPassword: "pw" })).toBe(true);
+  });
+
+  it("is on with Slack OAuth (id + secret), no password", () => {
+    expect(authIsEnabled({ slackOAuthClientId: "C1", slackOAuthClientSecret: "s" })).toBe(true);
+  });
+
+  it("Slack OAuth needs BOTH id and secret", () => {
+    expect(authIsEnabled({ slackOAuthClientId: "C1" })).toBe(false);
+  });
+
+  it("is on with GitHub OAuth when an allowed-org is set", () => {
+    expect(
+      authIsEnabled({ githubOAuthClientId: "g", githubOAuthClientSecret: "s", githubAllowedOrg: "acme" }),
+    ).toBe(true);
+  });
+
+  it("GitHub OAuth without an allowed-org does NOT enable auth", () => {
+    // Mirrors the dashboard's githubOAuthEnabled gate — creds alone aren't enough.
+    expect(authIsEnabled({ githubOAuthClientId: "g", githubOAuthClientSecret: "s" })).toBe(false);
+  });
+});
 
 describe("createToken / verifyToken", () => {
   it("creates a valid token and verifies it", () => {

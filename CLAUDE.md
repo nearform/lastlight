@@ -524,7 +524,10 @@ Web search (optional, opt-in per workflow phase):
 
 Admin dashboard:
 
-- `ADMIN_PASSWORD` — if set, login required
+- `ADMIN_PASSWORD` — enables password login. Auth is required when a password
+  **or** a working OAuth provider (Slack / GitHub) is configured; the dashboard
+  is only fully open when *no* login method is set. Clearing the password while
+  OAuth is configured keeps auth on (OAuth-only).
 - `ADMIN_SECRET` — HMAC secret for session tokens
 
 Slack (optional):
