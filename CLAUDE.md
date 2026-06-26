@@ -384,7 +384,9 @@ lastlight setup                        # first-run wizard (asks: client | server
 # Server lifecycle (HOST-LOCAL — run on the server, not over HTTP). Operate on a
 # working directory (full repo checkout + instance/ overlay + override symlink)
 # resolved from --home → LASTLIGHT_HOME → ~/.lastlight serverHome → ~/lastlight.
-lastlight server setup                 # scaffold/adopt the working dir (clone core + overlay)
+lastlight server setup                 # scaffold/adopt the working dir (clone core; clone OR
+                                        # create the instance/ overlay — fresh overlay offers a
+                                        # private `gh repo create` via src/overlay-bootstrap.ts)
 lastlight server start|stop|restart [service]   # docker compose up -d / stop|down / restart
 lastlight server update                # the canonical deploy: pull core+overlay, build
                                         # (agent + sandbox + sandbox-qa), up -d --remove-orphans,

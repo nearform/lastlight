@@ -191,8 +191,12 @@ instance/
     app.pem
 ```
 
-`npx lastlight setup` scaffolds this for you. To do it by hand (or to clone a
-private overlay repo into place):
+Both `npx lastlight setup` (the config wizard) and `lastlight server setup`
+scaffold this for you and then offer to **version it as a private repo** —
+`git init` + an initial commit, then `gh repo create … --private --push` when
+the GitHub CLI is authenticated, or the exact git/GitHub commands to run by hand
+otherwise. `server setup` also lets you point at an existing overlay repo to
+clone instead. To do it fully by hand:
 
 ```bash
 mkdir -p instance/secrets
@@ -533,6 +537,19 @@ lastlight/
 ```
 
 ## Troubleshooting
+
+### `npm i -g lastlight` prints deprecation warnings
+
+```
+npm warn deprecated prebuild-install@7.1.3: No longer maintained …
+npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException …
+```
+
+These are harmless **transitive** deprecations, not Last Light deps:
+`prebuild-install` is pulled by `better-sqlite3` (its native-binary fetcher), and
+`node-domexception` by `@google/genai`'s `node-fetch` polyfill chain. They don't
+affect the install — the package works. A future thin-CLI package split (so a
+CLI-only install skips the server's native/AI deps) is the only clean removal.
 
 ### Server won't start
 

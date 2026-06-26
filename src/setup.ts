@@ -23,6 +23,7 @@ import { resolve, join } from "node:path";
 import { execSync } from "node:child_process";
 import * as p from "@clack/prompts";
 import chalk from "chalk";
+import { OVERLAY_GITIGNORE, detectGh, bootstrapOverlayRepo } from "./overlay-bootstrap.js";
 
 // ── Brand colors ───────────────────────────────────────────────────────────
 
@@ -205,17 +206,6 @@ export function buildOverlayConfig(config: SetupConfig): string {
   lines.push("");
   return lines.join("\n");
 }
-
-/** .gitignore for the instance/ overlay so it can be its own private repo without leaking secrets. */
-const OVERLAY_GITIGNORE = [
-  "# Host-only secrets — never commit. Everything under secrets/ is ignored",
-  "# except the template.",
-  "secrets/*",
-  "!secrets/.env.example",
-  ".env",
-  "*.pem",
-  "",
-].join("\n");
 
 /** Compose override (overlay): disable Caddy when the operator opts out of its TLS. */
 export const CADDY_DISABLED_OVERRIDE = [
@@ -785,7 +775,7 @@ function printSummary(domain: string, webhookSecret: string): void {
   console.log();
   console.log("  " + dim("Next steps:"));
   console.log("  " + dim("  • Tune ") + teal("instance/config.yaml") + dim(" (managed repos, models, overrides), then ") + teal("docker compose restart agent"));
-  console.log("  " + dim("  • Optional: version your overlay — ") + teal("git -C instance init && …push to a private repo"));
+  console.log("  " + dim("  • Push later edits to your overlay repo, then ") + teal("lastlight server restart agent"));
   console.log("  " + dim("  • Verify webhook delivery in GitHub App settings"));
   console.log("  " + dim("  • Check logs: ") + teal("docker compose logs -f") + dim(" (or docker-compose)"));
   console.log();
@@ -837,6 +827,11 @@ export async function runSetup(): Promise<void> {
   };
 
   writeConfig(config);
+
+  // Offer to version the freshly-scaffolded overlay + create a private GitHub repo.
+  p.log.step(gold("Version overlay"));
+  await bootstrapOverlayRepo(resolve("instance"), { gh: await detectGh() });
+
   await dockerBuildAndLaunch();
 
   p.outro(gold("Last Light is ready."));

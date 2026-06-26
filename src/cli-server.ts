@@ -23,6 +23,7 @@ import path from "node:path";
 import * as p from "@clack/prompts";
 import chalk from "chalk";
 import { resolveServerHome, saveServerHome } from "./cli-config.js";
+import { detectGh, scaffoldOverlayFiles, bootstrapOverlayRepo } from "./overlay-bootstrap.js";
 
 const exec = promisify(execFile);
 
@@ -288,24 +289,49 @@ export async function serverSetup(opts: ServerOpts): Promise<void> {
     await runStep("Clone core repo", "git", ["clone", CORE_REPO, home]);
   }
 
-  // 2. Overlay checkout under instance/.
+  // 2. Overlay under instance/ — clone an existing one, create a fresh one, or skip.
   const instance = path.join(home, "instance");
   if (isGitRepo(instance)) {
     p.log.info("Overlay already present at instance/.");
+  } else if (opts.yes) {
+    // Non-interactive: preserve prior behaviour — clone the default overlay.
+    await runStep("Clone overlay", "git", ["clone", OVERLAY_REPO_DEFAULT, instance]);
   } else {
-    let overlayUrl = OVERLAY_REPO_DEFAULT;
-    if (!opts.yes) {
+    const choice = await p.select({
+      message: "Deployment overlay (instance/) — config + secrets for this server",
+      options: [
+        { value: "create", label: "Create a fresh overlay", hint: "scaffold defaults + optional private GitHub repo" },
+        { value: "clone", label: "Clone an existing overlay repo", hint: "you already have one" },
+        { value: "skip", label: "Skip for now", hint: "add config + secrets into instance/ yourself" },
+      ],
+      initialValue: "create",
+    });
+    if (p.isCancel(choice)) { p.cancel("Cancelled."); process.exit(1); }
+
+    if (choice === "clone") {
       const answer = await p.text({
-        message: "Overlay (instance) git URL — blank to skip",
+        message: "Overlay (instance) git URL",
         initialValue: OVERLAY_REPO_DEFAULT,
       });
       if (p.isCancel(answer)) { p.cancel("Cancelled."); process.exit(1); }
-      overlayUrl = answer.trim();
-    }
-    if (overlayUrl) {
-      await runStep("Clone overlay", "git", ["clone", overlayUrl, instance]);
+      const overlayUrl = answer.trim();
+      if (overlayUrl) {
+        await runStep("Clone overlay", "git", ["clone", overlayUrl, instance]);
+      } else {
+        p.log.warn("No URL given — skipped overlay clone. Drop config + secrets into instance/ before starting.");
+      }
+    } else if (choice === "create") {
+      const { created } = scaffoldOverlayFiles(instance);
+      p.log.success(
+        `Scaffolded ${created.length} file${created.length === 1 ? "" : "s"} in instance/ ` +
+          chalk.dim(`(${created.join(", ") || "all present"})`),
+      );
+      p.log.warn(
+        "Fill in instance/secrets/.env and drop your GitHub App *.pem into instance/secrets/ before starting.",
+      );
+      await bootstrapOverlayRepo(instance, { gh: await detectGh() });
     } else {
-      p.log.warn("Skipped overlay clone — drop config + secrets into instance/ before starting.");
+      p.log.warn("Skipped overlay — drop config + secrets into instance/ before starting.");
     }
   }
 

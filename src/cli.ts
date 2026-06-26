@@ -198,7 +198,7 @@ ${chalk.bold("Debug")} (read the running instance instead of SSH)
   lastlight stats [--daily n | --hourly n]
 
 ${chalk.bold("Server")} (host-local — run on the server; manages the docker stack)
-  lastlight server setup             Scaffold/adopt the working dir (checkout + overlay)
+  lastlight server setup             Scaffold/adopt the working dir; create or clone the overlay (+ gh repo)
   lastlight server start [service]   docker compose up -d
   lastlight server stop [service]    Stop one service, or the whole stack (down)
   lastlight server restart [service] Restart a service (default: agent)
