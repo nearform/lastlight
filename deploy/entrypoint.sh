@@ -10,19 +10,34 @@ SECRETS="/app/instance/secrets"
 APP_DIR="/app"
 STATE_DIR="${STATE_DIR:-/app/data}"
 
-# Symlink secrets from mounted volume
+# Materialize secrets into the writable /app layer, owned by `lastlight` (mode
+# 600). We COPY rather than symlink: the source lives on a read-only mount owned
+# by whatever uid created it on the host (often 1000), while the harness runs as
+# `lastlight` (uid-pinned 10001) via gosu below. A symlink would leave the
+# unreadable 600 source in place and the harness would EACCES on it. root (this
+# entrypoint, pre-gosu) bypasses the source perms to read+copy; the chown then
+# hands the copy to lastlight. Same pattern as the PEM→state-volume copy below.
+# rm -f first so a stale symlink from an older image isn't written through.
 for f in .env; do
   if [ -f "$SECRETS/$f" ]; then
-    ln -sf "$SECRETS/$f" "$APP_DIR/$f"
-    echo "Linked $f from secrets volume"
+    rm -f "$APP_DIR/$f"
+    cp "$SECRETS/$f" "$APP_DIR/$f"
+    chown lastlight:lastlight "$APP_DIR/$f"
+    chmod 600 "$APP_DIR/$f"
+    echo "Copied $f from secrets volume"
   fi
 done
 
-# Symlink PEM files (GitHub App private key)
+# GitHub App private key(s) — same copy+chown so the in-process Octokit (which
+# also runs as lastlight) can read them.
 for pem in "$SECRETS"/*.pem; do
   if [ -f "$pem" ]; then
-    ln -sf "$pem" "$APP_DIR/$(basename "$pem")"
-    echo "Linked $(basename "$pem") from secrets volume"
+    dest="$APP_DIR/$(basename "$pem")"
+    rm -f "$dest"
+    cp "$pem" "$dest"
+    chown lastlight:lastlight "$dest"
+    chmod 600 "$dest"
+    echo "Copied $(basename "$pem") from secrets volume"
   fi
 done
 
