@@ -47,7 +47,8 @@ The terms used across this spec, in dependency order.
   `running`, `paused`, `complete`, or `failed`. Resumable across process
   restarts.
 - **Phase** — a single step in a Workflow. Either a `context` checkpoint
-  (no agent invocation), an `agent` phase (one agent session), or a
+  (no agent invocation), an `agent` phase (one agent session), a `bash` /
+  `script` phase (a deterministic command run in the sandbox, no LLM), or a
   `loop` phase (an agent phase that iterates on reviewer feedback, e.g.
   `reviewer_fix_1`, `reviewer_recheck_1`).
 - **Execution** — one agent session: a single phase running, or a single

@@ -352,8 +352,14 @@ npm run build:dashboard  # vite build for dashboard/
 npm start                # compiled JS
 
 # Tests
-npx vitest run           # full server suite
+npx vitest run           # full server suite (docker integration tests skip unless opted in)
 cd dashboard && npx tsc -b  # dashboard typecheck
+
+# Sandbox integration tests — actually start a docker sandbox and run a no-AI
+# workflow (type: bash / type: script phases). Opt-in + self-gating: needs
+# docker + the lean image built, else skips instantly.
+docker compose --profile build-only build sandbox   # if not already built
+RUN_SANDBOX_IT=1 npx vitest run src/sandbox/command-exec.integration.test.ts
 
 # CLI — `lastlight` (bin → dist/cli.js; `npm run cli -- <args>` in dev)
 # A thin client for a running instance: it POSTs triggers and reads the

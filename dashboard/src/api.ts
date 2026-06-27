@@ -155,8 +155,16 @@ export interface WorkflowSummary {
 export interface WorkflowFullPhase {
   name: string;
   label?: string;
-  type: "context" | "agent";
+  type: "context" | "agent" | "bash" | "script";
   prompt?: string;
+  /** type: bash — deterministic shell command run in the sandbox. */
+  command?: string;
+  /** type: script — inline source run in the sandbox. */
+  script?: string;
+  /** type: script — runtime selector (js/ts → node, python → uv run). */
+  runtime?: "js" | "ts" | "python";
+  /** type: bash/script — per-step timeout in seconds. */
+  timeout_seconds?: number;
   skill?: string;
   model?: string;
   approval_gate?: string;

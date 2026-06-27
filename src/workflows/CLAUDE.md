@@ -88,7 +88,7 @@ Both are optional — omit the YAML entry and the runner uses the env-level
 default, omit env-level too and OpenCode picks its built-in default
 (model: `OPENCODE_MODEL`, variant: no `--variant` flag passed).
 
-Three kinds of phase the runner recognises:
+Phase kinds the runner recognises:
 
 - **context** (`type: context`) — no agent execution. Runner persists a
   phase-history entry and moves on. Used for `Context` / `complete` markers
@@ -143,13 +143,47 @@ Three kinds of phase the runner recognises:
   > verify/qa-test were added so their browser-QA screenshots, written to
   > `.lastlight/<key>/` under the repo, land where `serverArtifacts()`
   > harvests them rather than orphaned at the workspace root.
+- **bash** (`type: bash`) — runs a deterministic shell command
+  (`command:`) **inside the sandbox container** (no LLM). Built on
+  `DockerSandbox.runCommand` (the non-agent sibling of `runAgent`:
+  `docker exec --user agent -w <cwd> … sh -c <cmd>`), running in the same
+  workspace agent phases use (the host `workDir` persists across phases by
+  taskId). Exit 0 = success; a non-zero exit **fails the phase** and cascades
+  like any phase failure. The command is rendered through the template engine
+  first (so it can reference `{{phaseOutputs.*}}`, `{{branch}}`, …), then a
+  post-render `validateShellCommand` guard rejects any leftover `{{` marker.
+  stdout is exposed downstream exactly like an agent phase
+  (`output_var` → `{{phaseOutputs.<name>}}`); upstream string outputs
+  are also forwarded as `LL_OUT_<PHASE>` env vars (single-line, ≤4KB).
+  Honours `unrestricted_egress` / `sandbox_image` / `timeout_seconds`. The run
+  is mirrored to a session jsonl (command → `bash` tool_use, output →
+  tool_result) so it shows in the dashboard + `lastlight session log` like an
+  agent turn, with `turns: 0` and no model cost. On gondolin/none the command
+  falls back to a host `spawnSync` in the workspace.
+- **script** (`type: script`) — same machinery as `bash`, but runs an inline
+  program (`script:`) with a runtime selected by `runtime:` — `js`/`ts` →
+  `node` (TS via `--experimental-strip-types`), `python` → `uv run`. The source
+  is written to a workspace-root sibling beside the skill bundle (`.lastlight-scripts/<phase>/script.<ext>`,
+  never inside the repo git tree) and executed there. Python sources may carry
+  a PEP 723 `# /// script` inline-dependency block — `uv run` resolves it from
+  PyPI (already on the strict egress allowlist) into a cached venv
+  (`UV_CACHE_DIR=/cache/uv`, `UV_PYTHON_DOWNLOADS=never` so it uses the baked-in
+  python3).
 - **loop-phase** — any phase with `loop:` set. Always executes as an
   agent phase internally, but repeated in `reviewer → fix → reviewer`
   pairs up to `max_cycles`. See loop iteration naming below.
 
+`type: bash`/`type: script` phases share the agent phase's dedup ledger
+(`runCommandPhase` → `runPhaseLedger`), so they get an `executions` row and
+dedup on resume like everything else.
+
 `generic_loop` is a second, newer loop mechanism with an `until`
 expression (evaluated by `loop-eval.ts`) instead of fixed review/fix
-cycles. Used for custom "retry until X" phases.
+cycles. Used for custom "retry until X" phases. Its `until_bash` exit-condition
+runs **inside the sandbox** (via `executeCommand`, `writeSession: false`)
+against the persisted workspace — exit 0 ends the loop. (It used to run on the
+harness host via `execSync`; it now executes in the same container the phase
+does.)
 
 ## Per-phase sandbox requirement (`requires_sandbox`)
 

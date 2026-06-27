@@ -362,6 +362,115 @@ context:
   });
 });
 
+describe("loader — bash / script phase types", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = makeTempDir();
+    setWorkflowDir(dir);
+    clearWorkflowCache();
+  });
+
+  it("loads a bash phase with a command", () => {
+    writeFileSync(
+      join(dir, "b.yaml"),
+      `
+kind: agent
+name: b
+phases:
+  - name: run
+    type: bash
+    command: "echo hi"
+    output_var: out
+    timeout_seconds: 30
+`.trim(),
+    );
+    const wf = getWorkflow("b");
+    expect(wf.phases[0].type).toBe("bash");
+    expect(wf.phases[0].command).toBe("echo hi");
+    expect(wf.phases[0].timeout_seconds).toBe(30);
+  });
+
+  it("loads a script phase with runtime", () => {
+    writeFileSync(
+      join(dir, "s.yaml"),
+      `
+kind: agent
+name: s
+phases:
+  - name: run
+    type: script
+    runtime: python
+    script: "print('hi')"
+`.trim(),
+    );
+    const wf = getWorkflow("s");
+    expect(wf.phases[0].type).toBe("script");
+    expect(wf.phases[0].runtime).toBe("python");
+    expect(wf.phases[0].script).toBe("print('hi')");
+  });
+
+  it("rejects a bash phase with no command", () => {
+    writeFileSync(
+      join(dir, "nocmd.yaml"),
+      `
+kind: agent
+name: nocmd
+phases:
+  - name: run
+    type: bash
+`.trim(),
+    );
+    expect(() => getWorkflow("nocmd")).toThrow(/requires .command/);
+  });
+
+  it("rejects a script phase with no script", () => {
+    writeFileSync(
+      join(dir, "noscript.yaml"),
+      `
+kind: agent
+name: noscript
+phases:
+  - name: run
+    type: script
+`.trim(),
+    );
+    expect(() => getWorkflow("noscript")).toThrow(/requires .script/);
+  });
+
+  it("rejects command on a non-bash phase", () => {
+    writeFileSync(
+      join(dir, "mix.yaml"),
+      `
+kind: agent
+name: mix
+phases:
+  - name: run
+    type: agent
+    prompt: prompts/x.md
+    command: "echo nope"
+`.trim(),
+    );
+    expect(() => getWorkflow("mix")).toThrow(/command.* only valid on type .bash/);
+  });
+
+  it("rejects script field on a bash phase", () => {
+    writeFileSync(
+      join(dir, "mix2.yaml"),
+      `
+kind: agent
+name: mix2
+phases:
+  - name: run
+    type: bash
+    command: "echo ok"
+    script: "print('no')"
+`.trim(),
+    );
+    expect(() => getWorkflow("mix2")).toThrow(/script.* only valid on type .script/);
+  });
+});
+
 describe("loader — resolveSkillPaths", () => {
   it("resolves known skill names to absolute directory paths", () => {
     const paths = resolveSkillPaths(["issue-triage", "pr-review"]);

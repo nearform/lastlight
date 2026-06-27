@@ -1,11 +1,10 @@
 import { randomUUID } from "crypto";
-import { execSync } from "child_process";
 import type {
   ExecutorConfig,
   ExecutionResult,
   GitSandboxAccess,
 } from "../engine/profiles.js";
-import { executeAgent } from "../engine/agent-executor.js";
+import { executeAgent, executeCommand, type CommandSpec } from "../engine/agent-executor.js";
 import type { StateDb } from "../state/db.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "./schema.js";
 import { phaseSkillNames } from "./schema.js";
@@ -122,6 +121,24 @@ function validateShellCommand(cmd: string): void {
 }
 
 /**
+ * Forward upstream phase outputs to a `bash`/`script` command as env vars
+ * (`LL_OUT_<PHASE>`), so a script can read them via `process.env` / `os.environ`
+ * without any shell-injection risk. Only simple single-line, reasonably-sized
+ * string outputs are forwarded; larger / multi-line outputs are still reachable
+ * via `{{phaseOutputs.<name>.output}}` template substitution in the command.
+ */
+function upstreamOutputsEnv(outputs: Readonly<Record<string, unknown>>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(outputs)) {
+    if (typeof v !== "string" || v.length === 0 || v.length > 4096) continue;
+    if (/[\n\r]/.test(v)) continue;
+    const key = `LL_OUT_${k.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`;
+    if (/^LL_OUT_[A-Z0-9_]+$/.test(key)) env[key] = v;
+  }
+  return env;
+}
+
+/**
  * Build the agent prompt for a phase, handling both `prompt:` (template file)
  * and `skill:`/`skills:` (skill references) phase definitions.
  */
@@ -235,31 +252,27 @@ type RunPhaseResult =
  * runner.ts — the dedup ledger (`shouldRunPhase`) is the single source of
  * truth for resume, so re-running from the top skips completed phases here.
  */
-export async function runPhase(
-  workflowName: string,
-  phaseName: string,
-  taskId: string,
-  triggerId: string,
-  prompt: string,
-  config: ExecutorConfig,
-  db?: StateDb,
-  modelOverride?: string,
-  workflowRunId?: string,
-  githubAccess?: GitSandboxAccess,
-  variantOverride?: string,
+/**
+ * The DB-tracked dedup ledger shared by agent phases ({@link runPhase}) and
+ * deterministic command phases ({@link runCommandPhase}). The `run` callback
+ * does the actual work and receives a session-id sink so the executions row can
+ * be linked to its session jsonl mid-run. `shouldRunPhase` is the single source
+ * of truth for resume — re-running from the top skips completed phases here.
+ */
+async function runPhaseLedger(
+  attrs: Record<string, unknown>,
+  meta: {
+    dedupKey: string;
+    phaseName: string;
+    taskId: string;
+    triggerId: string;
+    repo?: string;
+    workflowRunId?: string;
+  },
+  db: StateDb | undefined,
+  run: (onSessionId: (sessionId: string) => void) => Promise<ExecutionResult>,
 ): Promise<RunPhaseResult> {
-  const dedupKey = `${workflowName}:${phaseName}`;
-  const attrs = {
-    "workflow.name": workflowName,
-    "phase.name": phaseName,
-    "workflow.run_id": workflowRunId,
-    "trigger.id": triggerId,
-    "task.id": taskId,
-    repo: githubAccess?.repo,
-    "issue.number": issueNumberFromTrigger(triggerId),
-    "sandbox.backend": config.sandbox,
-    model: modelOverride || config.model,
-  };
+  const { dedupKey, phaseName, taskId, triggerId, repo, workflowRunId } = meta;
   return withSpan("lastlight.workflow.phase", attrs, async (span) => {
     if (db) {
       const status = db.executions.shouldRunPhase(dedupKey, triggerId, workflowRunId);
@@ -285,29 +298,19 @@ export async function runPhase(
         triggerType: "webhook",
         triggerId,
         skill: dedupKey,
-        repo: githubAccess?.repo,
+        repo,
         issueNumber: issueNumberFromTrigger(triggerId),
         startedAt: new Date().toISOString(),
         workflowRunId,
       });
 
-      const baseConfig = modelOverride ? { ...config, model: modelOverride } : config;
-      const phaseConfigBase = variantOverride ? { ...baseConfig, variant: variantOverride } : baseConfig;
-      const phaseConfig: ExecutorConfig = {
-        ...phaseConfigBase,
-        telemetry: { workflowName, phaseName, triggerId, workflowRunId },
-      };
       try {
-        const result = await executeAgent(prompt, phaseConfig, {
-          taskId,
-          githubAccess,
-          onSessionId: (sessionId) => {
-            try {
-              db.executions.recordSessionId(executionId, sessionId);
-            } catch (err) {
-              console.warn(`[runner] Failed to persist session id mid-run for ${phaseName}:`, err);
-            }
-          },
+        const result = await run((sessionId) => {
+          try {
+            db.executions.recordSessionId(executionId, sessionId);
+          } catch (err) {
+            console.warn(`[runner] Failed to persist session id mid-run for ${phaseName}:`, err);
+          }
         });
 
         db.executions.recordFinish(executionId, {
@@ -335,13 +338,87 @@ export async function runPhase(
       }
     }
 
-    const baseConfig = modelOverride ? { ...config, model: modelOverride } : config;
-    const phaseConfigBase = variantOverride ? { ...baseConfig, variant: variantOverride } : baseConfig;
-    const phaseConfig: ExecutorConfig = { ...phaseConfigBase, telemetry: { workflowName, phaseName, triggerId, workflowRunId } };
-    const result = await executeAgent(prompt, phaseConfig, { taskId, githubAccess });
+    const result = await run(() => {});
     recordExecutionMetrics("phase", { ...attrs, success: result.success, stop_reason: result.stopReason, durationMs: result.durationMs, costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens });
     return { result, skipped: false };
   });
+}
+
+/**
+ * Run a single agent phase with DB-tracked deduplication. The dedup ledger
+ * (`shouldRunPhase`) is the single source of truth for resume, so re-running
+ * from the top skips completed phases here.
+ */
+export async function runPhase(
+  workflowName: string,
+  phaseName: string,
+  taskId: string,
+  triggerId: string,
+  prompt: string,
+  config: ExecutorConfig,
+  db?: StateDb,
+  modelOverride?: string,
+  workflowRunId?: string,
+  githubAccess?: GitSandboxAccess,
+  variantOverride?: string,
+): Promise<RunPhaseResult> {
+  const dedupKey = `${workflowName}:${phaseName}`;
+  const attrs = {
+    "workflow.name": workflowName,
+    "phase.name": phaseName,
+    "workflow.run_id": workflowRunId,
+    "trigger.id": triggerId,
+    "task.id": taskId,
+    repo: githubAccess?.repo,
+    "issue.number": issueNumberFromTrigger(triggerId),
+    "sandbox.backend": config.sandbox,
+    model: modelOverride || config.model,
+  };
+  const baseConfig = modelOverride ? { ...config, model: modelOverride } : config;
+  const phaseConfigBase = variantOverride ? { ...baseConfig, variant: variantOverride } : baseConfig;
+  const phaseConfig: ExecutorConfig = {
+    ...phaseConfigBase,
+    telemetry: { workflowName, phaseName, triggerId, workflowRunId },
+  };
+  return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, workflowRunId }, db, (onSessionId) =>
+    executeAgent(prompt, phaseConfig, { taskId, githubAccess, onSessionId }),
+  );
+}
+
+/**
+ * Run a single deterministic `bash`/`script` phase, sharing the agent phase's
+ * dedup ledger + executions row so it appears (and dedups on resume) exactly
+ * like an agent phase — just with `turns: 0` and no model cost.
+ */
+export async function runCommandPhase(
+  workflowName: string,
+  phaseName: string,
+  taskId: string,
+  triggerId: string,
+  spec: CommandSpec,
+  config: ExecutorConfig,
+  db?: StateDb,
+  workflowRunId?: string,
+  githubAccess?: GitSandboxAccess,
+  timeoutSeconds?: number,
+  sandboxEnv?: Record<string, string>,
+): Promise<RunPhaseResult> {
+  const dedupKey = `${workflowName}:${phaseName}`;
+  const attrs = {
+    "workflow.name": workflowName,
+    "phase.name": phaseName,
+    "workflow.run_id": workflowRunId,
+    "trigger.id": triggerId,
+    "task.id": taskId,
+    repo: githubAccess?.repo,
+    "issue.number": issueNumberFromTrigger(triggerId),
+    "sandbox.backend": config.sandbox,
+    model: spec.kind,
+  };
+  const phaseConfig: ExecutorConfig = { ...config, telemetry: { workflowName, phaseName, triggerId, workflowRunId } };
+  return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, workflowRunId }, db, (onSessionId) =>
+    executeCommand(spec, phaseConfig, { taskId, githubAccess, onSessionId, timeoutSeconds, sandboxEnv }),
+  );
 }
 
 // ── PhaseExecutor ────────────────────────────────────────────────────────────
@@ -372,6 +449,7 @@ export class PhaseExecutor {
 
     const phaseType = phase.type ?? "agent";
     if (phaseType === "context") return this.runContext(phase);
+    if (phaseType === "bash" || phaseType === "script") return this.runCommandBody(phase, outputs);
 
     if (!phase.prompt && phaseSkillNames(phase).length === 0) {
       console.warn(`[runner] Phase "${phase.name}" has type=agent but neither prompt: nor skills: — skipping`);
@@ -513,6 +591,132 @@ export class PhaseExecutor {
       phaseOutputs: { ...outputs, ...outputVars },
     });
     return { results: [result], status: "succeeded", outputVars };
+  }
+
+  /**
+   * Body for `type: bash` / `type: script` phases. Runs a deterministic command
+   * in the sandbox (no LLM), then mirrors the agent-phase lifecycle: report
+   * progress, expose stdout downstream via `output_var` →
+   * `{{phaseOutputs.<name>.output}}`, fail the workflow on a non-zero exit, and
+   * honour an optional `approval_gate`.
+   */
+  private async runCommandBody(
+    phase: PhaseDefinition,
+    outputs: Readonly<Record<string, unknown>>,
+  ): Promise<PhaseOutcome> {
+    const phaseName = phase.name;
+    await this.reporter.onStart(phaseName);
+    await this.reporter.step(phaseName, "running", phase.messages?.on_start);
+
+    const spec = this.buildCommandSpec(phase, outputs);
+    const sandboxEnv = upstreamOutputsEnv(outputs);
+    const pr = await this.runCommandPhaseCall(phaseName, phase, spec, sandboxEnv);
+
+    if (pr.skipped) {
+      if (pr.reason === "running") {
+        await this.reporter.message(phase.messages?.on_skipped_done);
+        return { results: [], status: "failed", aborted: true };
+      }
+      const result: PhaseResult = { phase: phaseName, success: true, output: "Already completed" };
+      this.reporter.persistPhase(phaseName, "Already completed (deduplicated)");
+      await this.reporter.onEnd(phaseName, result);
+      await this.reporter.step(phaseName, "done", phase.messages?.on_skipped_done);
+      return { results: [result], status: "succeeded" };
+    }
+
+    const result: PhaseResult = { phase: phaseName, ...pickResult(pr.result) };
+    await this.reporter.onEnd(phaseName, result);
+
+    const rawOutput = pr.result.output ?? "";
+    const outputVars: Record<string, unknown> = { [phaseName]: rawOutput };
+    if (phase.output_var) outputVars[phase.output_var] = rawOutput;
+
+    if (!pr.result.success) {
+      if (!isTerminated(pr.result.error)) {
+        await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
+      }
+      this.reporter.failWorkflow(pr.result.error);
+      return { results: [result], status: "failed", outputVars };
+    }
+
+    if (phase.approval_gate && this.resolver.gateEnabled(phase.approval_gate) && this.run.db && this.run.workflowId) {
+      await this.pauseForApproval(
+        phaseName,
+        phase.approval_gate,
+        `${phaseName} complete — awaiting ${phase.approval_gate} approval.`,
+        "approve",
+        phase.approval_gate_message,
+        { gateKey: phase.approval_gate },
+        undefined,
+        phase.approval_artifact,
+      );
+      return { results: [result], status: "succeeded", paused: true, outputVars };
+    }
+
+    this.reporter.persistPhase(phaseName);
+    await this.reporter.step(phaseName, "done", phase.messages?.on_success, {
+      phaseOutputs: { ...outputs, ...outputVars },
+    });
+    return { results: [result], status: "succeeded", outputVars };
+  }
+
+  /** Render a command/script phase's template fields into a {@link CommandSpec}. */
+  private buildCommandSpec(
+    phase: PhaseDefinition,
+    outputs: Readonly<Record<string, unknown>>,
+  ): CommandSpec {
+    const ctx: TemplateContext = { ...this.run.ctx, phaseOutputs: outputs as Record<string, unknown> };
+    if ((phase.type ?? "agent") === "script") {
+      const script = renderTemplate(phase.script ?? "", ctx);
+      return { kind: "script", script, runtime: phase.runtime ?? "js", name: phase.name.replace(/[^A-Za-z0-9_-]/g, "_") };
+    }
+    const command = renderTemplate(phase.command ?? "", ctx);
+    // Guard against an unresolved template marker reaching the shell.
+    validateShellCommand(command);
+    return { kind: "bash", command };
+  }
+
+  private async runCommandPhaseCall(
+    label: string,
+    phase: PhaseDefinition,
+    spec: CommandSpec,
+    sandboxEnv: Record<string, string>,
+  ): Promise<RunPhaseResult> {
+    const { definition, config, db, workflowId, githubAccess, taskId, triggerId } = this.run;
+    return runCommandPhase(
+      definition.name,
+      label,
+      taskId,
+      triggerId,
+      spec,
+      phaseConfigFor(config, phase),
+      db,
+      workflowId,
+      githubAccess,
+      phase.timeout_seconds,
+      sandboxEnv,
+    );
+  }
+
+  /**
+   * Evaluate a `generic_loop.until_bash` condition INSIDE the sandbox (against
+   * the persisted workspace), replacing the old harness-host `execSync`. Exit 0
+   * ⇒ loop complete. The check inherits the phase's egress; no session log is
+   * written (it's an internal loop condition, not a user-facing phase).
+   */
+  private async runUntilBash(command: string, phase: PhaseDefinition): Promise<boolean> {
+    const { config, githubAccess, taskId, triggerId, definition, workflowId } = this.run;
+    try {
+      validateShellCommand(command);
+      const res = await executeCommand(
+        { kind: "bash", command },
+        { ...phaseConfigFor(config, phase), telemetry: { workflowName: definition.name, phaseName: `${phase.name}_until`, triggerId, workflowRunId: workflowId } },
+        { taskId, githubAccess, timeoutSeconds: phase.timeout_seconds ?? 30, writeSession: false },
+      );
+      return res.success;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -869,13 +1073,7 @@ export class PhaseExecutor {
         });
       }
       if (!conditionMet && loop.until_bash) {
-        try {
-          validateShellCommand(loop.until_bash);
-          execSync(loop.until_bash, { timeout: 30_000, stdio: "pipe", cwd: config.sandboxDir ?? config.cwd });
-          conditionMet = true;
-        } catch {
-          conditionMet = false;
-        }
+        conditionMet = await this.runUntilBash(loop.until_bash, phase);
       }
 
       const iterExecutionId = "executionId" in ir ? ir.executionId : undefined;

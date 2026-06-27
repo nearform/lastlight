@@ -5,9 +5,11 @@ import type { RunnerCallbacks, ApprovalGateConfig } from "./runner.js";
 import type { StateDb } from "../state/db.js";
 import type { ProgressReporter, ProgressModel, ProgressStep, StepStatus } from "../notify/types.js";
 
-// Mock the executor so we don't make real agent calls
+// Mock the executor so we don't make real agent calls. `executeCommand` backs
+// both `type: bash`/`script` phases and the in-sandbox `until_bash` check.
 vi.mock("../engine/agent-executor.js", () => ({
   executeAgent: vi.fn(),
+  executeCommand: vi.fn(),
 }));
 
 // Mock the docker module
@@ -20,17 +22,18 @@ vi.mock("./loader.js", () => ({
   loadPromptTemplate: vi.fn((path: string) => `TEMPLATE:${path}`),
 }));
 
-// Mock child_process for until_bash tests
-vi.mock("child_process", () => ({
-  execSync: vi.fn(),
-}));
+// Keep child_process mocked so `qaImageAvailable()` (images.ts) sees no
+// `execFileSync` and reports the QA image as unavailable in tests. until_bash no
+// longer uses execSync (it runs via the mocked executeCommand), but this mock
+// must stay for the sandbox_image:qa skip test.
+vi.mock("child_process", () => ({ execSync: vi.fn() }));
 
-import { execSync } from "child_process";
-import { executeAgent } from "../engine/agent-executor.js";
+import { executeAgent, executeCommand } from "../engine/agent-executor.js";
 import { loadPromptTemplate } from "./loader.js";
 import { runWorkflow, gitAccessProfileForWorkflow, gitSandboxAccessForWorkflow } from "./runner.js";
 
 const mockExecuteAgent = vi.mocked(executeAgent);
+const mockExecuteCommand = vi.mocked(executeCommand);
 const mockLoadPromptTemplate = vi.mocked(loadPromptTemplate);
 
 const BASE_CTX: TemplateContext = {
@@ -793,7 +796,10 @@ describe("runWorkflow — callbacks", () => {
   });
 });
 
-const mockExecSync = vi.mocked(execSync);
+// until_bash now runs in the sandbox via executeCommand; exit code maps to
+// ExecutionResult.success (exit 0 → success: true).
+const cmdOk = () => ({ success: true, output: "", turns: 0, durationMs: 1 });
+const cmdFail = () => ({ success: false, output: "", error: "command exited 1", turns: 0, durationMs: 1 });
 
 const WORKFLOW_WITH_GENERIC_LOOP: AgentWorkflowDefinition = {
   kind: "agent",
@@ -821,7 +827,7 @@ describe("runWorkflow — generic loop node", () => {
 
   it("completes on first iteration when until_bash exits 0", async () => {
     mockExecuteAgent.mockResolvedValueOnce(makeSuccessResult("tests pass"));
-    mockExecSync.mockReturnValueOnce(Buffer.from("")); // exit 0
+    mockExecuteCommand.mockResolvedValueOnce(cmdOk()); // exit 0
 
     const started: string[] = [];
     const result = await runWorkflow(WORKFLOW_WITH_GENERIC_LOOP, BASE_CTX, {} as never, {
@@ -838,9 +844,9 @@ describe("runWorkflow — generic loop node", () => {
     mockExecuteAgent
       .mockResolvedValueOnce(makeSuccessResult("attempt 1"))
       .mockResolvedValueOnce(makeSuccessResult("attempt 2"));
-    mockExecSync
-      .mockImplementationOnce(() => { throw new Error("exit 1"); }) // iteration 1 fails
-      .mockReturnValueOnce(Buffer.from("")); // iteration 2 passes
+    mockExecuteCommand
+      .mockResolvedValueOnce(cmdFail()) // iteration 1 fails
+      .mockResolvedValueOnce(cmdOk()); // iteration 2 passes
 
     const started: string[] = [];
     const result = await runWorkflow(WORKFLOW_WITH_GENERIC_LOOP, BASE_CTX, {} as never, {
@@ -876,7 +882,7 @@ describe("runWorkflow — generic loop node", () => {
         },
       ],
     };
-    mockExecSync.mockImplementation(() => { throw new Error("exit 1"); });
+    mockExecuteCommand.mockResolvedValue(cmdFail());
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("still failing"));
 
     const comments: string[] = [];
@@ -972,9 +978,9 @@ describe("runWorkflow — generic loop node", () => {
       capturedPrompts.push(prompt);
       return makeSuccessResult("iteration output");
     });
-    mockExecSync
-      .mockImplementationOnce(() => { throw new Error("exit 1"); })
-      .mockReturnValueOnce(Buffer.from(""));
+    mockExecuteCommand
+      .mockResolvedValueOnce(cmdFail())
+      .mockResolvedValueOnce(cmdOk());
 
     await runWorkflow(workflow, BASE_CTX, {} as never, {});
 
@@ -1012,9 +1018,9 @@ describe("runWorkflow — generic loop node", () => {
       capturedPrompts.push(prompt);
       return makeSuccessResult("iteration output ABC");
     });
-    mockExecSync
-      .mockImplementationOnce(() => { throw new Error("exit 1"); })
-      .mockReturnValueOnce(Buffer.from(""));
+    mockExecuteCommand
+      .mockResolvedValueOnce(cmdFail())
+      .mockResolvedValueOnce(cmdOk());
 
     await runWorkflow(workflow, BASE_CTX, {} as never, {});
 
@@ -1068,7 +1074,7 @@ describe("runWorkflow — generic loop node", () => {
   });
 
   it("fails workflow if an iteration agent call fails", async () => {
-    mockExecSync.mockImplementation(() => { throw new Error("exit 1"); });
+    mockExecuteCommand.mockResolvedValue(cmdFail());
     mockExecuteAgent.mockResolvedValueOnce(makeFailResult("oom killed"));
 
     const comments: string[] = [];
@@ -1100,17 +1106,16 @@ describe("runWorkflow — generic loop node", () => {
       ],
     };
     mockExecuteAgent.mockResolvedValueOnce(makeSuccessResult("output"));
-    // execSync should NOT be called — validateShellCommand throws first
-    mockExecSync.mockReturnValue(Buffer.from(""));
+    // executeCommand should NOT be reached — validateShellCommand throws first.
+    mockExecuteCommand.mockResolvedValue(cmdOk());
 
     const result = await runWorkflow(workflow, BASE_CTX, {} as never, {});
 
-    // validateShellCommand throws, caught by catch block, conditionMet stays false
-    // loop exhausts max_iterations=1 and workflow completes as success (loop exhausted is not failure)
+    // validateShellCommand throws, caught by runUntilBash, conditionMet stays false;
+    // loop exhausts max_iterations=1 and the workflow completes (loop exhausted is not failure).
     expect(result.success).toBe(true);
-    // execSync must NOT have been called with the mustache-containing command
-    const calls = mockExecSync.mock.calls.map((c) => c[0] as string);
-    expect(calls.every((cmd) => !cmd.includes("{{"))).toBe(true);
+    // executeCommand must NOT have been called with the mustache-containing command.
+    expect(mockExecuteCommand).not.toHaveBeenCalled();
   });
 });
 

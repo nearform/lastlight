@@ -95,8 +95,47 @@ const PhaseDefinitionSchema = z
      * UI element that wants to display this phase.
      */
     label: z.string().optional(),
-    /** context: no agent execution (just metadata); agent: run an agent session */
-    type: z.enum(["context", "agent"]).default("agent"),
+    /**
+     * Phase kind:
+     * - `context`: no execution (just a dashboard checkpoint marker).
+     * - `agent` (default): run an LLM agent session.
+     * - `bash`: run a deterministic shell command inside the sandbox
+     *   container (no LLM). Requires `command:`.
+     * - `script`: run an inline JS/TS (via `node`) or Python (via `uv run`)
+     *   program inside the sandbox container. Requires `script:`.
+     *
+     * `bash`/`script` phases run in the SAME sandbox/workspace as agent
+     * phases (the host workDir persists across phases keyed by taskId), honour
+     * `unrestricted_egress`/`sandbox_image`/`timeout_seconds`, and expose
+     * their stdout downstream exactly like an agent phase (`output_var` →
+     * `{{phaseOutputs.<name>.output}}`). A non-zero exit fails the phase.
+     */
+    type: z.enum(["context", "agent", "bash", "script"]).default("agent"),
+    /**
+     * Shell command for `type: bash`. Rendered through the template engine
+     * first (so it may reference `{{phaseOutputs.*}}`, `{{branch}}`, etc.),
+     * then executed via `sh -c` inside the sandbox container. Exit 0 = success.
+     */
+    command: z.string().optional(),
+    /**
+     * Inline program source for `type: script`. Rendered through the template
+     * engine, written to a temp file in the workspace, and executed with the
+     * runtime selected by `runtime`. Python sources may carry a PEP 723
+     * `# /// script` inline-dependency block (resolved by `uv run`).
+     */
+    script: z.string().optional(),
+    /**
+     * Runtime for `type: script` (default `js`):
+     * - `js` → `node <file>`
+     * - `ts` → `node --experimental-strip-types <file>` (sandbox Node 22)
+     * - `python` → `uv run <file>`
+     */
+    runtime: z.enum(["js", "ts", "python"]).optional(),
+    /**
+     * Per-step timeout in seconds for `bash`/`script` phases. Defaults to the
+     * sandbox's configured timeout (fallback 300s for deterministic steps).
+     */
+    timeout_seconds: z.number().int().positive().optional(),
     /**
      * Path to a prompt template file (relative to workflowDir).
      * Mutually exclusive with `skill`.
@@ -247,6 +286,35 @@ const PhaseDefinitionSchema = z
   })
   .refine((p) => !(p.skill && p.skills), {
     message: "phase cannot specify both `skill` and `skills` — use `skills` for multiple",
+  })
+  .superRefine((p, ctx) => {
+    const type = p.type ?? "agent";
+    if (type === "bash") {
+      if (!p.command) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "phase type `bash` requires `command:`" });
+      }
+      if (p.script !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`script:` is only valid on type `script`" });
+      }
+    } else if (type === "script") {
+      if (!p.script) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "phase type `script` requires `script:`" });
+      }
+      if (p.command !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`command:` is only valid on type `bash`" });
+      }
+    } else {
+      // context / agent
+      if (p.command !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`command:` is only valid on type `bash`" });
+      }
+      if (p.script !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`script:` is only valid on type `script`" });
+      }
+      if (p.runtime !== undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "`runtime:` is only valid on type `script`" });
+      }
+    }
   });
 
 export type PhaseDefinition = z.infer<typeof PhaseDefinitionSchema>;

@@ -30,7 +30,7 @@ chown agent:agent "$AGENT_HOME/.config"
 # agent-owned, chown -R it. The recursive pass runs only when something is
 # actually wrong, so a warm, correctly-owned cache stays cheap.
 if [ -d /cache ]; then
-  for sub in npm pnpm yarn; do
+  for sub in npm pnpm yarn uv; do
     mkdir -p "/cache/$sub"
     if [ -n "$(find "/cache/$sub" -maxdepth 1 ! -user agent -print -quit 2>/dev/null)" ]; then
       chown -R agent:agent "/cache/$sub" 2>/dev/null || true

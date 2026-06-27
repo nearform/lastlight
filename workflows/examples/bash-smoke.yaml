@@ -1,0 +1,41 @@
+kind: agent
+name: bash-smoke
+description: "Smoke test for deterministic bash + script phases (run in sandbox)"
+phases:
+  - name: phase_0
+    type: context
+
+  # Deterministic shell command in the sandbox. stdout is captured and exposed
+  # downstream via output_var.
+  - name: emit
+    type: bash
+    command: "echo hello-from-bash"
+    output_var: greeting
+
+  # A second bash phase reads the first phase's output via template substitution
+  # AND via the forwarded LL_OUT_<PHASE> env var.
+  - name: consume
+    type: bash
+    command: "echo template={{phaseOutputs.emit}} ; echo env=$LL_OUT_EMIT"
+
+  # Inline JS via node.
+  - name: js
+    type: script
+    runtime: js
+    script: |
+      console.log("node version:", process.version);
+      console.log("answer:", 6 * 7);
+
+  # Inline Python via uv. The PEP 723 block declares a dependency that uv
+  # resolves from PyPI (pypi.org is on the strict egress allowlist) into a
+  # cached venv. unrestricted_egress is NOT needed for PyPI.
+  - name: py
+    type: script
+    runtime: python
+    timeout_seconds: 120
+    script: |
+      # /// script
+      # dependencies = ["cowsay"]
+      # ///
+      import cowsay
+      cowsay.cow("hello from uv")

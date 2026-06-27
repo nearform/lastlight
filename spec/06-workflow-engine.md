@@ -64,8 +64,12 @@ through — webhook dispatch, CLI, cron, admin resume.
 {
   name: string;                         // unique within workflow
   label?: string;                       // dashboard display
-  type?: "context" | "agent";           // default "agent"
+  type?: "context" | "agent" | "bash" | "script";  // default "agent"
   prompt?: string;                      // path to template, e.g. "prompts/architect.md"
+  command?: string;                     // type: bash — deterministic shell command (templated)
+  script?: string;                      // type: script — inline source (templated)
+  runtime?: "js" | "ts" | "python";     // type: script — js/ts → node, python → uv run (default "js")
+  timeout_seconds?: number;             // type: bash/script — per-step timeout (default 300)
   skill?: string;                       // single skill name; sugar for `skills: [<name>]`
   skills?: string[];                    // per-phase bundle: <workspaceRoot>/.lastlight-skills/<phase>/<name>/
                                         // may coexist with `prompt`; mutually exclusive with `skill`
@@ -96,7 +100,8 @@ Defined with Zod; loaded and cached by `loader.ts`.
 
 ## Phase types
 
-Two: `context` (no agent), `agent` (one session).
+Four: `context` (no execution), `agent` (one LLM session), and the
+deterministic `bash` / `script` pair (a command, no LLM).
 
 - **context** — a checkpoint. The runner writes a `phase_history` row and
   moves on. Used to mark dashboard pipeline stages without spending
@@ -110,6 +115,32 @@ Two: `context` (no agent), `agent` (one session).
   Iterates if `loop:` or `generic_loop:` is declared. See
   [Phases & Prompts](/spec/07-phases-and-prompts) and
   [Skills](/spec/08-skills) for the prompt/skill mechanics.
+- **bash** — run a deterministic shell command (`command:`) **inside the
+  sandbox container** via `executeCommand()` (no LLM). Built on
+  `DockerSandbox.runCommand` (the non-agent sibling of `runAgent`:
+  `docker exec --user agent -w <cwd> … sh -c <cmd>`), in the same workspace
+  agent phases use (the host workDir persists across phases by taskId). The
+  command is template-rendered first (so it can reference
+  `{{phaseOutputs.<name>}}`, `{{branch}}`, …) then a post-render
+  `validateShellCommand` guard rejects any leftover `{{` marker. Exit 0 =
+  success; a non-zero exit **fails the phase** and cascades like any phase
+  failure. stdout is exposed downstream like an agent phase (`output_var` →
+  `{{phaseOutputs.<name>}}`); upstream string outputs are also forwarded as
+  `LL_OUT_<PHASE>` env vars. The run is mirrored to a session jsonl (command →
+  `bash` tool_use, output → tool_result) so it appears in the dashboard +
+  `lastlight session log` like an agent turn, with `turns: 0` and no model
+  cost. On gondolin/none it falls back to a host `spawnSync`.
+- **script** — same machinery as `bash`, but runs an inline program
+  (`script:`) with the runtime in `runtime:` — `js`/`ts` → `node` (TS via
+  `--experimental-strip-types`), `python` → `uv run`. The source is written to
+  a workspace-root sibling beside the skill bundle
+  (`.lastlight-scripts/<phase>/script.<ext>`, never inside the repo git tree). Python sources may carry a PEP 723 `# /// script`
+  inline-dependency block, resolved by `uv` from PyPI (on the strict egress
+  allowlist) into a cached venv. See [Sandbox](/spec/09-sandbox).
+
+Both deterministic types share the agent phase's dedup ledger
+(`runCommandPhase` → `runPhaseLedger`), so they get an `executions` row and
+dedup on resume like everything else.
 
 ## Linear vs DAG
 
@@ -360,10 +391,10 @@ Unrecognised expressions return `false` (safe default — the loop runs
 until `max_iterations`).
 
 `until_bash` is the alternative: a shell command whose exit code (0 →
-stop) drives the loop. Template variables in `until_bash` are
-sanity-checked at runner load time — `{{}}` markers in the rendered
-string are rejected to prevent template-after-render injection
-(`runner.ts:25–29`).
+stop) drives the loop. It runs **inside the sandbox** (via `executeCommand`
+with `writeSession: false`) against the persisted workspace — not on the
+harness host. `{{}}` markers in the command are rejected before execution to
+prevent template-after-render injection (`validateShellCommand`).
 
 ## Invariants
 

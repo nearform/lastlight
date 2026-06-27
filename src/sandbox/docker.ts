@@ -153,13 +153,20 @@ export class DockerSandbox {
     dockerArgs.push("-v", `${pkgCacheVolume}:${PKG_CACHE_DIR}`);
     // Point each package manager at its shared subdir. npm reads npm_config_cache;
     // pnpm reads npm-style env config (npm_config_store_dir → store-dir); yarn
-    // (classic + berry) reads YARN_CACHE_FOLDER. The agent already picks the PM
-    // from the repo's lockfile (see skills/pr-review/SKILL.md), so all three are
-    // wired regardless of which one a given repo uses.
+    // (classic + berry) reads YARN_CACHE_FOLDER; uv (python `type: script`
+    // phases) reads UV_CACHE_DIR. The agent already picks the PM from the repo's
+    // lockfile (see skills/pr-review/SKILL.md), so all are wired regardless of
+    // which one a given repo uses.
     dockerArgs.push(
       "-e", `npm_config_cache=${PKG_CACHE_DIR}/npm`,
       "-e", `npm_config_store_dir=${PKG_CACHE_DIR}/pnpm`,
       "-e", `YARN_CACHE_FOLDER=${PKG_CACHE_DIR}/yarn`,
+      "-e", `UV_CACHE_DIR=${PKG_CACHE_DIR}/uv`,
+      // uv resolves PEP 723 deps from PyPI (pypi.org / pythonhosted.org are in
+      // the strict egress allowlist). Pin it to the baked-in system python3 so
+      // it never tries to fetch a managed interpreter from astral.sh / GitHub
+      // (not guaranteed reachable under strict egress).
+      "-e", "UV_PYTHON_DOWNLOADS=never",
     );
 
     // Resolve git mounts for worktrees (if .git is a file pointing elsewhere).
@@ -471,6 +478,122 @@ export class DockerSandbox {
         } else {
           reject(new Error(`Sandbox agent failed (exit ${code}): ${stderrTail || "no output"}`));
         }
+      });
+    });
+  }
+
+  /**
+   * Run a deterministic shell command inside an already-provisioned sandbox
+   * container and return its exit code + captured output. This is the
+   * non-agent sibling of {@link runAgent}: same `docker exec --user agent -w
+   * <workdir> … sh -c <cmd>` machinery, but it captures a bounded stdout tail
+   * (runAgent discards stdout) and RESOLVES with the exit code instead of
+   * rejecting on non-zero — the caller decides success/failure.
+   *
+   * Powers `type: bash` / `type: script` workflow phases (and the in-sandbox
+   * `generic_loop.until_bash` check). `command` is passed as a single argv slot
+   * to `sh -c`, so it is NOT re-parsed by the host shell — it is the script we
+   * intend to run. Env is forwarded via `docker exec -e KEY=VALUE` (argv, not
+   * shell-interpolated); keys are charset-asserted defensively.
+   */
+  async runCommand(
+    taskId: string,
+    command: string,
+    opts?: {
+      /**
+       * Working directory inside the container. Defaults to WORKSPACE_DIR.
+       * Asserted against the workspace-root allowlist (same guard as runAgent).
+       */
+      cwd?: string;
+      /** Env forwarded into the command via `docker exec -e`. */
+      sandboxEnv?: Record<string, string>;
+      /** Per-command timeout in seconds (default: the sandbox config timeout). */
+      timeoutSeconds?: number;
+      /** Called for each newline-terminated stdout line as it arrives. */
+      onLine?: (line: string) => void;
+    },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
+    const info = this.activeContainers.get(taskId);
+    if (!info) throw new Error(`No sandbox for task ${taskId}`);
+
+    const timeout = opts?.timeoutSeconds || this.config.timeoutSeconds || 1800;
+
+    const workdir = opts?.cwd ?? WORKSPACE_DIR;
+    if (!workdir.startsWith(WORKSPACE_DIR) || !/^[A-Za-z0-9/_.-]+$/.test(workdir)) {
+      throw new Error(`Refusing to run command in cwd "${workdir}" — must live under ${WORKSPACE_DIR}`);
+    }
+
+    const envFlags: string[] = [];
+    for (const [k, v] of Object.entries(opts?.sandboxEnv ?? {})) {
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) {
+        throw new Error(`Refusing sandbox-env key "${k}" — must be UPPER_SNAKE`);
+      }
+      // Values travel as argv (no shell re-parse), so any value is safe — but a
+      // newline would let a value smuggle a second `-e` token in some shells;
+      // reject defensively to match runAgent's posture.
+      if (/[\n\r]/.test(v)) {
+        throw new Error(`Refusing sandbox-env value for "${k}" — contains newline`);
+      }
+      envFlags.push("-e", `${k}=${v}`);
+    }
+
+    const args = ["exec", "--user", "agent", "-w", workdir, ...envFlags, info.containerName, "sh", "-c", command];
+
+    // Bounded tails so a runaway command (e.g. a build dumping MB of logs)
+    // can't OOM the harness — keep enough stdout for the downstream
+    // `{{phaseOutputs.*}}` reference to be useful.
+    const STDOUT_TAIL_BYTES = 256 * 1024;
+    const STDERR_TAIL_BYTES = 32 * 1024;
+    return await new Promise((resolvePromise, reject) => {
+      const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+      let stdoutTail = "";
+      let stderrTail = "";
+      let buf = "";
+      let timedOut = false;
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, timeout * 1000);
+
+      child.stdout.setEncoding("utf-8");
+      child.stdout.on("data", (chunk: string) => {
+        stdoutTail += chunk;
+        if (stdoutTail.length > STDOUT_TAIL_BYTES) stdoutTail = stdoutTail.slice(-STDOUT_TAIL_BYTES);
+        if (!opts?.onLine) return;
+        buf += chunk;
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.length > 0) {
+            try { opts.onLine(line); } catch { /* swallow listener errors */ }
+          }
+        }
+      });
+
+      child.stderr.setEncoding("utf-8");
+      child.stderr.on("data", (chunk: string) => {
+        stderrTail += chunk;
+        if (stderrTail.length > STDERR_TAIL_BYTES) stderrTail = stderrTail.slice(-STDERR_TAIL_BYTES);
+      });
+
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        reject(new Error(`Sandbox command spawn failed: ${err.message}`));
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        if (buf.length > 0 && opts?.onLine) {
+          try { opts.onLine(buf); } catch { /* ignore */ }
+        }
+        resolvePromise({
+          exitCode: timedOut ? 124 : (code ?? 1),
+          stdout: stdoutTail,
+          stderr: stderrTail,
+          timedOut,
+        });
       });
     });
   }

@@ -8,6 +8,7 @@ import type { PhaseResult } from "./runner.js";
 // Mock the executor so we don't make real agent calls.
 vi.mock("../engine/agent-executor.js", () => ({
   executeAgent: vi.fn(),
+  executeCommand: vi.fn(),
 }));
 vi.mock("../admin/docker.js", () => ({
   listRunningContainers: vi.fn(async () => []),
@@ -18,7 +19,7 @@ vi.mock("./loader.js", () => ({
 }));
 vi.mock("child_process", () => ({ execSync: vi.fn() }));
 
-import { executeAgent } from "../engine/agent-executor.js";
+import { executeAgent, executeCommand } from "../engine/agent-executor.js";
 import { listRunningContainers } from "../admin/docker.js";
 import {
   PhaseExecutor,
@@ -28,6 +29,7 @@ import {
 } from "./phase-executor.js";
 
 const mockExecuteAgent = vi.mocked(executeAgent);
+const mockExecuteCommand = vi.mocked(executeCommand);
 
 const BASE_CTX: TemplateContext = {
   owner: "acme",
@@ -533,5 +535,79 @@ describe("PhaseExecutor — generic loop", () => {
 
     expect(outcome.status).toBe("failed");
     expect(reporter.failed).toContain("iter boom");
+  });
+});
+
+describe("PhaseExecutor — bash / script phase", () => {
+  function cmdResult(over: Partial<ReturnType<typeof makeSuccessResult>> = {}) {
+    return { success: true, output: "hello\n", error: undefined, turns: 0, durationMs: 12, ...over };
+  }
+
+  it("runs a bash command and exposes stdout under phase name + output_var", async () => {
+    mockExecuteCommand.mockResolvedValue(cmdResult({ output: "hi there\n" }));
+    const def: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "wf",
+      phases: [makePhase({ name: "emit", type: "bash", command: "echo hi there", output_var: "greeting" })],
+    };
+    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+
+    const outcome = await exec.execute(node("emit"), {});
+
+    expect(mockExecuteAgent).not.toHaveBeenCalled();
+    expect(mockExecuteCommand).toHaveBeenCalledTimes(1);
+    const spec = mockExecuteCommand.mock.calls[0][0];
+    expect(spec).toEqual({ kind: "bash", command: "echo hi there" });
+    expect(outcome.status).toBe("succeeded");
+    expect(outcome.outputVars).toEqual({ emit: "hi there\n", greeting: "hi there\n" });
+  });
+
+  it("renders templates + forwards upstream outputs as LL_OUT_ env to the command", async () => {
+    mockExecuteCommand.mockResolvedValue(cmdResult());
+    const def: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "wf",
+      phases: [makePhase({ name: "consume", type: "bash", command: "echo {{phaseOutputs.emit}}" })],
+    };
+    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+
+    await exec.execute(node("consume"), { emit: "from-upstream" });
+
+    const spec = mockExecuteCommand.mock.calls[0][0];
+    expect(spec).toEqual({ kind: "bash", command: "echo from-upstream" });
+    // 4th positional arg to executeCommand is opts; sandboxEnv carries LL_OUT_*.
+    const opts = mockExecuteCommand.mock.calls[0][2] as { sandboxEnv?: Record<string, string> };
+    expect(opts.sandboxEnv).toEqual({ LL_OUT_EMIT: "from-upstream" });
+  });
+
+  it("fails the workflow when the command exits non-zero", async () => {
+    mockExecuteCommand.mockResolvedValue({ success: false, output: "", error: "command exited 3", turns: 0, durationMs: 5 });
+    const def: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "wf",
+      phases: [makePhase({ name: "boom", type: "bash", command: "exit 3" })],
+    };
+    const reporter = makeReporter();
+    const exec = new PhaseExecutor(makeRun(def), reporter, makeResolver());
+
+    const outcome = await exec.execute(node("boom"), {});
+
+    expect(outcome.status).toBe("failed");
+    expect(reporter.failed).toContain("command exited 3");
+  });
+
+  it("builds a script spec with runtime + name", async () => {
+    mockExecuteCommand.mockResolvedValue(cmdResult({ output: "42\n" }));
+    const def: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "wf",
+      phases: [makePhase({ name: "calc-it", type: "script", runtime: "python", script: "print(6*7)" })],
+    };
+    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+
+    await exec.execute(node("calc-it"), {});
+
+    const spec = mockExecuteCommand.mock.calls[0][0];
+    expect(spec).toEqual({ kind: "script", script: "print(6*7)", runtime: "python", name: "calc-it" });
   });
 });

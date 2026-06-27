@@ -573,6 +573,16 @@ function PhaseDetailBox({ phase, onClose }: PhaseDetailBoxProps) {
         <Field label="type">{phase.type}</Field>
         {phase.skill && <Field label="skill">{phase.skill}</Field>}
         {phase.prompt && <Field label="prompt">{phase.prompt}</Field>}
+        {phase.command && <Field label="command">{phase.command}</Field>}
+        {phase.runtime && <Field label="runtime">{phase.runtime}</Field>}
+        {phase.script && (
+          <Field label="script">
+            <pre className="whitespace-pre-wrap break-all">{phase.script}</pre>
+          </Field>
+        )}
+        {phase.timeout_seconds !== undefined && (
+          <Field label="timeout_seconds">{phase.timeout_seconds}</Field>
+        )}
         {phase.model && <Field label="model">{phase.model}</Field>}
         {phase.approval_gate && <Field label="approval_gate">{phase.approval_gate}</Field>}
         {phase.approval_gate_message && (

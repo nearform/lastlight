@@ -62,6 +62,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get purge -y python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
+# uv — fast, isolated Python runner for `type: script` (runtime: python) phases.
+# Single static binary; `uv run script.py` honours PEP 723 inline dependency
+# blocks and resolves them into a cached venv (UV_CACHE_DIR is pointed at the
+# shared /cache volume at runtime, mirroring the npm/pnpm/yarn cache wiring).
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+ && uv --version
+
 # Create non-root agent user, UID/GID pinned to 10001 to MATCH the harness
 # `lastlight` user (see Dockerfile: `useradd -u 10001 lastlight`). The
 # entrypoint chowns the bind-mounted workspace to `agent`; per-PR workspaces
