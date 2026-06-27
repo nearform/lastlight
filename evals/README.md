@@ -11,8 +11,6 @@ by an in-process fake (seeded + recording), and `git push` goes to a local bare
 repo. The only deviations from production are the ones we can't do unattended:
 approval gates are disabled and outward side-effects are mocked.
 
-## How it works
-
 ```
 instance (SWE-bench shape)
    │
@@ -25,10 +23,9 @@ instance (SWE-bench shape)
         • behavioral — recorded GitHub calls vs the instance's expectations
 ```
 
-The agent reaches the fake GitHub because agentic-pi's built-in GitHub tools
-accept a `githubApiBaseUrl` (added in agentic-pi ≥ 0.2.11); Last Light threads
-it through `ExecutorConfig.githubApiBaseUrl` → `agenticRun`. Static-token mode
-(`GITHUB_TOKEN` set, no App creds) means no real token is ever minted.
+> Working on the harness itself? See `CLAUDE.md` for the seams and invariants
+> (the base-URL mock, static-token mode, the no-clone seeding trick, the metrics
+> drain).
 
 ## Run it
 
@@ -111,15 +108,11 @@ Held-out tests are run with `node --test --experimental-strip-types`
 agent can't edit them — exactly like SWE-bench's `test_patch`. For React/DOM
 fixtures, set a custom test command (future work — see below).
 
-## Notes / future work
+## Limitations / future work
 
-- **agentic-pi dependency.** The GitHub-mock seam (`githubApiBaseUrl`) ships in
-  agentic-pi ≥ 0.2.11; Last Light depends on `^0.2.11`. The deterministic
-  `mechanism.test.ts` exercises the seam against the installed package.
-- **Backend.** Runs on the in-process `none` backend (no Docker): the fake
-  GitHub is host-local at `127.0.0.1` and the real workflow/prompts/skills/agent
-  loop all run unchanged. A Docker-backed eval (full isolation/egress fidelity)
-  would need the fake reachable in-container — a future upgrade.
+- **Backend.** Runs on the in-process `none` backend (no Docker). A Docker-backed
+  eval (full isolation/egress fidelity) would need the fake GitHub reachable
+  in-container — a future upgrade.
 - **Real SWE-bench Lite.** The schema is compatible; ingesting real instances
   needs per-repo Python Docker environments — a separate effort.
 - **React fixtures.** Need a real test runner (vitest + jsdom) and per-fixture
