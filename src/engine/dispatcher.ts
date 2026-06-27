@@ -708,11 +708,17 @@ async function handleChat(
   const sender = context.sender as string;
 
   if (deps.chatCoordinator && envelope.source !== "cli") {
+    // Slack `ts` (string, epoch seconds) → number for in-batch send-order sort.
+    const tsRaw = context.messageTs;
+    const ts = typeof tsRaw === "string" ? Number.parseFloat(tsRaw)
+      : typeof tsRaw === "number" ? tsRaw
+      : undefined;
     deps.chatCoordinator.submit({
       sessionId: messagingSessionId,
       message,
       sender,
       reply: envelope.reply,
+      ts: Number.isFinite(ts) ? ts : undefined,
     });
     return { kind: "handled", handler: "chat" };
   }

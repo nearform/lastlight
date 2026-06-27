@@ -48,7 +48,9 @@ queued and, once it finishes, drained together as a **single** combined
 follow-up turn (newline-joined into one prompt, one executions row, one reply
 threaded under the latest message). So a rapid `A B C D E` burst produces a
 reply to `A` and then one combined reply for `B…E`, rather than five separate
-turns. Different sessions run in parallel; the same session strictly in order.
+turns. A batch is sorted by the source send timestamp (Slack `ts`) before
+joining, since webhook delivery can reorder a rapid burst. Different sessions
+run in parallel; the same session strictly in order.
 
 This is the only non-wasteful option: neither runtime can inject context into a
 running agent (pi-ai is a stateless completion client whose only mid-flight

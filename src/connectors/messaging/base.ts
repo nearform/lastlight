@@ -65,21 +65,15 @@ export abstract class MessagingConnector extends EventEmitter implements Connect
     if (!cleanText) return;
 
     // Thread anchor for status indicators / replies, and the session key.
-    // For a reply inside an existing thread this is the parent thread ts.
-    //
-    // For a DM with no thread_ts we must NOT default to the message's own
-    // ts — that would mint a fresh thread (and a new session + agent jsonl)
-    // on every top-level message, fragmenting one continuous DM
-    // conversation across many dashboard sessions. Instead, pin it to the
-    // DM's most-recent active session thread so the whole conversation
-    // stays one thread + one session until it goes stale. A fresh DM (no
-    // active session) and channel @mentions still root a new thread on the
-    // message's own ts.
-    let replyThreadId = threadId;
-    if (!replyThreadId && isDM) {
-      replyThreadId = this.sessionManager.findActiveDmThread(this.name, channelId, platformUserId);
-    }
-    replyThreadId = replyThreadId || messageId;
+    // A reply inside an existing thread carries its parent thread ts and
+    // continues that thread/session; a top-level message (no thread_ts —
+    // e.g. the user starting a NEW conversation in a DM, or a fresh channel
+    // @mention) roots a new thread on its own ts. This is exactly Slack's
+    // own threading: each distinct thread is its own conversation, so each
+    // maps to its own session. (Do NOT collapse top-level DM messages into
+    // the most-recent thread — that strands a deliberately-new thread's
+    // replies back in the old one.)
+    const replyThreadId = threadId || messageId;
 
     // Show acknowledgment
     this.showTyping(channelId, messageId, replyThreadId).catch(() => {});

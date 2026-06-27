@@ -26,6 +26,12 @@ interface PendingMessage {
   message: string;
   sender: string;
   reply: (msg: string) => Promise<void>;
+  /**
+   * Source-platform send timestamp (e.g. Slack `ts`, epoch seconds). Used to
+   * sort a batch back into send order — webhook delivery can reorder rapid
+   * messages. Undefined for sources that don't carry one (sorted last, stably).
+   */
+  ts?: number;
 }
 
 interface SessionState {
@@ -53,6 +59,8 @@ export interface ChatSubmitInput {
   message: string;
   sender: string;
   reply: (msg: string) => Promise<void>;
+  /** Source send timestamp (epoch seconds) for in-batch ordering, if known. */
+  ts?: number;
 }
 
 export class ChatCoordinator {
@@ -74,7 +82,7 @@ export class ChatCoordinator {
       state = { queue: [], draining: false };
       this.sessions.set(input.sessionId, state);
     }
-    state.queue.push({ message: input.message, sender: input.sender, reply: input.reply });
+    state.queue.push({ message: input.message, sender: input.sender, reply: input.reply, ts: input.ts });
     if (!state.draining) {
       state.draining = true;
       void this.drain(input.sessionId, state);
@@ -95,6 +103,10 @@ export class ChatCoordinator {
       // a submit cannot interleave there and strand a message.
       while (state.queue.length > 0) {
         const batch = state.queue.splice(0, state.queue.length);
+        // Sort back into send order — webhook delivery can reorder a rapid
+        // burst, so arrival order isn't reliable. Stable: messages without a
+        // timestamp keep their arrival position (sorted last).
+        batch.sort((a, b) => (a.ts ?? Infinity) - (b.ts ?? Infinity));
         const combined = batch.map((b) => b.message).join("\n");
         // Reply via the most recent message so the response threads under the
         // latest thing the user typed.

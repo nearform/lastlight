@@ -147,29 +147,6 @@ describe("SessionManager", () => {
     legacy.close();
   });
 
-  it("findActiveDmThread reuses the active DM thread so the conversation doesn't fragment", () => {
-    // First DM message roots a thread keyed by its own ts.
-    const dm = { platform: "slack", channelId: "D123", threadId: "ts-1", userId: "U1" };
-    const first = manager.getOrCreateSession(dm);
-
-    // A later top-level DM message (no thread_ts) should resolve back to the
-    // same thread instead of minting a new one.
-    expect(manager.findActiveDmThread("slack", "D123", "U1")).toBe("ts-1");
-    const second = manager.getOrCreateSession({ ...dm, threadId: "ts-1" });
-    expect(second.id).toBe(first.id);
-  });
-
-  it("findActiveDmThread returns null when there is no active session", () => {
-    expect(manager.findActiveDmThread("slack", "D999", "Unobody")).toBeNull();
-  });
-
-  it("findActiveDmThread ignores deactivated sessions", () => {
-    const dm = { platform: "slack", channelId: "D123", threadId: "ts-1", userId: "U1" };
-    const s = manager.getOrCreateSession(dm);
-    manager.deactivateSession(s.id);
-    expect(manager.findActiveDmThread("slack", "D123", "U1")).toBeNull();
-  });
-
   it("partial unique index still prevents two active rows for the same key", () => {
     const a = manager.getOrCreateSession(KEY);
     expect(a.active).toBe(true);

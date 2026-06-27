@@ -234,31 +234,6 @@ export class SessionManager {
     }));
   }
 
-  /**
-   * Thread id of the most-recent active, non-stale session for a DM
-   * (platform + channel + user), ignoring the thread dimension. Returns
-   * null if there is none.
-   *
-   * Used to keep a continuous DM conversation pinned to one thread (and
-   * therefore one session + one agent jsonl). Without this, a DM message
-   * that arrives without a `thread_ts` mints a brand-new thread keyed by
-   * its own ts on every top-level message, fragmenting a single human
-   * conversation across many dashboard sessions (see issue: chat log
-   * "missing messages"). Explicit Slack threads (a real `thread_ts`)
-   * bypass this and still get their own session.
-   */
-  findActiveDmThread(platform: string, channelId: string, userId: string): string | null {
-    const cutoff = new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();
-    const row = this.db.prepare(`
-      SELECT thread_id FROM messaging_sessions
-      WHERE platform = ? AND channel_id = ? AND user_id = ?
-        AND active = 1 AND last_activity_at >= ?
-      ORDER BY last_activity_at DESC
-      LIMIT 1
-    `).get(platform, channelId, userId, cutoff) as { thread_id: string | null } | undefined;
-    return row?.thread_id ?? null;
-  }
-
   /** Check if the bot is already participating in a thread (any user, any active non-stale session) */
   hasActiveThread(platform: string, channelId: string, threadId: string): boolean {
     const cutoff = new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();

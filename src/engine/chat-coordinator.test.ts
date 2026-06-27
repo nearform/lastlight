@@ -70,6 +70,39 @@ describe("ChatCoordinator", () => {
     expect(c.activeSessions).toBe(0);
   });
 
+  it("sorts a batch back into send order by ts (webhook can reorder)", async () => {
+    const { calls, runTurn } = makeRunTurn();
+    const c = new ChatCoordinator({ runTurn });
+
+    c.submit({ sessionId: "s1", message: "first", sender: "u", reply: noReply, ts: 100 });
+    await tick();
+    // These arrive out of order (later-ts message delivered before earlier-ts).
+    c.submit({ sessionId: "s1", message: "C", sender: "u", reply: noReply, ts: 303 });
+    c.submit({ sessionId: "s1", message: "A", sender: "u", reply: noReply, ts: 301 });
+    c.submit({ sessionId: "s1", message: "B", sender: "u", reply: noReply, ts: 302 });
+
+    calls[0].resolve();
+    await tick();
+
+    expect(calls[1].message).toBe("A\nB\nC"); // re-sorted by ts, not arrival order
+  });
+
+  it("keeps untimed messages in arrival order (sorted last, stably)", async () => {
+    const { calls, runTurn } = makeRunTurn();
+    const c = new ChatCoordinator({ runTurn });
+
+    c.submit({ sessionId: "s1", message: "first", sender: "u", reply: noReply, ts: 1 });
+    await tick();
+    c.submit({ sessionId: "s1", message: "no-ts-1", sender: "u", reply: noReply });
+    c.submit({ sessionId: "s1", message: "timed", sender: "u", reply: noReply, ts: 50 });
+    c.submit({ sessionId: "s1", message: "no-ts-2", sender: "u", reply: noReply });
+
+    calls[0].resolve();
+    await tick();
+
+    expect(calls[1].message).toBe("timed\nno-ts-1\nno-ts-2");
+  });
+
   it("replies via (and attributes) the most recent message in a batch", async () => {
     const { calls, runTurn } = makeRunTurn();
     const c = new ChatCoordinator({ runTurn });
