@@ -443,7 +443,7 @@ Overlay files are read at startup only; `docker compose restart agent` after cha
 2. **Router** maps event type to skill deterministically (no LLM in the routing loop):
    - `issue.opened` → `issue-triage`
    - `pr.opened` → `pr-review`
-   - `comment.created` with `@last-light` from a maintainer → routed by intent classifier (build / explore / triage / review / action)
+   - `comment.created` with `@last-light` from a maintainer → routed by intent classifier (build / explore / question / triage / review / security / verify / qa-test / demo)
 3. **Workflow runner** loads the matching YAML, dispatches each phase to `executeAgent` (`src/engine/agent-executor.ts`, which invokes agentic-pi) or, for chat, `ChatRunner` (`src/engine/chat-runner.ts`, in-process pi-ai)
 4. **Build workflow** runs a multi-phase cycle:
    - Phase 1: **Architect** — read-only analysis, writes plan to `.lastlight/issue-N/architect-plan.md`
@@ -454,13 +454,14 @@ Overlay files are read at startup only; `docker compose restart agent` after cha
 
 ### Cron
 
-When webhooks are enabled, only the weekly health report runs on cron (issue/PR events arrive in real-time via webhooks). Without webhooks, triage and PR review also run on cron.
+When webhooks are enabled, only the weekly reports (health + security) run on cron (issue/PR events arrive in real-time via webhooks). Without webhooks, triage and PR review also run on cron.
 
 | Job | Schedule | Condition |
 |-----|----------|-----------|
 | Triage new issues | Every 15 min | Only without webhooks |
 | Check PRs for review | Every 30 min | Only without webhooks |
 | Weekly health report | Mondays 9am | Always |
+| Weekly security scan | Mondays 10am | Always |
 
 ---
 
@@ -516,10 +517,20 @@ lastlight/
 
   workflows/                # YAML workflow definitions
     build.yaml              # Architect → Executor → Reviewer → PR
-    issue-triage.yaml
-    pr-review.yaml
-    repo-health.yaml
-    cron-*.yaml             # Cron-kind triggers
+    issue-triage.yaml       # Label/triage an issue
+    issue-comment.yaml      # Handle an @mention on an issue
+    pr-review.yaml          # Structured PR review
+    pr-fix.yaml             # Apply review feedback to a PR
+    pr-comment.yaml         # Handle an @mention on a PR
+    explore.yaml            # Shape an idea into a spec (web search)
+    answer.yaml             # Research and answer a question
+    verify.yaml             # Confirm/refute a claim by running code
+    qa-test.yaml            # Browser/QA test pass
+    security-review.yaml    # Security scan
+    security-feedback.yaml  # Apply security review feedback
+    repo-health.yaml        # Health report
+    demo.yaml               # Recorded demo run
+    cron-*.yaml             # Cron-kind triggers (triage, review, health, security)
     prompts/                # Per-phase prompt templates
 
   deploy/

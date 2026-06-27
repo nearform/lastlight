@@ -76,7 +76,7 @@ phases:
   # workflow-level `final_message`. Pure composition — no skills, no repo work.
   - name: synthesize
     label: Summary
-    depends_on: [qa_test]
+    depends_on: [qa_test, qa_browser]
     prompt: prompts/qa-synth.md
     model: "{{models.qa-test}}"
     variant: "{{variants.qa-test}}"
