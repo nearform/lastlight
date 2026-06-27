@@ -168,46 +168,6 @@ describe('dispatch — chat handler', () => {
     expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/error/i));
   });
 
-  it('routes a messaging-sourced turn through the coordinator instead of running inline', async () => {
-    const envelope = makeEnvelope({ type: 'message', source: 'slack' });
-    const submit = vi.fn();
-    const runChat = vi.fn();
-    const deps = makeDeps(chatRoute(), {
-      sessionManager: { getSession: vi.fn(), setAgentSessionId: vi.fn() } as any,
-      runChat,
-      chatCoordinator: { submit } as any,
-    });
-
-    const outcome = await dispatch(envelope, deps);
-
-    expect(outcome).toEqual({ kind: 'handled', handler: 'chat' });
-    expect(submit).toHaveBeenCalledWith({
-      sessionId: 'sess-1',
-      message: 'hi',
-      sender: 'octocat',
-      reply: envelope.reply,
-    });
-    // The turn is deferred to the coordinator — dispatch did not run it inline.
-    expect(runChat).not.toHaveBeenCalled();
-  });
-
-  it('keeps the CLI (cli source) on the inline synchronous path even with a coordinator', async () => {
-    const envelope = makeEnvelope({ type: 'message', source: 'cli' });
-    const submit = vi.fn();
-    const runChat = vi.fn().mockResolvedValue(chatResult());
-    const deps = makeDeps(chatRoute(), {
-      db: mockDb() as any,
-      sessionManager: { getSession: vi.fn().mockReturnValue(undefined), setAgentSessionId: vi.fn() } as any,
-      runChat,
-      chatCoordinator: { submit } as any,
-    });
-
-    await dispatch(envelope, deps);
-
-    expect(submit).not.toHaveBeenCalled();
-    expect(runChat).toHaveBeenCalledWith('hi', 'sess-1', 'octocat', undefined);
-    expect(envelope.reply).toHaveBeenCalledWith('hello back');
-  });
 });
 
 describe('dispatch — chat-reset handler', () => {

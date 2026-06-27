@@ -38,26 +38,32 @@ interface ChatRunnerConfig {
 The runner is constructed once at [Harness](/spec/01-harness) boot
 (`src/index.ts:103–111`) and lives for the lifetime of the process.
 
-### Per-session batching (ChatCoordinator)
+### Per-session batching (MessageBatcher)
 
-Messaging-sourced turns are serialized and batched per session by the
-`ChatCoordinator` (`src/engine/chat-coordinator.ts`), wired into
-`DispatchDeps.chatCoordinator`. The first message in an idle session starts a
-turn immediately; any messages that arrive *while that turn is in flight* are
-queued and, once it finishes, drained together as a **single** combined
-follow-up turn (newline-joined into one prompt, one executions row, one reply
-threaded under the latest message). So a rapid `A B C D E` burst produces a
-reply to `A` and then one combined reply for `B…E`, rather than five separate
-turns. A batch is sorted by the source send timestamp (Slack `ts`) before
-joining, since webhook delivery can reorder a rapid burst. Different sessions
-run in parallel; the same session strictly in order.
+Bursty messaging input is coalesced **before routing** by the `MessageBatcher`
+(`src/engine/message-batcher.ts`), gated on `type === "message"` at the
+`registry.onEvent` boundary in `index.ts`. The first message for an idle session
+opens a short settle window (`CHAT_BATCH_DEBOUNCE_MS`, default 700ms; 0
+disables); every message that lands in that window — or while a turn is already
+in flight — is collected, sorted back into send order by source timestamp
+(Slack `ts`), and **collapsed into one envelope** (bodies newline-joined). That
+single envelope is dispatched once, so the burst is **classified once** and
+answered as a single ordered turn (one executions row, one reply threaded under
+the latest message). A rapid `A B C D E` burst becomes one `A\nB\nC\nD\nE` turn.
 
-This is the only non-wasteful option: neither runtime can inject context into a
-running agent (pi-ai is a stateless completion client whose only mid-flight
-primitive is `AbortSignal`), so new input is handled by finishing the current
-turn and running the queue, not by steering or aborting. The synchronous CLI
-`/api/chat` path (`envelope.source === "cli"`) bypasses the coordinator and runs
-inline so its caller still gets the reply on the same request.
+Batching before the classifier is deliberate: routing runs a ~700ms LLM
+classifier per message concurrently, which would otherwise reorder a burst (a
+later message whose classification finishes first would start its own turn
+ahead of earlier ones). Collapsing first removes that reorder and the redundant
+per-message classification. Different sessions run in parallel; the same session
+strictly in order.
+
+Neither runtime can inject context into a running agent (pi-ai is a stateless
+completion client whose only mid-flight primitive is `AbortSignal`), so input
+that arrives mid-turn is handled by finishing the current turn and running the
+next batch, not by steering or aborting. The synchronous CLI `/api/chat` path
+dispatches directly (not via `registry.onEvent`), so it bypasses the batcher and
+its caller still gets the reply on the same request.
 
 ## pi-ai vs agentic-pi
 

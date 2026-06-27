@@ -4,7 +4,6 @@ import type { SessionManager } from "../connectors/index.js";
 import type { StateDb } from "../state/db.js";
 import type { GitHubClient } from "./github.js";
 import type { ChatResult } from "./chat.js";
-import type { ChatCoordinator } from "./chat-coordinator.js";
 import { routeEvent, type Route, type RouterDeps } from "./router.js";
 import { runDashboardUrl } from "../notify/model.js";
 
@@ -38,13 +37,6 @@ export interface DispatchDeps {
   dispatchWorkflow: DispatchWorkflowFn;
   sessionManager: SessionManager;
   runChat: RunChatFn;
-  /**
-   * Optional per-session chat batcher. When present, messaging-sourced chat
-   * turns (everything except the synchronous CLI `/api/chat` path) are routed
-   * through it so messages that arrive mid-turn queue and drain as one
-   * combined follow-up. Absent in unit tests, which take the inline path.
-   */
-  chatCoordinator?: ChatCoordinator;
   route?: (envelope: EventEnvelope, deps: RouterDeps) => Promise<Route>;
   reviewPostsCheck: boolean;
   publicUrl?: string;
@@ -692,11 +684,10 @@ async function handleApprovalResponse(
  * session id for resume on the next turn, and replies. Failures still record a
  * finish row and apologize rather than going silent.
  *
- * Messaging-sourced chat (Slack etc.) is routed through `chatCoordinator` when
- * one is wired, so messages that arrive while a turn is in flight queue and
- * drain together as one combined follow-up turn. The synchronous CLI
- * `/api/chat` path (and unit tests, which inject no coordinator) take the
- * inline path so the caller still gets its reply on the same await.
+ * Per-session batching of bursty messaging input happens *before* this point,
+ * in the MessageBatcher at the connector→dispatch boundary (see
+ * `src/engine/message-batcher.ts`) — so by the time a turn reaches here it is
+ * already one combined, send-ordered message. This handler just runs it.
  */
 async function handleChat(
   envelope: EventEnvelope,
@@ -706,22 +697,6 @@ async function handleChat(
   const messagingSessionId = context.sessionId as string;
   const message = context.message as string;
   const sender = context.sender as string;
-
-  if (deps.chatCoordinator && envelope.source !== "cli") {
-    // Slack `ts` (string, epoch seconds) → number for in-batch send-order sort.
-    const tsRaw = context.messageTs;
-    const ts = typeof tsRaw === "string" ? Number.parseFloat(tsRaw)
-      : typeof tsRaw === "number" ? tsRaw
-      : undefined;
-    deps.chatCoordinator.submit({
-      sessionId: messagingSessionId,
-      message,
-      sender,
-      reply: envelope.reply,
-      ts: Number.isFinite(ts) ? ts : undefined,
-    });
-    return { kind: "handled", handler: "chat" };
-  }
 
   await runChatTurn(deps, { sessionId: messagingSessionId, message, sender, reply: envelope.reply });
   return { kind: "handled", handler: "chat" };

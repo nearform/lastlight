@@ -568,6 +568,10 @@ Slack (optional):
   `SLACK_OAUTH_REDIRECT_URI` — enables "Login with Slack" on the dashboard
   (OIDC via arctic, uses `openid.connect.userInfo`)
 - `SLACK_ALLOWED_WORKSPACE` — restrict OAuth login to one team_id / domain
+- `CHAT_BATCH_DEBOUNCE_MS` — settle window (ms, default 700; 0 disables) the
+  `MessageBatcher` waits to coalesce a bursty thread before routing, so a rapid
+  multi-message burst is classified once and answered as one ordered turn
+  (`src/engine/message-batcher.ts`, gated at `registry.onEvent`).
 
 ## Deployment
 

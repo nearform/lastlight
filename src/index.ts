@@ -3,8 +3,8 @@ import { resolve } from "path";
 import { randomUUID } from "crypto";
 import { loadConfig, resolveModel, resolveVariant } from "./config.js";
 import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService } from "./connectors/index.js";
-import { dispatch, runChatTurn, type DispatchDeps } from "./engine/dispatcher.js";
-import { ChatCoordinator } from "./engine/chat-coordinator.js";
+import { dispatch, type DispatchDeps } from "./engine/dispatcher.js";
+import { MessageBatcher } from "./engine/message-batcher.js";
 import { CHAT_SYSTEM_SUFFIX, handleChatMessage, loadAgentContext } from "./engine/chat.js";
 import { configureWorkflowAssets, validateAssets, getWorkflow } from "./workflows/loader.js";
 import { ChatRunner } from "./engine/chat-runner.js";
@@ -780,15 +780,6 @@ async function main() {
     publicUrl: config.publicUrl,
   };
 
-  // Per-session chat batcher. Messaging-sourced turns (Slack) route through it
-  // so messages typed while the agent is mid-turn queue and drain together as
-  // one combined follow-up. The CLI `/api/chat` path stays inline+synchronous
-  // (envelope.source === "cli" bypasses the coordinator in handleChat).
-  dispatchDeps.chatCoordinator = new ChatCoordinator({
-    runTurn: (sessionId, message, sender, reply) =>
-      runChatTurn(dispatchDeps, { sessionId, message, sender, reply }),
-  });
-
   // One chat turn over HTTP — `lastlight chat` without a messaging platform.
   // Routes through the SAME dispatcher seam Slack uses (forcing the chat
   // handler), so the executions row, agent-session resume, and telemetry are
@@ -830,7 +821,7 @@ async function main() {
     return c.json({ text: reply, thread: threadId ?? session.id, sessionId: session.id, outcome: outcome.kind });
   });
 
-  registry.onEvent(async (envelope: EventEnvelope) => {
+  const handleEnvelope = async (envelope: EventEnvelope) => {
     console.log(`[event] ${envelope.source}:${envelope.type} from ${envelope.sender}${envelope.repo ? ` on ${envelope.repo}` : ""}`);
     try {
       const outcome = await dispatch(envelope, dispatchDeps);
@@ -843,6 +834,26 @@ async function main() {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[event] dispatch threw: ${msg}`);
     }
+  };
+
+  // Batch bursty messaging input per session BEFORE routing: a rapid Slack
+  // burst is collected, sorted into send order, and collapsed into ONE
+  // envelope so it's classified once and answered as a single ordered turn.
+  // Gated on `type === "message"` — only messaging connectors emit that here
+  // (GitHub events have richer types; the CLI dispatches directly, not via the
+  // registry). Tunable settle window via CHAT_BATCH_DEBOUNCE_MS (default 700ms;
+  // 0 disables).
+  const messageBatcher = new MessageBatcher({
+    dispatch: handleEnvelope,
+    debounceMs: Number.parseInt(process.env.CHAT_BATCH_DEBOUNCE_MS || "700", 10),
+  });
+
+  registry.onEvent(async (envelope: EventEnvelope) => {
+    if (envelope.type === "message") {
+      messageBatcher.submit(envelope);
+      return;
+    }
+    await handleEnvelope(envelope);
   });
 
   // Cron jobs — fan out from each tick into one workflow run per managed repo

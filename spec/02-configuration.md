@@ -93,6 +93,7 @@ Missing or malformed PEM exits `78`.
 | `SLACK_DELIVERY_CHANNEL` / `SLACK_HOME_CHANNEL` | cron report destination | none |
 | `SLACK_OAUTH_CLIENT_ID` / `SLACK_OAUTH_CLIENT_SECRET` / `SLACK_OAUTH_REDIRECT_URI` | "Login with Slack" for dashboard | none |
 | `SLACK_ALLOWED_WORKSPACE` | restrict OAuth to one team | none |
+| `CHAT_BATCH_DEBOUNCE_MS` | settle window to coalesce a bursty thread before classifying (see [Chat](/spec/11-chat)) | `700` (0 disables) |
 
 Presence of `SLACK_BOT_TOKEN` gates the `slack` config sub-object.
 Without it, the Slack connector never registers.

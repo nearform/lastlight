@@ -648,9 +648,6 @@ export async function routeEvent(
               message: slackText,
               sender: envelope.sender,
               source: envelope.source,
-              // Slack message ts (epoch seconds, string) — lets the chat
-              // coordinator sort a batched burst back into send order.
-              messageTs: raw?.ts,
             },
           };
       }
