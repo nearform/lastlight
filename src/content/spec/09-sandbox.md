@@ -75,7 +75,13 @@ agentic-pi's VM. Container name: `lastlight-sandbox-{taskId}-{uuid}`.
 - Memory: `--memory 2g --memory-swap 2g` by default.
 - Timeout: 30 min default; runs longer than that are killed.
 - Image: the lean `lastlight-sandbox:latest` (`sandbox.Dockerfile`) by
-  default. A phase declaring `sandbox_image: qa` runs instead on
+  default — base `node:20-slim` with fnm-managed Node 22 (default; supports
+  `--experimental-strip-types` for inline TS), `python3`, and `uv` (for
+  `type: script` `runtime: python`). The shared `/cache` package-manager volume
+  is mounted with `npm_config_cache`/`YARN_CACHE_FOLDER`/`UV_CACHE_DIR` pointed
+  at it; `UV_PYTHON_DOWNLOADS=never` pins `uv` to the baked-in `python3` so it
+  never fetches an interpreter off-allowlist. A phase declaring
+  `sandbox_image: qa` runs instead on
   `lastlight-sandbox-qa:latest` (`sandbox-qa.Dockerfile` — `FROM` the base
   plus Playwright + a pinned Chromium baked at build time for the browser-QA
   path, and `ffmpeg` for the `demo` workflow's video-compositing step
@@ -295,7 +301,13 @@ Per-phase model and variant overrides resolve through
    `taskId` in `activeContainers`.
 3. **Run** — `docker exec -i -w <cwd> {container} sh -c "agentic-pi run ..."`
    with streaming stdout. Stderr captured to a tail buffer for error
-   reporting.
+   reporting. Deterministic `type: bash` / `type: script` phases (and the
+   `generic_loop.until_bash` check) take the non-agent path:
+   `DockerSandbox.runCommand` runs `docker exec --user agent -w <cwd> …
+   sh -c <cmd>` and returns the exit code + captured stdout/stderr instead of
+   an agent event stream. Script phases first write the inline source to a
+   workspace-root sibling (`.lastlight-script/<phase>.<ext>`) and run it with
+   `node` (js/ts) or `uv run` (python).
 4. **Teardown** — `docker rm -f` on completion or error.
 5. **Boot-time cleanup** — `cleanupOrphanedSandboxes()` (`sandbox/index.ts:12–26`)
    kills any leftover `lastlight-sandbox-*` containers from prior

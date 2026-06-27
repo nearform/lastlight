@@ -85,7 +85,7 @@ phases:
 		<div class="principles-grid" style="margin-top: 1.5rem;">
 			<div class="principle-card">
 				<div class="principle-header"><h3>Phase types</h3></div>
-				<p>A phase is either <strong>context</strong> (a no-op checkpoint for the dashboard), <strong>agent</strong> (runs an agentic-pi session with a <code>prompt:</code> and/or one or more <code>skills:</code>), or <strong>loop</strong> (an agent phase that iterates on reviewer feedback up to <code>max_cycles</code> times, each cycle tracked as a <code>reviewer_fix_1</code> / <code>reviewer_recheck_1</code> pair…).</p>
+				<p>A phase is <strong>context</strong> (a no-op checkpoint for the dashboard), <strong>agent</strong> (runs an agentic-pi session with a <code>prompt:</code> and/or one or more <code>skills:</code>), <strong>bash</strong> / <strong>script</strong> (a deterministic shell command or inline <code>node</code>/<code>uv run</code> program executed in the sandbox — no LLM, exit code drives success), or <strong>loop</strong> (an agent phase that iterates on reviewer feedback up to <code>max_cycles</code> times, each cycle tracked as a <code>reviewer_fix_1</code> / <code>reviewer_recheck_1</code> pair…).</p>
 			</div>
 			<div class="principle-card">
 				<div class="principle-header"><h3>Permission profiles</h3></div>

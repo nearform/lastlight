@@ -13,13 +13,21 @@ of prompt files that drive each workflow.
 
 ## Phase types
 
-Two from the runner's perspective; an agent phase further specialises
+Four from the runner's perspective; an agent phase further specialises
 depending on whether it declares `loop:` or `generic_loop:`.
 
 | Type | Used for | Required fields | Optional fields |
 |---|---|---|---|
 | `context` | Dashboard checkpoints — no agent runs | `name`, `label`, `type: "context"` | — |
 | `agent` (default) | One agent session | `name`; at least one of `prompt:`, `skill:`, `skills:` | `model`, `variant`, `loop`, `generic_loop`, `approval_gate`, `output_var`, `on_output`, `messages`, `depends_on`, `unrestricted_egress`, `web_search`, `requires_sandbox`, `sandbox_image` |
+| `bash` | Deterministic shell command in the sandbox (no LLM) | `name`, `type: "bash"`, `command:` | `timeout_seconds`, `output_var`, `approval_gate`, `messages`, `depends_on`, `unrestricted_egress`, `sandbox_image` |
+| `script` | Inline JS/TS (`node`) or Python (`uv run`) in the sandbox | `name`, `type: "script"`, `script:` | `runtime` (default `js`), `timeout_seconds`, `output_var`, `approval_gate`, `messages`, `depends_on`, `unrestricted_egress`, `sandbox_image` |
+
+`bash`/`script` phases run in the same sandbox/workspace as agent phases,
+expose stdout downstream via `output_var` → `{{phaseOutputs.<name>}}`, fail the
+phase on a non-zero exit, and are mirrored to a session jsonl (command →
+`bash` tool_use, output → tool_result) so they show in the dashboard +
+`lastlight session log` with `turns: 0`. See [Sandbox](/spec/09-sandbox).
 
 `prompt:` and `skills:` (or sugar `skill:`) may be set together — the
 prompt template is rendered as the user prompt, and the named skills
@@ -254,9 +262,9 @@ filesystem + `read` tool path.
   pi-coding-agent's loader silently drops SKILL.md files that omit
   either, which would surface as "no skills appeared in the catalogue"
   with no error. Audit on add.
-- **Phase-rendered shell commands are sanity-checked.** `until_bash`
-  expressions are rejected if they contain unrendered `{{}}` markers
-  after template rendering (`runner.ts:25–29`) — a defence against
+- **Phase-rendered shell commands are sanity-checked.** `until_bash` and
+  `type: bash` commands are rejected if they contain unrendered `{{}}` markers
+  after template rendering (`validateShellCommand`) — a defence against
   template injection.
 
 ## Current implementation
