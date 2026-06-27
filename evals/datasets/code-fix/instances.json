@@ -1,0 +1,26 @@
+[
+  {
+    "instance_id": "codefix__date-range-off-by-one",
+    "repo": "lastlight-evals/daterange",
+    "workflow": "build",
+    "base_commit": "0000000000000000000000000000000000000000",
+    "problem_statement": "inclusiveDayCount is off by one\n\n`inclusiveDayCount(start, end)` should return the number of whole days in the INCLUSIVE range [start, end], but it returns one too few.\n\nExample:\n- `inclusiveDayCount(2026-01-01, 2026-01-01)` returns 0, should be 1.\n- `inclusiveDayCount(2026-01-01, 2026-01-03)` returns 2, should be 3.\n\nThe fix is in `src/date-range.ts`. `eachDay` already enumerates the inclusive range correctly, so don't change it.",
+    "issue": {
+      "number": 201,
+      "title": "inclusiveDayCount is off by one",
+      "body": "`inclusiveDayCount(start, end)` should count days in the INCLUSIVE range but returns one too few. `inclusiveDayCount(2026-01-01, 2026-01-01)` returns 0 (should be 1). The bug is in `src/date-range.ts`.",
+      "labels": ["bug", "ready-for-agent"],
+      "user": "reporter"
+    },
+    "FAIL_TO_PASS": [
+      "inclusive single day counts as one",
+      "inclusive three day span counts as three"
+    ],
+    "PASS_TO_PASS": [
+      "eachDay still lists every inclusive day"
+    ],
+    "expect_github": {
+      "pr_opened": { "base": "main", "head_is_branch": true }
+    }
+  }
+]

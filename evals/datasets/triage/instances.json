@@ -1,0 +1,62 @@
+[
+  {
+    "instance_id": "triage__bug-with-repro-ready",
+    "repo": "lastlight-evals/widget",
+    "workflow": "issue-triage",
+    "problem_statement": "Crash on empty config file",
+    "issue": {
+      "number": 101,
+      "title": "Crash on empty config file",
+      "body": "## Steps to reproduce\n1. Create an empty `config.yaml`\n2. Run `widget start`\n\n## Expected\nIt should start with defaults.\n\n## Actual\nIt throws `TypeError: Cannot read properties of undefined (reading 'port')` at `src/config.ts:42`.\n\nEnvironment: widget v2.1.0, Node 20. This reproduces 100% of the time.",
+      "labels": [],
+      "user": "alice"
+    },
+    "triage_gold": { "category": "bug", "state": "ready-for-agent" },
+    "expect_github": { "labels_added": ["bug"] }
+  },
+  {
+    "instance_id": "triage__bug-no-repro-needs-info",
+    "repo": "lastlight-evals/widget",
+    "workflow": "issue-triage",
+    "problem_statement": "It's broken",
+    "issue": {
+      "number": 102,
+      "title": "It doesn't work",
+      "body": "I tried to use the thing and it didn't work. Please fix.",
+      "labels": [],
+      "user": "bob"
+    },
+    "triage_gold": { "state": "needs-info" },
+    "expect_github": { "labels_added": ["needs-info"], "labels_absent": ["ready-for-agent"], "comment_matches": "need|provide|repro|version|steps" }
+  },
+  {
+    "instance_id": "triage__feature-well-specified",
+    "repo": "lastlight-evals/widget",
+    "workflow": "issue-triage",
+    "problem_statement": "Add --json flag to widget status",
+    "issue": {
+      "number": 103,
+      "title": "Add a --json output flag to `widget status`",
+      "body": "## Use case\nWe script around `widget status` in CI and parsing the human table is brittle.\n\n## Proposal\nAdd a `--json` flag that prints the same status as a JSON object: `{ \"state\": \"running\", \"uptimeSec\": 1234 }`.\n\nThe table output stays the default. This is additive and well-scoped — the status data already exists in `src/status.ts`.",
+      "labels": [],
+      "user": "carol"
+    },
+    "triage_gold": { "category": "enhancement" },
+    "expect_github": { "labels_added": ["enhancement"] }
+  },
+  {
+    "instance_id": "triage__pure-question",
+    "repo": "lastlight-evals/widget",
+    "workflow": "issue-triage",
+    "problem_statement": "How do I change the port?",
+    "issue": {
+      "number": 104,
+      "title": "How do I change the listening port?",
+      "body": "Quick question — what's the right way to change the port widget listens on? Is it an env var or a config key? Not a bug, just want to understand the options.",
+      "labels": [],
+      "user": "dave"
+    },
+    "triage_gold": { "category": "question" },
+    "expect_github": { "labels_added": ["question"], "labels_absent": ["ready-for-agent", "ready-for-human"] }
+  }
+]

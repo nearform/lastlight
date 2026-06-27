@@ -1,0 +1,9 @@
+{
+  "name": "daterange",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Tiny date-range utility.",
+  "scripts": {
+    "test": "node --test --experimental-strip-types"
+  }
+}

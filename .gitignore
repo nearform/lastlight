@@ -91,3 +91,6 @@ bin/
 checkpoints/
 whatsapp/
 solo.yml
+
+# Eval run outputs (scorecards, predictions)
+evals/results/

@@ -75,6 +75,15 @@ export interface ExecutorConfig {
    * one based on which API key env var is present (Tavily > Exa > Brave).
    */
   webSearchProvider?: "tavily" | "brave" | "exa";
+  /**
+   * Override the GitHub REST API base URL for agentic-pi's built-in
+   * `github_*` tools (Octokit `baseUrl`). Test/eval escape hatch only:
+   * the eval harness (`evals/`) points this at a local fake GitHub server so
+   * a real workflow runs unchanged with its GitHub calls mocked. Production
+   * leaves it unset → `https://api.github.com`. Only honoured by the
+   * in-process (`none`/`gondolin`) path.
+   */
+  githubApiBaseUrl?: string;
   /** Controls OTEL env forwarding and PI event redaction for workflow phase runs. */
   otel?: OtelConfig;
   telemetry?: {

@@ -795,6 +795,10 @@ async function executeInProcess(
       prompt,
       thinking,
       profile,
+      // Test/eval escape hatch: when set (by the eval harness), agentic-pi's
+      // built-in github_* tools talk to a local fake GitHub instead of
+      // api.github.com. Unset in production.
+      githubApiBaseUrl: config.githubApiBaseUrl,
       sandbox: ctx.backend === "gondolin" ? "gondolin" : "none",
       sandboxEnv,
       cwd: agentCwd,
@@ -1096,6 +1100,7 @@ export class RunResultAccumulator {
   private finalText = "";
   private agentEnded = false;
   private toolErrors = false;
+  private maxStepsReached = false;
   private lastToolError?: { tool?: string; message: string };
   // True iff the last assistant turn ended with a tool call — i.e. the agent
   // asked for a tool and the loop terminated before it could respond to the
@@ -1198,6 +1203,9 @@ export class RunResultAccumulator {
         this.agentEnded = true;
         if (Array.isArray(r.messages)) this.messages = r.messages;
         break;
+      case "max_steps_reached":
+        this.maxStepsReached = true;
+        break;
       case "usage_snapshot":
         this.snapshotStats = r.stats as RunResult["stats"];
         break;
@@ -1258,6 +1266,7 @@ export class RunResultAccumulator {
       ok: exitCode === 0 && !this.fatalError,
       agentEnded: this.agentEnded,
       toolErrors: this.toolErrors,
+      maxStepsReached: this.maxStepsReached,
       fatalError: this.fatalError,
       sessionId: this.sessionId,
       finalText: this.finalText,
