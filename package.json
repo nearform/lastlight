@@ -46,7 +46,8 @@
     "cli": "tsx src/cli.ts",
     "build:issue": "tsx src/cli.ts",
     "test:watch": "vitest",
-    "eval": "tsx evals/run.ts"
+    "eval": "tsx evals/run.ts",
+    "eval:compare": "tsx evals/run.ts --compare"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",

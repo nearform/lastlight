@@ -72,6 +72,17 @@ drain and cost silently reads 0.
 
 No LLM-as-judge — by design.
 
+## Models
+
+The model list lives in `models.json` (`default` + a `compare` set); `env.ts`
+reads it. Each `compare` entry is key-gated by its `envKey`, so
+`npm run eval:compare` only runs models whose provider key is present — adding
+an entry with no key is a silent no-op, not an error. `id` must be a spec
+pi-ai's registry resolves (`provider/model`); Fireworks ids are the long
+`fireworks/accounts/fireworks/models/<x>` form. Provider keys are read from
+`process.env` by agentic-pi directly (the harness loads `.env`), so a new
+provider just needs its key set + a registry id — no harness change.
+
 ## Adding a workflow/tier
 
 When pointing the harness at a new real workflow, check:

@@ -134,6 +134,16 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     result.workflowSucceeded = wf.success;
     result.phases = wf.phases.map((p) => ({ phase: p.phase, success: p.success }));
 
+    // A workflow-level failure (a phase erroring — provider auth/credit/rate
+    // errors, timeouts) is a RUN error, not a model "miss". Surface it so the
+    // scorecard counts it under errors instead of behavioral✗.
+    if (!wf.success) {
+      const failed = wf.phases.find((p) => !p.success && p.error);
+      result.error = failed?.error
+        ? `${failed.phase}: ${failed.error}`.slice(0, 300)
+        : "workflow failed";
+    }
+
     // 5a. Behavioral grade (GitHub mutations).
     const behavioralExpect = gradeBehavioral(inst.expect_github, fake, { issueNumber, branch });
     const triage = gradeTriage(inst.triage_gold, fake, issueNumber);

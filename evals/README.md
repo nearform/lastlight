@@ -30,7 +30,7 @@ instance (SWE-bench shape)
 ## Run it
 
 ```bash
-# triage tier (cheap, fast), default model
+# triage tier (cheap, fast), single default model
 npm run eval
 
 # choose tiers
@@ -38,20 +38,38 @@ npm run eval -- triage
 npm run eval -- code-fix
 npm run eval -- triage code-fix
 
-# compare models (any provider/model id pi-ai knows)
-EVAL_MODELS="openai/gpt-5.5,openai/gpt-5.4-mini" npm run eval
+# cross-vendor comparison (OpenAI + Anthropic + open source) — see models.json
+npm run eval:compare
+npm run eval:compare -- code-fix
+
+# ad-hoc model set / focus one instance
+EVAL_MODELS="openai/gpt-5.5,anthropic/claude-sonnet-4-6" npm run eval
+EVAL_INSTANCE=off-by-one npm run eval -- code-fix
 ```
 
 Needs a provider key (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
-`OPENROUTER_API_KEY`) in the environment or repo-root `.env`. Output: a
-scorecard table on stdout plus `evals/results/<tiers>/`:
+`FIREWORKS_API_KEY` / `OPENROUTER_API_KEY`) in the environment or repo-root
+`.env`. Output: a scorecard table on stdout plus `evals/results/<tiers>/`:
 
+- `index.html` — styled scorecard (open in a browser).
 - `scorecard.json` — structured roll-up per model.
 - `predictions.jsonl` — SWE-bench predictions shape
   (`{ instance_id, model_name_or_path, model_patch }`).
 
 The runner exits non-zero **only** if the harness itself errors — a weak model
 scoring poorly is the measurement, not a build failure.
+
+## Models (`models.json`)
+
+The model list is managed in `evals/models.json`:
+
+- `default` — the single model `npm run eval` uses.
+- `compare` — the cross-vendor set `npm run eval:compare` fans out over. Each
+  entry has an `id` (the agentic-pi/pi-ai `provider/model` spec), a display
+  `label`, and an `envKey`. **An entry only runs if its `envKey` is present**,
+  so the compare set auto-trims to whatever keys you have. Add/remove freely —
+  any model in pi-ai's registry works (OpenAI incl. codex, Anthropic, and
+  Fireworks-hosted open models like GLM-5.x / DeepSeek / GPT-OSS).
 
 ## Files
 
@@ -64,7 +82,9 @@ scoring poorly is the measurement, not a build failure.
 | `metrics.ts` | Token/cost/turn roll-up from the session jsonl. |
 | `run-instance.ts` | Orchestrates one instance through the real workflow + grading. |
 | `report.ts` | Scorecard table + `scorecard.json` + `predictions.jsonl`. |
-| `run.ts` | CLI entry (`npm run eval`). A measurement, not a test. |
+| `run.ts` | CLI entry (`npm run eval` / `eval:compare`). A measurement, not a test. |
+| `models.json` | Managed model list — `default` + the `compare` set (key-gated). |
+| `html-report.ts` | Self-contained HTML scorecard (lastlight-www theme). |
 | `mechanism.test.ts` | **Deterministic, AI-free** tests of the harness plumbing — run in `npm test`. |
 | `datasets/<tier>/` | `instances.json` + (code-fix) `repos/<id>` fixtures + `tests/<id>` held-out tests. |
 

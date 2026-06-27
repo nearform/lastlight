@@ -7,9 +7,11 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 let loaded = false;
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 export function loadDotEnv(root = process.cwd()): void {
   if (loaded) return;
@@ -33,14 +35,48 @@ export function loadDotEnv(root = process.cwd()): void {
 /** True if at least one provider key the eval can use is set. */
 export function hasProviderKey(): boolean {
   return Boolean(
-    process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.OPENROUTER_API_KEY,
+    process.env.OPENAI_API_KEY ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.OPENROUTER_API_KEY ||
+      process.env.FIREWORKS_API_KEY ||
+      process.env.DEEPSEEK_API_KEY,
   );
 }
 
-/** The models to compare, from EVAL_MODELS (comma-separated) or a default. */
+export interface ModelEntry {
+  id: string;
+  label?: string;
+  provider?: string;
+  envKey?: string;
+}
+interface ModelsConfig {
+  default: string;
+  compare: ModelEntry[];
+}
+
+function modelsConfig(): ModelsConfig {
+  return JSON.parse(readFileSync(join(HERE, "models.json"), "utf8")) as ModelsConfig;
+}
+
+/** Single-model run: EVAL_MODELS override, else the `default` from models.json. */
 export function evalModels(): string[] {
   const raw = process.env.EVAL_MODELS?.trim();
   if (raw) return raw.split(",").map((m) => m.trim()).filter(Boolean);
-  if (process.env.ANTHROPIC_API_KEY) return ["anthropic/claude-haiku-4-5"];
-  return ["openai/gpt-5.4-mini"];
+  return [modelsConfig().default];
+}
+
+/**
+ * Cross-vendor comparison set from `models.json`, filtered to the models whose
+ * provider key is actually present — so `npm run eval:compare` runs whatever
+ * you have keys for and silently skips the rest.
+ */
+export function compareModels(): ModelEntry[] {
+  return modelsConfig().compare.filter((m) => !m.envKey || Boolean(process.env[m.envKey]));
+}
+
+/** id → display label, from models.json (for the scorecard). */
+export function modelLabels(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of modelsConfig().compare) if (m.label) out[m.id] = m.label;
+  return out;
 }

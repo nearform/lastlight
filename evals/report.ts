@@ -64,10 +64,10 @@ export function summarize(results: InstanceResult[]): Scorecard {
   return { models, results };
 }
 
-export function renderTable(card: Scorecard): string {
+export function renderTable(card: Scorecard, labels: Record<string, string> = {}): string {
   const header = ["model", "code-fix", "behavioral", "in tok", "out tok", "cost $", "p50", "err"];
   const rows = card.models.map((m) => [
-    m.model,
+    labels[m.model] ?? m.model,
     m.codeFixTotal ? `${m.codeFixResolved}/${m.codeFixTotal}` : "—",
     m.behavioralTotal ? `${m.behavioralOk}/${m.behavioralTotal}` : "—",
     String(Math.round(m.avgInputTokens)),

@@ -21,9 +21,10 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadDotEnv, hasProviderKey, evalModels } from "./env.js";
+import { loadDotEnv, hasProviderKey, evalModels, compareModels, modelLabels } from "./env.js";
 import { runInstance } from "./run-instance.js";
 import { summarize, renderTable, writeArtifacts } from "./report.js";
+import { writeHtml } from "./html-report.js";
 import type { SweBenchInstance, InstanceResult } from "./schema.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +57,7 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  const compare = process.argv.includes("--compare");
   const requested = process.argv.slice(2).filter((a) => !a.startsWith("-"));
   const tiers = (requested.length ? requested : ["triage"]).filter((t) => {
     if (!TIERS[t]) {
@@ -64,9 +66,21 @@ async function main(): Promise<number> {
     }
     return true;
   });
-  const models = evalModels();
 
-  console.log(`Models: ${models.join(", ")}`);
+  // Single-model run by default; `--compare` fans out across models.json's set
+  // (only the ones whose provider key is present).
+  const models = compare ? compareModels().map((m) => m.id) : evalModels();
+  if (!models.length) {
+    console.error(
+      "No comparison models available — set provider keys (OPENAI_API_KEY / ANTHROPIC_API_KEY /\n" +
+        "FIREWORKS_API_KEY …) for the entries in evals/models.json.",
+    );
+    return 1;
+  }
+  const labels = modelLabels();
+
+  console.log(`Mode:   ${compare ? "compare" : "single"}`);
+  console.log(`Models: ${models.map((m) => labels[m] ?? m).join(", ")}`);
   console.log(`Tiers:  ${tiers.join(", ")}\n`);
 
   const all: InstanceResult[] = [];
@@ -109,10 +123,17 @@ async function main(): Promise<number> {
   }
 
   const card = summarize(all);
-  const resultsDir = join(HERE, "results", tiers.join("+"));
+  const resultsDir = join(HERE, "results", `${tiers.join("+")}${compare ? "-compare" : ""}`);
   writeArtifacts(resultsDir, card);
-  console.log("\n" + renderTable(card) + "\n");
-  console.log(`Artifacts: ${resultsDir}/{scorecard.json,predictions.jsonl}`);
+  const html = writeHtml(resultsDir, card, {
+    generatedAt: new Date().toISOString(),
+    models: models.map((m) => labels[m] ?? m),
+    tiers,
+    labels,
+  });
+  console.log("\n" + renderTable(card, labels) + "\n");
+  console.log(`Artifacts: ${resultsDir}/{scorecard.json,predictions.jsonl,index.html}`);
+  console.log(`Scorecard (HTML): ${html}`);
 
   // Non-zero ONLY on harness failure — model quality is the measurement.
   return harnessErrors > 0 ? 1 : 0;

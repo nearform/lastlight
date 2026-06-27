@@ -1,0 +1,18 @@
+{
+  "_comment": "Models for the eval harness. `default` is what `npm run eval` uses (single model). `compare` is the cross-vendor set `npm run eval:compare` runs — each entry only runs if its `envKey` is present in the environment, so add/remove freely. `id` is the agentic-pi/pi-ai 'provider/model' spec; `label` is the display name on the scorecard.",
+  "default": "openai/gpt-5.4-mini",
+  "compare": [
+    { "id": "openai/gpt-5.5", "label": "GPT-5.5", "provider": "OpenAI", "envKey": "OPENAI_API_KEY" },
+    { "id": "openai/gpt-5.4-mini", "label": "GPT-5.4 mini", "provider": "OpenAI", "envKey": "OPENAI_API_KEY" },
+    { "id": "openai/gpt-5.3-codex", "label": "GPT-5.3 Codex", "provider": "OpenAI", "envKey": "OPENAI_API_KEY" },
+
+    { "id": "anthropic/claude-opus-4-8", "label": "Claude Opus 4.8", "provider": "Anthropic", "envKey": "ANTHROPIC_API_KEY" },
+    { "id": "anthropic/claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "provider": "Anthropic", "envKey": "ANTHROPIC_API_KEY" },
+    { "id": "anthropic/claude-haiku-4-5", "label": "Claude Haiku 4.5", "provider": "Anthropic", "envKey": "ANTHROPIC_API_KEY" },
+
+    { "id": "fireworks/accounts/fireworks/models/glm-5p2", "label": "GLM-5.2", "provider": "Fireworks (open)", "envKey": "FIREWORKS_API_KEY" },
+    { "id": "fireworks/accounts/fireworks/models/glm-5p1", "label": "GLM-5.1", "provider": "Fireworks (open)", "envKey": "FIREWORKS_API_KEY" },
+    { "id": "fireworks/accounts/fireworks/models/deepseek-v4-pro", "label": "DeepSeek V4 Pro", "provider": "Fireworks (open)", "envKey": "FIREWORKS_API_KEY" },
+    { "id": "fireworks/accounts/fireworks/models/gpt-oss-120b", "label": "GPT-OSS 120B", "provider": "Fireworks (open)", "envKey": "FIREWORKS_API_KEY" }
+  ]
+}
