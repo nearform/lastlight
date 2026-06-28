@@ -169,6 +169,27 @@ lastlight fork agent-context [file]   # copy soul.md / rules.md / security.md (a
 		default" or "added".
 	</p>
 
+	<h2>Claude Code skills</h2>
+	<p>
+		Last Light ships a <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a>
+		plugin that teaches Claude Code to install, configure and operate Last Light
+		and Last Light Evals — ask it e.g. <em>"set up a Last Light server"</em> or
+		<em>"scaffold an evals workspace"</em>. <code>lastlight skills install</code>
+		(host-local) installs the bundled, version-matched skills: it uses the
+		<code>claude</code> plugin marketplace when present, otherwise copies the
+		skills into <code>~/.claude/skills</code>.
+	</p>
+	<pre><code>lastlight skills install              # → ~/.claude/skills (user) [--scope project] [--no-marketplace]
+lastlight skills list                 # bundled skills + where they're installed
+lastlight skills uninstall            # remove them [--scope user|project]</code></pre>
+	<p>
+		The bundle includes <code>lastlight-server</code>, <code>lastlight-client</code>,
+		<code>lastlight-overlay</code> and <code>lastlight-evals</code>. You can also
+		register the marketplace directly from a checkout:
+		<code>claude plugin marketplace add ./</code> then
+		<code>claude plugin install lastlight@lastlight-skills</code>.
+	</p>
+
 	<h2>Setup wizard</h2>
 	<pre><code>lastlight setup                       # first-run wizard — asks: client (login) or server (stack)
 lastlight setup --client              # skip the prompt: configure this machine as a client
