@@ -247,7 +247,7 @@ type PrePopulate = {
  */
 export { prePopulateWorkspace as __prePopulateWorkspaceForTest };
 
-function prePopulateWorkspace(
+export function prePopulateWorkspace(
   workDir: string,
   pre: PrePopulate,
 ): void {

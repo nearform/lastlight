@@ -58,7 +58,7 @@ export interface VariantConfig {
   [taskType: string]: string | undefined;
 }
 
-export type SandboxBackend = "gondolin" | "docker" | "none";
+export type SandboxBackend = "gondolin" | "docker" | "smol" | "none";
 
 export type BuildAssetsLocation = "repo" | "server";
 
@@ -519,8 +519,8 @@ function optionalStringArray(raw: unknown, path: string): string[] {
 }
 
 function sandboxBackend(raw: unknown, path: string): SandboxBackend {
-  if (raw === "gondolin" || raw === "docker" || raw === "none") return raw;
-  throw new Error(`${path} must be one of gondolin, docker, none`);
+  if (raw === "gondolin" || raw === "docker" || raw === "smol" || raw === "none") return raw;
+  throw new Error(`${path} must be one of gondolin, docker, smol, none`);
 }
 
 function buildAssetsLocation(raw: unknown, path: string): BuildAssetsLocation {
@@ -566,7 +566,7 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
 
   const sandbox: Record<string, unknown> = {};
   const backend = (env.LASTLIGHT_SANDBOX || "").trim().toLowerCase();
-  if (backend === "gondolin" || backend === "docker" || backend === "none") {
+  if (backend === "gondolin" || backend === "docker" || backend === "smol" || backend === "none") {
     sandbox.backend = backend;
   } else if (backend) {
     console.warn(`[config] Unknown LASTLIGHT_SANDBOX value "${backend}" — using the file/default backend`);

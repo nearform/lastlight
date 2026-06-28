@@ -531,6 +531,26 @@ Sandbox egress (docker backend only):
   bounded instead by per-PR workspace reuse (`PER_TARGET_REUSE_WORKFLOWS`
   in `src/workflows/simple.ts`) plus #106's reaping.
 
+Sandbox (smolvm `smol` backend — experimental, opt-in):
+
+- `LASTLIGHT_SANDBOX=smol` runs each phase in a smolvm micro-VM (own kernel
+  via Hypervisor.framework / KVM). Local-only: needs the `smolvm` CLI on PATH
+  and a host hypervisor. Driven by `SmolSandbox` (`src/sandbox/smol.ts`) over
+  the smolvm CLI — peer of the docker backend (runs `agentic-pi run --sandbox
+  none` inside the VM). Not the default; `config/default.yaml` stays `gondolin`.
+- `SMOLVM_BIN` — `smolvm` CLI path (default `smolvm`).
+- `SMOLVM_IMAGE` — OCI ref OR a local `docker save` archive / rootfs dir
+  (default `lastlight-sandbox:latest`). The archive form loads offline (no
+  registry) so it works under the strict allowlist: `docker save
+  lastlight-sandbox:latest -o img.tar` then `SMOLVM_IMAGE=img.tar`.
+- Egress is native per-machine `--allow-host` from the same
+  `egress-allowlist.ts` — no coredns/nginx sidecars. **Caveat:** smolvm
+  resolves each host at VM start and the filter is IP-pinned (not
+  apex+subdomain like docker SNI / gondolin); unresolvable apex-only entries
+  are pre-dropped. Workspace bind-mounts at `/workspace` (smolvm's special
+  path → direct share). See `spec/09-sandbox.md`. Opt-in IT:
+  `RUN_SMOL_IT=1 SMOLVM_IMAGE=<archive> npx vitest run src/sandbox/smol.integration.test.ts`.
+
 Sandbox workspace provisioning (issue #107):
 
 - **Shallow clone** — read-only workflows (everything except the
