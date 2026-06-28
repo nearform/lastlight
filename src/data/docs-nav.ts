@@ -12,6 +12,7 @@ export const docsNav: DocsNavSection[] = [
 	{
 		title: 'Getting Started',
 		items: [
+			{ slug: 'quickstart', label: 'Quick start with Claude' },
 			{ slug: 'introduction', label: 'Introduction' },
 			{ slug: 'prerequisites', label: 'Prerequisites' },
 			{ slug: 'github-app', label: 'Create a GitHub App' },

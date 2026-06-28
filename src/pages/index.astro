@@ -95,7 +95,7 @@ const description = "An open-source agent that keeps the lights on in your GitHu
 		<h2>How it works</h2>
 		<p class="section-desc">
 			Built on <a href="https://github.com/cliftonc/agentic-pi" target="_blank" rel="noopener">agentic-pi</a> —
-			provider-agnostic, runs against OpenAI, Anthropic, <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a>, or any other model you wire up (default <code>anthropic/claude-sonnet-4-6</code>).
+			it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more (default <code>anthropic/claude-sonnet-4-6</code>).
 			Each workflow phase runs in its own sandbox — gondolin micro-VM by default, Docker on opt-in.
 			Authenticates as its own GitHub App — every action is clearly from the bot, not you.
 		</p>
@@ -136,18 +136,30 @@ const description = "An open-source agent that keeps the lights on in your GitHu
 	<section class="get-started" id="get-started">
 		<h2>Light it up</h2>
 		<p class="section-note" style="margin-top: 0; margin-bottom: 2rem;">
-			<strong>The short version is below.</strong> For the full walkthrough — creating the GitHub App with the right permissions, deploying to production with Caddy TLS, wiring up Slack chat + OAuth login, and every env var the harness reads — start with <a href="/docs/introduction">the docs</a>.
+			<strong>Two ways to get going.</strong> Let Claude Code stand it up for you (recommended), or run the steps by hand. For the full walkthrough — creating the GitHub App with the right permissions, deploying to production with Caddy TLS, wiring up Slack chat + OAuth login, and every env var the harness reads — start with <a href="/docs/quickstart">the quick start</a>.
 		</p>
 
-		<div class="step-block">
+		<h3 class="setup-option-heading">Option A — Set it up with Claude Code <span class="badge-warn" style="color: var(--teal); background: rgba(26, 122, 138, 0.12);">recommended</span></h3>
+		<div class="step-block" style="border-top: none; padding-top: 0;">
+			<p>Last Light ships <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a> skills that install, configure and launch the whole stack for you. Install the CLI and the skills:</p>
+			<pre><code>npm i -g lastlight          # or run it via npx
+lastlight skills install    # adds the bundled Claude Code skills</code></pre>
+			<p>Then open Claude Code in an empty directory and ask:</p>
+			<pre><code>"set up a Last Light server"</code></pre>
+			<p>The <code>lastlight-server</code> skill checks prerequisites, scaffolds the working directory, walks you through the GitHub App, model and managed repos, launches the docker stack, and verifies it's healthy. Sibling skills cover the rest — <code>lastlight-client</code> (point a CLI at a server), <code>lastlight-overlay</code> (customize workflows &amp; persona), and <code>lastlight-evals</code> (scaffold an evals workspace). See the <a href="/docs/quickstart">quick start</a> or the <a href="/docs/cli#claude-code-skills">CLI reference</a> for details.</p>
+		</div>
+
+		<h3 class="setup-option-heading">Option B — Set it up by hand</h3>
+
+		<div class="step-block" style="border-top: none; padding-top: 0;">
 			<h3><span class="step-label">Step 1</span> Set a model API key</h3>
-			<p>Last Light's agent runtime is <a href="https://github.com/cliftonc/agentic-pi" target="_blank" rel="noopener">agentic-pi</a> — provider-agnostic. Set the key matching your chosen model in <code>.env</code>:</p>
+			<p>Last Light runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more. Set the key matching your chosen model in <code>.env</code>:</p>
 			<pre><code>ANTHROPIC_API_KEY=sk-ant-...
 # or
 OPENAI_API_KEY=sk-...
 # or use one OpenRouter key for Claude / GPT / Gemini / Llama / ...
 OPENROUTER_API_KEY=sk-or-v1-...</code></pre>
-			<p>The default model is <code>anthropic/claude-sonnet-4-6</code>. Override per-phase via <code>LASTLIGHT_MODEL</code> / <code>LASTLIGHT_MODELS</code>. Any <code>provider/model</code> string pi-ai supports works.</p>
+			<p>The default model is <code>anthropic/claude-sonnet-4-6</code>. Override it — globally or per-phase — via <code>LASTLIGHT_MODEL</code> / <code>LASTLIGHT_MODELS</code>.</p>
 		</div>
 
 		<div class="step-block">
@@ -652,6 +664,20 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 	.get-started {
 		border-top: 1px solid var(--border);
 		padding-top: 3rem;
+	}
+
+	.setup-option-heading {
+		font-size: 1.3rem;
+		margin: 2.75rem 0 1.25rem;
+		padding-bottom: 0.6rem;
+		border-bottom: 1px solid var(--border);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.setup-option-heading:first-of-type {
+		margin-top: 0;
 	}
 
 	.step-block {

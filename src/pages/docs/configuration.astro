@@ -106,11 +106,11 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 
 	<p>
 		The agent runtime is <a href="https://github.com/cliftonc/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>
-		(workflow phases) plus <code>@earendil-works/pi-ai</code> (in-process chat) —
-		both provider-agnostic. Any <code>provider/model</code> string pi-ai supports works
-		(<code>openai/…</code>, <code>anthropic/…</code>, <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code>, etc.).
+		(workflow phases) plus <code>@earendil-works/pi-ai</code> (in-process chat). It runs on any model
+		the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports —
+		Claude, GPT, Gemini, Llama, and more, as <code>openai/…</code>, <code>anthropic/…</code> or <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code> strings.
 		Set whichever provider API keys match your selected models — one OpenRouter
-		key covers most providers if you'd rather have a single billing surface.
+		key covers most of them if you'd rather have a single billing surface.
 	</p>
 
 	<table class="docs-table config-table">

@@ -33,7 +33,7 @@ interface LastLightConfig {
   models: ModelConfig;                    // { default: string; [taskType: string]: string }
   variants: VariantConfig;                // { default?: string; [taskType: string]: string | undefined }
   maxTurns: number;
-  sandbox: "gondolin" | "docker" | "none";
+  sandbox: "gondolin" | "docker" | "smol" | "none";
   buildAssets: "repo" | "server";         // where build handoff docs live
   buildAssetsDir: string;                  // server-mode store root ($STATE_DIR/build-assets)
   githubApp?: {
@@ -146,14 +146,19 @@ Resolution at dispatch (`src/config.ts:296`): per-type if present, else
 
 | Var | Purpose | Default |
 |---|---|---|
-| `LASTLIGHT_SANDBOX` | backend: `gondolin` / `docker` / `none` | `gondolin` |
+| `LASTLIGHT_SANDBOX` | backend: `gondolin` / `docker` / `smol` / `none` | `gondolin` |
 | `MAX_TURNS` | agent loop budget per session | `200` |
 | `SANDBOX_MEMORY_LIMIT` | docker only | `2g` |
 | `SANDBOX_DATA_VOLUME` | docker only — named volume or bind-mount path | `lastlight_agent-data` |
 | `LASTLIGHT_SANDBOX_NETWORK` | docker only | `lastlight_sandbox-egress` |
+| `SMOLVM_BIN` | smol only — `smolvm` CLI path | `smolvm` |
+| `SMOLVM_IMAGE` | smol only — OCI ref OR local `docker save` archive | `lastlight-sandbox:latest` |
 
 Unknown `LASTLIGHT_SANDBOX` values log a warning and fall back to
-`gondolin`. `none` is for local dev only — no isolation.
+`gondolin`. `none` is for local dev only — no isolation. `smol`
+(experimental) runs agent work in a smolvm micro-VM; it needs a host
+hypervisor + the `smolvm` CLI, and its `--allow-host` egress is
+IP-pinned per host rather than apex+subdomain — see `09-sandbox.md`.
 
 ### Build assets
 

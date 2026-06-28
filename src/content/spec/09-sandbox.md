@@ -38,7 +38,7 @@ export async function executeAgent(
 | `cwd?` | Agent's working directory |
 | `model?` | Provider/model — e.g. `anthropic/claude-sonnet-4-6` |
 | `variant?` | Reasoning effort — `off | minimal | low | medium | high | xhigh` |
-| `sandbox?` | Backend — `gondolin` (default) / `docker` / `none` |
+| `sandbox?` | Backend — `gondolin` (default) / `docker` / `smol` / `none` |
 | `sessionsDir?` | Where the JSONL event log lands |
 | `unrestrictedEgress?` | Opt out of the strict allowlist |
 | `webSearch?` | Enable agentic-pi's web tools for this phase |
@@ -51,7 +51,10 @@ and `stopReason`.
 
 ## Backends
 
-Three modes; selected per-call at `agent-executor.ts:55`.
+Four modes; selected per-call in `executeAgent` (`agent-executor.ts`).
+The three sandboxed executors live in `src/engine/executors/backends.ts`
+(`executeInProcess` for gondolin/none, `executeDocker`, `executeSmol`)
+over shared building blocks in `src/engine/executors/shared.ts`.
 
 ### `gondolin` — default
 
@@ -93,6 +96,42 @@ agentic-pi's VM. Container name: `lastlight-sandbox-{taskId}-{uuid}`.
   `sandbox_image: qa` phase (a non-failing skip) when that image isn't built,
   so browser QA degrades gracefully on a lean host. Built only when QA is
   enabled — `docker compose --profile build-only build sandbox sandbox-qa`.
+
+### `smol` — micro-VM (smolvm), experimental
+
+> **Spike / opt-in.** Not the default; enable with `LASTLIGHT_SANDBOX=smol`.
+> Local-only: needs a host hypervisor (Apple Silicon Hypervisor.framework /
+> Linux KVM) and the `smolvm` CLI on `PATH`. Verified against smolvm 1.2.5.
+
+Structural peer of `docker`: Last Light owns the boundary via `SmolSandbox`
+(`src/sandbox/smol.ts`), a wrapper over the **smolvm CLI** (`machine
+create/start/exec/delete`), and runs `agentic-pi run --sandbox none` inside the
+micro-VM. Isolation is a real kernel (libkrun), so it's stronger than a
+container; the driver is the CLI because the embedded Node SDK is unpublished
+and doesn't expose the egress allowlist.
+
+- Worktree bind-mounted at `/workspace` — smolvm's special path, so the host
+  dir is shared directly (no `virtiofs` carve-out other targets get). A
+  boot-time probe (`resolveHostWorkspace`) confirms the host-side path and the
+  harness clones/stages into it.
+- **Image** (`SMOLVM_IMAGE`, default `lastlight-sandbox:latest`): smolvm's `-I`
+  accepts a local `docker save` archive (`./img.tar`) or rootfs dir as well as
+  a registry ref. The archive form needs no registry, so it loads offline under
+  the strict allowlist — the locally-built sandbox image is consumed via
+  `docker save lastlight-sandbox:latest -o img.tar`.
+- **Egress**: native per-machine `--allow-host`, sourced from the same
+  `egress-allowlist.ts`. No coredns/nginx sidecars. **Caveat:** smolvm resolves
+  each host to IP(s) *at VM start* and aborts `create` on an unresolvable
+  entry, so apex-only entries with no A record (e.g. `githubusercontent.com`)
+  are pre-resolved and dropped. The filter is therefore **IP-pinned, not
+  apex+subdomain** like docker (SNI) / gondolin (hostname) — `--allow-host
+  github.com` does not cover `api.github.com` or rotating CDN IPs. A faithful
+  policy would enumerate concrete subdomains; this is a known spike gap. There
+  is also no SSRF metadata floor in `unrestrictedEgress` mode.
+- **Secrets** (provider keys, `GITHUB_TOKEN`) injected via `--secret-env
+  GUEST=HOST` so values never appear on the argv.
+- `SMOLVM_BIN` overrides the binary path; `smolAvailable()` self-skips when
+  absent. Teardown is `machine delete -f`.
 
 ### `none` — in-process
 
@@ -306,7 +345,8 @@ Per-phase model and variant overrides resolve through
    `DockerSandbox.runCommand` runs `docker exec --user agent -w <cwd> …
    sh -c <cmd>` and returns the exit code + captured stdout/stderr instead of
    an agent event stream. Script phases first write the inline source to a
-   workspace-root sibling (`.lastlight-script/<phase>.<ext>`) and run it with
+   workspace-root sibling beside the skill bundle
+   (`.lastlight-scripts/<phase>/script.<ext>`) and run it with
    `node` (js/ts) or `uv run` (python).
 4. **Teardown** — `docker rm -f` on completion or error.
 5. **Boot-time cleanup** — `cleanupOrphanedSandboxes()` (`sandbox/index.ts:12–26`)
@@ -338,10 +378,13 @@ Per-phase model and variant overrides resolve through
 
 | Piece | File |
 |---|---|
-| `executeAgent`, agentic-pi call | `src/engine/agent-executor.ts` |
+| `executeAgent` dispatch + command path + `prepareRun` | `src/engine/agent-executor.ts` |
+| Per-backend executors (in-process / docker / smol) | `src/engine/executors/backends.ts` |
+| Shared executor helpers (staging, accumulator, finalize) | `src/engine/executors/shared.ts` |
 | `ExecutorConfig`, `GitAccessProfile`, profiles | `src/engine/profiles.ts` |
 | Token minting + downscope | `src/engine/git-auth.ts` |
 | Docker backend | `src/sandbox/docker.ts` |
+| smol backend (smolvm CLI wrapper, experimental) | `src/sandbox/smol.ts` |
 | Sandbox dispatch + orphan cleanup | `src/sandbox/index.ts` |
 | Sandbox image names + availability probe | `src/sandbox/images.ts` (`SANDBOX_IMAGE`, `SANDBOX_IMAGE_QA`, `qaImageAvailable`) |
 | Browser-QA image | `sandbox-qa.Dockerfile`; bundled driver `skills/browser-qa/scripts/agent-browser.mjs` |

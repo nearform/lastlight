@@ -133,8 +133,8 @@ deterministic `bash` / `script` pair (a command, no LLM).
 - **script** — same machinery as `bash`, but runs an inline program
   (`script:`) with the runtime in `runtime:` — `js`/`ts` → `node` (TS via
   `--experimental-strip-types`), `python` → `uv run`. The source is written to
-  a workspace-root sibling (`.lastlight-script/<phase>.<ext>`, never inside the
-  repo git tree). Python sources may carry a PEP 723 `# /// script`
+  a workspace-root sibling beside the skill bundle
+  (`.lastlight-scripts/<phase>/script.<ext>`, never inside the repo git tree). Python sources may carry a PEP 723 `# /// script`
   inline-dependency block, resolved by `uv` from PyPI (on the strict egress
   allowlist) into a cached venv. See [Sandbox](/spec/09-sandbox).
 

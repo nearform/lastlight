@@ -14,8 +14,8 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 
 	<p>
 		It is built on <a href="https://github.com/cliftonc/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>
-		(provider-agnostic — OpenAI, Anthropic, OpenRouter, or any other model pi-ai supports;
-		default <code>anthropic/claude-sonnet-4-6</code>) with a lightweight TypeScript harness that
+		— it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports
+		(Claude, GPT, Gemini, Llama, and more; default <code>anthropic/claude-sonnet-4-6</code>) with a lightweight TypeScript harness that
 		handles webhook ingestion, Slack messaging, cron scheduling, sandbox isolation, and an
 		admin dashboard. Every piece of non-trivial behavior is expressed as a
 		<strong>YAML workflow</strong> — the harness itself knows nothing about "build" or
@@ -49,7 +49,8 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 	<h2>How this documentation is organized</h2>
 
 	<ul>
-		<li><strong>Getting Started</strong> walks you through prerequisites, creating a GitHub App, running locally, deploying to production, and wiring up Slack.</li>
+		<li><strong><a href="/docs/quickstart">Quick start with Claude</a></strong> is the fastest path — install the bundled Claude Code skills and let Claude stand the whole stack up for you.</li>
+		<li><strong>Getting Started</strong> walks you through prerequisites, creating a GitHub App, running locally, deploying to production, and wiring up Slack — the by-hand route.</li>
 		<li><strong>Reference</strong> documents every environment variable the harness reads.</li>
 	</ul>
 
@@ -63,7 +64,10 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 	</div>
 
 	<div class="docs-next">
-		<span></span>
+		<a href="/docs/quickstart" class="prev">
+			<span class="label">← Previous</span>
+			<span class="title">Quick start with Claude</span>
+		</a>
 		<a href="/docs/prerequisites" class="next">
 			<span class="label">Next →</span>
 			<span class="title">Prerequisites</span>

@@ -23,7 +23,7 @@ const description = "Frequently asked questions about Last Light — the open-so
 				<div class="faq-answer">
 					<p>Three things:</p>
 					<ol>
-						<li>An API key for your chosen model provider — <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, or <code>OPENROUTER_API_KEY</code> (the agent runtime is <a href="https://github.com/cliftonc/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>, provider-agnostic; one OpenRouter key gets you Claude / GPT / Gemini / Llama / etc. through a single endpoint)</li>
+						<li>An API key for your chosen model — <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, or <code>OPENROUTER_API_KEY</code> (Last Light runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more; one OpenRouter key reaches most of them through a single endpoint)</li>
 						<li>A <a href="https://docs.github.com/en/apps/creating-github-apps" target="_blank" rel="noopener">GitHub App</a> with Issues, PRs, and Contents permissions</li>
 						<li>Node.js 20+. Docker is required only when <code>LASTLIGHT_SANDBOX=docker</code>; the default gondolin sandbox uses HVF/KVM with no Docker dependency.</li>
 					</ol>
@@ -34,7 +34,7 @@ const description = "Frequently asked questions about Last Light — the open-so
 			<details class="faq-item">
 				<summary>Which LLM does it use?</summary>
 				<div class="faq-answer">
-					<p>The agent runtime is <a href="https://github.com/cliftonc/agentic-pi" target="_blank" rel="noopener">agentic-pi</a> (workflow phases) plus <code>@earendil-works/pi-ai</code> (in-process chat) — both provider-agnostic. The default model is <code>anthropic/claude-sonnet-4-6</code>, configurable via the <code>LASTLIGHT_MODEL</code> environment variable. Any <code>provider/model</code> string pi-ai supports works (<code>openai/…</code>, <code>anthropic/…</code>, <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code>, etc.).</p>
+					<p>The agent runtime is <a href="https://github.com/cliftonc/agentic-pi" target="_blank" rel="noopener">agentic-pi</a> (workflow phases) plus <code>@earendil-works/pi-ai</code> (in-process chat). It runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more, as <code>openai/…</code>, <code>anthropic/…</code> or <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code> strings. The default model is <code>anthropic/claude-sonnet-4-6</code>, configurable via the <code>LASTLIGHT_MODEL</code> environment variable.</p>
 					<p>Per-phase overrides go through <code>LASTLIGHT_MODELS</code> as JSON — e.g. <code>&#123;"chat":"openai/gpt-5.1-mini","architect":"openai/gpt-5.5"&#125;</code>. Set <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, and/or <code>OPENROUTER_API_KEY</code> to match — one OpenRouter key covers most providers. Legacy <code>OPENCODE_*</code> env vars are still read as fallbacks.</p>
 				</div>
 			</details>
@@ -149,7 +149,7 @@ const description = "Frequently asked questions about Last Light — the open-so
 			<details class="faq-item">
 				<summary>How much does it cost to run?</summary>
 				<div class="faq-answer">
-					<p>The main cost is model API usage on whichever provider you've configured (OpenAI, Anthropic, OpenRouter, etc.). Each issue triage or PR review is roughly one agent session. For a repo with a few events per day, expect modest API costs. Build requests (cloning, editing, testing) use more tokens but are less frequent.</p>
+					<p>The main cost is model API usage on whichever model you've configured. Each issue triage or PR review is roughly one agent session. For a repo with a few events per day, expect modest API costs. Build requests (cloning, editing, testing) use more tokens but are less frequent.</p>
 					<p>Set <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, and/or <code>OPENROUTER_API_KEY</code> to match your <code>LASTLIGHT_MODEL</code> and costs depend on usage. Cheap models like <code>anthropic/claude-haiku-4-5-20251001</code> or <code>openrouter/google/gemini-2.5-flash</code> can be routed to high-volume phases (triage, screen) via <code>LASTLIGHT_MODELS</code> to keep the bill down. OpenRouter adds a small per-token markup over going direct, but in exchange you get a single key + dashboard for every model.</p>
 					<p>The agent itself is free and open-source.</p>
 				</div>
