@@ -20,7 +20,7 @@ export { getWorkflow, configureWorkflowAssets } from "./workflows/loader.js";
 export type { WorkflowAssetConfig } from "./workflows/loader.js";
 export { runWorkflow } from "./workflows/runner.js";
 export type { RunnerCallbacks, WorkflowResult } from "./workflows/runner.js";
-export type { ExecutorConfig } from "./engine/profiles.js";
+export type { ExecutorConfig } from "./engine/github/profiles.js";
 export type { TemplateContext } from "./workflows/templates.js";
 
 // ── overlay/evals repo bootstrap (reused by `lastlight-evals init`) ──────────
@@ -32,5 +32,5 @@ export {
   OVERLAY_CONFIG_PLACEHOLDER,
   OVERLAY_ENV_EXAMPLE,
   OVERLAY_README,
-} from "./overlay-bootstrap.js";
-export type { GhStatus, ScaffoldResult, BootstrapOpts } from "./overlay-bootstrap.js";
+} from "./config/overlay-bootstrap.js";
+export type { GhStatus, ScaffoldResult, BootstrapOpts } from "./config/overlay-bootstrap.js";

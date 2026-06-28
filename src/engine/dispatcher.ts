@@ -2,8 +2,8 @@ import { randomUUID } from "crypto";
 import type { EventEnvelope } from "../connectors/types.js";
 import type { SessionManager } from "../connectors/index.js";
 import type { StateDb } from "../state/db.js";
-import type { GitHubClient } from "./github.js";
-import type { ChatResult } from "./chat.js";
+import type { GitHubClient } from "./github/github.js";
+import type { ChatResult } from "./chat/chat.js";
 import { routeEvent, type Route, type RouterDeps } from "./router.js";
 import { runDashboardUrl } from "../notify/model.js";
 

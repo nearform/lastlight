@@ -1,7 +1,7 @@
 import type { StateDb, WorkflowRun } from "../state/db.js";
-import type { ExecutorConfig } from "../engine/profiles.js";
-import type { GitHubClient } from "../engine/github.js";
-import type { ModelConfig, VariantConfig } from "../config.js";
+import type { ExecutorConfig } from "../engine/github/profiles.js";
+import type { GitHubClient } from "../engine/github/github.js";
+import type { ModelConfig, VariantConfig } from "../config/config.js";
 import { runWorkflow, type ApprovalGateConfig, type RunnerCallbacks } from "./runner.js";
 import { getWorkflow } from "./loader.js";
 import { slugify, type TemplateContext } from "./templates.js";

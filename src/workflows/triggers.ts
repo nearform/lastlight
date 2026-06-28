@@ -1,5 +1,5 @@
 import { getCronWorkflows } from "./loader.js";
-import { getRoutes } from "../config.js";
+import { getRoutes } from "../config/config.js";
 
 export type TriggerInfo =
   | { kind: "cron"; name: string; schedule: string }

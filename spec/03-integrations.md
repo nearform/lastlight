@@ -81,7 +81,7 @@ concern — see [Chat](/spec/11-chat).
 
 | | |
 |---|---|
-| **Transport** | HTTP POST from `src/cli.ts` to the running harness. `POST /api/run` (generic workflow dispatch) or `POST /api/build` (build cycle on an issue URL). |
+| **Transport** | HTTP POST from `src/cli/cli.ts` to the running harness. `POST /api/run` (generic workflow dispatch) or `POST /api/build` (build cycle on an issue URL). |
 | **Auth** | `Authorization: Bearer <token>` header. The token is issued by `POST /admin/api/login` after the CLI submits `LASTLIGHT_TOKEN` (which the operator sets to match `ADMIN_PASSWORD`). HMAC-signed, 7-day TTL. Verified by `authMiddleware()` (`src/admin/auth.ts:35–65`). |
 | **Normalize** | None — the CLI does not produce an EventEnvelope. The `/api/run` handler unpacks `{ workflow, context }` and calls `dispatchWorkflow()` directly (`src/index.ts:495–518`). Workflows triggered this way see `_triggerType: "api"` in their context. |
 | **Event types** | n/a |
@@ -153,7 +153,7 @@ webhooks disabled, they kick in to keep parity. The scheduled crons
 | GitHub webhook connector | `src/connectors/github-webhook.ts` |
 | Messaging base (allowlist, sessions, chunking) | `src/connectors/messaging/base.ts` |
 | Slack connector | `src/connectors/slack/connector.ts` |
-| CLI client | `src/cli.ts` |
+| CLI client | `src/cli/cli.ts` |
 | API endpoints (`/api/run`, `/api/build`) | `src/index.ts:481–557` |
 | Cron scheduler | `src/cron/scheduler.ts` |
 | Cron job loader | `src/cron/jobs.ts` |

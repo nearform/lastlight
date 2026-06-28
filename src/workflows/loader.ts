@@ -8,7 +8,7 @@ import {
   type AgentWorkflowDefinition,
   type CronWorkflowDefinition,
 } from "./schema.js";
-import type { DisabledConfig, RouteConfig } from "../config.js";
+import type { DisabledConfig, RouteConfig } from "../config/config.js";
 
 interface AssetLayer {
   name: "built-in" | "overlay" | "legacy";

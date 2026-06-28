@@ -19,7 +19,7 @@ import {
 import { authMiddleware, createToken, verifyToken } from "./auth.js";
 import { Cron } from "croner";
 import type { CronScheduler } from "../cron/scheduler.js";
-import { enumerateOverlayAssets } from "../overlay-assets.js";
+import { enumerateOverlayAssets } from "../config/overlay-assets.js";
 import {
   getCronWorkflows,
   getWorkflow,
@@ -35,7 +35,7 @@ import {
 import { getManagedRepos } from "../managed-repos.js";
 import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
-import type { PublicConfigBundle, BuildAssetsLocation } from "../config.js";
+import type { PublicConfigBundle, BuildAssetsLocation } from "../config/config.js";
 
 /**
  * Map a build-asset filename extension to a binary MIME type, or null when the

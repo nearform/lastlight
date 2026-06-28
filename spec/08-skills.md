@@ -229,7 +229,7 @@ then maps it to the agent explicitly via pi's `--skill` (docker) /
 
 Chat doesn't run inside pi-coding-agent's `AgentSession` — it uses
 pi-ai's lower-level `completeSimple` loop. To still give chat the
-same progressive-disclosure model, `src/engine/chat-skills.ts`:
+same progressive-disclosure model, `src/engine/chat/chat-skills.ts`:
 
 1. Loads a curated chat skill list from `<repo>/skills/<name>/` using
    `loadSkillsFromDir` (same parser pi-coding-agent uses for sandbox
@@ -311,7 +311,7 @@ const md = loadAgentContext(config.agentContextDir);
 if (md) writeFileSync(join(workDir, "AGENTS.md"), md);
 ```
 
-`loadAgentContext()` (`src/engine/profiles.ts`) joins
+`loadAgentContext()` (`src/engine/github/profiles.ts`) joins
 `agent-context/*.md` with `\n\n---\n\n`. pi-coding-agent's discovery
 walks up from cwd and reads it.
 
@@ -381,11 +381,11 @@ state belongs in `workflows/prompts/`.
 | Phase config overlay (resolves `skill:`/`skills:` into `ExecutorConfig.skillPaths`) | `src/workflows/runner.ts` (`phaseConfigFor`) |
 | User prompt generation | `src/workflows/runner.ts` (`buildPhasePrompt`) |
 | Per-phase bundle staging (symlink/copy) | `src/engine/agent-executor.ts` (`stageSkillBundle`, `skillBundleKey`, `excludeFromGit`) |
-| Chat catalogue + `read_skill` tool | `src/engine/chat-skills.ts` |
+| Chat catalogue + `read_skill` tool | `src/engine/chat/chat-skills.ts` |
 | Chat catalogue wiring | `src/index.ts` (ChatRunner boot) |
 | Skills | `skills/<name>/SKILL.md` |
 | Agent context layer | `agent-context/{rules,security,soul}.md` |
-| In-process `loadAgentContext()` | `src/engine/profiles.ts` |
+| In-process `loadAgentContext()` | `src/engine/github/profiles.ts` |
 
 ## Rebuild notes
 

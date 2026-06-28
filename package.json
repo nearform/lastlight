@@ -1,6 +1,6 @@
 {
   "name": "lastlight",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "GitHub repository maintenance agent — Agent SDK harness",
   "type": "module",
   "main": "dist/index.js",
@@ -14,7 +14,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "lastlight": "dist/cli.js"
+    "lastlight": "dist/cli/cli.js"
   },
   "files": [
     "dist",
@@ -47,7 +47,8 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "build": "tsc && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/cli/cli.js', 0o755)\"",
     "build:dashboard": "npm run build -w dashboard",
     "build:all": "npm run build && npm run build -w dashboard",
     "start": "node dist/index.js",

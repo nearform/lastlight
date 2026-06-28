@@ -213,10 +213,12 @@ ${chalk.bold("Server")} (host-local — run on the server; manages the docker st
 
 ${chalk.bold("Fork")} (host-local — copy built-in assets into the deployment overlay)
   lastlight fork                     List forkable workflows + agent-context (marks what's forked)
+  lastlight fork all                 Copy every workflow + prompts + skills + agent-context
   lastlight fork <workflow>          Copy a workflow + its prompts + skills into instance/
   lastlight fork agent-context       Copy soul.md / rules.md / security.md into instance/
   lastlight fork agent-context <f>   Copy a single agent-context file (e.g. soul.md)
                                      [--home dir] [--force to overwrite existing]
+                                     Reads built-ins bundled with the CLI — no checkout needed.
 
 ${chalk.bold("Skills")} (host-local — install the Last Light Claude Code skills)
   lastlight skills install           Install the skills into a local Claude Code

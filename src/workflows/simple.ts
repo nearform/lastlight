@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
-import type { ExecutorConfig } from "../engine/profiles.js";
+import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun } from "../state/db.js";
-import type { ModelConfig, VariantConfig } from "../config.js";
+import type { ModelConfig, VariantConfig } from "../config/config.js";
 import { getWorkflow } from "./loader.js";
 import {
   runWorkflow,
@@ -12,7 +12,7 @@ import {
 import { PhaseRef } from "./phase-ref.js";
 import type { TemplateContext } from "./templates.js";
 import { slugify } from "./templates.js";
-import { wrapUntrusted } from "../engine/screen.js";
+import { wrapUntrusted } from "../engine/screen/screen.js";
 import { buildProgressModel, runDashboardUrl } from "../notify/model.js";
 import { buildAssetIssueKey } from "../state/build-assets.js";
 

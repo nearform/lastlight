@@ -9,17 +9,17 @@ import {
   SANDBOX_IMAGE_QA,
 } from "../sandbox/index.js";
 import { SmolSandbox, smolAvailable, SMOL_WORKSPACE_DIR } from "../sandbox/smol.js";
-import { refreshGitAuth } from "./git-auth.js";
+import { refreshGitAuth } from "./github/git-auth.js";
 import {
   GITHUB_PERMISSION_PROFILES,
   loadAgentContext,
   type ExecutorConfig,
   type ExecutionResult,
   type GitSandboxAccess,
-} from "./profiles.js";
+} from "./github/profiles.js";
 import { AgenticShim } from "./event-shim.js";
 import { projectSlugForCwd } from "../session-log.js";
-import type { SandboxBackend } from "../config.js";
+import type { SandboxBackend } from "../config/config.js";
 import { DEFAULT_ALLOWLIST, mergeAllowlist } from "../sandbox/egress-allowlist.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
 // Per-backend executors + their shared building blocks live under ./executors/.

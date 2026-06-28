@@ -1,4 +1,4 @@
-import { getRuntimeConfig } from "./config.js";
+import { getRuntimeConfig } from "./config/config.js";
 
 /**
  * Fallback list used only before runtime config is loaded (e.g. tests).

@@ -54,12 +54,29 @@ shim is `src/engine/opencode-shim.ts`.
 src/
   index.ts              Main entry — wires connectors, boots opencode
                         serve, starts the cron scheduler and admin dashboard.
-  config.ts             Layered config load: config/default.yaml +
+  evals-api.ts          Public barrel for `lastlight/evals` — workflow driving
+                        + overlay bootstrap symbols for external eval harnesses.
+  managed-repos.ts      getManagedRepos / isManagedRepo helpers.
+  session-log.ts        SessionLog + projectSlugForCwd.
+  cli/                  CLI entry-point + host-local lifecycle commands.
+    cli.ts              Thin client that POSTs to a running server.
+    cli-config.ts       Auth + target resolution helpers.
+    cli-server.ts       `lastlight server` lifecycle (docker compose wrappers).
+    cli-format.ts       Table / age / color helpers for CLI output.
+    cli-timeline.ts     Session timeline renderer.
+    setup.ts            First-run setup wizard.
+    fork-cli.ts         `lastlight fork` — copy built-in assets into overlay.
+    skills-install.ts   `lastlight skills install` — install Claude Code skills.
+  config/               Config loading + overlay helpers.
+    config.ts           Layered config load: config/default.yaml +
                         optional $LASTLIGHT_OVERLAY_DIR/config.yaml + env
                         overrides. Secrets stay env-only. Exposes
                         getRuntimeConfig / getManagedRepos / getRoutes /
                         getPublicConfig.
-  cli.ts                Thin client that POSTs to a running server.
+    config-resolve.ts   Pure config layer resolution (default / overlay / env).
+    overlay-assets.ts   Enumerate overlay vs core asset overrides/additions.
+    overlay-bootstrap.ts Shared overlay repo scaffolding (detectGh,
+                        scaffoldOverlayFiles, bootstrapOverlayRepo).
   connectors/           Platform abstraction — every event source emits an
                         EventEnvelope so the engine never sees raw payloads.
     github-webhook.ts   GitHub App webhook → EventEnvelope.
@@ -72,39 +89,33 @@ src/
     router.ts           Deterministic, code-based routing of EventEnvelope
                         → { skill, context }. Classifies build intent via a
                         small LLM call. No LLM decides the tab.
-    opencode-executor.ts  Runs one agent session via opencode run inside a
-                        Docker sandbox. Parses --format json stream for
-                        tokens / cost / session id / stop reason and feeds
-                        the dashboard shim.
-    opencode-chat-server.ts  Supervisor + typed HTTP client for the
-                        long-lived opencode serve process. Per-session
-                        in-flight chain serializes same-sessionId calls
-                        (e.g. two messages in one Slack thread) while
-                        keeping cross-session traffic parallel.
-    chat.ts             Chat skill — creates/resumes an OpenCode session
-                        per Slack thread, posts the turn, writes the
-                        dashboard envelope jsonl, returns ChatResult
-                        metrics for the executions row.
-    opencode-shim.ts    ClaudeJsonlShim: translates OpenCode events
-                        (text / tool_use / error) into Claude-SDK
-                        envelope jsonl lines under opencode-home/projects/.
-                        MCP tool name shim (github_<tool> → mcp_github_<tool>
-                        for the dashboard tool-family classifier).
-    profiles.ts         ExecutorConfig / ExecutionResult / GitSandboxAccess
-                        types + GITHUB_PERMISSION_PROFILES + loadAgentContext.
-                        Imported by runner.ts, chat.ts, opencode-executor.ts.
-    llm.ts              One-shot LLM helper for screen.ts + classifier.ts —
+    agent-executor.ts   Runs one agent session via agentic-pi inside a
+                        Docker or smolvm sandbox. Parses event stream for
+                        tokens / cost / session id / stop reason.
+    dispatcher.ts       Routes classified events to workflow or chat handler.
+    event-shim.ts       Translates agentic-pi events → Claude-SDK envelope jsonl.
+    llm.ts              One-shot LLM helper for screen/ + classifier —
                         direct fetch to Anthropic Messages or OpenAI Chat
                         Completions based on the model id prefix.
-    screen.ts           Prompt-injection screener. Uses llm.ts with a cheap
-                        model (claude-haiku by default).
-    classifier.ts       Tiny LLM call that decides "is this comment asking
-                        me to build something?". Uses llm.ts.
-    git-auth.ts         GitHub App JWT → installation token. Supports
-                        permission downscoping (contents/issues/pull_requests/
-                        metadata read vs write) and a per-token repo allowlist.
-    github.ts           Harness-side Octokit client (post comments, create
+    github/             GitHub auth + client layer.
+      git-auth.ts       GitHub App JWT → installation token. Supports
+                        permission downscoping and a per-token repo allowlist.
+      github.ts         Harness-side Octokit client (post comments, create
                         issues, react to comments). Not used by agents.
+      github-tools.ts   In-process GitHub tools for the chat path.
+      github-app-client.ts  GitHub App Octokit factory (JWT + token auth).
+      profiles.ts       ExecutorConfig / ExecutionResult / GitSandboxAccess
+                        types + GITHUB_PERMISSION_PROFILES + loadAgentContext.
+    chat/               In-process chat path (Slack thread → pi-ai).
+      chat.ts           Chat skill — one pi-ai session per Slack thread.
+      chat-runner.ts    pi-ai conversation driver with retry logic.
+      chat-skills.ts    Chat skill catalogue + read_skill tool.
+      message-batcher.ts  Debounce bursty Slack message bursts before routing.
+    screen/             Prompt screening + intent classification.
+      screen.ts         Prompt-injection screener. Uses llm.ts with a cheap
+                        model (claude-haiku by default).
+      classifier.ts     Tiny LLM call that decides "is this comment asking
+                        me to build something?". Uses llm.ts.
   workflows/            See src/workflows/CLAUDE.md for the full runner
                         story. Loads YAML definitions, executes phases
                         (linear or DAG), manages resume, approval gates,
@@ -178,7 +189,7 @@ skills/                 Skill directories — each contains SKILL.md
                         demand via its `read` tool. Chat threads use the same skills
                         in-process via a `read_skill` tool —
                         catalogue built at boot from CHAT_SKILL_NAMES
-                        in src/engine/chat-skills.ts.
+                        in src/engine/chat/chat-skills.ts.
 agent-context/          *.md files concatenated and prepended as AGENTS.md
                         for every agent session — the bot's "personality"
                         plus hard rules. Sandbox entrypoint cats these into
@@ -193,7 +204,7 @@ plugins/                Claude Code plugin (distinct from the internal
                         (lastlight-server / -client / -overlay / -evals).
                         The repo root is also a Claude Code marketplace
                         (.claude-plugin/marketplace.json). Installed via
-                        `lastlight skills install` (src/skills-install.ts):
+                        `lastlight skills install` (src/cli/skills-install.ts):
                         prefers `claude plugin marketplace add` of the
                         bundled path, falls back to copying the skill dirs
                         into ~/.claude/skills. Shipped in the npm package
@@ -217,7 +228,7 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
 - **Workflow** — a YAML file listing phases. The runner knows nothing about
   "build" vs "triage" — it just executes phases in order (or as a DAG). See
   `src/workflows/CLAUDE.md`.
-- **Configuration & deployment overlay** (`src/config.ts`, `config/default.yaml`,
+- **Configuration & deployment overlay** (`src/config/config.ts`, `config/default.yaml`,
   issue #61) — non-secret config (managed repos, routes, models, variants,
   approvals, disables) is loaded at startup from the packaged
   `config/default.yaml`, then an optional `$LASTLIGHT_OVERLAY_DIR/config.yaml`
@@ -245,7 +256,7 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     `opencode run --format json` in the container and the harness parses
     the streamed events into an ExecutionResult + envelope jsonl. Every
     phase writes an `executions` row.
-  - **Chat** — the chat skill (`src/engine/chat.ts`) talks to the
+  - **Chat** — the chat skill (`src/engine/chat/chat.ts`) talks to the
     long-lived `opencode serve` process over HTTP. One OpenCode session
     per messaging thread, resumed across turns. Each turn writes an
     `executions` row (triggerType=`chat`, skill=`chat`,
@@ -259,7 +270,7 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     `trigger_id` / Slack thread). Read by `ChatSessionReader`; messages
     resolved to the single jsonl owned by `messaging_sessions.agent_session_id`
     under `opencode-home/projects/-app/`.
-- **Permission profiles** (`src/engine/profiles.ts`) — each workflow maps to
+- **Permission profiles** (`src/engine/github/profiles.ts`) — each workflow maps to
   a `GitAccessProfile`: `read`, `issues-write`, `review-write`, `repo-write`.
   `runner.ts` picks one per workflow name and `opencode-executor.ts` mints a
   downscoped installation token for the sandbox. Only `repo-write` runs see
@@ -372,7 +383,7 @@ cd dashboard && npx tsc -b  # dashboard typecheck
 # workflow (type: bash / type: script phases). Opt-in + self-gating: needs
 # docker + the lean image built, else skips instantly.
 docker compose --profile build-only build sandbox   # if not already built
-RUN_SANDBOX_IT=1 npx vitest run src/sandbox/command-exec.integration.test.ts
+RUN_SANDBOX_IT=1 npx vitest run tests/sandbox/command-exec.integration.test.ts
 
 # CLI — `lastlight` (bin → dist/cli.js; `npm run cli -- <args>` in dev)
 # A thin client for a running instance: it POSTs triggers and reads the
@@ -406,7 +417,7 @@ lastlight setup                        # first-run wizard (asks: client | server
 # resolved from --home → LASTLIGHT_HOME → ~/.lastlight serverHome → ~/lastlight.
 lastlight server setup                 # scaffold/adopt the working dir (clone core; clone OR
                                         # create the instance/ overlay — fresh overlay offers a
-                                        # private `gh repo create` via src/overlay-bootstrap.ts)
+                                        # private `gh repo create` via src/config/overlay-bootstrap.ts)
 lastlight server start|stop|restart [service]   # docker compose up -d / stop|down / restart
 lastlight server update                # the canonical deploy: pull core+overlay, build
                                         # (agent + sandbox + sandbox-qa), up -d --remove-orphans,
@@ -415,7 +426,7 @@ lastlight server update                # the canonical deploy: pull core+overlay
 lastlight server status                # compose ps + core/overlay version drift +
                                         # forked-asset overrides (shadows default / added)
 
-# Fork built-in assets into the instance/ overlay (HOST-LOCAL; src/fork-cli.ts).
+# Fork built-in assets into the instance/ overlay (HOST-LOCAL; src/cli/fork-cli.ts).
 # Copies the chosen built-ins into instance/ so they shadow the defaults by
 # logical name (overlay wins at startup). Resolution: explicit --home wins;
 # else cwd if it's an overlay/checkout; else the server home.
@@ -425,7 +436,7 @@ lastlight fork agent-context [file]    # all agent-context/*.md (soul/rules/secu
                                         # [--home dir] [--force to overwrite existing]
 
 # Install the Last Light Claude Code skills into a local Claude Code (HOST-LOCAL;
-# src/skills-install.ts). Prefers `claude plugin marketplace add` of the bundled
+# src/cli/skills-install.ts). Prefers `claude plugin marketplace add` of the bundled
 # plugins/ path; falls back to copying skill dirs into the scope's .claude/skills.
 lastlight skills install               # → ~/.claude/skills (user) [--scope project] [--no-marketplace]
 lastlight skills list                  # bundled skills + where they're installed
@@ -549,7 +560,7 @@ Sandbox (smolvm `smol` backend — experimental, opt-in):
   apex+subdomain like docker SNI / gondolin); unresolvable apex-only entries
   are pre-dropped. Workspace bind-mounts at `/workspace` (smolvm's special
   path → direct share). See `spec/09-sandbox.md`. Opt-in IT:
-  `RUN_SMOL_IT=1 SMOLVM_IMAGE=<archive> npx vitest run src/sandbox/smol.integration.test.ts`.
+  `RUN_SMOL_IT=1 SMOLVM_IMAGE=<archive> npx vitest run tests/sandbox/smol.integration.test.ts`.
 
 Sandbox workspace provisioning (issue #107):
 
@@ -617,7 +628,7 @@ Slack (optional):
 - `CHAT_BATCH_DEBOUNCE_MS` — settle window (ms, default 700; 0 disables) the
   `MessageBatcher` waits to coalesce a bursty thread before routing, so a rapid
   multi-message burst is classified once and answered as one ordered turn
-  (`src/engine/message-batcher.ts`, gated at `registry.onEvent`).
+  (`src/engine/chat/message-batcher.ts`, gated at `registry.onEvent`).
 
 ## Deployment
 
@@ -650,7 +661,7 @@ ssh <production-server>
 sudo -u lastlight -i lastlight server update
 ```
 
-`lastlight server update` (`src/cli-server.ts`) is the single source of truth. It:
+`lastlight server update` (`src/cli/cli-server.ts`) is the single source of truth. It:
 
 1. `git pull --ff-only` the core repo (`/home/lastlight/lastlight`, `main`).
 2. `git pull` the `instance/` overlay as the `lastlight` user (its read-only

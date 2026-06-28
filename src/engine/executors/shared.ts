@@ -6,7 +6,7 @@ import {
   type ExecutionResult,
   type ExtensionStatusMap,
   type SkillsStatus,
-} from "../profiles.js";
+} from "../github/profiles.js";
 import { AgenticShim, truncateForLog, safeStringify } from "../event-shim.js";
 import { BuildAssetStore, type BuildAssetRef } from "../../state/build-assets.js";
 

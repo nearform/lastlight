@@ -1,7 +1,7 @@
 import { basename, join, relative } from "path";
 import { writeFileSync } from "fs";
 import type { run as agenticRunType, RunResult } from "agentic-pi";
-import type { SandboxBackend } from "../../config.js";
+import type { SandboxBackend } from "../../config/config.js";
 import {
   createTaskSandbox,
   setupTaskWorktree,
@@ -15,7 +15,7 @@ import {
   type ExecutorConfig,
   type ExecutionResult,
   type GitSandboxAccess,
-} from "../profiles.js";
+} from "../github/profiles.js";
 import { AgenticShim } from "../event-shim.js";
 import { projectSlugForCwd } from "../../session-log.js";
 import { ALLOW_ALL_SENTINEL, DEFAULT_ALLOWLIST, mergeAllowlist } from "../../sandbox/egress-allowlist.js";

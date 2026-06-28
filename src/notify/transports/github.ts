@@ -3,7 +3,7 @@
  * it in place on every `publish()`; `note()` posts a fresh comment for moments
  * that deserve a real notification (approval prompts, terminal summary).
  */
-import type { GitHubClient } from "../../engine/github.js";
+import type { GitHubClient } from "../../engine/github/github.js";
 import type { NotifierTransport } from "../types.js";
 
 export interface GitHubTransportDeps {

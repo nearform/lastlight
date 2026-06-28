@@ -24,6 +24,10 @@ phases:
         re_review_prompt: prompts/re-reviewer.md
 `;
 
+function hasBuiltinsAt(dir: string): boolean {
+  return existsSync(join(dir, "workflows")) && existsSync(join(dir, "skills"));
+}
+
 function makeCore(): string {
   const root = mkdtempSync(join(tmpdir(), "fork-cli-"));
   const core = join(root, "core");
@@ -66,9 +70,36 @@ describe("fork-cli", () => {
   });
 
   it("resolveForkTarget honours an explicit --home over cwd", () => {
-    const t = resolveForkTarget({ home: "/tmp/somewhere" });
-    expect(t.coreRoot).toBe("/tmp/somewhere");
-    expect(t.instanceDir).toBe("/tmp/somewhere/instance");
+    const t = resolveForkTarget({ home: core });
+    expect(t.coreRoot).toBe(core);
+    expect(t.instanceDir).toBe(join(core, "instance"));
+  });
+
+  it("falls back to the CLI-bundled assets when --home has no checkout", () => {
+    // An overlay-only dir (no workflows/ + skills/) → coreRoot resolves to the
+    // assets shipped with the CLI itself, not an error.
+    const overlayOnly = mkdtempSync(join(tmpdir(), "fork-overlay-"));
+    const t = resolveForkTarget({ home: overlayOnly });
+    expect(t.instanceDir).toBe(join(overlayOnly, "instance"));
+    expect(t.coreRoot).not.toBe(overlayOnly);
+    // The bundled root really ships built-ins (this repo's own workflows/ + skills/).
+    expect(existsSync(join(t.coreRoot, "workflows"))).toBe(true);
+    expect(existsSync(join(t.coreRoot, "skills"))).toBe(true);
+  });
+
+  it("targets a contained instance/ from a workspace root (evals layout)", () => {
+    // Mimic an evals workspace: <root>/instance (overlay) + <root>/evals.
+    const ws = mkdtempSync(join(tmpdir(), "fork-evals-"));
+    mkdirSync(join(ws, "instance", "secrets"), { recursive: true });
+    mkdirSync(join(ws, "evals"), { recursive: true });
+    const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(ws);
+    try {
+      const t = resolveForkTarget({});
+      expect(t.instanceDir).toBe(join(ws, "instance"));
+      expect(hasBuiltinsAt(t.coreRoot)).toBe(true); // bundled fallback
+    } finally {
+      cwdSpy.mockRestore();
+    }
   });
 
   it("forks a workflow plus every referenced prompt and skill", async () => {
@@ -84,6 +115,14 @@ describe("fork-cli", () => {
     expect(existsSync(join(inst, "skills", "code-review", "SKILL.md"))).toBe(true);
   });
 
+  it("forks a real built-in via the bundled fallback when no checkout exists", async () => {
+    // No core checkout anywhere — just an overlay dir. fork must read the
+    // workflow shipped with the CLI (this repo's own workflows/build.yaml).
+    const overlayOnly = mkdtempSync(join(tmpdir(), "fork-bundled-"));
+    await fork(["build"], { home: overlayOnly });
+    expect(existsSync(join(overlayOnly, "instance", "workflows", "build.yaml"))).toBe(true);
+  });
+
   it("skips existing assets by default and overwrites with --force", async () => {
     const inst = join(core, "instance");
     mkdirSync(join(inst, "workflows"), { recursive: true });
@@ -94,6 +133,17 @@ describe("fork-cli", () => {
 
     await fork(["build"], { home: core, force: true });
     expect(readFileSync(join(inst, "workflows", "build.yaml"), "utf8")).toContain("name: build");
+  });
+
+  it("forks everything via the `all` target", async () => {
+    await fork(["all"], { home: core });
+    const inst = join(core, "instance");
+    // The one fixture workflow + its prompts/skills…
+    expect(existsSync(join(inst, "workflows", "build.yaml"))).toBe(true);
+    expect(existsSync(join(inst, "skills", "building", "SKILL.md"))).toBe(true);
+    // …and every agent-context file.
+    expect(existsSync(join(inst, "agent-context", "soul.md"))).toBe(true);
+    expect(existsSync(join(inst, "agent-context", "rules.md"))).toBe(true);
   });
 
   it("forks all agent-context files via the explicit target", async () => {

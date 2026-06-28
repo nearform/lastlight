@@ -3,7 +3,7 @@ import type {
   ExecutorConfig,
   ExecutionResult,
   GitSandboxAccess,
-} from "../engine/profiles.js";
+} from "../engine/github/profiles.js";
 import { executeAgent, executeCommand, type CommandSpec } from "../engine/agent-executor.js";
 import type { StateDb } from "../state/db.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "./schema.js";

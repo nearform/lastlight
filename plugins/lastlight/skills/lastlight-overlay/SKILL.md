@@ -1,7 +1,7 @@
 ---
 name: lastlight-overlay
 description: Create or customize a Last Light deployment OVERLAY (the private instance/ repo) — scaffold it, then fork built-in workflows, prompts, skills, or the agent persona (agent-context) so a deployment can override them. Use when the user wants to "create a Last Light overlay / instance repo", "customize / fork a workflow", "override a prompt or skill", "change the agent's persona/soul/rules", or tune a deployment's config without forking the whole codebase. For first-time server install use lastlight-server.
-version: 1.0.0
+version: 1.1.0
 tags: [lastlight, overlay, instance, fork, workflows, customization]
 ---
 
@@ -43,6 +43,12 @@ Edit `instance/config.yaml` to set `managedRepos`, and optionally override
 Use `lastlight fork` — it copies a built-in into `instance/` so your edited copy
 shadows the default. Read **`references/forking.md`** for exactly what each fork
 copies and the editing workflow.
+
+> **No core checkout needed.** The defaults it forks *from* ship inside the
+> `lastlight` package, so this works from any overlay — including a **Last Light
+> Evals** workspace (run it from the workspace root to target `./instance`, or
+> from inside `./instance`). You only need `lastlight server setup` (which clones
+> core) when you're standing up a deployment, not to fork into an existing overlay.
 
 ```bash
 lastlight fork                     # list forkable workflows + agent-context (marks what's already forked)

@@ -1,8 +1,8 @@
 import type { EventEnvelope } from "../connectors/types.js";
-import { classifyComment, classifyIssueIsQuestion } from "./classifier.js";
-import { screenForInjection, flagPrefix } from "./screen.js";
+import { classifyComment, classifyIssueIsQuestion } from "./screen/classifier.js";
+import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
-import { getRoutes } from "../config.js";
+import { getRoutes } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
 
 /**

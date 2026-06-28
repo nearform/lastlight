@@ -109,7 +109,7 @@ finish in roughly the same time so combined latency is `max(a, b)`,
 not `a + b`.
 
 ```ts
-// src/engine/screen.ts:47
+// src/engine/screen/screen.ts:47
 async function screenForInjection(text: string, model?: string): Promise<ScreenResult>;
 // ScreenResult = { flagged: boolean; reason?: string }
 ```
@@ -244,8 +244,8 @@ dispatching) gets its own branch.
 | Piece | File |
 |---|---|
 | `routeEvent`, `RoutingResult`, `MAINTAINER_ROLES`, `BOT_MENTION` regex | `src/engine/router.ts` |
-| Build-intent classifier | `src/engine/classifier.ts` |
-| Injection screener | `src/engine/screen.ts` |
+| Build-intent classifier | `src/engine/screen/classifier.ts` |
+| Injection screener | `src/engine/screen/screen.ts` |
 | Direct provider calls + model auto-detect | `src/engine/llm.ts` |
 | Harness consumer (skill → handler) | `src/index.ts:560–1124` |
 | URL extraction fallback | `extractGithubRefFromText()` in `classifier.ts:182–189` |

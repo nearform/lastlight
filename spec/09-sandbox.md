@@ -31,7 +31,7 @@ export async function executeAgent(
 ): Promise<ExecutionResult>;
 ```
 
-`ExecutorConfig` (`src/engine/profiles.ts:17–64`) carries:
+`ExecutorConfig` (`src/engine/github/profiles.ts:17–64`) carries:
 
 | Field | Meaning |
 |---|---|
@@ -236,7 +236,7 @@ the blast radius is contained to the sandbox network.
 ## Permissions and tokens
 
 ```ts
-// src/engine/profiles.ts:93
+// src/engine/github/profiles.ts:93
 export type GitAccessProfile = "read" | "issues-write" | "review-write" | "repo-write";
 
 // :130–155
@@ -381,8 +381,8 @@ Per-phase model and variant overrides resolve through
 | `executeAgent` dispatch + command path + `prepareRun` | `src/engine/agent-executor.ts` |
 | Per-backend executors (in-process / docker / smol) | `src/engine/executors/backends.ts` |
 | Shared executor helpers (staging, accumulator, finalize) | `src/engine/executors/shared.ts` |
-| `ExecutorConfig`, `GitAccessProfile`, profiles | `src/engine/profiles.ts` |
-| Token minting + downscope | `src/engine/git-auth.ts` |
+| `ExecutorConfig`, `GitAccessProfile`, profiles | `src/engine/github/profiles.ts` |
+| Token minting + downscope | `src/engine/github/git-auth.ts` |
 | Docker backend | `src/sandbox/docker.ts` |
 | smol backend (smolvm CLI wrapper, experimental) | `src/sandbox/smol.ts` |
 | Sandbox dispatch + orphan cleanup | `src/sandbox/index.ts` |

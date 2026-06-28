@@ -2,11 +2,11 @@ import type {
   ExecutorConfig,
   GitAccessProfile,
   GitSandboxAccess,
-} from "../engine/profiles.js";
+} from "../engine/github/profiles.js";
 import type { StateDb } from "../state/db.js";
 import type { PhaseHistoryEntry } from "../state/db.js";
-import type { ModelConfig, VariantConfig } from "../config.js";
-import { resolveModel, resolveVariant } from "../config.js";
+import type { ModelConfig, VariantConfig } from "../config/config.js";
+import { resolveModel, resolveVariant } from "../config/config.js";
 import type { AgentWorkflowDefinition } from "./schema.js";
 import { loadPromptTemplate } from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";

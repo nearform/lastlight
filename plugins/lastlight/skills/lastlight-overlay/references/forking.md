@@ -4,19 +4,38 @@
 edited copy shadows the default by logical name. It's host-local — it operates on
 the working directory's files, not over HTTP.
 
-Path resolution: an explicit `--home <dir>` wins; otherwise if you're standing in
-an overlay it writes there (reading built-ins from the parent checkout); if
-you're in a core checkout it writes to `<checkout>/instance`; else it falls back
-to `LASTLIGHT_HOME` / the saved server home / `~/lastlight`.
+**No core checkout required.** The built-in assets it forks *from* ship inside
+the `lastlight` package itself, so a globally-installed CLI can fork from its own
+bundled `workflows/` / `skills/` / `agent-context/` with no git checkout anywhere.
+A colocated checkout (or a server home that is one) is still preferred when
+present — so local, unpublished asset edits get forked — but it's no longer a
+prerequisite.
+
+Destination (where the fork is written) resolution:
+- an explicit `--home <dir>` → `<dir>/instance`;
+- standing inside an overlay (`instance/` itself) → writes there;
+- standing in a core checkout → `<checkout>/instance`;
+- standing in a workspace that *contains* an overlay (e.g. an **evals
+  workspace**: `instance/` + `evals/`) → that `instance/`;
+- otherwise → `LASTLIGHT_HOME` / the saved server home / `~/lastlight`.
+
+So in a Last Light Evals workspace you can run `lastlight fork <name>` from the
+workspace root (it targets `./instance`) or from inside `./instance` directly —
+either way it reads the defaults bundled with the CLI.
 
 ## Commands
 
 ```bash
 lastlight fork                       # list forkable workflows + agent-context files; marks what's already forked
+lastlight fork all                   # fork EVERY workflow (+ prompts & skills) plus all agent-context
 lastlight fork <workflow>            # e.g. `lastlight fork build`
 lastlight fork agent-context         # all of soul.md / rules.md / security.md
 lastlight fork agent-context <file>  # a single persona file, e.g. soul.md
 ```
+
+`lastlight fork all` is the "fully fork the defaults" shortcut — handy for an
+evals workspace where you want every workflow editable in one go. Shared prompts
+and skills are copied once.
 
 Flags: `--force` overwrites an existing overlay copy (otherwise existing files
 are skipped); `--home <dir>` targets a specific working directory.

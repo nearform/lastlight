@@ -5,7 +5,7 @@ import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
-import type { OtelConfig } from "../config.js";
+import type { OtelConfig } from "../config/config.js";
 import { OTEL_COLLECTOR_SANDBOX_ENDPOINT } from "../sandbox/egress-firewall-config.js";
 
 export type TelemetryPrimitive = string | number | boolean;

@@ -23,6 +23,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import {
   configureWorkflowAssets,
@@ -57,6 +58,28 @@ function hasBuiltins(dir: string): boolean {
   return isDir(path.join(dir, "workflows")) && isDir(path.join(dir, "skills"));
 }
 
+/**
+ * Assets bundled with this CLI. The npm package ships `workflows/`, `skills/`,
+ * `agent-context/` and `config/` at its root, so a globally-installed
+ * `lastlight` can fork from itself with no git checkout in sight. Resolves for
+ * both compiled (`dist/cli/fork-cli.js` → `../..` = package root) and dev
+ * (`src/cli/fork-cli.ts` → repo root) layouts — same trick as
+ * `skills-install.ts`'s `bundleRoot()`.
+ */
+function bundledAssetRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+}
+
+/**
+ * Pick the first candidate that actually ships built-ins, else the assets
+ * bundled with the CLI. This is what lets fork work from an overlay-only or
+ * evals workspace — the core no longer has to be a colocated checkout.
+ */
+function resolveCoreRoot(...candidates: string[]): string {
+  for (const c of candidates) if (c && hasBuiltins(c)) return c;
+  return bundledAssetRoot();
+}
+
 /** A directory that looks like a deployment overlay (config + secrets), not a
  *  core checkout (which keeps config under config/default.yaml, no secrets/). */
 function looksLikeOverlay(dir: string): boolean {
@@ -75,31 +98,45 @@ export interface ForkTarget {
 
 /**
  * Resolve where to read built-ins from and where to write the fork.
- * - An explicit `--home` wins outright → `<home>` + `<home>/instance`.
- * - Standing inside an overlay → write here, read built-ins from the parent
- *   checkout (or the resolved server home).
- * - Standing in a core checkout → write to `<checkout>/instance`.
- * - Otherwise → fall back to `LASTLIGHT_HOME` / the saved / default server home.
+ *
+ * Built-ins (`coreRoot`) are read from the first available of: a colocated core
+ * checkout, the saved server home (if it's a checkout), else the assets bundled
+ * with the CLI itself — so `fork` works from a CLI install with no checkout
+ * anywhere (the common case for overlay + evals workspaces).
+ *
+ * The overlay destination (`instanceDir`) is:
+ * - An explicit `--home` → `<home>/instance`.
+ * - Standing inside an overlay (e.g. `instance/` itself) → write here.
+ * - Standing in a core checkout → `<checkout>/instance`.
+ * - Standing in a workspace that *contains* an overlay (an evals workspace:
+ *   `instance/` + `evals/`) → that `instance/`.
+ * - Otherwise → `LASTLIGHT_HOME` / the saved / default server home + `/instance`.
  */
 export function resolveForkTarget(opts: ForkOpts): ForkTarget {
   // An explicit flag is unambiguous intent — it overrides cwd auto-detection.
   if (opts.home) {
     const home = path.resolve(opts.home);
-    return { coreRoot: home, instanceDir: path.join(home, "instance") };
+    return { coreRoot: resolveCoreRoot(home), instanceDir: path.join(home, "instance") };
   }
 
   const cwd = process.cwd();
 
+  // Inside an overlay (instance/ itself) → fork here.
   if (looksLikeOverlay(cwd)) {
-    const parent = path.dirname(cwd);
-    const coreRoot = hasBuiltins(parent) ? parent : resolveServerHome(opts.home);
-    return { coreRoot, instanceDir: cwd };
+    return { coreRoot: resolveCoreRoot(path.dirname(cwd), resolveServerHome(opts.home)), instanceDir: cwd };
   }
+  // In a core checkout → fork into its instance/.
   if (hasBuiltins(cwd)) {
     return { coreRoot: cwd, instanceDir: path.join(cwd, "instance") };
   }
+  // A workspace that contains an overlay (e.g. an evals workspace) → its instance/.
+  const localInstance = path.join(cwd, "instance");
+  if (looksLikeOverlay(localInstance)) {
+    return { coreRoot: resolveCoreRoot(cwd), instanceDir: localInstance };
+  }
+  // Fall back to the saved/default server home.
   const home = resolveServerHome(opts.home);
-  return { coreRoot: home, instanceDir: path.join(home, "instance") };
+  return { coreRoot: resolveCoreRoot(home), instanceDir: path.join(home, "instance") };
 }
 
 // ── copy helpers ───────────────────────────────────────────────────────────
@@ -174,6 +211,26 @@ function forkWorkflow(t: ForkTarget, name: string, force: boolean): CopyResult[]
   return results;
 }
 
+/**
+ * Fork *everything* — every agent workflow (and the prompts + skills each
+ * references) plus all agent-context files. Shared assets (a skill or prompt
+ * used by several workflows) are physically copied once; the per-`rel` dedup
+ * here keeps the report from listing them N times as "skipped".
+ */
+function forkAll(t: ForkTarget, force: boolean): CopyResult[] {
+  const byRel = new Map<string, CopyResult>();
+  const add = (r: CopyResult): void => {
+    const prev = byRel.get(r.rel);
+    // Prefer the most informative action: a real write beats a later skip.
+    if (!prev || (prev.action === "skipped" && r.action !== "skipped")) byRel.set(r.rel, r);
+  };
+  for (const def of [...listAgentWorkflows()].sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const r of forkWorkflow(t, def.name, force)) add(r);
+  }
+  for (const r of forkAgentContext(t, builtinAgentContext(t.coreRoot), force)) add(r);
+  return [...byRel.values()].sort((a, b) => a.rel.localeCompare(b.rel));
+}
+
 /** Copy one or more agent-context files (soul.md / rules.md / security.md). */
 function forkAgentContext(t: ForkTarget, files: string[], force: boolean): CopyResult[] {
   return files.map((file) => {
@@ -234,6 +291,7 @@ function listForkable(t: ForkTarget): void {
     for (const file of context) console.log(`  ${file}${mark(`agent-context:${file}`)}`);
   }
   console.log(chalk.dim("\nFork one with: ") + chalk.cyan("lastlight fork <name>"));
+  console.log(chalk.dim("Fork everything with: ") + chalk.cyan("lastlight fork all"));
 }
 
 // ── entry point ────────────────────────────────────────────────────────────
@@ -241,6 +299,7 @@ function listForkable(t: ForkTarget): void {
 /**
  * `lastlight fork [target] [sub]` — dispatch on an explicit target.
  *   - (none)                       → list forkable targets
+ *   - "all"                        → every workflow (+ prompts & skills) + context
  *   - "agent-context" [file]       → all context files, or one named file
  *   - "<workflow>"                 → workflow + its prompts + skills
  * Agent-context is never inferred from a bare filename — it's only reached via
@@ -250,9 +309,12 @@ export async function fork(args: string[], opts: ForkOpts): Promise<void> {
   const [target, sub] = args;
   const t = resolveForkTarget(opts);
   if (!hasBuiltins(t.coreRoot)) {
+    // resolveCoreRoot falls back to the CLI's bundled assets, so this only
+    // fires if the install itself is missing workflows/ + skills/ (corrupt
+    // package) — not for a plain "no checkout here" situation any more.
     console.error(
-      chalk.red(`No lastlight checkout at ${t.coreRoot} (expected workflows/ + skills/).`) +
-        chalk.dim(`\n  Run from a checkout, pass --home <dir>, or set up the server home first.`),
+      chalk.red(`No built-in assets found at ${t.coreRoot} (expected workflows/ + skills/).`) +
+        chalk.dim(`\n  The lastlight install looks incomplete — try reinstalling, or pass --home <checkout>.`),
     );
     process.exit(1);
   }
@@ -263,6 +325,12 @@ export async function fork(args: string[], opts: ForkOpts): Promise<void> {
   }
 
   configureWorkflowAssets({ builtInRoot: t.coreRoot });
+
+  // `fork all` — every workflow (+ its prompts & skills) plus all agent-context.
+  if (target === "all") {
+    printSummary(t, forkAll(t, opts.force ?? false));
+    return;
+  }
 
   // agent-context — `fork agent-context [file]`. All files, or one named file.
   if (target === "agent-context") {
@@ -289,7 +357,8 @@ export async function fork(args: string[], opts: ForkOpts): Promise<void> {
     console.error(
       chalk.red(`Unknown fork target: ${target}`) +
         chalk.dim(`\n  Workflows: ${names.join(", ")}`) +
-        chalk.dim(`\n  Agent-context: "agent-context" (optionally a file, e.g. agent-context soul.md).`),
+        chalk.dim(`\n  Agent-context: "agent-context" (optionally a file, e.g. agent-context soul.md).`) +
+        chalk.dim(`\n  Everything: "all".`),
     );
     process.exit(1);
   }
