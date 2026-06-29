@@ -19,7 +19,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { spawn } from "node:child_process";
 
 import * as p from "@clack/prompts";
@@ -27,6 +27,7 @@ import chalk from "chalk";
 
 import { loadDotEnv, hasProviderKey, evalModels, compareModels, modelLabels, resolveModel, setModelsPath } from "./env.js";
 import { runInstance, applyEvalEnv, slug } from "./run-instance.js";
+import { loadMergedConfig, type ModelConfig, type VariantConfig } from "./config.js";
 import {
   summarize,
   writeArtifacts,
@@ -144,6 +145,7 @@ function silenceConsole(): () => void {
 function verdictLine(tierName: string, inst: SweBenchInstance, r: InstanceResult): string {
   const head = `${chalk.cyan(tierName)}/${inst.instance_id}`;
   if (r.error) return `${head}  ${chalk.red("harness error")}`;
+  if (r.blocked) return `${head}  ${chalk.yellow("blocked")} ${chalk.dim("(workflow gate)")}`;
   const count = (pass?: number) => (pass !== undefined && r.trials ? chalk.dim(` ${pass}/${r.trials}`) : "");
   const parts: string[] = [];
   if (r.resolved !== undefined)
@@ -181,23 +183,91 @@ function strFlag(name: string): string | undefined {
   return process.env[`EVAL_${name.toUpperCase()}`];
 }
 
+/** Collect ALL occurrences of a repeatable string flag (`--name a --name b` or
+ * `--name=a`). Used by `--overlay`, which may repeat in `config` mode to compare
+ * one arm per overlay. */
+function strFlagAll(name: string): string[] {
+  const out: string[] = [];
+  const argv = process.argv;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === `--${name}` && argv[i + 1] !== undefined) {
+      out.push(argv[i + 1]);
+      i++;
+      continue;
+    }
+    const m = argv[i].match(new RegExp(`^--${name}=(.+)$`));
+    if (m) out.push(m[1]);
+  }
+  return out;
+}
+
 /** CLI flags that take a following value (so it isn't read as a tier name). */
-const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--overlay", "--datasets", "--models-file"]);
+const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file"]);
 
 async function runEval(): Promise<number> {
   loadDotEnv();
   p.intro(chalk.bold(`Last Light ${chalk.yellow("·")} eval`));
+
+  // Run type — the comparison axis:
+  //   `models` — compare N models, each FORCED across every workflow step.
+  //   `config` — run an overlay's REAL per-step model config (what ships); the
+  //              arm is the config/overlay, compared across runs (or N overlays
+  //              side-by-side). `--mode` wins; an explicit `--model`/`--compare`
+  //              implies `models`; otherwise ask in a TTY (default `models`).
+  const modeFlag = strFlag("mode");
+  const modelArg = strFlag("model") ?? strFlag("models");
+  const compare = process.argv.includes("--compare");
+  let runType: "models" | "config";
+  if (modeFlag === "config") runType = "config";
+  else if (modeFlag === "models" || modelArg || compare) runType = "models";
+  else if (process.stdin.isTTY) {
+    const picked = await p.select({
+      message: "What do you want to eval?",
+      options: [
+        { value: "models", label: "compare models", hint: "force each model across every workflow step" },
+        { value: "config", label: "eval config", hint: "an overlay's real per-step model config (what ships)" },
+      ],
+      initialValue: "models",
+    });
+    if (p.isCancel(picked)) {
+      p.cancel("aborted");
+      return 1;
+    }
+    runType = picked as "models" | "config";
+  } else runType = "models";
 
   // Asset roots FIRST — before any getWorkflow/runWorkflow. `--overlay` (or
   // LASTLIGHT_OVERLAY_DIR) layers a deployment's own workflows/skills over the
   // built-ins, and also contributes its `evals/datasets/` (see discovery).
   // With neither set, auto-detect a local `./instance/` overlay checkout — the
   // Separate layout `init --clone` produces — so a bare run "just works".
+  // `--overlay` may REPEAT in config mode (one arm per overlay).
   const autoInstance = join(process.cwd(), "instance");
   const autoOverlay = existsSync(join(autoInstance, "config.yaml")) ? autoInstance : undefined;
-  const overlayDir = strFlag("overlay") ?? process.env.LASTLIGHT_OVERLAY_DIR ?? autoOverlay;
-  if (overlayDir === autoOverlay && autoOverlay) p.log.info(`overlay → ${chalk.cyan("./instance")} ${chalk.dim("(auto-detected)")}`);
-  bootstrapAssets({ overlayDir });
+  const overlayFlags = strFlagAll("overlay");
+  let overlays: string[] = overlayFlags.length
+    ? overlayFlags
+    : [process.env.LASTLIGHT_OVERLAY_DIR ?? autoOverlay].filter((d): d is string => !!d);
+  // In a config-mode TTY with no overlay given, ask for one (blank ⇒ core defaults).
+  if (runType === "config" && !overlayFlags.length && process.stdin.isTTY) {
+    const ans = await p.text({
+      message: "Overlay dir whose config.yaml drives per-step models (blank = core defaults):",
+      placeholder: overlays[0] ?? autoInstance,
+      initialValue: overlays[0] ?? "",
+    });
+    if (p.isCancel(ans)) {
+      p.cancel("aborted");
+      return 1;
+    }
+    const dir = ans.trim();
+    overlays = dir ? [dir] : [];
+  }
+  // The primary overlay wires discovery + the initial asset bootstrap. Config
+  // arms re-bootstrap their own overlay before running (the asset root is a
+  // process global — see the serial loop below).
+  const overlayDir: string | undefined = overlays[0];
+  if (overlayDir && overlayDir === autoOverlay) p.log.info(`overlay → ${chalk.cyan("./instance")} ${chalk.dim("(auto-detected)")}`);
+  const { builtInRoot } = bootstrapAssets({ overlayDir });
 
   // A user/overlay can ship its own model registry too: explicit --models-file
   // wins, else an overlay's `evals/models.json` if present, else the built-in.
@@ -226,7 +296,6 @@ async function runEval(): Promise<number> {
     return 1;
   }
 
-  const compare = process.argv.includes("--compare");
   const noOpen = process.argv.includes("--no-open") || !!process.env.CI;
   const runs = intFlag("runs", 1);
 
@@ -285,27 +354,56 @@ async function runEval(): Promise<number> {
     if (!discovered.has(t)) p.log.warn(`Unknown tier "${t}". Known: ${known.join(", ")}`);
   }
 
-  // Model selection precedence:
-  //   1. --model / --models (or EVAL_MODEL[S]) — an explicit list, fuzzy-matched
-  //      against models.json; lets you test one model quickly.
-  //   2. --compare — the full cross-vendor set (key-gated).
-  //   3. default single model from models.json.
-  // Each entry carries its provider family (env-key) for parallel grouping.
-  const modelArg = strFlag("model") ?? strFlag("models");
-  const mode = modelArg ? "select" : compare ? "compare" : "single";
-  const entries: { id: string; family: string }[] = modelArg
-    ? modelArg
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((tok) => {
-          const r = resolveModel(tok);
-          return { id: r.id, family: r.family };
-        })
-    : compare
-      ? compareModels().map((m) => ({ id: m.id, family: m.envKey ?? m.provider ?? "default" }))
-      : evalModels().map((id) => ({ id, family: "default" }));
-  if (!entries.length) {
+  // An "arm" is one column of the comparison. `models` runs have one arm per
+  // model (forced across every step); `config` runs have one arm per overlay
+  // (its merged per-step config drives selection). Both flow through the same
+  // work-list → scorecard → dashboard, keyed on the arm's `label`.
+  interface Arm {
+    /** Axis label (model id in `models` runs; overlay/config name in `config`). */
+    label: string;
+    /** Parallel-grouping key: provider env-key in `models`; arm id in `config`. */
+    family: string;
+    /** `config` runs: the merged per-step model/variant maps + which overlay's
+     * assets to bootstrap. Absent in `models` runs (one forced model = label). */
+    modelConfig?: ModelConfig;
+    variantConfig?: VariantConfig;
+    overlayDir?: string;
+  }
+
+  // The model-selection sub-mode (only meaningful for `models` runs); shown in
+  // the plan note. `config` runs report their arm count instead.
+  const mode = runType === "config" ? "config" : modelArg ? "select" : compare ? "compare" : "single";
+  let arms: Arm[];
+  if (runType === "config") {
+    // One arm per overlay (or a single core-defaults arm when none). `--model`
+    // overrides each merged config's `default` key for quick what-if runs.
+    const configOverlays = overlays.length ? overlays : [overlayDir];
+    arms = configOverlays.map((dir) => {
+      const merged = loadMergedConfig(builtInRoot, dir);
+      if (modelArg) merged.models.default = resolveModel(modelArg).id;
+      const label = dir ? basename(dir) : "config";
+      return { label, family: label, modelConfig: merged.models, variantConfig: merged.variants, overlayDir: dir };
+    });
+  } else {
+    // Model selection precedence:
+    //   1. --model / --models (or EVAL_MODEL[S]) — an explicit list, fuzzy-matched.
+    //   2. --compare — the full cross-vendor set (key-gated).
+    //   3. default single model from models.json.
+    const entries = modelArg
+      ? modelArg
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((tok) => {
+            const r = resolveModel(tok);
+            return { id: r.id, family: r.family };
+          })
+      : compare
+        ? compareModels().map((m) => ({ id: m.id, family: m.envKey ?? m.provider ?? "default" }))
+        : evalModels().map((id) => ({ id, family: "default" }));
+    arms = entries.map((e) => ({ label: e.id, family: e.family }));
+  }
+  if (!arms.length) {
     p.log.error(
       "No comparison models available — set provider keys (OPENAI_API_KEY / ANTHROPIC_API_KEY /\n" +
         "FIREWORKS_API_KEY …) for the entries in evals/models.json.",
@@ -319,13 +417,20 @@ async function runEval(): Promise<number> {
     tierName: string;
     defaultWorkflow: string;
     datasetDir: string;
+    /** The arm's axis label (= {@link Arm.label}); recorded as InstanceResult.model. */
     model: string;
     family: string;
+    /** `config` arms only: threaded to runInstance to drive per-step selection. */
+    modelConfig?: ModelConfig;
+    variantConfig?: VariantConfig;
+    /** `config` arms only: which overlay's assets to bootstrap before this arm. */
+    overlayDir?: string;
     inst: SweBenchInstance;
   }
 
-  // Resolve the work-list up front so we can show deterministic progress.
-  const work: WorkItem[] = [];
+  // Instances per tier, resolved ONCE — the case set is identical across arms
+  // (arms vary only the model selection / assets, never the cases).
+  const tierInstances = new Map<string, SweBenchInstance[]>();
   for (const tierName of tiers) {
     const tier: Tier = discovered.get(tierName)!;
     const instances = loadInstances(tier);
@@ -333,7 +438,16 @@ async function runEval(): Promise<number> {
       p.log.warn(`tier "${tierName}": no instances at ${tier.instancesPath} — skipping`);
       continue;
     }
-    for (const e of entries) {
+    tierInstances.set(tierName, instances);
+  }
+
+  // Resolve the work-list up front so we can show deterministic progress. Arms
+  // are the OUTER loop so a `config` run's per-arm overlay switches at most once
+  // (the serial loop re-bootstraps on arm change; see below).
+  const work: WorkItem[] = [];
+  for (const arm of arms) {
+    for (const [tierName, instances] of tierInstances) {
+      const tier: Tier = discovered.get(tierName)!;
       for (const inst of instances) {
         // Per-instance workflow wins, else the tier's defaultWorkflow (throws if
         // neither is set — surfaced as a harness error for that case).
@@ -341,8 +455,11 @@ async function runEval(): Promise<number> {
           tierName,
           defaultWorkflow: workflowFor(tier, inst),
           datasetDir: tier.root,
-          model: e.id,
-          family: e.family,
+          model: arm.label,
+          family: arm.family,
+          modelConfig: arm.modelConfig,
+          variantConfig: arm.variantConfig,
+          overlayDir: arm.overlayDir,
           inst,
         });
       }
@@ -364,7 +481,9 @@ async function runEval(): Promise<number> {
     if (arr) arr.push(w);
     else byFamily.set(w.family, [w]);
   }
-  const parallel = !process.argv.includes("--serial") && byFamily.size > 1;
+  // `config` runs stay SERIAL: arms may carry distinct overlays and the asset
+  // root is a process global, so the serial loop re-bootstraps per arm (below).
+  const parallel = runType === "models" && !process.argv.includes("--serial") && byFamily.size > 1;
 
   // Each tier writes its OWN folder + scorecard (all sharing this run's id), so
   // tiers stay separate in the dashboard instead of collapsing into one combined
@@ -372,8 +491,10 @@ async function runEval(): Promise<number> {
   // touched. The `-compare` suffix keeps cross-vendor runs on their own trend
   // line, distinct from single-model runs of the same tier. The dashboard server
   // indexes the whole tree; each tier dir is a `tierKey` segment the SPA routes on.
+  // `-compare` keeps cross-vendor runs on their own trend line; `-config` keeps
+  // config-eval runs on theirs — so the three run shapes never collapse together.
   const gitSha = gitShortSha();
-  const tierKeyFor = (tier: string) => `${tier}${compare ? "-compare" : ""}`;
+  const tierKeyFor = (tier: string) => `${tier}${runType === "config" ? "-config" : compare ? "-compare" : ""}`;
   // One shared runId, checked free in the first tier's dir (collisions in the
   // same second across runs are what the suffix guards — rare, one dir suffices).
   const runId = makeRunId(new Date(), gitSha, tierResultsDir(tierKeyFor(tiers[0])));
@@ -389,20 +510,36 @@ async function runEval(): Promise<number> {
   // Per-tier run metadata stamped into every scorecard write (the dashboard reads
   // identity, labels, and live state straight off disk). `live`/`progress`/
   // `pending`/`generatedAt` are layered on per write; `tiers` is the single tier.
+  const armLabels = arms.map((a) => labels[a.label] ?? a.label);
   const baseMetaFor = (tier: string): Omit<RunMeta, "generatedAt"> => ({
     runId,
+    runType,
     tiers: [tier],
-    models: entries.map((e) => labels[e.id] ?? e.id),
+    models: armLabels,
     runs,
     gitSha,
     labels,
   });
 
+  // In `config` runs the axis is the config(s); show the merged per-step model
+  // map for a single-arm run so the plan is legible.
+  const axisLine =
+    runType === "config"
+      ? `${chalk.bold("configs")} ${armLabels.join(", ")}`
+      : `${chalk.bold("models")}  ${armLabels.join(", ")}`;
+  const phaseMapLine =
+    runType === "config" && arms.length === 1 && arms[0].modelConfig
+      ? `\n${chalk.bold("models")}  ${chalk.dim(
+          Object.entries(arms[0].modelConfig)
+            .map(([k, v]) => `${k}→${v}`)
+            .join("  "),
+        )}`
+      : "";
   p.note(
     `${chalk.bold("mode")}    ${mode}${
       parallel ? chalk.dim(` (parallel · ${byFamily.size} families)`) : ""
     }\n` +
-      `${chalk.bold("models")}  ${entries.map((e) => labels[e.id] ?? e.id).join(", ")}\n` +
+      `${axisLine}${phaseMapLine}\n` +
       `${chalk.bold("tiers")}   ${tiers.join(", ")}\n` +
       `${chalk.bold("cases")}   ${work.length}${
         runs > 1
@@ -496,6 +633,10 @@ async function runEval(): Promise<number> {
       const trialRel = trialRelFor(w.inst.instance_id, w.model, t);
       const r = await runInstance(w.inst, {
         model: w.model,
+        // `config` arms carry the merged per-step maps; `models` arms leave
+        // these undefined so the workflow forces `w.model` on every step.
+        modelConfig: w.modelConfig,
+        variantConfig: w.variantConfig,
         datasetDir: w.datasetDir,
         defaultWorkflow: w.defaultWorkflow,
         manageEnv: false,
@@ -550,7 +691,7 @@ async function runEval(): Promise<number> {
               running.delete(k);
               all.push(result);
               if (result.error) harnessErrors++;
-              const mark = result.error ? chalk.red("✗") : chalk.green("✓");
+              const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
               verdicts.push(`${mark} ${chalk.dim(familyLabel(f))}  ${verdictLine(w.tierName, w.inst, result)}`);
               refresh();
             }
@@ -563,8 +704,15 @@ async function runEval(): Promise<number> {
       p.log.message(verdicts.join("\n"));
     } else {
       // Serial: one spinner per case (updates per trial) + a verdict line.
+      // `config` runs repoint the (process-global) asset root when the arm's
+      // overlay changes — work is arms-outer, so this fires at most once per arm.
+      let currentOverlay: string | undefined = overlayDir;
       for (let i = 0; i < work.length; i++) {
         const w = work[i];
+        if (runType === "config" && w.overlayDir !== currentOverlay) {
+          bootstrapAssets({ overlayDir: w.overlayDir });
+          currentOverlay = w.overlayDir;
+        }
         const s = makeSpinner();
         const head = `${chalk.dim(`[${i + 1}/${work.length}]`)} ${chalk.cyan(w.tierName)}/${w.inst.instance_id}  ${chalk.dim(labels[w.model] ?? w.model)}`;
         s.start(head);
@@ -584,7 +732,7 @@ async function runEval(): Promise<number> {
         all.push(result);
         if (result.error) harnessErrors++;
 
-        const mark = result.error ? chalk.red("✗") : chalk.green("✓");
+        const mark = result.error ? chalk.red("✗") : result.blocked ? chalk.yellow("■") : chalk.green("✓");
         s.stop(`${chalk.dim(`[${i + 1}/${work.length}]`)} ${mark} ${verdictLine(w.tierName, w.inst, result)}`);
         if (result.error) {
           p.log.error(chalk.dim(result.error));
@@ -679,8 +827,14 @@ Usage:
   lastlight-evals serve [options]              Browse past runs in the dashboard (no models run)
 
 Run options:
-  --overlay <dir>      Layer a deployment's workflows/skills + evals/ over built-ins
-  --model <m[,m2]>     Model(s) to run (fuzzy-matched against models.json)
+  --mode <models|config>  Comparison axis. models (default): force each --model
+                          across every step. config: run an overlay's real
+                          per-step model config (its config.yaml). No flags in a
+                          TTY ⇒ asks.
+  --overlay <dir>      Layer a deployment's workflows/skills + evals/ over built-ins.
+                       Repeatable in --mode config (one arm per overlay).
+  --model <m[,m2]>     models: model(s) to run (fuzzy-matched against models.json).
+                       config: override each config's default model.
   --compare            Cross-vendor set (only models whose provider key is present)
   --runs <n>           Repeat each case n× (worst-case verdict, mean metrics)
   --serial             Force serial execution across provider families

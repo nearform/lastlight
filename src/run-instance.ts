@@ -29,13 +29,32 @@ import {
 } from "lastlight/evals";
 
 import type { SweBenchInstance, InstanceResult, PhaseSession } from "./schema.js";
+import { resolvePhaseModel, type ModelConfig, type VariantConfig } from "./config.js";
 import { startFakeGitHub } from "./fake-github.js";
 import { seedWorkspace } from "./seed.js";
 import { collectMetrics, drainSessions, readSessionLog, listSessionFiles, concatJsonl } from "./metrics.js";
 import { gradeBehavioral, gradeExecution, gradeTriage } from "./grade.js";
 
 export interface RunInstanceOptions {
+  /**
+   * The arm's axis LABEL recorded on the result (a model id in `models` runs,
+   * the config/overlay name in `config` runs). In `models` runs it's also the
+   * model forced across every step; in `config` runs the per-step models come
+   * from {@link modelConfig} instead and `model` is just the label.
+   */
   model: string;
+  /**
+   * `config` run type: the merged per-step model map (default.yaml + overlay
+   * config.yaml). When set, this is threaded to core EXACTLY as production does
+   * — onto `ctx.models` (so `{{models.X}}` phase templates resolve) AND as the
+   * `runWorkflow` `models` arg (the resolver fallback) — so core picks the
+   * model per phase. `ExecutorConfig.model` falls back to `modelConfig.default`.
+   * Omit for `models` runs (one model forced across all steps).
+   */
+  modelConfig?: ModelConfig;
+  /** `config` run type: the merged per-step reasoning-effort map, threaded
+   * alongside {@link modelConfig} (prod parity). */
+  variantConfig?: VariantConfig;
   /** Base dir for the run's sandbox/sessions (a fresh temp dir if omitted). */
   stateDir?: string;
   /** Dataset dir holding `repos/<id>` (fixture) + `tests/<id>` (held-out). */
@@ -163,11 +182,24 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       // works in the dir we seeded above (or an empty dir for triage).
     };
 
+    // `config` run type: thread the merged per-step model/variant maps onto the
+    // context EXACTLY as production (`simple.js`) does, so phase `model:
+    // "{{models.X}}"` templates resolve against `ctx.models`. (TemplateContext
+    // doesn't declare these — prod sets them as extra top-level keys too.)
+    if (opts.modelConfig) {
+      (ctx as Record<string, unknown>).models = opts.modelConfig;
+      (ctx as Record<string, unknown>).variants = opts.variantConfig ?? {};
+    }
+
     const config: ExecutorConfig = {
       sandbox: "none",
       stateDir,
       sessionsDir,
-      model: opts.model,
+      // `config` mode lets core pick per phase; `config.model` is only the
+      // fallback for phases that resolve to nothing, so use the config default
+      // (NOT opts.model, which is the arm label in config mode). `models` mode
+      // forces opts.model across every step.
+      model: opts.modelConfig ? opts.modelConfig.default : opts.model,
       githubApiBaseUrl: fake.url,
       // Eval workflows shouldn't reach the network beyond the model + fake GH.
       webSearch: false,
@@ -204,25 +236,58 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     };
 
     // 4. Run. Empty approvalConfig (7th arg) → every approval gate is disabled.
+    // In `config` mode the merged maps go to args 6 (models) and 9 (variants),
+    // matching prod's runWorkflow call; in `models` mode both stay undefined so
+    // every phase falls back to config.model (one model everywhere).
     const flushTimer = fullFile ? setInterval(flushFull, 1000) : undefined;
     let wf;
     try {
-      wf = await runWorkflow(def, ctx, config, callbacks, undefined, undefined, {});
+      wf = await runWorkflow(
+        def,
+        ctx,
+        config,
+        callbacks,
+        undefined,
+        opts.modelConfig,
+        {},
+        undefined,
+        opts.variantConfig,
+      );
     } finally {
       if (flushTimer) clearInterval(flushTimer);
     }
 
     result.workflowSucceeded = wf.success;
-    result.phases = wf.phases.map((p) => ({ phase: p.phase, success: p.success }));
+    // Record the model each phase resolved to — the run's forced model in
+    // `models` mode, or the per-step model the merged config assigned in
+    // `config` mode (mirrors core's selection for display; see config.ts).
+    const phaseModelTemplates = new Map(def.phases.map((p) => [p.name, p.model]));
+    result.phases = wf.phases.map((p) => ({
+      phase: p.phase,
+      success: p.success,
+      model: opts.modelConfig
+        ? resolvePhaseModel(phaseModelTemplates.get(p.phase), p.phase, opts.modelConfig)
+        : opts.model,
+    }));
 
-    // A workflow-level failure (a phase erroring — provider auth/credit/rate
-    // errors, timeouts) is a RUN error, not a model "miss". Surface it so the
-    // scorecard counts it under errors instead of behavioral✗.
+    // A workflow can end un-successful for two very different reasons:
+    //   - a DELIBERATE gate decision (guardrails `on_output` BLOCKED — the agent
+    //     judged the repo/issue unfit to build). Core marks that phase with the
+    //     constant `error: "BLOCKED"`. That's a legitimate measured outcome, NOT
+    //     a harness failure — record it as `blocked` so it doesn't count as an
+    //     error or flip the exit code.
+    //   - a real RUN failure (a phase erroring — provider auth/credit/rate,
+    //     timeout, a crash). That IS an error; surface it so the scorecard counts
+    //     it under errors instead of a bare behavioral✗.
     if (!wf.success) {
       const failed = wf.phases.find((p) => !p.success && p.error);
-      result.error = failed?.error
-        ? `${failed.phase}: ${failed.error}`.slice(0, 300)
-        : "workflow failed";
+      if (failed?.error === "BLOCKED") {
+        result.blocked = true;
+      } else {
+        result.error = failed?.error
+          ? `${failed.phase}: ${failed.error}`.slice(0, 300)
+          : "workflow failed";
+      }
     }
 
     // 5a. Behavioral grade (GitHub mutations).

@@ -32,8 +32,24 @@ npx tsx src/run.ts init /tmp/my-evals  # scaffold an overlay+evals repo
 
 # Installed:
 lastlight-evals run [tier...] [--model X] [--runs N] [--overlay DIR] [--datasets DIR]
+lastlight-evals run [tier...] --mode config [--overlay DIR ...] [--model X]  # per-step config run type
 lastlight-evals serve [--port N]       # dashboard over ./eval-results
 ```
+
+**Two run types (the comparison axis), set by `--mode`:**
+- `models` (default) — compare models, each FORCED across every workflow step
+  (`--model`/`--compare` select the set). → `eval-results/<tier>[-compare]/`.
+- `config` (`--mode config`) — run a deployment's REAL per-step model config:
+  `models`/`variants` from `--overlay`'s `config.yaml`, merged over core's
+  `config/default.yaml` (via `src/config.ts`) and threaded to `runWorkflow`
+  exactly as prod (`ctx.models` + the `models`/`variants` args) so core picks the
+  model per phase. The arm is the config/overlay (repeat `--overlay` for
+  side-by-side; `--model` overrides a config's `default`). →
+  `eval-results/<tier>-config/` (own trend line). `examples/overlay/` is a
+  ready-to-run sample. Both types share ALL downstream machinery (work-list →
+  scorecard → dashboard); they differ only in model selection per step, keyed on
+  the arm label (`InstanceResult.model`). A run with no model flags in a TTY asks
+  which type.
 
 The dashboard is a separate Vite app under `dashboard/` (its own `package.json`).
 `npm run build` builds it and `dashboard/dist` ships in the package, so an

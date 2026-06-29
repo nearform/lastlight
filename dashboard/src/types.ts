@@ -40,11 +40,26 @@ export interface TrialSession {
   phases: PhaseSession[];
 }
 
+/** Per-phase metrics (mirrors harness `schema.ts`). `model` is the model the
+ * phase resolved to — the forced model in `models` runs, the per-step model the
+ * merged config assigned in `config` runs. */
+export interface PhaseMetric {
+  phase: string;
+  success: boolean;
+  model?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+  durationMs?: number;
+}
+
 export interface InstanceResult {
   instance_id: string;
   model: string;
   tier?: string;
   workflowSucceeded: boolean;
+  /** Per-phase metrics; carries the per-step model map in `config` runs. */
+  phases?: PhaseMetric[];
   resolved?: boolean;
   behavioral?: { ok: boolean; checks: Check[] };
   trials?: number;
@@ -60,7 +75,11 @@ export interface InstanceResult {
   outputTokens: number;
   costUsd: number;
   durationMs: number;
+  /** A real run failure (provider/credit/timeout/crash). */
   error?: string;
+  /** The workflow stopped on a deliberate gate decision (e.g. guardrails) — a
+   * legitimate "unresolved" outcome, NOT an error. */
+  blocked?: boolean;
 }
 
 export interface PendingCase {
@@ -72,9 +91,14 @@ export interface PendingCase {
   sessionLog?: string;
 }
 
+/** Comparison axis: `models` compares N models forced across every step;
+ * `config` compares deployment configs (per-step model maps). Absent ⇒ `models`. */
+export type RunType = "models" | "config";
+
 export interface RunMeta {
   runId: string;
   generatedAt: string;
+  runType?: RunType;
   tiers: string[];
   models: string[];
   runs: number;
@@ -102,6 +126,7 @@ export interface IndexRun {
   runId: string;
   generatedAt: string;
   gitSha?: string;
+  runType?: RunType;
   tiers: string[];
   labels: Record<string, string>;
   byTier: TierSummary[];

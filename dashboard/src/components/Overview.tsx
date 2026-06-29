@@ -1,7 +1,7 @@
 import type { IndexRun, IndexTier, ModelSummary } from "../types";
 import { fmtDate, modelLabel, tierMetric } from "../lib/format";
 import { useNavigate } from "../lib/router";
-import { LiveBadge, Sparkline } from "./ui";
+import { LiveBadge, RunTypeBadge, Sparkline } from "./ui";
 
 const tierModels = (run: IndexRun, tier: string): ModelSummary[] =>
   run.byTier.find((b) => b.tier === tier)?.models ?? [];
@@ -128,6 +128,7 @@ function TierSection({
                 >
                   <td className="px-3 py-2.5 font-mono">
                     <span className="text-info hover:underline">{fmtDate(r.generatedAt)}</span>
+                    <RunTypeBadge runType={r.runType} className="ml-2" />
                     <LiveBadge run={r} className="ml-2" />
                   </td>
                   <td className="px-3 py-2.5 font-mono text-base-content/50">{r.gitSha ?? "—"}</td>

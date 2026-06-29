@@ -1,0 +1,27 @@
+# Sample overlay #2 — an Anthropic per-phase mix, for comparing CONFIGS.
+#
+# Pair it with examples/overlay (an OpenAI mix) to see two deployment configs
+# side-by-side in one run:
+#
+#   lastlight-evals run code-fix --mode config \
+#     --overlay examples/overlay --overlay examples/overlay-anthropic
+#
+# Each --overlay is one arm (row); the arm's label is the dir's basename, so name
+# dirs meaningfully. Merged over core's config/default.yaml exactly as prod. The
+# eval reads only `models`/`variants`.
+
+# Tier the model to the phase's difficulty: a cheap gate (haiku), the strongest
+# model for the hard planning step (opus → architect), the workhorse for the
+# rest (sonnet). This is the kind of cost/quality trade-off the config run type
+# is built to evaluate.
+models:
+  default: anthropic/claude-sonnet-4-6
+  guardrails: anthropic/claude-haiku-4-5
+  architect: anthropic/claude-opus-4-8
+  executor: anthropic/claude-sonnet-4-6
+  reviewer: anthropic/claude-haiku-4-5
+  fix: anthropic/claude-sonnet-4-6
+
+variants:
+  guardrails: low
+  reviewer: low

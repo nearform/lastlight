@@ -2,16 +2,20 @@ import type { ModelSummary } from "../types";
 import { fmtMs, fmtTokens, modelLabel, rankModels, tierMetric } from "../lib/format";
 import { Bar } from "./ui";
 
-/** Model-comparison table for one tier: models as rows, ranked by the tier's
- * primary metric, with inline bars + best-in-column stars. */
+/** Comparison table for one tier: arms (models, or configs in a `config` run) as
+ * rows, ranked by the tier's primary metric, with inline bars + best-in-column
+ * stars. `axisLabel` names the row axis ("Model" by default, "Config" for a
+ * `config` run). */
 export function CompareTable({
   models,
   tier,
   labels,
+  axisLabel = "model",
 }: {
   models: ModelSummary[];
   tier: string;
   labels: Record<string, string>;
+  axisLabel?: string;
 }) {
   const metric = tierMetric(tier);
   const ranked = rankModels(models, metric);
@@ -30,7 +34,7 @@ export function CompareTable({
         <thead>
           <tr className="bg-neutral text-2xs uppercase tracking-wide text-base-content/50">
             <th className="w-8 px-3 py-3 text-center font-semibold">#</th>
-            <th className="px-3 py-3 text-left font-semibold">model</th>
+            <th className="px-3 py-3 text-left font-semibold">{axisLabel.toLowerCase()}</th>
             <th className="px-3 py-3 text-left font-semibold">{metric.label} →</th>
             <th className="px-3 py-3 text-left font-semibold">total cost ↓</th>
             <th className="px-3 py-3 text-left font-semibold">p50 latency ↓</th>

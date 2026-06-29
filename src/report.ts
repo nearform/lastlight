@@ -33,7 +33,15 @@ export interface RunMeta {
   runId: string;
   generatedAt: string;
   tiers: string[];
-  /** Model labels under test (what the scorecard table displays). */
+  /**
+   * The comparison axis for this run. `"models"` (default) compares N models,
+   * each forced across every workflow step. `"config"` compares N deployment
+   * configs (per-step model maps merged from an overlay's `config.yaml`) — the
+   * setup you actually ship. Absent ⇒ `"models"` (back-compat with older runs).
+   */
+  runType?: "models" | "config";
+  /** Axis labels under test (model ids in `models` runs, config/overlay names
+   * in `config` runs) — what the scorecard table displays as rows. */
   models: string[];
   /** Trials per case (`--runs N`). */
   runs: number;
@@ -101,6 +109,9 @@ export function aggregateTrials(trials: InstanceResult[]): InstanceResult {
     githubMutations: Math.round(mean(ok.map((t) => t.githubMutations ?? 0))),
     trials: ok.length,
     trialErrors: trials.length - ok.length,
+    // Worst-case (matches resolved/behavioral): marked blocked only if every
+    // non-errored trial was a deliberate gate block.
+    blocked: ok.every((t) => t.blocked) || undefined,
   };
 
   // behavioral: worst-case ok, checks AND'd by name, keep a failing detail.
@@ -226,6 +237,9 @@ export interface IndexRun {
   runId: string;
   generatedAt: string;
   gitSha?: string;
+  /** Comparison axis (see {@link RunMeta.runType}) — lets the SPA badge a run
+   * without fetching its scorecard. Absent ⇒ `"models"`. */
+  runType?: "models" | "config";
   tiers: string[];
   /** Display labels keyed by model id, carried for the SPA. */
   labels: Record<string, string>;
@@ -287,6 +301,7 @@ function indexRun(tierKey: string, dir: string, card: Scorecard): IndexRun {
     runId: meta?.runId ?? dir ?? tierKey,
     generatedAt: meta?.generatedAt ?? dir ?? "",
     gitSha: meta?.gitSha,
+    runType: meta?.runType,
     tiers: meta?.tiers ?? tierOrder,
     labels: meta?.labels ?? {},
     byTier,

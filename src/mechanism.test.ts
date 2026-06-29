@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { startFakeGitHub } from "./fake-github.js";
 import { seedWorkspace } from "./seed.js";
 import { gradeExecution, gradeBehavioral, gradeTriage } from "./grade.js";
+import { loadMergedConfig, resolvePhaseModel } from "./config.js";
 
 const staticAuth = { getToken: async () => "fake-token", expiresAt: null };
 
@@ -68,6 +69,55 @@ describe("fake GitHub + agentic-pi github tools (baseUrl seam)", () => {
     } finally {
       await fake.close();
     }
+  });
+});
+
+describe("config run type — per-step model resolution (config.ts)", () => {
+  it("deep-merges overlay config.yaml over core default.yaml (overlay wins per key)", () => {
+    const root = mkdtempSync(join(tmpdir(), "ll-eval-cfg-"));
+    try {
+      // A stand-in core root: just the one file loadMergedConfig reads.
+      mkdirSync(join(root, "config"), { recursive: true });
+      writeFileSync(
+        join(root, "config", "default.yaml"),
+        "models:\n  default: anthropic/claude-sonnet-4-6\nvariants: {}\n",
+      );
+      // An overlay that retargets some phases + sets a variant.
+      const overlay = join(root, "overlay");
+      mkdirSync(overlay, { recursive: true });
+      writeFileSync(
+        join(overlay, "config.yaml"),
+        "models:\n  default: openai/gpt-5.4-mini\n  architect: openai/gpt-5.5\nvariants:\n  guardrails: low\n",
+      );
+
+      const { models, variants } = loadMergedConfig(root, overlay);
+      expect(models.default).toBe("openai/gpt-5.4-mini"); // overlay wins
+      expect(models.architect).toBe("openai/gpt-5.5"); // overlay-only key kept
+      expect(variants.guardrails).toBe("low");
+
+      // No overlay ⇒ just the core defaults.
+      const core = loadMergedConfig(root);
+      expect(core.models.default).toBe("anthropic/claude-sonnet-4-6");
+      expect(core.models.architect).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolvePhaseModel mirrors core precedence: {{models.X}} template → models[phase] → default", () => {
+    const models = { default: "m-default", guardrails: "m-guard", explore: "m-explore" };
+    // 1. A phase whose YAML names `{{models.guardrails}}` → that template wins.
+    expect(resolvePhaseModel("{{models.guardrails}}", "guardrails", models)).toBe("m-guard");
+    // 2. A template keyed differently from the phase name (explore.yaml's
+    //    `read_context` phase uses `{{models.explore}}`) → the TEMPLATE key wins,
+    //    NOT the phase-name lookup. This is the case the `ctx.models` wiring guards.
+    expect(resolvePhaseModel("{{models.explore}}", "read_context", models)).toBe("m-explore");
+    // 3. No template, phase name present in the map → that entry.
+    expect(resolvePhaseModel(undefined, "guardrails", models)).toBe("m-guard");
+    // 4. No template, unmapped phase → the default.
+    expect(resolvePhaseModel(undefined, "executor", models)).toBe("m-default");
+    // 5. Template referencing an unset key → falls through to phase/default.
+    expect(resolvePhaseModel("{{models.missing}}", "executor", models)).toBe("m-default");
   });
 });
 

@@ -73,19 +73,23 @@ export function InstanceTable({
                 <td className="px-3 py-2.5 font-mono text-base-content/50">{modelLabel(labels, r.model)}</td>
                 {showCodeFix && (
                   <td className="px-3 py-2.5">
-                    {r.resolved === undefined ? (
+                    {r.blocked ? (
+                      <Pill kind="blocked">blocked</Pill>
+                    ) : r.resolved === undefined ? (
                       <Pill kind="na">—</Pill>
                     ) : r.resolved ? (
                       <Pill kind="pass">resolved</Pill>
                     ) : (
                       <Pill kind="fail">unresolved</Pill>
                     )}
-                    <Frac pass={r.resolvedPass} trials={r.trials} />
+                    {!r.blocked && <Frac pass={r.resolvedPass} trials={r.trials} />}
                   </td>
                 )}
                 <td className="px-3 py-2.5">
                   {r.error ? (
                     <Pill kind="fail">error</Pill>
+                  ) : r.blocked ? (
+                    <Pill kind="blocked">blocked</Pill>
                   ) : r.behavioral ? (
                     r.behavioral.ok ? (
                       <Pill kind="pass">ok</Pill>
@@ -95,7 +99,7 @@ export function InstanceTable({
                   ) : (
                     <Pill kind="na">—</Pill>
                   )}
-                  {!r.error && <Frac pass={r.behavioralPass} trials={r.trials} />}
+                  {!r.error && !r.blocked && <Frac pass={r.behavioralPass} trials={r.trials} />}
                 </td>
                 <td className="px-3 py-2.5 leading-7">
                   {checks.length ? (

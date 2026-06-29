@@ -86,6 +86,10 @@ export interface SweBenchInstance {
 export interface PhaseMetric {
   phase: string;
   success: boolean;
+  /** The model this phase resolved to. In `models` runs it equals the run's
+   * forced model; in `config` runs it's the per-step model the merged config
+   * assigned (the payoff signal that surfaces the per-phase model map). */
+  model?: string;
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
@@ -114,6 +118,9 @@ export interface TrialSession {
 
 export interface InstanceResult {
   instance_id: string;
+  /** The run arm's axis label: a model id in `models` runs, the config/overlay
+   * name in `config` runs (see {@link RunMeta.runType}). Results group by this
+   * field into scorecard rows, and the per-case session dir is keyed on it. */
   model: string;
   /** Which tier this instance belongs to (triage / code-fix). */
   tier?: string;
@@ -155,5 +162,12 @@ export interface InstanceResult {
   costUsd: number;
   durationMs: number;
   phases: PhaseMetric[];
+  /** A real RUN failure — provider auth/credit/rate, timeout, or a crash. Counts
+   * toward the runner's non-zero exit. NOT set for a {@link blocked} workflow. */
   error?: string;
+  /** The workflow stopped on a deliberate gate decision (e.g. guardrails judged
+   * the repo/issue unfit to build) rather than failing. A legitimate measured
+   * outcome — the case is unresolved, but this is NOT a harness error and does
+   * not affect the exit code. */
+  blocked?: boolean;
 }

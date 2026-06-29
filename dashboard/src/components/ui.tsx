@@ -27,7 +27,25 @@ export function Bar({
   );
 }
 
-export type PillKind = "pass" | "fail" | "na" | "run" | "wait";
+/** Badge distinguishing a `config` run (per-step model config) from the default
+ * `models` comparison. Renders nothing for `models` runs to keep the common case
+ * uncluttered. */
+export function RunTypeBadge({ runType, className = "" }: { runType?: string; className?: string }) {
+  if (runType !== "config") return null;
+  return (
+    <span
+      title="Eval of a deployment's real per-step model config"
+      className={clsx(
+        "inline-block whitespace-nowrap rounded-full bg-primary/15 px-2 py-0.5 font-mono text-2xs font-semibold text-primary",
+        className,
+      )}
+    >
+      config
+    </span>
+  );
+}
+
+export type PillKind = "pass" | "fail" | "na" | "run" | "wait" | "blocked";
 
 export function Pill({ kind, children }: { kind: PillKind; children: React.ReactNode }) {
   const cls: Record<PillKind, string> = {
@@ -36,6 +54,8 @@ export function Pill({ kind, children }: { kind: PillKind; children: React.React
     na: "bg-base-300 text-base-content/50",
     run: "bg-accent/15 text-accent ll-pulse",
     wait: "bg-base-300 text-base-content/50",
+    // A deliberate workflow gate stop — neutral/warning, distinct from a fail.
+    blocked: "bg-warning/15 text-warning",
   };
   return (
     <span className={clsx("inline-block rounded-full px-2 py-0.5 font-mono text-2xs font-semibold", cls[kind])}>

@@ -1,0 +1,36 @@
+# Sample deployment overlay — for trying the `config` eval run type.
+#
+# Modeled on a real Last Light instance overlay (~/work/lastlight-instance),
+# trimmed to what the eval harness actually consumes. It's merged over core's
+# `config/default.yaml` exactly as production does (maps deep-merge per key).
+#
+# Run it:
+#   lastlight-evals run code-fix --mode config --overlay examples/overlay
+#   lastlight-evals run triage   --mode config --overlay examples/overlay
+#
+# NOTE: the eval reads ONLY `models` and `variants` from here — it forces
+# sandbox:none and disables approval gates (the two sanctioned deviations from
+# prod), so any `sandbox` / `approval` / `managedRepos` keys would be ignored.
+# That's why this sample omits them.
+
+# Per-step model map. Keys are workflow task names; anything unset falls back to
+# `default`. This deliberately VARIES per phase so the dashboard's "Per-step
+# models" panel shows the assignment: cheap/fast model on the gate + review
+# phases, a stronger model where the real work happens (architect/executor/fix).
+#
+# These ids must resolve in pi-ai's registry and have their provider key set
+# (here: OPENAI_API_KEY). Swap to your available provider as needed — e.g.
+# anthropic/claude-haiku-4-5 + anthropic/claude-opus-4-8.
+models:
+  default: openai/gpt-5.4-mini
+  guardrails: openai/gpt-5.4-mini
+  architect: openai/gpt-5.5
+  executor: openai/gpt-5.5
+  reviewer: openai/gpt-5.4-mini
+  fix: openai/gpt-5.5
+
+# Reasoning-effort per task (pi-ai "thinking": off|low|medium|high|xhigh).
+# Empty/unset ⇒ the model's default effort.
+variants:
+  guardrails: low
+  reviewer: low

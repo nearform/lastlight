@@ -1,7 +1,7 @@
 import type { IndexTier, ModelSummary } from "../types";
 import { fmtDate, modelLabel, tierMetric } from "../lib/format";
 import { useNavigate } from "../lib/router";
-import { LiveBadge } from "./ui";
+import { LiveBadge, RunTypeBadge } from "./ui";
 
 /** Landing page: every tier as a card + the most recent runs across all tiers.
  * Each tier now lives in its own folder, so this is the place that ties them
@@ -85,6 +85,7 @@ export function Home({ tiers }: { tiers: IndexTier[] }) {
                 >
                   <td className="whitespace-nowrap px-3 py-2.5 font-mono">
                     <span className="text-info hover:underline">{fmtDate(run.generatedAt)}</span>
+                    <RunTypeBadge runType={run.runType} className="ml-2" />
                     <LiveBadge run={run} className="ml-2" />
                   </td>
                   <td className="px-3 py-2.5 font-mono text-base-content/70">{tierKey}</td>

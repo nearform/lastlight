@@ -181,6 +181,12 @@ lastlight-evals run --overlay ~/work/lastlight-instance
 # add your own datasets dir without an overlay
 lastlight-evals run --datasets ~/my-evals/datasets
 
+# CONFIG run type — eval a deployment's REAL per-step model config (different
+# models per workflow phase, from the overlay's config.yaml) instead of forcing
+# one model. This is the setup you actually ship. Try the bundled sample overlay:
+lastlight-evals run code-fix --mode config --overlay examples/overlay
+lastlight-evals run code-fix --mode config --overlay A --overlay B   # 2 configs side-by-side
+
 # ad-hoc model set / focus one instance / no browser
 EVAL_MODELS="openai/gpt-5.5,anthropic/claude-sonnet-4-6" lastlight-evals run
 EVAL_INSTANCE=off-by-one lastlight-evals run code-fix
@@ -213,6 +219,25 @@ Needs a provider key (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
 `FIREWORKS_API_KEY` / `OPENROUTER_API_KEY`) in the environment or a cwd `.env`.
 The runner exits non-zero **only** if the harness itself errors — a weak model
 scoring poorly is the measurement, not a build failure.
+
+### Two run types
+
+A run compares N **arms** along one of two axes — pick with `--mode` (or, in a
+TTY with no model flags, you're asked):
+
+- **`models`** (default) — compare models, each **forced across every workflow
+  step**. `--model`/`--compare` select the set. Lands in `eval-results/<tier>/`
+  (or `<tier>-compare/`).
+- **`config`** (`--mode config`) — run a deployment's **real per-step model
+  config**: the `models`/`variants` maps from an overlay's `config.yaml`, merged
+  over core's `config/default.yaml` exactly as production does, so each phase can
+  run on a different model. The arm is the config/overlay; pass `--overlay` more
+  than once to compare configs side-by-side, or re-run over time to compare as
+  you tweak prompts/skills/workflow/model-config. `--model` overrides a config's
+  `default` for quick what-ifs. Lands in `eval-results/<tier>-config/`, on its
+  own trend line. The run view shows a **Per-step models** panel with each
+  phase's resolved model. See [`examples/overlay`](examples/overlay) for a
+  ready-to-run sample.
 
 ## Your own workflows + datasets (overlays)
 

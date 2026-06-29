@@ -4,6 +4,8 @@
   "type": "module",
   "description": "Tiny date-range utility.",
   "scripts": {
-    "test": "node --test --experimental-strip-types"
+    "test": "node --test --experimental-strip-types",
+    "lint": "node scripts/lint.mjs",
+    "check": "npm run lint && npm test"
   }
 }
