@@ -51,15 +51,28 @@ and `stopReason`.
 
 ## Backends
 
-Four modes; selected per-call in `executeAgent` (`agent-executor.ts`).
-The three sandboxed executors live in `src/engine/executors/backends.ts`
-(`executeInProcess` for gondolin/none, `executeDocker`, `executeSmol`)
-over shared building blocks in `src/engine/executors/shared.ts`.
+Four modes, all behind the **Sandbox port** (`src/sandbox/sandbox.ts`):
+`provision` / `stageSkills` / `runAgent` / `runCommand` / `dispose`. The
+`sandboxFor(backend, opts)` factory returns one of four adapters —
+`DockerSandbox`, `SmolSandbox`, `InProcessSandbox` (`mode: gondolin | none`),
+or the test-only `FakeSandbox`. Each adapter owns its isolation mechanism and
+translates the intent-only `EgressPolicy` to its own controls.
+
+The **orchestrator** (`src/engine/executors/orchestrator.ts`) drives any
+adapter through that port: `withSandbox` brackets provision → work → dispose,
+and `runSandboxedAgent` / `runSandboxedCommand` hold the skill staging,
+build-artifact stage/harvest, the `RunResultAccumulator` + shim +
+`recordPiEvent` event loop, and the single converged fallback path — written
+once, over shared building blocks in `src/engine/executors/shared.ts`.
+`executeAgent` / `executeCommand` (`agent-executor.ts`) mint the token, build
+the env, and delegate. (This replaced the per-backend `executeDocker` /
+`executeSmol` / `executeInProcess` twins.)
 
 ### `gondolin` — default
 
 Agentic-pi's QEMU micro-VM. Invoked in-process via the `agenticRun()`
-call (`agent-executor.ts:263–287`). The agent's working directory is
+call inside `InProcessSandbox.runAgent` (`src/sandbox/sandbox.ts`,
+`mode: gondolin`). The agent's working directory is
 the host worktree mounted at `/workspace` inside the VM. Network
 isolation is at the VM layer — agentic-pi's HTTP interceptor 502s any
 outbound request whose host isn't on `allowedHttpHosts`.
@@ -378,13 +391,14 @@ Per-phase model and variant overrides resolve through
 
 | Piece | File |
 |---|---|
-| `executeAgent` dispatch + command path + `prepareRun` | `src/engine/agent-executor.ts` |
-| Per-backend executors (in-process / docker / smol) | `src/engine/executors/backends.ts` |
+| `executeAgent` / `executeCommand` + `prepareRun` (token mint, env) | `src/engine/agent-executor.ts` |
+| Sandbox port + `sandboxFor` factory + adapters + `FakeSandbox` | `src/sandbox/sandbox.ts` |
+| Orchestrator (`withSandbox` / `runSandboxedAgent` / `runSandboxedCommand`) | `src/engine/executors/orchestrator.ts` |
 | Shared executor helpers (staging, accumulator, finalize) | `src/engine/executors/shared.ts` |
 | `ExecutorConfig`, `GitAccessProfile`, profiles | `src/engine/github/profiles.ts` |
 | Token minting + downscope | `src/engine/github/git-auth.ts` |
-| Docker backend | `src/sandbox/docker.ts` |
-| smol backend (smolvm CLI wrapper, experimental) | `src/sandbox/smol.ts` |
+| Docker container driver (wrapped by the DockerSandbox adapter) | `src/sandbox/docker.ts` |
+| smol micro-VM driver (wrapped by the SmolSandbox adapter, experimental) | `src/sandbox/smol.ts` |
 | Sandbox dispatch + orphan cleanup | `src/sandbox/index.ts` |
 | Sandbox image names + availability probe | `src/sandbox/images.ts` (`SANDBOX_IMAGE`, `SANDBOX_IMAGE_QA`, `qaImageAvailable`) |
 | Browser-QA image | `sandbox-qa.Dockerfile`; bundled driver `skills/browser-qa/scripts/agent-browser.mjs` |

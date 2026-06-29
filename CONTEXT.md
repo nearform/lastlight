@@ -86,3 +86,67 @@ dashboard groups them by `<phase>_` prefix.
   (with a fallback when the marker is absent). `parseReviewerVerdict` is the
   single pure parser (`src/workflows/verdict.ts`); it reports `viaFallback` so
   callers can warn when the marker was missing.
+
+## Sandbox execution
+
+Vocabulary pinned during the `/grilling` of the sandbox-seam deepening
+(architecture review: collapse `executeDocker`/`executeSmol`/`executeInProcess`
+into one orchestrator behind a named port). Describes the agreed target shape;
+the implementation PR uses these names.
+
+- **Sandbox** — the **port** every backend implements: `provision() →
+  { hostWorkspaceDir, agentCwd }`, `runAgent(taskId, prompt, opts, onEvent)`,
+  `runCommand(taskId, command, opts)`, `dispose()`. The port **owns
+  provisioning** — each adapter orders its own clone-vs-boot internally (docker
+  pre-clones then mounts; smol boots then probes the share-backed dir then
+  clones; in-process just `setupTaskWorktree`) and hands back the two things the
+  orchestrator needs. `runAgent` emits **parsed event records**, never raw
+  lines — `JSON.parse` is the subprocess adapters' job. _Avoid_: calling the
+  backend classes a "driver" or "runtime"; the deep module behind the port is
+  the **orchestrator** (below), the things at the seam are **adapters**.
+
+- **Sandbox adapter** — a concrete backend at the `Sandbox` seam:
+  `DockerSandbox`, `SmolSandbox`, `InProcessSandbox`, `FakeSandbox`. An adapter
+  owns its isolation mechanism (container / micro-VM / in-process env-splice)
+  and its egress enforcement; none of that surfaces at the interface.
+  `InProcessSandbox` is **one** class parameterized by `mode: 'gondolin' |
+  'none'` — the two differ only in agentic-pi's `sandbox` arg and a `HOME`
+  override; it owns the `applyEnv`/`restore` `process.env` splice and the lazy
+  `import("agentic-pi")`. The `mode` flag is a **tombstone**: when `gondolin`
+  is retired it collapses to single-mode `none`. _Avoid_: a second
+  near-twin `GondolinSandbox` class (the split is two field values, not two
+  behaviours).
+
+- **Sandbox orchestrator** — the deep module that owns one agent/command run
+  end-to-end: a shared `withSandbox(...)` bracket (provision → work →
+  session-jsonl write → dispose → fallback-finalize) with two thin callers,
+  `runSandboxedAgent` and `runSandboxedCommand`. It holds the
+  skill-staging, build-artifact stage/harvest, `RunResultAccumulator` + shim +
+  `recordPiEvent` event loop, and session-id notification — **written once**,
+  identical for every adapter. Replaces the per-backend `executeDocker` /
+  `executeSmol` / `executeInProcess` twins and the `if (backend === …)`
+  ladders. Adapters are built by the single factory `sandboxFor(backend,
+  { egress, env, imageName })`; tests substitute one via an optional
+  `sandboxFactory` on the `executeAgent`/`executeCommand` opts (default
+  `sandboxFor`).
+
+- **EgressPolicy** — the **intent-only** value object the orchestrator hands an
+  adapter at construction: `{ unrestricted: boolean; hosts: string[] }` (hosts
+  already merged with OTEL collector hosts). The orchestrator decides *what is
+  allowed*; each adapter translates it to its *mechanism* — docker `--dns`
+  strict/open, smol `--allow-host`, in-process `allowedHttpHosts` / `["*"]`. The
+  `172.30.0.x` constants and the `"*"` sentinel live inside adapters. The
+  SSRF-metadata floor is adapter-local (docker `coredns-open` NXDOMAINs the
+  metadata literals; smol does not — a documented gap). _Avoid_: a
+  per-mechanism struct (`{ dnsIp?, allowHosts?, allowedHttpHosts? }`) — that is
+  the leak wearing a value object.
+
+- **FakeSandbox** — the in-memory `Sandbox` adapter for unit-testing the
+  orchestrator without Docker/VMs. `provision()` returns a **real** `mkdtemp`
+  workspace (so skill staging + artifact harvest run for real), `runAgent`
+  replays a **canned array of pi event records** through `onEvent` (with a throw
+  mode for the fallback path), and it **records** the opts it received
+  (`EgressPolicy`, `agentCwd`, `skillDirs`, `sandboxEnv`) for assertions. Covers
+  Last Light's orchestration, not agentic-pi's semantics. The
+  `RUN_SANDBOX_IT` / `RUN_SMOL_IT` integration tests demote from "only coverage"
+  to boundary smoke (real adapter boots + streams).

@@ -80,9 +80,10 @@ launch — so a misconfigured image can never produce faked screenshots.
   Playwright CDN. `docker-compose.yml` adds a `sandbox-qa` build-only service.
 - **`sandbox_image` field** — `src/workflows/schema.ts` (enum `default|qa`),
   overlaid onto `ExecutorConfig.sandboxImage` by `phaseConfigFor`
-  (`src/workflows/phase-executor.ts`). `executeDocker`
-  (`src/engine/agent-executor.ts`) maps `qa` → `SANDBOX_IMAGE_QA` and passes it
-  as `createTaskSandbox({ imageName })`.
+  (`src/workflows/phase-executor.ts`). The orchestrator's `withSandbox`
+  (`src/engine/executors/orchestrator.ts`) maps `qa` → `SANDBOX_IMAGE_QA` and
+  passes it via `sandboxFor`; the `DockerSandbox` adapter forwards it as
+  `createTaskSandbox({ imageName })`.
 - **Image constants + availability probe** — `src/sandbox/images.ts`
   (`SANDBOX_IMAGE`, `SANDBOX_IMAGE_QA`, `qaImageAvailable()`). Kept in a
   docker-free module so `runner.ts` can import it without pulling

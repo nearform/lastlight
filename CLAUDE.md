@@ -89,9 +89,22 @@ src/
     router.ts           Deterministic, code-based routing of EventEnvelope
                         → { skill, context }. Classifies build intent via a
                         small LLM call. No LLM decides the tab.
-    agent-executor.ts   Runs one agent session via agentic-pi inside a
-                        Docker or smolvm sandbox. Parses event stream for
-                        tokens / cost / session id / stop reason.
+    agent-executor.ts   Public executor surface: `executeAgent` /
+                        `executeCommand`. Mints the scoped GitHub token,
+                        assembles the sandbox env, then delegates to the
+                        Sandbox orchestrator. Thin — no backend branching.
+    executors/
+      orchestrator.ts   The Sandbox orchestrator: `withSandbox` bracket +
+                        `runSandboxedAgent` / `runSandboxedCommand`. Owns skill
+                        staging, build-artifact stage/harvest, the
+                        RunResultAccumulator + shim + recordPiEvent event loop,
+                        session-id notify, and the single converged fallback.
+                        Computes one intent-only `EgressPolicy` per run.
+                        Written once for every backend (replaced the
+                        executeDocker/executeSmol/executeInProcess twins).
+      shared.ts         Backend-agnostic building blocks (RunResultAccumulator,
+                        skill-bundle staging, server-artifact stage/harvest,
+                        finalizeFromRunResult, env splice).
     dispatcher.ts       Routes classified events to workflow or chat handler.
     event-shim.ts       Translates agentic-pi events → Claude-SDK envelope jsonl.
     llm.ts              One-shot LLM helper for screen/ + classifier —
@@ -120,10 +133,21 @@ src/
                         story. Loads YAML definitions, executes phases
                         (linear or DAG), manages resume, approval gates,
                         loop iterations.
-  sandbox/              Docker-based isolation for agent runs. One container
-                        per task, mounted data volume, hardened path checks
-                        (gitdir mounts validated against sandbox root,
-                        taskId traversal rejected).
+  sandbox/              Isolation backends for agent runs. One container/VM/
+                        worktree per task, hardened path checks (gitdir mounts
+                        validated against sandbox root, taskId traversal
+                        rejected).
+    sandbox.ts          The **Sandbox port** + `sandboxFor` factory + the four
+                        adapters: `DockerSandbox`, `SmolSandbox`,
+                        `InProcessSandbox` (`mode: gondolin | none`),
+                        `FakeSandbox` (test-only). Each owns its isolation
+                        mechanism + egress translation behind one interface
+                        (`provision` / `stageSkills` / `runAgent` / `runCommand`
+                        / `dispose`). The orchestrator (engine/executors) drives
+                        them. See CONTEXT.md → "Sandbox execution".
+    docker.ts           Docker container driver (`docker run` / `exec`) the
+                        DockerSandbox adapter wraps.
+    smol.ts             smolvm micro-VM driver the SmolSandbox adapter wraps.
     egress-allowlist.ts Single source of truth for HTTP egress hosts.
                         GITHUB_HOSTS + PROVIDER_HOSTS + PACKAGE_REGISTRY_HOSTS.
                         Leading-dot entries (e.g. ".github.com") are

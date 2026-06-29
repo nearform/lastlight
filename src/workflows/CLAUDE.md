@@ -209,8 +209,10 @@ A phase can declare `sandbox_image: qa` to run on the enriched browser-QA image
 (`lastlight-sandbox-qa:latest` — Playwright + Chromium baked in) instead of the
 lean default (`lastlight-sandbox:latest`). The field is overlaid by
 `phaseConfigFor` onto `ExecutorConfig.sandboxImage`; only the docker path acts on
-it (`executeDocker` → `createTaskSandbox({ imageName })`). The image name is a
-fixed constant in `src/sandbox/images.ts` (`SANDBOX_IMAGE_QA`) — not env-overridable.
+it (the orchestrator's `withSandbox` resolves `imageName` from `sandbox_image`
+and passes it to `sandboxFor`; the `DockerSandbox` adapter forwards it to
+`createTaskSandbox({ imageName })`). The image name is a fixed constant in
+`src/sandbox/images.ts` (`SANDBOX_IMAGE_QA`) — not env-overridable.
 
 Pair it with `requires_sandbox: docker` so the phase skips on gondolin. On the
 docker backend the scheduler *also* skips it when the QA image isn't built

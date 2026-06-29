@@ -1,33 +1,26 @@
-import { resolve, join } from "path";
-import { mkdirSync, writeFileSync } from "fs";
-import { spawnSync } from "child_process";
+import { resolve } from "path";
 import { randomUUID } from "crypto";
-import {
-  createTaskSandbox,
-  setupTaskWorktree,
-  prePopulateWorkspace,
-  SANDBOX_IMAGE_QA,
-} from "../sandbox/index.js";
-import { SmolSandbox, smolAvailable, SMOL_WORKSPACE_DIR } from "../sandbox/smol.js";
 import { refreshGitAuth } from "./github/git-auth.js";
 import {
   GITHUB_PERMISSION_PROFILES,
-  loadAgentContext,
   type ExecutorConfig,
   type ExecutionResult,
   type GitSandboxAccess,
 } from "./github/profiles.js";
-import { AgenticShim } from "./event-shim.js";
-import { projectSlugForCwd } from "../session-log.js";
 import type { SandboxBackend } from "../config/config.js";
-import { DEFAULT_ALLOWLIST, mergeAllowlist } from "../sandbox/egress-allowlist.js";
+import type { PrePopulateSpec, SandboxFactory } from "../sandbox/sandbox.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
-// Per-backend executors + their shared building blocks live under ./executors/.
-import { executeInProcess, executeDocker, executeSmol } from "./executors/backends.js";
-import { DEFAULT_MODEL, DOCKER_WORKSPACE_DIR, resolveSessionsDir } from "./executors/shared.js";
-// Re-exported for back-compat with existing importers (tests, dashboards).
+import { DEFAULT_MODEL } from "./executors/shared.js";
+import {
+  runSandboxedAgent,
+  runSandboxedCommand,
+  type CommandSpec,
+  type SandboxRunContext,
+} from "./executors/orchestrator.js";
+// Re-exported for back-compat with existing importers (tests, dashboards,
+// workflow phase executor).
 export { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError } from "./executors/shared.js";
-
+export type { CommandSpec } from "./executors/orchestrator.js";
 
 /**
  * Shared run preparation for {@link executeAgent} and {@link executeCommand}:
@@ -46,7 +39,7 @@ async function prepareRun(
   backend: SandboxBackend;
   ghEnv: Record<string, string>;
   mintedToken?: string;
-  prePopulate?: { owner: string; repo: string; branch: string; token: string; runId?: string; shallow?: boolean };
+  prePopulate?: PrePopulateSpec;
 }> {
   const taskId = opts?.taskId || `task-${randomUUID().slice(0, 8)}`;
   const stateDir = config.stateDir || resolve("data");
@@ -163,6 +156,8 @@ export async function executeAgent(
      */
     onSessionId?: (sessionId: string) => void;
     githubAccess?: GitSandboxAccess;
+    /** Test seam — substitute a FakeSandbox. Defaults to the real factory. */
+    sandboxFactory?: SandboxFactory;
   },
 ): Promise<ExecutionResult> {
   const { taskId, stateDir, backend, ghEnv, prePopulate } = await prepareRun(config, opts);
@@ -182,54 +177,18 @@ export async function executeAgent(
     "phase.name": config.telemetry?.phaseName,
   });
 
-  if (backend === "docker") {
-    return withSpan("lastlight.agent.execute", spanAttrs, () => executeDocker(prompt, config, {
-      taskId,
-      stateDir,
-      env: ghEnv,
-      prePopulate,
-      access,
-      onSessionId: opts?.onSessionId,
-    }));
-  }
-
-  if (backend === "smol") {
-    return withSpan("lastlight.agent.execute", spanAttrs, () => executeSmol(prompt, config, {
-      taskId,
-      stateDir,
-      env: ghEnv,
-      prePopulate,
-      access,
-      onSessionId: opts?.onSessionId,
-    }));
-  }
-
-  const workDir = setupTaskWorktree({
+  const ctx: SandboxRunContext = {
+    config,
     taskId,
     stateDir,
-    sandboxDir: config.sandboxDir,
-    prePopulate,
-  });
-
-  // Drop AGENTS.md into the workspace — agentic-pi reads it as the
-  // system context (same convention as the previous opencode setup).
-  try {
-    const md = loadAgentContext(config.agentContextDir);
-    if (md) writeFileSync(join(workDir, "AGENTS.md"), md);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[executor] Could not write AGENTS.md: ${msg}`);
-  }
-
-  return withSpan("lastlight.agent.execute", spanAttrs, () => executeInProcess(prompt, config, {
     backend,
-    taskId,
-    workDir,
-    stateDir,
     env: ghEnv,
+    prePopulate,
     access,
     onSessionId: opts?.onSessionId,
-  }));
+    sandboxFactory: opts?.sandboxFactory,
+  };
+  return withSpan("lastlight.agent.execute", spanAttrs, () => runSandboxedAgent(prompt, ctx));
 }
 
 // ── Deterministic command path (type: bash / type: script) ───────────
@@ -241,112 +200,6 @@ export async function executeAgent(
 // and `lastlight session log` exactly like an agent turn: the command renders
 // as a `bash` tool_use and its stdout/stderr as the tool_result.
 
-/** What a command phase runs. */
-export type CommandSpec =
-  | { kind: "bash"; command: string }
-  | { kind: "script"; script: string; runtime: "js" | "ts" | "python"; name: string };
-
-const SCRIPT_EXT: Record<"js" | "ts" | "python", string> = { js: "mjs", ts: "mts", python: "py" };
-
-/**
- * Where a `type: script` source file is staged. A workspace-root sibling of
- * {@link SKILL_BUNDLE_ROOT}, keyed per phase (`<root>/<phase>/script.<ext>`) —
- * same convention as the skill bundle, so it sits beside the skills and is
- * never written inside any checked-out repo's git tree.
- */
-const SCRIPT_BUNDLE_ROOT = ".lastlight-scripts";
-
-/** Build the shell invocation + on-disk filename for a script spec. */
-function scriptInvocation(spec: Extract<CommandSpec, { kind: "script" }>): { fileName: string; run: (path: string) => string } {
-  const fileName = `script.${SCRIPT_EXT[spec.runtime]}`;
-  const run = (path: string): string => {
-    switch (spec.runtime) {
-      case "js":
-        return `node ${path}`;
-      case "ts":
-        return `node --experimental-strip-types ${path}`;
-      case "python":
-        return `uv run ${path}`;
-    }
-  };
-  return { fileName, run };
-}
-
-/**
- * Mirror a finished command into a session jsonl via the shim. Synthesizes a
- * minimal agentic-pi event stream: session → assistant(tool_use bash) →
- * user(tool_result) → assistant(text summary) → result. Returns the session id
- * the shim wrote under (so the executions row can link to it).
- */
-async function writeCommandSession(opts: {
-  sessionsDir: string;
-  projectSlug: string;
-  model?: string;
-  displayPrompt: string;
-  toolName: string;
-  toolInput: Record<string, unknown>;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  durationMs: number;
-}): Promise<string | null> {
-  const shim = new AgenticShim({
-    homeDir: opts.sessionsDir,
-    projectSlug: opts.projectSlug,
-    model: opts.model,
-    initialPrompt: opts.displayPrompt,
-  });
-  const sessionId = randomUUID();
-  const ts = Date.now();
-  const toolCallId = `cmd_${randomUUID().slice(0, 8)}`;
-  const feed = (record: Record<string, unknown>): void =>
-    shim.feed(record as unknown as Parameters<typeof shim.feed>[0]);
-
-  feed({ type: "session", id: sessionId, timestamp: ts });
-  feed({
-    type: "message_end",
-    sessionId,
-    timestamp: ts,
-    message: { role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: opts.toolName, arguments: opts.toolInput }] },
-  });
-  const combined = opts.stderr ? `${opts.stdout}${opts.stdout && !opts.stdout.endsWith("\n") ? "\n" : ""}${opts.stderr}` : opts.stdout;
-  feed({
-    type: "tool_execution_end",
-    sessionId,
-    timestamp: ts,
-    toolCallId,
-    result: combined || `(no output, exit ${opts.exitCode})`,
-    isError: opts.exitCode !== 0,
-  });
-  const summary = opts.exitCode === 0 ? "Command succeeded (exit 0)." : `Command failed (exit ${opts.exitCode}).`;
-  feed({
-    type: "message_end",
-    sessionId,
-    timestamp: ts,
-    message: { role: "assistant", content: [{ type: "text", text: summary }] },
-  });
-
-  shim.finalize({
-    finalText: summary,
-    turns: 1,
-    costUsd: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadInputTokens: 0,
-    cacheCreationInputTokens: 0,
-    stopReason: opts.exitCode === 0 ? "success" : "error_bash",
-    durationMs: opts.durationMs,
-  });
-  await shim.flush();
-  return shim.isInitialized ? sessionId : null;
-}
-
-/**
- * Execute a deterministic command/script. Mirrors {@link executeDocker} /
- * {@link executeInProcess} for sandbox setup but runs `runCommand` (docker) or
- * `spawnSync` (gondolin/none) instead of an agent, and writes a session jsonl
- * so the output is visible in the dashboard + CLI.
- */
 export async function executeCommand(
   spec: CommandSpec,
   config: ExecutorConfig,
@@ -364,17 +217,12 @@ export async function executeCommand(
      * shouldn't create a user-facing session log.
      */
     writeSession?: boolean;
+    /** Test seam — substitute a FakeSandbox. Defaults to the real factory. */
+    sandboxFactory?: SandboxFactory;
   },
 ): Promise<ExecutionResult> {
   const { taskId, stateDir, backend, ghEnv, prePopulate } = await prepareRun(config, opts);
   const access = opts?.githubAccess;
-  const model = config.model || DEFAULT_MODEL;
-  const sessionsDir = resolveSessionsDir(config);
-  const timeoutSeconds = opts?.timeoutSeconds ?? 300;
-  const startTime = Date.now();
-
-  const displayPrompt =
-    spec.kind === "bash" ? `$ ${spec.command}` : `${spec.runtime} script: ${spec.name}\n\n${spec.script}`;
 
   const spanAttrs = safeSpanAttributes({
     "agent.runtime": spec.kind,
@@ -387,171 +235,22 @@ export async function executeCommand(
     "phase.name": config.telemetry?.phaseName,
   });
 
-  return withSpan("lastlight.command.execute", spanAttrs, async () => {
-    // Per-phase script-bundle dir, a workspace-root sibling of the skill bundle
-    // (and of any repo checkout) — so a `type: script` file is never written
-    // inside the target's git tree. `spec.name` is the (sanitized) phase name.
-    const scriptDir = spec.kind === "script" ? `${SCRIPT_BUNDLE_ROOT}/${spec.name}` : SCRIPT_BUNDLE_ROOT;
-
-    if (backend === "docker") {
-      const dnsIp = config.unrestrictedEgress
-        ? (process.env.LASTLIGHT_DNS_OPEN || "172.30.0.11")
-        : (process.env.LASTLIGHT_DNS_STRICT || "172.30.0.10");
-      const imageName = config.sandboxImage === "qa" ? SANDBOX_IMAGE_QA : undefined;
-
-      const sbx = await createTaskSandbox({
-        taskId, stateDir, sandboxDir: config.sandboxDir, env: ghEnv, prePopulate, dnsIp, imageName,
-      });
-      if (!sbx) {
-        throw new Error("LASTLIGHT_SANDBOX=docker but no docker sandbox was available for command phase.");
-      }
-      const agentCwd = prePopulate ? `${DOCKER_WORKSPACE_DIR}/${prePopulate.repo}` : DOCKER_WORKSPACE_DIR;
-      try {
-        let command: string;
-        let toolName: string;
-        let toolInput: Record<string, unknown>;
-        if (spec.kind === "bash") {
-          command = spec.command;
-          toolName = "bash";
-          toolInput = { command: spec.command };
-        } else {
-          const { fileName, run } = scriptInvocation(spec);
-          mkdirSync(join(sbx.workDir, scriptDir), { recursive: true });
-          writeFileSync(join(sbx.workDir, scriptDir, fileName), spec.script);
-          const inContainer = `${DOCKER_WORKSPACE_DIR}/${scriptDir}/${fileName}`;
-          command = run(inContainer);
-          toolName = "bash";
-          toolInput = { command, runtime: spec.runtime };
-        }
-        const res = await sbx.sandbox.runCommand(taskId, command, {
-          cwd: agentCwd,
-          sandboxEnv: opts?.sandboxEnv,
-          timeoutSeconds,
-          onLine: () => {},
-        });
-        const durationMs = Date.now() - startTime;
-        const sessionId = opts?.writeSession === false ? null : await writeCommandSession({
-          sessionsDir, projectSlug: projectSlugForCwd(agentCwd), model,
-          displayPrompt, toolName, toolInput,
-          stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode, durationMs,
-        });
-        if (sessionId && opts?.onSessionId) opts.onSessionId(sessionId);
-        return buildCommandResult(res, durationMs, sessionId);
-      } finally {
-        await sbx.cleanup();
-      }
-    }
-
-    if (backend === "smol") {
-      if (!smolAvailable()) {
-        throw new Error("LASTLIGHT_SANDBOX=smol but the smolvm CLI is not available for command phase.");
-      }
-      const allowHosts = config.unrestrictedEgress
-        ? null
-        : mergeAllowlist(DEFAULT_ALLOWLIST, config.otel?.enabled && config.otel.forwardToSandbox ? config.otel.collectorHosts : []);
-      // Boot first, then provision the probed share-backed dir (see executeSmol).
-      const workDir = setupTaskWorktree({ taskId, stateDir, sandboxDir: config.sandboxDir });
-      const sandbox = new SmolSandbox({ env: ghEnv, allowHosts });
-      const machine = await sandbox.create({ taskId, worktreePath: workDir });
-      const hostWs = machine.hostWorkspace;
-      if (prePopulate) prePopulateWorkspace(hostWs, prePopulate);
-      const agentCwd = prePopulate ? `${SMOL_WORKSPACE_DIR}/${prePopulate.repo}` : SMOL_WORKSPACE_DIR;
-      try {
-        let command: string;
-        let toolName: string;
-        let toolInput: Record<string, unknown>;
-        if (spec.kind === "bash") {
-          command = spec.command;
-          toolName = "bash";
-          toolInput = { command: spec.command };
-        } else {
-          const { fileName, run } = scriptInvocation(spec);
-          mkdirSync(join(hostWs, scriptDir), { recursive: true });
-          writeFileSync(join(hostWs, scriptDir, fileName), spec.script);
-          const inGuest = `${SMOL_WORKSPACE_DIR}/${scriptDir}/${fileName}`;
-          command = run(inGuest);
-          toolName = "bash";
-          toolInput = { command, runtime: spec.runtime };
-        }
-        const res = await sandbox.runCommand(taskId, command, {
-          cwd: agentCwd,
-          sandboxEnv: opts?.sandboxEnv,
-          timeoutSeconds,
-          onLine: () => {},
-        });
-        const durationMs = Date.now() - startTime;
-        const sessionId = opts?.writeSession === false ? null : await writeCommandSession({
-          sessionsDir, projectSlug: projectSlugForCwd(agentCwd), model,
-          displayPrompt, toolName, toolInput,
-          stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode, durationMs,
-        });
-        if (sessionId && opts?.onSessionId) opts.onSessionId(sessionId);
-        return buildCommandResult(res, durationMs, sessionId);
-      } finally {
-        await sandbox.destroy(taskId);
-      }
-    }
-
-    // gondolin / none — run on the host worktree via spawnSync (the same
-    // degraded model those backends already use; matches the pre-existing
-    // host-side until_bash behaviour).
-    const workDir = setupTaskWorktree({ taskId, stateDir, sandboxDir: config.sandboxDir, prePopulate });
-    const agentCwd = access?.prePopulateBranch ? join(workDir, access.repo) : workDir;
-    let command: string;
-    let toolName = "bash";
-    let toolInput: Record<string, unknown>;
-    if (spec.kind === "bash") {
-      command = spec.command;
-      toolInput = { command: spec.command };
-    } else {
-      const { fileName, run } = scriptInvocation(spec);
-      mkdirSync(join(workDir, scriptDir), { recursive: true });
-      const filePath = join(workDir, scriptDir, fileName);
-      writeFileSync(filePath, spec.script);
-      command = run(filePath);
-      toolInput = { command, runtime: spec.runtime };
-    }
-    const proc = spawnSync("sh", ["-c", command], {
-      cwd: agentCwd,
-      env: { ...process.env, ...ghEnv, ...(opts?.sandboxEnv ?? {}) },
-      encoding: "utf-8",
-      timeout: timeoutSeconds * 1000,
-      maxBuffer: 256 * 1024 * 1024,
-    });
-    const durationMs = Date.now() - startTime;
-    const exitCode = proc.status ?? (proc.signal ? 124 : 1);
-    const res = { exitCode, stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", timedOut: proc.signal === "SIGTERM" };
-    const sessionId = opts?.writeSession === false ? null : await writeCommandSession({
-      sessionsDir, projectSlug: projectSlugForCwd(agentCwd), model,
-      displayPrompt, toolName, toolInput,
-      stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode, durationMs,
-    });
-    if (sessionId && opts?.onSessionId) opts.onSessionId(sessionId);
-    return buildCommandResult(res, durationMs, sessionId);
-  });
-}
-
-/** Map a raw command result onto the ExecutionResult contract (turns 0, no cost). */
-function buildCommandResult(
-  res: { exitCode: number; stdout: string; stderr: string; timedOut: boolean },
-  durationMs: number,
-  sessionId: string | null,
-): ExecutionResult {
-  const success = res.exitCode === 0;
-  const combined = res.stderr ? `${res.stdout}${res.stdout && !res.stdout.endsWith("\n") ? "\n" : ""}${res.stderr}` : res.stdout;
-  // Strip the trailing newline so the value substitutes cleanly into a
-  // downstream command / `{{phaseOutputs.<name>}}` and can be forwarded as an
-  // `LL_OUT_<PHASE>` env var (mirrors archon's "trailing newline removed"). The
-  // full raw stdout/stderr is preserved verbatim in the session jsonl.
-  const output = combined.replace(/\n+$/, "");
-  return {
-    success,
-    output,
-    turns: 0,
-    durationMs,
-    sessionId: sessionId ?? undefined,
-    error: success ? undefined : res.timedOut ? `command timed out after ${Math.round(durationMs / 1000)}s` : `command exited ${res.exitCode}`,
-    stopReason: success ? "success" : res.timedOut ? "error_timeout" : "error_bash",
+  const ctx: SandboxRunContext = {
+    config,
+    taskId,
+    stateDir,
+    backend,
+    env: ghEnv,
+    prePopulate,
+    access,
+    onSessionId: opts?.onSessionId,
+    sandboxFactory: opts?.sandboxFactory,
   };
+  return withSpan("lastlight.command.execute", spanAttrs, () =>
+    runSandboxedCommand(spec, ctx, {
+      timeoutSeconds: opts?.timeoutSeconds,
+      sandboxEnv: opts?.sandboxEnv,
+      writeSession: opts?.writeSession,
+    }),
+  );
 }
-
