@@ -57,7 +57,7 @@ interface SlackConfig {
 }
 ```
 
-Defined in `src/config.ts:74–143`. Loaded once at boot, never mutated. A
+Defined in `src/config/config.ts:74–143`. Loaded once at boot, never mutated. A
 re-implementation should treat this object as effectively `Readonly` —
 any per-task overrides are layered *over* the base config at dispatch
 time, not back into it.
@@ -138,7 +138,7 @@ LASTLIGHT_THINKINGS={
 
 Keys are phase names from YAML workflows (e.g. `architect`, `reviewer`)
 or skill types (e.g. `chat`, `triage`). `default` is the catch-all.
-Resolution at dispatch (`src/config.ts:296`): per-type if present, else
+Resolution at dispatch (`src/config/config.ts:296`): per-type if present, else
 `default`, else the base `LASTLIGHT_MODEL`. Thinking values are pi-ai's
 `ThinkingLevel`: `off | minimal | low | medium | high | xhigh`.
 
@@ -206,7 +206,7 @@ file/default location.
 |---|---|
 | `APPROVAL_GATES` | comma-separated gate names, e.g. `post_architect,post_triage` |
 
-Parsed into `Record<string, boolean>` (`src/config.ts:242–248`). A phase
+Parsed into `Record<string, boolean>` (`src/config/config.ts:242–248`). A phase
 declaring `approval_gate: post_architect` only pauses if `post_architect`
 appears in the map. Missing names are *implicitly disabled* — there is no
 "enable all" mode.
@@ -260,7 +260,7 @@ OpenRouter) are forwarded unconditionally.
 
 ### CLI client
 
-The `npm run cli` thin client (`src/cli.ts`) reads its own env:
+The `npm run cli` thin client (`src/cli/cli.ts`) reads its own env:
 
 | Var | Purpose | Default |
 |---|---|---|
@@ -276,7 +276,7 @@ production `deploy.sh` flow (pull core + overlay → build → `up -d
 --remove-orphans` → restart egress sidecars → health-check). These run on the
 server, unlike the rest of the CLI which targets a remote instance over HTTP.
 
-`lastlight fork <workflow>` (host-local, `src/fork-cli.ts`) copies a built-in
+`lastlight fork <workflow>` (host-local, `src/cli/fork-cli.ts`) copies a built-in
 workflow YAML plus every prompt and skill its phases reference into the
 `instance/` overlay so they can be edited per-deployment (the overlay wins by
 logical name at startup). `lastlight fork agent-context [file]` does the same
@@ -285,7 +285,7 @@ assets are then surfaced as overrides: `lastlight server status` prints an
 **Overrides** section (each asset tagged *shadows default* or *added*) and the
 dashboard's Config tab gains an **Overrides** pane reading
 `GET /admin/api/overrides` — both backed by the shared
-`enumerateOverlayAssets` enumerator (`src/overlay-assets.ts`).
+`enumerateOverlayAssets` enumerator (`src/config/overlay-assets.ts`).
 
 ## Secrets layout
 
@@ -300,7 +300,7 @@ $STATE_DIR/secrets/app.pem          ← copy populated by deploy/entrypoint.sh
 ```
 
 The PEM is read by the harness itself to mint installation tokens
-(`src/engine/git-auth.ts`). Sandboxes receive the **minted token**
+(`src/engine/github/git-auth.ts`). Sandboxes receive the **minted token**
 (`GIT_TOKEN` env), not the PEM. The PEM only reaches a sandbox when the
 access profile sets `allowMcpAppAuth: true` (currently only the
 `repo-write` profile for the build cycle), and even then via the shared
@@ -362,7 +362,7 @@ firewall containers.
 
 ## Current implementation
 
-Single file: `src/config.ts`. Schema at `74–143`. JSON parsers for
+Single file: `src/config/config.ts`. Schema at `74–143`. JSON parsers for
 models/variants at `265–281` and `313–327`. Approval-gate parser at
 `242–248`. Public URL resolution at `229–234`. Sandbox backend selection
 at `206–214`.

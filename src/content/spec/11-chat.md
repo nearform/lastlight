@@ -19,7 +19,7 @@ the latter; agentic-pi is the right runtime for the former.
 ## Public contract
 
 ```ts
-// src/engine/chat-runner.ts:75
+// src/engine/chat/chat-runner.ts:75
 export class ChatRunner {
   constructor(cfg: ChatRunnerConfig, sessionManager: SessionManager);
   async turn(messagingSessionId: string, prompt: string): Promise<ChatRunnerTurnResult>;
@@ -41,7 +41,7 @@ The runner is constructed once at [Harness](/spec/01-harness) boot
 ### Per-session batching (MessageBatcher)
 
 Bursty messaging input is coalesced **before routing** by the `MessageBatcher`
-(`src/engine/message-batcher.ts`), gated on `type === "message"` at the
+(`src/engine/chat/message-batcher.ts`), gated on `type === "message"` at the
 `registry.onEvent` boundary in `index.ts`. The first message for an idle session
 opens a short settle window (`CHAT_BATCH_DEBOUNCE_MS`, default 700ms; 0
 disables); every message that lands in that window — or while a turn is already
@@ -113,7 +113,7 @@ Two toolsets, merged into a single tool list at construction time
 
 ### GitHub (read-only)
 
-Ten functions wired into pi-ai at `src/engine/github-tools.ts`:
+Ten functions wired into pi-ai at `src/engine/github/github-tools.ts`:
 
 | Tool | Purpose |
 |---|---|
@@ -132,7 +132,7 @@ Ten functions wired into pi-ai at `src/engine/github-tools.ts`:
 ### Skills (`read_skill`)
 
 One tool wired in via `extraTools`, defined in
-`src/engine/chat-skills.ts`:
+`src/engine/chat/chat-skills.ts`:
 
 | Tool | Purpose |
 |---|---|
@@ -183,15 +183,15 @@ systemPrompt = loadAgentContext() + CHAT_SYSTEM_SUFFIX + chatSkills.catalogueXml
 
 Three layers:
 
-- `loadAgentContext()` (`src/engine/profiles.ts`) concatenates all
+- `loadAgentContext()` (`src/engine/github/profiles.ts`) concatenates all
   `.md` files under `agent-context/` in alphabetical order, joined
   with `\n\n---\n\n` (see [Skills §AGENTS.md](/spec/08-skills)).
-- `CHAT_SYSTEM_SUFFIX` (`src/engine/chat.ts`) adds the chat-specific
+- `CHAT_SYSTEM_SUFFIX` (`src/engine/chat/chat.ts`) adds the chat-specific
   constraints — read-only tools, no write actions, hand off to the
   build workflow for code changes — so the same persona file
   (`soul.md`) can serve both surfaces without contradicting itself.
 - `chatSkills.catalogueXml`
-  (`src/engine/chat-skills.ts → loadChatSkillCatalogue`) is the XML
+  (`src/engine/chat/chat-skills.ts → loadChatSkillCatalogue`) is the XML
   `<available_skills>` block listing each curated chat skill's name +
   description. Mirrors the catalogue pi-coding-agent emits for
   sandbox phases. The agent uses it to decide which `read_skill` call
@@ -276,9 +276,9 @@ so the next turn isn't blocked by a prior crash.
 
 | Piece | File |
 |---|---|
-| `ChatRunner` class | `src/engine/chat-runner.ts` |
-| System prompt assembly, screening | `src/engine/chat.ts` |
-| Read-only GitHub tools | `src/engine/github-tools.ts` |
+| `ChatRunner` class | `src/engine/chat/chat-runner.ts` |
+| System prompt assembly, screening | `src/engine/chat/chat.ts` |
+| Read-only GitHub tools | `src/engine/github/github-tools.ts` |
 | Session manager + DB | `src/connectors/messaging/session-manager.ts` |
 | `chat-reset` handler | `src/index.ts:654–661` |
 | `status-report` handler | `src/index.ts:664–675` |

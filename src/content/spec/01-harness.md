@@ -141,12 +141,12 @@ Supporting files referenced by name during boot:
 
 | Step | File |
 |---|---|
-| Config validation | `src/config.ts` |
+| Config validation | `src/config/config.ts` |
 | Orphaned-sandbox cleanup | `src/sandbox/index.ts` |
 | Egress firewall config generation | `src/sandbox/egress-firewall-config.ts` |
 | `StateDb` | `src/state/db.ts` |
-| `ChatRunner` | `src/engine/chat-runner.ts` |
-| Git auth bootstrap | `src/engine/git-auth.ts` |
+| `ChatRunner` | `src/engine/chat/chat-runner.ts` |
+| Git auth bootstrap | `src/engine/github/git-auth.ts` |
 | `GitHubWebhookConnector` | `src/connectors/github-webhook.ts` |
 | `SlackConnector` | `src/connectors/slack/index.ts` |
 | `CronScheduler` + `getJobs()` | `src/cron/*` |

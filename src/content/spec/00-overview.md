@@ -72,7 +72,11 @@ The terms used across this spec, in dependency order.
 - **Sandbox** — the isolated environment one agent session runs in. Two
   backends: `gondolin` (QEMU micro-VM, default) and `docker` container.
   Both apply a default-deny network egress policy and receive only a
-  scoped GitHub token, never the App PEM. See [Sandbox](/spec/09-sandbox).
+  scoped GitHub token, never the App PEM. Last Light puts the agent
+  runtime *itself* inside this boundary (the agent-in-sandbox model),
+  not just its tools — so the egress, token, and filesystem limits apply
+  at the process edge rather than per tool call. See
+  [Sandbox](/spec/09-sandbox).
 - **Session** — the agent runtime's per-execution conversation,
   identified by an `agentSessionId`. The same id appears in the SQLite
   `executions` row and in the JSONL filename of the session's event log,

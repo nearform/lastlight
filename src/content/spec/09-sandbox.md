@@ -16,6 +16,22 @@ the agent can actually reason.
 The [Chat](/spec/11-chat) path does *not* go through this layer — it
 runs in-process. Everything else does.
 
+## Execution model: agent inside the boundary
+
+Last Light puts the **entire agent process inside the isolation
+boundary** — the `agentic-pi` runtime, its reasoning, and every tool it
+calls (`bash`, `read`, `edit`, `write`, network egress) all run on the
+inside. The harness mints a downscoped token and forwards provider keys
+*into* the sandbox; the sandbox enforces default-deny egress from the
+outside. This is deliberately **not** the tools-in-sandbox model, where
+the agent runs on the host and only its write-capable tool calls are
+marshalled out (e.g. via `docker exec`). Wrapping the runtime instead of
+each tool keeps containment structural: there is no host-side code path
+an agent tool could escape through, so a `read`-profile triage run cannot
+reach the host even if a prompt injection convinces it to try. See
+[ADR-0001](https://github.com/cliftonc/lastlight/blob/main/docs/adr/0001-agent-in-sandbox.md)
+for the decision and the rejected alternative.
+
 ## Public contract
 
 ```ts
@@ -31,7 +47,7 @@ export async function executeAgent(
 ): Promise<ExecutionResult>;
 ```
 
-`ExecutorConfig` (`src/engine/profiles.ts:17–64`) carries:
+`ExecutorConfig` (`src/engine/github/profiles.ts:17–64`) carries:
 
 | Field | Meaning |
 |---|---|
@@ -51,15 +67,28 @@ and `stopReason`.
 
 ## Backends
 
-Four modes; selected per-call in `executeAgent` (`agent-executor.ts`).
-The three sandboxed executors live in `src/engine/executors/backends.ts`
-(`executeInProcess` for gondolin/none, `executeDocker`, `executeSmol`)
-over shared building blocks in `src/engine/executors/shared.ts`.
+Four modes, all behind the **Sandbox port** (`src/sandbox/sandbox.ts`):
+`provision` / `stageSkills` / `runAgent` / `runCommand` / `dispose`. The
+`sandboxFor(backend, opts)` factory returns one of four adapters —
+`DockerSandbox`, `SmolSandbox`, `InProcessSandbox` (`mode: gondolin | none`),
+or the test-only `FakeSandbox`. Each adapter owns its isolation mechanism and
+translates the intent-only `EgressPolicy` to its own controls.
+
+The **orchestrator** (`src/engine/executors/orchestrator.ts`) drives any
+adapter through that port: `withSandbox` brackets provision → work → dispose,
+and `runSandboxedAgent` / `runSandboxedCommand` hold the skill staging,
+build-artifact stage/harvest, the `RunResultAccumulator` + shim +
+`recordPiEvent` event loop, and the single converged fallback path — written
+once, over shared building blocks in `src/engine/executors/shared.ts`.
+`executeAgent` / `executeCommand` (`agent-executor.ts`) mint the token, build
+the env, and delegate. (This replaced the per-backend `executeDocker` /
+`executeSmol` / `executeInProcess` twins.)
 
 ### `gondolin` — default
 
 Agentic-pi's QEMU micro-VM. Invoked in-process via the `agenticRun()`
-call (`agent-executor.ts:263–287`). The agent's working directory is
+call inside `InProcessSandbox.runAgent` (`src/sandbox/sandbox.ts`,
+`mode: gondolin`). The agent's working directory is
 the host worktree mounted at `/workspace` inside the VM. Network
 isolation is at the VM layer — agentic-pi's HTTP interceptor 502s any
 outbound request whose host isn't on `allowedHttpHosts`.
@@ -236,7 +265,7 @@ the blast radius is contained to the sandbox network.
 ## Permissions and tokens
 
 ```ts
-// src/engine/profiles.ts:93
+// src/engine/github/profiles.ts:93
 export type GitAccessProfile = "read" | "issues-write" | "review-write" | "repo-write";
 
 // :130–155
@@ -378,13 +407,14 @@ Per-phase model and variant overrides resolve through
 
 | Piece | File |
 |---|---|
-| `executeAgent` dispatch + command path + `prepareRun` | `src/engine/agent-executor.ts` |
-| Per-backend executors (in-process / docker / smol) | `src/engine/executors/backends.ts` |
+| `executeAgent` / `executeCommand` + `prepareRun` (token mint, env) | `src/engine/agent-executor.ts` |
+| Sandbox port + `sandboxFor` factory + adapters + `FakeSandbox` | `src/sandbox/sandbox.ts` |
+| Orchestrator (`withSandbox` / `runSandboxedAgent` / `runSandboxedCommand`) | `src/engine/executors/orchestrator.ts` |
 | Shared executor helpers (staging, accumulator, finalize) | `src/engine/executors/shared.ts` |
-| `ExecutorConfig`, `GitAccessProfile`, profiles | `src/engine/profiles.ts` |
-| Token minting + downscope | `src/engine/git-auth.ts` |
-| Docker backend | `src/sandbox/docker.ts` |
-| smol backend (smolvm CLI wrapper, experimental) | `src/sandbox/smol.ts` |
+| `ExecutorConfig`, `GitAccessProfile`, profiles | `src/engine/github/profiles.ts` |
+| Token minting + downscope | `src/engine/github/git-auth.ts` |
+| Docker container driver (wrapped by the DockerSandbox adapter) | `src/sandbox/docker.ts` |
+| smol micro-VM driver (wrapped by the SmolSandbox adapter, experimental) | `src/sandbox/smol.ts` |
 | Sandbox dispatch + orphan cleanup | `src/sandbox/index.ts` |
 | Sandbox image names + availability probe | `src/sandbox/images.ts` (`SANDBOX_IMAGE`, `SANDBOX_IMAGE_QA`, `qaImageAvailable`) |
 | Browser-QA image | `sandbox-qa.Dockerfile`; bundled driver `skills/browser-qa/scripts/agent-browser.mjs` |
@@ -400,6 +430,12 @@ Per-phase model and variant overrides resolve through
   choose container, VM, or unikernel — but the *contract* is the
   same: default-deny network, scoped token, isolated FS. Don't drop
   any of those by accident.
+- **The whole agent goes in the box, not just its tools.** A reimpl
+  that runs the agent on the host and marshals individual tool calls
+  out to a sandbox (the tools-in-sandbox model) re-creates the
+  host/container seam this design avoids — every tool then has to
+  remember to route through the executor, and one that forgets gets
+  host access. Wrap the runtime, not each tool. See ADR-0001.
 - **Don't rely on HTTP_PROXY env vars.** Most SDKs ignore them. SNI
   peek + DNS sinkhole is what works generally; if you can do real
   TLS termination, do that — but only after exhausting the cheaper
