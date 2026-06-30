@@ -19,6 +19,7 @@ compatible. **Node 24+.**
 ```bash
 node --version    # need >= 24
 command -v lastlight-evals >/dev/null && echo "installed" || npm i -g lastlight-evals
+lastlight-evals --version   # prints the evals version + the bundled lastlight core version
 ```
 
 ## 2. Scaffold a workspace

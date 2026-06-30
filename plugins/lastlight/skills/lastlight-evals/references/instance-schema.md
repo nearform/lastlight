@@ -28,8 +28,9 @@ Datasets are discovered from (overlay > user > built-in): `<overlay>/evals/datas
   "problem_statement": "short issue text",
   "patch": "...",                          // gold patch — reference only, NOT graded
   "test_patch": "...",                     // held-out tests (code-fix), git-apply form
-  "FAIL_TO_PASS": ["test id 1"],          // must go red→green. Empty ⇒ suite mode
-  "PASS_TO_PASS": ["test id 2"],          // must stay green (code-fix)
+  "hold_out_tests": true,                 // opt into SWE-bench held-out grading (default: suite mode)
+  "FAIL_TO_PASS": ["test id 1"],          // hold-out only: must go red→green. Empty ⇒ suite mode
+  "PASS_TO_PASS": ["*"],                  // hold-out only: must stay green; ["*"] = whole suite
   "test_cmd": ["npm", "test"],            // held-out test argv (default: node --test)
   "setup_cmd": ["npm", "ci"],             // optional install/build before tests (git-source)
   "head_commit": "abc123...",             // PR head SHA — reference/authoring only
@@ -94,10 +95,18 @@ and `tests/<id>/`. Discovery auto-finds it — no code change. Run it with
 - **Behavioral:** did the workflow take the expected GitHub actions
   (`expect_github`)?
 - **Triage:** did the decision match `triage_gold`?
-- **Execution (code-fix):** all `FAIL_TO_PASS` green AND all `PASS_TO_PASS` still
-  green after applying held-out tests. When the runner emits no TAP test names
-  (a non-`node --test` `test_cmd` and an empty `FAIL_TO_PASS`), grading falls back
-  to **suite mode** — resolved iff the test command exits 0.
+- **Execution (code-fix)** — two modes:
+  - **Suite (default).** Nothing held out: run the repo's own `test_cmd` against the
+    agent's final tree, **resolved iff it exits 0**. Grades "did the agent leave the
+    repo with a passing suite?" The captured output (setup log + TAP) is saved per
+    case and shown in the dashboard's **tests** view, for resolved and unresolved
+    cases alike.
+  - **Hold-out (`hold_out_tests: true`).** SWE-bench style: the maintainer's
+    `test_patch` is hidden from the agent and applied only at grade time; resolved
+    iff all `FAIL_TO_PASS` go green AND all `PASS_TO_PASS` stay green. `PASS_TO_PASS:
+    ["*"]` is a wildcard meaning "the whole suite must stay green" (robust to tests
+    being renamed/added; `--pass-list` to enumerate). If the runner emits no TAP
+    names, hold-out also falls back to exit-code grading.
 - With `--runs N` (N>1) the binary verdict is **worst-case** (passes only if every
   trial passed); the scorecard also shows per-verdict pass counts to expose
   variance.
