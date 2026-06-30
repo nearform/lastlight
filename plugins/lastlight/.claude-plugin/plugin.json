@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin.json",
   "name": "lastlight",
   "displayName": "Last Light",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Install, configure and operate Last Light (GitHub maintenance agent) — its server, CLI client, deployment overlay, and the Last Light Evals harness.",
   "author": { "name": "Clifton Cunningham" },
   "homepage": "https://github.com/cliftonc/lastlight",
