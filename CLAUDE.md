@@ -15,6 +15,22 @@ A CLI that runs Last Light's real workflows against a mocked GitHub for a set of
 models and prints a deterministic, model-comparison scorecard. `run.ts` is the
 entry; `lastlight-evals run` / `lastlight-evals init` are the two subcommands.
 
+## Related: the `lastlight-evals` skill (keep in sync)
+
+The user-facing **agent skill** that teaches people to drive this CLI lives in a
+**separate repo** — the `lastlight` plugin, at
+`~/work/lastlight/plugins/lastlight/skills/lastlight-evals/SKILL.md` (+ its
+`references/`). It documents this CLI's surface: the `run` / `init` / `serve`
+subcommands and their flags, defined here in `src/run.ts` (the `USAGE` block)
+and `src/init.ts` (the `init` flags).
+
+**When you change that surface — add/rename/remove a subcommand, flag, default,
+or example — update the skill in the same change** so it doesn't drift. A
+checked-in Claude Code hook (`.claude/hooks/check-cli-skill.sh`, wired in
+`.claude/settings.json`) reminds you whenever `src/run.ts` or `src/init.ts` is
+edited; it resolves the skill at `../lastlight` by default, overridable with
+`LASTLIGHT_CORE_DIR`.
+
 ## Commands
 
 ```bash
@@ -80,6 +96,10 @@ deliberate trigger. The CI workflow re-runs typecheck + test + build before
 `npm publish --provenance`, but run the gate locally first so a broken release
 never reaches the Release step:
 
+Before cutting a release, confirm the `lastlight-evals` skill (in the `lastlight`
+plugin — see "Related: the `lastlight-evals` skill" above) still matches the
+shipped CLI; the published surface and its skill docs should ship together.
+
 ```bash
 # 0. On main, clean tree, in sync with origin. Gate locally:
 npm run typecheck && npm test && npm run build
@@ -121,6 +141,7 @@ The release commit is conventionally just the two version-file lines
 | `src/report.ts` | Scorecard roll-up + JSON/JSONL artifacts + `buildIndex` (filesystem → the SPA's `/api/index`). |
 | `src/serve.ts` | Tiny dependency-free server: `/api/index` (fs scan), `/data/*` (raw artifacts), the SPA + fallback. |
 | `dashboard/` | The JSON-driven dashboard SPA (Vite + React + Tailwind/daisyUI + TanStack Query); ships prebuilt as `dashboard/dist`. |
+| `.claude/hooks/check-cli-skill.sh` | PostToolUse hook: nudges a skill review when `run.ts`/`init.ts` (the CLI surface) change. |
 | `datasets/<tier>/` | Shipped sample tiers (`instances.json` + `tier.json` [+ `repos/` `tests/`]). |
 | `models.json` | Default + compare model registry. |
 

@@ -71,6 +71,11 @@ bare `lastlight-evals run` "just works" (it auto-detects `./instance` as the
 overlay and `./evals/datasets`). Now you're evaluating *your* agent against the
 models you care about. Prefer to drive it by hand? Keep reading.
 
+> The skill itself lives in a separate repo — it's bundled in the **`lastlight`
+> plugin** ([`cliftonc/lastlight`](https://github.com/cliftonc/lastlight), under
+> `plugins/lastlight/skills/lastlight-evals/`) and tracks this CLI's `init` /
+> `run` surface, so the two are kept in sync.
+
 ### Manual: scaffold with `init`
 
 The fastest CLI path is **`init`** — it scaffolds *your own* evals workspace
