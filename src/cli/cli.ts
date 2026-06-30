@@ -20,6 +20,9 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import readline from "node:readline";
+import path from "node:path";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import * as p from "@clack/prompts";
 import chalk from "chalk";
@@ -37,6 +40,7 @@ import { renderTimeline, renderMessage, renderRaw } from "./cli-timeline.js";
 
 const BOOLEAN_FLAGS = new Set([
   "json", "follow", "f", "no-browser", "password", "help", "h", "full",
+  "version", "v",
   // `server` lifecycle flags
   "no-core", "no-overlay", "no-build", "yes",
   // `setup` mode selectors (skip the interactive client/server prompt)
@@ -83,6 +87,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   }
   if (flags.f) flags.follow = true;
   if (flags.h) flags.help = true;
+  if (flags.v) flags.version = true;
   return { positionals, flags };
 }
 
@@ -100,6 +105,21 @@ function out(human: string, data?: unknown): void {
 function die(msg: string): never {
   console.error(chalk.red(msg));
   process.exit(1);
+}
+
+/**
+ * This CLI's version, read from the bundled package.json. Resolves for both the
+ * compiled (`dist/cli/cli.js` → `../..` = package root) and dev
+ * (`src/cli/cli.ts` → repo root) layouts — same trick fork-cli/skills-install use.
+ */
+function cliVersion(): string {
+  try {
+    const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..", "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -168,7 +188,7 @@ function num(flag: string | boolean | undefined, fallback: number): number {
 // ── help ───────────────────────────────────────────────────────────────────
 
 const HELP = `
-${chalk.bold("Last Light CLI")}
+${chalk.bold("Last Light CLI")} ${chalk.dim("v" + cliVersion())}
 
 ${chalk.bold("Auth")}
   lastlight login [url]              Authenticate via browser, save the token
@@ -229,6 +249,7 @@ ${chalk.bold("Skills")} (host-local — install the Last Light Claude Code skill
 ${chalk.bold("Other")}
   lastlight setup                    First-run wizard — asks client (login) or server (stack)
                                      [--client | --server to skip the prompt]
+  lastlight version                  Print the CLI version (also --version / -v)
 
 ${chalk.dim("Global flags: --json (machine output), --url <u>, --token <t>.")}
 ${chalk.dim("Target resolves from --url/--token, then LASTLIGHT_URL/LASTLIGHT_TOKEN, then ~/.lastlight, then " + DEFAULT_URL + ".")}
@@ -942,9 +963,15 @@ async function cmdSkills(): Promise<void> {
 async function main() {
   const cmd = positionals[0];
 
+  // `--version` / `-v` / `lastlight version` → print just the version and exit.
+  if (flags.version || cmd === "version") {
+    out(cliVersion(), { version: cliVersion() });
+    process.exit(0);
+  }
+
   if (!cmd || flags.help) {
     console.log(HELP);
-    process.exit(cmd ? 0 : 0);
+    process.exit(0);
   }
 
   switch (cmd) {
