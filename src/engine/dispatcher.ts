@@ -475,16 +475,50 @@ async function handlePrFix(
   let prBody = (context.body as string) || "";
   let branch = "";
   let failedChecks = "";
+  let isForkPr = false;
+  let headRepoFullName: string | null = null;
   if (deps.github) {
     try {
       const pr = await deps.github.getPullRequest(owner, repo, prNumber);
       prTitle = prTitle || pr.title;
       prBody = prBody || pr.body || "";
       branch = pr.head.ref;
+      // Cross-repo (fork) PR detection. A fork PR's head branch lives on
+      // another repo we have no write access to, and its head ref isn't on
+      // this repo's origin — so there's nothing for pr-fix to clone or push
+      // to. Bail here, before any sandbox is provisioned. `head.repo` is null
+      // when the source fork was deleted; treat that as a fork too (the branch
+      // is gone either way).
+      headRepoFullName = pr.head.repo?.full_name ?? null;
+      const baseRepoFullName = pr.base.repo?.full_name ?? `${owner}/${repo}`;
+      isForkPr = headRepoFullName === null || headRepoFullName !== baseRepoFullName;
       failedChecks = await deps.github.getFailedChecks(owner, repo, pr.head.sha);
     } catch (err: any) {
       console.warn(`[event] Could not fetch PR: ${err.message}`);
     }
+  }
+
+  if (isForkPr) {
+    console.log(
+      `[event] pr-fix skipped: PR #${prNumber} is a fork PR ` +
+      `(head ${headRepoFullName ?? "deleted fork"} ≠ base ${owner}/${repo})`,
+    );
+    if (deps.github) {
+      const source = headRepoFullName ? `from \`${headRepoFullName}\`` : "from a now-deleted fork";
+      await deps.github
+        .postComment(
+          owner,
+          repo,
+          prNumber,
+          `I can't apply fixes to this PR — it comes ${source}, and I have no write access to the ` +
+          `source branch (nor is its head ref on \`${owner}/${repo}\`). Re-create the change on a ` +
+          `branch in \`${owner}/${repo}\` and I'll fix it there.`,
+        )
+        .catch((e: unknown) =>
+          console.warn(`[event] fork-PR notice comment failed: ${e instanceof Error ? e.message : String(e)}`),
+        );
+    }
+    return { kind: "ignored", reason: `pr-fix not supported for fork PR #${prNumber}` };
   }
 
   if (!branch) {

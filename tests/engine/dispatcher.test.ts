@@ -543,7 +543,12 @@ describe('dispatch — pr-fix dispatch', () => {
     const envelope = makeEnvelope({ type: 'comment.created', prNumber: 5 });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
     const github = {
-      getPullRequest: vi.fn().mockResolvedValue({ title: 'PR', body: 'b', head: { ref: 'fix-branch', sha: 'abc' } }),
+      getPullRequest: vi.fn().mockResolvedValue({
+        title: 'PR',
+        body: 'b',
+        head: { ref: 'fix-branch', sha: 'abc', repo: { full_name: 'cliftonc/lastlight' } },
+        base: { repo: { full_name: 'cliftonc/lastlight' } },
+      }),
       getFailedChecks: vi.fn().mockResolvedValue('test-suite failed'),
     };
     const deps = makeDeps(prFixRoute(), {
@@ -559,6 +564,63 @@ describe('dispatch — pr-fix dispatch', () => {
       'pr-fix',
       expect.objectContaining({ prNumber: 5, branch: 'fix-branch', failedChecks: 'test-suite failed', _triggerType: 'webhook' }),
     );
+  });
+
+  it('does not dispatch a fork PR — bails fast and posts a notice', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created', prNumber: 5 });
+    const dispatchWorkflow = vi.fn();
+    const github = {
+      getPullRequest: vi.fn().mockResolvedValue({
+        title: 'PR',
+        body: 'b',
+        head: { ref: 'their-branch', sha: 'abc', repo: { full_name: 'octocat/lastlight' } },
+        base: { repo: { full_name: 'cliftonc/lastlight' } },
+      }),
+      getFailedChecks: vi.fn().mockResolvedValue(''),
+      postComment: vi.fn().mockResolvedValue(1),
+    };
+    const deps = makeDeps(prFixRoute(), {
+      db: mockDb() as any,
+      github: github as any,
+      dispatchWorkflow,
+    });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(outcome.kind).toBe('ignored');
+    expect(github.postComment).toHaveBeenCalledWith(
+      'cliftonc',
+      'lastlight',
+      5,
+      expect.stringContaining('octocat/lastlight'),
+    );
+  });
+
+  it('treats a deleted-fork PR (null head.repo) as a fork and bails', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created', prNumber: 5 });
+    const dispatchWorkflow = vi.fn();
+    const github = {
+      getPullRequest: vi.fn().mockResolvedValue({
+        title: 'PR',
+        body: 'b',
+        head: { ref: 'gone', sha: 'abc', repo: null },
+        base: { repo: { full_name: 'cliftonc/lastlight' } },
+      }),
+      getFailedChecks: vi.fn().mockResolvedValue(''),
+      postComment: vi.fn().mockResolvedValue(1),
+    };
+    const deps = makeDeps(prFixRoute(), {
+      db: mockDb() as any,
+      github: github as any,
+      dispatchWorkflow,
+    });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(outcome.kind).toBe('ignored');
+    expect(github.postComment).toHaveBeenCalled();
   });
 
   it('does not dispatch when the branch cannot be resolved', async () => {
