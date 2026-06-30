@@ -189,6 +189,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     let body = "";
     let title = "";
     let labels: string[] = [];
+    let issueAuthor: string | undefined;
 
     switch (githubEvent) {
       case "issues":
@@ -196,6 +197,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         body = payload.issue?.body || "";
         title = payload.issue?.title || "";
         labels = (payload.issue?.labels || []).map((l: any) => l.name);
+        issueAuthor = payload.issue?.user?.login;
         if (action === "opened") type = "issue.opened";
         else if (action === "reopened") type = "issue.reopened";
         break;
@@ -206,6 +208,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         body = payload.pull_request?.body || "";
         title = payload.pull_request?.title || "";
         labels = (payload.pull_request?.labels || []).map((l: any) => l.name);
+        issueAuthor = payload.pull_request?.user?.login;
         if (action === "opened") type = "pr.opened";
         // synchronize fires on every new commit pushed to the PR's branch.
         // We map it through so the pr-review workflow re-runs against the
@@ -225,6 +228,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         // security-feedback skill. Without this, every comment arrived
         // label-less and fell through to the build path.
         labels = (payload.issue?.labels || []).map((l: any) => l.name);
+        issueAuthor = payload.issue?.user?.login;
         if (action === "created") type = "comment.created";
         // Detect if this is on a PR
         if (payload.issue?.pull_request) {
@@ -292,6 +296,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       issueNumber,
       prNumber,
       sender,
+      issueAuthor,
       senderIsBot: false, // already filtered bots above
       body,
       title,

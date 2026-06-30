@@ -1,5 +1,5 @@
 import type { EventEnvelope } from "../connectors/types.js";
-import { classifyComment, classifyIssueIsQuestion } from "./screen/classifier.js";
+import { classifyComment, classifyCommentAddsInfo, classifyIssueIsQuestion } from "./screen/classifier.js";
 import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getRoutes } from "../config/config.js";
@@ -153,6 +153,59 @@ export async function routeEvent(
               workflowRunId: pendingReply.workflowRunId,
             },
           };
+        }
+      }
+
+      // Reporter-driven re-triage (pre-build only). A plain (non-@mention)
+      // comment on an ISSUE can re-open triage so new information re-classifies
+      // it — but only before the issue has entered a build, and only from
+      // people whose comment is meaningful triage input. Sits above the
+      // mention/maintainer gates because reporters answering won't @-mention
+      // and usually aren't maintainers. Bot comments are filtered at the
+      // connector, so this can't self-loop.
+      if (
+        deps.db &&
+        envelope.issueNumber &&
+        !envelope.prNumber &&
+        !BOT_MENTION.test(envelope.body)
+      ) {
+        const triggerId = `${envelope.repo}#${envelope.issueNumber}`;
+        const buildStarted = deps.db.runs.hasRunForTrigger(triggerId, "build");
+        if (!buildStarted) {
+          const isAuthor =
+            !!envelope.issueAuthor && envelope.sender === envelope.issueAuthor;
+          const isMaintainer = MAINTAINER_ROLES.has(envelope.authorAssociation || "");
+          const hasNeedsInfo = (envelope.labels || []).includes("needs-info");
+
+          let retriage = false;
+          if (hasNeedsInfo && (isAuthor || isMaintainer)) {
+            // Answering a needs-info request — any OP/maintainer reply re-triages.
+            retriage = true;
+          } else if (isAuthor) {
+            // Any other pre-build state: re-triage only when the reporter adds
+            // substantive information (not "thanks"/acknowledgement).
+            retriage = await classifyCommentAddsInfo(envelope.body, {
+              issueTitle: envelope.title,
+            });
+          }
+
+          if (retriage) {
+            console.log(
+              `[router] Re-triaging ${triggerId} from reporter/maintainer comment`,
+            );
+            return {
+              action: "handler",
+              handler: gh.issue_opened || "issue-triage",
+              context: {
+                repo: envelope.repo,
+                issueNumber: envelope.issueNumber,
+                title: envelope.title,
+                sender: envelope.sender,
+                commentBody: envelope.body,
+                mode: "retriage",
+              },
+            };
+          }
         }
       }
 

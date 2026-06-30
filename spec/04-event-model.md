@@ -33,6 +33,9 @@ export interface EventEnvelope {
   prNumber?: number;
   /** Login / username of the originator. */
   sender: string;
+  /** Login of the issue/PR original author — distinct from `sender` (the
+   *  commenter). Used to detect reporter replies for re-triage. */
+  issueAuthor?: string;
   /** True if the originator is a bot — used for self-loop checks. */
   senderIsBot: boolean;
   /** Event body text — issue body, comment body, PR description, message text. */
@@ -103,6 +106,7 @@ the workflow context where dispatched code may pull fields from it.
 | `issueNumber` | issues + PRs + comments + reviews | never |
 | `prNumber` | PR events + PR comments only | never |
 | `title` | issues + PRs (+ comments via parent) | never |
+| `issueAuthor` | issues + PRs + comments (parent author) | never |
 | `labels` | issues + PRs (snapshot at event time) | never |
 | `authorAssociation` | always (see below) | never |
 | `senderIsBot` | always `false` (bot self-events are filtered at the connector) | always `false` |

@@ -5,6 +5,7 @@ import type { EventEnvelope } from '#src/connectors/types.js';
 vi.mock('#src/engine/screen/classifier.js', () => ({
   classifyComment: vi.fn().mockResolvedValue({ intent: 'chat' }),
   classifyIssueIsQuestion: vi.fn().mockResolvedValue(false),
+  classifyCommentAddsInfo: vi.fn().mockResolvedValue(false),
 }));
 vi.mock('#src/engine/screen/screen.js', async () => {
   const actual = await vi.importActual<typeof import('#src/engine/screen/screen.js')>('#src/engine/screen/screen.js');
@@ -14,14 +15,26 @@ vi.mock('#src/engine/screen/screen.js', async () => {
   };
 });
 
-import { routeEvent } from '#src/engine/router.js';
-import { classifyComment, classifyIssueIsQuestion } from '#src/engine/screen/classifier.js';
+import { routeEvent, type RouterDeps } from '#src/engine/router.js';
+import { classifyComment, classifyCommentAddsInfo, classifyIssueIsQuestion } from '#src/engine/screen/classifier.js';
 import { screenForInjection } from '#src/engine/screen/screen.js';
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from '#src/config/config.js';
 
 const mockClassifyComment = vi.mocked(classifyComment);
+const mockClassifyAddsInfo = vi.mocked(classifyCommentAddsInfo);
 const mockClassifyIssue = vi.mocked(classifyIssueIsQuestion);
 const mockScreen = vi.mocked(screenForInjection);
+
+/** Build RouterDeps with a stubbed workflow-run store. `buildStarted` controls
+ *  hasRunForTrigger — true means a build has already run for the issue. */
+function makeDeps(buildStarted = false): RouterDeps {
+  return {
+    db: {
+      runs: { hasRunForTrigger: vi.fn().mockReturnValue(buildStarted) },
+      approvals: { getPendingReplyGateByTrigger: vi.fn().mockReturnValue(null) },
+    } as unknown as RouterDeps['db'],
+  };
+}
 
 // The router gates on managed repos via runtime config (config/default.yaml ships
 // an empty list). Register the repos these tests target so they're in scope.
@@ -767,5 +780,120 @@ describe('routeEvent — security Slack intent', () => {
     if (result.action === 'reply') {
       expect(result.message).toContain('unknown/repo');
     }
+  });
+});
+
+describe('routeEvent — reporter-driven re-triage', () => {
+  beforeEach(() => {
+    mockClassifyComment.mockResolvedValue({ intent: 'chat' });
+    mockClassifyAddsInfo.mockResolvedValue(false);
+    mockScreen.mockResolvedValue({ flagged: false });
+  });
+
+  function reporterComment(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
+    return makeEnvelope({
+      type: 'comment.created',
+      issueNumber: 7,
+      title: 'Add target date to todos',
+      body: 'Here are the repro steps you asked for: ...',
+      sender: 'reporter',
+      issueAuthor: 'reporter',
+      authorAssociation: 'NONE',
+      labels: [],
+      ...overrides,
+    });
+  }
+
+  it('re-triages a needs-info issue when the original author replies (no mention needed)', async () => {
+    const result = await routeEvent(
+      reporterComment({ labels: ['enhancement', 'needs-info'] }),
+      makeDeps(false),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('issue-triage');
+      expect(result.context.mode).toBe('retriage');
+      expect(result.context.issueNumber).toBe(7);
+    }
+  });
+
+  it('re-triages a needs-info issue when a maintainer (non-author) replies', async () => {
+    const result = await routeEvent(
+      reporterComment({
+        labels: ['needs-info'],
+        sender: 'maintainer',
+        issueAuthor: 'reporter',
+        authorAssociation: 'MEMBER',
+      }),
+      makeDeps(false),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.handler).toBe('issue-triage');
+  });
+
+  it('re-triages a non-needs-info issue when the author adds substantive info', async () => {
+    mockClassifyAddsInfo.mockResolvedValue(true);
+    const result = await routeEvent(
+      reporterComment({ labels: ['enhancement', 'ready-for-agent'] }),
+      makeDeps(false),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.handler).toBe('issue-triage');
+  });
+
+  it('does NOT re-triage when the author comment is noise (thanks)', async () => {
+    mockClassifyAddsInfo.mockResolvedValue(false);
+    const result = await routeEvent(
+      reporterComment({ body: 'thanks, looks great!', labels: ['ready-for-agent'] }),
+      makeDeps(false),
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it('does NOT re-triage once a build has started, even for a needs-info author reply', async () => {
+    const result = await routeEvent(
+      reporterComment({ labels: ['needs-info'] }),
+      makeDeps(true),
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it('does NOT re-triage a non-author, non-maintainer plain comment', async () => {
+    mockClassifyAddsInfo.mockResolvedValue(true); // even if it "adds info"
+    const result = await routeEvent(
+      reporterComment({
+        sender: 'stranger',
+        issueAuthor: 'reporter',
+        authorAssociation: 'NONE',
+        labels: ['needs-info'],
+      }),
+      makeDeps(false),
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it('leaves @last-light mention comments on the existing command path', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'build' });
+    const result = await routeEvent(
+      reporterComment({
+        body: '@last-light build this',
+        authorAssociation: 'OWNER',
+        labels: ['needs-info'],
+      }),
+      makeDeps(false),
+    );
+    // Mention present → skips the re-triage branch; OWNER + build intent → build cycle.
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.context.mode).toBeUndefined();
+  });
+
+  it('does not re-triage PR comments', async () => {
+    mockClassifyAddsInfo.mockResolvedValue(true);
+    const result = await routeEvent(
+      reporterComment({ prNumber: 7, labels: ['needs-info'] }),
+      makeDeps(false),
+    );
+    // PR comment falls through to the mention gate → ignored (no mention).
+    expect(result.action).toBe('ignore');
   });
 });

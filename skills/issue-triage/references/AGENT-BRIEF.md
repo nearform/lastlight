@@ -1,25 +1,34 @@
-# Writing agent briefs
+# Writing a triage summary
 
-An agent brief is a comment posted when an issue moves to `ready-for-agent`
-(or `ready-for-human`). It is the **contract** an AFK agent will build from — the
-original body and discussion are context; the brief is what gets implemented.
-Post it with `github_add_issue_comment`.
+A triage summary is a comment posted when an issue moves to `ready-for-agent`
+(or `ready-for-human`). It captures the **problem statement** — what the issue is
+really asking for and what "done" looks like — so a downstream agent (or human)
+can pick it up. The original body and discussion are context; the summary is the
+distilled problem.
+
+Triage classifies and **scopes the problem**. It does **not** design the
+solution: triage runs with read-only context and no deep exploration, so any
+implementation it guessed would be wrong as often as right. The build agent
+explores the codebase fresh, with full source access, and owns every
+implementation decision. Post the summary with `github_add_issue_comment`.
 
 ## Principles
 
 **Durable.** The issue may sit in `ready-for-agent` for weeks while the codebase
-moves. Describe interfaces, types, and behavioural contracts — name specific
-types, function signatures, or config shapes to look for. **Never** reference
-file paths or line numbers; they go stale. Don't assume today's structure survives.
+moves. Describe the problem and the desired behaviour in terms that stay true as
+the code changes. **Never** reference file paths or line numbers; they go stale.
 
-**Behavioural, not procedural.** Say *what* the system should do, not *how* to
-code it — the agent explores fresh and makes its own implementation calls.
-- Good: "`SkillConfig` should accept an optional `schedule: CronExpression`."
-- Bad: "Add a `schedule` field in src/types/skill.ts on line 42."
+**Problem, not solution.** Say *what* should be true when the work is done, not
+*how* to build it. Do **not** name types, function signatures, or config shapes,
+propose an implementation approach, or point at where in the code to change —
+that is the build agent's job.
+- Good: "Todos can have an optional target date, shown in the list and editable."
+- Bad: "Add a `dueDate: Date` field to the `Todo` interface and a date picker in `TodoForm`."
 
-**Complete acceptance criteria.** Every brief lists concrete, independently
-testable criteria so the agent knows when it's done.
-- Good: "`gh issue list --label needs-triage` returns issues that passed initial classification."
+**Complete acceptance criteria.** List concrete, independently testable criteria
+so the agent knows when it's done. These describe the problem's done-state — not
+the implementation.
+- Good: "A todo with a past target date is visually flagged as overdue."
 - Bad: "Triage should work correctly."
 
 **Explicit scope boundaries.** State what is *out of scope* so the agent doesn't
@@ -28,7 +37,7 @@ gold-plate or wander into adjacent features.
 ## Template
 
 ```markdown
-## Agent Brief
+## Triage Summary
 
 **Category:** bug / enhancement
 **Summary:** one line — what needs to happen
@@ -39,12 +48,7 @@ status quo it builds on.
 
 **Desired behavior:**
 What should happen after the work is done. Be specific about edge cases and
-error conditions.
-
-**Key interfaces:**
-- `TypeName` — what changes and why
-- `functionName()` — current vs intended return/behaviour
-- Config shape — any new options
+error conditions — in user-visible / behavioural terms, not code.
 
 **Acceptance criteria:**
 - [ ] Specific, testable criterion 1

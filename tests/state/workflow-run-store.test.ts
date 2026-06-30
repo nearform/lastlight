@@ -318,3 +318,24 @@ describe("resolveReplyGateAndResume — the socratic explore-reply atomic op", (
     expect(reloaded!.scratch).toBeUndefined();
   });
 });
+
+describe("hasRunForTrigger", () => {
+  it("returns true for a build run regardless of status", () => {
+    makeRun({ workflowName: "build", triggerId: "acme/widgets#14", status: "succeeded" });
+    expect(db.runs.hasRunForTrigger("acme/widgets#14", "build")).toBe(true);
+  });
+
+  it("returns true for a running build (mid-flight)", () => {
+    makeRun({ workflowName: "build", triggerId: "acme/widgets#15", status: "running" });
+    expect(db.runs.hasRunForTrigger("acme/widgets#15", "build")).toBe(true);
+  });
+
+  it("returns false when no run exists for the trigger", () => {
+    expect(db.runs.hasRunForTrigger("acme/widgets#99", "build")).toBe(false);
+  });
+
+  it("returns false for a different workflow name on the same trigger", () => {
+    makeRun({ workflowName: "issue-triage", triggerId: "acme/widgets#16", status: "succeeded" });
+    expect(db.runs.hasRunForTrigger("acme/widgets#16", "build")).toBe(false);
+  });
+});

@@ -15,7 +15,7 @@ or editing a skill.
 | Skill | Used by | Purpose |
 |-------|---------|---------|
 | [`chat`](chat/) | chat | Conversational assistant for Slack/Discord threads — answer repo/PR/issue questions, guide to natural-language triggers. |
-| [`issue-triage`](issue-triage/) | `issue-triage.yaml`, chat | Move issues through the canonical triage state machine — categorise, label, dedupe, manage stale, write agent briefs. |
+| [`issue-triage`](issue-triage/) | `issue-triage.yaml`, chat | Move issues through the canonical triage state machine — categorise, label, dedupe, manage stale, write a problem-statement summary (not a solution design), re-triage on reporter replies. |
 | [`issue-comment`](issue-comment/) | `issue-comment.yaml` | Handle non-build maintainer comments on issues/PRs — close, label, answer briefly, redirect build requests. |
 | [`pr-review`](pr-review/) | `pr-review.yaml`, chat | Review a PR with structured, tiered feedback; build and test from the local checkout; post a formal review. |
 | [`pr-comment`](pr-comment/) | `pr-comment.yaml` | Answer a maintainer's question about an open PR with concrete, code-cited evidence (not a full review). |

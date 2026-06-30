@@ -21,6 +21,12 @@ there is no maintainer to ask mid-run. Where you'd want direction, either make
 the call and apply the label, or post a comment and stop — the async comment *is*
 the conversation.
 
+Your job is to **classify the issue and pin down the problem statement** —
+clarify what's actually being asked, and ask for missing information when it's
+under-specified. You do **not** design or plan the implementation: you have only
+read-only context and no deep exploration, so solution design is left to the
+downstream build agent, which has full source access.
+
 ## 0. Ensure the labels exist
 
 Before applying any label, create the canonical set idempotently with
@@ -65,18 +71,39 @@ labels you need are present or you've confirmed you can't create them.
      close. (Factual — safe to close autonomously.)
    - **Under-specified** (bug without repro, feature without a use case) → add
      `needs-info`, post the [needs-info template](#needs-info-template), stop.
-   - **Fully specified and delegatable** → add `ready-for-agent`, post an agent
-     brief ([references/AGENT-BRIEF.md](references/AGENT-BRIEF.md)).
+   - **Fully specified and delegatable** → add `ready-for-agent`, post a triage
+     summary — the problem statement, not a solution design
+     ([references/AGENT-BRIEF.md](references/AGENT-BRIEF.md)).
    - **Needs human implementation** (judgment calls, external access, design
-     decisions, manual testing) → add `ready-for-human` with a brief noting why
-     it can't be delegated.
+     decisions, manual testing) → add `ready-for-human` with a triage summary
+     noting why it can't be delegated.
    - **Looks out of scope** (an enhancement you'd reject) → this is a maintainer
      decision; do **not** auto-close. Add `needs-triage`, post a comment with
      your reasoning (cite any matching `.out-of-scope/` file), and leave it for a
      human.
-4. **Apply exactly one category + one state.** If the existing labels conflict
-   (two state roles), flag it in a comment and don't override — a maintainer may
-   have set them deliberately.
+4. **Apply exactly one category + one state.** When you change an issue's state,
+   **remove the superseded state label** (e.g. clear `needs-info` when moving to
+   `ready-for-agent`) so the issue never carries two state roles. If the existing
+   labels conflict (two state roles you didn't set this run), flag it in a comment
+   and don't override — a maintainer may have set them deliberately.
+
+## 1a. Reporter answered or added information
+
+You may be re-triaging an open, pre-build issue because the reporter (or a
+maintainer) just commented — answering a `needs-info` request, or adding new
+detail, repro steps, or clarification. (Re-triage only fires before any build has
+started; once an issue is building, it's out of your hands.)
+
+1. **Re-read the whole thread** — the issue body, existing labels, and *all*
+   comments including the newest. Re-assess against the gaps that originally held
+   it back.
+2. **If the new information resolves the gaps** → move the issue forward per §1
+   step 3: remove `needs-info` and add `ready-for-agent` (+ triage summary),
+   `ready-for-human`, or `needs-triage` as appropriate.
+3. **If it's still under-specified** → keep `needs-info`, but **do not repost the
+   full [needs-info template](#needs-info-template)**. Acknowledge what they
+   answered and ask only the still-open questions — never duplicate a question
+   they've already addressed.
 
 ## 2. New unlabelled issues (batch / cron)
 

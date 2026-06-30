@@ -179,3 +179,58 @@ describe("GitHubWebhookConnector — re-run checks", () => {
     expect(emitted).toBeNull();
   });
 });
+
+/** POST a signed `issue_comment` webhook; capture any emitted envelope. */
+async function postIssueComment(
+  conn: GitHubWebhookConnector,
+  opts: { issueAuthor: string; commenter: string; labels?: string[] },
+): Promise<{ emitted: any | null }> {
+  let emitted: any = null;
+  conn.on("event", (e) => { emitted = e; });
+  const payload = {
+    action: "created",
+    repository: { full_name: REPO },
+    sender: { login: opts.commenter, type: "User" },
+    issue: {
+      number: 14,
+      title: "Make sure todos have a target date",
+      body: "original report",
+      labels: (opts.labels || []).map((name) => ({ name })),
+      user: { login: opts.issueAuthor },
+    },
+    comment: { body: "here are the repro steps", author_association: "NONE" },
+  };
+  const body = JSON.stringify(payload);
+  await conn.honoApp.request("/webhooks/github", {
+    method: "POST",
+    headers: {
+      "x-hub-signature-256": sign(body),
+      "x-github-event": "issue_comment",
+      "x-github-delivery": "test-delivery",
+      "content-type": "application/json",
+    },
+    body,
+  });
+  await new Promise((r) => setImmediate(r));
+  return { emitted };
+}
+
+describe("GitHubWebhookConnector — issue_comment normalization", () => {
+  beforeEach(() => {
+    setRuntimeConfig({ managedRepos: [REPO] } as unknown as LastLightConfig);
+  });
+  afterEach(() => resetRuntimeConfigForTests());
+
+  it("sets issueAuthor to the issue's original author, distinct from the commenter", async () => {
+    const { emitted } = await postIssueComment(connector(), {
+      issueAuthor: "reporter",
+      commenter: "someone-else",
+      labels: ["enhancement", "needs-info"],
+    });
+    expect(emitted).not.toBeNull();
+    expect(emitted.type).toBe("comment.created");
+    expect(emitted.issueAuthor).toBe("reporter");
+    expect(emitted.sender).toBe("someone-else");
+    expect(emitted.labels).toContain("needs-info");
+  });
+});

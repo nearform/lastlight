@@ -20,6 +20,8 @@ export interface EventEnvelope {
   prNumber?: number;
   /** Login/username of the sender */
   sender: string;
+  /** Login of the issue/PR original author (distinct from `sender`, the commenter) */
+  issueAuthor?: string;
   /** Whether sender is a bot */
   senderIsBot: boolean;
   /** Event body text (issue body, comment body, PR body, etc.) */

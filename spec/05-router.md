@@ -50,6 +50,7 @@ rule wins.
 | `issue.opened` / `issue.reopened` | `skill: issue-triage` | `reopened=true` for the latter |
 | `pr.opened` / `pr.synchronize` / `pr.reopened` | `skill: pr-review` | |
 | `comment.created` with pending reply gate | `skill: explore-reply` | Reply-gate short-circuit — see below |
+| `comment.created` on a pre-build issue, plain (no `@last-light`) | `skill: issue-triage` (`mode: retriage`) | Reporter-driven re-triage — see below |
 | `comment.created` without `@last-light` | `ignore` | reason: "no bot mention" |
 | `comment.created` from non-maintainer | `reply: "only maintainers can trigger builds"` | `authorAssociation` not in `MAINTAINER_ROLES` |
 | `comment.created` matching `@last-light approve\|reject [reason]` | `skill: approval-response` | Regex parse, no classifier |
@@ -80,6 +81,30 @@ maintainer check, no classifier call. This is the mechanism that lets
 the explore workflow have a natural back-and-forth with a human.
 
 (`router.ts:97–112` for GitHub, `272–288` for Slack.)
+
+## Reporter-driven re-triage
+
+Sitting just above the mention gate (so it can catch the plain replies the
+mention gate would otherwise drop), this branch lets new information re-open
+triage on an issue **before it has entered a build**. It fires only for a
+GitHub `comment.created` that is on an **issue** (not a PR), carries **no
+`@last-light` mention**, and whose issue has **no `build` run** in
+`workflow_runs` (`deps.db.runs.hasRunForTrigger("${repo}#${n}", "build")` —
+any status, so a started/failed/completed build closes the window). Within
+that gate:
+
+- **`needs-info` issue + original author *or* a maintainer replies** →
+  re-triage. Answering a `needs-info` request always re-opens triage.
+- **Any other state + the original author replies** → re-triage only if a cheap
+  classifier (`classifyCommentAddsInfo`) judges the comment to add substantive
+  information (new detail / repro / clarification / scope change) rather than
+  social noise ("thanks"). Safe default on classifier error is *no* re-triage.
+
+Re-triage reuses the `issue-triage` handler with `context.mode = "retriage"`;
+the triage agent re-reads the whole thread regardless. Bot comments are filtered
+at the connector, so this can't self-loop. Author identity comes from
+`envelope.issueAuthor` vs `envelope.sender`. (`router.ts`, `comment.created`
+branch.)
 
 ## Maintainer gate
 
@@ -172,6 +197,12 @@ Failure modes:
 
 Called only on (a) GitHub `comment.created` with maintainer @-mention,
 and (b) Slack `message`. Never on deterministic events.
+
+A second, smaller helper — `classifyCommentAddsInfo` — answers a single
+yes/no question (does a reporter's plain comment add substantive information,
+or is it social noise?) and gates the [reporter-driven re-triage](#reporter-driven-re-triage)
+branch for non-`needs-info` issues. Same cheap-helper path; fail-closed
+(error → no re-triage).
 
 ## `llm.ts` — the cheap-helper path
 

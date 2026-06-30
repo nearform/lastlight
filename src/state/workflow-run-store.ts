@@ -159,6 +159,21 @@ export class WorkflowRunStore {
     return row ? this.deserialize(row) : null;
   }
 
+  /**
+   * True if any run of `workflowName` exists for this trigger, in ANY status.
+   * Unlike `getByTrigger` (active runs only), this also sees a build that has
+   * already succeeded/failed/cancelled — the signal the router uses to gate
+   * reporter-driven re-triage to the pre-build window.
+   */
+  hasRunForTrigger(triggerId: string, workflowName: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 FROM workflow_runs
+      WHERE trigger_id = ? AND workflow_name = ?
+      LIMIT 1
+    `).get(triggerId, workflowName);
+    return !!row;
+  }
+
   /** List all active (running or paused) workflow runs */
   listActive(): WorkflowRun[] {
     const rows = this.db.prepare(`
