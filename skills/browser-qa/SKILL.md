@@ -91,10 +91,25 @@ Step keys (a step may combine an action **plus** a trailing `screenshot`):
 | `waitFor`    | selector             | Wait until the element is visible (~10s timeout).                |
 | `assertText` | string               | Pass if the text is visible anywhere on the page; else step FAIL.|
 | `text`       | selector             | Extract `textContent` into the step result (for you to read).    |
+| `pause`      | milliseconds         | Hold for N ms — a readable beat after a state change (demo videos).|
 | `screenshot` | basename             | Write `<out-dir>/<basename>.png` (full page).                    |
 
 The whole flow runs in **one Chromium session** — login state, cookies, and
 navigation persist across steps.
+
+### Demo mode (recording only)
+
+When the session is **recorded** (`--record-dir`, `"record": true`, or an
+explicit `--demo`), the driver switches on "demo mode" so the capture is
+watchable — headless Chromium otherwise paints no cursor and fires actions
+instantly. Demo mode adds a **synthetic cursor overlay** that animates to each
+target, types `type` steps **character-by-character**, and holds a beat
+**between steps**. For screenshot QA (no recording) these are all no-ops, so
+QA runs stay fast. Prefer `type` over `fill` in a recorded flow so the typing is
+visible, and use `pause` for deliberate holds. Tunables:
+`--step-delay MS` (default 700), `--type-delay MS` (default 70),
+`--move-steps N` (default 25), `--no-cursor` to drop the overlay (env:
+`LASTLIGHT_STEP_DELAY_MS`, `LASTLIGHT_TYPE_DELAY_MS`, `LASTLIGHT_MOVE_STEPS`).
 
 ## Run the flow
 

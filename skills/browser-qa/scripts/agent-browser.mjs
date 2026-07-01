@@ -18,6 +18,8 @@
 //     The skill runs this first to decide browser-vs-text.
 //
 //   run <flow.json> [--base-url URL] [--out-dir DIR] [--record-dir DIR]
+//              [--demo] [--no-cursor] [--step-delay MS] [--type-delay MS]
+//              [--move-steps N]
 //     Executes a FLOW in ONE Chromium session (state preserved across steps) and
 //     prints a single JSON report.
 //
@@ -26,6 +28,17 @@
 //     <record-dir>/session.webm (default: the out-dir). The saved path is
 //     reported as `video` in the JSON. Used by the `/demo` workflow, which then
 //     composites the raw webm into a titled mp4 with compose-demo.sh.
+//
+//     DEMO MODE (auto-on whenever recording; also --demo or `"demo": true` in the
+//     flow) makes the capture human-watchable — headless Chromium otherwise
+//     paints no cursor and fires actions instantly:
+//       - a synthetic cursor overlay (opt out with --no-cursor) that animates to
+//         each target before acting, driven by real page.mouse events;
+//       - `type` steps that key in char-by-char (--type-delay, default 70ms);
+//       - a deliberate hold between steps (--step-delay, default 700ms).
+//     Outside demo mode every one of these is a no-op, so screenshot QA runs
+//     behave exactly as before. Env equivalents: LASTLIGHT_STEP_DELAY_MS,
+//     LASTLIGHT_TYPE_DELAY_MS, LASTLIGHT_MOVE_STEPS.
 //
 //     Flow shape:
 //       { "baseUrl": "http://localhost:3000",
@@ -38,10 +51,13 @@
 //           {"press":"Enter"},
 //           {"waitFor":"#dashboard"},
 //           {"assertText":"Welcome"},
+//           {"pause": 1200},
 //           {"text":"h1"},
 //           {"screenshot":"after-login"}
 //         ] }
-//     A step may combine an action plus a trailing `screenshot`.
+//     A step may combine an action plus a trailing `screenshot`. `pause` holds
+//     for N ms (a readable beat after a state change, for demo recordings);
+//     `type` shows visible per-character typing, `fill` sets the value instantly.
 //
 //     Per-step semantics:
 //       - A step error (selector not found, assertion fail, timeout) is recorded
@@ -76,6 +92,81 @@ const WAIT_TIMEOUT = 10_000; // sane default for waitFor / assertText probes
 // Settling lets late paints + async data ("Loading…") resolve and guarantees a
 // watchable tail. Override with --record-settle-ms / LASTLIGHT_RECORD_SETTLE_MS.
 const RECORD_SETTLE_MS = Number(process.env.LASTLIGHT_RECORD_SETTLE_MS) || 1500;
+
+// ── Demo-mode pacing ─────────────────────────────────────────────────────────
+// Headless Chromium paints NO cursor and fires actions instantly, so a raw
+// recording looks like the UI mutating on its own. "Demo mode" (auto-on whenever
+// the session is recorded — see run()) makes the capture human-watchable: a
+// synthetic cursor overlay that animates to each target, char-by-char typing,
+// and a deliberate pause between steps. These are no-ops outside demo mode, so
+// screenshot QA runs are untouched. All tunable via flags / env.
+const DEMO_STEP_DELAY_MS = Number(process.env.LASTLIGHT_STEP_DELAY_MS) || 700;
+const DEMO_TYPE_DELAY_MS = Number(process.env.LASTLIGHT_TYPE_DELAY_MS) || 70;
+const DEMO_MOVE_STEPS = Number(process.env.LASTLIGHT_MOVE_STEPS) || 25;
+
+// Synthetic cursor overlay, adapted from Puppeteer's mouse-helper (Apache-2.0),
+// made self-installing so it can be injected via context.addInitScript and picked
+// up by Playwright's recordVideo (it's page DOM, so it lands in the .webm). It
+// follows the REAL mouse events that page.mouse.move/down/up dispatch.
+const MOUSE_HELPER_SRC = `(() => {
+  const install = () => {
+    if (window.__mouseHelperInstalled || !document.body) return;
+    window.__mouseHelperInstalled = true;
+    const box = document.createElement('div');
+    box.classList.add('mouse-helper');
+    const style = document.createElement('style');
+    style.innerHTML = \`
+      .mouse-helper {
+        pointer-events: none;
+        position: absolute;
+        z-index: 2147483647;
+        width: 20px; height: 20px;
+        margin-left: -10px; margin-top: -10px;
+        border-radius: 10px;
+        border: 2px solid rgba(255,255,255,.9);
+        background: rgba(0,0,0,.35);
+        box-shadow: 0 0 0 1px rgba(0,0,0,.4);
+        transition: background .15s, border-radius .15s, transform .08s;
+      }
+      .mouse-helper.button-1 {
+        transition: none;
+        background: rgba(30,120,255,.7);
+        transform: scale(.75);
+      }
+    \`;
+    document.head.appendChild(style);
+    document.body.appendChild(box);
+    const move = (e) => { box.style.left = e.pageX + 'px'; box.style.top = e.pageY + 'px'; };
+    document.addEventListener('mousemove', move, true);
+    document.addEventListener('mousedown', (e) => { move(e); box.classList.add('button-1'); }, true);
+    document.addEventListener('mouseup', (e) => { move(e); box.classList.remove('button-1'); }, true);
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', install, false);
+  } else {
+    install();
+  }
+})();`;
+
+// Animate the synthetic cursor to the centre of a selector, best-effort. Returns
+// the target box when it landed (so the caller can click at those coords), or
+// null to fall back to Playwright's own targeting.
+async function moveCursorTo(page, selector, demo) {
+  try {
+    const loc = page.locator(selector).first();
+    await loc.waitFor({ state: 'visible', timeout: WAIT_TIMEOUT });
+    await loc.scrollIntoViewIfNeeded({ timeout: WAIT_TIMEOUT }).catch(() => {});
+    const box = await loc.boundingBox();
+    if (!box) return null;
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    await page.mouse.move(cx, cy, { steps: demo.moveSteps });
+    await page.waitForTimeout(140).catch(() => {});
+    return { cx, cy };
+  } catch {
+    return null;
+  }
+}
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
@@ -140,6 +231,7 @@ function actionOf(step) {
     'waitFor',
     'assertText',
     'text',
+    'pause',
   ]) {
     if (k in step) return k;
   }
@@ -147,7 +239,7 @@ function actionOf(step) {
   return 'noop';
 }
 
-async function execStep(page, step, baseUrl, outDir, screenshots) {
+async function execStep(page, step, baseUrl, outDir, screenshots, demo) {
   const result = {};
   let fatal = false;
 
@@ -164,15 +256,31 @@ async function execStep(page, step, baseUrl, outDir, screenshots) {
       });
     }
   } else if ('click' in step) {
-    await page.click(step.click, { timeout: WAIT_TIMEOUT });
+    // Demo mode: animate the cursor to the target and click at its coordinates
+    // so the pointer travel + press are visible. Fall back to Playwright's own
+    // targeting when the box can't be resolved (or outside demo mode).
+    const at = demo.enabled ? await moveCursorTo(page, step.click, demo) : null;
+    if (at) {
+      await page.mouse.down();
+      await page.mouse.up();
+    } else {
+      await page.click(step.click, { timeout: WAIT_TIMEOUT });
+    }
   } else if ('fill' in step) {
     const [sel, val] = step.fill;
+    if (demo.enabled) await moveCursorTo(page, sel, demo);
     await page.fill(sel, val, { timeout: WAIT_TIMEOUT });
   } else if ('type' in step) {
     const [sel, val] = step.type;
+    if (demo.enabled) await moveCursorTo(page, sel, demo);
     await page.locator(sel).first().pressSequentially(val, {
       timeout: WAIT_TIMEOUT,
+      delay: demo.enabled ? demo.typeDelay : 0,
     });
+  } else if ('pause' in step) {
+    // Explicit hold — for reading a state change before the next action.
+    const ms = Number(step.pause) || 0;
+    if (ms > 0) await page.waitForTimeout(ms);
   } else if ('press' in step) {
     await page.keyboard.press(step.press);
   } else if ('waitFor' in step) {
@@ -210,7 +318,7 @@ async function execStep(page, step, baseUrl, outDir, screenshots) {
   return { result, fatal };
 }
 
-async function run(flowPath, baseUrlArg, outDirArg, recordDirArg) {
+async function run(flowPath, baseUrlArg, outDirArg, recordDirArg, opts = {}) {
   let flow;
   try {
     flow = JSON.parse(readFileSync(resolve(flowPath), 'utf8'));
@@ -229,6 +337,17 @@ async function run(flowPath, baseUrlArg, outDirArg, recordDirArg) {
   // `"record": true`. The .webm lands in the record dir (default: out-dir).
   const doRecord = !!recordDirArg || flow.record === true;
   const videoDir = resolve(recordDirArg || outDir);
+  // Demo mode = recording, an explicit --demo, or flow.demo. It slows the run
+  // down (cursor animation, char-by-char typing, inter-step holds) so the
+  // capture is watchable; it's a no-op for plain screenshot QA. Cursor overlay
+  // is on by default in demo mode, opt out with --no-cursor.
+  const demo = {
+    enabled: opts.demo === true || flow.demo === true || doRecord,
+    cursor: opts.cursor !== false,
+    stepDelay: Number.isFinite(opts.stepDelay) ? opts.stepDelay : DEMO_STEP_DELAY_MS,
+    typeDelay: Number.isFinite(opts.typeDelay) ? opts.typeDelay : DEMO_TYPE_DELAY_MS,
+    moveSteps: Number.isFinite(opts.moveSteps) ? opts.moveSteps : DEMO_MOVE_STEPS,
+  };
   try {
     mkdirSync(outDir, { recursive: true });
   } catch {
@@ -267,6 +386,11 @@ async function run(flowPath, baseUrlArg, outDirArg, recordDirArg) {
       // the clip isn't letterboxed. The .webm is flushed on context.close().
       ...(doRecord ? { recordVideo: { dir: videoDir, size: viewport } } : {}),
     });
+    // Inject the synthetic cursor before the first navigation so it's present on
+    // every page (addInitScript re-runs on each document). Only in demo mode.
+    if (demo.enabled && demo.cursor) {
+      await context.addInitScript(MOUSE_HELPER_SRC).catch(() => {});
+    }
     const page = await context.newPage();
 
     page.on('console', (msg) => {
@@ -288,7 +412,7 @@ async function run(flowPath, baseUrlArg, outDirArg, recordDirArg) {
 
       const started = Date.now();
       try {
-        const { result } = await execStep(page, step, baseUrl, outDir, screenshots);
+        const { result } = await execStep(page, step, baseUrl, outDir, screenshots, demo);
         steps.push({ index: i, action, ok: true, ms: Date.now() - started, ...result });
       } catch (err) {
         const entry = {
@@ -300,6 +424,12 @@ async function run(flowPath, baseUrlArg, outDirArg, recordDirArg) {
         };
         steps.push(entry);
         if (err && err.fatal) fatalHit = true; // navigation failure: skip the rest
+      }
+
+      // Demo mode: hold between steps so the video breathes (skip after an
+      // explicit `pause`, which already held, and after a fatal step).
+      if (demo.enabled && demo.stepDelay > 0 && action !== 'pause' && !fatalHit) {
+        await page.waitForTimeout(demo.stepDelay).catch(() => {});
       }
     }
 
@@ -370,18 +500,24 @@ async function main() {
     let baseUrl;
     let outDir;
     let recordDir;
+    const opts = {};
     for (let i = 0; i < rest.length; i++) {
       const a = rest[i];
       if (a === '--base-url') baseUrl = rest[++i];
       else if (a === '--out-dir') outDir = rest[++i];
       else if (a === '--record-dir') recordDir = rest[++i];
+      else if (a === '--demo') opts.demo = true;
+      else if (a === '--no-cursor') opts.cursor = false;
+      else if (a === '--step-delay') opts.stepDelay = Number(rest[++i]);
+      else if (a === '--type-delay') opts.typeDelay = Number(rest[++i]);
+      else if (a === '--move-steps') opts.moveSteps = Number(rest[++i]);
       else positional.push(a);
     }
     if (!positional[0]) {
-      emit({ ok: false, error: 'usage: agent-browser.mjs run <flow.json> [--base-url URL] [--out-dir DIR] [--record-dir DIR]' });
+      emit({ ok: false, error: 'usage: agent-browser.mjs run <flow.json> [--base-url URL] [--out-dir DIR] [--record-dir DIR] [--demo] [--no-cursor] [--step-delay MS] [--type-delay MS] [--move-steps N]' });
       process.exit(1);
     }
-    await run(positional[0], baseUrl, outDir, recordDir);
+    await run(positional[0], baseUrl, outDir, recordDir, opts);
     return;
   }
 

@@ -76,7 +76,10 @@ wrong — STOP and fix it; do not ship a side-by-side that proves nothing.{{/if}
 
 Author a `flow.json` (shape in the `browser-qa` skill) that scripts the
 interaction like a director — record the baseline first, hold after state
-changes, verify between steps. Record with `--record-dir`:
+changes (use `{"pause": 1200}` steps), verify between steps. Recording
+auto-enables the driver's demo mode, so a **visible cursor** animates to each
+target and a beat is held between steps — prefer `type` over `fill` so typing
+shows on screen. Record with `--record-dir`:
 
 ```
 node <browser-qa skill dir>/scripts/agent-browser.mjs run flow.json \
@@ -89,7 +92,7 @@ writing it into **`{{issueDir}}/demo.mp4`** (the harness harvests that dir):
 ```
 <demo skill dir>/scripts/compose-demo.sh \
   --output {{issueDir}}/demo.mp4 --title "<PR # — what it does>" \
-  --subtitle "<one line>" --layout single --speed 1.5 --target-size-mb 5 \
+  --subtitle "<one line>" --layout single --speed 1 --target-size-mb 5 \
   /tmp/demo-cap/session.webm
 ```
 

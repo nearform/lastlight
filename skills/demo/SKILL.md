@@ -82,9 +82,17 @@ Author a `flow.json` (same shape as **browser-qa**) that scripts the
 interaction as a *director*, not an operator:
 
 - **Record the baseline first** — the starting state is act one.
-- **Hold after state changes** — add a `waitFor`/short pause so text is readable.
+- **Hold after state changes** — add a `{"pause": 1200}` (or `waitFor`) so the
+  result is readable before moving on.
 - **Verify between steps** — `waitFor` the expected element before the next
   action; don't blindly fire keys into an unsettled page.
+
+Because recording auto-enables the driver's **demo mode**, you get a visible
+**synthetic cursor** that animates to each target, and holds between steps —
+you don't script those. To make typing visible on screen, prefer **`type`**
+(character-by-character) over `fill` (instant) for any input the viewer should
+watch being filled. Tune pacing with `--step-delay` / `--type-delay` if a flow
+feels rushed or draggy (see the browser-qa skill).
 
 Record the session by passing `--record-dir`:
 
@@ -134,7 +142,7 @@ Composite the raw recording(s) into the final mp4 with the bundled wrapper:
   --output <artifact-dir>/demo.mp4 \
   --title "PR #42 — Add dark mode toggle" \
   --subtitle "Toggling persists the theme across reloads" \
-  --layout single --speed 1.5 \
+  --layout single --speed 1 \
   /tmp/demo-cap/session.webm
 
 # Before/after comparison — first clip = left/BEFORE, second = right/AFTER
