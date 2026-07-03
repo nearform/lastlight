@@ -100,6 +100,26 @@ export function RunView({ run }: { run: IndexRun }) {
             {isConfig ? "Config comparison" : "Model comparison"}{" "}
             <span className="font-normal text-base-content/50">— {tier}</span>
           </h2>
+          {tier === "pr-review" && (
+            <p className="-mt-2 mb-4 max-w-3xl text-2xs leading-5 text-base-content/50">
+              <b className="font-semibold text-base-content/70">F0.5</b> scores the posted review against a
+              human-verified gold set of real issues: an LLM judge matches each finding to a gold comment, giving{" "}
+              <span className="text-base-content/70">precision</span> (matched ÷ posted) and{" "}
+              <span className="text-base-content/70">recall</span> (matched ÷ gold), combined as the F-beta with{" "}
+              <span className="font-mono">β=0.5</span> — weighting precision 2× over recall, since false positives cost
+              more than misses. Click <b className="font-semibold text-base-content/70">judge</b> on any row to inspect
+              the match. Methodology:{" "}
+              <a
+                href="https://codereview.withmartian.com/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-info hover:underline"
+              >
+                Martian Code Review Bench
+              </a>
+              .
+            </p>
+          )}
           <CompareTable models={models} tier={tier} labels={labels} axisLabel={isConfig ? "Config" : "Model"} />
 
           {isConfig && <PhaseModelPanel results={tierResults} labels={labels} />}
