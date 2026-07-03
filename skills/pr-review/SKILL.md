@@ -1,21 +1,21 @@
 ---
 name: pr-review
-description: Review a GitHub pull request and post one formal review — advance the existing discussion, verify by building where possible, and give precision-first, high-signal feedback. Use when asked to review a PR or on a cron PR scan.
-version: 4.0.0
+description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. A pure code review — no building. Use when asked to review a PR or on a cron PR scan.
+version: 5.0.0
 tags: [github, review, code-quality]
 ---
 
 # PR Review
 
 Review an open PR and post **one formal review** — high-signal findings only.
-Build and test the change when you can; when the toolchain isn't available or the
-repo is too large to build in the time you have, fall back to a careful static
-review and say so. A noisy review gets muted, so precision matters more than
-volume.
+This is a **pure code review**: read the change and reason about it. Do **not**
+install dependencies, build, or run tests — that is CI's job, and it validates
+whether the change actually works far more reliably than you re-running it here.
+Your job is judgement on the diff, not a build gate. A noisy review gets muted,
+so precision matters more than volume.
 
-This skill is the PR-specific procedure. It uses two shared skills: the
-**building** skill for installing and running the test/lint/typecheck gate, and
-the **code-review** skill for the precision bar and what-to-check rubric.
+This skill is the PR-specific procedure. It uses the **code-review** skill for
+the precision bar and what-to-check rubric.
 
 ## Workspace
 
@@ -66,23 +66,12 @@ git diff --stat origin/<baseRef>...HEAD    # churn
 git diff origin/<baseRef>...HEAD           # the patch
 ```
 
-### 4. Verify by building (best-effort)
-
-Try to follow the **building** skill: install dependencies (install-first), then
-run the project's build and tests, and cite the real output — a finding you
-verified by running is the highest-signal kind.
-
-But building is **best-effort, not a gate**. If the toolchain isn't available,
-the repo is too large to build in the time you have, or the build/tests error for
-reasons unrelated to the diff, **don't block and don't withhold the review** —
-fall back to a careful static read of the diff in its full context and state
-plainly that you didn't run the build. A pure style/docs PR needs no build. Never
-skip the review just because you couldn't build.
-
-### 5. Assess and submit
+### 4. Assess and submit
 
 Apply the **code-review** skill's rubric — read each changed file in context;
 check correctness / edge-cases / security / regression-risk / test-coverage.
+Reason about the code statically; **don't build or run it** — trust CI to catch
+what only running reveals, and spend your effort on what a human reviewer sees.
 Follow that skill's **precision-first** rule: post **only Critical and Important**
 findings, each with a `path:line` reference and a one-line concrete impact (what
 breaks, for which input or caller) plus an inline code suggestion where it helps.

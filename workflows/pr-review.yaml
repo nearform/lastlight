@@ -13,8 +13,9 @@ description: |
 phases:
   - name: review
     label: Review
-    # pr-review: the PR procedure (primary). building: install + test gate.
-    # code-review: the finding-tier + what-to-check rubric.
-    skills: [pr-review, building, code-review]
+    # pr-review: the PR procedure (primary). code-review: the finding-tier +
+    # what-to-check rubric. No `building` — pr-review is a pure code review; CI
+    # validates that the change builds/runs.
+    skills: [pr-review, code-review]
     model: "{{models.review}}"
     variant: "{{variants.review}}"

@@ -255,12 +255,12 @@ chat runtime:
 |---|---|---|
 | `issue-triage` | Label, deduplicate, request info, manage stale issues | `issue-triage.yaml`, `cron-triage.yaml`, chat |
 | `issue-comment` | Handle non-build maintainer comments on issues | `issue-comment.yaml` |
-| `pr-review` | Precision-first PR review: advance the discussion, verify by building (best-effort — fall back to static review if the repo can't be built), post only Critical / Important findings past a confidence gate | `pr-review.yaml`, `cron-review.yaml`, chat |
+| `pr-review` | Precision-first PR review: advance the discussion, post only Critical / Important findings past a confidence gate. A **pure code review — no building** (CI validates the change builds/runs) | `pr-review.yaml`, `cron-review.yaml`, chat |
 | `pr-comment` | Answer maintainer questions on open PRs | `pr-comment.yaml` |
 | `repo-health` | Weekly health report (open / stale / velocity / labels) | `repo-health.yaml`, `cron-health.yaml`, chat |
 | `security-review` | Diff-based security scan since last review | `security-review.yaml`, `cron-security.yaml` |
 | `security-feedback` | Break out scan findings into individual issues | `security-feedback.yaml` |
-| `building` | Shared craft: install deps + run the test/lint/typecheck gate in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml`, `pr-review.yaml` |
+| `building` | Shared craft: install deps + run the test/lint/typecheck gate in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml` |
 | `code-review` | Shared review rubric, precision-first: post **only Critical / Important** (Suggestions / Nits are dropped as noise), each with a concrete-impact line, past a self-refutation confidence gate + what to check (correctness incl. silent-default/dropped-output as a bug, security, edge cases, complexity, duplication, type-safety, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
 | `issue-answer` | Answer a question directly: sourced neutral reply to a GitHub issue or Slack thread; research repo docs + web; label `question` (GitHub only); never write a brief, mark ready-for-agent, or change code | `answer.yaml` |
 | `verify` | Test a behaviour claim as an investigator: install + run the code in the sandbox, capture bash/text evidence, report CONFIRMED / REFUTED / INCONCLUSIVE; never fabricate or stage evidence | `verify.yaml` (text phase) |
@@ -270,10 +270,11 @@ chat runtime:
 | `chat` | Conversational assistant persona | chat (always-on) |
 
 `building` and `code-review` are not optional libraries — they're live
-shared building blocks staged into multiple workflows (the build cycle,
-`pr-fix`, and `pr-review`), the same way `issue-triage` is reused across
-webhook and cron. The "Used by" column lists every workflow that stages
-each.
+shared building blocks staged into multiple workflows (`code-review` in the
+build cycle and `pr-review`; `building` in the build cycle and `pr-fix`), the
+same way `issue-triage` is reused across webhook and cron. The "Used by"
+column lists every workflow that stages each. Note `pr-review` stages
+`code-review` but **not** `building` — it's a pure code review.
 
 Nested skill directories (`skills/software-development/architect`,
 `skills/github/github-pr-workflow`, etc.) exist as a category library —
