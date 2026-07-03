@@ -61,6 +61,14 @@ export function JudgeModal({ title, trace, onClose }: { title: string; trace: Re
           <span className="shrink-0 whitespace-nowrap font-mono text-2xs text-base-content/50">
             {matched}/{trace.gold.length} gold matched · {trace.findings.length} posted
           </span>
+          {trace.usedDiff && (
+            <span
+              className="shrink-0 whitespace-nowrap rounded border border-info/40 bg-info/10 px-1.5 py-0.5 font-mono text-2xs text-info"
+              title="The PR diff was fed to the judge (--judge-with-diff) — not comparable to Martian's diff-blind offline leaderboard"
+            >
+              diff-aware
+            </span>
+          )}
           <button onClick={onClose} className="btn btn-ghost btn-xs ml-auto h-6 min-h-0" aria-label="Close">
             ✕
           </button>

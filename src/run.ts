@@ -206,7 +206,7 @@ function strFlagAll(name: string): string[] {
 }
 
 /** CLI flags that take a following value (so it isn't read as a tier name). */
-const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit"]);
+const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta"]);
 
 async function runEval(): Promise<number> {
   loadDotEnv();
@@ -434,6 +434,18 @@ async function runEval(): Promise<number> {
     p.log.error(`--limit must be a positive integer, got "${limitRaw}".`);
     return 1;
   }
+
+  // pr-review judge knobs (flags; `EVAL_F_BETA` env still honored as a fallback):
+  //   --f-beta <n>       the F-beta β (1 = F1 default, 0.5 = precision 2×).
+  //   --judge-with-diff  feed the PR diff to the judge (higher fidelity, off by
+  //                      default — Martian's offline judge is diff-blind).
+  const fBetaRaw = strFlag("f-beta");
+  const fBeta = fBetaRaw !== undefined ? Number(fBetaRaw) : undefined;
+  if (fBeta !== undefined && (!Number.isFinite(fBeta) || fBeta <= 0)) {
+    p.log.error(`--f-beta must be a positive number, got "${fBetaRaw}".`);
+    return 1;
+  }
+  const judge = { beta: fBeta, withDiff: process.argv.includes("--judge-with-diff") };
 
   // Instances per tier, resolved ONCE — the case set is identical across arms
   // (arms vary only the model selection / assets, never the cases).
@@ -725,6 +737,7 @@ async function runEval(): Promise<number> {
         sessionTrialDir: join(resultsDirFor(w.tierName), trialRel),
         sessionTrialRel: trialRel,
         trial: t,
+        judge,
       });
       r.tier = w.tierName;
       trials.push(r);
@@ -950,6 +963,9 @@ Run options:
   --instance <id[,id]> Only run these instance_id(s) (or set EVAL_INSTANCE). Exact match.
   --limit <n>          Run only the first n instances per tier (after --instance).
   --runs <n>           Repeat each case n× (worst-case verdict, mean metrics)
+  --f-beta <n>         pr-review F-beta β (default 1 = F1; 0.5 = precision 2×). Or EVAL_F_BETA.
+  --judge-with-diff    pr-review: feed the PR diff to the judge (higher fidelity,
+                       off by default — Martian's offline judge is diff-blind)
   --serial             Force serial execution across provider families
   --datasets <dir>     Extra datasets root to discover tiers from
   --models-file <f>    Use an explicit models.json

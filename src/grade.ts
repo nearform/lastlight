@@ -143,6 +143,8 @@ export interface ReviewTrace {
   rawExtract?: string;
   /** The judge's raw reply for the matching step. */
   rawMatch?: string;
+  /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
+  usedDiff?: boolean;
 }
 
 /** Cap on trimmed text fields in a {@link ReviewTrace}, keeping the scorecard
@@ -202,14 +204,25 @@ const EXTRACT_SYSTEM =
   "security flaw, missing test, performance problem, etc. — tied to a location. " +
   "IGNORE: summaries of what the PR does, praise, approvals, meta commentary, and vague remarks with no concrete problem. " +
   "Merge duplicates that describe the same issue. " +
+  "If a PR DIFF is provided, use it ONLY to understand terse or location-anchored comments (what the reviewer's `here`/`this` refers to) — " +
+  "NEVER invent a finding from the diff that the reviewer did not raise. " +
   'Output ONLY JSON: {"findings":[{"description":"<the problem>","file":"<path or null>"}]}';
 
 const MATCH_SYSTEM =
   "You judge whether a reviewer's findings match a gold set of KNOWN real issues in a pull request. " +
   "Two items MATCH when they describe the SAME underlying issue — the same root cause or the same required fix — " +
   "even if worded differently or the line is slightly off. Wording need not match; substance must. " +
+  "If a PR DIFF is provided, use it to resolve whether a finding and a gold issue point at the same code change. " +
   "Each gold issue matches AT MOST ONE finding, and each finding matches at most one gold issue (choose the best pairing). " +
   'Output ONLY JSON: {"matches":[{"finding":<finding index>,"gold":<gold index>}]}';
+
+/** Cap on the PR diff fed to the judge (diff-aware mode). */
+const DIFF_CAP = 20_000;
+/** Prefix a judge user turn with the PR diff for context, when provided. */
+function withDiffContext(diff: string | undefined, purpose: string, body: string): string {
+  if (!diff?.trim()) return body;
+  return `PR DIFF (${purpose}):\n\`\`\`diff\n${diff.slice(0, DIFF_CAP)}\n\`\`\`\n\n${body}`;
+}
 
 /**
  * Grade a posted PR review against the gold set via an LLM judge, mirroring
@@ -224,9 +237,14 @@ export async function gradeReview(opts: {
   reviews: SubmittedReview[];
   judgeModel?: string;
   beta?: number;
+  /** The PR diff. When provided (opt-in `--judge-with-diff`), the judge sees the
+   * code so it can resolve terse, location-anchored review comments — at the cost
+   * of leaderboard parity (Martian's offline judge is diff-blind). */
+  diff?: string;
 }): Promise<ReviewGrade> {
   const gold = opts.gold;
   const beta = opts.beta ?? defaultBeta();
+  const diff = opts.diff?.trim() ? opts.diff : undefined;
   const empty = (partial: Partial<ReviewGrade>): ReviewGrade => ({
     precision: 0,
     recall: 0,
@@ -272,7 +290,7 @@ export async function gradeReview(opts: {
   // 1. Extract distinct findings from the review.
   let findings: ExtractedFinding[];
   try {
-    rawExtract = await judge(model, EXTRACT_SYSTEM, text);
+    rawExtract = await judge(model, EXTRACT_SYSTEM, withDiffContext(diff, "context only — extract findings ONLY from the reviewer's writeup below", `REVIEWER'S WRITEUP:\n${text}`));
     const parsed = parseJudgeJson<{ findings?: ExtractedFinding[] }>(rawExtract);
     if (!parsed?.findings) return empty({ error: "judge: unparseable extraction reply" });
     findings = parsed.findings.filter((f) => f && typeof f.description === "string" && f.description.trim());
@@ -304,7 +322,7 @@ export async function gradeReview(opts: {
   });
   let matches: { finding: number; gold: number }[];
   try {
-    rawMatch = await judge(model, MATCH_SYSTEM, matchUser);
+    rawMatch = await judge(model, MATCH_SYSTEM, withDiffContext(diff, "resolve whether a finding and a gold issue point at the same code", matchUser));
     const parsed = parseJudgeJson<{ matches?: { finding: number; gold: number }[] }>(rawMatch);
     if (!parsed?.matches) return empty({ error: "judge: unparseable match reply", posted });
     matches = parsed.matches;
@@ -358,6 +376,7 @@ export async function gradeReview(opts: {
     })),
     rawExtract: capTrace(rawExtract),
     rawMatch: capTrace(rawMatch),
+    usedDiff: !!diff,
   };
 
   return { precision, recall, fbeta, beta, posted, gold: gold.length, matched, falsePositives, falseNegatives, trace };

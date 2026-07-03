@@ -309,9 +309,16 @@ the user-facing version):
   head is off-branch otherwise).
 - **Judge (two steps, `gradeReview`).** (1) *extract* the review's distinct
   concrete findings; (2) *match* each to a gold comment. precision = matched ÷
-  posted, recall = matched ÷ gold, combined as **F-beta** at `beta`
-  (`defaultBeta()` ← `EVAL_F_BETA`, default 1). The dashboard labels the column
-  `F{β}` from `review.beta`.
+  posted, recall = matched ÷ gold, combined as **F-beta** at `beta` (`--f-beta`
+  flag → `opts.judge.beta`, else `defaultBeta()` ← `EVAL_F_BETA`, else 1). The
+  dashboard labels the column `F{β}` from `review.beta`.
+- **Diff-blind by default (Martian-offline parity).** The judge reads only the
+  posted review (body + inline comments from `fake.submittedReviews`), NOT the PR
+  diff. `--judge-with-diff` (`opts.judge.withDiff`) makes `run-instance` compute
+  `git diff base..head` in the seeded workspace and pass it to `gradeReview`,
+  which feeds it to both judge steps (instructed to use it only to interpret
+  comments, never to invent findings). Sets `trace.usedDiff` → a `diff-aware`
+  badge in the JudgeModal. Off by default because it diverges from the leaderboard.
 - **Trace.** `gradeReview` returns a `ReviewTrace` (judge model, the review text
   it read, extracted findings, the gold set, the finding↔gold pairing, raw
   replies). It rides in `InstanceResult.review.trace` → the dashboard's **judge**

@@ -244,6 +244,8 @@ export interface InstanceResult {
       gold: { description: string; severity: string; matchedFinding: number | null }[];
       rawExtract?: string;
       rawMatch?: string;
+      /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
+      usedDiff?: boolean;
     };
   };
   /** When `--runs N`: how many trials the mean review metrics aggregate. */

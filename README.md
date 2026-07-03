@@ -405,9 +405,9 @@ out the PR **head** (mirroring production's pre-clone contract), so the skill's
 
 From the matches: **precision** = matched ÷ posted, **recall** = matched ÷ gold,
 combined as **F-beta**. The headline is **F1** (β=1 — precision and recall weighted
-equally, Martian's leaderboard metric). Set **`EVAL_F_BETA=0.5`** to weight
-precision 2× (F0.5), mirroring Martian's adjustable F-beta; the dashboard relabels
-itself `F{β}` to match.
+equally, Martian's leaderboard metric). Pass **`--f-beta 0.5`** (or `EVAL_F_BETA=0.5`)
+to weight precision 2× (F0.5), mirroring Martian's adjustable F-beta; the dashboard
+relabels itself `F{β}` to match.
 
 > **Gold-set caveat.** Martian's own methodology documents the gold set as
 > *incomplete* — it caps at human performance, so a real issue the annotators
@@ -420,12 +420,21 @@ your provider key (`EVAL_JUDGE_MODEL` overrides). A judge failure marks the case
 *errored* (ungraded), never a silent zero. Alongside the judge score, a cheap
 deterministic `review_submitted` proxy checks a review was actually posted.
 
+**Diff-blind by default.** The judge sees only the posted review (body + inline
+comments) matched against the gold set — *not* the PR diff — mirroring Martian's
+offline judge. This can penalize terse, location-anchored comments (`off-by-one
+here` on a line the judge can't see). Pass **`--judge-with-diff`** to feed the PR
+diff into the judge for higher-fidelity matching (the judge is instructed never to
+invent findings from the diff); this trades away leaderboard parity, and the
+dashboard marks such grades **`diff-aware`**.
+
 **Run it** (heavy — clones real repos + calls the judge):
 
 ```bash
 lastlight-evals run pr-review --model <model>            # full tier
 lastlight-evals run pr-review --model <model> --limit 3  # first 3 cases (controlled)
-EVAL_F_BETA=0.5 lastlight-evals run pr-review --model <model>   # weight precision 2×
+lastlight-evals run pr-review --model <model> --f-beta 0.5        # weight precision 2×
+lastlight-evals run pr-review --model <model> --judge-with-diff   # give the judge the diff
 ```
 
 In the dashboard, each row's **judge** button opens the judge's working — the

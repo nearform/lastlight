@@ -65,6 +65,10 @@ export interface RunInstanceOptions {
   sessionTrialRel?: string;
   /** 1-based trial index recorded on the result's {@link TrialSession}. */
   trial?: number;
+  /** pr-review judge configuration. `beta` overrides `EVAL_F_BETA`/default; when
+   * `withDiff` is set the PR diff is fed to the judge (higher fidelity for terse
+   * comments, at the cost of Martian-offline parity). */
+  judge?: { beta?: number; withDiff?: boolean };
   /**
    * When `false`, this call does NOT touch `process.env` — the caller has
    * already installed the eval's static-token env around the whole batch (see
@@ -367,7 +371,22 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // silent zero, so it doesn't masquerade as a real score.
     if (isPrReview && inst.review_gold) {
       const reviews = fake.submittedReviews(issueNumber);
-      const rg = await gradeReview({ gold: inst.review_gold, reviews });
+      // Opt-in (`--judge-with-diff`): feed the PR diff to the judge so it can
+      // resolve terse, location-anchored review comments. The diff is base..head,
+      // already in the seeded workspace — no network.
+      let diff: string | undefined;
+      if (opts.judge?.withDiff && inst.pr && seed) {
+        try {
+          diff = execFileSync("git", ["diff", `${inst.pr.base_commit}..${inst.pr.head_commit}`], {
+            cwd: repoDir,
+            encoding: "utf8",
+            maxBuffer: 64 * 1024 * 1024,
+          });
+        } catch {
+          /* leave diff undefined — judge falls back to diff-blind */
+        }
+      }
+      const rg = await gradeReview({ gold: inst.review_gold, reviews, beta: opts.judge?.beta, diff });
       result.review = {
         precision: rg.precision,
         recall: rg.recall,
