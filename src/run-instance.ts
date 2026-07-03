@@ -6,8 +6,10 @@
  *   2. (code-fix) Deterministically seed the workspace: fixture repo @ base
  *      commit + a local bare `origin` so `git push` works offline.
  *   3. Load the REAL workflow YAML (build / issue-triage / …) via the loader.
- *   4. runWorkflow with `sandbox: "none"`, `githubApiBaseUrl → fake GitHub`,
- *      and an EMPTY approvalConfig so gates never pause. No real GitHub creds.
+ *   4. runWorkflow with `sandbox` (default `"none"`; `"gondolin"` isolates the
+ *      agent's tools in a QEMU micro-VM — see `opts.sandbox`), `githubApiBaseUrl
+ *      → fake GitHub`, and an EMPTY approvalConfig so gates never pause. No real
+ *      GitHub creds.
  *   5. Grade deterministically (execution + behavioral) and collect metrics.
  *
  * The only deviations from production are the ones we can't do unattended:
@@ -69,6 +71,16 @@ export interface RunInstanceOptions {
    * `withDiff` is set the PR diff is fed to the judge (higher fidelity for terse
    * comments, at the cost of Martian-offline parity). */
   judge?: { beta?: number; withDiff?: boolean };
+  /**
+   * Execution sandbox backend for the agent (defaults to `"none"`). `"gondolin"`
+   * runs the agent's bash/file tools inside a QEMU micro-VM so it cannot read
+   * host paths outside its workspace (the anti-spoil property) — crucially the
+   * agent runtime and `github_*` tools stay in-process, so the fake GitHub
+   * (`githubApiBaseUrl`) is still honoured. `"docker"`/`"smol"` run the whole
+   * agent inside the container/VM and do NOT honour `githubApiBaseUrl`, so they
+   * break the GitHub mock as wired today (a documented follow-up).
+   */
+  sandbox?: NonNullable<ExecutorConfig["sandbox"]>;
   /**
    * When `false`, this call does NOT touch `process.env` — the caller has
    * already installed the eval's static-token env around the whole batch (see
@@ -231,7 +243,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     const prepared = opts.arm.prepare(ctx as Record<string, unknown>);
 
     const config: ExecutorConfig = {
-      sandbox: "none",
+      sandbox: opts.sandbox ?? "none",
       stateDir,
       sessionsDir,
       // Run the agent inside the pre-seeded `<workspace>/<repo>/` checkout (only

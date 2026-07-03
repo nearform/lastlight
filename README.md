@@ -145,8 +145,10 @@ tests) is taken through the **real** production workflow end to end:
 2. For `code-fix`, the **workspace is seeded** with the fixture repo at its base
    commit plus a local bare `origin`, so `git push` works fully offline.
 3. The **real workflow YAML** (`issue-triage`, `build`, …) is loaded from
-   `lastlight` and run with `sandbox:"none"`, the agent's `github_*` tools
-   pointed at the fake, and approval gates disabled (so it never pauses).
+   `lastlight` and run with `sandbox:"none"` by default (in-process), the agent's
+   `github_*` tools pointed at the fake, and approval gates disabled (so it never
+   pauses). Pass `--sandbox gondolin` to isolate the agent's bash/file tools in a
+   QEMU micro-VM (see [Isolation](#isolation---sandbox) below).
 4. The result is **graded deterministically** (with one scoped judge for
    pr-review):
    - **behavioral** — the recorded GitHub calls (labels, comments, PRs) vs the
@@ -162,6 +164,31 @@ tests) is taken through the **real** production workflow end to end:
 
 Run multiple models and you get a side-by-side **scorecard** (HTML + JSON)
 ranking them on pass rate, cost, and latency.
+
+### Isolation (`--sandbox`)
+
+By default the agent runs **in-process** (`sandbox:"none"`) — fast and CI-friendly,
+but with **no filesystem restriction**: the agent process can read any absolute
+path, including this repo's held-out gold data (`datasets/<tier>/tests/`,
+`instances.json`, `.eval-cache/`). A capable model that explores the disk could
+find and spoil the answer key.
+
+`--sandbox gondolin` (or `EVAL_SANDBOX=gondolin`) closes that gap: the agent's
+bash/file tools execute inside a **QEMU micro-VM** that only sees its own
+workspace, so host gold paths are invisible. The agent runtime and `github_*`
+tools stay in-process, so the fake-GitHub mock still works unchanged — this is
+why gondolin, and not `docker`, is the supported isolation backend (`docker`/`smol`
+run the *whole* agent in the container/VM, where the in-process fake GitHub isn't
+reachable).
+
+Gondolin needs QEMU with hardware acceleration and runs **natively** (macOS via
+Apple's Hypervisor.framework, Linux via KVM) — install it with `brew install qemu`
+(macOS) or your distro's `qemu-system` package. It does **not** work inside a
+container on macOS (no `/dev/kvm`, and the failure is a silent hang), so the
+harness runs a fail-fast preflight and aborts with guidance rather than wedging.
+Expect a one-time ~13s VM cold start plus per-tool-call overhead, so keep
+`--sandbox gondolin` for trustworthy/anti-spoil runs and leave the default `none`
+for quick iteration.
 
 ## Run it
 
@@ -185,6 +212,10 @@ lastlight-evals run triage --model glm,deepseek   # a comma-list also works
 
 # repeat each case N times; verdicts WORST-case, cost/tokens/latency MEAN
 lastlight-evals run triage --runs 3
+
+# isolate the agent's tools in a QEMU micro-VM so it can't read host gold data
+# (anti-spoil; needs QEMU natively — see "Isolation" above). Default is none.
+lastlight-evals run pr-review --sandbox gondolin
 
 # run against an overlay repo's OWN workflows + datasets (see below)
 lastlight-evals run --overlay ~/work/lastlight-instance
@@ -454,5 +485,7 @@ black box.
 
 - **`lastlight-evals extract <owner>/<repo>#<n>`** — generate eval cases from
   GitHub historical issues/PRs (issue → fixture, merged PR → held-out tests).
-- Docker-backed runs; real SWE-bench Lite ingestion; per-fixture test runners.
+- Docker-backed sandboxed runs (needs the fake GitHub reachable from inside the
+  container — `--sandbox gondolin` already gives native isolation today); real
+  SWE-bench Lite ingestion; per-fixture test runners.
 - LLM-as-judge stays out by design — grading is deterministic.

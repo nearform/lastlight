@@ -46,6 +46,7 @@ import { startServer, type RunningServer } from "./serve.js";
 import { runInit } from "./init.js";
 import { runAddCase } from "./add-case.js";
 import { runClean } from "./clean.js";
+import { preflightSandbox } from "./sandbox-preflight.js";
 import { ensureRepoCache, ensurePrCommitsInCache, isRealSha } from "./seed.js";
 
 /** Minimal subset of the clack spinner we use. */
@@ -206,7 +207,7 @@ function strFlagAll(name: string): string[] {
 }
 
 /** CLI flags that take a following value (so it isn't read as a tier name). */
-const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta"]);
+const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit", "--f-beta", "--sandbox"]);
 
 async function runEval(): Promise<number> {
   loadDotEnv();
@@ -446,6 +447,33 @@ async function runEval(): Promise<number> {
     return 1;
   }
   const judge = { beta: fBeta, withDiff: process.argv.includes("--judge-with-diff") };
+
+  // Execution sandbox backend (or EVAL_SANDBOX). Default `none` (in-process, no
+  // QEMU dependency — the fast/CI path). `gondolin` isolates the agent's tools
+  // in a QEMU micro-VM so it can't read host gold data, while keeping the fake
+  // GitHub mock (github_* stays in-process). `docker`/`smol` are accepted by the
+  // type but break the mock as wired today — reject them here with guidance.
+  const SANDBOX_BACKENDS = ["none", "gondolin", "docker", "smol"] as const;
+  const sandbox = (strFlag("sandbox") ?? "none") as (typeof SANDBOX_BACKENDS)[number];
+  if (!SANDBOX_BACKENDS.includes(sandbox)) {
+    p.log.error(`--sandbox must be one of ${SANDBOX_BACKENDS.join("|")}, got "${sandbox}".`);
+    return 1;
+  }
+  if (sandbox === "docker" || sandbox === "smol") {
+    p.log.error(
+      `--sandbox ${sandbox} isn't supported yet: it runs the whole agent inside the ` +
+        `container/VM, where the in-process fake GitHub (githubApiBaseUrl) isn't reachable. ` +
+        `Use --sandbox gondolin for isolation (keeps the mock), or --sandbox none.`,
+    );
+    return 1;
+  }
+  if (sandbox === "gondolin") {
+    const probe = preflightSandbox(sandbox);
+    if (!probe.ok) {
+      p.log.error(probe.message);
+      return 1;
+    }
+  }
 
   // Instances per tier, resolved ONCE — the case set is identical across arms
   // (arms vary only the model selection / assets, never the cases).
@@ -738,6 +766,7 @@ async function runEval(): Promise<number> {
         sessionTrialRel: trialRel,
         trial: t,
         judge,
+        sandbox,
       });
       r.tier = w.tierName;
       trials.push(r);
@@ -966,6 +995,10 @@ Run options:
   --f-beta <n>         pr-review F-beta β (default 1 = F1; 0.5 = precision 2×). Or EVAL_F_BETA.
   --judge-with-diff    pr-review: feed the PR diff to the judge (higher fidelity,
                        off by default — Martian's offline judge is diff-blind)
+  --sandbox <backend>  Agent execution sandbox: none (default) | gondolin. none is
+                       in-process (fast, CI). gondolin isolates the agent's tools
+                       in a QEMU micro-VM so it can't read host gold data (needs
+                       QEMU natively — brew install qemu). Or EVAL_SANDBOX.
   --serial             Force serial execution across provider families
   --datasets <dir>     Extra datasets root to discover tiers from
   --models-file <f>    Use an explicit models.json
