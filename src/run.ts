@@ -206,7 +206,7 @@ function strFlagAll(name: string): string[] {
 }
 
 /** CLI flags that take a following value (so it isn't read as a tier name). */
-const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance"]);
+const VALUE_FLAGS = new Set(["--runs", "--model", "--models", "--mode", "--overlay", "--datasets", "--models-file", "--instance", "--limit"]);
 
 async function runEval(): Promise<number> {
   loadDotEnv();
@@ -424,17 +424,32 @@ async function runEval(): Promise<number> {
     .map((s) => s.trim())
     .filter(Boolean);
 
+  // Optional `--limit N`: cap each tier to its first N instances (in file order),
+  // applied AFTER `--instance`. For controlled/cheap runs — e.g. clone + grade
+  // only the first few cases of a heavy tier. `--instance` selects *which* cases;
+  // `--limit` bounds *how many*. Ignored when absent or non-positive.
+  const limitRaw = strFlag("limit");
+  const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
+  if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+    p.log.error(`--limit must be a positive integer, got "${limitRaw}".`);
+    return 1;
+  }
+
   // Instances per tier, resolved ONCE — the case set is identical across arms
   // (arms vary only the model selection / assets, never the cases).
   const tierInstances = new Map<string, SweBenchInstance[]>();
   for (const tierName of tiers) {
     const tier: Tier = discovered.get(tierName)!;
     const all = loadInstances(tier);
-    const instances = instanceFilter.length ? all.filter((i) => instanceFilter.includes(i.instance_id)) : all;
+    const filtered = instanceFilter.length ? all.filter((i) => instanceFilter.includes(i.instance_id)) : all;
+    const instances = limit !== undefined ? filtered.slice(0, limit) : filtered;
     if (!instances.length) {
       const why = instanceFilter.length ? ` matching --instance ${instanceFilter.join(",")}` : ` at ${tier.instancesPath}`;
       p.log.warn(`tier "${tierName}": no instances${why} — skipping`);
       continue;
+    }
+    if (limit !== undefined && filtered.length > instances.length) {
+      p.log.info(`tier "${tierName}": limited to first ${instances.length} of ${filtered.length} instances (--limit ${limit})`);
     }
     tierInstances.set(tierName, instances);
   }
@@ -933,6 +948,7 @@ Run options:
                        config: override each config's default model.
   --compare            Cross-vendor set (only models whose provider key is present)
   --instance <id[,id]> Only run these instance_id(s) (or set EVAL_INSTANCE). Exact match.
+  --limit <n>          Run only the first n instances per tier (after --instance).
   --runs <n>           Repeat each case n× (worst-case verdict, mean metrics)
   --serial             Force serial execution across provider families
   --datasets <dir>     Extra datasets root to discover tiers from

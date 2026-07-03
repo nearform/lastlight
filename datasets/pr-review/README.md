@@ -22,8 +22,13 @@ Then run the tier (heavy — clones the real repos, calls a judge model):
 ```bash
 # grade one model; the judge defaults to a strong model per your provider keys
 # (override with EVAL_JUDGE_MODEL). See src/judge.ts.
-npx tsx src/run.ts run pr-review --model <model> --limit 3
+npx tsx src/run.ts run pr-review --model <model>            # full tier
+npx tsx src/run.ts run pr-review --model <model> --limit 3  # first 3 cases (controlled/cheap)
 ```
+
+`--limit N` caps the tier to its first N instances (in file order) — the
+lightest way to smoke-test the plumbing before cloning + grading all 50. Combine
+with `--instance <id>` to pin exact cases.
 
 Each case's shape (`src/schema.ts`):
 
