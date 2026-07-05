@@ -196,7 +196,9 @@ skills/                 Skill directories — each contains SKILL.md
                         `skill: a`); the runner stages each into a
                         per-phase bundle at `<workspaceRoot>/
                         .lastlight-skills/<phase>/<name>/` (symlink for
-                        gondolin/none, copy for docker) before the agent
+                        none, copy for docker/gondolin — gondolin mounts
+                        only cwd so a symlink would dangle in the guest)
+                        before the agent
                         runs, then maps it to the agent via pi's
                         `--skill`/`skillPaths`. The bundle sits at the
                         workspace root — a sibling of any checked-out

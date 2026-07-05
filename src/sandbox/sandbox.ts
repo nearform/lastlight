@@ -434,14 +434,19 @@ class InProcessSandbox implements Sandbox {
   }
 
   stageSkills(phaseKey: string, skillPaths: string[] | undefined): string[] | undefined {
-    // none: stage at the workspace ROOT (host FS fully visible). gondolin
-    // mounts only cwd, so its bundle is staged under the repo + added to the
-    // checkout's local `.git/info/exclude` so the agent can't commit it.
+    // none: stage at the workspace ROOT (host FS fully visible), by symlink —
+    // the host resolves it and it's the cheap/CI path. gondolin mounts ONLY cwd
+    // into the guest, so its bundle is staged under the repo (inside the mount)
+    // AND must be COPIED, not symlinked: a symlink's target is the skill source
+    // in the install tree (outside cwd), which isn't mounted, so it would dangle
+    // in the guest and the agent couldn't read SKILL.md. Copying (dereferenced)
+    // lands the real files inside the mount, exactly as docker does. The bundle
+    // is added to the checkout's local `.git/info/exclude` so it's never committed.
     const gondolin = this.mode === "gondolin";
     const skillRoot = gondolin ? this.agentCwd : this.hostWorkspaceDir;
-    const staged = stageSkillBundle(skillRoot, phaseKey, skillPaths, "symlink");
+    const staged = stageSkillBundle(skillRoot, phaseKey, skillPaths, gondolin ? "copy" : "symlink");
     if (staged && gondolin) excludeFromGit(this.agentCwd, SKILL_BUNDLE_ROOT);
-    return staged; // host paths — passed through to agentic-pi's skillPaths
+    return staged; // paths inside cwd → agentic-pi maps them into the guest's /workspace
   }
 
   sandboxPathFor(relPath: string): string {

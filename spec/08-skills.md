@@ -34,7 +34,9 @@ runner only:
 1. Resolves the named skills to absolute host directory paths.
 2. Stages each directory into a **per-phase bundle** at
    `<workspaceRoot>/.lastlight-skills/<phaseName>/<name>/` before the
-   agent runs (symlink in gondolin/none, copy in docker). The bundle
+   agent runs (symlink in `none`, copy in docker/gondolin — gondolin
+   mounts only cwd, so a symlink's target would sit outside the mount
+   and dangle in the guest). The bundle
    sits at the workspace root — a sibling of any checked-out repo, never
    inside its git tree — and is keyed per phase so concurrent phases in
    one workspace can't clobber each other's catalogue.
@@ -203,13 +205,16 @@ then maps it to the agent explicitly via pi's `--skill` (docker) /
 - **Whole directory, not just SKILL.md.** `scripts/`, `references/`,
   `assets/` travel along.
 - **Two modes:**
-  - `symlink` (gondolin / none) — `symlinkSync(hostDir, dest, "dir")`.
-    Zero-copy; pi reads the skill files host-side (`none`) or through the
-    cwd mount (`gondolin`, where the bundle sits under the repo).
-  - `copy` (docker) — recursive `cpSync(hostDir, dest, { recursive: true, dereference: true })`.
-    Symlinks pointing at harness host paths wouldn't resolve inside the
-    container; copy piggybacks on the existing workspace bind-mount
-    instead of adding new `-v` flags per skill.
+  - `symlink` (`none` only) — `symlinkSync(hostDir, dest, "dir")`.
+    Zero-copy; the host FS is fully visible so pi reads the skill files
+    host-side through the link.
+  - `copy` (docker / gondolin) — recursive `cpSync(hostDir, dest, { recursive: true, dereference: true })`.
+    The dest sits inside the agent's mounted cwd, but the symlink *target*
+    (the skill source in the install tree) would sit outside it — so a
+    symlink dangles in the guest. Docker's container and gondolin's
+    cwd-only mount both need the real files present; copy (dereferenced)
+    lands them inside the mount, piggybacking on the existing
+    bind/cwd mount instead of adding new mounts per skill.
 
 ```
 <workspaceRoot>/              ← host workDir (bind-mounted whole on docker)

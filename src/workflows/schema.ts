@@ -164,7 +164,8 @@ const PhaseDefinitionSchema = z
      *
      * Each named skill is staged into a per-phase bundle at
      * `.lastlight-skills/<phaseName>/<name>/` before the agent runs (symlink
-     * in gondolin/none, copy in docker) and mapped to the agent explicitly via
+     * in none, copy in docker/gondolin — a symlink's target would be outside
+     * the guest's mounted cwd and dangle) and mapped to the agent explicitly via
      * pi's `--skill`/`skillPaths` (absolute paths). cwd stays the repo; the
      * bundle is staged at the workspace root — a sibling of the repo, outside
      * its git tree — for docker/none (gondolin, which mounts only cwd, stages
