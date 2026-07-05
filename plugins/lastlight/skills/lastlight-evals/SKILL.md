@@ -28,6 +28,7 @@ they want, then go:
 | Author one case from a GitHub PR or issue | **§6** |
 | **Build a PR-review dataset from my own gold PRs** | **§6 → "Build a PR-review dataset"** |
 | Add cases by hand / understand the schema | **§5** + `references/instance-schema.md` |
+| **Iteratively improve the score toward a target** | the **`lastlight-evals-loop`** skill |
 
 New to the whole plugin (server / overlay / client, not just evals)? That's the
 **`lastlight-guide`** skill — this one is evals-only.
@@ -123,6 +124,7 @@ lastlight-evals run pr-review --limit 3         # only the first 3 cases of the 
 lastlight-evals run triage --instance <id[,id2]> # only these exact instance_id(s), comma-separated (or set EVAL_INSTANCE)
 lastlight-evals run pr-review --f-beta 0.5      # pr-review F-beta β (default 1=F1; 0.5=precision 2×). Or EVAL_F_BETA
 lastlight-evals run pr-review --judge-with-diff # feed the PR diff to the judge (higher fidelity; off by default)
+lastlight-evals run pr-review --no-inject-context # DON'T inject synthetic repo-context into the checkout (clean A/B control)
 lastlight-evals run pr-review --sandbox gondolin # isolate the agent's tools in a QEMU micro-VM (anti-spoil). Or EVAL_SANDBOX
 lastlight-evals run triage --no-open            # don't open the report
 # Plain layout: add --overlay .   (e.g. lastlight-evals run triage --overlay .)
@@ -168,6 +170,15 @@ Quick shape (paths are relative to the workspace's `evals/` dir):
   with `add-case --pr <url> --review` (see §6 and
   **`references/authoring-pr-review.md`**). Grading needs a judge model
   (`EVAL_JUDGE_MODEL`, else a strong default per provider key).
+  - **Repo-context injection (pr-review).** The harness can drop a synthetic
+    `AGENTS.md`/`CLAUDE.md` into the checked-out repo so the reviewing agent reads
+    it — a **generic** block from `<overlay>/repo-context/AGENTS.md` (every repo)
+    plus a **per-repo** block from `datasets/pr-review/context/<instance_id>/AGENTS.md`.
+    Presence-based (just create the file), on by default; `--no-inject-context`
+    (or `EVAL_INJECT_CONTEXT=0`) forces a clean control for an A/B. It appends to
+    a real `AGENTS.md`/`CLAUDE.md` if the repo ships one (never shadowing it). This
+    is how you prove *"adding this to your repo improves review quality"* — and the
+    lever the **`lastlight-evals-loop`** skill drives.
 - **Custom tier:** a new `evals/datasets/<tier>/` with `tier.json` +
   `instances.json` (+ `repos/` & `tests/` for code-fix-style tiers). Discovery is
   automatic — no code change.

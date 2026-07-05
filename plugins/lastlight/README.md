@@ -18,6 +18,7 @@ Light's *internal* sandbox skills under the repo's top-level `skills/` dir
 | `lastlight-client` | Point the `lastlight` **CLI client** at an existing server and log in. |
 | `lastlight-overlay` | Create a deployment **overlay** instance and fork/customize workflows, prompts, skills, or the agent persona. |
 | `lastlight-evals` | Scaffold and run a **Last Light Evals** workspace (datasets, models, model comparisons). |
+| `lastlight-evals-loop` | **Drive an eval toward a target score** with a disciplined, anti-gaming improvement loop — diagnose on a train split, validate on a blind held-out split, propose one generic fix at a time. |
 
 ## Install
 

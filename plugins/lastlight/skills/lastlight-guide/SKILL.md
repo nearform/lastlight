@@ -1,6 +1,6 @@
 ---
 name: lastlight-guide
-description: Orientation & router for the Last Light skills. Use ONLY when the user has NOT named a concrete Last Light task — i.e. they're unsure which skill/flow they need, ask "what can Last Light do / where do I start", say "help me with Last Light" with no specific goal, or want a guided tour across server / client / overlay / evals. Do NOT use when the ask already names a task — "set up/deploy a server" → lastlight-server, "connect/log in my CLI" → lastlight-client, "customize a workflow/prompt/persona/config" → lastlight-overlay, "run evals / compare models / author a case / build a PR-review dataset" → lastlight-evals: invoke that skill directly. This skill only routes and, when the goal is ambiguous, asks. Also invocable as /lastlight-guide.
+description: Orientation & router for the Last Light skills. Use ONLY when the user has NOT named a concrete Last Light task — i.e. they're unsure which skill/flow they need, ask "what can Last Light do / where do I start", say "help me with Last Light" with no specific goal, or want a guided tour across server / client / overlay / evals. Do NOT use when the ask already names a task — "set up/deploy a server" → lastlight-server, "connect/log in my CLI" → lastlight-client, "customize a workflow/prompt/persona/config" → lastlight-overlay, "run evals / compare models / author a case / build a PR-review dataset" → lastlight-evals, "iteratively improve an eval toward a target score" → lastlight-evals-loop: invoke that skill directly. This skill only routes and, when the goal is ambiguous, asks. Also invocable as /lastlight-guide.
 version: 1.0.0
 tags: [lastlight, guide, router, orientation, help]
 ---
@@ -66,6 +66,11 @@ exactly what you ship. The loop that ties it together:
 > customize in **`lastlight-overlay`** → measure the change with
 > **`lastlight-evals --overlay .`** → keep it or revert.
 
+To run that loop *toward a target score* — automatically, and without overfitting
+to specific cases — use **`lastlight-evals-loop`**: it diagnoses on a train split,
+validates on a blind held-out split, and proposes one generic overlay fix at a
+time (stopping for sign-off before it touches a gold answer).
+
 ## Quick menu — "I want to…"
 
 | …do this | go to |
@@ -76,6 +81,7 @@ exactly what you ship. The loop that ties it together:
 | Run evals, compare models, browse past runs | **`lastlight-evals`** |
 | Author an eval case from a GitHub PR or issue | **`lastlight-evals`** (§6) |
 | Build a PR-review eval dataset from a list of gold PRs | **`lastlight-evals`** (§6) |
+| Iteratively improve a workflow/prompt to raise an eval score | **`lastlight-evals-loop`** |
 
 ## Preconditions (what every flow assumes)
 
