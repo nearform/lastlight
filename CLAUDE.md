@@ -153,13 +153,15 @@ The release commit is conventionally just the two version-file lines
 
 ## Common tasks
 
-- **Run a subset:** `EVAL_INSTANCE=<substr> lastlight-evals run <tier>` filters by
-  instance id; `--model haiku` (fuzzy) picks one model; `--runs 3` repeats
-  (worst-case verdict, mean metrics).
+- **Run a subset:** `EVAL_INSTANCE=<id[,id2]> lastlight-evals run <tier>` (same as
+  `--instance`) filters by **exact** `instance_id` (comma-separated for several) —
+  NOT a substring, so pass the full id (e.g. `prreview__discourse-graphite-6`);
+  `--model haiku` (fuzzy) picks one model; `--runs 3` repeats (worst-case verdict,
+  mean metrics).
 - **Verifying the harness/UI (not a model):** when running an eval just to check
   the plumbing or dashboard works, pick the **cheapest, fastest** model available
   (e.g. `--model haiku`, or the cheapest entry in `models.json`) and the smallest
-  scope (`EVAL_INSTANCE=<substr>` and/or one tier). Model quality isn't what
+  scope (`EVAL_INSTANCE=<exact-id>` and/or one tier). Model quality isn't what
   you're testing — don't burn time/cost on a strong model for a smoke run.
 - **Add a triage case:** append a `SweBenchInstance` to
   `datasets/triage/instances.json` (`instance_id`, `issue`, `triage_gold`,

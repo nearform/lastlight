@@ -101,11 +101,17 @@ export function discoverTiers(opts: DiscoverOptions): Map<string, Tier> {
   return tiers;
 }
 
-/** Load a tier's instances, with the optional `EVAL_INSTANCE` substring filter. */
+/**
+ * Load a tier's instances (no filtering). The `--instance` / `EVAL_INSTANCE`
+ * filter is applied by the sole caller (`run.ts`) with exact, comma-split
+ * `instance_id` matching — do NOT re-filter here. An earlier substring filter on
+ * this line silently shadowed that one: it treated the whole `EVAL_INSTANCE`
+ * value (commas and all) as a single substring, so a comma-separated list matched
+ * nothing and the run aborted with "no instances matched" before the real filter
+ * ran. One filter, one place.
+ */
 export function loadInstances(tier: Tier): SweBenchInstance[] {
-  const all = JSON.parse(readFileSync(tier.instancesPath, "utf8")) as SweBenchInstance[];
-  const filter = process.env.EVAL_INSTANCE?.trim();
-  return filter ? all.filter((i) => i.instance_id.includes(filter)) : all;
+  return JSON.parse(readFileSync(tier.instancesPath, "utf8")) as SweBenchInstance[];
 }
 
 /**
