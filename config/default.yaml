@@ -62,6 +62,7 @@ routes:
     qa_test: qa-test
     demo: demo
     pr_fix: pr-fix
+    pr_review: pr-review
     pr_comment: pr-comment
     issue_build: github-orchestrator
     issue_explore: explore

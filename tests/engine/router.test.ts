@@ -216,6 +216,22 @@ describe('routeEvent — comment.created', () => {
     }
   });
 
+  it('routes a review request on a PR to pr-review (a real formal review)', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'review' });
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light can you review this?',
+      authorAssociation: 'COLLABORATOR',
+      prNumber: 5,
+    }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-review');
+      expect(result.context._routeKey).toBe('github.pr_review');
+      expect(result.context.prNumber).toBe(5);
+    }
+  });
+
   it('routes maintainer non-build intent on PR to pr-comment (diff-aware Q&A)', async () => {
     mockClassifyComment.mockResolvedValue({ intent: 'chat' });
     const result = await routeEvent(makeEnvelope({

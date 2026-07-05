@@ -473,6 +473,7 @@ function defaultRouteConfig(): RouteConfig {
       approval_response: "approval-response",
       security_review: "security-review",
       pr_fix: "pr-fix",
+      pr_review: "pr-review",
       pr_comment: "pr-comment",
       issue_build: "github-orchestrator",
       issue_explore: "explore",

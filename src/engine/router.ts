@@ -335,6 +335,9 @@ export async function routeEvent(
       if (envelope.prNumber) {
         // PR comments:
         //   build    → pr-fix (full Architect→Executor→Reviewer fix loop)
+        //   review   → pr-review (a real formal review with inline comments —
+        //              "can you review this?" should trigger an actual review,
+        //              not a one-off Q&A answer)
         //   verify   → verify (test a behavioural claim against the PR)
         //   qa-test  → qa-test (drive a flow against the PR, step pass/fail)
         //   else     → pr-comment (diff-aware Q&A; the issue-comment skill
@@ -343,6 +346,7 @@ export async function routeEvent(
         // Explore isn't meaningful on PRs since the code already exists.
         const { handler: prHandler, routeKey: prRouteKey } =
           intent === "build" ? { handler: gh.pr_fix || "pr-fix", routeKey: "github.pr_fix" }
+          : intent === "review" ? { handler: gh.pr_review || "pr-review", routeKey: "github.pr_review" }
           : intent === "verify" ? { handler: gh.verify || "verify", routeKey: "github.verify" }
           : intent === "qa-test" ? { handler: gh.qa_test || "qa-test", routeKey: "github.qa_test" }
           : intent === "demo" ? { handler: gh.demo || "demo", routeKey: "github.demo" }

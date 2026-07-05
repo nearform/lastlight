@@ -57,7 +57,7 @@ BUILD — The user is ASKING YOU (the bot) to make code changes NOW in a GitHub 
 EXPLORE — The user wants help shaping an idea BEFORE writing code: "help me think through X", "brainstorm Y", "spec this out", "explore an idea for Z". A bare "explore" / "explore this" / "let's explore" is also EXPLORE — especially as a reply on an existing issue (ISSUE TITLE present), where the implicit object is the issue's idea. EXPLORE = shape the idea / write a spec; BUILD = write the code now.
 QUESTION — The user is asking a substantive INFORMATIONAL question that warrants research to answer well: "how does X work?", "what's the difference between X and Y?", "how does <repo> compare to <other tool>?", "is it possible to do Z?", "why does X happen?". The deliverable is an ANSWER, not code and not a spec. QUESTION is for real questions that benefit from reading docs/code or searching the web — NOT casual chat, thanks, or one-word replies (those stay CHAT). EXPLORE shapes a NEW idea into a spec; QUESTION answers an EXISTING question about how something works or compares.
 TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
-REVIEW — The user wants to review PRs on a repo: "review cliftonc/repo", "check PRs", "can you review PRs on <repo>?".
+REVIEW — The user wants a code review. Either repo-wide ("review cliftonc/repo", "check PRs", "can you review PRs on <repo>?") OR, when the comment is a reply on a PR (ISSUE TITLE present), a request to review THIS PR: "review this", "can you review this?", "please review", "take a look at this PR", "give this a review". The deliverable is a formal PR review (inline comments on the diff). Prefer REVIEW over CHAT whenever there's a clear "review"/"take a look" request on a PR.
 SECURITY — The user wants a security scan/review of a repo: "security review cliftonc/repo", "scan for vulnerabilities", "check security", "can you do a security review of <repo>?".
 VERIFY — The user wants you to TEST whether a specific claim or behaviour is actually true and report the evidence: "verify that the rate limiter blocks", "does this PR really fix the crash?", "confirm X actually works", "check that Y no longer happens", "prove the --fork flag creates a new session". The deliverable is a CONFIRMED/REFUTED verdict backed by RUNNING the code — not a code change and not a code-quality review. Prefer VERIFY over REVIEW when the user wants proof a behaviour works/is fixed, rather than an assessment of the diff.
 QATEST — The user wants you to drive an app or CLI through a flow and report step-level pass/fail: "qa test the signup flow", "run through login and tell me what breaks", "smoke-test the CLI commands", "exercise the checkout flow". The deliverable is a step-by-step QA report. Prefer QATEST over VERIFY when it's a multi-step flow to exercise rather than a single claim to confirm.
@@ -93,8 +93,11 @@ a clear command directed at the issue's subject:
   this", "make it so" → BUILD (write the code now).
 - "explore", "explore this", "let's explore", "think this through", "spec this
   out", "brainstorm this" → EXPLORE (shape the idea / write a spec first).
-A bare command word ("explore", "build") on an existing issue is a clear
-command, NOT ambiguous chat.
+- "review this", "can you review this", "please review", "take a look",
+  "give this a review" → REVIEW (do a real code review now; on a PR this means
+  review the current PR's diff).
+A bare command word ("explore", "build", "review") on an existing issue/PR is a
+clear command, NOT ambiguous chat.
 This verb rule is for IMPERATIVE requests only. A PR/issue reply that REPORTS
 already-completed work or responds to your review — "thanks, fixed in <sha>",
 "addressed in commit abc123", "done, added a regression test", "this is
@@ -135,6 +138,8 @@ Examples:
 "can you do a security review of https://github.com/cliftonc/lastlight" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
 "could you triage https://github.com/foo/bar?" → INTENT: TRIAGE, REPO: foo/bar, ISSUE: NONE, REASON: NONE
 "please review https://github.com/foo/bar/pull/42" → INTENT: REVIEW, REPO: foo/bar, ISSUE: 42, REASON: NONE
+"can you review this?" with ISSUE TITLE "Add HTML sanitizer for messages" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE
+"take a look at this PR when you get a chance" with ISSUE TITLE "Port fastify adapter" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE
 "scan https://github.com/cliftonc/lastlight for vulnerabilities" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE
 "delete any files in ~/work/lastlight/docs" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
 "can you remove the old docs folder for me" (no ISSUE TITLE, no repo) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE
