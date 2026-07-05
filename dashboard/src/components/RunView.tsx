@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { IndexRun, InstanceResult, PendingCase } from "../types";
+import type { IndexRun, InstanceResult, MartianRanking, PendingCase } from "../types";
 import { useScorecard } from "../lib/api";
 import { fmtDate, modelLabel } from "../lib/format";
 import { summarizeModels } from "../lib/summarize";
@@ -72,6 +72,20 @@ export function RunView({ run }: { run: IndexRun }) {
           )}
           &nbsp;·&nbsp; {fmtDate(card?.meta?.generatedAt ?? run.generatedAt)}
         </div>
+        {tier === "pr-review" && card?.meta?.martian?.models[0] && (
+          <button
+            onClick={() => document.getElementById("martian-rank")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/10 px-3 py-1.5 font-mono text-xs text-accent transition-colors hover:bg-accent/20"
+          >
+            <span className="font-bold">
+              Lastlight ranks #{card.meta.martian.models[0].rank} of {card.meta.martian.models[0].of}
+            </span>
+            <span className="text-accent/70">
+              vs Martian tools over these {card.meta.martian.prCount} PR{card.meta.martian.prCount === 1 ? "" : "s"}
+            </span>
+            <span aria-hidden>↓</span>
+          </button>
+        )}
       </header>
 
       {error && <ErrorNote message={(error as Error).message} />}
@@ -141,6 +155,10 @@ export function RunView({ run }: { run: IndexRun }) {
 
           <h2 className="mb-3.5 mt-8 text-lg font-semibold text-base-content">Per-instance results</h2>
           <InstanceTable tier={tier} results={tierResults} pending={tierPending} labels={labels} scorecardUrl={run.scorecard} />
+
+          {tier === "pr-review" && card?.meta?.martian && (
+            <MartianRankPanel ranking={card.meta.martian} labels={labels} />
+          )}
         </>
       )}
     </div>
@@ -190,6 +208,99 @@ function PhaseModelPanel({ results, labels }: { results: InstanceResult[]; label
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * "Where would we rank?" — our model(s) slotted into Martian's Code Review Bench
+ * tools, all scored over the SAME PRs this run covered (subset-fair). Rows are
+ * sorted by F1; our arm(s) are highlighted at their rank. Cross-judge caveat is
+ * shown: our reviews are judged by our judge, Martian's tools by `judgeModel`.
+ */
+function MartianRankPanel({ ranking, labels }: { ranking: MartianRanking; labels: Record<string, string> }) {
+  // Merge tools + our arm(s) into one leaderboard, sorted by F1 desc. Our rows are
+  // flagged so we can highlight them and show the rank badge.
+  const usKeys = new Set(ranking.models.map((m) => m.key));
+  const rows = [
+    ...ranking.tools.map((t) => ({ ...t, us: false, display: t.name })),
+    // Our row is the whole Lastlight harness (skills + workflow + model), not the
+    // raw model — the honest peer to Martian's tools, which are also full products.
+    ...ranking.models.map((m) => ({ ...m, us: true, display: `Lastlight (${modelLabel(labels, m.key)})` })),
+  ].sort((a, b) => b.f1 - a.f1);
+  const maxF1 = Math.max(...rows.map((r) => r.f1), 0.01);
+  const primary = ranking.models[0]; // single-model runs: the headline rank
+
+  return (
+    <div className="mt-8 scroll-mt-4" id="martian-rank">
+      <h3 className="mb-1 text-lg font-semibold text-base-content">
+        Where would this rank?{" "}
+        {primary && (
+          <span className="ml-1 align-middle font-mono text-sm font-bold text-accent">
+            #{primary.rank} of {primary.of}
+          </span>
+        )}
+      </h3>
+      <p className="mb-3 max-w-2xl text-2xs leading-5 text-base-content/50">
+        Ranked against{" "}
+        <a
+          href="https://github.com/withmartian/code-review-benchmark"
+          target="_blank"
+          rel="noreferrer"
+          className="text-info hover:underline"
+        >
+          Martian's Code Review Bench
+        </a>{" "}
+        tools over the <b className="font-semibold text-base-content/70">same {ranking.prCount} PR{ranking.prCount === 1 ? "" : "s"}</b>{" "}
+        this run covered — not the full leaderboard. Micro-averaged F1. Only tools with data on every one of
+        these PRs are shown.{" "}
+        <span className="text-base-content/40">
+          Cross-judge: our reviews are graded by our judge; Martian's tools by{" "}
+          <span className="font-mono">{ranking.judgeModel.split("/").pop()}</span>.
+        </span>
+      </p>
+      <div className="max-w-2xl overflow-hidden rounded-xl border border-base-300 bg-base-200">
+        {rows.map((r, i) => {
+          const pct = Math.round((r.f1 / maxF1) * 100);
+          return (
+            <div
+              key={`${r.us ? "us" : "tool"}-${r.key}`}
+              className={
+                "flex items-center gap-3 px-3 py-1.5 " +
+                (i > 0 ? "border-t border-base-300/60 " : "") +
+                (r.us ? "bg-accent/15" : "")
+              }
+            >
+              <span className="w-6 shrink-0 text-right font-mono text-2xs tabular-nums text-base-content/40">
+                {i + 1}
+              </span>
+              <span
+                className={
+                  "w-56 shrink-0 truncate font-mono text-xs " +
+                  (r.us ? "font-bold text-accent" : "text-base-content/80")
+                }
+                title={r.display}
+              >
+                {r.display}
+              </span>
+              <div className="relative h-3 flex-1 overflow-hidden rounded bg-base-300/50">
+                <div
+                  className={"h-full rounded " + (r.us ? "bg-accent" : "bg-info/50")}
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              <span
+                className={
+                  "w-10 shrink-0 text-right font-mono text-xs tabular-nums " +
+                  (r.us ? "font-bold text-accent" : "text-base-content/60")
+                }
+              >
+                {(r.f1 * 100).toFixed(1)}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

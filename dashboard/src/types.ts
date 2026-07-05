@@ -154,6 +154,34 @@ export interface RunMeta {
   live?: boolean;
   progress?: string;
   pending?: PendingCase[];
+  /** pr-review: this run's rank among Martian's Code Review Bench tools over the
+   * PRs it covered (subset-fair). Absent unless the tier ships the sidecar. */
+  martian?: MartianRanking;
+}
+
+/** One tool's (or our model's) micro-aggregated score over the covered PR subset. */
+export interface MartianScore {
+  key: string;
+  name: string;
+  tp: number;
+  fp: number;
+  fn: number;
+  precision: number;
+  recall: number;
+  f1: number;
+}
+
+export interface MartianModelRank extends MartianScore {
+  rank: number;
+  of: number;
+}
+
+export interface MartianRanking {
+  judgeModel: string;
+  prCount: number;
+  coveredInstances: string[];
+  tools: MartianScore[];
+  models: MartianModelRank[];
 }
 
 export interface Scorecard {

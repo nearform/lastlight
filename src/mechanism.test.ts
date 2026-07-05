@@ -19,6 +19,8 @@ import { seedWorkspace, seedWorkspaceFromGit, prFilesFromGit } from "./seed.js";
 import { gitDiffAgainstBase } from "./run-instance.js";
 import { execFileSync } from "node:child_process";
 import { gradeExecution, gradeBehavioral, gradeTriage, gradeReview, fBeta } from "./grade.js";
+import { computeMartianRanking, type MartianSidecar } from "./report.js";
+import type { InstanceResult } from "./schema.js";
 import { loadMergedConfig, resolvePhaseModel } from "./config.js";
 import { modelsArm, configArm, releaseOverlayGuard } from "./arm.js";
 
@@ -292,6 +294,12 @@ describe("pr-review grade — F-beta math + judge-free paths", () => {
     expect(g.fbeta).toBe(0);
     expect(g.falseNegatives).toHaveLength(1);
     expect(g.error).toBeUndefined();
+    // Carries a minimal trace so the 0 is inspectable (not a blank judge modal):
+    // no findings, and the gold listed as unmatched.
+    expect(g.trace).toBeDefined();
+    expect(g.trace!.findings).toHaveLength(0);
+    expect(g.trace!.gold).toHaveLength(1);
+    expect(g.trace!.gold[0].matchedFinding).toBeNull();
   });
 
   it("an empty review on an empty gold set is perfect (no judge call)", async () => {
@@ -299,6 +307,8 @@ describe("pr-review grade — F-beta math + judge-free paths", () => {
     expect(g.precision).toBe(1);
     expect(g.recall).toBe(1);
     expect(g.fbeta).toBe(1);
+    expect(g.trace).toBeDefined();
+    expect(g.trace!.gold).toHaveLength(0);
   });
 
   it("a posted review with no provider key is ungraded (error), not a silent zero", async () => {
@@ -324,6 +334,46 @@ describe("pr-review grade — F-beta math + judge-free paths", () => {
       if (saved.r !== undefined) process.env.OPENROUTER_API_KEY = saved.r;
       if (saved.j !== undefined) process.env.EVAL_JUDGE_MODEL = saved.j;
     }
+  });
+});
+
+describe("computeMartianRanking — subset-fair leaderboard placement", () => {
+  // Two covered PRs; toolA has data on both, toolB only on PR1 (must be excluded
+  // so every ranked row is scored on the identical PR set). Our model is slotted
+  // in by micro-F1.
+  const sidecar: MartianSidecar = {
+    judgeModel: "anthropic/claude-opus-4-5-20251101",
+    toolDisplayNames: { toolA: "Tool A", toolB: "Tool B" },
+    instances: {
+      pr1: { url: "u1", toolMetrics: { toolA: { tp: 2, fp: 0, fn: 1 }, toolB: { tp: 1, fp: 1, fn: 2 } } },
+      pr2: { url: "u2", toolMetrics: { toolA: { tp: 1, fp: 1, fn: 1 } } },
+    },
+  };
+  const review = (matched: number, posted: number, gold: number) =>
+    ({ precision: 0, recall: 0, fbeta: 0, beta: 1, posted, gold, matched, falsePositives: [], falseNegatives: [] });
+  const res = (id: string, r: ReturnType<typeof review>) =>
+    ({ instance_id: id, model: "m", review: r } as unknown as InstanceResult);
+
+  it("ranks only tools present on every covered PR, and slots our model by micro-F1", () => {
+    const results = [
+      res("pr1", review(1, 3, 2)), // tp1 fp2 fn1
+      res("pr2", review(1, 2, 2)), // tp1 fp1 fn1  → micro tp2 fp3 fn2 → F1 ≈ 0.444
+      res("other", review(9, 9, 9)), // not in the sidecar → ignored, doesn't inflate prCount
+    ];
+    const r = computeMartianRanking(results, sidecar)!;
+    expect(r.prCount).toBe(2);
+    expect(r.coveredInstances).toEqual(["pr1", "pr2"]);
+    // toolB dropped (missing on pr2); only toolA is comparable on both PRs.
+    expect(r.tools.map((t) => t.key)).toEqual(["toolA"]);
+    expect(r.tools[0].f1).toBeCloseTo(2 / 3, 5); // tp3 fp1 fn2 → P.75 R.6 → F1 .667
+    const us = r.models[0];
+    expect(us.f1).toBeCloseTo(4 / 9, 5); // tp2 fp3 fn2 → P.4 R.5 → F1 .444
+    expect(us.rank).toBe(2); // below toolA
+    expect(us.of).toBe(2); // 1 comparable tool + us
+  });
+
+  it("returns undefined when nothing graded overlaps the sidecar", () => {
+    expect(computeMartianRanking([res("nope", review(1, 1, 1))], sidecar)).toBeUndefined();
   });
 });
 

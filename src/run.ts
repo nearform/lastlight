@@ -34,9 +34,12 @@ import {
   writeArtifacts,
   writeScorecard,
   aggregateTrials,
+  loadMartianSidecar,
+  computeMartianRanking,
   type RunMeta,
   type PendingCase,
   type Scorecard,
+  type MartianSidecar,
 } from "./report.js";
 import type { SweBenchInstance, InstanceResult, TrialSession } from "./schema.js";
 import { bootstrapAssets } from "./bootstrap.js";
@@ -525,66 +528,69 @@ async function runEval(): Promise<number> {
     return 1;
   }
 
-  // Prefetch git-source repos into the repo-local cache, SERIALLY and once per
-  // repo, BEFORE the (possibly parallel) batch — concurrent clones of the same
-  // repo race, and after this the per-run checkout is fully offline. A vendored
-  // `repos/<id>/` fixture skips this (it isn't a git-source case).
-  const gitRepos = new Map<string, string>(); // repo -> a base sha to verify
-  for (const w of work) {
-    const fixture = join(w.datasetDir, "repos", w.inst.instance_id);
-    if (existsSync(fixture)) continue;
-    if (isRealSha(w.inst.base_commit) && /^[^/]+\/[^/]+$/.test(w.inst.repo) && !gitRepos.has(w.inst.repo)) {
-      gitRepos.set(w.inst.repo, w.inst.base_commit);
-    }
-  }
-  if (gitRepos.size) {
-    const s = p.spinner();
-    s.start(`Caching ${gitRepos.size} git-source repo(s)…`);
-    try {
-      for (const [repo, baseCommit] of gitRepos) {
-        s.message(`Caching ${repo}…`);
-        ensureRepoCache({ repo, baseCommit });
+  // Prefetch git-source repos + pr-review checkouts into the repo-local cache,
+  // SERIALLY and once per repo / (repo, PR), BEFORE the (possibly parallel) batch —
+  // concurrent clones of the same repo race, and after this each per-run checkout is
+  // fully offline. A vendored `repos/<id>/` fixture skips the clone (not a
+  // git-source case); pr-review fetches `refs/pull/<n>/head` for squash/rebase-merged
+  // PRs. Returns false (after printing the failure) on a cache error so the caller
+  // aborts. DEFERRED until AFTER the dashboard server is up (below): a cold clone can
+  // take minutes, and gating the browser open behind it makes the dashboard look
+  // hung — this way it opens immediately and shows the plan + pending cases while
+  // the prefetch runs.
+  const prefetchSources = (): boolean => {
+    const gitRepos = new Map<string, string>(); // repo -> a base sha to verify
+    for (const w of work) {
+      const fixture = join(w.datasetDir, "repos", w.inst.instance_id);
+      if (existsSync(fixture)) continue;
+      if (isRealSha(w.inst.base_commit) && /^[^/]+\/[^/]+$/.test(w.inst.repo) && !gitRepos.has(w.inst.repo)) {
+        gitRepos.set(w.inst.repo, w.inst.base_commit);
       }
-      s.stop(`Cached ${gitRepos.size} git-source repo(s).`);
-    } catch (err) {
-      s.stop(chalk.red(`Failed to cache a git-source repo: ${(err as Error).message}`));
-      p.outro(chalk.red("aborted"));
-      return 1;
     }
-  }
+    if (gitRepos.size) {
+      const s = p.spinner();
+      s.start(`Caching ${gitRepos.size} git-source repo(s)…`);
+      try {
+        for (const [repo, baseCommit] of gitRepos) {
+          s.message(`Caching ${repo}…`);
+          ensureRepoCache({ repo, baseCommit });
+        }
+        s.stop(`Cached ${gitRepos.size} git-source repo(s).`);
+      } catch (err) {
+        s.stop(chalk.red(`Failed to cache a git-source repo: ${(err as Error).message}`));
+        return false;
+      }
+    }
 
-  // Prefetch pr-review checkouts: ensure each PR's base + head commit is in the
-  // repo-local mirror (fetching refs/pull/<n>/head for squash/rebase-merged PRs),
-  // SERIALLY and once per (repo, PR) before the batch — so per-run checkout is
-  // offline and concurrent fetches don't race.
-  const seenPr = new Set<string>();
-  const prToFetch = work.filter((w) => {
-    if (!w.inst.pr || !/^[^/]+\/[^/]+$/.test(w.inst.repo)) return false;
-    const k = `${w.inst.repo}#${w.inst.pr.number}`;
-    if (seenPr.has(k)) return false;
-    seenPr.add(k);
-    return true;
-  });
-  if (prToFetch.length) {
-    const s = p.spinner();
-    s.start(`Caching ${prToFetch.length} PR checkout(s)…`);
-    try {
-      for (const w of prToFetch) {
-        s.message(`Caching ${w.inst.repo}#${w.inst.pr!.number}…`);
-        ensurePrCommitsInCache({
-          repo: w.inst.repo,
-          pullNumber: w.inst.pr!.number,
-          baseCommit: w.inst.pr!.base_commit,
-          headCommit: w.inst.pr!.head_commit,
-        });
+    const seenPr = new Set<string>();
+    const prToFetch = work.filter((w) => {
+      if (!w.inst.pr || !/^[^/]+\/[^/]+$/.test(w.inst.repo)) return false;
+      const k = `${w.inst.repo}#${w.inst.pr.number}`;
+      if (seenPr.has(k)) return false;
+      seenPr.add(k);
+      return true;
+    });
+    if (prToFetch.length) {
+      const s = p.spinner();
+      s.start(`Caching ${prToFetch.length} PR checkout(s)…`);
+      try {
+        for (const w of prToFetch) {
+          s.message(`Caching ${w.inst.repo}#${w.inst.pr!.number}…`);
+          ensurePrCommitsInCache({
+            repo: w.inst.repo,
+            pullNumber: w.inst.pr!.number,
+            baseCommit: w.inst.pr!.base_commit,
+            headCommit: w.inst.pr!.head_commit,
+          });
+        }
+        s.stop(`Cached ${prToFetch.length} PR checkout(s).`);
+      } catch (err) {
+        s.stop(chalk.red(`Failed to cache a PR checkout: ${(err as Error).message}`));
+        return false;
       }
-      s.stop(`Cached ${prToFetch.length} PR checkout(s).`);
-    } catch (err) {
-      s.stop(chalk.red(`Failed to cache a PR checkout: ${(err as Error).message}`));
-      p.outro(chalk.red("aborted"));
-      return 1;
     }
-  }
+    return true;
+  };
 
   // Group work by provider family. Families run CONCURRENTLY (independent
   // provider keys / rate limits); within a family runs stay serial. Force
@@ -634,6 +640,19 @@ async function runEval(): Promise<number> {
     gitSha,
     labels,
   });
+
+  // pr-review: load each tier's Martian leaderboard sidecar ONCE. Lets every
+  // scorecard carry "where would we rank" over the PRs it covered (recomputed per
+  // write so it fills in live). Tiers that ship no sidecar just get `undefined`.
+  const martianSidecars = new Map<string, MartianSidecar | undefined>();
+  for (const tier of tiers) {
+    const root = discovered.get(tier)?.root;
+    martianSidecars.set(tier, root ? loadMartianSidecar(root) : undefined);
+  }
+  const martianFor = (tier: string, tierResults: InstanceResult[]) => {
+    const sc = martianSidecars.get(tier);
+    return sc ? computeMartianRanking(tierResults, sc) : undefined;
+  };
 
   // In `config` runs the axis is the config(s); show the merged per-step model
   // map for a single-arm run so the plan is legible.
@@ -691,6 +710,16 @@ async function runEval(): Promise<number> {
     }
   }
 
+  // With the dashboard already open above, do the (possibly slow) source prefetch —
+  // a cold clone now shows as pending in the dashboard instead of a blank wait. On
+  // failure, tear the server down so the open listening socket doesn't keep the
+  // process alive past the abort.
+  if (!prefetchSources()) {
+    if (server) await server.close();
+    p.outro(chalk.red("aborted"));
+    return 1;
+  }
+
   const all: InstanceResult[] = [];
   let harnessErrors = 0;
   let completed = 0;
@@ -741,6 +770,7 @@ async function runEval(): Promise<number> {
           heartbeat: now,
           progress: `${tierResults.length}/${tierCases}`,
           pending,
+          martian: martianFor(tier, tierResults),
         }),
       );
     }
@@ -886,7 +916,7 @@ async function runEval(): Promise<number> {
   const generatedAt = new Date().toISOString();
   for (const tier of tiers) {
     const tierResults = all.filter((r) => (r.tier ?? "") === tier);
-    writeArtifacts(resultsDirFor(tier), withMeta(summarize(tierResults), { ...baseMetaFor(tier), generatedAt, live: false }));
+    writeArtifacts(resultsDirFor(tier), withMeta(summarize(tierResults), { ...baseMetaFor(tier), generatedAt, live: false, martian: martianFor(tier, tierResults) }));
   }
 
   p.log.success(
@@ -895,17 +925,21 @@ async function runEval(): Promise<number> {
 
   const ran = runs > 1 ? `${completed} runs (${all.length} cases × ${runs})` : `${all.length} runs`;
 
-  // Keep the dashboard server alive so the just-finished run stays viewable.
-  // Only block in an interactive terminal — piped/non-TTY callers exit cleanly.
-  if (server && process.stdout.isTTY) {
+  // Keep the dashboard server alive so the just-finished run stays viewable —
+  // until the user stops it (Ctrl-C, or `kill`/stop for a detached run). The
+  // dashboard is opt-in already (`--no-open`, or CI, ⇒ no server was started), so
+  // the server merely existing means "the user wants the report up." We hold it
+  // open even for non-TTY/background runs — that's exactly when you want to come
+  // back to the report after the run has detached — so a finished background run
+  // stays serving until explicitly killed instead of vanishing on completion.
+  if (server) {
     const runUrl = `${server.url}/#/${encodeURIComponent(tierKeyFor(tiers[0]))}/${encodeURIComponent(runId)}`;
-    p.log.success(`Dashboard → ${chalk.cyan(runUrl)} ${chalk.dim("(serving · Ctrl-C to stop)")}`);
+    p.log.success(`Dashboard → ${chalk.cyan(runUrl)} ${chalk.dim("(serving · Ctrl-C or kill to stop)")}`);
     const tail = harnessErrors > 0 ? chalk.yellow(`done — ${ran}, ${harnessErrors} harness error${harnessErrors === 1 ? "" : "s"} (see above)`) : chalk.green(`done — ${ran}`);
     p.outro(tail);
     await waitForSigint();
     await server.close();
   } else {
-    if (server) await server.close();
     if (harnessErrors > 0) {
       p.outro(chalk.yellow(`done — ${ran}, ${harnessErrors} harness error${harnessErrors === 1 ? "" : "s"} (see above)`));
     } else {
