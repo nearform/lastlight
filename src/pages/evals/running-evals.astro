@@ -63,6 +63,7 @@ lastlight-evals run pr-review --limit 3   # only the first 3 cases (controlled /
 			<tr><td><code>--runs &lt;n&gt;</code></td><td>Repeat each case n× — worst-case verdict, mean metrics.</td></tr>
 			<tr><td><code>--f-beta &lt;n&gt;</code></td><td>PR-review F-beta β (default 1 = F1). See <a href="/evals/pr-review">PR review</a>.</td></tr>
 			<tr><td><code>--judge-with-diff</code></td><td>PR-review: feed the PR diff to the judge (off by default).</td></tr>
+			<tr><td><code>--no-inject-context</code></td><td>PR-review: don't inject synthetic repo context into the checkout (a clean A/B control; or <code>EVAL_INJECT_CONTEXT=0</code>). See <a href="/evals/pr-review">PR review</a>.</td></tr>
 			<tr><td><code>--sandbox &lt;backend&gt;</code></td><td><code>none</code> (default, in-process, fast/CI) or <code>gondolin</code> (QEMU micro-VM isolation; or <code>EVAL_SANDBOX</code>).</td></tr>
 			<tr><td><code>--serial</code></td><td>Force serial execution across provider families.</td></tr>
 			<tr><td><code>--datasets &lt;dir&gt;</code></td><td>Extra datasets root to discover tiers from.</td></tr>

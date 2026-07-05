@@ -35,6 +35,12 @@ export const evalsNav: EvalsNavSection[] = [
 		],
 	},
 	{
+		title: 'Improving',
+		items: [
+			{ slug: 'improve', label: 'Improving the score' },
+		],
+	},
+	{
 		title: 'Reference',
 		items: [
 			{ slug: 'dashboard', label: 'The dashboard' },

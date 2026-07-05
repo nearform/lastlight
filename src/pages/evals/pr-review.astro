@@ -131,6 +131,38 @@ lastlight-evals run pr-review --model &lt;model&gt; --judge-with-diff # give the
 		<figcaption>The judge trace — extracted findings ↔ gold, false positives, and the raw replies behind the score.</figcaption>
 	</figure>
 
+	<h2>Give the reviewer repo context</h2>
+
+	<p>
+		A PR is locked at its head SHA, so the reviewing agent only sees the code — not
+		the conventions a maintainer carries in their head. The harness can inject a
+		synthetic <code>AGENTS.md</code> / <code>CLAUDE.md</code> into the checkout so the
+		agent reads it (the coding agent auto-loads it, walking up from its working
+		directory — no prompt change needed). Two presence-based sources, on by default:
+	</p>
+
+	<ul>
+		<li><strong>Generic</strong> — <code>&lt;overlay&gt;/repo-context/AGENTS.md</code>, injected into <em>every</em> reviewed repo. For guidance that helps on any codebase (e.g. "prefer concrete, line-anchored findings; suppress pure style nits").</li>
+		<li><strong>Per-repo</strong> — <code>datasets/pr-review/context/&lt;instance_id&gt;/AGENTS.md</code>, injected only for that case's repo. This is the portable <em>"add this to your repo and reviews improve"</em> recommendation — honest because it's exactly what a maintainer could commit.</li>
+	</ul>
+
+	<p>
+		It appends to a real <code>AGENTS.md</code> / <code>CLAUDE.md</code> if the repo
+		ships one (never shadowing it), and records which context each case saw on the
+		scorecard. Toggle it off for a clean control run to measure the lift:
+	</p>
+
+	<pre><code>lastlight-evals run pr-review --overlay instance                      # inject (default)
+lastlight-evals run pr-review --overlay instance --no-inject-context  # control (or EVAL_INJECT_CONTEXT=0)</code></pre>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			Proving that a piece of context lifts review quality — generically or for one
+			repo — is exactly what the <a href="/evals/improve">improvement loop</a> drives,
+			alongside prompt and skill changes.
+		</div>
+	</div>
+
 	<h2>Where would this rank? (Martian only)</h2>
 
 	<p>
@@ -152,9 +184,9 @@ lastlight-evals run pr-review --model &lt;model&gt; --judge-with-diff # give the
 			<span class="label">← Previous</span>
 			<span class="title">Code fix</span>
 		</a>
-		<a class="next" href="/evals/dashboard">
+		<a class="next" href="/evals/improve">
 			<span class="label">Next →</span>
-			<span class="title">The dashboard</span>
+			<span class="title">Improving the score</span>
 		</a>
 	</div>
 </EvalsLayout>
