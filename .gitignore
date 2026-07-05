@@ -4,6 +4,9 @@ dist-site/
 .wrangler/
 eval-results/
 .eval-cache/
+# pr-review cases are generated from Martian's benchmark (scripts/import-martian.ts),
+# not vendored — populate locally and it persists across runs without git noise.
+datasets/pr-review/instances.json
 .env
 *.log
 .DS_Store

@@ -9,9 +9,10 @@ leaderboard metric); set `EVAL_F_BETA=0.5` to weight precision 2× (F0.5), mirro
 Martian's adjustable F-beta. Cases come from their **offline** set
 (`offline/results/benchmark_data.json`).
 
-`instances.json` ships **empty** because the cases are large, real-repo PRs — they
-are *generated*, not vendored. Populate it from the Martian offline set (50 PRs
-across Sentry / Grafana / Cal.com / Discourse / Keycloak):
+`instances.json` is **gitignored** — the cases are *generated* from Martian's
+benchmark, not vendored, so they don't live in this repo. Populate it **once**
+locally and it persists across runs (no git noise, no re-import each time). It
+holds 50 PRs across Sentry / Grafana / Cal.com / Discourse / Keycloak:
 
 ```bash
 # needs `gh` (authenticated) + network; pins base/head SHAs into instances.json
@@ -48,3 +49,10 @@ Each case's shape (`src/schema.ts`):
 > (by their own methodology) to be **incomplete** — it caps at human performance, so
 > a real issue the annotators missed scores as a false positive. That understates
 > precision, which is why the default is F1 rather than the precision-weighted F0.5.
+
+---
+
+**Attribution.** Cases derive from Martian's
+[Code Review Bench](https://github.com/withmartian/code-review-benchmark)
+(© 2025 Martian, MIT). The importer pins the PRs' base/head SHAs and inlines the
+gold comments locally; nothing from Martian's dataset is committed to this repo.
