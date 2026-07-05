@@ -650,17 +650,37 @@ export class PhaseExecutor {
 
   /** Compute the base…head diff locally and parse it into a commentable set. */
   private gitCommentableDiff(repoDir: string, baseRef: string): Map<string, Set<string>> | null {
+    const diff = () =>
+      execFileSync("git", ["-C", repoDir, "diff", `origin/${baseRef}...HEAD`], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
     try {
       try {
         execFileSync("git", ["-C", repoDir, "fetch", "origin", baseRef, "--depth", "50"], { stdio: "ignore" });
       } catch {
         /* offline / already present — fall through to diff */
       }
-      const diff = execFileSync("git", ["-C", repoDir, "diff", `origin/${baseRef}...HEAD`], {
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-      });
-      return parseDiff(diff);
+      try {
+        return parseDiff(diff());
+      } catch (err) {
+        // The `--depth 50` fetch above shallow-clones the base branch. When a PR
+        // forked far behind the branch's current tip (a long-lived / stale PR),
+        // the merge-base sits beyond that shallow boundary and the three-dot
+        // diff dies with "no merge base" — which would demote EVERY finding to
+        // the body. Deepen the base history and retry once so the review still
+        // anchors inline. Only on this rare failure path do we pay the full
+        // fetch. (`--unshallow` no-ops-then-throws on an already-complete repo,
+        // hence best-effort.)
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/no merge base|shallow/i.test(msg)) throw err;
+        try {
+          execFileSync("git", ["-C", repoDir, "fetch", "origin", baseRef, "--unshallow"], { stdio: "ignore" });
+        } catch {
+          /* already complete / offline — retry the diff regardless */
+        }
+        return parseDiff(diff());
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[post-review] git diff failed (${msg}); demoting all findings to the body`);
