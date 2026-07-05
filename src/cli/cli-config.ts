@@ -17,7 +17,7 @@ import path from "node:path";
 export interface CliConfig {
   /** Base URL of the Last Light instance, e.g. https://ll.example.com */
   url: string;
-  /** Bearer token minted by the instance (7-day TTL). */
+  /** Bearer token minted by the instance (30-day TTL, auto-renewed on use). */
   token: string;
   /** ISO timestamp the token was saved — informational. */
   savedAt: string;
@@ -116,6 +116,28 @@ export function resolveServerHome(override?: string): string {
     readRaw()?.serverHome ||
     defaultServerHome()
   );
+}
+
+/**
+ * Read a bearer token's expiry (unix seconds) WITHOUT verifying its signature —
+ * the CLI lacks the server secret, it only needs the timestamp to decide when
+ * to proactively refresh. Returns null if the token shape is unparseable.
+ */
+export function tokenExpiry(token: string): number | null {
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));
+    return typeof payload.exp === "number" ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a token is already past its expiry (unverified — see tokenExpiry). */
+export function tokenIsExpired(token: string): boolean {
+  const exp = tokenExpiry(token);
+  return exp !== null && Math.floor(Date.now() / 1000) >= exp;
 }
 
 /** Remove the saved config (logout). No-op if it doesn't exist. */

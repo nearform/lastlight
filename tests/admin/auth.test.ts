@@ -1,7 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { createToken, verifyToken, authIsEnabled } from "#src/admin/auth.js";
+import crypto from "node:crypto";
+import {
+  createToken,
+  verifyToken,
+  verifyTokenForRefresh,
+  decodeToken,
+  authIsEnabled,
+  REFRESH_GRACE_SECONDS,
+} from "#src/admin/auth.js";
 
 const SECRET = "test-secret-key";
+
+/** Mint a signed token with an arbitrary payload — for crafting expired ones. */
+function signToken(payload: object): string {
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto.createHmac("sha256", SECRET).update(payloadB64).digest("base64url");
+  return `${payloadB64}.${sig}`;
+}
+
+const nowS = () => Math.floor(Date.now() / 1000);
 
 describe("authIsEnabled", () => {
   it("is off when nothing is configured", () => {
@@ -71,5 +88,54 @@ describe("createToken / verifyToken", () => {
 
   it("rejects a token with wrong part count", () => {
     expect(verifyToken("notavalidtoken", SECRET)).toBe(false);
+  });
+});
+
+describe("decodeToken", () => {
+  it("returns exp and method for a valid token", () => {
+    const token = createToken(SECRET, "slack");
+    const decoded = decodeToken(token);
+    expect(decoded?.method).toBe("slack");
+    expect(typeof decoded?.exp).toBe("number");
+  });
+
+  it("decodes WITHOUT verifying the signature (tampered sig still decodes)", () => {
+    const token = createToken(SECRET, "password");
+    const tampered = token.slice(0, -2) + "xx";
+    expect(decodeToken(tampered)?.method).toBe("password");
+  });
+
+  it("drops an unrecognized method", () => {
+    expect(decodeToken(signToken({ exp: nowS() + 100, method: "evil" }))?.method).toBeUndefined();
+  });
+
+  it("returns null when exp is missing", () => {
+    expect(decodeToken(signToken({ method: "slack" }))).toBeNull();
+  });
+
+  it("returns null for a malformed token", () => {
+    expect(decodeToken("nope")).toBeNull();
+  });
+});
+
+describe("verifyTokenForRefresh", () => {
+  it("accepts a live token", () => {
+    expect(verifyTokenForRefresh(createToken(SECRET), SECRET)).toBe(true);
+  });
+
+  it("accepts a token expired within the grace window", () => {
+    const token = signToken({ exp: nowS() - REFRESH_GRACE_SECONDS + 60 });
+    expect(verifyToken(token, SECRET)).toBe(false); // strictly expired
+    expect(verifyTokenForRefresh(token, SECRET)).toBe(true); // but still refreshable
+  });
+
+  it("rejects a token expired beyond the grace window", () => {
+    const token = signToken({ exp: nowS() - REFRESH_GRACE_SECONDS - 60 });
+    expect(verifyTokenForRefresh(token, SECRET)).toBe(false);
+  });
+
+  it("rejects a grace-window token signed with a different secret", () => {
+    const token = signToken({ exp: nowS() - 60 });
+    expect(verifyTokenForRefresh(token, "wrong-secret")).toBe(false);
   });
 });

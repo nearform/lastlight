@@ -1,7 +1,15 @@
 import crypto from "node:crypto";
 import type { Context, Next } from "hono";
 
-const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+
+/**
+ * Grace window past `exp` in which a token can still be *refreshed* (but not
+ * used to authenticate a normal request). Lets an active user whose token
+ * lapsed briefly slide their session forward via the refresh route instead of
+ * being bounced back through a full login. Beyond this, they must re-login.
+ */
+export const REFRESH_GRACE_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
 export function createToken(secret: string, method?: "password" | "slack" | "github"): string {
   const payload: { exp: number; method?: string } = { exp: Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS };
@@ -11,24 +19,68 @@ export function createToken(secret: string, method?: "password" | "slack" | "git
   return `${payloadB64}.${sig}`;
 }
 
-export function verifyToken(token: string, secret: string): boolean {
+/**
+ * Verify the HMAC signature and return the decoded payload, or null if the
+ * signature is invalid / the payload is unparseable. Does NOT check expiry —
+ * that's the caller's job (strict for auth, lenient for refresh).
+ */
+function verifySignature(token: string, secret: string): TokenPayload | null {
   const parts = token.split(".");
-  if (parts.length !== 2) return false;
+  if (parts.length !== 2) return null;
   const [payloadB64, sig] = parts as [string, string];
   const expectedSig = crypto.createHmac("sha256", secret).update(payloadB64).digest("base64url");
   if (
     expectedSig.length !== sig.length ||
     !crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(sig))
   ) {
-    return false;
+    return null;
   }
+  return decodeToken(token);
+}
+
+export function verifyToken(token: string, secret: string): boolean {
+  const payload = verifySignature(token, secret);
+  if (!payload) return false;
+  return Math.floor(Date.now() / 1000) < payload.exp;
+}
+
+/**
+ * Like `verifyToken`, but also accepts a token that expired within the last
+ * `REFRESH_GRACE_SECONDS`. Used ONLY by the refresh route so a briefly-lapsed
+ * session can be renewed. The signature must still be valid (we minted it), so
+ * this can't be forged.
+ */
+export function verifyTokenForRefresh(token: string, secret: string): boolean {
+  const payload = verifySignature(token, secret);
+  if (!payload) return false;
+  return Math.floor(Date.now() / 1000) < payload.exp + REFRESH_GRACE_SECONDS;
+}
+
+export interface TokenPayload {
+  exp: number;
+  method?: "password" | "slack" | "github";
+}
+
+/**
+ * Decode a token's payload WITHOUT verifying its signature or expiry — used to
+ * carry the login `method` across a refresh. Callers that need authenticity
+ * must still gate on `verifyToken` (the refresh route runs behind
+ * `authMiddleware`, which does exactly that). Returns null if unparseable.
+ */
+export function decodeToken(token: string): TokenPayload | null {
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
   try {
-    const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
-    if (typeof payload.exp !== "number") return false;
-    if (Math.floor(Date.now() / 1000) >= payload.exp) return false;
-    return true;
+    const payload = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));
+    if (typeof payload.exp !== "number") return null;
+    const method = payload.method;
+    return {
+      exp: payload.exp,
+      method:
+        method === "password" || method === "slack" || method === "github" ? method : undefined,
+    };
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -65,6 +117,7 @@ export function authMiddleware(enabled: boolean, secret: string) {
     // Let login + health + OAuth routes through
     if (
       path.endsWith("/login") ||
+      path.endsWith("/token/refresh") ||
       path.endsWith("/health") ||
       path.endsWith("/auth-required") ||
       path.endsWith("/oauth/slack/authorize") ||

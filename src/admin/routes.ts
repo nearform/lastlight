@@ -16,7 +16,7 @@ import {
   getContainerLogs,
   streamContainerLogs,
 } from "./docker.js";
-import { authMiddleware, createToken, verifyToken } from "./auth.js";
+import { authMiddleware, createToken, verifyTokenForRefresh, decodeToken } from "./auth.js";
 import { Cron } from "croner";
 import type { CronScheduler } from "../cron/scheduler.js";
 import { enumerateOverlayAssets } from "../config/overlay-assets.js";
@@ -441,6 +441,24 @@ export function createAdminRoutes(
       return c.json({ error: "invalid password" }, 401);
     }
     return c.json({ token: createToken(config.adminSecret, "password") });
+  });
+
+  // Slide an active session forward: mint a fresh full-TTL token. Runs OUTSIDE
+  // the strict authMiddleware (it's on the pass-through list) so a token that
+  // lapsed within REFRESH_GRACE_SECONDS can still renew — we re-check the
+  // signature + grace here via verifyTokenForRefresh. The login `method` is
+  // carried across so refreshed tokens keep their provenance.
+  app.post("/token/refresh", (c) => {
+    if (!authEnabled) {
+      // No auth configured — hand back the same open-access token login issues.
+      return c.json({ token: createToken(config.adminSecret), authDisabled: true });
+    }
+    const header = c.req.header("Authorization");
+    const current = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+    if (!current || !verifyTokenForRefresh(current, config.adminSecret)) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    return c.json({ token: createToken(config.adminSecret, decodeToken(current)?.method) });
   });
 
   // Slack OAuth routes (only active when Slack OAuth env vars are configured)

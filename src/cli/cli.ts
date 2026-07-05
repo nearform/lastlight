@@ -31,6 +31,8 @@ import {
   saveConfig,
   clearConfig,
   loadConfig,
+  tokenExpiry,
+  tokenIsExpired,
   DEFAULT_URL,
 } from "./cli-config.js";
 import { table, age, colorStatus, checkmark, followSSE } from "./cli-format.js";
@@ -154,7 +156,46 @@ async function handle(res: Response, path: string): Promise<any> {
   return data;
 }
 
+/**
+ * Server token TTL is 30 days; renew once a token is past its half-life so an
+ * active user's session slides forward indefinitely and never lapses mid-use.
+ */
+const REFRESH_WHEN_UNDER_SECONDS = 60 * 60 * 24 * 15; // 15 days
+
+let refreshChecked = false;
+
+/**
+ * Proactively swap a near-expiry (or grace-window-lapsed) saved token for a
+ * fresh one before it dies. Only touches the file-persisted token — never an
+ * env/flag-supplied one, which we don't own. Best-effort: a failed refresh
+ * leaves the old token in place and the command proceeds (a real 401 is handled
+ * downstream). Runs at most once per process.
+ */
+async function ensureFreshToken(): Promise<void> {
+  if (refreshChecked) return;
+  refreshChecked = true;
+  if (typeof flags.token === "string" || process.env.LASTLIGHT_TOKEN) return;
+  const saved = loadConfig();
+  if (!saved?.token) return;
+  const exp = tokenExpiry(saved.token);
+  if (exp === null) return;
+  const remaining = exp - Math.floor(Date.now() / 1000);
+  if (remaining > REFRESH_WHEN_UNDER_SECONDS) return; // still comfortably fresh
+  try {
+    const res = await fetch(`${saved.url}/admin/api/token/refresh`, {
+      method: "POST",
+      headers: authHeaders(saved.token),
+    });
+    if (!res.ok) return; // expired beyond grace, or unreachable — leave it be
+    const { token } = (await res.json()) as { token?: string };
+    if (token) saveConfig({ url: saved.url, token });
+  } catch {
+    /* offline / unreachable — proceed with the existing token */
+  }
+}
+
 async function apiGet(path: string): Promise<any> {
+  await ensureFreshToken();
   const t = target();
   let res: Response;
   try {
@@ -166,6 +207,7 @@ async function apiGet(path: string): Promise<any> {
 }
 
 async function apiPost(path: string, body: unknown): Promise<any> {
+  await ensureFreshToken();
   const t = target();
   let res: Response;
   try {
@@ -296,7 +338,7 @@ async function cmdLogin(): Promise<void> {
     if (!res.ok) die(`Login failed (${res.status}).`);
     const { token } = (await res.json()) as { token: string };
     saveConfig({ url, token });
-    console.log(chalk.green(`✓ Logged in to ${url}`) + chalk.dim(" (token valid ~7 days)"));
+    console.log(chalk.green(`✓ Logged in to ${url}`) + chalk.dim(" (token valid ~30 days)"));
     return;
   }
 
@@ -313,7 +355,9 @@ async function cmdLogin(): Promise<void> {
       }
       const gotState = reqUrl.searchParams.get("state");
       const gotToken = reqUrl.searchParams.get("token");
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      // `Connection: close` so the browser's keep-alive socket doesn't keep
+      // Node's event loop alive after server.close() — otherwise login hangs.
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", Connection: "close" });
       if (gotState !== state || !gotToken) {
         res.end("<html><body><h2>Login failed</h2><p>Invalid state — you can close this tab.</p></body></html>");
         server.close();
@@ -340,8 +384,20 @@ async function cmdLogin(): Promise<void> {
     }, 120_000).unref();
   });
 
+  // Defend against a stale dashboard handing back an already-dead token: refuse
+  // to persist it rather than saving a credential that 401s on first use.
+  if (tokenIsExpired(token)) {
+    die(
+      "The dashboard handed back an already-expired token (its dashboard build may be stale). " +
+        "Try `lastlight login <url> --password`, or update the instance.",
+    );
+  }
+
   saveConfig({ url, token });
-  console.log(chalk.green(`✓ Logged in to ${url}`) + chalk.dim(" (token valid ~7 days)"));
+  console.log(chalk.green(`✓ Logged in to ${url}`) + chalk.dim(" (token valid ~30 days)"));
+  // The loopback server's keep-alive socket can keep the event loop alive even
+  // after server.close(); exit explicitly now that the token is saved.
+  process.exit(0);
 }
 
 // ── status ───────────────────────────────────────────────────────────────────

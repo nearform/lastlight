@@ -34,20 +34,19 @@ export function CliAuthorize({
     setWorking(true);
     setError(null);
     try {
-      // Normally the token is already in localStorage. If auth is disabled the
-      // dashboard renders without one — mint a throwaway token so the CLI still
-      // receives something to send (the instance accepts an empty body then).
-      let token = auth.getToken();
+      // ALWAYS mint a fresh token for the CLI rather than recycling whatever is
+      // in localStorage — that stored token may be days old and near (or past)
+      // expiry, which previously handed the CLI a dead-on-arrival credential.
+      // The refresh route is authed, so send the current token when we have one;
+      // when auth is disabled it returns an open-access token regardless.
+      const existing = auth.getToken();
+      const res = await fetch("/admin/api/token/refresh", {
+        method: "POST",
+        headers: existing ? { Authorization: `Bearer ${existing}` } : {},
+      });
+      const token = res.ok ? (((await res.json()) as { token?: string }).token ?? null) : null;
       if (!token) {
-        const res = await fetch("/admin/api/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-        if (res.ok) token = ((await res.json()) as { token?: string }).token ?? null;
-      }
-      if (!token) {
-        setError("No token available to hand to the CLI.");
+        setError("Could not mint a fresh token to hand to the CLI.");
         setWorking(false);
         return;
       }
@@ -67,7 +66,7 @@ export function CliAuthorize({
           <p className="text-sm text-base-content/70">
             A command-line tool on this machine (<code className="text-xs">{host}</code>) is
             requesting access to this Last Light instance. Authorizing sends it a session token
-            valid for ~7 days.
+            valid for ~30 days (and the CLI keeps it renewed while you use it).
           </p>
           {error && <div className="alert alert-error text-sm">{error}</div>}
           <div className="card-actions justify-end mt-2">
