@@ -33,7 +33,7 @@ import {
 import type { SweBenchInstance, InstanceResult, PhaseSession } from "./schema.js";
 import type { Arm } from "./arm.js";
 import { startFakeGitHub } from "./fake-github.js";
-import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, isRealSha, type SeedResult } from "./seed.js";
+import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, type SeedResult } from "./seed.js";
 import { collectMetrics, drainSessions, readSessionLog, listSessionFiles, concatJsonl } from "./metrics.js";
 import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview } from "./grade.js";
 
@@ -212,6 +212,13 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // the diff run. Falls back to the workspace root if nothing was seeded.
     const repoDir = seed?.workDir ?? join(stateDir, "sandboxes", taskId);
 
+    // Serve the PR's changed files at GET /pulls/:n/files (pr-review): computed
+    // from base..head in the just-seeded workspace, so a review agent that lists
+    // files via the API gets the real changed set instead of a 404.
+    if (isPrReview && inst.pr && seed) {
+      fake.setPullFiles(inst.pr.number, prFilesFromGit(repoDir, inst.pr.base_commit, inst.pr.head_commit));
+    }
+
     // 3. Real workflow definition + run context.
     const def = getWorkflow(workflowName);
     const ctx: TemplateContext = {
@@ -229,8 +236,15 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       bootstrapLabel: "lastlight:bootstrap",
       // pr-review's Context block keys off `prNumber` — the skill goes straight
       // to github_get_pull_request when it's set (buildPhasePrompt dumps every
-      // defined ctx field into the "Context:" block).
-      ...(isPrReview && inst.pr ? { prNumber: inst.pr.number, prTitle: inst.pr.title } : {}),
+      // defined ctx field into the "Context:" block). `baseBranch` is what the
+      // deterministic `post-review` phase reads to compute the commentable diff
+      // (`git diff origin/<baseBranch>...HEAD`) — WITHOUT it every finding is
+      // demoted to the review body and the line-anchored inline-comment path
+      // (the point of the tier) never fires. Prod sets it from the PR's base ref;
+      // the eval must too, or it diverges from what ships.
+      ...(isPrReview && inst.pr
+        ? { prNumber: inst.pr.number, prTitle: inst.pr.title, baseBranch: inst.pr.base_ref }
+        : {}),
       // No prePopulateBranch → the runner never clones from GitHub; the agent
       // works in the dir we seeded above (or an empty dir for triage).
     };

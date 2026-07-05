@@ -15,7 +15,7 @@
 import { createServer } from "node:http";
 import { type AddressInfo } from "node:net";
 
-import type { IssueSeed, PullSeed } from "./schema.js";
+import type { IssueSeed, PullSeed, PullFile } from "./schema.js";
 
 export interface RecordedCall {
   method: string;
@@ -28,7 +28,7 @@ export interface RecordedCall {
 export interface SubmittedReview {
   body: string;
   event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT" | "PENDING";
-  comments: { path: string; line?: number; body: string }[];
+  comments: { path: string; line?: number; side?: "LEFT" | "RIGHT"; body: string }[];
 }
 
 interface Label {
@@ -59,6 +59,10 @@ interface InlineComment {
   user: { login: string };
   path: string;
   line?: number;
+  /** Diff side the line anchors to (RIGHT = head, LEFT = base) — part of
+   * GitHub's real review-comment shape, so the workflow posts it and the grader
+   * can see which version a finding is on. */
+  side?: "LEFT" | "RIGHT";
   position?: number;
   body: string;
   created_at: string;
@@ -117,6 +121,9 @@ export interface FakeGitHub {
   /** Reviews the workflow submitted on a PR (event + body + inline comments) —
    * the pr-review grade reads these. */
   submittedReviews: (prNumber: number) => SubmittedReview[];
+  /** Register the changed-file set served at `GET /pulls/:n/files`. Called after
+   * the workspace is seeded (the diff isn't known at construction time). */
+  setPullFiles: (prNumber: number, files: PullFile[]) => void;
 }
 
 export interface FakeGitHubOptions {
@@ -167,6 +174,10 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
   const pulls: PullRequest[] = [];
   let pullSeq = 1;
   let reviewSeq = 5000;
+
+  // Changed files per PR, served at GET /pulls/:n/files. Populated after seeding
+  // via setPullFiles (the diff isn't known when the fake is constructed).
+  const pullFiles = new Map<number, PullFile[]>();
 
   // Seed PRs (pr-review tier). Each PR also gets a SHADOW issue so the
   // issue-comment + labels endpoints work on the PR number (GitHub models a PR
@@ -405,8 +416,8 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
       }
     }
 
-    // Per-PR routes: /repos/:owner/:repo/pulls/:n[/reviews|/comments]
-    const pullMatch = path.match(new RegExp(`^${escapeRe(repoBase)}/pulls/(\\d+)(/reviews|/comments)?$`));
+    // Per-PR routes: /repos/:owner/:repo/pulls/:n[/reviews|/comments|/files]
+    const pullMatch = path.match(new RegExp(`^${escapeRe(repoBase)}/pulls/(\\d+)(/reviews|/comments|/files)?$`));
     if (pullMatch) {
       const num = Number(pullMatch[1]);
       const sub = pullMatch[2];
@@ -433,7 +444,7 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
             body?: string;
             event?: string;
             commit_id?: string;
-            comments?: { path: string; line?: number; position?: number; body: string }[];
+            comments?: { path: string; line?: number; side?: "LEFT" | "RIGHT"; position?: number; body: string }[];
           };
           const review: Review = {
             id: reviewSeq++,
@@ -447,6 +458,7 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
               user: { login: "last-light[bot]" },
               path: c.path,
               line: c.line,
+              side: c.side,
               position: c.position,
               body: c.body,
               created_at: NOW,
@@ -463,6 +475,14 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
       // /pulls/:n/comments — inline review comments.
       if (sub === "/comments" && method === "GET") {
         json(200, pr.reviewComments);
+        return true;
+      }
+
+      // /pulls/:n/files — the PR's changed files (computed from the seeded
+      // workspace's git diff; empty until setPullFiles is called). Pagination
+      // query params are ignored — the full set is returned in one page.
+      if (sub === "/files" && method === "GET") {
+        json(200, pullFiles.get(num) ?? []);
         return true;
       }
     }
@@ -527,8 +547,9 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
       (pulls.find((p) => p.number === n)?.submitted ?? []).map((r) => ({
         body: r.body,
         event: stateToEvent(r.state),
-        comments: r.comments.map((c) => ({ path: c.path, line: c.line, body: c.body })),
+        comments: r.comments.map((c) => ({ path: c.path, line: c.line, side: c.side, body: c.body })),
       })),
+    setPullFiles: (n, files) => pullFiles.set(n, files),
   };
 }
 

@@ -23,6 +23,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, cpSync, existsSync, appendFileSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 
+import type { PullFile } from "./schema.js";
+
 const FIXED = "2026-01-01T00:00:00 +0000";
 const GIT_ENV: NodeJS.ProcessEnv = {
   ...process.env,
@@ -36,6 +38,75 @@ const GIT_ENV: NodeJS.ProcessEnv = {
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, env: GIT_ENV, stdio: ["ignore", "pipe", "pipe"] }).toString();
+}
+
+const FILE_STATUS: Record<string, PullFile["status"]> = { A: "added", D: "removed", M: "modified" };
+
+/** Build GitHub's `GET /pulls/:n/files` payload from `git diff base..head` in the
+ * seeded workspace, so the fake GitHub can serve a review agent that lists PR
+ * files via the API. Rename detection is OFF (`-M` omitted) so a rename shows as
+ * a delete + add with plain paths — a faithful-enough view for review and far
+ * simpler to parse than git's rename-pair path syntax. Binary files carry no
+ * `patch`. Returns `[]` if the range can't be diffed (never throws). */
+export function prFilesFromGit(workDir: string, base: string, head: string): PullFile[] {
+  const range = `${base}..${head}`;
+  let nameStatus = "";
+  let numstat = "";
+  let fullDiff = "";
+  try {
+    nameStatus = git(workDir, ["diff", "--no-color", "--name-status", range]);
+    numstat = git(workDir, ["diff", "--no-color", "--numstat", range]);
+    fullDiff = git(workDir, ["diff", "--no-color", range]);
+  } catch {
+    return [];
+  }
+
+  // additions/deletions per file (numstat: "<adds>\t<dels>\t<path>"; "-" = binary).
+  const stats = new Map<string, { additions: number; deletions: number }>();
+  for (const line of numstat.split("\n")) {
+    if (!line.trim()) continue;
+    const [adds, dels, ...rest] = line.split("\t");
+    const file = rest.join("\t");
+    if (!file) continue;
+    stats.set(file, {
+      additions: adds === "-" ? 0 : Number(adds) || 0,
+      deletions: dels === "-" ? 0 : Number(dels) || 0,
+    });
+  }
+
+  // per-file patch: split the full diff on the `diff --git ` file boundary and
+  // keep the hunks (from the first `@@`), matching GitHub's `patch` field.
+  const patches = new Map<string, string>();
+  const MARKER = "diff --git ";
+  for (let chunk of fullDiff.split(new RegExp(`\\n(?=${MARKER})`))) {
+    if (!chunk.startsWith(MARKER)) continue;
+    chunk = chunk.slice(MARKER.length);
+    const header = chunk.split("\n", 1)[0];
+    const m = header.match(/^a\/(.*) b\/(.*)$/);
+    const file = m?.[2];
+    if (!file) continue;
+    const at = chunk.indexOf("\n@@");
+    if (at >= 0) patches.set(file, chunk.slice(at + 1));
+  }
+
+  const files: PullFile[] = [];
+  for (const line of nameStatus.split("\n")) {
+    if (!line.trim()) continue;
+    const [code, ...rest] = line.split("\t");
+    const file = rest.join("\t");
+    if (!file) continue;
+    const s = stats.get(file) ?? { additions: 0, deletions: 0 };
+    files.push({
+      sha: "0".repeat(40),
+      filename: file,
+      status: FILE_STATUS[code[0]] ?? "modified",
+      additions: s.additions,
+      deletions: s.deletions,
+      changes: s.additions + s.deletions,
+      patch: patches.get(file),
+    });
+  }
+  return files;
 }
 
 /** Where to seed the repo: `<stateDir>/sandboxes/<taskId>[/<repoSubdir>]`. With a

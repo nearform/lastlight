@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { startFakeGitHub } from "./fake-github.js";
-import { seedWorkspace, seedWorkspaceFromGit } from "./seed.js";
+import { seedWorkspace, seedWorkspaceFromGit, prFilesFromGit } from "./seed.js";
 import { gitDiffAgainstBase } from "./run-instance.js";
 import { execFileSync } from "node:child_process";
 import { gradeExecution, gradeBehavioral, gradeTriage, gradeReview, fBeta } from "./grade.js";
@@ -157,6 +157,106 @@ describe("fake GitHub — PR + review endpoints (pr-review tier)", () => {
       expect(miss.ok).toBe(false);
     } finally {
       await fake.close();
+    }
+  });
+
+  it("records line-anchored inline comments (the contract pr-review's post-review phase depends on)", async () => {
+    // pr-review's deterministic `post-review` phase POSTs a review whose
+    // findings are inline comments with path + line + side. The mock must
+    // preserve those anchors so the grader can fold them in and a human sees
+    // them threaded on the diff. This locks that route.
+    const fake = await seedPr();
+    try {
+      const res = await fetch(`${fake.url}/repos/acme/widget/pulls/42/reviews`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event: "REQUEST_CHANGES",
+          body: "Two findings, both on the diff.",
+          commit_id: "b".repeat(40),
+          comments: [
+            { path: "src/page.ts", line: 12, side: "RIGHT", body: "negative slice crashes" },
+            { path: "src/page.ts", line: 20, side: "RIGHT", body: "missing await" },
+          ],
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      const submitted = fake.submittedReviews(42);
+      expect(submitted).toHaveLength(1);
+      expect(submitted[0].comments).toHaveLength(2);
+      // The full anchor round-trips — path + line + side (RIGHT = head), the
+      // shape GitHub's real review-comment API carries.
+      expect(submitted[0].comments[0]).toMatchObject({ path: "src/page.ts", line: 12, side: "RIGHT" });
+      expect(submitted[0].comments[1]).toMatchObject({ path: "src/page.ts", line: 20, side: "RIGHT" });
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("serves GET /pulls/:n/files — empty (not 404) until seeded, then the registered set", async () => {
+    // A review agent may list the PR's files via the API instead of a local
+    // `git diff`. The route must exist (empty array before seeding, never 404)
+    // and return whatever setPullFiles registered post-seed.
+    const fake = await seedPr();
+    try {
+      const before = await fetch(`${fake.url}/repos/acme/widget/pulls/42/files`);
+      expect(before.status).toBe(200);
+      expect(await before.json()).toEqual([]);
+
+      fake.setPullFiles(42, [
+        { sha: "0".repeat(40), filename: "src/page.ts", status: "modified", additions: 3, deletions: 1, changes: 4, patch: "@@ -1 +1,3 @@" },
+      ]);
+      const after = await fetch(`${fake.url}/repos/acme/widget/pulls/42/files?per_page=100`);
+      expect(after.status).toBe(200);
+      const files = await after.json();
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatchObject({ filename: "src/page.ts", status: "modified", additions: 3, changes: 4 });
+      expect(files[0].patch).toContain("@@");
+
+      // Unknown PR still 404s (the route only serves seeded PRs).
+      expect((await fetch(`${fake.url}/repos/acme/widget/pulls/999/files`)).status).toBe(404);
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
+describe("prFilesFromGit — GitHub /pulls/:n/files payload from a real git diff", () => {
+  it("reports added/modified files with counts and per-file patch hunks", () => {
+    const dir = mkdtempSync(join(tmpdir(), "prfiles-"));
+    try {
+      const git = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
+      git("init", "-q", "-b", "main");
+      git("config", "user.email", "t@e.com");
+      git("config", "user.name", "t");
+      writeFileSync(join(dir, "keep.txt"), "one\ntwo\nthree\n");
+      git("add", "-A");
+      git("commit", "-qm", "base");
+      const base = git("rev-parse", "HEAD");
+      writeFileSync(join(dir, "keep.txt"), "one\nTWO\nthree\n"); // modify
+      writeFileSync(join(dir, "added.txt"), "brand new\n"); // add
+      git("add", "-A");
+      git("commit", "-qm", "head");
+      const head = git("rev-parse", "HEAD");
+
+      const files = prFilesFromGit(dir, base, head).sort((a, b) => a.filename.localeCompare(b.filename));
+      expect(files.map((f) => f.filename)).toEqual(["added.txt", "keep.txt"]);
+
+      const added = files.find((f) => f.filename === "added.txt")!;
+      expect(added.status).toBe("added");
+      expect(added.additions).toBe(1);
+      expect(added.patch).toContain("brand new");
+
+      const modified = files.find((f) => f.filename === "keep.txt")!;
+      expect(modified.status).toBe("modified");
+      expect(modified.additions).toBe(1);
+      expect(modified.deletions).toBe(1);
+      expect(modified.changes).toBe(2);
+      expect(modified.patch).toMatch(/@@.*@@/);
+      expect(modified.patch).toContain("+TWO");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

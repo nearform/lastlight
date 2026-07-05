@@ -68,6 +68,23 @@ export interface PullSeed {
   issue_comments?: IssueCommentSeed[];
 }
 
+/** One changed file in a PR, in GitHub's `GET /pulls/:n/files` shape. The fake
+ * GitHub serves these so a review agent that lists a PR's files via the API
+ * (instead of a local `git diff`) gets the real changed set + per-file patch.
+ * Computed from `git diff base..head` in the seeded workspace — see
+ * `prFilesFromGit`. */
+export interface PullFile {
+  sha: string;
+  filename: string;
+  status: "added" | "removed" | "modified";
+  additions: number;
+  deletions: number;
+  changes: number;
+  /** The unified-diff hunks for this file (GitHub's `patch`); absent for binary
+   * files, which carry no textual hunks. */
+  patch?: string;
+}
+
 /** One human-verified "golden comment" — a real issue a reviewer should catch.
  * Mirrors Martian's Code Review Bench gold-set shape. Used only to grade the
  * `pr-review` tier (LLM judge match → precision/recall/F-beta). */
