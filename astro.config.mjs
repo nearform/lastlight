@@ -8,8 +8,8 @@ export default defineConfig({
   site: 'https://lastlight.dev',
   integrations: [
     sitemap({
-      // /docs/ is a meta-refresh redirect to /docs/introduction, not a real page
-      filter: (page) => !page.endsWith('/docs/'),
+      // /docs/ and /evals/ are meta-refresh redirects to their intro pages, not real pages
+      filter: (page) => !page.endsWith('/docs/') && !page.endsWith('/evals/'),
     }),
   ],
 });

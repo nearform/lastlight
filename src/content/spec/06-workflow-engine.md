@@ -137,10 +137,33 @@ deterministic `bash` / `script` pair (a command, no LLM).
   (`.lastlight-scripts/<phase>/script.<ext>`, never inside the repo git tree). Python sources may carry a PEP 723 `# /// script`
   inline-dependency block, resolved by `uv` from PyPI (on the strict egress
   allowlist) into a cached venv. See [Sandbox](/spec/09-sandbox).
+- **post-review** — a first-class, **in-process** PR-review submission
+  (`PhaseExecutor.runPostReview`; no sandbox). It reads the reviewer agent's
+  `.lastlight/pr-review/findings.json` for the review *content only*
+  (`{ skip?, summary, event, findings[] }`) from the persisted host checkout,
+  and supplies every other fact from the harness's own run context: the PR
+  number (`ctx.prNumber`/`ctx.issueNumber`), the base ref (`ctx.baseBranch`),
+  and the head SHA + diff (`git` on the checkout). It anchors each finding to a
+  changed line via `src/engine/github/review-poster.ts`, demotes off-diff
+  findings to the body, and posts one review through `GitHubClient` (App auth in
+  prod; a bearer token + `config.githubApiBaseUrl` against the eval mock, which
+  serves no App-token or diff endpoint). A genuine failure — missing findings
+  after a real review, or a GitHub error surviving the body-only retry — **fails
+  the phase**; a legitimate `skip` succeeds without posting. Idempotent on
+  resume (no-op when a bot review already exists on the head SHA). This replaced
+  the earlier in-sandbox `type: script` poster, which depended on the AI
+  hand-writing `pr_number`/`base_ref`/`head_sha` into the JSON and silently
+  `exit 0`'d on any mismatch.
 
-Both deterministic types share the agent phase's dedup ledger
+The `bash`/`script` deterministic types share the agent phase's dedup ledger
 (`runCommandPhase` → `runPhaseLedger`), so they get an `executions` row and
-dedup on resume like everything else.
+dedup on resume like everything else. They also inherit the run's minted
+`GITHUB_TOKEN` (scoped by the workflow's permission profile). When the harness
+configures a GitHub API base-url override (`config.githubApiBaseUrl`, set only
+by the eval harness to point at its mock), `runSandboxedCommand` forwards it into
+the command env as `GITHUB_API_URL`, and `post-review` reads it directly to
+build its `GitHubClient`; in production both are unset, so GitHub calls fall
+back to `api.github.com`.
 
 ## Linear vs DAG
 

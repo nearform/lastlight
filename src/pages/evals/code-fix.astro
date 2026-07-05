@@ -1,0 +1,102 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="code-fix"
+	description="The code-fix tier runs the real build workflow through a full cycle and grades it on execution — held-out tests must go red → green and stay green, SWE-bench's resolved criterion. Bring your own cases from real PRs."
+>
+	<p>
+		The <code>code-fix</code> tier runs the real <strong>build</strong> workflow
+		through a full cycle: the agent reads an issue, edits code in a seeded
+		workspace, and opens a PR against the in-process fake GitHub. It's the heavy
+		tier — it clones and runs real repositories — and it's graded the way SWE-bench
+		grades: by executing held-out tests.
+	</p>
+
+	<pre><code>lastlight-evals run code-fix                     # default model (heavy)
+lastlight-evals run code-fix --model haiku       # one model
+lastlight-evals run code-fix --compare           # cross-vendor set</code></pre>
+
+	<figure class="evals-figure">
+		<img src="/evals/scorecard-compare.png" alt="A code-fix comparison scorecard: nine models ranked by resolved rate, with bar charts for total cost and P50 latency, token usage, and error count, plus per-instance rows with resolved/tests/pr-opened badges." loading="lazy" />
+		<figcaption>A <code>code-fix</code> comparison — resolved rate, cost, and latency across nine models.</figcaption>
+	</figure>
+
+	<h2>How it's graded (execution)</h2>
+
+	<p>
+		Grading is <strong>execution-based</strong>: held-out tests are copied into the
+		agent's final workspace and run. A case is <em>resolved</em> only if
+	</p>
+
+	<ul>
+		<li>every test named in <code>FAIL_TO_PASS</code> now <strong>passes</strong> (the bug is fixed), and</li>
+		<li>every test named in <code>PASS_TO_PASS</code> <strong>still passes</strong> (nothing regressed).</li>
+	</ul>
+
+	<p>
+		That's SWE-bench's resolved criterion. Held-out tests live in
+		<code>datasets/code-fix/tests/&lt;id&gt;/</code>, kept out of the seeded repo so
+		the agent can't edit them. A non-TAP test runner falls back to
+		<strong>suite mode</strong> — the case resolves iff the test command exits 0.
+		The dashboard's per-row <code>tests</code> button shows the captured setup log +
+		TAP for resolved and unresolved cases alike, and <code>files</code> shows the
+		agent's diff.
+	</p>
+
+	<h2>Two shapes of case</h2>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Shape</th><th>What's on disk</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><strong>Vendored fixture</strong></td>
+				<td><code>instances.json</code> + <code>repos/&lt;id&gt;/</code> (the fixture at its base commit) + <code>tests/&lt;id&gt;/</code> (held-out tests). Self-contained and fast.</td>
+			</tr>
+			<tr>
+				<td><strong>Git-source</strong></td>
+				<td>A real <code>repo</code> + <code>base_commit</code> + <code>test_patch</code>, no vendored <code>repos/&lt;id&gt;/</code>. At run time the repo is cloned into the gitignored <code>./.eval-cache/</code> and checked out at <code>base_commit</code>.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>Adding a code-fix case from a real PR</h2>
+
+	<p>
+		The usual path is a git-source case authored from a merged PR:
+	</p>
+
+	<pre><code>lastlight-evals add-case --pr &lt;url&gt; --code-fix --dry-run   # propose; don't write
+lastlight-evals add-case --pr &lt;url&gt; --code-fix             # write into ./datasets/code-fix (or --overlay)</code></pre>
+
+	<p>
+		It derives <code>repo</code>, <code>base_commit</code> (the merge-base of the
+		base branch and PR head), <code>head_commit</code>, the test diff, and the issue
+		fixture. Two grading modes: <strong>suite</strong> (default — run the repo's own
+		<code>test_cmd</code>, resolved iff it exits 0) or <strong>hold-out</strong>
+		(<code>--hold-out</code>, SWE-bench style — hide the PR's test files and
+		auto-detect <code>FAIL_TO_PASS</code> by running tests at base vs head). Details
+		on the <a href="/evals/authoring">Authoring cases</a> page.
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			A code-fix case runs real repository code during validation and grading —
+			<strong>only use trusted repos.</strong> For stronger isolation, run under
+			<a href="/evals/running-evals"><code>--sandbox gondolin</code></a>.
+		</div>
+	</div>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/triage">
+			<span class="label">← Previous</span>
+			<span class="title">Triage</span>
+		</a>
+		<a class="next" href="/evals/pr-review">
+			<span class="label">Next →</span>
+			<span class="title">PR review</span>
+		</a>
+	</div>
+</EvalsLayout>

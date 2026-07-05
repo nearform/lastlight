@@ -1,0 +1,113 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="getting-started"
+	description="Install lastlight-evals, set a model provider API key, and run your first eval against the shipped sample datasets — no GitHub credentials needed."
+>
+	<p>
+		Getting a first eval on the board takes two things: Node 24+ and one model
+		provider API key. GitHub is mocked, so you do <strong>not</strong> need any
+		GitHub credentials to run evals.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			This is the <strong>manual</strong> path. The default way to use the harness
+			is to let a skill drive it — see
+			<a href="/evals/skills">Drive it with Claude</a>. The commands below are what
+			that skill runs for you.
+		</div>
+	</div>
+
+	<h2>Install</h2>
+
+	<pre><code>node --version                  # need &gt;= 24
+npm install -g lastlight-evals  # pulls in lastlight (core) + agentic-pi
+lastlight-evals --version       # prints the evals + bundled lastlight core versions</code></pre>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			Prefer not to install globally? Every command works with
+			<code>npx lastlight-evals …</code>.
+		</div>
+	</div>
+
+	<h2>Set a provider key</h2>
+
+	<p>
+		Set at least one provider key in your environment or a <code>.env</code> file
+		in the directory you run from (auto-loaded, <code>KEY=VALUE</code>, no quotes).
+		The compare set only runs the models whose key is present, so one key is
+		enough to start.
+	</p>
+
+	<pre><code># .env
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+FIREWORKS_API_KEY=fw-...      # GLM / DeepSeek / GPT-OSS (open models)
+OPENROUTER_API_KEY=sk-or-...</code></pre>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>Don't put a real <code>GITHUB_TOKEN</code> in <code>.env</code>.</strong>
+			The harness sets its own dummy token and unsets the GitHub App vars so no
+			real installation token is ever minted. (The one command that <em>does</em>
+			read real GitHub is <code>add-case</code>, which uses your <code>gh</code>
+			login — see <a href="/evals/authoring">Authoring cases</a>.)
+		</div>
+	</div>
+
+	<h2>Run your first eval</h2>
+
+	<p>
+		The sample <code>triage</code> tier is the cheapest, fastest way to see the
+		whole pipeline — work list → run → grade → scorecard → dashboard:
+	</p>
+
+	<pre><code>lastlight-evals run triage</code></pre>
+
+	<p>
+		When it finishes (in fact, while it's still running) the CLI starts a tiny
+		local server and opens the dashboard deep-linked at your run, so you watch the
+		scorecard fill in live. The runner exits non-zero <strong>only</strong> if the
+		harness itself errors — a weak model scoring badly is the measurement, not a
+		build failure.
+	</p>
+
+	<h2>Where results land</h2>
+
+	<p>
+		Each run gets its own timestamped folder so runs accumulate instead of
+		overwriting:
+	</p>
+
+	<pre><code>./eval-results/&lt;tierKey&gt;/&lt;runId&gt;/
+  scorecard.json      # structured roll-up (per model + per instance), live-updated
+  predictions.jsonl   # SWE-bench predictions shape
+  sessions/…          # per-phase agent session logs</code></pre>
+
+	<p>
+		<code>tierKey</code> is <code>&lt;tier&gt;</code>,
+		<code>&lt;tier&gt;-compare</code>, or <code>&lt;tier&gt;-config</code>, and
+		<code>runId</code> is <code>&lt;timestamp&gt;-&lt;git-sha&gt;</code>. Override
+		the root with <code>LASTLIGHT_EVALS_OUT</code>. Set <code>CI=1</code> to keep
+		the browser from opening.
+	</p>
+
+	<p>
+		Next: turn this into <em>your</em> workspace — with your own workflows and
+		datasets — via <a href="/evals/workspaces">init and overlays</a>.
+	</p>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/skills">
+			<span class="label">← Previous</span>
+			<span class="title">Drive it with Claude</span>
+		</a>
+		<a class="next" href="/evals/workspaces">
+			<span class="label">Next →</span>
+			<span class="title">Workspaces &amp; overlays</span>
+		</a>
+	</div>
+</EvalsLayout>

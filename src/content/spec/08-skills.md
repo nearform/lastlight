@@ -34,7 +34,9 @@ runner only:
 1. Resolves the named skills to absolute host directory paths.
 2. Stages each directory into a **per-phase bundle** at
    `<workspaceRoot>/.lastlight-skills/<phaseName>/<name>/` before the
-   agent runs (symlink in gondolin/none, copy in docker). The bundle
+   agent runs (symlink in `none`, copy in docker/gondolin — gondolin
+   mounts only cwd, so a symlink's target would sit outside the mount
+   and dangle in the guest). The bundle
    sits at the workspace root — a sibling of any checked-out repo, never
    inside its git tree — and is keyed per phase so concurrent phases in
    one workspace can't clobber each other's catalogue.
@@ -203,13 +205,16 @@ then maps it to the agent explicitly via pi's `--skill` (docker) /
 - **Whole directory, not just SKILL.md.** `scripts/`, `references/`,
   `assets/` travel along.
 - **Two modes:**
-  - `symlink` (gondolin / none) — `symlinkSync(hostDir, dest, "dir")`.
-    Zero-copy; pi reads the skill files host-side (`none`) or through the
-    cwd mount (`gondolin`, where the bundle sits under the repo).
-  - `copy` (docker) — recursive `cpSync(hostDir, dest, { recursive: true, dereference: true })`.
-    Symlinks pointing at harness host paths wouldn't resolve inside the
-    container; copy piggybacks on the existing workspace bind-mount
-    instead of adding new `-v` flags per skill.
+  - `symlink` (`none` only) — `symlinkSync(hostDir, dest, "dir")`.
+    Zero-copy; the host FS is fully visible so pi reads the skill files
+    host-side through the link.
+  - `copy` (docker / gondolin) — recursive `cpSync(hostDir, dest, { recursive: true, dereference: true })`.
+    The dest sits inside the agent's mounted cwd, but the symlink *target*
+    (the skill source in the install tree) would sit outside it — so a
+    symlink dangles in the guest. Docker's container and gondolin's
+    cwd-only mount both need the real files present; copy (dereferenced)
+    lands them inside the mount, piggybacking on the existing
+    bind/cwd mount instead of adding new mounts per skill.
 
 ```
 <workspaceRoot>/              ← host workDir (bind-mounted whole on docker)
@@ -255,13 +260,13 @@ chat runtime:
 |---|---|---|
 | `issue-triage` | Label, deduplicate, request info, manage stale issues | `issue-triage.yaml`, `cron-triage.yaml`, chat |
 | `issue-comment` | Handle non-build maintainer comments on issues | `issue-comment.yaml` |
-| `pr-review` | Structured PR review (critical / important / suggestion / nit) | `pr-review.yaml`, `cron-review.yaml`, chat |
+| `pr-review` | Precision-first PR review: advance the discussion, keep only Critical / Important findings past a confidence gate. A **pure code review — no building** (CI validates the change builds/runs). Does **not** post the review itself — it writes review *content only* (`{ skip?, summary, event, findings[] }`) to `.lastlight/pr-review/findings.json` (schema in `references/findings-schema.md`); `pr-review.yaml`'s first-class `type: post-review` action reads that, supplies the PR number / base ref / head SHA / diff from the harness itself, and posts one formal review with the findings as line-anchored inline comments (demoting any off-diff finding to the body) | `pr-review.yaml`, `cron-review.yaml`, chat |
 | `pr-comment` | Answer maintainer questions on open PRs | `pr-comment.yaml` |
 | `repo-health` | Weekly health report (open / stale / velocity / labels) | `repo-health.yaml`, `cron-health.yaml`, chat |
 | `security-review` | Diff-based security scan since last review | `security-review.yaml`, `cron-security.yaml` |
 | `security-feedback` | Break out scan findings into individual issues | `security-feedback.yaml` |
-| `building` | Shared craft: install deps + run the test/lint/typecheck gate in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml`, `pr-review.yaml` |
-| `code-review` | Shared review rubric: finding tiers (Critical / Important / Suggestions / Nits) + what to check (correctness incl. silent-default/dropped-output as a bug, security, edge cases, complexity, duplication, type-safety, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
+| `building` | Shared craft: install deps + run the test/lint/typecheck gate in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml` |
+| `code-review` | Shared review rubric, precision-first: post **only Critical / Important** (Suggestions / Nits are dropped as noise), each with a concrete-impact line, past a self-refutation confidence gate + what to check (correctness incl. silent-default/dropped-output as a bug, security, edge cases, complexity, duplication, type-safety, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
 | `issue-answer` | Answer a question directly: sourced neutral reply to a GitHub issue or Slack thread; research repo docs + web; label `question` (GitHub only); never write a brief, mark ready-for-agent, or change code | `answer.yaml` |
 | `verify` | Test a behaviour claim as an investigator: install + run the code in the sandbox, capture bash/text evidence, report CONFIRMED / REFUTED / INCONCLUSIVE; never fabricate or stage evidence | `verify.yaml` (text phase) |
 | `qa-test` | Drive a CLI or locally-served app through a flow and report step-level pass/fail with evidence; continue past failures unless one blocks everything | `qa-test.yaml` (text phase) |
@@ -270,10 +275,11 @@ chat runtime:
 | `chat` | Conversational assistant persona | chat (always-on) |
 
 `building` and `code-review` are not optional libraries — they're live
-shared building blocks staged into multiple workflows (the build cycle,
-`pr-fix`, and `pr-review`), the same way `issue-triage` is reused across
-webhook and cron. The "Used by" column lists every workflow that stages
-each.
+shared building blocks staged into multiple workflows (`code-review` in the
+build cycle and `pr-review`; `building` in the build cycle and `pr-fix`), the
+same way `issue-triage` is reused across webhook and cron. The "Used by"
+column lists every workflow that stages each. Note `pr-review` stages
+`code-review` but **not** `building` — it's a pure code review.
 
 Nested skill directories (`skills/software-development/architect`,
 `skills/github/github-pr-workflow`, etc.) exist as a category library —

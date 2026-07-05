@@ -1,0 +1,123 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="introduction"
+	description="Last Light Evals runs the real production workflows against a mocked GitHub, grades them deterministically, and compares models on cost, latency, and pass rate."
+>
+	<p>
+		<strong>Last Light Evals</strong> is a CLI that runs Last Light's
+		<em>real</em> production workflows — issue triage, build, PR review — end to
+		end against a <strong>mocked GitHub</strong>, grades the results
+		<strong>deterministically</strong>, and prints a model-comparison scorecard
+		on cost, latency, and pass rate. It's SWE-bench compatible and ships with
+		sample datasets so you can run it in one command.
+	</p>
+
+	<figure class="evals-figure">
+		<img src="/evals/overview.png" alt="The Evals dashboard overview — tier cards and a table of recent runs newest-first, each with its model, git SHA, score, and cost." loading="lazy" />
+		<figcaption>The dashboard overview: every run, newest first, with score and cost.</figcaption>
+	</figure>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>See it live:</strong>
+			<a href="https://evals.lastlight.dev/" target="_blank" rel="noopener">evals.lastlight.dev</a>
+			is a real, published dashboard you can browse right now — runs, model
+			comparisons, trend lines, and inspectable judge traces.
+		</div>
+	</div>
+
+	<h2>Why run it against the real workflows?</h2>
+
+	<p>
+		The point is to measure what actually ships. These evals load the actual
+		workflow YAML, prompts, skills, and agent loop from the <code>lastlight</code>
+		package — unmodified. There are only <strong>two</strong> deviations from
+		production, and they're the two you can't do unattended:
+	</p>
+
+	<ol>
+		<li>
+			<strong>GitHub is mocked, not bypassed.</strong> The agent's
+			<code>github_*</code> tool calls hit an in-process fake REST API that seeds
+			fixtures and records mutations; <code>git push</code> goes to a local bare
+			repo. The agent still believes it is talking to GitHub.
+		</li>
+		<li>
+			<strong>Approval gates are disabled</strong> so runs never pause waiting for
+			a human.
+		</li>
+	</ol>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>The one invariant:</strong> if a change makes the eval diverge from
+			production in any <em>other</em> way, it's wrong. The whole value is that a
+			green (or red) score reflects the shipping workflow, not a lab replica.
+		</div>
+	</div>
+
+	<h2>What you get</h2>
+
+	<ul>
+		<li>
+			<strong>A model comparison.</strong> Force a set of models across every
+			workflow step and see pass rate, total cost, P50 latency, and token usage
+			side by side.
+		</li>
+		<li>
+			<strong>Deterministic grading.</strong> Triage is graded on recorded GitHub
+			mutations; code-fix on held-out tests (SWE-bench's resolved criterion). The
+			only LLM judge is a single, scoped one for PR-review quality.
+		</li>
+		<li>
+			<strong>A JSON-driven dashboard.</strong> Every run writes a
+			<code>scorecard.json</code> that a local SPA renders live — overview,
+			per-model trend lines, per-instance rows, and inspectable judge traces.
+		</li>
+		<li>
+			<strong>Your own workflows and data.</strong> Point the harness at a
+			deployment <em>overlay</em> to eval forked workflows, a per-step model
+			config, and your own dataset cases.
+		</li>
+	</ul>
+
+	<h2>The three tiers</h2>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Tier</th><th>Workflow</th><th>Graded on</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>triage</code></td>
+				<td>issue-triage (cheap, fast)</td>
+				<td>Behavioral — labels / comments / state vs the gold expectation.</td>
+			</tr>
+			<tr>
+				<td><code>code-fix</code></td>
+				<td>build (heavy, full cycle)</td>
+				<td>Execution — held-out tests must go red → green and stay green.</td>
+			</tr>
+			<tr>
+				<td><code>pr-review</code></td>
+				<td>pr-review</td>
+				<td>An LLM judge scores the posted review against a human gold set (F1).</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<p>
+		New to it? <a href="/evals/getting-started">Install it and run your first
+		eval</a> in a couple of minutes — no GitHub credentials required.
+	</p>
+
+	<div class="docs-next">
+		<span></span>
+		<a class="next" href="/evals/skills">
+			<span class="label">Next →</span>
+			<span class="title">Drive it with Claude</span>
+		</a>
+	</div>
+</EvalsLayout>

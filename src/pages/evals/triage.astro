@@ -1,0 +1,90 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="triage"
+	description="The triage tier runs the real issue-triage workflow and grades it behaviorally — the labels, comments, and issue state it produced against a gold expectation. The cheapest, fastest tier."
+>
+	<p>
+		The <code>triage</code> tier runs the real <strong>issue-triage</strong>
+		workflow: the agent reads a freshly-seeded issue and decides how to triage it —
+		which labels to apply, whether to ask for more info, whether to close it. It's
+		the cheapest and fastest tier, so it's the best one for smoke-testing the
+		harness or a forked workflow.
+	</p>
+
+	<pre><code>lastlight-evals run triage                       # default model
+lastlight-evals run triage --model haiku         # one model
+lastlight-evals run triage --compare             # cross-vendor set
+lastlight-evals run triage --runs 3              # repeat each case (worst-case verdict)</code></pre>
+
+	<figure class="evals-figure">
+		<img src="/evals/triage-scorecard.png" alt="A triage comparison scorecard: nine models ranked by behavioral pass rate, with cost and latency bars, and per-instance rows showing the exact label / category / state checks each case asserts." loading="lazy" />
+		<figcaption>A <code>triage</code> comparison — behavioral pass rate, and the exact label / category / state checks per case.</figcaption>
+	</figure>
+
+	<h2>How it's graded (behavioral)</h2>
+
+	<p>
+		Triage grading is <strong>behavioral</strong>: it asserts the GitHub mutations
+		the agent actually made — recorded by the in-process fake GitHub — against the
+		instance's expectation. A case passes only if every expected mutation happened
+		and every forbidden one didn't:
+	</p>
+
+	<ul>
+		<li><code>expect_github.labels_added</code> / <code>labels_absent</code> — labels the triage must (or must not) apply.</li>
+		<li><code>expect_github.comment_matches</code> — a regex the posted comment must match (e.g. asking for a repro).</li>
+		<li><code>expect_github.issue_closed</code> — whether the issue should end up closed.</li>
+		<li><code>triage_gold</code> — the expected <code>{`{ category, state }`}</code> classification per your deployment's taxonomy.</li>
+	</ul>
+
+	<p>
+		Each per-instance row in the dashboard shows exactly which checks it asserted
+		(<code>label:bug</code>, <code>category=bug</code>, <code>state=ready-for-agent</code>,
+		…), so a pass or fail is legible at a glance. Only the fields present on an
+		instance are checked, so a case can assert as much or as little as you want.
+	</p>
+
+	<h2>Adding a triage case</h2>
+
+	<p>
+		Two ways. Hand-write a <code>SweBenchInstance</code> in
+		<code>datasets/triage/instances.json</code> (the <code>issue</code> seed,
+		<code>triage_gold</code>, and <code>expect_github</code>), or scaffold from a
+		real resolved issue:
+	</p>
+
+	<pre><code>lastlight-evals add-case --issue &lt;url&gt; --dry-run   # propose a triage case; don't write
+lastlight-evals add-case --issue &lt;url&gt;             # write into ./datasets/triage (or --overlay)</code></pre>
+
+	<p>
+		<code>add-case --issue</code> pulls the issue content and the labels that were
+		actually applied — read from the issue <em>events</em> API, so the evidence
+		shows <em>who</em> applied each (maintainer vs bot) — seeds the issue
+		<strong>without</strong> its triage labels so the agent triages fresh, and sets
+		<code>expect_github.labels_added</code> / <code>issue_closed</code>. You then
+		assign <code>triage_gold</code> per your taxonomy. The full flow is on the
+		<a href="/evals/authoring">Authoring cases</a> page.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			On tiny synthetic fixtures a model can occasionally pick the wrong owner/repo
+			for a GitHub call (there's no real remote to infer from) — that surfaces as a
+			behavioral miss. Stronger models fare better; it's exactly the kind of thing
+			the eval is meant to reveal.
+		</div>
+	</div>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/running-evals">
+			<span class="label">← Previous</span>
+			<span class="title">Running evals</span>
+		</a>
+		<a class="next" href="/evals/code-fix">
+			<span class="label">Next →</span>
+			<span class="title">Code fix</span>
+		</a>
+	</div>
+</EvalsLayout>

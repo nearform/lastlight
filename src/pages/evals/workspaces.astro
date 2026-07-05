@@ -1,0 +1,128 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="workspaces"
+	description="Scaffold your own evals workspace with init — link it to an existing deployment overlay or make a self-contained one — then fork the default workflows and measure the effect."
+>
+	<p>
+		Running the shipped samples is a good smoke test. To eval <em>your</em>
+		deployment — your forked workflows, your prompts, your dataset cases — scaffold
+		a workspace with <code>init</code>, then layer an
+		<a href="/docs/configuration"><strong>overlay</strong></a> over the built-ins.
+		(New to overlays? The <a href="/docs/configuration">Configuration docs</a>
+		cover what an <code>instance/</code> overlay is and how it overrides the
+		built-in config, workflows, prompts, skills, and persona.)
+	</p>
+
+	<h2>Scaffold with <code>init</code></h2>
+
+	<p>
+		<code>init</code> creates a workspace seeded from the built-in samples. It is
+		non-interactive when there's no TTY (agent / CI / piped), so it never blocks on
+		a prompt. There are two layouts.
+	</p>
+
+	<h3>Recommended: point at an existing deployment overlay</h3>
+
+	<p>
+		If you already have a Last Light deployment repo (the private
+		<a href="/docs/configuration"><code>instance/</code> overlay</a>), clone it in
+		as its own checkout and let the runner auto-detect everything:
+	</p>
+
+	<pre><code>lastlight-evals init my-evals --clone your-org/lastlight-instance
+cd my-evals &amp;&amp; lastlight-evals run     # bare run — overlay + datasets auto-detected</code></pre>
+
+	<p>This produces:</p>
+
+	<ul>
+		<li><code>instance/</code> — your overlay, cloned as its own git checkout (git-ignored here; <code>cd instance &amp;&amp; git pull</code> to update).</li>
+		<li><code>evals/datasets/</code> — seeded from the built-in <code>triage</code> + <code>code-fix</code> samples; this is what you edit.</li>
+		<li><code>evals/models.json</code> — a copy of the built-in model registry.</li>
+		<li><code>.gitignore</code> + <code>README.md</code>.</li>
+	</ul>
+
+	<p>
+		The runner auto-detects <code>./instance</code> as the overlay (it looks for
+		<code>instance/config.yaml</code>) and <code>./evals/datasets</code> as the
+		dataset root, so a bare <code>lastlight-evals run</code> just works — no
+		<code>--overlay</code> flag. Re-running <code>init --clone</code> is
+		idempotent; it won't re-clone an existing <code>instance/</code>.
+	</p>
+
+	<h3>Self-contained: workspace <em>is</em> the overlay</h3>
+
+	<p>
+		No existing overlay repo? Scaffold a workspace that is its own overlay — it
+		gets <code>workflows/</code>, <code>skills/</code>, <code>agent-context/</code>
+		placeholders and its own <code>config.yaml</code> alongside <code>evals/</code>:
+	</p>
+
+	<pre><code>lastlight-evals init my-evals          # or: lastlight-evals init  (→ ./lastlight-evals-workspace)
+cd my-evals &amp;&amp; lastlight-evals run --overlay .</code></pre>
+
+	<p>
+		In a TTY it offers <code>git init</code> plus a private <code>gh repo create</code>.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Flag</th><th>Meaning</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>dir</code> (positional)</td><td>Target directory (default <code>lastlight-evals-workspace</code>; <code>.</code> = here).</td></tr>
+			<tr><td><code>--clone &lt;repo&gt;</code> (alias <code>--from</code>)</td><td>Separate layout: clone the overlay into <code>&lt;dir&gt;/instance/</code>, scaffold evals at the root. Accepts <code>owner/repo</code> or a full URL.</td></tr>
+			<tr><td><code>--yes</code>, <code>-y</code></td><td>Non-interactive: scaffold without prompting; print the git/gh commands instead of running them.</td></tr>
+			<tr><td><code>--no-git</code></td><td>Scaffold files only; skip the git / GitHub bootstrap.</td></tr>
+			<tr><td><code>--help</code>, <code>-h</code></td><td>Show help.</td></tr>
+		</tbody>
+	</table>
+
+	<h2>Fork the default workflows</h2>
+
+	<p>
+		An overlay's <code>workflows/</code>, <code>skills/</code>, and
+		<code>agent-context/</code> <strong>shadow the core built-ins by logical
+		name</strong> — the same deployment-overlay mechanism production uses. To
+		customize a workflow, <em>fork</em> it into your overlay with the
+		<code>lastlight</code> CLI. This works from an evals workspace with no core
+		checkout, because the defaults it forks from ship inside the
+		<code>lastlight</code> package:
+	</p>
+
+	<pre><code>lastlight fork                       # list forkable workflows + agent-context (marks what's already forked)
+lastlight fork &lt;workflow&gt;            # copy a workflow YAML + every prompt &amp; skill its phases reference
+lastlight fork agent-context         # copy soul.md / rules.md / security.md (the persona)
+lastlight fork agent-context soul.md # just one persona file
+#   --force to overwrite an existing copy; --home &lt;dir&gt; to target a specific working dir</code></pre>
+
+	<p>
+		Run it from the workspace root to target <code>./instance</code>, or from
+		inside <code>./instance</code>. Then edit the copied files under
+		<code>instance/…</code> and re-run the evals to measure the effect — overlay
+		workflows and skills layer over core, and overlay datasets under
+		<code>&lt;overlay&gt;/evals/datasets/</code> shadow the built-in tiers of the
+		same name.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			The whole loop is: <strong>fork a workflow → edit the prompt/skill →
+			<code>lastlight-evals run</code> → read the scorecard delta</strong>. That's
+			how you tune a deployment's workflows against real, graded cases instead of
+			by feel.
+		</div>
+	</div>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/getting-started">
+			<span class="label">← Previous</span>
+			<span class="title">Install &amp; first run</span>
+		</a>
+		<a class="next" href="/evals/models">
+			<span class="label">Next →</span>
+			<span class="title">Models</span>
+		</a>
+	</div>
+</EvalsLayout>
