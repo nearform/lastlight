@@ -1,5 +1,10 @@
 import type { Octokit } from "octokit";
-import { githubAppClient, type GitHubAppClientConfig } from "./github-app-client.js";
+import {
+  githubAppClient,
+  githubTokenClient,
+  type GitHubAppClientConfig,
+} from "./github-app-client.js";
+import type { InlineComment, ReviewEvent } from "./review-poster.js";
 
 /** GitHub reaction emoji values accepted by the reactions API. */
 export type ReactionContent =
@@ -21,6 +26,20 @@ export class GitHubClient {
 
   constructor(config: GitHubAppClientConfig) {
     this.octokit = githubAppClient(config);
+  }
+
+  /**
+   * Build a client authed with a raw bearer token (a pre-minted installation
+   * token) instead of App JWT auth. Used by the harness-side `post-review`
+   * action: prod passes the run's scoped review-write token; evals pass the
+   * mock's token + `baseUrl`. Avoids the App installation-token minting
+   * round-trip (which hard-codes api.github.com and the evals mock doesn't
+   * serve).
+   */
+  static withToken(token: string, baseUrl?: string): GitHubClient {
+    const client = Object.create(GitHubClient.prototype) as GitHubClient;
+    client.octokit = githubTokenClient(token, baseUrl);
+    return client;
   }
 
   /**
@@ -277,6 +296,49 @@ export class GitHubClient {
       }
     }
     return null;
+  }
+
+  /**
+   * Fetch a PR's unified diff (three-dot, base…head) as a string. Used by the
+   * `post-review` action to anchor findings to changed lines — the harness runs
+   * this in-process (not in the sandbox), so the diff comes from the API rather
+   * than a local `git diff`, with no dependency on checkout/fetch state.
+   */
+  async getPullRequestDiff(owner: string, repo: string, pullNumber: number): Promise<string> {
+    const res = await this.octokit.rest.pulls.get({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      mediaType: { format: "diff" },
+    });
+    // With `format: diff` Octokit returns the raw diff as the response body,
+    // typed as the JSON shape — cast through unknown.
+    return res.data as unknown as string;
+  }
+
+  /**
+   * Submit one formal PR review with an event (APPROVE / REQUEST_CHANGES /
+   * COMMENT) plus optional line-anchored inline comments. `commitId` pins the
+   * review to the reviewed head SHA. This is the single harness-side write for
+   * PR reviews — the reviewer agent never submits; it writes findings and the
+   * `post-review` action calls this. Throws on a non-2xx so the action can fail
+   * the phase visibly (or retry body-only).
+   */
+  async createPullRequestReview(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    review: { body: string; event: ReviewEvent; comments?: InlineComment[]; commitId?: string },
+  ): Promise<void> {
+    await this.octokit.rest.pulls.createReview({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      body: review.body,
+      event: review.event,
+      ...(review.comments && review.comments.length ? { comments: review.comments } : {}),
+      ...(review.commitId ? { commit_id: review.commitId } : {}),
+    });
   }
 
   /**

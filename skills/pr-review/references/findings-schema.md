@@ -1,32 +1,30 @@
 # PR review findings schema
 
 The `pr-review` skill writes its findings to `.lastlight/pr-review/findings.json`
-(relative to the repo checkout — your cwd). The deterministic `post-review`
-workflow phase reads this file and posts **one** formal GitHub review:
+(relative to the repo checkout — your cwd). The first-class `post-review` action
+reads this file and posts **one** formal GitHub review:
 
 - Each finding whose `line`/`side` anchors to a line that appears in the PR diff
   becomes an **inline comment** on that exact line.
 - Any finding whose anchor isn't in the diff is **demoted** into the review body
   under an "Additional findings" heading (GitHub rejects comments off the diff).
-- If the diff can't be computed (missing `base_ref`, git failure), **all**
-  findings go into the body — the review still posts, so nothing is lost.
+- If the diff can't be computed (git failure), **all** findings go into the
+  body — the review still posts, so nothing is lost.
 
-You never call `github_create_pull_request_review` yourself. Writing this file is
+You write only the review **content** — `skip?` / `summary` / `event` /
+`findings[]`. The PR number, base ref, head SHA and diff come from the harness's
+own run context and the checkout, so you do **not** record any of that metadata.
+You never call `github_create_pull_request_review` yourself; writing this file is
 how you submit.
 
 ## Top-level object
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `skip` | boolean | no | `true` → you decided not to review (bot-authored / merged / already reviewed at head). The follow-up step posts nothing. |
+| `skip` | boolean | no | `true` → you decided not to review (bot-authored / merged / already reviewed at head). The action posts nothing. |
 | `summary` | string | yes | One or two sentences on what the PR does + your overall assessment. Becomes the review body. |
 | `event` | string | yes | `APPROVE` \| `REQUEST_CHANGES` \| `COMMENT`. A clean PR is `APPROVE` with an empty `findings` array. |
-| `base_ref` | string | yes | The PR base branch (e.g. `main`), from the `github_get_pull_request` call. Used to compute the diff for anchoring. |
-| `head_sha` | string | yes | The PR head SHA, from the same call. Pins the review to the reviewed commit. |
 | `findings` | array | yes | The surviving Critical/Important findings (may be empty). |
-
-`base_ref` and `head_sha` are mandatory — without them the follow-up step can't
-compute the diff and demotes every finding to the body.
 
 ## Finding object
 
@@ -48,8 +46,6 @@ compute the diff and demotes every finding to the body.
   "skip": false,
   "summary": "Adds a `--config` flag to the CLI and threads it into the connect path. Solid overall; one crash on the default path and one missing-await.",
   "event": "REQUEST_CHANGES",
-  "base_ref": "main",
-  "head_sha": "9f3c1a2b7d4e5f60112233445566778899aabbcc",
   "findings": [
     {
       "path": "src/cli.ts",
@@ -79,8 +75,6 @@ compute the diff and demotes every finding to the body.
   "skip": false,
   "summary": "Small, well-tested refactor of the retry helper. No correctness or regression concerns.",
   "event": "APPROVE",
-  "base_ref": "main",
-  "head_sha": "1122334455667788990011223344556677889900",
   "findings": []
 }
 ```

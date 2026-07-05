@@ -18,150 +18,25 @@ phases:
     # validates that the change builds/runs.
     #
     # The agent does NOT submit the review itself — it writes structured
-    # findings to .lastlight/pr-review/findings.json (the "reference"). The
-    # deterministic `post-review` phase below reads that file and posts one
-    # formal review with the findings as line-anchored inline comments.
+    # findings (content only: skip? / summary / event / findings[]) to
+    # .lastlight/pr-review/findings.json. The first-class `post-review` action
+    # below reads that file and posts one formal review.
     skills: [pr-review, code-review]
     model: "{{models.review}}"
     variant: "{{variants.review}}"
 
-  # Deterministic submission step: read the agent's findings.json and post ONE
-  # formal PR review, anchoring each finding to its diff line where possible and
-  # demoting off-diff findings to the summary body (GitHub 422s on off-diff
-  # lines). Terminal + always exits 0 — a posting hiccup must not fail an
-  # otherwise-good review (errors go to stderr, captured in the session log).
-  # owner/repo come from the template context; pr_number/base_ref/head_sha come
-  # from findings.json (the agent recorded them from github_get_pull_request).
-  # GITHUB_TOKEN is the run's minted review-write token; in evals the harness
-  # injects GITHUB_API_URL pointing at the mock so the review lands there.
+  # First-class, in-process submission (type: post-review → PhaseExecutor.
+  # runPostReview). Reads the agent's findings.json for the review *content*
+  # (skip? / summary / event / findings[]) and supplies everything else from
+  # the harness itself — PR number (run context), base ref (baseBranch), head
+  # SHA + diff (the pre-cloned checkout) — so the AI never hand-copies metadata.
+  # It anchors each finding to a changed line, demotes off-diff findings to the
+  # body (GitHub 422s on off-diff lines), and posts ONE review via GitHubClient
+  # (App auth in prod; token + githubApiBaseUrl against the eval mock). A
+  # genuine failure — missing findings after a real review, or a GitHub error
+  # that survives the body-only retry — FAILS this phase visibly; a legitimate
+  # `skip` succeeds without posting. Idempotent on resume (no-op if a bot review
+  # already exists on the head SHA).
   - name: post-review
     label: Post inline review
-    type: script
-    runtime: js
-    timeout_seconds: 120
-    script: |
-      import { readFileSync } from "node:fs";
-      import { execFileSync } from "node:child_process";
-
-      const api = (process.env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
-      const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "";
-      const owner = "{{owner}}";
-      const repo = "{{repo}}";
-      const log = (m) => process.stderr.write("[post-review] " + m + "\n");
-
-      let doc;
-      try {
-        doc = JSON.parse(readFileSync(".lastlight/pr-review/findings.json", "utf8"));
-      } catch (e) {
-        log("no readable findings.json (" + e.message + "); nothing to post");
-        process.exit(0);
-      }
-      if (doc.skip) { log("skip: " + (doc.summary || "agent skipped review")); process.exit(0); }
-
-      const prNumber = doc.pr_number;
-      const baseRef = doc.base_ref;
-      const headSha = doc.head_sha;
-      const findings = Array.isArray(doc.findings) ? doc.findings : [];
-      if (!prNumber) { log("findings.json missing pr_number; cannot post"); process.exit(0); }
-
-      // path -> Set of "SIDE:line". "+"/context are RIGHT:newLine; "-"/context
-      // are LEFT:oldLine. Mirrors GitHub's three-dot PR diff anchoring.
-      function parseDiff(diff) {
-        const map = new Map();
-        let path = null, right = 0, left = 0, inHunk = false;
-        for (const line of diff.split("\n")) {
-          if (line.startsWith("+++ ")) {
-            const p = line.slice(4).replace(/^b\//, "");
-            path = p === "/dev/null" ? null : p;
-            if (path && !map.has(path)) map.set(path, new Set());
-            inHunk = false;
-          } else if (line.startsWith("@@")) {
-            const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-            if (m) { left = parseInt(m[1], 10); right = parseInt(m[2], 10); inHunk = true; }
-          } else if (inHunk && path) {
-            const set = map.get(path);
-            if (line.startsWith("+")) { set.add("RIGHT:" + right); right++; }
-            else if (line.startsWith("-")) { set.add("LEFT:" + left); left++; }
-            else if (line.startsWith(" ")) { set.add("RIGHT:" + right); set.add("LEFT:" + left); right++; left++; }
-            else if (line.startsWith("\\")) { /* "\ No newline at end of file" */ }
-            else { inHunk = false; }
-          }
-        }
-        return map;
-      }
-
-      // Commentable line set from the local checkout. Failure → null → demote all
-      // to the body (the review still posts; the judge/human still sees findings).
-      let commentable = null;
-      if (baseRef) {
-        try {
-          try { execFileSync("git", ["fetch", "origin", baseRef, "--depth", "50"], { stdio: "ignore" }); } catch {}
-          const diff = execFileSync("git", ["diff", "origin/" + baseRef + "...HEAD"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-          commentable = parseDiff(diff);
-        } catch (e) {
-          log("git diff failed (" + e.message + "); demoting all findings to the body");
-        }
-      }
-
-      const anchored = (f) => {
-        if (!commentable) return false;
-        const side = f.side === "LEFT" ? "LEFT" : "RIGHT";
-        const set = commentable.get(f.path);
-        if (!set || !set.has(side + ":" + f.line)) return false;
-        if (f.start_line && !set.has(side + ":" + f.start_line)) return false;
-        return true;
-      };
-
-      const inline = [], demoted = [];
-      for (const f of findings) {
-        if (f && f.path && f.line && anchored(f)) inline.push(f);
-        else if (f) demoted.push(f);
-      }
-
-      const FENCE = "```";
-      const commentBody = (f) => {
-        let b = "**[" + (f.severity || "Important") + "] " + (f.title || "") + "**\n\n" + (f.body || "");
-        if (f.suggestion) b += "\n\n" + FENCE + "suggestion\n" + f.suggestion + "\n" + FENCE;
-        return b;
-      };
-      const renderDemoted = (list) => list.length
-        ? "\n\n### Additional findings\n" + list.map((f) =>
-            "- **[" + (f.severity || "Important") + "] " + (f.title || "") + "** (" + f.path + ":" + f.line + ") — " + (f.body || "")).join("\n")
-        : "";
-      const buildComments = (list) => list.map((f) => {
-        const side = f.side === "LEFT" ? "LEFT" : "RIGHT";
-        const c = { path: f.path, line: f.line, side, body: commentBody(f) };
-        if (f.start_line) { c.start_line = f.start_line; c.start_side = side; }
-        return c;
-      });
-
-      const event = doc.event || (findings.length === 0 ? "APPROVE" : "COMMENT");
-      async function postReview(comments, extraBody) {
-        const payload = { body: (doc.summary || "") + (extraBody || ""), event, comments };
-        if (headSha) payload.commit_id = headSha;
-        return fetch(api + "/repos/" + owner + "/" + repo + "/pulls/" + prNumber + "/reviews", {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + token,
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-            "User-Agent": "last-light",
-            "X-GitHub-Api-Version": "2022-11-28",
-          },
-          body: JSON.stringify(payload),
-        });
-      }
-
-      let res = await postReview(buildComments(inline), renderDemoted(demoted));
-      if (!res.ok) {
-        const t = await res.text().catch(() => "");
-        log("inline review POST failed (" + res.status + "): " + t.slice(0, 300) + "; retrying body-only");
-        res = await postReview([], renderDemoted([...inline, ...demoted]));
-        if (!res.ok) {
-          const t2 = await res.text().catch(() => "");
-          log("body-only review POST also failed (" + res.status + "): " + t2.slice(0, 300));
-          process.exit(0);
-        }
-      }
-      log("posted review: " + inline.length + " inline, " + demoted.length + " in body, event=" + event);
-      process.exit(0);
+    type: post-review

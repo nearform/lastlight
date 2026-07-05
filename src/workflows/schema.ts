@@ -103,6 +103,14 @@ const PhaseDefinitionSchema = z
      *   container (no LLM). Requires `command:`.
      * - `script`: run an inline JS/TS (via `node`) or Python (via `uv run`)
      *   program inside the sandbox container. Requires `script:`.
+     * - `post-review`: first-class, in-process PR-review submission. Reads the
+     *   reviewer agent's `.lastlight/pr-review/findings.json` (content only:
+     *   `{ skip?, summary, event, findings[] }`), supplies the PR number / base
+     *   ref / head SHA / diff from the harness's own run context + checkout,
+     *   anchors each finding to a changed line, and posts ONE formal review via
+     *   `GitHubClient`. Runs on the harness (no sandbox); a genuine failure
+     *   fails the phase, a legitimate `skip` succeeds without posting. See
+     *   `PhaseExecutor.runPostReview`.
      *
      * `bash`/`script` phases run in the SAME sandbox/workspace as agent
      * phases (the host workDir persists across phases keyed by taskId), honour
@@ -110,7 +118,7 @@ const PhaseDefinitionSchema = z
      * their stdout downstream exactly like an agent phase (`output_var` →
      * `{{phaseOutputs.<name>.output}}`). A non-zero exit fails the phase.
      */
-    type: z.enum(["context", "agent", "bash", "script"]).default("agent"),
+    type: z.enum(["context", "agent", "bash", "script", "post-review"]).default("agent"),
     /**
      * Shell command for `type: bash`. Rendered through the template engine
      * first (so it may reference `{{phaseOutputs.*}}`, `{{branch}}`, etc.),

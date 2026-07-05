@@ -1,7 +1,7 @@
 ---
 name: pr-review
 description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. A pure code review — no building. Use when asked to review a PR or on a cron PR scan.
-version: 6.0.0
+version: 7.0.0
 tags: [github, review, code-quality]
 ---
 
@@ -99,8 +99,6 @@ the shape is:
   "skip": false,
   "summary": "One or two sentences on what the PR does + overall assessment.",
   "event": "COMMENT",
-  "base_ref": "main",
-  "head_sha": "<PR head SHA>",
   "findings": [
     {
       "path": "src/foo.ts",
@@ -115,6 +113,11 @@ the shape is:
 }
 ```
 
+Write **only these content fields** — `skip?` / `summary` / `event` /
+`findings[]`. The follow-up step already knows the PR number, base ref, head
+SHA and diff from the harness's own context and the checkout, so you do **not**
+record any of that metadata (that reliance was a footgun — omit it).
+
 Rules:
 - **Anchor precisely.** `path` must match the diff path exactly; `line`/`side`
   must point at a line that appears in the diff (added/context → `side: RIGHT`;
@@ -128,9 +131,6 @@ Rules:
 - `event` is `APPROVE` / `REQUEST_CHANGES` / `COMMENT`, matching what survived
   the gate. A clean PR is an `APPROVE` with an empty `findings` array and a short
   `summary`.
-- `base_ref` and `head_sha` come from the `github_get_pull_request` call in §1 —
-  no extra API call. They are **mandatory**: without them the follow-up step
-  can't compute the diff and demotes every finding to the body.
 - Create the dir and keep the file out of git first:
   `mkdir -p .lastlight/pr-review && echo '.lastlight/' >> .git/info/exclude`.
 
@@ -140,7 +140,9 @@ and stop — the follow-up step then posts nothing.
 
 ## Verification
 
-Confirm `.lastlight/pr-review/findings.json` is valid JSON, has `base_ref` +
-`head_sha`, and every finding carries `path` + `line`. The deterministic
-follow-up step posts the review and logs how many findings landed inline vs in
-the body.
+Confirm `.lastlight/pr-review/findings.json` is valid JSON and every finding
+carries `path` + `line`. The first-class `post-review` action then posts the
+review — anchoring each finding to its diff line, demoting any off-diff finding
+to the body, and logging how many landed inline vs in the body. If the file is
+missing after a real review (not a `skip`), that step **fails the run** loudly
+rather than posting nothing.

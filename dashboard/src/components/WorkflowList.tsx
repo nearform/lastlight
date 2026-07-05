@@ -314,6 +314,18 @@ function DetailPanel({ run, approvals, onCancel, onApprovalResponded, onOpenDefi
     prevRunIdRef.current = run.id;
   }, [run.id, setSelectedPhase]);
 
+  // Default the selection to the run's first substantive phase once the
+  // definition loads, so opening a run — whether by deeplink (?run=… with no
+  // ?phase=) or a click — lands on real logs instead of an empty right pane.
+  // Skips `context` markers (they never have a session). Only fills a NULL
+  // selection, so an explicit ?run=…&phase=… deeplink still wins, and the
+  // run-switch reset above re-defaults to the new run's first phase.
+  useEffect(() => {
+    if (selectedPhase || !definition) return;
+    const first = definition.phases.find((p) => p.type !== "context") ?? definition.phases[0];
+    if (first) setSelectedPhase(first.name);
+  }, [definition, selectedPhase, setSelectedPhase]);
+
   // Build the per-phase grouping. For loop phases that produced multiple
   // executions (reviewer + reviewer_recheck_* / reviewer_fix_*) we always pick the most
   // recent — the count is shown in PhaseDetailPanel so the user knows.

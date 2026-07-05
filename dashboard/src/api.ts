@@ -103,7 +103,7 @@ export interface WorkflowRun {
 export interface WorkflowPhaseDefinition {
   name: string;
   label: string;
-  type: "context" | "agent";
+  type: "context" | "agent" | "bash" | "script" | "post-review";
   hasLoop?: boolean;
   approvalGate?: string;
 }
@@ -155,7 +155,7 @@ export interface WorkflowSummary {
 export interface WorkflowFullPhase {
   name: string;
   label?: string;
-  type: "context" | "agent" | "bash" | "script";
+  type: "context" | "agent" | "bash" | "script" | "post-review";
   prompt?: string;
   /** type: bash — deterministic shell command run in the sandbox. */
   command?: string;
