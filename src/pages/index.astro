@@ -1,9 +1,9 @@
 ---
-// Last Light — GitHub maintenance agent
+// Last Light — self-hostable AI coding agent
 import BaseLayout from '../layouts/BaseLayout.astro';
 
-const title = "Last Light — GitHub Maintenance Agent";
-const description = "An open-source agent that keeps the lights on in your GitHub repos. Triages issues, reviews PRs, monitors repo health — so you can focus elsewhere.";
+const title = "Last Light — Self-Hostable AI Coding Agent";
+const description = "Last Light is a self-hostable, MIT-licensed AI coding agent for your GitHub org. It triages issues, reviews PRs, and ships fixes on your own infrastructure — enterprise-ready, working for you after dark.";
 ---
 
 <BaseLayout title={title} description={description} ogType="website">
@@ -13,10 +13,16 @@ const description = "An open-source agent that keeps the lights on in your GitHu
 		<div class="hero-content">
 			<img src="/logo.png" alt="Last Light logo" class="hero-logo" />
 			<p class="hero-name">Last Light</p>
-			<h1>Keep the lights on <span class="accent">after you've moved on</span></h1>
+			<div class="hero-badges">
+				<span class="hero-badge">Self-hostable</span>
+				<span class="hero-badge">MIT-licensed</span>
+				<span class="hero-badge">Enterprise-ready</span>
+			</div>
+			<h1>Keeps working for you <span class="accent">after dark</span></h1>
 			<p class="subtitle">
-				An open-source agent that looks after repos in maintenance mode.
-				Triages issues, reviews PRs, chases down stale items — so you can focus on what's next.
+				A self-hostable, MIT-licensed AI coding agent for your GitHub org.
+				It triages issues, reviews pull requests, and ships fixes — running on
+				your own infrastructure, under your own keys, working while you're away.
 			</p>
 			<div class="hero-actions">
 				<a href="#get-started" class="btn btn-primary">Get Started</a>
@@ -28,7 +34,7 @@ const description = "An open-source agent that keeps the lights on in your GitHu
 
 	<!-- What it does -->
 	<section class="features" id="features">
-		<h2>Keeping the lights on</h2>
+		<h2>Working after dark</h2>
 		<p class="section-desc">Issue triage, PR review, on-request builds, weekly health reports, Slack chat — all driven by YAML workflows you can fork and edit.</p>
 		<div class="feature-grid">
 			<div class="feature-card">
@@ -468,7 +474,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 		justify-content: center;
 		text-align: center;
 		padding: 2rem;
-		max-width: 700px;
+		max-width: 880px;
 		margin: 0 auto;
 	}
 
@@ -488,6 +494,25 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 		margin-bottom: 0.75rem;
 	}
 
+	.hero-badges {
+		display: flex;
+		gap: 0.5rem;
+		justify-content: center;
+		flex-wrap: wrap;
+		margin-bottom: 1.5rem;
+	}
+
+	.hero-badge {
+		font-size: 0.75rem;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--text-muted);
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		padding: 0.3rem 0.8rem;
+	}
+
 	h1 {
 		font-size: clamp(2rem, 5vw, 3.2rem);
 		line-height: 1.15;
@@ -502,7 +527,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 	.subtitle {
 		font-size: 1.15rem;
 		color: var(--text-muted);
-		max-width: 520px;
+		max-width: 640px;
 		margin-bottom: 2rem;
 		line-height: 1.65;
 	}
@@ -530,8 +555,8 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 	}
 
 	.btn-primary:hover {
-		background: #D9A025;
-		border-color: #D9A025;
+		background: var(--gold-dark);
+		border-color: var(--gold-dark);
 		color: var(--bg);
 	}
 
@@ -581,7 +606,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 	}
 
 	.feature-card:hover {
-		border-color: #2A3A4D;
+		border-color: var(--border-bright);
 		background: var(--bg-card-hover);
 	}
 

@@ -26,39 +26,39 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<div class="workflow-diagram">
 		<svg viewBox="0 0 820 140" fill="none" xmlns="http://www.w3.org/2000/svg">
 			<!-- Nodes -->
-			<rect x="0" y="35" width="100" height="56" rx="8" fill="#1B2230" stroke="#4A5568" stroke-width="1.5"/>
-			<text x="50" y="60" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Context</text>
-			<text x="50" y="75" text-anchor="middle" fill="#7D8694" font-size="8" font-family="JetBrains Mono">phase_0</text>
+			<rect x="0" y="35" width="100" height="56" rx="8" fill="var(--fill-grey)" stroke="var(--diag-grey)" stroke-width="1.5"/>
+			<text x="50" y="60" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Context</text>
+			<text x="50" y="75" text-anchor="middle" fill="var(--text-muted)" font-size="8" font-family="JetBrains Mono">phase_0</text>
 
-			<rect x="130" y="35" width="120" height="56" rx="8" fill="#10202A" stroke="#4A9EDB" stroke-width="1.5"/>
-			<text x="190" y="60" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Read context</text>
-			<text x="190" y="75" text-anchor="middle" fill="#4A9EDB" font-size="8" font-family="JetBrains Mono">clone + explore</text>
+			<rect x="130" y="35" width="120" height="56" rx="8" fill="var(--fill-blue)" stroke="var(--diag-blue)" stroke-width="1.5"/>
+			<text x="190" y="60" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Read context</text>
+			<text x="190" y="75" text-anchor="middle" fill="var(--diag-blue)" font-size="8" font-family="JetBrains Mono">clone + explore</text>
 
-			<rect x="280" y="35" width="180" height="56" rx="8" fill="#2A2210" stroke="#F0B429" stroke-width="1.5"/>
-			<text x="370" y="55" text-anchor="middle" fill="#ECEFF4" font-size="11" font-weight="600" font-family="Inter">Socratic questioning</text>
-			<text x="370" y="72" text-anchor="middle" fill="#F0B429" font-size="8" font-family="JetBrains Mono">reply-gated loop (max 8)</text>
+			<rect x="280" y="35" width="180" height="56" rx="8" fill="var(--fill-gold)" stroke="var(--gold)" stroke-width="1.5"/>
+			<text x="370" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="11" font-weight="600" font-family="Inter">Socratic questioning</text>
+			<text x="370" y="72" text-anchor="middle" fill="var(--gold)" font-size="8" font-family="JetBrains Mono">reply-gated loop (max 8)</text>
 
-			<rect x="490" y="35" width="130" height="56" rx="8" fill="#0F2328" stroke="#2EBDA8" stroke-width="1.5"/>
-			<text x="555" y="60" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Synthesize spec</text>
-			<text x="555" y="75" text-anchor="middle" fill="#2EBDA8" font-size="8" font-family="JetBrains Mono">write document</text>
+			<rect x="490" y="35" width="130" height="56" rx="8" fill="var(--fill-teal)" stroke="var(--diag-mint)" stroke-width="1.5"/>
+			<text x="555" y="60" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Synthesize spec</text>
+			<text x="555" y="75" text-anchor="middle" fill="var(--diag-mint)" font-size="8" font-family="JetBrains Mono">write document</text>
 
-			<rect x="650" y="35" width="130" height="56" rx="8" fill="#1A1528" stroke="#8B5CF6" stroke-width="1.5"/>
-			<text x="715" y="60" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Publish</text>
-			<text x="715" y="75" text-anchor="middle" fill="#8B5CF6" font-size="8" font-family="JetBrains Mono">create issue</text>
+			<rect x="650" y="35" width="130" height="56" rx="8" fill="var(--fill-purple)" stroke="var(--diag-purple)" stroke-width="1.5"/>
+			<text x="715" y="60" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Publish</text>
+			<text x="715" y="75" text-anchor="middle" fill="var(--diag-purple)" font-size="8" font-family="JetBrains Mono">create issue</text>
 
 			<!-- Edges -->
-			<line x1="100" y1="63" x2="130" y2="63" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow-e)"/>
-			<line x1="250" y1="63" x2="280" y2="63" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow-e)"/>
-			<line x1="460" y1="63" x2="490" y2="63" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow-e)"/>
-			<line x1="620" y1="63" x2="650" y2="63" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow-e)"/>
+			<line x1="100" y1="63" x2="130" y2="63" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow-e)"/>
+			<line x1="250" y1="63" x2="280" y2="63" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow-e)"/>
+			<line x1="460" y1="63" x2="490" y2="63" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow-e)"/>
+			<line x1="620" y1="63" x2="650" y2="63" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow-e)"/>
 
 			<!-- Reply loop arc -->
-			<path d="M 420 91 L 420 115 L 320 115 L 320 91" stroke="#F0B429" stroke-width="1" stroke-dasharray="4,3" fill="none" marker-end="url(#arrow-gold)"/>
-			<text x="370" y="130" text-anchor="middle" fill="#F0B429" font-size="8" font-family="JetBrains Mono">user replies in thread</text>
+			<path d="M 420 91 L 420 115 L 320 115 L 320 91" stroke="var(--gold)" stroke-width="1" stroke-dasharray="4,3" fill="none" marker-end="url(#arrow-gold)"/>
+			<text x="370" y="130" text-anchor="middle" fill="var(--gold)" font-size="8" font-family="JetBrains Mono">user replies in thread</text>
 
 			<defs>
-				<marker id="arrow-e" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#4A5568"/></marker>
-				<marker id="arrow-gold" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#F0B429"/></marker>
+				<marker id="arrow-e" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--diag-grey)"/></marker>
+				<marker id="arrow-gold" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--gold)"/></marker>
 			</defs>
 		</svg>
 	</div>

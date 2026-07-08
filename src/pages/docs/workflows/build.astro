@@ -25,44 +25,44 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<div class="workflow-diagram">
 		<svg viewBox="0 0 820 120" fill="none" xmlns="http://www.w3.org/2000/svg">
 			<!-- Nodes -->
-			<rect x="0" y="30" width="110" height="56" rx="8" fill="#1B2230" stroke="#4A5568" stroke-width="1.5"/>
-			<text x="55" y="55" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Context</text>
-			<text x="55" y="70" text-anchor="middle" fill="#7D8694" font-size="8" font-family="JetBrains Mono">phase_0</text>
+			<rect x="0" y="30" width="110" height="56" rx="8" fill="var(--fill-grey)" stroke="var(--diag-grey)" stroke-width="1.5"/>
+			<text x="55" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Context</text>
+			<text x="55" y="70" text-anchor="middle" fill="var(--text-muted)" font-size="8" font-family="JetBrains Mono">phase_0</text>
 
-			<rect x="140" y="30" width="110" height="56" rx="8" fill="#2A1A10" stroke="#E8752A" stroke-width="1.5"/>
-			<text x="195" y="55" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Guardrails</text>
-			<text x="195" y="70" text-anchor="middle" fill="#E8752A" font-size="8" font-family="JetBrains Mono">READY / BLOCKED</text>
+			<rect x="140" y="30" width="110" height="56" rx="8" fill="var(--fill-orange)" stroke="var(--orange)" stroke-width="1.5"/>
+			<text x="195" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Guardrails</text>
+			<text x="195" y="70" text-anchor="middle" fill="var(--orange)" font-size="8" font-family="JetBrains Mono">READY / BLOCKED</text>
 
-			<rect x="280" y="30" width="110" height="56" rx="8" fill="#2A2210" stroke="#F0B429" stroke-width="1.5"/>
-			<text x="335" y="55" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Architect</text>
-			<text x="335" y="70" text-anchor="middle" fill="#F0B429" font-size="8" font-family="JetBrains Mono">approval gate</text>
+			<rect x="280" y="30" width="110" height="56" rx="8" fill="var(--fill-gold)" stroke="var(--gold)" stroke-width="1.5"/>
+			<text x="335" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Architect</text>
+			<text x="335" y="70" text-anchor="middle" fill="var(--gold)" font-size="8" font-family="JetBrains Mono">approval gate</text>
 
-			<rect x="420" y="30" width="110" height="56" rx="8" fill="#10202A" stroke="#4A9EDB" stroke-width="1.5"/>
-			<text x="475" y="55" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Executor</text>
-			<text x="475" y="70" text-anchor="middle" fill="#4A9EDB" font-size="8" font-family="JetBrains Mono">TDD implement</text>
+			<rect x="420" y="30" width="110" height="56" rx="8" fill="var(--fill-blue)" stroke="var(--diag-blue)" stroke-width="1.5"/>
+			<text x="475" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Executor</text>
+			<text x="475" y="70" text-anchor="middle" fill="var(--diag-blue)" font-size="8" font-family="JetBrains Mono">TDD implement</text>
 
-			<rect x="560" y="30" width="110" height="56" rx="8" fill="#0F2328" stroke="#1A7A8A" stroke-width="1.5"/>
-			<text x="615" y="55" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">Reviewer</text>
-			<text x="615" y="70" text-anchor="middle" fill="#2EBDA8" font-size="8" font-family="JetBrains Mono">loop (max 2)</text>
+			<rect x="560" y="30" width="110" height="56" rx="8" fill="var(--fill-teal)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="615" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Reviewer</text>
+			<text x="615" y="70" text-anchor="middle" fill="var(--diag-mint)" font-size="8" font-family="JetBrains Mono">loop (max 2)</text>
 
-			<rect x="700" y="30" width="110" height="56" rx="8" fill="#1A1528" stroke="#8B5CF6" stroke-width="1.5"/>
-			<text x="755" y="55" text-anchor="middle" fill="#ECEFF4" font-size="10" font-weight="600" font-family="Inter">PR</text>
-			<text x="755" y="70" text-anchor="middle" fill="#8B5CF6" font-size="8" font-family="JetBrains Mono">open pull request</text>
+			<rect x="700" y="30" width="110" height="56" rx="8" fill="var(--fill-purple)" stroke="var(--diag-purple)" stroke-width="1.5"/>
+			<text x="755" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">PR</text>
+			<text x="755" y="70" text-anchor="middle" fill="var(--diag-purple)" font-size="8" font-family="JetBrains Mono">open pull request</text>
 
 			<!-- Edges -->
-			<line x1="110" y1="58" x2="140" y2="58" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow)"/>
-			<line x1="250" y1="58" x2="280" y2="58" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow)"/>
-			<line x1="390" y1="58" x2="420" y2="58" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow)"/>
-			<line x1="530" y1="58" x2="560" y2="58" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow)"/>
-			<line x1="670" y1="58" x2="700" y2="58" stroke="#4A5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="110" y1="58" x2="140" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="250" y1="58" x2="280" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="390" y1="58" x2="420" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="530" y1="58" x2="560" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="670" y1="58" x2="700" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
 
 			<!-- Review loop arc -->
-			<path d="M 615 86 L 615 105 L 475 105 L 475 86" stroke="#2EBDA8" stroke-width="1" stroke-dasharray="4,3" fill="none" marker-end="url(#arrow-teal)"/>
-			<text x="545" y="115" text-anchor="middle" fill="#2EBDA8" font-size="8" font-family="JetBrains Mono">REQUEST_CHANGES</text>
+			<path d="M 615 86 L 615 105 L 475 105 L 475 86" stroke="var(--diag-mint)" stroke-width="1" stroke-dasharray="4,3" fill="none" marker-end="url(#arrow-teal)"/>
+			<text x="545" y="115" text-anchor="middle" fill="var(--diag-mint)" font-size="8" font-family="JetBrains Mono">REQUEST_CHANGES</text>
 
 			<defs>
-				<marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#4A5568"/></marker>
-				<marker id="arrow-teal" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#2EBDA8"/></marker>
+				<marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--diag-grey)"/></marker>
+				<marker id="arrow-teal" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--diag-mint)"/></marker>
 			</defs>
 		</svg>
 	</div>

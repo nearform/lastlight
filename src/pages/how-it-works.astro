@@ -202,63 +202,63 @@ phases:
 				<rect width="800" height="340" fill="none"/>
 
 				<!-- Phase boxes -->
-				<rect x="20" y="40" width="140" height="70" rx="10" fill="#141B24" stroke="#1E2A38" stroke-width="1.5"/>
-				<text x="90" y="68" text-anchor="middle" fill="#7D8694" font-size="11" font-family="Inter, sans-serif">PHASE 0</text>
-				<text x="90" y="88" text-anchor="middle" fill="#ECEFF4" font-size="13" font-weight="600" font-family="Inter, sans-serif">Context</text>
+				<rect x="20" y="40" width="140" height="70" rx="10" fill="var(--bg-card)" stroke="var(--border)" stroke-width="1.5"/>
+				<text x="90" y="68" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">PHASE 0</text>
+				<text x="90" y="88" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">Context</text>
 
-				<rect x="195" y="40" width="140" height="70" rx="10" fill="#141B24" stroke="#1A7A8A" stroke-width="1.5"/>
-				<text x="265" y="68" text-anchor="middle" fill="#1A7A8A" font-size="11" font-family="Inter, sans-serif">PHASE 1</text>
-				<text x="265" y="88" text-anchor="middle" fill="#ECEFF4" font-size="13" font-weight="600" font-family="Inter, sans-serif">Architect</text>
+				<rect x="195" y="40" width="140" height="70" rx="10" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+				<text x="265" y="68" text-anchor="middle" fill="var(--teal)" font-size="11" font-family="Inter, sans-serif">PHASE 1</text>
+				<text x="265" y="88" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">Architect</text>
 
-				<rect x="370" y="40" width="140" height="70" rx="10" fill="#141B24" stroke="#F0B429" stroke-width="1.5"/>
-				<text x="440" y="68" text-anchor="middle" fill="#F0B429" font-size="11" font-family="Inter, sans-serif">PHASE 2</text>
-				<text x="440" y="88" text-anchor="middle" fill="#ECEFF4" font-size="13" font-weight="600" font-family="Inter, sans-serif">Executor</text>
+				<rect x="370" y="40" width="140" height="70" rx="10" fill="var(--bg-card)" stroke="var(--gold)" stroke-width="1.5"/>
+				<text x="440" y="68" text-anchor="middle" fill="var(--gold)" font-size="11" font-family="Inter, sans-serif">PHASE 2</text>
+				<text x="440" y="88" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">Executor</text>
 
-				<rect x="545" y="40" width="140" height="70" rx="10" fill="#141B24" stroke="#E8752A" stroke-width="1.5"/>
-				<text x="615" y="68" text-anchor="middle" fill="#E8752A" font-size="11" font-family="Inter, sans-serif">PHASE 3</text>
-				<text x="615" y="88" text-anchor="middle" fill="#ECEFF4" font-size="13" font-weight="600" font-family="Inter, sans-serif">Reviewer</text>
+				<rect x="545" y="40" width="140" height="70" rx="10" fill="var(--bg-card)" stroke="var(--orange)" stroke-width="1.5"/>
+				<text x="615" y="68" text-anchor="middle" fill="var(--orange)" font-size="11" font-family="Inter, sans-serif">PHASE 3</text>
+				<text x="615" y="88" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">Reviewer</text>
 
 				<!-- Arrows forward -->
-				<line x1="160" y1="75" x2="195" y2="75" stroke="#2A3A4D" stroke-width="1.5" marker-end="url(#arrow)"/>
-				<line x1="335" y1="75" x2="370" y2="75" stroke="#2A3A4D" stroke-width="1.5" marker-end="url(#arrow)"/>
-				<line x1="510" y1="75" x2="545" y2="75" stroke="#2A3A4D" stroke-width="1.5" marker-end="url(#arrow)"/>
+				<line x1="160" y1="75" x2="195" y2="75" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#arrow)"/>
+				<line x1="335" y1="75" x2="370" y2="75" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#arrow)"/>
+				<line x1="510" y1="75" x2="545" y2="75" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#arrow)"/>
 
 				<!-- Decision diamond -->
-				<polygon points="615,140 650,170 615,200 580,170" fill="#141B24" stroke="#E8752A" stroke-width="1.5"/>
-				<text x="615" y="174" text-anchor="middle" fill="#ECEFF4" font-size="11" font-weight="500" font-family="Inter, sans-serif">OK?</text>
+				<polygon points="615,140 650,170 615,200 580,170" fill="var(--bg-card)" stroke="var(--orange)" stroke-width="1.5"/>
+				<text x="615" y="174" text-anchor="middle" fill="var(--text-bright)" font-size="11" font-weight="500" font-family="Inter, sans-serif">OK?</text>
 
 				<!-- Arrow down from Reviewer to diamond -->
-				<line x1="615" y1="110" x2="615" y2="140" stroke="#2A3A4D" stroke-width="1.5" marker-end="url(#arrow)"/>
+				<line x1="615" y1="110" x2="615" y2="140" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#arrow)"/>
 
 				<!-- Yes path — to PR -->
-				<rect x="545" y="240" width="140" height="60" rx="10" fill="#141B24" stroke="#1A7A8A" stroke-width="1.5"/>
-				<text x="615" y="266" text-anchor="middle" fill="#1A7A8A" font-size="11" font-family="Inter, sans-serif">PHASE 5</text>
-				<text x="615" y="284" text-anchor="middle" fill="#ECEFF4" font-size="13" font-weight="600" font-family="Inter, sans-serif">Create PR</text>
-				<line x1="615" y1="200" x2="615" y2="240" stroke="#1A7A8A" stroke-width="1.5" marker-end="url(#arrow)"/>
-				<text x="628" y="224" fill="#1A7A8A" font-size="10" font-family="Inter, sans-serif">yes</text>
+				<rect x="545" y="240" width="140" height="60" rx="10" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+				<text x="615" y="266" text-anchor="middle" fill="var(--teal)" font-size="11" font-family="Inter, sans-serif">PHASE 5</text>
+				<text x="615" y="284" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">Create PR</text>
+				<line x1="615" y1="200" x2="615" y2="240" stroke="var(--teal)" stroke-width="1.5" marker-end="url(#arrow)"/>
+				<text x="628" y="224" fill="var(--teal)" font-size="10" font-family="Inter, sans-serif">yes</text>
 
 				<!-- No path — fix loop back to Executor -->
-				<line x1="580" y1="170" x2="440" y2="170" stroke="#E8752A" stroke-width="1.5" stroke-dasharray="6,3"/>
-				<line x1="440" y1="170" x2="440" y2="110" stroke="#E8752A" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-orange)"/>
-				<text x="505" y="162" fill="#E8752A" font-size="10" font-family="Inter, sans-serif">no (max 2x)</text>
+				<line x1="580" y1="170" x2="440" y2="170" stroke="var(--orange)" stroke-width="1.5" stroke-dasharray="6,3"/>
+				<line x1="440" y1="170" x2="440" y2="110" stroke="var(--orange)" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-orange)"/>
+				<text x="505" y="162" fill="var(--orange)" font-size="10" font-family="Inter, sans-serif">no (max 2x)</text>
 
 				<!-- GitHub issue bar at bottom -->
-				<rect x="20" y="340" width="665" height="30" rx="6" fill="#0C1117" stroke="#1E2A38" stroke-width="1"/>
-				<text x="352" y="360" text-anchor="middle" fill="#7D8694" font-size="11" font-family="Inter, sans-serif">GitHub Issue — progress posted at every phase</text>
+				<rect x="20" y="340" width="665" height="30" rx="6" fill="var(--bg)" stroke="var(--border)" stroke-width="1"/>
+				<text x="352" y="360" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">GitHub Issue — progress posted at every phase</text>
 
 				<!-- Dashed lines from phases to issue bar -->
-				<line x1="90" y1="110" x2="90" y2="340" stroke="#1E2A38" stroke-width="1" stroke-dasharray="3,4"/>
-				<line x1="265" y1="110" x2="265" y2="340" stroke="#1E2A38" stroke-width="1" stroke-dasharray="3,4"/>
-				<line x1="440" y1="170" x2="440" y2="340" stroke="#1E2A38" stroke-width="1" stroke-dasharray="3,4"/>
-				<line x1="615" y1="300" x2="615" y2="340" stroke="#1E2A38" stroke-width="1" stroke-dasharray="3,4"/>
+				<line x1="90" y1="110" x2="90" y2="340" stroke="var(--border)" stroke-width="1" stroke-dasharray="3,4"/>
+				<line x1="265" y1="110" x2="265" y2="340" stroke="var(--border)" stroke-width="1" stroke-dasharray="3,4"/>
+				<line x1="440" y1="170" x2="440" y2="340" stroke="var(--border)" stroke-width="1" stroke-dasharray="3,4"/>
+				<line x1="615" y1="300" x2="615" y2="340" stroke="var(--border)" stroke-width="1" stroke-dasharray="3,4"/>
 
 				<!-- Arrow markers -->
 				<defs>
 					<marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-						<path d="M0,0 L8,3 L0,6" fill="#2A3A4D"/>
+						<path d="M0,0 L8,3 L0,6" fill="var(--border-bright)"/>
 					</marker>
 					<marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-						<path d="M0,0 L8,3 L0,6" fill="#E8752A"/>
+						<path d="M0,0 L8,3 L0,6" fill="var(--orange)"/>
 					</marker>
 				</defs>
 			</svg>
@@ -732,7 +732,7 @@ is recorded), but the rubric below is the same.
 		transition: border-color 0.25s;
 	}
 
-	.principle-card:hover { border-color: #2A3A4D; }
+	.principle-card:hover { border-color: var(--border-bright); }
 
 	.principle-header {
 		display: flex;
@@ -940,7 +940,7 @@ is recorded), but the rubric below is the same.
 		transition: border-color 0.25s;
 	}
 
-	.event-card:hover { border-color: #2A3A4D; }
+	.event-card:hover { border-color: var(--border-bright); }
 
 	.event-header {
 		display: flex;
