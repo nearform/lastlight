@@ -473,6 +473,53 @@ findings it extracted, the gold set, the finding↔gold pairing (matched / false
 positive / missed), and its raw replies — so the F1 score is inspectable, not a
 black box.
 
+## Improving an eval — the loop (`lastlight-evals-loop`)
+
+Running an eval gives you a score; the **improvement loop** raises it *without
+gaming it*. It's driven by the sibling **`lastlight-evals-loop`** skill (say
+*"raise the pr-review F1"*) and two read-only helpers in `scripts/`. The method —
+**mine the failures → propose a few minimal candidate fixes → keep the one that
+survives a blind held-out gate** — follows
+[*Self-Harness: Harnesses That Improve Themselves*](https://arxiv.org/abs/2606.09498),
+adapted to keep the anti-gaming discipline below.
+
+One round:
+
+1. **Diagnose (mine).** `scripts/mine-failures.ts` reads the **TRAIN** split of a
+   scorecard and clusters the judge's `falseNegatives` (recall loss, weighted by
+   severity) and `falsePositives` (precision loss) into a **ranked signature
+   bundle** — the systematic patterns, ordered by F1 headroom, instead of reading
+   traces by hand.
+
+   ```bash
+   npx tsx scripts/mine-failures.ts <train-scorecard>.json --train <train-ids> --keywords
+   ```
+
+2. **Propose.** Draft a few (K=2–4) **minimal, diverse** candidate edits for the
+   top pattern — lowest lever first: a generic overlay prompt/skill/persona edit,
+   or a synthetic `AGENTS.md` injected into the checkout. Never a core change.
+3. **Select on TRAIN, confirm on HELD-OUT once.** Rank candidates on the train
+   split, then give the single winner **one** blind held-out confirmation (gating
+   every candidate on held-out would inflate it). `scripts/diff-runs.ts` computes
+   the keep/revert verdict:
+
+   ```bash
+   npx tsx scripts/diff-runs.ts <baseline>.json <winner>.json \
+       --train <train-ids> --heldout <heldout-ids>
+   # VERDICT: KEEP — train ↑ and held-out held  (or REVERT — OVERFIT: held-out regressed)
+   # --symmetric swaps in the paper's non-regressive gate (neither split may regress).
+   ```
+
+4. **Keep one, journal, repeat** until a target F1 or a plateau.
+
+**What keeps it honest:** a fixed **train / blind held-out** split (the empirical
+gate), **one change kept per round** (attribution), an adversarial **generality +
+leak auditor** that rejects any edit naming a specific repo/file or encoding the
+gold answer, and **generic-first** levers — core is never touched. The loop
+produces two durable outputs: workflow improvements (better prompts/skills for
+every repo) and per-repo recommendations (context a maintainer can commit), each
+backed by a measured held-out lift.
+
 ## Models (`models.json`)
 
 - `default` — the single model `run` uses.

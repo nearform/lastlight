@@ -34,10 +34,15 @@ edited; it resolves the skill at `../lastlight` by default, overridable with
 
 A sibling **`lastlight-evals-loop`** skill (same plugin dir) drives the
 score-improvement loop *on top of* this CLI — it consumes `scorecard.json`, the
-repo-context injection seam (below), and `scripts/diff-runs.ts` (the read-only
-two-run F1 diff + keep/revert verdict). It adds no CLI subcommands, but it relies
-on the `--no-inject-context` flag and the `repo-context/` / `context/<id>/`
-convention, so keep those in sync with it too.
+repo-context injection seam (below), `scripts/mine-failures.ts` (the read-only
+TRAIN-only failure-signature miner — its diagnosis input) and `scripts/diff-runs.ts`
+(the read-only two-run F1 diff + keep/revert verdict, now with an opt-in
+`--symmetric` gate + a machine-readable `REGRESSED(train)/REGRESSED(heldout)` line).
+It adds no CLI subcommands, but it relies on those two scripts, the
+`--no-inject-context` flag and the `repo-context/` / `context/<id>/` convention, so
+keep those in sync with it too. The loop's method (mine → propose a few candidates →
+keep the best under a blind held-out gate) follows *Self-Harness*
+(arXiv:2606.09498); see the skill's `references/approach.md`.
 
 ## Commands
 
@@ -151,7 +156,8 @@ The release commit is conventionally just the two version-file lines
 | `src/seed.ts` / `src/grade.ts` / `src/metrics.ts` | Workspace seeding (vendored fixture, git-source `base_commit` checkout, OR pr-review PR-head checkout — all from the `./.eval-cache/` mirror) / grading (execution TAP, behavioral, + `gradeReview` judge) / token-cost roll-up. |
 | `src/judge.ts` | One-shot LLM client for `gradeReview` (pr-review only) — direct provider `fetch`, temp 0. `EVAL_JUDGE_MODEL` overrides `defaultJudgeModel()`. |
 | `scripts/import-martian.ts` | Import Martian's Code Review Bench offline set (50 PRs) into the `pr-review` tier (`gh`+`git`: resolves base/head, pins SHAs). |
-| `scripts/diff-runs.ts` | Read-only two-scorecard F1 diff (per-case + arm delta) + train/held-out keep/revert verdict — the measurement step of the `lastlight-evals-loop` skill. |
+| `scripts/mine-failures.ts` | Read-only TRAIN-only failure-signature miner — clusters `review.falseNegatives`/`falsePositives` into ranked recall/precision signatures (the evidence bundle) for the `lastlight-evals-loop` skill's diagnose step. |
+| `scripts/diff-runs.ts` | Read-only two-scorecard F1 diff (per-case + arm delta) + train/held-out keep/revert verdict (opt-in `--symmetric` non-regressive gate; split-partitioned `REGRESSED(...)` line) — the measurement step of the `lastlight-evals-loop` skill. |
 | `src/report.ts` | Scorecard roll-up + JSON/JSONL artifacts + `buildIndex` (filesystem → the SPA's `/api/index`). |
 | `src/serve.ts` | Tiny dependency-free server: `/api/index` (fs scan), `/data/*` (raw artifacts), the SPA + fallback. |
 | `dashboard/` | The JSON-driven dashboard SPA (Vite + React + Tailwind/daisyUI + TanStack Query); ships prebuilt as `dashboard/dist`. |
