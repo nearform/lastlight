@@ -129,7 +129,7 @@ describe("post-review action (runPostReview)", () => {
     writeFileSync(join(dir, "findings.json"), JSON.stringify(doc));
   }
 
-  function makeExecutor(taskId: string) {
+  function makeExecutor(taskId: string, ctxOverrides: Partial<TemplateContext> = {}) {
     const ctx: TemplateContext = {
       owner: "acme",
       repo: "widget",
@@ -143,6 +143,7 @@ describe("post-review action (runPostReview)", () => {
       taskId,
       issueDir: ".lastlight/issue-42",
       bootstrapLabel: "x",
+      ...ctxOverrides,
     };
     const run: PhaseRunContext = {
       definition: DEFINITION,
@@ -173,6 +174,22 @@ describe("post-review action (runPostReview)", () => {
     const body = reviews[0]!.body as { event: string; body: string };
     expect(body.event).toBe("APPROVE");
     expect(body.body).toContain("Looks good.");
+  });
+
+  it("posts from prNumber alone when issueNumber is absent (real PR webhook ctx)", async () => {
+    // A `pr.opened`/`synchronize`/`reopened` webhook routes with only prNumber
+    // (router drops the issue mirror), so simple.ts builds a ctx with
+    // issueNumber: 0 + prNumber set. Regression for a real PR review that
+    // computed findings but failed post-review with "no PR number in run
+    // context" because the ctx never carried the PR number.
+    const taskId = "widget-42-pronly";
+    seedFindings(taskId, "widget", { summary: "Looks good.", event: "APPROVE", findings: [] });
+    const { executor, rep } = makeExecutor(taskId, { issueNumber: 0, prNumber: 42 });
+    const outcome = await executor.execute(NODE, {});
+    expect(outcome.status).toBe("succeeded");
+    expect(rep.failed).toHaveLength(0);
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]!.pr).toBe("42");
   });
 
   it("skips (no post) when the agent recorded skip:true", async () => {

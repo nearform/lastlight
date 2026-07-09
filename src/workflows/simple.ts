@@ -390,7 +390,15 @@ export async function runSimpleWorkflow(
   const ctx: TemplateContext = {
     owner,
     repo,
-    issueNumber: issueNumber ?? 0,
+    // A PR is its own GitHub number, so for PR-scoped workflows (pr-review /
+    // pr-fix, triggered by a `pr.*` webhook that carries only `prNumber`)
+    // fall back to it — otherwise `issueNumber` is 0 and the `post-review`
+    // action can't find the PR to post against. Mirrors the DB run row and
+    // taskId, both of which already key off `issueNumber ?? prNumber`.
+    issueNumber: issueNumber ?? prNumber ?? 0,
+    // Surface the PR number explicitly too; `post-review` prefers it over
+    // `issueNumber`, and PR-scoped prompts can reference `{{prNumber}}`.
+    prNumber,
     issueTitle: request.issueTitle || "",
     issueBody: request.issueBody || "",
     issueLabels: request.issueLabels || [],
