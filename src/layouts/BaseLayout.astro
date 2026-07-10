@@ -20,7 +20,7 @@ const ogImageURL = new URL(ogImage, Astro.site);
 <head>
 	<meta charset="utf-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
-	<link rel="icon" type="image/png" href="/logo.png" />
+	<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 	<link rel="canonical" href={canonicalURL} />
 	<link rel="sitemap" href="/sitemap-index.xml" />
 	<link rel="llms-txt" href="/llms.txt" />
@@ -246,6 +246,20 @@ const ogImageURL = new URL(ogImage, Astro.site);
 
 	.nav-logo:hover {
 		color: var(--gold);
+	}
+
+	/* Nearform monogram — its "N" uses currentColor, so drive it to the bright
+	   heading colour: exact brand navy (#000E38) on the light theme, near-white
+	   on dark. The green bar in the mark is fixed. Keep the nav's hover-gold on
+	   the monogram, and the footer's subtle muted treatment. */
+	.nf-logo {
+		color: var(--text-bright);
+	}
+	.nav-logo:hover .nf-logo {
+		color: var(--gold);
+	}
+	.footer-content .nf-logo {
+		opacity: 0.85;
 	}
 
 	.nav-toggle {
