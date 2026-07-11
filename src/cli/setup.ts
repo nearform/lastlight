@@ -306,16 +306,16 @@ function preflight(): void {
       process.chdir("lastlight");
     } else {
       const s = p.spinner();
-      s.start("Cloning cliftonc/lastlight ...");
+      s.start("Cloning nearform/lastlight ...");
       try {
-        execSync("git clone https://github.com/cliftonc/lastlight.git lastlight", {
+        execSync("git clone https://github.com/nearform/lastlight.git lastlight", {
           stdio: "pipe",
         });
         s.stop("Repository cloned.");
       } catch {
         s.stop("Clone failed.");
         p.log.error("Failed to clone. Please clone manually:");
-        p.log.info("  git clone https://github.com/cliftonc/lastlight.git");
+        p.log.info("  git clone https://github.com/nearform/lastlight.git");
         process.exit(1);
       }
       process.chdir("lastlight");

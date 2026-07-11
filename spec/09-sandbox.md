@@ -29,7 +29,7 @@ marshalled out (e.g. via `docker exec`). Wrapping the runtime instead of
 each tool keeps containment structural: there is no host-side code path
 an agent tool could escape through, so a `read`-profile triage run cannot
 reach the host even if a prompt injection convinces it to try. See
-[ADR-0001](https://github.com/cliftonc/lastlight/blob/main/docs/adr/0001-agent-in-sandbox.md)
+[ADR-0001](https://github.com/nearform/lastlight/blob/main/docs/adr/0001-agent-in-sandbox.md)
 for the decision and the rejected alternative.
 
 ## Public contract

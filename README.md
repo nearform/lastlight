@@ -11,7 +11,7 @@
 
 An AI agent that maintains GitHub repositories: triaging issues, reviewing PRs, monitoring repo health, and building features through an Architect → Executor → Reviewer development cycle.
 
-Built on [agentic-pi](https://github.com/cliftonc/agentic-pi) (workflow phases) and [`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai) (in-process chat) with a lightweight TypeScript harness for webhook ingestion, cron scheduling, and process management. Provider-agnostic — point `LASTLIGHT_MODEL` at any `provider/model` pi-ai supports (defaults to `anthropic/claude-sonnet-4-6`).
+Built on [agentic-pi](https://github.com/nearform/agentic-pi) (workflow phases) and [`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai) (in-process chat) with a lightweight TypeScript harness for webhook ingestion, cron scheduling, and process management. Provider-agnostic — point `LASTLIGHT_MODEL` at any `provider/model` pi-ai supports (defaults to `anthropic/claude-sonnet-4-6`).
 
 ## Production Setup (Clean Server)
 
@@ -66,7 +66,7 @@ For a Docker-free production install (systemd unit, gondolin sandbox), see [Nati
 ### Setup
 
 ```bash
-git clone https://github.com/cliftonc/lastlight.git
+git clone https://github.com/nearform/lastlight.git
 cd lastlight
 npm install
 ```
@@ -287,7 +287,7 @@ For a Linux production host with KVM available (`/dev/kvm`), the native deploy r
 See [deploy/native/README.md](deploy/native/README.md) for the full runbook. The short version:
 
 ```bash
-git clone https://github.com/cliftonc/lastlight.git /opt/lastlight
+git clone https://github.com/nearform/lastlight.git /opt/lastlight
 cd /opt/lastlight
 # (optional) install -m 0600 -o root /path/to/app.pem /etc/lastlight/app.pem
 sudo bash deploy/native/install.sh        # scaffolds /etc/lastlight/lastlight.env

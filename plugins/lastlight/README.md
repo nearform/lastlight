@@ -34,7 +34,7 @@ lastlight skills install --scope project   # → ./.claude/skills (this repo onl
 **Via the Claude Code plugin marketplace** (from a checkout of this repo):
 
 ```bash
-claude plugin marketplace add ./        # or: cliftonc/lastlight if public
+claude plugin marketplace add ./        # or: nearform/lastlight if public
 claude plugin install lastlight@lastlight-skills
 ```
 

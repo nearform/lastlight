@@ -23,7 +23,7 @@ import { resolve } from "node:path";
 
 const exec = promisify(execFile);
 
-const CORE_REMOTE = "https://github.com/cliftonc/lastlight";
+const CORE_REMOTE = "https://github.com/nearform/lastlight";
 /** Overlay checkout path inside the container (LASTLIGHT_OVERLAY_DIR mount). */
 function overlayDir(): string {
   return process.env.LASTLIGHT_OVERLAY_DIR || "/app/instance";

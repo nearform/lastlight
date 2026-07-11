@@ -16,7 +16,7 @@ Edit the right-hand column to match whatever vocabulary you actually use.
 
 ## Notes for this repo
 
-- All five labels exist in `cliftonc/lastlight`. `needs-info` and `wontfix`
+- All five labels exist in `nearform/lastlight`. `needs-info` and `wontfix`
   predate this setup; `needs-triage`, `ready-for-agent`, and `ready-for-human`
   were created during `/setup-matt-pocock-skills`.
 - The repo also carries a separate `needs-review` label (used for

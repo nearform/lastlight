@@ -56,7 +56,7 @@
 2. Write `scripts/pi-spike.ts` that:
    - Builds an `Agent` with system prompt = concat of `agent-context/*.md`.
    - Loads `mcp-github-app` via `pi-mcp-adapter` with `directTools: true`.
-   - Runs one prompt: "Fetch the title of issue cliftonc/lastlight#1".
+   - Runs one prompt: "Fetch the title of issue nearform/lastlight#1".
    - Logs every `AgentEvent` and the final `usage.cost`.
 3. Audit `pi-mcp-adapter` source (~30 min): confirm it's not doing anything surprising with credentials, that it respects `env` interpolation, and that `directTools` registration produces the expected tool surface.
 4. Confirm the Anthropic provider in `pi-ai`:
@@ -591,7 +591,7 @@ These are the tests that justify the trust-boundary claim. **Each one targets a 
 
 #### 9. Production canary
 
-- **Phase 1.** Run `repo-health` weekly on `cliftonc/lastlight` for two cycles before promoting any other workflow. Compare cost, run duration, output structure to the prior month's baseline.
+- **Phase 1.** Run `repo-health` weekly on `nearform/lastlight` for two cycles before promoting any other workflow. Compare cost, run duration, output structure to the prior month's baseline.
 - **Phase 2–6.** Per-phase canary on a staging repo for 24 hours minimum. Roll forward only after zero unexpected errors.
 - **Phase 7.** Production soak for one week with all-workflows-on-pi before deleting the old executor code.
 

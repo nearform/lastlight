@@ -103,7 +103,7 @@ export const OVERLAY_ENV_EXAMPLE = [
 export const OVERLAY_README = [
   "# lastlight-instance",
   "",
-  "Private deployment overlay for [Last Light](https://github.com/cliftonc/lastlight).",
+  "Private deployment overlay for [Last Light](https://github.com/nearform/lastlight).",
   "Keeps deployment-specific config and secrets out of the public repo.",
   "",
   "Cloned into `instance/` next to the lastlight checkout's `docker-compose.yml`,",

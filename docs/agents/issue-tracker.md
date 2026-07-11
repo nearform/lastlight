@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for this repo live as GitHub issues in `cliftonc/lastlight`. Use the `gh` CLI for all operations.
+Issues and PRDs for this repo live as GitHub issues in `nearform/lastlight`. Use the `gh` CLI for all operations.
 
 ## Conventions
 

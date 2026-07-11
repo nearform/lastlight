@@ -31,7 +31,7 @@ const exec = promisify(execFile);
 // ── constants ────────────────────────────────────────────────────────────────
 
 /** SSH clone URL for the public core repo. */
-export const CORE_REPO = "git@github.com:cliftonc/lastlight.git";
+export const CORE_REPO = "git@github.com:nearform/lastlight.git";
 /** Default clone URL for the private deployment overlay (see CLAUDE.md). */
 export const OVERLAY_REPO_DEFAULT = "git@github-instance:cliftonc/lastlight-instance.git";
 /** Compose override the overlay ships; symlinked into the project root. */

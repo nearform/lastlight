@@ -1,6 +1,6 @@
 [Unit]
 Description=Last Light — GitHub repository maintenance agent
-Documentation=https://github.com/cliftonc/lastlight
+Documentation=https://github.com/nearform/lastlight
 After=network-online.target
 Wants=network-online.target
 

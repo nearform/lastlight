@@ -27,7 +27,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const coreLsRemote = "ls-remote https://github.com/cliftonc/lastlight HEAD";
+const coreLsRemote = "ls-remote https://github.com/nearform/lastlight HEAD";
 const overlayRevParse = `-C ${OV} rev-parse HEAD`;
 const overlayLsRemote = `-C ${OV} ls-remote origin HEAD`;
 

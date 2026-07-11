@@ -258,7 +258,7 @@ export const PROVIDERS: readonly ProviderSpec[] = [
     sampleModel: "anthropic/claude-sonnet-4.5",
     preserveNestedModelId: true,
     extraHeaders: {
-      "HTTP-Referer": "https://github.com/cliftonc/lastlight",
+      "HTTP-Referer": "https://github.com/nearform/lastlight",
       "X-Title": "Last Light",
     },
     keyPrefix: "sk-or-",

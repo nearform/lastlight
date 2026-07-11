@@ -19,7 +19,7 @@ On the prod host as root:
 
 ```bash
 # 1. Clone the repo to the canonical path.
-git clone https://github.com/cliftonc/lastlight.git /opt/lastlight
+git clone https://github.com/nearform/lastlight.git /opt/lastlight
 cd /opt/lastlight
 
 # 2. (Optional) Drop the GitHub App PEM in place before the install runs,

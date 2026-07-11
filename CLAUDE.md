@@ -804,7 +804,7 @@ Notes:
 
 ### Issue tracker
 
-Issues are tracked as GitHub issues in `cliftonc/lastlight` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues are tracked as GitHub issues in `nearform/lastlight` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

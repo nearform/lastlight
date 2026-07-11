@@ -101,7 +101,7 @@ Cut aggressively:
   API operations (read metadata, post comments, labels, reviews, create issues).
   Never `gh` CLI, `curl`, or raw HTTP for the API. (This differs from
   `docs/agents/issue-tracker.md`, which governs the *maintainer* working on
-  `cliftonc/lastlight` locally — that uses `gh`.)
+  `nearform/lastlight` locally — that uses `gh`.)
 - **Local checkout over API for code.** When a repo is cloned/pre-cloned, read
   diffs and file contents from the local checkout via `git`/`read`/`grep` — not
   `github_get_pull_request_diff` / `github_list_pull_request_files` /
