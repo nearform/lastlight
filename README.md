@@ -20,7 +20,7 @@ difference. Drop in your own issues and repos and it evaluates *your* agent.
 
 > 🛰️ Part of [**Last Light**](https://lastlight.dev) — the AI agent that triages,
 > reviews, and fixes your GitHub repos.
-> **[lastlight.dev](https://lastlight.dev)** · [Core repo](https://github.com/cliftonc/lastlight) · [Eval repo](https://github.com/cliftonc/lastlight-evals)
+> **[lastlight.dev](https://lastlight.dev)** · [Core repo](https://github.com/nearform/lastlight) · [Eval repo](https://github.com/nearform/lastlight-evals)
 
 It's **SWE-bench-compatible**, and nothing here touches real GitHub: the agent's
 `github_*` tool calls are served by an in-process fake (seeded + recording) and
@@ -73,7 +73,7 @@ overlay and `./evals/datasets`). Now you're evaluating *your* agent against the
 models you care about. Prefer to drive it by hand? Keep reading.
 
 > The skill itself lives in a separate repo — it's bundled in the **`lastlight`
-> plugin** ([`cliftonc/lastlight`](https://github.com/cliftonc/lastlight), under
+> plugin** ([`nearform/lastlight`](https://github.com/nearform/lastlight), under
 > `plugins/lastlight/skills/lastlight-evals/`) and tracks this CLI's `init` /
 > `run` surface, so the two are kept in sync.
 

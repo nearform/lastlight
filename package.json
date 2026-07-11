@@ -29,7 +29,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cliftonc/lastlight-evals.git"
+    "url": "git+https://github.com/nearform/lastlight-evals.git"
   },
   "keywords": [
     "lastlight",

@@ -35,7 +35,7 @@ if [ -f "$skill_path" ]; then
   location="$skill_path (+ its references/)"
 else
   # Fresh clone / different layout: point at the canonical home instead.
-  location="$skill_rel in cliftonc/lastlight (the lastlight plugin); set LASTLIGHT_CORE_DIR to resolve it locally"
+  location="$skill_rel in nearform/lastlight (the lastlight plugin); set LASTLIGHT_CORE_DIR to resolve it locally"
 fi
 
 reminder="You edited the lastlight-evals CLI surface ($file_path). The 'lastlight-evals' agent skill documents this CLI (run/init/add-case/serve subcommands + flags) and lives in a SEPARATE repo: $location. If you changed any subcommand, flag, default, or example, update the skill (SKILL.md and references/) in the same change so it doesn't drift."

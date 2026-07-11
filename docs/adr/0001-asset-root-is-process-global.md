@@ -56,7 +56,7 @@ overlay explicitly, eliminating the global and unblocking parallel config arms.
 
 This is a change to the `lastlight` core package and the barrel contract, out of
 scope for the Arm deepening in this repo. It is tracked at
-[cliftonc/lastlight#139](https://github.com/cliftonc/lastlight/issues/139). When
+[nearform/lastlight#139](https://github.com/nearform/lastlight/issues/139). When
 it lands, the migration here is one file: `configArm` returns its overlay as a
 value (likely from `prepare()`), and `activate()` plus its guard are deleted.
 
