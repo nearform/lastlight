@@ -15,7 +15,7 @@
     "agentic-pi": "^0.2.4",
     "ansi-to-html": "^0.7.2",
     "clsx": "^2.1.1",
-    "dompurify": "^3.3.4",
+    "dompurify": "^3.4.11",
     "lucide-react": "^0.468.0",
     "marked": "^11.2.0",
     "prismjs": "^1.30.0",
