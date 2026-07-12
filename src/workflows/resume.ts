@@ -4,6 +4,7 @@ import type { GitHubClient } from "../engine/github/github.js";
 import type { ModelConfig, VariantConfig } from "../config/config.js";
 import { runWorkflow, type ApprovalGateConfig, type RunnerCallbacks } from "./runner.js";
 import { getWorkflow } from "./loader.js";
+import { workflowScopedTaskId } from "./simple.js";
 import { slugify, type TemplateContext } from "./templates.js";
 import {
   ProgressNotifier,
@@ -59,18 +60,6 @@ export function parseSlackTriggerId(
   const [teamId, channelId, threadTs] = parts;
   if (!teamId || !channelId || !threadTs) return null;
   return { teamId, channelId, threadTs };
-}
-
-function workflowScopedTaskId(
-  repo: string,
-  issueNumber: number | undefined,
-  workflowName: string,
-  workflowRunId: string,
-): string {
-  const suffix = workflowRunId.slice(0, 8);
-  return issueNumber !== undefined
-    ? `${repo}-${issueNumber}-${workflowName}-${suffix}`
-    : `${repo}-${workflowName}-${suffix}`;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { isAbsolute, join, relative, resolve, sep } from "path";
 import { DockerSandbox, type WorkspaceMount } from "./docker.js";
 import { SANDBOX_IMAGE, isSandboxAvailable } from "./images.js";
@@ -228,22 +228,29 @@ type PrePopulate = {
   token: string;
   runId?: string;
   shallow?: boolean;
+  recreateFromBase?: boolean;
 };
 
 /**
  * Clone the repo into `<workDir>/<repo>` at the given branch.
  *
- * Three cases:
+ * Cases:
  * - **Fresh dir** (no `.git`): clone. `--depth 1 --single-branch` for
- *   read-only workflows (`pre.shallow`), `--depth 50` otherwise.
+ *   read-only workflows (`pre.shallow`), `--depth 50` otherwise. For
+ *   `recreateFromBase` the branch is cut from the default branch directly
+ *   (never `clone --branch <feature>`).
  * - **Same run revisiting the workspace** (`.git` exists, run marker matches
  *   `pre.runId`): preserve — this is a later phase of the same run reading
  *   what an earlier phase wrote (architect's `plan.md`, the reviewer's
  *   checkout). No git ops.
- * - **A fresh run reusing an old per-PR workspace** (`.git` exists, marker
- *   differs/absent): fetch + hard-reset to the remote branch + `git clean`
- *   that **keeps `node_modules`** so the next `npm install` is incremental.
- *   This is the re-review fast path from issue #107.
+ * - **A fresh run reusing an old per-target workspace** (`.git` exists, marker
+ *   differs/absent):
+ *   - default (pr-review / pr-fix): fetch + hard-reset to the remote branch +
+ *     `git clean` that **keeps `node_modules`** so the next `npm install` is
+ *     incremental (the re-review fast path from issue #107).
+ *   - `recreateFromBase` (build): delete the stale checkout and re-clone from
+ *     the default branch — a re-triggered incomplete build starts again off
+ *     current `main` (issue #153).
  */
 export { prePopulateWorkspace as __prePopulateWorkspaceForTest };
 
@@ -266,8 +273,10 @@ export function prePopulateWorkspace(
   // the workspace root.
   const repoDir = join(workDir, pre.repo);
   const markerPath = join(workDir, RUN_MARKER);
+  const scrub = (s: unknown): string =>
+    typeof s === "string" ? s.replaceAll(pre.token, "[REDACTED-TOKEN]") : "";
   // Repo dir might already exist — from a later phase of the same run, or a
-  // *different* run reusing a stable per-PR workspace (issue #107).
+  // *different* run reusing a stable per-target workspace (issue #107).
   if (existsSync(join(repoDir, ".git"))) {
     const lastRun = readMarker(markerPath);
     // Same run (or a caller that doesn't track runs): preserve the workspace
@@ -278,15 +287,39 @@ export function prePopulateWorkspace(
       );
       return;
     }
-    // Different run reusing this PR's workspace — refresh in place.
-    refreshExistingClone(repoDir, markerPath, pre);
-    return;
+    if (pre.recreateFromBase) {
+      // build (#153): a prior incomplete run left a checkout on a possibly
+      // stale feature branch. Discard it and re-clone from the default branch
+      // (below) so the re-triggered build starts again off current `main`.
+      try {
+        rmSync(repoDir, { recursive: true, force: true });
+        console.log(
+          `[sandbox] Recreating ${repoDir} from the default branch ` +
+          `(discarded stale workspace from run ${lastRun ?? "unknown"}).`,
+        );
+      } catch (err: any) {
+        console.warn(
+          `[sandbox] Failed to remove stale workspace ${repoDir} ` +
+          `(${scrub(err?.message)}); attempting a fresh clone anyway.`,
+        );
+      }
+      // fall through to the recreate-from-base clone below.
+    } else {
+      // Different run reusing this PR's workspace — refresh in place.
+      refreshExistingClone(repoDir, markerPath, pre);
+      return;
+    }
   }
-  const scrub = (s: unknown): string =>
-    typeof s === "string" ? s.replaceAll(pre.token, "[REDACTED-TOKEN]") : "";
   const start = Date.now();
   const depth = pre.shallow ? "1" : "50";
   const shallowArgs = pre.shallow ? ["--single-branch"] : [];
+  // Recreate-from-base workflows (build) always cut their branch from the
+  // default branch — never `clone --branch <feature>`, which would resurrect a
+  // stale *pushed* feature branch from an earlier incomplete run (#153).
+  if (pre.recreateFromBase) {
+    cloneDefaultAndCreateBranch(repoDir, url, depth, shallowArgs, pre, markerPath, start, scrub);
+    return;
+  }
   try {
     execFileSync(
       "git",
@@ -306,34 +339,9 @@ export function prePopulateWorkspace(
       // Build-style workflows create a brand-new branch (e.g. `lastlight/N-slug`)
       // and push it later. The remote doesn't have it yet at pre-clone time —
       // clone the default branch, then create the target branch locally so
-      // the agent enters a workspace already on the right branch with the
-      // right upstream URL configured.
-      try {
-        execFileSync(
-          "git",
-          ["clone", "--depth", depth, ...shallowArgs, url, repoDir],
-          { stdio: "pipe", timeout: 120_000 },
-        );
-        execFileSync(
-          "git",
-          ["-C", repoDir, "checkout", "-b", pre.branch],
-          { stdio: "pipe", timeout: 30_000 },
-        );
-        writeMarker(markerPath, pre.runId);
-        const ms = Date.now() - start;
-        console.log(
-          `[sandbox] Pre-cloned ${pre.owner}/${pre.repo} (default branch) into ${repoDir} ` +
-          `and created local branch ${pre.branch} (${ms}ms)`,
-        );
-        return;
-      } catch (err2: any) {
-        const secondError = scrub(err2?.message) || scrub(err2?.stderr?.toString?.()) || "unknown error";
-        console.warn(
-          `[sandbox] Pre-clone fallback of ${pre.owner}/${pre.repo} failed (${secondError}). ` +
-          `Agent will need to clone via MCP.`,
-        );
-        return;
-      }
+      // the agent enters a workspace already on the right branch.
+      cloneDefaultAndCreateBranch(repoDir, url, depth, shallowArgs, pre, markerPath, start, scrub);
+      return;
     }
     // Don't kill the run on a failed pre-clone — fall through to an empty
     // workspace and let the agent clone via the MCP path as a backup.
@@ -343,6 +351,51 @@ export function prePopulateWorkspace(
     // The token is scrubbed above before anything reaches the logs.
     console.warn(
       `[sandbox] Pre-clone of ${pre.owner}/${pre.repo}@${pre.branch} failed (${firstError}). ` +
+      `Agent will need to clone via MCP.`,
+    );
+  }
+}
+
+/**
+ * Clone the repo's default branch into `repoDir` and create `pre.branch`
+ * locally off it (`checkout -B`), then stamp the run marker. Shared by two
+ * paths: the feature branch not existing on the remote yet (build-style first
+ * run) and a recreate-from-base workflow deliberately re-cutting its branch
+ * from the default (issue #153). Best-effort — on failure it logs a
+ * token-scrubbed warning and leaves an empty workspace for the agent's MCP
+ * clone fallback.
+ */
+function cloneDefaultAndCreateBranch(
+  repoDir: string,
+  url: string,
+  depth: string,
+  shallowArgs: string[],
+  pre: PrePopulate,
+  markerPath: string,
+  start: number,
+  scrub: (s: unknown) => string,
+): void {
+  try {
+    execFileSync(
+      "git",
+      ["clone", "--depth", depth, ...shallowArgs, url, repoDir],
+      { stdio: "pipe", timeout: 120_000 },
+    );
+    execFileSync(
+      "git",
+      ["-C", repoDir, "checkout", "-B", pre.branch],
+      { stdio: "pipe", timeout: 30_000 },
+    );
+    writeMarker(markerPath, pre.runId);
+    const ms = Date.now() - start;
+    console.log(
+      `[sandbox] Pre-cloned ${pre.owner}/${pre.repo} (default branch) into ${repoDir} ` +
+      `and created local branch ${pre.branch} (${ms}ms)`,
+    );
+  } catch (err: any) {
+    const reason = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
+    console.warn(
+      `[sandbox] Default-branch clone of ${pre.owner}/${pre.repo} failed (${reason}). ` +
       `Agent will need to clone via MCP.`,
     );
   }

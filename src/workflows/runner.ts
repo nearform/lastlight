@@ -11,6 +11,7 @@ import type { AgentWorkflowDefinition } from "./schema.js";
 import { loadPromptTemplate } from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
 import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
+import { PER_TARGET_RECREATE_WORKFLOWS } from "./target-policy.js";
 import { qaImageAvailable, SANDBOX_IMAGE_QA } from "../sandbox/images.js";
 import {
   PhaseExecutor,
@@ -120,6 +121,9 @@ export function gitSandboxAccessForWorkflow(
     // the code-pushing profiles (build / pr-fix / security-feedback) keep the
     // deeper clone for rebase/amend headroom.
     shallow: profile !== "repo-write",
+    // `build` recreates its workspace from the default branch on a fresh run
+    // (issue #153) rather than refreshing a possibly-stale feature branch.
+    recreateFromBase: PER_TARGET_RECREATE_WORKFLOWS.has(workflowName),
   };
 }
 

@@ -397,12 +397,25 @@ suffix — their taskId is `${repo}-${prNumber}-${workflowName}`, keyed by
 sandbox dir, so `prePopulateWorkspace` does `git fetch` + `reset --hard` +
 `git clean -fdx -e node_modules` instead of a fresh 1.3G clone + full
 install, and N dirs/PR collapse to 1 (cutting the #106 churn at its
-source). `build` is excluded — it creates a new branch per run and must not
-reuse. Concurrency is held off by the dispatcher's
-`isRunning(skill, triggerId)` guard plus `runs.getByTrigger` reuse; the
-cross-run vs same-run distinction is made by a `<workDir>/.lastlight-run`
-marker stamped with the owning run id (same id → preserve the checkout for
-the next phase; different id → refresh). See `src/sandbox/index.ts`.
+source).
+
+**Per-target recreate (issue #153).** `PER_TARGET_RECREATE_WORKFLOWS`
+(`build`) *also* drops the run-id suffix (taskId `${repo}-${issueNumber}-build`)
+so a re-triggered build lands in the **same** sandbox dir — but on a
+*different*-run marker it **deletes the leftover checkout and re-clones from the
+default branch** instead of refreshing the (stale) feature branch. An incomplete
+build is therefore disposable: re-running it starts again off current `main`,
+and its `lastlight/N-slug` branch is always cut from the latest default, never a
+stale pushed branch. This is driven by `recreateFromBase` on `GitSandboxAccess`
+/ `PrePopulateSpec` (set in `gitSandboxAccessForWorkflow`).
+
+Concurrency is held off by the dispatcher's `isRunning(skill, triggerId)` guard
+plus `runs.getByTrigger` reuse; the cross-run vs same-run distinction is made by
+a `<workDir>/.lastlight-run` marker stamped with the owning run id (same id →
+preserve the checkout for the next phase — the architect's `plan.md` survives;
+different id → refresh for pr-review/pr-fix, recreate-from-base for build). The
+workspace-provisioning policy sets live in `src/workflows/target-policy.ts`; the
+clone logic is in `src/sandbox/index.ts`.
 
 ## Templates
 

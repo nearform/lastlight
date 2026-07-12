@@ -181,3 +181,71 @@ describe("prePopulateWorkspace clone depth + per-PR reuse (issue #107)", () => {
     expect(readFileSync(join(workDir, ".lastlight-run"), "utf-8")).toBe("old-run");
   });
 });
+
+describe("prePopulateWorkspace recreate-from-base (build, issue #153)", () => {
+  let workDir: string;
+  const REPO = "lastlight";
+  const FEATURE = "lastlight/149-foo";
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "ll-recreate-"));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockExec.mockReturnValue(Buffer.from(""));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    mockExec.mockReset();
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  function seedExistingClone(marker?: string): void {
+    mkdirSync(join(workDir, REPO, ".git"), { recursive: true });
+    if (marker !== undefined) writeFileSync(join(workDir, ".lastlight-run"), marker);
+  }
+
+  it("deletes a stale checkout from a DIFFERENT run and re-clones from the default branch", () => {
+    seedExistingClone("old-run");
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: FEATURE, token: TOKEN,
+      runId: "new-run", shallow: false, recreateFromBase: true,
+    });
+    // The stale checkout was removed (clone is mocked, so it isn't recreated).
+    expect(existsSync(join(workDir, REPO, ".git"))).toBe(false);
+    // Never refreshes the stale feature branch (no fetch/reset/clean).
+    expect(calledArgs().some((a) => a.includes("fetch"))).toBe(false);
+    // Clones the DEFAULT branch (no `--branch <feature>`), then cuts the
+    // feature branch locally off it.
+    const clone = calledArgs().find((a) => a[0] === "clone")!;
+    expect(clone).not.toContain("--branch");
+    const checkout = calledArgs().find((a) => a.includes("checkout"))!;
+    expect(checkout).toEqual(["-C", join(workDir, REPO), "checkout", "-B", FEATURE]);
+    // Marker advanced to the new run.
+    expect(readFileSync(join(workDir, ".lastlight-run"), "utf-8")).toBe("new-run");
+  });
+
+  it("cuts the branch from the default branch on a fresh clone (never clone --branch)", () => {
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: FEATURE, token: TOKEN,
+      runId: "run-1", shallow: false, recreateFromBase: true,
+    });
+    // A stale *pushed* feature branch must never be resurrected via clone --branch.
+    const clones = calledArgs().filter((a) => a[0] === "clone");
+    expect(clones).toHaveLength(1);
+    expect(clones[0]).not.toContain("--branch");
+    const checkout = calledArgs().find((a) => a.includes("checkout"))!;
+    expect(checkout[checkout.indexOf("checkout") + 1]).toBe("-B");
+    expect(readFileSync(join(workDir, ".lastlight-run"), "utf-8")).toBe("run-1");
+  });
+
+  it("preserves the workspace on a SAME-run revisit even with recreateFromBase", () => {
+    seedExistingClone("run-1");
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: FEATURE, token: TOKEN,
+      runId: "run-1", recreateFromBase: true,
+    });
+    // Same run → no git ops, no delete (the architect's plan.md must survive).
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(existsSync(join(workDir, REPO, ".git"))).toBe(true);
+  });
+});

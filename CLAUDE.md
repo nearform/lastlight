@@ -652,6 +652,12 @@ Sandbox workspace provisioning (issue #107):
   phase; a different run reusing the dir → `git fetch` + `reset --hard` +
   `git clean -fdx -e node_modules` (deps stay warm). See the workflows
   guide's "taskId scoping" section.
+- **Per-issue build recreate (issue #153)** — `build` workspaces are keyed by
+  (repo, issue) too, but a different-run marker → **delete the leftover
+  checkout and re-clone from the default branch** (`recreateFromBase`), so a
+  re-triggered incomplete build starts again off current `main` and never
+  inherits a stale feature branch. A same-run resume still preserves the
+  checkout. Policy sets: `src/workflows/target-policy.ts`.
 
 OpenTelemetry (optional):
 

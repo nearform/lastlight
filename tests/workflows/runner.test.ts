@@ -1429,3 +1429,16 @@ describe("gitSandboxAccessForWorkflow — App PEM never enters the sandbox", () 
     },
   );
 });
+
+describe("gitSandboxAccessForWorkflow — recreate-from-base (issue #153)", () => {
+  it("sets recreateFromBase for build", () => {
+    expect(gitSandboxAccessForWorkflow("build", "owner", "repo").recreateFromBase).toBe(true);
+  });
+
+  it.each(["pr-review", "pr-fix", "issue-triage", "verify", "qa-test"])(
+    "leaves recreateFromBase falsy for %s (reuse/refresh or in-session clone)",
+    (wf) => {
+      expect(gitSandboxAccessForWorkflow(wf, "owner", "repo").recreateFromBase).toBeFalsy();
+    },
+  );
+});
