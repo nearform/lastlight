@@ -3,6 +3,7 @@ import { Clock, LogOut, Moon, Radio, Sun } from "lucide-react";
 import type { StreamStatus } from "../hooks/useSessionStream";
 import { useTheme } from "../hooks/useTheme";
 import { NearformLogo } from "./NearformLogo";
+import { VersionPin } from "./VersionPin";
 
 interface Props {
   timeRange: string;
@@ -113,6 +114,8 @@ export function StatsHeader({
       </div>
 
       <div className="flex-1" />
+
+      <VersionPin />
 
       <button
         onClick={toggleTheme}

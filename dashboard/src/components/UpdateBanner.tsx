@@ -7,7 +7,9 @@ const short = (sha: string | null) => (sha ? sha.slice(0, 8) : "unknown");
  * Thin "update available" strip shown under the header when the running
  * instance is behind the latest core or overlay. Detection only — the update
  * is run with `lastlight server update` on the host (the agent never rebuilds
- * itself). Renders nothing when up to date, unknown, or the lookup fails.
+ * itself). Renders nothing when up to date, unknown, or the lookup fails. The
+ * quiet at-rest "pinned to X" label moved into the header ({@link VersionPin});
+ * this strip is now warnings-only.
  */
 export function UpdateBanner() {
   const [info, setInfo] = useState<ServerInfo | null>(null);
@@ -42,17 +44,9 @@ export function UpdateBanner() {
   }
   if (info.overlay.behind) parts.push(`overlay ${short(info.overlay.current)} → ${short(info.overlay.latest)}`);
 
-  // Pinned + already on the pin: no warning, just a quiet "pinned to X" label.
-  if (parts.length === 0) {
-    if (!info.pinned) return null;
-    return (
-      <div className="flex items-center gap-2 px-4 py-1 text-xs bg-base-200/60 text-base-content/60 border-b border-base-300/40">
-        <span>
-          Pinned to <code className="px-1 rounded bg-base-300/60">{info.pinned}</code>
-        </span>
-      </div>
-    );
-  }
+  // Pinned + already on the pin (or unpinned + up to date): no strip. The quiet
+  // "pinned to X" label now lives in the header via <VersionPin />.
+  if (parts.length === 0) return null;
 
   return (
     <div className="flex items-center gap-2 px-4 py-1.5 text-xs bg-warning/15 text-warning-content border-b border-warning/30">
