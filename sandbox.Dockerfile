@@ -11,7 +11,14 @@
 #
 # Build order matters (sandbox-base must exist first):
 #   docker compose --profile build-only build sandbox-base sandbox
-FROM lastlight-sandbox-base:latest
+#
+# BASE_IMAGE defaults to the local tag (host `--local` builds + docker compose
+# resolve it from the local image store). CI overrides it to the just-pushed
+# GHCR ref (`--build-arg BASE_IMAGE=ghcr.io/nearform/lastlight-sandbox-base:<tag>`)
+# because the buildx docker-container driver resolves FROM from a registry, not
+# the local store. See .github/workflows/docker-publish.yml.
+ARG BASE_IMAGE=lastlight-sandbox-base:latest
+FROM ${BASE_IMAGE}
 
 # Install agentic-pi globally so the harness can `docker exec ...
 # agentic-pi run ...` against this container. The version + integrity come from

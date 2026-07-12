@@ -24,7 +24,12 @@
 # image must be able to launch Chromium headless with no network access to the
 # outside world (it only ever dials localhost / the repo's dev-server).
 
-FROM lastlight-sandbox-base:latest
+# BASE_IMAGE defaults to the local tag (host `--local` builds + docker compose
+# resolve it from the local image store); CI overrides it to the just-pushed
+# GHCR ref because the buildx docker-container driver resolves FROM from a
+# registry, not the local store. See .github/workflows/docker-publish.yml.
+ARG BASE_IMAGE=lastlight-sandbox-base:latest
+FROM ${BASE_IMAGE}
 
 # The base image ends as root; be explicit — we need root to apt-get install,
 # npm install, and (in the tail below) chown.

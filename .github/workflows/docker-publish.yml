@@ -9,6 +9,20 @@ name: Publish Docker images
 # The stock sidecar images (coredns / nginx / otel-collector / caddy) are pulled
 # from Docker Hub by docker-compose and are NOT built here. `egress-init` reuses
 # the agent image, so it's covered too.
+#
+# CACHING: every image still builds each release (a release always needs a
+# complete, matching set of image tags for the pin-based pull to resolve — see
+# lastlight-prebuilt-images), but each build uses a per-image GitHub Actions
+# build cache (`--cache-from/--cache-to type=gha,scope=<img>`), so unchanged
+# layers — notably sandbox-qa's ~300 MB Chromium — are restored from cache
+# instead of rebuilt cold. A dashboard-only release then re-tags near-identical
+# sandbox images in seconds rather than rebuilding them.
+#
+# FROM resolution: the buildx docker-container driver resolves `FROM` from a
+# registry, not the local image store, so the sandbox leaves can't see a
+# locally-tagged base. We push sandbox-base first, then build the leaves with
+# `--build-arg BASE_IMAGE=<pushed GHCR base ref>` (the Dockerfiles default the
+# arg to the local tag, so host `--local` builds are unchanged).
 on:
   release:
     types: [published]
@@ -48,62 +62,61 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Exposes ACTIONS_CACHE_URL + ACTIONS_RUNTIME_TOKEN so `--cache-to
+      # type=gha` works with bare `docker buildx build` (docker/build-push-action
+      # would wire these itself; we call buildx directly for the base-image
+      # ordering + the local-tag default).
+      - name: Expose GitHub Actions cache backend
+        uses: crazy-max/ghaction-github-runtime@v3
+
       - name: Build metadata
         id: meta
         run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       # Only the agent Dockerfile takes GIT_SHA / BUILD_DATE (drift banner).
-      - name: Build agent
+      - name: Build & push agent
         run: |
-          docker build \
+          LATEST=""; [ "$PUSH_LATEST" = "true" ] && LATEST="-t $REGISTRY/lastlight-agent:latest"
+          docker buildx build --push \
             --build-arg GIT_SHA=${{ github.sha }} \
             --build-arg BUILD_DATE=${{ steps.meta.outputs.date }} \
-            -t "$REGISTRY/lastlight-agent:$TAG" \
-            -t "$REGISTRY/lastlight-agent:latest" \
+            --cache-from type=gha,scope=agent \
+            --cache-to type=gha,mode=max,scope=agent \
+            -t "$REGISTRY/lastlight-agent:$TAG" $LATEST \
             -f Dockerfile .
 
-      # Build order matters: sandbox + sandbox-qa are `FROM
-      # lastlight-sandbox-base:latest`. `docker build` loads into the local image
-      # store, so tagging the base `lastlight-sandbox-base:latest` here lets the
-      # leaf FROMs resolve it locally in the steps below.
-      - name: Build sandbox-base
+      # Push sandbox-base first so the leaves can pull it as their FROM.
+      - name: Build & push sandbox-base
         run: |
-          docker build \
-            -t "$REGISTRY/lastlight-sandbox-base:$TAG" \
-            -t "$REGISTRY/lastlight-sandbox-base:latest" \
-            -t lastlight-sandbox-base:latest \
+          LATEST=""; [ "$PUSH_LATEST" = "true" ] && LATEST="-t $REGISTRY/lastlight-sandbox-base:latest"
+          docker buildx build --push \
+            --cache-from type=gha,scope=sandbox-base \
+            --cache-to type=gha,mode=max,scope=sandbox-base \
+            -t "$REGISTRY/lastlight-sandbox-base:$TAG" $LATEST \
             -f sandbox-base.Dockerfile .
 
-      - name: Build sandbox
+      - name: Build & push sandbox
         run: |
-          docker build \
-            -t "$REGISTRY/lastlight-sandbox:$TAG" \
-            -t "$REGISTRY/lastlight-sandbox:latest" \
+          LATEST=""; [ "$PUSH_LATEST" = "true" ] && LATEST="-t $REGISTRY/lastlight-sandbox:latest"
+          docker buildx build --push \
+            --build-arg BASE_IMAGE="$REGISTRY/lastlight-sandbox-base:$TAG" \
+            --cache-from type=gha,scope=sandbox \
+            --cache-to type=gha,mode=max,scope=sandbox \
+            -t "$REGISTRY/lastlight-sandbox:$TAG" $LATEST \
             -f sandbox.Dockerfile .
 
       # Non-fatal: browser-QA is an optional tier; a failure just means QA phases
       # skip until the image is present (mirrors the CLI's buildImages).
-      - name: Build sandbox-qa (non-fatal)
+      - name: Build & push sandbox-qa (non-fatal)
         continue-on-error: true
         run: |
-          docker build \
-            -t "$REGISTRY/lastlight-sandbox-qa:$TAG" \
-            -t "$REGISTRY/lastlight-sandbox-qa:latest" \
+          LATEST=""; [ "$PUSH_LATEST" = "true" ] && LATEST="-t $REGISTRY/lastlight-sandbox-qa:latest"
+          docker buildx build --push \
+            --build-arg BASE_IMAGE="$REGISTRY/lastlight-sandbox-base:$TAG" \
+            --cache-from type=gha,scope=sandbox-qa \
+            --cache-to type=gha,mode=max,scope=sandbox-qa \
+            -t "$REGISTRY/lastlight-sandbox-qa:$TAG" $LATEST \
             -f sandbox-qa.Dockerfile .
-
-      - name: Push images
-        run: |
-          for repo in lastlight-agent lastlight-sandbox-base lastlight-sandbox; do
-            docker push "$REGISTRY/$repo:$TAG"
-            if [ "$PUSH_LATEST" = "true" ]; then
-              docker push "$REGISTRY/$repo:latest"
-            fi
-          done
-
-      - name: Push sandbox-qa (non-fatal)
-        continue-on-error: true
-        run: |
-          docker push "$REGISTRY/lastlight-sandbox-qa:$TAG"
-          if [ "$PUSH_LATEST" = "true" ]; then
-            docker push "$REGISTRY/lastlight-sandbox-qa:latest"
-          fi
