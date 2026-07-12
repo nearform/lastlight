@@ -1,10 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  htmlToText,
-  extractTitle,
-} from "../../../src/extensions/web-search/extract.js";
+import { htmlToText, extractTitle } from "../../../src/extensions/web-search/extract.js";
 
 describe("htmlToText", () => {
   test("strips script, style, noscript, iframe, and comments", () => {
@@ -47,7 +44,7 @@ describe("htmlToText", () => {
   });
 
   test("byte cap truncates large output", () => {
-    const html = "<p>" + "abc ".repeat(10_000) + "</p>";
+    const html = `<p>${"abc ".repeat(10_000)}</p>`;
     const out = htmlToText(html, 100);
     assert.ok(new TextEncoder().encode(out).byteLength <= 100);
   });

@@ -29,9 +29,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # We don't ship ESLint yet; the TypeScript compiler in `--noEmit` mode
-      # is the static-analysis gate. If/when ESLint lands, add it here.
-      - name: Type-check (lint)
+      # Biome is the lint gate (non-writing; lint diagnostics fail the build).
+      # Formatting is intentionally NOT enforced here — it's a local convenience
+      # (`npm run format` / editor-on-save), so a pure whitespace drift never
+      # reds a PR. The TypeScript compiler in `--noEmit` mode remains the
+      # type-level static-analysis gate.
+      - name: Lint (biome)
+        run: npm run lint
+
+      - name: Type-check
         run: npm run check
 
       - name: Build

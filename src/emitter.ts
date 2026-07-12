@@ -29,7 +29,7 @@ export interface EmitterContext {
 /** Writes JSONL to process.stdout. Used by the CLI. */
 export class StdoutSink implements EmitterSink {
   write(record: EmitterRecord): void {
-    process.stdout.write(JSON.stringify(record) + "\n");
+    process.stdout.write(`${JSON.stringify(record)}\n`);
   }
 }
 

@@ -1,10 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  safeFetch,
-  SafeFetchError,
-} from "../../../src/extensions/web-search/safe-fetch.js";
+import { safeFetch, SafeFetchError } from "../../../src/extensions/web-search/safe-fetch.js";
 
 function ok(body: string, contentType = "text/html"): Response {
   return new Response(body, {
@@ -52,8 +49,7 @@ describe("safeFetch", () => {
               headers: { "content-type": "text/html" },
             }),
         }),
-      (e) =>
-        e instanceof SafeFetchError && e.code === "http-error" && e.status === 404,
+      (e) => e instanceof SafeFetchError && e.code === "http-error" && e.status === 404,
     );
   });
 
@@ -87,7 +83,7 @@ describe("safeFetch", () => {
         });
       }
       if (s === "https://a.example/3") return ok("final", "text/plain");
-      throw new Error("unexpected url: " + s);
+      throw new Error(`unexpected url: ${s}`);
     };
     const r = await safeFetch("https://a.example/1", { fetchImpl });
     assert.equal(r.body, "final");

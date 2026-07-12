@@ -45,47 +45,47 @@ const skipReason = !HAS_OPENAI
       ? `local agentic-pi-dev image not built (expected at ${IMAGE_PATH ?? "<unknown-arch>"})`
       : false;
 
-describe(
-  "run() + --sandbox gondolin + --sandbox-image <local-path>",
-  { skip: skipReason },
-  () => {
-    test("git and gh are available inside the custom image", async () => {
-      const workspace = "/tmp/agentic-pi-sandbox-image-integration-test";
-      rmSync(workspace, { recursive: true, force: true });
-      mkdirSync(workspace, { recursive: true });
+describe("run() + --sandbox gondolin + --sandbox-image <local-path>", { skip: skipReason }, () => {
+  test("git and gh are available inside the custom image", async () => {
+    const workspace = "/tmp/agentic-pi-sandbox-image-integration-test";
+    rmSync(workspace, { recursive: true, force: true });
+    mkdirSync(workspace, { recursive: true });
 
-      const result = await run({
-        model: "openai/gpt-5.4-nano",
-        prompt:
-          "use the bash tool to run exactly `git --version && gh --version` and report what it prints",
-        thinking: "off",
-        noSession: true,
-        sandbox: "gondolin",
-        sandboxImage: IMAGE_PATH!,
-        cwd: workspace,
-      });
-
-      assert.equal(result.ok, true, `run failed: ${result.fatalError?.message ?? "(no error message)"}`);
-      assert.equal(result.sandbox?.backend, "gondolin");
-
-      const image = (result.sandbox?.status as { image?: { source?: string; name?: string } })?.image;
-      assert.equal(image?.source, "local-path");
-      assert.equal(image?.name, `out-${HOST_ARCH}`);
-
-      const bashEnds = result.records.filter(
-        (r) => r.type === "tool_execution_end" && (r as { toolName?: string }).toolName === "bash",
-      );
-      const bashOutputs = JSON.stringify(bashEnds);
-      assert.ok(
-        /git version/i.test(bashOutputs),
-        `expected 'git version' in bash output; got: ${bashOutputs.slice(0, 500)}`,
-      );
-      assert.ok(
-        /gh version/i.test(bashOutputs),
-        `expected 'gh version' in bash output; got: ${bashOutputs.slice(0, 500)}`,
-      );
-
-      rmSync(workspace, { recursive: true, force: true });
+    const result = await run({
+      model: "openai/gpt-5.4-nano",
+      prompt:
+        "use the bash tool to run exactly `git --version && gh --version` and report what it prints",
+      thinking: "off",
+      noSession: true,
+      sandbox: "gondolin",
+      sandboxImage: IMAGE_PATH!,
+      cwd: workspace,
     });
-  },
-);
+
+    assert.equal(
+      result.ok,
+      true,
+      `run failed: ${result.fatalError?.message ?? "(no error message)"}`,
+    );
+    assert.equal(result.sandbox?.backend, "gondolin");
+
+    const image = (result.sandbox?.status as { image?: { source?: string; name?: string } })?.image;
+    assert.equal(image?.source, "local-path");
+    assert.equal(image?.name, `out-${HOST_ARCH}`);
+
+    const bashEnds = result.records.filter(
+      (r) => r.type === "tool_execution_end" && (r as { toolName?: string }).toolName === "bash",
+    );
+    const bashOutputs = JSON.stringify(bashEnds);
+    assert.ok(
+      /git version/i.test(bashOutputs),
+      `expected 'git version' in bash output; got: ${bashOutputs.slice(0, 500)}`,
+    );
+    assert.ok(
+      /gh version/i.test(bashOutputs),
+      `expected 'gh version' in bash output; got: ${bashOutputs.slice(0, 500)}`,
+    );
+
+    rmSync(workspace, { recursive: true, force: true });
+  });
+});

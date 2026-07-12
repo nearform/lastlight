@@ -65,9 +65,7 @@ describe("Tavily provider", () => {
       apiKey: "tvly-x",
       fetchImpl: async () =>
         jsonResponse({
-          results: [
-            { url: "https://x.example", raw_content: "extracted body", title: "X" },
-          ],
+          results: [{ url: "https://x.example", raw_content: "extracted body", title: "X" }],
         }),
     });
     const r = await p.fetch!({ url: "https://x.example" });
@@ -192,9 +190,7 @@ describe("Exa provider", () => {
       apiKey: "exa",
       fetchImpl: async () =>
         jsonResponse({
-          results: [
-            { url: "https://x.example", title: "X", text: "body of x" },
-          ],
+          results: [{ url: "https://x.example", title: "X", text: "body of x" }],
         }),
     });
     const r = await p.fetch!({ url: "https://x.example" });

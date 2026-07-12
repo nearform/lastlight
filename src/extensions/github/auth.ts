@@ -44,11 +44,9 @@ export class GitHubAppAuth implements GitHubAuth {
 
   private generateJwt(): string {
     const now = Math.floor(Date.now() / 1000);
-    return jwt.sign(
-      { iat: now - 60, exp: now + 600, iss: this.appId },
-      this.privateKey,
-      { algorithm: "RS256" },
-    );
+    return jwt.sign({ iat: now - 60, exp: now + 600, iss: this.appId }, this.privateKey, {
+      algorithm: "RS256",
+    });
   }
 
   async getToken(): Promise<string> {
@@ -104,9 +102,9 @@ export interface GitHubAuthEnv {
 
 /** Why auth could not be built. Consumers can distinguish silent skips from misconfiguration. */
 export type AuthFailureReason =
-  | "no-credentials"     // no GITHUB_APP_* and no GITHUB_TOKEN — silent skip
-  | "pem-unreadable"     // App creds set but the PEM file isn't readable
-  | "invalid-config";    // partial App creds (e.g. APP_ID set, INSTALLATION_ID missing)
+  | "no-credentials" // no GITHUB_APP_* and no GITHUB_TOKEN — silent skip
+  | "pem-unreadable" // App creds set but the PEM file isn't readable
+  | "invalid-config"; // partial App creds (e.g. APP_ID set, INSTALLATION_ID missing)
 
 export interface BuildAuthResult {
   auth: GitHubAuth | null;
@@ -126,7 +124,8 @@ export interface BuildAuthResult {
  * just silently skip GitHub-tool registration.
  */
 export function buildAuthFromEnv(env: GitHubAuthEnv = process.env): BuildAuthResult {
-  const { GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_APP_INSTALLATION_ID, GITHUB_TOKEN } = env;
+  const { GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_APP_INSTALLATION_ID, GITHUB_TOKEN } =
+    env;
   const appParts = [GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_APP_INSTALLATION_ID];
   const appPartsSet = appParts.filter(Boolean).length;
 

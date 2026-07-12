@@ -14,17 +14,13 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import { buildAuthFromEnv, type AuthFailureReason, type GitHubAuth } from "./auth.js";
 import { buildGitHubTools } from "./tools.js";
-import {
-  PROFILE_TOOLS,
-  isGitAccessProfile,
-  type GitAccessProfile,
-} from "./profiles.js";
+import { PROFILE_TOOLS, isGitAccessProfile, type GitAccessProfile } from "./profiles.js";
 
 export { isGitAccessProfile, type GitAccessProfile } from "./profiles.js";
 
 /** Why the extension didn't load tools. */
 export type GitHubExtensionSkipReason =
-  | "no-profile"          // user did not pass --profile; safe default
+  | "no-profile" // user did not pass --profile; safe default
   | AuthFailureReason;
 
 export interface GitHubExtensionResult {

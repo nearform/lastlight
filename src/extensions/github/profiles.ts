@@ -67,7 +67,7 @@ const REPO_WRITE_TOOLS = [
 ] as const;
 
 export const PROFILE_TOOLS: Record<GitAccessProfile, readonly string[]> = {
-  "read": READ_TOOLS,
+  read: READ_TOOLS,
   "issues-write": ISSUES_WRITE_TOOLS,
   "review-write": REVIEW_WRITE_TOOLS,
   "repo-write": REPO_WRITE_TOOLS,

@@ -23,40 +23,35 @@ import { run } from "../src/index.js";
 
 const REAL_OPENAI_KEY = process.env.OPENAI_API_KEY;
 
-describe(
-  "run() — authFile credential store",
-  { skip: REAL_OPENAI_KEY ? false : "OPENAI_API_KEY not set (integration test)" },
-  () => {
-    test("reads the model key from --auth-file, not the environment", async () => {
-      const dir = mkdtempSync(join(tmpdir(), "agpi-authfile-"));
-      const authFile = join(dir, "auth.json");
-      writeFileSync(
-        authFile,
-        JSON.stringify({ openai: { type: "api_key", key: REAL_OPENAI_KEY } }),
-      );
+describe("run() — authFile credential store", {
+  skip: REAL_OPENAI_KEY ? false : "OPENAI_API_KEY not set (integration test)",
+}, () => {
+  test("reads the model key from --auth-file, not the environment", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agpi-authfile-"));
+    const authFile = join(dir, "auth.json");
+    writeFileSync(authFile, JSON.stringify({ openai: { type: "api_key", key: REAL_OPENAI_KEY } }));
 
-      // Poison the env key: AuthStorage must prefer the auth file. If authFile
-      // were ignored, the run would fall back to this bogus key and 401.
-      const savedEnv = process.env.OPENAI_API_KEY;
-      process.env.OPENAI_API_KEY = "sk-bogus-must-not-be-used";
-      try {
-        const result = await run({
-          model: "openai/gpt-5.4-nano",
-          prompt: "say 'authfile works' verbatim and nothing else",
-          thinking: "off",
-          noSession: true,
-          authFile,
-        });
-        assert.equal(result.ok, true, `run failed: ${JSON.stringify(result.warnings)}`);
-        assert.equal(result.agentEnded, true);
-        assert.ok(
-          result.finalText.toLowerCase().includes("authfile works"),
-          `expected the phrase, got: ${result.finalText}`,
-        );
-      } finally {
-        process.env.OPENAI_API_KEY = savedEnv;
-        rmSync(dir, { recursive: true, force: true });
-      }
-    });
-  },
-);
+    // Poison the env key: AuthStorage must prefer the auth file. If authFile
+    // were ignored, the run would fall back to this bogus key and 401.
+    const savedEnv = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-bogus-must-not-be-used";
+    try {
+      const result = await run({
+        model: "openai/gpt-5.4-nano",
+        prompt: "say 'authfile works' verbatim and nothing else",
+        thinking: "off",
+        noSession: true,
+        authFile,
+      });
+      assert.equal(result.ok, true, `run failed: ${JSON.stringify(result.warnings)}`);
+      assert.equal(result.agentEnded, true);
+      assert.ok(
+        result.finalText.toLowerCase().includes("authfile works"),
+        `expected the phrase, got: ${result.finalText}`,
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { type AddressInfo } from "node:net";
+import type { AddressInfo } from "node:net";
 
 import { GitHubClient } from "../../../src/extensions/github/client.js";
 import type { GitHubAuth } from "../../../src/extensions/github/auth.js";
@@ -12,7 +12,12 @@ const staticAuth: GitHubAuth = {
 };
 
 /** A throwaway HTTP server that records the paths it was asked for. */
-function recordingServer(): Promise<{ url: string; paths: string[]; close: () => Promise<void>; server: Server }> {
+function recordingServer(): Promise<{
+  url: string;
+  paths: string[];
+  close: () => Promise<void>;
+  server: Server;
+}> {
   const paths: string[] = [];
   const server = createServer((req, res) => {
     paths.push(req.url ?? "");

@@ -21,12 +21,7 @@ import type { RunConfig } from "./args.js";
  * hard rule #3).
  */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-import {
-  CollectorSink,
-  TeeSink,
-  type EmitterRecord,
-  type EmitterSink,
-} from "./emitter.js";
+import { CollectorSink, TeeSink, type EmitterRecord, type EmitterSink } from "./emitter.js";
 import { runOnce, type RunOnceExitCode } from "./runner.js";
 
 export interface RunOptions {
@@ -458,7 +453,9 @@ function buildResult(
       case "message_end": {
         // Accumulate assistant text. Pi's message structure:
         // r.message = { role: "assistant", content: [{type:"text", text:"…"}, ...] }
-        const m = r.message as { role?: string; content?: Array<{ type?: string; text?: string }> } | undefined;
+        const m = r.message as
+          | { role?: string; content?: Array<{ type?: string; text?: string }> }
+          | undefined;
         if (m?.role === "assistant" && Array.isArray(m.content)) {
           // Keep only the LATEST assistant text (final answer overwrites
           // intermediate ones). Pi guarantees the last assistant message

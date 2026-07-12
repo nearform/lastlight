@@ -9,10 +9,7 @@ describe("parseArgs", () => {
   });
 
   test("--model must be 'provider/id'", () => {
-    assert.throws(
-      () => parseArgs(["--model", "gpt-4"]),
-      /must be 'provider\/id'/,
-    );
+    assert.throws(() => parseArgs(["--model", "gpt-4"]), /must be 'provider\/id'/);
   });
 
   test("minimal happy path", () => {
@@ -60,10 +57,7 @@ describe("parseArgs", () => {
   });
 
   test("--sandbox accepts none and gondolin", () => {
-    assert.equal(
-      parseArgs(["--model", "openai/gpt-4", "--sandbox", "none"]).sandbox,
-      "none",
-    );
+    assert.equal(parseArgs(["--model", "openai/gpt-4", "--sandbox", "none"]).sandbox, "none");
     assert.equal(
       parseArgs(["--model", "openai/gpt-4", "--sandbox", "gondolin"]).sandbox,
       "gondolin",
@@ -78,26 +72,22 @@ describe("parseArgs", () => {
   });
 
   test("--dangerously-skip-permissions is accepted (no-op)", () => {
-    const cfg = parseArgs([
-      "--model",
-      "openai/gpt-4",
-      "--dangerously-skip-permissions",
-    ]);
+    const cfg = parseArgs(["--model", "openai/gpt-4", "--dangerously-skip-permissions"]);
     assert.equal(cfg.dangerouslySkipPermissions, true);
   });
 
   test("--tools parses comma-separated list", () => {
-    const cfg = parseArgs(["--model", "openai/gpt-4", "--tools", "read,bash,github_get_repository"]);
+    const cfg = parseArgs([
+      "--model",
+      "openai/gpt-4",
+      "--tools",
+      "read,bash,github_get_repository",
+    ]);
     assert.deepEqual(cfg.tools, ["read", "bash", "github_get_repository"]);
   });
 
   test("--no-session and --no-builtin-tools are boolean", () => {
-    const cfg = parseArgs([
-      "--model",
-      "openai/gpt-4",
-      "--no-session",
-      "--no-builtin-tools",
-    ]);
+    const cfg = parseArgs(["--model", "openai/gpt-4", "--no-session", "--no-builtin-tools"]);
     assert.equal(cfg.noSession, true);
     assert.equal(cfg.noBuiltinTools, true);
   });
@@ -109,10 +99,14 @@ describe("parseArgs", () => {
 
   test("--sandbox-env is repeatable and accumulates", () => {
     const cfg = parseArgs([
-      "--model", "openai/gpt-4",
-      "--sandbox-env", "A=1",
-      "--sandbox-env", "B=2",
-      "--sandbox-env", "C=three=with=equals",
+      "--model",
+      "openai/gpt-4",
+      "--sandbox-env",
+      "A=1",
+      "--sandbox-env",
+      "B=2",
+      "--sandbox-env",
+      "C=three=with=equals",
     ]);
     assert.deepEqual(cfg.sandboxEnv, { A: "1", B: "2", C: "three=with=equals" });
   });
@@ -148,26 +142,23 @@ describe("parseArgs", () => {
 
   test("--sandbox-env later key overrides earlier", () => {
     const cfg = parseArgs([
-      "--model", "openai/gpt-4",
-      "--sandbox-env", "X=first",
-      "--sandbox-env", "X=second",
+      "--model",
+      "openai/gpt-4",
+      "--sandbox-env",
+      "X=first",
+      "--sandbox-env",
+      "X=second",
     ]);
     assert.deepEqual(cfg.sandboxEnv, { X: "second" });
   });
 
   test("--sandbox-image captures a path", () => {
-    const cfg = parseArgs([
-      "--model", "openai/gpt-4",
-      "--sandbox-image", "/abs/path/to/image",
-    ]);
+    const cfg = parseArgs(["--model", "openai/gpt-4", "--sandbox-image", "/abs/path/to/image"]);
     assert.equal(cfg.sandboxImage, "/abs/path/to/image");
   });
 
   test("--sandbox-image accepts named selectors (resolution deferred)", () => {
-    const cfg = parseArgs([
-      "--model", "openai/gpt-4",
-      "--sandbox-image", "default",
-    ]);
+    const cfg = parseArgs(["--model", "openai/gpt-4", "--sandbox-image", "default"]);
     assert.equal(cfg.sandboxImage, "default");
   });
 
@@ -211,9 +202,12 @@ describe("parseArgs", () => {
 
   test("--skill accumulates repeated paths", () => {
     const cfg = parseArgs([
-      "--model", "openai/gpt-4",
-      "--skill", "~/.claude/skills",
-      "--skill", "./project-skills",
+      "--model",
+      "openai/gpt-4",
+      "--skill",
+      "~/.claude/skills",
+      "--skill",
+      "./project-skills",
     ]);
     assert.deepEqual(cfg.skillPaths, ["~/.claude/skills", "./project-skills"]);
   });
@@ -242,13 +236,25 @@ describe("parseArgs", () => {
   });
 
   test("--max-retries rejects negatives and non-integers", () => {
-    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--max-retries", "-1"]), /non-negative integer/);
-    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--max-retries", "2.5"]), /non-negative integer/);
+    assert.throws(
+      () => parseArgs(["--model", "openai/gpt-4", "--max-retries", "-1"]),
+      /non-negative integer/,
+    );
+    assert.throws(
+      () => parseArgs(["--model", "openai/gpt-4", "--max-retries", "2.5"]),
+      /non-negative integer/,
+    );
   });
 
   test("--retry-base-delay-ms accepts positive integers, rejects <1", () => {
-    assert.equal(parseArgs(["--model", "openai/gpt-4", "--retry-base-delay-ms", "5000"]).retryBaseDelayMs, 5000);
-    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--retry-base-delay-ms", "0"]), /positive integer/);
+    assert.equal(
+      parseArgs(["--model", "openai/gpt-4", "--retry-base-delay-ms", "5000"]).retryBaseDelayMs,
+      5000,
+    );
+    assert.throws(
+      () => parseArgs(["--model", "openai/gpt-4", "--retry-base-delay-ms", "0"]),
+      /positive integer/,
+    );
   });
 
   test("--max-steps is unset by default", () => {
@@ -261,9 +267,18 @@ describe("parseArgs", () => {
   });
 
   test("--max-steps rejects 0, negatives, and non-integers", () => {
-    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--max-steps", "0"]), /positive integer/);
-    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--max-steps", "-3"]), /positive integer/);
-    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--max-steps", "2.5"]), /positive integer/);
+    assert.throws(
+      () => parseArgs(["--model", "openai/gpt-4", "--max-steps", "0"]),
+      /positive integer/,
+    );
+    assert.throws(
+      () => parseArgs(["--model", "openai/gpt-4", "--max-steps", "-3"]),
+      /positive integer/,
+    );
+    assert.throws(
+      () => parseArgs(["--model", "openai/gpt-4", "--max-steps", "2.5"]),
+      /positive integer/,
+    );
   });
 
   test("otel is off (undefined) by default — env decides", () => {
@@ -284,9 +299,12 @@ describe("parseArgs", () => {
 
   test("--otel-service-name and --otel-endpoint capture values", () => {
     const cfg = parseArgs([
-      "--model", "openai/gpt-4",
-      "--otel-service-name", "my-svc",
-      "--otel-endpoint", "http://collector:4318",
+      "--model",
+      "openai/gpt-4",
+      "--otel-service-name",
+      "my-svc",
+      "--otel-endpoint",
+      "http://collector:4318",
     ]);
     assert.equal(cfg.otelServiceName, "my-svc");
     assert.equal(cfg.otelEndpoint, "http://collector:4318");
@@ -300,16 +318,10 @@ describe("parseArgs", () => {
   });
 
   test("unknown flag throws", () => {
-    assert.throws(
-      () => parseArgs(["--model", "openai/gpt-4", "--bogus"]),
-      /unknown flag/,
-    );
+    assert.throws(() => parseArgs(["--model", "openai/gpt-4", "--bogus"]), /unknown flag/);
   });
 
   test("flag without value throws", () => {
-    assert.throws(
-      () => parseArgs(["--model"]),
-      /requires a value/,
-    );
+    assert.throws(() => parseArgs(["--model"]), /requires a value/);
   });
 });

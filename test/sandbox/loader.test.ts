@@ -31,7 +31,14 @@ function makeArchive(): { body: Uint8Array; sha256: string; size: number } {
   writeFileSync(path.join(stageRoot, "rootfs.ext4"), "stub-rootfs-bytes");
 
   const archivePath = path.join(stageRoot, "out.tar.gz");
-  const r = spawnSync("tar", ["-czf", archivePath, "-C", stageRoot, "manifest.json", "rootfs.ext4"]);
+  const r = spawnSync("tar", [
+    "-czf",
+    archivePath,
+    "-C",
+    stageRoot,
+    "manifest.json",
+    "rootfs.ext4",
+  ]);
   assert.equal(r.status, 0, `tar failed: ${r.stderr?.toString()}`);
 
   const body = readFileSync(archivePath);
@@ -55,12 +62,22 @@ function manifestFor(arch: "aarch64" | "x86_64", sha: string, size: number): Ima
     name: "agentic-pi-dev",
     version: "0.1.0-test",
     archives: {
-      aarch64: arch === "aarch64"
-        ? { url: "https://example.com/aarch64.tar.gz", sha256: sha, uncompressedBytes: size }
-        : { url: "https://example.com/aarch64.tar.gz", sha256: "0".repeat(64), uncompressedBytes: 0 },
-      x86_64: arch === "x86_64"
-        ? { url: "https://example.com/x86_64.tar.gz", sha256: sha, uncompressedBytes: size }
-        : { url: "https://example.com/x86_64.tar.gz", sha256: "0".repeat(64), uncompressedBytes: 0 },
+      aarch64:
+        arch === "aarch64"
+          ? { url: "https://example.com/aarch64.tar.gz", sha256: sha, uncompressedBytes: size }
+          : {
+              url: "https://example.com/aarch64.tar.gz",
+              sha256: "0".repeat(64),
+              uncompressedBytes: 0,
+            },
+      x86_64:
+        arch === "x86_64"
+          ? { url: "https://example.com/x86_64.tar.gz", sha256: sha, uncompressedBytes: size }
+          : {
+              url: "https://example.com/x86_64.tar.gz",
+              sha256: "0".repeat(64),
+              uncompressedBytes: 0,
+            },
     },
   };
 }
@@ -95,9 +112,7 @@ describe("ensureImage", () => {
     };
     await assert.rejects(
       () => ensureImage("default", { manifest: empty, arch: "aarch64" }),
-      (err) =>
-        err instanceof ImageLoaderError &&
-        /gondolin-builtin/.test(err.hint),
+      (err) => err instanceof ImageLoaderError && /gondolin-builtin/.test(err.hint),
     );
   });
 
@@ -153,9 +168,7 @@ describe("ensureImage", () => {
             arch: "aarch64",
             fetch: stubFetch(body),
           }),
-        (err) =>
-          err instanceof ImageLoaderError &&
-          /sha256 mismatch/.test(err.message),
+        (err) => err instanceof ImageLoaderError && /sha256 mismatch/.test(err.message),
       );
       assert.equal(existsSync(path.join(cacheRoot, "images", wrongSha)), false);
     } finally {
@@ -167,7 +180,8 @@ describe("ensureImage", () => {
     const cacheRoot = mkdtempSync(path.join(tmpdir(), "loader-test-cache-"));
     try {
       const manifest = manifestFor("aarch64", "a".repeat(64), 100);
-      const badFetch = (async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
+      const badFetch = (async () =>
+        new Response("nope", { status: 503 })) as unknown as typeof fetch;
       await assert.rejects(
         () =>
           ensureImage("default", {

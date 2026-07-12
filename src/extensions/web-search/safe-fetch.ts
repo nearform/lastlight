@@ -55,7 +55,11 @@ export const SAFE_FETCH_DEFAULTS = {
 };
 
 export class SafeFetchError extends Error {
-  constructor(message: string, readonly code: string, readonly status?: number) {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status?: number,
+  ) {
     super(message);
     this.name = "SafeFetchError";
   }
@@ -70,10 +74,7 @@ function assertHttpScheme(url: URL): void {
   }
 }
 
-function isAllowedContentType(
-  ct: string | undefined,
-  prefixes: string[],
-): boolean {
+function isAllowedContentType(ct: string | undefined, prefixes: string[]): boolean {
   if (!ct) return false;
   const lower = ct.toLowerCase();
   return prefixes.some((p) => lower.startsWith(p));
@@ -94,8 +95,7 @@ export async function safeFetch(
   const timeoutMs = options.timeoutMs ?? SAFE_FETCH_DEFAULTS.timeoutMs;
   const maxBytes = options.maxBytes ?? SAFE_FETCH_DEFAULTS.maxBytes;
   const maxRedirects = options.maxRedirects ?? SAFE_FETCH_DEFAULTS.maxRedirects;
-  const allowedPrefixes =
-    options.allowedContentTypePrefixes ?? DEFAULT_ALLOWED_PREFIXES;
+  const allowedPrefixes = options.allowedContentTypePrefixes ?? DEFAULT_ALLOWED_PREFIXES;
 
   let currentUrl: URL;
   try {
@@ -128,10 +128,7 @@ export async function safeFetch(
           );
         }
         if (hop === maxRedirects) {
-          throw new SafeFetchError(
-            `too many redirects (>${maxRedirects})`,
-            "too-many-redirects",
-          );
+          throw new SafeFetchError(`too many redirects (>${maxRedirects})`, "too-many-redirects");
         }
         try {
           currentUrl = new URL(loc, currentUrl);
@@ -140,18 +137,30 @@ export async function safeFetch(
         }
         assertHttpScheme(currentUrl);
         // Drain/close any body the redirect carried, just in case.
-        try { await response.body?.cancel(); } catch { /* ignore */ }
+        try {
+          await response.body?.cancel();
+        } catch {
+          /* ignore */
+        }
         continue;
       }
 
       if (status >= 400) {
-        try { await response.body?.cancel(); } catch { /* ignore */ }
+        try {
+          await response.body?.cancel();
+        } catch {
+          /* ignore */
+        }
         throw new SafeFetchError(`http ${status}`, "http-error", status);
       }
 
       const contentType = response.headers.get("content-type") ?? undefined;
       if (!isAllowedContentType(contentType, allowedPrefixes)) {
-        try { await response.body?.cancel(); } catch { /* ignore */ }
+        try {
+          await response.body?.cancel();
+        } catch {
+          /* ignore */
+        }
         throw new SafeFetchError(
           `disallowed content-type '${contentType ?? "(none)"}'`,
           "bad-content-type",
@@ -188,11 +197,12 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
       if (!value) continue;
       total += value.byteLength;
       if (total > maxBytes) {
-        try { await reader.cancel(); } catch { /* ignore */ }
-        throw new SafeFetchError(
-          `response exceeded ${maxBytes} bytes`,
-          "too-large",
-        );
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
+        }
+        throw new SafeFetchError(`response exceeded ${maxBytes} bytes`, "too-large");
       }
       chunks.push(value);
     }
@@ -208,10 +218,7 @@ async function readCapped(response: Response, maxBytes: number): Promise<string>
   // injected fetch returns a stub Response.
   const text = await response.text();
   if (text.length > maxBytes) {
-    throw new SafeFetchError(
-      `response exceeded ${maxBytes} bytes`,
-      "too-large",
-    );
+    throw new SafeFetchError(`response exceeded ${maxBytes} bytes`, "too-large");
   }
   return text;
 }

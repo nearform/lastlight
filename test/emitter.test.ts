@@ -1,12 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  CollectorSink,
-  Emitter,
-  TeeSink,
-  type EmitterRecord,
-} from "../src/emitter.js";
+import { CollectorSink, Emitter, TeeSink, type EmitterRecord } from "../src/emitter.js";
 
 const ctx = {
   sessionId: "test-session-id",

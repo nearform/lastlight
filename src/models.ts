@@ -9,7 +9,7 @@
 // in providers/all as `getBuiltinModel` (the root/`compat` aliases are deprecated).
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { Model } from "@earendil-works/pi-ai";
-import { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 export function parseModelSpec(spec: string): { provider: string; modelId: string } {
   const idx = spec.indexOf("/");

@@ -18,10 +18,20 @@ Two entry points, same underlying behaviour:
 npm install              # one-time
 npm run build            # tsc → dist/
 npm run check            # tsc --noEmit (type-check only)
+npm run lint             # biome lint — lint-only gate; this is what CI runs
+npm run format           # biome format --write (rewrite to formatter style)
+npm run fix              # biome check --write (safe lint fixes + format)
 npm test                 # full suite (integration auto-skips if env unset)
 npm run test:unit        # unit only (~170ms, no API keys / QEMU)
 npm run test:integration # needs OPENAI_API_KEY; sandbox tests need QEMU too
 ```
+
+Biome (`biome.json`) is the lint + format tool. CI runs `npm run lint`
+**lint-only** — formatting isn't CI-enforced (whitespace never reds a PR;
+keep it tidy with `npm run format`). Biome is scoped to `src|test/**/*.ts`
++ `scripts/**/*.mjs` and **never touches `test/fixtures/*.jsonl`**.
+`noNonNullAssertion` and `noExplicitAny` are relaxed (both deliberate in
+this codebase).
 
 Run a single test file directly (the runner discovers `*.test.ts`; `node --test` doesn't find `.ts`):
 ```bash
@@ -70,4 +80,4 @@ Extensions live in `src/extensions/`, each "safe by default" (skip with an enume
 
 ## Releasing
 
-Bump `package.json`, commit, `git tag vX.Y.Z && git push origin main vX.Y.Z`, then **create a GitHub Release** for the tag (`gh release create vX.Y.Z --title vX.Y.Z --notes …`). `.github/workflows/publish.yml` triggers on the *published release* — not the tag push — verifies the tag matches `package.json`, and publishes via npm OIDC trusted-publisher (no `NPM_TOKEN`). `ci.yml` runs type-check/build/tests on push + PR (integration gated on the `OPENAI_API_KEY` secret).
+Bump `package.json`, commit, `git tag vX.Y.Z && git push origin main vX.Y.Z`, then **create a GitHub Release** for the tag (`gh release create vX.Y.Z --title vX.Y.Z --notes …`). `.github/workflows/publish.yml` triggers on the *published release* — not the tag push — verifies the tag matches `package.json`, and publishes via npm OIDC trusted-publisher (no `NPM_TOKEN`). `ci.yml` runs lint/type-check/build/tests on push + PR (integration gated on the `OPENAI_API_KEY` secret).

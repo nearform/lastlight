@@ -40,6 +40,9 @@
     "test:unit": "node scripts/run-tests.mjs --unit",
     "test:integration": "node scripts/run-tests.mjs --integration",
     "check": "tsc --noEmit",
+    "lint": "biome lint",
+    "format": "biome format --write",
+    "fix": "biome check --write",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -63,6 +66,7 @@
     "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.3",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

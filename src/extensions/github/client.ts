@@ -49,14 +49,20 @@ export class GitHubClient {
   private _tokenUsed: string | null = null;
   private readonly baseUrl?: string;
 
-  constructor(private readonly auth: GitHubAuth, opts: GitHubClientOptions = {}) {
+  constructor(
+    private readonly auth: GitHubAuth,
+    opts: GitHubClientOptions = {},
+  ) {
     this.baseUrl = opts.baseUrl;
   }
 
   async octokit(): Promise<Octokit> {
     const token = await this.auth.getToken();
     if (token !== this._tokenUsed) {
-      this._octokit = new Octokit({ auth: token, ...(this.baseUrl ? { baseUrl: this.baseUrl } : {}) });
+      this._octokit = new Octokit({
+        auth: token,
+        ...(this.baseUrl ? { baseUrl: this.baseUrl } : {}),
+      });
       this._tokenUsed = token;
     }
     return this._octokit!;
@@ -78,9 +84,9 @@ export class GitHubClient {
         let delayMs: number;
         if (status === 429) {
           const retryAfter = e.response?.headers?.["retry-after"];
-          delayMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : BASE_DELAY_MS * Math.pow(2, attempt);
+          delayMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : BASE_DELAY_MS * 2 ** attempt;
         } else {
-          delayMs = BASE_DELAY_MS * Math.pow(2, attempt);
+          delayMs = BASE_DELAY_MS * 2 ** attempt;
         }
         if (status === 401) {
           this._tokenUsed = null;
@@ -104,24 +110,44 @@ export class GitHubClient {
   async getFileContents(owner: string, repo: string, path: string, branch?: string) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const params: { owner: string; repo: string; path: string; ref?: string } = { owner, repo, path };
+      const params: { owner: string; repo: string; path: string; ref?: string } = {
+        owner,
+        repo,
+        path,
+      };
       if (branch) params.ref = branch;
       const { data } = await ok.repos.getContent(params);
-      if (typeof data === "object" && data !== null && "content" in data && typeof data.content === "string") {
-        (data as { decoded_content?: string }).decoded_content = Buffer.from(data.content, "base64").toString("utf8");
+      if (
+        typeof data === "object" &&
+        data !== null &&
+        "content" in data &&
+        typeof data.content === "string"
+      ) {
+        (data as { decoded_content?: string }).decoded_content = Buffer.from(
+          data.content,
+          "base64",
+        ).toString("utf8");
       }
       return data;
     });
   }
 
   async createOrUpdateFile(
-    owner: string, repo: string, path: string, content: string, message: string,
-    branch?: string, sha?: string,
+    owner: string,
+    repo: string,
+    path: string,
+    content: string,
+    message: string,
+    branch?: string,
+    sha?: string,
   ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const params: Parameters<typeof ok.repos.createOrUpdateFileContents>[0] = {
-        owner, repo, path, message,
+        owner,
+        repo,
+        path,
+        message,
         content: Buffer.from(content).toString("base64"),
       };
       if (branch) params.branch = branch;
@@ -132,22 +158,30 @@ export class GitHubClient {
   }
 
   async pushFiles(
-    owner: string, repo: string, branch: string,
-    files: Array<{ path: string; content: string }>, message: string,
+    owner: string,
+    repo: string,
+    branch: string,
+    files: Array<{ path: string; content: string }>,
+    message: string,
   ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      let ref;
+      // getRef and createRef both return the `git-ref` schema; only ref.object.sha
+      // is read below. Typed explicitly to satisfy noImplicitAnyLet.
+      let ref: Awaited<ReturnType<typeof ok.git.getRef>>["data"];
       try {
         const { data } = await ok.git.getRef({ owner, repo, ref: `heads/${branch}` });
         ref = data;
       } catch {
         const { data: repoData } = await ok.repos.get({ owner, repo });
         const { data: defaultRef } = await ok.git.getRef({
-          owner, repo, ref: `heads/${repoData.default_branch}`,
+          owner,
+          repo,
+          ref: `heads/${repoData.default_branch}`,
         });
         const { data: newRef } = await ok.git.createRef({
-          owner, repo,
+          owner,
+          repo,
           ref: `refs/heads/${branch}`,
           sha: defaultRef.object.sha,
         });
@@ -156,19 +190,32 @@ export class GitHubClient {
       const blobs = await Promise.all(
         files.map(async (f) => {
           const { data } = await ok.git.createBlob({
-            owner, repo, content: f.content, encoding: "utf-8",
+            owner,
+            repo,
+            content: f.content,
+            encoding: "utf-8",
           });
           return { path: f.path, sha: data.sha, mode: "100644" as const, type: "blob" as const };
         }),
       );
       const { data: tree } = await ok.git.createTree({
-        owner, repo, base_tree: ref.object.sha, tree: blobs,
+        owner,
+        repo,
+        base_tree: ref.object.sha,
+        tree: blobs,
       });
       const { data: commit } = await ok.git.createCommit({
-        owner, repo, message, tree: tree.sha, parents: [ref.object.sha],
+        owner,
+        repo,
+        message,
+        tree: tree.sha,
+        parents: [ref.object.sha],
       });
       const { data: updated } = await ok.git.updateRef({
-        owner, repo, ref: `heads/${branch}`, sha: commit.sha,
+        owner,
+        repo,
+        ref: `heads/${branch}`,
+        sha: commit.sha,
       });
       return { commit: commit.sha, branch, ref: updated };
     });
@@ -187,7 +234,10 @@ export class GitHubClient {
       const ok = await this.octokit();
       const { data: ref } = await ok.git.getRef({ owner, repo, ref: `heads/${fromBranch}` });
       const { data } = await ok.git.createRef({
-        owner, repo, ref: `refs/heads/${branch}`, sha: ref.object.sha,
+        owner,
+        repo,
+        ref: `refs/heads/${branch}`,
+        sha: ref.object.sha,
       });
       return data;
     });
@@ -199,7 +249,11 @@ export class GitHubClient {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.issues.listForRepo({
-        owner, repo, state: "open", per_page: 30, ...omitFalsy(opts),
+        owner,
+        repo,
+        state: "open",
+        per_page: 30,
+        ...omitFalsy(opts),
       } as Parameters<typeof ok.issues.listForRepo>[0]);
       return data;
     });
@@ -213,21 +267,39 @@ export class GitHubClient {
     });
   }
 
-  async createIssue(owner: string, repo: string, title: string, body: string | undefined, opts: Record<string, unknown> = {}) {
+  async createIssue(
+    owner: string,
+    repo: string,
+    title: string,
+    body: string | undefined,
+    opts: Record<string, unknown> = {},
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.issues.create({
-        owner, repo, title, body, ...omitFalsy(opts),
+        owner,
+        repo,
+        title,
+        body,
+        ...omitFalsy(opts),
       } as Parameters<typeof ok.issues.create>[0]);
       return data;
     });
   }
 
-  async updateIssue(owner: string, repo: string, issue_number: number, updates: Record<string, unknown>) {
+  async updateIssue(
+    owner: string,
+    repo: string,
+    issue_number: number,
+    updates: Record<string, unknown>,
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.issues.update({
-        owner, repo, issue_number, ...omitFalsy(updates),
+        owner,
+        repo,
+        issue_number,
+        ...omitFalsy(updates),
       } as Parameters<typeof ok.issues.update>[0]);
       return data;
     });
@@ -241,11 +313,20 @@ export class GitHubClient {
     });
   }
 
-  async listIssueComments(owner: string, repo: string, issue_number: number, opts: Record<string, unknown> = {}) {
+  async listIssueComments(
+    owner: string,
+    repo: string,
+    issue_number: number,
+    opts: Record<string, unknown> = {},
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.issues.listComments({
-        owner, repo, issue_number, per_page: 30, ...omitFalsy(opts),
+        owner,
+        repo,
+        issue_number,
+        per_page: 30,
+        ...omitFalsy(opts),
       } as Parameters<typeof ok.issues.listComments>[0]);
       return data;
     });
@@ -275,7 +356,13 @@ export class GitHubClient {
     });
   }
 
-  async createLabel(owner: string, repo: string, name: string, color: string, description?: string) {
+  async createLabel(
+    owner: string,
+    repo: string,
+    name: string,
+    color: string,
+    description?: string,
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.issues.createLabel({ owner, repo, name, color, description });
@@ -294,7 +381,11 @@ export class GitHubClient {
         cleaned[k] = v;
       }
       const { data } = await ok.pulls.list({
-        owner, repo, state: "open", per_page: 30, ...cleaned,
+        owner,
+        repo,
+        state: "open",
+        per_page: 30,
+        ...cleaned,
       } as Parameters<typeof ok.pulls.list>[0]);
       return data;
     });
@@ -308,7 +399,14 @@ export class GitHubClient {
     });
   }
 
-  async createPullRequest(owner: string, repo: string, title: string, body: string | undefined, head: string, base: string) {
+  async createPullRequest(
+    owner: string,
+    repo: string,
+    title: string,
+    body: string | undefined,
+    head: string,
+    base: string,
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.pulls.create({ owner, repo, title, body, head, base });
@@ -335,7 +433,12 @@ export class GitHubClient {
   async listPullRequestReviewComments(owner: string, repo: string, pull_number: number) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.pulls.listReviewComments({ owner, repo, pull_number, per_page: 100 });
+      const { data } = await ok.pulls.listReviewComments({
+        owner,
+        repo,
+        pull_number,
+        per_page: 100,
+      });
       return data;
     });
   }
@@ -344,7 +447,9 @@ export class GitHubClient {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.pulls.get({
-        owner, repo, pull_number,
+        owner,
+        repo,
+        pull_number,
         mediaType: { format: "diff" },
       });
       return data;
@@ -352,23 +457,41 @@ export class GitHubClient {
   }
 
   async createPullRequestReview(
-    owner: string, repo: string, pull_number: number, body: string, event: string,
+    owner: string,
+    repo: string,
+    pull_number: number,
+    body: string,
+    event: string,
     comments: Array<{ path: string; position?: number; line?: number; body: string }> = [],
   ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const params: Parameters<typeof ok.pulls.createReview>[0] = { owner, repo, pull_number, body, event: event as "APPROVE" | "REQUEST_CHANGES" | "COMMENT" };
+      const params: Parameters<typeof ok.pulls.createReview>[0] = {
+        owner,
+        repo,
+        pull_number,
+        body,
+        event: event as "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+      };
       if (comments.length) (params as { comments?: typeof comments }).comments = comments;
       const { data } = await ok.pulls.createReview(params);
       return data;
     });
   }
 
-  async mergePullRequest(owner: string, repo: string, pull_number: number, opts: Record<string, unknown> = {}) {
+  async mergePullRequest(
+    owner: string,
+    repo: string,
+    pull_number: number,
+    opts: Record<string, unknown> = {},
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.pulls.merge({
-        owner, repo, pull_number, ...opts,
+        owner,
+        repo,
+        pull_number,
+        ...opts,
       } as Parameters<typeof ok.pulls.merge>[0]);
       return data;
     });
@@ -380,7 +503,10 @@ export class GitHubClient {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.repos.listCommits({
-        owner, repo, per_page: 30, ...opts,
+        owner,
+        repo,
+        per_page: 30,
+        ...opts,
       } as Parameters<typeof ok.repos.listCommits>[0]);
       return data;
     });

@@ -23,11 +23,13 @@ export interface SandboxNone {
   status: Record<string, unknown>;
 }
 
-export type SandboxResult = SandboxNone | (Omit<GondolinSandbox, "status"> & {
-  backend: "gondolin";
-  suppressBuiltins: true;
-  status: GondolinSandbox["status"];
-});
+export type SandboxResult =
+  | SandboxNone
+  | (Omit<GondolinSandbox, "status"> & {
+      backend: "gondolin";
+      suppressBuiltins: true;
+      status: GondolinSandbox["status"];
+    });
 
 export interface BuildSandboxOptions {
   backend: SandboxBackend;

@@ -308,7 +308,10 @@ export function parseArgs(argv: string[]): RunConfig {
         config.noBuiltinTools = true;
         break;
       case "--tools":
-        config.tools = next().split(",").map((s) => s.trim()).filter(Boolean);
+        config.tools = next()
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
         break;
       case "--dangerously-skip-permissions":
         config.dangerouslySkipPermissions = true;
@@ -453,6 +456,7 @@ export function parseArgs(argv: string[]): RunConfig {
       case "--help":
         printHelp();
         process.exit(0);
+        break;
       default:
         throw new Error(`unknown flag: ${arg}`);
     }

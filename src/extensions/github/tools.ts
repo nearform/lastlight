@@ -64,7 +64,10 @@ async function safeRun<T>(fn: () => Promise<T>) {
  * Build the entire GitHub tool set. Caller filters by profile.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {}): ToolDefinition<any>[] {
+export function buildGitHubTools(
+  auth: GitHubAuth,
+  opts: GitHubClientOptions = {},
+): ToolDefinition<any>[] {
   const gh = new GitHubClient(auth, opts);
 
   // Helper to keep the defineTool boilerplate tight.
@@ -73,15 +76,16 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
     description: string,
     parameters: P,
     handler: (params: Static<P>) => Promise<unknown>,
-  ): ToolDefinition<P> => defineTool({
-    name,
-    label: name,
-    description,
-    parameters,
-    async execute(_id, params) {
-      return safeRun(() => handler(params));
-    },
-  });
+  ): ToolDefinition<P> =>
+    defineTool({
+      name,
+      label: name,
+      description,
+      parameters,
+      async execute(_id, params) {
+        return safeRun(() => handler(params));
+      },
+    });
 
   return [
     // ── Git Auth ──────────────────────────────────────────────────────
@@ -92,8 +96,12 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
       Type.Object({
         owner: Type.String({ description: "Repository owner" }),
         repo: Type.String({ description: "Repository name" }),
-        branch: Type.Optional(Type.String({ description: "Branch to checkout (default: repo default branch)" })),
-        path: Type.Optional(Type.String({ description: "Local path to clone into (default: repo name)" })),
+        branch: Type.Optional(
+          Type.String({ description: "Branch to checkout (default: repo default branch)" }),
+        ),
+        path: Type.Optional(
+          Type.String({ description: "Local path to clone into (default: repo name)" }),
+        ),
       }),
       async ({ owner, repo, branch, path: clonePath }) => {
         const token = await auth.getToken();
@@ -108,9 +116,19 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
           timeout: 120_000,
           env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
         });
-        execFileSync("git", ["-C", dest, "config", "credential.helper", `store --file=${credPath}`], { stdio: "pipe" });
-        execFileSync("git", ["-C", dest, "config", "user.name", "last-light[bot]"], { stdio: "pipe" });
-        execFileSync("git", ["-C", dest, "config", "user.email", "last-light[bot]@users.noreply.github.com"], { stdio: "pipe" });
+        execFileSync(
+          "git",
+          ["-C", dest, "config", "credential.helper", `store --file=${credPath}`],
+          { stdio: "pipe" },
+        );
+        execFileSync("git", ["-C", dest, "config", "user.name", "last-light[bot]"], {
+          stdio: "pipe",
+        });
+        execFileSync(
+          "git",
+          ["-C", dest, "config", "user.email", "last-light[bot]@users.noreply.github.com"],
+          { stdio: "pipe" },
+        );
         return {
           cloned: `${owner}/${repo}`,
           path: dest,
@@ -170,7 +188,9 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
         content: Type.String({ description: "File content" }),
         message: Type.String({ description: "Commit message" }),
         branch: Type.Optional(Type.String()),
-        sha: Type.Optional(Type.String({ description: "SHA of file being replaced (for updates)" })),
+        sha: Type.Optional(
+          Type.String({ description: "SHA of file being replaced (for updates)" }),
+        ),
       }),
       ({ owner, repo, path, content, message, branch, sha }) =>
         gh.createOrUpdateFile(owner, repo, path, content, message, branch, sha),
@@ -186,7 +206,8 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
         files: Type.Array(Type.Object({ path: Type.String(), content: Type.String() })),
         message: Type.String(),
       }),
-      ({ owner, repo, branch, files, message }) => gh.pushFiles(owner, repo, branch, files, message),
+      ({ owner, repo, branch, files, message }) =>
+        gh.pushFiles(owner, repo, branch, files, message),
     ),
 
     tool(
@@ -221,9 +242,13 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
-        state: Type.Optional(Type.Union([Type.Literal("open"), Type.Literal("closed"), Type.Literal("all")])),
+        state: Type.Optional(
+          Type.Union([Type.Literal("open"), Type.Literal("closed"), Type.Literal("all")]),
+        ),
         labels: Type.Optional(Type.String({ description: "Comma-separated label names" })),
-        sort: Type.Optional(Type.Union([Type.Literal("created"), Type.Literal("updated"), Type.Literal("comments")])),
+        sort: Type.Optional(
+          Type.Union([Type.Literal("created"), Type.Literal("updated"), Type.Literal("comments")]),
+        ),
         direction: Type.Optional(Type.Union([Type.Literal("asc"), Type.Literal("desc")])),
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
@@ -264,7 +289,8 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
         labels: Type.Optional(Type.Array(Type.String())),
         assignees: Type.Optional(Type.Array(Type.String())),
       }),
-      ({ owner, repo, issue_number, ...updates }) => gh.updateIssue(owner, repo, issue_number, updates),
+      ({ owner, repo, issue_number, ...updates }) =>
+        gh.updateIssue(owner, repo, issue_number, updates),
     ),
 
     tool(
@@ -289,7 +315,8 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
       }),
-      ({ owner, repo, issue_number, ...opts }) => gh.listIssueComments(owner, repo, issue_number, opts),
+      ({ owner, repo, issue_number, ...opts }) =>
+        gh.listIssueComments(owner, repo, issue_number, opts),
     ),
 
     tool(
@@ -333,7 +360,8 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
         color: Type.String({ description: "Hex color without #, e.g. 'ff0000'" }),
         description: Type.Optional(Type.String()),
       }),
-      ({ owner, repo, name, color, description }) => gh.createLabel(owner, repo, name, color, description),
+      ({ owner, repo, name, color, description }) =>
+        gh.createLabel(owner, repo, name, color, description),
     ),
 
     // ── Pull Requests ─────────────────────────────────────────────────
@@ -344,11 +372,17 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
-        state: Type.Optional(Type.Union([Type.Literal("open"), Type.Literal("closed"), Type.Literal("all")])),
-        sort: Type.Optional(Type.Union([
-          Type.Literal("created"), Type.Literal("updated"),
-          Type.Literal("popularity"), Type.Literal("long-running"),
-        ])),
+        state: Type.Optional(
+          Type.Union([Type.Literal("open"), Type.Literal("closed"), Type.Literal("all")]),
+        ),
+        sort: Type.Optional(
+          Type.Union([
+            Type.Literal("created"),
+            Type.Literal("updated"),
+            Type.Literal("popularity"),
+            Type.Literal("long-running"),
+          ]),
+        ),
         direction: Type.Optional(Type.Union([Type.Literal("asc"), Type.Literal("desc")])),
         head: Type.Optional(Type.String({ description: "Filter by head branch (user:branch)" })),
         base: Type.Optional(Type.String({ description: "Filter by base branch" })),
@@ -421,12 +455,16 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
           Type.Literal("REQUEST_CHANGES"),
           Type.Literal("COMMENT"),
         ]),
-        comments: Type.Optional(Type.Array(Type.Object({
-          path: Type.String(),
-          position: Type.Optional(Type.Number()),
-          line: Type.Optional(Type.Number()),
-          body: Type.String(),
-        }))),
+        comments: Type.Optional(
+          Type.Array(
+            Type.Object({
+              path: Type.String(),
+              position: Type.Optional(Type.Number()),
+              line: Type.Optional(Type.Number()),
+              body: Type.String(),
+            }),
+          ),
+        ),
       }),
       ({ owner, repo, pull_number, body, event, comments }) =>
         gh.createPullRequestReview(owner, repo, pull_number, body, event, comments || []),
@@ -441,11 +479,12 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
         pull_number: Type.Number(),
         commit_title: Type.Optional(Type.String()),
         commit_message: Type.Optional(Type.String()),
-        merge_method: Type.Optional(Type.Union([
-          Type.Literal("merge"), Type.Literal("squash"), Type.Literal("rebase"),
-        ])),
+        merge_method: Type.Optional(
+          Type.Union([Type.Literal("merge"), Type.Literal("squash"), Type.Literal("rebase")]),
+        ),
       }),
-      ({ owner, repo, pull_number, ...opts }) => gh.mergePullRequest(owner, repo, pull_number, opts),
+      ({ owner, repo, pull_number, ...opts }) =>
+        gh.mergePullRequest(owner, repo, pull_number, opts),
     ),
 
     // ── Commits ───────────────────────────────────────────────────────
@@ -481,7 +520,9 @@ export function buildGitHubTools(auth: GitHubAuth, opts: GitHubClientOptions = {
       "github_search_issues",
       "Search issues and pull requests across repositories",
       Type.Object({
-        query: Type.String({ description: "GitHub search query (e.g. 'repo:owner/name is:open label:bug')" }),
+        query: Type.String({
+          description: "GitHub search query (e.g. 'repo:owner/name is:open label:bug')",
+        }),
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
       }),

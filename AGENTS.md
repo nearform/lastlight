@@ -207,7 +207,22 @@ npm run test:integration  # integration only (needs OPENAI_API_KEY; sandbox need
 
 # Type-check only
 npx tsc --noEmit
+
+# Lint / format (Biome — see biome.json)
+npm run lint              # lint-only gate (biome lint); this is what CI runs
+npm run format            # rewrite files to the formatter style (biome format --write)
+npm run fix               # apply safe lint fixes + format in one shot (biome check --write)
 ```
+
+Biome is the lint + format tool (`biome.json`). CI runs `npm run lint`
+(**lint-only** — formatting is deliberately *not* enforced in CI, so a
+whitespace drift never reds a PR; keep it tidy locally with `npm run
+format` / editor-on-save). The config scopes Biome to `src|test/**/*.ts`
+and `scripts/**/*.mjs` — it **never touches `test/fixtures/*.jsonl`**
+(those are contract evidence). Two `recommended` rules are relaxed:
+`noNonNullAssertion` (we use `!` deliberately) and `noExplicitAny` (the
+`ToolDefinition<any>[]` from Pi's SDK and the model-registry generics are
+structural).
 
 Tests live in `test/` as `*.test.ts` files; integration tests use
 `*.integration.test.ts` so the runner can include / exclude them. Discovery
@@ -219,8 +234,8 @@ discovery doesn't pick up `.ts` files automatically).
 Two GitHub Actions workflows ship with the repo:
 
 - `.github/workflows/ci.yml` runs on every push to `main` and every PR:
-  type-check, build, unit tests, integration tests (gated on the
-  `OPENAI_API_KEY` secret — auto-skipped if absent).
+  lint (`npm run lint`, Biome), type-check, build, unit tests, integration
+  tests (gated on the `OPENAI_API_KEY` secret — auto-skipped if absent).
 - `.github/workflows/publish.yml` runs when a **GitHub Release is
   published** (`release: published`) — pushing a tag alone does NOT
   publish. It verifies the tag matches `package.json`, then runs `npm
@@ -250,7 +265,8 @@ GITHUB_TOKEN=ghp_…
 1. **Read `README.md`** to understand the surface you're changing.
 2. **Make the smallest change that compiles and re-captures a fixture**
    for affected smoke commands. Don't refactor adjacent code.
-3. **Run `npm run build`** — must be clean.
+3. **Run `npm run lint` and `npm run build`** — both must be clean
+   (`npm run fix` auto-resolves most lint/format nits).
 4. **Re-run the smoke command for whatever you touched.** If you changed
    GitHub-tool wiring, run the `--profile read` smoke; if you touched
    the sandbox, run the `--sandbox gondolin` smoke. Replace the matching

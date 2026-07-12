@@ -29,12 +29,11 @@ export function assertSafeToken(token: unknown): asserts token is string {
  * convention but accepts an explicit override too.
  */
 export function credentialsFilePath(envVar = "LASTLIGHT_GIT_CREDENTIALS"): string {
-  const raw = (process.env[envVar] || "").trim() ||
+  const raw =
+    (process.env[envVar] || "").trim() ||
     join(process.env.HOME || "/tmp", ".lastlight-git-credentials");
   if (/\s/.test(raw)) {
-    throw new Error(
-      `${envVar} contains whitespace; git's helper-arg parsing would break: ${raw}`,
-    );
+    throw new Error(`${envVar} contains whitespace; git's helper-arg parsing would break: ${raw}`);
   }
   return raw;
 }

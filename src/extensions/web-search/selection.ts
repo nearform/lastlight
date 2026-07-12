@@ -13,11 +13,7 @@
  *   5. Unknown explicit provider name → throw (config error).
  */
 
-import {
-  PROVIDER_NAMES,
-  type ProviderName,
-  type WebSearchSkipReason,
-} from "./types.js";
+import { PROVIDER_NAMES, type ProviderName, type WebSearchSkipReason } from "./types.js";
 
 export interface SelectionInput {
   /** When false, force-skip with reason `disabled-by-flag`. */

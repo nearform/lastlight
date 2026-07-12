@@ -127,7 +127,7 @@ export async function ensureImage(
 
   const arch = options.arch ?? detectArch();
   const archive = manifest.archives[arch];
-  if (!archive || !archive.url || archive.sha256.length !== 64) {
+  if (!archive?.url || archive.sha256.length !== 64) {
     throw new ImageLoaderError(
       `default image has no entry for arch '${arch}'`,
       "use --sandbox-image gondolin-builtin or build a local image",

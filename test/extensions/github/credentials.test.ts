@@ -21,7 +21,7 @@ describe("assertSafeToken", () => {
       "tok:en",
       "tok\nen",
       "tok'en",
-      "tok\"en",
+      'tok"en',
       "tok;en",
       "tok$en",
       "tok&en",

@@ -78,7 +78,12 @@ const SAMPLE: AgentSessionEvent[] = [
       content: [{ type: "text", text: "thinking out loud" }],
     },
   },
-  { type: "tool_execution_start", toolCallId: "tc1", toolName: "bash", args: { command: "ls -la" } },
+  {
+    type: "tool_execution_start",
+    toolCallId: "tc1",
+    toolName: "bash",
+    args: { command: "ls -la" },
+  },
   {
     type: "tool_execution_end",
     toolCallId: "tc1",

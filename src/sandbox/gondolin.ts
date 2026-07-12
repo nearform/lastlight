@@ -37,7 +37,7 @@ const GUEST_WORKSPACE = "/workspace";
 
 function shQuote(value: string): string {
   // POSIX shell quoting: wrap in single quotes; escape any internal quote.
-  return "'" + value.replace(/'/g, "'\\''") + "'";
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function toGuestPath(localCwd: string, localPath: string): string {
@@ -75,11 +75,7 @@ function createGondolinReadOps(vm: VM, localCwd: string): ReadOperations {
     detectImageMimeType: async (p) => {
       const guestPath = toGuestPath(localCwd, p);
       try {
-        const r = await vm.exec([
-          "/bin/sh",
-          "-lc",
-          `file --mime-type -b ${shQuote(guestPath)}`,
-        ]);
+        const r = await vm.exec(["/bin/sh", "-lc", `file --mime-type -b ${shQuote(guestPath)}`]);
         if (!r.ok) return null;
         const m = r.stdout.trim();
         return ["image/jpeg", "image/png", "image/gif", "image/webp"].includes(m) ? m : null;
@@ -297,12 +293,11 @@ export async function buildGondolinSandbox(
   // The `"*"` wildcard is recognized by the underlying
   // `@earendil-works/gondolin` host-pattern matcher: a list containing it
   // collapses to allow-all, matching any hostname.
-  const allowedHosts = options.allowedHttpHosts === undefined
-    ? [...DEFAULT_GUEST_ALLOWED_HOSTS]
-    : options.allowedHttpHosts;
-  const httpConfig = allowedHosts === null
-    ? undefined
-    : createHttpHooks({ allowedHosts });
+  const allowedHosts =
+    options.allowedHttpHosts === undefined
+      ? [...DEFAULT_GUEST_ALLOWED_HOSTS]
+      : options.allowedHttpHosts;
+  const httpConfig = allowedHosts === null ? undefined : createHttpHooks({ allowedHosts });
 
   const t0 = Date.now();
   const vm = await VM.create({

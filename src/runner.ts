@@ -83,12 +83,10 @@ export async function runOnce(
   // skips (no --profile, no creds at all).
   if (isMisconfigurationSkip(github)) {
     warn(`GitHub extension disabled (${github.reason}): ${github.message ?? ""}`);
-  } else if (
-    github.status === "skipped" &&
-    github.reason === "no-credentials" &&
-    config.profile
-  ) {
-    warn(`--profile=${config.profile} set but no GITHUB_APP_* or GITHUB_TOKEN env vars found; GitHub tools disabled`);
+  } else if (github.status === "skipped" && github.reason === "no-credentials" && config.profile) {
+    warn(
+      `--profile=${config.profile} set but no GITHUB_APP_* or GITHUB_TOKEN env vars found; GitHub tools disabled`,
+    );
   }
 
   // Web-search extension. Host-process execution (does not consume the
@@ -179,7 +177,9 @@ export async function runOnce(
         // sandbox. If they passed --sandbox-image=default explicitly,
         // a failure there is fatal — they asked for this image.
         if (config.sandboxImage === undefined) {
-          warn(`default image unavailable (${err.message}); falling back to gondolin-builtin. Hint: ${err.hint}`);
+          warn(
+            `default image unavailable (${err.message}); falling back to gondolin-builtin. Hint: ${err.hint}`,
+          );
           imageDescriptor = { name: "gondolin-builtin", source: "builtin" };
         } else {
           warn(`--sandbox-image=${selector} failed: ${err.message}. Hint: ${err.hint}`);
@@ -203,7 +203,9 @@ export async function runOnce(
     allowedHttpHosts: config.allowedHttpHosts,
   });
   if (!sandboxOutcome.ok) {
-    warn(`--sandbox=${sandboxOutcome.backend} failed (${sandboxOutcome.reason}): ${sandboxOutcome.hint}`);
+    warn(
+      `--sandbox=${sandboxOutcome.backend} failed (${sandboxOutcome.reason}): ${sandboxOutcome.hint}`,
+    );
     return 2;
   }
   const sandbox: SandboxResult = sandboxOutcome.sandbox;
@@ -211,10 +213,11 @@ export async function runOnce(
   // When a sandbox is active it supplies its own read/write/edit/bash that
   // route through the VM; Pi's host built-ins of the same names must be
   // suppressed so they don't shadow ours.
-  const noToolsMode =
-    config.noBuiltinTools ? "builtin" :
-    sandbox.suppressBuiltins ? "builtin" :
-    undefined;
+  const noToolsMode = config.noBuiltinTools
+    ? "builtin"
+    : sandbox.suppressBuiltins
+      ? "builtin"
+      : undefined;
 
   // Build the resource loader ourselves so we can inject the bundled
   // pi-fff extension via additionalExtensionPaths while preserving Pi's

@@ -274,7 +274,13 @@ export class SpanMapper {
     if (usage) {
       const dims = { [GenAI.SYSTEM]: system, [GenAI.REQUEST_MODEL]: model };
       this.setAndMeasureToken(span, GenAI.USAGE_INPUT_TOKENS, usage.input, TokenType.INPUT, dims);
-      this.setAndMeasureToken(span, GenAI.USAGE_OUTPUT_TOKENS, usage.output, TokenType.OUTPUT, dims);
+      this.setAndMeasureToken(
+        span,
+        GenAI.USAGE_OUTPUT_TOKENS,
+        usage.output,
+        TokenType.OUTPUT,
+        dims,
+      );
       this.setAndMeasureToken(
         span,
         AgenticPi.CACHE_READ_TOKENS,
@@ -324,12 +330,7 @@ export class SpanMapper {
     this.inst.toolInvocations.add(1, { [GenAI.TOOL_NAME]: toolName });
   }
 
-  private onToolEnd(
-    toolCallId: string,
-    toolName: string,
-    result: unknown,
-    isError: boolean,
-  ): void {
+  private onToolEnd(toolCallId: string, toolName: string, result: unknown, isError: boolean): void {
     let entry = this.toolSpans.get(toolCallId);
     if (!entry) {
       if (!this.warnedUnknownTool) {

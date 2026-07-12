@@ -12,7 +12,14 @@ describe("preflightGondolin", () => {
       assert.match(r.detail, /qemu=/);
       assert.match(r.detail, /accel=/);
     } else {
-      assert.ok(["qemu-not-installed", "qemu-img-not-installed", "linux-no-kvm", "in-container-no-accel"].includes(r.reason));
+      assert.ok(
+        [
+          "qemu-not-installed",
+          "qemu-img-not-installed",
+          "linux-no-kvm",
+          "in-container-no-accel",
+        ].includes(r.reason),
+      );
       assert.equal(typeof r.hint, "string");
       assert.ok(r.hint.length > 0);
     }

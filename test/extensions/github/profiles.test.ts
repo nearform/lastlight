@@ -1,33 +1,38 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  PROFILE_TOOLS,
-  isGitAccessProfile,
-} from "../../../src/extensions/github/profiles.js";
+import { PROFILE_TOOLS, isGitAccessProfile } from "../../../src/extensions/github/profiles.js";
 
 describe("PROFILE_TOOLS", () => {
   test("the four expected profiles exist", () => {
-    assert.ok(PROFILE_TOOLS["read"]);
+    assert.ok(PROFILE_TOOLS.read);
     assert.ok(PROFILE_TOOLS["issues-write"]);
     assert.ok(PROFILE_TOOLS["review-write"]);
     assert.ok(PROFILE_TOOLS["repo-write"]);
   });
 
   test("each profile is a strict superset of the more restrictive one", () => {
-    const read = new Set(PROFILE_TOOLS["read"]);
+    const read = new Set(PROFILE_TOOLS.read);
     const issuesWrite = new Set(PROFILE_TOOLS["issues-write"]);
     const reviewWrite = new Set(PROFILE_TOOLS["review-write"]);
     const repoWrite = new Set(PROFILE_TOOLS["repo-write"]);
 
     for (const t of read) assert.ok(issuesWrite.has(t), `issues-write missing read tool ${t}`);
-    for (const t of issuesWrite) assert.ok(reviewWrite.has(t), `review-write missing issues-write tool ${t}`);
-    for (const t of reviewWrite) assert.ok(repoWrite.has(t), `repo-write missing review-write tool ${t}`);
+    for (const t of issuesWrite)
+      assert.ok(reviewWrite.has(t), `review-write missing issues-write tool ${t}`);
+    for (const t of reviewWrite)
+      assert.ok(repoWrite.has(t), `repo-write missing review-write tool ${t}`);
   });
 
   test("write-only tools appear in the right tier", () => {
     // contents:write tools must live in repo-write, not below.
-    const repoOnly = ["github_clone_repo", "github_create_or_update_file", "github_push_files", "github_create_branch", "github_merge_pull_request"];
+    const repoOnly = [
+      "github_clone_repo",
+      "github_create_or_update_file",
+      "github_push_files",
+      "github_create_branch",
+      "github_merge_pull_request",
+    ];
     for (const t of repoOnly) {
       assert.ok(PROFILE_TOOLS["repo-write"].includes(t), `${t} missing from repo-write`);
       assert.ok(!PROFILE_TOOLS["review-write"].includes(t), `${t} leaked into review-write`);
@@ -41,15 +46,22 @@ describe("PROFILE_TOOLS", () => {
     }
 
     // issues:write tools must live in issues-write+, not in read.
-    const issuesOnly = ["github_create_issue", "github_update_issue", "github_add_issue_comment", "github_add_labels", "github_remove_label", "github_create_label"];
+    const issuesOnly = [
+      "github_create_issue",
+      "github_update_issue",
+      "github_add_issue_comment",
+      "github_add_labels",
+      "github_remove_label",
+      "github_create_label",
+    ];
     for (const t of issuesOnly) {
       assert.ok(PROFILE_TOOLS["issues-write"].includes(t), `${t} missing from issues-write`);
-      assert.ok(!PROFILE_TOOLS["read"].includes(t), `${t} leaked into read`);
+      assert.ok(!PROFILE_TOOLS.read.includes(t), `${t} leaked into read`);
     }
   });
 
   test("expected tool counts per profile", () => {
-    assert.equal(PROFILE_TOOLS["read"].length, 18);
+    assert.equal(PROFILE_TOOLS.read.length, 18);
     assert.equal(PROFILE_TOOLS["issues-write"].length, 24);
     assert.equal(PROFILE_TOOLS["review-write"].length, 26);
     assert.equal(PROFILE_TOOLS["repo-write"].length, 31);

@@ -28,11 +28,7 @@ import { dirname } from "node:path";
 /** FFF mode. `override` replaces Pi's built-in find/grep under the same names. */
 export type FileSearchMode = "override" | "tools-only" | "tools-and-ui";
 
-export const VALID_FILE_SEARCH_MODES: FileSearchMode[] = [
-  "override",
-  "tools-only",
-  "tools-and-ui",
-];
+export const VALID_FILE_SEARCH_MODES: FileSearchMode[] = ["override", "tools-only", "tools-and-ui"];
 
 export const DEFAULT_FILE_SEARCH_MODE: FileSearchMode = "override";
 

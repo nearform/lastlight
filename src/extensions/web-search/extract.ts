@@ -60,10 +60,38 @@ function safeFromCodePoint(code: number): string {
 }
 
 const BLOCK_TAGS = new Set([
-  "p", "br", "div", "section", "article", "header", "footer", "main",
-  "nav", "aside", "ul", "ol", "li", "table", "tr", "td", "th",
-  "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "hr", "pre", "code",
-  "dl", "dt", "dd", "figure", "figcaption",
+  "p",
+  "br",
+  "div",
+  "section",
+  "article",
+  "header",
+  "footer",
+  "main",
+  "nav",
+  "aside",
+  "ul",
+  "ol",
+  "li",
+  "table",
+  "tr",
+  "td",
+  "th",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "blockquote",
+  "hr",
+  "pre",
+  "code",
+  "dl",
+  "dt",
+  "dd",
+  "figure",
+  "figcaption",
 ]);
 
 export function extractTitle(html: string): string | undefined {
@@ -110,7 +138,5 @@ export function htmlToText(html: string, maxBytes = EXTRACT_MAX_BYTES): string {
   const bytes = encoder.encode(s);
   if (bytes.byteLength <= maxBytes) return s;
   // Decode just the prefix.
-  return new TextDecoder("utf-8", { fatal: false }).decode(
-    bytes.subarray(0, maxBytes),
-  );
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes.subarray(0, maxBytes));
 }

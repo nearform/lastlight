@@ -85,15 +85,11 @@ export function createBraveProvider(options: BraveOptions): Provider {
       let filtered = items;
       if (params.includeDomains?.length) {
         const list = params.includeDomains;
-        filtered = filtered.filter((it) =>
-          it.url && list.some((d) => hostMatches(it.url, d)),
-        );
+        filtered = filtered.filter((it) => it.url && list.some((d) => hostMatches(it.url, d)));
       }
       if (params.excludeDomains?.length) {
         const list = params.excludeDomains;
-        filtered = filtered.filter((it) =>
-          !(it.url && list.some((d) => hostMatches(it.url, d))),
-        );
+        filtered = filtered.filter((it) => !(it.url && list.some((d) => hostMatches(it.url, d))));
       }
       filtered = filtered.slice(0, params.maxResults);
 

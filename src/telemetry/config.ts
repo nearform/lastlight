@@ -56,10 +56,7 @@ function isTruthy(v: string | undefined): boolean {
  * Content gating: on iff `--otel-include-content` OR env
  * `AGENTIC_PI_OTEL_INCLUDE_CONTENT` is truthy. Default is metadata-only.
  */
-export function resolveTelemetryConfig(
-  cfg: TelemetryConfigInput,
-  env: Env,
-): TelemetryConfig {
+export function resolveTelemetryConfig(cfg: TelemetryConfigInput, env: Env): TelemetryConfig {
   const includeContent =
     cfg.otelIncludeContent === true || isTruthy(env.AGENTIC_PI_OTEL_INCLUDE_CONTENT);
   const serviceName = cfg.otelServiceName ?? env.OTEL_SERVICE_NAME;

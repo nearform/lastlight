@@ -57,10 +57,7 @@ export interface NormalizedFetchResult {
 }
 
 /** Minimal fetch signature used by providers and safe-fetch for DI in tests. */
-export type FetchImpl = (
-  input: string | URL,
-  init?: RequestInit,
-) => Promise<Response>;
+export type FetchImpl = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export interface Provider {
   readonly name: ProviderName;
@@ -75,7 +72,4 @@ export interface Provider {
   fetch?(params: FetchParams): Promise<NormalizedFetchResult>;
 }
 
-export type WebSearchSkipReason =
-  | "disabled-by-flag"
-  | "no-credentials"
-  | "invalid-config";
+export type WebSearchSkipReason = "disabled-by-flag" | "no-credentials" | "invalid-config";
