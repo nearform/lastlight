@@ -202,6 +202,7 @@ async function prepareRun(
           token: mintedToken,
           runId: access.runId,
           shallow: access.shallow,
+          recreateFromBase: access.recreateFromBase,
         }
       : undefined;
 

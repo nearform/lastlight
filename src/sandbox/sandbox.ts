@@ -104,6 +104,15 @@ export interface PrePopulateSpec {
   token: string;
   runId?: string;
   shallow?: boolean;
+  /**
+   * Recreate the checkout from the default branch on a fresh (different-run)
+   * provision instead of refreshing the existing feature branch: delete any
+   * leftover checkout and clone the default branch, then create `branch`
+   * locally off it. Set for `build` so a re-triggered incomplete build starts
+   * again from current `main` (issue #153). A same-run provision still
+   * preserves the workspace.
+   */
+  recreateFromBase?: boolean;
 }
 
 /** What {@link Sandbox.provision} hands back to the orchestrator. */

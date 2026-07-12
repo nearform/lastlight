@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workflowScopedTaskId, resolveRunBranch, PER_TARGET_REUSE_WORKFLOWS, PREPOPULATE_SYNTH_WORKFLOWS, PR_HEADREF_PREPOPULATE_WORKFLOWS } from "#src/workflows/simple.js";
+import { workflowScopedTaskId, resolveRunBranch, PER_TARGET_REUSE_WORKFLOWS, PER_TARGET_RECREATE_WORKFLOWS, PREPOPULATE_SYNTH_WORKFLOWS, PR_HEADREF_PREPOPULATE_WORKFLOWS } from "#src/workflows/simple.js";
 
 const RUN = "abcdef12-3456-7890-abcd-ef1234567890";
 
@@ -14,9 +14,15 @@ describe("workflowScopedTaskId", () => {
     }
   });
 
-  it("keeps the run suffix for build so each run gets a fresh workspace", () => {
-    const id = workflowScopedTaskId("drizzle-cube", 918, "build", RUN);
-    expect(id).toBe("drizzle-cube-918-build-abcdef12");
+  it("keys build (recreate-from-base) by (repo, issue) with no run suffix so a re-run lands on the same dir", () => {
+    for (const wf of PER_TARGET_RECREATE_WORKFLOWS) {
+      const a = workflowScopedTaskId("drizzle-cube", 918, wf, RUN);
+      const b = workflowScopedTaskId("drizzle-cube", 918, wf, "different-run-id");
+      expect(a).toBe(`drizzle-cube-918-${wf}`);
+      // A re-triggered build resolves to the same dir → the stale checkout is
+      // found and recreated from the default branch (issue #153).
+      expect(a).toBe(b);
+    }
   });
 
   it("keeps the run suffix for repo-scoped (no number) workflows", () => {

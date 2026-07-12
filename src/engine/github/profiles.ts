@@ -251,11 +251,11 @@ export interface GitSandboxAccess {
    * task's workspace before the sandbox container starts. The agent then
    * sees the workspace already checked out — no `clone_repo` call needed
    * inside the session. Used by read-only workflows (pr-review, pr-fix)
-   * that operate on an existing branch rather than creating one.
-   *
-   * Build-style workflows that create a new lastlight/* branch from main
-   * leave this unset — they start empty and let the agent set up the
-   * branch fresh.
+   * that operate on an existing branch, and by branch-synthesizing
+   * workflows (`build`, `verify`, `qa-test`, `demo` — see
+   * `PREPOPULATE_SYNTH_WORKFLOWS`) whose `lastlight/N-slug` branch doesn't
+   * exist on the remote yet: the missing-branch fallback in
+   * `prePopulateWorkspace` clones the default branch and creates it locally.
    */
   prePopulateBranch?: string;
   /**
@@ -275,6 +275,16 @@ export interface GitSandboxAccess {
    * have headroom.
    */
   shallow?: boolean;
+  /**
+   * Recreate the workspace from the **default branch** on a fresh run instead
+   * of reusing/refreshing an existing feature-branch checkout. Set for the
+   * `PER_TARGET_RECREATE_WORKFLOWS` (build): a re-triggered build discards any
+   * leftover from an earlier incomplete run and starts again off current
+   * `main`, and its feature branch is always cut from the latest default —
+   * never inheriting a stale pushed branch (issue #153). A same-run resume
+   * (approval gate) still preserves the checkout via the run marker.
+   */
+  recreateFromBase?: boolean;
 }
 
 export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPermissions> = {

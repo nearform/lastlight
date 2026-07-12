@@ -15,6 +15,12 @@ import { slugify } from "./templates.js";
 import { wrapUntrusted } from "../engine/screen/screen.js";
 import { buildProgressModel, runDashboardUrl } from "../notify/model.js";
 import { buildAssetIssueKey } from "../state/build-assets.js";
+import {
+  PER_TARGET_REUSE_WORKFLOWS,
+  PER_TARGET_RECREATE_WORKFLOWS,
+  PREPOPULATE_SYNTH_WORKFLOWS,
+  PR_HEADREF_PREPOPULATE_WORKFLOWS,
+} from "./target-policy.js";
 
 /**
  * Lightweight invocation request for any agent workflow. The runner handles
@@ -63,61 +69,16 @@ export interface SimpleWorkflowRequest {
   prePopulateBranch?: string;
 }
 
-/**
- * Workflows whose workspace is keyed by **(repo, PR)** rather than per-run.
- * For these the taskId drops the run-id suffix so re-reviews of the same PR
- * (push → `synchronize`, cron PR-review fanout) reuse one sandbox dir — a
- * warm `node_modules` + an incremental `git fetch` instead of a fresh
- * 1.3G clone + full install each time, and N dirs/PR collapse to 1 (issue
- * #107, cutting the #106 churn at its source). Concurrency is held off by
- * the dispatcher's `isRunning(skill, triggerId)` guard plus
- * `runs.getByTrigger` reuse — two runs never share the dir live; the
- * cross-run refresh in `prePopulateWorkspace` resets it cleanly between them.
- * `build` is excluded — it creates a new branch per run and must not reuse.
- */
-export const PER_TARGET_REUSE_WORKFLOWS = new Set(["pr-review", "pr-fix"]);
-
-/**
- * Workflows that synthesize their own `lastlight/N-slug` branch (which doesn't
- * exist on the remote at dispatch time) yet should still pre-populate the
- * sandbox: the agent's cwd becomes the repo root (no `git clone`/`cd`), and —
- * for the read-only `verify`/`qa-test` runs — server-mode artifacts the agent
- * writes to `.lastlight/<key>/` (e.g. browser-QA screenshots) land where
- * `serverArtifacts()` harvests them instead of being orphaned a level up.
- * `build` was the original member; verify/qa-test were added for the harvest
- * fix, and `demo` for the same reason (its `demo.mp4` is written under
- * `.lastlight/<key>/` and harvested into the Artifacts store). For a fresh
- * (issue-scoped) dispatch the dispatcher leaves `prePopulateBranch` unset and
- * the missing-branch fallback in `prePopulateWorkspace` clones the default
- * branch — correct for `build`/`demo`, which *create* the synth branch off the
- * default. But when the *same* workflow runs against an existing PR, the synth
- * `lastlight/<prNumber>-<title-slug>` name won't match the PR's real head ref
- * (named after the originating issue), so the fallback would clone the default
- * branch and test/demo code that lacks the PR — see
- * `PR_HEADREF_PREPOPULATE_WORKFLOWS`.
- */
-export const PREPOPULATE_SYNTH_WORKFLOWS = new Set(["build", "verify", "qa-test", "demo"]);
-
-/**
- * The subset of PR-scoped read workflows the dispatcher pins to the PR's *real*
- * head ref (via `getPullRequest(...).head.ref`) before pre-populating, instead
- * of letting them fall back to the synthesized `lastlight/N-<title-slug>` name.
- * Each of these is meaningful only against an existing PR, and the synth name
- * never matches the PR's actual branch (which is named after the originating
- * issue, e.g. `lastlight/14-…` for a PR #15). Without this pinning:
- *   - `qa-test` / `verify` QA the *base* branch and report the PR's feature
- *     missing — a false-negative result.
- *   - `demo`'s "after" collapses onto the default branch, matching "before".
- * `pr-fix` is handled separately (it plumbs `branch` through context for the
- * architect/executor to push to). See the resolution block in
- * `dispatchWorkflow` (src/index.ts).
- */
-export const PR_HEADREF_PREPOPULATE_WORKFLOWS = new Set([
-  "pr-review",
-  "demo",
-  "qa-test",
-  "verify",
-]);
+// Per-target workspace provisioning policy lives in `./target-policy.js` (a
+// leaf module the runner can share without an import cycle). Imported at the
+// top for local use; re-exported here for existing callers (e.g. src/index.ts
+// imports PR_HEADREF_PREPOPULATE_WORKFLOWS).
+export {
+  PER_TARGET_REUSE_WORKFLOWS,
+  PER_TARGET_RECREATE_WORKFLOWS,
+  PREPOPULATE_SYNTH_WORKFLOWS,
+  PR_HEADREF_PREPOPULATE_WORKFLOWS,
+};
 
 export function workflowScopedTaskId(
   repo: string,
@@ -125,8 +86,14 @@ export function workflowScopedTaskId(
   workflowName: string,
   workflowId: string,
 ): string {
-  // Reusable per-PR workspaces are keyed by (repo, PR) only — no run suffix.
-  if (number !== undefined && PER_TARGET_REUSE_WORKFLOWS.has(workflowName)) {
+  // Reusable / recreatable per-target workspaces are keyed by (repo, issue)
+  // only — no run suffix — so a re-run lands on the same dir (reused for
+  // pr-review/pr-fix, recreated-from-base for build; see the two sets above).
+  if (
+    number !== undefined &&
+    (PER_TARGET_REUSE_WORKFLOWS.has(workflowName) ||
+      PER_TARGET_RECREATE_WORKFLOWS.has(workflowName))
+  ) {
     return `${repo}-${number}-${workflowName}`;
   }
   const suffix = workflowId.slice(0, 8);
