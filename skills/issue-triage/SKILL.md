@@ -29,8 +29,10 @@ downstream build agent, which has full source access.
 
 ## 0. Ensure the labels exist
 
-Before applying any label, create the canonical set idempotently with
-`github_create_label` (ignore 422 "already exists"):
+Before applying any label, create the canonical set in a **single** idempotent
+`github_ensure_labels` call — pass every row below as one `labels` array
+(`{name, color}`). It lists once and creates only the missing ones, so it never
+errors on labels that already exist:
 
 | Label | Color | Role |
 |-------|-------|------|
@@ -44,7 +46,7 @@ Before applying any label, create the canonical set idempotently with
 | `duplicate` | `cfd3d7` | dedupe |
 | `question` | `d876e3` | question |
 
-If label creation is denied (the token lacks the permission), fall back to using
+If the call is denied (the token lacks the permission), fall back to using
 only the labels that already exist on the repo and skip the rest. Done when the
 labels you need are present or you've confirmed you can't create them.
 
