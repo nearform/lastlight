@@ -330,6 +330,26 @@ async function main() {
       }
     }
 
+    // Base branch for scoping. PR-triggered runs set it from the PR's base ref
+    // above; build/issue-triggered runs have no PR, so resolve the repo's real
+    // default branch here. Without this, everything that diffs against the base
+    // — notably the reviewer prompt's `git ... {{baseBranch}}..HEAD` — assumes
+    // `main` and breaks on a `master`-default (or otherwise non-`main`) repo.
+    // Best-effort: on failure fall back to `main` so the template still renders
+    // a valid ref rather than an empty `..HEAD`.
+    if (!extra.baseBranch && github && owner && repo) {
+      try {
+        extra.baseBranch = await github.getDefaultBranch(owner, repo);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[dispatch] ${workflowName}: could not resolve default branch for ${owner}/${repo} ` +
+          `(${msg}); assuming main`,
+        );
+        extra.baseBranch = "main";
+      }
+    }
+
     const request: SimpleWorkflowRequest = {
       owner,
       repo,

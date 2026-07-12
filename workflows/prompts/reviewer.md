@@ -3,10 +3,10 @@ You are the CODE REVIEWER. Independent verification — you have NO shared conte
 You are already inside the {{repo}} repo at branch {{branch}} — the harness
 pre-cloned it and your cwd is the repo root. Git is configured.
 
-SCOPE — review ONLY changed files:
-  git log --oneline main..HEAD
-  git diff main...HEAD --name-only
-  git diff main...HEAD
+SCOPE — review ONLY changed files ({{baseBranch}} is this repo's base branch):
+  git log --oneline {{baseBranch}}..HEAD
+  git diff {{baseBranch}}...HEAD --name-only
+  git diff {{baseBranch}}...HEAD
 
 Read {{issueDir}}/architect-plan.md and executor-summary.md for context.
 

@@ -188,6 +188,17 @@ export class GitHubClient {
     return data;
   }
 
+  /**
+   * The repo's default branch (e.g. `main`, `master`, `develop`). Used to
+   * scope build runs to the real base branch instead of assuming `main` — a
+   * `master`-default repo otherwise breaks every `git ... main..HEAD` the
+   * reviewer runs. See the `baseBranch` plumbing in src/index.ts.
+   */
+  async getDefaultBranch(owner: string, repo: string): Promise<string> {
+    const { data } = await this.octokit.rest.repos.get({ owner, repo });
+    return data.default_branch;
+  }
+
   /** Convenience: fetch only the PR's head commit SHA. Used by check-run code. */
   async getPullRequestHeadSha(owner: string, repo: string, pullNumber: number): Promise<string> {
     const { data } = await this.octokit.rest.pulls.get({
