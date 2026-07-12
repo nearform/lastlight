@@ -745,6 +745,11 @@ which is also `~lastlight/lastlight`, so the default resolves):
 
 ```bash
 ssh <production-server>
+# ALWAYS update the global CLI FIRST — it's versioned separately from the agent
+# image, and new deploy behaviour (e.g. the GHCR image-pull path) lives in the
+# CLI. A stale CLI silently uses the old path (e.g. builds locally, ignores a
+# pin). Match the version you're deploying:
+npm i -g lastlight@<version>          # e.g. lastlight@0.12.0 (or @latest)
 sudo -u lastlight -i lastlight server update
 ```
 
