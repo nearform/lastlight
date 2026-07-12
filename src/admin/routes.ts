@@ -1207,13 +1207,9 @@ export function createAdminRoutes(
   function computeArtifactMetadata(owner: string, repo: string, key: string, doc: string): ArtifactMetadata {
     const approvals = db.approvals.listByArtifact(doc);
     if (approvals.length === 0) {
-      return {
-        editable: false,
-        lock: {
-          reason: "no_matching_approval",
-          message: `No approval references ${doc}`,
-        },
-      };
+      // No approval references this artifact. Docs that aren't guarded by an
+      // approval remain editable (status.md, executor-summary.md, etc.).
+      return { editable: true, lock: null };
     }
 
     const enriched = approvals.map((approval) => ({

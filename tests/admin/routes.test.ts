@@ -947,6 +947,26 @@ describe("artifacts endpoints (server-mode build assets)", () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ll-routes-assets-")); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
+  it("allows editing artifacts with no approvals", async () => {
+    const { app } = appWithArtifacts();
+
+    const meta = await request(app, "/artifacts/acme/widget/issue-149/status.md/metadata");
+    expect(meta.status).toBe(200);
+    expect(await meta.json()).toEqual({ editable: true, lock: null });
+
+    const put = await request(app, "/artifacts/acme/widget/issue-149/status.md", {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain" },
+      body: "# Status\n",
+    });
+    expect(put.status).toBe(200);
+    expect(await put.json()).toEqual({ ok: true });
+
+    const doc = await request(app, "/artifacts/acme/widget/issue-149/status.md");
+    expect(doc.status).toBe(200);
+    expect(await doc.text()).toBe("# Status\n");
+  });
+
   it("PUT succeeds when a matching pending approval exists", async () => {
     const approvals: ApprovalRow[] = [
       {
