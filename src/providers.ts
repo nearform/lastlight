@@ -294,3 +294,80 @@ export const PROVIDER_HOSTS: readonly string[] = PROVIDERS.map((p) => p.host);
  */
 export const DEFAULT_PROVIDER = "anthropic";
 export const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
+
+/**
+ * OAuth (subscription-login) providers — the ones the API-key registry above
+ * deliberately excludes. These don't authenticate with a static key env var;
+ * a user logs in once (`lastlight oauth login <id>`) and pi-ai manages the
+ * token. Two consumption seams with different reach:
+ *
+ *   - **chat** (in-process pi-ai) supports ALL of these — the chat runner
+ *     passes the resolved token as the per-call `apiKey`.
+ *   - **sandbox** (agentic-pi) resolves creds from ENV only, so a provider is
+ *     sandbox-usable ONLY if `sandboxEnvVar` is set (the env var pi-ai reads
+ *     inside the sandbox). Codex has none → chat-only.
+ *
+ * Egress note: chat is in-process (not behind the sandbox firewall), and the
+ * one sandbox-capable OAuth provider whose models we ship (`anthropic`) reuses
+ * the `anthropic.com` host already in the API-key registry — so no OAuth host
+ * is added to the sandbox allowlist here.
+ */
+export interface OAuthProviderSpec {
+  /** pi-ai OAuth provider id — also `lastlight oauth login <id>`. */
+  readonly id: string;
+  /** Display name (wizard + CLI). */
+  readonly displayName: string;
+  /** pi-ai model-spec prefix (`provider` in `provider/model`) for its models. */
+  readonly modelPrefix: string;
+  /** Representative model spec — wizard placeholder / docs hint. */
+  readonly sampleModel: string;
+  /**
+   * Env var pi-ai reads for this provider's OAuth token inside a sandbox, or
+   * `null` when there's no env route (⇒ chat-only; cannot run sandbox phases).
+   */
+  readonly sandboxEnvVar: string | null;
+  /** True when login is mandatory (no API-key fallback). */
+  readonly oauthOnly: boolean;
+}
+
+export const OAUTH_PROVIDERS: readonly OAuthProviderSpec[] = [
+  {
+    id: "openai-codex",
+    displayName: "ChatGPT Plus/Pro (Codex)",
+    modelPrefix: "openai-codex",
+    sampleModel: "openai-codex/gpt-5.4",
+    sandboxEnvVar: null, // chatgpt.com backend — no env route, chat-only
+    oauthOnly: true,
+  },
+  {
+    id: "anthropic",
+    displayName: "Anthropic (Claude Pro/Max)",
+    modelPrefix: "anthropic",
+    sampleModel: "anthropic/claude-sonnet-4-6",
+    sandboxEnvVar: "ANTHROPIC_OAUTH_TOKEN",
+    oauthOnly: false, // falls back to ANTHROPIC_API_KEY
+  },
+  {
+    id: "github-copilot",
+    displayName: "GitHub Copilot",
+    modelPrefix: "github-copilot",
+    sampleModel: "github-copilot/gpt-4o",
+    sandboxEnvVar: "COPILOT_GITHUB_TOKEN",
+    oauthOnly: true,
+  },
+];
+
+const OAUTH_PREFIX_INDEX = new Map<string, OAuthProviderSpec>(
+  OAUTH_PROVIDERS.map((p) => [p.modelPrefix, p]),
+);
+const OAUTH_ID_INDEX = new Map<string, OAuthProviderSpec>(
+  OAUTH_PROVIDERS.map((p) => [p.id, p]),
+);
+
+export function oauthProviderByModelPrefix(prefix: string): OAuthProviderSpec | undefined {
+  return OAUTH_PREFIX_INDEX.get(prefix);
+}
+
+export function oauthProviderById(id: string): OAuthProviderSpec | undefined {
+  return OAUTH_ID_INDEX.get(id);
+}

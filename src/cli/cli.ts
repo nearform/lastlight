@@ -289,6 +289,14 @@ ${chalk.bold("Skills")} (host-local — install the Last Light Claude Code skill
   lastlight skills list              List bundled skills + where they're installed
   lastlight skills uninstall         Remove the installed skills [--scope user|project]
 
+${chalk.bold("OAuth")} (host-local — subscription logins for the model provider)
+  lastlight oauth list               List OAuth providers + which are logged in
+  lastlight oauth login [provider]   Log in via ChatGPT/Codex, Claude Pro, or Copilot
+  lastlight oauth status             Show the credential store + token expiry
+  lastlight oauth test <provider>    Verify a stored login still refreshes
+  lastlight oauth logout [provider]  Remove one (or all) stored logins
+                                     Writes auth.json under $STATE_DIR; restart the agent after.
+
 ${chalk.bold("Other")}
   lastlight setup                    First-run wizard — asks client (login) or server (stack)
                                      [--client | --server to skip the prompt]
@@ -1016,6 +1024,23 @@ async function cmdSkills(): Promise<void> {
   });
 }
 
+// ── oauth (host-local) ─────────────────────────────────────────────────────
+
+/**
+ * `lastlight oauth <login|list|status|logout|test>` — manage subscription
+ * logins (Codex / Claude Pro / Copilot). Host-local: runs the browser OAuth
+ * flow and writes auth.json under $STATE_DIR where the harness reads it. See
+ * src/cli/oauth-cli.ts.
+ */
+async function cmdOAuth(): Promise<void> {
+  const { oauth } = await import("./oauth-cli.js");
+  await oauth(positionals.slice(1), {
+    authFile: typeof flags["auth-file"] === "string" ? flags["auth-file"] : undefined,
+    stateDir: typeof flags["state-dir"] === "string" ? flags["state-dir"] : undefined,
+    json: flags.json === true,
+  });
+}
+
 // ── dispatch ─────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1052,6 +1077,8 @@ async function main() {
     case "approvals": return cmdApprovals();
     case "fork": return cmdFork();
     case "skills": return cmdSkills();
+    case "oauth":
+    case "auth": return cmdOAuth();
     case "server": return cmdServer();
     case "stats": return cmdStats();
     case "chat": return cmdChat();

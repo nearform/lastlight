@@ -163,6 +163,49 @@ The default for a single-issue/PR shorthand is the **cheap** action (triage or r
 
 pi-ai picks credentials from the provider env vars the harness forwards (the full listed set lives in `src/providers.ts` — Anthropic / OpenAI / OpenRouter / Google / Mistral / Groq / Cerebras / xAI / HuggingFace / Moonshot / NVIDIA / Fireworks / Together / DeepSeek / Z.AI / Kimi / MiniMax). The harness forwards them into each sandbox container (or VM) so workflow runs can reach the API.
 
+#### Subscription logins (OAuth) — Codex, Claude Pro, Copilot
+
+Instead of an API key you can authenticate with a paid subscription. pi-ai
+supports three OAuth providers; log in once on the host and Last Light stores
+and refreshes the token for you. In this from-source checkout the CLI runs via
+`tsx` (there's no globally-installed `lastlight` binary yet — that's what a
+published `npm i -g lastlight` gives you):
+
+```bash
+npx tsx src/cli/cli.ts oauth login openai-codex   # ChatGPT Plus/Pro (Codex)
+npx tsx src/cli/cli.ts oauth login anthropic      # Claude Pro/Max
+npx tsx src/cli/cli.ts oauth login github-copilot # GitHub Copilot
+npx tsx src/cli/cli.ts oauth list                 # providers + who's logged in
+npx tsx src/cli/cli.ts oauth status               # store path + token expiry
+npx tsx src/cli/cli.ts oauth test openai-codex    # verify a stored login refreshes
+npx tsx src/cli/cli.ts oauth logout [provider]    # remove one (or all)
+```
+
+> Installed globally, these are just `lastlight oauth login …` etc. — the
+> subcommands are identical.
+
+Then point the model at that provider and restart the agent:
+
+```bash
+LASTLIGHT_MODEL=openai-codex/gpt-5.5   # Codex ids: gpt-5.5 / gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex-spark
+```
+
+The login writes `auth.json` under `$STATE_DIR` (same JSON shape pi-ai's own
+`npx @earendil-works/pi-ai login` writes; override with `LASTLIGHT_AUTH_FILE`).
+It's **host-local** — the browser OAuth flow runs where you type the command,
+so run it on the machine that runs the agent, then restart (`npm run dev:server`
+from source, or `lastlight server restart agent` for the installed deploy) to
+pick it up. Note `tsx watch` does **not** reload on `.env` changes — restart
+after switching `LASTLIGHT_MODEL`.
+
+**Reach differs by execution path.** The in-process **chat** path passes the
+token as a per-call key, so all three providers work there. The **sandbox**
+(agentic-pi workflow phases) resolves credentials from env only —
+`ANTHROPIC_OAUTH_TOKEN` / `COPILOT_GITHUB_TOKEN` cover Anthropic and Copilot,
+but **Codex has no env-token route and therefore can't run sandbox workflows**
+(it's chat-only). Use an API-key provider for build/triage/review workflows if
+you only have a Codex subscription.
+
 ---
 
 ## Docker Deployment

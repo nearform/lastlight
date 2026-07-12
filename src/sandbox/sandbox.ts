@@ -129,6 +129,14 @@ export interface RunAgentOpts {
   webSearchProvider?: "tavily" | "brave" | "exa";
   /** Test/eval escape hatch — only honoured by the in-process adapter. */
   githubApiBaseUrl?: string;
+  /**
+   * Credential store (`auth.json`) agentic-pi points Pi's AuthStorage at for
+   * model auth — carries OAuth subscription logins (Codex / Claude Pro /
+   * Copilot). Only meaningful for the in-process adapter (none/gondolin), where
+   * the model call runs host-side so a host path resolves; the docker adapter
+   * ignores it (its model call is in-container) and relies on env tokens.
+   */
+  authFile?: string;
 }
 
 export interface RunCommandOpts {
@@ -473,6 +481,7 @@ class InProcessSandbox implements Sandbox {
         prompt,
         thinking: opts.thinking,
         profile: opts.profile,
+        authFile: opts.authFile,
         githubApiBaseUrl: opts.githubApiBaseUrl,
         sandbox: this.mode === "gondolin" ? "gondolin" : "none",
         sandboxEnv: this.innerAgentEnv(opts.sandboxEnv),

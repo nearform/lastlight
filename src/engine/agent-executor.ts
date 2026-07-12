@@ -12,6 +12,7 @@ import type { PrePopulateSpec, SandboxFactory } from "../sandbox/sandbox.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
 import { DEFAULT_MODEL } from "./executors/shared.js";
 import { PROVIDER_ENV_KEYS } from "../providers.js";
+import { oauthEnvVarForProvider, oauthProviderIdForModel, resolveOAuthApiKey } from "./oauth.js";
 import {
   runSandboxedAgent,
   runSandboxedCommand,
@@ -128,6 +129,48 @@ async function prepareRun(
   for (const envKey of PROVIDER_ENV_KEYS) {
     const v = process.env[envKey];
     if (v) ghEnv[envKey] = v;
+  }
+
+  // OAuth-backed providers (subscription logins: Codex / Claude Pro / Copilot).
+  //
+  // In-process backends (none/gondolin) run the model call host-side, so the
+  // orchestrator hands agentic-pi `authFile` = our credential store and Pi's
+  // AuthStorage resolves EVERY OAuth provider (Codex included) from it. Nothing
+  // to do here for those backends.
+  //
+  // Container backends (docker/smol) run the model call inside the guest, where
+  // that host path can't be read — so we inject the refreshed token via the env
+  // var pi reads in-guest (ANTHROPIC_OAUTH_TOKEN / COPILOT_GITHUB_TOKEN). Codex
+  // has no in-guest env route (chatgpt.com backend), so it can't authenticate
+  // there — warn rather than 401 mid-run, and point at a host-side backend.
+  const inProcessBackend = backend === "none" || backend === "gondolin";
+  const modelSpec = config.model || DEFAULT_MODEL;
+  const oauthId = oauthProviderIdForModel(modelSpec);
+  if (oauthId && !inProcessBackend) {
+    const oauthEnvVar = oauthEnvVarForProvider(oauthId);
+    if (!oauthEnvVar) {
+      console.warn(
+        `[executor] Model '${modelSpec}' uses OAuth provider '${oauthId}', which has no ` +
+          `in-guest env route — the '${backend}' sandbox can't authenticate it. Use the ` +
+          `gondolin/none backend (host-side auth via the credential store) or an API-key provider.`,
+      );
+    } else if (!ghEnv[oauthEnvVar] && !process.env[oauthEnvVar]) {
+      // Only mint from stored creds when an explicit token isn't already set.
+      try {
+        const res = await resolveOAuthApiKey(oauthId, undefined, stateDir);
+        if (res) {
+          ghEnv[oauthEnvVar] = res.apiKey;
+        } else {
+          console.warn(
+            `[executor] Model '${modelSpec}' needs an OAuth login for '${oauthId}' but none is ` +
+              `stored. Run: lastlight oauth login ${oauthId}`,
+          );
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[executor] OAuth token refresh failed for '${oauthId}': ${msg}`);
+      }
+    }
   }
 
   // Web-search provider keys. Forwarded only when the workflow opted into

@@ -25,7 +25,7 @@ import * as p from "@clack/prompts";
 import chalk from "chalk";
 import { OVERLAY_GITIGNORE, detectGh, bootstrapOverlayRepo } from "../config/overlay-bootstrap.js";
 import { serverUpdate } from "./cli-server.js";
-import { PROVIDERS, providerByPrefix, DEFAULT_MODEL, type ProviderSpec } from "../providers.js";
+import { PROVIDERS, providerByPrefix, OAUTH_PROVIDERS, oauthProviderById, type ProviderSpec } from "../providers.js";
 
 // ── Brand colors ───────────────────────────────────────────────────────────
 
@@ -536,7 +536,8 @@ async function collectManagedRepos(): Promise<string[]> {
  */
 async function collectModelAndKey(): Promise<{
   model: string;
-  providerApiKey: { envKey: string; value: string };
+  /** Undefined for OAuth (subscription-login) providers — they use auth.json, not an env key. */
+  providerApiKey: { envKey: string; value: string } | undefined;
 }> {
   p.log.step(gold("Model provider"));
   p.log.info(
@@ -564,10 +565,46 @@ async function collectModelAndKey(): Promise<{
               : spec.displayName,
           hint: spec.prefix,
         })),
+        // OAuth (subscription-login) providers — no API key; the user logs in
+        // separately via `lastlight oauth login`. Value tagged `oauth:<id>`.
+        ...OAUTH_PROVIDERS.map((o) => ({
+          value: `oauth:${o.id}`,
+          label: `${o.displayName} ${dim("(OAuth login)")}`,
+          hint: o.modelPrefix,
+        })),
         { value: "__custom__", label: dim("Enter a custom provider/model...") },
       ],
     }),
   ) as string;
+
+  // OAuth branch: no API key. Pick a model id, return a key-less result, and
+  // remind the user to run the login after setup (the browser flow writes
+  // auth.json, not the .env this wizard produces).
+  if (providerChoice.startsWith("oauth:")) {
+    const oauth = oauthProviderById(providerChoice.slice("oauth:".length))!;
+    const sampleId = oauth.sampleModel.slice(oauth.sampleModel.indexOf("/") + 1);
+    const customModelId = required(
+      await p.text({
+        message: `Model id for ${oauth.displayName} ${dim("(provider prefix added automatically)")}`,
+        placeholder: sampleId,
+        defaultValue: sampleId,
+        validate: (v) =>
+          !v || !v.trim() || /^[A-Za-z0-9][\w/.-]*$/.test(v)
+            ? undefined
+            : "Use the model id (e.g. gpt-5.4).",
+      }),
+    ) as string;
+    const model = `${oauth.modelPrefix}/${(customModelId || sampleId).trim()}`;
+    p.log.success(`Model: ${teal(model)} — auth: ${dim("OAuth (subscription login)")}`);
+    p.note(
+      `After setup finishes, log in on this host:\n\n  ${teal(`lastlight oauth login ${oauth.id}`)}\n\n` +
+        (oauth.sandboxEnvVar
+          ? dim("Works for chat and sandbox workflows.")
+          : dim("Chat only — sandbox workflows can't use this provider (no env-token route).")),
+      "One more step",
+    );
+    return { model, providerApiKey: undefined };
+  }
 
   let spec: ProviderSpec;
   let modelId: string;

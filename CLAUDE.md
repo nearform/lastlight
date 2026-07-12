@@ -32,6 +32,22 @@ API credentials are read from the provider env vars in the registry at
 match your `OPENCODE_MODEL` / `OPENCODE_MODELS`. No `claude` CLI, no
 Anthropic SDK in the runtime path.
 
+**Subscription logins (OAuth).** Besides the API-key providers above, three
+providers authenticate by subscription login instead of a static key —
+`openai-codex` (ChatGPT Plus/Pro), `anthropic` (Claude Pro/Max), and
+`github-copilot`. They're registered in `OAUTH_PROVIDERS` in `src/providers.ts`
+(separate from the API-key `PROVIDERS`). `src/engine/oauth.ts` is the shared
+layer: one on-disk store (`$STATE_DIR/auth.json`, override `LASTLIGHT_AUTH_FILE`
+— same JSON shape pi-ai's own CLI writes), `resolveOAuthApiKey()`
+(refresh-if-expired + persist), and the model-prefix→provider-id map.
+`lastlight oauth login|list|status|test|logout` (host-local,
+`src/cli/oauth-cli.ts`) drives the browser flow. **Two seams, different reach:**
+the in-process **chat** path (`chat-runner.ts`) passes the token as a per-call
+`apiKey`, so all three work; the **sandbox** path (`agent-executor.ts`) resolves
+creds from env only and injects `ANTHROPIC_OAUTH_TOKEN` / `COPILOT_GITHUB_TOKEN`
+— Codex has no env-token route, so it's **chat-only** (the executor warns if a
+Codex model is used for a sandbox phase).
+
 The cheap-helper path (`src/engine/llm.ts`, used by screener + classifier)
 bypasses OpenCode and dispatches directly to the same three providers.
 `defaultFastModel()` prefers Anthropic > OpenAI > OpenRouter when multiple
@@ -477,6 +493,15 @@ lastlight fork agent-context [file]    # all agent-context/*.md (soul/rules/secu
 lastlight skills install               # → ~/.claude/skills (user) [--scope project] [--no-marketplace]
 lastlight skills list                  # bundled skills + where they're installed
 lastlight skills uninstall             # remove them [--scope user|project]
+
+# Subscription logins (HOST-LOCAL; src/cli/oauth-cli.ts). Browser OAuth flow +
+# credential store at $STATE_DIR/auth.json (override LASTLIGHT_AUTH_FILE);
+# restart the agent to apply. Codex is chat-only (no sandbox env-token route).
+lastlight oauth login [provider]       # openai-codex | anthropic | github-copilot
+lastlight oauth list                   # providers + login status
+lastlight oauth status                 # store path + token expiry
+lastlight oauth test <provider>        # force a refresh to verify the login
+lastlight oauth logout [provider]      # remove one (or all) [--auth-file f] [--state-dir d]
 
 # Local dev with Docker sandbox isolation
 ./scripts/dev-local.sh                 # builds opencode.json + secrets

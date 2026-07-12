@@ -1,5 +1,6 @@
 import { basename, join } from "path";
-import { mkdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { resolveAuthFile } from "../oauth.js";
 import { randomUUID } from "crypto";
 import type { SandboxBackend } from "../../config/config.js";
 import {
@@ -185,6 +186,18 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
       }
     };
 
+    // OAuth credential store for model auth. Only the in-process adapters
+    // (none/gondolin) run the model call host-side, so a host path resolves
+    // there; the docker adapter ignores authFile (its model call is
+    // in-container) and relies on the OAuth env tokens spliced in by the
+    // executor. Pass the path only when the store actually exists so pure
+    // API-key deployments never point agentic-pi at a phantom file.
+    let authFile: string | undefined;
+    if (ctx.backend === "none" || ctx.backend === "gondolin") {
+      const candidate = resolveAuthFile(undefined, ctx.stateDir);
+      if (existsSync(candidate)) authFile = candidate;
+    }
+
     let returned;
     try {
       returned = await sandbox.runAgent(
@@ -194,6 +207,7 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
           model,
           thinking,
           profile,
+          authFile,
           sandboxEnv: AGENT_GIT_IDENTITY_ENV,
           agentCwd: prov.agentCwd,
           skillDirs,

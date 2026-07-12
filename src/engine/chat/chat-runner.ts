@@ -29,6 +29,12 @@ import {
 } from "@earendil-works/pi-ai";
 import type { SessionManager } from "../../connectors/messaging/session-manager.js";
 import { buildChatGitHubTools, type ChatGitHubAuth, type ChatGitHubToolset } from "../github/github-tools.js";
+import {
+  OAUTH_ONLY_PROVIDERS,
+  getOAuthProvider,
+  oauthProviderIdForModel,
+  resolveOAuthApiKey,
+} from "../oauth.js";
 
 const MAX_TOOL_ROUNDS = 8;
 
@@ -182,10 +188,18 @@ export class ChatRunner {
   private model: Model<Api> | undefined;
   private modelError: string | undefined;
   private chains = new Map<string, Promise<unknown>>();
+  /**
+   * OAuth provider id backing the chat model (e.g. `openai-codex` for a
+   * `openai-codex/gpt-5.4` spec), or undefined for API-key providers. When
+   * set, each turn resolves a fresh subscription token instead of relying on
+   * a provider env var. Derived once from `cfg.model`.
+   */
+  private oauthProviderId: string | undefined;
 
   constructor(cfg: ChatRunnerConfig, sessionManager: SessionManager) {
     this.cfg = cfg;
     this.sessionManager = sessionManager;
+    this.oauthProviderId = oauthProviderIdForModel(cfg.model);
     if (cfg.github) {
       this.tools = buildChatGitHubTools(cfg.github);
     }
@@ -212,6 +226,22 @@ export class ChatRunner {
     return {
       content: JSON.stringify({ error: `unknown tool: ${call.name}` }),
       isError: true,
+    };
+  }
+
+  /** Build a failed-turn result carrying a single actionable error message. */
+  private errorTurn(agentSessionId: string, message: string): ChatRunnerTurnResult {
+    return {
+      text: "",
+      agentSessionId,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      costUsd: 0,
+      modelTurns: 0,
+      finish: "error",
+      errors: [message],
+      assistantMessages: [],
+      toolResults: [],
+      modelId: this.cfg.model,
     };
   }
 
@@ -265,18 +295,43 @@ export class ChatRunner {
     // model only fails chat turns, not the whole server.
     const model = this.resolveModelLazy();
     if (!model) {
-      return {
-        text: "",
-        agentSessionId,
-        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        costUsd: 0,
-        modelTurns: 0,
-        finish: "error",
-        errors: [this.modelError ?? "chat model not configured"],
-        assistantMessages: [],
-        toolResults: [],
-        modelId: this.cfg.model,
-      };
+      return this.errorTurn(agentSessionId, this.modelError ?? "chat model not configured");
+    }
+
+    // Resolve the effective model + credentials. For OAuth-backed chat models
+    // (Codex / Claude Pro / Copilot) we mint a fresh subscription token per
+    // turn (pi-ai refreshes it if expired) and pass it as the per-call apiKey
+    // — the in-process chat path can carry an explicit key, unlike the sandbox.
+    let effectiveModel = model;
+    let apiKey: string | undefined;
+    if (this.oauthProviderId) {
+      try {
+        const res = await resolveOAuthApiKey(this.oauthProviderId);
+        if (res) {
+          apiKey = res.apiKey;
+          // Some providers rewrite the model (e.g. base URL) from credentials.
+          const prov = getOAuthProvider(this.oauthProviderId);
+          if (prov?.modifyModels) {
+            effectiveModel = prov.modifyModels([model], res.credentials)[0] ?? model;
+          }
+        } else if (OAUTH_ONLY_PROVIDERS.has(this.oauthProviderId)) {
+          // OAuth-only provider with no stored credentials — cannot fall back
+          // to an API key, so fail this turn with an actionable message.
+          return this.errorTurn(
+            agentSessionId,
+            `Chat model '${this.cfg.model}' requires an OAuth login. Run: ` +
+              `lastlight oauth login ${this.oauthProviderId}`,
+          );
+        }
+        // Non-OAuth-only (anthropic) with no creds: fall through to env-key auth.
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return this.errorTurn(
+          agentSessionId,
+          `OAuth token refresh failed for '${this.oauthProviderId}': ${msg}. ` +
+            `Re-run: lastlight oauth login ${this.oauthProviderId}`,
+        );
+      }
     }
 
     // Rehydrate conversation context from the DB. Messages were stored
@@ -301,6 +356,7 @@ export class ChatRunner {
     const opts: SimpleStreamOptions = {
       reasoning: pickReasoning(this.cfg.thinking),
       timeoutMs: this.cfg.timeoutMs ?? 120_000,
+      ...(apiKey ? { apiKey } : {}),
     };
 
     let finish = "stop";
@@ -316,7 +372,7 @@ export class ChatRunner {
       modelTurns++;
       let assistant: AssistantMessage;
       try {
-        assistant = await completeWithRetry(completeSimple, model, context, opts, {
+        assistant = await completeWithRetry(completeSimple, effectiveModel, context, opts, {
           onRetry: ({ attempt, delayMs, reason }) =>
             console.warn(
               `[chat] transient model error (retry ${attempt}/${CHAT_RETRY_BACKOFF_MS.length} ` +
