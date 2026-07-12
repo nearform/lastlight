@@ -38,6 +38,15 @@ sandbox:
 buildAssets:
   location: repo
 
+# Pin which core version an instance runs. Set `deploy.version` to a git tag/ref
+# (e.g. v0.10.6) in your private overlay's config.yaml — `lastlight server
+# update|setup` then checks core out at that tag and rebuilds, instead of
+# tracking `main`. Unset here (and the sentinels `main`/`latest`) means track
+# `main` — today's behaviour. Overridable via the `LASTLIGHT_CORE_VERSION` env
+# var for CI. Bump + commit in the overlay to drive deploys declaratively.
+deploy:
+  version: null
+
 approval: {}
 
 bootstrap:

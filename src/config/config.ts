@@ -125,6 +125,14 @@ export interface LastLightConfig {
   buildAssets: BuildAssetsLocation;
   /** Filesystem root for server-mode build assets (default $STATE_DIR/build-assets). */
   buildAssetsDir: string;
+  /**
+   * Core-version pin the overlay declares (`deploy.version` in config.yaml, or
+   * the `LASTLIGHT_CORE_VERSION` env override). A git tag/ref (e.g. `v0.10.6`)
+   * that `lastlight server update|setup` checks core out at; `null` means track
+   * `main`. Read raw from the overlay by `readCorePin()` — this field mirrors it
+   * for the dashboard `/config` view. See src/config/core-pin.ts.
+   */
+  deploy: { version: string | null };
   managedRepos: string[];
   routes: RouteConfig;
   disabled: DisabledConfig;
@@ -395,6 +403,7 @@ export function loadConfig(): LastLightConfig {
     sandbox,
     buildAssets,
     buildAssetsDir,
+    deploy: fileCfg.deploy,
     managedRepos: fileCfg.managedRepos,
     routes: fileCfg.routes,
     disabled: fileCfg.disabled,
@@ -432,6 +441,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   variants: VariantConfig;
   sandbox: { backend: SandboxBackend; maxTurns: number };
   buildAssets: BuildAssetsLocation;
+  deploy: { version: string | null };
   approval: Record<string, boolean>;
   bootstrapLabel: string;
   exploreDefaultRepo?: string;
@@ -446,6 +456,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const variantsRaw = isPlainObject(raw.variants) ? raw.variants : {};
   const sandboxRaw = isPlainObject(raw.sandbox) ? raw.sandbox : {};
   const buildAssetsRaw = isPlainObject(raw.buildAssets) ? raw.buildAssets : {};
+  const deployRaw = isPlainObject(raw.deploy) ? raw.deploy : {};
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {};
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
@@ -462,6 +473,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const backend = sandboxBackend(sandboxRaw.backend, "sandbox.backend");
   const maxTurns = typeof sandboxRaw.maxTurns === "number" ? sandboxRaw.maxTurns : 200;
   const buildAssets = buildAssetsLocation(buildAssetsRaw.location, "buildAssets.location");
+  const deployVersion = typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
   const bootstrapLabel = typeof bootstrapRaw.label === "string" ? bootstrapRaw.label : "lastlight:bootstrap";
   const exploreDefaultRepo = typeof exploreRaw.defaultRepo === "string" ? exploreRaw.defaultRepo : undefined;
   const reviewPostsCheck = reviewRaw.postsCheck === true;
@@ -481,6 +493,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     variants,
     sandbox: { backend, maxTurns },
     buildAssets,
+    deploy: { version: deployVersion },
     approval,
     bootstrapLabel,
     exploreDefaultRepo,
@@ -618,6 +631,10 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   } else if (buildAssetsLoc) {
     console.warn(`[config] Unknown LASTLIGHT_BUILD_ASSETS value "${buildAssetsLoc}" — using the file/default location`);
   }
+
+  // Core-version pin override (CI can set this instead of editing config.yaml).
+  const coreVersion = (env.LASTLIGHT_CORE_VERSION || "").trim();
+  if (coreVersion) layer.deploy = { version: coreVersion };
 
   const otel: Record<string, unknown> = {};
   setBoolEnv(otel, "enabled", env.LASTLIGHT_OTEL_ENABLED);

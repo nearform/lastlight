@@ -20,6 +20,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { readCorePin } from "../config/core-pin.js";
 
 const exec = promisify(execFile);
 
@@ -38,6 +39,13 @@ export interface RepoVersion {
 export interface ServerVersion {
   core: RepoVersion;
   overlay: RepoVersion;
+  /**
+   * Core-version pin the overlay declares (`deploy.version`), if any. When set,
+   * `core.latest` is the pinned tag's commit (not `main` HEAD), so `core.behind`
+   * means "the pin was bumped, redeploy needed" — the dashboard shows a "pinned"
+   * label instead of a main-drift nudge.
+   */
+  pinned: string | null;
   /** package.json version of the running harness. */
   packageVersion: string | null;
   /** Build date baked into the image (LASTLIGHT_BUILD_DATE), if any. */
@@ -74,17 +82,36 @@ function readPackageVersion(): string | null {
   }
 }
 
+/**
+ * Resolve the core "latest" SHA to compare the running image against. Unpinned:
+ * `main` HEAD (today's behaviour). Pinned: the pinned tag's commit — preferring
+ * the peeled `…^{}` line so an annotated tag compares against its commit, i.e.
+ * the SHA baked into an image built at that tag.
+ */
+async function coreLatestSha(pin: string | null): Promise<string | null> {
+  if (!pin) return lsRemoteSha(await softCapture("git", ["ls-remote", CORE_REMOTE, "HEAD"]));
+  const out =
+    (await softCapture("git", ["ls-remote", CORE_REMOTE, `refs/tags/${pin}`])) ||
+    (await softCapture("git", ["ls-remote", CORE_REMOTE, pin]));
+  if (!out) return null;
+  const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  const peeled = lines.find((l) => /\^\{\}$/.test(l));
+  return lsRemoteSha(peeled ?? lines[0] ?? "");
+}
+
 /** Compute core + overlay version drift for `GET /admin/api/server/info`. */
 export async function getServerVersion(): Promise<ServerVersion> {
   const ov = overlayDir();
+  const pin = readCorePin(ov);
   const [coreLatest, overlayCurrent, overlayLatest] = await Promise.all([
-    softCapture("git", ["ls-remote", CORE_REMOTE, "HEAD"]),
+    coreLatestSha(pin),
     softCapture("git", ["-C", ov, "rev-parse", "HEAD"]),
     softCapture("git", ["-C", ov, "ls-remote", "origin", "HEAD"]),
   ]);
   return {
-    core: compare(process.env.LASTLIGHT_GIT_SHA || null, lsRemoteSha(coreLatest)),
+    core: compare(process.env.LASTLIGHT_GIT_SHA || null, coreLatest),
     overlay: compare(overlayCurrent, lsRemoteSha(overlayLatest)),
+    pinned: pin,
     packageVersion: readPackageVersion(),
     buildDate: process.env.LASTLIGHT_BUILD_DATE || null,
   };

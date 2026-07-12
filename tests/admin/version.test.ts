@@ -24,6 +24,7 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.LASTLIGHT_GIT_SHA;
   delete process.env.LASTLIGHT_OVERLAY_DIR;
+  delete process.env.LASTLIGHT_CORE_VERSION;
   vi.restoreAllMocks();
 });
 
@@ -78,5 +79,53 @@ describe("getServerVersion", () => {
     const v = await getServerVersion();
     expect(v.core.current).toBeNull();
     expect(v.core.behind).toBe(false); // unknown current → not behind
+  });
+
+  it("has pinned=null and compares against main HEAD when unpinned", async () => {
+    process.env.LASTLIGHT_GIT_SHA = "aaaa1111";
+    responses[coreLsRemote] = "aaaa1111\tHEAD";
+    responses[overlayRevParse] = "3333";
+    responses[overlayLsRemote] = "3333\tHEAD";
+
+    const v = await getServerVersion();
+    expect(v.pinned).toBeNull();
+    expect(v.core.latest).toBe("aaaa1111"); // came from ls-remote … HEAD
+    expect(v.core.behind).toBe(false);
+  });
+
+  describe("pinned (LASTLIGHT_CORE_VERSION / deploy.version)", () => {
+    const pinTag = "refs/tags/v9.9.9";
+    const pinLsRemote = `ls-remote https://github.com/nearform/lastlight ${pinTag}`;
+
+    // Annotated tag: two lines; the peeled ^{} line is the commit the checkout
+    // lands on. tagObj is the tag object SHA (must be ignored).
+    const tagObj = "aaaa0000bbbb1111";
+    const pinCommit = "deadbeefcafe0099";
+    const pinnedTwoLine = `${tagObj}\t${pinTag}\n${pinCommit}\t${pinTag}^{}`;
+
+    it("compares the image against the pinned tag's commit (peeled ^{})", async () => {
+      process.env.LASTLIGHT_CORE_VERSION = "v9.9.9";
+      process.env.LASTLIGHT_GIT_SHA = pinCommit;
+      responses[pinLsRemote] = pinnedTwoLine;
+      responses[overlayRevParse] = "3333";
+      responses[overlayLsRemote] = "3333\tHEAD";
+
+      const v = await getServerVersion();
+      expect(v.pinned).toBe("v9.9.9");
+      expect(v.core.latest).toBe(pinCommit); // peeled commit, not the tag object
+      expect(v.core.behind).toBe(false); // image == pin
+    });
+
+    it("flags behind (redeploy needed) when the image is older than the pin", async () => {
+      process.env.LASTLIGHT_CORE_VERSION = "v9.9.9";
+      process.env.LASTLIGHT_GIT_SHA = "0000111122223333";
+      responses[pinLsRemote] = pinnedTwoLine;
+      responses[overlayRevParse] = "3333";
+      responses[overlayLsRemote] = "3333\tHEAD";
+
+      const v = await getServerVersion();
+      expect(v.core.latest).toBe(pinCommit);
+      expect(v.core.behind).toBe(true);
+    });
   });
 });

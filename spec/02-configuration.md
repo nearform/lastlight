@@ -38,6 +38,7 @@ interface LastLightConfig {
   sandbox: "gondolin" | "docker" | "smol" | "none";
   buildAssets: "repo" | "server";         // where build handoff docs live
   buildAssetsDir: string;                  // server-mode store root ($STATE_DIR/build-assets)
+  deploy: { version: string | null };      // core-version pin (git tag/ref) or null = track main
   githubApp?: {
     appId: string;
     privateKeyPath: string;
@@ -260,6 +261,7 @@ OpenRouter) are forwarded unconditionally.
 | `LASTLIGHT_WRITE_GLOBAL_GIT` | when `"1"`, configure git globally not just per-repo | `0` |
 | `LASTLIGHT_GIT_SHA` | core git SHA baked into the image (Dockerfile `ARG`); surfaced by `GET /admin/api/server/info` for the dashboard drift banner | empty → "unknown" |
 | `LASTLIGHT_BUILD_DATE` | build date baked alongside `LASTLIGHT_GIT_SHA` | empty |
+| `LASTLIGHT_CORE_VERSION` | override the overlay's `deploy.version` core-version pin (git tag/ref); `server update\|setup` checks core out at it and the drift banner compares against it | overlay `deploy.version`; `main`/`latest`/unset = track main |
 
 ### CLI client
 
@@ -275,9 +277,22 @@ The CLI is also the host control plane: `lastlight server
 setup\|start\|stop\|restart\|update\|status` shell out to `git` + `docker
 compose` in `LASTLIGHT_HOME` (resolved `--home` → env → `serverHome` in
 `~/.lastlight/config.json` → `~/lastlight`). `server update` reproduces the
-production `deploy.sh` flow (pull core + overlay → build → `up -d
+production `deploy.sh` flow (pull overlay → converge core → build → `up -d
 --remove-orphans` → restart egress sidecars → health-check). These run on the
 server, unlike the rest of the CLI which targets a remote instance over HTTP.
+
+**Core-version pin.** The overlay drives *which core version* an instance runs
+via `deploy.version` in its `config.yaml` (or the `LASTLIGHT_CORE_VERSION` env
+override) — read by `readCorePin()` (`src/config/core-pin.ts`). `server update`
+pulls the overlay first, then, if a pin is set, `git fetch --tags` + `git
+checkout <tag>` (detached HEAD) instead of `git checkout main` + `pull --ff-only
+origin main`; `server setup` applies the same pin before its first build. Unset,
+or the sentinels `main`/`latest`, mean track `main`. When pinned, the drift
+surfaces (`server status`, the dashboard `GET /server/info` banner) compare the
+running image's SHA against the pinned tag rather than `main` HEAD — so "behind"
+means "pin bumped, redeploy needed", and an already-pinned instance shows a
+quiet "pinned vX.Y.Z" label instead of an update nudge. This makes bumping
+`deploy.version` in the overlay repo the declarative trigger for a CI/CD deploy.
 
 `lastlight fork <workflow>` (host-local, `src/cli/fork-cli.ts`) copies a built-in
 workflow YAML plus every prompt and skill its phases reference into the

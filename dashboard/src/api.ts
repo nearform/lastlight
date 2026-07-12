@@ -315,6 +315,9 @@ export interface RepoVersion {
 export interface ServerInfo {
   core: RepoVersion;
   overlay: RepoVersion;
+  /** Core-version pin (`deploy.version`) the overlay declares, or null. When
+   *  set, core drift is measured against the pinned tag, not `main`. */
+  pinned: string | null;
   packageVersion: string | null;
   buildDate: string | null;
 }

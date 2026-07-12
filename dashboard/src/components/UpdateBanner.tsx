@@ -30,13 +30,33 @@ export function UpdateBanner() {
 
   if (!info) return null;
   const parts: string[] = [];
-  if (info.core.behind) parts.push(`core ${short(info.core.current)} → ${short(info.core.latest)}`);
+  // When pinned, core.latest is the pinned tag's commit, so core.behind means
+  // "the pin was bumped but the image hasn't been rebuilt" — a redeploy nudge,
+  // not a main-drift nudge. When unpinned, it's the usual "behind main".
+  if (info.core.behind) {
+    parts.push(
+      info.pinned
+        ? `core → ${info.pinned} (${short(info.core.current)} → ${short(info.core.latest)})`
+        : `core ${short(info.core.current)} → ${short(info.core.latest)}`,
+    );
+  }
   if (info.overlay.behind) parts.push(`overlay ${short(info.overlay.current)} → ${short(info.overlay.latest)}`);
-  if (parts.length === 0) return null;
+
+  // Pinned + already on the pin: no warning, just a quiet "pinned to X" label.
+  if (parts.length === 0) {
+    if (!info.pinned) return null;
+    return (
+      <div className="flex items-center gap-2 px-4 py-1 text-xs bg-base-200/60 text-base-content/60 border-b border-base-300/40">
+        <span>
+          Pinned to <code className="px-1 rounded bg-base-300/60">{info.pinned}</code>
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center gap-2 px-4 py-1.5 text-xs bg-warning/15 text-warning-content border-b border-warning/30">
-      <span className="font-medium">Update available</span>
+      <span className="font-medium">{info.pinned && info.core.behind ? "Redeploy needed" : "Update available"}</span>
       <span className="text-base-content/70">{parts.join(" · ")}</span>
       <span className="ml-auto text-base-content/60">
         run <code className="px-1 rounded bg-base-300/60">lastlight server update</code> on the host

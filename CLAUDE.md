@@ -296,7 +296,11 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   recreate — `docker compose up -d agent` / `lastlight server start agent` —
   because compose injects `env_file` vars at container *creation* and a restart
   can't unset them. The dashboard `/config` endpoint surfaces Default / Overlay
-  / Merged (non-secret).
+  / Merged (non-secret). The overlay can also **pin the core version** via a
+  `deploy.version` key (a git tag/ref, e.g. `v0.10.6`) — this is deployment
+  config, not runtime behaviour: `lastlight server update|setup` checks core out
+  at that tag instead of tracking `main`. Read host-side and in-container by
+  `readCorePin()` (`src/config/core-pin.ts`); see "Redeploy a code change".
 - **Two execution modes**:
   - **Sandbox** — workflow phases run inside a Docker sandbox
     (`src/sandbox`) with a minted per-run GitHub token. Each phase invokes
@@ -572,6 +576,10 @@ Runtime:
   into the agent image (Dockerfile `ARG`s). `lastlight server update` passes
   `--build-arg GIT_SHA=$(git rev-parse HEAD)`; surfaced by
   `GET /admin/api/server/info` for the dashboard drift banner. Empty → "unknown".
+- `LASTLIGHT_CORE_VERSION` — override the overlay's `deploy.version` core-version
+  pin (a git tag/ref) so CI can pin without editing `config.yaml`. Consumed by
+  the host-local `lastlight server update|setup` and the in-container drift
+  banner via `readCorePin()`. Unset (or `main`/`latest`) tracks `main`.
 - `LASTLIGHT_BUILD_ASSETS` — `repo` (default) | `server`. In `server` mode the
   per-phase build handoff docs (`architect-plan.md`, `status.md`,
   `executor-summary.md`, `reviewer-verdict.md`, …) are externalized to the
@@ -736,11 +744,21 @@ sudo -u lastlight -i lastlight server update
 
 `lastlight server update` (`src/cli/cli-server.ts`) is the single source of truth. It:
 
-1. `git pull --ff-only` the core repo (`/home/lastlight/lastlight`, `main`).
-2. `git pull` the `instance/` overlay as the `lastlight` user (its read-only
-   deploy key, `git@github-instance:cliftonc/lastlight-instance.git`; clones it
-   if missing) and symlinks `instance/docker-compose.override.yml` into the
-   project root.
+1. `git pull` the `instance/` overlay **first** as the `lastlight` user (its
+   read-only deploy key, `git@github-instance:cliftonc/lastlight-instance.git`;
+   clones it if missing) and symlinks `instance/docker-compose.override.yml`
+   into the project root — so a freshly-bumped core-version pin is visible
+   before the core is converged.
+2. Converge the core checkout (`/home/lastlight/lastlight`). If the overlay
+   declares a **core-version pin** (`deploy.version` in `config.yaml`, or the
+   `LASTLIGHT_CORE_VERSION` env override) it `git fetch origin --tags` +
+   `git checkout <tag>` (detached HEAD); otherwise it `git checkout main` +
+   `git pull --ff-only origin main`. The pin (`readCorePin`,
+   `src/config/core-pin.ts`) is how the overlay repo drives *which core version*
+   an instance runs: bump `deploy.version`, commit, and a CI/CD job (or a human)
+   running `lastlight server update` converges the host to it. `server setup`
+   applies the same pin before its first build. Unset (or the sentinels
+   `main`/`latest`) = track `main`.
 3. `docker compose build agent sandbox --build-arg GIT_SHA=<HEAD>` (stamps the
    image so `GET /admin/api/server/info` + the dashboard drift banner work),
    then a non-fatal `docker compose build sandbox-qa` (browser-QA image; skips
@@ -755,7 +773,12 @@ The CLI is the control plane — npm-versioned and **separate from the agent
 image it builds**, so it survives the agent container recreating itself.
 `server start|stop|restart|status` cover the rest of the lifecycle, and
 `server status` (plus the dashboard's drift banner, `GET /server/info`) reports
-when core/overlay are behind.
+when core/overlay are behind. **When a core-version pin is set**, the drift
+check repoints from `main` to the pinned tag: `server status` shows
+`pinned vX.Y.Z`, and the dashboard banner stops nagging about `main`-drift —
+it only warns "redeploy needed" when the running image's SHA is behind the
+pinned tag (pin bumped but not yet deployed), else shows a quiet "Pinned to
+vX.Y.Z" label.
 
 So a normal deploy is: **commit + push to `main`, then run `lastlight server
 update` on the host.** Code changes (anything under `src/`, `workflows/`,

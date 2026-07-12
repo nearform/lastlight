@@ -52,6 +52,12 @@ export const OVERLAY_CONFIG_PLACEHOLDER = [
   "managedRepos:",
   "  []  # add owner/repo entries — the bot ignores repos not listed here",
   "",
+  "# Pin which core version this instance runs. `lastlight server update|setup`",
+  "# checks core out at this git tag/ref and rebuilds; unset (or main/latest)",
+  "# tracks main. Bump + commit here to drive deploys from the overlay.",
+  "# deploy:",
+  "#   version: v0.10.6",
+  "",
 ].join("\n");
 
 /** Template `secrets/.env.example` — the only tracked file under `secrets/`.
@@ -130,6 +136,20 @@ export const OVERLAY_README = [
   "",
   "Editing the overlay is **restart-only** (no image rebuild):",
   "`git pull` then `lastlight server restart agent`.",
+  "",
+  "## Pinning the core version",
+  "",
+  "Add a `deploy.version` to `config.yaml` to pin which core release this",
+  "instance runs (a git tag/ref); unset — or `main`/`latest` — tracks `main`:",
+  "",
+  "```yaml",
+  "deploy:",
+  "  version: v0.10.6",
+  "```",
+  "",
+  "`lastlight server update` (and `server setup`) checks core out at that tag and",
+  "rebuilds. Bump + commit here and run `lastlight server update` on the host —",
+  "so this overlay repo is the single source of truth for the deployed version.",
   "",
 ].join("\n");
 

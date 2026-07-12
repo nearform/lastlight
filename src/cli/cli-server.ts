@@ -25,6 +25,7 @@ import chalk from "chalk";
 import { resolveServerHome, saveServerHome, serverHomeSource } from "./cli-config.js";
 import { detectGh, scaffoldOverlayFiles, bootstrapOverlayRepo } from "../config/overlay-bootstrap.js";
 import { enumerateOverlayAssets, type OverlayAsset } from "../config/overlay-assets.js";
+import { readCorePin } from "../config/core-pin.js";
 
 const exec = promisify(execFile);
 
@@ -205,18 +206,45 @@ function compareDrift(current: string | null, latest: string | null): RepoDrift 
   return { current, latest, behind };
 }
 
-/** Compute core + overlay drift from the local checkouts under `home`. */
-export async function localDrift(home: string): Promise<{ core: RepoDrift; overlay: RepoDrift }> {
+/**
+ * Commit SHA a pin (git tag/ref) resolves to on `origin`, or null. Uses
+ * `ls-remote` (no fetch) and prefers the peeled `…^{}` line so an *annotated*
+ * tag compares against its commit — matching what `git rev-parse HEAD` reports
+ * after checking the tag out.
+ */
+async function resolvePinnedSha(home: string, pin: string): Promise<string | null> {
+  const out =
+    (await captureSoft("git", ["ls-remote", "origin", `refs/tags/${pin}`], home)) ||
+    (await captureSoft("git", ["ls-remote", "origin", pin], home));
+  if (!out) return null;
+  const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  const peeled = lines.find((l) => /\^\{\}$/.test(l));
+  return parseLsRemoteSha(peeled ?? lines[0] ?? "");
+}
+
+/**
+ * Compute core + overlay drift from the local checkouts under `home`. When the
+ * overlay pins a core version (`deploy.version`), core drift is measured against
+ * the pinned tag's commit (behind ⇒ "pin bumped, redeploy needed") rather than
+ * against `main` HEAD.
+ */
+export async function localDrift(
+  home: string,
+): Promise<{ core: RepoDrift; overlay: RepoDrift; pin: string | null }> {
   const instance = path.join(home, "instance");
-  const [coreCur, coreRemote, ovCur, ovRemote] = await Promise.all([
+  const pin = readCorePin(instance);
+  const [coreCur, coreLatest, ovCur, ovRemote] = await Promise.all([
     captureSoft("git", ["rev-parse", "HEAD"], home),
-    captureSoft("git", ["ls-remote", "origin", "HEAD"], home),
+    pin
+      ? resolvePinnedSha(home, pin)
+      : captureSoft("git", ["ls-remote", "origin", "HEAD"], home).then((o) => (o ? parseLsRemoteSha(o) : null)),
     isGitRepo(instance) ? captureSoft("git", ["rev-parse", "HEAD"], instance) : Promise.resolve(null),
     isGitRepo(instance) ? captureSoft("git", ["ls-remote", "origin", "HEAD"], instance) : Promise.resolve(null),
   ]);
   return {
-    core: compareDrift(coreCur, coreRemote ? parseLsRemoteSha(coreRemote) : null),
+    core: compareDrift(coreCur, coreLatest),
     overlay: compareDrift(ovCur, ovRemote ? parseLsRemoteSha(ovRemote) : null),
+    pin,
   };
 }
 
@@ -355,6 +383,12 @@ export async function serverSetup(opts: ServerOpts): Promise<void> {
   saveServerHome(home);
   p.log.success(`Saved serverHome = ${chalk.bold(home)}`);
 
+  // 3b. Honour a core-version pin the overlay declares, so the FIRST deploy
+  // builds the pinned commit rather than whatever `main` the clone landed on.
+  // A fresh / unpinned overlay leaves the clone on `main` — no-op.
+  const pin = readCorePin(instance);
+  if (pin) await pinCore(home, pin);
+
   // 4. Offer an initial build + launch.
   const build = opts.yes
     ? true
@@ -435,6 +469,17 @@ export async function serverBuild(opts: ServerOpts): Promise<void> {
   p.log.success(`Built. Start with: ${chalk.cyan("lastlight server start")}`);
 }
 
+/**
+ * Fetch tags and check `home`'s core repo out at `pin` (a git tag/ref). The
+ * resulting detached HEAD is expected — this is a deploy checkout, not a working
+ * branch. `buildImages` stamps GIT_SHA from `git rev-parse HEAD`, so the image
+ * is correctly labelled with the pinned commit. Shared by `update` and `setup`.
+ */
+async function pinCore(home: string, pin: string): Promise<void> {
+  await runStep("Fetch core tags", "git", ["-C", home, "fetch", "origin", "--tags", "--prune"]);
+  await runStep(`Pin core → ${pin}`, "git", ["-C", home, "-c", "advice.detachedHead=false", "checkout", pin]);
+}
+
 /** `lastlight server update` — the deploy.sh-equivalent flow. */
 export async function serverUpdate(opts: UpdateOpts): Promise<void> {
   const home = requireHome(opts);
@@ -443,14 +488,23 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
   const doBuild = opts.build !== false;
   const instance = path.join(home, "instance");
 
-  if (pullCore) {
-    await runStep("Pull core", "git", ["-C", home, "pull", "--ff-only", "origin", "main"]);
-  }
+  // Overlay first: it's the declarative source of truth, so a freshly-bumped
+  // deploy.version must be visible before we converge the core checkout.
   if (pullOverlay) {
     if (isGitRepo(instance)) {
       await runStep("Pull overlay", "git", ["-C", instance, "pull", "--ff-only"]);
     } else {
       p.log.warn("No overlay checkout at instance/ — skipping overlay pull.");
+    }
+  }
+  if (pullCore) {
+    const pin = readCorePin(instance);
+    if (pin) {
+      await pinCore(home, pin);
+    } else {
+      // Return to main (a previous pin may have left HEAD detached), then ff.
+      await runStep("Track core main", "git", ["-C", home, "checkout", "main"]);
+      await runStep("Pull core", "git", ["-C", home, "pull", "--ff-only", "origin", "main"]);
     }
   }
 
@@ -476,7 +530,7 @@ export async function serverUpdate(opts: UpdateOpts): Promise<void> {
 /** `lastlight server status` — compose state + local version drift + overrides. */
 export async function serverStatus(opts: ServerOpts): Promise<{
   home: string;
-  drift: { core: RepoDrift; overlay: RepoDrift };
+  drift: { core: RepoDrift; overlay: RepoDrift; pin: string | null };
   overrides: OverlayAsset[];
 }> {
   const home = requireHome(opts);
@@ -488,7 +542,21 @@ export async function serverStatus(opts: ServerOpts): Promise<{
     (d.behind ? chalk.yellow("behind") : d.latest ? chalk.green("up to date") : chalk.dim("unknown"));
   console.log();
   console.log(chalk.bold("Version"));
-  console.log(row("core", drift.core));
+  if (drift.pin) {
+    // Pinned: measured against the pinned tag, so "behind" means "pin bumped —
+    // redeploy needed", not "behind main".
+    const state = drift.core.behind
+      ? chalk.yellow("redeploy needed")
+      : drift.core.latest
+        ? chalk.green("up to date")
+        : chalk.dim("unknown");
+    console.log(
+      `  ${chalk.bold("core".padEnd(8))} ${short(drift.core.current)} → ${short(drift.core.latest)}  ` +
+        `${chalk.cyan(`pinned ${drift.pin}`)}  ${state}`,
+    );
+  } else {
+    console.log(row("core", drift.core));
+  }
   console.log(row("overlay", drift.overlay));
   if (drift.core.behind || drift.overlay.behind) {
     console.log(chalk.yellow(`\nUpdate available — run: ${chalk.cyan("lastlight server update")}`));
