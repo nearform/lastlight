@@ -35,6 +35,7 @@ import {
 import { getManagedRepos } from "../managed-repos.js";
 import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
+import type { WorkflowApproval } from "../state/approval-store.js";
 import type { PublicConfigBundle, BuildAssetsLocation } from "../config/config.js";
 
 /**
@@ -1137,6 +1138,120 @@ export function createAdminRoutes(
   // the dashboard tab degrades gracefully.
   const buildAssetStore = config.buildAssetsDir ? new BuildAssetStore(config.buildAssetsDir) : null;
 
+  type ArtifactLockReason = "no_matching_approval" | "unverified_owner" | "approval_resolved" | "approval_rejected";
+
+  interface ArtifactApprovalSummary {
+    id: string;
+    workflowRunId: string;
+    status: WorkflowApproval["status"];
+    gate: string;
+    summary: string;
+    respondedBy?: string;
+    respondedAt?: string;
+    createdAt: string;
+  }
+
+  interface ArtifactLock {
+    reason: ArtifactLockReason;
+    approval?: ArtifactApprovalSummary;
+    message?: string;
+  }
+
+  interface ArtifactMetadata {
+    editable: boolean;
+    lock: ArtifactLock | null;
+  }
+
+  function summarizeApproval(approval: WorkflowApproval): ArtifactApprovalSummary {
+    return {
+      id: approval.id,
+      workflowRunId: approval.workflowRunId,
+      status: approval.status,
+      gate: approval.gate,
+      summary: approval.summary,
+      respondedBy: approval.respondedBy,
+      respondedAt: approval.respondedAt,
+      createdAt: approval.createdAt,
+    };
+  }
+
+  function ownerRepoForRun(run: WorkflowRun | null): { owner?: string; repo?: string; issueKey?: string; branch?: string } {
+    if (!run) return {};
+    const ctx = run.context ?? {};
+    const ctxOwner = typeof ctx.owner === "string" ? ctx.owner : undefined;
+    const branch = typeof ctx.branch === "string" ? ctx.branch : undefined;
+    const repoField = typeof run.repo === "string" ? run.repo : undefined;
+    let owner: string | undefined;
+    let repo: string | undefined;
+    if (repoField) {
+      if (repoField.includes("/")) {
+        const [maybeOwner, maybeRepo] = repoField.split("/", 2);
+        owner = ctxOwner ?? maybeOwner;
+        repo = maybeRepo;
+      } else {
+        owner = ctxOwner;
+        repo = repoField;
+      }
+    }
+    const issueKey = buildAssetIssueKey(run.workflowName, run.issueNumber, run.id);
+    return { owner, repo, issueKey, branch };
+  }
+
+  function runMatchesArtifactTarget(run: WorkflowRun | null, owner: string, repo: string, key: string): boolean {
+    if (!run) return false;
+    const { owner: runOwner, repo: runRepo, issueKey } = ownerRepoForRun(run);
+    if (!runOwner || !runRepo || !issueKey) return false;
+    return runOwner === owner && runRepo === repo && issueKey === key;
+  }
+
+  function computeArtifactMetadata(owner: string, repo: string, key: string, doc: string): ArtifactMetadata {
+    const approvals = db.approvals.listByArtifact(doc);
+    if (approvals.length === 0) {
+      return {
+        editable: false,
+        lock: {
+          reason: "no_matching_approval",
+          message: `No approval references ${doc}`,
+        },
+      };
+    }
+
+    const enriched = approvals.map((approval) => ({
+      approval,
+      run: db.runs.getRun(approval.workflowRunId),
+    }));
+
+    const matching = enriched.filter(({ run }) => runMatchesArtifactTarget(run, owner, repo, key));
+    const latestMatching = matching[0];
+
+    if (latestMatching && latestMatching.approval.status === "pending") {
+      return { editable: true, lock: null };
+    }
+
+    if (!latestMatching) {
+      const latest = enriched[0];
+      return {
+        editable: false,
+        lock: {
+          reason: "unverified_owner",
+          message: "Could not verify owner/repo/issue for the approval",
+          approval: summarizeApproval(latest.approval),
+        },
+      };
+    }
+
+    const reason: ArtifactLockReason = latestMatching.approval.status === "rejected"
+      ? "approval_rejected"
+      : "approval_resolved";
+    return {
+      editable: false,
+      lock: {
+        reason,
+        approval: summarizeApproval(latestMatching.approval),
+      },
+    };
+  }
+
   // List the run keys (issue-N / <workflow>-<id>) stored for ?repo=owner/repo.
   app.get("/artifacts", (c) => {
     const repoParam = c.req.query("repo");
@@ -1185,12 +1300,31 @@ export function createAdminRoutes(
     }
   });
 
+  app.get("/artifacts/:owner/:repo/:key/:doc/metadata", (c) => {
+    if (!buildAssetStore) return c.json({ error: "build-assets store not configured" }, 404);
+    const { owner, repo, key, doc } = c.req.param();
+    try {
+      // Validate the doc path upfront so traversal attempts surface as 400s.
+      buildAssetStore.fileFor({ owner, repo, issueKey: key }, doc);
+      const metadata = computeArtifactMetadata(owner, repo, key, doc);
+      return c.json(metadata);
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
   // Overwrite one doc with the raw markdown request body. The store creates
   // the run dir on demand and rejects path traversal on every segment.
   app.put("/artifacts/:owner/:repo/:key/:doc", async (c) => {
     if (!buildAssetStore) return c.json({ error: "build-assets store not configured" }, 404);
     const { owner, repo, key, doc } = c.req.param();
     try {
+      // Validate the doc path before hitting the approval gate.
+      buildAssetStore.fileFor({ owner, repo, issueKey: key }, doc);
+      const metadata = computeArtifactMetadata(owner, repo, key, doc);
+      if (!metadata.editable) {
+        return c.json({ error: "artifact_locked", lock: metadata.lock }, 403);
+      }
       const body = await c.req.text();
       buildAssetStore.write({ owner, repo, issueKey: key }, doc, body);
       return c.json({ ok: true });
