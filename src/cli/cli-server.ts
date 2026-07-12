@@ -67,15 +67,34 @@ export function restartArgv(service?: string): string[] {
   return ["restart", service ?? "agent"];
 }
 
-/** `docker compose build` args for an update, stamping the core SHA. */
+/**
+ * Build waves, run in order. Both `sandbox` and `sandbox-qa` are
+ * `FROM lastlight-sandbox-base:latest`, and `docker compose build` builds a
+ * single invocation's services in PARALLEL (the classic builder has no
+ * FROM-dependency ordering) — so the shared base must be built in an earlier
+ * invocation, or the leaf builds race their own base and fail to pull it.
+ *
+ *   wave 1 (buildArgv):        agent + sandbox-base   — independent, parallel-safe
+ *   wave 2 (buildSandboxArgv): sandbox                — needs the base tagged
+ *   wave 3 (buildQaArgv):      sandbox-qa             — needs the base, non-fatal
+ */
+
+/** Wave 1: the agent image (stamped with the core SHA) + the shared
+ *  sandbox-base. Independent bases (node:22 vs node:20), safe to build together. */
 export function buildArgv(gitSha: string): string[] {
-  const args = ["build", "agent", "sandbox"];
+  const args = ["build", "agent", "sandbox-base"];
   if (gitSha) args.push("--build-arg", `GIT_SHA=${gitSha}`);
   return args;
 }
 
-/** `docker compose build` args for the browser-QA sandbox image. Built after
- *  the base sandbox (it's FROM lastlight-sandbox:latest) and non-fatally. */
+/** Wave 2: the lean sandbox — `FROM lastlight-sandbox-base:latest`, so it runs
+ *  after wave 1 has tagged the base. */
+export function buildSandboxArgv(): string[] {
+  return ["build", "sandbox"];
+}
+
+/** Wave 3: the browser-QA sandbox — also `FROM` the shared base, built after it
+ *  and non-fatally (a failure just means browser-QA phases skip). */
 export function buildQaArgv(): string[] {
   return ["build", "sandbox-qa"];
 }
@@ -444,10 +463,15 @@ export async function serverRestart(service: string | undefined, opts: ServerOpt
  */
 async function buildImages(home: string): Promise<void> {
   const sha = (await captureSoft("git", ["rev-parse", "HEAD"], home)) ?? "";
+  // Wave 1: agent + the shared sandbox-base (independent bases).
   await composeRun(home, "Build images", buildArgv(sha));
-  // Browser-QA sandbox (FROM lastlight-sandbox:latest) — build after the base
-  // image, and non-fatally: a failure just means browser-QA phases skip
-  // (graceful degradation) rather than blocking the whole deploy.
+  // Wave 2: the lean sandbox (FROM lastlight-sandbox-base:latest) — must run
+  // after wave 1 tags the base, since compose builds one invocation's services
+  // in parallel and would otherwise race the FROM.
+  await composeRun(home, "Build sandbox", buildSandboxArgv());
+  // Wave 3: browser-QA sandbox (also FROM the shared base) — non-fatally: a
+  // failure just means browser-QA phases skip (graceful degradation) rather
+  // than blocking the whole deploy.
   try {
     await composeRun(home, "Build browser-QA sandbox", buildQaArgv());
   } catch (err) {

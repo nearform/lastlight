@@ -34,7 +34,7 @@ fi
 if [ "$LASTLIGHT_SANDBOX" = "docker" ]; then
   if ! docker images -q lastlight-sandbox:latest | grep -q .; then
     echo "ERROR: LASTLIGHT_SANDBOX=docker but lastlight-sandbox:latest is not built." >&2
-    echo "       Build it with: docker compose --profile build-only build sandbox" >&2
+    echo "       Build it with: docker compose --profile build-only build sandbox-base && docker compose --profile build-only build sandbox" >&2
     exit 1
   fi
 fi

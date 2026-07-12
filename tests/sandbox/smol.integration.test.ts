@@ -23,7 +23,8 @@ import { smolAvailable } from "#src/sandbox/smol.js";
  *
  *   curl -sSL https://smolmachines.com/install.sh | sh   # install smolvm
  *   smolvm serve &                                        # start the daemon
- *   docker compose --profile build-only build sandbox     # build the image
+ *   docker compose --profile build-only build sandbox-base            # shared base first
+ *   docker compose --profile build-only build sandbox                 # then the image
  *   docker save lastlight-sandbox:latest -o /tmp/smol-img.tar   # export it
  *   # …point SMOLVM_IMAGE at that archive (loads offline under the strict
  *   #   allowlist), or any image with agentic-pi + node + git baked in.

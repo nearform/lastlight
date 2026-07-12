@@ -17,7 +17,8 @@ import { runWorkflow } from "#src/workflows/runner.js";
  * image is built, so the default `npx vitest run` (and CI without docker) skip
  * it instantly. To run:
  *
- *   docker compose --profile build-only build sandbox   # if not already built
+ *   docker compose --profile build-only build sandbox-base   # shared base first
+ *   docker compose --profile build-only build sandbox        # then the lean image
  *   RUN_SANDBOX_IT=1 npx vitest run src/sandbox/command-exec.integration.test.ts
  *
  * Each command phase spins up + tears down its own container, so these are

@@ -122,11 +122,12 @@ launch — so a misconfigured image can never produce faked screenshots.
 ## Deploy
 
 `lastlight-sandbox-qa:latest` is **not** built by a normal deploy (it adds
-hundreds of MB). Build it explicitly on a QA-enabled docker host, after the base
-image (`FROM` dependency):
+hundreds of MB). Build it explicitly on a QA-enabled docker host, after the
+shared `lastlight-sandbox-base:latest` (`FROM` dependency):
 
 ```bash
-docker compose --profile build-only build sandbox sandbox-qa
+docker compose --profile build-only build sandbox-base   # shared base first
+docker compose --profile build-only build sandbox-qa
 ```
 
 Then run the harness on the docker backend with `LASTLIGHT_BUILD_ASSETS=server`.

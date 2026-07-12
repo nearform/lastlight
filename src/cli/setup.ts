@@ -823,8 +823,8 @@ async function dockerBuildAndLaunch(): Promise<void> {
   }
 
   // Delegate to the canonical deploy flow (`lastlight server update`) instead
-  // of re-implementing build/launch here. It builds the agent + sandbox +
-  // sandbox-qa images, brings the stack up, restarts the egress sidecars, and
+  // of re-implementing build/launch here. It builds the agent + sandbox-base +
+  // sandbox + sandbox-qa images, brings the stack up, restarts the egress sidecars, and
   // health-checks — all with inherited stdio so the user sees live progress
   // (docker build layers) rather than a silent spinner. The checkout is already
   // current and the overlay was just written, so skip the git pulls.

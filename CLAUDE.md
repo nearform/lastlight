@@ -429,7 +429,8 @@ cd dashboard && npx tsc -b  # dashboard typecheck
 # Sandbox integration tests — actually start a docker sandbox and run a no-AI
 # workflow (type: bash / type: script phases). Opt-in + self-gating: needs
 # docker + the lean image built, else skips instantly.
-docker compose --profile build-only build sandbox   # if not already built
+docker compose --profile build-only build sandbox-base   # shared base first
+docker compose --profile build-only build sandbox        # then the lean image
 RUN_SANDBOX_IT=1 npx vitest run tests/sandbox/command-exec.integration.test.ts
 
 # CLI — `lastlight` (bin → dist/cli.js; `npm run cli -- <args>` in dev)
@@ -465,7 +466,7 @@ lastlight setup                        # first-run wizard (asks: client | server
 lastlight server setup                 # scaffold/adopt the working dir (clone core; clone OR
                                         # create the instance/ overlay — fresh overlay offers a
                                         # private `gh repo create` via src/config/overlay-bootstrap.ts)
-lastlight server build                 # build the docker images (agent + sandbox + sandbox-qa)
+lastlight server build                 # build the docker images (agent + sandbox-base + sandbox + sandbox-qa)
                                         # without starting anything — the explicit first-run step
                                         # so `server start` has a `lastlight-agent` image to run
 lastlight server start|stop|restart [service]   # docker compose up -d / stop|down / restart
@@ -761,10 +762,17 @@ sudo -u lastlight -i lastlight server update
    running `lastlight server update` converges the host to it. `server setup`
    applies the same pin before its first build. Unset (or the sentinels
    `main`/`latest`) = track `main`.
-3. `docker compose build agent sandbox --build-arg GIT_SHA=<HEAD>` (stamps the
-   image so `GET /admin/api/server/info` + the dashboard drift banner work),
-   then a non-fatal `docker compose build sandbox-qa` (browser-QA image; skips
-   gracefully on failure).
+3. Builds in dependency waves (both `sandbox` and `sandbox-qa` are `FROM` the
+   shared `lastlight-sandbox-base`, and `docker compose build` builds one
+   invocation's services in parallel, so the base must be built first):
+   `docker compose build agent sandbox-base --build-arg GIT_SHA=<HEAD>` (stamps
+   the image so `GET /admin/api/server/info` + the dashboard drift banner work),
+   then `docker compose build sandbox`, then a non-fatal
+   `docker compose build sandbox-qa` (browser-QA image; skips gracefully on
+   failure). The sandbox images install agentic-pi from the committed
+   `sandbox/agentic-pi.pin` (not the whole lockfile), so an ordinary version bump
+   doesn't rebuild them — and sandbox-qa's ~300 MB Chromium stays cached unless
+   its own inputs change.
 4. `docker compose up -d --remove-orphans` (recreates only what changed).
 5. Force-restarts the egress sidecars (`coredns-strict`, `coredns-open`,
    `nginx-egress-strict`, `nginx-egress-open`, `otel-collector`) so they

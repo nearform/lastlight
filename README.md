@@ -122,6 +122,7 @@ The dev script is explicitly safe with your personal config:
 If you want the Docker sandbox mode locally, build the image once first:
 
 ```bash
+docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 ```
 
@@ -218,6 +219,7 @@ Build both the harness image **and** the sandbox image. The sandbox image is wha
 
 ```bash
 docker compose build agent
+docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 docker compose up -d agent
 ```
@@ -680,6 +682,7 @@ npm run dev:server
 ### `npm run dev` says the sandbox image is missing (docker-sandbox mode)
 
 ```bash
+docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 ```
 
@@ -688,6 +691,7 @@ docker compose --profile build-only build sandbox
 The sandbox image needs `agentic-pi` baked in. Rebuild it:
 
 ```bash
+docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 ```
 

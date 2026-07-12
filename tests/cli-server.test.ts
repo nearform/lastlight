@@ -4,6 +4,7 @@ import {
   stopArgv,
   restartArgv,
   buildArgv,
+  buildSandboxArgv,
   buildQaArgv,
   upArgv,
   restartSidecarsArgv,
@@ -27,12 +28,21 @@ describe("cli-server argv builders", () => {
     expect(restartArgv("caddy")).toEqual(["restart", "caddy"]);
   });
 
-  it("build: stamps GIT_SHA when present, omits when empty", () => {
-    expect(buildArgv("abc123")).toEqual(["build", "agent", "sandbox", "--build-arg", "GIT_SHA=abc123"]);
-    expect(buildArgv("")).toEqual(["build", "agent", "sandbox"]);
+  it("build wave 1: agent + shared sandbox-base, stamps GIT_SHA when present", () => {
+    // sandbox-base is built here (wave 1); the leaf sandbox images that are
+    // FROM it build in later waves, so a single parallel `compose build` can't
+    // race the base.
+    expect(buildArgv("abc123")).toEqual([
+      "build", "agent", "sandbox-base", "--build-arg", "GIT_SHA=abc123",
+    ]);
+    expect(buildArgv("")).toEqual(["build", "agent", "sandbox-base"]);
   });
 
-  it("build qa: browser-QA sandbox image (built after the base)", () => {
+  it("build wave 2: lean sandbox (FROM the shared base)", () => {
+    expect(buildSandboxArgv()).toEqual(["build", "sandbox"]);
+  });
+
+  it("build wave 3: browser-QA sandbox (FROM the shared base, non-fatal)", () => {
     expect(buildQaArgv()).toEqual(["build", "sandbox-qa"]);
   });
 

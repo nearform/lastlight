@@ -107,15 +107,21 @@ agentic-pi's VM. Container name: `lastlight-sandbox-{taskId}-{uuid}`.
 - Memory: `--memory 2g --memory-swap 2g` by default.
 - Timeout: 30 min default; runs longer than that are killed.
 - Image: the lean `lastlight-sandbox:latest` (`sandbox.Dockerfile`) by
-  default — base `node:20-slim` with fnm-managed Node 22 (default; supports
-  `--experimental-strip-types` for inline TS), `python3`, and `uv` (for
-  `type: script` `runtime: python`). The shared `/cache` package-manager volume
+  default — built `FROM` the shared `lastlight-sandbox-base:latest`
+  (`sandbox-base.Dockerfile`: `node:20-slim` with fnm-managed Node 22 —
+  default; supports `--experimental-strip-types` for inline TS — plus `python3`,
+  `semgrep`/`gitleaks`, and `uv` for `type: script` `runtime: python`). The base
+  holds the heavy, stable toolchain; each leaf image adds only a thin agentic-pi
+  (from the committed `sandbox/agentic-pi.pin`) + agent-context + entrypoint
+  tail, so ordinary releases don't rebuild the sandbox images. The shared `/cache` package-manager volume
   is mounted with `npm_config_cache`/`YARN_CACHE_FOLDER`/`UV_CACHE_DIR` pointed
   at it; `UV_PYTHON_DOWNLOADS=never` pins `uv` to the baked-in `python3` so it
   never fetches an interpreter off-allowlist. A phase declaring
   `sandbox_image: qa` runs instead on
-  `lastlight-sandbox-qa:latest` (`sandbox-qa.Dockerfile` — `FROM` the base
-  plus Playwright + a pinned Chromium baked at build time for the browser-QA
+  `lastlight-sandbox-qa:latest` (`sandbox-qa.Dockerfile` — `FROM` the shared
+  `lastlight-sandbox-base:latest`, so Chromium is a cached child of the stable
+  base and survives ordinary releases; adds Playwright + a pinned Chromium
+  baked at build time for the browser-QA
   path, and `ffmpeg` for the `demo` workflow's video-compositing step
   (`skills/demo/scripts/compose-demo.sh` transcodes the Playwright screen
   recording into a titled, size-capped mp4 — all offline); the egress allowlist
@@ -124,7 +130,9 @@ agentic-pi's VM. Container name: `lastlight-sandbox-{taskId}-{uuid}`.
   `src/sandbox/images.ts`; `qaImageAvailable()` there lets the runner skip a
   `sandbox_image: qa` phase (a non-failing skip) when that image isn't built,
   so browser QA degrades gracefully on a lean host. Built only when QA is
-  enabled — `docker compose --profile build-only build sandbox sandbox-qa`.
+  enabled — build the shared base first, then the leaves:
+  `docker compose --profile build-only build sandbox-base` then
+  `docker compose --profile build-only build sandbox sandbox-qa`.
 
 ### `smol` — micro-VM (smolvm), experimental
 

@@ -49,7 +49,22 @@ services:
     networks:
       - internal
 
-  # Build the sandbox image (used by the harness to spawn per-task containers)
+  # Shared heavy base for the sandbox images (fnm + Node + semgrep/gitleaks + uv
+  # + the agent user). Both sandbox and sandbox-qa build FROM it, so it must be
+  # built FIRST:
+  #   docker compose --profile build-only build sandbox-base sandbox sandbox-qa
+  # Split out so the frequently-changing agentic-pi/agent-context tail (and, in
+  # sandbox-qa, ~300 MB of Chromium) stays cached across ordinary releases.
+  sandbox-base:
+    build:
+      context: .
+      dockerfile: sandbox-base.Dockerfile
+    image: lastlight-sandbox-base:latest
+    profiles:
+      - build-only     # never started as a service, just built
+
+  # Build the sandbox image (used by the harness to spawn per-task containers).
+  # FROM lastlight-sandbox-base:latest — build sandbox-base first.
   sandbox:
     build:
       context: .
@@ -60,8 +75,8 @@ services:
 
   # Build the enriched browser-QA sandbox image (Tier B). Separate + heavier
   # (Playwright + a baked Chromium), built only when QA is enabled. Its FROM
-  # depends on lastlight-sandbox:latest existing first, so build in that order:
-  #   docker compose --profile build-only build sandbox sandbox-qa
+  # depends on lastlight-sandbox-base:latest existing first, so build in that order:
+  #   docker compose --profile build-only build sandbox-base sandbox-qa
   sandbox-qa:
     build:
       context: .
