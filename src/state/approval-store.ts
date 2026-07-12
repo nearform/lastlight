@@ -146,6 +146,16 @@ export class ApprovalStore {
     return rows.map((r) => this.deserialize(r));
   }
 
+  /** List all approvals carrying a specific artifact name, newest first */
+  listByArtifact(artifact: string): WorkflowApproval[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM workflow_approvals
+      WHERE artifact = ?
+      ORDER BY created_at DESC
+    `).all(artifact) as Record<string, unknown>[];
+    return rows.map((r) => this.deserialize(r));
+  }
+
   /** List all pending approvals */
   listPending(): WorkflowApproval[] {
     const rows = this.db.prepare(`

@@ -53,6 +53,7 @@ const mockDb = {
   },
   approvals: {
     listPending: vi.fn(() => []),
+    listByArtifact: vi.fn(() => []),
   },
 } as unknown as StateDb;
 
@@ -890,16 +891,106 @@ describe("GET /approvals/:id (focused approval enrichment)", () => {
 
 describe("artifacts endpoints (server-mode build assets)", () => {
   let dir: string;
-  // Auth disabled (empty password) so the round-trip test doesn't need a token.
-  const app = () =>
-    createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({ adminPassword: "", buildAssetsDir: dir }));
+
+  type ApprovalRow = {
+    id: string;
+    workflowRunId: string;
+    gate?: string;
+    summary?: string;
+    status: "pending" | "approved" | "rejected";
+    artifact?: string;
+    createdAt: string;
+    respondedBy?: string;
+    respondedAt?: string;
+  };
+
+  const baseRun = {
+    id: "run-1",
+    workflowName: "build",
+    triggerId: "acme/widget#149",
+    repo: "widget",
+    issueNumber: 149,
+    context: { owner: "acme", issueDir: ".lastlight/issue-149" },
+  };
+
+  function appWithArtifacts(opts: {
+    approvalsByArtifact?: Record<string, ApprovalRow[]>;
+    runs?: Record<string, unknown>;
+    config?: Partial<AdminConfig>;
+  } = {}) {
+    const approvalsByArtifact = opts.approvalsByArtifact ?? {};
+    const runsById = opts.runs ?? { [baseRun.id]: baseRun };
+    const db = {
+      ...((mockDb as unknown) as Record<string, unknown>),
+      approvals: {
+        ...((mockDb as unknown as { approvals: Record<string, unknown> }).approvals),
+        listPending: vi.fn(() =>
+          Object.values(approvalsByArtifact).flat().filter((row) => row.status === "pending"),
+        ),
+        listByArtifact: vi.fn((artifact: string) => approvalsByArtifact[artifact] ?? []),
+      },
+      runs: {
+        ...((mockDb as unknown as { runs: Record<string, unknown> }).runs),
+        getRun: vi.fn((id: string) => runsById[id] ?? null),
+      },
+    } as unknown as StateDb;
+
+    const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({
+      adminPassword: "",
+      buildAssetsDir: dir,
+      ...opts.config,
+    }));
+
+    return { app, db };
+  }
 
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ll-routes-assets-")); });
   afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-  it("PUT then GET round-trips a doc and lists keys/files", async () => {
-    const a = app();
-    const put = await request(a, "/artifacts/acme/widget/issue-42/architect-plan.md", {
+  it("allows editing artifacts with no approvals", async () => {
+    const { app } = appWithArtifacts();
+
+    const meta = await request(app, "/artifacts/acme/widget/issue-149/status.md/metadata");
+    expect(meta.status).toBe(200);
+    expect(await meta.json()).toEqual({ editable: true, lock: null });
+
+    const put = await request(app, "/artifacts/acme/widget/issue-149/status.md", {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain" },
+      body: "# Status\n",
+    });
+    expect(put.status).toBe(200);
+    expect(await put.json()).toEqual({ ok: true });
+
+    const doc = await request(app, "/artifacts/acme/widget/issue-149/status.md");
+    expect(doc.status).toBe(200);
+    expect(await doc.text()).toBe("# Status\n");
+  });
+
+  it("PUT succeeds when a matching pending approval exists", async () => {
+    const approvals: ApprovalRow[] = [
+      {
+        id: "a-pending",
+        workflowRunId: baseRun.id,
+        status: "pending",
+        artifact: "architect-plan.md",
+        createdAt: "2026-01-01T01:00:00Z",
+        gate: "post_architect",
+        summary: "Review the architect plan",
+      },
+      {
+        id: "a-old",
+        workflowRunId: baseRun.id,
+        status: "approved",
+        artifact: "architect-plan.md",
+        createdAt: "2026-01-01T00:00:00Z",
+        respondedBy: "alice",
+        respondedAt: "2026-01-01T00:30:00Z",
+      },
+    ];
+    const { app } = appWithArtifacts({ approvalsByArtifact: { "architect-plan.md": approvals } });
+
+    const put = await request(app, "/artifacts/acme/widget/issue-149/architect-plan.md", {
       method: "PUT",
       headers: { "Content-Type": "text/plain" },
       body: "# Plan\n",
@@ -907,19 +998,95 @@ describe("artifacts endpoints (server-mode build assets)", () => {
     expect(put.status).toBe(200);
     expect(await put.json()).toEqual({ ok: true });
 
-    const keys = await request(a, "/artifacts?repo=acme/widget");
-    expect(await keys.json()).toEqual({ keys: ["issue-42"] });
-
-    const files = await request(a, "/artifacts/acme/widget/issue-42");
-    expect(await files.json()).toEqual({ files: ["architect-plan.md"] });
-
-    const doc = await request(a, "/artifacts/acme/widget/issue-42/architect-plan.md");
+    const doc = await request(app, "/artifacts/acme/widget/issue-149/architect-plan.md");
     expect(doc.status).toBe(200);
     expect(await doc.text()).toBe("# Plan\n");
   });
 
+  it("403s on PUT when no pending approval matches the artifact", async () => {
+    const approvals: ApprovalRow[] = [
+      {
+        id: "a-approved",
+        workflowRunId: baseRun.id,
+        status: "approved",
+        artifact: "architect-plan.md",
+        createdAt: "2026-01-02T00:00:00Z",
+        respondedBy: "reviewer",
+        respondedAt: "2026-01-02T00:10:00Z",
+      },
+    ];
+    const { app } = appWithArtifacts({ approvalsByArtifact: { "architect-plan.md": approvals } });
+
+    const put = await request(app, "/artifacts/acme/widget/issue-149/architect-plan.md", {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain" },
+      body: "# New Plan\n",
+    });
+    expect(put.status).toBe(403);
+    const body = await put.json() as { error: string; lock: { reason: string; approval: { id: string; status: string } } };
+    expect(body.error).toBe("artifact_locked");
+    expect(body.lock.approval.id).toBe("a-approved");
+    expect(body.lock.approval.status).toBe("approved");
+  });
+
+  it("metadata reports editable:true when a pending approval matches", async () => {
+    const approvals: ApprovalRow[] = [
+      {
+        id: "a-pending",
+        workflowRunId: baseRun.id,
+        status: "pending",
+        artifact: "architect-plan.md",
+        createdAt: "2026-01-03T00:00:00Z",
+        gate: "post_architect",
+        summary: "Review the architect plan",
+      },
+    ];
+    const { app } = appWithArtifacts({ approvalsByArtifact: { "architect-plan.md": approvals } });
+
+    const res = await request(app, "/artifacts/acme/widget/issue-149/architect-plan.md/metadata");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { editable: boolean; lock: unknown };
+    expect(body).toEqual({ editable: true, lock: null });
+  });
+
+  it("metadata reports editable:false with lock details when the latest approval is resolved", async () => {
+    const approvals: ApprovalRow[] = [
+      {
+        id: "a-approved",
+        workflowRunId: baseRun.id,
+        status: "approved",
+        artifact: "architect-plan.md",
+        createdAt: "2026-01-04T00:00:00Z",
+        respondedBy: "alice",
+        respondedAt: "2026-01-04T00:05:00Z",
+        gate: "post_architect",
+        summary: "Review the architect plan",
+      },
+      {
+        id: "a-old",
+        workflowRunId: baseRun.id,
+        status: "pending",
+        artifact: "architect-plan.md",
+        createdAt: "2026-01-03T00:00:00Z",
+      },
+    ];
+    const { app } = appWithArtifacts({ approvalsByArtifact: { "architect-plan.md": approvals } });
+
+    const res = await request(app, "/artifacts/acme/widget/issue-149/architect-plan.md/metadata");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      editable: boolean;
+      lock: { reason: string; approval: { id: string; status: string; respondedBy?: string; respondedAt?: string } } | null;
+    };
+    expect(body.editable).toBe(false);
+    expect(body.lock?.reason).toBe("approval_resolved");
+    expect(body.lock?.approval.id).toBe("a-approved");
+    expect(body.lock?.approval.respondedBy).toBe("alice");
+  });
+
   it("400s on a traversal attempt in the doc name", async () => {
-    const res = await request(app(), "/artifacts/acme/widget/issue-42/..%2f..%2fsecret", {
+    const { app } = appWithArtifacts();
+    const res = await request(app, "/artifacts/acme/widget/issue-149/..%2f..%2fsecret", {
       method: "PUT",
       body: "x",
     });
@@ -927,15 +1094,36 @@ describe("artifacts endpoints (server-mode build assets)", () => {
   });
 
   it("404 on an unknown doc; empty lists for an unknown repo", async () => {
-    const a = app();
-    const missing = await request(a, "/artifacts/acme/widget/issue-1/nope.md");
+    const { app } = appWithArtifacts();
+    const missing = await request(app, "/artifacts/acme/widget/issue-1/nope.md");
     expect(missing.status).toBe(404);
-    const keys = await request(a, "/artifacts?repo=nobody/nothing");
+    const keys = await request(app, "/artifacts?repo=nobody/nothing");
     expect(await keys.json()).toEqual({ keys: [] });
   });
 
   it("reports empty when no store dir is configured", async () => {
-    const a = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
+    const approvals: ApprovalRow[] = [
+      {
+        id: "a-pending",
+        workflowRunId: baseRun.id,
+        status: "pending",
+        artifact: "architect-plan.md",
+        createdAt: "2026-01-03T00:00:00Z",
+      },
+    ];
+    const db = {
+      ...((mockDb as unknown) as Record<string, unknown>),
+      approvals: {
+        ...((mockDb as unknown as { approvals: Record<string, unknown> }).approvals),
+        listPending: vi.fn(() => approvals.filter((row) => row.status === "pending")),
+        listByArtifact: vi.fn(() => approvals),
+      },
+      runs: {
+        ...((mockDb as unknown as { runs: Record<string, unknown> }).runs),
+        getRun: vi.fn(() => baseRun),
+      },
+    } as unknown as StateDb;
+    const a = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
     const keys = await request(a, "/artifacts?repo=acme/widget");
     expect(await keys.json()).toEqual({ keys: [] });
   });

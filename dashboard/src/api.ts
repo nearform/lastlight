@@ -359,6 +359,44 @@ export interface ArtifactRef {
   githubUrl?: string;
 }
 
+export type ArtifactLockReason =
+  | "no_matching_approval"
+  | "unverified_owner"
+  | "approval_resolved"
+  | "approval_rejected";
+
+export interface ArtifactApprovalSummary {
+  id: string;
+  workflowRunId: string;
+  status: WorkflowApproval["status"];
+  gate: string;
+  summary: string;
+  respondedBy?: string;
+  respondedAt?: string;
+  createdAt: string;
+}
+
+export interface ArtifactLock {
+  reason: ArtifactLockReason;
+  approval?: ArtifactApprovalSummary;
+  message?: string;
+}
+
+export interface ArtifactMetadata {
+  editable: boolean;
+  lock: ArtifactLock | null;
+}
+
+export class ArtifactLockedError extends Error {
+  lock: ArtifactLock;
+
+  constructor(lock: ArtifactLock, message = "artifact_locked") {
+    super(message);
+    this.name = "ArtifactLockedError";
+    this.lock = lock;
+  }
+}
+
 export class UnauthorizedError extends Error {
   constructor() {
     super("unauthorized");
@@ -544,6 +582,10 @@ export const api = {
     reqText(
       `/artifacts/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(key)}/${encodeURIComponent(doc)}`,
     ),
+  artifactMetadata: (owner: string, repo: string, key: string, doc: string) =>
+    req<ArtifactMetadata>(
+      `/artifacts/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(key)}/${encodeURIComponent(doc)}/metadata`,
+    ),
   // Binary artifacts (PNG screenshot evidence etc.) — fetched as a Blob the
   // image viewer turns into an object URL.
   getArtifactBlob: (owner: string, repo: string, key: string, doc: string) =>
@@ -551,14 +593,42 @@ export const api = {
       `/artifacts/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(key)}/${encodeURIComponent(doc)}`,
     ),
   saveArtifact: async (owner: string, repo: string, key: string, doc: string, content: string) => {
-    await reqText(
-      `/artifacts/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(key)}/${encodeURIComponent(doc)}`,
+    const token = auth.getToken();
+    const headers: Record<string, string> = { "Content-Type": "text/plain" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(
+      `${BASE}/artifacts/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(key)}/${encodeURIComponent(doc)}`,
       {
         method: "PUT",
-        headers: { "Content-Type": "text/plain" },
+        headers,
         body: content,
       },
     );
+    if (res.status === 401) {
+      handleUnauthorized();
+      throw new UnauthorizedError();
+    }
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!res.ok) {
+      let parsed: any = null;
+      if (contentType.includes("application/json")) {
+        try {
+          parsed = await res.json();
+        } catch {
+          parsed = null;
+        }
+      }
+      if (res.status === 403 && parsed?.error === "artifact_locked" && parsed.lock) {
+        throw new ArtifactLockedError(parsed.lock);
+      }
+      const message = typeof parsed?.error === "string" ? parsed.error : `${res.status} ${res.statusText}`;
+      throw new Error(message);
+    }
+    if (contentType.includes("application/json")) {
+      await res.json();
+    } else {
+      await res.text();
+    }
   },
   approvals: () => req<{ approvals: WorkflowApproval[] }>("/approvals"),
   approval: (id: string) =>
