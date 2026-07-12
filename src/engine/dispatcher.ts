@@ -6,6 +6,7 @@ import type { GitHubClient } from "./github/github.js";
 import type { ChatResult } from "./chat/chat.js";
 import { routeEvent, type Route, type RouterDeps } from "./router.js";
 import { runDashboardUrl } from "../notify/model.js";
+import { getRuntimeConfig } from "../config/config.js";
 
 /**
  * Hand a workflow to the runner. Matches `dispatchWorkflow` in index.ts — the
@@ -335,7 +336,7 @@ async function handleWebhookDispatch(
         try {
           // Re-fetch head SHA in case the PR was rebased mid-review.
           const headSha = await github.getPullRequestHeadSha(owner, repo, prNumber);
-          const review = await github.getLatestBotReview(owner, repo, prNumber, headSha);
+          const review = await github.getLatestBotReview(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin);
           const conclusion: "success" | "failure" | "neutral" = !result.success
             ? "neutral"
             : review?.state === "APPROVED"

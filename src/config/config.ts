@@ -100,6 +100,15 @@ export interface PublicConfigBundle {
 export interface LastLightConfig {
   port: number;
   webhookSecret: string;
+  /**
+   * The GitHub App slug (no `[bot]` suffix) — e.g. `last-light` or
+   * `nearform-lastlight`. Single source of truth for the bot's identity:
+   * derives the incoming `@mention` handle (router), `botLogin`
+   * (`${botName}[bot]`, self-comment/self-review filter), and the git commit
+   * author. Overridable via overlay `config.yaml` `botName` or the
+   * `GITHUB_APP_BOT_NAME` env var; defaults to `last-light`.
+   */
+  botName: string;
   botLogin: string;
   dbPath: string;
   overlayDir?: string;
@@ -168,6 +177,16 @@ export function getPublicConfig(): PublicConfigBundle {
 
 export function getRoutes(): RouteConfig {
   return currentConfig?.routes || defaultRouteConfig();
+}
+
+/**
+ * The configured bot slug (no `[bot]` suffix), e.g. `last-light` or
+ * `nearform-lastlight`. Returns the `last-light` default when config isn't
+ * loaded yet (unit tests). Drives the router's `@mention` handle plus the
+ * derived `botLogin` and git commit author.
+ */
+export function getBotName(): string {
+  return currentConfig?.botName || "last-light";
 }
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
@@ -361,7 +380,8 @@ export function loadConfig(): LastLightConfig {
   const config: LastLightConfig = {
     port: parseInt(process.env.WEBHOOK_PORT || process.env.PORT || "8644", 10),
     webhookSecret: process.env.WEBHOOK_SECRET || "",
-    botLogin: process.env.BOT_LOGIN || "last-light[bot]",
+    botName: fileCfg.botName,
+    botLogin: process.env.BOT_LOGIN || `${fileCfg.botName}[bot]`,
     stateDir,
     sandboxDir: join(stateDir, "sandboxes"),
     sessionsDir: resolve(process.env.LASTLIGHT_SESSIONS_DIR || join(stateDir, "agent-sessions")),
@@ -405,6 +425,7 @@ function stringEnv(name: string, fallback: string): string {
 
 function normalizeFileConfig(raw: Record<string, unknown>): {
   managedRepos: string[];
+  botName: string;
   routes: RouteConfig;
   disabled: DisabledConfig;
   models: ModelConfig;
@@ -418,6 +439,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   otel: OtelConfig;
 } {
   const managedRepos = stringArray(raw.managedRepos, "managedRepos");
+  const botName = typeof raw.botName === "string" && raw.botName.trim() ? raw.botName.trim() : "last-light";
   const routes = normalizeRoutes(raw.routes);
   const disabledRaw = isPlainObject(raw.disabled) ? raw.disabled : {};
   const modelsRaw = isPlainObject(raw.models) ? raw.models : {};
@@ -446,6 +468,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
 
   return {
     managedRepos,
+    botName,
     routes,
     disabled: {
       workflows: optionalStringArray(disabledRaw.workflows, "disabled.workflows"),
@@ -605,6 +628,7 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   setBoolEnv(otel, "strict", env.LASTLIGHT_OTEL_STRICT);
   if (Object.keys(otel).length) layer.otel = otel;
 
+  if (env.GITHUB_APP_BOT_NAME) layer.botName = env.GITHUB_APP_BOT_NAME;
   if (env.BOOTSTRAP_LABEL) layer.bootstrap = { label: env.BOOTSTRAP_LABEL };
   if (env.EXPLORE_DEFAULT_REPO) layer.explore = { defaultRepo: env.EXPLORE_DEFAULT_REPO };
   if (env.REVIEW_POSTS_CHECK !== undefined && env.REVIEW_POSTS_CHECK !== "") {

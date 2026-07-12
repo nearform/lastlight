@@ -23,7 +23,9 @@ warning and fall back — they don't crash boot.
 interface LastLightConfig {
   port: number;
   webhookSecret: string;
-  botLogin: string;
+  botName: string;                        // GitHub App slug (no [bot]); default "last-light".
+                                          // Derives the @mention handle, botLogin, and git author.
+  botLogin: string;                       // "<botName>[bot]" unless BOT_LOGIN overrides
   dbPath: string;
   workflowDir: string;
   stateDir: string;
@@ -76,7 +78,8 @@ missing `GITHUB_APP_ID` is fine for a chat-only deployment.
 | `GITHUB_APP_INSTALLATION_ID` | GitHub integration | — |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | GitHub integration | `./secrets/app.pem` |
 | `WEBHOOK_SECRET` | webhook signature verification | empty (verification **disabled**) |
-| `BOT_LOGIN` | self-event filtering | `last-light[bot]` |
+| `GITHUB_APP_BOT_NAME` | bot slug — `@mention` handle + `botLogin` + git author (also overlay `botName`) | `last-light` |
+| `BOT_LOGIN` | self-event filtering (overrides the `<botName>[bot]` derivation) | `<botName>[bot]` |
 
 The PEM is validated at boot: must exist and parse as PEM (`src/index.ts:42–51`).
 Missing or malformed PEM exits `78`.

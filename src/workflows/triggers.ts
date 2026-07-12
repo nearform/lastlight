@@ -1,5 +1,5 @@
 import { getCronWorkflows } from "./loader.js";
-import { getRoutes } from "../config/config.js";
+import { getRoutes, getBotName } from "../config/config.js";
 
 export type TriggerInfo =
   | { kind: "cron"; name: string; schedule: string }
@@ -16,17 +16,18 @@ function add(map: Map<string, TriggerInfo[]>, name: string | undefined, info: Tr
 
 function routeTriggers(): Map<string, TriggerInfo[]> {
   const routes = getRoutes();
+  const bot = `@${getBotName()}`;
   const map = new Map<string, TriggerInfo[]>();
   add(map, routes.github.issue_opened, { kind: "github", event: "issue.opened", description: "An issue is opened" });
   add(map, routes.github.issue_reopened, { kind: "github", event: "issue.reopened", description: "An issue is reopened" });
   add(map, routes.github.pr_opened, { kind: "github", event: "pr.opened", description: "A PR is opened" });
   add(map, routes.github.pr_synchronize, { kind: "github", event: "pr.synchronize", description: "A PR is updated" });
   add(map, routes.github.pr_reopened, { kind: "github", event: "pr.reopened", description: "A PR is reopened" });
-  add(map, routes.github.pr_fix, { kind: "mention", description: "`@last-light build …` on a PR comment (maintainers only)" });
-  add(map, routes.github.pr_comment, { kind: "mention", description: "`@last-light <message>` on a PR comment / review" });
-  add(map, routes.github.issue_build, { kind: "mention", description: "`@last-light build …` on an issue comment (maintainers only)" });
-  add(map, routes.github.issue_explore, { kind: "mention", description: "`@last-light explore …` on an issue comment" });
-  add(map, routes.github.issue_comment, { kind: "mention", description: "`@last-light <message>` on an issue comment" });
+  add(map, routes.github.pr_fix, { kind: "mention", description: `\`${bot} build …\` on a PR comment (maintainers only)` });
+  add(map, routes.github.pr_comment, { kind: "mention", description: `\`${bot} <message>\` on a PR comment / review` });
+  add(map, routes.github.issue_build, { kind: "mention", description: `\`${bot} build …\` on an issue comment (maintainers only)` });
+  add(map, routes.github.issue_explore, { kind: "mention", description: `\`${bot} explore …\` on an issue comment` });
+  add(map, routes.github.issue_comment, { kind: "mention", description: `\`${bot} <message>\` on an issue comment` });
   add(map, routes.github.security_feedback, { kind: "internal", description: "Chained from `security-review` when issues are found" });
   add(map, routes.slack.build, { kind: "slack", command: "build", description: "Slack: `build <repo>#<n>`" });
   add(map, routes.slack.triage, { kind: "slack", command: "triage", description: "Slack: `triage <repo>`" });

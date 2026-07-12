@@ -53,7 +53,7 @@ phases:
       - Plan: `{{issueDir}}/architect-plan.md`
 
       **Review & decide:** {{approvalUrl}}
-      **Or comment:** `@last-light approve` / `@last-light reject [reason]`
+      **Or comment:** `{{botMention}} approve` / `{{botMention}} reject [reason]`
     messages:
       # Single-line messages become the one-line detail on the checklist step,
       # so keep them concise and link the artifact on the branch.
@@ -101,7 +101,7 @@ phases:
           - Verdict: `{{issueDir}}/reviewer-verdict.md`
 
           **Review & decide:** {{approvalUrl}}
-          **Or comment:** `@last-light approve` / `@last-light reject [reason]`
+          **Or comment:** `{{botMention}} approve` / `{{botMention}} reject [reason]`
 
   - name: pr
     label: PR

@@ -518,6 +518,16 @@ Required:
 
 - `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, `GITHUB_APP_INSTALLATION_ID`
 - `WEBHOOK_SECRET` — must match the GitHub App webhook secret
+- **Bot identity** (optional; defaults to `last-light`) — `botName` is the
+  GitHub App slug (no `[bot]` suffix) and the single source of truth for the
+  bot's identity. Set it in the overlay `config.yaml` (`botName:
+  nearform-lastlight`) or via the `GITHUB_APP_BOT_NAME` env var. It derives
+  three things: the incoming **`@mention` handle** the router triggers on
+  (`@<botName>` — *only* the configured handle matches, no legacy fallback),
+  the **`botLogin`** used to filter the bot's own comments/reviews
+  (`<botName>[bot]`, still overridable with `BOT_LOGIN`), and the **git commit
+  author** for agent commits (`<botName>[bot]`). Must match the real App slug
+  so `@`-autocomplete and notifications work.
 - One of the provider API-key env vars from `src/providers.ts`
   (Anthropic / OpenAI / OpenRouter / Google / Mistral / Groq / Cerebras /
   xAI / Hugging Face / Moonshot / NVIDIA / Fireworks / Together / DeepSeek /

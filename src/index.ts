@@ -200,6 +200,7 @@ async function main() {
         appId: config.githubApp.appId,
         privateKeyPath: config.githubApp.privateKeyPath,
         installationId: config.githubApp.installationId,
+        botLogin: config.botLogin,
       });
     } catch (err: any) {
       console.warn(`[git-auth] Initial token mint failed (will retry per-execution): ${err.message}`);

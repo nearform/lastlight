@@ -45,6 +45,13 @@ Defined in `src/engine/router.ts:8–40`.
 These run before any LLM call. For every envelope, the first matching
 rule wins.
 
+The `@last-light` handle shown throughout this table is the **default**. The
+mention handle is derived from the configured bot slug (`botName`, default
+`last-light`; set via overlay `config.yaml` or `GITHUB_APP_BOT_NAME`), so a
+deployment with `botName: nearform-lastlight` triggers on `@nearform-lastlight`
+instead. Only the configured handle matches — there is no legacy fallback (see
+[Configuration](/spec/02-configuration)).
+
 | Trigger | Result | Notes |
 |---|---|---|
 | `issue.opened` / `issue.reopened` | `skill: issue-triage` | `reopened=true` for the latter |

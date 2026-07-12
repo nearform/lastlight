@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun } from "../state/db.js";
-import type { ModelConfig, VariantConfig } from "../config/config.js";
+import { getBotName, type ModelConfig, type VariantConfig } from "../config/config.js";
 import { getWorkflow } from "./loader.js";
 import {
   runWorkflow,
@@ -404,6 +404,9 @@ export async function runSimpleWorkflow(
     issueLabels: request.issueLabels || [],
     commentBody: request.commentBody || "",
     sender: request.sender,
+    // The bot's `@mention` handle (e.g. `@last-light`), for approval-gate and
+    // command help strings in workflow YAML — `{{botMention}} approve`.
+    botMention: `@${getBotName()}`,
     branch,
     taskId,
     issueDir,

@@ -2,7 +2,7 @@ import type { EventEnvelope } from "../connectors/types.js";
 import { classifyComment, classifyCommentAddsInfo, classifyIssueIsQuestion } from "./screen/classifier.js";
 import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
-import { getRoutes } from "../config/config.js";
+import { getRoutes, getBotName } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
 
 /**
@@ -51,8 +51,26 @@ function requireManagedRepo(
 /** Author associations that can trigger builds via @mention */
 const MAINTAINER_ROLES = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
-/** Bot mention pattern — case-insensitive */
-const BOT_MENTION = /@last-light\b/i;
+/** Escape a string for safe interpolation into a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Bot-mention matchers derived from the configured bot handle (`getBotName()`,
+ * e.g. `last-light` / `nearform-lastlight`). Only the configured handle
+ * matches — there is no legacy `@last-light` fallback (the default handle is
+ * already `last-light`, so existing deployments are unaffected).
+ * `command` builds `@<handle> <cmd>...` matchers for the structured commands.
+ */
+function botMatchers(handle: string) {
+  const h = escapeRegExp(handle);
+  return {
+    /** Bare mention gate — case-insensitive. */
+    mention: new RegExp(`@${h}\\b`, "i"),
+    command: (pattern: string) => new RegExp(`@${h}\\s+${pattern}`, "i"),
+  };
+}
 
 /**
  * Event routing — deterministic for most events, LLM-classified for comments.
@@ -66,6 +84,7 @@ export async function routeEvent(
   const routes = getRoutes();
   const gh = routes.github;
   const slack = routes.slack;
+  const bot = botMatchers(getBotName());
   switch (envelope.type) {
     case "issue.opened": {
       // Pure question issues ("how does X work?", "X vs Y?") want an ANSWER,
@@ -167,7 +186,7 @@ export async function routeEvent(
         deps.db &&
         envelope.issueNumber &&
         !envelope.prNumber &&
-        !BOT_MENTION.test(envelope.body)
+        !bot.mention.test(envelope.body)
       ) {
         const triggerId = `${envelope.repo}#${envelope.issueNumber}`;
         const buildStarted = deps.db.runs.hasRunForTrigger(triggerId, "build");
@@ -209,8 +228,8 @@ export async function routeEvent(
         }
       }
 
-      // Only act on @last-light mentions
-      if (!BOT_MENTION.test(envelope.body)) {
+      // Only act on mentions of the configured bot handle
+      if (!bot.mention.test(envelope.body)) {
         return { action: "ignore", reason: "no bot mention in comment" };
       }
 
@@ -228,8 +247,8 @@ export async function routeEvent(
       }
 
       // Check for approval commands before LLM classification
-      const approveMatch = envelope.body.match(/@last-light\s+approve\b/i);
-      const rejectMatch = envelope.body.match(/@last-light\s+reject\b(.*)/i);
+      const approveMatch = envelope.body.match(bot.command("approve\\b"));
+      const rejectMatch = envelope.body.match(bot.command("reject\\b(.*)"));
       if (approveMatch || rejectMatch) {
         return {
           action: "handler",
@@ -245,7 +264,7 @@ export async function routeEvent(
       }
 
       // Structured match for security-review before LLM classification
-      const securityMatch = envelope.body.match(/@last-light\s+security-review\b/i);
+      const securityMatch = envelope.body.match(bot.command("security-review\\b"));
       if (securityMatch) {
         return {
           action: "handler",
@@ -258,7 +277,7 @@ export async function routeEvent(
       // Everything after the command word is the claim (verify) or the
       // target/steps (qa-test); it flows through as `commentBody`. Both work on
       // issues and PRs. Maintainer-gated above, like security-review.
-      const verifyMatch = envelope.body.match(/@last-light\s+verify\b([\s\S]*)/i);
+      const verifyMatch = envelope.body.match(bot.command("verify\\b([\\s\\S]*)"));
       if (verifyMatch) {
         return {
           action: "handler",
@@ -273,7 +292,7 @@ export async function routeEvent(
           },
         };
       }
-      const qaTestMatch = envelope.body.match(/@last-light\s+qa-test\b([\s\S]*)/i);
+      const qaTestMatch = envelope.body.match(bot.command("qa-test\\b([\\s\\S]*)"));
       if (qaTestMatch) {
         return {
           action: "handler",
@@ -288,11 +307,11 @@ export async function routeEvent(
           },
         };
       }
-      // `@last-light demo [notes]` — record a demo video of the PR/feature.
+      // `@<bot> demo [notes]` — record a demo video of the PR/feature.
       // Anything after the command word flows through as `commentBody` (demo
       // scope/notes). Gated to the docker QA image at the workflow level; on a
       // host without it the demo phase silently skips.
-      const demoMatch = envelope.body.match(/@last-light\s+demo\b([\s\S]*)/i);
+      const demoMatch = envelope.body.match(bot.command("demo\\b([\\s\\S]*)"));
       if (demoMatch) {
         return {
           action: "handler",
@@ -374,7 +393,7 @@ export async function routeEvent(
       // Key on `security-scan` (not just `security`) so we only divert to
       // security-feedback on the per-run SUMMARY issue. Broken-out sub-issues
       // carry `["security", severity]` (no `security-scan`) and must stay on
-      // the normal build/issue-comment path — "@last-light build this fix"
+      // the normal build/issue-comment path — "@<bot> build this fix"
       // on a sub-issue needs the real build cycle, not security-feedback.
       //
       // ALL comment intents on a summary issue funnel to security-feedback

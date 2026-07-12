@@ -19,6 +19,7 @@ import type { StateDb } from "../state/db.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "./schema.js";
 import { phaseSkillNames } from "./schema.js";
 import { loadPromptTemplate, resolveSkillPaths } from "./loader.js";
+import { getRuntimeConfig, getBotName } from "../config/config.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
 import { evalUntilExpression } from "./loop-eval.js";
 import { parseReviewerVerdict } from "./verdict.js";
@@ -569,7 +570,7 @@ export class PhaseExecutor {
     // resume / re-entry from double-posting).
     if (headSha) {
       try {
-        const existing = await github.getLatestBotReview(owner, repo, prNumber, headSha);
+        const existing = await github.getLatestBotReview(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin);
         if (existing) return succeed(`already reviewed head ${headSha.slice(0, 7)} (${existing.state})`);
       } catch {
         /* best-effort — fall through and attempt the post */
@@ -1357,8 +1358,8 @@ export class PhaseExecutor {
           await this.reporter.postNote(
             `**${phaseName} iteration ${iteration}/${MAX_ITER} complete** — approval required to continue.\n\n` +
               `${gateMsg}\n\n` +
-              `**To continue:** comment \`@last-light approve\`\n` +
-              `**To abort:** comment \`@last-light reject [reason]\``,
+              `**To continue:** comment \`@${getBotName()} approve\`\n` +
+              `**To abort:** comment \`@${getBotName()} reject [reason]\``,
           );
         }
         return { results, status: "succeeded", paused: true };

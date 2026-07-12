@@ -3,6 +3,14 @@
 # wholesale. Webhooks for repos not listed here are filtered at the connector level.
 managedRepos: []
 
+# The GitHub App slug (no `[bot]` suffix). Single source of truth for the bot's
+# identity: the incoming `@mention` handle (e.g. `@last-light`), the derived
+# `botLogin` (`<botName>[bot]`, self-comment/self-review filter), and the git
+# commit author. Override in your overlay `config.yaml` or via the
+# `GITHUB_APP_BOT_NAME` env var — e.g. set `nearform-lastlight` for the
+# Nearform app so it triggers on `@nearform-lastlight`.
+botName: last-light
+
 models:
   default: anthropic/claude-sonnet-4-6
 

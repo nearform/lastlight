@@ -572,6 +572,58 @@ describe('routeEvent — approval commands in comment.created', () => {
   });
 });
 
+describe('routeEvent — configurable bot handle', () => {
+  // Override the runtime config for this block so the mention handle is a
+  // custom slug rather than the `last-light` default.
+  beforeEach(() => {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      botName: 'nearform-lastlight',
+    } as unknown as LastLightConfig);
+  });
+
+  it('routes @<configured-handle> approve to approval-response', async () => {
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@nearform-lastlight approve',
+      authorAssociation: 'OWNER',
+      issueNumber: 10,
+      repo: 'cliftonc/drizzle-cube',
+    }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('approval-response');
+      expect(result.context.decision).toBe('approved');
+    }
+  });
+
+  it('acts on a bare @<configured-handle> mention (build intent)', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'build' });
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@nearform-lastlight build this fix',
+      authorAssociation: 'OWNER',
+      issueNumber: 11,
+      repo: 'cliftonc/drizzle-cube',
+    }));
+    expect(result.action).toBe('handler');
+  });
+
+  it('ignores the legacy @last-light mention when a different handle is configured', async () => {
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light approve',
+      authorAssociation: 'OWNER',
+      issueNumber: 10,
+      repo: 'cliftonc/drizzle-cube',
+    }));
+    expect(result.action).toBe('ignore');
+    if (result.action === 'ignore') {
+      expect(result.reason).toBe('no bot mention in comment');
+    }
+  });
+});
+
 // Slack approval routing is now tested in the classifier-driven message
 // events section above (approve/reject intent tests).
 
