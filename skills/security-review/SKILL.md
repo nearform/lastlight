@@ -68,7 +68,9 @@ recording "no relevant changes since prior scan" and return.
 
 ### 2. Ensure labels exist
 
-`github_create_label` for each (idempotent — ignore 422):
+One idempotent `github_ensure_labels` call — pass every row below as a single
+`labels` array of `{name, color}` (it creates only the missing ones, never
+errors on existing labels):
 
 | Label | Color | Purpose |
 |-------|-------|---------|

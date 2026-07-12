@@ -23,7 +23,9 @@ outgoing comment.** Never make code changes, create branches, or push.
 2. **Do the bounded action:**
    - Close / reopen → `github_update_issue`
    - Label → `github_add_labels` / `github_remove_label` (use the canonical
-     triage roles from `docs/agents/triage-labels.md` where relevant)
+     triage roles from `docs/agents/triage-labels.md` where relevant; if you're
+     applying a canonical label that may not exist yet, ensure it first with one
+     idempotent `github_ensure_labels` call so it lands with the right color)
    - Duplicate check → search similar issues, link the original in one comment
    - Answer a direct question → ≤5 sentences, ≤2 file reads. Don't survey the
      codebase or compile a report.

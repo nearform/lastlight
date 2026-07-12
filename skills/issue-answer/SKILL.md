@@ -67,10 +67,11 @@ maintainer to `@last-light build` (or `explore`) it — let triage own work item
      For broad/open-ended questions (e.g. "what's missing vs tool X"), gather a
      representative sample and answer from it — explicitly noting it's a
      sample, not an exhaustive audit — rather than enumerating everything.
-3. **Label (GitHub issue only).** Apply `question` with `github_add_labels`
-   (create it first with `github_create_label`, color `d876e3`; ignore a 422
-   "already exists"). If label creation/adding is denied, skip it — the answer
-   is the deliverable. For a Slack-initiated question there is no issue to label.
+3. **Label (GitHub issue only).** Ensure `question` exists idempotently with
+   `github_ensure_labels` (`[{name: "question", color: "d876e3"}]` — one call,
+   no 422 to worry about), then apply it with `github_add_labels`. If ensuring
+   or adding the label is denied, skip it — the answer is the deliverable. For a
+   Slack-initiated question there is no issue to label.
 4. **Write the answer as your final message** (the harness delivers it — see
    above; do not post it yourself):
    - Direct and structured. Lead with the answer; use short sections or a

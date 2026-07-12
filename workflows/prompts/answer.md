@@ -58,7 +58,8 @@ double-post. The only GitHub write you make is the label:
 
 {{#if issueNumber}}
 - Apply the `question` label to issue #{{issueNumber}} with `github_add_labels`
-  (create it first with `github_create_label`, color `d876e3`; ignore a 422).
+  (ensure it exists first with one `github_ensure_labels` call —
+  `[{name: "question", color: "d876e3"}]`; it's idempotent, no 422 to handle).
   Leave the issue open.
 {{/if}}
 {{#if !issueNumber}}
