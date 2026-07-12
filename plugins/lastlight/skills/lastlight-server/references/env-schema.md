@@ -31,11 +31,21 @@ WEBHOOK_SECRET=<openssl rand -hex 32>
 DOMAIN=lastlight.example.com
 
 # ── Model + provider API key ─────────────────────────────
+# Multi-provider: the `provider/` prefix selects the provider, e.g.
+#   anthropic/claude-sonnet-4-6 · openai/gpt-5.5 · google/gemini-2.5-pro
+#   openrouter/anthropic/claude-sonnet-4.5
 LASTLIGHT_MODEL=anthropic/claude-sonnet-4-6
-# Set whichever ONE matches LASTLIGHT_MODEL:
+# Set whichever ONE env var matches LASTLIGHT_MODEL's provider:
 ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
 # OPENROUTER_API_KEY=sk-or-...
+# GEMINI_API_KEY=AIza...          # google/…
+# MISTRAL_API_KEY=...             # mistral/…
+# GROQ_API_KEY=...                # groq/…
+# XAI_API_KEY=...                 # xai/…
+# DEEPSEEK_API_KEY=...            # deepseek/…
+# …plus Cerebras, Hugging Face (HF_TOKEN), Moonshot, NVIDIA, Fireworks,
+#    Together, Z.AI, Kimi, MiniMax — see src/providers.ts for the full list.
 
 # ── Admin dashboard ──────────────────────────────────────
 ADMIN_SECRET=<openssl rand -hex 32>
@@ -53,8 +63,11 @@ Notes:
 - `GITHUB_APP_PRIVATE_KEY_PATH=./app.pem` is correct as-is — it's resolved
   inside the container, not on the host. Just place the file at
   `instance/secrets/app.pem`.
-- Provider-key detection: `sk-ant-…` is Anthropic; `sk-or-…` is OpenRouter; any
-  other `sk-…` is OpenAI.
+- Provider selection is driven by `LASTLIGHT_MODEL`'s `provider/` prefix, not by
+  the key shape — Last Light forwards every provider's API-key env var into the
+  runtime and each provider authenticates with its own. Set only the env var for
+  the provider your model prefix names. The `sk-ant-…` / `sk-or-…` / `sk-…` key
+  prefixes are just the wizard's convenience hints, not the selection mechanism.
 - **Removing** an env var later requires a container *recreate*
   (`lastlight server start agent`), not just a restart — compose injects
   `env_file` vars at creation time. Adding/changing one only needs

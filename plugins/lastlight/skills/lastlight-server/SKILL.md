@@ -46,9 +46,24 @@ Ask for each of these (don't guess). Group the questions; explain what each is f
 - **Managed repos** — one or more `owner/repo` the bot is allowed to act on. The
   bot ignores any repo not listed.
 - **Model** — a `provider/model` string (default `anthropic/claude-sonnet-4-6`),
-  plus the **matching** provider API key. Key→provider mapping:
-  `sk-ant-…` → `ANTHROPIC_API_KEY`, `sk-or-…` → `OPENROUTER_API_KEY`, other
-  `sk-…` → `OPENAI_API_KEY`.
+  plus the **matching** provider's API key. Last Light is multi-provider: the
+  `provider/` prefix picks the provider and the model id follows, e.g.
+  `anthropic/claude-sonnet-4-6`, `openai/gpt-5.5`, `google/gemini-2.5-pro`,
+  `openrouter/anthropic/claude-sonnet-4.5`. Set **only** the one API-key env var
+  that matches the provider you chose. Common ones:
+  - `anthropic/…` → `ANTHROPIC_API_KEY` (`sk-ant-…`)
+  - `openai/…` → `OPENAI_API_KEY` (`sk-…`)
+  - `openrouter/…` → `OPENROUTER_API_KEY` (`sk-or-…`) — aggregator, reaches
+    Anthropic/Google/xAI/… models through one key
+  - `google/…` → `GEMINI_API_KEY`, `mistral/…` → `MISTRAL_API_KEY`,
+    `groq/…` → `GROQ_API_KEY`, `xai/…` → `XAI_API_KEY`, `deepseek/…` →
+    `DEEPSEEK_API_KEY`, and more (Cerebras, Hugging Face, Moonshot, NVIDIA,
+    Fireworks, Together, Z.AI, Kimi, MiniMax).
+
+  The env var name is not always `<PROVIDER>_API_KEY` (e.g. Google uses
+  `GEMINI_API_KEY`, Hugging Face uses `HF_TOKEN`); the full provider → model
+  prefix → env-var map is the registry in `src/providers.ts`, echoed in
+  `references/env-schema.md`.
 
 **Optional**
 - Admin dashboard password (≥8 chars) to protect `/admin`.
