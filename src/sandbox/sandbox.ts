@@ -173,12 +173,13 @@ export interface SandboxFactoryOpts {
 export type SandboxFactory = (backend: SandboxBackend, opts: SandboxFactoryOpts) => Sandbox;
 
 /**
- * Inner-run git identity, shared by every adapter's agent path. The author is
- * derived from the configured bot slug (`botName`, e.g. `last-light` /
- * `nearform-lastlight`) so agent commits are attributed to the actual App.
+ * Inner-run git identity, shared by every adapter's agent path. Takes the
+ * resolved bot login (e.g. `last-light[bot]` / `nearform-lastlight[bot]`) so
+ * agent commits are attributed to the actual App — including a `BOT_LOGIN`
+ * override, which the caller resolves before passing it here.
  */
-export function agentGitIdentityEnv(botName: string): Record<string, string> {
-  const login = `${botName}[bot]`;
+export function agentGitIdentityEnv(botLogin: string): Record<string, string> {
+  const login = botLogin;
   return {
     GIT_AUTHOR_NAME: login,
     GIT_AUTHOR_EMAIL: `${login}@users.noreply.github.com`,

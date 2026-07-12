@@ -102,7 +102,8 @@ export async function configureGitAuth(config: {
   appId: string;
   privateKeyPath: string;
   installationId: string;
-  botName?: string;
+  /** Resolved bot login incl. the `[bot]` suffix (e.g. `last-light[bot]`). */
+  botLogin?: string;
   /**
    * Optional repository-name allowlist for the minted installation token.
    * Names are repo names within the installation owner (e.g. ["lastlight"]).
@@ -127,9 +128,9 @@ export async function configureGitAuth(config: {
   const credPath = writeCredentialsFile(token.token);
   execGit(["config", "--global", "credential.helper", `store --file=${credPath}`]);
 
-  const botName = config.botName || "last-light";
-  execGit(["config", "--global", "user.name", `${botName}[bot]`]);
-  execGit(["config", "--global", "user.email", `${botName}[bot]@users.noreply.github.com`]);
+  const botLogin = config.botLogin || "last-light[bot]";
+  execGit(["config", "--global", "user.name", botLogin]);
+  execGit(["config", "--global", "user.email", `${botLogin}@users.noreply.github.com`]);
 
   console.log(`[git-auth] Configured GLOBAL git with GitHub App token (file: ${credPath}, expires: ${token.expiresAt})`);
 

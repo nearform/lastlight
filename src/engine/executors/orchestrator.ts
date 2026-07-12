@@ -2,7 +2,7 @@ import { basename, join } from "path";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { resolveAuthFile } from "../oauth.js";
 import { randomUUID } from "crypto";
-import { getBotName, type SandboxBackend } from "../../config/config.js";
+import { getBotName, getRuntimeConfig, type SandboxBackend } from "../../config/config.js";
 import {
   agentGitIdentityEnv,
   sandboxFor,
@@ -208,7 +208,7 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
           thinking,
           profile,
           authFile,
-          sandboxEnv: agentGitIdentityEnv(getBotName()),
+          sandboxEnv: agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`),
           agentCwd: prov.agentCwd,
           skillDirs,
           webSearch: config.webSearch === true,
