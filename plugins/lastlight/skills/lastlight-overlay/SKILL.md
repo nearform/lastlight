@@ -1,7 +1,7 @@
 ---
 name: lastlight-overlay
 description: Create or customize a Last Light deployment OVERLAY (the private instance/ repo) — scaffold it, then fork built-in workflows, prompts, skills, or the agent persona (agent-context) so a deployment can override them. Use when the user wants to "create a Last Light overlay / instance repo", "customize / fork a workflow", "override a prompt or skill", "change the agent's persona/soul/rules", or tune a deployment's config without forking the whole codebase. For first-time server install use lastlight-server.
-version: 1.1.0
+version: 1.2.0
 tags: [lastlight, overlay, instance, fork, workflows, customization]
 ---
 
