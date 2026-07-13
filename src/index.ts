@@ -22,6 +22,7 @@ import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
 import { authMiddleware, authIsEnabled } from "./admin/auth.js";
 import { GitHubClient } from "./engine/github/github.js";
+import { setInstallationRepos } from "./managed-repos.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
 import { runSimpleWorkflow, PR_HEADREF_PREPOPULATE_WORKFLOWS, type SimpleWorkflowRequest } from "./workflows/simple.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
@@ -215,6 +216,24 @@ async function main() {
     : config.githubToken
       ? GitHubClient.withToken(config.githubToken)
       : null;
+
+  // Discover the repos the App installation can access and seed the managed-repo
+  // list. When the overlay's `managedRepos` is empty this becomes the effective
+  // allowlist (getManagedRepos falls back to it); a configured list still wins.
+  // Kept live afterwards by installation webhooks (github-webhook.ts). Non-fatal:
+  // on failure we fall back to whatever `managedRepos` config provides. Runs
+  // before the HTTP listener opens, so the list is warm before the first event.
+  if (github && config.githubApp) {
+    try {
+      const repos = await github.listInstallationRepos();
+      setInstallationRepos(repos);
+      console.log(`[github] Discovered ${repos.length} installation repos`);
+    } catch (err) {
+      console.warn(
+        `[github] Installation repo discovery failed: ${(err as Error).message}`,
+      );
+    }
+  }
 
   /**
    * Dispatch a workflow by name. Used by webhook events, cron jobs, and the

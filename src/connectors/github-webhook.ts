@@ -2,7 +2,12 @@ import { EventEmitter } from "events";
 import { Hono } from "hono";
 import { createHmac, timingSafeEqual } from "crypto";
 import type { Connector, EventEnvelope, EventType } from "./types.js";
-import { isManagedRepo } from "../managed-repos.js";
+import {
+  isManagedRepo,
+  setInstallationRepos,
+  addInstallationRepos,
+  removeInstallationRepos,
+} from "../managed-repos.js";
 
 export interface GitHubWebhookConfig {
   /**
@@ -96,6 +101,15 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
 
       const action = payload.action;
 
+      // Keep the discovered installation-repo list live. These events carry no
+      // `payload.repository` (they're app-wide) and `installation`/`deleted`
+      // would otherwise be dropped by IGNORED_ACTIONS below — so handle them
+      // first, before any action/repo filtering. Signature is already verified.
+      if (eventType === "installation" || eventType === "installation_repositories") {
+        this.handleInstallationEvent(eventType, action, payload);
+        return c.json({ accepted: true, kind: "installation-sync" }, 200);
+      }
+
       // Filter out ignored actions
       if (action && IGNORED_ACTIONS.has(action)) {
         return c.json({ filtered: true, reason: `action=${action}` }, 200);
@@ -168,6 +182,45 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
 
       return c.json({ accepted: true, id: deliveryId }, 202);
     });
+  }
+
+  /**
+   * Apply an `installation` / `installation_repositories` event to the in-memory
+   * managed-repo list (src/managed-repos.ts). We apply the payload diff directly
+   * — the events carry the affected repos' `full_name`, so no API round-trip is
+   * needed. The list is seeded at boot; these keep it current between restarts.
+   */
+  private handleInstallationEvent(
+    eventType: string,
+    action: string | undefined,
+    payload: any,
+  ): void {
+    const names = (repos: any): string[] =>
+      Array.isArray(repos) ? repos.map((r: any) => r?.full_name).filter(Boolean) : [];
+
+    if (eventType === "installation_repositories") {
+      if (action === "added") {
+        const added = names(payload.repositories_added);
+        addInstallationRepos(added);
+        console.log(`[github] Installation repos added: ${added.join(", ") || "(none)"}`);
+      } else if (action === "removed") {
+        const removed = names(payload.repositories_removed);
+        removeInstallationRepos(removed);
+        console.log(`[github] Installation repos removed: ${removed.join(", ") || "(none)"}`);
+      }
+      return;
+    }
+
+    // eventType === "installation"
+    if (action === "created") {
+      // The initial-install payload lists the granted repos; reset to exactly them.
+      const repos = names(payload.repositories);
+      setInstallationRepos(repos);
+      console.log(`[github] App installed with ${repos.length} repos`);
+    } else if (action === "deleted") {
+      setInstallationRepos([]);
+      console.log(`[github] App uninstalled — cleared installation repos`);
+    }
   }
 
   private verifySignature(body: string, signature: string): boolean {

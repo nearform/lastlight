@@ -59,6 +59,21 @@ export class GitHubClient {
   }
 
   /**
+   * List every repository the App installation can access, as `owner/repo`
+   * full names. Used at boot to seed the managed-repo list from the App grant
+   * (see src/managed-repos.ts). The installation id is bound by the App auth
+   * strategy, so no argument is needed. Paginated — handles installs with
+   * hundreds of repos.
+   */
+  async listInstallationRepos(): Promise<string[]> {
+    const repos = await this.octokit.paginate(
+      this.octokit.rest.apps.listReposAccessibleToInstallation,
+      { per_page: 100 },
+    );
+    return repos.map((r) => r.full_name);
+  }
+
+  /**
    * Edit an existing issue/PR comment in place. Paired with `postComment` to
    * maintain a single status comment that updates as a workflow progresses,
    * rather than posting a new comment per phase. GitHub does NOT notify

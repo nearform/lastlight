@@ -32,7 +32,12 @@ import {
   getWorkflowTriggers,
   getWorkflowTriggerKinds,
 } from "../workflows/triggers.js";
-import { getManagedRepos } from "../managed-repos.js";
+import {
+  getManagedRepos,
+  getInstallationRepos,
+  getInstallationReposRefreshedAt,
+} from "../managed-repos.js";
+import { getRuntimeConfig } from "../config/config.js";
 import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
 import type { WorkflowApproval } from "../state/approval-store.js";
@@ -406,6 +411,22 @@ export function createAdminRoutes(
   app.use("/*", authMiddleware(authEnabled, config.adminSecret));
 
   app.get("/config", (c) => c.json(config.publicConfig || { default: {}, overlay: null, merged: {}, sources: {} }));
+
+  // Effective managed-repo list — runtime/derived state, so a dedicated endpoint
+  // rather than a field in the static config bundle. `configured` is the overlay
+  // list; `installation` is what the GitHub App can access (discovered at boot +
+  // kept live by installation webhooks); `effective` is what actually gates
+  // events (config wins when set, else installation). See src/managed-repos.ts.
+  app.get("/managed-repos", (c) => {
+    const configured = getRuntimeConfig()?.managedRepos ?? [];
+    return c.json({
+      configured,
+      installation: getInstallationRepos(),
+      effective: getManagedRepos(),
+      source: configured.length > 0 ? "config" : "installation",
+      refreshedAt: getInstallationReposRefreshedAt(),
+    });
+  });
 
   // Forked/overridden assets the deployment overlay supplies — workflows,
   // prompts, skills, agent-context — each tagged as shadowing a built-in or a

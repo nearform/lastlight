@@ -279,7 +279,19 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   `src/workflows/loader.ts` (overlay wins by logical name; built-ins are the
   fallback). The public `config/default.yaml` ships an **empty** `managedRepos`
   list and no private values; `src/managed-repos.ts` reads the effective list
-  via `getManagedRepos()` (runtime config, not a baked constant). In the
+  via `getManagedRepos()` (runtime config, not a baked constant). **Effective
+  managed-repo list:** a non-empty configured `managedRepos` wins and restricts
+  to exactly those repos; when it's **empty**, the list is instead sourced from
+  the **GitHub App installation** — the repos the App can access, fetched once at
+  boot (`GitHubClient.listInstallationRepos()`, wired in `src/index.ts`) into an
+  in-memory cache and kept live by `installation` / `installation_repositories`
+  webhooks (`src/connectors/github-webhook.ts`). So an org install that already
+  limits the App to a subset of repos need not maintain a second copy in config.
+  The admin `/managed-repos` endpoint (Config → Managed repos pane) surfaces the
+  configured / installation / effective lists + source. Caveat: for a
+  `repository_selection: "all"` install, a newly-created org repo isn't picked up
+  until the next boot fetch (no webhook fires); the `selected` case is fully
+  covered. In the
   docker-compose stack the deployment folder is **`instance/`** (mounted
   read-only at `/app/instance`), holding `config.yaml` + asset overrides + a
   gitignored `secrets/` subdir (`.env`, `*.pem`). It's never baked into the

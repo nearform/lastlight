@@ -6,6 +6,13 @@ import {
   resetRuntimeConfigForTests,
   type LastLightConfig,
 } from "#src/config/config.js";
+import {
+  getInstallationRepos,
+  getManagedRepos,
+  isManagedRepo,
+  setInstallationRepos,
+  resetInstallationReposForTests,
+} from "#src/managed-repos.js";
 
 const SECRET = "test-webhook-secret";
 const BOT_LOGIN = "last-light[bot]";
@@ -214,6 +221,88 @@ async function postIssueComment(
   await new Promise((r) => setImmediate(r));
   return { emitted };
 }
+
+/** POST a signed installation-family webhook (no `payload.repository`). */
+async function postInstallationEvent(
+  conn: GitHubWebhookConnector,
+  event: "installation" | "installation_repositories",
+  payload: Record<string, unknown>,
+): Promise<{ status: number; json: any }> {
+  const body = JSON.stringify(payload);
+  const res = await conn.honoApp.request("/webhooks/github", {
+    method: "POST",
+    headers: {
+      "x-hub-signature-256": sign(body),
+      "x-github-event": event,
+      "x-github-delivery": "test-delivery",
+      "content-type": "application/json",
+    },
+    body,
+  });
+  return { status: res.status, json: await res.json() };
+}
+
+describe("GitHubWebhookConnector — installation repo sync", () => {
+  beforeEach(() => {
+    // Empty configured list → the effective list falls back to the installation cache.
+    setRuntimeConfig({ managedRepos: [] } as unknown as LastLightConfig);
+    resetInstallationReposForTests();
+  });
+  afterEach(() => {
+    resetRuntimeConfigForTests();
+    resetInstallationReposForTests();
+  });
+
+  it("seeds the cache from an `installation` created event", async () => {
+    const { status, json } = await postInstallationEvent(connector(), "installation", {
+      action: "created",
+      installation: { id: 1 },
+      repositories: [{ full_name: "acme/one" }, { full_name: "acme/two" }],
+    });
+    expect(status).toBe(200);
+    expect(json).toMatchObject({ accepted: true, kind: "installation-sync" });
+    expect(getInstallationRepos().sort()).toEqual(["acme/one", "acme/two"]);
+    expect(isManagedRepo("acme/one")).toBe(true);
+    expect(getManagedRepos()).toContain("acme/two");
+  });
+
+  it("adds and removes repos on installation_repositories events", async () => {
+    setInstallationRepos(["acme/one"]);
+    await postInstallationEvent(connector(), "installation_repositories", {
+      action: "added",
+      repositories_added: [{ full_name: "acme/two" }, { full_name: "acme/three" }],
+    });
+    expect(getInstallationRepos().sort()).toEqual(["acme/one", "acme/three", "acme/two"]);
+
+    await postInstallationEvent(connector(), "installation_repositories", {
+      action: "removed",
+      repositories_removed: [{ full_name: "acme/one" }],
+    });
+    expect(getInstallationRepos().sort()).toEqual(["acme/three", "acme/two"]);
+    expect(isManagedRepo("acme/one")).toBe(false);
+  });
+
+  it("clears the cache when the app is uninstalled", async () => {
+    setInstallationRepos(["acme/one", "acme/two"]);
+    await postInstallationEvent(connector(), "installation", {
+      action: "deleted",
+      installation: { id: 1 },
+    });
+    expect(getInstallationRepos()).toEqual([]);
+  });
+
+  it("processes installation events even when the action is in IGNORED_ACTIONS (deleted)", async () => {
+    // `deleted` is an ignored action for repo events, but installation/deleted
+    // must still be handled — it's intercepted before the IGNORED_ACTIONS filter.
+    setInstallationRepos(["acme/one"]);
+    const { json } = await postInstallationEvent(connector(), "installation", {
+      action: "deleted",
+      installation: { id: 1 },
+    });
+    expect(json.kind).toBe("installation-sync");
+    expect(getInstallationRepos()).toEqual([]);
+  });
+});
 
 describe("GitHubWebhookConnector — issue_comment normalization", () => {
   beforeEach(() => {

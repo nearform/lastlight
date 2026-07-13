@@ -65,6 +65,20 @@ export interface ConfigBundle {
   sources: Record<string, unknown>;
 }
 
+/** Effective managed-repo list — see the admin `/managed-repos` endpoint. */
+export interface ManagedRepos {
+  /** The overlay `managedRepos` list (empty when unset). */
+  configured: string[];
+  /** Repos the GitHub App installation can access (discovered at boot + webhooks). */
+  installation: string[];
+  /** What actually gates events: `configured` when non-empty, else `installation`. */
+  effective: string[];
+  /** Which list `effective` came from. */
+  source: "config" | "installation";
+  /** ISO timestamp of the last installation-repo cache update, or null. */
+  refreshedAt: string | null;
+}
+
 export type OverlayAssetType = "workflow" | "cron" | "prompt" | "skill" | "agent-context";
 
 export interface OverlayAsset {
@@ -662,6 +676,7 @@ export const api = {
     ),
   config: () => req<ConfigBundle>("/config"),
   overrides: () => req<OverridesBundle>("/overrides"),
+  managedRepos: () => req<ManagedRepos>("/managed-repos"),
 };
 
 export interface CronInfo {

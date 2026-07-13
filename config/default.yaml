@@ -1,6 +1,11 @@
-# Repositories Last Light manages. Empty by default — set the real list in your
-# private overlay ($LASTLIGHT_OVERLAY_DIR/config.yaml), which replaces this list
-# wholesale. Webhooks for repos not listed here are filtered at the connector level.
+# Repositories Last Light manages. Set an explicit list in your private overlay
+# ($LASTLIGHT_OVERLAY_DIR/config.yaml), which replaces this one wholesale;
+# webhooks for repos not listed are filtered at the connector level. When left
+# EMPTY (the default), the managed list is instead sourced from the GitHub App
+# installation itself — the repos it can access, discovered at boot and kept
+# live by installation webhooks — so an org install that already limits the App
+# to a subset of repos need not maintain a second copy here. See
+# src/managed-repos.ts.
 managedRepos: []
 
 # The GitHub App slug (no `[bot]` suffix). Single source of truth for the bot's
