@@ -772,9 +772,9 @@ sudo -u lastlight -i lastlight server update
    `main`/`latest`) = track `main`.
 3. **Fetches the images.** By default it *pulls* the prebuilt images from GHCR
    rather than building them on the host — a release publishes
-   `ghcr.io/nearform/lastlight-{agent,sandbox-base,sandbox,sandbox-qa}` via
-   `.github/workflows/docker-publish.yml` (on GitHub Release + `workflow_dispatch`,
-   amd64, public). `server update` pulls the tag `resolveImageTag` returns — the
+   `ghcr.io/nearform/lastlight-{agent,sandbox-base,sandbox,sandbox-qa}` via the
+   `images` job of `.github/workflows/publish.yml` (on GitHub Release +
+   `workflow_dispatch`, amd64, public). `server update` pulls the tag `resolveImageTag` returns — the
    overlay's `deploy.version` pin (e.g. `v0.11.0`) when set, else `:latest` — and
    re-tags each to its **local** name (`lastlight-agent`,
    `lastlight-sandbox:latest`, …), which is what `docker-compose.yml` and the
@@ -815,8 +815,8 @@ vX.Y.Z" label.
 So a normal deploy is: **commit + push to `main`, then run `lastlight server
 update` on the host.** Code changes (anything under `src/`, `workflows/`,
 `skills/`, `agent-context/`, `config/default.yaml`) reach prod through a
-**published image**: cut a release (which runs `docker-publish.yml`) and bump
-the overlay's `deploy.version` to that tag, then `server update` pulls it. To
+**published image**: cut a release (whose `publish.yml` `images` job builds them)
+and bump the overlay's `deploy.version` to that tag, then `server update` pulls it. To
 deploy un-released `main` (or local edits) build on the host with `server update
 --local` (or `server build`). Deployment-only config (the `instance/` overlay)
 can instead be
@@ -854,15 +854,21 @@ sandbox port, config resolution) must be published for evals to pick it up —
 cut a release even though the CLI is untouched. When in doubt, if the change
 affects the workflow-execution path that evals drives, release it. (See the
 npm-release-policy note in local agent memory.) A release is a version bump + a
-`vX.Y.Z` tag + a GitHub release. **npm publish is automated** — creating the GitHub release
-fires the `publish.yml` workflow, which typechecks + tests + builds + publishes
-to npm using a repo token (no 2FA). Do NOT run `npm publish` or prompt for an
-OTP; just watch the release run and confirm the version went live. The same
-release event also fires **`docker-publish.yml`**, which builds + pushes the four
-Docker images to `ghcr.io/nearform/lastlight-*` tagged `vX.Y.Z` (and moves
-`:latest` for non-prerelease releases). This is what lets a deploy host
+`vX.Y.Z` tag + a GitHub release. **Publishing is automated** — creating the
+GitHub release fires the `publish.yml` workflow, which runs as two ordered jobs.
+First `images` builds + pushes the four Docker images to
+`ghcr.io/nearform/lastlight-*` tagged `vX.Y.Z` (via `docker buildx bake` +
+`docker-bake.hcl`; moves `:latest` for non-prerelease releases). Then `npm`
+(which `needs: images`) typechecks + tests + builds + publishes to npm using a
+repo token (no 2FA). **The order is deliberate:** the CLI only goes live once the
+`:vX.Y.Z` images it tells hosts to pull already exist in GHCR — otherwise a
+`npm i -g lastlight@X.Y.Z && server update` in the gap would fail the image pull.
+Do NOT run `npm publish` or prompt for an OTP; just watch the release run and
+confirm the version went live. The image build is what lets a deploy host
 `server update` *pull* the new version instead of building it — so after cutting
 the release, bump the overlay's `deploy.version` to the tag to roll it out.
+(`workflow_dispatch` on `publish.yml` rebuilds only the images for a given tag;
+the `npm` job is gated to `release` events.)
 
 Patch for fixes/doc tweaks to the CLI surface; minor for new user-facing
 commands/features. The dance (run on a clean `main`, up to date with origin):

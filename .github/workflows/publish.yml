@@ -1,22 +1,123 @@
-name: Publish to npm
+name: Publish release
 
-# Publishing is gated to a GitHub Release: cutting a release (which carries the
-# v* tag) is the deliberate trigger, so a bare tag push never publishes on its
-# own. Flow: `npm version <patch|minor|major>` → push main + the tag → create a
-# Release on that tag → this runs.
+# The release pipeline: on a GitHub Release, build+push the Docker images to
+# GHCR, THEN publish the CLI to npm — in that order, as two jobs (`npm` needs
+# `images`). Ordering matters: if npm published first, a deployer could
+# `npm i -g lastlight@X.Y.Z && server update` in the window before the
+# `:vX.Y.Z` images exist and the image pull would fail. Chaining the jobs closes
+# that race — the CLI only goes live once its images are already in GHCR.
+#
+# `workflow_dispatch` rebuilds the IMAGES for a specific tag only (the npm job is
+# gated to `release` events, so a dispatch never publishes to npm).
+#
+# Build the four locally-built images (agent + sandbox-base + sandbox +
+# sandbox-qa) once and push them to GHCR, so `lastlight server update` PULLS them
+# on the deploy host instead of building from source (minutes → seconds).
+#
+# The stock sidecar images (coredns / nginx / otel-collector / caddy) are pulled
+# from Docker Hub by docker-compose and are NOT built here. `egress-init` reuses
+# the agent image, so it's covered too.
+#
+# CACHING: driven by `docker buildx bake` against docker-bake.hcl. Each image
+# has a per-image **registry** build cache (ghcr.io/nearform/lastlight-<img>:
+# buildcache) that any run can read, so unchanged layers survive across releases.
+#
+#   Why registry and not `type=gha`: this workflow only runs on a RELEASE (a tag
+#   ref). GitHub Actions cache is ref-scoped — a run restores only caches written
+#   by its own ref or the default branch — so a cache on tag vA was invisible to
+#   the next release on tag vB, and every release built cold.
+#
+#   Why bake and not four separate `buildx build`s: the sandbox leaves are FROM
+#   sandbox-base. Built separately FROM the *pushed* base tag, their cache keyed
+#   on the base's image DIGEST — which drifts every build (config timestamp +
+#   provenance attestation) even when the layers are identical, busting the leaf
+#   cache and re-running the ~300 MB Chromium download. bake builds base + leaves
+#   in ONE graph and wires `FROM lastlight-sandbox-base:latest` to
+#   `target:sandbox-base`, so the leaf cache keys on the base's CONTENT, not its
+#   pushed digest — stable across releases, and every image keeps its provenance
+#   + SBOM attestations. See docker-bake.hcl for the full rationale.
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag/ref to check out AND image tag to publish (e.g. v0.11.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: publish-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
 
 permissions:
-  id-token: write
   contents: read
+  packages: write
+  id-token: write # npm provenance on the downstream publish job
 
 jobs:
-  publish:
+  images:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io/nearform
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # Only move `:latest` on a real, non-prerelease Release — never when a
+      # workflow_dispatch rebuilds an arbitrary (possibly older) tag.
+      PUSH_LATEST: ${{ github.event_name == 'release' && github.event.release.prerelease == false }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build metadata
+        id: meta
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # Required set: agent + sandbox-base + sandbox, built in one bake graph so
+      # `sandbox` links to `target:sandbox-base` by content (see docker-bake.hcl).
+      - name: Build & push core images
+        run: docker buildx bake --push core
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          TAG: ${{ env.TAG }}
+          PUSH_LATEST: ${{ env.PUSH_LATEST }}
+          GIT_SHA: ${{ github.sha }}
+          BUILD_DATE: ${{ steps.meta.outputs.date }}
+
+      # Non-fatal optional tier — its own bake invocation so a failure can't block
+      # the core images. It rebuilds sandbox-base as a content-keyed context
+      # dependency (cache-restored in seconds), which is what keeps its Chromium
+      # layer cached across releases.
+      - name: Build & push sandbox-qa (non-fatal)
+        continue-on-error: true
+        run: docker buildx bake --push sandbox-qa
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          TAG: ${{ env.TAG }}
+          PUSH_LATEST: ${{ env.PUSH_LATEST }}
+
+  # Publish the CLI to npm — ONLY after the images job succeeds, and ONLY for a
+  # real Release (a workflow_dispatch image rebuild never publishes to npm). This
+  # is the ordering guarantee: the npm package that tells hosts to pull
+  # `:vX.Y.Z` images only goes live once those images are already in GHCR.
+  # A sandbox-qa failure is non-fatal (continue-on-error) so `images` still
+  # succeeds and npm still publishes; a core-image failure fails `images` and
+  # skips npm.
+  npm:
+    needs: images
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
-      # For a release event, default checkout resolves to the release's tag.
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.release.tag_name }}

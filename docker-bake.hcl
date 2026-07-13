@@ -1,5 +1,5 @@
 # Build definition for the four locally-built Last Light images, driven by
-# .github/workflows/docker-publish.yml via `docker buildx bake`.
+# the `images` job of .github/workflows/publish.yml via `docker buildx bake`.
 #
 # WHY BAKE: the sandbox leaves (sandbox, sandbox-qa) are `FROM
 # lastlight-sandbox-base:latest`. Building each leaf as a separate `docker buildx

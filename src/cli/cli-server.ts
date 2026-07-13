@@ -49,7 +49,7 @@ export const SIDECARS = [
 /** Loopback health endpoint the harness serves (admin/routes.ts `GET /health`). */
 const HEALTH_URL = "http://127.0.0.1:8644/health";
 
-/** GHCR namespace the release CI (`docker-publish.yml`) publishes the four
+/** GHCR namespace the release CI (`publish.yml` `images` job) publishes the four
  *  locally-built images to. Public packages, so `docker pull` needs no login. */
 export const IMAGE_REGISTRY = "ghcr.io/nearform";
 /**
