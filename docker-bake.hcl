@@ -67,7 +67,13 @@ target "sandbox-base" {
 target "sandbox" {
   dockerfile = "sandbox.Dockerfile"
   context    = "."
-  contexts   = { "lastlight-sandbox-base:latest" = "target:sandbox-base" }
+  # Override the Dockerfile's BASE_IMAGE to a bare placeholder and link that
+  # name to the sandbox-base target — a bare, tag-less context name matches
+  # `FROM ${BASE_IMAGE}` reliably (a registry-style `name:tag` key normalizes to
+  # docker.io/... and won't match). Host `--local`/compose builds keep the
+  # Dockerfile default (lastlight-sandbox-base:latest).
+  args       = { BASE_IMAGE = "sandbox-base" }
+  contexts   = { sandbox-base = "target:sandbox-base" }
   tags       = tags("lastlight-sandbox")
   cache-from = cache_from("lastlight-sandbox")
   cache-to   = cache_to("lastlight-sandbox")
@@ -80,7 +86,8 @@ target "sandbox" {
 target "sandbox-qa" {
   dockerfile = "sandbox-qa.Dockerfile"
   context    = "."
-  contexts   = { "lastlight-sandbox-base:latest" = "target:sandbox-base" }
+  args       = { BASE_IMAGE = "sandbox-base" }
+  contexts   = { sandbox-base = "target:sandbox-base" }
   tags       = tags("lastlight-sandbox-qa")
   cache-from = cache_from("lastlight-sandbox-qa")
   cache-to   = cache_to("lastlight-sandbox-qa")
