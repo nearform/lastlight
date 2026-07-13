@@ -1,5 +1,13 @@
 kind: explore
 name: explore
+classification:
+  intent: explore
+  description: |
+    EXPLORE — The user wants help shaping an idea BEFORE writing code: "help me think through X", "brainstorm Y", "spec this out", "explore an idea for Z". A bare "explore" / "explore this" / "let's explore" is also EXPLORE — especially as a reply on an existing issue (ISSUE TITLE present), where the implicit object is the issue's idea. EXPLORE = shape the idea / write a spec; BUILD = write the code now.
+  examples:
+    - '"explore adding webhooks to cliftonc/drizby" → INTENT: EXPLORE, REPO: cliftonc/drizby, ISSUE: NONE, REASON: NONE'
+    - '"explore" with ISSUE TITLE "Feature: Allow configuration of otel endpoints" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"explore this" with ISSUE TITLE "Add webhook support" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE'
 description: |
   Socratic idea-shaping loop: read the existing issue/thread for context, ask
   clarifying questions in a reply-gated loop until the shape is clear, then

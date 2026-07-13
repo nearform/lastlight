@@ -1,5 +1,11 @@
 kind: triage
 name: issue-triage
+classification:
+  intent: triage
+  description: |
+    TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
+  examples:
+    - '"could you triage https://github.com/foo/bar?" → INTENT: TRIAGE, REPO: foo/bar, ISSUE: NONE, REASON: NONE'
 description: |
   Triage a GitHub issue: read it, classify it, label it, and act on stale or
   incomplete reports. Single agent invocation, no PR creation.

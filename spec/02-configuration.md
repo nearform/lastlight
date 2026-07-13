@@ -396,6 +396,14 @@ Per-task resolvers — `resolveModel(models, taskType)`, `resolveVariant()` —
 sit alongside the schema (`296–297`, `336–340`) and are called from the
 runner and dispatch closure, not from the config loader itself.
 
+The cheap one-shot helpers (`classifier`, `screener` in `src/engine/llm.ts`)
+also honour the `models:` map: `defaultFastModel(taskType)` reads
+`config.models[taskType]` first (so `models.classifier` / `models.screener` in
+`config.yaml` work like any per-task model), then the env `OPENCODE_MODELS`
+map, then the first provider's fast model. Unlike `resolveModel`, it never
+falls back to `models.default` — an unset helper stays on the cheap provider
+default rather than inheriting the (expensive) workflow default.
+
 ## Rebuild notes
 
 - **Layered config, not flattened.** Keep base + per-task-override

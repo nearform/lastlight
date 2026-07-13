@@ -4,9 +4,21 @@ import type { EventEnvelope } from '#src/connectors/types.js';
 // Mock the classifier and screener before importing router
 vi.mock('#src/engine/screen/classifier.js', () => ({
   classifyComment: vi.fn().mockResolvedValue({ intent: 'chat' }),
-  classifyIssueIsQuestion: vi.fn().mockResolvedValue(false),
+  classifyIssueIntent: vi.fn().mockResolvedValue(false),
   classifyCommentAddsInfo: vi.fn().mockResolvedValue(false),
+  // Real well-known set so the router's novel-intent fallback only fires for
+  // intents outside it (issue #164).
+  WELL_KNOWN_INTENTS: new Set([
+    'build', 'explore', 'question', 'triage', 'review', 'security',
+    'verify', 'qa-test', 'demo', 'approve', 'reject', 'status', 'reset', 'chat',
+  ]),
 }));
+// Mock only the loader's getWorkflowByIntent (the router's data-driven fallback
+// lookup); keep everything else real.
+vi.mock('#src/workflows/loader.js', async () => {
+  const actual = await vi.importActual<typeof import('#src/workflows/loader.js')>('#src/workflows/loader.js');
+  return { ...actual, getWorkflowByIntent: vi.fn().mockReturnValue(undefined) };
+});
 vi.mock('#src/engine/screen/screen.js', async () => {
   const actual = await vi.importActual<typeof import('#src/engine/screen/screen.js')>('#src/engine/screen/screen.js');
   return {
@@ -16,13 +28,15 @@ vi.mock('#src/engine/screen/screen.js', async () => {
 });
 
 import { routeEvent, type RouterDeps } from '#src/engine/router.js';
-import { classifyComment, classifyCommentAddsInfo, classifyIssueIsQuestion } from '#src/engine/screen/classifier.js';
+import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent } from '#src/engine/screen/classifier.js';
+import { getWorkflowByIntent } from '#src/workflows/loader.js';
 import { screenForInjection } from '#src/engine/screen/screen.js';
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from '#src/config/config.js';
 
 const mockClassifyComment = vi.mocked(classifyComment);
 const mockClassifyAddsInfo = vi.mocked(classifyCommentAddsInfo);
-const mockClassifyIssue = vi.mocked(classifyIssueIsQuestion);
+const mockClassifyIssue = vi.mocked(classifyIssueIntent);
+const mockGetWorkflowByIntent = vi.mocked(getWorkflowByIntent);
 const mockScreen = vi.mocked(screenForInjection);
 
 /** Build RouterDeps with a stubbed workflow-run store. `buildStarted` controls
@@ -42,6 +56,11 @@ beforeEach(() => {
   // Default: new issues are work items (→ triage). Question-routing tests
   // opt in by overriding this per-case.
   mockClassifyIssue.mockResolvedValue(false);
+  // Default: no workflow claims a novel intent (fallback disabled). Overlay
+  // fallback tests opt in per-case. Reset call history too — one case asserts
+  // the fallback was NOT consulted.
+  mockGetWorkflowByIntent.mockReset();
+  mockGetWorkflowByIntent.mockReturnValue(undefined);
   setRuntimeConfig({
     managedRepos: ['cliftonc/drizzle-cube', 'cliftonc/drizby', 'cliftonc/lastlight'],
   } as unknown as LastLightConfig);
@@ -308,6 +327,42 @@ describe('routeEvent — comment.created', () => {
     }
   });
 
+  it('routes a novel overlay intent on an issue to its owning workflow (issue #164)', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'incident' });
+    mockGetWorkflowByIntent.mockReturnValue({ name: 'incident' } as any);
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light declare an incident for this outage',
+      authorAssociation: 'MEMBER',
+      issueNumber: 11,
+    }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('incident');
+      expect(result.context._routeKey).toBe('intent.incident');
+    }
+    expect(mockGetWorkflowByIntent).toHaveBeenCalledWith('incident');
+  });
+
+  it('does NOT fire the fallback for a well-known intent excluded on this surface', async () => {
+    // `explore` is a no-op on a PR → pr-comment; the fallback must not divert it
+    // even if a workflow claims the intent.
+    mockClassifyComment.mockResolvedValue({ intent: 'explore' });
+    mockGetWorkflowByIntent.mockReturnValue({ name: 'explore' } as any);
+    const result = await routeEvent(makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light explore this',
+      authorAssociation: 'MEMBER',
+      issueNumber: 12,
+      prNumber: 8,
+    }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-comment');
+    }
+    expect(mockGetWorkflowByIntent).not.toHaveBeenCalled();
+  });
+
   it('passes issue title to classifier on comment events', async () => {
     mockClassifyComment.mockResolvedValue({ intent: 'build' });
     await routeEvent(makeEnvelope({
@@ -400,6 +455,29 @@ describe('routeEvent — message events (classifier-driven)', () => {
   it('routes build intent with unmanaged repo to reply', async () => {
     mockClassifyComment.mockResolvedValue({ intent: 'build', repo: 'unknown/repo' });
     const result = await routeEvent(makeEnvelope({ type: 'message', body: 'build unknown/repo' }));
+    expect(result.action).toBe('reply');
+    if (result.action === 'reply') {
+      expect(result.message).toContain('unknown/repo');
+    }
+  });
+
+  it('routes a novel overlay intent to its owning workflow (issue #164)', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'incident', repo: 'cliftonc/lastlight' });
+    mockGetWorkflowByIntent.mockReturnValue({ name: 'incident' } as any);
+    const result = await routeEvent(makeEnvelope({ type: 'message', body: 'declare an incident on cliftonc/lastlight' }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('incident');
+      expect(result.context._routeKey).toBe('intent.incident');
+      expect(result.context.repo).toBe('cliftonc/lastlight');
+    }
+    expect(mockGetWorkflowByIntent).toHaveBeenCalledWith('incident');
+  });
+
+  it('rejects a novel overlay intent naming an unmanaged repo', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'incident', repo: 'unknown/repo' });
+    mockGetWorkflowByIntent.mockReturnValue({ name: 'incident' } as any);
+    const result = await routeEvent(makeEnvelope({ type: 'message', body: 'incident on unknown/repo' }));
     expect(result.action).toBe('reply');
     if (result.action === 'reply') {
       expect(result.message).toContain('unknown/repo');

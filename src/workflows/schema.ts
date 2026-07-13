@@ -377,6 +377,29 @@ export type OutputRule = z.infer<typeof OutputRuleSchema>;
 // The `kind` field is purely a categorization label used by the dashboard
 // (e.g. to group runs by purpose). The runner ignores it.
 
+/**
+ * Intents owned by the harness itself (workflow gates / session control), not by
+ * any workflow. A workflow's `classification.intent` may not claim one of these.
+ * The classifier keeps their category text + examples in its base prompt template.
+ */
+export const RESERVED_CONTROL_INTENTS = [
+  "approve",
+  "reject",
+  "status",
+  "reset",
+  "chat",
+] as const;
+
+/**
+ * Uppercase prompt token for an intent — the string the classifier emits on its
+ * `INTENT:` line and parses back. `qa-test` → `QATEST`, `incident` → `INCIDENT`.
+ * Kept here (workflows layer) so the loader's validation and the classifier's
+ * prompt/parser derive tokens the same way.
+ */
+export function intentToken(intent: string): string {
+  return intent.toUpperCase().replace(/-/g, "");
+}
+
 export const AgentWorkflowSchema = z.object({
   /** Categorization label — e.g. "build", "triage", "review", "health". Free string. */
   kind: z.string().default("agent"),
@@ -406,6 +429,27 @@ export const AgentWorkflowSchema = z.object({
    */
   final_message: z.string().optional(),
   variables: z.record(z.string(), z.string()).optional(),
+  /**
+   * How the free-text intent classifier should route to this workflow. When
+   * present, this workflow contributes one category to the composed classifier
+   * prompt (`src/engine/screen/classifier.ts`) AND claims the `intent` token:
+   * a comment/message the classifier tags with this intent routes here (via the
+   * router's `getWorkflowByIntent` fallback) unless a bespoke router branch
+   * already handles that intent. The prompt token is derived from `intent`
+   * (`intent.toUpperCase().replace(/-/g, "")` — e.g. `qa-test` → `QATEST`).
+   * Validated in the loader: `intent` must be unique across workflows and must
+   * not collide with a reserved control intent (approve/reject/status/reset/chat).
+   */
+  classification: z
+    .object({
+      /** Intent token this workflow owns (e.g. "build", "qa-test", "incident"). */
+      intent: z.string(),
+      /** The category paragraph, conventionally prefixed with its UPPER token. */
+      description: z.string(),
+      /** Optional one-line classifier examples (verbatim lines for the prompt). */
+      examples: z.array(z.string()).optional(),
+    })
+    .optional(),
   phases: z.array(PhaseDefinitionSchema),
 });
 

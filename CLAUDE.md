@@ -50,9 +50,13 @@ Codex model is used for a sandbox phase).
 
 The cheap-helper path (`src/engine/llm.ts`, used by screener + classifier)
 bypasses OpenCode and dispatches directly to the same three providers.
-`defaultFastModel()` prefers Anthropic > OpenAI > OpenRouter when multiple
-keys are set — direct provider routes avoid OpenRouter's per-token markup
-when possible.
+`defaultFastModel(taskType)` resolves the model in order: the config `models:`
+map for the task key (`models.classifier` / `models.screener` in `config.yaml`,
+which env `OPENCODE_MODELS` is layered into) → the env `OPENCODE_MODELS` map
+directly → the first configured provider's fast model (Anthropic > OpenAI >
+OpenRouter — direct routes avoid OpenRouter's per-token markup). Only an
+explicit per-task entry counts, never `models.default`, so the helpers stay
+cheap unless deliberately pinned.
 
 Two execution surfaces:
 - **Sandbox** — `opencode run --format json` invoked per workflow phase
@@ -148,8 +152,15 @@ src/
     screen/             Prompt screening + intent classification.
       screen.ts         Prompt-injection screener. Uses llm.ts with a cheap
                         model (claude-haiku by default).
-      classifier.ts     Tiny LLM call that decides "is this comment asking
-                        me to build something?". Uses llm.ts.
+      classifier.ts     Tiny LLM call that classifies a comment/message into
+                        an intent (build / review / … / chat). Uses llm.ts.
+                        The prompt is COMPOSED at runtime, not hardcoded: a
+                        forkable base (workflows/prompts/classifier.md) + one
+                        `classification:` block per workflow YAML. Adding a
+                        workflow (even in an overlay) adds a routable intent
+                        with no core edit — the router's getWorkflowByIntent
+                        fallback routes it. `lastlight fork classifier` forks
+                        the base prompt. (issue #164)
   workflows/            See src/workflows/CLAUDE.md for the full runner
                         story. Loads YAML definitions, executes phases
                         (linear or DAG), manages resume, approval gates,
@@ -502,6 +513,9 @@ lastlight server status                # compose ps + core/overlay version drift
 lastlight fork                         # list forkable workflows + agent-context (marks forked)
 lastlight fork <workflow>              # workflow YAML + every prompt + skill its phases reference
 lastlight fork agent-context [file]    # all agent-context/*.md (soul/rules/security), or one file
+lastlight fork classifier              # the base intent-classifier prompts (classifier.md +
+                                        # classify-adds-info.md); per-workflow category text
+                                        # travels with `fork <workflow>` already
                                         # [--home dir] [--force to overwrite existing]
 
 # Install the Last Light Claude Code skills into a local Claude Code (HOST-LOCAL;

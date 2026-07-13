@@ -228,6 +228,7 @@ function forkAll(t: ForkTarget, force: boolean): CopyResult[] {
     for (const r of forkWorkflow(t, def.name, force)) add(r);
   }
   for (const r of forkAgentContext(t, builtinAgentContext(t.coreRoot), force)) add(r);
+  for (const r of forkClassifier(t, force)) add(r);
   return [...byRel.values()].sort((a, b) => a.rel.localeCompare(b.rel));
 }
 
@@ -237,6 +238,26 @@ function forkAgentContext(t: ForkTarget, files: string[], force: boolean): CopyR
     const src = path.join(t.coreRoot, "agent-context", file);
     return copyFile(src, path.join(t.instanceDir, "agent-context", file), `agent-context/${file}`, force);
   });
+}
+
+/**
+ * The base classifier prompt files (issue #164) — the framing/disambiguation
+ * template the intent classifier composes per-workflow categories into, plus
+ * the re-triage novelty gate. Each workflow's own category text lives in its
+ * YAML, so it already travels with `fork <workflow>`; these are the standalone
+ * base prompts a deployment forks to retune the router's classification.
+ */
+const CLASSIFIER_PROMPTS = ["prompts/classifier.md", "prompts/classify-adds-info.md"];
+
+/** Copy the base classifier prompt files into the overlay (skip any absent from core). */
+function forkClassifier(t: ForkTarget, force: boolean): CopyResult[] {
+  const results: CopyResult[] = [];
+  for (const rel of CLASSIFIER_PROMPTS) {
+    const src = path.join(t.coreRoot, "workflows", rel);
+    if (!fs.existsSync(src)) continue;
+    results.push(copyFile(src, path.join(t.instanceDir, "workflows", rel), `workflows/${rel}`, force));
+  }
+  return results;
 }
 
 /** Built-in agent-context filenames (e.g. soul.md, rules.md, security.md). */
@@ -290,6 +311,10 @@ function listForkable(t: ForkTarget): void {
     console.log(chalk.bold("\nForkable agent-context") + chalk.dim("  (lastlight fork agent-context)\n"));
     for (const file of context) console.log(`  ${file}${mark(`agent-context:${file}`)}`);
   }
+  console.log(chalk.bold("\nForkable classifier") + chalk.dim("  (lastlight fork classifier)\n"));
+  for (const rel of CLASSIFIER_PROMPTS) {
+    console.log(`  ${rel}${mark(`prompt:${path.basename(rel)}`)}`);
+  }
   console.log(chalk.dim("\nFork one with: ") + chalk.cyan("lastlight fork <name>"));
   console.log(chalk.dim("Fork everything with: ") + chalk.cyan("lastlight fork all"));
 }
@@ -299,8 +324,9 @@ function listForkable(t: ForkTarget): void {
 /**
  * `lastlight fork [target] [sub]` — dispatch on an explicit target.
  *   - (none)                       → list forkable targets
- *   - "all"                        → every workflow (+ prompts & skills) + context
+ *   - "all"                        → every workflow (+ prompts & skills) + context + classifier
  *   - "agent-context" [file]       → all context files, or one named file
+ *   - "classifier"                 → the base intent-classifier prompt files
  *   - "<workflow>"                 → workflow + its prompts + skills
  * Agent-context is never inferred from a bare filename — it's only reached via
  * the literal `agent-context` target.
@@ -349,6 +375,12 @@ export async function fork(args: string[], opts: ForkOpts): Promise<void> {
     return;
   }
 
+  // classifier — the base intent-classifier prompts (issue #164).
+  if (target === "classifier") {
+    printSummary(t, forkClassifier(t, opts.force ?? false));
+    return;
+  }
+
   // Otherwise treat it as a workflow name.
   try {
     getWorkflow(target);
@@ -358,6 +390,7 @@ export async function fork(args: string[], opts: ForkOpts): Promise<void> {
       chalk.red(`Unknown fork target: ${target}`) +
         chalk.dim(`\n  Workflows: ${names.join(", ")}`) +
         chalk.dim(`\n  Agent-context: "agent-context" (optionally a file, e.g. agent-context soul.md).`) +
+        chalk.dim(`\n  Classifier: "classifier".`) +
         chalk.dim(`\n  Everything: "all".`),
     );
     process.exit(1);

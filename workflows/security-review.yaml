@@ -1,5 +1,13 @@
 kind: health
 name: security-review
+classification:
+  intent: security
+  description: |
+    SECURITY — The user wants a security scan/review of a repo: "security review cliftonc/repo", "scan for vulnerabilities", "check security", "can you do a security review of <repo>?".
+  examples:
+    - '"run a security review on cliftonc/lastlight" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
+    - '"can you do a security review of https://github.com/cliftonc/lastlight" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
+    - '"scan https://github.com/cliftonc/lastlight for vulnerabilities" → INTENT: SECURITY, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
 description: |
   Scan the target repository for security issues using open-source tools
   (npm audit, semgrep, gitleaks) plus AI code review. Files ONE summary

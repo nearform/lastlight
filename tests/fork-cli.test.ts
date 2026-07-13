@@ -40,6 +40,8 @@ function makeCore(): string {
   for (const p of ["architect", "reviewer", "fix", "re-reviewer"]) {
     writeFileSync(join(core, "workflows", "prompts", `${p}.md`), `# ${p} (core)`);
   }
+  writeFileSync(join(core, "workflows", "prompts", "classifier.md"), "# classifier base (core)");
+  writeFileSync(join(core, "workflows", "prompts", "classify-adds-info.md"), "# adds-info (core)");
   writeFileSync(join(core, "skills", "building", "SKILL.md"), "# building (core)");
   writeFileSync(join(core, "skills", "building", "scripts", "run.sh"), "echo hi");
   writeFileSync(join(core, "skills", "code-review", "SKILL.md"), "# code-review (core)");
@@ -144,6 +146,18 @@ describe("fork-cli", () => {
     // …and every agent-context file.
     expect(existsSync(join(inst, "agent-context", "soul.md"))).toBe(true);
     expect(existsSync(join(inst, "agent-context", "rules.md"))).toBe(true);
+    // …and the base classifier prompts.
+    expect(existsSync(join(inst, "workflows", "prompts", "classifier.md"))).toBe(true);
+    expect(existsSync(join(inst, "workflows", "prompts", "classify-adds-info.md"))).toBe(true);
+  });
+
+  it("forks the base classifier prompts via the `classifier` target", async () => {
+    await fork(["classifier"], { home: core });
+    const prompts = join(core, "instance", "workflows", "prompts");
+    expect(readFileSync(join(prompts, "classifier.md"), "utf8")).toContain("classifier base");
+    expect(existsSync(join(prompts, "classify-adds-info.md"))).toBe(true);
+    // The classifier target must NOT drag in unrelated workflow assets.
+    expect(existsSync(join(core, "instance", "workflows", "build.yaml"))).toBe(false);
   });
 
   it("forks all agent-context files via the explicit target", async () => {

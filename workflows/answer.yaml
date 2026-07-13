@@ -1,5 +1,12 @@
 kind: answer
 name: answer
+classification:
+  intent: question
+  description: |
+    QUESTION — The user is asking a substantive INFORMATIONAL question that warrants research to answer well: "how does X work?", "what's the difference between X and Y?", "how does <repo> compare to <other tool>?", "is it possible to do Z?", "why does X happen?". The deliverable is an ANSWER, not code and not a spec. QUESTION is for real questions that benefit from reading docs/code or searching the web — NOT casual chat, thanks, or one-word replies (those stay CHAT). EXPLORE shapes a NEW idea into a spec; QUESTION answers an EXISTING question about how something works or compares.
+  examples:
+    - '"how does cliftonc/lastlight compare to Vercel''s Eve framework?" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
+    - '"what''s the difference between a sandbox phase and a chat session in cliftonc/lastlight?" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
 description: |
   Answer a question issue directly. Used when a newly-opened issue asks for
   information, an explanation, or a comparison rather than a code change — the

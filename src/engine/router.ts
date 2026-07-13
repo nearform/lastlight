@@ -1,9 +1,22 @@
 import type { EventEnvelope } from "../connectors/types.js";
-import { classifyComment, classifyCommentAddsInfo, classifyIssueIsQuestion } from "./screen/classifier.js";
+import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent, WELL_KNOWN_INTENTS } from "./screen/classifier.js";
 import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
+import { getWorkflowByIntent } from "../workflows/loader.js";
 import { getRoutes, getBotName } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
+
+/**
+ * Resolve a classifier intent the router has no bespoke branch for to the
+ * workflow that claims it via its `classification.intent` (issue #164). Returns
+ * undefined for well-known intents (they keep their explicit, context-dependent
+ * routing) and for unclaimed tokens — so this fires only for a genuinely new
+ * intent an overlay workflow introduced, routing it to that workflow.
+ */
+function fallbackWorkflowForIntent(intent: string): string | undefined {
+  if (WELL_KNOWN_INTENTS.has(intent)) return undefined;
+  return getWorkflowByIntent(intent)?.name;
+}
 
 /**
  * A routing decision — the single term for "what should process this event"
@@ -92,7 +105,7 @@ export async function routeEvent(
       // search + its own model) instead of triage, which would otherwise file
       // a question as an enhancement and write an agent brief. Classified with
       // the same cheap model as comments; WORK is the safe default.
-      const isQuestion = await classifyIssueIsQuestion(
+      const isQuestion = await classifyIssueIntent(
         envelope.title || "",
         envelope.body || "",
       );
@@ -363,12 +376,14 @@ export async function routeEvent(
         //              caps at 2 file reads which isn't enough to answer
         //              "does this PR consider X?" with code-cited evidence)
         // Explore isn't meaningful on PRs since the code already exists.
+        const prNovelWf = fallbackWorkflowForIntent(intent);
         const { handler: prHandler, routeKey: prRouteKey } =
           intent === "build" ? { handler: gh.pr_fix || "pr-fix", routeKey: "github.pr_fix" }
           : intent === "review" ? { handler: gh.pr_review || "pr-review", routeKey: "github.pr_review" }
           : intent === "verify" ? { handler: gh.verify || "verify", routeKey: "github.verify" }
           : intent === "qa-test" ? { handler: gh.qa_test || "qa-test", routeKey: "github.qa_test" }
           : intent === "demo" ? { handler: gh.demo || "demo", routeKey: "github.demo" }
+          : prNovelWf ? { handler: prNovelWf, routeKey: `intent.${intent}` }
           : { handler: gh.pr_comment || "pr-comment", routeKey: "github.pr_comment" };
         return {
           action: "handler",
@@ -415,12 +430,14 @@ export async function routeEvent(
           },
         };
       }
+      const issueNovelWf = fallbackWorkflowForIntent(intent);
       const { handler: issueSkill, routeKey: issueRouteKey } =
         intent === "build" ? { handler: gh.issue_build || "github-orchestrator", routeKey: "github.issue_build" }
         : intent === "explore" ? { handler: gh.issue_explore || "explore", routeKey: "github.issue_explore" }
         : intent === "verify" ? { handler: gh.verify || "verify", routeKey: "github.verify" }
         : intent === "qa-test" ? { handler: gh.qa_test || "qa-test", routeKey: "github.qa_test" }
         : intent === "demo" ? { handler: gh.demo || "demo", routeKey: "github.demo" }
+        : issueNovelWf ? { handler: issueNovelWf, routeKey: `intent.${intent}` }
         : { handler: gh.issue_comment || "issue-comment", routeKey: "github.issue_comment" };
       return {
         action: "handler",
@@ -714,7 +731,31 @@ export async function routeEvent(
           };
         }
 
-        default:
+        default: {
+          // A novel intent an overlay workflow introduced (issue #164) → route
+          // to that workflow. If it named an unmanaged repo, reject on the same
+          // security boundary the built-in repo-scoped intents use.
+          const novelWf = fallbackWorkflowForIntent(intent);
+          if (novelWf) {
+            if (classifiedRepo && !isManagedRepo(classifiedRepo)) {
+              return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };
+            }
+            return {
+              action: "handler",
+              handler: novelWf,
+              context: {
+                _routeKey: `intent.${intent}`,
+                repo: classifiedRepo,
+                issueNumber: classifiedIssue,
+                sender: envelope.sender,
+                commentBody: slackText,
+                source: envelope.source,
+                triggerId: slackTriggerId,
+                channelId,
+                threadId,
+              },
+            };
+          }
           // chat — conversational reply
           return {
             action: "handler",
@@ -726,6 +767,7 @@ export async function routeEvent(
               source: envelope.source,
             },
           };
+        }
       }
     }
 

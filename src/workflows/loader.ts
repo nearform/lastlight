@@ -5,6 +5,8 @@ import {
   AgentWorkflowSchema,
   CronWorkflowSchema,
   phaseSkillNames,
+  intentToken,
+  RESERVED_CONTROL_INTENTS,
   type AgentWorkflowDefinition,
   type CronWorkflowDefinition,
 } from "./schema.js";
@@ -39,6 +41,14 @@ const cronCache = new Map<string, CronWorkflowDefinition>();
 const agentOrigins = new Map<string, WorkflowOrigin>();
 const cronOrigins = new Map<string, WorkflowOrigin>();
 let cachePopulated = false;
+
+/**
+ * Bumped every time the asset layers change (reconfigure / cache clear). Lets
+ * downstream consumers that derive state from the workflow set — notably the
+ * classifier's composed prompt + intent vocabulary — cheaply detect staleness
+ * without a cross-layer import or a callback registry. Read via `getAssetVersion()`.
+ */
+let assetVersion = 0;
 
 function emptyDisabled(): DisabledConfig {
   return { workflows: [], crons: [], prompts: [], skills: [], agentContext: [] };
@@ -106,6 +116,12 @@ export function clearWorkflowCache(): void {
   agentOrigins.clear();
   cronOrigins.clear();
   cachePopulated = false;
+  assetVersion++;
+}
+
+/** Monotonic counter bumped on every asset-layer reconfigure / cache clear. */
+export function getAssetVersion(): number {
+  return assetVersion;
 }
 
 function loadYamlFile(filePath: string): unknown {
@@ -188,6 +204,20 @@ export function getCronWorkflows(): CronWorkflowDefinition[] {
 export function listAgentWorkflows(): AgentWorkflowDefinition[] {
   populateCache();
   return Array.from(agentCache.values());
+}
+
+/**
+ * The enabled workflow that claims a given classifier intent via its
+ * `classification.intent`, if any. Backs the router's data-driven fallback: an
+ * intent the router's bespoke switch doesn't handle routes to its owning
+ * workflow. Returns undefined for control intents and unclaimed tokens.
+ */
+export function getWorkflowByIntent(intent: string): AgentWorkflowDefinition | undefined {
+  populateCache();
+  for (const def of agentCache.values()) {
+    if (def.classification?.intent === intent) return def;
+  }
+  return undefined;
 }
 
 export function getWorkflowOrigin(name: string): WorkflowOrigin | undefined {
@@ -351,6 +381,50 @@ export function validateAssets(routes?: RouteConfig): void {
   for (const [cronName, def] of cronCache) {
     if (!agentCache.has(def.workflow)) {
       throw new Error(`Cron "${cronName}" targets missing or disabled workflow: ${def.workflow}`);
+    }
+  }
+
+  // Classifier `classification` blocks: each declared intent must be unique
+  // across workflows (two owners would make routing/parsing ambiguous), must
+  // not shadow a reserved control intent (approve/reject/status/reset/chat —
+  // the harness owns those), and its derived prompt token must be collision-free
+  // (e.g. `qa-test` and `qa_test` both → QATEST). A base classifier template
+  // must also exist to compose into. This runs at boot so a bad overlay fails
+  // fast instead of on the first classified event.
+  const controlIntents = new Set<string>(RESERVED_CONTROL_INTENTS);
+  const intentOwner = new Map<string, string>();
+  const tokenOwner = new Map<string, string>();
+  let anyClassification = false;
+  for (const [wfName, def] of agentCache) {
+    const c = def.classification;
+    if (!c) continue;
+    anyClassification = true;
+    if (controlIntents.has(c.intent)) {
+      throw new Error(
+        `Workflow "${wfName}" classification.intent "${c.intent}" is a reserved control intent (${[...controlIntents].join(", ")})`,
+      );
+    }
+    const prevIntent = intentOwner.get(c.intent);
+    if (prevIntent) {
+      throw new Error(
+        `Workflows "${prevIntent}" and "${wfName}" both claim classifier intent "${c.intent}" — an intent must have exactly one owning workflow`,
+      );
+    }
+    intentOwner.set(c.intent, wfName);
+    const token = intentToken(c.intent);
+    const prevToken = tokenOwner.get(token);
+    if (prevToken) {
+      throw new Error(
+        `Workflows "${prevToken}" and "${wfName}" derive the same classifier token "${token}" from different intents — rename one classification.intent`,
+      );
+    }
+    tokenOwner.set(token, wfName);
+  }
+  if (anyClassification) {
+    try {
+      resolvePromptPath("prompts/classifier.md");
+    } catch (err: unknown) {
+      throw new Error(`Classifier base template prompts/classifier.md: ${(err as Error).message}`);
     }
   }
 

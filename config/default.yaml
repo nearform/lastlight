@@ -18,6 +18,13 @@ botName: last-light
 
 models:
   default: anthropic/claude-sonnet-4-6
+  # Per-task overrides keyed by phase or helper name, e.g.:
+  #   architect: anthropic/claude-opus-4-8
+  #   classifier: anthropic/claude-haiku-4-5-20251001   # the intent-routing helper
+  #   screener: anthropic/claude-haiku-4-5-20251001     # the prompt-injection screener
+  # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
+  # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
+  # configured provider's fast model, NOT `default`.
 
 variants: {}
 

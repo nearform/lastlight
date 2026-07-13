@@ -1,5 +1,12 @@
 kind: qa-test
 name: qa-test
+classification:
+  intent: qa-test
+  description: |
+    QATEST — The user wants you to drive an app or CLI through a flow and report step-level pass/fail: "qa test the signup flow", "run through login and tell me what breaks", "smoke-test the CLI commands", "exercise the checkout flow". The deliverable is a step-by-step QA report. Prefer QATEST over VERIFY when it's a multi-step flow to exercise rather than a single claim to confirm.
+  examples:
+    - '"qa test the login flow on this PR" with ISSUE TITLE "Add login" → INTENT: QATEST, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"run through the signup flow and tell me what breaks" with ISSUE TITLE "Signup v2" → INTENT: QATEST, REPO: NONE, ISSUE: NONE, REASON: NONE'
 description: |
   Run an automated QA flow against a repo's CLI or locally-served app and report
   step-level pass/fail with evidence. It installs and runs the code in the

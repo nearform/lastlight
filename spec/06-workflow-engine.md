@@ -54,9 +54,21 @@ through — webhook dispatch, CLI, cron, admin resume.
   description?: string;
   trigger?: string;      // informational
   variables?: Record<string, string>;
+  classification?: {     // how the intent classifier routes to this workflow (issue #164)
+    intent: string;      //   the intent token this workflow owns (unique; not a control intent)
+    description: string; //   the category paragraph merged into the composed classifier prompt
+    examples?: string[]; //   optional one-line classifier examples
+  };
   phases: PhaseDefinition[];
 }
 ```
+
+The optional `classification` block makes a workflow **self-describing to the
+router**: its `description`/`examples` are composed into the classifier prompt
+(`workflows/prompts/classifier.md`), and its `intent` becomes routable via the
+router's `getWorkflowByIntent` fallback — so adding a workflow (even in an
+overlay) can add a new intent with no core change. See
+[05-router.md → Build-intent classifier](05-router.md#build-intent-classifier).
 
 **Phase level** (`schema.ts:84–182`):
 

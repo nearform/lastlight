@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { classifyComment, classifyIssueIsQuestion, extractGithubRefFromText } from "#src/engine/screen/classifier.js";
+import {
+  buildClassifierPrompt,
+  classifyComment,
+  classifyIssueIntent,
+  extractGithubRefFromText,
+} from "#src/engine/screen/classifier.js";
 
 describe("extractGithubRefFromText", () => {
   it("returns undefined when no github.com URL is present", () => {
@@ -116,10 +121,32 @@ describe("classifyComment — injected chat", () => {
   });
 });
 
-describe("classifyIssueIsQuestion — injected chat", () => {
+describe("buildClassifierPrompt — composition", () => {
+  it("includes every shipped workflow category + control intents", () => {
+    const prompt = buildClassifierPrompt();
+    // Workflow-owned categories (from each workflow's classification block).
+    for (const token of ["BUILD", "EXPLORE", "QUESTION", "TRIAGE", "REVIEW", "SECURITY", "VERIFY", "QATEST", "DEMO"]) {
+      expect(prompt).toContain(`${token} —`);
+    }
+    // Control categories stay in the base template.
+    for (const token of ["APPROVE", "REJECT", "STATUS", "RESET", "CHAT"]) {
+      expect(prompt).toContain(`${token} —`);
+    }
+    // The format line is composed from the full token set, workflow-first.
+    expect(prompt).toContain(
+      "INTENT: BUILD|EXPLORE|QUESTION|TRIAGE|REVIEW|SECURITY|VERIFY|QATEST|DEMO|APPROVE|REJECT|STATUS|RESET|CHAT",
+    );
+    // No unfilled slots remain.
+    expect(prompt).not.toContain("{{");
+    // A workflow-contributed example made it into the Examples block.
+    expect(prompt).toContain("INTENT: QATEST");
+  });
+});
+
+describe("classifyIssueIntent — injected chat", () => {
   it("returns true for a question issue", async () => {
-    const chat = vi.fn().mockResolvedValue("QUESTION");
-    const r = await classifyIssueIsQuestion(
+    const chat = vi.fn().mockResolvedValue("INTENT: QUESTION\nREPO: NONE\nISSUE: NONE\nREASON: NONE");
+    const r = await classifyIssueIntent(
       "How is lastlight different to Vercel Eve?",
       "Keen on a comparison.",
       { chat, defaultFastModel: () => "openai/test" },
@@ -131,13 +158,13 @@ describe("classifyIssueIsQuestion — injected chat", () => {
         expect.objectContaining({ role: "system" }),
         expect.objectContaining({ role: "user", content: expect.stringContaining("How is lastlight different") }),
       ]),
-      { maxTokens: 16 },
+      { maxTokens: 128 },
     );
   });
 
-  it("returns false for a work item", async () => {
-    const chat = vi.fn().mockResolvedValue("WORK");
-    const r = await classifyIssueIsQuestion("Crash on startup", "App throws on boot.", {
+  it("returns false for a work item (any non-question intent → triage)", async () => {
+    const chat = vi.fn().mockResolvedValue("INTENT: BUILD\nREPO: NONE\nISSUE: NONE\nREASON: NONE");
+    const r = await classifyIssueIntent("Crash on startup", "App throws on boot.", {
       chat,
       defaultFastModel: () => "openai/test",
     });
@@ -147,7 +174,7 @@ describe("classifyIssueIsQuestion — injected chat", () => {
   it("defaults to false (work → triage) when chat rejects", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("network"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const r = await classifyIssueIsQuestion("Anything", "body", { chat, defaultFastModel: () => "openai/test" });
+    const r = await classifyIssueIntent("Anything", "body", { chat, defaultFastModel: () => "openai/test" });
     expect(r).toBe(false);
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();

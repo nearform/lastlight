@@ -1,5 +1,20 @@
 kind: build
 name: build
+classification:
+  intent: build
+  description: |
+    BUILD — The user is ASKING YOU (the bot) to make code changes NOW in a GitHub repo: implement a feature, fix a bug, create/send a PR, resolve an issue with code. BUILD requires a GitHub target — either an explicit repo reference (owner/name or github.com URL) in the message, OR an ISSUE TITLE context line indicating the comment is a reply on an existing issue/PR. If neither is present, classify as CHAT — local filesystem operations ("delete files in ~/foo", "clean up my downloads"), shell-style commands, or vague "build something" with no target are NOT BUILD.
+      BUILD is a REQUEST for NEW work directed at you. A comment that merely REPORTS work the human has ALREADY done is NOT BUILD — it is CHAT. Tells: past-tense ("fixed", "done", "implemented", "added a test", "pushed a fix", "handled it"), a reference to a commit the human made ("addressed in <sha>", "see commit abc123"), thanking you, or explaining/justifying a change they made in response to your review. These are status reports, not requests — classify them CHAT even when the comment is on a PR and even when it @-mentions you. Only classify BUILD when the human asks you to do NEW work (imperative request: "fix X", "now also handle Y", "can you update Z").
+  examples:
+    - '"build cliftonc/drizzle-cube#42" → INTENT: BUILD, REPO: cliftonc/drizzle-cube, ISSUE: 42, REASON: NONE'
+    - '"lets build this!" with ISSUE TITLE "Security Review" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"go ahead" with ISSUE TITLE "Add CSV export" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"now also handle the GET /sql case please" with ISSUE TITLE "Port adapters" → INTENT: BUILD, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"Thanks @last-light — addressed in 49ccadf. Fixed the nested body in the core and added a regression test; point 3 is intentional, confirmed with the maintainer." with ISSUE TITLE "Port fastify/hono/nextjs adapters" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"done, pushed a fix for the type error in 1a2b3c4" with ISSUE TITLE "Fix build" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"delete any files in ~/work/lastlight/docs" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"can you remove the old docs folder for me" (no ISSUE TITLE, no repo) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"build something cool" (no repo, no ISSUE TITLE) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE'
 description: "Architect -> Executor -> Reviewer build cycle"
 trigger: build
 # Render progress as a single in-place task-list comment/message that updates

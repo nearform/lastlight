@@ -1,5 +1,13 @@
 kind: review
 name: pr-review
+classification:
+  intent: review
+  description: |
+    REVIEW — The user wants a code review. Either repo-wide ("review cliftonc/repo", "check PRs", "can you review PRs on <repo>?") OR, when the comment is a reply on a PR (ISSUE TITLE present), a request to review THIS PR: "review this", "can you review this?", "please review", "take a look at this PR", "give this a review". The deliverable is a formal PR review (inline comments on the diff). Prefer REVIEW over CHAT whenever there's a clear "review"/"take a look" request on a PR.
+  examples:
+    - '"please review https://github.com/foo/bar/pull/42" → INTENT: REVIEW, REPO: foo/bar, ISSUE: 42, REASON: NONE'
+    - '"can you review this?" with ISSUE TITLE "Add HTML sanitizer for messages" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"take a look at this PR when you get a chance" with ISSUE TITLE "Port fastify adapter" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
 description: |
   Review a single GitHub pull request: read the diff, check for issues, and
   post structured feedback. Does not run a full build cycle and does not

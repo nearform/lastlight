@@ -1,5 +1,12 @@
 kind: demo
 name: demo
+classification:
+  intent: demo
+  description: |
+    DEMO — The user wants you to record a DEMO VIDEO of a feature/PR: "demo this", "record a demo of the new dashboard", "make a video showing the dark-mode toggle", "show me a before/after of the fix". The deliverable is a short screen-recorded mp4 of the running web UI, not a pass/fail report and not a verdict. Prefer DEMO over QATEST/VERIFY when the user explicitly asks for a recording, a video, or "show"/"demo" rather than to test or confirm a behaviour.
+  examples:
+    - '"record a demo of this" with ISSUE TITLE "Add dark-mode toggle" → INTENT: DEMO, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - '"make a short before/after video of the fix on cliftonc/foo#12" → INTENT: DEMO, REPO: cliftonc/foo, ISSUE: 12, REASON: NONE'
 description: |
   Record a short demo VIDEO of a PR or feature and post it. Drives the repo's
   web UI in a real headless browser, screen-records the session, and composites

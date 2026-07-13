@@ -159,8 +159,8 @@ Behaviour:
 
 ## Build-intent classifier
 
-The classifier turns a free-form comment or message into one of fourteen
-discrete intents:
+The classifier turns a free-form comment or message into one discrete intent.
+By default there are fourteen:
 
 ```
 BUILD | EXPLORE | QUESTION | TRIAGE | REVIEW | SECURITY |
@@ -173,8 +173,32 @@ keyword matches above short-circuit before the classifier; natural-language
 requests like "does this actually fix the crash?" reach `verify` via this
 classifier path, and "record a demo of this" reaches `demo`.)
 
-`classifier.ts:39–96` defines the system prompt. The model must reply
-in exactly four lines:
+**The prompt is composed, forkable, and workflow-driven (issue #164).** The
+system prompt is assembled at runtime by `buildClassifierPrompt()`, not
+hardcoded:
+
+- A **forkable base template** — `workflows/prompts/classifier.md`, resolved
+  through the same overlay machinery as any other prompt (overlay wins by name;
+  `lastlight fork classifier` copies it into `instance/`). It holds the framing,
+  the global disambiguation rules, the five harness-owned **control** categories
+  (`APPROVE`/`REJECT`/`STATUS`/`RESET`/`CHAT`), and the `{{categories}}` /
+  `{{examples}}` / `{{intentTokens}}` slots.
+- **Per-workflow categories.** Each workflow YAML contributes its own category
+  via a `classification:` block (`intent` + `description` + optional `examples`);
+  `build.yaml` owns `BUILD`, `pr-review.yaml` owns `REVIEW`, and so on. The
+  classifier enumerates `listAgentWorkflows()`, merges the blocks in canonical
+  order, and derives the token→intent vocabulary (token =
+  `intent.toUpperCase().replace(/-/g,"")`, so `qa-test` → `QATEST`) from the same
+  blocks. The composition is memoised and rebuilt when the asset layers change.
+
+So a deployment can **add a routable intent by adding a workflow** — an overlay
+`incident.yaml` with `classification.intent: incident` teaches the classifier the
+`INCIDENT` category, the parser the token, and the router the route (see
+[data-driven routing](#data-driven-routing-for-new-intents)) with **no core
+edit**. The loader validates at boot that every `classification.intent` is unique
+and doesn't shadow a control intent.
+
+The model must reply in exactly four lines:
 
 ```
 INTENT: BUILD
@@ -205,10 +229,30 @@ Failure modes:
 Called only on (a) GitHub `comment.created` with maintainer @-mention,
 and (b) Slack `message`. Never on deterministic events.
 
+### Data-driven routing for new intents
+
+The router keeps its bespoke, context-dependent branches for the well-known
+intents (`build` → `pr-fix` on a PR vs `github-orchestrator` on an issue;
+`explore` is a no-op on a PR; the `security-scan` diversion). For an intent
+*outside* that well-known set — a new one an overlay workflow introduced — the
+trailing generic default falls back to `getWorkflowByIntent(intent)` (the
+workflow whose `classification.intent` matches), routing to it on both GitHub
+comments and Slack. It routes to that single workflow uniformly across surfaces;
+a deployment needing surface-specific routing for its new intent can still add
+`routes.github` / `routes.slack` overrides. Well-known intents never hit the
+fallback, so their established routing is untouched.
+
+**New issues** (`issue.opened`) route through the same composed classifier:
+`classifyIssueIntent()` runs the main classifier over the issue title + body and
+sends a `QUESTION` intent to the `answer` workflow, everything else to triage
+(the safe default). This replaced a separate hardcoded question-vs-work prompt —
+`answer.yaml` now owns the `QUESTION` category, so the two share one vocabulary.
+
 A second, smaller helper — `classifyCommentAddsInfo` — answers a single
 yes/no question (does a reporter's plain comment add substantive information,
 or is it social noise?) and gates the [reporter-driven re-triage](#reporter-driven-re-triage)
-branch for non-`needs-info` issues. Same cheap-helper path; fail-closed
+branch for non-`needs-info` issues. Its prompt is the forkable
+`workflows/prompts/classify-adds-info.md`. Same cheap-helper path; fail-closed
 (error → no re-triage).
 
 ## `llm.ts` — the cheap-helper path
@@ -218,12 +262,21 @@ which does direct HTTP POSTs to provider APIs (Anthropic Messages,
 OpenAI Chat Completions, OpenRouter passthrough). No agent SDK, no
 tools, no streaming — single-turn calls only.
 
-Provider auto-detection at `llm.ts:91–105`:
+Fast-model resolution (`defaultFastModel(taskType)` in `llm.ts`), in order:
 
-1. `OPENCODE_MODELS` JSON for the relevant key (`screener`, `classifier`)
-2. `ANTHROPIC_API_KEY` set → `anthropic/claude-haiku-4-5-20251001`
-3. `OPENAI_API_KEY` set → `openai/gpt-5.4-mini`
-4. `OPENROUTER_API_KEY` set → `openrouter/google/gemini-2.5-flash`
+1. The config `models:` map for the task key (`models.classifier`,
+   `models.screener`) — set it in `config.yaml` like any other per-task model.
+   Env `OPENCODE_MODELS` / `LASTLIGHT_MODELS` is layered into this map at
+   config-load, so it's covered here too (env wins over `config.yaml`).
+2. The env `OPENCODE_MODELS` JSON read directly — a fallback for contexts where
+   runtime config isn't loaded (some CLI / test paths).
+3. First configured provider's fast model, in registry order:
+   `ANTHROPIC_API_KEY` → `anthropic/claude-haiku-4-5-20251001`,
+   else `OPENAI_API_KEY` → `openai/gpt-5.4-mini`,
+   else `OPENROUTER_API_KEY` → `openrouter/google/gemini-2.5-flash`.
+
+Only an **explicit** per-task entry counts — never `models.default` — so the
+cheap helpers stay cheap unless a deployment deliberately pins them.
 
 Single retry on 429 / 5xx with a 750 ms back-off; never retries on
 other 4xx (those are real errors).
@@ -282,11 +335,14 @@ dispatching) gets its own branch.
 | Piece | File |
 |---|---|
 | `routeEvent`, `RoutingResult`, `MAINTAINER_ROLES`, `BOT_MENTION` regex | `src/engine/router.ts` |
-| Build-intent classifier | `src/engine/screen/classifier.ts` |
+| Build-intent classifier (compose + parse) | `src/engine/screen/classifier.ts` |
+| Composable base prompt + adds-info prompt | `workflows/prompts/classifier.md`, `workflows/prompts/classify-adds-info.md` |
+| Per-workflow category source | `classification:` block in each `workflows/<name>.yaml` |
+| Intent → workflow fallback | `getWorkflowByIntent()` in `src/workflows/loader.ts` |
 | Injection screener | `src/engine/screen/screen.ts` |
 | Direct provider calls + model auto-detect | `src/engine/llm.ts` |
 | Harness consumer (skill → handler) | `src/index.ts:560–1124` |
-| URL extraction fallback | `extractGithubRefFromText()` in `classifier.ts:182–189` |
+| URL extraction fallback | `extractGithubRefFromText()` in `classifier.ts` |
 
 ## Rebuild notes
 
@@ -311,6 +367,9 @@ dispatching) gets its own branch.
   comment and every Slack message, so cost it. SQLite handles it
   trivially; a re-implementation on a remote DB should cache the active
   set of `triggerId`s in memory.
-- **Treat the classifier prompt as code.** A change to the intent set,
-  the output format, or the fallback rules ripples through every chat
-  surface. Version it like a config file; test it with golden cases.
+- **Treat the classifier prompt as code.** A change to the base template's
+  output format or fallback rules ripples through every chat surface; the intent
+  set itself is now data (one `classification:` block per workflow). Version both
+  like config; test with golden cases (`buildClassifierPrompt()` is pure and
+  snapshot-friendly). Keep the base template and the per-workflow blocks in sync
+  with the token→intent vocabulary they compose into.

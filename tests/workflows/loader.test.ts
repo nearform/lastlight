@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { setWorkflowDir, clearWorkflowCache, getWorkflow, getCronWorkflows, loadPromptTemplate, resolveSkillPaths } from "#src/workflows/loader.js";
+import { setWorkflowDir, clearWorkflowCache, getWorkflow, getCronWorkflows, loadPromptTemplate, resolveSkillPaths, getWorkflowByIntent, validateAssets } from "#src/workflows/loader.js";
 
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "loader-test-"));
@@ -485,5 +485,68 @@ describe("loader — resolveSkillPaths", () => {
 
   it("throws on path-traversal in skill name", () => {
     expect(() => resolveSkillPaths(["#src/etc/passwd"])).toThrow(/Invalid skill name/);
+  });
+});
+
+describe("loader — classifier classification blocks (issue #164)", () => {
+  let dir: string;
+
+  function writeClassifierTemplate(): void {
+    mkdirSync(join(dir, "prompts"), { recursive: true });
+    writeFileSync(join(dir, "prompts", "classifier.md"), "{{categories}}\n{{examples}}\n{{intentTokens}}");
+  }
+
+  function writeWorkflow(name: string, intent: string): void {
+    writeFileSync(
+      join(dir, `${name}.yaml`),
+      `
+kind: agent
+name: ${name}
+classification:
+  intent: ${intent}
+  description: "${intent.toUpperCase()} — do a ${intent}"
+phases:
+  - name: phase_0
+    type: context
+`.trim(),
+    );
+  }
+
+  beforeEach(() => {
+    dir = makeTempDir();
+    setWorkflowDir(dir);
+    clearWorkflowCache();
+    writeClassifierTemplate();
+  });
+
+  it("getWorkflowByIntent returns the owning workflow", () => {
+    writeWorkflow("incident-flow", "incident");
+    expect(getWorkflowByIntent("incident")?.name).toBe("incident-flow");
+    expect(getWorkflowByIntent("nope")).toBeUndefined();
+  });
+
+  it("validateAssets passes for a single classification owner", () => {
+    writeWorkflow("incident-flow", "incident");
+    expect(() => validateAssets()).not.toThrow();
+  });
+
+  it("validateAssets rejects two workflows claiming the same intent", () => {
+    writeWorkflow("incident-a", "incident");
+    writeWorkflow("incident-b", "incident");
+    expect(() => validateAssets()).toThrow(/both claim classifier intent "incident"/);
+  });
+
+  it("validateAssets rejects a workflow claiming a reserved control intent", () => {
+    writeWorkflow("chatty", "chat");
+    expect(() => validateAssets()).toThrow(/reserved control intent/);
+  });
+
+  it("validateAssets rejects a missing base classifier template", () => {
+    // Remove the template written by beforeEach by pointing at a fresh dir.
+    dir = makeTempDir();
+    setWorkflowDir(dir);
+    clearWorkflowCache();
+    writeWorkflow("incident-flow", "incident");
+    expect(() => validateAssets()).toThrow(/classifier\.md/);
   });
 });
