@@ -262,12 +262,21 @@ which does direct HTTP POSTs to provider APIs (Anthropic Messages,
 OpenAI Chat Completions, OpenRouter passthrough). No agent SDK, no
 tools, no streaming — single-turn calls only.
 
-Provider auto-detection at `llm.ts:91–105`:
+Fast-model resolution (`defaultFastModel(taskType)` in `llm.ts`), in order:
 
-1. `OPENCODE_MODELS` JSON for the relevant key (`screener`, `classifier`)
-2. `ANTHROPIC_API_KEY` set → `anthropic/claude-haiku-4-5-20251001`
-3. `OPENAI_API_KEY` set → `openai/gpt-5.4-mini`
-4. `OPENROUTER_API_KEY` set → `openrouter/google/gemini-2.5-flash`
+1. The config `models:` map for the task key (`models.classifier`,
+   `models.screener`) — set it in `config.yaml` like any other per-task model.
+   Env `OPENCODE_MODELS` / `LASTLIGHT_MODELS` is layered into this map at
+   config-load, so it's covered here too (env wins over `config.yaml`).
+2. The env `OPENCODE_MODELS` JSON read directly — a fallback for contexts where
+   runtime config isn't loaded (some CLI / test paths).
+3. First configured provider's fast model, in registry order:
+   `ANTHROPIC_API_KEY` → `anthropic/claude-haiku-4-5-20251001`,
+   else `OPENAI_API_KEY` → `openai/gpt-5.4-mini`,
+   else `OPENROUTER_API_KEY` → `openrouter/google/gemini-2.5-flash`.
+
+Only an **explicit** per-task entry counts — never `models.default` — so the
+cheap helpers stay cheap unless a deployment deliberately pins them.
 
 Single retry on 429 / 5xx with a 750 ms back-off; never retries on
 other 4xx (those are real errors).

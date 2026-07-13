@@ -23,6 +23,7 @@
  */
 
 import { PROVIDERS, providerByPrefix, type ApiType, type ProviderSpec } from "../providers.js";
+import { getRuntimeConfig } from "../config/config.js";
 
 export type ChatRole = "system" | "user" | "assistant";
 
@@ -95,12 +96,23 @@ export function resolveProvider(model: string): ResolvedProvider {
 
 /**
  * Resolve the model id for a tiny one-shot helper call (classifier / screener).
- * Prefers explicit per-task overrides from OPENCODE_MODELS, then the first
- * configured provider in `PROVIDERS` order (registry order: Anthropic first,
- * then OpenAI, OpenRouter, then the rest — see `src/providers.ts`).
+ * Precedence for a given `taskType`:
+ *   1. an explicit per-task entry in the config `models:` map (`models.classifier`,
+ *      `models.screener`) — which already has env `OPENCODE_MODELS` /
+ *      `LASTLIGHT_MODELS` layered on top at config-load, so this covers both
+ *      config.yaml and the env override in one lookup;
+ *   2. the env `OPENCODE_MODELS` map read directly — a fallback for contexts
+ *      where runtime config isn't loaded (some CLI / test paths);
+ *   3. the first configured provider in `PROVIDERS` order (registry order:
+ *      Anthropic first, then OpenAI, OpenRouter, then the rest — `src/providers.ts`).
+ *
+ * Note: only an EXPLICIT per-task entry counts — never `models.default` — so the
+ * cheap helpers stay cheap unless a deployment deliberately pins them.
  */
 export function defaultFastModel(taskType?: string): string {
   if (taskType) {
+    const configured = getRuntimeConfig()?.models?.[taskType];
+    if (configured) return configured;
     const override = readOpencodeModelOverride(taskType);
     if (override) return override;
   }

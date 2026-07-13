@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { callLlm, chat, defaultFastModel, resolveProvider } from "#src/engine/llm.js";
 import { PROVIDER_ENV_KEYS } from "#src/providers.js";
+import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from "#src/config/config.js";
 
 describe("resolveProvider", () => {
   it("prefers explicit provider prefix", () => {
@@ -41,8 +42,9 @@ describe("defaultFastModel", () => {
   beforeEach(() => {
     for (const key of PROVIDER_ENV_KEYS) delete process.env[key];
     delete process.env.OPENCODE_MODELS;
+    resetRuntimeConfigForTests();
   });
-  afterEach(() => { process.env = { ...ORIGINAL_ENV }; });
+  afterEach(() => { process.env = { ...ORIGINAL_ENV }; resetRuntimeConfigForTests(); });
 
   it("picks an OpenAI model when only OPENAI_API_KEY is set", () => {
     process.env.OPENAI_API_KEY = "k";
@@ -83,6 +85,26 @@ describe("defaultFastModel", () => {
     process.env.OPENAI_API_KEY = "k";
     process.env.OPENCODE_MODELS = "not-json";
     expect(defaultFastModel("classifier")).toMatch(/^openai\//);
+  });
+
+  it("resolves a per-task model from the config models map", () => {
+    process.env.ANTHROPIC_API_KEY = "k";
+    setRuntimeConfig({
+      models: { default: "anthropic/claude-sonnet-4-6", classifier: "anthropic/claude-haiku-4-5-20251001" },
+    } as unknown as LastLightConfig);
+    expect(defaultFastModel("classifier")).toBe("anthropic/claude-haiku-4-5-20251001");
+    // A task without its own entry never inherits models.default — it stays on
+    // the provider fast model.
+    expect(defaultFastModel("screener")).toMatch(/^anthropic\//);
+    expect(defaultFastModel("screener")).not.toBe("anthropic/claude-sonnet-4-6");
+  });
+
+  it("prefers the config models map over provider order", () => {
+    process.env.ANTHROPIC_API_KEY = "k";
+    setRuntimeConfig({
+      models: { default: "anthropic/x", classifier: "openai/pinned-mini" },
+    } as unknown as LastLightConfig);
+    expect(defaultFastModel("classifier")).toBe("openai/pinned-mini");
   });
 });
 

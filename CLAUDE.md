@@ -50,9 +50,13 @@ Codex model is used for a sandbox phase).
 
 The cheap-helper path (`src/engine/llm.ts`, used by screener + classifier)
 bypasses OpenCode and dispatches directly to the same three providers.
-`defaultFastModel()` prefers Anthropic > OpenAI > OpenRouter when multiple
-keys are set — direct provider routes avoid OpenRouter's per-token markup
-when possible.
+`defaultFastModel(taskType)` resolves the model in order: the config `models:`
+map for the task key (`models.classifier` / `models.screener` in `config.yaml`,
+which env `OPENCODE_MODELS` is layered into) → the env `OPENCODE_MODELS` map
+directly → the first configured provider's fast model (Anthropic > OpenAI >
+OpenRouter — direct routes avoid OpenRouter's per-token markup). Only an
+explicit per-task entry counts, never `models.default`, so the helpers stay
+cheap unless deliberately pinned.
 
 Two execution surfaces:
 - **Sandbox** — `opencode run --format json` invoked per workflow phase
