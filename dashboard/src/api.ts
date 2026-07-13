@@ -555,6 +555,9 @@ export const api = {
     req<{ approvals: WorkflowApproval[] }>(`/workflow-runs/${id}/approvals`),
   cancelWorkflowRun: (id: string) =>
     req<{ cancelled: string }>(`/workflow-runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+  // Retry a FAILED run — resumes from the phase that failed with the same context.
+  retryWorkflowRun: (id: string) =>
+    req<{ retrying: string }>(`/workflow-runs/${encodeURIComponent(id)}/retry`, { method: "POST" }),
   workflowDefinition: (name: string) =>
     req<{ workflow: WorkflowDefinition }>(`/workflows/${encodeURIComponent(name)}`),
   workflows: () => req<{ workflows: WorkflowSummary[] }>("/workflows"),

@@ -50,6 +50,7 @@ interface DetailPanelProps {
   run: WorkflowRun;
   approvals: WorkflowApproval[];
   onCancel: (id: string) => void;
+  onRetry: (id: string) => void;
   onApprovalResponded: () => void;
   onOpenDefinition?: (name: string) => void;
 }
@@ -198,8 +199,9 @@ function ResizablePipeline({
 
 // ── Detail panel ────────────────────────────────────────────────────────
 
-function DetailPanel({ run, approvals, onCancel, onApprovalResponded, onOpenDefinition }: DetailPanelProps) {
+function DetailPanel({ run, approvals, onCancel, onRetry, onApprovalResponded, onOpenDefinition }: DetailPanelProps) {
   const canCancel = run.status === "running" || run.status === "paused";
+  const canRetry = run.status === "failed";
 
   const [definition, setDefinition] = useState<WorkflowDefinition | null>(null);
   const [definitionError, setDefinitionError] = useState<string | null>(null);
@@ -369,6 +371,15 @@ function DetailPanel({ run, approvals, onCancel, onApprovalResponded, onOpenDefi
             onClick={() => onCancel(run.id)}
           >
             Cancel
+          </button>
+        )}
+        {canRetry && (
+          <button
+            className="btn btn-xs btn-warning btn-outline ml-auto"
+            onClick={() => onRetry(run.id)}
+            title="Re-run from the phase that failed, keeping the same context"
+          >
+            Retry
           </button>
         )}
       </div>
@@ -563,6 +574,15 @@ export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowLis
     }
   };
 
+  const handleRetry = async (id: string) => {
+    try {
+      await api.retryWorkflowRun(id);
+      await load();
+    } catch {
+      /* ignore */
+    }
+  };
+
   const detailForSelected = detailRun?.id === selectedId ? detailRun : null;
   const listRow = visibleRuns.find((r) => r.id === selectedId) ?? null;
   // Prefer the live-updating list row, but splice in `context` (absent from the
@@ -613,6 +633,7 @@ export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowLis
             {visibleRuns.map((run) => {
               const active = run.id === selectedId;
               const canCancel = run.status === "running" || run.status === "paused";
+              const canRetry = run.status === "failed";
               const hasApprovals = approvals.some((a) => a.workflowRunId === run.id);
               return (
                 <li key={run.id} className="border-b border-base-300/40">
@@ -664,6 +685,18 @@ export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowLis
                         cancel
                       </button>
                     )}
+                    {canRetry && (
+                      <button
+                        className="btn btn-2xs btn-warning btn-outline mt-1 h-5 min-h-0 text-2xs"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRetry(run.id);
+                        }}
+                        title="Re-run from the phase that failed, keeping the same context"
+                      >
+                        retry
+                      </button>
+                    )}
                   </div>
                 </li>
               );
@@ -692,6 +725,7 @@ export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowLis
             run={selectedRun}
             approvals={approvals}
             onCancel={handleCancel}
+            onRetry={handleRetry}
             onApprovalResponded={load}
             onOpenDefinition={onOpenDefinition}
           />

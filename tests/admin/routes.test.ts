@@ -630,6 +630,68 @@ describe("POST /workflow-runs/:id/cancel", () => {
   });
 });
 
+describe("POST /workflow-runs/:id/retry", () => {
+  function makeRetryDb(run: { id: string; status: string } | null) {
+    return {
+      ...((mockDb as unknown) as Record<string, unknown>),
+      runs: {
+        ...((mockDb as unknown as { runs: Record<string, unknown> }).runs),
+        getRun: vi.fn(() =>
+          run
+            ? {
+                id: run.id,
+                workflowName: "explore",
+                triggerId: "slack:t:c:th",
+                currentPhase: "read_context",
+                phaseHistory: [],
+                status: run.status,
+                context: {},
+                startedAt: "",
+                updatedAt: "",
+              }
+            : null,
+        ),
+      },
+    } as unknown as StateDb;
+  }
+
+  it("returns 404 when the run is not found", async () => {
+    const db = makeRetryDb(null);
+    const retryWorkflow = vi.fn(async () => {});
+    const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "", retryWorkflow }));
+    const res = await request(app, "/workflow-runs/missing/retry", { method: "POST" });
+    expect(res.status).toBe(404);
+    expect(retryWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for a non-failed run and does not dispatch", async () => {
+    const db = makeRetryDb({ id: "r1", status: "running" });
+    const retryWorkflow = vi.fn(async () => {});
+    const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "", retryWorkflow }));
+    const res = await request(app, "/workflow-runs/r1/retry", { method: "POST" });
+    expect(res.status).toBe(400);
+    expect(retryWorkflow).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 when no retry callback is wired", async () => {
+    const db = makeRetryDb({ id: "r1", status: "failed" });
+    const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
+    const res = await request(app, "/workflow-runs/r1/retry", { method: "POST" });
+    expect(res.status).toBe(503);
+  });
+
+  it("dispatches the retry callback for a failed run and returns 200", async () => {
+    const db = makeRetryDb({ id: "r1", status: "failed" });
+    const retryWorkflow = vi.fn(async () => {});
+    const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "", retryWorkflow }));
+    const res = await request(app, "/workflow-runs/r1/retry", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ retrying: "r1" });
+    expect(retryWorkflow).toHaveBeenCalledTimes(1);
+    expect(retryWorkflow.mock.calls[0][1]).toBe("admin");
+  });
+});
+
 describe("GET /workflow-runs/:id/approvals", () => {
   function makeApprovalsDb(run: unknown, approvals: unknown[]) {
     const listForWorkflow = vi.fn(() => approvals);

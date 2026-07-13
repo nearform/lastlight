@@ -126,12 +126,25 @@ function makeCallbacks(
 }
 
 /**
- * Resume any orphaned workflow run by calling runWorkflow directly with the
- * existing workflowId. We bypass runSimpleWorkflow because that wrapper
- * always creates a fresh workflow_runs row — we want to keep the existing
- * one and let the runner's per-phase dedup handle "what's already done".
+ * Resume a workflow run by calling runWorkflow directly with the existing
+ * workflowId. We bypass runSimpleWorkflow because that wrapper always creates a
+ * fresh workflow_runs row — we want to keep the existing one and let the
+ * runner's per-phase dedup (`shouldRunPhase`) handle "what's already done".
+ *
+ * Two callers, same machinery:
+ *  - `resumeOrphanedWorkflows` — boot recovery of `running` runs after a crash.
+ *  - the admin/CLI **retry** path (`config.retryWorkflow` in `src/index.ts`) —
+ *    a user retrying a `failed` run. The failed phase's ledger row is
+ *    `success=0`, so it re-runs while already-succeeded phases skip; context is
+ *    reconstructed here from the stored `run.context` + `run.scratch`, which is
+ *    why retry works for Slack-thread-scoped runs the lossy `resumeWorkflow`
+ *    (owner/repo/issueNumber) path can't handle.
+ *
+ * The caller MUST have already flipped the row to `running` (`setRunning` /
+ * `restartRun`) — this function does not change the pre-run status, only the
+ * terminal `finishRun` at the end.
  */
-async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Promise<void> {
+export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Promise<void> {
   const stored = (run.context || {}) as Record<string, unknown>;
 
   // Derive owner/repo: GitHub trigger ids encode it as owner/repo#N;

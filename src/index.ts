@@ -25,7 +25,7 @@ import { GitHubClient } from "./engine/github/github.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
 import { runSimpleWorkflow, PR_HEADREF_PREPOPULATE_WORKFLOWS, type SimpleWorkflowRequest } from "./workflows/simple.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
-import { resumeOrphanedWorkflows } from "./workflows/resume.js";
+import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
 import {
   ProgressNotifier,
   GitHubTransport,
@@ -664,6 +664,34 @@ async function main() {
     }
   });
 
+  // Options for the ledger-driven resume machinery (`resumeSimpleRun`). Shared
+  // by the boot-time orphan sweep (`resumeOrphanedWorkflows`, below) AND the
+  // dashboard/CLI "retry a failed run" callback (`retryWorkflow`, in mountAdmin)
+  // so both reconstruct context from the stored `workflow_runs` row identically.
+  const resumeOpts: ResumeOptions = {
+    db,
+    github,
+    config: {
+      model: config.model,
+      maxTurns: config.maxTurns,
+      stateDir: config.stateDir,
+      sandboxDir: config.sandboxDir,
+      sessionsDir: config.sessionsDir,
+      sandbox: config.sandbox,
+      buildAssets: config.buildAssets,
+      buildAssetsDir: config.buildAssetsDir,
+      otel: config.otel,
+    },
+    models: config.models,
+    variants: config.variants,
+    approvalConfig: config.approval,
+    bootstrapLabel: config.bootstrapLabel,
+    publicUrl: config.publicUrl,
+    slackPoster: slackConnector
+      ? (channelId, threadId, msg) => slackConnector!.sendMessage(channelId, threadId, msg).then(() => {})
+      : undefined,
+  };
+
   // Mount admin dashboard on the shared HTTP server (always available).
   {
     mountAdmin(app, db, {
@@ -718,6 +746,32 @@ async function main() {
           sender,
           _triggerType: "admin",
         }).catch((err) => console.error(`[admin] Resume failed:`, err));
+      },
+      // Retry a FAILED run, resuming from the phase that failed with the same
+      // context. Unlike `resumeWorkflow` (approval-gate resume, which rebuilds a
+      // lossy owner/repo/issueNumber context and bails on non-issue runs), this
+      // re-enters via `resumeSimpleRun`, reconstructing the full context from the
+      // stored `workflow_runs.context` + `scratch` — so it also retries
+      // Slack-thread-scoped runs (e.g. an `explore` started from Slack). The
+      // failed phase's ledger row is `success=0`, so it re-runs while
+      // already-succeeded phases skip.
+      retryWorkflow: async (workflowRun, sender) => {
+        if (workflowRun.status !== "failed") {
+          console.warn(`[admin] Cannot retry ${workflowRun.id}: status is '${workflowRun.status}', not 'failed'`);
+          return;
+        }
+        // Compare-and-set: flip failed→running and clear the terminal markers.
+        // If a racing retry already flipped it, changes===0 and we don't dispatch.
+        const changed = db.runs.restartRun(workflowRun.id);
+        if (changed !== 1) {
+          console.warn(`[admin] Retry ${workflowRun.id}: run is no longer 'failed' (raced) — skipping dispatch`);
+          return;
+        }
+        const fresh = db.runs.getRun(workflowRun.id);
+        if (!fresh) return;
+        console.log(`[admin] Retrying ${fresh.workflowName} run ${fresh.id} (was on phase=${workflowRun.currentPhase}) by ${sender}`);
+        resumeSimpleRun(fresh, resumeOpts).catch((err) =>
+          console.error(`[admin] Retry ${fresh.id} failed:`, err));
       },
     });
     console.log(`[admin] Dashboard mounted at /admin`);
@@ -946,29 +1000,7 @@ async function main() {
   // failed and re-dispatch each run so the runner can pick up after the last
   // completed phase. Skips 'paused' runs — those intentionally wait for a
   // human approval and are resumed via the dashboard / GitHub comment flow.
-  resumeOrphanedWorkflows({
-    db,
-    github,
-    config: {
-      model: config.model,
-      maxTurns: config.maxTurns,
-      stateDir: config.stateDir,
-      sandboxDir: config.sandboxDir,
-      sessionsDir: config.sessionsDir,
-      sandbox: config.sandbox,
-      buildAssets: config.buildAssets,
-      buildAssetsDir: config.buildAssetsDir,
-      otel: config.otel,
-    },
-    models: config.models,
-    variants: config.variants,
-    approvalConfig: config.approval,
-    bootstrapLabel: config.bootstrapLabel,
-    publicUrl: config.publicUrl,
-    slackPoster: slackConnector
-      ? (channelId, threadId, msg) => slackConnector!.sendMessage(channelId, threadId, msg).then(() => {})
-      : undefined,
-  }).catch((err) => console.error("[main] Resume sweep failed:", err));
+  resumeOrphanedWorkflows(resumeOpts).catch((err) => console.error("[main] Resume sweep failed:", err));
 
   console.log("[main] Ready to receive events");
 

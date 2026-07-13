@@ -319,6 +319,60 @@ describe("resolveReplyGateAndResume — the socratic explore-reply atomic op", (
   });
 });
 
+describe("restartRun — retry a failed run", () => {
+  it("flips failed→running, clears finished_at and context.error, bumps restart_count", () => {
+    const runId = makeRun();
+    // Simulate a failed run: finishRun writes status, finished_at and the
+    // context.error annotation.
+    db.runs.finishRun(runId, "failed", { error: "boom" });
+    const failed = db.runs.getRun(runId)!;
+    expect(failed.status).toBe("failed");
+    expect(failed.finishedAt).toBeTruthy();
+    expect(failed.context).toEqual({ error: "boom" });
+
+    const changed = db.runs.restartRun(runId);
+    expect(changed).toBe(1);
+
+    const restarted = db.runs.getRun(runId)!;
+    expect(restarted.status).toBe("running");
+    expect(restarted.finishedAt).toBeFalsy();
+    // The stale error annotation is gone so the row no longer reads "failed at".
+    expect(restarted.context).toEqual({});
+    expect(restarted.restartCount).toBe(1);
+  });
+
+  it("preserves context (taskId, branch) and scratch across the restart", () => {
+    const runId = makeRun({
+      context: { taskId: "acme-1-explore-abcd1234", branch: "lastlight/1-foo", owner: "acme" },
+      scratch: { socratic: { qa: [{ question: "Q1", answer: "A1" }] } },
+    });
+    db.runs.finishRun(runId, "failed", { error: "read_context crashed" });
+
+    expect(db.runs.restartRun(runId)).toBe(1);
+
+    const restarted = db.runs.getRun(runId)!;
+    expect(restarted.context).toEqual({
+      taskId: "acme-1-explore-abcd1234",
+      branch: "lastlight/1-foo",
+      owner: "acme",
+    });
+    expect(restarted.scratch).toEqual({ socratic: { qa: [{ question: "Q1", answer: "A1" }] } });
+  });
+
+  it("is a compare-and-set: a non-failed run is not restarted (0 rows changed)", () => {
+    // A running run — the concurrency guard: a second retry click after the
+    // first already flipped it to running must not re-dispatch.
+    const runId = makeRun({ status: "running" });
+    expect(db.runs.restartRun(runId)).toBe(0);
+    expect(db.runs.getRun(runId)!.status).toBe("running");
+
+    // A succeeded run is likewise untouched.
+    const doneId = makeRun({ status: "succeeded" });
+    expect(db.runs.restartRun(doneId)).toBe(0);
+    expect(db.runs.getRun(doneId)!.status).toBe("succeeded");
+  });
+});
+
 describe("hasRunForTrigger", () => {
   it("returns true for a build run regardless of status", () => {
     makeRun({ workflowName: "build", triggerId: "acme/widgets#14", status: "succeeded" });

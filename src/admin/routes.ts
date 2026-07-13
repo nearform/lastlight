@@ -158,6 +158,13 @@ export interface AdminConfig {
   /** Optional callback to actively resume a paused workflow after dashboard approval */
   resumeWorkflow?: (workflowRun: WorkflowRun, sender: string) => Promise<void>;
   /**
+   * Optional callback to retry a FAILED workflow run, resuming from the phase
+   * that failed with the same context (ledger-driven). Wired in `src/index.ts`;
+   * absent in environments without the runner (tests, CLI-only), in which case
+   * the retry endpoint reports 503.
+   */
+  retryWorkflow?: (workflowRun: WorkflowRun, sender: string) => Promise<void>;
+  /**
    * Cron scheduler. When supplied, the admin Crons tab can list/toggle/edit
    * registered cron jobs. Optional so the admin routes still mount in
    * environments where the scheduler isn't running (tests, CLI).
@@ -990,6 +997,28 @@ export function createAdminRoutes(
       }
     }
     return c.json({ cancelled: id, killedContainers: killed });
+  });
+
+  // Retry a FAILED workflow run — resume from the phase that failed with the
+  // same context. Only `failed` runs are retryable; the callback flips the row
+  // failed→running (compare-and-set) and re-dispatches via the same
+  // ledger-driven resume path the boot-recovery sweep uses. Sits under the
+  // `authMiddleware` guard above, like cancel/respond.
+  app.post("/workflow-runs/:id/retry", async (c) => {
+    const id = c.req.param("id");
+    const run = db.runs.getRun(id);
+    if (!run) return c.json({ error: "workflow run not found" }, 404);
+    if (run.status !== "failed") {
+      return c.json({ error: `cannot retry a run with status '${run.status}'` }, 400);
+    }
+    if (!config.retryWorkflow) {
+      return c.json({ error: "retry not available (runner not wired)" }, 503);
+    }
+    // Fire-and-forget: restartRun (inside the callback) flips status→running
+    // atomically, so a second immediate retry click 400s on the status guard.
+    config.retryWorkflow(run, "admin").catch((err) =>
+      console.error(`[admin] retry ${id} failed:`, err));
+    return c.json({ retrying: id });
   });
 
   // ── Workflow definitions ─────────────────────────────────────────

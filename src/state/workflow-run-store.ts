@@ -330,6 +330,33 @@ export class WorkflowRunStore {
   }
 
   /**
+   * Restart a FAILED run so it can be retried from the phase that failed.
+   * Unlike {@link setRunning} this also clears the terminal markers a failure
+   * left behind — `finished_at` and the `context.error` string `flipFinished`
+   * wrote — so the row reads live again rather than "failed at …". The taskId,
+   * branch, scratch and phase_history are all preserved, so the ledger-driven
+   * re-dispatch (`resumeSimpleRun`) resumes from the failed phase with the same
+   * context.
+   *
+   * Guarded by `WHERE status = 'failed'` and returns the changed-row count so
+   * the caller can make retry a compare-and-set: a second concurrent retry
+   * click sees 0 rows changed and does NOT dispatch again.
+   */
+  restartRun(id: string): number {
+    const now = new Date().toISOString();
+    const info = this.db.prepare(`
+      UPDATE workflow_runs
+      SET status = 'running',
+          finished_at = NULL,
+          updated_at = ?,
+          restart_count = COALESCE(restart_count, 0) + 1,
+          context = json_remove(COALESCE(context, '{}'), '$.error')
+      WHERE id = ? AND status = 'failed'
+    `).run(now, id);
+    return info.changes;
+  }
+
+  /**
    * Increment the restart counter and return the new value. Used by
    * `resumeOrphanedWorkflows` to enforce a retry budget so a run that
    * crashes the host (agent OOM, etc.) eventually self-terminates instead

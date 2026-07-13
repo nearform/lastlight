@@ -10,6 +10,7 @@
  *   lastlight <github-url|ref>       Triage that issue (default — cheap)
  *   lastlight build <ref>            Run the FULL build cycle
  *   lastlight workflow list          Inspect recent workflow runs
+ *   lastlight workflow retry <id>    Re-run a failed run from where it failed
  *   lastlight session log <id> -f    Tail a sandbox session live
  *   lastlight logs search "<text>"   Search execution errors / transcripts
  *
@@ -253,6 +254,7 @@ ${chalk.bold("Trigger")}
 ${chalk.bold("Debug")} (read the running instance instead of SSH)
   lastlight workflow list [--status s] [--workflow name] [--limit n]
   lastlight workflow log <id> [--follow]
+  lastlight workflow retry <id>                (re-run a failed run from the phase that failed)
   lastlight session list [--limit n]
   lastlight session log <id> [--follow] [--since n] [--full]   (--full = raw, unformatted dump)
   lastlight logs search "<text>" [--scope errors|messages|all] [--limit n]
@@ -541,7 +543,16 @@ async function cmdWorkflow(): Promise<void> {
     }
     return;
   }
-  die("Usage: lastlight workflow list|log");
+  if (sub === "retry") {
+    const id = positionals[2];
+    if (!id) die("Usage: lastlight workflow retry <id>");
+    // Resumes a FAILED run from the phase that failed, keeping the same
+    // context. The server rejects any non-failed run with a 400.
+    const data = await apiPost(`/admin/api/workflow-runs/${id}/retry`, {});
+    out(chalk.green(`✓ retrying ${id}`), data);
+    return;
+  }
+  die("Usage: lastlight workflow list|log|retry");
 }
 
 // ── debug: sessions ───────────────────────────────────────────────────────────

@@ -45,6 +45,30 @@ Resume is **ledger-driven**: the runner always re-runs from the top and the
 `executions` table (via `shouldRunPhase`) skips already-completed phases — no
 per-workflow branching, no `currentPhase`-derived resume index.
 
+**Retry a failed run.** The dashboard's Retry button (and `lastlight workflow
+retry <id>`) reuses the exact same ledger-driven machinery via
+`config.retryWorkflow` (`src/index.ts`) → `WorkflowRunStore.restartRun` (flips
+`failed → running`, clears `finished_at`/`context.error`, compare-and-set so a
+double-click no-ops) → `resumeSimpleRun`. The failed phase's ledger row is
+`success=0`, so `shouldRunPhase` re-runs it while already-succeeded phases skip —
+resuming from the phase that failed with the same context, taskId and workspace.
+Unlike the approval `resumeWorkflow` path (which rebuilds a lossy
+owner/repo/issueNumber context), retry reconstructs the full context from the
+stored `workflow_runs.context` + `scratch`, so it also retries Slack-thread-scoped
+runs (e.g. an `explore` started from Slack).
+
+> **Caveat — skipped phases don't re-expose outputs.** A phase skipped on resume
+> because its ledger row is already `success=1` contributes **nothing** to the
+> in-memory `outputs` map: `PhaseExecutor.runStandard` returns no `outputVars` on
+> a dedup-`done` skip, and standard phases never persist `output_text`. So a
+> still-to-run phase that reads a *skipped* upstream via
+> `{{phaseOutputs.X.output}}` / an `output_var` would see it EMPTY. Every
+> production workflow avoids this by handing large context between phases through
+> committed build-assets / workspace files / `scratch` (explore writes
+> `explore-context.md` + `scratch.socratic.qa`; build/pr-review hand off via
+> committed docs), not `{{phaseOutputs}}` across a resume boundary. Keep it that
+> way when authoring retryable workflows.
+
 ## Phase types
 
 A phase is one entry in the `phases:` array of a workflow YAML.

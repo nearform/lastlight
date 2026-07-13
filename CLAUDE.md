@@ -452,6 +452,7 @@ lastlight health|security owner/repo   # repo-level report
 # Debug (read the admin API instead of SSH; all accept --json):
 lastlight workflow list [--status s] [--workflow name] [--limit n]
 lastlight workflow log <id> [--follow]
+lastlight workflow retry <id>          # re-run a failed run from the phase that failed
 lastlight session list|log <id> [--follow]
 lastlight logs search "<text>" [--scope errors|messages|all]
 lastlight server list                  # the lastlight-* docker containers
