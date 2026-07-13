@@ -33,6 +33,8 @@ const exec = promisify(execFile);
 
 /** SSH clone URL for the public core repo. */
 export const CORE_REPO = "git@github.com:nearform/lastlight.git";
+/** HTTPS URL for read-only operations (ls-remote from thin hosts). */
+const CORE_REPO_HTTPS = "https://github.com/nearform/lastlight.git";
 /** Default clone URL for the private deployment overlay (see CLAUDE.md). */
 export const OVERLAY_REPO_DEFAULT = "git@github-instance:cliftonc/lastlight-instance.git";
 /** Compose override the overlay ships; symlinked into the project root. */
@@ -253,6 +255,15 @@ function compareDrift(current: string | null, latest: string | null): RepoDrift 
   return { current, latest, behind };
 }
 
+async function overlayDriftForInstance(instance: string): Promise<RepoDrift> {
+  if (!isGitRepo(instance)) return compareDrift(null, null);
+  const [current, remote] = await Promise.all([
+    captureSoft("git", ["rev-parse", "HEAD"], instance),
+    captureSoft("git", ["ls-remote", "origin", "HEAD"], instance),
+  ]);
+  return compareDrift(current, remote ? parseLsRemoteSha(remote) : null);
+}
+
 /**
  * Commit SHA a pin (git tag/ref) resolves to on `origin`, or null. Uses
  * `ls-remote` (no fetch) with a glob so an *annotated* tag surfaces its peeled
@@ -267,6 +278,17 @@ async function resolvePinnedSha(home: string, pin: string): Promise<string | nul
   return ref ? parseLsRemoteSha(ref) : null;
 }
 
+async function resolvePinnedShaRemote(
+  pin: string,
+  lsRemote: (remote: string, ref: string) => Promise<string | null>,
+): Promise<string | null> {
+  const tags = await lsRemote(CORE_REPO_HTTPS, `refs/tags/${pin}*`);
+  const fromTag = pickTagCommit(tags ?? null, pin);
+  if (fromTag) return fromTag;
+  const ref = await lsRemote(CORE_REPO_HTTPS, pin);
+  return ref ? parseLsRemoteSha(ref) : null;
+}
+
 /**
  * Compute core + overlay drift from the local checkouts under `home`. When the
  * overlay pins a core version (`deploy.version`), core drift is measured against
@@ -278,17 +300,90 @@ export async function localDrift(
 ): Promise<{ core: RepoDrift; overlay: RepoDrift; pin: string | null }> {
   const instance = path.join(home, "instance");
   const pin = readCorePin(instance);
-  const [coreCur, coreLatest, ovCur, ovRemote] = await Promise.all([
+  const [coreCur, coreLatest] = await Promise.all([
     captureSoft("git", ["rev-parse", "HEAD"], home),
     pin
       ? resolvePinnedSha(home, pin)
       : captureSoft("git", ["ls-remote", "origin", "HEAD"], home).then((o) => (o ? parseLsRemoteSha(o) : null)),
-    isGitRepo(instance) ? captureSoft("git", ["rev-parse", "HEAD"], instance) : Promise.resolve(null),
-    isGitRepo(instance) ? captureSoft("git", ["ls-remote", "origin", "HEAD"], instance) : Promise.resolve(null),
   ]);
+  const overlay = await overlayDriftForInstance(instance);
   return {
     core: compareDrift(coreCur, coreLatest),
-    overlay: compareDrift(ovCur, ovRemote ? parseLsRemoteSha(ovRemote) : null),
+    overlay,
+    pin,
+  };
+}
+
+export interface ThinHostDriftDeps {
+  inspectImage?: () => Promise<unknown>;
+  lsRemote?: (remote: string, ref: string) => Promise<string | null>;
+  overlay?: () => Promise<{ overlay: RepoDrift; pin: string | null }>;
+}
+
+function extractImageRevision(info: unknown): string | null {
+  if (!info) return null;
+  const first = Array.isArray(info) ? info[0] : info;
+  if (!first || typeof first !== "object") return null;
+  const config = (first as Record<string, unknown>).Config;
+  const labels = config && typeof config === "object" ? (config as { Labels?: Record<string, unknown> }).Labels : null;
+  if (!labels) return null;
+  const revision =
+    labels["org.opencontainers.image.revision"] ?? labels["org.opencontainers.image.source-revision"];
+  if (typeof revision === "string" && /^[0-9a-f]{7,40}$/i.test(revision)) {
+    return revision;
+  }
+  return null;
+}
+
+export async function thinHostDrift(
+  home: string,
+  instance: string,
+  deps: ThinHostDriftDeps = {},
+): Promise<{ core: RepoDrift; overlay: RepoDrift; pin: string | null }> {
+  const inspectImage =
+    deps.inspectImage ??
+    (async () => {
+      const raw = await captureSoft("docker", ["image", "inspect", "lastlight-agent"], home);
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    });
+  const lsRemote = deps.lsRemote ?? ((remote: string, ref: string) => captureSoft("git", ["ls-remote", remote, ref]));
+  const overlayProvider =
+    deps.overlay ??
+    (async () => ({ overlay: await overlayDriftForInstance(instance), pin: readCorePin(instance) }));
+
+  const { overlay, pin } = await overlayProvider();
+
+  const inspect = await inspectImage();
+  const current = extractImageRevision(inspect);
+  if (!current) {
+    p.log.warn(
+      `Could not determine the core revision from the ${chalk.bold("lastlight-agent")} image. ` +
+        `Pull the published images with ${chalk.cyan("lastlight server update")}.`,
+    );
+  }
+
+  let latest: string | null = null;
+  if (pin) {
+    latest = await resolvePinnedShaRemote(pin, lsRemote);
+    if (!latest) {
+      p.log.warn(`Failed to resolve pinned core version ${chalk.bold(pin)} on ${CORE_REPO_HTTPS}.`);
+    }
+  } else {
+    const head = await lsRemote(CORE_REPO_HTTPS, "HEAD");
+    if (!head) {
+      p.log.warn(`Failed to resolve core HEAD on ${CORE_REPO_HTTPS}.`);
+    }
+    latest = head ? parseLsRemoteSha(head) : null;
+  }
+
+  return {
+    core: compareDrift(current, latest),
+    overlay,
     pin,
   };
 }
@@ -328,17 +423,71 @@ export interface UpdateOpts extends ServerOpts {
   local?: boolean;
 }
 
-/** Resolve the working dir and fail clearly if it isn't a checkout yet. */
-function requireHome(opts: ServerOpts): string {
-  const home = resolveServerHome(opts.home);
-  if (!isGitRepo(home)) {
-    p.log.error(
-      `No lastlight checkout at ${chalk.bold(home)}.\n` +
-        `  Run ${chalk.cyan("lastlight server setup")} first, or pass ${chalk.cyan("--home <dir>")}.`,
-    );
-    process.exit(1);
+export type WorkingDirLayout = "checkout" | "thin";
+
+export interface ResolvedHomeAndLayout {
+  home: string;
+  layout: WorkingDirLayout;
+}
+
+function layoutError(home: string, reason: string): never {
+  p.log.error(
+    `${reason}\n` +
+      `  Run ${chalk.cyan("lastlight server setup")} first, or pass ${chalk.cyan("--home <dir>")} to choose a different directory.`,
+  );
+  process.exit(1);
+}
+
+function readPackageName(home: string): string | null {
+  const pkgPath = path.join(home, "package.json");
+  if (!fs.existsSync(pkgPath)) return null;
+  try {
+    const raw = fs.readFileSync(pkgPath, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && "name" in parsed) {
+      const name = (parsed as Record<string, unknown>).name;
+      if (typeof name === "string") return name;
+    }
+    return null;
+  } catch {
+    return null;
   }
-  return home;
+}
+
+/** Resolve the working dir and classify its layout (checkout vs thin host). */
+export function resolveHomeAndLayout(opts: ServerOpts): ResolvedHomeAndLayout {
+  const home = path.resolve(resolveServerHome(opts.home));
+  if (!fs.existsSync(home)) {
+    layoutError(home, `No lastlight assets at ${chalk.bold(home)}.`);
+  }
+  const pkgName = readPackageName(home);
+  if (pkgName !== "lastlight") {
+    const reason =
+      pkgName === null
+        ? `No ${chalk.bold("package.json")} found in ${chalk.bold(home)}.`
+        : `Expected ${chalk.bold("package.json name")} to be ${chalk.bold("lastlight")}, found ${chalk.bold(pkgName)}.`;
+    layoutError(home, reason);
+  }
+  if (isGitRepo(home)) {
+    return { home, layout: "checkout" };
+  }
+  const instanceDir = path.join(home, "instance");
+  const composePath = path.join(home, "docker-compose.yml");
+  if (fs.existsSync(instanceDir) && fs.existsSync(composePath)) {
+    return { home, layout: "thin" };
+  }
+  layoutError(home, `The directory ${chalk.bold(home)} is not a lastlight checkout or thin-host bundle.`);
+}
+
+export function ensureLocalBuildAllowed(layout: WorkingDirLayout, command: string): void {
+  if (layout !== "thin") return;
+  const guidance = command.includes("--local")
+    ? `Re-run ${chalk.cyan("lastlight server update")} without ${chalk.cyan("--local")}, or execute it from a full checkout.`
+    : `Run ${chalk.cyan("lastlight server setup")} to provision a full checkout before running ${chalk.bold(command)}.`;
+  p.log.error(
+    `${chalk.bold(command)} is only supported from a full lastlight checkout.\n  ${guidance}`,
+  );
+  process.exit(1);
 }
 
 // ── commands ─────────────────────────────────────────────────────────────────
@@ -449,7 +598,7 @@ export async function serverSetup(opts: ServerOpts & { local?: boolean }): Promi
 
 /** `lastlight server start [service]`. */
 export async function serverStart(service: string | undefined, opts: ServerOpts): Promise<void> {
-  const home = requireHome(opts);
+  const { home } = resolveHomeAndLayout(opts);
   // The agent image is built locally (never published), and several services
   // reference the `lastlight-agent` tag. Starting before it exists yields an
   // opaque "pull access denied" from docker — pre-check and point at the build
@@ -474,14 +623,14 @@ async function agentImageExists(): Promise<boolean> {
 
 /** `lastlight server stop [service]`. */
 export async function serverStop(service: string | undefined, opts: ServerOpts): Promise<void> {
-  const home = requireHome(opts);
+  const { home } = resolveHomeAndLayout(opts);
   await composeRun(home, service ? `Stop ${service}` : "Stop stack (down)", stopArgv(service));
   p.log.success("Stopped.");
 }
 
 /** `lastlight server restart [service]` (default `agent`). */
 export async function serverRestart(service: string | undefined, opts: ServerOpts): Promise<void> {
-  const home = requireHome(opts);
+  const { home } = resolveHomeAndLayout(opts);
   const target = service ?? "agent";
   await composeRun(home, `Restart ${target}`, restartArgv(service));
   p.log.success(`Restarted ${target}.`);
@@ -539,6 +688,53 @@ async function pullImages(home: string, tag: string): Promise<void> {
   }
 }
 
+const COMPOSE_ASSETS = ["docker-compose.yml", "Caddyfile"] as const;
+
+export interface SyncComposeAssetsOptions {
+  home: string;
+  ref: string;
+  fetcher?: typeof fetch;
+}
+
+function writeFileAtomic(target: string, contents: string): void {
+  const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(16).slice(2)}`;
+  try {
+    fs.writeFileSync(tmp, contents, "utf8");
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch {
+      /* ignore cleanup errors */
+    }
+    throw err;
+  }
+}
+
+const composeTree = (ref: string) => (ref === "latest" ? "main" : ref);
+
+export async function syncComposeAssets({ home, ref, fetcher }: SyncComposeAssetsOptions): Promise<void> {
+  const fetchImpl = fetcher ?? fetch;
+  const tree = composeTree(ref);
+  p.log.step(chalk.bold(`Sync compose assets (${tree})`));
+  for (const file of COMPOSE_ASSETS) {
+    const url = `https://raw.githubusercontent.com/nearform/lastlight/${tree}/${file}`;
+    let response: Response;
+    try {
+      response = await fetchImpl(url, { cache: "no-store" });
+    } catch (err) {
+      throw new Error(`Failed to fetch ${file} from ${tree}: ${(err as Error).message}`);
+    }
+    if (!response.ok) {
+      throw new Error(`Failed to fetch ${file} from ${tree} (HTTP ${response.status}).`);
+    }
+    const body = await response.text();
+    writeFileAtomic(path.join(home, file), body);
+    p.log.info(`${chalk.bold(file)} ← ${chalk.dim(url)}`);
+  }
+  p.log.success(`Compose assets synced from ${tree}.`);
+}
+
 /**
  * `lastlight server build` — build the docker images FROM SOURCE without starting
  * anything. The local-build escape hatch: `server update` pulls prebuilt images
@@ -546,7 +742,8 @@ async function pullImages(home: string, tag: string): Promise<void> {
  * bring the stack up.
  */
 export async function serverBuild(opts: ServerOpts): Promise<void> {
-  const home = requireHome(opts);
+  const { home, layout } = resolveHomeAndLayout(opts);
+  ensureLocalBuildAllowed(layout, "server build");
   await buildImages(home);
   p.log.success(`Built. Start with: ${chalk.cyan("lastlight server start")}`);
 }
@@ -564,42 +761,61 @@ async function pinCore(home: string, pin: string): Promise<void> {
 
 /** `lastlight server update` — the deploy.sh-equivalent flow. */
 export async function serverUpdate(opts: UpdateOpts): Promise<void> {
-  const home = requireHome(opts);
+  const { home, layout } = resolveHomeAndLayout(opts);
   const pullCore = opts.core !== false;
   const pullOverlay = opts.overlay !== false;
   const doBuild = opts.build !== false;
   const instance = path.join(home, "instance");
 
-  // Overlay first: it's the declarative source of truth, so a freshly-bumped
-  // deploy.version must be visible before we converge the core checkout.
-  if (pullOverlay) {
-    if (isGitRepo(instance)) {
-      await runStep("Pull overlay", "git", ["-C", instance, "pull", "--ff-only"]);
-    } else {
-      p.log.warn("No overlay checkout at instance/ — skipping overlay pull.");
-    }
+  if (layout === "thin" && opts.local) {
+    ensureLocalBuildAllowed(layout, "server update --local");
   }
-  if (pullCore) {
-    const pin = readCorePin(instance);
-    if (pin) {
-      await pinCore(home, pin);
-    } else {
-      // Return to main (a previous pin may have left HEAD detached), then ff.
-      await runStep("Track core main", "git", ["-C", home, "checkout", "main"]);
-      await runStep("Pull core", "git", ["-C", home, "pull", "--ff-only", "origin", "main"]);
+
+  if (layout === "checkout") {
+    // Overlay first: it's the declarative source of truth, so a freshly-bumped
+    // deploy.version must be visible before we converge the core checkout.
+    if (pullOverlay) {
+      if (isGitRepo(instance)) {
+        await runStep("Pull overlay", "git", ["-C", instance, "pull", "--ff-only"]);
+      } else {
+        p.log.warn("No overlay checkout at instance/ — skipping overlay pull.");
+      }
+    }
+    if (pullCore) {
+      const pin = readCorePin(instance);
+      if (pin) {
+        await pinCore(home, pin);
+      } else {
+        // Return to main (a previous pin may have left HEAD detached), then ff.
+        await runStep("Track core main", "git", ["-C", home, "checkout", "main"]);
+        await runStep("Pull core", "git", ["-C", home, "pull", "--ff-only", "origin", "main"]);
+      }
+    }
+  } else {
+    if (pullOverlay) {
+      p.log.warn("Thin-host layout: skipping overlay pull — no git checkout present.");
+    }
+    if (pullCore) {
+      p.log.warn("Thin-host layout: skipping core pull — no git checkout present.");
     }
   }
 
   ensureOverrideSymlink(home);
 
+  const imageTag = resolveImageTag(instance);
+
   // Images: pull prebuilt from GHCR by default (seconds); `--local` builds from
   // source (minutes). `--no-build` skips both — just recreate + restart.
   if (doBuild) {
-    if (opts.local) {
+    if (layout === "checkout" && opts.local) {
       await buildImages(home);
     } else {
-      await pullImages(home, resolveImageTag(instance));
+      await pullImages(home, imageTag);
     }
+  }
+
+  if (layout === "thin") {
+    await syncComposeAssets({ home, ref: imageTag });
   }
 
   await composeRun(home, "Recreate services", upArgv());
@@ -621,10 +837,11 @@ export async function serverStatus(opts: ServerOpts): Promise<{
   drift: { core: RepoDrift; overlay: RepoDrift; pin: string | null };
   overrides: OverlayAsset[];
 }> {
-  const home = requireHome(opts);
+  const { home, layout } = resolveHomeAndLayout(opts);
   await composeRun(home, "Compose state", ["ps"]);
 
-  const drift = await localDrift(home);
+  const instance = path.join(home, "instance");
+  const drift = layout === "thin" ? await thinHostDrift(home, instance) : await localDrift(home);
   const row = (label: string, d: RepoDrift) =>
     `  ${chalk.bold(label.padEnd(8))} ${short(d.current)} → ${short(d.latest)}  ` +
     (d.behind ? chalk.yellow("behind") : d.latest ? chalk.green("up to date") : chalk.dim("unknown"));

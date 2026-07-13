@@ -25,6 +25,7 @@
     "deploy",
     "sandbox.Dockerfile",
     "docker-compose.yml",
+    "Caddyfile",
     ".claude-plugin",
     "plugins"
   ],
