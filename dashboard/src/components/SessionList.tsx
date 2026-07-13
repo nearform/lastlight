@@ -1,6 +1,7 @@
 import clsx from "clsx";
 import type { Session } from "../api";
 import { getSessionType } from "../sessionTypes";
+import { ProviderIcon } from "./ProviderIcon";
 
 function timeAgo(unix: number | null): string {
   if (unix == null) return "";
@@ -128,7 +129,10 @@ export function SessionList({
                   {highlight(title, query)}
                 </div>
                 <div className="flex gap-2 text-2xs text-base-content/40 w-full font-mono">
-                  <span className="truncate">{s.model ?? "---"}</span>
+                  <span className="inline-flex items-center gap-1 min-w-0">
+                    {s.model && <ProviderIcon model={s.model} size={11} />}
+                    <span className="truncate">{s.model ?? "---"}</span>
+                  </span>
                   <span>- {duration(s)}</span>
                 </div>
               </button>

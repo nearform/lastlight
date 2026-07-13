@@ -6,6 +6,7 @@ import { toBaseMessages } from "../adapters/lastlightToTimeline";
 import { processMessages, isToolPair } from "../timeline";
 import type { TimelineItem as TimelineItemT } from "../timeline";
 import { TimelineItem } from "./timeline/TimelineItem";
+import { ProviderIcon } from "./ProviderIcon";
 
 export type MessageOrder = "newest" | "oldest";
 
@@ -51,6 +52,16 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
       setShowConfirm(false);
     }
   }, [onTerminate]);
+
+  // The model the agent actually ran with rides along on assistant messages
+  // (the same field getSessionMeta reads for the sandbox list) — pull it from
+  // the already-streamed messages so we don't re-read the session JSONL.
+  const model = useMemo(() => {
+    for (const m of messages) {
+      if (m.role === "assistant" && typeof m.model === "string") return m.model;
+    }
+    return null;
+  }, [messages]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const userScrolledAwayRef = useRef(false);
@@ -120,6 +131,15 @@ export function MessageFeed({ sessionId, order, onOrderChange, searchQuery, isLi
       <div className="px-4 py-2 border-b border-base-300 bg-base-200/80 backdrop-blur flex items-center gap-3 shrink-0">
         <div className={clsx("w-1.5 h-1.5 rounded-full shrink-0", STATUS_DOT[status])} title={status} />
         <span className="text-xs font-mono text-base-content/60 truncate">{sessionId}</span>
+        {model && (
+          <span
+            className="inline-flex items-center gap-1 text-2xs font-mono text-base-content/70 bg-base-300/60 rounded px-1.5 py-0.5 shrink-0"
+            title="Model used for this session"
+          >
+            <ProviderIcon model={model} size={12} />
+            {model}
+          </span>
+        )}
         <span className="text-base-content/30 text-xs">-</span>
         <span className="text-xs text-base-content/60">
           <span className="text-base-content font-semibold">{items.length}</span>
