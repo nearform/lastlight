@@ -682,7 +682,7 @@ describe("POST /workflow-runs/:id/retry", () => {
 
   it("dispatches the retry callback for a failed run and returns 200", async () => {
     const db = makeRetryDb({ id: "r1", status: "failed" });
-    const retryWorkflow = vi.fn(async () => {});
+    const retryWorkflow = vi.fn(async (_run: unknown, _sender: string) => {});
     const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "", retryWorkflow }));
     const res = await request(app, "/workflow-runs/r1/retry", { method: "POST" });
     expect(res.status).toBe(200);
