@@ -159,7 +159,8 @@ lastlight server status               # compose state + core/overlay version dri
 	</p>
 	<pre><code>lastlight fork                        # list forkable workflows + agent-context (marks what's forked)
 lastlight fork &lt;workflow&gt;              # copy a workflow YAML + every prompt &amp; skill its phases reference
-lastlight fork agent-context [file]   # copy soul.md / rules.md / security.md (all, or one named file)</code></pre>
+lastlight fork agent-context [file]   # copy soul.md / rules.md / security.md (all, or one named file)
+lastlight fork classifier             # copy the base intent-classifier prompts (classifier.md + adds-info)</code></pre>
 	<p>
 		It writes into the overlay resolved from <code>--home</code> (else the cwd
 		if it's an overlay or checkout, else the server home); pass
