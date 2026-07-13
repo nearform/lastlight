@@ -26,11 +26,12 @@ either way it reads the defaults bundled with the CLI.
 ## Commands
 
 ```bash
-lastlight fork                       # list forkable workflows + agent-context files; marks what's already forked
-lastlight fork all                   # fork EVERY workflow (+ prompts & skills) plus all agent-context
+lastlight fork                       # list forkable workflows + agent-context + classifier; marks what's already forked
+lastlight fork all                   # fork EVERY workflow (+ prompts & skills) + all agent-context + the classifier
 lastlight fork <workflow>            # e.g. `lastlight fork build`
 lastlight fork agent-context         # all of soul.md / rules.md / security.md
 lastlight fork agent-context <file>  # a single persona file, e.g. soul.md
+lastlight fork classifier            # the base intent-classifier prompts
 ```
 
 `lastlight fork all` is the "fully fork the defaults" shortcut — handy for an
@@ -51,9 +52,31 @@ are skipped); `--home <dir>` targets a specific working directory.
   (`agent-context/*.md` — typically `soul.md`, `rules.md`, `security.md`) into
   `instance/agent-context/`. With no file argument it forks all of them; pass a
   filename for just one.
+- **`lastlight fork classifier`** copies the base intent-classifier prompts
+  (`workflows/prompts/classifier.md` — the framing + disambiguation + control
+  categories the router's classification is composed from — and
+  `workflows/prompts/classify-adds-info.md`). Each **workflow's own** category
+  text lives in that workflow's `classification:` block, so it already travels
+  with `lastlight fork <workflow>` — fork the classifier only to retune the
+  shared base or add/adjust the control categories.
 
-`agent-context` is forked only via the literal `agent-context` target — a bare
-name is always treated as a workflow.
+`agent-context` and `classifier` are forked only via their literal targets — a
+bare name is always treated as a workflow.
+
+### The intent classifier is workflow-driven
+
+The classifier that routes free-text comments/messages to a workflow composes
+its prompt from the forkable base **plus one `classification:` block per
+workflow YAML** (`intent` + `description` + `examples`). Two ways to customise
+routing in an overlay:
+
+- **Retune existing routing** — `fork classifier` and edit the base, or fork a
+  workflow and edit its `classification:` block.
+- **Add a new routable intent** — add a new workflow YAML in the overlay with
+  its own `classification.intent` (e.g. `intent: incident`). The classifier
+  learns the category, the parser learns the token, and the router routes it to
+  that workflow — **no core change**. The intent must be unique and must not be
+  a reserved control intent (`approve`/`reject`/`status`/`reset`/`chat`).
 
 ## Editing workflow
 

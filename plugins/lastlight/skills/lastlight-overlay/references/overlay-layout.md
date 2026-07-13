@@ -43,6 +43,14 @@ instance/
 effort), `routes`, `approvals`, and `disabled.*`. See the repo's
 `config/default.yaml` for the authoritative shape and keys.
 
+**Models.** `models.default` is the fallback for every agent phase; per-task
+keys (a phase name like `architect`, or a cheap helper `classifier` / `screener`)
+override it, each a `provider/model` string. The provider **API key** is env-only
+(`secrets/.env`), never in `config.yaml`. The `classifier`/`screener` helpers fall
+back to the first provider's fast model — not `models.default` — when unset, so an
+unpinned deployment routes cheaply. (Env `OPENCODE_MODELS` still works and is
+layered on top of the `models` map at load, so env wins over `config.yaml`.)
+
 ## Applying changes
 
 - config.yaml change, or an added/changed `.env` value → `lastlight server

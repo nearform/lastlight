@@ -38,6 +38,33 @@ Edit `instance/config.yaml` to set `managedRepos`, and optionally override
 `models`, `variants`, `routes`, `approvals`, `disabled.*`. Secrets stay in
 `instance/secrets/.env` (never in config.yaml).
 
+### Model setup
+
+Two halves — the **credential** (env) and the **model choice** (config):
+
+1. **Provider API key → `instance/secrets/.env`.** Set the key matching the
+   provider you'll use, e.g. `ANTHROPIC_API_KEY=…` (or `OPENAI_API_KEY`,
+   `OPENROUTER_API_KEY`, … — see the repo's `src/providers.ts` for the full
+   registry). Keys are env-only, never in `config.yaml`.
+2. **Model choice → `config.yaml` `models:` map.** `default` is the model every
+   agent phase uses unless overridden; add per-task keys to override individual
+   phases or the cheap helpers:
+
+   ```yaml
+   models:
+     default: anthropic/claude-sonnet-4-6      # every phase, provider/model form
+     architect: anthropic/claude-opus-4-8      # a specific phase
+     classifier: anthropic/claude-haiku-4-5-20251001   # the intent-routing helper
+     screener: anthropic/claude-haiku-4-5-20251001     # the prompt-injection screener
+   ```
+
+   Keys are `provider/model` strings. A per-task entry wins over `default`.
+   `classifier` / `screener` are the cheap one-shot helpers — when unset they
+   fall back to the first configured provider's fast model (Anthropic Haiku when
+   `ANTHROPIC_API_KEY` is set), **not** `default`, so routing stays cheap unless
+   you deliberately pin it. `variants:` sets reasoning effort per task the same
+   way. See `references/overlay-layout.md`.
+
 ## 3. Fork built-in assets to customize them
 
 Use `lastlight fork` — it copies a built-in into `instance/` so your edited copy
@@ -51,12 +78,21 @@ copies and the editing workflow.
 > core) when you're standing up a deployment, not to fork into an existing overlay.
 
 ```bash
-lastlight fork                     # list forkable workflows + agent-context (marks what's already forked)
+lastlight fork                     # list forkable workflows + agent-context + classifier (marks what's already forked)
 lastlight fork <workflow>          # copy a workflow YAML + every prompt & skill its phases reference
 lastlight fork agent-context       # copy soul.md / rules.md / security.md (the persona)
 lastlight fork agent-context soul.md   # just one persona file
+lastlight fork classifier          # copy the base intent-classifier prompts (classifier.md + classify-adds-info.md)
 #   add --force to overwrite an existing overlay copy; --home <dir> to target a specific working dir
 ```
+
+> **Routing / the intent classifier.** The classifier prompt is composed from a
+> forkable base (`workflows/prompts/classifier.md`) plus a `classification:`
+> block in each workflow YAML. To retune *how* free-text is routed, either
+> `fork classifier` and edit the base, or edit a forked workflow's
+> `classification:` block. A **new** overlay workflow that declares its own
+> `classification.intent` becomes routable with no core change — the classifier
+> learns the category and the router routes it. See `references/forking.md`.
 
 Then edit the copied files under `instance/…`.
 
