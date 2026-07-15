@@ -1,5 +1,9 @@
 # Last Light — Development Guide
 
+> **Monorepo move (Phase 2):** this package now lives at `apps/server/` in the
+> monorepo; paths in this file predate the move (the full docs-sync pass is
+> Phase 7 — see `docs/plans/monorepo-migration/`).
+
 > **Architectural reference:** `spec/README.md` is the rebuild-grade
 > specification — twelve pages covering every layer with schemas,
 > invariants, and rebuild notes. Use this CLAUDE.md for day-to-day

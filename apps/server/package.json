@@ -55,8 +55,8 @@
     "dev": "concurrently -n server,dash -c blue,magenta \"bash scripts/dev-local.sh\" \"pnpm --filter @lastlight/dashboard dev\"",
     "dev:server": "bash scripts/dev-local.sh",
     "dev:dashboard": "pnpm --filter @lastlight/dashboard dev",
-    "cli": "tsx src/cli.ts",
-    "build:issue": "tsx src/cli.ts",
+    "cli": "tsx src/cli/cli.ts",
+    "build:issue": "tsx src/cli/cli.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
