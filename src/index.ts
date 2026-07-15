@@ -494,6 +494,7 @@ async function main() {
           step: (k, s, d) => notifier?.step(k, s, d) ?? Promise.resolve(),
           insertStep: (st, b) => notifier?.insertStep(st, b) ?? Promise.resolve(),
           note: (m) => notifier?.note(m) ?? Promise.resolve(),
+          noteApproval: (m, meta) => notifier?.noteApproval(m, meta) ?? Promise.resolve(),
           footer: (m) => notifier?.footer(m) ?? Promise.resolve(),
           noteTerminal: (m) => notifier?.noteTerminal(m) ?? Promise.resolve(),
         }
@@ -903,6 +904,23 @@ async function main() {
     reviewPostsCheck: config.reviewPostsCheck,
     publicUrl: config.publicUrl,
   };
+
+  // Wire Slack approval buttons into the SAME approval-resolution path as the
+  // `/approve` slash command. The connector verifies + parses the button click
+  // (on /webhooks/slack/interactions) and hands us the workflow run id; we force
+  // the route to `approval-response`, reusing the whole dispatcher/resume seam.
+  if (slackConnector) {
+    slackConnector.onApprovalAction(async ({ decision, workflowRunId, sender, envelope }) => {
+      await dispatch(envelope, {
+        ...dispatchDeps,
+        route: async () => ({
+          action: "handler",
+          handler: "approval-response",
+          context: { decision, workflowRunId, sender, source: "slack" },
+        }),
+      });
+    });
+  }
 
   // One chat turn over HTTP — `lastlight chat` without a messaging platform.
   // Routes through the SAME dispatcher seam Slack uses (forcing the chat

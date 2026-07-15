@@ -88,6 +88,15 @@ export interface PhaseReporter {
   ): Promise<void>;
   /** Render a YAML message template and post it as a standalone note. */
   message(template: string | undefined, extraCtx?: Partial<TemplateContext>): Promise<void>;
+  /**
+   * Render a YAML message template and post it as an *interactive approval
+   * prompt* (Approve/Reject buttons on rich surfaces, plain text elsewhere).
+   */
+  approvalNote(
+    template: string | undefined,
+    extraCtx: Partial<TemplateContext>,
+    meta: { workflowRunId: string },
+  ): Promise<void>;
   /** Post a pre-rendered standalone message. */
   postNote(text: string): Promise<void>;
   /** Persist a phase-history entry on the workflow run. */
@@ -1073,8 +1082,16 @@ export class PhaseExecutor {
       scratchPatch,
     );
     // Expose `approvalId` to the gate message template so it can deep-link to
-    // the focused approval view via `{{approvalUrl}}`.
-    await this.reporter.step(stepKey, "awaiting", message, { ...extraCtx, approvalId }, { alsoNote: true });
+    // the focused approval view via `{{approvalUrl}}`. Transition the checklist
+    // step to "awaiting" (with a collapsed detail), then post the full prompt
+    // as a standalone note: approve gates get interactive Approve/Reject buttons
+    // (Slack) via `approvalNote`; reply gates stay a plain message.
+    await this.reporter.step(stepKey, "awaiting", message, { ...extraCtx, approvalId });
+    if (kind === "approve") {
+      await this.reporter.approvalNote(message, { ...extraCtx, approvalId }, { workflowRunId: workflowId });
+    } else {
+      await this.reporter.message(message, { ...extraCtx, approvalId });
+    }
   }
 
   private async runReviewerLoop(

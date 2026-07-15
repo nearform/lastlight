@@ -157,4 +157,127 @@ describe("SlackConnector webhook receiver", () => {
     await new Promise((r) => setImmediate(r));
     expect(events).toHaveLength(0);
   });
+
+  it("sends both text fallback and blocks when blocks are provided", async () => {
+    let payload: any;
+    (conn as any).web.chat.postMessage = async (p: any) => {
+      payload = p;
+      return { ts: "9.9" };
+    };
+    const blocks = [{ type: "header", text: { type: "plain_text", text: "hi" } }] as any;
+    await conn.sendMessage("C1", "T1", "**bold** fallback", blocks);
+    expect(payload.text).toBe("*bold* fallback"); // converted mrkdwn fallback
+    expect(payload.blocks).toEqual(blocks);
+    expect(payload.thread_ts).toBe("T1");
+  });
+
+  it("omits blocks (text only) when none are provided", async () => {
+    let payload: any;
+    (conn as any).web.chat.postMessage = async (p: any) => {
+      payload = p;
+      return { ts: "9.9" };
+    };
+    await conn.sendMessage("C1", null, "plain");
+    expect(payload.blocks).toBeUndefined();
+    expect(payload.text).toBe("plain");
+  });
+
+  it("auto-promotes a markdown image to an image block", async () => {
+    let payload: any;
+    (conn as any).web.chat.postMessage = async (p: any) => {
+      payload = p;
+      return { ts: "9.9" };
+    };
+    await conn.sendMessage("C1", null, "look: ![logo](https://ex.com/l.png)");
+    const image = payload.blocks?.find((b: any) => b.type === "image");
+    expect(image?.image_url).toBe("https://ex.com/l.png");
+    // Notification fallback still carries the (link-downgraded) text.
+    expect(payload.text).toContain("<https://ex.com/l.png|logo>");
+  });
+
+  it("falls back to plain text when Slack rejects the auto image blocks", async () => {
+    const calls: any[] = [];
+    (conn as any).web.chat.postMessage = async (p: any) => {
+      calls.push(p);
+      if (p.blocks) throw new Error("invalid_blocks");
+      return { ts: "9.9" };
+    };
+    const ts = await conn.sendMessage("C1", null, "![x](https://bad/img.png)");
+    expect(ts).toBe("9.9");
+    expect(calls).toHaveLength(2); // first with blocks (threw), retry text-only
+    expect(calls[1].blocks).toBeUndefined();
+  });
+
+  // ── Interactivity (approval buttons) ──────────────────────────────────────
+  const approvePayload = (overrides: Record<string, unknown> = {}) => ({
+    type: "block_actions",
+    trigger_id: "trig-1",
+    user: { id: "U1" },
+    channel: { id: "C1" },
+    message: {
+      ts: "100.1",
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: "approve?" } },
+        { type: "actions", elements: [] },
+      ],
+    },
+    actions: [{ action_id: "approval_approve", value: "run-xyz" }],
+    ...overrides,
+  });
+
+  const postInteraction = (obj: unknown, hdrs?: Record<string, string>) => {
+    const body = "payload=" + encodeURIComponent(JSON.stringify(obj));
+    return app.request("/webhooks/slack/interactions", {
+      method: "POST",
+      headers: hdrs ?? headers(body),
+      body,
+    });
+  };
+
+  const settle = async () => {
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+  };
+
+  it("routes a valid approval button click to the approval handler", async () => {
+    const actions: any[] = [];
+    conn.onApprovalAction(async (a) => { actions.push(a); });
+    const res = await postInteraction(approvePayload());
+    expect(res.status).toBe(200);
+    await settle();
+    expect(actions).toHaveLength(1);
+    expect(actions[0].decision).toBe("approved");
+    expect(actions[0].workflowRunId).toBe("run-xyz");
+  });
+
+  it("routes a reject click with the rejected decision", async () => {
+    const actions: any[] = [];
+    conn.onApprovalAction(async (a) => { actions.push(a); });
+    await postInteraction(
+      approvePayload({ actions: [{ action_id: "approval_reject", value: "run-9" }], trigger_id: "t2" }),
+    );
+    await settle();
+    expect(actions[0].decision).toBe("rejected");
+    expect(actions[0].workflowRunId).toBe("run-9");
+  });
+
+  it("rejects an interaction with a bad signature", async () => {
+    conn.onApprovalAction(async () => {});
+    const res = await postInteraction(approvePayload(), {
+      "content-type": "application/x-www-form-urlencoded",
+      "x-slack-request-timestamp": String(Math.floor(Date.now() / 1000)),
+      "x-slack-signature": "v0=bad",
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("dedupes a retried interaction (same trigger_id) — routes once", async () => {
+    const actions: any[] = [];
+    conn.onApprovalAction(async (a) => { actions.push(a); });
+    await postInteraction(approvePayload());
+    await settle();
+    await postInteraction(approvePayload()); // Slack retry, identical trigger_id
+    await settle();
+    expect(actions).toHaveLength(1);
+  });
 });

@@ -84,6 +84,9 @@ function makeReporter(): PhaseReporter & { steps: RecordedStep[]; notes: string[
     message: vi.fn(async (template) => {
       if (template) notes.push(template);
     }),
+    approvalNote: vi.fn(async (template) => {
+      if (template) notes.push(template);
+    }),
     postNote: vi.fn(async (text) => {
       notes.push(text);
     }),

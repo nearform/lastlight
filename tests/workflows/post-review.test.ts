@@ -75,6 +75,7 @@ function makeReporter() {
     onEnd: vi.fn(async () => {}),
     step: vi.fn(async (key, status) => { doneSteps.push({ key, status }); }),
     message: vi.fn(async () => {}),
+    approvalNote: vi.fn(async () => {}),
     postNote: vi.fn(async () => {}),
     persistPhase: vi.fn(() => {}),
     failWorkflow: vi.fn((e?: string) => { failed.push(e ?? ""); }),

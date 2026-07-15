@@ -3,6 +3,15 @@ import { GitHubTransport } from "#src/notify/transports/github.js";
 import { SlackTransport } from "#src/notify/transports/slack.js";
 import type { GitHubClient } from "#src/engine/github/github.js";
 import type { SlackConnector } from "#src/connectors/slack/connector.js";
+import type { ProgressModel } from "#src/notify/types.js";
+
+const MODEL: ProgressModel = {
+  title: "build for #18",
+  steps: [
+    { key: "architect", label: "Architect", status: "done" },
+    { key: "executor", label: "Executor", status: "running" },
+  ],
+};
 
 describe("GitHubTransport", () => {
   it("creates the comment on first publish (storing the id) then edits it", async () => {
@@ -44,6 +53,15 @@ describe("GitHubTransport", () => {
     await t.note("ping");
     expect(postComment).toHaveBeenCalledWith("o", "r", 7, "ping");
   });
+
+  it("ignores the structured model — posts markdown only", async () => {
+    const postComment = vi.fn(async () => 1);
+    const updateComment = vi.fn(async () => {});
+    const github = { postComment, updateComment } as unknown as GitHubClient;
+    const t = new GitHubTransport({ github, owner: "o", repo: "r", issueNumber: 7 });
+    await t.publish("body", MODEL);
+    expect(postComment).toHaveBeenCalledWith("o", "r", 7, "body");
+  });
 });
 
 describe("SlackTransport", () => {
@@ -61,10 +79,26 @@ describe("SlackTransport", () => {
     await t.publish("second");
 
     expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith("C", "T", "first");
+    expect(sendMessage).toHaveBeenCalledWith("C", "T", "first", undefined);
     expect(updateMessage).toHaveBeenCalledTimes(1);
-    expect(updateMessage).toHaveBeenCalledWith("C", "111.222", "second");
+    expect(updateMessage).toHaveBeenCalledWith("C", "111.222", "second", undefined);
     expect(saved).toEqual(["111.222"]);
+  });
+
+  it("renders Block Kit from the model while keeping text as the fallback", async () => {
+    const sendMessage = vi.fn(async () => "111.222");
+    const updateMessage = vi.fn(async () => {});
+    const slack = { sendMessage, updateMessage } as unknown as SlackConnector;
+
+    const t = new SlackTransport({ slack, channel: "C", thread: "T" });
+    await t.publish("checklist markdown", MODEL);
+
+    const [, , text, blocks] = sendMessage.mock.calls[0];
+    expect(text).toBe("checklist markdown"); // text fallback preserved
+    expect(Array.isArray(blocks)).toBe(true);
+    expect((blocks as unknown[]).length).toBeGreaterThan(0);
+    // First block is the header derived from the model title.
+    expect((blocks as any[])[0].type).toBe("header");
   });
 
   it("wants a terminal ping (silent edits, no other signal) unlike GitHub", () => {
@@ -83,6 +117,6 @@ describe("SlackTransport", () => {
     await t.publish("edit");
 
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(updateMessage).toHaveBeenCalledWith("C", "900.1", "edit");
+    expect(updateMessage).toHaveBeenCalledWith("C", "900.1", "edit", undefined);
   });
 });

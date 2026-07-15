@@ -15,6 +15,7 @@
 import { renderProgress } from "./render.js";
 import { setStep, upsertBefore } from "./model.js";
 import type {
+  ApprovalNoteMeta,
   NotifierTransport,
   ProgressModel,
   ProgressReporter,
@@ -39,11 +40,12 @@ export class ProgressNotifier implements ProgressReporter {
 
   private async publish(): Promise<void> {
     if (!this.model) return;
-    const body = renderProgress(this.model);
+    const model = this.model;
+    const body = renderProgress(model);
     // Best-effort per transport — one platform failing must not block the other.
     await Promise.all(
       this.transports.map((t) =>
-        t.publish(body).catch((err: unknown) => {
+        t.publish(body, model).catch((err: unknown) => {
           const m = err instanceof Error ? err.message : String(err);
           console.warn(`[notifier] publish failed: ${m}`);
         }),
@@ -85,6 +87,23 @@ export class ProgressNotifier implements ProgressReporter {
 
   note(markdown: string): Promise<void> {
     return this.noteTo(this.transports, markdown);
+  }
+
+  noteApproval(markdown: string, meta: ApprovalNoteMeta): Promise<void> {
+    return this.enqueue(async () => {
+      if (!markdown.trim() || this.transports.length === 0) return;
+      await Promise.all(
+        this.transports.map((t) =>
+          // Rich surfaces render interactive controls; the rest post plain text.
+          (t.noteApproval ? t.noteApproval(markdown, meta) : t.note(markdown)).catch(
+            (err: unknown) => {
+              const m = err instanceof Error ? err.message : String(err);
+              console.warn(`[notifier] noteApproval failed: ${m}`);
+            },
+          ),
+        ),
+      );
+    });
   }
 
   noteTerminal(markdown: string): Promise<void> {

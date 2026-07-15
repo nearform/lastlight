@@ -4,7 +4,7 @@
  * that deserve a real notification (approval prompts, terminal summary).
  */
 import type { GitHubClient } from "../../engine/github/github.js";
-import type { NotifierTransport } from "../types.js";
+import type { NotifierTransport, ProgressModel } from "../types.js";
 
 export interface GitHubTransportDeps {
   github: GitHubClient;
@@ -26,7 +26,8 @@ export class GitHubTransport implements NotifierTransport {
     this.commentId = deps.commentId;
   }
 
-  async publish(markdown: string): Promise<void> {
+  async publish(markdown: string, _model?: ProgressModel): Promise<void> {
+    // GitHub renders markdown natively — the structured model is Slack-only.
     const { github, owner, repo, issueNumber } = this.deps;
     if (this.commentId !== undefined) {
       await github.updateComment(owner, repo, this.commentId, markdown);

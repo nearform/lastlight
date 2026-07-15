@@ -1,11 +1,25 @@
 import { App } from "@slack/bolt";
-import { WebClient } from "@slack/web-api";
+import { WebClient, type KnownBlock } from "@slack/web-api";
 import { createHmac, timingSafeEqual } from "crypto";
 import type { Hono } from "hono";
 import { MessagingConnector } from "../messaging/base.js";
 import type { SessionManager } from "../messaging/session-manager.js";
 import type { MessagingConfig } from "../messaging/types.js";
-import { markdownToSlackMrkdwn } from "./mrkdwn.js";
+import type { EventEnvelope } from "../types.js";
+import { hasMarkdownImage, markdownToSlackBlocks, markdownToSlackMrkdwn } from "./mrkdwn.js";
+
+/**
+ * A resolved approval-button click, handed to the app for routing. `envelope`
+ * carries a `reply()` that posts a confirmation into the button's thread, so
+ * the same approval-resolution path used by `/approve` can run unchanged.
+ */
+export interface SlackApprovalAction {
+  decision: "approved" | "rejected";
+  /** The paused workflow run id (the button's `value`). */
+  workflowRunId: string;
+  sender: string;
+  envelope: EventEnvelope;
+}
 
 /** Rotating status messages shown while the agent is thinking */
 const THINKING_MESSAGES = [
@@ -69,6 +83,8 @@ export class SlackConnector extends MessagingConnector {
   /** Bounded set of processed Events API delivery ids, to drop Slack retries. */
   private seenEventIds = new Set<string>();
   private seenEventOrder: string[] = [];
+  /** App-provided hook that routes an approval button click into the dispatcher. */
+  private approvalHandler?: (action: SlackApprovalAction) => Promise<void>;
 
   constructor(config: SlackConnectorConfig, sessionManager: SessionManager) {
     super(config, sessionManager);
@@ -96,6 +112,17 @@ export class SlackConnector extends MessagingConnector {
     }
   }
 
+  /**
+   * Register the hook that routes an approval button click into the app's
+   * dispatcher. Wired in `src/index.ts` (after the dispatch deps exist) to the
+   * same `approval-response` resolution path as the `/approve` slash command.
+   */
+  onApprovalAction(handler: (action: SlackApprovalAction) => Promise<void>): void {
+    this.approvalHandler = handler;
+    // Socket mode needs Bolt action listeners; webhook mode uses the HTTP route.
+    if (this.bolt) this.setupInteractionListeners();
+  }
+
   async start(): Promise<void> {
     if (this.bolt) {
       await this.bolt.start();
@@ -113,13 +140,49 @@ export class SlackConnector extends MessagingConnector {
     // Webhook mode shares the GitHub connector's HTTP server; nothing to stop.
   }
 
-  async sendMessage(channelId: string, threadId: string | null, text: string): Promise<string | void> {
-    const result = await this.web.chat.postMessage({
-      channel: channelId,
-      text: markdownToSlackMrkdwn(text),
-      thread_ts: threadId || undefined,
-    });
-    return result.ts;
+  /**
+   * Post a message. When `blocks` are supplied they carry the rich rendering;
+   * `text` is still sent as the notification preview + accessibility fallback
+   * (Slack requires it and truncates it for the push/desktop notification).
+   * When no explicit blocks are given but the text contains a markdown image,
+   * the message is auto-promoted to Block Kit so the image renders inline (the
+   * mrkdwn text path can only downgrade `![alt](url)` to a link); if Slack
+   * rejects the generated blocks (e.g. an unreachable image URL) it falls back
+   * to a plain-text post.
+   */
+  async sendMessage(
+    channelId: string,
+    threadId: string | null,
+    text: string,
+    blocks?: KnownBlock[],
+  ): Promise<string | void> {
+    const fallbackText = markdownToSlackMrkdwn(text);
+    const autoBlocks = !blocks && hasMarkdownImage(text);
+    const effectiveBlocks = blocks && blocks.length > 0
+      ? blocks
+      : autoBlocks
+      ? markdownToSlackBlocks(text)
+      : undefined;
+    try {
+      const result = await this.web.chat.postMessage({
+        channel: channelId,
+        text: fallbackText,
+        blocks: effectiveBlocks,
+        thread_ts: threadId || undefined,
+      });
+      return result.ts;
+    } catch (err) {
+      // Only auto-generated image blocks are worth retrying without — an
+      // explicit-blocks caller owns its payload and should see the error.
+      if (!autoBlocks) throw err;
+      console.warn(`[slack] image blocks rejected, falling back to text: ${err instanceof Error ? err.message : String(err)}`);
+      const result = await this.web.chat.postMessage({
+        channel: channelId,
+        text: fallbackText,
+        thread_ts: threadId || undefined,
+      });
+      return result.ts;
+    }
   }
 
   /**
@@ -130,11 +193,22 @@ export class SlackConnector extends MessagingConnector {
    * silent — it does not re-notify — so a separate terminal message is posted
    * at the end for an actual ping.
    */
-  async updateMessage(channelId: string, ts: string, text: string): Promise<void> {
+  async updateMessage(
+    channelId: string,
+    ts: string,
+    text: string,
+    blocks?: KnownBlock[],
+  ): Promise<void> {
+    const effectiveBlocks = blocks && blocks.length > 0
+      ? blocks
+      : hasMarkdownImage(text)
+      ? markdownToSlackBlocks(text)
+      : []; // empty array (not undefined) clears any prior blocks on update
     await this.web.chat.update({
       channel: channelId,
       ts,
       text: markdownToSlackMrkdwn(text),
+      blocks: effectiveBlocks,
     });
   }
 
@@ -239,6 +313,115 @@ export class SlackConnector extends MessagingConnector {
       }
 
       return c.body(null, 200);
+    });
+
+    // Interactivity endpoint — Slack POSTs button clicks here as a
+    // form-encoded `payload=<json>` body (a DIFFERENT Request URL from the
+    // Events API above, configured under the app's Interactivity settings).
+    app.post("/webhooks/slack/interactions", async (c) => {
+      const body = await c.req.text();
+      const timestamp = c.req.header("x-slack-request-timestamp") || "";
+      const signature = c.req.header("x-slack-signature") || "";
+      if (!verifySlackSignature(body, timestamp, signature, this.slackConfig.signingSecret!)) {
+        return c.json({ error: "Invalid signature" }, 401);
+      }
+      const raw = new URLSearchParams(body).get("payload");
+      if (!raw) return c.body(null, 200);
+      let payload: any;
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        return c.json({ error: "Invalid JSON" }, 400);
+      }
+      // Ack within Slack's 3s window; resolve the gate asynchronously.
+      setImmediate(() => {
+        this.handleInteraction(payload).catch((err) =>
+          console.error("[slack] interaction handler error:", err),
+        );
+      });
+      return c.body(null, 200);
+    });
+  }
+
+  /** Wire Bolt block-action listeners (socket mode) to the same handler. */
+  private setupInteractionListeners(): void {
+    if (!this.bolt) return;
+    const handle = async ({ ack, body }: { ack: () => Promise<void>; body: unknown }) => {
+      await ack();
+      await this.handleInteraction(body).catch((err) =>
+        console.error("[slack] interaction handler error:", err),
+      );
+    };
+    this.bolt.action("approval_approve", handle);
+    this.bolt.action("approval_reject", handle);
+  }
+
+  /**
+   * Resolve an approval button click: rewrite the prompt message to a
+   * button-free resolved state, then route the decision through the app's
+   * approval handler (the same path as the `/approve` slash command).
+   */
+  private async handleInteraction(payload: any): Promise<void> {
+    if (!payload || payload.type !== "block_actions") return;
+    const action = Array.isArray(payload.actions) ? payload.actions[0] : undefined;
+    const actionId = action?.action_id as string | undefined;
+    if (actionId !== "approval_approve" && actionId !== "approval_reject") return;
+
+    const channelId = payload.channel?.id as string | undefined;
+    const messageTs = payload.message?.ts as string | undefined;
+    const threadTs = payload.message?.thread_ts as string | undefined;
+    const workflowRunId = typeof action?.value === "string" ? action.value : "";
+
+    // Dedup Slack retries of the same interaction (at-least-once, like events).
+    const dedupKey = `interaction:${payload.trigger_id ?? `${channelId}:${messageTs}:${actionId}`}`;
+    if (this.markSeen(dedupKey)) return;
+    if (!workflowRunId || !this.approvalHandler) return;
+
+    const decision = actionId === "approval_approve" ? "approved" : "rejected";
+    const sender = await this.resolveUsername(payload.user?.id ?? "");
+
+    // Rewrite the original message so the buttons can't be clicked twice.
+    await this.resolveApprovalMessage(payload, decision, sender).catch(() => {});
+
+    // Build a minimal envelope whose reply() posts a confirmation in-thread.
+    const replyThread = threadTs || messageTs || null;
+    const envelope: EventEnvelope = {
+      id: `slack-approval-${messageTs ?? workflowRunId}`,
+      source: this.name,
+      type: "message",
+      sender,
+      senderIsBot: false,
+      body: decision === "approved" ? "approve" : "reject",
+      raw: { channelId, threadId: replyThread, approvalAction: { decision, workflowRunId } },
+      reply: async (msg: string) => {
+        if (channelId) await this.sendMessage(channelId, replyThread, msg);
+      },
+      timestamp: new Date(),
+    };
+    await this.approvalHandler({ decision, workflowRunId, sender, envelope });
+  }
+
+  /** Rewrite an approval prompt to a resolved, button-free state. */
+  private async resolveApprovalMessage(
+    payload: any,
+    decision: "approved" | "rejected",
+    sender: string,
+  ): Promise<void> {
+    const channel = payload.channel?.id as string | undefined;
+    const ts = payload.message?.ts as string | undefined;
+    if (!channel || !ts) return;
+    const verb = decision === "approved" ? "✅ Approved" : "❌ Rejected";
+    const original = Array.isArray(payload.message?.blocks) ? payload.message.blocks : [];
+    // Drop the interactive actions block; append a resolution status line.
+    const kept = original.filter((b: any) => b?.type !== "actions");
+    await this.web.chat.update({
+      channel,
+      ts,
+      text: `${verb} by ${sender}`,
+      blocks: [
+        ...kept,
+        { type: "context", elements: [{ type: "mrkdwn", text: `${verb} by ${sender}` }] },
+      ],
     });
   }
 
