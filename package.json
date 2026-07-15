@@ -42,19 +42,20 @@
   ],
   "author": "Clifton Cunningham",
   "license": "MIT",
-  "workspaces": [
-    "dashboard"
-  ],
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "build": "tsc && node -e \"require('fs').chmodSync('dist/cli/cli.js', 0o755)\"",
-    "build:dashboard": "npm run build -w dashboard",
-    "build:all": "npm run build && npm run build -w dashboard",
+    "build:dashboard": "pnpm --filter @lastlight/dashboard build",
+    "build:all": "pnpm run build && pnpm --filter @lastlight/dashboard build",
     "start": "node dist/index.js",
-    "dev": "concurrently -n server,dash -c blue,magenta \"bash scripts/dev-local.sh\" \"npm run dev -w dashboard\"",
+    "dev": "concurrently -n server,dash -c blue,magenta \"bash scripts/dev-local.sh\" \"pnpm --filter @lastlight/dashboard dev\"",
     "dev:server": "bash scripts/dev-local.sh",
-    "dev:dashboard": "npm run dev -w dashboard",
+    "dev:dashboard": "pnpm --filter @lastlight/dashboard dev",
     "cli": "tsx src/cli.ts",
     "build:issue": "tsx src/cli.ts",
     "test:watch": "vitest"
@@ -63,6 +64,7 @@
     "@clack/prompts": "^1.2.0",
     "@earendil-works/pi-ai": "^0.79.8",
     "@hono/node-server": "^1.19.13",
+    "@octokit/auth-app": "^8.2.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-logs-otlp-http": "^0.219.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.219.0",
@@ -91,6 +93,7 @@
     "@types/node": "^22.0.0",
     "concurrently": "^9.0.0",
     "tsx": "^4.0.0",
+    "turbo": "^2.10.5",
     "typescript": "^5.7.0",
     "vitest": "^4.1.4"
   }
