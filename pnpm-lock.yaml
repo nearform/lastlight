@@ -7,6 +7,12 @@ settings:
 importers:
 
   .:
+    devDependencies:
+      turbo:
+        specifier: ^2.10.5
+        version: 2.10.5
+
+  apps/server:
     dependencies:
       '@clack/prompts':
         specifier: ^1.2.0
@@ -99,9 +105,6 @@ importers:
       tsx:
         specifier: ^4.0.0
         version: 4.22.3
-      turbo:
-        specifier: ^2.10.5
-        version: 2.10.5
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
@@ -109,7 +112,7 @@ importers:
         specifier: ^4.1.4
         version: 4.1.7(@opentelemetry/api@1.9.1)(@types/node@22.19.19)(vite@8.1.4(@types/node@22.19.19)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.3)(yaml@2.9.0))
 
-  dashboard:
+  apps/server/dashboard:
     dependencies:
       '@heroicons/react':
         specifier: ^2.2.0
@@ -5066,7 +5069,7 @@ snapshots:
       '@ff-labs/fff-bin-win32-arm64': 0.9.4
       '@ff-labs/fff-bin-win32-x64': 0.9.4
 
-  '@ff-labs/pi-fff@0.9.4(@earendil-works/pi-coding-agent@0.80.6(ws@8.21.0)(zod@4.4.3))(@earendil-works/pi-tui@0.80.6)(@sinclair/typebox@0.34.49)':
+  '@ff-labs/pi-fff@0.9.4(@earendil-works/pi-coding-agent@0.80.6(ws@8.21.0))(@earendil-works/pi-tui@0.80.6)(@sinclair/typebox@0.34.49)':
     dependencies:
       '@earendil-works/pi-coding-agent': 0.80.6(ws@8.21.0)(zod@4.4.3)
       '@earendil-works/pi-tui': 0.80.6
@@ -6915,7 +6918,7 @@ snapshots:
       '@earendil-works/gondolin': 0.12.0
       '@earendil-works/pi-ai': 0.80.6(ws@8.21.0)(zod@4.4.3)
       '@earendil-works/pi-coding-agent': 0.80.6(ws@8.21.0)(zod@4.4.3)
-      '@ff-labs/pi-fff': 0.9.4(@earendil-works/pi-coding-agent@0.80.6(ws@8.21.0)(zod@4.4.3))(@earendil-works/pi-tui@0.80.6)(@sinclair/typebox@0.34.49)
+      '@ff-labs/pi-fff': 0.9.4(@earendil-works/pi-coding-agent@0.80.6(ws@8.21.0))(@earendil-works/pi-tui@0.80.6)(@sinclair/typebox@0.34.49)
       '@octokit/auth-app': 7.2.2
       '@octokit/rest': 21.1.1
       '@opentelemetry/api': 1.9.1

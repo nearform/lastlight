@@ -42,7 +42,6 @@
   ],
   "author": "Clifton Cunningham",
   "license": "MIT",
-  "packageManager": "pnpm@9.15.9",
   "engines": {
     "node": ">=22.12"
   },
@@ -58,7 +57,8 @@
     "dev:dashboard": "pnpm --filter @lastlight/dashboard dev",
     "cli": "tsx src/cli.ts",
     "build:issue": "tsx src/cli.ts",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
@@ -93,7 +93,6 @@
     "@types/node": "^22.0.0",
     "concurrently": "^9.0.0",
     "tsx": "^4.0.0",
-    "turbo": "^2.10.5",
     "typescript": "^5.7.0",
     "vitest": "^4.1.4"
   }

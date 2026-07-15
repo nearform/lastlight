@@ -21,14 +21,29 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LOCK="$ROOT/pnpm-lock.yaml"
+# The single pnpm-lock.yaml lives at the WORKSPACE root (the monorepo root,
+# two levels up from this package) — walk upward until we find it, so the
+# script keeps working if the package ever moves again.
+WORKSPACE_ROOT="$ROOT"
+while [ ! -f "$WORKSPACE_ROOT/pnpm-lock.yaml" ]; do
+  parent="$(dirname "$WORKSPACE_ROOT")"
+  if [ "$parent" = "$WORKSPACE_ROOT" ]; then
+    echo "pnpm-lock.yaml not found above $ROOT" >&2
+    exit 1
+  fi
+  WORKSPACE_ROOT="$parent"
+done
+LOCK="$WORKSPACE_ROOT/pnpm-lock.yaml"
 PIN="$ROOT/sandbox/agentic-pi.pin"
+# The lockfile importer key for this package (`.` when the package IS the
+# workspace root, else its relative path, e.g. `apps/server`).
+IMPORTER="$(node -e "process.stdout.write(require('path').relative('$WORKSPACE_ROOT','$ROOT')||'.')")"
 
 pin_from_lock() {
   node -e "const {parse}=require('$ROOT/node_modules/yaml'); \
            const fs=require('fs'); \
            const lock=parse(fs.readFileSync('$LOCK','utf-8')); \
-           const dep=lock.importers?.['.']?.dependencies?.['agentic-pi']; \
+           const dep=lock.importers?.['$IMPORTER']?.dependencies?.['agentic-pi']; \
            if(!dep) throw new Error('agentic-pi missing from lockfile'); \
            const version=dep.version.replace(/\(.*\$/,''); \
            const pkg=lock.packages?.['agentic-pi@'+version]; \

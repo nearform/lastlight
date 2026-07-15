@@ -89,6 +89,7 @@ state.db*
 pairing/
 hooks/
 !dashboard/src/hooks/
+!apps/server/dashboard/src/hooks/
 !.claude/hooks/
 bin/
 checkpoints/

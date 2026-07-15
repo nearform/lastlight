@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "fs";
-import { resolve } from "path";
+import { existsSync, readFileSync } from "fs";
+import { dirname, join, relative, resolve } from "path";
 import { parse } from "yaml";
 
 /**
@@ -14,10 +14,26 @@ import { parse } from "yaml";
  * lockfile, so a forgotten `scripts/agentic-pi-pin.sh` regeneration fails CI
  * instead of silently installing a stale agentic-pi into the sandbox.
  */
+/** Walk upward from `start` to the directory holding the workspace lockfile. */
+function findWorkspaceRoot(start: string): string {
+  let dir = start;
+  while (!existsSync(join(dir, "pnpm-lock.yaml"))) {
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error(`pnpm-lock.yaml not found above ${start}`);
+    dir = parent;
+  }
+  return dir;
+}
+
 describe("sandbox/agentic-pi.pin", () => {
   it("matches the agentic-pi version + integrity in pnpm-lock.yaml", () => {
-    const lock = parse(readFileSync(resolve("pnpm-lock.yaml"), "utf-8"));
-    const dep = lock.importers?.["."]?.dependencies?.["agentic-pi"];
+    // The single pnpm-lock.yaml lives at the MONOREPO root; this package's
+    // importer key is its path relative to that root (e.g. "apps/server").
+    const packageRoot = resolve(".");
+    const workspaceRoot = findWorkspaceRoot(packageRoot);
+    const importer = relative(workspaceRoot, packageRoot) || ".";
+    const lock = parse(readFileSync(join(workspaceRoot, "pnpm-lock.yaml"), "utf-8"));
+    const dep = lock.importers?.[importer]?.dependencies?.["agentic-pi"];
     expect(dep, "agentic-pi missing from lockfile").toBeTruthy();
 
     // The importer's resolved version may carry a peer-dependency suffix,
