@@ -5,7 +5,8 @@
  * prompts, terminal summary) — `chat.update` itself is silent.
  */
 import type { SlackConnector } from "../../connectors/slack/connector.js";
-import type { NotifierTransport } from "../types.js";
+import { renderApprovalBlocks, renderProgressBlocks } from "../blocks.js";
+import type { ApprovalNoteMeta, NotifierTransport, ProgressModel } from "../types.js";
 
 export interface SlackTransportDeps {
   slack: SlackConnector;
@@ -26,12 +27,15 @@ export class SlackTransport implements NotifierTransport {
     this.ts = deps.ts;
   }
 
-  async publish(markdown: string): Promise<void> {
+  async publish(markdown: string, model?: ProgressModel): Promise<void> {
     const { slack, channel, thread } = this.deps;
+    // Render Block Kit from the model when available; `markdown` stays the
+    // notification/accessibility fallback carried alongside the blocks.
+    const blocks = model ? renderProgressBlocks(model) : undefined;
     if (this.ts !== undefined) {
-      await slack.updateMessage(channel, this.ts, markdown);
+      await slack.updateMessage(channel, this.ts, markdown, blocks);
     } else {
-      const ts = await slack.sendMessage(channel, thread, markdown);
+      const ts = await slack.sendMessage(channel, thread, markdown, blocks);
       if (typeof ts === "string") {
         this.ts = ts;
         this.deps.save?.(ts);
@@ -42,5 +46,11 @@ export class SlackTransport implements NotifierTransport {
   async note(markdown: string): Promise<void> {
     const { slack, channel, thread } = this.deps;
     await slack.sendMessage(channel, thread, markdown);
+  }
+
+  async noteApproval(markdown: string, meta: ApprovalNoteMeta): Promise<void> {
+    const { slack, channel, thread } = this.deps;
+    const blocks = renderApprovalBlocks(markdown, meta.workflowRunId);
+    await slack.sendMessage(channel, thread, markdown, blocks);
   }
 }

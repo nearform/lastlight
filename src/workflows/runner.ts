@@ -216,6 +216,23 @@ export async function runWorkflow(
     else await notify(text);
   };
 
+  /**
+   * Render a YAML message template and post it as an interactive approval
+   * prompt — Approve/Reject buttons on rich surfaces (Slack), plain text on the
+   * legacy `notify` path or a surface without buttons (GitHub).
+   */
+  const approvalNote = async (
+    template: string | undefined,
+    extraCtx: Partial<TemplateContext>,
+    meta: { workflowRunId: string },
+  ): Promise<void> => {
+    if (!template) return;
+    const rendered = renderTemplate(template, { ...ctx, phaseOutputs: outputs, ...(extraCtx || {}) });
+    if (!rendered.trim()) return;
+    if (reporter) await reporter.noteApproval(rendered, meta);
+    else await notify(rendered);
+  };
+
   /** Transition a checklist step (and optionally render a YAML message detail). */
   const reportStep = async (
     key: string,
@@ -283,6 +300,7 @@ export async function runWorkflow(
     onEnd,
     step: reportStep,
     message: notifyMessage,
+    approvalNote,
     postNote,
     persistPhase,
     failWorkflow,

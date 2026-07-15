@@ -14,6 +14,8 @@ export type {
 } from "./types.js";
 export { ProgressNotifier } from "./notifier.js";
 export { renderProgress, STATUS_EMOJI } from "./render.js";
+export { renderProgressBlocks, renderApprovalBlocks } from "./blocks.js";
+export type { ApprovalNoteMeta } from "./types.js";
 export { stepsFromPhases, setStep, upsertBefore, buildProgressModel, runDashboardUrl } from "./model.js";
 export type { ProgressModelInput } from "./model.js";
 export { GitHubTransport } from "./transports/github.js";

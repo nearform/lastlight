@@ -593,6 +593,7 @@ describe("runWorkflow — final_message + synthesize (verify/qa-test shape)", ()
       step: async (k: string, s: StepStatus) => { sink.steps.push([k, s]); },
       insertStep: async (_st: ProgressStep) => {},
       note: async () => {},
+      noteApproval: async () => {},
       footer: async (m: string) => { sink.footer = m; },
       noteTerminal: async () => {},
     };
