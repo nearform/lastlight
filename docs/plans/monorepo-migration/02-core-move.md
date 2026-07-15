@@ -337,4 +337,68 @@ layout.
 
 ## Deviations
 
-None yet.
+Executed 2026-07-15 (commits `4772140`…; rename-only commit is `4772140`,
+376 renames, `git log --follow` verified). Deviations from this doc:
+
+1. **F2 gate ran on `docker compose build`, not `docker buildx bake`** — the
+   build host's docker CLI (29.5.2) has no buildx plugin (same as Phase 1).
+   All four images were built from the new layout via the split invocation
+   (`docker compose -f apps/server/docker-compose.yml --project-directory .
+   build …` + `lastlight server build --home <repo root>`), and the agent
+   image was booted and probed (`/health` 200, `/admin` 200 text/html,
+   `/app` inventory complete). The bake file itself could not be executed
+   locally; it is exercised next by `publish.yml` in CI.
+2. **`docker-bake.hcl` uses `context = "../.."`, not the doc's "keep
+   `context = "."`"** — buildx bake resolves relative paths against the
+   *bake file's directory* (documented behaviour), so `"."` would have meant
+   `apps/server/`, not the repo root. `dockerfile` paths are context-relative
+   (`apps/server/<name>.Dockerfile`), and cwd of the bake invocation no
+   longer matters. `publish.yml` gained `-f apps/server/docker-bake.hcl` on
+   both bake steps as planned.
+3. **`publish.yml` npm job also updated** (beyond the doc's bake-only
+   mention): the `npm publish` step gained `working-directory: apps/server`
+   — the root package is now `private: true` and would have failed/been
+   wrong. Keeps the frozen workflow truthful; the real publish flow is
+   Phase 7's.
+4. **`engines` kept in `apps/server/package.json`** (only `packageManager`
+   was removed as duplicated). `engines` is part of the published package's
+   contract and keeping it preserves the 0.16.0 tarball's package.json
+   semantics; the root also declares it.
+5. **Tarball fence:** post-move `npm pack --dry-run` = baseline minus three
+   stale `dist/engine/executors/backends.*` files — stale artifacts in the
+   old root `dist/` with no matching `src/` file (the fresh build rightly
+   omits them); the lists are otherwise identical. `apps/server/README.md`
+   (new, brief pointer) and `LICENSE` (copy of the root one) were added
+   because npm auto-includes both and the baseline tarball shipped them.
+6. **Pre-existing breakage fixed:** the `cli`/`build:issue` scripts ran
+   `tsx src/cli.ts`, which hasn't existed since the `src/cli/` regroup
+   (`fa2e12b`) — the doc's claim that the path "still resolves" had drifted.
+   Repointed to `src/cli/cli.ts` (the F5 verification depends on the
+   script).
+7. **`.dockerignore`:** dockerignore patterns are context-root-anchored
+   (unlike gitignore), so the audit added `**/` forms rather than relying on
+   unanchored entries — including a hardening pass for `**/.env`, `**/*.pem`,
+   `**/secrets/` now that the build stage COPYs `apps/server/` wholesale.
+   Dead legacy (Hermes-era) entries were left as-is.
+8. **Step-20 grep fixes beyond `cli-server.ts`:** `setup.ts`'s preflight now
+   recognizes a checkout by `apps/server/docker-compose.yml` (root compose
+   kept as a pre-monorepo fallback), and `fork-cli.ts`'s `resolveCoreRoot`
+   prefers `<candidate>/apps/server` so `fork --home <git root>` reads the
+   checkout's built-ins instead of silently falling back to the CLI's
+   bundled assets. (Both are reworked anyway in Phase 4.)
+9. **Pre-existing, left alone:** `npm run typecheck:test`
+   (`tsc -p tsconfig.test.json`) fails in `tests/notify/transports.test.ts`
+   (vitest mock-call tuple typings). Verified present without this phase's
+   edits; CI has never run that script. `turbo run typecheck test build` is
+   green.
+10. **Verification-command drift:** `pnpm --filter lastlight run cli --
+    server status …` forwards the literal `--` to the CLI (pnpm behaviour)
+    and misroutes to the remote `status` command; the F5 gates were run as
+    `npx tsx src/cli/cli.ts server status|build --home <repo root>` from
+    `apps/server` instead.
+11. **`secrets/.gitignore`** was moved as a single tracked file; untracked
+    local `secrets/` contents (and the root `.env`, `data/`, stale `dist/`)
+    stayed at the repo root — developers move them into `apps/server/`
+    manually, per step 21. The untracked `deploy/slack/` directory traveled
+    on disk with `deploy/` to `apps/server/deploy/slack/` and remains
+    untracked.

@@ -25,9 +25,11 @@ each must leave the repo green before the next starts.
 - [x] **Phase 1 (A)** — [01-tooling-skeleton.md](01-tooling-skeleton.md) —
   pnpm + Turborepo skeleton, NO file moves; convert the npm workspace, swap
   CI + Dockerfile installs to pnpm *(risk: low)*
-- [ ] **Phase 2 (B)** — [02-core-move.md](02-core-move.md) — `git mv` core
+- [x] **Phase 2 (B)** — [02-core-move.md](02-core-move.md) — `git mv` core
   into `apps/server`; Docker context/bake/compose repoint; the `lastlight
   server` home/serverDir split — fences **F2 F3 F5** *(risk: HIGH)*
+  *(done 2026-07-15; F2 gated via `docker compose build` — no buildx on the
+  build host; see the phase doc's Deviations)*
 - [ ] **Phase 3 (C)** — [03-workflow-engine.md](03-workflow-engine.md) —
   extract `@lastlight/workflow-engine` per
   [workflow-engine-extraction-design.md](../../workflow-engine-extraction-design.md)
