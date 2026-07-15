@@ -22,9 +22,9 @@ FROM ${BASE_IMAGE}
 
 # Install agentic-pi globally so the harness can `docker exec ...
 # agentic-pi run ...` against this container. The version + integrity come from
-# `sandbox/agentic-pi.pin` (regenerated from lastlight's package-lock.json by
+# `sandbox/agentic-pi.pin` (regenerated from lastlight's pnpm-lock.yaml by
 # scripts/agentic-pi-pin.sh, drift-guarded by tests/agentic-pi-pin.test.ts). We
-# COPY that tiny two-line file rather than the whole package-lock.json on
+# COPY that tiny two-line file rather than the whole pnpm-lock.yaml on
 # purpose: the lockfile's hash changes on every release and would rebust this
 # layer (and sandbox-qa's Chromium) on every version bump; the pin changes only
 # when agentic-pi actually does. `npm install -g <tarball>` doesn't consult a

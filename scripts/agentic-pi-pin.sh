@@ -2,9 +2,9 @@
 # Regenerate / verify sandbox/agentic-pi.pin — the two-line
 # (version, sha512 integrity) pin the sandbox images use to install agentic-pi.
 #
-# WHY a committed pin file instead of COPYing package-lock.json into the sandbox
-# build: the lockfile's content hash changes on EVERY release (`npm version`
-# bumps its root `version` field), which busted the sandbox image's agentic-pi
+# WHY a committed pin file instead of COPYing pnpm-lock.yaml into the sandbox
+# build: the lockfile's content hash changes on EVERY release (a version bump
+# touches it), which busted the sandbox image's agentic-pi
 # layer — and, because sandbox-qa is FROM the base sandbox, re-downloaded its
 # ~300 MB Chromium — on every version bump. This tiny pin file changes ONLY when
 # agentic-pi's version/integrity actually changes, so the layer (and Chromium)
@@ -21,13 +21,19 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LOCK="$ROOT/package-lock.json"
+LOCK="$ROOT/pnpm-lock.yaml"
 PIN="$ROOT/sandbox/agentic-pi.pin"
 
 pin_from_lock() {
-  node -e "const p=require('$LOCK').packages['node_modules/agentic-pi']; \
-           if(!p) throw new Error('agentic-pi missing from lockfile'); \
-           process.stdout.write(p.version + '\n' + p.integrity + '\n')"
+  node -e "const {parse}=require('$ROOT/node_modules/yaml'); \
+           const fs=require('fs'); \
+           const lock=parse(fs.readFileSync('$LOCK','utf-8')); \
+           const dep=lock.importers?.['.']?.dependencies?.['agentic-pi']; \
+           if(!dep) throw new Error('agentic-pi missing from lockfile'); \
+           const version=dep.version.replace(/\(.*\$/,''); \
+           const pkg=lock.packages?.['agentic-pi@'+version]; \
+           if(!pkg?.resolution?.integrity) throw new Error('agentic-pi@'+version+' resolution missing from lockfile'); \
+           process.stdout.write(version + '\n' + pkg.resolution.integrity + '\n')"
 }
 
 expected="$(pin_from_lock)"
