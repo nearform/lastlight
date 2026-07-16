@@ -195,6 +195,12 @@ vs the others' 22).
 
 ## 4. Publish contract across four packages
 
+> **Superseded — five packages, not four.** `@lastlight/shared` also publishes
+> (it is a runtime `workspace:*` dep of two published packages, rewritten to a
+> concrete range on pack). See the migration plan's locked decision 14 and
+> `docs/RELEASING.md` for the authoritative publish contract + manual flow.
+
+
 - **`lastlight` (CLI, `packages/cli`)** — `bin.lastlight` → `dist/cli.js`; lean
   `dependencies` (chalk, @clack/prompts, cli-table3, yaml, zod,
   `@earendil-works/pi-ai` for the oauth subpath) + workspace deps `@lastlight/shared`,

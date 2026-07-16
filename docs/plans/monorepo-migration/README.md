@@ -61,9 +61,27 @@ each must leave the repo green before the next starts.
   dashboard scripts switched to `pnpm --filter`. F1 resolution proven both ways
   through the workspace symlink; live-model eval half not run — no provider key.
   See the phase doc's Deviations.)*
-- [ ] **Phase 7 (G)** — [07-ci-publish-deploys.md](07-ci-publish-deploys.md)
+- [x] **Phase 7 (G)** — [07-ci-publish-deploys.md](07-ci-publish-deploys.md)
   — consolidated CI, the manual publish flow (RELEASING.md), Cloudflare
   deploy jobs; end the release freeze; archive the old repos *(risk: medium)*
+  *(done 2026-07-16; ci.yml gained a `.turbo` cache step; publish.yml trimmed
+  to `checks → images` — the `npm` job + `id-token` permission removed;
+  deploy-www.yml + deploy-evals.yml added (path-filtered leaf deploys, need
+  the `CLOUDFLARE_API_TOKEN` repo secret); `docs/RELEASING.md` authored (manual
+  graph-aware publish flow + end-of-freeze runbook); thin root `CLAUDE.md`
+  created. `pnpm pack` proves all five publishables rewrite `workspace:*` to
+  concrete pins; `pnpm -r publish --dry-run` registry-skips `lastlight@0.16.0`
+  + `lastlight-evals@0.7.1` (already on npm) — the exact guard forcing the
+  first post-migration CLI bump > 0.16.0. build-site.ts already tolerates a
+  missing `eval-results/` (no patch). The end-of-freeze runbook steps
+  (publish, host CLI update, overlay unpin, repo archive) are DOCUMENTED, not
+  executed — they are post-merge operator actions. See the phase doc's
+  Deviations.)*
+
+**All seven phases complete.** The consolidated monorepo is green from a clean
+checkout; the release freeze remains in effect until the operator runs the
+Phase 7 end-of-freeze runbook (07-ci-publish-deploys.md §6, and
+`docs/RELEASING.md`) after this branch merges to `main`.
 
 Architecture reference (read before any phase):
 [00-target-architecture.md](00-target-architecture.md).

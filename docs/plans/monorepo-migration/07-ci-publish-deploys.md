@@ -234,4 +234,57 @@ Plus the runbook's own production checks (step 6.5).
 
 ## Deviations
 
-None yet.
+- **`docker buildx bake` path asserted by inspection, not executed.** The build
+  host has no buildx plugin, so the `images` job's bake path (and the deploy
+  Actions' actual Cloudflare deploy) could not be run locally. Correctness was
+  verified by careful reading: `apps/server/docker-bake.hcl` targets already use
+  `context = "../.."` + `dockerfile = "apps/server/*.Dockerfile"` (Phase 2/4
+  deviation, preserved — NOT reverted to `context = "."`), and `publish.yml`
+  invokes them unchanged with `-f apps/server/docker-bake.hcl`. The `checks →
+  images` chain is intact after removing the `npm` job (`images` still
+  `needs: checks`).
+- **`ci.yml` kept `pnpm/action-setup@v4` + `setup-node cache: pnpm`** (the
+  Phase 1 shape) rather than switching to a raw corepack step as the doc's prose
+  suggested — the existing setup already provides pnpm and a store cache; only
+  the `.turbo` cache step was added (path `.turbo`, which is where Turbo 2.10.5
+  writes its local cache and which `.gitignore` already excludes).
+- **The dep-cruiser boundary gate was already wired into `typecheck`**, not a
+  separate `test`/`lint` task: `apps/server` and `packages/workflow-engine` both
+  run `tsc --noEmit && pnpm run lint:boundaries` as their `typecheck` script, so
+  `pnpm turbo run typecheck` (already in `ci.yml`) executes it. No change needed
+  to keep it — confirmed it still runs in the turbo graph.
+- **`build-site.ts` needed no patch.** `buildIndex` (imported from `src/report.ts`)
+  already returns `{ generatedAt, tiers: [] }` when the results root is missing
+  (report.ts:581), and the `cpSync` of `eval-results/` is `existsSync`-guarded.
+  A local `pnpm --filter lastlight-evals... run build:site` with `eval-results/`
+  absent produced an empty `/api/index` and no `/data` — exactly the shell-only
+  CI behaviour deploy-evals.yml documents.
+- **`publish.yml` `id-token: write` permission dropped.** It existed only for
+  npm provenance on the removed `npm` job; nothing else needs it. `packages:
+  write` (GHCR push) is retained.
+- **Root `CLAUDE.md` was created fresh, not edited.** Phase 2 `git mv`'d the
+  original root guide into `apps/server/CLAUDE.md`, leaving no root file — so the
+  thin monorepo-orientation `CLAUDE.md` is a new file pointing at
+  `apps/server/CLAUDE.md` for the full guide. (The `# claudeMd` project-context
+  block still shows the pre-move full guide; that is a stale cache, not a
+  tracked root file.)
+- **Docs-sync pass is partial (deliberately scoped).** The load-bearing,
+  low-risk doc items were done in-phase: the thin root `CLAUDE.md` and the
+  "four→five published packages" superseded marker in
+  `docs/monorepo-migration-design.md`. The broader step-5 sweep — path updates
+  across `apps/server/spec/*.md` and the CLI-shipped Claude Code skills
+  (`packages/cli/plugins/lastlight/skills/*`), plus the `plugin.json` version
+  bump — is left for a dedicated docs-sync commit at release time: it is not
+  load-bearing for the CI/publish/deploy config this phase lands, `plugin.json`
+  is bumped as part of RELEASING.md's release checklist (not now, during the
+  freeze), and the skill/spec path edits are a large surface best reviewed on
+  their own rather than bundled into the workflow-config change.
+- **`pnpm -r publish --dry-run` does not list all five** because it consults the
+  registry and skips versions already published: `lastlight@0.16.0` and
+  `lastlight-evals@0.7.1` already exist on npm (the pre-migration standalone
+  packages), so only the three new scoped names (`@lastlight/{core,shared,
+  workflow-engine}`) show as "would publish". This is correct — and is the guard
+  that forces the first post-migration `lastlight` version above 0.16.0
+  (decision 13). Full five-package pack correctness (including `workspace:*` →
+  concrete-pin rewrite, and zero `workspace:` leakage) was proven with
+  registry-free `pnpm pack` per package instead.
