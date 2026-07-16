@@ -1,1 +1,1 @@
-export * from "../workflow-engine/core/templates.js";
+export * from "@lastlight/workflow-engine";

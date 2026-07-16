@@ -17,7 +17,7 @@
 // (`workflow-engine/ports/ports.ts`); import for in-file use + re-export so this
 // module's renderer + transport code (and every existing importer) resolves them
 // here unchanged.
-import type { StepStatus, ProgressStep } from "../workflow-engine/ports/ports.js";
+import type { StepStatus, ProgressStep } from "@lastlight/workflow-engine";
 export type { StepStatus, ProgressStep };
 
 /** Metadata carried alongside an interactive approval prompt. */

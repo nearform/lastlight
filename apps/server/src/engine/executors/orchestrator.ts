@@ -289,8 +289,8 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
 // (`workflow-engine/core/types.ts`); re-export it so existing importers of
 // `./executors/orchestrator.js` (and the `agent-executor.js` chain) resolve
 // unchanged.
-export type { CommandSpec } from "../../workflow-engine/core/types.js";
-import type { CommandSpec } from "../../workflow-engine/core/types.js";
+export type { CommandSpec } from "@lastlight/workflow-engine";
+import type { CommandSpec } from "@lastlight/workflow-engine";
 
 const SCRIPT_EXT: Record<"js" | "ts" | "python", string> = { js: "mjs", ts: "mts", python: "py" };
 

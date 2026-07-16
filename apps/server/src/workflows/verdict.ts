@@ -1,1 +1,1 @@
-export * from "../workflow-engine/core/verdict.js";
+export * from "@lastlight/workflow-engine";

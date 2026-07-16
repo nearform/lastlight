@@ -1,0 +1,33 @@
+{
+  "name": "@lastlight/workflow-engine",
+  "version": "0.1.0",
+  "description": "Port-driven workflow engine extracted from Last Light — DAG scheduler, phase executor, DSL/schema, template + loop constructs.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./test-support": { "types": "./dist/test-support/fakes.d.ts", "import": "./dist/test-support/fakes.js" },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && pnpm run lint:boundaries",
+    "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "dependency-cruiser": "^18.1.0",
+    "typescript": "^5.7.0"
+  }
+}

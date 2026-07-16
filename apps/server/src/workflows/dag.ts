@@ -1,1 +1,1 @@
-export * from "../workflow-engine/core/dag.js";
+export * from "@lastlight/workflow-engine";

@@ -1,1 +1,1 @@
-export * from "../workflow-engine/core/phase-ref.js";
+export * from "@lastlight/workflow-engine";

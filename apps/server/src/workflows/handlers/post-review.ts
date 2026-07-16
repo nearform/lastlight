@@ -9,17 +9,17 @@ import {
   type ReviewFindingsDoc,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
-import type { ExecutorConfig } from "../../workflow-engine/core/types.js";
-import type { TemplateContext } from "../../workflow-engine/core/templates.js";
-import type { PhaseDefinition } from "../../workflow-engine/core/schema.js";
-import type { DagNode } from "../../workflow-engine/core/dag.js";
+import type { ExecutorConfig } from "@lastlight/workflow-engine";
+import type { TemplateContext } from "@lastlight/workflow-engine";
+import type { PhaseDefinition } from "@lastlight/workflow-engine";
+import type { DagNode } from "@lastlight/workflow-engine";
 import type {
   PhaseOutcome,
   PhaseReporter,
   PhaseResult,
   PhaseTypeHandler,
   WorkflowStateStore,
-} from "../../workflow-engine/ports/ports.js";
+} from "@lastlight/workflow-engine";
 
 /** Run-scoped data the `post-review` handler needs. */
 export interface PostReviewRunScope {

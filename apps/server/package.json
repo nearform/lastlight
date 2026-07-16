@@ -64,6 +64,7 @@
   "dependencies": {
     "@clack/prompts": "^1.2.0",
     "@earendil-works/pi-ai": "^0.79.8",
+    "@lastlight/workflow-engine": "workspace:*",
     "@hono/node-server": "^1.19.13",
     "@octokit/auth-app": "^8.2.0",
     "@opentelemetry/api": "^1.9.1",

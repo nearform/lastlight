@@ -1,10 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { BuildAssetStore } from "../../state/build-assets.js";
-import { parseReviewerVerdict } from "../../workflow-engine/core/verdict.js";
-import type { ExecutorConfig } from "../../workflow-engine/core/types.js";
-import type { ParsedVerdict } from "../../workflow-engine/core/verdict.js";
-import type { VerdictArtifactReader } from "../../workflow-engine/ports/ports.js";
+import { parseReviewerVerdict } from "@lastlight/workflow-engine";
+import type { ExecutorConfig } from "@lastlight/workflow-engine";
+import type { ParsedVerdict } from "@lastlight/workflow-engine";
+import type { VerdictArtifactReader } from "@lastlight/workflow-engine";
 
 /**
  * App-side {@link VerdictArtifactReader}: the reviewer loop's on-disk verdict

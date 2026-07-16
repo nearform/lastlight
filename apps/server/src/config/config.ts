@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { parse as parseYaml } from "yaml";
 import { normalizeAllowlistHost } from "../sandbox/egress-allowlist.js";
 import { resolveConfigLayers } from "./config-resolve.js";
-import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "../workflow-engine/core/types.js";
+import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "@lastlight/workflow-engine";
 
 /**
  * Load .env file into process.env (simple, no dependency).
@@ -64,7 +64,7 @@ export interface VariantConfig {
 // (which lives there now) has no back-edge to the config layer. Imported for
 // in-file use and re-exported so every existing `../config/config.js` import
 // keeps resolving unchanged.
-export type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "../workflow-engine/core/types.js";
+export type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "@lastlight/workflow-engine";
 
 export interface DisabledConfig {
   workflows: string[];

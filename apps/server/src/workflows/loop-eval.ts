@@ -1,1 +1,1 @@
-export * from "../workflow-engine/core/loop-eval.js";
+export * from "@lastlight/workflow-engine";

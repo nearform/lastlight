@@ -16,7 +16,7 @@ import { executeAgent, executeCommand } from "../engine/agent-executor.js";
 import { listRunningContainers } from "../admin/docker.js";
 import { withSpan, recordExecutionMetrics, recordError } from "../telemetry/index.js";
 import { isTerminated, type PhaseRunContext } from "./phase-executor.js";
-import { runWorkflowCore } from "../workflow-engine/core/scheduler.js";
+import { runWorkflowCore } from "@lastlight/workflow-engine";
 import type {
   EnginePorts,
   EngineSpan,
@@ -28,7 +28,7 @@ import type {
   StepStatus,
   ProgressStep,
   WorkflowResult,
-} from "../workflow-engine/ports/ports.js";
+} from "@lastlight/workflow-engine";
 import { makePostReviewHandler } from "./handlers/post-review.js";
 import { fileVerdictReader } from "./handlers/verdict-reader.js";
 import type { ProgressReporter } from "../notify/types.js";

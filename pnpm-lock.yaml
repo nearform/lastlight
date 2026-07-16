@@ -23,6 +23,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.19.13
         version: 1.19.14(hono@4.12.29)
+      '@lastlight/workflow-engine':
+        specifier: workspace:*
+        version: link:../../packages/workflow-engine
       '@octokit/auth-app':
         specifier: ^8.2.0
         version: 8.2.0
@@ -190,6 +193,22 @@ importers:
       vite:
         specifier: ^8.1.4
         version: 8.1.4(@types/node@22.19.19)(esbuild@0.28.1)(jiti@1.21.7)(tsx@4.22.3)(yaml@2.9.0)
+
+  packages/workflow-engine:
+    dependencies:
+      zod:
+        specifier: ^4.3.6
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      dependency-cruiser:
+        specifier: ^18.1.0
+        version: 18.1.0
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
 
 packages:
 
@@ -668,7 +687,6 @@ packages:
   '@ff-labs/fff-node@0.9.4':
     resolution: {integrity: sha512-yUphwzcVBuNrg1iEAE5XVPOWfCLuq/BE1scUxtHMmLo+e1KuKWBRgSKFXGjNBfL8lV3c5VGwIgK66aBqmhqVBQ==}
     engines: {node: '>=18.0.0'}
-    cpu: [x64, arm64]
     os: [darwin, linux, win32]
 
   '@ff-labs/pi-fff@0.9.4':

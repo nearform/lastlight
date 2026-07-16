@@ -18,7 +18,7 @@ vi.mock("#src/workflows/loader.js", () => ({
 }));
 
 import { GitHubPostReviewHandler, type PostReviewRunScope } from "#src/workflows/handlers/post-review.js";
-import type { PhaseReporter } from "#src/workflow-engine/ports/ports.js";
+import type { PhaseReporter } from "@lastlight/workflow-engine";
 import type { TemplateContext } from "#src/workflows/templates.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "#src/workflows/schema.js";
 import type { DagNode } from "#src/workflows/dag.js";

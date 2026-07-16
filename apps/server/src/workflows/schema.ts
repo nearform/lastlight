@@ -1,1 +1,1 @@
-export * from "../workflow-engine/core/schema.js";
+export * from "@lastlight/workflow-engine";

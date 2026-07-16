@@ -2,4 +2,4 @@
 // (`workflow-engine/core/phase-executor.ts`). This one-line re-export keeps the
 // old `src/workflows/phase-executor.js` import path (runner, tests via the
 // `#src/workflows/phase-executor.js` alias) resolving unchanged.
-export * from "../workflow-engine/core/phase-executor.js";
+export * from "@lastlight/workflow-engine";

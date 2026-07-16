@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { StateDb } from "#src/state/db.js";
-import type { WorkflowStateStore } from "#src/workflow-engine/ports/ports.js";
+import type { WorkflowStateStore } from "@lastlight/workflow-engine";
 
 /**
  * Compile-time fence (extraction design §7): `StateDb satisfies
