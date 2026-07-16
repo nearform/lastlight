@@ -312,4 +312,76 @@ abandoned attempt just bumps their next publish to 0.1.1.
 
 ## Deviations
 
-None yet.
+Executed 2026-07-16. Verified green: `pnpm turbo run typecheck test build`
+(all packages), `pnpm --filter lastlight test` (7 files, 83 tests incl. the new
+`package-root.test.ts`), core `evals-contract` + `lint:boundaries`, the core
+`npm pack --dry-run` list, and the F4 clean-container gate.
+
+- **loader + oauth kept re-export shims (not direct rewrites).** The plan's
+  step 5 allows shims for >20-call-site modules; both qualify AND — decisively —
+  the test suite `vi.mock("#src/workflows/loader.js")` (×5: runner, phase-executor,
+  post-review, router) and `vi.mock("#src/engine/oauth.js")` (×2: chat-runner,
+  agent-executor). A direct rewrite would move the real import to
+  `@lastlight/shared`, so those mocks would no longer intercept the code under
+  test. Kept thin shims at the original paths (`src/workflows/loader.ts` →
+  `export * from "@lastlight/shared/workflow-loader"`, `src/engine/oauth.ts` →
+  `@lastlight/shared/oauth`), preserving both the mock targets and the loader's
+  process-global singleton identity. The consequence: those two moved files show
+  as add-in-shared + modified-shim rather than pure `git mv` renames (the origin
+  path is reused by the shim); the other four modules are clean renames.
+
+- **Shared exposes per-module subpath exports; core imports narrow subpaths,
+  never the barrel.** `@lastlight/shared`'s barrel `export *`s every module, so
+  importing e.g. `PROVIDER_ENV_KEYS` from the barrel eagerly evaluates
+  `overlay-bootstrap` (which imports `child_process` + `@clack/prompts` + `chalk`)
+  — pulling interactive-CLI deps into the harness runtime and tripping
+  `runner.test`'s partial `child_process` mock. Fixed by adding subpath exports
+  (`./providers`, `./oauth`, `./overlay-bootstrap`, `./overlay-assets`,
+  `./core-pin`, `./workflow-loader`, `./config-types`) and pointing every core
+  importer + core test at the specific subpath. The barrel remains for the CLI
+  (which legitimately uses the interactive modules).
+
+- **CLI dependency set is the minimal imported closure, not the plan's superset.**
+  The plan's step 7 lists `yaml`, `zod`, and `@earendil-works/pi-ai` among the
+  CLI deps, but no CLI source imports them directly (oauth/loader/schema now
+  arrive via `@lastlight/shared` / `@lastlight/workflow-engine`). Declared only
+  the actually-imported set — `chalk`, `@clack/prompts`, `cli-table3`,
+  `@lastlight/shared`, `@lastlight/workflow-engine` — which satisfies the plan's
+  "nothing else may appear" ceiling and keeps the install leanest (pi-ai still
+  arrives transitively via shared's oauth, as F4 anticipates). Correspondingly
+  removed the now-unused `chalk` / `@clack/prompts` / `cli-table3` from
+  `@lastlight/core`'s deps (provably unused in the harness after the CLI moved).
+
+- **Fixed a latent Phase-3 Dockerfile gap (in scope — the Dockerfile is retargeted
+  here anyway).** Phase 3 added `@lastlight/workflow-engine` as a core workspace
+  dep but never updated `apps/server/Dockerfile` to copy/build it, so the image
+  build could not resolve or build the workspace link. Beyond the mandated
+  `--filter lastlight → @lastlight/core` retarget, the build now `COPY`s
+  `packages/{workflow-engine,shared}/package.json` before the filtered frozen
+  install and their source before an explicit dependency-ordered build
+  (engine → shared → core → dashboard), so `pnpm --filter @lastlight/core deploy`
+  bundles their built dist into `/app`.
+
+- **F4 gate ran against a throwaway verdaccio, not real npm.** The release-freeze
+  carve-out forbids publishing under the frozen names, and the operator-publish
+  of the new scoped names was not performed here. Instead: `@lastlight/workflow-engine`
+  + `@lastlight/shared` were published to a local `verdaccio:6` container, the
+  `lastlight` CLI packed with `pnpm pack` (rewriting `workspace:*` → `0.1.0`), and
+  installed via `npm i -g` in a clean `node:22-slim` pointed at the local registry.
+  Note: `shared` must be published from a `pnpm pack` tarball (or `pnpm publish`)
+  — a plain `npm publish` leaves its `@lastlight/workflow-engine: workspace:*`
+  unrewritten and the downstream install fails; the real Phase-7 flow uses
+  `pnpm -r publish`, which rewrites, so this is a gate-setup nuance only.
+
+  **F4 result:** install exit 0, no native-compile markers, all six audited heavy
+  deps absent (`better-sqlite3`, `@slack/bolt`, `octokit`, `hono`, `croner`,
+  `agentic-pi`); `lastlight --help` works; `lastlight server status` fails
+  gracefully with its no-home pointer (not a module-load crash). **Measured global
+  install ≈ 153M total, of which the `lastlight` subtree is ≈ 134M.** **Flagged:**
+  `@earendil-works/pi-ai`'s transitive provider-SDK tree dominates — `@mistralai`
+  25M, `@opentelemetry/*` (pi-ai's own API, not core's sdk stack) 15M, `openai`
+  14M, `@google/genai` 14M, `@aws-sdk`+`@smithy` ~17M, `@anthropic-ai` 6.7M — even
+  though the CLI only uses pi-ai's `oauth` subpath. Vendoring that submodule is
+  the design's noted follow-up (out of scope here). `@opentelemetry/api` is
+  therefore present transitively via pi-ai; core's heavy otel stack
+  (`@opentelemetry/sdk-node`/exporters) is absent.

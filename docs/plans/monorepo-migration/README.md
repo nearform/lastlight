@@ -37,9 +37,14 @@ each must leave the repo green before the next starts.
   *(done 2026-07-16; step 1 landed by a prior agent as 20fa7b6; engine now at
   `packages/workflow-engine`, workspace:* dep, dep-cruiser boundary gates green,
   turbo ^build orders engine→core; see the phase doc's Deviations)*
-- [ ] **Phase 4 (D)** — [04-cli-shared-rename.md](04-cli-shared-rename.md) —
+- [x] **Phase 4 (D)** — [04-cli-shared-rename.md](04-cli-shared-rename.md) —
   extract `packages/cli` (published `lastlight`) + `@lastlight/shared`; rename
   the server package to `@lastlight/core` — fence **F4** *(risk: HIGH)*
+  *(done 2026-07-16; F4 gated via a throwaway verdaccio registry — pnpm/npm
+  publish to real npm stays frozen; clean-container install 134M, all six heavy
+  deps absent, pi-ai's provider-SDK tree dominates as flagged. loader + oauth
+  kept re-export shims; core imports narrow shared subpaths. Also fixed a latent
+  Phase-3 Dockerfile gap. See the phase doc's Deviations.)*
 - [ ] **Phase 5 (E)** — [05-import-www.md](05-import-www.md) — subtree-import
   `lastlight-www` into `apps/www`; re-point `sync-spec.mjs` *(risk: low)*
 - [ ] **Phase 6 (F)** — [06-import-evals.md](06-import-evals.md) —
