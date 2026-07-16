@@ -1,0 +1,99 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/demo"
+	description="The demo workflow — records a short demo video of a PR or feature by driving the repo's web UI in a headless browser, then composites a titled, size-capped mp4 with ffmpeg and embeds it inline."
+>
+	<p>
+		The demo workflow turns a PR or feature into a short, polished <strong>demo
+		video</strong>. It drives the repo's web UI in a real headless Chromium,
+		screen-records the session, and composites a titled, size-capped
+		<strong>mp4</strong> the maintainer can watch inline on the originating
+		issue/PR (and in the dashboard Artifacts view). It never modifies code.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>issues-write</code> — can read
+			repo contents and post a comment with the embedded video; it never pushes
+			code.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Demo</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">record UI + composite mp4</text>
+		</svg>
+	</div>
+
+	<h2>What it does</h2>
+
+	<ul>
+		<li>Reads the PR (description, diff, linked issue) to decide what to prove and how — a single walkthrough or a before/after comparison</li>
+		<li>Installs and runs the repo's dev-server, then drives the web UI in a real headless Chromium</li>
+		<li>Screen-records the session (Playwright <code>recordVideo</code> &rarr; <code>session.webm</code>)</li>
+		<li>Composites the recording into a titled, size-capped (&le; 5 MB) mp4 with ffmpeg — title card, optional before/after side-by-side, trim/speed — via the bundled <code>compose-demo.sh</code></li>
+		<li>Embeds the playable video inline on the issue/PR comment and in the dashboard Artifacts view</li>
+	</ul>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>Gated to the Docker QA image, silently skipped elsewhere.</strong>
+			The demo phase runs only on a Docker host with the browser-QA image built
+			(Playwright + Chromium + ffmpeg baked in). On gondolin, or a host without
+			that image, the phase is silently skipped (graceful degradation) and the run
+			completes without a video — it never fails the trigger. Compositing is
+			<strong>ffmpeg-only</strong> — there is no Remotion / cinematic pipeline.
+			Web/Electron targets only; for a CLI, a curl-able API, or pure pass/fail
+			evidence use <a href="/docs/workflows/qa-test">qa-test</a> /
+			<a href="/docs/workflows/verify">verify</a>.
+		</div>
+	</div>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub:</strong> a maintainer comment <code>@last-light demo [notes]</code> on an issue or PR, or a natural-language request the classifier reads as a demo intent ("record a demo of the new dashboard", "make a before/after video of the fix")</li>
+		<li><strong>Slack:</strong> a message classified as a demo intent against a managed repo</li>
+		<li><strong>CLI:</strong> <code>lastlight demo owner/repo#N -- "&lt;notes&gt;"</code></li>
+	</ul>
+
+	<h2>Skills</h2>
+
+	<p>This workflow uses the <code>demo</code> skill (the director procedure and the <code>compose-demo.sh</code> ffmpeg wrapper) plus the <code>browser-qa</code> skill (the bundled Playwright driver, in its <code>--record-dir</code> recording mode) and the <code>building</code> skill (install + run the repo's dev-server).</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/qa-test" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">QA test</span>
+		</a>
+		<a href="/docs/configuration" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Configuration</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

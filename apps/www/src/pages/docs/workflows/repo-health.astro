@@ -1,0 +1,88 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/repo-health"
+	description="The repo health workflow — generates weekly health reports covering open issues, stale items, PR velocity, and action items."
+>
+	<p>
+		Repo health is a single-phase workflow that scans a repository and
+		generates a comprehensive health report. It runs weekly via cron by
+		default, summarizing the state of issues, pull requests, and overall
+		project velocity.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>read</code> — read-only access
+			to repository contents and metadata. Cannot modify anything.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Report</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">analyze + summarize</text>
+		</svg>
+	</div>
+
+	<h2>What it covers</h2>
+
+	<ul>
+		<li>Open issues count and trend</li>
+		<li>Stale issues (no activity for 30+ days)</li>
+		<li>Label distribution</li>
+		<li>Pull request velocity — opened, merged, and time-to-merge</li>
+		<li>Issues missing labels or assignees</li>
+		<li>Action items and recommendations</li>
+	</ul>
+
+	<h2>Report delivery</h2>
+
+	<p>
+		When <code>SLACK_DELIVERY_CHANNEL</code> is configured, the report is
+		posted to that Slack channel. The report is also visible in the admin
+		dashboard under the workflow run's session logs.
+	</p>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>Cron:</strong> Weekly on Monday at 09:00 UTC (configurable in <code>workflows/cron-health.yaml</code>)</li>
+		<li><strong>Slack:</strong> <code>health cliftonc/repo</code></li>
+		<li><strong>CLI:</strong> <code>npm run cli -- health owner/repo</code></li>
+	</ul>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/pr-fix" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">PR fix</span>
+		</a>
+		<a href="/docs/workflows/security-review" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Security review</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

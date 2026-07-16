@@ -1,0 +1,182 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/build"
+	description="The build workflow — Last Light's full Architect, Executor, Reviewer cycle that plans, implements, reviews, and opens a PR."
+>
+	<p>
+		The build workflow is Last Light's most complex workflow. It runs a full
+		software development cycle: check prerequisites, plan the implementation,
+		write the code, review it independently, fix any issues, and open a pull
+		request. Every step runs in an isolated Docker sandbox with a scoped
+		GitHub token.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>repo-write</code> — the agent
+			can push commits, create branches, and open pull requests.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 820 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<!-- Nodes -->
+			<rect x="0" y="30" width="110" height="56" rx="8" fill="var(--fill-grey)" stroke="var(--diag-grey)" stroke-width="1.5"/>
+			<text x="55" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Context</text>
+			<text x="55" y="70" text-anchor="middle" fill="var(--text-muted)" font-size="8" font-family="JetBrains Mono">phase_0</text>
+
+			<rect x="140" y="30" width="110" height="56" rx="8" fill="var(--fill-orange)" stroke="var(--orange)" stroke-width="1.5"/>
+			<text x="195" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Guardrails</text>
+			<text x="195" y="70" text-anchor="middle" fill="var(--orange)" font-size="8" font-family="JetBrains Mono">READY / BLOCKED</text>
+
+			<rect x="280" y="30" width="110" height="56" rx="8" fill="var(--fill-gold)" stroke="var(--gold)" stroke-width="1.5"/>
+			<text x="335" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Architect</text>
+			<text x="335" y="70" text-anchor="middle" fill="var(--gold)" font-size="8" font-family="JetBrains Mono">approval gate</text>
+
+			<rect x="420" y="30" width="110" height="56" rx="8" fill="var(--fill-blue)" stroke="var(--diag-blue)" stroke-width="1.5"/>
+			<text x="475" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Executor</text>
+			<text x="475" y="70" text-anchor="middle" fill="var(--diag-blue)" font-size="8" font-family="JetBrains Mono">TDD implement</text>
+
+			<rect x="560" y="30" width="110" height="56" rx="8" fill="var(--fill-teal)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="615" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Reviewer</text>
+			<text x="615" y="70" text-anchor="middle" fill="var(--diag-mint)" font-size="8" font-family="JetBrains Mono">loop (max 2)</text>
+
+			<rect x="700" y="30" width="110" height="56" rx="8" fill="var(--fill-purple)" stroke="var(--diag-purple)" stroke-width="1.5"/>
+			<text x="755" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">PR</text>
+			<text x="755" y="70" text-anchor="middle" fill="var(--diag-purple)" font-size="8" font-family="JetBrains Mono">open pull request</text>
+
+			<!-- Edges -->
+			<line x1="110" y1="58" x2="140" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="250" y1="58" x2="280" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="390" y1="58" x2="420" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="530" y1="58" x2="560" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<line x1="670" y1="58" x2="700" y2="58" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+			<!-- Review loop arc -->
+			<path d="M 615 86 L 615 105 L 475 105 L 475 86" stroke="var(--diag-mint)" stroke-width="1" stroke-dasharray="4,3" fill="none" marker-end="url(#arrow-teal)"/>
+			<text x="545" y="115" text-anchor="middle" fill="var(--diag-mint)" font-size="8" font-family="JetBrains Mono">REQUEST_CHANGES</text>
+
+			<defs>
+				<marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--diag-grey)"/></marker>
+				<marker id="arrow-teal" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--diag-mint)"/></marker>
+			</defs>
+		</svg>
+	</div>
+
+	<h2>Phases</h2>
+
+	<h3>1. Guardrails</h3>
+	<p>
+		Pre-flight check that verifies the repo has foundational tooling: a test
+		framework, linter, and type checker. Outputs <code>READY</code> or
+		<code>BLOCKED</code>. If blocked, the workflow stops unless the issue has
+		a <code>lastlight:bootstrap</code> label (used for issues that set up the
+		missing tooling).
+	</p>
+
+	<h3>2. Architect</h3>
+	<p>
+		Clones the repo, reads the issue context, and produces a detailed
+		implementation plan at <code>.lastlight/issue-N/architect-plan.md</code>.
+		Includes problem statement, files to modify with line numbers, and a
+		step-by-step approach.
+	</p>
+	<p>
+		If the <code>post_architect</code> approval gate is enabled, the workflow
+		pauses here until a maintainer comments <code>@last-light approve</code>
+		or approves via the dashboard. The pause message links to a
+		<strong>focused approval view</strong> for the architect plan — in
+		server storage mode the maintainer can edit and save the plan before
+		approving; in repo mode it links out to the doc on GitHub.
+	</p>
+
+	<h3>3. Executor</h3>
+	<p>
+		Implements the architect's plan using TDD: writes failing tests first,
+		then implements until tests pass. Runs the full guardrails suite (test,
+		lint, typecheck) before committing. Pushes to the workflow's branch.
+	</p>
+
+	<h3>4. Reviewer</h3>
+	<p>
+		Independent code review with <strong>no shared context</strong> from the
+		executor. Reads only the diff and the plan. Outputs a verdict:
+		<code>APPROVED</code> or <code>REQUEST_CHANGES</code>.
+	</p>
+	<p>
+		On <code>REQUEST_CHANGES</code>, the runner enters a fix loop: the executor
+		addresses the feedback, then the reviewer re-reviews. This repeats up to
+		2 cycles. The <code>post_reviewer</code> approval gate can pause before
+		each fix cycle.
+	</p>
+
+	<h3>5. PR</h3>
+	<p>
+		Creates a pull request from the workflow branch to main. The PR body
+		includes the architect's plan, the reviewer's verdict, and links to the
+		issue.
+	</p>
+
+	<h2>Triggers</h2>
+	<ul>
+		<li><strong>GitHub comment:</strong> <code>@last-light build this</code> on an issue (classifier detects BUILD intent)</li>
+		<li><strong>Slack:</strong> <code>build cliftonc/repo#42</code></li>
+		<li><strong>CLI:</strong> <code>npm run cli -- build owner/repo#N</code></li>
+	</ul>
+
+	<h2>Model configuration</h2>
+	<p>
+		Each phase can use a different model via the <code>LASTLIGHT_MODELS</code>
+		env var (the agent runtime is <a href="https://github.com/nearform/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>,
+		provider-agnostic; default <code>anthropic/claude-sonnet-4-6</code>). Common
+		setup: a strong reasoning model for architect (planning quality), a mid-tier
+		model for executor and reviewer (speed), and a small/cheap model for
+		guardrails (cost).
+	</p>
+	<pre><code set:text={'LASTLIGHT_MODELS=\'{"architect":"openai/gpt-5.5","guardrails":"anthropic/claude-haiku-4-5-20251001"}\''}/></pre>
+	<p>
+		Or use a single <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a>
+		key to mix vendors freely from one billing surface — useful if you don't want
+		to manage separate OpenAI and Anthropic accounts:
+	</p>
+	<pre><code set:text={'LASTLIGHT_MODELS=\'{"architect":"openrouter/anthropic/claude-sonnet-4.5","guardrails":"openrouter/google/gemini-2.5-flash"}\''}/></pre>
+	<p>
+		Per-phase reasoning effort goes through <code>LASTLIGHT_THINKING</code> /
+		<code>LASTLIGHT_THINKINGS</code> — typical setup is <code>high</code> for
+		architect and reviewer, <code>minimal</code> for triage / screen.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/overview" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Workflows overview</span>
+		</a>
+		<a href="/docs/workflows/explore" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Explore workflow</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 820px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

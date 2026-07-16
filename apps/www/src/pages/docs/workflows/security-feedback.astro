@@ -1,0 +1,85 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/security-feedback"
+	description="The security feedback workflow — processes maintainer feedback on a security-labelled issue: create issues, accept risk, mark false-positive, reopen, or discuss."
+>
+	<p>
+		The security feedback workflow processes a maintainer's response to a
+		security-labelled issue — usually one of the scan summaries produced by
+		<a href="/docs/workflows/security-review">security review</a>. It turns
+		that feedback into action: breaking findings into individual issues,
+		recording accepted risk or false-positives, reopening, or simply
+		discussing.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>repo-write</code> — full
+			read/write, so it can open PRs that update <code>SECURITY.md</code> and
+			create new issues.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Process feedback</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">act on maintainer reply</text>
+		</svg>
+	</div>
+
+	<h2>What it does</h2>
+
+	<p>Depending on the maintainer's intent, it can:</p>
+
+	<ul>
+		<li><strong>Create issues</strong> — break the findings into individual issues</li>
+		<li><strong>Accept risk / false-positive</strong> — update <code>SECURITY.md</code> via a PR</li>
+		<li><strong>Reopen</strong> — reopen a finding</li>
+		<li><strong>Discuss</strong> — reply in-thread without further action</li>
+	</ul>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub comment:</strong> an <code>@last-light</code> mention on an issue labelled <code>security</code> (route <code>security_feedback</code>)</li>
+	</ul>
+
+	<h2>Skill</h2>
+
+	<p>This workflow uses the <code>security-feedback</code> skill.</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/security-review" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Security review</span>
+		</a>
+		<a href="/docs/workflows/verify" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Verify</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

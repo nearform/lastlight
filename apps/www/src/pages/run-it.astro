@@ -1,0 +1,505 @@
+---
+// Last Light — Run it for real
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const title = "Run It for Real — Last Light";
+const description = "Deploy Last Light for real — fork, configure, docker compose up. Production-ready with automatic TLS via Caddy.";
+---
+
+<BaseLayout title={title} description={description}>
+
+	<section class="page-header">
+		<h1>Run it <span class="accent">for real</span></h1>
+		<p class="subtitle">Fork the repo, drop in your secrets, <code>docker compose up</code>. Caddy handles TLS automatically.</p>
+		<p class="subtitle" style="font-size: 0.95rem; margin-top: 1rem;">
+			For the authoritative step-by-step — including every optional env var, Slack OAuth login, approval gates, and the dashboard password — read <a href="/docs/production">Production deploy</a> in the docs.
+		</p>
+	</section>
+
+	<section class="security-advisory">
+		<div class="advisory-card">
+			<h3>Run it outside your core infrastructure</h3>
+			<p>Last Light is a powerful autonomous agent. While it runs all code in isolated per-phase sandboxes (gondolin micro-VMs by default, Docker containers on opt-in), it is early-stage software that may have undetected security issues. Deploy it on an isolated host — a cheap VPS, a separate cloud project, or a dedicated VM — where it cannot reach sensitive internal systems, databases, or credentials beyond what it explicitly needs.</p>
+		</div>
+	</section>
+
+	<!-- Step 1: Fork -->
+	<section>
+		<div class="step-block">
+			<h3><span class="step-label">Step 1</span> Fork the repo</h3>
+		<p class="section-desc">Fork Last Light so you can customize skills, tweak prompts, and track your own changes. Pull upstream updates whenever you want.</p>
+		<pre><code># Fork on GitHub first, then clone your fork
+git clone https://github.com/YOUR-USERNAME/lastlight.git
+cd lastlight
+
+# Add upstream so you can pull updates later
+git remote add upstream https://github.com/nearform/lastlight.git</code></pre>
+		<p class="section-note">Your skills, deployment config, and Dockerfile are yours to modify. The <code>skills/</code> directory is where all the behavior lives — edit freely.</p>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 2</span> Configure your overlay</h3>
+		<p class="section-desc">Everything deployment-specific — managed repos, config overrides, and secrets — lives in a single <code>instance/</code> folder, gitignored and mounted read-only at <code>/app/instance</code>. It's never baked into the image, so it's the natural home for a private config repo. (<code>npx lastlight setup</code> scaffolds all of this for you.)</p>
+		<pre><code># Secrets (gitignored, host-only)
+mkdir -p instance/secrets
+cp deploy/.env.production.example instance/secrets/.env
+cp ~/path-to/your-app.private-key.pem instance/secrets/app.pem
+chmod 600 instance/secrets/.env instance/secrets/app.pem
+
+# Overlay config — at minimum the repos the bot manages
+printf 'managedRepos:\n  - your-org/repo-one\n' &gt; instance/config.yaml</code></pre>
+		<p class="step-detail">Edit <code>instance/secrets/.env</code> with your:</p>
+		<ul class="config-list">
+			<li><strong>Managed repositories</strong> — set <code>managedRepos</code> in <code>instance/config.yaml</code> (the public default ships empty)</li>
+			<li><strong>GitHub App credentials</strong> — App ID, Installation ID, and private key path (<code>./app.pem</code>)</li>
+			<li><strong>Webhook secret</strong> — must match your GitHub App's webhook settings</li>
+			<li><strong>Domain</strong> — your public hostname for automatic TLS (or <code>localhost</code> for dev)</li>
+			<li><strong>Model API key</strong> — <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, or <code>OPENROUTER_API_KEY</code> matching your <code>LASTLIGHT_MODEL</code> (Last Light runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more; default <code>anthropic/claude-sonnet-4-6</code>; one OpenRouter key reaches most of them)</li>
+			<li><strong>Sandbox backend</strong> (optional) — <code>LASTLIGHT_SANDBOX</code> selects <code>gondolin</code> (default — QEMU micro-VM), <code>docker</code>, or <code>none</code></li>
+			<li><strong>Model overrides</strong> (optional) — <code>LASTLIGHT_MODELS</code> as JSON to route architect/executor/reviewer phases to different <code>provider/model</code> strings</li>
+			<li><strong>Reasoning effort</strong> (optional) — <code>LASTLIGHT_THINKING</code> as the default (<code>off</code> / <code>minimal</code> / <code>low</code> / <code>medium</code> / <code>high</code> / <code>xhigh</code>), or <code>LASTLIGHT_THINKINGS</code> JSON for per-phase overrides</li>
+			<li><strong>Approval gates</strong> (optional) — <code>APPROVAL_GATES=post_architect,post_reviewer</code> to pause at human-in-the-loop checkpoints</li>
+			<li><strong>Admin dashboard</strong> (recommended) — <code>ADMIN_PASSWORD</code> and a stable <code>ADMIN_SECRET</code> for persistent login sessions</li>
+			<li><strong>Slack chat</strong> (optional) — <code>SLACK_BOT_TOKEN</code> and <code>SLACK_APP_TOKEN</code> for the in-process chat skill (Socket Mode)</li>
+			<li><strong>Slack OAuth login</strong> (optional) — <code>SLACK_OAUTH_CLIENT_ID</code>, <code>SLACK_OAUTH_CLIENT_SECRET</code>, <code>SLACK_OAUTH_REDIRECT_URI</code>, and optionally <code>SLACK_ALLOWED_WORKSPACE</code> to restrict login to one team</li>
+		</ul>
+		<p class="step-detail">See the <a href="/docs/configuration">Configuration reference</a> for every variable the harness reads, with defaults and descriptions.</p>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 3</span> Build & run</h3>
+		<p class="section-desc">The harness Docker image bundles agentic-pi as an npm dep; all skills and dependencies are baked in, and GitHub tooling is built into the agent (no separate MCP process to run). Secrets are injected at runtime via the mounted volume.</p>
+
+		<div class="advisory-card" style="margin-bottom: 1.25rem; background: rgba(26, 122, 138, 0.08); border-color: rgba(26, 122, 138, 0.3);">
+			<h3 style="color: var(--teal);">Docker-free alternative (native + gondolin)</h3>
+			<p>On a Linux host with <code>/dev/kvm</code> exposed, the <a href="https://github.com/nearform/lastlight/blob/main/deploy/native/README.md" target="_blank" rel="noopener">native systemd deploy</a> runs the harness directly under systemd and uses gondolin for sandboxing — no Docker required. Re-deploys are a <code>git pull</code> plus <code>sudo bash deploy/native/install.sh</code>. Most managed container hosts (Cloud Run, Fly Machines, shared-CPU VMs) don't expose nested virt — stay on the Docker deploy below in those cases.</p>
+		</div>
+		<pre><code># DOMAIN lives in instance/secrets/.env (read by Caddy via env_file) —
+# no repo-root .env needed.
+
+# Build and start
+docker compose up -d
+
+# Watch the logs
+docker compose logs -f agent</code></pre>
+		<p class="step-detail">No interactive login step — pi-ai reads the <code>OPENAI_API_KEY</code> / <code>ANTHROPIC_API_KEY</code> / <code>OPENROUTER_API_KEY</code> you put in <code>instance/secrets/.env</code> and forwards them into each sandbox.</p>
+
+		<p class="step-detail">What happens:</p>
+		<ul class="config-list">
+			<li><strong>Agent container</strong> starts, symlinks your secrets, generates a GitHub token, and starts the webhook listener on port 8644</li>
+			<li><strong>Caddy container</strong> provisions a Let's Encrypt certificate for your domain and reverse-proxies HTTPS to the agent</li>
+			<li>For local dev, set <code>DOMAIN=localhost</code> — Caddy serves HTTP only, no TLS</li>
+		</ul>
+		<p class="step-detail">Verify it's running:</p>
+		<pre><code># Health check
+curl https://lastlight.example.com/health
+
+# Or locally
+curl http://localhost/health</code></pre>
+
+		<div class="existing-proxy-note">
+			<h4>Already have a reverse proxy?</h4>
+			<p>If you already run Caddy, Nginx, or another reverse proxy on the host, the bundled Caddy container will fail with "address already in use" on ports 80/443. Instead, disable it and point your existing proxy at the agent:</p>
+			<p class="step-detail"><strong>1.</strong> Create a <code>docker-compose.override.yml</code> to disable the Caddy service and expose the agent port locally:</p>
+			<pre><code># docker-compose.override.yml
+services:
+  agent:
+    ports:
+      - "127.0.0.1:8644:8644"
+  caddy:
+    profiles:
+      - disabled</code></pre>
+			<p class="step-detail"><strong>2.</strong> Add a reverse proxy entry in your existing config. For Caddy:</p>
+			<pre set:html={`<code>lastlight.example.com {
+    reverse_proxy localhost:8644
+}</code>`}></pre>
+			<p class="step-detail">For Nginx:</p>
+			<pre set:html={`<code>server {
+    listen 443 ssl;
+    server_name lastlight.example.com;
+    location / {
+        proxy_pass http://127.0.0.1:8644;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}</code>`}></pre>
+			<p class="step-detail"><strong>3.</strong> Start only the agent: <code>docker compose up -d agent</code></p>
+		</div>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 4</span> Point GitHub webhooks</h3>
+		<p class="section-desc">In your GitHub App settings, set the webhook URL and subscribe to events.</p>
+		<ul class="config-list">
+			<li><strong>Webhook URL:</strong> <code>https://lastlight.example.com/webhooks/github</code></li>
+			<li><strong>Secret:</strong> same value as <code>WEBHOOK_SECRET</code> in your <code>instance/secrets/.env</code></li>
+			<li><strong>Events:</strong> Issues, Pull requests, Issue comments, PR review comments, PR reviews</li>
+		</ul>
+		<p class="step-detail">Install the GitHub App on the repos (or org) you want Last Light to manage. Test by opening an issue — the bot should triage it within seconds.</p>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 5</span> Running in Kubernetes <span class="step-label">optional</span></h3>
+		<p class="section-desc">The same Docker image works in K8s. Skip Caddy — use your cluster's Ingress controller for TLS instead.</p>
+		<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lastlight
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lastlight
+  template:
+    metadata:
+      labels:
+        app: lastlight
+    spec:
+      containers:
+      - name: agent
+        image: your-registry/lastlight:latest
+        ports:
+        - containerPort: 8644
+        env:
+        - name: LASTLIGHT_OVERLAY_DIR
+          value: /app/instance
+        volumeMounts:
+        - name: secrets
+          mountPath: /app/instance/secrets
+          readOnly: true
+        - name: state
+          mountPath: /app/data
+      volumes:
+      - name: secrets
+        secret:
+          secretName: lastlight-secrets
+      - name: state
+        persistentVolumeClaim:
+          claimName: lastlight-state
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lastlight
+spec:
+  selector:
+    app: lastlight
+  ports:
+  - port: 8644
+    targetPort: 8644</code></pre>
+		<p class="section-note">Create the K8s Secret from your local files: <code>kubectl create secret generic lastlight-secrets --from-file=.env=instance/secrets/.env --from-file=app.pem=instance/secrets/app.pem</code></p>
+		</div>
+	</section>
+
+	<!-- Ops tips -->
+	<section>
+		<h2>Operational tips</h2>
+		<div class="tips-grid">
+			<div class="tip-card">
+				<h3>Updating Last Light</h3>
+				<p>Pull upstream changes, rebuild the image, restart:</p>
+				<pre><code>git fetch upstream
+git merge upstream/main
+docker compose build
+docker compose up -d</code></pre>
+				<p>This also pulls the latest agentic-pi (an npm dependency baked into the image at build time). To pick up the latest agentic-pi without any other Last Light changes, just rebuild:</p>
+				<pre><code>docker compose build --no-cache agent
+docker compose up -d agent</code></pre>
+			</div>
+			<div class="tip-card">
+				<h3>Token refresh</h3>
+				<p>GitHub App tokens expire hourly. The harness mints fresh per-phase installation tokens on every workflow run, so refresh is automatic — no action needed. If you see auth errors, restart the agent container.</p>
+			</div>
+			<div class="tip-card">
+				<h3>Rate limits</h3>
+				<p>GitHub App installations get 5,000 API calls/hour. For most repos that's plenty. If you hit limits, increase cron intervals or reduce repos per installation.</p>
+			</div>
+			<div class="tip-card">
+				<h3>LLM costs</h3>
+				<p>Each triage or review is ~1 agent session. Build requests use more tokens. Costs depend on your configured model provider's API usage (OpenAI / Anthropic / OpenRouter / whichever <code>LASTLIGHT_MODEL</code> points at). Route cheap models to high-volume phases (triage, screen) via <code>LASTLIGHT_MODELS</code> to keep the bill down.</p>
+			</div>
+			<div class="tip-card">
+				<h3>Logs</h3>
+				<p>Session logs are saved as JSON trajectories. View them with <code>docker compose logs agent</code> or inspect the <code>agent-logs</code> volume.</p>
+			</div>
+			<div class="tip-card">
+				<h3>Multiple repos</h3>
+				<p>One instance handles all repos where the GitHub App is installed. No per-repo config needed — skills apply universally.</p>
+			</div>
+		</div>
+	</section>
+
+</BaseLayout>
+
+<style is:global>
+	section {
+		max-width: 1000px;
+		margin: 0 auto;
+		padding: 2.5rem 2rem;
+	}
+
+	section h2 {
+		font-size: 1.4rem;
+		margin-bottom: 0.75rem;
+		letter-spacing: -0.01em;
+	}
+
+	.accent { color: var(--gold); }
+
+	.section-desc {
+		color: var(--text-muted);
+		margin-bottom: 1rem;
+		line-height: 1.65;
+		font-size: 0.92rem;
+	}
+
+	.section-note {
+		background: var(--bg-card);
+		border-left: 3px solid var(--teal);
+		padding: 0.75rem 1rem;
+		border-radius: 0 8px 8px 0;
+		font-size: 0.85rem;
+		color: var(--text-muted);
+		margin-top: 0.75rem;
+		line-height: 1.6;
+	}
+
+	/* Page header */
+	.page-header {
+		max-width: 1000px;
+		margin: 0 auto;
+		padding: 4rem 2rem 1rem;
+	}
+
+	.page-header h1 {
+		font-size: clamp(1.8rem, 4vw, 2.5rem);
+		margin-bottom: 1rem;
+		letter-spacing: -0.02em;
+	}
+
+	.page-header .subtitle {
+		font-size: 1.1rem;
+		color: var(--text-muted);
+		max-width: 800px;
+		line-height: 1.65;
+	}
+
+	/* Security advisory */
+	.security-advisory {
+		padding-top: 0;
+		padding-bottom: 0;
+	}
+
+	.advisory-card {
+		background: rgba(232, 117, 42, 0.08);
+		border: 1px solid rgba(232, 117, 42, 0.3);
+		border-radius: 10px;
+		padding: 1.25rem 1.5rem;
+	}
+
+	.advisory-card h3 {
+		font-size: 0.95rem;
+		color: var(--orange);
+		margin-bottom: 0.5rem;
+	}
+
+	.advisory-card p {
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		line-height: 1.7;
+	}
+
+	/* Step blocks — matches home page pattern */
+	.step-block {
+		margin-bottom: 2.5rem;
+		padding-top: 2rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.step-block:first-child {
+		border-top: none;
+		padding-top: 0;
+	}
+
+	.step-block h3 {
+		font-size: 1.2rem;
+		margin-bottom: 0.75rem;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.6rem;
+	}
+
+	.step-label {
+		font-family: var(--mono);
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		background: var(--teal);
+		color: var(--text-bright);
+		padding: 0.2rem 0.55rem;
+		border-radius: 4px;
+		font-weight: 600;
+	}
+
+	.step-block p {
+		font-size: 0.9rem;
+		color: var(--text-muted);
+		margin: 0.5rem 0;
+		line-height: 1.65;
+	}
+
+	.step-detail {
+		font-size: 0.9rem;
+		color: var(--text-muted);
+		margin-top: 0.75rem;
+		line-height: 1.6;
+	}
+
+	.config-list {
+		list-style: none;
+		padding: 0;
+		margin: 0.75rem 0;
+	}
+
+	.config-list li {
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		line-height: 1.7;
+		padding: 0.35rem 0 0.35rem 1.5rem;
+		position: relative;
+	}
+
+	.config-list li::before {
+		content: '';
+		position: absolute;
+		left: 0.25rem;
+		top: 0.85em;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--teal);
+	}
+
+	/* Existing proxy note */
+	.existing-proxy-note {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 1.25rem 1.5rem;
+		margin-top: 1.5rem;
+	}
+
+	.existing-proxy-note h4 {
+		font-size: 0.95rem;
+		color: var(--teal);
+		margin-bottom: 0.5rem;
+	}
+
+	.existing-proxy-note p {
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		line-height: 1.7;
+	}
+
+	/* Backend cards */
+	.backends-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 1rem;
+		margin-top: 1rem;
+	}
+
+	.backend-card {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 1.25rem;
+		transition: border-color 0.25s;
+		position: relative;
+	}
+
+	.backend-card:hover {
+		border-color: var(--border-bright);
+	}
+
+	.backend-card.recommended {
+		border-color: var(--teal-dark);
+	}
+
+	.backend-card.warning {
+		border-color: var(--fill-orange-2);
+		opacity: 0.8;
+	}
+
+	.backend-card .badge {
+		position: absolute;
+		top: -0.5rem;
+		right: 1rem;
+		background: var(--teal);
+		color: var(--text-bright);
+		font-size: 0.7rem;
+		font-weight: 600;
+		padding: 0.15rem 0.6rem;
+		border-radius: 4px;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+
+	.backend-card h3 {
+		font-size: 0.95rem;
+		margin-bottom: 0.35rem;
+	}
+
+	.backend-card p {
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		line-height: 1.55;
+	}
+
+	.backend-card pre {
+		margin-top: 0.5rem;
+		margin-bottom: 0;
+	}
+
+	/* Tips grid */
+	.tips-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 1rem;
+		margin-top: 1.25rem;
+	}
+
+	.tip-card {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 1.25rem;
+		transition: border-color 0.25s, background 0.25s;
+	}
+
+	.tip-card:hover {
+		border-color: var(--border-bright);
+		background: var(--bg-card-hover);
+	}
+
+	.tip-card h3 {
+		font-size: 0.9rem;
+		margin-bottom: 0.35rem;
+	}
+
+	.tip-card p {
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		line-height: 1.55;
+	}
+
+	.tip-card pre {
+		margin-bottom: 0;
+	}
+
+	@media (max-width: 640px) {
+		.backends-grid { grid-template-columns: 1fr; }
+		.tips-grid { grid-template-columns: 1fr; }
+	}
+</style>

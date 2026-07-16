@@ -1,0 +1,329 @@
+---
+// Last Light — Comparisons
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const title = "Comparisons — Last Light";
+const description = "An honest comparison of Last Light against Factory.ai droid, the autonomous GitHub bots (Devin, Copilot coding agent, Codex cloud, Jules), and the self-hosted OSS agents (OpenHands, Goose, Archon, Aider, Cline) — with 'choose X when' guidance.";
+
+// At-a-glance comparison data
+const cols = ["Tool", "Category", "Hosting", "Trigger model", "BYO model?", "Isolation", "Human gates", "Cost model", "Best for"];
+const rows = [
+  ["Last Light", "Repo-maintenance harness", "Self-hosted only", "Webhooks + Slack + cron + CLI", "Yes (Anthropic / OpenAI / OpenRouter)", "Docker / micro-VM sandbox + default-deny egress firewall", "First-class (GitHub / Slack / dashboard)", "Free / OSS + your model spend + your infra", "Self-hosted autonomous repo maintenance with approval gates", true],
+  ["Factory droid", "Commercial multi-agent platform", "SaaS (on-prem at Enterprise)", "IDE + CLI + browser + Slack + Jira/Linear", "Yes (Claude / GPT / Gemini / DeepSeek / Qwen)", "Managed cloud sandboxes (“Droid Computers”)", "Tiered autonomy levels", "$20 / $100 / $200 per mo + Team/Enterprise", "Enterprises wanting a polished multi-surface droid fleet", false],
+  ["Devin", "Autonomous cloud agent", "SaaS", "Task / issue assignment", "No (vendor model)", "Vendor cloud sandbox", "Review the PR", "Subscription", "Delegating well-scoped tasks to a “junior engineer”", false],
+  ["Copilot coding agent", "Autonomous GitHub agent", "SaaS (GitHub)", "Assign a GitHub issue", "No (vendor model)", "Sandboxed GitHub Actions", "Review the draft PR", "Copilot subscription", "Teams already living in GitHub", false],
+  ["OpenAI Codex (cloud)", "Autonomous cloud agent", "SaaS", "Task / multi-surface", "No (vendor model)", "Vendor cloud sandbox", "Review the PR", "Subscription", "GPT-5.x-grade autonomy", false],
+  ["Google Jules", "Autonomous cloud agent", "SaaS", "GitHub issue→PR", "No (Gemini)", "Google Cloud VMs", "Review the PR", "Free preview / subscription", "Gemini-grade autonomy in GCP", false],
+  ["OpenHands", "OSS agent + Resolver", "Self-hosted or cloud", "CLI/IDE and event-driven (issue label → PR)", "Yes (full BYOM)", "Sandboxed runtime", "In the loop or review the PR", "Free / OSS + your model spend (or Cloud)", "Self-hosted single-pipeline issue→PR autonomy", false],
+  ["Goose", "OSS general agent", "Self-hosted", "CLI/IDE, recipes, built-in scheduler", "Yes (full BYOM)", "Local / your choice", "Configurable approval gates", "Free / OSS + your model spend", "Composing your own autonomous / scheduled agent", false],
+  ["Archon", "OSS harness builder", "Self-hosted", "Terminal + Slack + Telegram + GitHub comments + web", "Yes (orchestrates Claude Code / Codex / etc.)", "Per-run Git worktrees", "Workflow gates", "Free / OSS + your model spend", "Dispatching parallel coding runs from anywhere", false],
+  ["Aider / Cline", "OSS dev-driven agents", "Self-hostable", "CLI / IDE, per task", "Yes (full BYOM)", "Local / your choice", "You’re in the loop", "Free / OSS + your model spend", "Free, private, hackable per-task coding", false],
+];
+---
+
+<BaseLayout title={title} description={description}>
+
+	<!-- Header -->
+	<section class="page-header">
+		<h1>How Last Light <span class="accent">compares</span></h1>
+		<p class="subtitle">An honest, point-in-time look (June 2026) at where Last Light sits among AI coding agents — against Factory.ai droid, the vendor-hosted GitHub bots, and the self-hosted open-source agents. Pricing and benchmark numbers move fast, so figures link to sources rather than being treated as durable truth.</p>
+	</section>
+
+	<!-- TL;DR -->
+	<section class="content-section">
+		<h2>The short version</h2>
+		<div class="callout-card">
+			<p>Last Light is <strong>not</strong> in the same category as most "AI coding agent" tools, and comparing it feature-for-feature is misleading. It's a <strong>self-hosted, event-driven, single-tenant repository-maintenance harness</strong> — a YAML workflow engine that reacts to GitHub webhooks, Slack messages, and cron ticks by running sandboxed agents to triage issues, review PRs, build features, and report on health and security.</p>
+			<p>Almost everything it's compared to is either a <strong>developer-driven pair programmer</strong> you sit in front of (Cursor, Claude Code, Codex CLI, Aider, Cline), or a <strong>vendor-hosted issue&rarr;PR agent</strong> you delegate to in someone else's cloud (Devin, Copilot coding agent, Codex cloud, Jules) — or its commercial-platform sibling, Factory droid.</p>
+			<p>The important exceptions, and Last Light's truest peers, are the <strong>open-source agents that also run self-hosted <em>and</em> autonomously</strong>: OpenHands (Resolver / headless), Goose (scheduler / recipes), and Archon (an OSS workflow-harness builder). Last Light is <em>not</em> alone in that quadrant — the honest distinction from those is <strong>shape</strong>, covered below.</p>
+		</div>
+	</section>
+
+	<!-- Category map -->
+	<section class="content-section">
+		<h2>The category map</h2>
+		<p class="section-intro">A flat feature table would flatter or unfairly penalise everything, because these tools live on two axes: <strong>who drives</strong> (you, per task &harr; it reacts to events) and <strong>who hosts</strong> (a vendor &harr; you). Last Light lives in the self-hosted, event-driven quadrant — but it shares it.</p>
+
+		<div class="quad-axis-top">developer-driven (you drive it, per task) &nbsp;&harr;&nbsp; event-driven / autonomous (it reacts)</div>
+		<div class="quadrant-grid">
+			<div class="quadrant-cell">
+				<div class="quad-tag">Hosted &middot; developer-driven</div>
+				<p>Cursor, Claude Code, Codex CLI, Windsurf</p>
+			</div>
+			<div class="quadrant-cell">
+				<div class="quad-tag">Hosted &middot; event-driven</div>
+				<p>Devin, Copilot coding agent, Codex cloud, Jules, <strong>Factory droid</strong></p>
+			</div>
+			<div class="quadrant-cell">
+				<div class="quad-tag">Self-hosted &middot; developer-driven</div>
+				<p>Aider, Cline &middot; <span class="muted">OpenHands / Goose (interactive)</span></p>
+			</div>
+			<div class="quadrant-cell highlight">
+				<div class="quad-tag">Self-hosted &middot; event-driven</div>
+				<p><span class="star">&#9733; Last Light</span>, Archon, OpenHands (Resolver), Goose (scheduler / recipes)</p>
+			</div>
+		</div>
+
+		<p class="section-note">So the meaningful question isn't "is anything else self-hosted and autonomous" (things are) but <strong>what shape that autonomy takes</strong>: the vendor bots are autonomous but hosted; OpenHands / Goose are autonomous and self-hostable but as a single pipeline or a general agent you compose; Archon is a self-hosted harness that orchestrates external CLIs; Last Light ships a purpose-built, multi-workflow repo-maintenance service. That breadth is the point — and also why it carries operational burden a per-task CLI or a SaaS bot doesn't.</p>
+	</section>
+
+	<!-- At a glance -->
+	<section class="content-section">
+		<h2>At a glance</h2>
+		<p class="section-intro">Treat each cell as a generalisation, not a spec sheet — see each tool's own docs for specifics, and the <a href="#sources">sources</a> for where these claims come from.</p>
+		<div class="table-scroll">
+			<table class="cmp">
+				<thead>
+					<tr>{cols.map((c) => <th>{c}</th>)}</tr>
+				</thead>
+				<tbody>
+					{rows.map((r) => (
+						<tr class={r[9] ? "is-ll" : undefined}>
+							{r.slice(0, 9).map((cell, i) => (
+								i === 0 ? <th scope="row">{cell}</th> : <td>{cell}</td>
+							))}
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<!-- Factory head-to-head -->
+	<section class="content-section">
+		<h2>Last Light vs. Factory droid</h2>
+		<p class="section-intro">These two look superficially similar — both run AI coding agents with a planner/reviewer split, both are model-agnostic, both reach Slack — so this is the comparison worth doing carefully. The difference is <strong>commercial platform vs. self-hosted harness</strong>.</p>
+
+		<div class="hh-grid">
+			<div class="hh-card">
+				<h3>What Factory does that Last Light doesn't</h3>
+				<ul class="card-list">
+					<li><strong>Multi-surface presence</strong> — droids live in the terminal, VS Code, JetBrains, Vim, browser, and Slack. Last Light has no editor integration.</li>
+					<li><strong>Managed cloud sandboxes</strong> ("Droid Computers"), zero setup. Last Light expects you to run the sandbox on your host.</li>
+					<li><strong>Ticket-native work</strong> — Jira and Linear are first-class. Last Light is GitHub-issue-centric.</li>
+					<li><strong>Broader model menu</strong> — Claude, GPT-5.x, Gemini, DeepSeek, Qwen.</li>
+					<li><strong>Published benchmark leadership</strong> (state-of-the-art Terminal-Bench results). Last Light publishes none.</li>
+					<li><strong>A commercial product</strong> — SOC 2 Type II, support, SLA, managed upgrades, polished UX.</li>
+					<li><strong>Mature multi-agent coordination</strong> across Code/Reviewer/Tester/Knowledge/Reliability droids.</li>
+				</ul>
+			</div>
+			<div class="hh-card">
+				<h3>What Last Light does that Factory doesn't</h3>
+				<ul class="card-list">
+					<li><strong>Truly self-hosted at every tier</strong> — code, prompts, and model traffic stay on your infra with your keys. Factory on-prem is Enterprise-only.</li>
+					<li><strong>Workflows as open config</strong>, not a closed product — read, fork, and override every behaviour via the <code>instance/</code> overlay.</li>
+					<li><strong>An egress policy you own</strong> — default-deny firewall plus four downscoped, per-run GitHub App token profiles.</li>
+					<li><strong>First-class approval gates</strong> — pause after the architect plan; resume via GitHub comment, Slack, or dashboard.</li>
+					<li><strong>Standing event + cron service</strong> — real-time webhooks <em>and</em> scheduled weekly health/security sweeps.</li>
+					<li><strong>Free and OSS</strong> — no per-seat or per-tier cost.</li>
+				</ul>
+			</div>
+		</div>
+
+		<div class="choose-grid">
+			<div class="choose-card factory">
+				<div class="choose-tag">Choose Factory droid when</div>
+				<p>you want a polished, supported, multi-surface platform your whole team can adopt today, you're fine with a SaaS vendor (or buying Enterprise for on-prem), and you value benchmark-leading models and zero-ops sandboxes over owning the stack.</p>
+			</div>
+			<div class="choose-card lastlight">
+				<div class="choose-tag">Choose Last Light when</div>
+				<p>you need the agent on your own infrastructure with your own keys and a network boundary you control, you want repo-maintenance behaviours as forkable YAML, and you'd rather operate an OSS harness than pay and trust a SaaS — accepting that you own the ops.</p>
+			</div>
+		</div>
+	</section>
+
+	<!-- Autonomous GitHub bots -->
+	<section class="content-section">
+		<h2>Last Light vs. the autonomous GitHub bots</h2>
+		<p class="section-intro">Devin / Copilot coding agent / Codex cloud / Jules are Last Light's closest <em>behavioural</em> peers. They share one lifecycle: <strong>ticket &rarr; cloud sandbox &rarr; autonomous edit &rarr; PR &rarr; human review</strong>. Last Light's build cycle (Guardrails &rarr; Architect &rarr; Executor &rarr; Reviewer &rarr; PR) does the same thing. The divergence is <strong>ownership and extensibility</strong>, not the basic loop.</p>
+
+		<ul class="plain-list">
+			<li><strong>The bots' advantage:</strong> zero operations, best-in-class first-party models, tight platform integration (Copilot in GitHub, Jules in GCP), a polished managed sandbox. Assign an issue, a PR appears, nothing to run.</li>
+			<li><strong>The bots' constraints:</strong> vendor-hosted (your code runs in their cloud), vendor-model-locked (no BYOM), an opaque sandbox and egress boundary you can't tighten, per-seat or usage pricing, limited ability to customise the <em>workflow</em>.</li>
+			<li><strong>Last Light's trade:</strong> you own the harness, model routing, egress allowlist, GitHub token scopes, and the workflow DAG — and you can add triage, review, health, and security behaviours the bots don't offer as a unit. The cost is that you run and maintain it yourself, with no vendor to page.</li>
+		</ul>
+
+		<p class="section-note"><strong>Rule of thumb:</strong> if you want an issue&rarr;PR agent and don't care where it runs, the hosted bots are less work and likely have stronger out-of-the-box models. If <em>where</em> it runs, <em>what</em> it can reach, and <em>how</em> the workflow is shaped are first-order concerns, Last Light is built for that and they aren't.</p>
+	</section>
+
+	<!-- OpenHands / Goose -->
+	<section class="content-section">
+		<h2>Last Light vs. self-hosted autonomous OSS agents (OpenHands / Goose)</h2>
+		<p class="section-intro">Last Light's truest peer group — all self-hostable, all fully BYO-model, all able to run <strong>autonomously</strong>, not just interactively. Last Light is <strong>not</strong> uniquely "the self-hosted autonomous one." The real difference is <strong>a turnkey multi-workflow service vs. an autonomy primitive you assemble</strong>.</p>
+
+		<p><strong>OpenHands</strong> is the closest single competitor. Its <strong>Resolver</strong> (a GitHub Action backed by headless mode) does exactly the event-driven thing: label an issue and it spins up a sandboxed runtime, edits code, runs tests, and opens a PR — fully autonomous and self-hostable (or run on OpenHands Cloud / Enterprise). That's the same loop as Last Light's build cycle. OpenHands is also a larger project with a bigger ecosystem, a cloud product, and broader general-purpose use.</p>
+		<p><strong>Goose</strong> (from Block) is autonomous-capable too: a headless CLI, reusable <strong>recipes</strong>, a built-in <strong>scheduler</strong> for timetabled runs, CI/CD embedding, and configurable approval gates — a general agent you can shape into a scheduled, non-interactive worker.</p>
+
+		<p style="margin-top:1.25rem;">What Last Light adds on top of "self-hosted + autonomous," for its niche:</p>
+		<ul class="plain-list">
+			<li><strong>A suite of distinct workflows, not one pipeline</strong> — triage, PR review, the full build cycle, weekly health, weekly security, explore, verify, demo, and chat, as forkable YAML out of the box.</li>
+			<li><strong>Multi-source event routing</strong> — many GitHub webhook types, Slack, <em>and</em> cron sweeps through one deterministic router, not a single issue-label trigger.</li>
+			<li><strong>Approval gates as a built-in, mid-run primitive</strong> wired to GitHub / Slack / dashboard and the workflow DAG.</li>
+			<li><strong>An ownership-grade security boundary</strong> — default-deny egress firewall plus four downscoped per-run token profiles, as the default posture.</li>
+		</ul>
+
+		<p class="section-note">What OpenHands / Goose do better: bigger, more general-purpose, larger communities, more integrations, and (for OpenHands) a managed cloud option. If your need is "label an issue, get a PR, self-hosted," OpenHands Resolver is a more proven, lower-effort path. If your need is "a schedulable general agent," Goose is more flexible. Last Light wins specifically when you want the <em>whole repo-maintenance suite</em> as one purpose-built service rather than something you compose.</p>
+	</section>
+
+	<!-- Archon -->
+	<section class="content-section">
+		<h2>Last Light vs. Archon (the closest architectural twin)</h2>
+		<p class="section-intro"><a href="https://archon.diy/" target="_blank" rel="noopener">Archon</a> ("the first open-source harness builder for AI coding") is the most architecturally similar tool here. Both are <strong>self-hosted, open-source, YAML-DAG workflow engines</strong> with loops, gates, and conditions; <strong>multi-channel dispatch</strong>; and <strong>per-workflow model choice</strong>. The differences are subtle and worth spelling out.</p>
+
+		<ul class="plain-list">
+			<li><strong>What runs the agent.</strong> Archon is a harness that <em>orchestrates external agent CLIs</em> (Claude Code, Codex, …) — you bring the coding agent, and it runs wherever you point it. Last Light has its own integrated runtime (agentic-pi / pi-ai) with model routing baked in, and runs that runtime <em>fully inside</em> the sandbox boundary. Archon is more agent-agnostic; Last Light is more self-contained.</li>
+			<li><strong>Isolation.</strong> Archon isolates parallel runs in <em>per-run Git worktrees</em> — light and collision-free, great for fan-out. Last Light isolates in a <em>Docker / micro-VM sandbox with a default-deny egress firewall and downscoped per-run tokens</em> — heavier, but a real network/permission boundary. And it's the <strong>whole agent</strong> that goes in the box, not just its tools: the agent's reasoning, its bash, its file I/O, and its network egress all sit behind one perimeter — so a prompt injection has nowhere to escape to, rather than relying on each tool call to route itself through a sandbox.</li>
+			<li><strong>Intent.</strong> Archon's framing is <em>developer dispatch</em> — "dispatch work from anywhere," run many agents in parallel. Last Light's is <em>autonomous repo maintenance</em> — a standing service that triages, reviews, and reports on its own, with human approval gates.</li>
+		</ul>
+
+		<div class="choose-grid">
+			<div class="choose-card archon">
+				<div class="choose-tag">Choose Archon when</div>
+				<p>you want a lightweight, agent-agnostic harness to dispatch parallel coding runs (across worktrees) from many channels, driving whatever CLI agent you already use.</p>
+			</div>
+			<div class="choose-card lastlight">
+				<div class="choose-tag">Choose Last Light when</div>
+				<p>you want a self-contained repo-maintenance service with its own runtime, a hardened sandbox / egress / token boundary, and a built-in suite of triage / review / health / security workflows.</p>
+			</div>
+		</div>
+		<p class="section-note">Honestly, if you like one's philosophy you should evaluate the other — they're solving adjacent problems and borrow the same core idea (workflows as code).</p>
+	</section>
+
+	<!-- Honest limitations -->
+	<section class="content-section">
+		<h2>Honest limitations of Last Light</h2>
+		<p class="section-intro">The flip side of the design choices above — stated plainly.</p>
+		<ul class="plain-list">
+			<li><strong>Self-hosted only.</strong> No hosted / SaaS option. You provision a host, run the compose stack, and operate it.</li>
+			<li><strong>Single-tenant.</strong> Built around one operator/installation — no per-user RBAC or multi-team isolation.</li>
+			<li><strong>No IDE or editor integration.</strong> No pair-programming or inline completions; it reaches you through GitHub, Slack, and the dashboard.</li>
+			<li><strong>No published benchmarks.</strong> No Terminal-Bench / SWE-bench numbers; quality tracks whatever models you route to.</li>
+			<li><strong>Smaller ecosystem, no vendor support.</strong> No SLA, support desk, or account team — it's an OSS project you read the source of.</li>
+			<li><strong>Egress caveat in open mode.</strong> The Docker firewall peeks TLS SNI without terminating it, so in opt-in <em>unrestricted-egress</em> mode a hostname resolving to a private IP could be tunnelled. Strict mode (the default) avoids this by only resolving allowlisted hosts.</li>
+		</ul>
+	</section>
+
+	<!-- Decision guide -->
+	<section class="content-section">
+		<h2>Decision guide</h2>
+		<div class="decide-list">
+			<div class="decide-row"><span class="decide-want">Write code interactively at your desk</span><span class="decide-pick">Cursor / Claude Code / Codex CLI (or OSS: Aider / Cline / Goose)</span></div>
+			<div class="decide-row"><span class="decide-want">Delegate a task and get a PR back, zero ops, best models</span><span class="decide-pick">Devin / Copilot coding agent / Codex cloud / Jules</span></div>
+			<div class="decide-row"><span class="decide-want">A polished, supported, multi-surface platform for a whole team</span><span class="decide-pick">Factory droid</span></div>
+			<div class="decide-row"><span class="decide-want">A self-hosted, single-pipeline issue&rarr;PR agent</span><span class="decide-pick">OpenHands (Resolver)</span></div>
+			<div class="decide-row"><span class="decide-want">A lightweight, agent-agnostic harness to dispatch parallel runs from many channels</span><span class="decide-pick">Archon</span></div>
+			<div class="decide-row is-ll"><span class="decide-want">Autonomous repo maintenance on your own infra — your runtime and keys, a boundary you control, forkable YAML, a triage/review/health/security suite, and approval gates</span><span class="decide-pick">Last Light</span></div>
+			<div class="decide-row"><span class="decide-want">A free, private, per-task agent on your own machine</span><span class="decide-pick">Aider / Cline / Goose / OpenHands</span></div>
+		</div>
+	</section>
+
+	<!-- Sources -->
+	<section class="content-section last-section" id="sources">
+		<h2>Sources</h2>
+		<p class="section-intro">External claims about other tools are point-in-time (June 2026). Last Light's own specifics are drawn from the <a href="/spec/">spec</a> and the project repository.</p>
+		<ul class="src-list">
+			<li>Factory — <a href="https://factory.ai/" target="_blank" rel="noopener">product</a>, <a href="https://docs.factory.ai/pricing" target="_blank" rel="noopener">pricing</a>, <a href="https://docs.factory.ai/reference/cli-reference" target="_blank" rel="noopener">CLI docs</a>, <a href="https://factory.ai/news/terminal-bench" target="_blank" rel="noopener">Terminal-Bench</a></li>
+			<li>GitHub — <a href="https://docs.github.com/en/copilot/concepts/agents" target="_blank" rel="noopener">Copilot agents</a>, <a href="https://docs.github.com/en/copilot/concepts/agents/openai-codex" target="_blank" rel="noopener">Codex on GitHub</a>, <a href="https://github.com/features/copilot" target="_blank" rel="noopener">Copilot</a></li>
+			<li>OpenHands — <a href="https://github.com/OpenHands/OpenHands" target="_blank" rel="noopener">repo</a>, <a href="https://docs.openhands.dev/openhands/usage/run-openhands/headless-mode" target="_blank" rel="noopener">headless / Resolver docs</a></li>
+			<li>Goose — <a href="https://goose-docs.ai/" target="_blank" rel="noopener">docs</a> (recipes, scheduler, headless)</li>
+			<li>Archon — <a href="https://archon.diy/" target="_blank" rel="noopener">site</a>, <a href="https://github.com/coleam00/Archon" target="_blank" rel="noopener">repo</a></li>
+			<li>Landscape & benchmarks — <a href="https://artificialanalysis.ai/agents/coding" target="_blank" rel="noopener">Artificial Analysis</a>, <a href="https://www.morphllm.com/best-ai-coding-agents-2026" target="_blank" rel="noopener">Morph leaderboard</a></li>
+		</ul>
+		<p class="section-note">Pricing, model menus, and benchmark scores change frequently — verify against each vendor's own pages before relying on a specific figure.</p>
+	</section>
+
+	<style is:global>
+		/* Page header */
+		.page-header { max-width: 1000px; margin: 0 auto; padding: 4rem 2rem 1rem; }
+		.page-header h1 { font-size: clamp(1.8rem, 4vw, 2.5rem); margin-bottom: 1rem; letter-spacing: -0.02em; }
+		.page-header .subtitle { font-size: 1.1rem; color: var(--text-muted); line-height: 1.65; }
+		.accent { color: var(--gold); }
+
+		/* Content sections */
+		.content-section { max-width: 1000px; margin: 0 auto; padding: 3rem 2rem; }
+		.content-section h2 { font-size: 1.6rem; margin-bottom: 0.75rem; letter-spacing: -0.01em; width: 100%; }
+		.content-section p { line-height: 1.7; font-size: 0.95rem; }
+		.content-section h3 { letter-spacing: -0.01em; }
+		.section-intro { font-size: 0.95rem; color: var(--text-muted); line-height: 1.7; margin-bottom: 2rem; }
+		.section-note { font-size: 0.88rem; color: var(--text-muted); margin-top: 1.5rem; line-height: 1.65; }
+		.last-section { padding-bottom: 1rem; }
+
+		/* Callout card */
+		.callout-card { background: var(--bg-card); border: 1px solid var(--border); border-left: 3px solid var(--teal); border-radius: 10px; padding: 1.5rem 1.75rem; }
+		.callout-card p { font-size: 0.95rem; color: var(--text); line-height: 1.7; margin-bottom: 0.85rem; }
+		.callout-card p:last-child { margin-bottom: 0; }
+
+		/* Quadrant map */
+		.quad-axis-top { text-align: center; font-family: var(--mono); font-size: 0.74rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.85rem; }
+		.quadrant-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.85rem; }
+		.quadrant-cell { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem 1.35rem; }
+		.quadrant-cell.highlight { border-color: var(--gold); background: rgba(240, 180, 41, 0.06); }
+		.quadrant-cell p { font-size: 0.92rem; color: var(--text); margin: 0; }
+		.quadrant-cell .muted { color: var(--text-muted); }
+		.quad-tag { font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.55rem; }
+		.quadrant-cell.highlight .quad-tag { color: var(--gold); }
+		.star { color: var(--gold); font-weight: 600; }
+
+		/* At-a-glance table */
+		.table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; margin-top: 1.5rem; }
+		table.cmp { border-collapse: collapse; width: 100%; min-width: 900px; font-size: 0.82rem; }
+		table.cmp thead { background: var(--navy); }
+		table.cmp th, table.cmp td { padding: 0.7rem 0.9rem; text-align: left; vertical-align: top; line-height: 1.45; border-bottom: 1px solid var(--border); }
+		table.cmp thead th { color: var(--text-bright); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+		table.cmp tbody td { color: var(--text-muted); }
+		table.cmp tbody th[scope="row"] { color: var(--text-bright); font-weight: 600; white-space: nowrap; background: var(--bg-card); }
+		table.cmp tbody tr:last-child th, table.cmp tbody tr:last-child td { border-bottom: none; }
+		table.cmp tr.is-ll, table.cmp tbody tr.is-ll th, table.cmp tbody tr.is-ll td { background: rgba(240, 180, 41, 0.07); }
+		table.cmp tbody tr.is-ll th[scope="row"] { color: var(--gold); }
+
+		/* Head-to-head */
+		.hh-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 1rem; }
+		.hh-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; }
+		.hh-card h3 { font-size: 1rem; margin-bottom: 0.85rem; }
+		.card-list { list-style: none; padding: 0; margin: 0; }
+		.card-list li { font-size: 0.88rem; color: var(--text-muted); line-height: 1.6; padding-left: 1.1rem; position: relative; margin-bottom: 0.7rem; }
+		.card-list li:last-child { margin-bottom: 0; }
+		.card-list li::before { content: "\2192"; position: absolute; left: 0; color: var(--teal); }
+		.card-list strong, .plain-list strong { color: var(--text-bright); font-weight: 600; }
+
+		/* Plain lists */
+		.plain-list { list-style: none; padding: 0; margin: 1rem 0 0; }
+		.plain-list li { font-size: 0.92rem; color: var(--text-muted); line-height: 1.65; padding-left: 1.2rem; position: relative; margin-bottom: 0.85rem; }
+		.plain-list li::before { content: "\2022"; position: absolute; left: 0.15rem; color: var(--gold); }
+
+		/* Choose-when cards */
+		.choose-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 1.5rem; }
+		.choose-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.4rem 1.5rem; }
+		.choose-card.lastlight { border-left: 3px solid var(--gold); }
+		.choose-card.factory, .choose-card.archon { border-left: 3px solid var(--teal); }
+		.choose-card p { font-size: 0.9rem; color: var(--text); line-height: 1.65; margin: 0; }
+		.choose-tag { font-family: var(--mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-bright); margin-bottom: 0.6rem; }
+		.choose-card.lastlight .choose-tag { color: var(--gold); }
+		.choose-card.factory .choose-tag, .choose-card.archon .choose-tag { color: var(--teal); }
+
+		/* Decision guide */
+		.decide-list { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-top: 1.5rem; }
+		.decide-row { display: grid; grid-template-columns: 1fr 280px; gap: 1rem; padding: 0.85rem 1.25rem; border-bottom: 1px solid var(--border); align-items: center; }
+		.decide-row:last-child { border-bottom: none; }
+		.decide-row:nth-child(odd) { background: rgba(20, 27, 36, 0.5); }
+		.decide-row.is-ll { background: rgba(240, 180, 41, 0.07); }
+		.decide-want { font-size: 0.9rem; color: var(--text); line-height: 1.55; }
+		.decide-pick { font-size: 0.86rem; color: var(--text-bright); font-weight: 600; text-align: right; }
+		.decide-row.is-ll .decide-pick { color: var(--gold); }
+
+		/* Sources */
+		.src-list { list-style: none; padding: 0; margin: 0; }
+		.src-list li { font-size: 0.9rem; color: var(--text-muted); line-height: 1.6; padding-left: 1.2rem; position: relative; margin-bottom: 0.6rem; }
+		.src-list li::before { content: "\2022"; position: absolute; left: 0.15rem; color: var(--text-muted); }
+
+		/* Responsive */
+		@media (max-width: 720px) {
+			.quadrant-grid { grid-template-columns: 1fr; }
+			.hh-grid { grid-template-columns: 1fr; }
+			.choose-grid { grid-template-columns: 1fr; }
+			.decide-row { grid-template-columns: 1fr; gap: 0.35rem; }
+			.decide-pick { text-align: left; }
+		}
+	</style>
+
+</BaseLayout>

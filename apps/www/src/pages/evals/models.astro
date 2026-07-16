@@ -1,0 +1,98 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="models"
+	description="Configure which models the harness runs via models.json, select them on the CLI, and choose between comparing models forced across every step or replaying a deployment's real per-step config."
+>
+	<p>
+		The model registry lives in <code>models.json</code>. Resolution order:
+		an explicit <code>--models-file &lt;path&gt;</code> wins, else an overlay's
+		<code>evals/models.json</code> if present, else the built-in registry.
+	</p>
+
+	<h2><code>models.json</code></h2>
+
+	<pre><code>{`{
+  "default": "openai/gpt-5.4-mini",
+  "compare": [
+    { "id": "openai/gpt-5.5",              "label": "GPT-5.5",         "provider": "OpenAI",           "envKey": "OPENAI_API_KEY" },
+    { "id": "anthropic/claude-opus-4-8",   "label": "Claude Opus 4.8", "provider": "Anthropic",        "envKey": "ANTHROPIC_API_KEY" },
+    { "id": "fireworks/accounts/fireworks/models/glm-5p2", "label": "GLM-5.2", "provider": "Fireworks (open)", "envKey": "FIREWORKS_API_KEY" }
+  ]
+}`}</code></pre>
+
+	<ul>
+		<li><strong><code>default</code></strong> — the single model a bare <code>run</code> uses.</li>
+		<li>
+			<strong><code>compare</code></strong> — the cross-vendor set <code>--compare</code>
+			fans out over. <strong>Each entry runs only if its <code>envKey</code> is
+			present</strong>, so the set auto-trims to whatever keys you have. An entry
+			with no key is a silent no-op, not an error.
+		</li>
+	</ul>
+
+	<p>
+		Per entry: <code>id</code> is an agentic-pi <code>provider/model</code> spec
+		(Fireworks ids use the long
+		<code>fireworks/accounts/fireworks/models/&lt;x&gt;</code> form),
+		<code>label</code> is the scorecard display name, <code>provider</code> groups
+		families for parallelism, and <code>envKey</code> is the gating variable. A new
+		provider just needs its key set plus a registry id — no harness change.
+	</p>
+
+	<h2>Selecting models on the CLI</h2>
+
+	<pre><code>lastlight-evals run triage --model haiku            # fuzzy substring match against id/label
+lastlight-evals run triage --model openai/gpt-5.5   # exact provider/model id
+lastlight-evals run triage --model glm,deepseek     # comma-list
+lastlight-evals run --compare                       # whole compare set (key-gated)
+EVAL_MODELS="openai/gpt-5.5,anthropic/claude-sonnet-4-6" lastlight-evals run   # env override</code></pre>
+
+	<h2>Two run types: <code>--mode</code></h2>
+
+	<p>
+		A run compares N <strong>arms</strong> along one of two axes. In a TTY with no
+		model flags you're asked which; otherwise pick with <code>--mode</code>.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Mode</th><th>What varies</th><th>Use it to…</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>models</code> (default)</td>
+				<td>One model, <strong>forced across every workflow step</strong>. <code>--model</code> / <code>--compare</code> pick the set.</td>
+				<td>Compare models head-to-head. Lands in <code>eval-results/&lt;tier&gt;/</code> (or <code>&lt;tier&gt;-compare/</code>).</td>
+			</tr>
+			<tr>
+				<td><code>config</code></td>
+				<td>A deployment's <strong>real per-step config</strong> — the <code>models</code>/<code>variants</code> maps from an overlay's <code>config.yaml</code>, merged over core's default exactly as prod, so each phase can run on a different model.</td>
+				<td>Measure a real deployment config. The arm is the config/overlay. Lands in <code>eval-results/&lt;tier&gt;-config/</code> on its own trend line.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<pre><code>lastlight-evals run code-fix --mode config --overlay examples/overlay
+lastlight-evals run code-fix --mode config --overlay A --overlay B   # 2 configs side-by-side
+lastlight-evals run code-fix --mode config --overlay A --model haiku # override a config's default</code></pre>
+
+	<p>
+		<code>examples/overlay/</code> ships as a ready-to-run sample. Both run types
+		share all downstream machinery — work list, scorecard, dashboard — they differ
+		only in how the model is chosen per step. A config run's dashboard view adds a
+		<strong>Per-step models</strong> panel showing each phase's resolved model.
+	</p>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/workspaces">
+			<span class="label">← Previous</span>
+			<span class="title">Workspaces &amp; overlays</span>
+		</a>
+		<a class="next" href="/evals/authoring">
+			<span class="label">Next →</span>
+			<span class="title">Authoring cases</span>
+		</a>
+	</div>
+</EvalsLayout>

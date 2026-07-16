@@ -1,0 +1,81 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/issue-comment"
+	description="The issue comment workflow — conversational replies when a maintainer comments on an issue without requesting a build."
+>
+	<p>
+		The issue comment workflow handles lightweight conversational replies. When
+		a maintainer comments on an issue with an <code>@last-light</code> mention
+		and the LLM classifier determines they're not asking for a code change
+		(BUILD) or idea exploration (EXPLORE), this workflow responds in-thread.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>issues-write</code> — can read
+			repo contents and post issue comments.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Respond</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">conversational reply</text>
+		</svg>
+	</div>
+
+	<h2>When it runs</h2>
+
+	<p>
+		This workflow is the catch-all for <code>@last-light</code> mentions on
+		issues that aren't builds or explores. Examples:
+	</p>
+
+	<ul>
+		<li>"@last-light can you close this?" — labels/closes the issue</li>
+		<li>"@last-light what's the status of this?" — summarizes the issue state</li>
+		<li>"@last-light add the bug label" — applies labels</li>
+		<li>"@last-light thanks!" — acknowledges</li>
+	</ul>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub webhook:</strong> <code>issue_comment.created</code> with an <code>@last-light</code> mention, classified as neither BUILD nor EXPLORE</li>
+	</ul>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/issue-triage" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Issue triage</span>
+		</a>
+		<a href="/docs/workflows/answer" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Answer</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

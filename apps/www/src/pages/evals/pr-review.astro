@@ -1,0 +1,192 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="pr-review"
+	description="The pr-review tier grades a posted review against a human gold set with an LLM judge (F1 / precision / recall). Run it against your own gold PRs, or benchmark against Martian's Code Review Bench — same mechanism, two sources of gold."
+>
+	<p>
+		The <code>pr-review</code> tier measures review <em>quality</em>. The real
+		<code>pr-review</code> workflow posts a review, and an LLM judge scores it
+		against a human-verified <strong>gold set</strong> → precision, recall, and
+		<strong>F1</strong>. It's the one tier graded by a judge — matching free-text
+		findings to semantic gold comments can't be done deterministically. Triage and
+		code-fix stay judge-free.
+	</p>
+
+	<p>
+		The gold set can come from <strong>two sources</strong>, and the tier runs the
+		same either way:
+	</p>
+
+	<ul>
+		<li><strong>Your own reviewed PRs</strong> — build a dataset from real PRs your team has reviewed. This is the everyday path for tuning a deployment.</li>
+		<li><strong>Martian's Code Review Bench</strong> — an optional public benchmark of 50 PRs that also lets you see where a run would rank against published tools.</li>
+	</ul>
+
+	<figure class="evals-figure">
+		<img src="/evals/pr-review-scorecard.png" alt="A pr-review scorecard: F1 with precision and recall, cost and latency, and a per-instance table where each row shows matched-vs-gold counts, false positives, and a judge button." loading="lazy" />
+		<figcaption>A <code>pr-review</code> scorecard — F1 headline, per-instance precision/recall, and a <code>judge</code> button on every row.</figcaption>
+	</figure>
+
+	<h2>Option A — bring your own gold PRs</h2>
+
+	<p>
+		Author cases from real PRs your team has already reviewed with
+		<a href="/evals/authoring"><code>add-case --pr &lt;url&gt; --review</code></a>.
+		It pulls the PR fixture and a candidate <code>review_gold</code> from the human
+		review (inline comments + substantive review bodies, with bot / nit / reply /
+		LGTM noise filtered out) and prints an evidence block; you assign real
+		severities and prune non-actionable comments.
+	</p>
+
+	<pre><code>lastlight-evals add-case --pr &lt;url&gt; --review --dry-run   # propose; read the evidence, curate
+lastlight-evals add-case --pr &lt;url&gt; --review             # write into ./datasets/pr-review (or --overlay)
+lastlight-evals run pr-review --model &lt;model&gt;            # run against your dataset</code></pre>
+
+	<p>
+		Re-running a PR <strong>replaces by id</strong>, so building up a dataset one PR
+		at a time is safe. Cases you author are byte-compatible with Martian imports, so
+		the two can coexist in one <code>instances.json</code>. The full authoring flow —
+		severities, the anti-spoil guarantee, curating for many PRs at once — is on the
+		<a href="/evals/authoring">Authoring cases</a> page.
+	</p>
+
+	<h2>Option B — benchmark against Martian's Code Review Bench</h2>
+
+	<p>
+		<a href="https://github.com/withmartian/code-review-benchmark" target="_blank" rel="noopener">Martian's Code Review Bench</a>
+		is an <strong>optional</strong> public benchmark: 50 real merged PRs (Sentry,
+		Grafana, Cal.com, Discourse, Keycloak), each carrying inlined
+		<code>golden_comments</code> with base/head SHAs pinned. Because they're large
+		real-repo PRs, the tier ships <strong>empty</strong> — you import them:
+	</p>
+
+	<pre><code>npx tsx scripts/import-martian.ts            # resolve all 50 via gh (pins base/head SHAs)
+npx tsx scripts/import-martian.ts --limit 3  # a quick subset first
+npx tsx scripts/import-martian.ts --dry-run  # print the first resolved instance, don't write</code></pre>
+
+	<p>
+		It needs an authenticated <code>gh</code> and network. Entries with no
+		<code>golden_comments</code> or an unrecognized source URL are skipped and
+		logged — never silently dropped. Then run the tier exactly as above:
+		<code>lastlight-evals run pr-review</code>. The payoff of using Martian's set is
+		the leaderboard ranking below.
+	</p>
+
+	<h2>How the judge grades</h2>
+
+	<p>Whichever source the gold comes from, grading is a two-step LLM judge:</p>
+
+	<ol>
+		<li><strong>Extract</strong> the review's distinct, concrete findings (dropping praise and summaries).</li>
+		<li><strong>Match</strong> each finding to a gold comment — same underlying issue?</li>
+	</ol>
+
+	<p>
+		From the matches: <strong>precision</strong> = matched ÷ posted,
+		<strong>recall</strong> = matched ÷ gold, combined as an
+		<strong>F-beta</strong>. The headline is <strong>F1</strong> (β = 1, precision
+		and recall weighted equally — Martian's leaderboard metric). Pass
+		<code>--f-beta 0.5</code> (or <code>EVAL_F_BETA=0.5</code>) to weight precision
+		2×; the dashboard relabels the column <code>F{`{β}`}</code> to match.
+	</p>
+
+	<pre><code>lastlight-evals run pr-review --model &lt;model&gt;                   # full tier
+lastlight-evals run pr-review --model &lt;model&gt; --limit 3         # first 3 cases (controlled)
+lastlight-evals run pr-review --model &lt;model&gt; --f-beta 0.5      # weight precision 2×
+lastlight-evals run pr-review --model &lt;model&gt; --judge-with-diff # give the judge the diff</code></pre>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>Gold sets are incomplete — treat the score as relative.</strong> A
+			gold set (yours or Martian's) can't list every valid finding, so a
+			real-but-unlisted finding scores as a false positive and understates
+			precision. That's why the default is F1, not the precision-weighted F0.5.
+			Don't re-attribute F0.5 to Martian — their leaderboard headline is F1.
+		</div>
+	</div>
+
+	<h2>The judge is independent — and inspectable</h2>
+
+	<p>
+		The judge model is independent of the models under test (a strong default per
+		your provider key, overridable with <code>EVAL_JUDGE_MODEL</code>; one-shot,
+		temperature 0). A judge failure marks the case <em>errored</em> (ungraded),
+		never a silent zero. By default it's <strong>diff-blind</strong> — it reads only
+		the posted review, mirroring Martian's offline judge; <code>--judge-with-diff</code>
+		feeds it the PR diff for higher-fidelity matching (and marks those grades
+		<code>diff-aware</code>, trading away leaderboard parity).
+	</p>
+
+	<p>
+		Every per-instance row has a <strong>judge</strong> button that opens the
+		judge's full working — the findings it extracted, the gold set, and the
+		finding ↔ gold pairing (matched / false positive / missed) — so an F1 score is
+		never a black box:
+	</p>
+
+	<figure class="evals-figure">
+		<img src="/evals/judge-modal.png" alt="The judge trace modal: findings extracted from the review, each tagged matched or false positive, the gold set with which finding matched each, and expandable raw judge replies." loading="lazy" />
+		<figcaption>The judge trace — extracted findings ↔ gold, false positives, and the raw replies behind the score.</figcaption>
+	</figure>
+
+	<h2>Give the reviewer repo context</h2>
+
+	<p>
+		A PR is locked at its head SHA, so the reviewing agent only sees the code — not
+		the conventions a maintainer carries in their head. The harness can inject a
+		synthetic <code>AGENTS.md</code> / <code>CLAUDE.md</code> into the checkout so the
+		agent reads it (the coding agent auto-loads it, walking up from its working
+		directory — no prompt change needed). Two presence-based sources, on by default:
+	</p>
+
+	<ul>
+		<li><strong>Generic</strong> — <code>&lt;overlay&gt;/repo-context/AGENTS.md</code>, injected into <em>every</em> reviewed repo. For guidance that helps on any codebase (e.g. "prefer concrete, line-anchored findings; suppress pure style nits").</li>
+		<li><strong>Per-repo</strong> — <code>datasets/pr-review/context/&lt;instance_id&gt;/AGENTS.md</code>, injected only for that case's repo. This is the portable <em>"add this to your repo and reviews improve"</em> recommendation — honest because it's exactly what a maintainer could commit.</li>
+	</ul>
+
+	<p>
+		It appends to a real <code>AGENTS.md</code> / <code>CLAUDE.md</code> if the repo
+		ships one (never shadowing it), and records which context each case saw on the
+		scorecard. Toggle it off for a clean control run to measure the lift:
+	</p>
+
+	<pre><code>lastlight-evals run pr-review --overlay instance                      # inject (default)
+lastlight-evals run pr-review --overlay instance --no-inject-context  # control (or EVAL_INJECT_CONTEXT=0)</code></pre>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			Proving that a piece of context lifts review quality — generically or for one
+			repo — is exactly what the <a href="/evals/improve">improvement loop</a> drives,
+			alongside prompt and skill changes.
+		</div>
+	</div>
+
+	<h2>Where would this rank? (Martian only)</h2>
+
+	<p>
+		When your run covers Martian PRs, each scorecard also computes a leaderboard
+		sidecar: <em>where would this run place</em> against the benchmark's tools, over
+		the same PRs this run covered (micro-averaged F1; only tools with data on every
+		one of those PRs are shown). It's a like-for-like slice, not the full
+		leaderboard — and it only appears for Martian-sourced cases, since your own PRs
+		aren't on it.
+	</p>
+
+	<figure class="evals-figure">
+		<img src="/evals/leaderboard.png" alt="A 'Where would this rank' bar chart placing Lastlight among Martian's Code Review Bench tools — Augment, Cubic, Qodo, Gemini, Claude Code, Devin, CodeRabbit and others — with the Lastlight row highlighted." loading="lazy" />
+		<figcaption>The leaderboard sidecar — a Martian run ranked against published tools over the same PRs.</figcaption>
+	</figure>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/code-fix">
+			<span class="label">← Previous</span>
+			<span class="title">Code fix</span>
+		</a>
+		<a class="next" href="/evals/improve">
+			<span class="label">Next →</span>
+			<span class="title">Improving the score</span>
+		</a>
+	</div>
+</EvalsLayout>

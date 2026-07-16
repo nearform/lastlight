@@ -1,0 +1,177 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/explore"
+	description="The explore workflow — a Socratic Q&A loop that shapes half-formed ideas into detailed specs through back-and-forth conversation."
+>
+	<p>
+		The explore workflow helps you turn a vague idea into a concrete spec
+		through a Socratic conversation. Instead of jumping straight to code, it
+		asks focused clarifying questions, reads your codebase for context, and
+		iterates until it has enough signal to write a detailed specification
+		document.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>issues-write</code> — the agent
+			can read your codebase, create issues, and post comments. It cannot push
+			code or open PRs.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 820 140" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<!-- Nodes -->
+			<rect x="0" y="35" width="100" height="56" rx="8" fill="var(--fill-grey)" stroke="var(--diag-grey)" stroke-width="1.5"/>
+			<text x="50" y="60" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Context</text>
+			<text x="50" y="75" text-anchor="middle" fill="var(--text-muted)" font-size="8" font-family="JetBrains Mono">phase_0</text>
+
+			<rect x="130" y="35" width="120" height="56" rx="8" fill="var(--fill-blue)" stroke="var(--diag-blue)" stroke-width="1.5"/>
+			<text x="190" y="60" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Read context</text>
+			<text x="190" y="75" text-anchor="middle" fill="var(--diag-blue)" font-size="8" font-family="JetBrains Mono">clone + explore</text>
+
+			<rect x="280" y="35" width="180" height="56" rx="8" fill="var(--fill-gold)" stroke="var(--gold)" stroke-width="1.5"/>
+			<text x="370" y="55" text-anchor="middle" fill="var(--text-bright)" font-size="11" font-weight="600" font-family="Inter">Socratic questioning</text>
+			<text x="370" y="72" text-anchor="middle" fill="var(--gold)" font-size="8" font-family="JetBrains Mono">reply-gated loop (max 8)</text>
+
+			<rect x="490" y="35" width="130" height="56" rx="8" fill="var(--fill-teal)" stroke="var(--diag-mint)" stroke-width="1.5"/>
+			<text x="555" y="60" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Synthesize spec</text>
+			<text x="555" y="75" text-anchor="middle" fill="var(--diag-mint)" font-size="8" font-family="JetBrains Mono">write document</text>
+
+			<rect x="650" y="35" width="130" height="56" rx="8" fill="var(--fill-purple)" stroke="var(--diag-purple)" stroke-width="1.5"/>
+			<text x="715" y="60" text-anchor="middle" fill="var(--text-bright)" font-size="10" font-weight="600" font-family="Inter">Publish</text>
+			<text x="715" y="75" text-anchor="middle" fill="var(--diag-purple)" font-size="8" font-family="JetBrains Mono">create issue</text>
+
+			<!-- Edges -->
+			<line x1="100" y1="63" x2="130" y2="63" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow-e)"/>
+			<line x1="250" y1="63" x2="280" y2="63" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow-e)"/>
+			<line x1="460" y1="63" x2="490" y2="63" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow-e)"/>
+			<line x1="620" y1="63" x2="650" y2="63" stroke="var(--diag-grey)" stroke-width="1.5" marker-end="url(#arrow-e)"/>
+
+			<!-- Reply loop arc -->
+			<path d="M 420 91 L 420 115 L 320 115 L 320 91" stroke="var(--gold)" stroke-width="1" stroke-dasharray="4,3" fill="none" marker-end="url(#arrow-gold)"/>
+			<text x="370" y="130" text-anchor="middle" fill="var(--gold)" font-size="8" font-family="JetBrains Mono">user replies in thread</text>
+
+			<defs>
+				<marker id="arrow-e" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--diag-grey)"/></marker>
+				<marker id="arrow-gold" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="var(--gold)"/></marker>
+			</defs>
+		</svg>
+	</div>
+
+	<h2>How the conversation works</h2>
+
+	<p>
+		The socratic phase uses a <strong>reply-gated loop</strong> — a new kind
+		of interactive gate where the workflow pauses after each iteration and waits
+		for any free-form reply in the same thread (not just an explicit "approve"
+		command). When you reply, your answer is appended to a Q&A transcript and
+		the next iteration runs with full context of everything discussed so far.
+		Replies feed back into the same paused run via the <code>explore_reply</code>
+		route — there's no separate workflow for the continuation.
+	</p>
+
+	<ol>
+		<li>The agent reads the context document it wrote during the clone phase</li>
+		<li>It asks 1-3 focused clarifying questions</li>
+		<li>The workflow pauses — your reply (in the same Slack thread or GitHub issue) resumes it</li>
+		<li>The agent reads your answer + all prior Q&A, then either asks follow-up questions or declares <code>READY</code></li>
+		<li>When ready (or after 8 iterations), it moves to synthesis</li>
+	</ol>
+
+	<p>
+		You can say <strong>"we're done"</strong> or <strong>"just write it up"</strong>
+		at any point to skip ahead to the spec draft.
+	</p>
+
+	<h2>Phases</h2>
+
+	<h3>1. Read context</h3>
+	<p>
+		Clones the target repository, explores the codebase, and writes a detailed
+		context document at <code>.lastlight/explore-{'{'+'runId}'}/explore-context.md</code>.
+		This document captures architecture, key code excerpts, relevant patterns,
+		and what's unclear — it's the reference for all subsequent phases so they
+		don't have to re-explore the codebase from scratch.
+	</p>
+
+	<h3>2. Socratic questioning</h3>
+	<p>
+		An interactive loop (max 8 iterations) that asks clarifying questions
+		grounded in the codebase. The agent reads the context doc and Q&A history,
+		references specific code when helpful ("I see <code>FooService</code> handles
+		this today — should the new feature extend it or replace it?"), and appends
+		any new discoveries to the context doc.
+	</p>
+
+	<h3>3. Synthesize spec</h3>
+	<p>
+		Reads the accumulated context doc and Q&A transcript, then writes a
+		structured specification to <code>explore-spec.md</code>. Includes problem
+		statement, users, goals, non-goals, proposed design (referencing actual
+		code paths), key files to modify, acceptance criteria, and open questions.
+	</p>
+
+	<h3>4. Publish</h3>
+	<p>
+		Publishes the spec as a new GitHub issue in the target repo. The issue
+		link is posted back to the originating Slack thread or GitHub issue.
+	</p>
+
+	<h2>Triggers</h2>
+	<ul>
+		<li><strong>Slack (natural language):</strong> "let's explore adding webhooks to nearform/lastlight" — the classifier detects EXPLORE intent and extracts the repo</li>
+		<li><strong>Slack (explicit):</strong> <code>explore cliftonc/repo</code> or <code>explore cliftonc/repo#42</code></li>
+		<li><strong>GitHub comment:</strong> <code>@last-light let's spec this out</code> on an issue (classifier detects EXPLORE intent)</li>
+	</ul>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			The explore workflow always requires a repo — the agent needs to clone
+			it for code-grounded questions. If you don't mention a repo in your
+			message, Last Light will ask you to include one.
+		</div>
+	</div>
+
+	<h2>State management</h2>
+	<p>
+		The Q&A transcript is stored in the workflow run's <code>scratch</code>
+		column and survives harness restarts. Each explore session gets an
+		isolated workspace directory (<code>.lastlight/explore-{'{'+'runId}'}</code>)
+		so concurrent sessions never overlap.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/build" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Build workflow</span>
+		</a>
+		<a href="/docs/workflows/issue-triage" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Issue triage</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 820px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

@@ -1,0 +1,117 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/pr-fix"
+	description="The PR fix workflow — lightweight fix-and-push for PR issues without the full architect/reviewer cycle."
+>
+	<p>
+		PR fix is a lightweight single-phase workflow for quick fixes on existing
+		pull requests. When a maintainer comments on a PR asking Last Light to fix
+		something, and the classifier detects a BUILD intent, this workflow runs
+		instead of the full build cycle — it fixes the issue and pushes directly
+		to the PR branch.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>repo-write</code> — can push
+			commits to the PR branch. No architect planning or independent review.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">fix + push to branch</text>
+		</svg>
+	</div>
+
+	<h2>How it differs from build</h2>
+
+	<table class="docs-table">
+		<thead>
+			<tr>
+				<th></th>
+				<th>Build</th>
+				<th>PR fix</th>
+			</tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td>Phases</td>
+				<td>6 (guardrails → architect → executor → reviewer → PR)</td>
+				<td>1 (fix and push)</td>
+			</tr>
+			<tr>
+				<td>Approval gates</td>
+				<td>Optional (post_architect, post_reviewer)</td>
+				<td>None</td>
+			</tr>
+			<tr>
+				<td>Code review</td>
+				<td>Independent reviewer with fix loop</td>
+				<td>None — relies on the existing PR review process</td>
+			</tr>
+			<tr>
+				<td>Creates branch</td>
+				<td>Yes (new branch per issue)</td>
+				<td>No (pushes to existing PR branch)</td>
+			</tr>
+			<tr>
+				<td>Typical use</td>
+				<td>New features from issues</td>
+				<td>Fixing failing CI, addressing review comments</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>What it does</h2>
+
+	<ul>
+		<li>Clones the repo at the PR's head branch</li>
+		<li>Reads the PR description, comment thread, and any CI failures</li>
+		<li>Implements the fix</li>
+		<li>Runs tests, lint, and typecheck</li>
+		<li>Pushes the fix commit to the PR branch</li>
+	</ul>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub comment:</strong> <code>@last-light fix this</code> on a PR (classifier detects BUILD intent on a PR comment)</li>
+	</ul>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/pr-review" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">PR review</span>
+		</a>
+		<a href="/docs/workflows/repo-health" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Repo health</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

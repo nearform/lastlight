@@ -1,0 +1,80 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/pr-comment"
+	description="The PR comment workflow — answers a maintainer's question about an open PR with concrete, code-cited evidence."
+>
+	<p>
+		The PR comment workflow is the PR-side counterpart to issue comment. When
+		a maintainer asks a question about an open pull request, this workflow
+		answers it with concrete, code-cited evidence — reading the diff and the
+		surrounding files to ground the response.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>issues-write</code> — can read
+			repo contents and post comments. It needs the diff plus a higher
+			file-read cap to cite code accurately.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Respond</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">code-cited answer</text>
+		</svg>
+	</div>
+
+	<h2>What it does</h2>
+
+	<ul>
+		<li>Reads the PR diff plus the relevant surrounding files</li>
+		<li>Answers the maintainer's question with concrete, code-cited evidence</li>
+		<li>Posts the answer back on the PR — no code changes</li>
+	</ul>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub webhook:</strong> an <code>issue_comment.created</code> event on a PR when the classifier returns a non-build intent (route <code>pr_comment</code>)</li>
+	</ul>
+
+	<h2>Skill</h2>
+
+	<p>This workflow uses the <code>pr-comment</code> skill.</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/answer" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Answer</span>
+		</a>
+		<a href="/docs/workflows/pr-review" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">PR review</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

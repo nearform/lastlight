@@ -1,0 +1,262 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="production"
+	description="Deploy Last Light to a production host with Docker Compose, Caddy TLS, and persistent state."
+>
+	<p>
+		Production is a single Docker host running two containers: the Last Light agent and
+		a Caddy reverse proxy that handles HTTPS automatically. State lives in one Docker
+		volume. The footprint is intentionally small — this is meant to run on a cheap VPS
+		you own, not your production cluster.
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>Deploy on an isolated host.</strong> Last Light runs arbitrary
+			agent-generated code inside per-phase sandboxes (gondolin VMs by default, or
+			Docker containers when <code>LASTLIGHT_SANDBOX=docker</code>). While that
+			isolation is strong, it is early-stage software and may have undiscovered
+			weaknesses. Put it on a host that cannot reach your internal systems,
+			databases, or credentials beyond what it explicitly needs.
+		</div>
+	</div>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Docker-free alternative.</strong> On a Linux host with
+			<code>/dev/kvm</code> available, the
+			<a href="https://github.com/nearform/lastlight/blob/main/deploy/native/README.md" target="_blank" rel="noopener">native systemd deploy</a>
+			runs the harness directly under systemd and uses gondolin for sandboxing —
+			no Docker required. Re-deploys are a <code>git pull</code> plus
+			<code>sudo bash deploy/native/install.sh</code>.
+		</div>
+	</div>
+
+	<h2>Quick setup (recommended)</h2>
+
+	<p>
+		The fastest path from a bare server to a running instance — the setup wizard
+		handles environment files, secrets, Docker Compose, and optional Caddy TLS:
+	</p>
+
+	<pre><code>npx lastlight setup</code></pre>
+
+	<p>
+		It walks you through entering your GitHub App credentials, domain, the
+		<strong>repositories the bot manages</strong>, your model provider API key
+		(OpenAI / Anthropic / OpenRouter), and optional Slack integration. When done it
+		scaffolds your private <strong>deployment overlay</strong> at <code>instance/</code> —
+		writing <code>instance/config.yaml</code> (your managed repos),
+		<code>instance/secrets/.env</code>, and your PEM at
+		<code>instance/secrets/app.pem</code> — then offers to build and start the containers.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Prerequisites:</strong> Node.js 20+, Docker, and a
+			<a href="/docs/github-app">GitHub App</a> already created. If you prefer
+			to configure everything manually, follow the steps below instead.
+		</div>
+	</div>
+
+	<h2>Manual setup</h2>
+
+	<h3>1. Fork and clone</h3>
+
+	<pre><code>git clone https://github.com/YOUR-USER/lastlight.git
+cd lastlight
+git remote add upstream https://github.com/nearform/lastlight.git</code></pre>
+
+	<p>
+		Forking is recommended so you can tweak workflows, prompts, and agent context to
+		match your project. Pull from <code>upstream</code> when you want updates.
+	</p>
+
+	<h3>2. Lay out your deployment overlay (<code>instance/</code>)</h3>
+
+	<p>
+		Everything specific to your deployment — managed repos, config overrides,
+		agent-context, and secrets — lives in a single <code>instance/</code> folder next
+		to <code>docker-compose.yml</code>. It's mounted read-only at <code>/app/instance</code>
+		(<code>LASTLIGHT_OVERLAY_DIR=/app/instance</code>) and is never committed to the
+		public repo or baked into the image — so it's the natural home for a private
+		config repo.
+	</p>
+
+	<pre><code>mkdir -p instance/secrets
+cp deploy/.env.production.example instance/secrets/.env
+cp /path/to/your-app.private-key.pem instance/secrets/app.pem
+chmod 600 instance/secrets/.env instance/secrets/app.pem
+
+# instance/config.yaml — at minimum the repos the bot manages:
+printf 'managedRepos:\n  - your-org/repo-one\n' &gt; instance/config.yaml</code></pre>
+
+	<p>Edit <code>instance/secrets/.env</code> and fill in at minimum:</p>
+
+	<ul>
+		<li><code>GITHUB_APP_ID</code>, <code>GITHUB_APP_INSTALLATION_ID</code>, <code>GITHUB_APP_PRIVATE_KEY_PATH</code> (use <code>./app.pem</code> — the entrypoint symlinks it)</li>
+		<li><code>WEBHOOK_SECRET</code></li>
+		<li><code>DOMAIN</code> — your public hostname, used by Caddy for automatic TLS</li>
+		<li><code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, and/or <code>OPENROUTER_API_KEY</code> — must match whichever provider <code>LASTLIGHT_MODEL</code> resolves to (default <code>anthropic/claude-sonnet-4-6</code>). One OpenRouter key covers most providers if you want a single billing surface.</li>
+	</ul>
+
+	<p>
+		Both the <code>agent</code> and <code>caddy</code> services read
+		<code>instance/secrets/.env</code> via <code>env_file</code>, and the entrypoint
+		sources it inside the container — so <strong>no repo-root <code>.env</code> is
+		needed</strong>. <code>instance/config.yaml</code> is merged over the public
+		<code>config/default.yaml</code> at startup (maps deep-merge, arrays like
+		<code>managedRepos</code> replace, env vars override). Edit any overlay file and
+		<code>docker compose restart agent</code> to apply — no rebuild.
+	</p>
+
+	<p>
+		See the <a href="/docs/configuration">Configuration reference</a> for every
+		variable the harness understands, including optional knobs like
+		<code>LASTLIGHT_MODEL</code>, <code>LASTLIGHT_MODELS</code>,
+		<code>LASTLIGHT_THINKING</code>, <code>LASTLIGHT_SANDBOX</code>,
+		<code>APPROVAL_GATES</code>, <code>ADMIN_PASSWORD</code>, and the Slack
+		OAuth group.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Coming from the OpenCode era?</strong> All legacy
+			<code>OPENCODE_*</code> env vars (<code>OPENCODE_MODEL</code>,
+			<code>OPENCODE_MODELS</code>, <code>OPENCODE_VARIANT</code>,
+			<code>OPENCODE_VARIANTS</code>) are still read as fallbacks for the matching
+			<code>LASTLIGHT_*</code> name. You can leave existing <code>.env</code> files
+			in place and rename at your leisure.
+		</div>
+	</div>
+
+	<h3>3. Build and start</h3>
+
+	<pre><code># Point Caddy at your domain (in instance/secrets/.env)
+echo "DOMAIN=lastlight.example.com" >> instance/secrets/.env
+
+# Build and start both containers
+docker compose build agent
+docker compose up -d
+
+# Tail the logs
+docker compose logs -f agent</code></pre>
+
+	<p>
+		Caddy reads <code>DOMAIN</code> from the environment and provisions a Let's
+		Encrypt certificate on first start. DNS must already resolve to the host.
+	</p>
+
+	<h3>4. Verify it's running</h3>
+
+	<pre><code>curl https://lastlight.example.com/health
+# &#123; "status": "ok" &#125;
+
+# Invalid webhook signature — returns 401, confirms the listener works
+curl -X POST https://lastlight.example.com/webhooks/github -d '&#123;&#125;'</code></pre>
+
+	<p>
+		Open <code>https://lastlight.example.com/admin</code> in a browser and check the
+		Home tab. You should see live activity stats, recent workflows, and resource usage.
+	</p>
+
+	<h3>5. Wire up the webhook</h3>
+
+	<p>Back in your GitHub App settings:</p>
+
+	<ul>
+		<li><strong>Webhook URL</strong> → <code>https://lastlight.example.com/webhooks/github</code></li>
+		<li><strong>Webhook secret</strong> → same value as <code>WEBHOOK_SECRET</code> in <code>instance/secrets/.env</code></li>
+		<li>Make sure <strong>Active</strong> is enabled.</li>
+	</ul>
+
+	<p>
+		Create a test issue on a repo where the App is installed; Last Light should react
+		within a few seconds and you'll see a new run appear on the dashboard Workflows
+		tab.
+	</p>
+
+	<h2>State and persistence</h2>
+
+	<p>
+		All persistent state lives under <code>/app/data</code> inside the container,
+		mounted as a Docker volume:
+	</p>
+
+	<ul>
+		<li><code>lastlight.db</code> — SQLite: executions, workflow runs, approvals, messaging sessions, rate limits, system status.</li>
+		<li><code>agent-sessions/projects/</code> — JSONL session files (Claude-SDK-style envelope written by <code>event-shim.ts</code> — the full audit trail for every run, read by the dashboard). Override the location with <code>LASTLIGHT_SESSIONS_DIR</code>.</li>
+		<li><code>sandboxes/</code> — cloned repos, one per task (gondolin or docker).</li>
+		<li><code>sandbox-data/</code> — shared volume mounted into docker-mode sandboxes.</li>
+		<li><code>logs/</code> — structured harness logs.</li>
+		<li><code>secrets/app.pem</code> — mode-600 copy of the GitHub App key, used by sandbox containers via the shared volume.</li>
+	</ul>
+
+	<p>Back this volume up if you care about the audit trail.</p>
+
+	<h2>Updating</h2>
+
+	<p>Updating <strong>lastlight itself</strong> (source, built-in assets) is a rebuild:</p>
+
+	<pre><code>git fetch upstream
+git merge upstream/main
+docker compose build agent
+docker compose up -d agent</code></pre>
+
+	<p>
+		Or let the CLI do it. With <code>lastlight</code> installed on the host,
+		<code>lastlight server update</code> pulls your overlay + the core repo,
+		rebuilds, recreates the stack, restarts the egress sidecars, and
+		health-checks — the same flow, with live progress. <code>server
+		start\|stop\|restart\|status</code> cover the rest of the lifecycle, and
+		the dashboard shows an "update available" banner when you're behind.
+	</p>
+
+	<p>
+		<strong>Pinning the core version.</strong> Add a <code>deploy.version</code>
+		(a git tag/ref, e.g. <code>v0.10.6</code>) to your overlay's
+		<code>config.yaml</code> to pin which core release this instance runs;
+		unset — or <code>main</code>/<code>latest</code> — tracks <code>main</code>:
+	</p>
+
+	<pre><code>deploy:
+  version: v0.10.6</code></pre>
+
+	<p>
+		<code>lastlight server update</code> (and <code>server setup</code>) then
+		checks core out at that tag and rebuilds, instead of following
+		<code>main</code>. This makes the overlay repo the single source of truth
+		for the deployed version — bump <code>deploy.version</code>, commit, and a
+		CI/CD job running <code>lastlight server update</code> converges the host.
+		When pinned, the dashboard drops the <code>main</code>-drift nudge: it
+		only warns "redeploy needed" if the running image is behind the pinned
+		tag, otherwise shows a quiet "pinned" label. (The
+		<code>LASTLIGHT_CORE_VERSION</code> env var overrides the file for CI.)
+	</p>
+
+	<p>
+		Updating <strong>your overlay</strong> (anything in <code>instance/</code> — managed
+		repos, config, agent-context) is just a restart, no rebuild:
+	</p>
+
+	<pre><code># edit instance/config.yaml (or git pull in instance/), then:
+docker compose restart agent</code></pre>
+
+	<p>
+		Sessions and the database survive rebuilds because they live in the volume, not
+		the image.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/local-dev">
+			<span class="label">← Previous</span>
+			<span class="title">Run it locally</span>
+		</a>
+		<a href="/docs/slack" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Slack integration</span>
+		</a>
+	</div>
+</DocsLayout>

@@ -1,0 +1,85 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/security-review"
+	description="The security review workflow — scans a repo with open-source tools plus AI review and files a single grouped summary issue per run."
+>
+	<p>
+		The security review workflow scans the target repository with open-source
+		tools — <code>npm audit</code>, <code>semgrep</code>, and
+		<code>gitleaks</code> — alongside an AI code review. It files a single
+		summary issue per run (Renovate-style) containing a GitHub task list of
+		findings grouped Critical / High / Medium / Low.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>issues-write</code> — can read
+			repo contents and create/edit issues and comments.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Scan</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">tools + AI review</text>
+		</svg>
+	</div>
+
+	<h2>What it does</h2>
+
+	<ul>
+		<li>Runs <code>npm audit</code>, <code>semgrep</code>, and <code>gitleaks</code> plus an AI code review</li>
+		<li>Files <strong>one</strong> summary issue per run with a GitHub task list of findings</li>
+		<li>Groups findings Critical / High / Medium / Low</li>
+		<li>Honours <code>SECURITY.md</code> for known false-positives and accepted risk</li>
+		<li>Each run scans exactly <strong>one</strong> repo</li>
+	</ul>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>Cron:</strong> weekly on Monday at 10:00 — fans out one run per managed repo</li>
+		<li><strong>CLI:</strong> <code>security owner/repo</code></li>
+		<li><strong>GitHub comment:</strong> <code>@last-light security-review</code></li>
+		<li><strong>Slack:</strong> <code>security review owner/repo</code></li>
+	</ul>
+
+	<h2>Skill</h2>
+
+	<p>This workflow uses the <code>security-review</code> skill.</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/repo-health" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Repo health</span>
+		</a>
+		<a href="/docs/workflows/security-feedback" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Security feedback</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

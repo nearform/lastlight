@@ -1,0 +1,99 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="quickstart"
+	description="Set up Last Light the fast way — install the bundled Claude Code skills and let Claude stand up a server, client, overlay, or evals workspace for you."
+>
+	<p>
+		The fastest way to get Last Light running is to let <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a>
+		do it for you. Last Light ships a set of Claude Code skills that know how to install,
+		configure, and operate the whole stack — you describe what you want in plain language and
+		the skill drives the CLI, scaffolds the working directory, and verifies the result.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Prefer to do it by hand?</strong> Every step the skills run is documented
+			manually too — start with <a href="/docs/prerequisites">Prerequisites</a>,
+			<a href="/docs/github-app">Create a GitHub App</a>, and <a href="/docs/local-dev">Run it locally</a>.
+		</div>
+	</div>
+
+	<h2>1. Install the CLI and skills</h2>
+
+	<p>Install the <code>lastlight</code> CLI, then install the bundled, version-matched skills:</p>
+
+	<pre><code>npm i -g lastlight          # or run it via npx
+lastlight skills install    # → ~/.claude/skills (user scope)</code></pre>
+
+	<p>
+		<code>lastlight skills install</code> uses the <code>claude</code> plugin marketplace when
+		one is present, otherwise it copies the skills into <code>~/.claude/skills</code>. Add
+		<code>--scope project</code> to install them into <code>./.claude/skills</code> for a single
+		repo. From a Last Light checkout you can also register the marketplace directly:
+	</p>
+
+	<pre><code>claude plugin marketplace add ./
+claude plugin install lastlight@lastlight-skills</code></pre>
+
+	<h2>2. Ask Claude to set it up</h2>
+
+	<p>
+		Open Claude Code in an empty directory and describe what you want. Each skill is triggered
+		by intent — you don't need to remember its name:
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Skill</th><th>Ask Claude…</th><th>What it does</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>lastlight-server</code></td>
+				<td><em>"set up a Last Light server"</em></td>
+				<td>Checks prerequisites, scaffolds the working directory, walks through the GitHub App, model and managed repos, launches the docker-compose stack, and verifies <code>/health</code>.</td>
+			</tr>
+			<tr>
+				<td><code>lastlight-client</code></td>
+				<td><em>"connect my lastlight CLI to a server"</em></td>
+				<td>Installs the CLI, logs in to an existing server, saves the token, and confirms the connection with <code>lastlight status</code>.</td>
+			</tr>
+			<tr>
+				<td><code>lastlight-overlay</code></td>
+				<td><em>"customize my Last Light workflows"</em></td>
+				<td>Scaffolds the private <code>instance/</code> overlay and forks built-in workflows, prompts, skills, or the agent persona so you can tune them.</td>
+			</tr>
+			<tr>
+				<td><code>lastlight-evals</code></td>
+				<td><em>"scaffold an evals workspace"</em></td>
+				<td>Sets up and runs a <a href="https://github.com/nearform/lastlight-evals" target="_blank" rel="noopener">Last Light Evals</a> workspace — the harness that runs real workflows against a mocked GitHub and grades them deterministically.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<p>
+		The skills run against any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a>
+		supports — Claude, GPT, Gemini, Llama, and more (default <code>anthropic/claude-sonnet-4-6</code>).
+	</p>
+
+	<h2>3. Verify</h2>
+
+	<p>Once the server skill finishes, confirm the agent is up:</p>
+
+	<pre><code>curl http://127.0.0.1:8644/health</code></pre>
+
+	<p>
+		Then open the dashboard at <code>/admin</code>, or trigger work from the CLI — see
+		<a href="/docs/local-dev">Run it locally</a> for the full command set and the
+		<a href="/docs/cli#claude-code-skills">CLI reference</a> for the skills commands.
+	</p>
+
+	<div class="docs-next">
+		<span></span>
+		<a href="/docs/introduction" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Introduction</span>
+		</a>
+	</div>
+</DocsLayout>

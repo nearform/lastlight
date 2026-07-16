@@ -1,0 +1,103 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/pr-review"
+	description="The PR review workflow — reads a pull request and posts one precision-first formal review with line-anchored inline comments, without modifying code or building."
+>
+	<p>
+		PR review reads the PR diff in full context and reasons about it
+		statically — this is a <strong>pure code review</strong>: it does not
+		install, build, or run the code (CI validates that the change actually
+		works). It runs in two phases: an agent phase judges the diff and records
+		its findings, then a deterministic phase posts <strong>one formal
+		review</strong> with each finding as an <strong>inline comment anchored to
+		its diff line</strong> (with an applyable suggestion where a concrete fix
+		fits). A finding whose line isn't in the diff is folded into the review
+		summary instead.
+	</p>
+
+	<p>
+		The review is <strong>precision-first</strong>: only high-signal
+		<strong>Critical</strong> and <strong>Important</strong> findings are
+		posted — each with a concrete impact (what breaks, for which input) and
+		put through a self-refutation confidence gate — while lower-value
+		suggestions and nits are dropped, because a noisy reviewer gets muted. A
+		clean PR is approved with few or no comments.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>review-write</code> — can read
+			the repo and post review comments, but cannot push code.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="8" y="12" width="82" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="49" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Review</text>
+			<text x="49" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">judge the diff</text>
+			<path d="M92 40 L108 40" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#arrow)"/>
+			<rect x="110" y="12" width="82" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="151" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Post</text>
+			<text x="151" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">inline comments</text>
+			<defs>
+				<marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+					<path d="M0 0 L6 3 L0 6 z" fill="var(--diag-line)"/>
+				</marker>
+			</defs>
+		</svg>
+	</div>
+
+	<h2>What it checks</h2>
+
+	<ul>
+		<li>Implementation correctness against the PR description</li>
+		<li>Test coverage for changed code</li>
+		<li>Security vulnerabilities (OWASP top 10)</li>
+		<li>Code style and naming consistency</li>
+		<li>Error handling and edge cases</li>
+	</ul>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub webhook:</strong> <code>pr.opened</code> event</li>
+		<li><strong>Cron fallback:</strong> Every 30 minutes (only when webhooks are not configured)</li>
+		<li><strong>Slack:</strong> <code>review cliftonc/repo</code></li>
+		<li><strong>CLI:</strong> <code>npm run cli -- review owner/repo</code></li>
+	</ul>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/pr-comment" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">PR comment</span>
+		</a>
+		<a href="/docs/workflows/pr-fix" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">PR fix</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

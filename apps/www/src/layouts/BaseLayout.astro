@@ -1,0 +1,428 @@
+---
+import Nav from '../components/Nav.astro';
+import Footer from '../components/Footer.astro';
+
+interface Props {
+	title: string;
+	description: string;
+	/** Path to an OG image under /public. Defaults to the square logo. */
+	ogImage?: string;
+	/** Override og:type. Defaults to "article" for docs, "website" elsewhere. */
+	ogType?: 'website' | 'article';
+}
+
+const { title, description, ogImage = '/logo-512.png', ogType = 'article' } = Astro.props;
+
+const canonicalURL = new URL(Astro.url.pathname, Astro.site);
+const ogImageURL = new URL(ogImage, Astro.site);
+---
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+	<link rel="canonical" href={canonicalURL} />
+	<link rel="sitemap" href="/sitemap-index.xml" />
+	<link rel="llms-txt" href="/llms.txt" />
+	<title>{title}</title>
+	<meta name="description" content={description} />
+
+	<!-- Open Graph -->
+	<meta property="og:type" content={ogType} />
+	<meta property="og:site_name" content="Last Light" />
+	<meta property="og:title" content={title} />
+	<meta property="og:description" content={description} />
+	<meta property="og:url" content={canonicalURL} />
+	<meta property="og:image" content={ogImageURL} />
+	<meta property="og:image:width" content="512" />
+	<meta property="og:image:height" content="512" />
+	<meta property="og:image:alt" content="Last Light logo" />
+
+	<!-- Twitter -->
+	<meta name="twitter:card" content="summary" />
+	<meta name="twitter:title" content={title} />
+	<meta name="twitter:description" content={description} />
+	<meta name="twitter:image" content={ogImageURL} />
+	<meta name="twitter:image:alt" content="Last Light logo" />
+
+	<link rel="preconnect" href="https://fonts.googleapis.com" />
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+	<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+	<!-- Theme boot: apply the saved / OS-preferred theme before first paint
+	     so there is no flash. Mirrors the admin dashboard's approach. -->
+	<script is:inline>
+		(function () {
+			try {
+				// Default to dark; only honour an explicit saved choice.
+				var theme = localStorage.getItem('theme') || 'dark';
+				document.documentElement.setAttribute('data-theme', theme);
+			} catch (e) {
+				document.documentElement.setAttribute('data-theme', 'dark');
+			}
+		})();
+	</script>
+</head>
+<body>
+	<Nav />
+	<slot />
+	<Footer />
+</body>
+</html>
+
+<style is:global>
+	/* ------------------------------------------------------------------ *
+	 * Theme tokens. Dark is the default (bare :root); the light theme is
+	 * the Nearform "neaform" palette that ships with the admin dashboard,
+	 * applied via html[data-theme="light"].
+	 *
+	 * EVERY colour used anywhere on the site — including the inline SVG
+	 * diagrams — is defined here as a token and referenced with var().
+	 * Inline SVG presentation attributes (fill="var(--x)") resolve CSS
+	 * custom properties, so the diagrams re-theme automatically. Do NOT
+	 * reintroduce a raw hex in a page or diagram; add a token here instead.
+	 * ------------------------------------------------------------------ */
+	:root {
+		/* Brand accents */
+		--gold: #F0B429;
+		--gold-dark: #D9A025;
+		--orange: #E8752A;
+		--teal: #1A7A8A;
+		--teal-dark: #135E6B;
+
+		/* Surfaces + text */
+		--navy: #1B2735;            /* inline code / pre background */
+		--bg: #0C1117;
+		--bg-card: #141B24;
+		--bg-card-hover: #1A2332;
+		--surface-alt: #1A2330;     /* near-dup of card-hover, used in spec diagram */
+		--border: #1E2A38;
+		--border-bright: #2A3A4D;
+		--text: #C9D1D9;
+		--text-muted: #7D8694;
+		--text-bright: #ECEFF4;
+
+		/* Diagram accents (strokes + label text) */
+		--diag-grey: #4A5568;       /* muted label text inside diagram boxes */
+		--diag-line: #2D3748;       /* diagram arrows / neutral borders */
+		--diag-blue: #4A9EDB;
+		--diag-mint: #2EBDA8;
+		--diag-purple: #8B5CF6;
+
+		/* Diagram tint fills (a dark wash behind an accent-stroked box) */
+		--fill-grey: #1B2230;
+		--fill-orange: #2A1A10;
+		--fill-orange-2: #3D2A1A;
+		--fill-gold: #2A2210;
+		--fill-blue: #10202A;
+		--fill-teal: #0F2328;
+		--fill-purple: #1A1528;
+
+		--mono: 'JetBrains Mono', monospace;
+		--sans: 'Inter', -apple-system, sans-serif;
+
+		color-scheme: dark;
+	}
+
+	html[data-theme="light"] {
+		/* Brand accents — darkened for AA contrast on white while keeping
+		   Last Light's warm identity. */
+		--gold: #B7791F;
+		--gold-dark: #A86A1A;
+		--orange: #C2410C;
+		--teal: #0F6674;
+		--teal-dark: #0B4F5C;
+
+		/* Surfaces + text — neaform: white cards on a soft grey page,
+		   deep-navy headings. */
+		--navy: #EEF1F4;
+		--bg: #F4F6F8;
+		--bg-card: #FFFFFF;
+		--bg-card-hover: #EEF1F4;
+		--surface-alt: #EEF1F4;
+		--border: #E2E6EA;
+		--border-bright: #CBD3DC;
+		--text: #1B2330;
+		--text-muted: #566274;
+		--text-bright: #000E38;
+
+		/* Diagram accents */
+		--diag-grey: #64748B;
+		--diag-line: #B4BECC;
+		--diag-blue: #1D6FA8;
+		--diag-mint: #0A8F79;
+		--diag-purple: #6D3FD4;
+
+		/* Diagram tint fills — light washes of the same hue on white */
+		--fill-grey: #EEF1F4;
+		--fill-orange: #FBEADE;
+		--fill-orange-2: #F0D9C4;
+		--fill-gold: #FAF1D8;
+		--fill-blue: #E6F1FB;
+		--fill-teal: #E2F2F0;
+		--fill-purple: #F0EAFE;
+
+		color-scheme: light;
+	}
+
+	* {
+		margin: 0;
+		padding: 0;
+		box-sizing: border-box;
+	}
+
+	html {
+		scroll-behavior: smooth;
+	}
+
+	body {
+		background: var(--bg);
+		color: var(--text);
+		font-family: var(--sans);
+		line-height: 1.6;
+		-webkit-font-smoothing: antialiased;
+	}
+
+	a {
+		color: var(--gold);
+		text-decoration: none;
+		transition: color 0.2s;
+	}
+
+	a:hover {
+		color: var(--orange);
+	}
+
+	h1, h2, h3, h4 {
+		color: var(--text-bright);
+		font-weight: 600;
+	}
+
+	code {
+		font-family: var(--mono);
+		font-size: 0.85em;
+		background: var(--navy);
+		padding: 0.15em 0.4em;
+		border-radius: 4px;
+		color: var(--gold);
+	}
+
+	pre {
+		background: var(--navy);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 1rem 1.25rem;
+		overflow-x: auto;
+		margin: 0.75rem 0;
+	}
+
+	pre code {
+		background: none;
+		padding: 0;
+		font-size: 0.82rem;
+		color: var(--text);
+		line-height: 1.7;
+	}
+
+	/* Nav */
+	nav {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 1.25rem 2rem;
+		max-width: 1200px;
+		margin: 0 auto;
+		flex-wrap: wrap;
+	}
+
+	.nav-logo {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		font-weight: 600;
+		color: var(--text-bright);
+		font-size: 1rem;
+	}
+
+	.nav-logo:hover {
+		color: var(--gold);
+	}
+
+	/* Nearform monogram — its "N" uses currentColor, so drive it to the bright
+	   heading colour: exact brand navy (#000E38) on the light theme, near-white
+	   on dark. The green bar in the mark is fixed. Keep the nav's hover-gold on
+	   the monogram, and the footer's subtle muted treatment. */
+	.nf-logo {
+		color: var(--text-bright);
+	}
+	.nav-logo:hover .nf-logo {
+		color: var(--gold);
+	}
+	.footer-content .nf-logo {
+		opacity: 0.85;
+	}
+
+	.nav-toggle {
+		display: none;
+		background: none;
+		border: 1px solid var(--border);
+		color: var(--text-bright);
+		padding: 0.4rem 0.5rem;
+		border-radius: 6px;
+		cursor: pointer;
+		align-items: center;
+		justify-content: center;
+		transition: border-color 0.2s, background 0.2s;
+	}
+
+	.nav-toggle:hover {
+		border-color: var(--teal);
+		background: var(--bg-card);
+	}
+
+	.nav-toggle[aria-expanded="true"] .nav-toggle-open,
+	.nav-toggle[aria-expanded="false"] .nav-toggle-close {
+		display: none;
+	}
+
+	.nav-links {
+		display: flex;
+		align-items: center;
+		gap: 1.25rem;
+	}
+
+	.nav-links a {
+		color: var(--text-muted);
+		font-size: 0.88rem;
+		font-weight: 500;
+		transition: color 0.2s;
+	}
+
+	.nav-links a:hover {
+		color: var(--text-bright);
+	}
+
+	.gh-link {
+		color: var(--text-muted);
+		display: flex;
+		align-items: center;
+		padding: 0.4rem;
+		border-radius: 6px;
+		transition: color 0.2s, background 0.2s;
+	}
+
+	.gh-link:hover {
+		color: var(--text-bright);
+		background: var(--bg-card);
+	}
+
+	/* Theme toggle — reuses .gh-link sizing; strip button chrome. */
+	.theme-toggle {
+		background: none;
+		border: none;
+		cursor: pointer;
+		font: inherit;
+	}
+	/* Show the icon for the theme you can switch TO: sun in dark, moon in light. */
+	.theme-icon-moon { display: none; }
+	.theme-icon-sun { display: block; }
+	html[data-theme="light"] .theme-icon-moon { display: block; }
+	html[data-theme="light"] .theme-icon-sun { display: none; }
+
+	@media (max-width: 720px) {
+		nav {
+			padding: 1rem 1.25rem;
+		}
+
+		.nav-toggle {
+			display: inline-flex;
+		}
+
+		.nav-links {
+			display: none;
+			flex-basis: 100%;
+			flex-direction: column;
+			align-items: stretch;
+			gap: 0;
+			margin-top: 0.85rem;
+			padding-top: 0.5rem;
+			border-top: 1px solid var(--border);
+		}
+
+		.nav-links.open {
+			display: flex;
+		}
+
+		.nav-links a {
+			padding: 0.75rem 0.25rem;
+			font-size: 0.95rem;
+			border-bottom: 1px solid var(--border);
+		}
+
+		.nav-links a:last-child {
+			border-bottom: none;
+		}
+
+		.gh-link {
+			padding: 0.75rem 0.25rem;
+		}
+	}
+
+	/* Footer */
+	footer {
+		border-top: 1px solid var(--border);
+		padding: 2rem;
+		margin-top: 2rem;
+	}
+
+	.footer-content {
+		max-width: 1200px;
+		margin: 0 auto;
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.footer-content img {
+		opacity: 0.8;
+	}
+
+	.footer-links {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.footer-links a {
+		color: var(--text-muted);
+		font-size: 0.85rem;
+		transition: color 0.2s;
+	}
+
+	.footer-links a:hover {
+		color: var(--text-bright);
+	}
+
+	.footer-sep {
+		color: var(--border);
+		font-size: 0.85rem;
+	}
+
+	.footer-meta {
+		margin-left: auto;
+		font-size: 0.82rem;
+		color: var(--text-muted);
+	}
+
+	@media (max-width: 640px) {
+		.footer-content {
+			flex-direction: column;
+			align-items: flex-start;
+		}
+		.footer-meta {
+			margin-left: 0;
+		}
+	}
+</style>

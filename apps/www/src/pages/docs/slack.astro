@@ -1,0 +1,149 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="slack"
+	description="Connect Last Light to Slack: the HTTP Events API for chat, OAuth for dashboard login."
+>
+	<p>
+		Slack integration is optional but recommended. Last Light uses two independent
+		Slack features that you can enable one at a time.
+	</p>
+
+	<ol>
+		<li>
+			<strong>Chat</strong> — the bot listens for messages and
+			@mentions, classifies intent, and runs an in-process <code>@earendil-works/pi-ai</code>
+			chat loop to reply. Every Slack thread becomes a growing, DB-backed
+			conversation; the harness rehydrates the message history from the
+			<code>messaging_messages</code> SQLite table on every turn, so context stays
+			coherent across hours or days. Events arrive over the <strong>HTTP Events
+			API</strong> by default (reliable, retried delivery); Socket Mode is
+			available as a dev fallback.
+		</li>
+		<li>
+			<strong>OAuth dashboard login</strong> — the admin dashboard offers "Login
+			with Slack" via OpenID Connect. You can restrict login to one workspace so
+			only your team can see execution history.
+		</li>
+	</ol>
+
+	<h2>Create the Slack app</h2>
+
+	<p>
+		Go to <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a>
+		and click <strong>Create New App</strong> → <strong>From scratch</strong>.
+	</p>
+
+	<h2>Enable chat (HTTP Events API)</h2>
+
+	<p>In the app's settings, do the following:</p>
+
+	<ol>
+		<li>
+			<strong>OAuth &amp; Permissions</strong> → add Bot Token Scopes:
+			<ul>
+				<li><code>app_mentions:read</code></li>
+				<li><code>chat:write</code></li>
+				<li><code>im:history</code>, <code>im:read</code>, <code>im:write</code></li>
+				<li><code>channels:history</code>, <code>groups:history</code></li>
+				<li><code>commands</code> (if you want <code>/approve</code>, <code>/reject</code> slash commands)</li>
+			</ul>
+		</li>
+		<li><strong>Install to Workspace</strong>. After install, copy the Bot User OAuth Token (<code>xoxb-...</code>) — that's <code>SLACK_BOT_TOKEN</code>.</li>
+		<li><strong>Basic Information</strong> → copy the <strong>Signing Secret</strong> — that's <code>SLACK_SIGNING_SECRET</code>. Deploy the harness with this set <em>first</em> (the Request URL below must already answer).</li>
+		<li>
+			<strong>Event Subscriptions</strong> → enable, set the <strong>Request URL</strong> to
+			<code>https://your-host/webhooks/slack</code> (Slack verifies it with a one-time challenge),
+			then subscribe to bot events:
+			<ul>
+				<li><code>message.im</code> — direct messages</li>
+				<li><code>app_mention</code> — @mentions in channels</li>
+			</ul>
+			(Don't also subscribe <code>message.channels</code> — a channel @mention would then
+			arrive twice, as both a <code>message</code> and an <code>app_mention</code>.)
+		</li>
+		<li>
+			<strong>Slash Commands</strong> (optional) → create <code>/approve</code>, <code>/reject</code>, <code>/status</code>, <code>/reset</code> pointing at <code>https://your-host/...</code>.
+		</li>
+	</ol>
+
+	<p>Add the tokens to <code>.env</code> (or <code>instance/secrets/.env</code> in production):</p>
+
+	<pre><code>SLACK_BOT_TOKEN=xoxb-...
+SLACK_SIGNING_SECRET=...        # enables webhook mode (the default)</code></pre>
+
+	<p>
+		<strong>Socket Mode (dev fallback).</strong> Without a public URL, set
+		<code>SLACK_MODE=socket</code> and enable Socket Mode in the app (App-Level Token with
+		<code>connections:write</code> → <code>SLACK_APP_TOKEN=xapp-...</code>). Mode is auto-detected
+		when <code>SLACK_MODE</code> is unset: webhook if <code>SLACK_SIGNING_SECRET</code> is present,
+		otherwise socket. Socket Mode is at-most-once and can drop messages under bursts, so
+		prefer webhooks in production.
+	</p>
+
+	<p>Optional restrictions and routing:</p>
+
+	<pre><code>SLACK_ALLOWED_USERS=U01ABC,U02DEF  # Comma-separated user IDs allowed to interact
+SLACK_DELIVERY_CHANNEL=C01XYZ      # Channel for cron health reports</code></pre>
+
+	<p>
+		Restart the harness. You should see a <code>[slack] Connected</code> log line,
+		and DM'ing the bot should get a reply. Every conversation shows up on the
+		dashboard's <strong>Chat Sessions</strong> tab.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			The <code>chat</code> skill is intentionally not overridden with a small/cheap
+			model in <code>LASTLIGHT_MODELS</code> — small models tend to refuse tool
+			calls on the assumption they lack permission, creating false "I can't do that"
+			replies. Leave it on the default mid/large-tier model.
+		</div>
+	</div>
+
+	<h2>Enable OAuth dashboard login</h2>
+
+	<p>
+		The dashboard can optionally let your team log in with Slack via OpenID Connect.
+		Back in the Slack app settings:
+	</p>
+
+	<ol>
+		<li>
+			<strong>OAuth &amp; Permissions</strong> → User Token Scopes → add
+			<code>openid</code>, <code>email</code>, <code>profile</code>. (These are user
+			scopes, separate from the bot scopes above.)
+		</li>
+		<li>
+			<strong>Redirect URLs</strong> → add exactly:
+			<code>https://your-host/admin/api/oauth/slack/callback</code>
+			(or <code>http://localhost:8644/...</code> for local dev).
+		</li>
+		<li><strong>Basic Information</strong> → copy the Client ID and Client Secret.</li>
+	</ol>
+
+	<p>Add the following to <code>.env</code>:</p>
+
+	<pre><code>SLACK_OAUTH_CLIENT_ID=...
+SLACK_OAUTH_CLIENT_SECRET=...
+SLACK_OAUTH_REDIRECT_URI=https://your-host/admin/api/oauth/slack/callback
+SLACK_ALLOWED_WORKSPACE=T01ABCDEF   # Optional: restrict to one team_id or domain</code></pre>
+
+	<p>
+		With these set, the dashboard login page shows a "Login with Slack" button
+		alongside the password login (or instead of it, if you don't set
+		<code>ADMIN_PASSWORD</code>).
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/production">
+			<span class="label">← Previous</span>
+			<span class="title">Production deploy</span>
+		</a>
+		<a href="/docs/configuration" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Configuration reference</span>
+		</a>
+	</div>
+</DocsLayout>

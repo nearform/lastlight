@@ -1,0 +1,1196 @@
+---
+// Last Light — self-hostable AI coding agent
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const title = "Last Light — Self-Hostable AI Coding Agent";
+const description = "Last Light is a self-hostable, MIT-licensed AI coding agent for your GitHub org. It triages issues, reviews PRs, and ships fixes on your own infrastructure — enterprise-ready, working for you after dark.";
+---
+
+<BaseLayout title={title} description={description} ogType="website">
+
+	<!-- Hero -->
+	<header class="hero">
+		<div class="hero-content">
+			<img src="/logo.png" alt="Last Light logo" class="hero-logo" />
+			<p class="hero-name">Last Light</p>
+			<div class="hero-badges">
+				<span class="hero-badge">Self-hostable</span>
+				<span class="hero-badge">MIT-licensed</span>
+				<span class="hero-badge">Enterprise-ready</span>
+			</div>
+			<h1>Keeps working for you <span class="accent">after dark</span></h1>
+			<p class="subtitle">
+				A self-hostable, MIT-licensed AI coding agent for your GitHub org.
+				It triages issues, reviews pull requests, and ships fixes — running on
+				your own infrastructure, under your own keys, working while you're away.
+			</p>
+			<div class="hero-actions">
+				<a href="#get-started" class="btn btn-primary">Get Started</a>
+				<a href="https://github.com/nearform/lastlight" class="btn btn-ghost" target="_blank" rel="noopener">View Source</a>
+				<a href="https://github.com/users/cliftonc/projects/4" class="btn btn-ghost" target="_blank" rel="noopener">Roadmap</a>
+			</div>
+		</div>
+	</header>
+
+	<!-- What it does -->
+	<section class="features" id="features">
+		<h2>Working after dark</h2>
+		<p class="section-desc">Issue triage, PR review, security scans, on-request builds, weekly health reports, Slack chat — all driven by YAML workflows you can fork and edit.</p>
+		<div class="feature-grid">
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+				</div>
+				<h3>Issue Triage</h3>
+				<p>Labels, deduplicates, and chases missing info. Real-time with webhooks, or every 15 minutes via cron.</p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/></svg>
+				</div>
+				<h3>PR Review</h3>
+				<p>Reads the diff, leaves honest feedback. Instant via webhooks, or polled every 30 minutes. Critical issues first, nits last.</p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+				</div>
+				<h3>Health Reports</h3>
+				<p>Monday morning summary of what's piling up, what's gone stale, and what needs you. Delivered to Slack.</p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+				</div>
+				<h3>Build on Request</h3>
+				<p>@mention the bot on an issue and it runs the full Guardrails → Architect → Executor → Reviewer cycle with fix-feedback loops, then opens a PR. <a href="/how-it-works">See how it works.</a></p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
+				</div>
+				<h3>Slack Chat</h3>
+				<p>DM the bot or @mention it in a channel. Every thread becomes a growing conversation — the agent resumes the same session on every turn, so context holds for hours or days. Every turn persisted.</p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9c1.66 0 3.22.45 4.56 1.24"/></svg>
+				</div>
+				<h3>Approval Gates</h3>
+				<p>Workflows can pause at human-in-the-loop checkpoints. Approve or reject from a GitHub comment, a Slack slash command, or the dashboard — the run resumes exactly where it stopped.</p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+				</div>
+				<h3>YAML Workflows</h3>
+				<p>Every behavior — triage, review, build, health — is a YAML workflow you can fork. Phases run linear or as a DAG. The runner knows nothing about "build" vs "triage"; it just executes what you declare.</p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+				</div>
+				<h3>Permission Profiles</h3>
+				<p>Every workflow runs with a downscoped GitHub App token: <code>read</code>, <code>issues-write</code>, <code>review-write</code>, or <code>repo-write</code>. A triage run literally cannot push code.</p>
+			</div>
+		</div>
+	</section>
+
+	<!-- How it works -->
+	<section class="how-it-works">
+		<h2>How it works</h2>
+		<p class="section-desc">
+			Built on <a href="https://github.com/nearform/agentic-pi" target="_blank" rel="noopener">agentic-pi</a> —
+			it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more (default <code>anthropic/claude-sonnet-4-6</code>).
+			Each workflow phase runs in its own sandbox — gondolin micro-VM by default, Docker on opt-in.
+			Authenticates as its own GitHub App — every action is clearly from the bot, not you.
+		</p>
+		<div class="architecture">
+			<div class="arch-step">
+				<span class="step-num">1</span>
+				<div>
+					<strong>Point it at your repos</strong>
+					<p>List what you want watched in <code>agent-context/rules.md</code></p>
+				</div>
+			</div>
+			<div class="arch-step">
+				<span class="step-num">2</span>
+				<div>
+					<strong>You move on to other things</strong>
+					<p>Cron jobs keep running — scanning for new issues, unreviewed PRs, stale items</p>
+				</div>
+			</div>
+			<div class="arch-step">
+				<span class="step-num">3</span>
+				<div>
+					<strong>Last Light gets to work</strong>
+					<p>Labels, reviews, closes duplicates, writes reports</p>
+				</div>
+			</div>
+			<div class="arch-step">
+				<span class="step-num">4</span>
+				<div>
+					<strong>The repo stays healthy</strong>
+					<p>Everything happens on GitHub — comments, labels, reviews. No extra dashboard to check</p>
+				</div>
+			</div>
+		</div>
+		<p class="section-note">Build requests use a role-based <strong>Architect→Executor→Reviewer</strong> cycle — <a href="/how-it-works">read how it works</a> for the full picture. Already have an <code>AGENTS.md</code> or <code>CLAUDE.md</code> in your repo? Last Light reads those automatically — your coding conventions, testing requirements, and architectural guardrails carry over.</p>
+	</section>
+
+	<!-- Get started -->
+	<section class="get-started" id="get-started">
+		<h2>Light it up</h2>
+		<p class="section-note" style="margin-top: 0; margin-bottom: 2rem;">
+			<strong>Two ways to get going.</strong> Let Claude Code stand it up for you (recommended), or run the steps by hand. For the full walkthrough — creating the GitHub App with the right permissions, deploying to production with Caddy TLS, wiring up Slack chat + OAuth login, and every env var the harness reads — start with <a href="/docs/quickstart">the quick start</a>.
+		</p>
+
+		<h3 class="setup-option-heading">Option A — Set it up with Claude Code <span class="badge-warn" style="color: var(--teal); background: rgba(26, 122, 138, 0.12);">recommended</span></h3>
+		<div class="step-block" style="border-top: none; padding-top: 0;">
+			<p>Last Light ships <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a> skills that install, configure and launch the whole stack for you. Install the CLI and the skills:</p>
+			<pre><code>npm i -g lastlight          # or run it via npx
+lastlight skills install    # adds the bundled Claude Code skills</code></pre>
+			<p>Then open Claude Code in an empty directory and ask:</p>
+			<pre><code>"set up a Last Light server"</code></pre>
+			<p>The <code>lastlight-server</code> skill checks prerequisites, scaffolds the working directory, walks you through the GitHub App, model and managed repos, launches the docker stack, and verifies it's healthy. Sibling skills cover the rest — <code>lastlight-client</code> (point a CLI at a server), <code>lastlight-overlay</code> (customize workflows &amp; persona), and <code>lastlight-evals</code> (scaffold an evals workspace). See the <a href="/docs/quickstart">quick start</a> or the <a href="/docs/cli#claude-code-skills">CLI reference</a> for details.</p>
+		</div>
+
+		<h3 class="setup-option-heading">Option B — Set it up by hand</h3>
+
+		<div class="step-block" style="border-top: none; padding-top: 0;">
+			<h3><span class="step-label">Step 1</span> Set a model API key</h3>
+			<p>Last Light runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more. Set the key matching your chosen model in <code>.env</code>:</p>
+			<pre><code>ANTHROPIC_API_KEY=sk-ant-...
+# or
+OPENAI_API_KEY=sk-...
+# or use one OpenRouter key for Claude / GPT / Gemini / Llama / ...
+OPENROUTER_API_KEY=sk-or-v1-...</code></pre>
+			<p>The default model is <code>anthropic/claude-sonnet-4-6</code>. Override it — globally or per-phase — via <code>LASTLIGHT_MODEL</code> / <code>LASTLIGHT_MODELS</code>.</p>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 2</span> Clone Last Light</h3>
+			<pre><code>git clone https://github.com/nearform/lastlight.git
+cd lastlight
+npm install</code></pre>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 3</span> Create a GitHub App</h3>
+			<p>
+				Head to <a href="https://github.com/settings/apps/new" target="_blank" rel="noopener">github.com/settings/apps/new</a> and create an app with these permissions:
+			</p>
+			<ul class="permissions-list">
+				<li><strong>Issues</strong> — Read & Write</li>
+				<li><strong>Pull Requests</strong> — Read & Write</li>
+				<li><strong>Contents</strong> — Read & Write</li>
+				<li><strong>Checks</strong> — Read & Write</li>
+				<li><strong>Metadata</strong> — Read</li>
+			</ul>
+			<p>Generate a private key, save the <code>.pem</code> file into the lastlight folder, and install the app on your repos.</p>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 4</span> Configure</h3>
+			<pre><code>cp .env.example .env</code></pre>
+			<p>Fill in your GitHub App credentials in <code>.env</code>:</p>
+			<pre><code>GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY_PATH=./your-app.private-key.pem
+GITHUB_APP_INSTALLATION_ID=789012
+WEBHOOK_SECRET=your-secret-here</code></pre>
+			<p>Then add your repos to <code>agent-context/rules.md</code>:</p>
+			<pre><code>## Managed Repositories
+- yourname/your-repo
+- yourname/another-repo</code></pre>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 5</span> Run it</h3>
+			<pre><code># Start the server (with hot reload)
+npm run dev</code></pre>
+			<p>Then trigger work via the CLI in another terminal:</p>
+			<pre><code># Build cycle for a specific issue
+npx tsx src/cli.ts https://github.com/owner/repo/issues/42
+npx tsx src/cli.ts owner/repo#42          # shorthand
+
+# Run maintenance tasks
+npx tsx src/cli.ts triage owner/repo      # triage scan
+npx tsx src/cli.ts review owner/repo      # PR review scan
+npx tsx src/cli.ts health owner/repo      # health report</code></pre>
+			<p>The CLI talks to the running server — it does not execute agents directly. Start the server first.</p>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 6</span> Set up GitHub webhooks</h3>
+			<p>Make Last Light react to repo events in real time — new issues, PRs, comments. The webhook listener is built into the server and starts automatically on port <code>8644</code>.</p>
+
+			<p>In your GitHub App settings, set:</p>
+			<ul class="permissions-list">
+				<li><strong>Webhook URL</strong> — <code>https://your-host:8644/webhooks/github</code></li>
+				<li><strong>Secret</strong> — same value as <code>WEBHOOK_SECRET</code> in <code>.env</code></li>
+			</ul>
+			<p>Subscribe to events: <strong>Issues</strong>, <strong>Pull requests</strong>, <strong>Issue comments</strong>, <strong>Check runs</strong>, <strong>Check suites</strong> (the last two power the "Re-run checks" buttons), and optionally <strong>PR reviews</strong>.</p>
+			<p>The endpoint must be publicly reachable. Use <a href="https://ngrok.com" target="_blank" rel="noopener">ngrok</a> or <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" target="_blank" rel="noopener">Cloudflare Tunnel</a> for testing, or deploy with the included Caddy reverse proxy for automatic TLS. See <a href="/run-it">Run It for Real</a> for production setup.</p>
+			<p>The deterministic event router handles the logic — <code>issue.opened</code> triggers triage, <code>pr.opened</code> triggers review, <code>@mention</code> from a maintainer triggers the full build cycle. No configuration needed beyond the webhook URL and secret.</p>
+		</div>
+
+		<div class="step-block">
+			<h3><span class="step-label">Step 7</span> Connect Slack <span class="step-label">optional</span></h3>
+			<p>Talk to Last Light from Slack. Uses Socket Mode (WebSocket) — no public URL needed. The bot responds to DMs and @mentions in channels, with multi-turn conversation support.</p>
+
+			<p>Create an app at <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> with Socket Mode enabled and bot token scopes for messaging, then add to <code>.env</code>:</p>
+			<pre><code>SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...</code></pre>
+			<p>Optionally restrict access and set a delivery channel for cron reports:</p>
+			<pre><code>SLACK_ALLOWED_USERS=U01ABC,U02DEF    # limit who can interact
+SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
+			<p>Chat interactions are read-only by default — the bot can answer questions and create issues, but won't make code changes from Slack. Build requests go through GitHub.</p>
+		</div>
+	</section>
+
+	<!-- Built-in skills -->
+	<section class="skills">
+		<h2>Tricks up its sleeve</h2>
+		<div class="skills-grid">
+			<div class="skill">
+				<code>/pr-review</code>
+				<p>Precision-first PR review — only Critical &amp; Important findings, posted as line-anchored inline comments</p>
+			</div>
+			<div class="skill">
+				<code>/issue-triage</code>
+				<p>Label, deduplicate, request missing info, and manage stale issues</p>
+			</div>
+			<div class="skill">
+				<code>/repo-health</code>
+				<p>Weekly health report — open/stale issues, PR velocity, and action items</p>
+			</div>
+			<div class="skill">
+				<code>/security-review</code>
+				<p>Scan with npm audit, semgrep &amp; gitleaks plus AI review, filed as one grouped issue</p>
+			</div>
+			<div class="skill">
+				<code>/verify</code>
+				<p>Test a behaviour claim in the sandbox — reports CONFIRMED / REFUTED / INCONCLUSIVE with evidence</p>
+			</div>
+			<div class="skill">
+				<code>/qa-test</code>
+				<p>Drive a CLI or running app through a flow, with step-level pass/fail evidence</p>
+			</div>
+			<div class="skill">
+				<code>/demo</code>
+				<p>Record a short demo video of a PR — headless-browser capture composited to an mp4</p>
+			</div>
+			<div class="skill">
+				<code>/answer</code>
+				<p>Research repo docs + the web and post a single sourced answer to a question</p>
+			</div>
+			<a href="https://github.com/users/cliftonc/projects/4" class="skill skill-cta" target="_blank" rel="noopener">
+				<strong>Want more?</strong>
+				<p>Check the roadmap for what's coming next</p>
+			</a>
+		</div>
+	</section>
+
+	<!-- Schedule -->
+	<section class="schedule">
+		<h2>Pick your mode</h2>
+		<p class="section-desc">Webhooks and cron handle the same jobs — use one or the other, not both.</p>
+
+		<div class="gateway-grid">
+			<div class="gateway-card">
+				<h4>Webhooks <span class="badge-warn" style="color: var(--teal); background: rgba(26, 122, 138, 0.12);">recommended</span></h4>
+				<p>Real-time. GitHub sends events as they happen — issues triaged instantly, PRs reviewed on open. Requires a public endpoint.</p>
+				<div class="schedule-table" style="margin-top: 0.75rem;">
+					<div class="schedule-row header">
+						<span>Event</span>
+						<span>Response</span>
+					</div>
+					<div class="schedule-row">
+						<span>Issue opened</span>
+						<span class="freq">Instant</span>
+					</div>
+					<div class="schedule-row">
+						<span>PR opened</span>
+						<span class="freq">Instant</span>
+					</div>
+					<div class="schedule-row">
+						<span>@mention from maintainer</span>
+						<span class="freq">Architect→Executor→Reviewer build cycle</span>
+					</div>
+				</div>
+			</div>
+			<div class="gateway-card">
+				<h4>Cron</h4>
+				<p>Periodic sweeps. No public endpoint needed — the agent polls GitHub on a schedule. Simpler to set up, but slower to respond.</p>
+				<div class="schedule-table" style="margin-top: 0.75rem;">
+					<div class="schedule-row header">
+						<span>Job</span>
+						<span>Frequency</span>
+					</div>
+					<div class="schedule-row">
+						<span>Triage new issues</span>
+						<span class="freq">Every 15 min</span>
+					</div>
+					<div class="schedule-row">
+						<span>Check PRs awaiting review</span>
+						<span class="freq">Every 30 min</span>
+					</div>
+					<div class="schedule-row">
+						<span>Weekly health report</span>
+						<span class="freq">Mondays 9am</span>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<p class="section-note">The weekly health report runs regardless of mode — it's useful either way.</p>
+	</section>
+
+	<!-- Dashboard tour -->
+	<section class="admin-section">
+		<h2>Inside the dashboard</h2>
+		<p class="section-desc">Every agent session — sandbox runs, Slack chats, cron jobs, approval gates — is logged, browsable, and streamable. The dashboard at <code>/admin</code> has four tabs, each answering a different question about what the bot is doing.</p>
+
+		<div class="dashboard-tour" id="dashboard-tour">
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="0" aria-label="View Home screenshot full size">
+					<img src="/screenshots/home.png" alt="Last Light dashboard home tab — live activity, execution stats, recent workflows, resource usage charts" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Home</strong>
+					<span>Live activity, rolling execution / token / cost stats, running containers, and the five most recent workflow runs at a glance.</span>
+				</figcaption>
+			</figure>
+
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="1" aria-label="View Workflows screenshot full size">
+					<img src="/screenshots/workflow.png" alt="Last Light Workflows tab showing a DAG pipeline with Guardrails, Architect, Executor, Reviewer, PR and complete phases" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Workflows</strong>
+					<span>Pipeline DAG for every run — Guardrails → Architect → Executor → Reviewer → PR, with fix-feedback loops stacked under the reviewer phase. Click any phase to see its full message stream.</span>
+				</figcaption>
+			</figure>
+
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="2" aria-label="View Sandbox Sessions screenshot full size">
+					<img src="/screenshots/session.png" alt="Last Light Sandbox Sessions tab showing agent conversation timeline with assistant, tool, and user messages" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Sandbox Sessions</strong>
+					<span>Drill into any sandboxed agent run. Full agent conversation — assistant thinking, tool calls, reviewer verdicts — filterable by skill, repo, and time range.</span>
+				</figcaption>
+			</figure>
+
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="3" aria-label="View Chat Sessions screenshot full size">
+					<img src="/screenshots/chat.png" alt="Last Light Chat Sessions tab showing a Slack thread's full message history" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Chat Sessions</strong>
+					<span>DB-backed history for every Slack thread. The bot rehydrates the same pi-ai conversation each turn, so one thread = one growing, coherent conversation.</span>
+				</figcaption>
+			</figure>
+		</div>
+
+		<div class="lightbox" id="tour-lightbox" role="dialog" aria-modal="true" aria-label="Dashboard screenshot viewer" hidden>
+			<button type="button" class="lightbox-close" data-lightbox-close aria-label="Close (Esc)">&times;</button>
+			<button type="button" class="lightbox-nav lightbox-prev" data-lightbox-prev aria-label="Previous (Left arrow)">&#8249;</button>
+			<button type="button" class="lightbox-nav lightbox-next" data-lightbox-next aria-label="Next (Right arrow)">&#8250;</button>
+			<figure class="lightbox-figure">
+				<img class="lightbox-image" alt="" />
+				<figcaption class="lightbox-caption"></figcaption>
+			</figure>
+		</div>
+	</section>
+
+	<script>
+		const lightbox = document.getElementById("tour-lightbox");
+		const tour = document.getElementById("dashboard-tour");
+		if (lightbox && tour) {
+			const imgEl = lightbox.querySelector(".lightbox-image") as HTMLImageElement;
+			const capEl = lightbox.querySelector(".lightbox-caption") as HTMLElement;
+			const triggers = Array.from(
+				tour.querySelectorAll<HTMLButtonElement>(".tour-card-trigger"),
+			);
+			const slides = triggers.map((btn) => {
+				const img = btn.querySelector("img") as HTMLImageElement;
+				const figcap = btn.parentElement?.querySelector("figcaption");
+				const title = figcap?.querySelector("strong")?.textContent ?? "";
+				const desc = figcap?.querySelector("span")?.textContent ?? "";
+				return { src: img.src, alt: img.alt, title, desc };
+			});
+
+			let current = 0;
+			let lastFocused: HTMLElement | null = null;
+
+			const render = () => {
+				const slide = slides[current];
+				imgEl.src = slide.src;
+				imgEl.alt = slide.alt;
+				capEl.innerHTML = `<strong>${slide.title}</strong>${slide.desc}`;
+			};
+
+			const open = (index: number) => {
+				current = index;
+				lastFocused = document.activeElement as HTMLElement;
+				render();
+				lightbox.hidden = false;
+				document.body.classList.add("lightbox-open");
+				(lightbox.querySelector("[data-lightbox-close]") as HTMLButtonElement)?.focus();
+			};
+
+			const close = () => {
+				lightbox.hidden = true;
+				document.body.classList.remove("lightbox-open");
+				lastFocused?.focus();
+			};
+
+			const step = (delta: number) => {
+				current = (current + delta + slides.length) % slides.length;
+				render();
+			};
+
+			triggers.forEach((btn, i) => {
+				btn.addEventListener("click", () => open(i));
+			});
+
+			lightbox.addEventListener("click", (e) => {
+				const target = e.target as HTMLElement;
+				if (target === lightbox) close();
+				if (target.closest("[data-lightbox-close]")) close();
+				if (target.closest("[data-lightbox-prev]")) step(-1);
+				if (target.closest("[data-lightbox-next]")) step(1);
+			});
+
+			document.addEventListener("keydown", (e) => {
+				if (lightbox.hidden) return;
+				if (e.key === "Escape") close();
+				else if (e.key === "ArrowLeft") step(-1);
+				else if (e.key === "ArrowRight") step(1);
+			});
+		}
+	</script>
+
+</BaseLayout>
+
+<style is:global>
+	/* Hero */
+	.hero {
+		min-height: 80vh;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.hero-content {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		padding: 2rem;
+		max-width: 880px;
+		margin: 0 auto;
+	}
+
+	.hero-logo {
+		width: 140px;
+		height: auto;
+		margin-bottom: 1.5rem;
+		filter: drop-shadow(0 0 40px rgba(240, 180, 41, 0.15));
+	}
+
+	.hero-name {
+		font-size: 1rem;
+		font-weight: 600;
+		color: var(--text-muted);
+		letter-spacing: 0.15em;
+		text-transform: uppercase;
+		margin-bottom: 0.75rem;
+	}
+
+	.hero-badges {
+		display: flex;
+		gap: 0.5rem;
+		justify-content: center;
+		flex-wrap: wrap;
+		margin-bottom: 1.5rem;
+	}
+
+	.hero-badge {
+		font-size: 0.75rem;
+		font-weight: 600;
+		letter-spacing: 0.02em;
+		color: var(--text-muted);
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		padding: 0.3rem 0.8rem;
+	}
+
+	h1 {
+		font-size: clamp(2rem, 5vw, 3.2rem);
+		line-height: 1.15;
+		margin-bottom: 1.25rem;
+		letter-spacing: -0.02em;
+	}
+
+	.accent {
+		color: var(--gold);
+	}
+
+	.subtitle {
+		font-size: 1.15rem;
+		color: var(--text-muted);
+		max-width: 640px;
+		margin-bottom: 2rem;
+		line-height: 1.65;
+	}
+
+	.hero-actions {
+		display: flex;
+		gap: 0.75rem;
+	}
+
+	.btn {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.65rem 1.5rem;
+		border-radius: 8px;
+		font-weight: 500;
+		font-size: 0.9rem;
+		transition: all 0.2s;
+		border: 1px solid transparent;
+	}
+
+	.btn-primary {
+		background: var(--gold);
+		color: var(--bg);
+		border-color: var(--gold);
+	}
+
+	.btn-primary:hover {
+		background: var(--gold-dark);
+		border-color: var(--gold-dark);
+		color: var(--bg);
+	}
+
+	.btn-ghost {
+		border-color: var(--border);
+		color: var(--text);
+	}
+
+	.btn-ghost:hover {
+		border-color: var(--text-muted);
+		color: var(--text-bright);
+	}
+
+	/* Sections */
+	section {
+		max-width: 1000px;
+		margin: 0 auto;
+		padding: 3rem 2rem;
+	}
+
+	section h2 {
+		font-size: 1.6rem;
+		margin-bottom: 1rem;
+		letter-spacing: -0.01em;
+	}
+
+	.section-desc {
+		color: var(--text-muted);
+		margin-bottom: 1.5rem;
+		line-height: 1.65;
+	}
+
+	/* Features */
+	.feature-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 1rem;
+		margin-top: 1.25rem;
+	}
+
+	.feature-card {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 1.5rem;
+		transition: border-color 0.25s, background 0.25s;
+	}
+
+	.feature-card:hover {
+		border-color: var(--border-bright);
+		background: var(--bg-card-hover);
+	}
+
+	.feature-icon {
+		color: var(--teal);
+		margin-bottom: 0.75rem;
+	}
+
+	.feature-card h3 {
+		font-size: 1rem;
+		margin-bottom: 0.4rem;
+	}
+
+	.feature-card p {
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		line-height: 1.55;
+	}
+
+	/* How it works */
+	.architecture {
+		display: flex;
+		flex-direction: column;
+		gap: 0.75rem;
+		margin-top: 1.25rem;
+	}
+
+	.arch-step {
+		display: flex;
+		gap: 1.25rem;
+		align-items: flex-start;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		transition: border-color 0.25s;
+	}
+
+	.arch-step:hover {
+		border-color: var(--teal-dark);
+	}
+
+	.step-num {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 32px;
+		height: 32px;
+		border-radius: 50%;
+		background: var(--teal-dark);
+		color: var(--text-bright);
+		font-weight: 600;
+		font-size: 0.85rem;
+	}
+
+	.arch-step strong {
+		display: block;
+		color: var(--text-bright);
+		margin-bottom: 0.2rem;
+	}
+
+	.arch-step p {
+		font-size: 0.88rem;
+		color: var(--text-muted);
+	}
+
+	.section-note {
+		margin-top: 1.5rem;
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		padding: 1rem 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		border-left: 3px solid var(--teal);
+		line-height: 1.55;
+	}
+
+	/* Get started */
+	.get-started {
+		border-top: 1px solid var(--border);
+		padding-top: 3rem;
+	}
+
+	.setup-option-heading {
+		font-size: 1.3rem;
+		margin: 2.75rem 0 1.25rem;
+		padding-bottom: 0.6rem;
+		border-bottom: 1px solid var(--border);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.setup-option-heading:first-of-type {
+		margin-top: 0;
+	}
+
+	.step-block {
+		margin-bottom: 2.5rem;
+		padding-top: 2rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.step-block:first-child {
+		border-top: none;
+		padding-top: 0;
+	}
+
+	.step-block h3 {
+		font-size: 1.2rem;
+		margin-bottom: 0.75rem;
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+	}
+
+	.step-label {
+		font-family: var(--mono);
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--bg);
+		background: var(--teal);
+		padding: 0.2em 0.6em;
+		border-radius: 4px;
+		font-weight: 600;
+	}
+
+	.step-block p {
+		font-size: 0.9rem;
+		color: var(--text-muted);
+		margin: 0.5rem 0;
+	}
+
+	.permissions-list {
+		list-style: none;
+		margin: 0.75rem 0;
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 0.4rem;
+	}
+
+	.permissions-list li {
+		font-size: 0.85rem;
+		color: var(--text-muted);
+		padding: 0.4rem 0.6rem;
+		background: var(--bg-card);
+		border-radius: 6px;
+		border: 1px solid var(--border);
+	}
+
+	.permissions-list li strong {
+		color: var(--text);
+	}
+
+	/* Backends */
+	.backends-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 0.75rem;
+		margin: 1rem 0;
+	}
+
+	.backend-card {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 1rem 1.25rem;
+	}
+
+	.backend-card h4 {
+		color: var(--text-bright);
+		font-size: 0.9rem;
+		margin-bottom: 0.3rem;
+	}
+
+	.backend-card > p {
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		line-height: 1.5;
+		margin: 0.3rem 0;
+	}
+
+	.backend-card pre {
+		margin: 0.5rem 0 0;
+		padding: 0.6rem 0.8rem;
+		font-size: 0.78rem;
+	}
+
+	/* Gateways */
+	.gateway-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 0.75rem;
+		margin: 1rem 0;
+	}
+
+	.gateway-card {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 1rem 1.25rem;
+	}
+
+	.gateway-card h4 {
+		color: var(--text-bright);
+		font-size: 0.9rem;
+		margin-bottom: 0.3rem;
+	}
+
+	.gateway-card > p {
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		line-height: 1.5;
+		margin: 0.3rem 0;
+	}
+
+	.gateway-card pre {
+		margin: 0.5rem 0 0;
+		padding: 0.6rem 0.8rem;
+		font-size: 0.78rem;
+	}
+
+	.backend-not-recommended {
+		opacity: 0.6;
+	}
+
+	.badge-warn {
+		font-family: var(--mono);
+		font-size: 0.65rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--orange);
+		background: rgba(232, 117, 42, 0.12);
+		padding: 0.15em 0.5em;
+		border-radius: 4px;
+		margin-left: 0.4rem;
+		vertical-align: middle;
+	}
+
+	/* Skills */
+	.skills-grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 1rem;
+		margin-top: 1.5rem;
+	}
+
+	.skill {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 1.25rem;
+	}
+
+	.skill code {
+		font-size: 0.9rem;
+		color: var(--orange);
+		background: rgba(232, 117, 42, 0.1);
+	}
+
+	.skill p {
+		font-size: 0.85rem;
+		color: var(--text-muted);
+		margin-top: 0.5rem;
+		line-height: 1.5;
+	}
+
+	.skill-cta {
+		border-style: dashed;
+		border-color: var(--border);
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		transition: border-color 0.2s;
+	}
+
+	.skill-cta:hover {
+		border-color: var(--gold);
+	}
+
+	.skill-cta strong {
+		color: var(--gold);
+		font-size: 0.9rem;
+	}
+
+	/* Schedule */
+	.schedule-table {
+		margin-top: 1.5rem;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow: hidden;
+	}
+
+	.schedule-row {
+		display: flex;
+		justify-content: space-between;
+		padding: 0.85rem 1.25rem;
+		font-size: 0.88rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.schedule-row:last-child {
+		border-bottom: none;
+	}
+
+	.schedule-row.header {
+		background: var(--bg-card);
+		font-weight: 600;
+		color: var(--text-bright);
+		font-size: 0.8rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+
+	.freq {
+		font-family: var(--mono);
+		font-size: 0.8rem;
+		color: var(--teal);
+	}
+
+	.schedule-cta {
+		border-style: dashed;
+		border-bottom: none;
+		color: var(--text-muted);
+		transition: color 0.2s;
+	}
+
+	.schedule-cta:hover {
+		color: var(--gold);
+	}
+
+	.schedule-cta .freq {
+		color: var(--gold);
+	}
+
+	/* Admin dashboard tour */
+	.admin-section {
+		border-top: 1px solid var(--border);
+	}
+
+	.dashboard-tour {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 1.25rem;
+		margin-top: 1.5rem;
+	}
+
+	.tour-card {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		overflow: hidden;
+		transition: border-color 0.25s, transform 0.25s;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.tour-card:hover {
+		border-color: var(--teal);
+		transform: translateY(-2px);
+	}
+
+	.tour-card-trigger {
+		display: block;
+		width: 100%;
+		padding: 0;
+		margin: 0;
+		background: none;
+		border: 0;
+		border-bottom: 1px solid var(--border);
+		cursor: zoom-in;
+		color: inherit;
+		font: inherit;
+	}
+
+	.tour-card-trigger:focus-visible {
+		outline: 2px solid var(--gold);
+		outline-offset: -2px;
+	}
+
+	.tour-card img {
+		width: 100%;
+		height: auto;
+		display: block;
+	}
+
+	/* Lightbox */
+	.lightbox {
+		position: fixed;
+		inset: 0;
+		z-index: 100;
+		background: rgba(5, 8, 12, 0.92);
+		backdrop-filter: blur(4px);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 3rem 4.5rem;
+		animation: lightbox-fade 0.18s ease-out;
+	}
+
+	.lightbox[hidden] {
+		display: none;
+	}
+
+	@keyframes lightbox-fade {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+
+	.lightbox-figure {
+		max-width: 100%;
+		max-height: 100%;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.9rem;
+		margin: 0;
+	}
+
+	.lightbox-image {
+		max-width: 100%;
+		max-height: calc(100vh - 8rem);
+		object-fit: contain;
+		border-radius: 8px;
+		border: 1px solid var(--border);
+		box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+	}
+
+	.lightbox-caption {
+		color: var(--text-muted);
+		font-size: 0.85rem;
+		text-align: center;
+		max-width: 60ch;
+	}
+
+	.lightbox-caption strong {
+		color: var(--text-bright);
+		display: block;
+		margin-bottom: 0.15rem;
+		font-size: 0.95rem;
+	}
+
+	.lightbox-close,
+	.lightbox-nav {
+		position: absolute;
+		background: rgba(20, 27, 36, 0.85);
+		border: 1px solid var(--border);
+		color: var(--text-bright);
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 999px;
+		transition: background 0.2s, border-color 0.2s, transform 0.2s;
+	}
+
+	.lightbox-close:hover,
+	.lightbox-nav:hover {
+		background: var(--bg-card-hover);
+		border-color: var(--teal);
+	}
+
+	.lightbox-close:focus-visible,
+	.lightbox-nav:focus-visible {
+		outline: 2px solid var(--gold);
+		outline-offset: 2px;
+	}
+
+	.lightbox-close {
+		top: 1rem;
+		right: 1rem;
+		width: 2.5rem;
+		height: 2.5rem;
+		font-size: 1.75rem;
+		line-height: 1;
+	}
+
+	.lightbox-nav {
+		top: 50%;
+		transform: translateY(-50%);
+		width: 3rem;
+		height: 3rem;
+		font-size: 2rem;
+		line-height: 1;
+	}
+
+	.lightbox-nav:hover {
+		transform: translateY(-50%) scale(1.05);
+	}
+
+	.lightbox-prev { left: 1rem; }
+	.lightbox-next { right: 1rem; }
+
+	body.lightbox-open {
+		overflow: hidden;
+	}
+
+	.tour-card figcaption {
+		padding: 1rem 1.25rem 1.15rem;
+	}
+
+	.tour-card figcaption strong {
+		display: block;
+		color: var(--text-bright);
+		font-size: 0.95rem;
+		margin-bottom: 0.3rem;
+	}
+
+	.tour-card figcaption span {
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		line-height: 1.55;
+	}
+
+	/* Responsive */
+	@media (max-width: 640px) {
+		.feature-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.skills-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.backends-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.gateway-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.permissions-list {
+			grid-template-columns: 1fr;
+		}
+
+		.dashboard-tour {
+			grid-template-columns: 1fr;
+		}
+
+		.lightbox {
+			padding: 3.5rem 0.75rem;
+		}
+
+		.lightbox-nav {
+			width: 2.5rem;
+			height: 2.5rem;
+			font-size: 1.5rem;
+		}
+
+		.lightbox-prev { left: 0.5rem; }
+		.lightbox-next { right: 0.5rem; }
+
+		.lightbox-close {
+			top: 0.5rem;
+			right: 0.5rem;
+		}
+
+		.hero-actions {
+			flex-direction: column;
+			width: 100%;
+		}
+
+		.btn {
+			justify-content: center;
+		}
+	}
+</style>

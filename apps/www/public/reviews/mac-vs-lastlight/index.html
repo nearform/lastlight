@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- Unlisted internal review: keep it out of search indexes. Not linked from nav
+     and not a real Astro route, so it never enters the sitemap. -->
+<meta name="robots" content="noindex, nofollow" />
+<title>Last Light vs MAC — Architecture Review</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<script>
+  // Match lastlight.dev: apply the saved / OS-preferred theme before first paint.
+  (function () {
+    try {
+      var theme = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', theme);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  })();
+</script>
+<style>
+  /* Tokens mirror lastlight.dev BaseLayout — dark is the default (:root),
+     light theme via html[data-theme="light"]. No raw hex in the page body. */
+  :root {
+    --sans: 'Inter', -apple-system, sans-serif;
+    --mono: 'JetBrains Mono', monospace;
+    --gold: #F0B429;
+    --gold-dark: #D9A025;
+    --orange: #E8752A;
+    --teal: #1A7A8A;
+    --navy: #1B2735;
+    --bg: #0C1117;
+    --bg-card: #141B24;
+    --bg-card-hover: #1A2332;
+    --border: #1E2A38;
+    --border-bright: #2A3A4D;
+    --text: #C9D1D9;
+    --text-muted: #7D8694;
+    --text-faint: #5C6773;
+    --text-bright: #ECEFF4;
+    --mint: #2EBDA8;   /* Last Light accent (badge) */
+    --blue: #4A9EDB;   /* MAC accent (badge) */
+    --danger: #E5484D;
+    --radius: 12px;
+    --maxw: 1060px;
+    color-scheme: dark;
+  }
+  html[data-theme="light"] {
+    --gold: #B7791F;
+    --gold-dark: #A86A1A;
+    --orange: #C2410C;
+    --teal: #0F6674;
+    --navy: #EEF1F4;
+    --bg: #F4F6F8;
+    --bg-card: #FFFFFF;
+    --bg-card-hover: #EEF1F4;
+    --border: #E2E6EA;
+    --border-bright: #CBD3DC;
+    --text: #1B2330;
+    --text-muted: #566274;
+    --text-faint: #7A8697;
+    --text-bright: #000E38;
+    --mint: #0A8F79;
+    --blue: #1D6FA8;
+    --danger: #C2371C;
+    color-scheme: light;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.6; font-size: 15px;
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  }
+  a { color: var(--gold); text-decoration: none; transition: color .2s; }
+  a:hover { color: var(--orange); }
+  code {
+    font-family: var(--mono); font-size: 0.85em;
+    background: var(--navy); color: var(--gold);
+    padding: 0.15em 0.4em; border-radius: 4px;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+  /* header */
+  header { border-bottom: 1px solid var(--border); background: linear-gradient(180deg, rgba(240,180,41,0.05), transparent 72%); }
+  .brandbar { display: flex; align-items: center; gap: 13px; padding: 24px 0 8px; }
+  .brandbar svg { width: 32px; height: 32px; flex: none; }
+  .brandbar .wordmark { font-weight: 700; letter-spacing: -0.01em; font-size: 15px; color: var(--text-bright); }
+  .brandbar .wordmark span { color: var(--text-muted); font-weight: 500; }
+  .hero { padding: 20px 0 38px; }
+  .hero h1 { font-size: clamp(29px, 5vw, 44px); line-height: 1.08; letter-spacing: -0.03em; margin: 0 0 14px; font-weight: 800; color: var(--text-bright); }
+  .hero h1 .accent { background: linear-gradient(100deg, var(--gold), var(--orange)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+  .hero p.sub { font-size: 18px; color: var(--text-muted); max-width: 720px; margin: 0 0 22px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--text-faint); }
+  .meta b { color: var(--text-muted); font-weight: 600; }
+
+  main { padding: 42px 0 76px; }
+  section { margin: 0 0 54px; scroll-margin-top: 64px; }
+  h2.eyebrow { font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--gold); font-weight: 700; margin: 0 0 6px; }
+  .h2sub { font-size: 25px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 20px; color: var(--text-bright); }
+  h3 { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; margin: 28px 0 10px; color: var(--text-bright); }
+  p { margin: 0 0 14px; }
+  .lead { color: var(--text-muted); }
+
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--gold); background: linear-gradient(100deg, rgba(240,180,41,0.05), transparent); border-radius: var(--radius); padding: 20px 22px; margin: 0 0 20px; }
+  .callout.warn { border-left-color: var(--orange); background: linear-gradient(100deg, rgba(232,117,42,0.06), transparent); }
+  .callout.red { border-left-color: var(--danger); background: linear-gradient(100deg, rgba(229,72,77,0.07), transparent); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .k { font-weight: 700; color: var(--text-bright); }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  thead th { background: var(--bg-card); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--bg-card-hover); }
+  td.dim { color: var(--text-muted); }
+
+  .badge { display: inline-block; font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+  .badge.ll  { color: #04120d; background: var(--mint); }
+  .badge.mac { color: #05122e; background: var(--blue); }
+  .badge.tie { color: var(--text-muted); background: var(--bg-card-hover); border: 1px solid var(--border-bright); }
+
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .cols { grid-template-columns: 1fr; } .meta { gap: 6px 14px; } }
+  .card { border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; background: var(--bg-card); }
+  .card h4 { margin: 0 0 12px; font-size: 15px; font-weight: 700; }
+  .card.gain h4 { color: var(--mint); }
+  .card.lose h4 { color: var(--danger); }
+  .card ul { margin: 0; padding-left: 18px; }
+  .card li { margin: 0 0 9px; }
+  .card li:last-child { margin-bottom: 0; }
+
+  ul.clean { list-style: none; padding: 0; margin: 0; }
+  ul.clean li { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  ul.clean li:last-child { border-bottom: none; }
+  ul.clean .num { color: var(--gold); font-weight: 700; margin-right: 8px; font-family: var(--mono); font-size: 0.9em; }
+
+  .pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border-bright); color: var(--text-muted); background: var(--bg-card); }
+
+  .toc { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+  .toc .wrap { display: flex; gap: 4px; overflow-x: auto; padding: 10px 24px; }
+  .toc a { font-size: 13px; color: var(--text-muted); padding: 5px 11px; border-radius: 7px; white-space: nowrap; }
+  .toc a:hover { color: var(--text-bright); background: var(--bg-card-hover); }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--text-muted); margin: 0 0 16px; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  footer { border-top: 1px solid var(--border); color: var(--text-faint); font-size: 13px; padding: 26px 0 56px; }
+  footer .wrap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="brandbar">
+      <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-label="Last Light">
+        <path fill="#00e6a4" d="M38.06,47.42h20.42v5.35h-20.42v-5.35Z" />
+        <path fill="var(--text-bright)" d="M5.52,11.05h5.46l17.72,25.77V11.05h5.87v36.37h-5.46L11.39,21.65v25.77h-5.87V11.05Z" />
+      </svg>
+      <div class="wordmark">Last Light <span>· Architecture Review</span></div>
+    </div>
+    <div class="hero">
+      <h1>Last Light <span style="color:var(--text-faint);font-weight:600">vs</span> <span class="accent">MAC</span><br>bespoke runtime vs the Mastra port</h1>
+      <p class="sub">A layer-by-layer comparison of the two implementations — measuring developer experience, the workflow/prompt SDL, scalability &amp; simplicity levers, and what a move onto the Mastra platform really gains (and gives up).</p>
+      <div class="meta">
+        <span><b>Baseline</b> Last Light spec (<code>spec/00–11</code>)</span>
+        <span><b>Compared</b> <code>~/work/mac</code> (Mastra port)</span>
+        <span><b>Method</b> 5 parallel analysis agents, both codebases</span>
+        <span><b>Date</b> 13 Jul 2026</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<nav class="toc">
+  <div class="wrap">
+    <a href="#tldr">TL;DR</a>
+    <a href="#scorecard">Scorecard</a>
+    <a href="#gain">What you gain</a>
+    <a href="#giveup">What you give up</a>
+    <a href="#sdl">Workflow SDL</a>
+    <a href="#dx">DX &amp; structure</a>
+    <a href="#sandbox">Sandbox &amp; scale</a>
+    <a href="#state">State / obs / chat</a>
+    <a href="#mastra">Mastra leverage</a>
+    <a href="#verdict">Verdict</a>
+  </div>
+</nav>
+
+<main>
+<div class="wrap">
+
+  <section id="tldr">
+    <h2 class="eyebrow">The bottom line</h2>
+    <div class="h2sub">A good trade, not yet a finished one</div>
+    <div class="callout">
+      <p><span class="k">MAC is the better <em>library architecture</em> and a dramatic simplification of the runtime; Last Light is the better <em>finished, production-hardened product</em> and the more operator-maintainable authoring surface.</span></p>
+      <p>The port is best read as <b>deleting most of Last Light's bespoke infrastructure in exchange for a maintained platform</b> — a sound trade. But today it does so at the cost of the security envelope, the operational control plane, and the multi-tenant deployment story, and it leaves substantial newer Mastra leverage (Channels, Signals, real Memory) on the table while drifting behind the current release line.</p>
+    </div>
+    <div class="callout warn">
+      <p><span class="k">Version correction.</span> <code>MIGRATION.md</code> pins <code>@mastra/core 1.37.1</code>, but MAC's lockfile is actually on <b>1.41.0</b>; latest published is <b>1.50.1</b>. There is <b>no 2.x</b> — the entire gap is same-major and additive, so upgrading is low-risk. MAC is ~9 minors behind, not a major version behind.</p>
+    </div>
+  </section>
+
+  <section id="scorecard">
+    <h2 class="eyebrow">At a glance</h2>
+    <div class="h2sub">Scorecard across every layer</div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--mint)"></span> Last Light wins</span>
+      <span><span class="dot" style="background:var(--blue)"></span> MAC wins</span>
+      <span><span class="dot" style="background:var(--bg-card-hover);border:1px solid var(--border-bright)"></span> Tie</span>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Dimension</th><th>Winner</th><th>One-line</th></tr></thead>
+        <tbody>
+          <tr><td>Workflow / prompt SDL maintainability</td><td><span class="badge ll">Last Light</span></td><td class="dim">Declarative forkable YAML + real template engine, per-phase model/egress/skills, <em>tested</em> orchestration vs MAC's ~1,300-line imperative TS workflows gated to core devs</td></tr>
+          <tr><td>Refactor safety (type-level)</td><td><span class="badge mac">MAC</span></td><td class="dim">zod I/O typed across <code>.then()</code> catches renamed state fields at compile time; Last Light fails silently on the value plane</td></tr>
+          <tr><td>DX / repo modularity</td><td><span class="badge mac">MAC</span></td><td class="dim">CI-asserted acyclic package graph + <code>createMacApp()</code> composition + Studio + source-only packages (no-rebuild inner loop)</td></tr>
+          <tr><td>Operational maturity (ship today)</td><td><span class="badge ll">Last Light</span></td><td class="dim">npm-published, GHCR prebuilt images, <code>server update</code>, rich ops CLI, hardened compose stack</td></tr>
+          <tr><td>Sandbox security</td><td><span class="badge ll">Last Light</span></td><td class="dim">Agent-in-sandbox + default-deny egress firewall + SSRF floor; MAC dropped all of it, kept only token-downscoping</td></tr>
+          <tr><td>Scalability / ops simplicity</td><td><span class="badge mac">MAC</span></td><td class="dim">One <code>MAC_SANDBOX</code> knob + one-line cloud factory vs KVM + 5-service sidecar mesh</td></tr>
+          <tr><td>Chat runtime</td><td><span class="badge mac">MAC</span></td><td class="dim">Entire SessionManager subsystem → <code>new Memory({ lastMessages: 20 })</code></td></tr>
+          <tr><td>Observability (debugging)</td><td><span class="badge mac">MAC</span></td><td class="dim">Free per-step AI tracing → DuckDB → Studio</td></tr>
+          <tr><td>Operational control plane</td><td><span class="badge ll">Last Light</span></td><td class="dim">Approvals UI/history, resume/cancel/retry, stat rollups, timeline — MAC <em>deleted</em> the dashboard; Studio is a debugger, not a fleet console</td></tr>
+          <tr><td>Config / multi-tenant deploy</td><td><span class="badge ll">Last Light</span></td><td class="dim">Overlay layering + core-version pinning + asset overlays vs MAC's <code>.env</code>-only (overlay dropped)</td></tr>
+          <tr><td>Event model</td><td><span class="badge tie">Tie</span></td><td class="dim"><code>EventEnvelope</code> ported essentially intact — strong evidence the abstraction was well-designed</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="gain">
+    <h2 class="eyebrow">The core answer</h2>
+    <div class="h2sub">What the Mastra port really gains</div>
+    <p class="lead">The strategic win is code MAC no longer maintains because Mastra provides it. A large fraction of Last Light's bespoke surface is retired for a maintained dependency:</p>
+    <ul class="clean">
+      <li><span class="num">01</span><b>Chat</b> — <code>SessionManager</code> + <code>messaging_sessions</code>/<code>messaging_messages</code> + JSONL chat shim + <code>ChatSessionReader</code> + bespoke pi-ai <code>ChatRunner</code> collapse into ~7 lines of Mastra <code>Memory</code>. <span class="pill">biggest single simplification</span></li>
+      <li><span class="num">02</span><b>Observability</b> — JSONL envelope shim + <code>SessionReader</code> + stat rollups + custom React/Vite dashboard → free AI tracing + Studio.</li>
+      <li><span class="num">03</span><b>Workflow runtime</b> — YAML runner + resume substrate → native <code>createWorkflow</code> / <code>.suspend()</code>/<code>.resume()</code> + durable LibSQL snapshots.</li>
+      <li><span class="num">04</span><b>Sandbox orchestration</b> — gondolin/docker + egress config generation → Mastra <code>Workspace</code> behind a swappable factory.</li>
+      <li><span class="num">05</span><b>Provider registry / OpenCode runtime</b> → model-router strings; per-run env splice → <code>RequestContext</code> DI.</li>
+    </ul>
+    <div class="callout" style="margin-top:22px">
+      <p>The <code>EventEnvelope</code> contract survives the port essentially intact — the single strongest piece of evidence that Last Light's core domain model was well-designed and that the port didn't compromise it.</p>
+    </div>
+  </section>
+
+  <section id="giveup">
+    <h2 class="eyebrow">The cost</h2>
+    <div class="h2sub">What MAC gives up — and must weigh</div>
+    <div class="cols">
+      <div class="card gain">
+        <h4>✓ Gained</h4>
+        <ul>
+          <li><b>Trivial horizontal scale</b> via pluggable cloud sandboxes (e2b / daytona / modal) — no host KVM, no per-host sidecar topology.</li>
+          <li><b>Radically simpler ops</b> — one <code>MAC_SANDBOX</code> env var vs generated nginx/coredns/otel configs on two internal networks.</li>
+          <li><b>Free debugging observability</b> — per-step spans, tool I/O, sensitive-data filtering, replay.</li>
+          <li><b>Enforced modularity</b> — acyclic package graph asserted in CI.</li>
+          <li><b>Token downscoping preserved</b> — the one hard GitHub control that transferred verbatim.</li>
+        </ul>
+      </div>
+      <div class="card lose">
+        <h4>✕ Given up</h4>
+        <ul>
+          <li><b>The security envelope</b> — default-deny egress allowlist, SNI-peek firewall, SSRF/metadata floor, agent-in-sandbox containment. All gone.</li>
+          <li><b>The operational control plane</b> — approvals UI + history, resume/cancel/retry, daily/hourly stat rollups, session timeline. The dashboard was <em>deleted</em>, not replaced.</li>
+          <li><b>Multi-tenant deployment</b> — overlay/instance layering + core-version pinning. No answer beyond forking the repo.</li>
+          <li><b>Slack durability</b> — at-least-once webhook delivery + restart-durable threads (now an in-memory Set).</li>
+          <li><b>DAG runner + crash-loop circuit breaker</b>; single-model only.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout red" style="margin-top:20px">
+      <p><span class="k">#1 production blocker.</span> MAC runs the <em>agent + host provider keys + token-bearing read tools on the host</em>; only shell <code>execute_command</code> is sandboxed. A prompt-injected agent has host keys + open network — a one-request exfiltration path. Cloud providers (e2b/daytona) relocate the shell but are <b>default-open egress</b>: they give isolation, not a default-deny allowlist. Mastra will not provide this for free.</p>
+    </div>
+  </section>
+
+  <section id="sdl">
+    <h2 class="eyebrow">Deep dive · Authoring</h2>
+    <div class="h2sub">Is the workflow / prompt SDL more maintainable?</div>
+    <p><b>Last Light's declarative YAML DSL is more maintainable — decisively for operators and prompt authors, modestly even for core devs on the authoring loop.</b> Adding a workflow in Last Light is <em>one file-drop</em> that self-wires its own routable intent, with a real template engine (<code>{{#if}}</code>, dotted vars, automatic phase-output injection) so prompt + data iteration is a markdown edit. In MAC it's ~200–1,300 lines of imperative TS across three files plus a rebuild; injecting a phase output means hand-splicing typed state; and there is <em>no overlay path</em> — only a fork of the server app.</p>
+    <h3>Winner by persona</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Persona</th><th>Winner</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>Deployment operator</td><td><span class="badge ll">Last Light</span></td><td class="dim">Add/override whole workflows, prompts, skills, per-phase model/egress via overlay — no checkout, no rebuild. MAC operators can override prompt <em>prose</em> only.</td></tr>
+          <tr><td>Prompt author</td><td><span class="badge ll">Last Light</span></td><td class="dim">Template engine makes prompt+data iteration a markdown edit; MAC forces every data change through TypeScript + a build.</td></tr>
+          <tr><td>Core developer</td><td><span class="badge tie">Split</span></td><td class="dim">MAC's compile-time zod wiring is safer to <em>refactor</em>; Last Light's orchestration is actually <em>tested</em> (loops, gates, DAG, resume) so it's safer to <em>change behavior</em> in.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="cols" style="margin-top:20px">
+      <div class="card">
+        <h4 style="color:var(--mint)">Last Light — biggest liability</h4>
+        <ul><li>No compile-time safety on the value plane. Mistyped template keys, <code>output_var</code> collisions, and cross-resume <code>{{phaseOutputs}}</code> reads fail silently or only at runtime — guarded by convention, not the type checker.</li></ul>
+      </div>
+      <div class="card">
+        <h4 style="color:var(--blue)">MAC — biggest liability</h4>
+        <ul><li>Authoring is gated to core devs and untested at the orchestration level. Hundreds of lines of imperative TS per workflow, hand-rolled loop caps, no per-phase model/egress, no run-level test, no overlay path.</li></ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="dx">
+    <h2 class="eyebrow">Deep dive · Developer experience</h2>
+    <div class="h2sub">Ergonomics &amp; repo structure</div>
+    <p><b>MAC is the more modular and, in 12 months, the more maintainable design.</b> The package split with a CI-asserted acyclic graph and a <code>createMacApp()</code> composition preset makes boundaries structural rather than conventional — <code>packages/mac/test/dependency-graph.test.ts</code> makes "don't create a cycle / don't depend on the app" a <em>failing test</em>. Mastra Studio + source-only packages give the fastest inner loop: editing any package is picked up with no build step.</p>
+    <p><b>Last Light pays none of the monorepo tax</b> — one <code>tsc</code>, one <code>vitest</code>, published to npm and running in production today via a hardened GHCR/compose pipeline, extended through an operator-facing overlay rather than code. Its <code>lastlight</code> CLI is a real control plane (login/oauth/skills/server-lifecycle/workflow/session/logs/stats/approvals); MAC's is a dev launcher + 3 trigger verbs.</p>
+    <div class="callout">
+      <p><span class="k">The key tradeoff:</span> modularity &amp; reuse (MAC) vs shipped simplicity &amp; operational maturity (Last Light). MAC is the better <em>library architecture</em>; Last Light is the better <em>finished product</em> right now. MAC's ceremony — <code>transpilePackages</code>, source-only <code>0.0.0</code> <code>private</code> packages, capability-registry indirection, and a not-yet-publishable package set (Phase 10 pending) — is the price of that modularity.</p>
+    </div>
+  </section>
+
+  <section id="sandbox">
+    <h2 class="eyebrow">Deep dive · Sandbox</h2>
+    <div class="h2sub">Scalability &amp; simplicity vs security</div>
+    <p><b>MAC is clearly the simpler and more horizontally-scalable model — and it isn't close.</b> One env var + a one-line cloud factory replaces gondolin's KVM dependency and a five-service sidecar mesh (coredns×2 / nginx×2 / otel) whose configs are regenerated from the allowlist at every boot. But that simplicity is bought <em>almost entirely with security</em>: everything the complexity buys — default-deny egress, SNI enforcement, the SSRF floor, and full-runtime containment — is exactly what MAC dropped.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Control</th><th>Winner</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>Isolation boundary</td><td><span class="badge ll">Last Light</span></td><td class="dim">Agent-in-sandbox (whole runtime + tools) vs MAC's agent-on-host, shell-only-in-sandbox — the trust edge MAC's own ADR-0001 rejected.</td></tr>
+          <tr><td>Default-deny egress</td><td><span class="badge ll">Last Light</span></td><td class="dim">MAC has only an on/off <code>allowNetwork</code> — no allowlist at all.</td></tr>
+          <tr><td>SSRF / metadata floor</td><td><span class="badge ll">Last Light</span></td><td class="dim">169.254.169.254 / metadata.google.internal hard-blocked. MAC: nothing.</td></tr>
+          <tr><td>Token downscoping</td><td><span class="badge tie">Tie</span></td><td class="dim">Ported verbatim — the one hard control that survived.</td></tr>
+          <tr><td>Horizontal scale</td><td><span class="badge mac">MAC</span></td><td class="dim">Pluggable cloud sandboxes; no KVM, no sidecars.</td></tr>
+          <tr><td>Operational complexity</td><td><span class="badge mac">MAC</span></td><td class="dim">One knob vs generated firewall configs + static-IP internal networks.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:16px"><span class="pill">verdict</span> &nbsp; In its current local-host form MAC is a <b>dev-grade</b> sandbox: fine for trusted development, unsafe for prompt-injectable agents against untrusted issue/PR content in production. A cloud provider is a genuine step up but substitutes <em>managed isolation</em> for a <em>default-deny egress + full-runtime containment</em> — it does not reach parity.</p>
+  </section>
+
+  <section id="state">
+    <h2 class="eyebrow">Deep dive · State, observability &amp; chat</h2>
+    <div class="h2sub">What Mastra gives for free vs what Last Light hand-rolls</div>
+    <div class="cols">
+      <div class="card gain">
+        <h4>✓ Free from Mastra</h4>
+        <ul>
+          <li>AI tracing → DuckDB → Studio (replaces JSONL shim + SessionReader + custom SPA)</li>
+          <li>Conversation Memory (replaces SessionManager + two tables + JSONL chat log)</li>
+          <li>Workflow suspend/resume + durable snapshots</li>
+          <li>Composite OLTP/OLAP storage in one object</li>
+          <li>Loop primitives (<code>.dountil</code>)</li>
+        </ul>
+      </div>
+      <div class="card lose">
+        <h4>✕ Lost in the port</h4>
+        <ul>
+          <li>Operational dashboard: resume / approve / reject / cancel / retry, approvals history, stat rollups, timeline, log search, kill-switches</li>
+          <li>Config overlay / instance layering / core-version pinning / asset overlays</li>
+          <li>DAG runner + crash-loop circuit breaker</li>
+          <li>GitHub-App-installation-sourced managed-repo list</li>
+          <li>Slack <code>webhook</code> mode + DB-durable session state; <code>MessageBatcher</code>; <code>issueAuthor</code> re-triage signal</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout warn" style="margin-top:20px">
+      <p><span class="k">Biggest regression:</span> loss of the operational control plane. Mastra Studio is a tracing / debugging tool, not a fleet-operations console — MAC deleted the dashboard and dropped stat rollups without an equivalent. <span class="k">Biggest simplification win:</span> chat on Mastra Memory — an entire bespoke subsystem replaced by ~7 lines (and it still under-uses the platform: semantic recall / working memory are available but off).</p>
+    </div>
+  </section>
+
+  <section id="mastra">
+    <h2 class="eyebrow">The overlay you asked for</h2>
+    <div class="h2sub">Newer Mastra leverage MAC leaves on the table</div>
+    <p class="lead">This is where the "buy" thesis compounds — and where MAC is currently under-collecting. Confirmed against the installed core's subpath exports.</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Mastra capability</th><th>MAC uses it?</th><th>Adopt?</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td><b>Channels</b> (msg connectors, since 1.22)</td><td class="dim">No — present, unused</td><td><span class="badge mac">Evaluate</span></td><td class="dim">Auto-generated per-platform webhook routes + persisted thread subscriptions could replace much of the hand-written Slack/GitHub connector layer.</td></tr>
+          <tr><td><b>Signals</b> (event ingestion, 1.42)</td><td class="dim">No — one minor away</td><td><span class="badge mac">Evaluate</span></td><td class="dim">The true analogue of the webhook→EventEnvelope→dispatcher for <em>triggering</em> workflows (<code>.handleWebhook()</code>/<code>.poll()</code>).</td></tr>
+          <tr><td>Memory (working memory / semantic recall / processors)</td><td class="dim">Minimal (<code>lastMessages:20</code>)</td><td><span class="badge ll">Yes</span></td><td class="dim">Shipped, free, entirely off.</td></tr>
+          <tr><td>Scorers / Evals</td><td class="dim">No</td><td><span class="badge tie">Evaluate</span></td><td class="dim">Overlaps the standalone <code>lastlight-evals</code> harness; could subsume much of it.</td></tr>
+          <tr><td>MCP server export</td><td class="dim">Stubbed TODO</td><td><span class="badge tie">Later</span></td><td class="dim">Framework support mature; MAC left it empty.</td></tr>
+          <tr><td>Durable agents / evented workflows / Schedules</td><td class="dim">No</td><td><span class="badge tie">Later</span></td><td class="dim">Would restore the dropped cron + circuit-breaker + durability surface.</td></tr>
+          <tr><td>Agent Networks / <code>.network()</code></td><td class="dim">No</td><td><span class="badge tie">No</span></td><td class="dim">Deprecated — use supervisor agents (MAC's Harness tools already approximate this).</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <h3>Focus: Channels — the feature you named</h3>
+    <p>Shipped in <code>@mastra/core@1.22.0</code>, Channels is a unified messaging-connector layer attached to an Agent: it auto-generates a per-platform webhook route, normalizes platform events (DMs, mentions, subscribed-thread replies, tool approvals), streams responses with typing indicators, and <b>persists thread subscriptions / dedup / tool-approvals</b> — precisely the restart-durable state MAC's in-memory active-thread Set currently loses. It maps almost exactly onto <code>mac-slack/connector.ts</code> and <code>mac-github/github-webhook.ts</code>.</p>
+    <div class="callout">
+      <p><span class="k">Realistic split:</span> Channels is Agent-attached and geared to the conversational reply loop — it fits MAC's chat/Harness lane cleanly. For the <em>deterministic build/pr-review trigger path</em>, <b>Signals</b> is the better-matched primitive. Together they'd retire most of <code>mac-slack/connector.ts</code>, <code>mac-github/github-webhook.ts</code>, the router normalization, and <code>engine/dispatch.ts</code>.</p>
+    </div>
+    <div class="callout warn">
+      <p><span class="k">Drift risk.</span> MAC uses the pre-rename <code>@mastra/core/harness</code>, which was <b>renamed Harness→AgentController at 1.46/1.47</b> — its chat surface will break on upgrade (Heartbeats→Schedules at 1.50 similarly). "Buy" only keeps winning if MAC tracks the line; the longer it sits on 1.41 the more its hand-rolled connector/dispatch/memory code re-diverges from primitives Mastra now ships.</p>
+    </div>
+  </section>
+
+  <section id="verdict">
+    <h2 class="eyebrow">Recommendation</h2>
+    <div class="h2sub">Highest-leverage next moves for MAC</div>
+    <ul class="clean">
+      <li><span class="num">01</span><b>Restore a default-deny egress + SSRF floor.</b> The hard production blocker. Mastra will not give this for free — it must be layered on whichever sandbox backend is used.</li>
+      <li><span class="num">02</span><b>Budget a routine 1.41 → 1.50 upgrade.</b> Same-major, low-risk; fixes the Harness→AgentController rename before it bites.</li>
+      <li><span class="num">03</span><b>Adopt Signals + Channels</b> to retire the hand-rolled connector/dispatch layer.</li>
+      <li><span class="num">04</span><b>Turn on real Memory features</b> (working memory / semantic recall) — you already pay for the platform; collect the leverage.</li>
+    </ul>
+    <div class="callout" style="margin-top:22px">
+      <p><span class="k">Keep in Last Light's column</span> as things MAC has no substitute for yet and would need to consciously rebuild if it becomes the future: the declarative overlay-friendly workflow authoring model, the operator control plane, and the security-first sandbox. Those three are the explicit debt to schedule.</p>
+    </div>
+  </section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Last Light — internal architecture review · generated 13 Jul 2026</span>
+    <span>Sources: <code>lastlight/spec/00–11</code> · <code>~/work/mac</code> · <code>MIGRATION.md</code></span>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,23 @@
+---
+import { getCollection, render } from 'astro:content';
+import SpecLayout from '../../layouts/SpecLayout.astro';
+
+export async function getStaticPaths() {
+	const entries = await getCollection('spec');
+	// 00-overview is rendered inside /spec/index.astro alongside the visual
+	// architecture diagram, so we skip it here. Every other entry gets its own
+	// page at /spec/<id>.
+	return entries
+		.filter((e) => e.id !== '00-overview')
+		.map((e) => ({
+			params: { slug: e.id },
+			props: { entry: e },
+		}));
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+---
+<SpecLayout id={entry.id} title={entry.data.title} description={entry.data.description}>
+	<Content />
+</SpecLayout>

@@ -1,0 +1,133 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="authoring"
+	description="Author your own eval cases from real GitHub PRs and issues with add-case — a pr-review case, a code-fix (build) case, or a triage case — using gh and git to extract the mechanical parts while you curate the gold."
+>
+	<p>
+		<code>add-case</code> turns a real GitHub PR or issue into an eval case. It does
+		the mechanical extraction via <code>gh</code> + <code>git</code> — base/head
+		SHAs, test diffs, applied labels, red→green verdicts — and you refine the fuzzy
+		parts (which findings are really gold, which severity, which labels are
+		triage-relevant).
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<code>add-case</code> is the one command that reads <strong>real</strong>
+			GitHub. It requires <code>gh</code> on PATH and authenticated
+			(<code>gh auth login</code>) and checks both up front. A PR can seed two
+			different evals, so <code>--pr</code> <strong>requires</strong> a kind —
+			<code>--review</code> or <code>--code-fix</code>.
+		</div>
+	</div>
+
+	<h2>The three flows</h2>
+
+	<pre><code>lastlight-evals add-case --pr &lt;url&gt; --review --dry-run     # propose a pr-review case; don't write
+lastlight-evals add-case --pr &lt;url&gt; --code-fix --dry-run   # propose a code-fix (build) case
+lastlight-evals add-case --issue &lt;url&gt; --dry-run           # propose a triage case</code></pre>
+
+	<p>
+		<code>--dry-run</code> prints the proposed instance JSON so you (or an agent
+		skill) can read the evidence and curate before writing. Drop it to write into
+		<code>./datasets/&lt;tier&gt;</code> (or <code>--overlay &lt;dir&gt;</code>'s
+		<code>evals/datasets</code>). Re-running the same PR/issue
+		<strong>replaces by id</strong>, so accumulating a dataset is idempotent.
+	</p>
+
+	<h3><code>--pr --review</code> → a pr-review case</h3>
+
+	<p>
+		Extracts the PR fixture (refs + SHAs, title, truncated body) and a candidate
+		<code>review_gold</code> from the PR's <em>human</em> review — inline comments
+		and substantive review bodies, with bot / nit / reply / LGTM / outdated noise
+		filtered out. It prints an evidence block
+		(<code>author · file:line [severity] first-line</code>); you assign real
+		severities and prune non-actionable comments. <strong>Anti-spoil:</strong> the
+		review lands only in <code>review_gold</code>, never in the fixture the mocked
+		GitHub would show the agent.
+	</p>
+
+	<h3><code>--pr --code-fix</code> → a build case</h3>
+
+	<p>Two grading modes:</p>
+	<ul>
+		<li><strong>Suite (default)</strong> — nothing held out; graded by running the repo's own <code>test_cmd</code> against the agent's final tree, resolved iff it exits 0. <code>add-case</code> warns if the suite is already green at base or doesn't pass at head.</li>
+		<li><strong>Hold-out (<code>--hold-out</code>)</strong> — SWE-bench style: the PR's test files are hidden and applied only at grade time; auto-detects <code>FAIL_TO_PASS</code> by running tests at base (red) vs head (green).</li>
+	</ul>
+	<p>
+		It derives <code>repo</code>, <code>base_commit</code> (the merge-base of the
+		base branch and PR head — the true fork point), <code>head_commit</code>, the
+		gold patch (reference only), the test diff, and the issue fixture. No
+		<code>repos/&lt;id&gt;/</code> is vendored — at run time the repo is cloned into
+		<code>./.eval-cache/</code> and checked out at <code>base_commit</code>.
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			A code-fix case runs real repo code during validation and grading —
+			<strong>only use trusted repos.</strong>
+		</div>
+	</div>
+
+	<h3><code>--issue</code> → a triage case</h3>
+
+	<p>
+		Derives the issue seed + problem statement, seeds the issue <strong>without</strong>
+		its triage labels (so the agent triages fresh), and sets
+		<code>expect_github.labels_added</code> from the labels that were actually
+		applied — read from the issue <em>events</em> API, so the evidence shows
+		<em>who</em> applied each (maintainer vs bot). You then assign
+		<code>triage_gold</code> (<code>{`{ category, state }`}</code>) per your
+		deployment's taxonomy and prune non-triage labels.
+	</p>
+
+	<h2><code>add-case</code> flags</h2>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Flag</th><th>Meaning</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>--pr &lt;url&gt;</code></td><td>GitHub PR url (pick <code>--review</code> or <code>--code-fix</code>).</td></tr>
+			<tr><td><code>--review</code></td><td>With <code>--pr</code> → a pr-review case (gold = the PR's human review).</td></tr>
+			<tr><td><code>--code-fix</code></td><td>With <code>--pr</code> → a code-fix (build) case.</td></tr>
+			<tr><td><code>--issue &lt;url&gt;</code></td><td>GitHub issue url → a triage case.</td></tr>
+			<tr><td><code>--tier &lt;name&gt;</code></td><td>Target tier dir (defaults per kind).</td></tr>
+			<tr><td><code>--id &lt;slug&gt;</code></td><td><code>instance_id</code> (default derived from repo + number).</td></tr>
+			<tr><td><code>--datasets &lt;dir&gt;</code></td><td>Datasets root to write into. Default <code>./datasets</code>, else <code>./evals/datasets</code>.</td></tr>
+			<tr><td><code>--overlay &lt;dir&gt;</code></td><td>Write into <code>&lt;dir&gt;/evals/datasets</code> instead.</td></tr>
+			<tr><td><code>--severity &lt;level&gt;</code></td><td>(<code>--review</code>) default severity for candidate gold comments (<code>low|medium|high|critical</code>, default <code>medium</code>).</td></tr>
+			<tr><td><code>--include-bots</code></td><td>(<code>--review</code>) keep bot review comments (default: skipped).</td></tr>
+			<tr><td><code>--test-cmd "&lt;cmd&gt;"</code></td><td>(<code>--code-fix</code>) held-out test command (default <code>node --test</code>).</td></tr>
+			<tr><td><code>--setup-cmd "&lt;cmd&gt;"</code></td><td>(<code>--code-fix</code>) install/build before tests (e.g. <code>"npm ci"</code>).</td></tr>
+			<tr><td><code>--hold-out</code></td><td>(<code>--code-fix</code>) SWE-bench mode: hold the PR's test files out and grade named <code>FAIL_TO_PASS</code>.</td></tr>
+			<tr><td><code>--pass-list</code></td><td>(<code>--code-fix</code>, hold-out) enumerate every green test in <code>PASS_TO_PASS</code> (default <code>["*"]</code>).</td></tr>
+			<tr><td><code>--no-validate</code></td><td>(<code>--code-fix</code>) don't run the repo's tests to validate — just scaffold.</td></tr>
+			<tr><td><code>--dry-run</code></td><td>Print the proposed instance JSON; don't write.</td></tr>
+			<tr><td><code>-h</code>, <code>--help</code></td><td>Show help.</td></tr>
+		</tbody>
+	</table>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			Building a PR-review dataset from a set of gold PRs? Run each through
+			<code>--review --dry-run</code>, curate, then write; replace-by-id makes
+			accumulation safe. A per-PR curation sub-agent (via the
+			<code>lastlight-evals</code> skill) can do them in parallel.
+		</div>
+	</div>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/models">
+			<span class="label">← Previous</span>
+			<span class="title">Models</span>
+		</a>
+		<a class="next" href="/evals/running-evals">
+			<span class="label">Next →</span>
+			<span class="title">Running evals</span>
+		</a>
+	</div>
+</EvalsLayout>

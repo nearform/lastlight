@@ -1,0 +1,89 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/answer"
+	description="The answer workflow — researches and posts a single sourced answer when a newly-opened issue or Slack message is classified as a question."
+>
+	<p>
+		The answer workflow handles questions. When a newly-opened issue (or a
+		Slack message) is classified as a <strong>question</strong> — someone
+		wanting information, an explanation, or a comparison rather than a code
+		change — this workflow researches the repo docs and the web, then posts a
+		single sourced answer. It never opens a PR or hands off an agent brief.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>issues-write</code> — can read
+			repo contents, post issue comments, and label issues.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Answer</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">research + reply</text>
+		</svg>
+	</div>
+
+	<h2>What it does</h2>
+
+	<ul>
+		<li>Researches the repo's documentation plus the web for relevant context</li>
+		<li>Posts a <strong>single sourced answer</strong> comment</li>
+		<li>Labels the issue <code>question</code> and leaves it open</li>
+		<li>No agent brief, no PR — just the answer</li>
+	</ul>
+
+	<h2>Delivery</h2>
+
+	<p>
+		For GitHub-initiated runs, the answer is posted as an issue comment. For
+		Slack-initiated runs, it's posted in the originating Slack thread.
+	</p>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub:</strong> a newly-opened issue classified as a question (route <code>issue_answer</code>)</li>
+		<li><strong>Slack:</strong> a message classified as a question (route <code>answer</code>)</li>
+	</ul>
+
+	<h2>Skill</h2>
+
+	<p>This workflow uses the <code>issue-answer</code> skill.</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/issue-comment" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Issue comment</span>
+		</a>
+		<a href="/docs/workflows/pr-comment" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">PR comment</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

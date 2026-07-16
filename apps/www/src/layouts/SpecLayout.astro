@@ -1,0 +1,353 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import { getSpecNav } from '../data/spec-nav';
+
+interface Props {
+	id: string;
+	title: string;
+	description?: string;
+}
+
+const { id, title, description } = Astro.props;
+const nav = await getSpecNav();
+const pageTitle = `${title} — Last Light Spec`;
+const pageDescription = description ?? `${title} — Last Light specification.`;
+---
+<BaseLayout title={pageTitle} description={pageDescription}>
+	<div class="spec-shell">
+		<aside class="spec-sidebar">
+			<button type="button" class="spec-sidebar-toggle" aria-expanded="false" aria-controls="spec-nav-list">
+				<span class="spec-sidebar-toggle-label">Specification menu</span>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+			</button>
+			<nav id="spec-nav-list" class="spec-nav" aria-label="Specification">
+				<p class="spec-nav-title">Specification</p>
+				<ul>
+					<li>
+						<a href="/spec/" class:list={['spec-nav-link', { active: id === 'index' }]}>Overview</a>
+					</li>
+					{nav.map((item) => (
+						<li>
+							<a
+								href={`/spec/${item.id}`}
+								class:list={['spec-nav-link', { active: item.id === id }]}
+							>
+								<span class="spec-nav-num">{String(item.order).padStart(2, '0')}</span>
+								<span class="spec-nav-label">{item.label}</span>
+							</a>
+						</li>
+					))}
+				</ul>
+			</nav>
+		</aside>
+		<main class="spec-main">
+			<article class="spec-article">
+				<header class="spec-header">
+					<p class="spec-eyebrow">Spec</p>
+					<h1>{title}</h1>
+				</header>
+				<slot />
+			</article>
+		</main>
+	</div>
+
+	<script>
+		const toggle = document.querySelector<HTMLButtonElement>(".spec-sidebar-toggle");
+		const list = document.getElementById("spec-nav-list");
+		if (toggle && list) {
+			toggle.addEventListener("click", () => {
+				const open = toggle.getAttribute("aria-expanded") === "true";
+				toggle.setAttribute("aria-expanded", String(!open));
+				list.classList.toggle("open", !open);
+			});
+		}
+	</script>
+</BaseLayout>
+
+<style is:global>
+	.spec-shell {
+		max-width: 1200px;
+		margin: 0 auto;
+		padding: 1.5rem 2rem 4rem;
+		display: grid;
+		grid-template-columns: 260px 1fr;
+		gap: 3rem;
+	}
+
+	.spec-sidebar {
+		position: sticky;
+		top: 1.5rem;
+		align-self: start;
+		max-height: calc(100vh - 3rem);
+		overflow-y: auto;
+		padding-right: 0.5rem;
+	}
+
+	.spec-sidebar-toggle {
+		display: none;
+		width: 100%;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.7rem 0.9rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		color: var(--text-bright);
+		font-family: inherit;
+		font-size: 0.88rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: border-color 0.2s, background 0.2s;
+	}
+
+	.spec-sidebar-toggle:hover {
+		border-color: var(--gold);
+		background: var(--bg-card-hover);
+	}
+
+	.spec-sidebar-toggle svg {
+		transition: transform 0.2s;
+		color: var(--text-muted);
+	}
+
+	.spec-sidebar-toggle[aria-expanded="true"] svg {
+		transform: rotate(180deg);
+	}
+
+	.spec-sidebar nav.spec-nav {
+		display: block;
+		max-width: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.spec-nav-title {
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--text-muted);
+		margin-bottom: 0.6rem;
+	}
+
+	.spec-nav ul {
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+	}
+
+	.spec-nav-link {
+		display: flex;
+		gap: 0.55rem;
+		align-items: baseline;
+		padding: 0.45rem 0.75rem;
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		border-left: 2px solid transparent;
+		border-radius: 0 6px 6px 0;
+		transition: color 0.2s, border-color 0.2s, background 0.2s;
+	}
+
+	.spec-nav-num {
+		font-family: var(--mono);
+		font-size: 0.7rem;
+		color: var(--text-muted);
+		opacity: 0.65;
+		flex-shrink: 0;
+	}
+
+	.spec-nav-label {
+		flex: 1;
+	}
+
+	.spec-nav-link:hover {
+		color: var(--text-bright);
+		background: var(--bg-card);
+	}
+
+	.spec-nav-link.active {
+		color: var(--gold);
+		border-left-color: var(--gold);
+		background: var(--bg-card);
+	}
+
+	.spec-nav-link.active .spec-nav-num {
+		color: var(--gold);
+		opacity: 1;
+	}
+
+	.spec-main {
+		min-width: 0;
+	}
+
+	.spec-article {
+		max-width: 800px;
+	}
+
+	.spec-header {
+		padding-bottom: 1.25rem;
+		margin-bottom: 2rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.spec-eyebrow {
+		font-family: var(--mono);
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.15em;
+		color: var(--gold);
+		margin-bottom: 0.5rem;
+	}
+
+	.spec-article h1 {
+		font-size: clamp(1.75rem, 3.5vw, 2.25rem);
+		letter-spacing: -0.01em;
+		line-height: 1.2;
+	}
+
+	.spec-article h2 {
+		font-size: 1.3rem;
+		margin: 2.5rem 0 0.75rem;
+		letter-spacing: -0.01em;
+	}
+
+	.spec-article h3 {
+		font-size: 1.05rem;
+		margin: 1.75rem 0 0.5rem;
+	}
+
+	.spec-article p,
+	.spec-article ul,
+	.spec-article ol {
+		font-size: 0.94rem;
+		line-height: 1.7;
+		color: var(--text);
+		margin-bottom: 1rem;
+	}
+
+	.spec-article ul,
+	.spec-article ol {
+		padding-left: 1.25rem;
+	}
+
+	.spec-article li {
+		margin-bottom: 0.35rem;
+	}
+
+	.spec-article li code,
+	.spec-article p code {
+		font-size: 0.85em;
+	}
+
+	.spec-article strong {
+		color: var(--text-bright);
+	}
+
+	.spec-article a {
+		text-decoration: underline;
+		text-decoration-color: rgba(240, 180, 41, 0.35);
+		text-underline-offset: 3px;
+	}
+
+	.spec-article a:hover {
+		text-decoration-color: var(--orange);
+	}
+
+	.spec-article blockquote {
+		border-left: 2px solid var(--gold);
+		padding: 0.2rem 0 0.2rem 1rem;
+		margin: 1.25rem 0;
+		color: var(--text-muted);
+		font-style: italic;
+	}
+
+	.spec-article table {
+		width: 100%;
+		border-collapse: collapse;
+		margin: 1rem 0 1.5rem;
+		font-size: 0.86rem;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		overflow: hidden;
+	}
+
+	.spec-article th,
+	.spec-article td {
+		text-align: left;
+		padding: 0.65rem 0.85rem;
+		border-bottom: 1px solid var(--border);
+		vertical-align: top;
+		color: var(--text);
+		line-height: 1.55;
+	}
+
+	.spec-article th {
+		background: var(--bg-card);
+		color: var(--text-bright);
+		font-weight: 600;
+		font-size: 0.78rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.spec-article tr:last-child td {
+		border-bottom: none;
+	}
+
+	.spec-article table code {
+		font-family: inherit;
+		font-size: inherit;
+		color: inherit;
+		background: transparent;
+		padding: 0;
+	}
+
+	.spec-article pre {
+		background: var(--navy);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 1rem 1.15rem;
+		overflow-x: auto;
+		margin: 1rem 0;
+	}
+
+	.spec-article pre code {
+		font-family: var(--mono);
+		font-size: 0.82rem;
+		color: var(--text);
+		background: none;
+		padding: 0;
+		line-height: 1.65;
+	}
+
+	@media (max-width: 860px) {
+		.spec-shell {
+			grid-template-columns: 1fr;
+			gap: 1rem;
+			padding: 1rem 1.25rem 3rem;
+		}
+		.spec-sidebar {
+			position: static;
+			max-height: none;
+			overflow-y: visible;
+			padding-right: 0;
+			padding-bottom: 0;
+			border-bottom: none;
+		}
+		.spec-sidebar-toggle {
+			display: flex;
+		}
+		.spec-sidebar nav.spec-nav {
+			display: none;
+			margin-top: 0.65rem;
+			padding: 0.75rem 0.25rem;
+			border: 1px solid var(--border);
+			border-radius: 8px;
+			background: var(--bg-card);
+		}
+		.spec-sidebar nav.spec-nav.open {
+			display: block;
+		}
+	}
+</style>

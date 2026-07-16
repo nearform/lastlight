@@ -1,0 +1,350 @@
+---
+import { getEntry, render } from 'astro:content';
+import SpecLayout from '../../layouts/SpecLayout.astro';
+import { getSpecNav } from '../../data/spec-nav';
+
+const overview = await getEntry('spec', '00-overview');
+if (!overview) {
+	throw new Error('Spec overview (00-overview.md) is missing — run scripts/sync-spec.mjs');
+}
+const { Content } = await render(overview);
+const nav = await getSpecNav();
+---
+<SpecLayout id="index" title="Last Light — Specification" description="The implementation-grade specification for Last Light. Detailed enough to rebuild the system in another tech stack from scratch.">
+	<section class="spec-intro">
+		<p class="spec-intro-lead">
+			<strong>This is the implementation-grade reference for Last Light.</strong>
+			<a href="/how-it-works">/how-it-works</a> explains the philosophy and shape;
+			<a href="/docs/introduction">/docs</a> shows operators how to run it. This spec
+			is the contract — the schemas, invariants, and lifecycle steps a re-implementation
+			must reproduce.
+		</p>
+		<div class="spec-intro-meta">
+			<span class="spec-status-pill">All eleven component pages drafted</span>
+		</div>
+	</section>
+
+	<section class="spec-architecture">
+		<h2>System architecture</h2>
+		<p class="spec-architecture-intro">
+			Every block in the diagram below is a spec page — click to jump straight to its
+			schemas and invariants. The order top-to-bottom matches the order of the
+			component pages.
+		</p>
+		<div class="spec-architecture-diagram">
+			<svg viewBox="0 0 800 700" xmlns="http://www.w3.org/2000/svg" class="spec-arch-svg" role="img" aria-label="Last Light system architecture: integrations flow into the event model, then the router, which dispatches to either the workflow engine (whose phases run inside the sandbox) or the chat path. Both write to state.">
+				<defs>
+					<marker id="spec-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+						<path d="M0,0 L8,3 L0,6" fill="var(--border-bright)"/>
+					</marker>
+				</defs>
+
+				{/* Integrations row — 5 boxes */}
+				<text x="20" y="18" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace" letter-spacing="1">INTEGRATIONS · §03</text>
+				<a href="/spec/03-integrations" class="spec-arch-node">
+					<rect x="20" y="30" width="140" height="60" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+					<text x="90" y="56" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">GitHub App</text>
+					<text x="90" y="74" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">webhooks + REST</text>
+				</a>
+				<a href="/spec/03-integrations" class="spec-arch-node">
+					<rect x="170" y="30" width="140" height="60" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+					<text x="240" y="56" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">Slack</text>
+					<text x="240" y="74" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">Bolt · Socket Mode</text>
+				</a>
+				<a href="/spec/03-integrations" class="spec-arch-node">
+					<rect x="320" y="30" width="140" height="60" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+					<text x="390" y="56" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">CLI</text>
+					<text x="390" y="74" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">npm run cli</text>
+				</a>
+				<a href="/spec/03-integrations" class="spec-arch-node">
+					<rect x="470" y="30" width="140" height="60" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+					<text x="540" y="56" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">Cron</text>
+					<text x="540" y="74" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">node-cron scheduler</text>
+				</a>
+				<a href="/spec/03-integrations" class="spec-arch-node">
+					<rect x="620" y="30" width="140" height="60" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+					<text x="690" y="56" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">Dashboard</text>
+					<text x="690" y="74" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">admin triggers</text>
+				</a>
+
+				{/* arrows from integrations down to event model */}
+				<line x1="90" y1="90" x2="90" y2="128" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+				<line x1="240" y1="90" x2="240" y2="128" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+				<line x1="390" y1="90" x2="390" y2="128" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+				<line x1="540" y1="90" x2="540" y2="128" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+				<line x1="690" y1="90" x2="690" y2="128" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+
+				{/* Event Model */}
+				<a href="/spec/04-event-model" class="spec-arch-node">
+					<rect x="20" y="135" width="740" height="55" rx="8" fill="var(--bg-card)" stroke="var(--border)" stroke-width="1.5"/>
+					<text x="35" y="153" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace" letter-spacing="1">EVENT MODEL · §04</text>
+					<text x="400" y="178" text-anchor="middle" fill="var(--text-bright)" font-size="14" font-weight="600" font-family="Inter, sans-serif">EventEnvelope — every integration normalizes into this shape</text>
+				</a>
+				<line x1="400" y1="190" x2="400" y2="223" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+
+				{/* Router */}
+				<a href="/spec/05-router" class="spec-arch-node">
+					<rect x="20" y="230" width="740" height="55" rx="8" fill="var(--bg-card)" stroke="var(--gold)" stroke-width="1.5"/>
+					<text x="35" y="248" fill="var(--gold)" font-size="10" font-family="JetBrains Mono, monospace" letter-spacing="1">ROUTER · §05</text>
+					<text x="400" y="273" text-anchor="middle" fill="var(--text-bright)" font-size="14" font-weight="600" font-family="Inter, sans-serif">deterministic matching + LLM intent classifier on @-mentions</text>
+				</a>
+
+				{/* Two-way split from router: left to Workflow Engine, right to Chat */}
+				<path d="M 235 285 Q 235 305 235 318" stroke="var(--border-bright)" stroke-width="1.5" fill="none" marker-end="url(#spec-arrow)"/>
+				<path d="M 615 285 Q 615 305 615 318" stroke="var(--border-bright)" stroke-width="1.5" fill="none" marker-end="url(#spec-arrow)"/>
+				<text x="240" y="306" fill="var(--text-muted)" font-size="10" font-style="italic" font-family="Inter, sans-serif">workflow dispatch</text>
+				<text x="610" y="306" text-anchor="end" fill="var(--text-muted)" font-size="10" font-style="italic" font-family="Inter, sans-serif">chat reply</text>
+
+				{/* Workflow Engine (LEFT) */}
+				<a href="/spec/06-workflow-engine" class="spec-arch-node">
+					<rect x="20" y="325" width="430" height="80" rx="8" fill="var(--bg-card)" stroke="var(--gold)" stroke-width="1.5"/>
+					<text x="35" y="343" fill="var(--gold)" font-size="10" font-family="JetBrains Mono, monospace" letter-spacing="1">WORKFLOW ENGINE · §06</text>
+					<text x="235" y="367" text-anchor="middle" fill="var(--text-bright)" font-size="13" font-weight="600" font-family="Inter, sans-serif">YAML phases · DAG · loops · gates · resume</text>
+					<text x="235" y="386" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-style="italic" font-family="Inter, sans-serif">Phases · Prompts (§07) and Skills (§08)</text>
+				</a>
+
+				{/* Arrow from Workflow Engine to Sandbox */}
+				<line x1="235" y1="405" x2="235" y2="438" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+				<text x="245" y="425" fill="var(--text-muted)" font-size="10" font-style="italic" font-family="Inter, sans-serif">each phase runs in</text>
+
+				{/* Sandbox box (left, beneath Workflow Engine) */}
+				<a href="/spec/09-sandbox" class="spec-arch-node">
+					<rect x="20" y="445" width="430" height="125" rx="8" fill="var(--bg-card)" stroke="var(--orange)" stroke-width="1.5"/>
+					<text x="35" y="463" fill="var(--orange)" font-size="10" font-family="JetBrains Mono, monospace" letter-spacing="1">SANDBOX · §09</text>
+					<text x="235" y="488" text-anchor="middle" fill="var(--text-bright)" font-size="14" font-weight="600" font-family="Inter, sans-serif">where all agent work happens</text>
+					<text x="35" y="512" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• agentic-pi runtime</text>
+					<text x="235" y="512" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• SNI-peek egress firewall</text>
+					<text x="35" y="531" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• gondolin VM or docker</text>
+					<text x="235" y="531" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• scoped GitHub App token</text>
+					<text x="35" y="550" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• GitHub MCP + web-search tools</text>
+					<text x="235" y="550" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• LLM provider routing</text>
+				</a>
+
+				{/* Chat box (RIGHT, peer of Workflow Engine) — spans the same vertical range as WE + Sandbox so the parallel paths are visible */}
+				<a href="/spec/11-chat" class="spec-arch-node">
+					<rect x="470" y="325" width="290" height="245" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+					<text x="485" y="343" fill="var(--teal)" font-size="10" font-family="JetBrains Mono, monospace" letter-spacing="1">CHAT · §11</text>
+					<text x="615" y="403" text-anchor="middle" fill="var(--text-bright)" font-size="14" font-weight="600" font-family="Inter, sans-serif">low-latency reply path</text>
+					<text x="615" y="421" text-anchor="middle" fill="var(--text-muted)" font-size="11" font-style="italic" font-family="Inter, sans-serif">no sandbox — runs in-process</text>
+					<text x="485" y="455" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• pi-ai in-process runtime</text>
+					<text x="485" y="474" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• one session per Slack thread</text>
+					<text x="485" y="493" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• read-only GitHub tools</text>
+					<text x="485" y="512" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• history rehydrated from SQLite</text>
+					<text x="485" y="531" fill="var(--text-muted)" font-size="11" font-family="Inter, sans-serif">• LLM provider routing (same keys)</text>
+				</a>
+
+				{/* arrows down from both columns to state */}
+				<line x1="235" y1="570" x2="235" y2="603" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+				<line x1="615" y1="570" x2="615" y2="603" stroke="var(--border-bright)" stroke-width="1.5" marker-end="url(#spec-arrow)"/>
+
+				{/* State */}
+				<a href="/spec/10-state" class="spec-arch-node">
+					<rect x="20" y="610" width="740" height="55" rx="8" fill="var(--bg-card)" stroke="var(--border)" stroke-width="1.5"/>
+					<text x="35" y="628" fill="var(--text-muted)" font-size="10" font-family="JetBrains Mono, monospace" letter-spacing="1">STATE · §10</text>
+					<text x="400" y="652" text-anchor="middle" fill="var(--text-bright)" font-size="14" font-weight="600" font-family="Inter, sans-serif">SQLite (resume) + JSONL (events)</text>
+				</a>
+			</svg>
+			<div class="spec-arch-annotations">
+				<div class="spec-arch-annotation">
+					<a href="/spec/01-harness">Harness · §01</a>
+					<span>wires every block at boot and recovers paused runs on restart</span>
+				</div>
+				<div class="spec-arch-annotation">
+					<a href="/spec/02-configuration">Configuration · §02</a>
+					<span>feeds env + per-task knobs into every layer; single source for secrets</span>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="spec-pages">
+		<h2>Component pages</h2>
+		<p class="spec-pages-intro">Eleven component specs plus this overview. Each follows the same shape: purpose, inputs and outputs, schema, behaviour, invariants, current implementation, rebuild notes.</p>
+		<div class="spec-pages-grid">
+			{nav.map((item) => (
+				<a class="spec-page-card" href={`/spec/${item.id}`}>
+					<div class="spec-page-card-num">{String(item.order).padStart(2, '0')}</div>
+					<div class="spec-page-card-body">
+						<h3>{item.label}</h3>
+						<p>{item.description}</p>
+					</div>
+				</a>
+			))}
+		</div>
+	</section>
+
+	<section class="spec-overview-content">
+		<Content />
+	</section>
+</SpecLayout>
+
+<style is:global>
+	.spec-intro {
+		margin-bottom: 2.5rem;
+	}
+
+	.spec-intro-lead {
+		font-size: 1rem;
+		color: var(--text);
+		line-height: 1.7;
+		margin-bottom: 1rem;
+	}
+
+	.spec-intro-meta {
+		display: flex;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+	}
+
+	.spec-status-pill {
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--gold);
+		background: rgba(240, 180, 41, 0.1);
+		border: 1px solid rgba(240, 180, 41, 0.3);
+		padding: 0.3em 0.7em;
+		border-radius: 4px;
+	}
+
+	.spec-pages {
+		margin: 2.5rem 0;
+	}
+
+	.spec-pages-intro {
+		font-size: 0.92rem;
+		color: var(--text-muted);
+		line-height: 1.65;
+		margin-bottom: 1.25rem;
+	}
+
+	.spec-pages-grid {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 0.85rem;
+	}
+
+	.spec-page-card {
+		display: flex;
+		gap: 0.85rem;
+		align-items: flex-start;
+		padding: 1rem 1.15rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		text-decoration: none;
+		transition: border-color 0.2s, background 0.2s;
+	}
+
+	.spec-page-card:hover {
+		border-color: var(--gold);
+		background: var(--bg-card-hover);
+	}
+
+	.spec-page-card-num {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+		color: var(--gold);
+		opacity: 0.85;
+		flex-shrink: 0;
+		padding-top: 0.1rem;
+	}
+
+	.spec-page-card-body h3 {
+		font-size: 0.95rem;
+		margin: 0 0 0.3rem;
+		color: var(--text-bright);
+		line-height: 1.3;
+	}
+
+	.spec-page-card-body p {
+		font-size: 0.85rem;
+		color: var(--text-muted);
+		line-height: 1.55;
+		margin: 0;
+	}
+
+	.spec-overview-content {
+		margin-top: 3rem;
+		padding-top: 2rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.spec-architecture {
+		margin: 2.5rem 0 3rem;
+	}
+
+	.spec-architecture-intro {
+		font-size: 0.92rem;
+		color: var(--text-muted);
+		line-height: 1.65;
+		margin-bottom: 1.25rem;
+	}
+
+	.spec-architecture-diagram {
+		background: var(--navy);
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		padding: 1.25rem 1.25rem 1.5rem;
+		overflow-x: auto;
+	}
+
+	.spec-arch-svg {
+		width: 100%;
+		max-width: 800px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+
+	.spec-arch-node rect {
+		transition: fill 0.2s, stroke-width 0.2s;
+	}
+
+	.spec-arch-node:hover rect {
+		fill: var(--surface-alt);
+		stroke-width: 2.5;
+	}
+
+	.spec-arch-annotations {
+		margin-top: 1rem;
+		padding-top: 1rem;
+		border-top: 1px solid var(--border);
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+
+	.spec-arch-annotation {
+		display: flex;
+		gap: 0.6rem;
+		align-items: baseline;
+		font-size: 0.82rem;
+		color: var(--text-muted);
+		line-height: 1.55;
+	}
+
+	.spec-arch-annotation a {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+		color: var(--gold);
+		text-decoration: none;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
+
+	.spec-arch-annotation a:hover {
+		text-decoration: underline;
+	}
+
+	@media (max-width: 640px) {
+		.spec-pages-grid {
+			grid-template-columns: 1fr;
+		}
+		.spec-arch-annotation {
+			flex-direction: column;
+			gap: 0.15rem;
+		}
+	}
+</style>

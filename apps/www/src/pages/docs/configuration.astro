@@ -1,0 +1,555 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="configuration"
+	description="Every environment variable Last Light reads — required and optional, with defaults."
+>
+	<p>
+		Last Light layers configuration at startup: the packaged
+		<code>config/default.yaml</code> (non-secret defaults), then an optional
+		<code>$LASTLIGHT_OVERLAY_DIR/config.yaml</code> overlay, then environment
+		variables (via <code>.env</code> in local dev, or <code>instance/secrets/.env</code>
+		in production). The authoritative source is <code>src/config.ts</code> in the repo;
+		this page mirrors it.
+	</p>
+
+	<h2>Config files &amp; overlay</h2>
+
+	<p>
+		Non-secret config — managed repos, routes, models, variants, approvals, and
+		<code>disabled.*</code> — lives in YAML. The public <code>config/default.yaml</code>
+		ships safe defaults (and an <strong>empty</strong> <code>managedRepos</code> list).
+		Your deployment overrides go in an overlay selected by
+		<code>LASTLIGHT_OVERLAY_DIR</code> — the docker-compose stack mounts an
+		<code>instance/</code> folder there as <code>/app/instance</code>.
+	</p>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>LASTLIGHT_OVERLAY_DIR</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Trusted overlay root. Layers <code>config.yaml</code> over the defaults and overlays assets under <code>workflows/</code>, <code>workflows/prompts/</code>, <code>skills/</code>, <code>agent-context/</code> (overlay wins by logical name). Secrets are read from its <code>secrets/</code> subdir. Read at startup — <code>docker compose restart agent</code> to apply.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<p>
+		Merge rules: maps (<code>models</code>, <code>variants</code>, <code>routes</code>,
+		<code>approval</code>) deep-merge over the defaults; arrays (<code>managedRepos</code>,
+		<code>disabled.*</code>) replace; environment variables override both. Secrets
+		(GitHub App key, provider API keys, Slack tokens, admin secret) stay env-only and
+		never appear in the dashboard <strong>Config</strong> tab, which shows the
+		Default / Overlay / Merged non-secret config.
+	</p>
+
+	<h2>GitHub App</h2>
+
+	<p>Required if you want to manage repos (not required for messaging-only mode).</p>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>GITHUB_APP_ID</code></td>
+				<td>Yes</td>
+				<td>—</td>
+				<td>Numeric GitHub App ID from the app settings page.</td>
+			</tr>
+			<tr>
+				<td><code>GITHUB_APP_PRIVATE_KEY_PATH</code></td>
+				<td>Yes</td>
+				<td>—</td>
+				<td>Path to the <code>.pem</code> file you downloaded when creating the app.</td>
+			</tr>
+			<tr>
+				<td><code>GITHUB_APP_INSTALLATION_ID</code></td>
+				<td>Yes</td>
+				<td>—</td>
+				<td>Installation ID — from the URL after installing the app on a repo.</td>
+			</tr>
+			<tr>
+				<td><code>WEBHOOK_SECRET</code></td>
+				<td>Yes</td>
+				<td>—</td>
+				<td>Matches the webhook secret configured in your GitHub App. Used to verify webhook signatures.</td>
+			</tr>
+			<tr>
+				<td><code>BOT_LOGIN</code></td>
+				<td>No</td>
+				<td><code>last-light[bot]</code></td>
+				<td>Bot login used to filter out the harness's own events from its own event stream.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>Models (agentic-pi)</h2>
+
+	<p>
+		The agent runtime is <a href="https://github.com/nearform/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>
+		(workflow phases) plus <code>@earendil-works/pi-ai</code> (in-process chat). It runs on any model
+		the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports —
+		Claude, GPT, Gemini, Llama, and more, as <code>openai/…</code>, <code>anthropic/…</code> or <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code> strings.
+		Set whichever provider API keys match your selected models — one OpenRouter
+		key covers most of them if you'd rather have a single billing surface.
+	</p>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>OPENAI_API_KEY</code></td>
+				<td>If using OpenAI</td>
+				<td>—</td>
+				<td>OpenAI API key. Required if <code>LASTLIGHT_MODEL</code> (or any entry in <code>LASTLIGHT_MODELS</code>) resolves to an OpenAI model.</td>
+			</tr>
+			<tr>
+				<td><code>ANTHROPIC_API_KEY</code></td>
+				<td>If using Anthropic</td>
+				<td>—</td>
+				<td>Anthropic API key. Required if any active model is <code>anthropic/…</code>.</td>
+			</tr>
+			<tr>
+				<td><code>OPENROUTER_API_KEY</code></td>
+				<td>If using OpenRouter</td>
+				<td>—</td>
+				<td>OpenRouter API key (<code>sk-or-…</code>). Required if any active model is <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code>. One key gives you Claude, GPT, Gemini, Llama, Mistral, DeepSeek, etc. through a single endpoint; OpenRouter takes a small per-token markup over going direct. Sign up at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_MODEL</code></td>
+				<td>No</td>
+				<td><code>anthropic/claude-sonnet-4-6</code></td>
+				<td>Default model used when no per-task override matches. Must be a <code>provider/model</code> string pi-ai recognises.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_MODELS</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Per-task-type model overrides as JSON. Keys match phase names or skill types. Do not override <code>chat</code> with a small model — small models tend to refuse tool calls. Example: <code>&#123;"chat":"openai/gpt-5.1-mini","architect":"openai/gpt-5.5"&#125;</code></td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_THINKING</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Catch-all reasoning-effort default. pi-ai translates it to the right per-provider knob (OpenAI <code>reasoning_effort</code>, Anthropic thinking budget, etc.). Allowed values: <code>off</code> | <code>minimal</code> | <code>low</code> | <code>medium</code> | <code>high</code> | <code>xhigh</code>.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_THINKINGS</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Per-task thinking-level overrides as JSON, same key scheme as <code>LASTLIGHT_MODELS</code>. Example: <code>&#123;"architect":"high","reviewer":"high","triage":"minimal"&#125;</code>.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_SANDBOX</code></td>
+				<td>No</td>
+				<td><code>gondolin</code></td>
+				<td>Workflow sandbox backend. <code>gondolin</code> (default) runs each phase in a QEMU micro-VM (HVF on macOS, KVM on Linux — no Docker needed). <code>docker</code> runs each phase in a sibling Docker container (requires the <code>lastlight-sandbox:latest</code> image). <code>smol</code> (experimental) runs each phase in a smolvm micro-VM via the <code>smolvm</code> CLI — stronger isolation, native per-host egress; local-only, needs a host hypervisor. <code>none</code> runs in-process with no isolation — dev only.</td>
+			</tr>
+			<tr>
+				<td><code>MAX_TURNS</code></td>
+				<td>No</td>
+				<td><code>200</code></td>
+				<td>Maximum agent turns per invocation. Reserved (kept for API stability).</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Legacy env vars.</strong> All <code>OPENCODE_*</code> names from the
+			OpenCode era are still read as fallbacks for the matching
+			<code>LASTLIGHT_*</code> name — <code>OPENCODE_MODEL</code> →
+			<code>LASTLIGHT_MODEL</code>, <code>OPENCODE_MODELS</code> →
+			<code>LASTLIGHT_MODELS</code>, <code>OPENCODE_VARIANT</code> →
+			<code>LASTLIGHT_THINKING</code>, <code>OPENCODE_VARIANTS</code> →
+			<code>LASTLIGHT_THINKINGS</code>. Existing <code>.env</code> files keep
+			working; rename at your leisure.
+		</div>
+	</div>
+
+	<h2>Runtime</h2>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>PORT</code> / <code>WEBHOOK_PORT</code></td>
+				<td>No</td>
+				<td><code>8644</code></td>
+				<td>Port the webhook listener binds to.</td>
+			</tr>
+			<tr>
+				<td><code>STATE_DIR</code></td>
+				<td>No</td>
+				<td><code>./data</code></td>
+				<td>Base directory for persistent state (DB, sessions, sandboxes, logs). Mount as a Docker volume in production.</td>
+			</tr>
+			<tr>
+				<td><code>DB_PATH</code></td>
+				<td>No</td>
+				<td><code>$STATE_DIR/lastlight.db</code></td>
+				<td>Override the SQLite database path.</td>
+			</tr>
+			<tr>
+				<td><code>WORKFLOW_DIR</code></td>
+				<td>No</td>
+				<td><code>./workflows</code></td>
+				<td>Directory containing YAML workflow definitions.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_SESSIONS_DIR</code></td>
+				<td>No</td>
+				<td><code>$STATE_DIR/agent-sessions</code></td>
+				<td>Directory the dashboard reads sandbox + chat session JSONLs from. <code>event-shim.ts</code> writes Claude-SDK-style envelope jsonl under <code>projects/&lt;slug&gt;/</code>.</td>
+			</tr>
+			<tr>
+				<td><code>SANDBOX_DATA_VOLUME</code></td>
+				<td>No</td>
+				<td><code>lastlight_agent-data</code></td>
+				<td>Used only when <code>LASTLIGHT_SANDBOX=docker</code>. Either a Docker named volume or a host path (starts with <code>/</code>, <code>./</code>, <code>../</code>, <code>~</code>) bind-mounted as <code>/data</code> in each sandbox.</td>
+			</tr>
+			<tr>
+				<td><code>SMOLVM_BIN</code></td>
+				<td>No</td>
+				<td><code>smolvm</code></td>
+				<td>Used only when <code>LASTLIGHT_SANDBOX=smol</code>. Path to the <code>smolvm</code> CLI.</td>
+			</tr>
+			<tr>
+				<td><code>SMOLVM_IMAGE</code></td>
+				<td>No</td>
+				<td><code>lastlight-sandbox:latest</code></td>
+				<td>Used only when <code>LASTLIGHT_SANDBOX=smol</code>. An OCI image reference, or a local <code>docker save</code> archive (<code>./img.tar</code>) / rootfs dir — the archive form loads offline (no registry), so the locally-built sandbox image works under the strict egress allowlist.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_LOCAL_DEV</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Set to <code>1</code> to prevent <code>git-auth.ts</code> from writing to <code>~/.gitconfig</code>. Used by <code>scripts/dev-local.sh</code>.</td>
+			</tr>
+			<tr>
+				<td><code>BOOTSTRAP_LABEL</code></td>
+				<td>No</td>
+				<td><code>lastlight:bootstrap</code></td>
+				<td>Label applied to issues that exist solely to set up missing guardrails in a target repo.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_HOME</code></td>
+				<td>No</td>
+				<td><code>~/lastlight</code></td>
+				<td>CLI-side only. Working directory for the host-local <code>lastlight server</code> lifecycle commands (checkout + <code>instance/</code> overlay + override symlink). Resolves from <code>--home</code> → this env → saved <code>serverHome</code> → default.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_GIT_SHA</code> / <code>LASTLIGHT_BUILD_DATE</code></td>
+				<td>No</td>
+				<td>empty → "unknown"</td>
+				<td>Core git SHA + build date baked into the agent image (Dockerfile <code>ARG</code>s; <code>lastlight server update</code> stamps them). Surfaced by <code>GET /admin/api/server/info</code> for the dashboard "update available" banner.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_CORE_VERSION</code></td>
+				<td>No</td>
+				<td>overlay <code>deploy.version</code>; unset = track main</td>
+				<td>Override the overlay's core-version pin (a git tag/ref). <code>lastlight server update</code>/<code>setup</code> checks core out at it and the drift banner compares against it. <code>main</code>/<code>latest</code>/unset tracks <code>main</code>. See <a href="/docs/production">Production</a>.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>Approval gates</h2>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>APPROVAL_GATES</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>
+					Comma-separated list of gate names to enable. Gate names match
+					<code>approval_gate:</code> fields declared in workflow YAML (e.g.
+					<code>post_architect</code>, <code>post_reviewer</code>). A gate only
+					pauses the run if its name appears here, so you can ship workflows with
+					gates pre-declared and enable them per environment.
+				</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>Build assets</h2>
+
+	<p>
+		The per-phase build handoff docs — <code>architect-plan.md</code>,
+		<code>status.md</code>, <code>executor-summary.md</code>,
+		<code>reviewer-verdict.md</code>, <code>guardrails-report.md</code>, and the
+		<code>explore-*</code> docs — can live in one of two places, selected by
+		<code>buildAssets.location</code> in YAML (or the <code>LASTLIGHT_BUILD_ASSETS</code>
+		env var). With <code>repo</code> (the default) they're committed into the target
+		repo under <code>.lastlight/&lt;issueKey&gt;/</code> and ride the working branch —
+		the historical behaviour. With <code>server</code> they're externalized to the
+		Last Light host instead, never committed into the target repo: injected into each
+		phase from outside the repo and harvested back after, PR-body links point at the
+		dashboard's <strong>Artifacts</strong> view rather than GitHub blob URLs, and the
+		admin API serves them read-only at <code>/admin/api/artifacts</code>.
+	</p>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>LASTLIGHT_BUILD_ASSETS</code></td>
+				<td>No</td>
+				<td><code>repo</code></td>
+				<td>Where build handoff docs live: <code>repo</code> commits them into the target repo under <code>.lastlight/&lt;issueKey&gt;/</code> on the working branch; <code>server</code> externalizes them to the Last Light host and never commits them into the target repo. Equivalent to the <code>buildAssets.location</code> config key.</td>
+			</tr>
+			<tr>
+				<td><code>BUILD_ASSETS_DIR</code></td>
+				<td>No</td>
+				<td><code>$STATE_DIR/build-assets</code></td>
+				<td>Server-mode store root. Docs are written under <code>&lt;owner&gt;/&lt;repo&gt;/&lt;issueKey&gt;/*.md</code>. Only used when <code>LASTLIGHT_BUILD_ASSETS=server</code>.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>Admin dashboard</h2>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>ADMIN_PASSWORD</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>If set, the dashboard requires password login.</td>
+			</tr>
+			<tr>
+				<td><code>ADMIN_SECRET</code></td>
+				<td>No</td>
+				<td>random</td>
+				<td>HMAC secret used to sign session tokens. Set this to a stable value in production so sessions survive restarts.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>Slack (optional)</h2>
+
+	<p>Two independent feature groups — see <a href="/docs/slack">Slack integration</a> for setup.</p>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>SLACK_BOT_TOKEN</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Bot User OAuth Token (<code>xoxb-...</code>). Presence of this var enables the Slack connector.</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_MODE</code></td>
+				<td>No</td>
+				<td>auto</td>
+				<td>Receive transport: <code>webhook</code> (HTTP Events API) or <code>socket</code> (Socket Mode). Auto-detected when unset: <code>webhook</code> if <code>SLACK_SIGNING_SECRET</code> is set, else <code>socket</code>.</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_SIGNING_SECRET</code></td>
+				<td>Yes (webhook mode)</td>
+				<td>—</td>
+				<td>Events API signing secret. Slack POSTs events to <code>/webhooks/slack</code>; delivery is retried (at-least-once).</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_APP_TOKEN</code></td>
+				<td>Yes (socket mode)</td>
+				<td>—</td>
+				<td>App-Level Token (<code>xapp-...</code>) for the Socket Mode dev fallback.</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_ALLOWED_USERS</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Comma-separated Slack user IDs allowed to interact with the bot.</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_DELIVERY_CHANNEL</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Channel ID where cron health reports are posted.</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_OAUTH_CLIENT_ID</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Enables "Login with Slack" on the dashboard.</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_OAUTH_CLIENT_SECRET</code></td>
+				<td>Yes (if client id set)</td>
+				<td>—</td>
+				<td>OAuth client secret.</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_OAUTH_REDIRECT_URI</code></td>
+				<td>Yes (if client id set)</td>
+				<td>—</td>
+				<td>Must exactly match a redirect URL configured on the Slack app, typically <code>https://your-host/admin/api/oauth/slack/callback</code>.</td>
+			</tr>
+			<tr>
+				<td><code>SLACK_ALLOWED_WORKSPACE</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Restrict OAuth login to a single Slack workspace (team ID or domain).</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>OpenTelemetry (optional)</h2>
+
+	<p>
+		Telemetry is disabled by default. Set <code>LASTLIGHT_OTEL_ENABLED=true</code> and
+		point the standard <code>OTEL_*</code> exporter vars at your collector. See
+		<a href="/docs/observability">Observability</a> for what's exported, content
+		redaction, and how sandbox telemetry is routed per backend.
+	</p>
+
+	<table class="docs-table config-table">
+		<colgroup>
+			<col class="col-var" />
+			<col class="col-req" />
+			<col class="col-default" />
+			<col class="col-desc" />
+		</colgroup>
+		<thead>
+			<tr><th>Variable</th><th>Required</th><th>Default</th><th>Description</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_ENABLED</code></td>
+				<td>No</td>
+				<td><code>false</code></td>
+				<td>Master switch. Standard <code>OTEL_*</code> env vars alone do <strong>not</strong> enable telemetry — this must be <code>true</code>.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_SERVICE_NAME</code></td>
+				<td>No</td>
+				<td><code>lastlight</code></td>
+				<td>OTEL service name. Falls back to <code>OTEL_SERVICE_NAME</code> if unset.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_INCLUDE_CONTENT</code></td>
+				<td>No</td>
+				<td><code>false</code></td>
+				<td>Include prompt / message / tool-result content in spans (truncated). Sensitive — only enable with a trusted collector. Default exports metadata only.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_FORWARD_TO_SANDBOX</code></td>
+				<td>No</td>
+				<td><code>true</code></td>
+				<td>Emit telemetry from inside workflow sandboxes too. On the <code>docker</code> backend this routes through an in-network collector; on <code>gondolin</code>/<code>none</code> it forwards <code>OTEL_*</code> env directly. Set <code>false</code> to keep telemetry harness-only.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_STRICT</code></td>
+				<td>No</td>
+				<td><code>false</code></td>
+				<td>Throw on OTEL init/export-setup failure instead of warning and continuing without telemetry.</td>
+			</tr>
+			<tr>
+				<td><code>LASTLIGHT_OTEL_COLLECTOR_HOSTS</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Comma-separated collector hostnames added to the strict sandbox egress allowlist. Used only by the <code>gondolin</code> backend — the <code>docker</code> backend reaches its collector internally and ignores this.</td>
+			</tr>
+			<tr>
+				<td><code>OTEL_EXPORTER_OTLP_ENDPOINT</code>, <code>OTEL_EXPORTER_OTLP_*_ENDPOINT</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Standard OTLP/HTTP collector endpoint(s). Used by the harness directly, and as the re-export target for the in-network collector on the <code>docker</code> backend.</td>
+			</tr>
+			<tr>
+				<td><code>OTEL_EXPORTER_OTLP_HEADERS</code>, <code>OTEL_EXPORTER_OTLP_*_HEADERS</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Standard OTLP headers (e.g. an auth token). Secret/env-only — never shown in the dashboard Config tab, and never forwarded into a sandbox on the <code>docker</code> backend.</td>
+			</tr>
+			<tr>
+				<td><code>OTEL_SERVICE_NAME</code>, <code>OTEL_RESOURCE_ATTRIBUTES</code></td>
+				<td>No</td>
+				<td>—</td>
+				<td>Standard OTEL resource configuration (e.g. <code>deployment.environment=prod</code>).</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<div class="docs-next">
+		<a href="/docs/slack">
+			<span class="label">← Previous</span>
+			<span class="title">Slack integration</span>
+		</a>
+		<a href="/docs/observability" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Observability</span>
+		</a>
+	</div>
+</DocsLayout>

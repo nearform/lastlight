@@ -1,0 +1,99 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="prerequisites"
+	description="What you need to install and configure before running Last Light."
+>
+	<p>Before you start, make sure you have the following in place.</p>
+
+	<h2>A host machine</h2>
+	<p>
+		Last Light runs as a single Node process (locally) or a single Docker container
+		(in production). Each workflow phase runs inside its own isolated sandbox so the
+		agent cannot touch your host filesystem, credentials, or git identity. The
+		sandbox backend is selected by <code>LASTLIGHT_SANDBOX</code>:
+		<code>gondolin</code> (default — QEMU micro-VM via agentic-pi, uses HVF on macOS
+		and KVM on Linux, no Docker needed), <code>docker</code> (sibling Docker container
+		per phase), or <code>none</code> (in-process, dev only).
+	</p>
+
+	<ul>
+		<li><strong>Node.js 20+</strong> — for local development (<code>npm run dev</code>).</li>
+		<li><strong>Docker</strong> — required only when <code>LASTLIGHT_SANDBOX=docker</code> or for the bundled docker-compose deploy. The default gondolin sandbox does not need it.</li>
+		<li><strong>KVM (Linux) or HVF (macOS)</strong> — required by gondolin for nested virtualisation. Bare-metal Linux and Apple Silicon Macs both have it; most managed container hosts do not.</li>
+		<li><strong>Git</strong> — for cloning the repo you want to deploy.</li>
+	</ul>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>Do not deploy Last Light onto core infrastructure.</strong> It's an
+			autonomous agent with write access to your repos. Run it on an isolated host
+			(a cheap VPS, a dedicated VM, a separate cloud project) where it cannot reach
+			sensitive internal systems.
+		</div>
+	</div>
+
+	<h2>A GitHub App</h2>
+	<p>
+		Last Light authenticates to GitHub as its own GitHub App rather than as a personal
+		access token. This keeps the bot's actions clearly attributed (<code>last-light[bot]</code>),
+		lets you downscope permissions per workflow, and makes installation per-repo
+		instead of per-user.
+	</p>
+	<p>
+		The <a href="/docs/github-app">Create a GitHub App</a> page walks through the exact
+		permissions and events to request. You'll end up with four values you need to
+		paste into <code>.env</code>: App ID, Installation ID, webhook secret, and a
+		<code>.pem</code> private key.
+	</p>
+
+	<h2>Model provider credentials</h2>
+	<p>
+		The agent runtime is <a href="https://github.com/nearform/agentic-pi" target="_blank" rel="noopener">agentic-pi</a> —
+		it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports
+		(Claude, GPT, Gemini, Llama, and more — as <code>openai/…</code>, <code>anthropic/…</code> or <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code> strings). The default is
+		<code>anthropic/claude-sonnet-4-6</code>. Set the matching API key in <code>.env</code>:
+	</p>
+	<ul>
+		<li><code>OPENAI_API_KEY</code> — required if <code>LASTLIGHT_MODEL</code> resolves to an OpenAI model.</li>
+		<li><code>ANTHROPIC_API_KEY</code> — required if <code>LASTLIGHT_MODEL</code> resolves to an Anthropic model.</li>
+		<li><code>OPENROUTER_API_KEY</code> — required if <code>LASTLIGHT_MODEL</code> resolves to an OpenRouter model (<code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code>). One key gives you access to Claude, GPT, Gemini, Llama, Mistral, DeepSeek, and most others through a single endpoint — at a small per-token markup over going direct. Sign up at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</li>
+		<li>You can set all three — phases routed via <code>LASTLIGHT_MODELS</code> JSON can mix providers freely.</li>
+	</ul>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			No interactive login step. pi-ai reads provider API keys directly from
+			the harness env — the same keys are forwarded into each sandbox so workflow
+			runs can reach the API without a separate auth file.
+		</div>
+	</div>
+
+	<h2>Optional: a Slack workspace</h2>
+	<p>
+		Slack integration is optional but recommended — it's how you chat with the bot
+		outside GitHub. You'll need permission to create a Slack app and install it in
+		your workspace. See <a href="/docs/slack">Slack integration</a>.
+	</p>
+
+	<h2>Optional: a public domain</h2>
+	<p>
+		To receive GitHub webhooks in real-time (instead of relying on cron polling), the
+		harness needs to be publicly reachable over HTTPS. In production this is handled by
+		the bundled Caddy reverse proxy, which provisions TLS automatically — you just
+		point a DNS record at your host. For local testing, use <a href="https://ngrok.com" target="_blank" rel="noopener">ngrok</a>
+		or <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" target="_blank" rel="noopener">Cloudflare Tunnel</a>.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/introduction">
+			<span class="label">← Previous</span>
+			<span class="title">Introduction</span>
+		</a>
+		<a href="/docs/github-app" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Create a GitHub App</span>
+		</a>
+	</div>
+</DocsLayout>

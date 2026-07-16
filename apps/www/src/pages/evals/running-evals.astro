@@ -1,0 +1,111 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="running-evals"
+	description="The shared run command — selecting tiers and models, the full flag reference, parallelism across provider families, sandbox isolation, and exit-code semantics. Then dive into each tier: triage, code-fix, pr-review."
+>
+	<p>
+		<code>run</code> is the default command and it's the same shape for every tier.
+		This page covers what's shared — selecting tiers, the flags, parallelism, and
+		isolation. Each tier then has its own page for how it seeds and grades:
+		<a href="/evals/triage">Triage</a>, <a href="/evals/code-fix">Code fix</a>, and
+		<a href="/evals/pr-review">PR review</a>.
+	</p>
+
+	<h2>Selecting tiers</h2>
+
+	<p>
+		Give <code>run</code> one or more tiers, or none to pick interactively (a
+		non-TTY run falls back to the cheapest tier). From a Separate-layout workspace
+		the overlay and datasets auto-detect; a Plain workspace adds
+		<code>--overlay .</code>.
+	</p>
+
+	<pre><code>lastlight-evals run                       # default model, default tier
+lastlight-evals run triage                # one tier
+lastlight-evals run triage code-fix       # multiple tiers → combined tabbed report
+lastlight-evals run --compare             # cross-vendor set (key-gated)
+lastlight-evals run triage --runs 3       # repeat each case 3× (worst-case verdict, mean metrics)
+lastlight-evals run pr-review --limit 3   # only the first 3 cases (controlled / cheap)</code></pre>
+
+	<h2>Grading, in one sentence per tier</h2>
+
+	<p>
+		Grading is deterministic — the one exception being the PR-review judge. Each
+		tier page has the detail; the summary:
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Tier</th><th>Graded on</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><a href="/evals/triage"><code>triage</code></a></td><td><strong>Behavioral</strong> — recorded GitHub mutations (labels, comments, state) vs the gold expectation.</td></tr>
+			<tr><td><a href="/evals/code-fix"><code>code-fix</code></a></td><td><strong>Execution</strong> — held-out tests must go red → green and stay green (SWE-bench's resolved criterion).</td></tr>
+			<tr><td><a href="/evals/pr-review"><code>pr-review</code></a></td><td><strong>Judge</strong> — an LLM judge scores the posted review against a human gold set (F1).</td></tr>
+		</tbody>
+	</table>
+
+	<h2>Run flags</h2>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Flag</th><th>Meaning</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>--mode &lt;models|config&gt;</code></td><td>Comparison axis (default <code>models</code>; a TTY with no flags asks). See <a href="/evals/models">Models</a>.</td></tr>
+			<tr><td><code>--overlay &lt;dir&gt;</code></td><td>Layer a deployment's workflows / skills + evals over the built-ins. Repeatable in <code>--mode config</code>.</td></tr>
+			<tr><td><code>--model &lt;m[,m2]&gt;</code></td><td>Select model(s), fuzzy-matched; in config mode, override each config's default.</td></tr>
+			<tr><td><code>--compare</code></td><td>Cross-vendor set (only models whose provider key is present).</td></tr>
+			<tr><td><code>--instance &lt;id[,id]&gt;</code></td><td>Run only these <strong>exact</strong> <code>instance_id</code>(s) (or <code>EVAL_INSTANCE</code>) — not a substring.</td></tr>
+			<tr><td><code>--limit &lt;n&gt;</code></td><td>First n instances per tier (applied after <code>--instance</code>).</td></tr>
+			<tr><td><code>--runs &lt;n&gt;</code></td><td>Repeat each case n× — worst-case verdict, mean metrics.</td></tr>
+			<tr><td><code>--f-beta &lt;n&gt;</code></td><td>PR-review F-beta β (default 1 = F1). See <a href="/evals/pr-review">PR review</a>.</td></tr>
+			<tr><td><code>--judge-with-diff</code></td><td>PR-review: feed the PR diff to the judge (off by default).</td></tr>
+			<tr><td><code>--no-inject-context</code></td><td>PR-review: don't inject synthetic repo context into the checkout (a clean A/B control; or <code>EVAL_INJECT_CONTEXT=0</code>). See <a href="/evals/pr-review">PR review</a>.</td></tr>
+			<tr><td><code>--sandbox &lt;backend&gt;</code></td><td><code>none</code> (default, in-process, fast/CI) or <code>gondolin</code> (QEMU micro-VM isolation; or <code>EVAL_SANDBOX</code>).</td></tr>
+			<tr><td><code>--serial</code></td><td>Force serial execution across provider families.</td></tr>
+			<tr><td><code>--datasets &lt;dir&gt;</code></td><td>Extra datasets root to discover tiers from.</td></tr>
+			<tr><td><code>--models-file &lt;f&gt;</code></td><td>Use an explicit <code>models.json</code>.</td></tr>
+			<tr><td><code>--no-open</code></td><td>Don't open / auto-serve the dashboard (also implied by <code>CI=1</code>).</td></tr>
+		</tbody>
+	</table>
+
+	<h2>Parallelism &amp; exit codes</h2>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			Provider families (OpenAI / Anthropic / Fireworks, keyed by <code>envKey</code>)
+			run concurrently but serial <em>within</em> a family, so one provider's rate
+			limit is never hammered. Config runs stay serial. Force serial everywhere with
+			<code>--serial</code>. The runner exits non-zero <strong>only</strong> if the
+			harness itself errors — a weak model scoring badly is the measurement, not a
+			build failure.
+		</div>
+	</div>
+
+	<h2>Isolation</h2>
+
+	<p>
+		The default <code>--sandbox none</code> runs the agent in-process: fast and
+		CI-friendly, but with no filesystem restriction — a capable model could read
+		host gold data. <code>--sandbox gondolin</code> runs the agent's bash/file
+		tools in a QEMU micro-VM that only sees its own workspace, while keeping
+		<code>github_*</code> in-process so the fake GitHub still works (this is why
+		<code>gondolin</code>, not <code>docker</code>/<code>smol</code>, is the
+		supported backend). It needs QEMU with hardware acceleration and adds a one-time
+		cold start; a fail-fast preflight aborts rather than hanging.
+	</p>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/authoring">
+			<span class="label">← Previous</span>
+			<span class="title">Authoring cases</span>
+		</a>
+		<a class="next" href="/evals/triage">
+			<span class="label">Next →</span>
+			<span class="title">Triage</span>
+		</a>
+	</div>
+</EvalsLayout>

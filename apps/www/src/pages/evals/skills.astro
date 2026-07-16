@@ -1,0 +1,109 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="skills"
+	description="The default way to use Last Light Evals is to let Claude Code (or any agent tool) drive it via the bundled lastlight-evals skill — you describe what you want and the skill scaffolds the workspace, authors cases, runs evals, and reads the results for you."
+>
+	<p>
+		The <strong>default, recommended way</strong> to use Last Light Evals is to let
+		<a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a>
+		— or any agent tool that supports skills — drive it for you. Last Light ships a
+		<code>lastlight-evals</code> skill that knows the whole CLI: you describe what
+		you want in plain language, and the skill scaffolds the workspace, authors
+		cases, runs the evals, and reads the scorecard back to you.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			The commands in the rest of these docs are what the skill runs under the hood.
+			You <em>can</em> run them by hand — see <a href="/evals/getting-started">Install
+			&amp; first run</a> — but you rarely need to. Reach for the raw CLI when you
+			want precise control; reach for the skill for everything else.
+		</div>
+	</div>
+
+	<h2>Install the CLI and skills</h2>
+
+	<p>
+		Install the <code>lastlight</code> CLI, then install the bundled,
+		version-matched skills:
+	</p>
+
+	<pre><code>npm i -g lastlight          # or run it via npx
+lastlight skills install    # → ~/.claude/skills (user scope)</code></pre>
+
+	<p>
+		<code>lastlight skills install</code> uses the <code>claude</code> plugin
+		marketplace when one is present, otherwise it copies the skills into
+		<code>~/.claude/skills</code>. Add <code>--scope project</code> to install them
+		into <code>./.claude/skills</code> for a single repo. The evals harness itself
+		(<code>lastlight-evals</code>) is a separate package the skill installs / invokes
+		as needed.
+	</p>
+
+	<h2>Ask for what you want</h2>
+
+	<p>
+		Open Claude Code in a working directory and describe the goal — the skill is
+		triggered by intent, so you don't need to remember command names or flags:
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Ask Claude…</th><th>What the skill does</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><em>"set up a Last Light evals workspace"</em></td>
+				<td>Scaffolds an <a href="/evals/workspaces">evals workspace</a> — links it to your deployment overlay, or makes a self-contained one.</td>
+			</tr>
+			<tr>
+				<td><em>"run evals"</em> / <em>"compare models on triage"</em></td>
+				<td>Picks the right tier + models, runs it, and opens the <a href="/evals/dashboard">dashboard</a> at the scorecard.</td>
+			</tr>
+			<tr>
+				<td><em>"create an eval case from this PR / issue"</em></td>
+				<td>Runs <a href="/evals/authoring"><code>add-case</code></a> against the GitHub URL, curates the fuzzy parts, and writes the case.</td>
+			</tr>
+			<tr>
+				<td><em>"build a PR-review dataset from these gold PRs"</em></td>
+				<td>Authors a <a href="/evals/pr-review">pr-review</a> dataset from your reviewed PRs — often a curation sub-agent per PR, in parallel.</td>
+			</tr>
+			<tr>
+				<td><em>"fork the build workflow and eval the change"</em></td>
+				<td>Forks the workflow into your overlay, edits it, and re-runs the evals so you can read the scorecard delta.</td>
+			</tr>
+			<tr>
+				<td><em>"raise the pr-review F1 toward a target"</em></td>
+				<td>Runs the <a href="/evals/improve">improvement loop</a> — diagnose, propose one generic fix, re-measure on a blind held-out split, keep or revert.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			Invoke it explicitly with <code>/lastlight-evals</code>, or just state the
+			goal and let it trigger. It runs against any model the underlying coding agent
+			supports — Claude, GPT, Gemini, and more.
+		</div>
+	</div>
+
+	<p>
+		Because GitHub is mocked when evals run, the skill needs only a model provider
+		API key to run and grade — no GitHub credentials. (The one exception is authoring
+		a case from a real PR/issue, which reads GitHub through your <code>gh</code>
+		login.) The next page covers those keys and a first manual run.
+	</p>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/introduction">
+			<span class="label">← Previous</span>
+			<span class="title">Introduction</span>
+		</a>
+		<a class="next" href="/evals/getting-started">
+			<span class="label">Next →</span>
+			<span class="title">Install &amp; first run</span>
+		</a>
+	</div>
+</EvalsLayout>

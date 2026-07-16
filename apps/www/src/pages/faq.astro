@@ -1,0 +1,299 @@
+---
+// Last Light — FAQ
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const title = "FAQ — Last Light";
+const description = "Frequently asked questions about Last Light — the self-hostable, MIT-licensed AI coding agent for GitHub. Setup, architecture, customization, operations.";
+---
+
+<BaseLayout title={title} description={description}>
+
+	<section class="page-header">
+		<h1>Frequently asked <span class="accent">questions</span></h1>
+		<p class="subtitle">Common questions about setting up, running, and customizing Last Light.</p>
+	</section>
+
+	<section class="faq-section">
+
+		<div class="faq-category">
+			<h2>Getting started</h2>
+
+			<details class="faq-item" open>
+				<summary>What do I need to run Last Light?</summary>
+				<div class="faq-answer">
+					<p>Three things:</p>
+					<ol>
+						<li>An API key for your chosen model — <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, or <code>OPENROUTER_API_KEY</code> (Last Light runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more; one OpenRouter key reaches most of them through a single endpoint)</li>
+						<li>A <a href="https://docs.github.com/en/apps/creating-github-apps" target="_blank" rel="noopener">GitHub App</a> with Issues, PRs, and Contents permissions</li>
+						<li>Node.js 20+. Docker is required only when <code>LASTLIGHT_SANDBOX=docker</code>; the default gondolin sandbox uses HVF/KVM with no Docker dependency.</li>
+					</ol>
+					<p>See the <a href="/#get-started">Get Started</a> guide for step-by-step instructions.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Which LLM does it use?</summary>
+				<div class="faq-answer">
+					<p>The agent runtime is <a href="https://github.com/nearform/agentic-pi" target="_blank" rel="noopener">agentic-pi</a> (workflow phases) plus <code>@earendil-works/pi-ai</code> (in-process chat). It runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more, as <code>openai/…</code>, <code>anthropic/…</code> or <code>openrouter/&lt;vendor&gt;/&lt;model&gt;</code> strings. The default model is <code>anthropic/claude-sonnet-4-6</code>, configurable via the <code>LASTLIGHT_MODEL</code> environment variable.</p>
+					<p>Per-phase overrides go through <code>LASTLIGHT_MODELS</code> as JSON — e.g. <code>&#123;"chat":"openai/gpt-5.1-mini","architect":"openai/gpt-5.5"&#125;</code>. Set <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, and/or <code>OPENROUTER_API_KEY</code> to match — one OpenRouter key covers most providers. Legacy <code>OPENCODE_*</code> env vars are still read as fallbacks.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Does it work with GitHub Enterprise?</summary>
+				<div class="faq-answer">
+					<p>Not yet tested, but it should work with GitHub Enterprise Cloud since it uses the same API. GitHub Enterprise Server (self-hosted) would need base URL configuration in the GitHub tooling layer — contributions welcome.</p>
+				</div>
+			</details>
+		</div>
+
+		<div class="faq-category">
+			<h2>How it works</h2>
+
+			<details class="faq-item">
+				<summary>How does the bot authenticate with GitHub?</summary>
+				<div class="faq-answer">
+					<p>Last Light authenticates as a <strong>GitHub App</strong>, not a personal account. It generates short-lived installation tokens (expire in ~1 hour) using your App's private key. Every action — comments, labels, PR reviews — shows up as coming from the bot, not you.</p>
+					<p>The harness handles token generation, refresh, and per-workflow downscoping automatically (see permission profiles below). For git operations inside sandboxes, a credential file is synced before each command.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>What's the difference between webhook mode and cron mode?</summary>
+				<div class="faq-answer">
+					<p><strong>Webhooks</strong> react in real-time — GitHub sends events (issue opened, PR created, comment posted) to your endpoint, and the agent handles them immediately. Requires a publicly reachable URL.</p>
+					<p><strong>Cron</strong> polls on a schedule — the agent checks for new issues, PRs, and stale items periodically (e.g. every 15 minutes). No public URL needed, but responses are delayed.</p>
+					<p>Use one or the other — not both. Webhooks are better for responsive repos; cron is simpler to deploy.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Can the bot actually fix bugs and open PRs?</summary>
+				<div class="faq-answer">
+					<p>Yes. When a maintainer @mentions the bot on an issue, it clones the repo into an isolated sandbox (a gondolin micro-VM by default, or a Docker container if <code>LASTLIGHT_SANDBOX=docker</code>), reads the code, makes changes, runs tests, and opens a PR. It's not magic — it works best for well-scoped issues with clear descriptions.</p>
+					<p>The bot always links back to the original issue and posts validation results so you can review before merging.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>What happens when it doesn't know what to do?</summary>
+				<div class="faq-answer">
+					<p>It does nothing. Silence is built into the design — the agent only acts on events it has explicit rules for. Unknown event types, ambiguous requests, and bot-generated events are all ignored. For build requests, if it can't push code, it posts a detailed comment explaining what it tried and what needs human attention.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>What's the difference between Sandbox Sessions and Chat Sessions?</summary>
+				<div class="faq-answer">
+					<p><strong>Sandbox sessions</strong> are agent runs that executed inside a sandbox — triage, PR review, build, health report, anything driven by a YAML workflow. Each phase runs <code>agentic-pi run</code> in a gondolin micro-VM (or Docker container when <code>LASTLIGHT_SANDBOX=docker</code>); events are streamed into a Claude-SDK-style JSONL envelope on disk and listed on the dashboard's <em>Sandbox Sessions</em> tab.</p>
+					<p><strong>Chat sessions</strong> are conversations from Slack threads. They run an in-process <code>@earendil-works/pi-ai</code> chat loop inside the harness — one pi-ai conversation per Slack thread, history rehydrated from the <code>messaging_messages</code> SQLite table on every turn, so context holds for hours or days. Every turn is persisted (<code>executions</code> table) and one thread becomes one growing, coherent JSONL. They live on the dashboard's <em>Chat Sessions</em> tab.</p>
+					<p>In short: sandbox sessions are one-shot workflow runs; chat sessions are multi-turn conversations glued to a Slack thread.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>How do approval gates work?</summary>
+				<div class="faq-answer">
+					<p>A workflow phase can declare <code>approval_gate: post_architect</code> (or any other gate name). If that gate is enabled via the <code>APPROVAL_GATES</code> env var, the runner pauses after that phase, persists the run state, writes a row to the <code>workflow_approvals</code> table, and waits for a human decision.</p>
+					<p>You resolve gates three ways: commenting <code>@last-light approve</code> or <code>@last-light reject</code> on the triggering GitHub issue; running <code>/approve</code> / <code>/reject</code> from Slack; or clicking the button on the dashboard. The run resumes exactly where it stopped — no phases re-execute.</p>
+					<p>Because gates are opt-in per environment, you can ship workflows with gates pre-declared and enable them only in production.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Where do the build handoff docs live — and can I keep them out of the target repo?</summary>
+				<div class="faq-answer">
+					<p>During a build, each phase writes a handoff doc — <code>architect-plan.md</code>, <code>status.md</code>, <code>executor-summary.md</code>, <code>reviewer-verdict.md</code>, <code>guardrails-report.md</code>, and the <code>explore-*</code> docs. By default (<code>buildAssets.location: repo</code>) these are committed into the target repo under <code>.lastlight/&lt;issueKey&gt;/</code> and ride the working branch.</p>
+					<p>If you'd rather not commit them, set <code>buildAssets.location: server</code> (or the <code>LASTLIGHT_BUILD_ASSETS=server</code> env var). The docs are then externalized to the Last Light host — written under <code>$STATE_DIR/build-assets/&lt;owner&gt;/&lt;repo&gt;/&lt;issueKey&gt;/*.md</code> (override the root with <code>BUILD_ASSETS_DIR</code>), injected into each phase from outside the repo and harvested back after. PR-body links point at the dashboard's <em>Artifacts</em> view instead of GitHub blob URLs, and the admin API serves them read-only at <code>/admin/api/artifacts</code>. Nothing is committed into the target repo.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>How do permission profiles downscope the GitHub token?</summary>
+				<div class="faq-answer">
+					<p>The GitHub App itself has broad permissions (contents read/write, issues read/write, PRs read/write). But every workflow declares a <code>profile</code> — one of <code>read</code>, <code>issues-write</code>, <code>review-write</code>, or <code>repo-write</code>. Before spawning a sandbox, the harness mints an installation token that only has the scopes that profile needs.</p>
+					<p>The practical effect: a triage run literally cannot push code, a review run cannot open issues, etc. Even if a prompt got compromised, the token handed into the sandbox doesn't have the write permission in the first place.</p>
+				</div>
+			</details>
+		</div>
+
+		<div class="faq-category">
+			<h2>Customization</h2>
+
+			<details class="faq-item">
+				<summary>How do I change what the bot does?</summary>
+				<div class="faq-answer">
+					<p>Edit the YAML in <code>workflows/</code>. Every behavior is a workflow — <code>build.yaml</code>, <code>issue-triage.yaml</code>, <code>pr-review.yaml</code>, <code>cron-health.yaml</code>, etc. A workflow is a list of phases; each phase runs an agent with either an inline prompt (<code>prompt: prompts/architect.md</code>) or a named skill (<code>skill: assure-guardrails</code>).</p>
+					<p>To change an existing behavior, edit its workflow file or its referenced prompt under <code>workflows/prompts/</code> or its <code>SKILL.md</code> under <code>skills/</code>. To add a new behavior, drop a new YAML file into <code>workflows/</code> — the harness picks it up automatically. No TypeScript needed.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Can I add my own skills?</summary>
+				<div class="faq-answer">
+					<p>Yes. Create a new directory under <code>skills/</code> with a <code>SKILL.md</code> file — name, description, and tags in the frontmatter, instructions in the body. Skills are plain Markdown that the agent follows as instructions. The agent discovers new skills automatically.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>How do I add more repos?</summary>
+				<div class="faq-answer">
+					<p>Just install the GitHub App on additional repos — no code changes needed. The bot handles all installed repos automatically. If you want different behavior per repo, you'd need to add conditional logic to the skill files (check <code>repository.full_name</code> in the webhook payload).</p>
+				</div>
+			</details>
+		</div>
+
+		<div class="faq-category">
+			<h2>Operations</h2>
+
+			<details class="faq-item">
+				<summary>How much does it cost to run?</summary>
+				<div class="faq-answer">
+					<p>The main cost is model API usage on whichever model you've configured. Each issue triage or PR review is roughly one agent session. For a repo with a few events per day, expect modest API costs. Build requests (cloning, editing, testing) use more tokens but are less frequent.</p>
+					<p>Set <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, and/or <code>OPENROUTER_API_KEY</code> to match your <code>LASTLIGHT_MODEL</code> and costs depend on usage. Cheap models like <code>anthropic/claude-haiku-4-5-20251001</code> or <code>openrouter/google/gemini-2.5-flash</code> can be routed to high-volume phases (triage, screen) via <code>LASTLIGHT_MODELS</code> to keep the bill down. OpenRouter adds a small per-token markup over going direct, but in exchange you get a single key + dashboard for every model.</p>
+					<p>The agent itself is free and open-source.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>What if the model provider goes down?</summary>
+				<div class="faq-answer">
+					<p>If the configured model provider is unavailable, agent sessions will fail and the error is logged. GitHub webhook events are retried by GitHub automatically if your endpoint doesn't respond, so the work will be picked up when service returns. Because pi-ai is provider-agnostic, you can flip <code>LASTLIGHT_MODEL</code> to a different provider during an outage. The execution database tracks all attempts for visibility.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Is there a risk of the bot going rogue?</summary>
+				<div class="faq-answer">
+					<p>The bot can only do what its GitHub App permissions allow. It can't delete repos, manage org settings, or access repos where it's not installed. Build requests only trigger when a maintainer explicitly @mentions the bot. All actions are logged as session trajectories in <code>logs/</code>.</p>
+					<p>For extra safety: install the App with read-only Contents permission if you don't want the bot pushing code, and only grant write access to Issues and PRs.</p>
+				</div>
+			</details>
+		</div>
+
+	</section>
+
+</BaseLayout>
+
+<style is:global>
+	section {
+		max-width: 1000px;
+		margin: 0 auto;
+		padding: 3rem 2rem;
+	}
+
+	section h2 {
+		font-size: 1.6rem;
+		margin-bottom: 1rem;
+		letter-spacing: -0.01em;
+	}
+
+	.accent { color: var(--gold); }
+
+	/* Page header */
+	.page-header {
+		max-width: 1000px;
+		margin: 0 auto;
+		padding: 4rem 2rem 1rem;
+	}
+
+	.page-header h1 {
+		font-size: clamp(1.8rem, 4vw, 2.5rem);
+		margin-bottom: 1rem;
+		letter-spacing: -0.02em;
+	}
+
+	.page-header .subtitle {
+		font-size: 1.1rem;
+		color: var(--text-muted);
+		max-width: 600px;
+		line-height: 1.65;
+	}
+
+	/* FAQ */
+	.faq-section {
+		padding-top: 0;
+	}
+
+	.faq-category {
+		margin-bottom: 2.5rem;
+	}
+
+	.faq-category h2 {
+		font-size: 1.15rem;
+		color: var(--teal);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		margin-bottom: 1rem;
+		padding-bottom: 0.5rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.faq-item {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		margin-bottom: 0.5rem;
+		transition: border-color 0.25s;
+	}
+
+	.faq-item:hover {
+		border-color: var(--border-bright);
+	}
+
+	.faq-item[open] {
+		border-color: var(--teal-dark);
+	}
+
+	.faq-item summary {
+		padding: 1rem 1.25rem;
+		cursor: pointer;
+		font-weight: 500;
+		font-size: 0.95rem;
+		color: var(--text-bright);
+		list-style: none;
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+	}
+
+	.faq-item summary::-webkit-details-marker { display: none; }
+
+	.faq-item summary::before {
+		content: '+';
+		font-family: var(--mono);
+		font-size: 1.1rem;
+		color: var(--teal);
+		flex-shrink: 0;
+		width: 1.25rem;
+		text-align: center;
+		transition: transform 0.2s;
+	}
+
+	.faq-item[open] summary::before {
+		content: '\2212';
+	}
+
+	.faq-answer {
+		padding: 0 1.25rem 1.25rem 3.25rem;
+	}
+
+	.faq-answer p {
+		font-size: 0.9rem;
+		color: var(--text-muted);
+		line-height: 1.7;
+		margin-bottom: 0.6rem;
+	}
+
+	.faq-answer ol, .faq-answer ul {
+		padding-left: 1.25rem;
+		margin: 0.5rem 0;
+	}
+
+	.faq-answer li {
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		line-height: 1.65;
+		margin-bottom: 0.3rem;
+	}
+</style>

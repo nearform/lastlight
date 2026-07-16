@@ -1,0 +1,448 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import { evalsNav, findEvalTitle } from '../data/evals-nav';
+
+interface Props {
+	slug: string;
+	description?: string;
+}
+
+const { slug, description } = Astro.props;
+const title = findEvalTitle(slug);
+const pageTitle = `${title} — Last Light Evals`;
+const pageDescription = description ?? `${title} — Last Light Evals documentation.`;
+---
+<BaseLayout title={pageTitle} description={pageDescription}>
+	<div class="docs-shell">
+		<aside class="docs-sidebar">
+			<button type="button" class="docs-sidebar-toggle" aria-expanded="false" aria-controls="evals-nav-list">
+				<span class="docs-sidebar-toggle-label">Evals menu</span>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+			</button>
+			<nav id="evals-nav-list" class="docs-nav" aria-label="Evals">
+				{evalsNav.map((section) => (
+					<div class="docs-nav-section">
+						<p class="docs-nav-title">{section.title}</p>
+						<ul>
+							{section.items.map((item) => (
+								<li>
+									<a
+										href={`/evals/${item.slug}`}
+										class:list={['docs-nav-link', { active: item.slug === slug }]}
+									>
+										{item.label}
+									</a>
+								</li>
+							))}
+						</ul>
+					</div>
+				))}
+			</nav>
+		</aside>
+		<main class="docs-main">
+			<article class="docs-article">
+				<header class="docs-header">
+					<p class="docs-eyebrow">Evals</p>
+					<h1>{title}</h1>
+				</header>
+				<slot />
+			</article>
+		</main>
+	</div>
+
+	<script>
+		const toggle = document.querySelector<HTMLButtonElement>(".docs-sidebar-toggle");
+		const list = document.getElementById("evals-nav-list");
+		if (toggle && list) {
+			toggle.addEventListener("click", () => {
+				const open = toggle.getAttribute("aria-expanded") === "true";
+				toggle.setAttribute("aria-expanded", String(!open));
+				list.classList.toggle("open", !open);
+			});
+		}
+	</script>
+</BaseLayout>
+
+<style is:global>
+	.docs-shell {
+		max-width: 1200px;
+		margin: 0 auto;
+		padding: 1.5rem 2rem 4rem;
+		display: grid;
+		grid-template-columns: 240px 1fr;
+		gap: 3rem;
+	}
+
+	.docs-sidebar {
+		position: sticky;
+		top: 1.5rem;
+		align-self: start;
+		max-height: calc(100vh - 3rem);
+		overflow-y: auto;
+		padding-right: 0.5rem;
+	}
+
+	.docs-sidebar-toggle {
+		display: none;
+		width: 100%;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.7rem 0.9rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		color: var(--text-bright);
+		font-family: inherit;
+		font-size: 0.88rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: border-color 0.2s, background 0.2s;
+	}
+
+	.docs-sidebar-toggle:hover {
+		border-color: var(--teal);
+		background: var(--bg-card-hover);
+	}
+
+	.docs-sidebar-toggle svg {
+		transition: transform 0.2s;
+		color: var(--text-muted);
+	}
+
+	.docs-sidebar-toggle[aria-expanded="true"] svg {
+		transform: rotate(180deg);
+	}
+
+	/* Override the global top-nav `nav { display: flex; ... }` from BaseLayout */
+	.docs-sidebar nav.docs-nav {
+		display: block;
+		max-width: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.docs-nav-section + .docs-nav-section {
+		margin-top: 1.5rem;
+	}
+
+	.docs-nav-title {
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--text-muted);
+		margin-bottom: 0.5rem;
+	}
+
+	.docs-nav ul {
+		list-style: none;
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+	}
+
+	.docs-nav-link {
+		display: block;
+		padding: 0.45rem 0.75rem;
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		border-left: 2px solid transparent;
+		border-radius: 0 6px 6px 0;
+		transition: color 0.2s, border-color 0.2s, background 0.2s;
+	}
+
+	.docs-nav-link:hover {
+		color: var(--text-bright);
+		background: var(--bg-card);
+	}
+
+	.docs-nav-link.active {
+		color: var(--gold);
+		border-left-color: var(--gold);
+		background: var(--bg-card);
+	}
+
+	.docs-main {
+		min-width: 0;
+	}
+
+	.docs-article {
+		max-width: 760px;
+	}
+
+	.docs-header {
+		padding-bottom: 1.25rem;
+		margin-bottom: 2rem;
+		border-bottom: 1px solid var(--border);
+	}
+
+	.docs-eyebrow {
+		font-family: var(--mono);
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.15em;
+		color: var(--teal);
+		margin-bottom: 0.5rem;
+	}
+
+	.docs-article h1 {
+		font-size: clamp(1.75rem, 3.5vw, 2.25rem);
+		letter-spacing: -0.01em;
+		line-height: 1.2;
+	}
+
+	.docs-article h2 {
+		font-size: 1.3rem;
+		margin: 2.25rem 0 0.75rem;
+		letter-spacing: -0.01em;
+	}
+
+	.docs-article h3 {
+		font-size: 1.05rem;
+		margin: 1.75rem 0 0.5rem;
+	}
+
+	.docs-article p,
+	.docs-article ul,
+	.docs-article ol {
+		font-size: 0.94rem;
+		line-height: 1.7;
+		color: var(--text);
+		margin-bottom: 1rem;
+	}
+
+	.docs-article ul,
+	.docs-article ol {
+		padding-left: 1.25rem;
+	}
+
+	.docs-article li {
+		margin-bottom: 0.35rem;
+	}
+
+	.docs-article li code,
+	.docs-article p code {
+		font-size: 0.85em;
+	}
+
+	.docs-article strong {
+		color: var(--text-bright);
+	}
+
+	.docs-article a {
+		text-decoration: underline;
+		text-decoration-color: rgba(240, 180, 41, 0.35);
+		text-underline-offset: 3px;
+	}
+
+	.docs-article a:hover {
+		text-decoration-color: var(--orange);
+	}
+
+	.docs-callout {
+		display: flex;
+		gap: 0.85rem;
+		padding: 1rem 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-left: 3px solid var(--teal);
+		border-radius: 8px;
+		margin: 1.25rem 0;
+	}
+
+	.docs-callout.warn {
+		border-left-color: var(--orange);
+	}
+
+	.docs-callout.tip {
+		border-left-color: var(--gold);
+	}
+
+	.docs-callout-body {
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		line-height: 1.6;
+	}
+
+	.docs-callout-body strong {
+		color: var(--text-bright);
+	}
+
+	.docs-table {
+		width: 100%;
+		border-collapse: collapse;
+		margin: 1rem 0 1.5rem;
+		font-size: 0.85rem;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		overflow: hidden;
+	}
+
+	.docs-table.config-table {
+		table-layout: fixed;
+	}
+
+	.docs-table th,
+	.docs-table td {
+		text-align: left;
+		padding: 0.65rem 0.85rem;
+		border-bottom: 1px solid var(--border);
+		vertical-align: top;
+		word-wrap: break-word;
+		overflow-wrap: break-word;
+		color: var(--text);
+		font-size: 0.86rem;
+		line-height: 1.55;
+	}
+
+	.docs-table th {
+		background: var(--bg-card);
+		color: var(--text-bright);
+		font-weight: 600;
+		font-size: 0.78rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+
+	.docs-table tr:last-child td {
+		border-bottom: none;
+	}
+
+	/* Inside tables, inline `<code>` inherits the cell's font + color so every
+	   column looks visually uniform. Identifiers still read as identifiers
+	   because of context, not because of a font or color change. */
+	.docs-table code {
+		font-family: inherit;
+		font-size: inherit;
+		font-weight: inherit;
+		color: inherit;
+		background: transparent;
+		padding: 0;
+		border-radius: 0;
+		word-break: break-word;
+	}
+
+	/* Exception: real code blocks (<pre><code>) inside tables keep monospace.
+	   These are multi-line JSON/snippet examples — they should still look like
+	   code. Single-line <code> tags stay in the body font. */
+	.docs-table pre code {
+		font-family: var(--mono);
+		font-size: 0.78rem;
+	}
+
+	/* Config reference: 4-column env-var table */
+	.docs-table.config-table col.col-var     { width: 26%; }
+	.docs-table.config-table col.col-req     { width: 12%; }
+	.docs-table.config-table col.col-default { width: 22%; }
+	.docs-table.config-table col.col-desc    { width: 40%; }
+
+	.docs-table.config-table pre {
+		margin: 0.5rem 0 0;
+		padding: 0.55rem 0.75rem;
+		font-size: 0.78rem;
+	}
+
+	.docs-table.config-table pre code {
+		font-size: 1em;
+		color: var(--text);
+		background: none;
+	}
+
+	/* Screenshot figures embedded in Evals pages */
+	.evals-figure {
+		margin: 1.5rem 0 1.75rem;
+	}
+
+	.evals-figure img {
+		display: block;
+		width: 100%;
+		height: auto;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		background: var(--bg-card);
+	}
+
+	.evals-figure figcaption {
+		margin-top: 0.6rem;
+		font-family: var(--mono);
+		font-size: 0.72rem;
+		letter-spacing: 0.02em;
+		color: var(--text-muted);
+		text-align: center;
+	}
+
+	.docs-next {
+		display: flex;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-top: 3rem;
+		padding-top: 1.5rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.docs-next a {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		padding: 0.85rem 1.1rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		transition: border-color 0.2s, background 0.2s;
+		text-decoration: none;
+		min-width: 180px;
+	}
+
+	.docs-next a:hover {
+		border-color: var(--teal);
+		background: var(--bg-card-hover);
+	}
+
+	.docs-next .label {
+		font-family: var(--mono);
+		font-size: 0.68rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: var(--text-muted);
+	}
+
+	.docs-next .title {
+		color: var(--text-bright);
+		font-size: 0.92rem;
+		font-weight: 500;
+	}
+
+	.docs-next .next {
+		text-align: right;
+	}
+
+	@media (max-width: 860px) {
+		.docs-shell {
+			grid-template-columns: 1fr;
+			gap: 1rem;
+			padding: 1rem 1.25rem 3rem;
+		}
+		.docs-sidebar {
+			position: static;
+			max-height: none;
+			overflow-y: visible;
+			padding-right: 0;
+			padding-bottom: 0;
+			border-bottom: none;
+		}
+		.docs-sidebar-toggle {
+			display: flex;
+		}
+		.docs-sidebar nav.docs-nav {
+			display: none;
+			margin-top: 0.65rem;
+			padding: 0.75rem 0.25rem;
+			border: 1px solid var(--border);
+			border-radius: 8px;
+			background: var(--bg-card);
+		}
+		.docs-sidebar nav.docs-nav.open {
+			display: block;
+		}
+	}
+</style>

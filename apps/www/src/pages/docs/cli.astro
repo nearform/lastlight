@@ -1,0 +1,228 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="cli"
+	description="The lastlight CLI — log in to a running instance, trigger work, chat with the bot, and debug production over the admin API instead of SSH."
+>
+	<p>
+		<code>lastlight</code> is a thin client for a <em>running</em> Last Light
+		instance. It doesn't run agents itself — it authenticates once, then POSTs
+		triggers and reads the instance's admin API over HTTP. That makes it the
+		primary way to drive and debug an instance (including production) without
+		SSHing to the host.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			In development run it as <code>npm run cli -- &lt;args&gt;</code> (or
+			<code>npx tsx src/cli.ts &lt;args&gt;</code>). Installed from the package,
+			the binary is just <code>lastlight</code>. All examples below use the bare
+			binary.
+		</div>
+	</div>
+
+	<h2>Connecting</h2>
+
+	<p>
+		<code>lastlight login</code> opens your browser to authenticate against the
+		instance (password, Slack, or GitHub — whatever that instance has enabled)
+		and saves the token to <code>~/.lastlight/config.json</code>. Every later
+		command runs against that saved instance.
+	</p>
+
+	<pre><code>lastlight login                       # prompts for the instance URL
+lastlight login https://ll.example.com
+lastlight login https://ll.example.com --password   # headless fallback (no browser)
+lastlight logout                      # forget the saved instance + token
+lastlight status                      # instance URL, server health, token validity</code></pre>
+
+	<p>
+		<strong>Target resolution</strong> for every command, highest priority
+		first: <code>--url</code> / <code>--token</code> flags →
+		<code>LASTLIGHT_URL</code> / <code>LASTLIGHT_TOKEN</code> env vars →
+		the saved <code>~/.lastlight/config.json</code> →
+		<code>http://localhost:8644</code>. So env vars override the saved file,
+		which lets CI and scripts target a different instance without touching disk.
+	</p>
+
+	<h2>Chat</h2>
+
+	<p>
+		Chat with the bot from your terminal — the same in-process chat skill that
+		answers Slack threads, no messaging platform required. With a message it's
+		one-shot; with no message it opens an interactive REPL (type
+		<code>exit</code> to quit). Each conversation is a stable thread, so context
+		carries across turns, and the turn shows up in the dashboard Chat tab
+		tagged <code>cli</code>.
+	</p>
+
+	<pre><code>lastlight chat "what does the build workflow do?"
+lastlight chat                        # interactive REPL</code></pre>
+
+	<h2>Triggering work</h2>
+
+	<p>
+		Point the CLI at a GitHub issue or PR. A bare reference is the
+		<strong>cheap</strong> default (triage an issue / review a PR); a full build
+		cycle is always an explicit opt-in via <code>build</code>.
+	</p>
+
+	<pre><code>lastlight &lt;github-url&gt;                 # default: triage that issue
+lastlight owner/repo#42               # shorthand for the same
+lastlight build owner/repo#42         # FULL build cycle (architect → executor → reviewer → PR)
+lastlight triage owner/repo           # scan a repo for issues to triage
+lastlight triage owner/repo#42        # triage one issue
+lastlight review owner/repo           # scan a repo's PRs to review
+lastlight review owner/repo#99        # review one PR
+lastlight verify owner/repo#42 -- "the rate limiter blocks"   # test a claim → CONFIRMED/REFUTED
+lastlight qa-test owner/repo#42 -- "login, create a project"  # drive a flow → step pass/fail
+lastlight health owner/repo           # weekly health report
+lastlight security owner/repo         # security review</code></pre>
+
+	<h2>Debugging a running instance</h2>
+
+	<p>
+		These read the same data the dashboard shows, so you can investigate a
+		remote instance from the terminal instead of SSHing in. Add
+		<code>--json</code> to any of them for machine-parseable output (pipe into
+		<code>jq</code>). Where an id is omitted, the CLI fetches the relevant list
+		and lets you pick interactively.
+	</p>
+
+	<h3>Workflow runs</h3>
+	<pre><code>lastlight workflow list [--status failed] [--workflow pr-review] [--limit 20]
+lastlight workflow log &lt;run-id&gt; [--follow]    # phases + per-phase status; --follow tails live</code></pre>
+
+	<h3>Agent sessions</h3>
+	<pre><code>lastlight session list [--limit 30]
+lastlight session log &lt;session-id&gt; [--follow] [--since N] [--full]</code></pre>
+	<p>
+		<code>session log</code> renders the transcript like the dashboard timeline —
+		tool calls paired with one-line result summaries. <code>--follow</code>
+		streams it live; <code>--full</code> dumps the raw, unformatted transcript.
+	</p>
+
+	<h3>Log search</h3>
+	<pre><code>lastlight logs search "ECONNREFUSED"                   # search execution errors (default)
+lastlight logs search "rate limit" --scope all         # errors + transcript content
+lastlight logs search "could not clone" --scope messages --limit 20</code></pre>
+
+	<h3>Server / container logs</h3>
+	<p>
+		Read the raw <code>docker logs</code> of the instance's containers (the agent
+		harness plus the egress sidecars) over the API — for crashes before any
+		session was written, or a misbehaving sidecar.
+	</p>
+	<pre><code>lastlight server list                                  # the lastlight-* containers + status
+lastlight server logs                                  # the agent harness (default)
+lastlight server logs --tail 500 --since 10m --follow
+lastlight server logs coredns-strict                   # a specific service/container</code></pre>
+
+	<h3>Approvals &amp; stats</h3>
+	<pre><code>lastlight approvals list                               # pending approval gates
+lastlight approvals approve &lt;id&gt; [--reason "..."]
+lastlight approvals reject  &lt;id&gt; [--reason "..."]
+lastlight stats                                        # totals + per-skill success/fail
+lastlight stats --daily 14                             # cost / token rollups</code></pre>
+
+	<h2>Server lifecycle (host-local)</h2>
+	<p>
+		Unlike the commands above (which target a remote instance over HTTP), these
+		run <strong>on the server</strong>: they shell out to <code>git</code> and
+		<code>docker compose</code> in a working directory (a full repo checkout +
+		the <code>instance/</code> overlay + the compose override symlink). The
+		working dir resolves from <code>--home</code> → <code>LASTLIGHT_HOME</code> →
+		the saved <code>serverHome</code> → <code>~/lastlight</code>.
+	</p>
+	<pre><code>lastlight server setup                # scaffold/adopt the working dir (clone core + overlay)
+lastlight server start [service]      # docker compose up -d
+lastlight server stop  [service]      # stop one service, or the whole stack (down)
+lastlight server restart [service]    # restart a service (default: agent)
+lastlight server update               # pull core + overlay, build, recreate, restart sidecars, health-check
+lastlight server status               # compose state + core/overlay version drift + forked-asset overrides</code></pre>
+	<p>
+		<code>server update</code> is the CLI equivalent of the production
+		<code>deploy.sh</code>; it accepts <code>--no-core</code>,
+		<code>--no-overlay</code>, <code>--no-build</code>, and <code>--yes</code>.
+		The dashboard shows an "update available" banner when the running instance
+		is behind the latest core or overlay.
+	</p>
+
+	<h2>Forking built-in assets</h2>
+	<p>
+		The <code>instance/</code> overlay can override any built-in workflow,
+		prompt, skill, or persona file — it wins by logical name at startup.
+		<code>lastlight fork</code> (host-local) copies the built-ins you want to
+		customise into the overlay so you can edit them per-deployment, instead of
+		hand-copying files.
+	</p>
+	<pre><code>lastlight fork                        # list forkable workflows + agent-context (marks what's forked)
+lastlight fork &lt;workflow&gt;              # copy a workflow YAML + every prompt &amp; skill its phases reference
+lastlight fork agent-context [file]   # copy soul.md / rules.md / security.md (all, or one named file)
+lastlight fork classifier             # copy the base intent-classifier prompts (classifier.md + adds-info)</code></pre>
+	<p>
+		It writes into the overlay resolved from <code>--home</code> (else the cwd
+		if it's an overlay or checkout, else the server home); pass
+		<code>--force</code> to overwrite assets already present. Forked assets then
+		show up as <strong>overrides</strong> — in <code>lastlight server status</code>
+		and in the dashboard's Config → Overrides pane — each tagged "shadows
+		default" or "added".
+	</p>
+
+	<h2 id="claude-code-skills">Claude Code skills</h2>
+	<p>
+		Last Light ships a <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a>
+		plugin that teaches Claude Code to install, configure and operate Last Light
+		and Last Light Evals — ask it e.g. <em>"set up a Last Light server"</em> or
+		<em>"scaffold an evals workspace"</em>. <code>lastlight skills install</code>
+		(host-local) installs the bundled, version-matched skills: it uses the
+		<code>claude</code> plugin marketplace when present, otherwise copies the
+		skills into <code>~/.claude/skills</code>.
+	</p>
+	<pre><code>lastlight skills install              # → ~/.claude/skills (user) [--scope project] [--no-marketplace]
+lastlight skills list                 # bundled skills + where they're installed
+lastlight skills uninstall            # remove them [--scope user|project]</code></pre>
+	<p>
+		The bundle includes <code>lastlight-server</code>, <code>lastlight-client</code>,
+		<code>lastlight-overlay</code> and <code>lastlight-evals</code>. You can also
+		register the marketplace directly from a checkout:
+		<code>claude plugin marketplace add ./</code> then
+		<code>claude plugin install lastlight@lastlight-skills</code>.
+	</p>
+
+	<h2>Setup wizard</h2>
+	<pre><code>lastlight setup                       # first-run wizard — asks: client (login) or server (stack)
+lastlight setup --client              # skip the prompt: configure this machine as a client
+lastlight setup --server              # skip the prompt: run the full server config wizard</code></pre>
+
+	<h2>Global flags</h2>
+
+	<table>
+		<thead>
+			<tr><th>Flag</th><th>Applies to</th><th>Effect</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>--json</code></td><td>all read commands</td><td>Print raw JSON instead of formatted tables — for scripting / <code>jq</code>.</td></tr>
+			<tr><td><code>--url &lt;u&gt;</code></td><td>all</td><td>One-shot instance URL override (beats env + saved config).</td></tr>
+			<tr><td><code>--token &lt;t&gt;</code></td><td>all</td><td>One-shot bearer token override.</td></tr>
+			<tr><td><code>--follow</code> / <code>-f</code></td><td>workflow/session/server logs</td><td>Stream live via server-sent events until interrupted.</td></tr>
+			<tr><td><code>--full</code></td><td>session log</td><td>Raw, unformatted transcript dump (no summarization).</td></tr>
+		</tbody>
+	</table>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			The debug commands are read-only except <code>approvals approve/reject</code>
+			and the trigger commands — investigating an instance never mutates it.
+		</div>
+	</div>
+
+	<div class="docs-next">
+		<a href="/docs/observability">
+			<span class="label">← Previous</span>
+			<span class="title">Observability</span>
+		</a>
+		<span></span>
+	</div>
+</DocsLayout>

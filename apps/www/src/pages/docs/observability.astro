@@ -1,0 +1,148 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="observability"
+	description="OpenTelemetry export — what Last Light emits, how content is redacted, and how sandbox telemetry is routed safely to your collector."
+>
+	<p>
+		Last Light has first-class <a href="https://opentelemetry.io/" target="_blank" rel="noopener">OpenTelemetry</a>
+		support: distributed traces and metrics across every workflow run, phase,
+		agent execution, PI event stream, and chat turn. It's <strong>disabled by
+		default</strong> — nothing leaves the harness until you opt in.
+	</p>
+
+	<h2>Enabling it</h2>
+
+	<p>
+		Set <code>LASTLIGHT_OTEL_ENABLED=true</code> and point the standard OTLP
+		exporter env vars at your collector:
+	</p>
+
+	<pre><code>LASTLIGHT_OTEL_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-collector.example.com
+OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer &lt;token&gt;
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod</code></pre>
+
+	<p>
+		The export uses the standard OTLP/HTTP protocol, so any OTEL-compatible
+		backend works — Grafana Tempo/Mimir, Honeycomb, Datadog, Jaeger,
+		Grafana Cloud, or a self-hosted OpenTelemetry Collector. Every
+		<code>LASTLIGHT_OTEL_*</code> and <code>OTEL_*</code> variable is listed on the
+		<a href="/docs/configuration">Configuration</a> page.
+	</p>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			Setting <code>OTEL_*</code> env vars alone does <strong>not</strong> turn
+			telemetry on — <code>LASTLIGHT_OTEL_ENABLED=true</code> is the master switch.
+			This keeps a stray <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> in your
+			environment from silently shipping data.
+		</div>
+	</div>
+
+	<h2>What's exported</h2>
+
+	<p>
+		Instrumentation spans the whole execution path so you can trace a single
+		issue or PR from event to outcome:
+	</p>
+
+	<ul>
+		<li><strong>Traces</strong> — a span per workflow phase (<code>lastlight.workflow.phase</code>) and per agent execution (<code>lastlight.agent.execute</code>), tagged with the workflow name, phase, repo, issue number, model, sandbox backend, and stop reason.</li>
+		<li><strong>Metrics</strong> — execution duration, cost (USD), input/output tokens, run and error counts, dimensioned by workflow, phase, repo, model, backend, and success/stop-reason.</li>
+		<li><strong>PI event streams</strong> — the agent's own tool-use / text / error events, recorded as span events.</li>
+		<li><strong>Chat turns</strong> — each in-process Slack chat turn, alongside the same execution metrics.</li>
+	</ul>
+
+	<h2>Content redaction</h2>
+
+	<p>
+		By default Last Light exports <strong>metadata only</strong>: workflow and
+		phase names, repo, sandbox backend, model, success / stop reason, timing,
+		token counts, and cost. Prompt text, message content, tool-call arguments,
+		and tool outputs are <strong>redacted</strong>.
+	</p>
+
+	<p>
+		Set <code>LASTLIGHT_OTEL_INCLUDE_CONTENT=true</code> to include that content
+		(truncated) — useful for debugging agent behaviour, but it can export
+		sensitive data.
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>Only enable content with a trusted collector.</strong> It can put
+			source code, secrets that appear in tool output, and full prompts on the
+			wire. Auth headers (<code>OTEL_EXPORTER_OTLP_HEADERS</code>) are always
+			treated as secrets and never appear in the dashboard Config tab.
+		</div>
+	</div>
+
+	<h2>Sandbox telemetry</h2>
+
+	<p>
+		With <code>LASTLIGHT_OTEL_FORWARD_TO_SANDBOX=true</code> (the default), the
+		agent emits its own telemetry from inside each workflow sandbox too — not
+		just the harness. How that reaches your collector depends on the
+		<a href="/docs/configuration">sandbox backend</a>:
+	</p>
+
+	<h3>docker backend — in-network collector</h3>
+
+	<p>
+		Docker sandboxes run with a default-deny egress firewall, so they can't dial
+		an arbitrary collector directly. Instead, Last Light runs a small
+		OpenTelemetry Collector <em>inside</em> the sandbox network. Sandboxes export
+		to it by a fixed internal address; it re-exports to your real backend over a
+		separate, trusted outbound network:
+	</p>
+
+	<pre><code>sandbox ──OTLP──▶ in-network collector ──OTLP──▶ your backend
+              (fixed internal IP)        (trusted outbound leg)</code></pre>
+
+	<p>This design has three properties worth calling out:</p>
+
+	<ul>
+		<li><strong>Secrets stay host-side.</strong> The real backend endpoint and its auth headers live only on the collector's config (on the host). They are <strong>never</strong> forwarded into the untrusted sandbox.</li>
+		<li><strong>Any backend works.</strong> The sandbox only ever dials one fixed internal endpoint, so a collector on any port or scheme (e.g. <code>https://collector:4318</code>) just works — no egress-allowlist or firewall changes needed.</li>
+		<li><strong>No new exfil surface.</strong> The collector only ever forwards to its configured backend; sandbox traffic can't redirect where it exports, only influence the span content sent to your own backend.</li>
+	</ul>
+
+	<h3>gondolin / none backends</h3>
+
+	<p>
+		On the <code>gondolin</code> (micro-VM) and <code>none</code> backends the agent
+		runs in the harness process and already inherits the harness's OTEL setup, so
+		the allowlisted <code>OTEL_*</code> env vars are forwarded directly. The
+		<code>gondolin</code> VM additionally adds your collector hosts — parsed from
+		the endpoint vars and <code>LASTLIGHT_OTEL_COLLECTOR_HOSTS</code> — to its
+		egress allowlist. Private and cloud-metadata hosts remain blocked.
+	</p>
+
+	<p>
+		To keep all telemetry harness-only and never touch the sandbox, set
+		<code>LASTLIGHT_OTEL_FORWARD_TO_SANDBOX=false</code>.
+	</p>
+
+	<h2>Failure handling</h2>
+
+	<p>
+		If the OTEL SDK fails to initialise (bad endpoint, unreachable collector),
+		Last Light logs a warning and continues <strong>without</strong> telemetry —
+		observability never takes the harness down. Set
+		<code>LASTLIGHT_OTEL_STRICT=true</code> to make such a failure fatal at
+		startup instead, which is useful when telemetry is a hard requirement.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/configuration">
+			<span class="label">← Previous</span>
+			<span class="title">Configuration</span>
+		</a>
+		<a href="/docs/cli">
+			<span class="label">Next →</span>
+			<span class="title">CLI</span>
+		</a>
+	</div>
+</DocsLayout>

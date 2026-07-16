@@ -1,0 +1,139 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="github-app"
+	description="Step-by-step: create a GitHub App, set permissions, generate a private key, and install it on your repos."
+>
+	<p>
+		Last Light needs a GitHub App to act on your repositories. The App gives the bot
+		its own identity (<code>your-bot[bot]</code> on comments and PRs), its own set of
+		downscoped tokens, and per-repo installation control.
+	</p>
+
+	<h2>1. Create the app</h2>
+
+	<ol>
+		<li>Go to <a href="https://github.com/settings/apps/new" target="_blank" rel="noopener">github.com/settings/apps/new</a>.</li>
+		<li>
+			Fill in the basics:
+			<ul>
+				<li><strong>Name</strong> — your bot name. This is what appears on comments and PRs with a <code>[bot]</code> suffix.</li>
+				<li><strong>Homepage URL</strong> — your repo URL is fine.</li>
+				<li><strong>Webhook URL</strong> — <code>https://your-host:8644/webhooks/github</code>, or leave blank for now if you're deploying webhooks later.</li>
+				<li><strong>Webhook secret</strong> — generate a random string. This becomes <code>WEBHOOK_SECRET</code> in <code>.env</code>.</li>
+			</ul>
+		</li>
+		<li>Uncheck <strong>Active</strong> under "Webhook" if you don't yet have a public URL. You can turn it back on after deploying.</li>
+	</ol>
+
+	<h2>2. Set permissions</h2>
+
+	<p>Under <strong>Repository permissions</strong>, grant:</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr>
+				<th>Permission</th>
+				<th>Access</th>
+				<th>Why</th>
+			</tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><strong>Contents</strong></td>
+				<td>Read &amp; Write</td>
+				<td>Clone repos, push branches, open PRs.</td>
+			</tr>
+			<tr>
+				<td><strong>Issues</strong></td>
+				<td>Read &amp; Write</td>
+				<td>Triage, label, comment on issues.</td>
+			</tr>
+			<tr>
+				<td><strong>Pull Requests</strong></td>
+				<td>Read &amp; Write</td>
+				<td>Review PRs, request changes, open PRs.</td>
+			</tr>
+			<tr>
+				<td><strong>Checks</strong></td>
+				<td>Read &amp; Write</td>
+				<td>Post the <code>last-light/review</code> check on PRs and receive its "Re-run" requests.</td>
+			</tr>
+			<tr>
+				<td><strong>Metadata</strong></td>
+				<td>Read</td>
+				<td>Default — required to see repo details.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			Last Light mints <strong>downscoped installation tokens</strong> per workflow,
+			so a triage run only sees read-only tokens even though the App itself has
+			write permissions. See <a href="/how-it-works">How it works</a> for the full
+			permission-profile story.
+		</div>
+	</div>
+
+	<h2>3. Subscribe to events</h2>
+
+	<p>Under <strong>Subscribe to events</strong>, check:</p>
+
+	<ul>
+		<li><strong>Issues</strong></li>
+		<li><strong>Issue comment</strong></li>
+		<li><strong>Pull request</strong></li>
+		<li><strong>Check run</strong> — enables the "Re-run" button on the review check to re-trigger a review</li>
+		<li><strong>Check suite</strong> — enables "Re-run all checks" to re-trigger a review</li>
+		<li><strong>Pull request review</strong> (optional — currently ignored but will be used)</li>
+	</ul>
+
+	<h2>4. Install the app</h2>
+
+	<ol>
+		<li>Click <strong>Create GitHub App</strong>.</li>
+		<li>On the settings page, click <strong>Generate a private key</strong> and save the <code>.pem</code> file — you will need it in a moment.</li>
+		<li>Note the <strong>App ID</strong> at the top of the settings page.</li>
+		<li>In the left sidebar click <strong>Install App</strong>, then install it on the repositories you want Last Light to manage.</li>
+		<li>After installing, the URL will be <code>github.com/settings/installations/<em>12345678</em></code> — copy that ID. That's your <strong>Installation ID</strong>.</li>
+	</ol>
+
+	<h2>5. Collect the four values</h2>
+
+	<p>At this point you should have:</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr>
+				<th>Value</th>
+				<th>Env var</th>
+			</tr>
+		</thead>
+		<tbody>
+			<tr><td>App ID</td><td><code>GITHUB_APP_ID</code></td></tr>
+			<tr><td>Installation ID</td><td><code>GITHUB_APP_INSTALLATION_ID</code></td></tr>
+			<tr><td>Path to the <code>.pem</code> you saved</td><td><code>GITHUB_APP_PRIVATE_KEY_PATH</code></td></tr>
+			<tr><td>Webhook secret you generated</td><td><code>WEBHOOK_SECRET</code></td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		Keep the <code>.pem</code> file somewhere safe. In local dev, drop it into the
+		project root and reference it with a relative path. In production, it lives inside
+		<code>secrets/</code> — see the <a href="/docs/production">Production deploy</a>
+		page.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/prerequisites">
+			<span class="label">← Previous</span>
+			<span class="title">Prerequisites</span>
+		</a>
+		<a href="/docs/local-dev" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Run it locally</span>
+		</a>
+	</div>
+</DocsLayout>

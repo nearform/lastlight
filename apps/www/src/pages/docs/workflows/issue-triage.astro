@@ -1,0 +1,79 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/issue-triage"
+	description="The issue triage workflow — automatically classifies, labels, and responds to new GitHub issues."
+>
+	<p>
+		Issue triage is a single-phase workflow that reads a new or reopened issue,
+		classifies it, applies appropriate labels, and responds — chasing missing
+		info on incomplete reports and deduplicating against existing issues.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>issues-write</code> — can read
+			repo contents and create/edit issues and comments.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Triage</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">classify, label, respond</text>
+		</svg>
+	</div>
+
+	<h2>What it does</h2>
+
+	<ul>
+		<li>Reads the issue title, body, and any prior comments</li>
+		<li>Classifies the issue type (bug, feature, question, etc.)</li>
+		<li>Applies appropriate labels</li>
+		<li>Checks for duplicates against open issues</li>
+		<li>Responds to the issue — asks for more info if the report is incomplete</li>
+	</ul>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub webhook:</strong> <code>issue.opened</code> and <code>issue.reopened</code> events</li>
+		<li><strong>Cron fallback:</strong> Every 15 minutes (only when webhooks are not configured)</li>
+		<li><strong>Slack:</strong> <code>triage cliftonc/repo</code></li>
+		<li><strong>CLI:</strong> <code>npm run cli -- owner/repo#N</code></li>
+	</ul>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/explore" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Explore workflow</span>
+		</a>
+		<a href="/docs/workflows/issue-comment" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Issue comment</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

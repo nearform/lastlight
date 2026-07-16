@@ -1,0 +1,78 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="introduction"
+	description="What Last Light is, what it does, and when to use it."
+>
+	<p>
+		Last Light is a self-hostable, MIT-licensed AI coding agent for GitHub. It sits in front of
+		one or more repositories, listens for events, and runs an AI agent against them to
+		triage issues, review pull requests, respond to comments, and — when you ask — build
+		features end-to-end through an Architect → Executor → Reviewer cycle. It runs on your
+		own infrastructure, under your own model keys — no SaaS in the loop.
+	</p>
+
+	<p>
+		It is built on <a href="https://github.com/nearform/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>
+		— it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports
+		(Claude, GPT, Gemini, Llama, and more; default <code>anthropic/claude-sonnet-4-6</code>) with a lightweight TypeScript harness that
+		handles webhook ingestion, Slack messaging, cron scheduling, sandbox isolation, and an
+		admin dashboard. Every piece of non-trivial behavior is expressed as a
+		<strong>YAML workflow</strong> — the harness itself knows nothing about "build" or
+		"triage" specifically; it just executes the phases a workflow declares.
+	</p>
+
+	<h2>What it does out of the box</h2>
+
+	<ul>
+		<li><strong>Triages new issues</strong> — labels, deduplicates, chases missing info.</li>
+		<li><strong>Reviews pull requests</strong> — posts severity-ranked feedback with file:line references.</li>
+		<li><strong>Builds features on request</strong> — Architect plans, Executor implements, Reviewer verifies, fix-feedback loops, PR opened.</li>
+		<li><strong>Writes weekly health reports</strong> — open/stale issues, PR velocity, action items.</li>
+		<li><strong>Talks to you on Slack</strong> — per-thread conversation, DB-backed session history.</li>
+		<li><strong>Gives you a dashboard</strong> — live activity, pipeline DAGs, full session drill-down.</li>
+	</ul>
+
+	<h2>Who it's for</h2>
+
+	<p>
+		Last Light is for teams and individuals who want an AI coding agent they fully own —
+		from solo maintainers keeping libraries and side projects healthy, to enterprises that
+		need every issue, review, and build to run inside their own perimeter. Self-hosted,
+		MIT-licensed, and always on: it keeps working for you after dark.
+	</p>
+
+	<p>
+		It runs as a single container you deploy somewhere you control. There is no SaaS —
+		you own the webhook endpoint, the Docker volume, and the audit trail.
+	</p>
+
+	<h2>How this documentation is organized</h2>
+
+	<ul>
+		<li><strong><a href="/docs/quickstart">Quick start with Claude</a></strong> is the fastest path — install the bundled Claude Code skills and let Claude stand the whole stack up for you.</li>
+		<li><strong>Getting Started</strong> walks you through prerequisites, creating a GitHub App, running locally, deploying to production, and wiring up Slack — the by-hand route.</li>
+		<li><strong>Reference</strong> documents every environment variable the harness reads.</li>
+	</ul>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Want the architecture story first?</strong> Read
+			<a href="/how-it-works">How it works</a> for the narrative on EventEnvelope,
+			the YAML workflow engine, phases, execution modes, permission profiles, and
+			approval gates.
+		</div>
+	</div>
+
+	<div class="docs-next">
+		<a href="/docs/quickstart" class="prev">
+			<span class="label">← Previous</span>
+			<span class="title">Quick start with Claude</span>
+		</a>
+		<a href="/docs/prerequisites" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Prerequisites</span>
+		</a>
+	</div>
+</DocsLayout>

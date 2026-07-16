@@ -1,0 +1,94 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/qa-test"
+	description="The qa-test workflow — drives a CLI or locally-served app through a flow in the sandbox and reports step-level pass/fail with evidence."
+>
+	<p>
+		The qa-test workflow drives a <strong>flow</strong>. Given a CLI command or
+		a locally-served app and a sequence of steps, it installs and runs the code
+		in the sandbox, exercises each step, and reports <strong>step-level
+		pass/fail</strong> with evidence. It never modifies code.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>issues-write</code> — can read
+			repo contents and post a QA report comment; it never pushes code.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">QA Test</text>
+			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">run flow + report steps</text>
+		</svg>
+	</div>
+
+	<h2>What it does</h2>
+
+	<ul>
+		<li>Defines the test steps (from the request, or inferred from a PR's diff) and their success criteria</li>
+		<li>Installs and runs the code, then exercises each step — a CLI directly, or a web service via its dev-server and <code>curl</code></li>
+		<li>Records each step PASS / FAIL / BLOCKED with evidence (command, stdout/stderr, exit code)</li>
+		<li>Continues past a failure for maximum coverage — unless a step blocks everything downstream</li>
+		<li>Posts a structured report: a results table, issues found, and what wasn't covered</li>
+	</ul>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>Text evidence by default, screenshots when available.</strong> The
+			text phase uses bash, file read, and the GitHub tools — no browser. On a
+			Docker host with the browser-QA image built, a second gated phase drives the
+			locally-served app in a real headless Chromium and posts step-level
+			screenshot evidence on top of the text report; everywhere else that phase is
+			silently skipped and a rendered-UI step is marked <code>BLOCKED</code>.
+		</div>
+	</div>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub:</strong> a maintainer comment <code>@last-light qa-test &lt;target&gt; [-- steps]</code> on an issue or PR, or a natural-language request the classifier reads as a qa-test intent ("run through the signup flow and tell me what breaks")</li>
+		<li><strong>Slack:</strong> a message classified as a qa-test intent against a managed repo</li>
+		<li><strong>CLI:</strong> <code>lastlight qa-test owner/repo#N -- "&lt;steps&gt;"</code></li>
+	</ul>
+
+	<h2>Skills</h2>
+
+	<p>This workflow uses the <code>qa-test</code> skill (the flow procedure and report shape) plus the <code>building</code> skill (install + run the repo). The gated browser phase additionally uses the <code>browser-qa</code> skill (a bundled Playwright driver) to drive the UI and capture screenshot evidence.</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/verify" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Verify</span>
+		</a>
+		<a href="/docs/workflows/demo" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Demo</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 200px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>

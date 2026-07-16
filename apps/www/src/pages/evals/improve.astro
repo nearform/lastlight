@@ -1,0 +1,132 @@
+---
+import EvalsLayout from '../../layouts/EvalsLayout.astro';
+---
+<EvalsLayout
+	slug="improve"
+	description="Drive an eval toward a target score without gaming it: mine the train-split failures, propose a few minimal fixes, and keep the one that holds up on a blind held-out split. The lastlight-evals-loop skill runs the loop; the honesty guardrails keep the fixes real."
+>
+	<p>
+		Running an eval tells you a score. The <strong>improvement loop</strong> raises
+		it — mine the failures, propose a few minimal fixes, re-measure, keep the best or
+		revert, repeat — until you hit a target or plateau. It's driven by the
+		<code>lastlight-evals-loop</code> skill (say <em>"raise the pr-review F1"</em>),
+		and it's built to do this <strong>without gaming the eval</strong>.
+	</p>
+
+	<p>
+		The method — <strong>mine weaknesses → propose a few minimal candidates → keep the
+		one that survives a blind held-out gate</strong> — follows
+		<a href="https://arxiv.org/abs/2606.09498" rel="noopener"><em>Self-Harness: Harnesses
+		That Improve Themselves</em></a>, adapted to keep the anti-gaming guardrails below.
+		The key adaptation: because this loop can <em>see</em> the gold answers, it ranks
+		candidates on the train split and confirms only the winner on held-out — once — so
+		screening many candidates can't quietly overfit the blind set.
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>The trap this avoids.</strong> The loop can see both the gold answer and
+			the agent's answer for every case, so the lazy path is to overfit — hardcode a
+			repo's finding into a prompt, or edit a gold answer to force a pass. That lifts
+			the number and ruins the reviewer. Every guardrail below exists to force
+			<strong>generic, cross-cutting</strong> changes that would help on repos the loop
+			has never seen.
+		</div>
+	</div>
+
+	<p>
+		Scope today is the <a href="/evals/pr-review">pr-review</a> tier — its judge trace
+		gives the agent-vs-gold detail that diagnosis needs (which real findings were
+		missed, which posted findings were noise). The pattern extends to triage and
+		code-fix.
+	</p>
+
+	<h2>The one rule: one change kept per round</h2>
+
+	<p>
+		A round may <em>explore</em> a few minimal candidates, but at most one is ever kept
+		and committed to the overlay — the rest are reverted. So which edit moved the number
+		is always attributable, and no overfit edit rides along with a good one. Candidates
+		are measured each on their own branch, and the blind held-out set is spent
+		<strong>once per round</strong>, never once per candidate.
+	</p>
+
+	<h2>The loop</h2>
+
+	<ol>
+		<li><strong>Split</strong> the tier's cases into a <strong>train</strong> set (you diagnose on these — traces visible) and a <strong>held-out</strong> set (blind — you never read its traces; only its aggregate F1 gates a keep). Fixed for the whole loop.</li>
+		<li><strong>Baseline</strong> — run both splits, record F1 for each.</li>
+		<li><strong>Diagnose (mine)</strong> the train failures with <code>mine-failures.ts</code>: it clusters missed real issues (false negatives → recall loss, weighted by severity) and noise (false positives → precision loss) into a <strong>ranked signature bundle</strong>, so you target the <em>systematic</em> pattern with the most headroom, not a one-off.</li>
+		<li><strong>Propose</strong> a few (2–4) minimal, diverse candidate fixes for the top pattern, each at the lowest lever that could move the whole cluster (below).</li>
+		<li><strong>Audit</strong> each (below) — reject anything case-specific or answer-leaking.</li>
+		<li><strong>Rank on train, confirm on held-out once</strong> — pick the best candidate by its train lift, then give that one winner a single blind held-out check. Keep it only if train improves <em>and</em> held-out doesn't regress; revert the rest.</li>
+		<li><strong>Journal</strong> the pattern, every candidate's delta, the winner, and the decision. Repeat until the target or a plateau.</li>
+	</ol>
+
+	<h2>What keeps it honest</h2>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Guardrail</th><th>What it prevents</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><strong>Held-out split</strong></td><td>The empirical anti-overfit gate. A change is kept only if train improves <em>and</em> the blind held-out set doesn't regress. A train gain with a held-out drop is overfitting → revert.</td></tr>
+			<tr><td><strong>Generality auditor</strong></td><td>An adversarial sub-agent rejects any prompt/skill edit that names a specific repo, instance, or file — a fix must apply to any repo.</td></tr>
+			<tr><td><strong>No-gold-leak auditor</strong></td><td>Injected repo context must read as plausible maintainer guidance written <em>without</em> knowledge of this PR's bug — never "look for finding X". This is the key check for the context lever.</td></tr>
+			<tr><td><strong>Lever ladder + sign-off</strong></td><td>Generic edits auto-apply; the game-able levers (per-repo context, gold edits) stop for human sign-off. Gold is edited only when it's demonstrably wrong — never to force a pass.</td></tr>
+			<tr><td><strong>Never touch core</strong></td><td>Changes live in the overlay and, with sign-off, the dataset — the <em>real</em> workflow always runs unmodified.</td></tr>
+		</tbody>
+	</table>
+
+	<h2>The three levers</h2>
+
+	<p>Every change lands in one of three places, preferred lowest-first:</p>
+
+	<ol>
+		<li><strong>Prompts / skills / persona</strong> <em>(generic — auto)</em> — the reviewer's rubric, precision bar, or what-to-check list, edited in the overlay so it applies to every repo. The highest-leverage lever, and the default.</li>
+		<li><strong>Repo context</strong> <em>(portable — signed off)</em> — a synthetic <code>AGENTS.md</code> the harness <a href="/evals/pr-review">injects into the checkout</a>. A generic block helps every repo; a per-repo block is the <em>"add this to your repo"</em> recommendation.</li>
+		<li><strong>The eval itself</strong> <em>(rare — signed off)</em> — fixing a <code>review_gold</code> entry, only when the gold is demonstrably wrong or incomplete, with the evidence named.</li>
+	</ol>
+
+	<h2>Measuring a change</h2>
+
+	<p>
+		Two read-only helpers back the loop. <code>mine-failures.ts</code> turns a train
+		scorecard into the ranked failure-signature bundle you diagnose from.
+		<code>diff-runs.ts</code> diffs two scorecards — per-case F1 before → after, the arm
+		summary delta, and, given the train / held-out id lists, the
+		<strong>keep-or-revert verdict</strong>: keep only when train improved and held-out
+		held. Both read only the ids you pass, so the held-out split stays blind.
+	</p>
+
+	<pre><code># Diagnose: rank the train-split failures by impact.
+npx tsx scripts/mine-failures.ts &lt;train-scorecard&gt;.json --train &lt;train-ids&gt; --keywords
+
+# Decide: the keep-or-revert verdict for the winning candidate.
+npx tsx scripts/diff-runs.ts &lt;baseline&gt;.json &lt;candidate&gt;.json \
+    --train &lt;train-ids&gt; --heldout &lt;heldout-ids&gt;
+
+# → per-case deltas, arm summary, and:
+# VERDICT: KEEP — train ↑ and held-out held  (or)  REVERT — OVERFIT: train ↑ but held-out regressed
+# --symmetric swaps in the non-regressive gate: neither split may regress, one must improve.</code></pre>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			The loop produces two kinds of durable output: <strong>workflow improvements</strong>
+			(better prompts/skills for every repo) and <strong>per-repo recommendations</strong>
+			(context a maintainer can commit). Both are backed by a measured, held-out lift —
+			not a number that only looks good on the cases you tuned against.
+		</div>
+	</div>
+
+	<div class="docs-next">
+		<a class="prev" href="/evals/pr-review">
+			<span class="label">← Previous</span>
+			<span class="title">PR review</span>
+		</a>
+		<a class="next" href="/evals/dashboard">
+			<span class="label">Next →</span>
+			<span class="title">The dashboard</span>
+		</a>
+	</div>
+</EvalsLayout>
