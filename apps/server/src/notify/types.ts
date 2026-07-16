@@ -13,24 +13,12 @@
  * shared.
  */
 
-/** Lifecycle state of a single checklist step. */
-export type StepStatus =
-  | "pending"
-  | "running"
-  | "done"
-  | "blocked"
-  | "awaiting"
-  | "failed"
-  | "skipped";
-
-/** One row in the task list. `key` is stable; `label` is what humans see. */
-export interface ProgressStep {
-  key: string;
-  label: string;
-  status: StepStatus;
-  /** Optional one-line context shown after the label (e.g. a link or status). */
-  detail?: string;
-}
+// StepStatus + ProgressStep are the workflow engine's reporting vocabulary now
+// (`workflow-engine/ports/ports.ts`); import for in-file use + re-export so this
+// module's renderer + transport code (and every existing importer) resolves them
+// here unchanged.
+import type { StepStatus, ProgressStep } from "../workflow-engine/ports/ports.js";
+export type { StepStatus, ProgressStep };
 
 /** Metadata carried alongside an interactive approval prompt. */
 export interface ApprovalNoteMeta {

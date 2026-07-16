@@ -17,14 +17,10 @@ vi.mock("#src/workflows/loader.js", () => ({
   resolveSkillPaths: vi.fn(() => undefined),
 }));
 
-import {
-  PhaseExecutor,
-  type PhaseReporter,
-  type PhaseResolver,
-  type PhaseRunContext,
-} from "#src/workflows/phase-executor.js";
+import { GitHubPostReviewHandler, type PostReviewRunScope } from "#src/workflows/handlers/post-review.js";
+import type { PhaseReporter } from "#src/workflow-engine/ports/ports.js";
 import type { TemplateContext } from "#src/workflows/templates.js";
-import type { AgentWorkflowDefinition } from "#src/workflows/schema.js";
+import type { AgentWorkflowDefinition, PhaseDefinition } from "#src/workflows/schema.js";
 import type { DagNode } from "#src/workflows/dag.js";
 
 /**
@@ -79,16 +75,11 @@ function makeReporter() {
     postNote: vi.fn(async () => {}),
     persistPhase: vi.fn(() => {}),
     failWorkflow: vi.fn((e?: string) => { failed.push(e ?? ""); }),
+    footer: vi.fn(async () => {}),
+    noteTerminal: vi.fn(async () => {}),
   };
   return { reporter, failed, doneSteps };
 }
-
-const RESOLVER: PhaseResolver = {
-  modelFor: () => undefined,
-  variantFor: () => undefined,
-  renderPrompt: () => "",
-  gateEnabled: () => false,
-};
 
 const DEFINITION = {
   name: "pr-review",
@@ -96,6 +87,7 @@ const DEFINITION = {
   phases: [{ name: "post-review", type: "post-review" }],
 } as unknown as AgentWorkflowDefinition;
 
+const PHASE = DEFINITION.phases[0] as PhaseDefinition;
 const NODE: DagNode = { name: "post-review", status: "pending", depends_on: [] } as unknown as DagNode;
 
 describe("post-review action (runPostReview)", () => {
@@ -146,17 +138,16 @@ describe("post-review action (runPostReview)", () => {
       bootstrapLabel: "x",
       ...ctxOverrides,
     };
-    const run: PhaseRunContext = {
-      definition: DEFINITION,
+    const run: PostReviewRunScope = {
       ctx,
-      config: { githubApiBaseUrl: baseUrl, sandboxDir: join(stateDir, "sandboxes"), stateDir } as unknown as PhaseRunContext["config"],
+      config: { githubApiBaseUrl: baseUrl, sandboxDir: join(stateDir, "sandboxes"), stateDir } as unknown as PostReviewRunScope["config"],
       taskId,
-      triggerId: "acme/widget#42",
-      githubAccess: { owner: "acme", repo: "widget", profile: "review-write" } as PhaseRunContext["githubAccess"],
-      scratch: {},
     };
     const rep = makeReporter();
-    return { executor: new PhaseExecutor(run, rep.reporter, RESOLVER), rep };
+    const handler = new GitHubPostReviewHandler(run, rep.reporter);
+    // Wrap so existing call sites keep using `executor.execute(NODE, {})` — the
+    // handler's execute takes the phase, which is constant for this suite.
+    return { executor: { execute: (node: DagNode, outputs: Record<string, unknown>) => handler.execute(PHASE, node, outputs) }, rep };
   }
 
   it("posts a review from content-only findings (no pr_number/base_ref/head_sha)", async () => {

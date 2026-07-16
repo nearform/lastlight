@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "#src/workflows/schema.js";
 import type { TemplateContext } from "#src/workflows/templates.js";
-import type { StateDb } from "#src/state/db.js";
 import type { DagNode } from "#src/workflows/dag.js";
 import type { PhaseResult } from "#src/workflows/runner.js";
 
@@ -21,6 +20,7 @@ vi.mock("child_process", () => ({ execSync: vi.fn() }));
 
 import { executeAgent, executeCommand } from "#src/engine/agent-executor.js";
 import { listRunningContainers } from "#src/admin/docker.js";
+import { loadPromptTemplate, resolveSkillPaths } from "#src/workflows/loader.js";
 import {
   PhaseExecutor,
   isSoftOutcome,
@@ -28,9 +28,37 @@ import {
   type PhaseResolver,
   type PhaseRunContext,
 } from "#src/workflows/phase-executor.js";
+import type { EnginePorts, WorkflowStateStore } from "#src/workflow-engine/ports/ports.js";
 
 const mockExecuteAgent = vi.mocked(executeAgent);
 const mockExecuteCommand = vi.mocked(executeCommand);
+
+// Engine ports that delegate to the module-mocked app functions above, so the
+// existing `mockExecuteAgent` / loader / docker assertions keep working while
+// the executor drives everything through the injected seams.
+const testPorts: EnginePorts = {
+  agent: {
+    runAgent: (prompt, config, opts) => executeAgent(prompt, config, opts),
+    runCommand: (spec, config, opts) => executeCommand(spec, config, opts),
+  },
+  assets: {
+    loadPromptTemplate: (p) => loadPromptTemplate(p),
+    resolveSkillPaths: ((n) => resolveSkillPaths(n)) as EnginePorts["assets"]["resolveSkillPaths"],
+  },
+  liveness: {
+    isPhaseContainerAlive: async (taskId) => (await listRunningContainers()).some((c) => c.taskId === taskId),
+  },
+  observability: {
+    withSpan: (_name, _attrs, fn) => Promise.resolve(fn(undefined)),
+    recordExecutionMetrics: () => {},
+    recordError: () => {},
+  },
+};
+
+/** Construct a PhaseExecutor with the delegating test ports injected. */
+function makeExecutor(run: PhaseRunContext, reporter: PhaseReporter, resolver: PhaseResolver): PhaseExecutor {
+  return new PhaseExecutor(run, reporter, resolver, testPorts);
+}
 
 const BASE_CTX: TemplateContext = {
   owner: "acme",
@@ -96,6 +124,8 @@ function makeReporter(): PhaseReporter & { steps: RecordedStep[]; notes: string[
     failWorkflow: vi.fn((err) => {
       failed.push(err ?? "");
     }),
+    footer: vi.fn(async () => {}),
+    noteTerminal: vi.fn(async () => {}),
   };
 }
 
@@ -109,7 +139,7 @@ function makeResolver(overrides: Partial<PhaseResolver> = {}): PhaseResolver {
   };
 }
 
-function makeRun(definition: AgentWorkflowDefinition, db?: StateDb, scratch: Record<string, unknown> = {}): PhaseRunContext {
+function makeRun(definition: AgentWorkflowDefinition, db?: WorkflowStateStore, scratch: Record<string, unknown> = {}): PhaseRunContext {
   return {
     definition,
     ctx: { ...BASE_CTX },
@@ -118,8 +148,9 @@ function makeRun(definition: AgentWorkflowDefinition, db?: StateDb, scratch: Rec
     triggerId: "acme/widget#42",
     githubAccess: { owner: "acme", repo: "widget", profile: "read", allowMcpAppAuth: false } as never,
     scratch,
-    db,
+    store: db,
     workflowId: db ? "wf-1" : undefined,
+    botName: "last-light",
   };
 }
 
@@ -127,7 +158,7 @@ function node(name: string, depends_on: string[] = []): DagNode {
   return { name, depends_on, status: "pending", trigger_rule: "all_success" };
 }
 
-function makeMockDb(): StateDb {
+function makeMockDb(): WorkflowStateStore {
   return {
     runs: {
       getRun: vi.fn(() => ({ currentPhase: "phase_0", phaseHistory: [], status: "running", scratch: {} })),
@@ -153,7 +184,7 @@ function makeMockDb(): StateDb {
       markStaleAsFailed: vi.fn(),
       markLatestAsFailed: vi.fn(),
     },
-  } as unknown as StateDb;
+  } as unknown as WorkflowStateStore;
 }
 
 function makePhase(p: Partial<PhaseDefinition> & { name: string }): PhaseDefinition {
@@ -172,7 +203,7 @@ describe("PhaseExecutor — context phase", () => {
       phases: [makePhase({ name: "phase_0", type: "context" })],
     };
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(def), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(def), reporter, makeResolver());
 
     const outcome = await exec.execute(node("phase_0"), {});
 
@@ -194,7 +225,7 @@ describe("PhaseExecutor — standard agent phase", () => {
 
   it("runs the agent and exposes output under phase name + output_var", async () => {
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("the plan"));
-    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("architect"), {});
 
@@ -223,7 +254,7 @@ describe("PhaseExecutor — standard agent phase", () => {
     };
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("the full answer text"));
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(successDef), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(successDef), reporter, makeResolver());
 
     await exec.execute(node("answer"), {});
 
@@ -244,7 +275,7 @@ describe("PhaseExecutor — standard agent phase", () => {
       phases: [makePhase({ name: "review", skills: ["pr-review", "building", "code-review"] })],
     };
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("reviewed"));
-    const exec = new PhaseExecutor(makeRun(skillsDef), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(skillsDef), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("review"), {});
 
@@ -256,7 +287,7 @@ describe("PhaseExecutor — standard agent phase", () => {
   it("returns status=failed and fails the workflow when the agent fails", async () => {
     mockExecuteAgent.mockResolvedValue(makeFailResult("kaboom"));
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(def), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(def), reporter, makeResolver());
 
     const outcome = await exec.execute(node("architect"), {});
 
@@ -268,7 +299,7 @@ describe("PhaseExecutor — standard agent phase", () => {
   it("does NOT report a failed step for terminated (OOM/cancel) errors", async () => {
     mockExecuteAgent.mockResolvedValue(makeFailResult("container is not running"));
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(def), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(def), reporter, makeResolver());
 
     const outcome = await exec.execute(node("architect"), {});
 
@@ -280,7 +311,7 @@ describe("PhaseExecutor — standard agent phase", () => {
     const db = makeMockDb();
     vi.mocked(db.executions.shouldRunPhase).mockReturnValue("running");
     vi.mocked(listRunningContainers).mockResolvedValueOnce([{ taskId: "widget-42" }] as never);
-    const exec = new PhaseExecutor(makeRun(def, db), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def, db), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("architect"), {});
 
@@ -293,7 +324,7 @@ describe("PhaseExecutor — standard agent phase", () => {
     const db = makeMockDb();
     vi.mocked(db.executions.shouldRunPhase).mockReturnValue("done");
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(def, db), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(def, db), reporter, makeResolver());
 
     const outcome = await exec.execute(node("architect"), {});
 
@@ -323,7 +354,7 @@ describe("PhaseExecutor — on_output BLOCKED", () => {
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("BLOCKED — no tests"));
     const reporter = makeReporter();
     const db = makeMockDb();
-    const exec = new PhaseExecutor(makeRun(def, db), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(def, db), reporter, makeResolver());
 
     const outcome = await exec.execute(node("guardrails"), {});
 
@@ -337,7 +368,7 @@ describe("PhaseExecutor — on_output BLOCKED", () => {
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("BLOCKED — no tests"));
     const run = makeRun(def, makeMockDb());
     run.ctx.issueLabels = ["lastlight:bootstrap"];
-    const exec = new PhaseExecutor(run, makeReporter(), makeResolver());
+    const exec = makeExecutor(run, makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("guardrails"), {});
 
@@ -355,7 +386,7 @@ describe("PhaseExecutor — approval gate", () => {
   it("pauses when the gate is enabled", async () => {
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("plan"));
     const db = makeMockDb();
-    const exec = new PhaseExecutor(
+    const exec = makeExecutor(
       makeRun(def, db),
       makeReporter(),
       makeResolver({ gateEnabled: (g?: string) => g === "post_architect" }),
@@ -372,7 +403,7 @@ describe("PhaseExecutor — approval gate", () => {
   it("does not pause when the gate is disabled", async () => {
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("plan"));
     const db = makeMockDb();
-    const exec = new PhaseExecutor(makeRun(def, db), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def, db), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("architect"), {});
 
@@ -400,7 +431,7 @@ describe("PhaseExecutor — reviewer loop", () => {
 
   it("approves on first review — no fix cycle", async () => {
     mockExecuteAgent.mockResolvedValue(makeSuccessResult("VERDICT: APPROVED"));
-    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("reviewer"), {});
 
@@ -414,7 +445,7 @@ describe("PhaseExecutor — reviewer loop", () => {
       .mockResolvedValueOnce(makeSuccessResult("VERDICT: REQUEST_CHANGES"))
       .mockResolvedValueOnce(makeSuccessResult("fixed"))
       .mockResolvedValueOnce(makeSuccessResult("VERDICT: APPROVED"));
-    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("reviewer"), {});
 
@@ -441,7 +472,7 @@ describe("PhaseExecutor — reviewer loop", () => {
       ],
     };
     const db = makeMockDb();
-    const exec = new PhaseExecutor(
+    const exec = makeExecutor(
       makeRun(loopDef, db),
       makeReporter(),
       makeResolver({ gateEnabled: (g?: string) => g === "post_reviewer" }),
@@ -486,7 +517,7 @@ describe("PhaseExecutor — reviewer loop", () => {
       .mockResolvedValueOnce(makeSuccessResult("fixed"))
       .mockResolvedValueOnce(makeSuccessResult("VERDICT: APPROVED"));
 
-    const exec = new PhaseExecutor(
+    const exec = makeExecutor(
       makeRun(loopDef, db, { "rloop:reviewer": { pausedAtCycle: 1 } }),
       makeReporter(),
       makeResolver({ gateEnabled: (g?: string) => g === "post_reviewer" }),
@@ -526,7 +557,7 @@ describe("PhaseExecutor — generic loop", () => {
     mockExecuteAgent
       .mockResolvedValueOnce(makeSuccessResult("still going"))
       .mockResolvedValueOnce(makeSuccessResult("all DONE"));
-    const exec = new PhaseExecutor(makeRun(def, makeMockDb()), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def, makeMockDb()), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("worker"), {});
 
@@ -538,7 +569,7 @@ describe("PhaseExecutor — generic loop", () => {
   it("fails the workflow when an iteration agent fails", async () => {
     mockExecuteAgent.mockResolvedValue(makeFailResult("iter boom"));
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(def, makeMockDb()), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(def, makeMockDb()), reporter, makeResolver());
 
     const outcome = await exec.execute(node("worker"), {});
 
@@ -571,7 +602,7 @@ describe("PhaseExecutor — generic loop", () => {
       .mockResolvedValueOnce(makeSoftResult())
       .mockResolvedValueOnce(makeSuccessResult("all DONE"));
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(softDef("complete"), makeMockDb()), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(softDef("complete"), makeMockDb()), reporter, makeResolver());
 
     const outcome = await exec.execute(node("worker"), {});
 
@@ -583,7 +614,7 @@ describe("PhaseExecutor — generic loop", () => {
   it("advances (then: complete) when a soft iteration persists after the retry", async () => {
     mockExecuteAgent.mockResolvedValue(makeSoftResult());
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(softDef("complete"), makeMockDb()), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(softDef("complete"), makeMockDb()), reporter, makeResolver());
 
     const outcome = await exec.execute(node("worker"), {});
 
@@ -598,7 +629,7 @@ describe("PhaseExecutor — generic loop", () => {
   it("still hard-fails a real crash even with on_soft_failure set", async () => {
     mockExecuteAgent.mockResolvedValue({ ...makeFailResult("fatal boom"), stopReason: "error_fatal" });
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(softDef("complete"), makeMockDb()), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(softDef("complete"), makeMockDb()), reporter, makeResolver());
 
     const outcome = await exec.execute(node("worker"), {});
 
@@ -610,7 +641,7 @@ describe("PhaseExecutor — generic loop", () => {
   it("hard-fails a persistent soft iteration when then: fail (default policy)", async () => {
     mockExecuteAgent.mockResolvedValue(makeSoftResult("nothing to add"));
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(softDef("fail"), makeMockDb()), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(softDef("fail"), makeMockDb()), reporter, makeResolver());
 
     const outcome = await exec.execute(node("worker"), {});
 
@@ -640,7 +671,7 @@ describe("PhaseExecutor — generic loop", () => {
     };
     const db = makeMockDb();
     mockExecuteAgent.mockResolvedValue(makeSoftResult());
-    const exec = new PhaseExecutor(makeRun(replyDef, db), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(replyDef, db), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("worker"), {});
 
@@ -678,7 +709,7 @@ describe("PhaseExecutor — bash / script phase", () => {
       name: "wf",
       phases: [makePhase({ name: "emit", type: "bash", command: "echo hi there", output_var: "greeting" })],
     };
-    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def), makeReporter(), makeResolver());
 
     const outcome = await exec.execute(node("emit"), {});
 
@@ -697,7 +728,7 @@ describe("PhaseExecutor — bash / script phase", () => {
       name: "wf",
       phases: [makePhase({ name: "consume", type: "bash", command: "echo {{phaseOutputs.emit}}" })],
     };
-    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def), makeReporter(), makeResolver());
 
     await exec.execute(node("consume"), { emit: "from-upstream" });
 
@@ -716,7 +747,7 @@ describe("PhaseExecutor — bash / script phase", () => {
       phases: [makePhase({ name: "boom", type: "bash", command: "exit 3" })],
     };
     const reporter = makeReporter();
-    const exec = new PhaseExecutor(makeRun(def), reporter, makeResolver());
+    const exec = makeExecutor(makeRun(def), reporter, makeResolver());
 
     const outcome = await exec.execute(node("boom"), {});
 
@@ -731,7 +762,7 @@ describe("PhaseExecutor — bash / script phase", () => {
       name: "wf",
       phases: [makePhase({ name: "calc-it", type: "script", runtime: "python", script: "print(6*7)" })],
     };
-    const exec = new PhaseExecutor(makeRun(def), makeReporter(), makeResolver());
+    const exec = makeExecutor(makeRun(def), makeReporter(), makeResolver());
 
     await exec.execute(node("calc-it"), {});
 
