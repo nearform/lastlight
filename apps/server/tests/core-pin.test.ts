@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readCorePin, pickTagCommit } from "#src/config/core-pin.js";
+import { readCorePin, pickTagCommit } from "@lastlight/shared/core-pin";
 
 /** Make a throwaway overlay dir with the given config.yaml body (or none). */
 function overlay(body?: string): string {

@@ -19,7 +19,7 @@ import {
 import { authMiddleware, createToken, verifyTokenForRefresh, decodeToken } from "./auth.js";
 import { Cron } from "croner";
 import type { CronScheduler } from "../cron/scheduler.js";
-import { enumerateOverlayAssets } from "../config/overlay-assets.js";
+import { enumerateOverlayAssets } from "@lastlight/shared/overlay-assets";
 import {
   getCronWorkflows,
   getWorkflow,

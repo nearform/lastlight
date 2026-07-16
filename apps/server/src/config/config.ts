@@ -66,18 +66,12 @@ export interface VariantConfig {
 // keeps resolving unchanged.
 export type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "@lastlight/workflow-engine";
 
-export interface DisabledConfig {
-  workflows: string[];
-  crons: string[];
-  prompts: string[];
-  skills: string[];
-  agentContext: string[];
-}
-
-export interface RouteConfig {
-  github: Record<string, string>;
-  slack: Record<string, string>;
-}
+// DisabledConfig / RouteConfig moved into `@lastlight/shared` (the workflow
+// loader — which lives there now — needs them, and shared must never depend
+// back on core; locked decision 11). Imported for in-file use and re-exported
+// so every existing `../config/config.js` importer keeps resolving unchanged.
+import type { DisabledConfig, RouteConfig } from "@lastlight/shared/config-types";
+export type { DisabledConfig, RouteConfig } from "@lastlight/shared/config-types";
 
 export interface PublicConfigBundle {
   default: Record<string, unknown>;

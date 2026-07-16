@@ -11,12 +11,12 @@ import {
   resolveAuthFile,
   resolveOAuthApiKey,
   saveAuthMap,
-} from "../../src/engine/oauth.js";
+} from "@lastlight/shared/oauth";
 import {
   OAUTH_PROVIDERS,
   oauthProviderById,
   oauthProviderByModelPrefix,
-} from "../../src/providers.js";
+} from "@lastlight/shared/providers";
 
 describe("providers: OAuth registry", () => {
   it("registers exactly Codex, Anthropic, and Copilot", () => {

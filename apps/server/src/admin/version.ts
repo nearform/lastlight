@@ -20,7 +20,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { readCorePin, pickTagCommit } from "../config/core-pin.js";
+import { readCorePin, pickTagCommit } from "@lastlight/shared/core-pin";
 
 const exec = promisify(execFile);
 

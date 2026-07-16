@@ -1,0 +1,41 @@
+{
+  "name": "@lastlight/shared",
+  "version": "0.1.0",
+  "description": "Light modules shared by the Last Light CLI and @lastlight/core — providers, oauth, overlay bootstrap/assets, core-pin, the workflow loader, and the config types it needs. No heavy runtime deps.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./providers": { "types": "./dist/providers.d.ts", "import": "./dist/providers.js" },
+    "./oauth": { "types": "./dist/oauth.d.ts", "import": "./dist/oauth.js" },
+    "./overlay-bootstrap": { "types": "./dist/overlay-bootstrap.d.ts", "import": "./dist/overlay-bootstrap.js" },
+    "./overlay-assets": { "types": "./dist/overlay-assets.d.ts", "import": "./dist/overlay-assets.js" },
+    "./core-pin": { "types": "./dist/core-pin.d.ts", "import": "./dist/core-pin.js" },
+    "./workflow-loader": { "types": "./dist/workflow-loader.d.ts", "import": "./dist/workflow-loader.js" },
+    "./config-types": { "types": "./dist/config-types.d.ts", "import": "./dist/config-types.js" },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.2.0",
+    "@earendil-works/pi-ai": "^0.79.8",
+    "@lastlight/workflow-engine": "workspace:*",
+    "chalk": "^5.6.2",
+    "yaml": "^2.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

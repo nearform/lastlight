@@ -22,7 +22,7 @@
  * supports); only the screener/classifier path is constrained here.
  */
 
-import { PROVIDERS, providerByPrefix, type ApiType, type ProviderSpec } from "../providers.js";
+import { PROVIDERS, providerByPrefix, type ApiType, type ProviderSpec } from "@lastlight/shared/providers";
 import { getRuntimeConfig } from "../config/config.js";
 
 export type ChatRole = "system" | "user" | "assistant";

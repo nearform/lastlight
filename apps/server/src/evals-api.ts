@@ -16,8 +16,8 @@
  */
 
 // ── workflow driving ────────────────────────────────────────────────────────
-export { getWorkflow, configureWorkflowAssets } from "./workflows/loader.js";
-export type { WorkflowAssetConfig } from "./workflows/loader.js";
+export { getWorkflow, configureWorkflowAssets } from "@lastlight/shared/workflow-loader";
+export type { WorkflowAssetConfig } from "@lastlight/shared/workflow-loader";
 export { runWorkflow } from "./workflows/runner.js";
 export type { RunnerCallbacks, WorkflowResult } from "./workflows/runner.js";
 export type { ExecutorConfig } from "./engine/github/profiles.js";
@@ -32,5 +32,5 @@ export {
   OVERLAY_CONFIG_PLACEHOLDER,
   OVERLAY_ENV_EXAMPLE,
   OVERLAY_README,
-} from "./config/overlay-bootstrap.js";
-export type { GhStatus, ScaffoldResult, BootstrapOpts } from "./config/overlay-bootstrap.js";
+} from "@lastlight/shared/overlay-bootstrap";
+export type { GhStatus, ScaffoldResult, BootstrapOpts } from "@lastlight/shared/overlay-bootstrap";

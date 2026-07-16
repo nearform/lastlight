@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { enumerateOverlayAssets } from "#src/config/overlay-assets.js";
+import { enumerateOverlayAssets } from "@lastlight/shared/overlay-assets";
 
 function makeTree(): { core: string; overlay: string } {
   const root = mkdtempSync(join(tmpdir(), "overlay-assets-"));

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { callLlm, chat, defaultFastModel, resolveProvider } from "#src/engine/llm.js";
-import { PROVIDER_ENV_KEYS } from "#src/providers.js";
+import { PROVIDER_ENV_KEYS } from "@lastlight/shared/providers";
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from "#src/config/config.js";
 
 describe("resolveProvider", () => {

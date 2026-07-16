@@ -11,7 +11,7 @@ import type { SandboxBackend } from "../config/config.js";
 import type { PrePopulateSpec, SandboxFactory } from "../sandbox/sandbox.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
 import { DEFAULT_MODEL } from "./executors/shared.js";
-import { PROVIDER_ENV_KEYS } from "../providers.js";
+import { PROVIDER_ENV_KEYS } from "@lastlight/shared/providers";
 import { oauthEnvVarForProvider, oauthProviderIdForModel, resolveOAuthApiKey } from "./oauth.js";
 import {
   runSandboxedAgent,

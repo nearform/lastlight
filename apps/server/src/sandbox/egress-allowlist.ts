@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { PROVIDER_HOSTS as REGISTRY_PROVIDER_HOSTS } from "../providers.js";
+import { PROVIDER_HOSTS as REGISTRY_PROVIDER_HOSTS } from "@lastlight/shared/providers";
 
 /**
  * Single source of truth for sandbox HTTP egress allowlists.

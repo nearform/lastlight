@@ -7,7 +7,7 @@ import {
   PROVIDER_HOSTS,
   DEFAULT_MODEL,
   DEFAULT_PROVIDER,
-} from "#src/providers.js";
+} from "@lastlight/shared/providers";
 
 describe("provider registry — structural invariants", () => {
   it("every provider has a unique prefix", () => {
