@@ -1,5 +1,5 @@
 {
-  "name": "lastlight",
+  "name": "@lastlight/core",
   "version": "0.16.0",
   "description": "GitHub repository maintenance agent — Agent SDK harness",
   "type": "module",
@@ -13,9 +13,6 @@
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },
-  "bin": {
-    "lastlight": "dist/cli/cli.js"
-  },
   "files": [
     "dist",
     "config",
@@ -24,9 +21,7 @@
     "agent-context",
     "deploy",
     "sandbox.Dockerfile",
-    "docker-compose.yml",
-    ".claude-plugin",
-    "plugins"
+    "docker-compose.yml"
   ],
   "repository": {
     "type": "git",
@@ -48,22 +43,20 @@
   "scripts": {
     "test": "vitest run",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
-    "build": "tsc && node -e \"require('fs').chmodSync('dist/cli/cli.js', 0o755)\"",
+    "build": "tsc",
     "build:dashboard": "pnpm --filter @lastlight/dashboard build",
     "build:all": "pnpm run build && pnpm --filter @lastlight/dashboard build",
     "start": "node dist/index.js",
     "dev": "concurrently -n server,dash -c blue,magenta \"bash scripts/dev-local.sh\" \"pnpm --filter @lastlight/dashboard dev\"",
     "dev:server": "bash scripts/dev-local.sh",
     "dev:dashboard": "pnpm --filter @lastlight/dashboard dev",
-    "cli": "tsx src/cli/cli.ts",
-    "build:issue": "tsx src/cli/cli.ts",
     "test:watch": "vitest",
     "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src",
     "typecheck": "tsc --noEmit && pnpm run lint:boundaries"
   },
   "dependencies": {
-    "@clack/prompts": "^1.2.0",
     "@earendil-works/pi-ai": "^0.79.8",
+    "@lastlight/shared": "workspace:*",
     "@lastlight/workflow-engine": "workspace:*",
     "@hono/node-server": "^1.19.13",
     "@octokit/auth-app": "^8.2.0",
@@ -82,8 +75,6 @@
     "agentic-pi": "^0.2.16",
     "arctic": "^3.7.0",
     "better-sqlite3": "^11.0.0",
-    "chalk": "^5.6.2",
-    "cli-table3": "^0.6.5",
     "croner": "^9.0.0",
     "hono": "^4.12.14",
     "octokit": "^5.0.5",

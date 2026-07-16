@@ -30,19 +30,32 @@ RUN corepack enable
 WORKDIR /repo
 
 # Workspace manifests first — deps layer changes only when these change.
+# @lastlight/core depends on the in-repo packages @lastlight/shared +
+# @lastlight/workflow-engine (workspace:*), so their manifests must be present
+# for the filtered frozen install to resolve the workspace links.
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.json ./
 COPY apps/server/package.json apps/server/package.json
 COPY apps/server/dashboard/package.json apps/server/dashboard/package.json
-RUN pnpm install --frozen-lockfile --filter lastlight... --filter @lastlight/dashboard...
+COPY packages/workflow-engine/package.json packages/workflow-engine/package.json
+COPY packages/shared/package.json packages/shared/package.json
+RUN pnpm install --frozen-lockfile --filter @lastlight/core... --filter @lastlight/dashboard...
 
-# Server package source (includes the nested dashboard).
+# Workspace source: the server (with its nested dashboard) + its package deps.
 COPY apps/server/ apps/server/
+COPY packages/workflow-engine/ packages/workflow-engine/
+COPY packages/shared/ packages/shared/
 
-# Build TypeScript harness + dashboard.
-RUN pnpm --filter lastlight build && pnpm --filter @lastlight/dashboard build
+# Build in dependency order (turbo's ^build graph, done explicitly here):
+# engine → shared → core + dashboard. core's tsc + the dashboard need the
+# built dist of the packages they import.
+RUN pnpm --filter @lastlight/workflow-engine build \
+ && pnpm --filter @lastlight/shared build \
+ && pnpm --filter @lastlight/core build \
+ && pnpm --filter @lastlight/dashboard build
 
-# Shape the runtime tree at /app (prod deps only, files per `files` field).
-RUN pnpm --filter lastlight deploy --prod /app
+# Shape the runtime tree at /app (prod deps only, files per `files` field —
+# pnpm deploy bundles the workspace deps' built dist into /app/node_modules).
+RUN pnpm --filter @lastlight/core deploy --prod /app
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
 FROM node:22-slim

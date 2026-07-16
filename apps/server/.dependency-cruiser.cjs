@@ -7,7 +7,7 @@
  * public barrel (or /test-support) — never a deep `dist/core|ports` path — so
  * the package's export surface stays the contract.
  *
- *   pnpm --filter lastlight run lint:boundaries
+ *   pnpm --filter @lastlight/core run lint:boundaries
  */
 module.exports = {
   forbidden: [
