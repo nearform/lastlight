@@ -58,7 +58,8 @@
     "cli": "tsx src/cli/cli.ts",
     "build:issue": "tsx src/cli/cli.ts",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src",
+    "typecheck": "tsc --noEmit && pnpm run lint:boundaries"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
@@ -92,6 +93,7 @@
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^22.0.0",
     "concurrently": "^9.0.0",
+    "dependency-cruiser": "^18.1.0",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.4"
