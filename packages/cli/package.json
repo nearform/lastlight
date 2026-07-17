@@ -1,6 +1,6 @@
 {
   "name": "lastlight",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "description": "Last Light CLI — a lean global client + host-local `server` lifecycle for the Last Light GitHub maintenance agent, plus the Claude Code plugin.",
   "type": "module",
   "bin": {
