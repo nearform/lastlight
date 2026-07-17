@@ -4,7 +4,7 @@
 # Purpose: when Claude is about to `git commit` a change that touches code
 # paths whose docs live elsewhere (workflows, skills, routes, connectors,
 # state, env, CLI), nudge it to run the `docs-sync` skill first — so the
-# in-repo spec/*.md and the separate lastlight-www site don't drift.
+# in-repo apps/server/spec/*.md and the apps/www site (same repo) don't drift.
 #
 # This is a NUDGE, not a gate. It exits 2 (feedback-to-Claude) only when
 # doc-relevant code is staged with NO accompanying spec/ edit. To proceed
@@ -37,14 +37,16 @@ cd "$repo_root" 2>/dev/null || exit 0
 staged="$(git diff --cached --name-only 2>/dev/null || true)"
 [ -z "$staged" ] && exit 0
 
-# High-signal paths whose documentation lives in spec/*.md and/or the www site.
-trigger_re='^(workflows/.*\.ya?ml|config/default\.yaml|skills/|agent-context/|src/connectors/|src/state/|src/engine/router\.ts|src/engine/chat|src/sandbox/|src/config\.ts|src/cli\.ts)'
+# High-signal paths whose documentation lives in apps/server/spec/*.md and/or
+# the apps/www site. Post-monorepo the server package sits under apps/server/ and
+# the CLI under packages/cli/, so the patterns are prefixed accordingly.
+trigger_re='^(apps/server/workflows/.*\.ya?ml|apps/server/config/default\.yaml|apps/server/skills/|apps/server/agent-context/|apps/server/src/connectors/|apps/server/src/state/|apps/server/src/engine/router\.ts|apps/server/src/engine/chat|apps/server/src/sandbox/|apps/server/src/config/|packages/cli/src/)'
 
 doc_relevant="$(printf '%s\n' "$staged" | grep -E "$trigger_re" || true)"
 [ -z "$doc_relevant" ] && exit 0
 
-# If a spec/ doc was also staged, assume docs were considered — let it pass.
-if printf '%s\n' "$staged" | grep -qE '^spec/.*\.md$'; then
+# If a spec doc was also staged, assume docs were considered — let it pass.
+if printf '%s\n' "$staged" | grep -qE '^apps/server/spec/.*\.md$'; then
   exit 0
 fi
 
@@ -53,7 +55,7 @@ fi
   echo "📝 docs-sync check: this commit stages doc-affecting paths but no spec/*.md update:"
   printf '%s\n' "$doc_relevant" | sed 's/^/    - /'
   echo ""
-  echo "Run the docs-sync skill to update the in-repo spec/ AND the lastlight-www site,"
+  echo "Run the docs-sync skill to update apps/server/spec/ AND the apps/www site,"
   echo "then re-commit. If this change genuinely needs no docs (internal refactor),"
   echo "re-run the commit with LASTLIGHT_SKIP_DOCS_CHECK=1 prefixed."
 } >&2
