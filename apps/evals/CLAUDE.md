@@ -17,9 +17,9 @@ entry; the subcommands are `run`, `init`, `add-case`, and `serve`.
 
 ## Related: the `lastlight-evals` skill (keep in sync)
 
-The user-facing **agent skill** that teaches people to drive this CLI lives in a
-**separate repo** — the `lastlight` plugin, at
-`~/work/lastlight/plugins/lastlight/skills/lastlight-evals/SKILL.md` (+ its
+The user-facing **agent skill** that teaches people to drive this CLI lives in
+the **same monorepo** — the `lastlight` plugin, at
+`plugins/lastlight/skills/lastlight-evals/SKILL.md` (+ its
 `references/`). It documents this CLI's surface: the `run` / `init` / `add-case`
 / `serve` subcommands and their flags, defined here in `src/run.ts` (the `USAGE`
 block), `src/init.ts` (the `init` flags), and `src/add-case.ts` (the `add-case`
@@ -29,8 +29,8 @@ flags + the PR/issue authoring flow, also in `references/authoring-from-pr.md`).
 or example — update the skill in the same change** so it doesn't drift. A
 checked-in Claude Code hook (`.claude/hooks/check-cli-skill.sh`, wired in
 `.claude/settings.json`) reminds you whenever `src/run.ts` or `src/init.ts` is
-edited; it resolves the skill at `../lastlight` by default, overridable with
-`LASTLIGHT_CORE_DIR`.
+edited; it resolves the skill at the monorepo root by default (four levels up
+from the hook), overridable with `LASTLIGHT_CORE_DIR`.
 
 A sibling **`lastlight-evals-loop`** skill (same plugin dir) drives the
 score-improvement loop *on top of* this CLI — it consumes `scorecard.json`, the

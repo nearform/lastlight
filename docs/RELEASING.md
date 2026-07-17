@@ -63,7 +63,7 @@ and every package that consumes it**, transitively:
 Rules:
 
 - **`plugin.json` lockstep.** Keep
-  `packages/cli/plugins/lastlight/.claude-plugin/plugin.json`'s `version` equal
+  `plugins/lastlight/.claude-plugin/plugin.json`'s `version` equal
   to the `lastlight` CLI version. Manual — bump it in the same commit as the CLI
   bump. (This is the direct successor of the old three-files-in-sync rule.)
 - **Semver intent.** patch = fix/refactor/doc, minor = new user-facing
@@ -142,7 +142,7 @@ Run on a clean `main`, up to date with origin.
    # bump each changed package + its dependents (example: a core-only change)
    pnpm --filter @lastlight/core version minor --no-git-tag-version
    pnpm --filter lastlight-evals version patch --no-git-tag-version   # picks up core
-   # edit packages/cli/plugins/lastlight/.claude-plugin/plugin.json if the CLI bumped
+   # edit plugins/lastlight/.claude-plugin/plugin.json if the CLI bumped
    pnpm install --lockfile-only
    git add -A
    git commit -m "chore(release): vX.Y.Z"

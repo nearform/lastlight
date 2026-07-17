@@ -10,7 +10,7 @@ const SITE_PAGES: Array<{ path: string; label: string; description?: string }> =
 
 const EXTERNAL: Array<{ url: string; label: string; description?: string }> = [
   { url: 'https://github.com/nearform/lastlight', label: 'GitHub repository', description: 'Source code, issues, and releases' },
-  { url: 'https://github.com/users/cliftonc/projects/4', label: 'Roadmap', description: 'GitHub Project tracking planned work' },
+  { url: 'https://github.com/orgs/nearform/projects/112', label: 'Roadmap', description: 'GitHub Project tracking planned work' },
   { url: 'https://cliftonc.nl/blog/the-harness-is-the-product.md', label: 'The harness is the product', description: 'Author\'s blog post explaining where Last Light fits in the broader agent-harness landscape' },
 ];
 

@@ -72,7 +72,7 @@ printf 'managedRepos:\n  - your-org/repo-one\n' &gt; instance/config.yaml</code>
 
 		<div class="advisory-card" style="margin-bottom: 1.25rem; background: rgba(26, 122, 138, 0.08); border-color: rgba(26, 122, 138, 0.3);">
 			<h3 style="color: var(--teal);">Docker-free alternative (native + gondolin)</h3>
-			<p>On a Linux host with <code>/dev/kvm</code> exposed, the <a href="https://github.com/nearform/lastlight/blob/main/deploy/native/README.md" target="_blank" rel="noopener">native systemd deploy</a> runs the harness directly under systemd and uses gondolin for sandboxing — no Docker required. Re-deploys are a <code>git pull</code> plus <code>sudo bash deploy/native/install.sh</code>. Most managed container hosts (Cloud Run, Fly Machines, shared-CPU VMs) don't expose nested virt — stay on the Docker deploy below in those cases.</p>
+			<p>On a Linux host with <code>/dev/kvm</code> exposed, the <a href="https://github.com/nearform/lastlight/blob/main/apps/server/deploy/native/README.md" target="_blank" rel="noopener">native systemd deploy</a> runs the harness directly under systemd and uses gondolin for sandboxing — no Docker required. Re-deploys are a <code>git pull</code> plus <code>sudo bash deploy/native/install.sh</code>. Most managed container hosts (Cloud Run, Fly Machines, shared-CPU VMs) don't expose nested virt — stay on the Docker deploy below in those cases.</p>
 		</div>
 		<pre><code># DOMAIN lives in instance/secrets/.env (read by Caddy via env_file) —
 # no repo-root .env needed.

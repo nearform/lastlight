@@ -20,7 +20,7 @@ difference. Drop in your own issues and repos and it evaluates *your* agent.
 
 > 🛰️ Part of [**Last Light**](https://lastlight.dev) — the AI agent that triages,
 > reviews, and fixes your GitHub repos.
-> **[lastlight.dev](https://lastlight.dev)** · [Core repo](https://github.com/nearform/lastlight) · [Eval repo](https://github.com/nearform/lastlight-evals)
+> **[lastlight.dev](https://lastlight.dev)** · [Core repo](https://github.com/nearform/lastlight) · [Eval repo](https://github.com/nearform/lastlight/tree/main/apps/evals)
 
 It's **SWE-bench-compatible**, and nothing here touches real GitHub: the agent's
 `github_*` tool calls are served by an in-process fake (seeded + recording) and

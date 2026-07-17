@@ -13,7 +13,8 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nearform/lastlight.git"
+    "url": "git+https://github.com/nearform/lastlight.git",
+    "directory": "packages/cli"
   },
   "keywords": [
     "github",
@@ -29,6 +30,9 @@
     "node": ">=22.12"
   },
   "scripts": {
+    "prepare": "node scripts/copy-plugin.mjs",
+    "prebuild": "node scripts/copy-plugin.mjs",
+    "prepack": "node scripts/copy-plugin.mjs",
     "build": "tsc && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

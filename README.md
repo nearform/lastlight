@@ -13,6 +13,30 @@ An AI agent that maintains GitHub repositories: triaging issues, reviewing PRs, 
 
 Built on [agentic-pi](https://github.com/nearform/agentic-pi) (workflow phases) and [`@earendil-works/pi-ai`](https://www.npmjs.com/package/@earendil-works/pi-ai) (in-process chat) with a lightweight TypeScript harness for webhook ingestion, cron scheduling, and process management. Provider-agnostic — point `LASTLIGHT_MODEL` at any `provider/model` pi-ai supports (defaults to `anthropic/claude-sonnet-4-6`).
 
+## Monorepo layout
+
+This repository is a **pnpm + Turborepo** workspace. The harness/server internals
+now live under `apps/server/` (formerly the repo root). At a glance:
+
+```
+apps/
+  server/   @lastlight/core  — the harness + server (src, config, workflows,
+                               skills, agent-context, deploy, dashboard, spec, …)
+  www/      lastlight-www     — the Astro marketing/docs site → lastlight.dev
+  evals/    lastlight-evals   — the eval harness → evals.lastlight.dev
+packages/
+  cli/               lastlight              — the lean, published global CLI (+ the Claude Code plugin)
+  shared/            @lastlight/shared      — shared utilities (e.g. the provider registry)
+  workflow-engine/   @lastlight/workflow-engine — the reusable workflow runner
+```
+
+Five packages publish to npm: `lastlight`, `@lastlight/core`,
+`@lastlight/workflow-engine`, `@lastlight/shared`, and `lastlight-evals`. The
+root package (`lastlight-monorepo`) is private. Common scripts run from the root
+via Turborepo: `pnpm build` / `pnpm test` / `pnpm typecheck` (each `turbo run …`),
+and `pnpm dev` (= `pnpm --filter @lastlight/core dev`). See the root `CLAUDE.md`
+for the canonical workspace map and orientation.
+
 ## Production Setup (Clean Server)
 
 The fastest way to go from a bare server to a running Last Light instance:
@@ -30,7 +54,7 @@ The setup wizard walks you through:
    providers (Anthropic, OpenAI, Google Gemini, Mistral, Groq, Cerebras, xAI,
    Hugging Face, Moonshot, NVIDIA, Fireworks, Together, DeepSeek, Z.AI,
    Kimi for Coding, MiniMax, OpenRouter), then enter the model id and the
-   matching API key. See `src/providers.ts` for the full registry.
+   matching API key. See `packages/shared/src/providers.ts` for the full registry.
 5. **Webhook secret** — auto-generated if you don't have one
 6. **Slack** — optional bot token and app token for Slack integration
 7. **Admin dashboard** — optional password protection
@@ -58,7 +82,7 @@ For a Docker-free production install (systemd unit, gondolin sandbox), see [Nati
 - Docker Desktop (or compatible) — only needed for `LASTLIGHT_SANDBOX=docker`; gondolin runs without it on macOS/Linux
 - A GitHub App (see [Create a GitHub App](#1-create-a-github-app) below)
 - An API key for whichever provider your chosen `LASTLIGHT_MODEL` uses.
-  The wizard surfaces pi-ai's 15+ providers — see `src/providers.ts` for the
+  The wizard surfaces pi-ai's 15+ providers — see `packages/shared/src/providers.ts` for the
   full registry (e.g. `ANTHROPIC_API_KEY` for anthropic/…, `OPENAI_API_KEY`
   for openai/…, `GROQ_API_KEY` for groq/…, `GEMINI_API_KEY` for google/…,
   `OPENROUTER_API_KEY` for the openrouter/… aggregator).
@@ -68,7 +92,7 @@ For a Docker-free production install (systemd unit, gondolin sandbox), see [Nati
 ```bash
 git clone https://github.com/nearform/lastlight.git
 cd lastlight
-npm install
+pnpm install          # this is a pnpm workspace — installs every package
 ```
 
 Copy and edit the environment file:
@@ -89,7 +113,7 @@ GITHUB_APP_INSTALLATION_ID=789012
 WEBHOOK_SECRET=your-secret-here
 
 # Model + provider — the wizard surfaces pi-ai's 15+ providers. The
-# registry lives in src/providers.ts; pick any `provider/model` it lists.
+# registry lives in packages/shared/src/providers.ts; pick any `provider/model` it lists.
 LASTLIGHT_MODEL=anthropic/claude-sonnet-4-6
 ANTHROPIC_API_KEY=sk-ant-...
 # OPENAI_API_KEY=sk-...
@@ -104,7 +128,7 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ### Run
 
-`npm run dev` runs the harness on your host. Sandbox mode is selected by `LASTLIGHT_SANDBOX`:
+`pnpm --filter @lastlight/core dev` runs the harness on your host. Sandbox mode is selected by `LASTLIGHT_SANDBOX`:
 
 - **`gondolin`** (default) — agentic-pi spawns a per-phase QEMU micro-VM in-process. Uses HVF on macOS, KVM on Linux. No Docker needed.
 - **`docker`** — agentic-pi runs inside a per-phase sibling Docker container (the `lastlight-sandbox:latest` image). Requires Docker. Useful for prod-like smoke testing.
@@ -126,60 +150,68 @@ docker compose --profile build-only build sandbox-base   # shared base first
 docker compose --profile build-only build sandbox
 ```
 
-Then run the harness (server + dashboard, with hot reload):
+Then run the harness (server + dashboard, with hot reload). These scripts live
+in the `@lastlight/core` package (`apps/server/`); run them with `pnpm --filter`
+from anywhere in the repo:
 
 ```bash
-npm run dev            # both server and dashboard, concurrent
-npm run dev:server     # server only
-npm run dev:dashboard  # dashboard only
+pnpm --filter @lastlight/core dev            # both server and dashboard, concurrent
+pnpm --filter @lastlight/core dev:server     # server only
+pnpm --filter @lastlight/core dev:dashboard  # dashboard only
 ```
 
-Both server scripts call `scripts/dev-local.sh`, which:
+Both server scripts call `apps/server/scripts/dev-local.sh`, which:
 - Verifies the sandbox image exists when `LASTLIGHT_SANDBOX=docker`
 - Copies your `GITHUB_APP_PRIVATE_KEY_PATH` into `./data/sandbox-data/secrets/app.pem` (mode 600) so the sandbox can authenticate to GitHub
 - Sets `LASTLIGHT_LOCAL_DEV=1`, `STATE_DIR=./data`, `LASTLIGHT_SESSIONS_DIR=./data/agent-sessions`
-- Starts the harness with `tsx watch src/index.ts`
+- Starts the harness with `tsx watch src/index.ts` (cwd is `apps/server/`)
 
 #### Triggering work via the CLI
 
-The CLI talks to the running server — it does not execute agents directly. Start the server first, then in another terminal:
+The CLI talks to the running server — it does not execute agents directly. The
+CLI source lives in the `lastlight` package (`packages/cli/`, entry `src/cli.ts`);
+from a checkout run it via `pnpm --filter lastlight exec tsx src/cli.ts`. Start
+the server first, then in another terminal:
 
 ```bash
 # Cheap, safe defaults — single agent invocation
-npx tsx src/cli.ts owner/repo#42                                # triage that one issue
-npx tsx src/cli.ts https://github.com/owner/repo/issues/42      # same, full URL form
-npx tsx src/cli.ts https://github.com/owner/repo/pull/99        # review that one PR
-npx tsx src/cli.ts triage owner/repo                            # scan repo for new issues to triage
-npx tsx src/cli.ts review owner/repo                            # scan repo for PRs to review
-npx tsx src/cli.ts health owner/repo                            # weekly health report
+pnpm --filter lastlight exec tsx src/cli.ts owner/repo#42                            # triage that one issue
+pnpm --filter lastlight exec tsx src/cli.ts https://github.com/owner/repo/issues/42  # same, full URL form
+pnpm --filter lastlight exec tsx src/cli.ts https://github.com/owner/repo/pull/99    # review that one PR
+pnpm --filter lastlight exec tsx src/cli.ts triage owner/repo                        # scan repo for new issues to triage
+pnpm --filter lastlight exec tsx src/cli.ts review owner/repo                        # scan repo for PRs to review
+pnpm --filter lastlight exec tsx src/cli.ts health owner/repo                        # weekly health report
 
 # Expensive, opt-in — full Architect → Executor → Reviewer → PR cycle
-npx tsx src/cli.ts build owner/repo#42
-npx tsx src/cli.ts build https://github.com/owner/repo/issues/42
+pnpm --filter lastlight exec tsx src/cli.ts build owner/repo#42
+pnpm --filter lastlight exec tsx src/cli.ts build https://github.com/owner/repo/issues/42
 ```
+
+> Installed globally, these are just `lastlight owner/repo#42` etc. — the
+> subcommands are identical.
 
 The default for a single-issue/PR shorthand is the **cheap** action (triage or review). Build cycles require the explicit `build` subcommand to opt in.
 
 ### Authentication
 
-pi-ai picks credentials from the provider env vars the harness forwards (the full listed set lives in `src/providers.ts` — Anthropic / OpenAI / OpenRouter / Google / Mistral / Groq / Cerebras / xAI / HuggingFace / Moonshot / NVIDIA / Fireworks / Together / DeepSeek / Z.AI / Kimi / MiniMax). The harness forwards them into each sandbox container (or VM) so workflow runs can reach the API.
+pi-ai picks credentials from the provider env vars the harness forwards (the full listed set lives in `packages/shared/src/providers.ts` — Anthropic / OpenAI / OpenRouter / Google / Mistral / Groq / Cerebras / xAI / HuggingFace / Moonshot / NVIDIA / Fireworks / Together / DeepSeek / Z.AI / Kimi / MiniMax). The harness forwards them into each sandbox container (or VM) so workflow runs can reach the API.
 
 #### Subscription logins (OAuth) — Codex, Claude Pro, Copilot
 
 Instead of an API key you can authenticate with a paid subscription. pi-ai
 supports three OAuth providers; log in once on the host and Last Light stores
 and refreshes the token for you. In this from-source checkout the CLI runs via
-`tsx` (there's no globally-installed `lastlight` binary yet — that's what a
-published `npm i -g lastlight` gives you):
+`tsx` from the `lastlight` package (`packages/cli/`); installed globally, `npm i
+-g lastlight` gives you the same `lastlight oauth …` commands:
 
 ```bash
-npx tsx src/cli/cli.ts oauth login openai-codex   # ChatGPT Plus/Pro (Codex)
-npx tsx src/cli/cli.ts oauth login anthropic      # Claude Pro/Max
-npx tsx src/cli/cli.ts oauth login github-copilot # GitHub Copilot
-npx tsx src/cli/cli.ts oauth list                 # providers + who's logged in
-npx tsx src/cli/cli.ts oauth status               # store path + token expiry
-npx tsx src/cli/cli.ts oauth test openai-codex    # verify a stored login refreshes
-npx tsx src/cli/cli.ts oauth logout [provider]    # remove one (or all)
+pnpm --filter lastlight exec tsx src/cli.ts oauth login openai-codex   # ChatGPT Plus/Pro (Codex)
+pnpm --filter lastlight exec tsx src/cli.ts oauth login anthropic      # Claude Pro/Max
+pnpm --filter lastlight exec tsx src/cli.ts oauth login github-copilot # GitHub Copilot
+pnpm --filter lastlight exec tsx src/cli.ts oauth list                 # providers + who's logged in
+pnpm --filter lastlight exec tsx src/cli.ts oauth status               # store path + token expiry
+pnpm --filter lastlight exec tsx src/cli.ts oauth test openai-codex    # verify a stored login refreshes
+pnpm --filter lastlight exec tsx src/cli.ts oauth logout [provider]    # remove one (or all)
 ```
 
 > Installed globally, these are just `lastlight oauth login …` etc. — the
@@ -194,8 +226,8 @@ LASTLIGHT_MODEL=openai-codex/gpt-5.5   # Codex ids: gpt-5.5 / gpt-5.4 / gpt-5.4-
 The login writes `auth.json` under `$STATE_DIR` (same JSON shape pi-ai's own
 `npx @earendil-works/pi-ai login` writes; override with `LASTLIGHT_AUTH_FILE`).
 It's **host-local** — the browser OAuth flow runs where you type the command,
-so run it on the machine that runs the agent, then restart (`npm run dev:server`
-from source, or `lastlight server restart agent` for the installed deploy) to
+so run it on the machine that runs the agent, then restart (`pnpm --filter
+@lastlight/core dev:server` from source, or `lastlight server restart agent` for the installed deploy) to
 pick it up. Note `tsx watch` does **not** reload on `.env` changes — restart
 after switching `LASTLIGHT_MODEL`.
 
@@ -255,7 +287,7 @@ clone instead. To do it fully by hand:
 
 ```bash
 mkdir -p instance/secrets
-cp deploy/.env.production.example instance/secrets/.env   # then fill it in
+cp apps/server/deploy/.env.production.example instance/secrets/.env   # then fill it in
 cp your-app.private-key.pem instance/secrets/app.pem
 chmod 600 instance/secrets/.env instance/secrets/app.pem
 # instance/config.yaml — at minimum your managed repos:
@@ -316,11 +348,11 @@ With the container running:
 # Health check
 curl http://localhost:8644/health
 
-# Trigger a build cycle
-npx tsx src/cli.ts https://github.com/owner/repo/issues/42
+# Trigger a build cycle (or just `lastlight …` with the installed CLI)
+pnpm --filter lastlight exec tsx src/cli.ts https://github.com/owner/repo/issues/42
 
 # Trigger triage
-npx tsx src/cli.ts triage owner/repo
+pnpm --filter lastlight exec tsx src/cli.ts triage owner/repo
 ```
 
 ---
@@ -329,18 +361,18 @@ npx tsx src/cli.ts triage owner/repo
 
 For a Linux production host with KVM available (`/dev/kvm`), the native deploy runs the harness directly under systemd and uses gondolin for sandboxing — no Docker required.
 
-See [deploy/native/README.md](deploy/native/README.md) for the full runbook. The short version:
+See [apps/server/deploy/native/README.md](apps/server/deploy/native/README.md) for the full runbook. The short version:
 
 ```bash
 git clone https://github.com/nearform/lastlight.git /opt/lastlight
-cd /opt/lastlight
+cd /opt/lastlight/apps/server
 # (optional) install -m 0600 -o root /path/to/app.pem /etc/lastlight/app.pem
 sudo bash deploy/native/install.sh        # scaffolds /etc/lastlight/lastlight.env
 sudo $EDITOR /etc/lastlight/lastlight.env # fill in secrets
 sudo bash deploy/native/install.sh        # second run: starts the service
 ```
 
-Re-deploys: `git pull && sudo bash deploy/native/install.sh` (idempotent — rebuilds and restarts the service).
+Re-deploys: `git pull && sudo bash deploy/native/install.sh` (idempotent — rebuilds and restarts the service), from `apps/server/`.
 
 **Required:** the host kernel must expose `/dev/kvm` (bare-metal Linux or KVM-enabled VM). Hetzner Cloud, Cloud Run, Fly Machines (without `--vm-cpu-class shared`), and most managed container hosts do **not** expose nested virt — see `agentic-pi`'s `SPIKE-gondolin.md` for the full constraint matrix.
 
@@ -398,7 +430,7 @@ Legacy `OPENCODE_*` names are still read as fallbacks for the corresponding `LAS
 | `ZAI_API_KEY` | One of | API key for `zai/…` (GLM) |
 | `KIMI_API_KEY` | One of | API key for `kimi-coding/…` |
 | `MINIMAX_API_KEY` | One of | API key for `minimax/…` |
-| _… or any other `provider/model` whose key is forwarded by `src/providers.ts`_ | | The wizard surfaces the registered set; see `src/providers.ts` for the full list. |
+| _… or any other `provider/model` whose key is forwarded by `packages/shared/src/providers.ts`_ | | The wizard surfaces the registered set; see `packages/shared/src/providers.ts` for the full list. |
 | `LASTLIGHT_OVERLAY_DIR` | No | Trusted deployment overlay directory (the docker-compose stack mounts `instance/` here as `/app/instance`). Startup loads `config/default.yaml`, optional `$LASTLIGHT_OVERLAY_DIR/config.yaml`, then env overrides; overlay assets under `workflows/`, `workflows/prompts/`, `skills/`, and `agent-context/` replace built-ins. Secrets live in `$LASTLIGHT_OVERLAY_DIR/secrets/`. Restart required after changes. See [Deployment overlay](#deployment-overlay). |
 | `LASTLIGHT_MODEL` | No | Default model (default: `anthropic/claude-sonnet-4-6`). Legacy: `OPENCODE_MODEL`. |
 | `LASTLIGHT_MODELS` | No | Per-task model overrides as JSON, e.g. `{"chat":"openai/gpt-5.1-mini","architect":"openai/gpt-5.5"}`. Legacy: `OPENCODE_MODELS`. |
@@ -507,16 +539,20 @@ lastlight skills list                    # show bundled skills + where they're i
 lastlight skills uninstall
 ```
 
-Or register the marketplace directly from a checkout of this repo:
+Or register the marketplace directly — this repo root is itself a Claude Code
+marketplace (from a checkout, or straight from GitHub):
 
 ```bash
-claude plugin marketplace add ./
+claude plugin marketplace add ./                 # from a local checkout
+claude plugin marketplace add nearform/lastlight # or straight from GitHub
 claude plugin install lastlight@lastlight-skills
 ```
 
-The skills live under `plugins/lastlight/` (manifest in `.claude-plugin/`). These
-are *Claude Code* skills — distinct from Last Light's internal sandbox skills in
-the top-level `skills/` dir.
+The plugin lives at the repo root — `plugins/lastlight/` (manifest in
+`.claude-plugin/`). The published `lastlight` CLI stages a copy into its own
+package at build (`packages/cli/scripts/copy-plugin.mjs`) so `lastlight skills
+install` works offline after a global install. These are *Claude Code* skills —
+distinct from Last Light's internal sandbox skills in `apps/server/skills/`.
 
 ---
 
@@ -576,110 +612,64 @@ When webhooks are enabled, only the weekly reports (health + security) run on cr
 
 ## Project Structure
 
+This is a pnpm + Turborepo workspace. Everything below is the effective layout;
+the full annotated map lives in the root [`CLAUDE.md`](CLAUDE.md).
+
 ```
-lastlight/
-  src/
-    index.ts                # Server entry point
-    cli.ts                  # CLI client (talks to server)
-    config.ts               # Config loader (.env)
-    connectors/
-      types.ts              # Connector + EventEnvelope interfaces
-      github-webhook.ts     # GitHub webhook connector (Hono)
-      index.ts              # Connector registry
-    engine/
-      router.ts             # Deterministic event → skill routing
-      agent-executor.ts     # Workflow phase runner: invokes agentic-pi
-                            #   (gondolin / docker / none backends)
-      chat-runner.ts        # In-process pi-ai chat loop; one session per
-                            #   Slack/Discord thread, rehydrated from DB
-      chat.ts               # Chat skill (delegates to ChatRunner)
-      github-tools.ts       # Read-only GitHub tools surfaced to chat
-      event-shim.ts         # Translates agentic-pi events → Claude-SDK
-                            #   envelope jsonl for the dashboard reader
-      profiles.ts           # ExecutorConfig / ExecutionResult types +
-                            #   GITHUB_PERMISSION_PROFILES + loadAgentContext
-      llm.ts                # One-shot LLM helper for screen + classifier
-      screen.ts             # Prompt-injection screener
-      classifier.ts         # Intent classifier (build / explore / triage / …)
-      git-auth.ts           # GitHub App git credential setup
-      github.ts             # Harness-side Octokit client (comments, etc.)
-    workflows/              # YAML workflow runner (see src/workflows/CLAUDE.md)
-    sandbox/                # Per-task workspace + docker-sandbox lifecycle
-    cron/
-      scheduler.ts          # Cron with overlap protection
-      jobs.ts               # Cron job registry
-    admin/                  # Dashboard API (Hono) + session readers
-    state/
-      db.ts                 # SQLite execution tracking
-
-  agent-context/
-    soul.md                 # Bot personality, principles, communication style
-    rules.md                # Operational rules, managed repos, review guidelines
-
-  skills/
-    github-orchestrator/    # Central build cycle coordinator
-    issue-triage/           # Issue labeling and triage
-    pr-review/              # Structured PR review
-    repo-health/            # Health reports
-    github/                 # GitHub API workflow skills
-    software-development/   # Dev skills (architect, TDD, debugging)
-
-  workflows/                # YAML workflow definitions
-    build.yaml              # Architect → Executor → Reviewer → PR
-    issue-triage.yaml       # Label/triage an issue
-    issue-comment.yaml      # Handle an @mention on an issue
-    pr-review.yaml          # Structured PR review
-    pr-fix.yaml             # Apply review feedback to a PR
-    pr-comment.yaml         # Handle an @mention on a PR
-    explore.yaml            # Shape an idea into a spec (web search)
-    answer.yaml             # Research and answer a question
-    verify.yaml             # Confirm/refute a claim by running code
-    qa-test.yaml            # Browser/QA test pass
-    security-review.yaml    # Security scan
-    security-feedback.yaml  # Apply security review feedback
-    repo-health.yaml        # Health report
-    demo.yaml               # Recorded demo run
-    cron-*.yaml             # Cron-kind triggers (triage, review, health, security)
-    prompts/                # Per-phase prompt templates
-
-  deploy/
-    entrypoint.sh           # Docker entrypoint (harness container)
-    sandbox-entrypoint.sh   # Sandbox container entrypoint (docker-sandbox mode)
-    native/                 # Native (systemd) deploy artifacts
-      lastlight.service     # systemd unit
-      install.sh            # Idempotent provision + redeploy script
-      lastlight.env.example # Env template for /etc/lastlight/lastlight.env
-      README.md             # Native-deploy operator runbook
-  Dockerfile                # Harness image (test-only; prod uses native deploy)
-  sandbox.Dockerfile        # Sandbox image for LASTLIGHT_SANDBOX=docker
-  docker-compose.yml
-  Caddyfile                 # Reverse proxy for HTTPS
+lastlight/                      # private root package (lastlight-monorepo)
+  CLAUDE.md                     # canonical workspace map + dev orientation
+  .claude-plugin/               # Claude Code marketplace manifest (repo = a marketplace)
+  plugins/lastlight/            # the Claude Code plugin (skills) — staged into packages/cli at build
+  apps/
+    server/                     # @lastlight/core — the harness + server
+      src/                      #   index.ts (entry), engine/, connectors/,
+                                #   workflows/, sandbox/, cron/, admin/, state/ …
+      config/                   #   config loader + config/default.yaml
+      workflows/                #   YAML workflow definitions + prompts/
+      skills/                   #   internal sandbox skills (pr-review, building, …)
+      agent-context/            #   soul.md / rules.md / security.md (bot persona)
+      dashboard/                #   React + Vite admin SPA
+      spec/                     #   rebuild-grade architecture spec
+      deploy/                   #   entrypoint.sh, native/ systemd deploy, Caddyfile
+      Dockerfile                #   harness image
+      sandbox*.Dockerfile       #   sandbox images for LASTLIGHT_SANDBOX=docker
+      docker-compose.yml        #   compose stack + docker-bake.hcl
+      CLAUDE.md                 #   server-package development guide
+    www/                        # lastlight-www — Astro site → lastlight.dev
+    evals/                      # lastlight-evals — eval harness → evals.lastlight.dev
+  packages/
+    cli/                        # lastlight — the lean published global CLI
+      src/                      #   cli.ts (entry), cli-server.ts, oauth-cli.ts, …
+      scripts/copy-plugin.mjs   #   stages the root plugins/ + .claude-plugin/ into
+                                #   this package at build (so the npm tarball ships them)
+    shared/                     # @lastlight/shared — e.g. src/providers.ts (registry)
+    workflow-engine/            # @lastlight/workflow-engine — reusable phase runner
 ```
+
+Core internals that used to sit at the repo root (`src/`, `workflows/`,
+`skills/`, `agent-context/`, `deploy/`, `config/`, `Dockerfile`, `docker-compose.yml`,
+`Caddyfile`, `spec/`) now live under `apps/server/`.
 
 ## Troubleshooting
 
-### `npm i -g lastlight` prints deprecation warnings
+### Installing the CLI
 
-```
-npm warn deprecated prebuild-install@7.1.3: No longer maintained …
-npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException …
-```
-
-These are harmless **transitive** deprecations, not Last Light deps:
-`prebuild-install` is pulled by `better-sqlite3` (its native-binary fetcher), and
-`node-domexception` by `@google/genai`'s `node-fetch` polyfill chain. They don't
-affect the install — the package works. A future thin-CLI package split (so a
-CLI-only install skips the server's native/AI deps) is the only clean removal.
+`npm i -g lastlight` installs the **lean** `lastlight` package (`packages/cli/`).
+It's a thin client + host-local `server` lifecycle and carries none of the
+server's native or AI dependencies (no `better-sqlite3`, no `@google/genai`), so
+the install is fast and free of the transitive-deprecation noise those deps used
+to print. The heavy runtime lives in `@lastlight/core` (`apps/server/`) and is
+installed on the host separately (the docker stack or `lastlight server` build).
 
 ### Server won't start
 
 ```bash
 # Check .env is loaded
-npm run dev:server
+pnpm --filter @lastlight/core dev:server
 # Look for "Required environment variable not set" errors
 ```
 
-### `npm run dev` says the sandbox image is missing (docker-sandbox mode)
+### `pnpm --filter @lastlight/core dev` says the sandbox image is missing (docker-sandbox mode)
 
 ```bash
 docker compose --profile build-only build sandbox-base   # shared base first

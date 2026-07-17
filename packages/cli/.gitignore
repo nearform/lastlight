@@ -1,0 +1,5 @@
+# Build artifacts staged by scripts/copy-plugin.mjs from the repo root.
+# Source of truth is the repo-root plugins/ + .claude-plugin/. Not committed
+# here; the package `files` allowlist still ships them in the npm tarball.
+/plugins/
+/.claude-plugin/

@@ -29,7 +29,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nearform/lastlight-evals.git"
+    "url": "git+https://github.com/nearform/lastlight.git",
+    "directory": "apps/evals"
   },
   "keywords": [
     "lastlight",

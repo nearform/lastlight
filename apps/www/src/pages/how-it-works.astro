@@ -54,7 +54,7 @@ const description = "Inside Last Light: EventEnvelope, the YAML workflow engine,
 		<p class="section-intro">Every behavior — triage, review, build, health, chat — is a YAML workflow. The harness is workflow-agnostic: it reads a file, executes phases in order (or as a DAG), and writes the results to SQLite and the session JSONLs. Adding a new behavior means dropping a new YAML file into <code>workflows/</code>, not editing TypeScript.</p>
 
 		<div class="code-block">
-			<div class="code-header"><a href="https://github.com/nearform/lastlight/blob/main/workflows/build.yaml" target="_blank" rel="noopener" style="color: var(--text-muted);">workflows/build.yaml</a> (excerpt)</div>
+			<div class="code-header"><a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/build.yaml" target="_blank" rel="noopener" style="color: var(--text-muted);">workflows/build.yaml</a> (excerpt)</div>
 			<pre><code>kind: build
 name: build
 description: Architect -> Executor -> Reviewer build cycle
@@ -105,7 +105,7 @@ phases:
 	<!-- The Three Roles -->
 	<section class="content-section">
 		<h2>The three roles</h2>
-		<p class="section-intro">Every significant piece of work flows through three specialised agents, each with strict boundaries on what they can and cannot do. Each role is a <a href="https://github.com/nearform/lastlight/tree/main/workflows/prompts" target="_blank" rel="noopener">prompt template</a> (<code>architect.md</code>, <code>executor.md</code>, <code>reviewer.md</code>) a build phase renders, paired with the skills it needs.</p>
+		<p class="section-intro">Every significant piece of work flows through three specialised agents, each with strict boundaries on what they can and cannot do. Each role is a <a href="https://github.com/nearform/lastlight/tree/main/apps/server/workflows/prompts" target="_blank" rel="noopener">prompt template</a> (<code>architect.md</code>, <code>executor.md</code>, <code>reviewer.md</code>) a build phase renders, paired with the skills it needs.</p>
 
 		<div class="roles-grid">
 			<div class="role-card role-architect">
@@ -270,7 +270,7 @@ phases:
 				<div>
 					<h4>Pre-context intake + guardrails</h4>
 					<p>Ensure a GitHub issue exists (create one if the request came from Slack or CLI). Clone the repo, read its <code>CLAUDE.md</code>/<code>AGENTS.md</code>, and assemble a context snapshot: what needs doing, what success looks like, what constraints exist, and what's unknown.</p>
-					<p>Then run the <a href="https://github.com/nearform/lastlight/blob/main/workflows/prompts/guardrails.md" target="_blank" rel="noopener">guardrails check</a>: verify the repo has a working test framework, linting, and type checking. If any are missing, the bot creates a separate issue for the gaps, links it to the original task, and fixes the foundations first. You can't do TDD without tests, and the Reviewer can't verify without a test suite to run.</p>
+					<p>Then run the <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/prompts/guardrails.md" target="_blank" rel="noopener">guardrails check</a>: verify the repo has a working test framework, linting, and type checking. If any are missing, the bot creates a separate issue for the gaps, links it to the original task, and fixes the foundations first. You can't do TDD without tests, and the Reviewer can't verify without a test suite to run.</p>
 				</div>
 			</div>
 			<div class="loop-step">
@@ -324,7 +324,7 @@ phases:
 					<span class="event-trigger">webhook</span>
 				</div>
 				<p>Classifies the issue (bug, feature, question), adds labels, checks for duplicates, and asks for missing information if needed. Runs with the <code>issues-write</code> permission profile.</p>
-				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/workflows/issue-triage.yaml" target="_blank" rel="noopener"><code>issue-triage.yaml</code></a></p>
+				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/issue-triage.yaml" target="_blank" rel="noopener"><code>issue-triage.yaml</code></a></p>
 			</div>
 
 			<div class="event-card">
@@ -334,7 +334,7 @@ phases:
 					<span class="event-trigger">webhook</span>
 				</div>
 				<p>Reviews the diff with structured feedback: critical issues first, then important, suggestions, and nits. Complex PRs (&gt;300 lines) get deep analysis with local clone and data flow tracing. Runs with the <code>review-write</code> permission profile.</p>
-				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/workflows/pr-review.yaml" target="_blank" rel="noopener"><code>pr-review.yaml</code></a></p>
+				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/pr-review.yaml" target="_blank" rel="noopener"><code>pr-review.yaml</code></a></p>
 			</div>
 
 			<div class="event-card">
@@ -344,7 +344,7 @@ phases:
 					<span class="event-trigger">webhook</span>
 				</div>
 				<p>Only triggers when a <strong>maintainer</strong> @mentions the bot — non-maintainers get a polite decline. The bot reacts with 🚀 on the triggering comment so you get instant visual feedback, then runs the full Guardrails → Architect → Executor → Reviewer → PR cycle with up to 2 reviewer-fix loops. Runs with the <code>repo-write</code> permission profile.</p>
-				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/workflows/build.yaml" target="_blank" rel="noopener"><code>build.yaml</code></a></p>
+				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/build.yaml" target="_blank" rel="noopener"><code>build.yaml</code></a></p>
 			</div>
 
 			<div class="event-card">
@@ -354,7 +354,7 @@ phases:
 					<span class="event-trigger event-trigger-cron">cron / 15 min</span>
 				</div>
 				<p>Polls for new unlabelled issues every 15 minutes. Same workflow as the webhook handler, but for setups without a public webhook endpoint. Skipped automatically when webhooks are enabled.</p>
-				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/workflows/cron-triage.yaml" target="_blank" rel="noopener"><code>cron-triage.yaml</code></a></p>
+				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/cron-triage.yaml" target="_blank" rel="noopener"><code>cron-triage.yaml</code></a></p>
 			</div>
 
 			<div class="event-card">
@@ -364,7 +364,7 @@ phases:
 					<span class="event-trigger event-trigger-cron">cron / Mon 9am</span>
 				</div>
 				<p>Summarises open issues by priority, stale items, PRs awaiting review, and recently closed work. Flags anything that needs attention and posts the result to Slack (<code>SLACK_DELIVERY_CHANNEL</code>).</p>
-				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/workflows/cron-health.yaml" target="_blank" rel="noopener"><code>cron-health.yaml</code></a></p>
+				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/cron-health.yaml" target="_blank" rel="noopener"><code>cron-health.yaml</code></a></p>
 			</div>
 
 			<div class="event-card">
@@ -374,7 +374,7 @@ phases:
 					<span class="event-trigger event-trigger-cron">cron / Mon 10am</span>
 				</div>
 				<p>A diff-scoped review of the SDLC concerns GitHub's scanners miss — CI/workflow hardening, auth changes, secret handling, supply-chain churn. Files one dated summary issue with a task-list of findings. Also on demand via <code>/security</code>. Runs with the <code>issues-write</code> profile.</p>
-				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/workflows/cron-security.yaml" target="_blank" rel="noopener"><code>cron-security.yaml</code></a> · <a href="https://github.com/nearform/lastlight/blob/main/workflows/security-review.yaml" target="_blank" rel="noopener"><code>security-review.yaml</code></a></p>
+				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/cron-security.yaml" target="_blank" rel="noopener"><code>cron-security.yaml</code></a> · <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/security-review.yaml" target="_blank" rel="noopener"><code>security-review.yaml</code></a></p>
 			</div>
 
 			<div class="event-card">
@@ -384,7 +384,7 @@ phases:
 					<span class="event-trigger">webhook</span>
 				</div>
 				<p>A newly-opened issue that asks for information rather than a code change gets a single sourced <strong>answer</strong> (repo docs + web search), labelled <code>question</code> and left open. A <code>/explore</code> request instead runs a Socratic idea-shaping loop — clarifying questions in a reply-gated loop, then a published spec. Both run with the <code>issues-write</code> profile.</p>
-				<p class="event-skill">Workflows: <a href="https://github.com/nearform/lastlight/blob/main/workflows/answer.yaml" target="_blank" rel="noopener"><code>answer.yaml</code></a> · <a href="https://github.com/nearform/lastlight/blob/main/workflows/explore.yaml" target="_blank" rel="noopener"><code>explore.yaml</code></a></p>
+				<p class="event-skill">Workflows: <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/answer.yaml" target="_blank" rel="noopener"><code>answer.yaml</code></a> · <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/explore.yaml" target="_blank" rel="noopener"><code>explore.yaml</code></a></p>
 			</div>
 
 			<div class="event-card">
@@ -549,7 +549,7 @@ reviewer-verdict.md    ← APPROVED or REQUEST_CHANGES, issues list, test result
 		<p class="section-intro">Workflows invoke <strong>skills</strong> by name. A skill is a <code>SKILL.md</code> file under <code>skills/</code> — no framework APIs, no plugin system, just instructions the agent follows. A phase can inline a prompt (<code>prompt: prompts/architect.md</code>), stage one or more skills (<code>skills: [code-review, building]</code>), or both. Change the file, change the behavior.</p>
 
 		<div class="code-block">
-			<div class="code-header"><a href="https://github.com/nearform/lastlight/blob/main/skills/code-review/SKILL.md" target="_blank" rel="noopener" style="color: var(--text-muted);">skills/code-review/SKILL.md</a></div>
+			<div class="code-header"><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/code-review/SKILL.md" target="_blank" rel="noopener" style="color: var(--text-muted);">skills/code-review/SKILL.md</a></div>
 			<pre><code>---
 name: code-review
 description: The shared rubric for reviewing a code change —
@@ -573,58 +573,58 @@ is recorded), but the rubric below is the same.
 				<span>Purpose</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/building/SKILL.md" target="_blank" rel="noopener"><code>building</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/building/SKILL.md" target="_blank" rel="noopener"><code>building</code></a></span>
 				<span>Install deps and run the test/lint/typecheck gate in the sandbox — package-manager detection, install-first, and (when implementing) TDD discipline. The executor and fix loop run under it.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/code-review/SKILL.md" target="_blank" rel="noopener"><code>code-review</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/code-review/SKILL.md" target="_blank" rel="noopener"><code>code-review</code></a></span>
 				<span>The shared review rubric — finding tiers (Critical / Important / Suggestions / Nits) and what to check. Used by both the PR review and the build cycle's branch-diff reviewer.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/pr-review/SKILL.md" target="_blank" rel="noopener"><code>pr-review</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/pr-review/SKILL.md" target="_blank" rel="noopener"><code>pr-review</code></a></span>
 				<span>Review a PR and post one formal review — advance the existing discussion, verify by building, and give tiered feedback.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/pr-comment/SKILL.md" target="_blank" rel="noopener"><code>pr-comment</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/pr-comment/SKILL.md" target="_blank" rel="noopener"><code>pr-comment</code></a></span>
 				<span>Answer a maintainer's question about an open PR with code-cited evidence — the PR-side counterpart to <code>issue-comment</code>.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/issue-triage/SKILL.md" target="_blank" rel="noopener"><code>issue-triage</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/issue-triage/SKILL.md" target="_blank" rel="noopener"><code>issue-triage</code></a></span>
 				<span>Classify, label, deduplicate issues through the canonical state machine. Chase missing info, write a problem-statement summary (not a solution design), re-triage when the reporter replies, manage stale items.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/issue-comment/SKILL.md" target="_blank" rel="noopener"><code>issue-comment</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/issue-comment/SKILL.md" target="_blank" rel="noopener"><code>issue-comment</code></a></span>
 				<span>Handle a non-build maintainer comment — close, reopen, label, dedupe, or answer a brief question. Redirects anything needing code to <code>/build</code>.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/issue-answer/SKILL.md" target="_blank" rel="noopener"><code>issue-answer</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/issue-answer/SKILL.md" target="_blank" rel="noopener"><code>issue-answer</code></a></span>
 				<span>Answer an information / explanation / comparison question directly — research repo docs and the web, post a sourced reply, never touch code.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/security-review/SKILL.md" target="_blank" rel="noopener"><code>security-review</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/security-review/SKILL.md" target="_blank" rel="noopener"><code>security-review</code></a></span>
 				<span>Diff-scoped review of SDLC concerns scanners miss — CI hardening, auth changes, secret handling, supply-chain churn. Files one dated summary issue.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/security-feedback/SKILL.md" target="_blank" rel="noopener"><code>security-feedback</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/security-feedback/SKILL.md" target="_blank" rel="noopener"><code>security-feedback</code></a></span>
 				<span>Process a maintainer's comment on a security scan issue — break findings into actionable issues or record accepted risks in <code>SECURITY.md</code>.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/repo-health/SKILL.md" target="_blank" rel="noopener"><code>repo-health</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/repo-health/SKILL.md" target="_blank" rel="noopener"><code>repo-health</code></a></span>
 				<span>Health report — open-issue and PR backlog, unreviewed PRs, stale needs-info, failing CI, and the resulting action items.</span>
 			</div>
 			<div class="skills-table-row">
-				<span><a href="https://github.com/nearform/lastlight/blob/main/skills/chat/SKILL.md" target="_blank" rel="noopener"><code>chat</code></a></span>
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/chat/SKILL.md" target="_blank" rel="noopener"><code>chat</code></a></span>
 				<span>The in-process Slack/Discord assistant — answers questions about repos, PRs, and issues, and guides users to slash commands like <code>/build</code>, <code>/triage</code>, <code>/review</code>.</span>
 			</div>
 		</div>
-		<p class="section-note">All skill files live in the <a href="https://github.com/nearform/lastlight/tree/main/skills" target="_blank" rel="noopener"><code>skills/</code></a> directory; the build cycle's role prompts (<code>architect</code>, <code>executor</code>, <code>reviewer</code>) live in <a href="https://github.com/nearform/lastlight/tree/main/workflows/prompts" target="_blank" rel="noopener"><code>workflows/prompts/</code></a>. The agent personality is defined in <a href="https://github.com/nearform/lastlight/blob/main/agent-context/soul.md" target="_blank" rel="noopener"><code>agent-context/soul.md</code></a>.</p>
+		<p class="section-note">All skill files live in the <a href="https://github.com/nearform/lastlight/tree/main/apps/server/skills" target="_blank" rel="noopener"><code>skills/</code></a> directory; the build cycle's role prompts (<code>architect</code>, <code>executor</code>, <code>reviewer</code>) live in <a href="https://github.com/nearform/lastlight/tree/main/apps/server/workflows/prompts" target="_blank" rel="noopener"><code>workflows/prompts/</code></a>. The agent personality is defined in <a href="https://github.com/nearform/lastlight/blob/main/apps/server/agent-context/soul.md" target="_blank" rel="noopener"><code>agent-context/soul.md</code></a>.</p>
 	</section>
 
 	<!-- Living Document -->
 	<section class="content-section last-section">
 		<div class="callout-card callout-evolving">
 			<h3>This page will evolve</h3>
-			<p>Last Light is in active development. As we test these patterns in the real world — on the <a href="https://github.com/cliftonc/drizzle-cube" target="_blank" rel="noopener">drizzle-cube</a> and <a href="https://github.com/cliftonc/drizby" target="_blank" rel="noopener">drizby</a> repositories — we'll update this page with what works, what doesn't, and what we've changed. Check the <a href="https://github.com/users/cliftonc/projects/4" target="_blank" rel="noopener">roadmap</a> for what's next.</p>
+			<p>Last Light is in active development. As we test these patterns in the real world — on the <a href="https://github.com/cliftonc/drizzle-cube" target="_blank" rel="noopener">drizzle-cube</a> and <a href="https://github.com/cliftonc/drizby" target="_blank" rel="noopener">drizby</a> repositories — we'll update this page with what works, what doesn't, and what we've changed. Check the <a href="https://github.com/orgs/nearform/projects/112" target="_blank" rel="noopener">roadmap</a> for what's next.</p>
 		</div>
 	</section>
 
