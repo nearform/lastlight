@@ -28,11 +28,12 @@ packages/
   cli/               lastlight              — the lean, published global CLI (+ the Claude Code plugin)
   shared/            lastlight-shared      — shared utilities (e.g. the provider registry)
   workflow-engine/   lastlight-workflow-engine — the reusable workflow runner
+  agentic-pi/        agentic-pi            — the coding-agent harness core runs in the sandbox
 ```
 
-Five packages publish to npm: `lastlight`, `lastlight-core`,
-`lastlight-workflow-engine`, `lastlight-shared`, and `lastlight-evals`. The
-root package (`lastlight-monorepo`) is private. Common scripts run from the root
+Six packages publish to npm: `lastlight`, `lastlight-core`,
+`lastlight-workflow-engine`, `lastlight-shared`, `lastlight-evals`, and
+`agentic-pi`. The root package (`lastlight-monorepo`) is private. Common scripts run from the root
 via Turborepo: `pnpm build` / `pnpm test` / `pnpm typecheck` (each `turbo run …`),
 and `pnpm dev` (= `pnpm --filter lastlight-core dev`). See the root `CLAUDE.md`
 for the canonical workspace map and orientation.
@@ -640,6 +641,7 @@ lastlight/                      # private root package (lastlight-monorepo)
                                 #   this package at build (so the npm tarball ships them)
     shared/                     # lastlight-shared — e.g. src/providers.ts (registry)
     workflow-engine/            # lastlight-workflow-engine — reusable phase runner
+    agentic-pi/                 # agentic-pi — the coding-agent harness run in the sandbox (published)
 ```
 
 Core internals that used to sit at the repo root (`src/`, `workflows/`,
