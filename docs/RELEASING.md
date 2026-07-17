@@ -169,6 +169,15 @@ Run on a clean `main`, up to date with origin.
    --push core`, then `sandbox-qa` non-fatal). `:latest` moves only for a real,
    non-prerelease Release.
 
+   The same Release also fires the two Cloudflare site deploys —
+   `deploy-www.yml` (→ lastlight.dev, re-rendering `apps/server/spec`) and
+   `deploy-evals.yml` (→ evals.lastlight.dev, the SPA + the vendored
+   `sample-results/`). Both are now release-gated (not push-to-main); use their
+   `workflow_dispatch` button for an out-of-band deploy between releases, and
+   note that a release deploy of the evals site resets its `/data` back to the
+   sample — re-run the manual `npm run deploy` afterward to restore real
+   results.
+
 5. **Wait for the images to be green:**
 
    ```bash

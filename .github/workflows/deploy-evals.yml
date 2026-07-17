@@ -3,24 +3,27 @@ name: Deploy evals
 # Deploy the evals dashboard (apps/evals → evals.lastlight.dev) to Cloudflare.
 #
 # A deploy-only LEAF job — deliberately NOT part of the shared CI (ci.yml). It
-# fires on push to `main` when the evals app changes.
+# is RELEASE-GATED: it fires on a published GitHub Release (+ workflow_dispatch),
+# NOT on every push to `main`. Release cadence is deliberate here — the CI deploy
+# only ever ships the SPA shell + the VENDORED sample data, so gating it keeps a
+# manual real-data deploy alive until the next release instead of clobbering it
+# on the next unrelated push.
 #
-# DATA NUANCE — this Action ships the SPA SHELL only, with an EMPTY /data:
-#   `eval-results/` is gitignored and absent in CI, so build:site bakes a site
-#   whose /api/index is empty (buildIndex tolerates a missing results root) and
-#   whose /data is empty. Publishing refreshed RESULTS stays a MANUAL local
+# DATA NUANCE — this Action ships the SPA SHELL + the committed SAMPLE /data:
+#   `eval-results/` is gitignored and absent in CI, so build:site falls back to
+#   the vendored `sample-results/` (one run per tier) — /api/index + /data are
+#   baked from it. Publishing refreshed REAL results stays a MANUAL local
 #   `npm run deploy` from a machine that holds eval-results/ (see the
-#   evals-live-dashboard runbook). CAUTION: a shell-only CI deploy that lands
-#   AFTER a manual data deploy resets /data back to empty — accepted for now.
+#   evals-live-dashboard runbook). CAUTION: a sample-only release deploy that
+#   lands AFTER a manual data deploy resets /data back to the sample — but only
+#   at release time now, not on every push.
 #
 # Requires the CLOUDFLARE_API_TOKEN repo secret (scoped to Workers deploys on
 # the lastlight.dev zone account) — set by a human, referenced here.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "apps/evals/**"
+  release:
+    types: [published]
+  workflow_dispatch:
 
 concurrency:
   group: deploy-evals
@@ -50,7 +53,7 @@ jobs:
       # over apps/evals/src — whose import graph (build-site -> report ->
       # schema/grade) never reaches @lastlight/core, so no workspace `dist/` is
       # needed here. It assembles dist-site/ (SPA shell + baked /api/index +
-      # /data copy — empty in CI, see the header note).
+      # /data copy — from the vendored sample-results/ in CI, see the header note).
       #
       # NOTE: if build:site ever imports the core barrel (@lastlight/core/evals),
       # add a `pnpm --filter ...lastlight-evals build` step BEFORE this to build

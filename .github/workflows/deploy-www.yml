@@ -3,21 +3,20 @@ name: Deploy www
 # Deploy the marketing/docs site (apps/www → lastlight.dev) to Cloudflare.
 #
 # A deploy-only LEAF job — deliberately NOT part of the shared CI (ci.yml). It
-# fires on push to `main` when either the site source OR the spec pages it
-# renders change (apps/www's sync-spec pulls apps/server/spec at build time), so
-# a spec edit re-renders the docs pages without a manual deploy.
+# is RELEASE-GATED: it fires on a published GitHub Release (like the npm/image
+# publish), so the live docs track the released code, not every push to `main`.
+# The site re-renders `apps/server/spec` at build time (apps/www's sync-spec), so
+# a spec edit ships with the release that carries it. `workflow_dispatch` is the
+# manual escape hatch for an out-of-band docs deploy between releases.
 #
 # Requires the CLOUDFLARE_API_TOKEN repo secret (a token scoped to Workers
 # deploys on the lastlight.dev zone account) — set by a human, referenced here.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "apps/www/**"
-      - "apps/server/spec/**"
+  release:
+    types: [published]
+  workflow_dispatch:
 
-# One deploy at a time; let a newer push supersede an in-flight one.
+# One deploy at a time; let a newer run supersede an in-flight one.
 concurrency:
   group: deploy-www
   cancel-in-progress: true
