@@ -36,6 +36,8 @@ images/
 # ...but agentic-pi ships tracked VM-image build configs (heavy out-* artifacts stay ignored)
 !packages/agentic-pi/images/
 packages/agentic-pi/images/*/out-*/
+# ...and its VM-image source dir (manifest.ts/loader.ts) is real source, not a cache
+!packages/agentic-pi/src/sandbox/images/
 sandboxes/
 
 # Debug
