@@ -188,7 +188,19 @@ jobs:
           out="$(mktemp -d)"
           for pkg in lastlight-workflow-engine lastlight-shared agentic-pi lastlight-core lastlight lastlight-evals; do
             echo "::group::publish $pkg"
-            pnpm --filter "$pkg" pack --pack-destination "$out"
+            ver="$(pnpm --filter "$pkg" exec -- node -p "require('./package.json').version" | tail -1)"
+            # Skip versions already on npm so a release that bumps only a SUBSET of
+            # packages (the common case) doesn't 403 on the unchanged ones — and
+            # so the job is safe to re-run. Mirrors `pnpm -r publish`'s skip.
+            if npm view "$pkg@$ver" version >/dev/null 2>&1; then
+              echo "$pkg@$ver already on npm — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            # `pnpm --filter <pkg> pack` is invalid (filter implies recursive, which
+            # `pack` rejects). Run `pnpm pack` INSIDE the package dir via `exec` so
+            # it packs that one package — still rewriting `workspace:*` → concrete.
+            pnpm --filter "$pkg" exec -- pnpm pack --pack-destination "$out"
             npm publish "$out"/*.tgz --access public --provenance
             rm -f "$out"/*.tgz
             echo "::endgroup::"
