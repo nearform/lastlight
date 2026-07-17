@@ -65,6 +65,7 @@ const REPO_WRITE_TOOLS = [
   "github_push_files",
   "github_create_branch",
   "github_merge_pull_request",
+  "github_enable_auto_merge",
 ] as const;
 
 export const PROFILE_TOOLS: Record<GitAccessProfile, readonly string[]> = {

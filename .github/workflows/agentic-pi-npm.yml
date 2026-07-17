@@ -1,0 +1,104 @@
+name: Publish agentic-pi (npm)
+
+# Independent npm-release stream for the `agentic-pi` package, decoupled from the
+# monorepo's full `publish.yml` release (which fires on a `v*` GitHub Release and
+# rebuilds every Docker image). agentic-pi is a LEAF workspace package (no
+# `workspace:*` deps of its own), consumed by apps/server + apps/evals and baked
+# into the sandbox image via apps/server/sandbox/agentic-pi.pin — so it can be
+# published on its own without touching the rest of the release machinery.
+#
+# Trigger: push an `agentic-pi-v<version>` tag (matching packages/agentic-pi's
+# package.json version), or run via workflow_dispatch against an existing such
+# tag. Mirrors the VM-image stream (`image-v*` → agentic-pi-image.yml); the two
+# agentic-pi artifacts (npm package + VM image) version independently.
+#
+# Publishing uses npm OIDC TRUSTED PUBLISHING (no NPM_TOKEN) + provenance — the
+# same mechanism as publish.yml. npm ties a trusted-publisher entry to the repo
+# AND the workflow filename, so this file needs its own trusted-publisher entry
+# for the `agentic-pi` package on npmjs.com (repo nearform/lastlight, workflow
+# agentic-pi-npm.yml). Without it the publish step 403s.
+#
+# AFTER a successful publish, regenerate the sandbox pin so the docker sandbox
+# installs the new version: `apps/server/scripts/agentic-pi-pin.sh` (reads
+# `npm view agentic-pi@<version> dist.integrity`), commit apps/server/sandbox/
+# agentic-pi.pin, and rebuild lastlight-sandbox. The offline pin drift-guard
+# (apps/server/tests/agentic-pi-pin.test.ts) reds CI until that pin is bumped.
+on:
+  push:
+    tags:
+      - "agentic-pi-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing agentic-pi-v* tag to (re)publish (e.g. agentic-pi-v0.2.17)"
+        required: true
+        type: string
+
+concurrency:
+  group: publish-agentic-pi-${{ github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC trusted publishing + provenance — no NPM_TOKEN secret
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      # OIDC trusted publishing (tokenless) needs a recent npm; the one bundled
+      # with Node 22 predates it. pnpm packs (rewriting workspace:* → concrete);
+      # npm publishes the tarball with the OIDC exchange + provenance.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The tag must match the package's own version, so a published
+      # `agentic-pi@X.Y.Z` is exactly the code at tag `agentic-pi-vX.Y.Z`.
+      - name: Verify tag matches package.json version
+        run: |
+          set -euo pipefail
+          ref="${{ inputs.tag || github.ref_name }}"
+          tag_ver="${ref#agentic-pi-v}"
+          pkg_ver="$(node -p "require('./packages/agentic-pi/package.json').version")"
+          if [ "$tag_ver" != "$pkg_ver" ]; then
+            echo "Tag version ($tag_ver) != packages/agentic-pi/package.json ($pkg_ver)" >&2
+            exit 1
+          fi
+          echo "Publishing agentic-pi@$pkg_ver"
+
+      - name: Build agentic-pi
+        run: pnpm --filter agentic-pi run build
+
+      - name: Publish to npm (provenance via OIDC)
+        run: |
+          set -euo pipefail
+          ver="$(node -p "require('./packages/agentic-pi/package.json').version")"
+          # Idempotent: skip if this version is already on npm, so a re-run (or a
+          # workflow_dispatch replay) doesn't 403.
+          if npm view "agentic-pi@$ver" version >/dev/null 2>&1; then
+            echo "agentic-pi@$ver already on npm — skipping"
+            exit 0
+          fi
+          out="$(mktemp -d)"
+          # `pnpm --filter <pkg> pack` is invalid (filter implies recursive, which
+          # pack rejects). Run pnpm pack INSIDE the package via exec so it packs
+          # that one package — still rewriting workspace:* → concrete.
+          pnpm --filter agentic-pi exec -- pnpm pack --pack-destination "$out"
+          npm publish "$out"/*.tgz --access public --provenance

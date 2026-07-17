@@ -177,3 +177,89 @@ describe("GitHubClient.createLabel", () => {
     }
   });
 });
+
+/**
+ * Fake GitHub that answers the two calls `enablePullRequestAutoMerge` makes:
+ * a REST `GET /repos/.../pulls/N` (to resolve the PR node id) and a
+ * `POST /graphql` (the mutation). `graphqlErrors` lets a test simulate a repo
+ * that doesn't allow auto-merge (GraphQL returns 200 with an `errors` array).
+ */
+function autoMergeServer(opts: { graphqlErrors?: string[] } = {}): Promise<{
+  url: string;
+  close: () => Promise<void>;
+}> {
+  const server = createServer((req, res) => {
+    const method = req.method ?? "GET";
+    const url = req.url ?? "";
+    res.setHeader("content-type", "application/json");
+    if (method === "GET" && url.startsWith("/repos/octo/widget/pulls/")) {
+      res.end(JSON.stringify({ number: 5, node_id: "PR_node_123" }));
+      return;
+    }
+    if (method === "POST" && url === "/graphql") {
+      if (opts.graphqlErrors) {
+        res.end(
+          JSON.stringify({ data: null, errors: opts.graphqlErrors.map((message) => ({ message })) }),
+        );
+        return;
+      }
+      res.end(
+        JSON.stringify({
+          data: {
+            enablePullRequestAutoMerge: {
+              pullRequest: { number: 5, autoMergeRequest: { enabledAt: "2026-07-17T00:00:00Z" } },
+            },
+          },
+        }),
+      );
+      return;
+    }
+    res.statusCode = 404;
+    res.end("{}");
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        close: () => new Promise((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+describe("GitHubClient.enablePullRequestAutoMerge", () => {
+  test("resolves the node id then enables auto-merge (ok: true)", async () => {
+    const fake = await autoMergeServer();
+    try {
+      const client = new GitHubClient(staticAuth, { baseUrl: fake.url });
+      const result = (await client.enablePullRequestAutoMerge("octo", "widget", 5)) as {
+        ok: boolean;
+        merge_method: string;
+        pull_number: number;
+      };
+      assert.equal(result.ok, true);
+      assert.equal(result.merge_method, "squash");
+      assert.equal(result.pull_number, 5);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  test("returns { ok: false, reason } when the repo disallows auto-merge (no throw)", async () => {
+    const fake = await autoMergeServer({
+      graphqlErrors: ["Auto merge is not allowed for this repository"],
+    });
+    try {
+      const client = new GitHubClient(staticAuth, { baseUrl: fake.url });
+      const result = (await client.enablePullRequestAutoMerge("octo", "widget", 5, "merge")) as {
+        ok: boolean;
+        reason: string;
+      };
+      assert.equal(result.ok, false);
+      assert.match(result.reason, /not allowed/i);
+    } finally {
+      await fake.close();
+    }
+  });
+});

@@ -32,6 +32,7 @@ describe("PROFILE_TOOLS", () => {
       "github_push_files",
       "github_create_branch",
       "github_merge_pull_request",
+      "github_enable_auto_merge",
     ];
     for (const t of repoOnly) {
       assert.ok(PROFILE_TOOLS["repo-write"].includes(t), `${t} missing from repo-write`);
@@ -65,7 +66,7 @@ describe("PROFILE_TOOLS", () => {
     assert.equal(PROFILE_TOOLS.read.length, 18);
     assert.equal(PROFILE_TOOLS["issues-write"].length, 25);
     assert.equal(PROFILE_TOOLS["review-write"].length, 27);
-    assert.equal(PROFILE_TOOLS["repo-write"].length, 32);
+    assert.equal(PROFILE_TOOLS["repo-write"].length, 33);
   });
 });
 

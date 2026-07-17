@@ -506,6 +506,21 @@ export function buildGitHubTools(
         gh.mergePullRequest(owner, repo, pull_number, opts),
     ),
 
+    tool(
+      "github_enable_auto_merge",
+      "Enable auto-merge on a pull request: GitHub merges it automatically once the required status checks pass (it will NOT merge a PR whose checks are failing or still running). Use this instead of github_merge_pull_request when you want the merge gated on green CI. Returns { ok: false, reason } if the repository does not allow auto-merge.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        merge_method: Type.Optional(
+          Type.Union([Type.Literal("merge"), Type.Literal("squash"), Type.Literal("rebase")]),
+        ),
+      }),
+      ({ owner, repo, pull_number, merge_method }) =>
+        gh.enablePullRequestAutoMerge(owner, repo, pull_number, merge_method),
+    ),
+
     // ── Commits ───────────────────────────────────────────────────────
 
     tool(

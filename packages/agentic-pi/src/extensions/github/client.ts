@@ -566,6 +566,66 @@ export class GitHubClient {
     });
   }
 
+  /**
+   * Enable GitHub auto-merge on a PR: GitHub merges it automatically once the
+   * required status checks pass. Unlike `mergePullRequest` (an immediate merge)
+   * this never merges a still-red PR. Uses the GraphQL
+   * `enablePullRequestAutoMerge` mutation — there is no REST equivalent — so it
+   * first resolves the PR's node id via REST.
+   *
+   * Auto-merge is not always available (the repo must have "Allow auto-merge"
+   * enabled and at least one required check). Rather than throw, we return
+   * `{ ok: false, reason }` in that case so the agent can fall back to leaving
+   * the PR for a human.
+   */
+  async enablePullRequestAutoMerge(
+    owner: string,
+    repo: string,
+    pull_number: number,
+    mergeMethod: "merge" | "squash" | "rebase" = "squash",
+  ) {
+    return this.withRetry(async () => {
+      const ok = await this.octokit();
+      const { data: pr } = await ok.pulls.get({ owner, repo, pull_number });
+      const method = mergeMethod.toUpperCase() as "MERGE" | "SQUASH" | "REBASE";
+      try {
+        const res = await ok.graphql<{
+          enablePullRequestAutoMerge: {
+            pullRequest: {
+              number: number;
+              autoMergeRequest: { enabledAt: string | null } | null;
+            };
+          };
+        }>(
+          // NB: `@octokit/graphql` reserves `method`/`url`/`query` etc. as
+          // request-option names, so the GraphQL variable can't be `$method`.
+          `mutation($id: ID!, $mergeMethod: PullRequestMergeMethod!) {
+            enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: $mergeMethod }) {
+              pullRequest { number autoMergeRequest { enabledAt } }
+            }
+          }`,
+          { id: pr.node_id, mergeMethod: method },
+        );
+        return {
+          ok: true,
+          pull_number,
+          merge_method: mergeMethod,
+          auto_merge: res.enablePullRequestAutoMerge.pullRequest.autoMergeRequest,
+        };
+      } catch (err) {
+        // GraphQL errors (e.g. "Auto merge is not allowed for this repository")
+        // arrive as a GraphqlResponseError carrying `.errors`. Surface the
+        // reason as a non-throwing result instead of failing the whole run.
+        const e = err as { message?: string; errors?: Array<{ message?: string }> };
+        const reason =
+          e.errors?.map((x) => x.message).filter(Boolean).join("; ") ||
+          e.message ||
+          "unknown error";
+        return { ok: false, pull_number, reason };
+      }
+    });
+  }
+
   // ── Commits ───────────────────────────────────────────────────────
 
   async listCommits(owner: string, repo: string, opts: Record<string, unknown> = {}) {
