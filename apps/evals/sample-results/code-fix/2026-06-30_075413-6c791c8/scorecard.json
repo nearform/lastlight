@@ -1,0 +1,168 @@
+{
+  "models": [
+    {
+      "model": "anthropic/claude-haiku-4-5",
+      "total": 1,
+      "codeFixResolved": 1,
+      "codeFixTotal": 1,
+      "behavioralOk": 1,
+      "behavioralTotal": 1,
+      "avgInputTokens": 867,
+      "avgCachedTokens": 1131748,
+      "avgOutputTokens": 18750,
+      "totalCostUsd": 0.27458265,
+      "p50DurationMs": 301996,
+      "errors": 0
+    }
+  ],
+  "results": [
+    {
+      "instance_id": "codefix__date-range-off-by-one",
+      "model": "anthropic/claude-haiku-4-5",
+      "workflowSucceeded": true,
+      "inputTokens": 867,
+      "cachedTokens": 1131748,
+      "outputTokens": 18750,
+      "costUsd": 0.27458265,
+      "durationMs": 301996,
+      "phases": [
+        {
+          "phase": "phase_0",
+          "success": true,
+          "model": "anthropic/claude-haiku-4-5"
+        },
+        {
+          "phase": "guardrails",
+          "success": true,
+          "model": "anthropic/claude-haiku-4-5"
+        },
+        {
+          "phase": "architect",
+          "success": true,
+          "model": "anthropic/claude-haiku-4-5"
+        },
+        {
+          "phase": "executor",
+          "success": true,
+          "model": "anthropic/claude-haiku-4-5"
+        },
+        {
+          "phase": "reviewer",
+          "success": true,
+          "model": "anthropic/claude-haiku-4-5"
+        },
+        {
+          "phase": "pr",
+          "success": true,
+          "model": "anthropic/claude-haiku-4-5"
+        }
+      ],
+      "modelPatchFile": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/changes.diff",
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "pr-opened",
+            "ok": true,
+            "detail": "head=lastlight/codefix__date-range-off-by-one base=main title=\"Fix date-range off-by-one bug in inclusiveDayCount (#201)\""
+          }
+        ]
+      },
+      "resolved": true,
+      "failToPass": [],
+      "passToPass": [],
+      "executionLog": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/execution.log",
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "guardrails",
+            "success": true,
+            "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/01-guardrails.jsonl"
+          },
+          {
+            "phase": "architect",
+            "success": true,
+            "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/02-architect.jsonl"
+          },
+          {
+            "phase": "executor",
+            "success": true,
+            "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/03-executor.jsonl"
+          },
+          {
+            "phase": "reviewer",
+            "success": true,
+            "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/04-reviewer.jsonl"
+          },
+          {
+            "phase": "pr",
+            "success": true,
+            "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/05-pr.jsonl"
+          }
+        ]
+      },
+      "tier": "code-fix",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "guardrails",
+              "success": true,
+              "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/01-guardrails.jsonl"
+            },
+            {
+              "phase": "architect",
+              "success": true,
+              "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/02-architect.jsonl"
+            },
+            {
+              "phase": "executor",
+              "success": true,
+              "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/03-executor.jsonl"
+            },
+            {
+              "phase": "reviewer",
+              "success": true,
+              "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/04-reviewer.jsonl"
+            },
+            {
+              "phase": "pr",
+              "success": true,
+              "log": "sessions/codefix__date-range-off-by-one__anthropic-claude-haiku-4-5/trial-1/05-pr.jsonl"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "runId": "2026-06-30_075413-6c791c8",
+    "runType": "models",
+    "tiers": [
+      "code-fix"
+    ],
+    "models": [
+      "Claude Haiku 4.5"
+    ],
+    "runs": 1,
+    "gitSha": "6c791c8",
+    "labels": {
+      "openai/gpt-5.5": "GPT-5.5",
+      "openai/gpt-5.4-mini": "GPT-5.4 mini",
+      "openai/gpt-5.3-codex": "GPT-5.3 Codex",
+      "anthropic/claude-opus-4-8": "Claude Opus 4.8",
+      "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",
+      "anthropic/claude-haiku-4-5": "Claude Haiku 4.5",
+      "fireworks/accounts/fireworks/models/glm-5p2": "GLM-5.2",
+      "fireworks/accounts/fireworks/models/deepseek-v4-pro": "DeepSeek V4 Pro",
+      "fireworks/accounts/fireworks/models/gpt-oss-120b": "GPT-OSS 120B"
+    },
+    "generatedAt": "2026-06-30T07:59:15.376Z",
+    "live": false
+  }
+}

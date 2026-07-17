@@ -1,0 +1,108 @@
+{
+  "models": [
+    {
+      "model": "anthropic/claude-haiku-4-5",
+      "total": 1,
+      "codeFixResolved": 0,
+      "codeFixTotal": 0,
+      "behavioralOk": 1,
+      "behavioralTotal": 1,
+      "avgInputTokens": 51,
+      "avgCachedTokens": 50429,
+      "avgOutputTokens": 2510,
+      "totalCostUsd": 0.034608700000000006,
+      "p50DurationMs": 27609,
+      "errors": 0
+    }
+  ],
+  "results": [
+    {
+      "instance_id": "triage__bug-with-repro-ready",
+      "model": "anthropic/claude-haiku-4-5",
+      "workflowSucceeded": true,
+      "inputTokens": 51,
+      "cachedTokens": 50429,
+      "outputTokens": 2510,
+      "costUsd": 0.034608700000000006,
+      "durationMs": 27609,
+      "phases": [
+        {
+          "phase": "triage",
+          "success": true,
+          "model": "anthropic/claude-haiku-4-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "label:bug",
+            "ok": true,
+            "detail": "labels=[bug, ready-for-agent]"
+          },
+          {
+            "name": "category=bug",
+            "ok": true,
+            "detail": "labels=[bug, ready-for-agent]"
+          },
+          {
+            "name": "state=ready-for-agent",
+            "ok": true,
+            "detail": "labels=[bug, ready-for-agent]"
+          }
+        ]
+      },
+      "githubMutations": 11,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/triage__bug-with-repro-ready__anthropic-claude-haiku-4-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "triage",
+            "success": true,
+            "log": "sessions/triage__bug-with-repro-ready__anthropic-claude-haiku-4-5/trial-1/01-triage.jsonl"
+          }
+        ]
+      },
+      "tier": "triage",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/triage__bug-with-repro-ready__anthropic-claude-haiku-4-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "triage",
+              "success": true,
+              "log": "sessions/triage__bug-with-repro-ready__anthropic-claude-haiku-4-5/trial-1/01-triage.jsonl"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "runId": "2026-06-29_160025-74bc10e",
+    "runType": "models",
+    "tiers": [
+      "triage"
+    ],
+    "models": [
+      "Claude Haiku 4.5"
+    ],
+    "runs": 1,
+    "gitSha": "74bc10e",
+    "labels": {
+      "openai/gpt-5.5": "GPT-5.5",
+      "openai/gpt-5.4-mini": "GPT-5.4 mini",
+      "openai/gpt-5.3-codex": "GPT-5.3 Codex",
+      "anthropic/claude-opus-4-8": "Claude Opus 4.8",
+      "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",
+      "anthropic/claude-haiku-4-5": "Claude Haiku 4.5",
+      "fireworks/accounts/fireworks/models/glm-5p2": "GLM-5.2",
+      "fireworks/accounts/fireworks/models/deepseek-v4-pro": "DeepSeek V4 Pro",
+      "fireworks/accounts/fireworks/models/gpt-oss-120b": "GPT-OSS 120B"
+    },
+    "generatedAt": "2026-06-29T16:00:53.535Z",
+    "live": false
+  }
+}

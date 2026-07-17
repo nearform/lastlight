@@ -1,0 +1,1515 @@
+{
+  "models": [
+    {
+      "model": "anthropic/claude-sonnet-5",
+      "total": 10,
+      "codeFixResolved": 0,
+      "codeFixTotal": 0,
+      "behavioralOk": 10,
+      "behavioralTotal": 10,
+      "reviewTotal": 10,
+      "avgPrecision": 0.36666666666666664,
+      "avgRecall": 0.3333333333333333,
+      "avgFbeta": 0.32499999999999996,
+      "reviewBeta": 1,
+      "avgInputTokens": 41.4,
+      "avgCachedTokens": 644054.9,
+      "avgOutputTokens": 10009.4,
+      "totalCostUsd": 3.2395202000000003,
+      "p50DurationMs": 217460,
+      "errors": 0
+    }
+  ],
+  "results": [
+    {
+      "instance_id": "prreview__discourse-graphite-9",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 38,
+      "cachedTokens": 464800,
+      "outputTokens": 7107,
+      "costUsd": 0.23705279999999998,
+      "durationMs": 164386,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=COMMENT bodyLen=487"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 1,
+        "gold": 2,
+        "matched": 0,
+        "falsePositives": [
+          {
+            "description": "No test coverage for the new fallback behavior: FallbackLocaleList#[] and #ensure_loaded! introduce the core fallback-order logic (user locale -> SiteSetting.default_locale -> :en) but no spec exercises it; a regression (e.g. wrong fallback order, or SiteSetting.default_locale not being callable during early boot) would only surface as silently-missing translations in production rather than a failing test.",
+            "file": "config/initializers/i18n.rb"
+          }
+        ],
+        "falseNegatives": [
+          {
+            "description": "Thread-safety issue with lazy @loaded_locales",
+            "severity": "low"
+          },
+          {
+            "description": "Consider normalizing the input locale (e.g., to a symbol) when checking/loading here to avoid double-loading if the same locale is passed as a String vs Symbol (also applies to other locations in the PR).",
+            "severity": "low"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Wires up server-side i18n locale fallbacks: registers the fallbacks/pluralization backends, defines a FallbackLocaleList (user locale -> site default -> :en), and forces the fallback chain to be loaded on each request via ensure_loaded!. It also correctly removes the previously-inert config.i18n.fallbacks = true declarations, which never had any effect. Logic is sound and matches the existing translate_accelerator caching/loading conventions; no correctness or security issues found.\n\n[inline config/initializers/i18n.rb:17] **[Important] No test coverage for the new fallback behavior**\n\nFallbackLocaleList#[] and #ensure_loaded! introduce the core fallback-order logic (user locale -> SiteSetting.default_locale -> :en) but no spec exercises it; a regression here (e.g. wrong fallback order, or SiteSetting.default_locale not being callable during early boot) would only surface as silently-missing translations in production rather than a failing test.",
+          "findings": [
+            {
+              "description": "No test coverage for the new fallback behavior: FallbackLocaleList#[] and #ensure_loaded! introduce the core fallback-order logic (user locale -> SiteSetting.default_locale -> :en) but no spec exercises it; a regression (e.g. wrong fallback order, or SiteSetting.default_locale not being callable during early boot) would only surface as silently-missing translations in production rather than a failing test.",
+              "file": "config/initializers/i18n.rb",
+              "matchedGold": null
+            }
+          ],
+          "gold": [
+            {
+              "description": "Thread-safety issue with lazy @loaded_locales",
+              "severity": "low",
+              "matchedFinding": null
+            },
+            {
+              "description": "Consider normalizing the input locale (e.g., to a symbol) when checking/loading here to avoid double-loading if the same locale is passed as a String vs Symbol (also applies to other locations in the PR).",
+              "severity": "low",
+              "matchedFinding": null
+            }
+          ],
+          "rawExtract": "{\"findings\":[{\"description\":\"No test coverage for the new fallback behavior: FallbackLocaleList#[] and #ensure_loaded! introduce the core fallback-order logic (user locale -> SiteSetting.default_locale -> :en) but no spec exercises it; a regression (e.g. wrong fallback order, or SiteSetting.default_locale not being callable during early boot) would only surface as silently-missing translations in production rather than a failing test.\",\"file\":\"config/initializers/i18n.rb\"}]}",
+          "rawMatch": "{\"matches\":[]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-9__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-9__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-9__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-9__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-10",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 28,
+      "cachedTokens": 429941,
+      "outputTokens": 10582,
+      "costUsd": 0.2857134,
+      "durationMs": 180113,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=REQUEST_CHANGES bodyLen=322"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0.5,
+        "recall": 0.5,
+        "fbeta": 0.5,
+        "beta": 1,
+        "posted": 4,
+        "gold": 4,
+        "matched": 2,
+        "falsePositives": [
+          {
+            "description": "Migration crashes when no category matches the embed_category setting. `execute(...)[0]` returns nil when embed_category is empty or unset (the default for most installs), so `['id']` raises NoMethodError and the migration fails for the vast majority of upgrading sites. Should guard with a nil/count check and fall back to 0 (uncategorized).",
+            "file": "db/migrate/20150818190757_create_embeddable_hosts.rb"
+          },
+          {
+            "description": "Raw string interpolation of the host value into the INSERT SQL is a SQL injection vector. An unescaped quote or semicolon in the historical embeddable_hosts site setting value can break or hijack the INSERT. Should use `ActiveRecord::Base.connection.quote(h)` or parameterized queries instead.",
+            "file": "db/migrate/20150818190757_create_embeddable_hosts.rb"
+          }
+        ],
+        "falseNegatives": [
+          {
+            "description": "record_for_host compares lower(host) = ? but does not normalize the parameter’s case, so mixed‑case referer hosts may fail to match even though comparison intends to be case‑insensitive.",
+            "severity": "medium"
+          },
+          {
+            "description": "Because this migration inserts embeddable_hosts rows with raw SQL, any existing embeddable_hosts values that include http:// or /https:// or path segments won’t go through the EmbeddableHost model’s normalization, so the new host lookup (which compares only the bare host) may fail for migrated data. Consider ensuring that migrated hosts are normalized to the same format as newly created EmbeddableHost records so existing embedding configurations keep working.",
+            "severity": "high"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Replaces the embeddable_hosts/embed_category site settings with a proper EmbeddableHost model + admin UI. The core model/controller/serializer work is solid, but the data-migration script will crash for the vast majority of existing installs, and a couple of the new admin endpoints don't guard against nil records/params.\n\n[inline db/migrate/20150818190757_create_embeddable_hosts.rb:11] **[Critical] Migration crashes when no category matches the (default empty) embed_category setting**\n\n`execute(\"SELECT c.id FROM categories ... WHERE s.value = c.name\")[0]['id']` returns 0 rows whenever `embed_category` isn't set to an existing category name — which is the default (`embed_category: ''` in site_settings.yml) for essentially every install. `execute(...)[0]` is then `nil`, so `['id']` raises `NoMethodError`, failing the migration for most upgrading sites instead of falling back to uncategorized.\n\n```suggestion\n    result = execute(\"SELECT c.id FROM categories AS c\n                        INNER JOIN site_settings AS s ON s.value = c.name\n                        WHERE s.name = 'embed_category'\")\n    category_id = result.count > 0 ? result[0]['id'].to_i : 0\n```\n\n[inline db/migrate/20150818190757_create_embeddable_hosts.rb:25] **[Important] Raw string interpolation into INSERT is a SQL injection vector**\n\n`h` comes from splitting the `embeddable_hosts` site setting value and is interpolated directly into the SQL string; an unescaped quote/semicolon in that historical value breaks or hijacks the INSERT. Use `ActiveRecord::Base.connection.quote(h)` (or parameterized execute) instead of raw interpolation.\n\n```suggestion\n            execute \"INSERT INTO embeddable_hosts (host, category_id, created_at, updated_at) VALUES (#{ActiveRecord::Base.connection.quote(h)}, #{category_id}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)\"\n```\n\n[inline app/models/embeddable_host.rb:6] **[Important] before_validation crashes on nil host instead of surfacing a validation error**\n\n`self.host.sub!` raises `NoMethodError` when `host` is nil/blank (e.g. a request missing the `host` param, or `params[:embeddable_host][:host]` not sent). Since `validates_format_of` runs after this callback, callers get a 500 instead of a normal validation failure.\n\n```suggestion\n  before_validation do\n    self.host = self.host.to_s.sub(/^https?:\\/\\//, '').sub(/\\/.*$/, '')\n  end\n```\n\n[inline app/controllers/admin/embeddable_hosts_controller.rb:16] **[Important] update/destroy don't handle a missing record, raising NoMethodError instead of 404**\n\n`EmbeddableHost.where(id: params[:id]).first` returns `nil` for a deleted/invalid id; `host.destroy` here (and `host.host = ...` in `save_host` for `update`) then raises `NoMethodError` -> 500, instead of a clean not-found response.\n\n```suggestion\n    host = EmbeddableHost.where(id: params[:id]).first\n    raise Discourse::NotFound unless host\n    host.destroy\n```",
+          "findings": [
+            {
+              "description": "Migration crashes when no category matches the embed_category setting. `execute(...)[0]` returns nil when embed_category is empty or unset (the default for most installs), so `['id']` raises NoMethodError and the migration fails for the vast majority of upgrading sites. Should guard with a nil/count check and fall back to 0 (uncategorized).",
+              "file": "db/migrate/20150818190757_create_embeddable_hosts.rb",
+              "matchedGold": null
+            },
+            {
+              "description": "Raw string interpolation of the host value into the INSERT SQL is a SQL injection vector. An unescaped quote or semicolon in the historical embeddable_hosts site setting value can break or hijack the INSERT. Should use `ActiveRecord::Base.connection.quote(h)` or parameterized queries instead.",
+              "file": "db/migrate/20150818190757_create_embeddable_hosts.rb",
+              "matchedGold": null
+            },
+            {
+              "description": "before_validation callback calls `self.host.sub!` which raises NoMethodError when host is nil/blank (e.g. missing param). This causes a 500 instead of a normal validation error. Should use `self.host.to_s.sub(...)` to handle nil safely.",
+              "file": "app/models/embeddable_host.rb",
+              "matchedGold": 0
+            },
+            {
+              "description": "update and destroy actions do not handle a missing record. `EmbeddableHost.where(id: params[:id]).first` returns nil for a deleted or invalid id, and subsequent calls like `host.destroy` or `host.host = ...` raise NoMethodError resulting in a 500 instead of a 404 not-found response.",
+              "file": "app/controllers/admin/embeddable_hosts_controller.rb",
+              "matchedGold": 1
+            }
+          ],
+          "gold": [
+            {
+              "description": "NoMethodError before_validation in EmbeddableHost",
+              "severity": "critical",
+              "matchedFinding": 2
+            },
+            {
+              "description": "The update and destroy methods in Admin::EmbeddableHostsController do not validate the existence of the EmbeddableHost record retrieved by ID. If EmbeddableHost.where(id: params[:id]).first returns nil (i.e., the host does not exist), attempting to call methods on the nil object (e.g., save_host or destroy) will result in a NoMethodError.",
+              "severity": "medium",
+              "matchedFinding": 3
+            },
+            {
+              "description": "record_for_host compares lower(host) = ? but does not normalize the parameter’s case, so mixed‑case referer hosts may fail to match even though comparison intends to be case‑insensitive.",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "Because this migration inserts embeddable_hosts rows with raw SQL, any existing embeddable_hosts values that include http:// or /https:// or path segments won’t go through the EmbeddableHost model’s normalization, so the new host lookup (which compares only the bare host) may fail for migrated data. Consider ensuring that migrated hosts are normalized to the same format as newly created EmbeddableHost records so existing embedding configurations keep working.",
+              "severity": "high",
+              "matchedFinding": null
+            }
+          ],
+          "rawExtract": "```json\n{\"findings\":[{\"description\":\"Migration crashes when no category matches the embed_category setting. `execute(...)[0]` returns nil when embed_category is empty or unset (the default for most installs), so `['id']` raises NoMethodError and the migration fails for the vast majority of upgrading sites. Should guard with a nil/count check and fall back to 0 (uncategorized).\",\"file\":\"db/migrate/20150818190757_create_embeddable_hosts.rb\"},{\"description\":\"Raw string interpolation of the host value into the INSERT SQL is a SQL injection vector. An unescaped quote or semicolon in the historical embeddable_hosts site setting value can break or hijack the INSERT. Should use `ActiveRecord::Base.connection.quote(h)` or parameterized queries instead.\",\"file\":\"db/migrate/20150818190757_create_embeddable_hosts.rb\"},{\"description\":\"before_validation callback calls `self.host.sub!` which raises NoMethodError when host is nil/blank (e.g. missing param). This causes a 500 instead of a normal validation error. Should use `self.host.to_s.sub(...)` to handle nil safely.\",\"file\":\"app/models/embeddable_host.rb\"},{\"description\":\"update and destroy actions do not handle a missing record. `EmbeddableHost.where(id: params[:id]).first` returns nil for a deleted or invalid id, and subsequent calls like `host.destroy` or `host.host = ...` raise NoMethodError resulting in a 500 instead of a 404 not-found response.\",\"file\":\"app/controllers/admin/embeddable_hosts_controller.rb\"}]}\n```",
+          "rawMatch": "{\"matches\":[{\"finding\":2,\"gold\":0},{\"finding\":3,\"gold\":1}]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-10__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-10__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-10__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-10__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-7",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 52,
+      "cachedTokens": 1041059,
+      "outputTokens": 12457,
+      "costUsd": 0.47803880000000015,
+      "durationMs": 196583,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=REQUEST_CHANGES bodyLen=962"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0.5,
+        "recall": 1,
+        "fbeta": 0.6666666666666666,
+        "beta": 1,
+        "posted": 6,
+        "gold": 3,
+        "matched": 3,
+        "falsePositives": [
+          {
+            "description": "Missed conversion — `.topic-list.categories .category .badge-notification` still uses plain `scale-color($primary, $lightness: 50%)` instead of `dark-light-choose(...)`, leaving the badge color washed out/near-invisible on dark themes.",
+            "file": "app/assets/stylesheets/common/base/_topic-list.scss"
+          },
+          {
+            "description": "Light-theme lightness changed from 20% to 50% for the `h3` selector — should be 20%/80% (light/dark) per the PR pattern, but is now 50%/50%, altering the existing light-theme color.",
+            "file": "app/assets/stylesheets/mobile/topic-post.scss"
+          },
+          {
+            "description": "Light-theme lightness changed from 30% to 50% for `.group-member-info .name` — should be 30%/70% (light/dark) per the PR pattern, but is now 50%/50%, altering the existing light-theme color.",
+            "file": "app/assets/stylesheets/mobile/user.scss"
+          }
+        ],
+        "falseNegatives": [],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Broad mechanical conversion of `scale-color($primary, ...)` to `dark-light-choose(scale-color($primary, ...), scale-color($secondary, ...))` across the stylesheet so dark themes get a sane color instead of a $primary-derived one. The pairing pattern (secondary lightness = 100 - primary lightness) is correct and consistent almost everywhere, but several spots got the wrong light-theme literal (changing existing light-theme colors, not just adding a dark branch) and one spot was left unconverted.\n\n### Additional findings\n- **[Important] Missed conversion — still uses raw scale-color($primary)** (app/assets/stylesheets/common/base/_topic-list.scss:115) — `.topic-list.categories .category .badge-notification` still uses plain `scale-color($primary, $lightness: 50%)` while every other occurrence in this file was converted to `dark-light-choose(...)`. On a dark theme this badge color will remain washed out/near-invisible, defeating the purpose of the PR.\n\n[inline app/assets/stylesheets/desktop/topic-post.scss:291] **[Important] Light-theme lightness changed from 30% to 70%**\n\nOriginal was `scale-color($primary, $lightness: 30%)`; the light-theme branch here now uses 70% while the dark-theme branch got 30% — the two values look swapped. This changes the existing light-theme color for `.topic-meta-data h5 a`, not just adding dark-theme support.\n\n```suggestion\n      color: dark-light-choose(scale-color($primary, $lightness: 30%), scale-color($secondary, $lightness: 70%));\n```\n\n[inline app/assets/stylesheets/desktop/user.scss:522] **[Important] Light-theme lightness changed from 30% to 50%**\n\nOriginal was `scale-color($primary, $lightness: 30%)` for `.group-member-info .name`; it's now 50%/50% instead of preserving 30% for light theme (with 70% for dark, matching the pattern used everywhere else in this PR). This alters the existing light-theme appearance.\n\n```suggestion\n        color: dark-light-choose(scale-color($primary, $lightness: 30%), scale-color($secondary, $lightness: 70%));\n```\n\n[inline app/assets/stylesheets/mobile/modal.scss:102] **[Important] Light-theme lightness changed from 70% to 30%**\n\nOriginal was `scale-color($primary, $lightness: 70%)` for `.custom-message-length`; the light/dark branches are swapped here (30%/70% instead of 70%/30%), changing the existing light-theme color.\n\n```suggestion\n  color: dark-light-choose(scale-color($primary, $lightness: 70%), scale-color($secondary, $lightness: 30%));\n```\n\n[inline app/assets/stylesheets/mobile/topic-post.scss:182] **[Important] Light-theme lightness changed from 20% to 50%**\n\nOriginal was `scale-color($primary, $lightness: 20%)` for this `h3`; it's now 50%/50% instead of preserving 20% for light theme (with 80% for dark, per the pattern used elsewhere for 20%/80% pairs, e.g. desktop/topic-post.scss `button.create` and `h3`). Alters the existing light-theme color.\n\n```suggestion\n    color: dark-light-choose(scale-color($primary, $lightness: 20%), scale-color($secondary, $lightness: 80%));\n```\n\n[inline app/assets/stylesheets/mobile/user.scss:497] **[Important] Light-theme lightness changed from 30% to 50%**\n\nSame `.group-member-info .name` case as desktop/user.scss: original was 30%, now 50%/50% instead of 30%/70%, changing the existing light-theme color.\n\n```suggestion\n        color: dark-light-choose(scale-color($primary, $lightness: 30%), scale-color($secondary, $lightness: 70%));\n```",
+          "findings": [
+            {
+              "description": "Missed conversion — `.topic-list.categories .category .badge-notification` still uses plain `scale-color($primary, $lightness: 50%)` instead of `dark-light-choose(...)`, leaving the badge color washed out/near-invisible on dark themes.",
+              "file": "app/assets/stylesheets/common/base/_topic-list.scss",
+              "matchedGold": null
+            },
+            {
+              "description": "Light-theme lightness changed from 30% to 70% for `.topic-meta-data h5 a` — the light and dark branch values appear swapped, altering the existing light-theme color instead of just adding dark-theme support.",
+              "file": "app/assets/stylesheets/desktop/topic-post.scss",
+              "matchedGold": 0
+            },
+            {
+              "description": "Light-theme lightness changed from 30% to 50% for `.group-member-info .name` — should be 30%/70% (light/dark) per the PR pattern, but is now 50%/50%, altering the existing light-theme color.",
+              "file": "app/assets/stylesheets/desktop/user.scss",
+              "matchedGold": 1
+            },
+            {
+              "description": "Light-theme lightness changed from 70% to 30% for `.custom-message-length` — the light and dark branch values are swapped (30%/70% instead of 70%/30%), changing the existing light-theme color.",
+              "file": "app/assets/stylesheets/mobile/modal.scss",
+              "matchedGold": 2
+            },
+            {
+              "description": "Light-theme lightness changed from 20% to 50% for the `h3` selector — should be 20%/80% (light/dark) per the PR pattern, but is now 50%/50%, altering the existing light-theme color.",
+              "file": "app/assets/stylesheets/mobile/topic-post.scss",
+              "matchedGold": null
+            },
+            {
+              "description": "Light-theme lightness changed from 30% to 50% for `.group-member-info .name` — should be 30%/70% (light/dark) per the PR pattern, but is now 50%/50%, altering the existing light-theme color.",
+              "file": "app/assets/stylesheets/mobile/user.scss",
+              "matchedGold": null
+            }
+          ],
+          "gold": [
+            {
+              "description": "In .topic-meta-data h5 a, the original code had color: scale-color($primary, $lightness: 30%) but was changed to dark-light-choose(scale-color($primary, $lightness: 70%), scale-color($secondary, $lightness: 30%)). The lightness for the light theme changed from 30% to 70%, which is a dramatic inversion",
+              "severity": "low",
+              "matchedFinding": 1
+            },
+            {
+              "description": "This change for desktop/user.css changes $primary from 30% to 50% for the light theme; most other changes preserve the original $primary value and move the complement to $secondary for dark. Consider reviewing this (also applies to a similar .name change in the mobile variant).",
+              "severity": "low",
+              "matchedFinding": 2
+            },
+            {
+              "description": "In topic-post.css the original code used $lightness: 70% but the replacement uses $lightness: 30% for the light theme. This makes the text significantly darker than intended.",
+              "severity": "low",
+              "matchedFinding": 3
+            }
+          ],
+          "rawExtract": "```json\n{\"findings\":[{\"description\":\"Missed conversion — `.topic-list.categories .category .badge-notification` still uses plain `scale-color($primary, $lightness: 50%)` instead of `dark-light-choose(...)`, leaving the badge color washed out/near-invisible on dark themes.\",\"file\":\"app/assets/stylesheets/common/base/_topic-list.scss\"},{\"description\":\"Light-theme lightness changed from 30% to 70% for `.topic-meta-data h5 a` — the light and dark branch values appear swapped, altering the existing light-theme color instead of just adding dark-theme support.\",\"file\":\"app/assets/stylesheets/desktop/topic-post.scss\"},{\"description\":\"Light-theme lightness changed from 30% to 50% for `.group-member-info .name` — should be 30%/70% (light/dark) per the PR pattern, but is now 50%/50%, altering the existing light-theme color.\",\"file\":\"app/assets/stylesheets/desktop/user.scss\"},{\"description\":\"Light-theme lightness changed from 70% to 30% for `.custom-message-length` — the light and dark branch values are swapped (30%/70% instead of 70%/30%), changing the existing light-theme color.\",\"file\":\"app/assets/stylesheets/mobile/modal.scss\"},{\"description\":\"Light-theme lightness changed from 20% to 50% for the `h3` selector — should be 20%/80% (light/dark) per the PR pattern, but is now 50%/50%, altering the existing light-theme color.\",\"file\":\"app/assets/stylesheets/mobile/topic-post.scss\"},{\"description\":\"Light-theme lightness changed from 30% to 50% for `.group-member-info .name` — should be 30%/70% (light/dark) per the PR pattern, but is now 50%/50%, altering the existing light-theme color.\",\"file\":\"app/assets/stylesheets/mobile/user.scss\"}]}\n```",
+          "rawMatch": "{\"matches\":[{\"finding\":1,\"gold\":0},{\"finding\":2,\"gold\":1},{\"finding\":3,\"gold\":2}]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-7__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-7__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-7__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-7__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-8",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 46,
+      "cachedTokens": 803215,
+      "outputTokens": 13223,
+      "costUsd": 0.3873753999999999,
+      "durationMs": 257151,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=REQUEST_CHANGES bodyLen=402"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 4,
+        "gold": 3,
+        "matched": 0,
+        "falsePositives": [
+          {
+            "description": "add/remove-member routes are member routes keyed on :id, but the controllers call `params.require(:group_id)`, which raises ActionController::ParameterMissing on every real request. The feature is unreachable in production; controller specs only pass because they supply group_id directly, bypassing the router.",
+            "file": "config/routes.rb"
+          },
+          {
+            "description": "`add_members` reads `params.require(:group_id)` but the route (member route under `resources :groups`) places the group id in `params[:id]`, so every real request raises ParameterMissing.",
+            "file": "app/controllers/admin/groups_controller.rb"
+          },
+          {
+            "description": "`group.users.delete(user_id)` passes an Integer to a `has_many :through` collection's delete method, which type-checks arguments against the association's model class and raises `ActiveRecord::AssociationTypeMismatch`. Should look up the User record and call `group.remove(user)` instead.",
+            "file": "app/controllers/admin/groups_controller.rb"
+          },
+          {
+            "description": "The public group members page silently truncates results to 50 with no pagination UI. `GroupsController#members` now always applies a limit of 50, but the group members template has no next/previous controls, so members beyond the first 50 are invisible with no way to view them.",
+            "file": "app/assets/javascripts/discourse/templates/group/members.hbs"
+          }
+        ],
+        "falseNegatives": [
+          {
+            "description": "The findMembers() call is now asynchronous and unhandled. The controller may not have member data immediately available, creating a race condition.",
+            "severity": "high"
+          },
+          {
+            "description": "In the next action, capping the next offset at user_count can produce an empty page (e.g., total equal to limit results in offset == total, showing 2/2 with no members). This can cause confusing UX on the last page.",
+            "severity": "medium"
+          },
+          {
+            "description": "HTTP method mismatch in .remove_member - test uses PUT but remove_member action expects DELETE",
+            "severity": "medium"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Reworks group membership management (paginated members, incremental add/remove member endpoints) across admin JS, group model, and controllers. The core add/remove-member endpoints are unreachable as routed (param name mismatch), and `.delete(id)` on the has_many :through association will raise even once that's fixed. The public group members page also silently truncates to 50 with no pagination UI.\n\n[inline config/routes.rb:49] **[Critical] add/remove-member routes are member routes keyed on :id, but controller expects :group_id**\n\nThese lines sit directly inside `resources :groups do ... end` (not in a `member`/`collection` block), so — matching the existing convention in this same file (e.g. `resources :posts do put \"bookmark\" ... end` → `/posts/:id/bookmark`) — they compile to `/admin/groups/:id/members`, putting the id in `params[:id]`. But `Admin::GroupsController#add_members`/`#remove_member` call `params.require(:group_id)`, which will raise `ActionController::ParameterMissing` (400) on every real request from the JS client (`/admin/groups/<id>/members.json`). The feature is unreachable in production; the controller specs only pass because they invoke the action directly with an explicit `group_id:` param, bypassing the router.\n\n```suggestion\n      delete \"members\" => \"groups#remove_member\"\n      put \"members\" => \"groups#add_members\"\n```\n\n[inline app/controllers/admin/groups_controller.rb:66] **[Critical] add_members reads params[:group_id], but the route supplies params[:id]**\n\nGiven the routing in config/routes.rb (member route under `resources :groups`), the actual request param is `id`, not `group_id`; `params.require(:group_id)` always raises ParameterMissing for real requests from the admin UI.\n\n```suggestion\n    group = Group.find(params.require(:id).to_i)\n```\n\n[inline app/controllers/admin/groups_controller.rb:90] **[Important] group.users.delete(user_id) raises AssociationTypeMismatch for a has_many :through**\n\n`users` is `has_many :users, through: :group_users`; `CollectionAssociation#delete` type-checks each argument against the association's model class and raises `ActiveRecord::AssociationTypeMismatch` when given an Integer instead of a `User` record, so this call blows up even after the routing param is fixed. The model already has the correct pattern for this (`Group#remove(user)`, which goes through `group_users`); this action should look up the `User` and call `group.remove(user)` instead of `group.users.delete(user_id)`.\n\n```suggestion\n    user = group.users.find(user_id)\n    group.remove(user)\n```\n\n[inline app/assets/javascripts/discourse/templates/group/members.hbs:6] **[Critical] Public group members page silently truncates to 50 with no pagination**\n\n`GroupsController#members` (app/controllers/groups_controller.rb) now always applies `limit = params[:limit] || 50`, replacing the previous behaviour where non-automatic groups returned every member unlimited. This template/route (group-members.js.es6) has no next/previous controls like the admin template gained — for any group with more than 50 members, everyone past the first 50 (alphabetically by username) is silently dropped from this page with no way to view them.",
+          "findings": [
+            {
+              "description": "add/remove-member routes are member routes keyed on :id, but the controllers call `params.require(:group_id)`, which raises ActionController::ParameterMissing on every real request. The feature is unreachable in production; controller specs only pass because they supply group_id directly, bypassing the router.",
+              "file": "config/routes.rb",
+              "matchedGold": null
+            },
+            {
+              "description": "`add_members` reads `params.require(:group_id)` but the route (member route under `resources :groups`) places the group id in `params[:id]`, so every real request raises ParameterMissing.",
+              "file": "app/controllers/admin/groups_controller.rb",
+              "matchedGold": null
+            },
+            {
+              "description": "`group.users.delete(user_id)` passes an Integer to a `has_many :through` collection's delete method, which type-checks arguments against the association's model class and raises `ActiveRecord::AssociationTypeMismatch`. Should look up the User record and call `group.remove(user)` instead.",
+              "file": "app/controllers/admin/groups_controller.rb",
+              "matchedGold": null
+            },
+            {
+              "description": "The public group members page silently truncates results to 50 with no pagination UI. `GroupsController#members` now always applies a limit of 50, but the group members template has no next/previous controls, so members beyond the first 50 are invisible with no way to view them.",
+              "file": "app/assets/javascripts/discourse/templates/group/members.hbs",
+              "matchedGold": null
+            }
+          ],
+          "gold": [
+            {
+              "description": "The findMembers() call is now asynchronous and unhandled. The controller may not have member data immediately available, creating a race condition.",
+              "severity": "high",
+              "matchedFinding": null
+            },
+            {
+              "description": "In the next action, capping the next offset at user_count can produce an empty page (e.g., total equal to limit results in offset == total, showing 2/2 with no members). This can cause confusing UX on the last page.",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "HTTP method mismatch in .remove_member - test uses PUT but remove_member action expects DELETE",
+              "severity": "medium",
+              "matchedFinding": null
+            }
+          ],
+          "rawExtract": "```json\n{\n  \"findings\": [\n    {\n      \"description\": \"add/remove-member routes are member routes keyed on :id, but the controllers call `params.require(:group_id)`, which raises ActionController::ParameterMissing on every real request. The feature is unreachable in production; controller specs only pass because they supply group_id directly, bypassing the router.\",\n      \"file\": \"config/routes.rb\"\n    },\n    {\n      \"description\": \"`add_members` reads `params.require(:group_id)` but the route (member route under `resources :groups`) places the group id in `params[:id]`, so every real request raises ParameterMissing.\",\n      \"file\": \"app/controllers/admin/groups_controller.rb\"\n    },\n    {\n      \"description\": \"`group.users.delete(user_id)` passes an Integer to a `has_many :through` collection's delete method, which type-checks arguments against the association's model class and raises `ActiveRecord::AssociationTypeMismatch`. Should look up the User record and call `group.remove(user)` instead.\",\n      \"file\": \"app/controllers/admin/groups_controller.rb\"\n    },\n    {\n      \"description\": \"The public group members page silently truncates results to 50 with no pagination UI. `GroupsController#members` now always applies a limit of 50, but the group members template has no next/previous controls, so members beyond the first 50 are invisible with no way to view them.\",\n      \"file\": \"app/assets/javascripts/discourse/templates/group/members.hbs\"\n    }\n  ]\n}\n```",
+          "rawMatch": "{\"matches\":[]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-8__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-8__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-8__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-8__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-3",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 34,
+      "cachedTokens": 432337,
+      "outputTokens": 7669,
+      "costUsd": 0.22427660000000002,
+      "durationMs": 156795,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=REQUEST_CHANGES bodyLen=363"
+          }
+        ]
+      },
+      "review": {
+        "precision": 1,
+        "recall": 0.5,
+        "fbeta": 0.6666666666666666,
+        "beta": 1,
+        "posted": 1,
+        "gold": 2,
+        "matched": 1,
+        "falsePositives": [],
+        "falseNegatives": [
+          {
+            "description": "Regex pattern @(#{domains}) only matches domain suffixes, not full domains. evil.example.com would match whitelist entry example.com.",
+            "severity": "medium"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Adds BlockedEmail (with match-count/last-match stats), extracts email validation into EmailValidator, and makes the signup form remember rejected emails client-side. The BlockedEmail model and validator logic are reasonable and tested, but the new stats-mutation has a double-counting bug caused by how the controller already validates the user twice per request.\n\n[inline lib/validators/email_validator.rb:13] **[Important] BlockedEmail stats double-counted per signup request**\n\n`BlockedEmail.should_block?` mutates and saves `match_count`/`last_match_at` as a side effect of validation. `UsersController#create` (app/controllers/users_controller.rb:168) calls `user.valid?` explicitly and then calls `user.save`, which re-runs validations internally — so for a single signup attempt against a blocked email, this validator runs twice and `match_count` is incremented twice, corrupting the very stats this feature exists to track.",
+          "findings": [
+            {
+              "description": "BlockedEmail stats are double-counted per signup request: `BlockedEmail.should_block?` mutates and saves `match_count`/`last_match_at` as a side effect of validation, but `UsersController#create` calls `user.valid?` explicitly and then `user.save` (which re-runs validations internally), causing the validator to fire twice for a single blocked signup attempt and incrementing `match_count` twice.",
+              "file": "lib/validators/email_validator.rb",
+              "matchedGold": 0
+            }
+          ],
+          "gold": [
+            {
+              "description": "BlockedEmail.should_block_email? method has side effects during a read operation - it updates statistics even when just checking if an email should be blocked. This could cause race conditions in concurrent environments and makes the method name misleading.",
+              "severity": "medium",
+              "matchedFinding": 0
+            },
+            {
+              "description": "Regex pattern @(#{domains}) only matches domain suffixes, not full domains. evil.example.com would match whitelist entry example.com.",
+              "severity": "medium",
+              "matchedFinding": null
+            }
+          ],
+          "rawExtract": "{\"findings\":[{\"description\":\"BlockedEmail stats are double-counted per signup request: `BlockedEmail.should_block?` mutates and saves `match_count`/`last_match_at` as a side effect of validation, but `UsersController#create` calls `user.valid?` explicitly and then `user.save` (which re-runs validations internally), causing the validator to fire twice for a single blocked signup attempt and incrementing `match_count` twice.\",\"file\":\"lib/validators/email_validator.rb\"}]}",
+          "rawMatch": "{\"matches\":[{\"finding\":0,\"gold\":0}]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-3__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-3__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-3__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-3__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-5",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 38,
+      "cachedTokens": 449802,
+      "outputTokens": 6350,
+      "costUsd": 0.20878930000000004,
+      "durationMs": 371287,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=APPROVE bodyLen=549"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 0,
+        "gold": 2,
+        "matched": 0,
+        "falsePositives": [],
+        "falseNegatives": [
+          {
+            "description": "Mixing float: left with flexbox causes layout issues. Further this PR removes the float-based right alignment for .d-header .panel, which may cause the login panel in the non-Ember/noscript header (where .panel is nested inside .row and not a flex item) to stack under the title instead of remaining right-aligned.",
+            "severity": "low"
+          },
+          {
+            "description": "-ms-align-items never existed in any version of IE/Edge; the correct legacy property is -ms-flex-align.",
+            "severity": "low"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "CSS-only refactor: adds vendor-prefixed flexbox mixins (flexbox, inline-flex, align-items, order) to foundation/mixins.scss and applies them to the header, small-action, topic extra-info, and badge components in place of hand-rolled float/inline-flex layouts. Traced the header's flex ordering (.panel order 3, .extra-info-wrapper order 2, home-logo default 0) against header.hbs's DOM order and it correctly reproduces the intended visual order (logo, title, controls). No unused classes are referenced elsewhere, no build/runtime risk — approving.",
+          "findings": [],
+          "gold": [
+            {
+              "description": "Mixing float: left with flexbox causes layout issues. Further this PR removes the float-based right alignment for .d-header .panel, which may cause the login panel in the non-Ember/noscript header (where .panel is nested inside .row and not a flex item) to stack under the title instead of remaining right-aligned.",
+              "severity": "low",
+              "matchedFinding": null
+            },
+            {
+              "description": "-ms-align-items never existed in any version of IE/Edge; the correct legacy property is -ms-flex-align.",
+              "severity": "low",
+              "matchedFinding": null
+            }
+          ],
+          "rawExtract": "{\"findings\":[]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-5__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-5__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-5__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-5__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-6",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 34,
+      "cachedTokens": 599363,
+      "outputTokens": 9648,
+      "costUsd": 0.3275819000000001,
+      "durationMs": 200651,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=COMMENT bodyLen=463"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0,
+        "recall": 0,
+        "fbeta": 0,
+        "beta": 1,
+        "posted": 2,
+        "gold": 1,
+        "matched": 0,
+        "falsePositives": [
+          {
+            "description": "The parent/subdomain check only works in one direction: it handles the case where `discourse_host` is a subdomain of `website_host`, but not the mirror case where the instance is at the bare domain (`example.com`) and the website is at a subdomain of it (e.g. `blog.example.com`). In that scenario the code falls through to the else branch and returns just `website_host` without the path, silently dropping the path for a plausible real-world configuration.",
+            "file": "app/serializers/user_serializer.rb"
+          },
+          {
+            "description": "Domain comparisons are case-sensitive, so `example.com` and `EXAMPLE.com` will not match, potentially causing the full URL path to be omitted when the domains differ only in case.",
+            "file": "app/serializers/user_serializer.rb"
+          }
+        ],
+        "falseNegatives": [
+          {
+            "description": "The include_website_name method is missing the required ? suffix. Rails serializers expect include_ methods to end with ? for conditional attribute inclusion, a convention followed by other methods in this serializer. Without it, the website_name attribute may not be conditionally included as intended. Additionally, the '.' << website_host string concatenation should be replaced with '.' + website_host or '.#{website_host}' to avoid mutating string literals, which can lead to issues.",
+            "severity": "medium"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Fixes the stated UX issue: when the profile website's domain matches (or is a parent of) the instance domain, the full URL path is now shown instead of just the bare host. The core same-host and 3-part-subdomain cases are correct and covered by tests. One gap in the domain-relationship logic below is worth fixing before merge; domain comparisons are also case-sensitive (`example.com` vs `EXAMPLE.com` won't match), which is a smaller follow-up worth a mention.\n\n[inline app/serializers/user_serializer.rb:149] **[Important] Parent/subdomain check only works in one direction**\n\nThis only handles the case where `discourse_host` is a subdomain of `website_host` (e.g. discourse_host=`forums.example.com`, website=`example.com`, tested in the spec). The mirror case — instance at the bare domain (`example.com`) and website at a subdomain of it (`blog.example.com`) — falls through to the `else` branch's own final expression and returns just `website_host` without the path, even though it's clearly the same site family. Since the same-domain checks above are meant to be symmetric (same registrable domain = show full path), this asymmetry silently drops the path for a plausible real-world configuration.",
+          "findings": [
+            {
+              "description": "The parent/subdomain check only works in one direction: it handles the case where `discourse_host` is a subdomain of `website_host`, but not the mirror case where the instance is at the bare domain (`example.com`) and the website is at a subdomain of it (e.g. `blog.example.com`). In that scenario the code falls through to the else branch and returns just `website_host` without the path, silently dropping the path for a plausible real-world configuration.",
+              "file": "app/serializers/user_serializer.rb",
+              "matchedGold": null
+            },
+            {
+              "description": "Domain comparisons are case-sensitive, so `example.com` and `EXAMPLE.com` will not match, potentially causing the full URL path to be omitted when the domains differ only in case.",
+              "file": "app/serializers/user_serializer.rb",
+              "matchedGold": null
+            }
+          ],
+          "gold": [
+            {
+              "description": "The include_website_name method is missing the required ? suffix. Rails serializers expect include_ methods to end with ? for conditional attribute inclusion, a convention followed by other methods in this serializer. Without it, the website_name attribute may not be conditionally included as intended. Additionally, the '.' << website_host string concatenation should be replaced with '.' + website_host or '.#{website_host}' to avoid mutating string literals, which can lead to issues.",
+              "severity": "medium",
+              "matchedFinding": null
+            }
+          ],
+          "rawExtract": "{\"findings\":[{\"description\":\"The parent/subdomain check only works in one direction: it handles the case where `discourse_host` is a subdomain of `website_host`, but not the mirror case where the instance is at the bare domain (`example.com`) and the website is at a subdomain of it (e.g. `blog.example.com`). In that scenario the code falls through to the else branch and returns just `website_host` without the path, silently dropping the path for a plausible real-world configuration.\",\"file\":\"app/serializers/user_serializer.rb\"},{\"description\":\"Domain comparisons are case-sensitive, so `example.com` and `EXAMPLE.com` will not match, potentially causing the full URL path to be omitted when the domains differ only in case.\",\"file\":\"app/serializers/user_serializer.rb\"}]}",
+          "rawMatch": "{\"matches\":[]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-6__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-6__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-6__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-6__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-4",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 34,
+      "cachedTokens": 535440,
+      "outputTokens": 13146,
+      "costUsd": 0.3300111,
+      "durationMs": 217902,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=REQUEST_CHANGES bodyLen=405"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0.5,
+        "recall": 0.16666666666666666,
+        "fbeta": 0.25,
+        "beta": 1,
+        "posted": 2,
+        "gold": 6,
+        "matched": 1,
+        "falsePositives": [
+          {
+            "description": "`i.content` is `nil` for RSS/Atom items that only have a `<description>` or no `content:encoded` element; calling `.scrub` on `nil` raises `NoMethodError`, aborting the entire `rss.items.each` loop and silently dropping all remaining items in that poll run. Since `sidekiq_options retry: false`, the failure is not retried until the next scheduled poll. Should fall back to `i.description` (e.g., `(i.content || i.description).to_s.scrub`).",
+            "file": "app/jobs/scheduled/poll_feed.rb"
+          }
+        ],
+        "falseNegatives": [
+          {
+            "description": "SSRF vulnerability using open(url) without validation",
+            "severity": "critical"
+          },
+          {
+            "description": "The current origin validation using indexOf is insufficient and can be bypassed. An attacker could use a malicious domain like evil-discourseUrl.com to pass this check.",
+            "severity": "medium"
+          },
+          {
+            "description": "postMessage targetOrigin should be the origin (scheme+host+port), not the full referrer URL; using the full URL will cause the message to be dropped and prevent resizing.",
+            "severity": "medium"
+          },
+          {
+            "description": "The code sets X-Frame-Options: ALLOWALL which completely disables clickjacking protection. The referer validation can be bypassed (referer headers are easily spoofed), and the fallback to empty string for nil referer masks validation failures.",
+            "severity": "medium"
+          },
+          {
+            "description": "The TopicEmbed.import method is susceptible to a NoMethodError if the contents parameter is nil when attempting to append a string, and an XSS vulnerability due to unescaped url interpolation in the generated HTML.",
+            "severity": "medium"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Adds embeddable Discourse comments (iframe widget + controller), an RSS/Atom feed poller using simple-rss instead of feedzirra, and raw-HTML topic import via TopicEmbed. Overall structure and host/referer checks for the embed endpoint are reasonable and tests cover the main paths, but the embed view has a Ruby syntax error that will break rendering, and the feed poller can crash on a common feed shape.\n\n[inline app/views/embed/best.html.erb:6] **[Critical] `end if` is invalid Ruby — the view will raise a SyntaxError on every render**\n\n`<%- end if %>` closes the preceding if/else, then leaves a dangling `if` with no matching `end` (the intended `end` for it is never supplied — the each-loop and the trailing if block below consume the remaining `end`s). This makes the compiled template invalid Ruby, so every request to `EmbedController#best` (both the 'topic found' and 'not found yet' paths, since this markup runs regardless) will 500 with a SyntaxError, breaking the entire embed feature this PR introduces.\n\n```suggestion\n  <%- end -%>\n```\n\n[inline app/jobs/scheduled/poll_feed.rb:35] **[Important] NoMethodError on feed items without content, silently killing the whole poll**\n\n`i.content` is `nil` for RSS/Atom items that only have a `<description>`/no `content:encoded` element (a common feed shape); `.scrub` on `nil` raises `NoMethodError`, which aborts the entire `rss.items.each` loop — every other item in that hourly run is silently dropped, and since `sidekiq_options retry: false`, the failure isn't retried until the next scheduled poll. Fall back to `i.description` (or skip the item) instead of assuming `content` is always present.\n\n```suggestion\n        content = CGI.unescapeHTML((i.content || i.description).to_s.scrub)\n```",
+          "findings": [
+            {
+              "description": "`<%- end if %>` is invalid Ruby — it closes the preceding if/else block but leaves a dangling `if` with no matching `end`, causing a SyntaxError on every render of the embed view and making the entire embed feature return 500 errors. Should be `<%- end -%>`.",
+              "file": "app/views/embed/best.html.erb",
+              "matchedGold": 5
+            },
+            {
+              "description": "`i.content` is `nil` for RSS/Atom items that only have a `<description>` or no `content:encoded` element; calling `.scrub` on `nil` raises `NoMethodError`, aborting the entire `rss.items.each` loop and silently dropping all remaining items in that poll run. Since `sidekiq_options retry: false`, the failure is not retried until the next scheduled poll. Should fall back to `i.description` (e.g., `(i.content || i.description).to_s.scrub`).",
+              "file": "app/jobs/scheduled/poll_feed.rb",
+              "matchedGold": null
+            }
+          ],
+          "gold": [
+            {
+              "description": "SSRF vulnerability using open(url) without validation",
+              "severity": "critical",
+              "matchedFinding": null
+            },
+            {
+              "description": "The current origin validation using indexOf is insufficient and can be bypassed. An attacker could use a malicious domain like evil-discourseUrl.com to pass this check.",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "postMessage targetOrigin should be the origin (scheme+host+port), not the full referrer URL; using the full URL will cause the message to be dropped and prevent resizing.",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "The code sets X-Frame-Options: ALLOWALL which completely disables clickjacking protection. The referer validation can be bypassed (referer headers are easily spoofed), and the fallback to empty string for nil referer masks validation failures.",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "The TopicEmbed.import method is susceptible to a NoMethodError if the contents parameter is nil when attempting to append a string, and an XSS vulnerability due to unescaped url interpolation in the generated HTML.",
+              "severity": "medium",
+              "matchedFinding": null
+            },
+            {
+              "description": "The ERB block closes with end if, which is invalid Ruby/ERB and will raise at render; it should just be end to close the if block.",
+              "severity": "medium",
+              "matchedFinding": 0
+            }
+          ],
+          "rawExtract": "```json\n{\"findings\":[{\"description\":\"`<%- end if %>` is invalid Ruby — it closes the preceding if/else block but leaves a dangling `if` with no matching `end`, causing a SyntaxError on every render of the embed view and making the entire embed feature return 500 errors. Should be `<%- end -%>`.\",\"file\":\"app/views/embed/best.html.erb\"},{\"description\":\"`i.content` is `nil` for RSS/Atom items that only have a `<description>` or no `content:encoded` element; calling `.scrub` on `nil` raises `NoMethodError`, aborting the entire `rss.items.each` loop and silently dropping all remaining items in that poll run. Since `sidekiq_options retry: false`, the failure is not retried until the next scheduled poll. Should fall back to `i.description` (e.g., `(i.content || i.description).to_s.scrub`).\",\"file\":\"app/jobs/scheduled/poll_feed.rb\"}]}```",
+          "rawMatch": "{\"matches\":[{\"finding\":0,\"gold\":5}]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-4__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-4__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-4__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-4__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-1",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 52,
+      "cachedTokens": 686172,
+      "outputTokens": 11001,
+      "costUsd": 0.3832071,
+      "durationMs": 2732787,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=REQUEST_CHANGES bodyLen=450"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0.6666666666666666,
+        "recall": 0.6666666666666666,
+        "fbeta": 0.6666666666666666,
+        "beta": 1,
+        "posted": 3,
+        "gold": 3,
+        "matched": 2,
+        "falsePositives": [
+          {
+            "description": "The download size limit for API-provided URLs is hardcoded to 10.megabytes instead of SiteSetting.max_image_size_kb.kilobytes. If an admin configures max_image_size_kb above 10MB, uploads are truncated or rejected before the downsize loop runs, silently ignoring the configured limit.",
+            "file": "app/controllers/uploads_controller.rb"
+          }
+        ],
+        "falseNegatives": [
+          {
+            "description": "Passing 80% as the dimensions can fail for animated GIFs when allow_animated_thumbnails is true, since the animated path uses gifsicle --resize-fit which expects WxH geometry, not a percentage; downsizing would then silently fail.",
+            "severity": "medium"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Adds automatic downsizing of oversized uploaded images by repeatedly shrinking them 80% until they fit max_image_size_kb. The OptimizedImage.downsize refactor accidentally defines the method twice with an incompatible arity, breaking the existing 4-positional-arg caller in resize_emoji.rb, and the size-limit hardcoding in two other spots silently drops the SiteSetting.max_image_size_kb configurability that the rest of the change still depends on.\n\n[inline app/models/optimized_image.rb:149] **[Critical] Duplicate `self.downsize` definition breaks existing 5-arg callers**\n\n`self.downsize` is now defined twice (line 145 keeps the old `(from, to, max_width, max_height, opts={})` signature, this one redefines it as `(from, to, dimensions, opts={})`). Ruby silently discards the first definition, so every existing caller that still passes separate width/height — e.g. `app/jobs/regular/resize_emoji.rb:14`: `OptimizedImage.downsize(path, path, 100, 100, opts)` (5 positional args) — now raises `ArgumentError: wrong number of arguments` against the 3..4-arg method, breaking emoji thumbnail generation. Remove the stale line-145 definition and update all callers (resize_emoji.rb) to pass a single `dimensions` string.\n\n```suggestion\n  def self.downsize(from, to, dimensions, opts={})\n    optimize(\"downsize\", from, to, dimensions, opts)\n  end\n```\n\n[inline app/controllers/uploads_controller.rb:55] **[Important] API upload size cap hardcoded, ignoring SiteSetting.max_image_size_kb**\n\nThe download limit for API-provided URLs is now a fixed `10.megabytes` instead of `SiteSetting.max_image_size_kb.kilobytes`. If an admin configures `max_image_size_kb` above 10MB, oversized API uploads are now truncated/rejected before the new downsize loop (line 67, which still reads the site setting) ever runs — the configured limit is silently ignored for this path.\n\n```suggestion\n        tempfile = FileHelper.download(url, SiteSetting.max_image_size_kb.kilobytes, \"discourse-upload-#{type}\") rescue nil\n```\n\n[inline app/assets/javascripts/discourse/lib/utilities.js:182] **[Important] Client-side file size check hardcoded, ignoring SiteSetting.max_*_size_kb**\n\n`maxSizeKB` is now hardcoded to `10 * 1024` instead of reading `Discourse.SiteSettings['max_' + type + '_size_kb']` (same issue repeated at line 246 for the 413 handler). Any admin-configured `max_image_size_kb`/`max_attachment_size_kb` below 10MB no longer blocks the client-side pre-upload check, so users only find out the file is too large after the server-side downsize loop runs (or, for non-image attachments, after the request is rejected server-side) instead of getting the immediate client-side message.\n\n```suggestion\n    var maxSizeKB = Discourse.SiteSettings['max_' + type + '_size_kb'];\n```",
+          "findings": [
+            {
+              "description": "self.downsize is defined twice with incompatible signatures. The first definition (5-arg: from, to, max_width, max_height, opts={}) is silently overwritten by the second (4-arg: from, to, dimensions, opts={}). Existing callers such as app/jobs/regular/resize_emoji.rb:14 that pass 5 positional arguments now raise ArgumentError, breaking emoji thumbnail generation. The stale first definition must be removed and all callers updated to pass a single dimensions string.",
+              "file": "app/models/optimized_image.rb",
+              "matchedGold": 0
+            },
+            {
+              "description": "The download size limit for API-provided URLs is hardcoded to 10.megabytes instead of SiteSetting.max_image_size_kb.kilobytes. If an admin configures max_image_size_kb above 10MB, uploads are truncated or rejected before the downsize loop runs, silently ignoring the configured limit.",
+              "file": "app/controllers/uploads_controller.rb",
+              "matchedGold": null
+            },
+            {
+              "description": "The client-side file size check uses a hardcoded value of 10 * 1024 KB instead of reading Discourse.SiteSettings['max_' + type + '_size_kb']. Any admin-configured limit below 10MB no longer triggers the immediate client-side rejection message; users only discover the file is too large after the server-side downsize loop runs or the request is rejected server-side.",
+              "file": "app/assets/javascripts/discourse/lib/utilities.js",
+              "matchedGold": 1
+            }
+          ],
+          "gold": [
+            {
+              "description": "The downsize method is defined twice. The second definition, which expects a single dimensions string parameter, overrides the first, which expected separate max_width and max_height parameters. This makes the original method unreachable and breaks existing code that calls it with separate width and height arguments.",
+              "severity": "medium",
+              "matchedFinding": 0
+            },
+            {
+              "description": "Hardcoding maxSizeKB = 10 * 1024 ignores Discourse.SiteSettings['max_' + type + '_size_kb'], so the client-side limit can diverge from server-side and per-type settings (also applies to the 413 handler below).",
+              "severity": "low",
+              "matchedFinding": 2
+            },
+            {
+              "description": "Passing 80% as the dimensions can fail for animated GIFs when allow_animated_thumbnails is true, since the animated path uses gifsicle --resize-fit which expects WxH geometry, not a percentage; downsizing would then silently fail.",
+              "severity": "medium",
+              "matchedFinding": null
+            }
+          ],
+          "rawExtract": "```json\n{\"findings\":[{\"description\":\"self.downsize is defined twice with incompatible signatures. The first definition (5-arg: from, to, max_width, max_height, opts={}) is silently overwritten by the second (4-arg: from, to, dimensions, opts={}). Existing callers such as app/jobs/regular/resize_emoji.rb:14 that pass 5 positional arguments now raise ArgumentError, breaking emoji thumbnail generation. The stale first definition must be removed and all callers updated to pass a single dimensions string.\",\"file\":\"app/models/optimized_image.rb\"},{\"description\":\"The download size limit for API-provided URLs is hardcoded to 10.megabytes instead of SiteSetting.max_image_size_kb.kilobytes. If an admin configures max_image_size_kb above 10MB, uploads are truncated or rejected before the downsize loop runs, silently ignoring the configured limit.\",\"file\":\"app/controllers/uploads_controller.rb\"},{\"description\":\"The client-side file size check uses a hardcoded value of 10 * 1024 KB instead of reading Discourse.SiteSettings['max_' + type + '_size_kb']. Any admin-configured limit below 10MB no longer triggers the immediate client-side rejection message; users only discover the file is too large after the server-side downsize loop runs or the request is rejected server-side.\",\"file\":\"app/assets/javascripts/discourse/lib/utilities.js\"}]}\n```",
+          "rawMatch": "{\"matches\":[{\"finding\":0,\"gold\":0},{\"finding\":2,\"gold\":1}]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-1__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-1__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-1__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-1__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "instance_id": "prreview__discourse-graphite-2",
+      "model": "anthropic/claude-sonnet-5",
+      "workflowSucceeded": true,
+      "inputTokens": 58,
+      "cachedTokens": 998420,
+      "outputTokens": 8911,
+      "costUsd": 0.3774738000000001,
+      "durationMs": 217460,
+      "phases": [
+        {
+          "phase": "review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        },
+        {
+          "phase": "post-review",
+          "success": true,
+          "model": "anthropic/claude-sonnet-5"
+        }
+      ],
+      "behavioral": {
+        "ok": true,
+        "checks": [
+          {
+            "name": "review-submitted",
+            "ok": true,
+            "detail": "event=REQUEST_CHANGES bodyLen=325"
+          }
+        ]
+      },
+      "review": {
+        "precision": 0.5,
+        "recall": 0.5,
+        "fbeta": 0.5,
+        "beta": 1,
+        "posted": 2,
+        "gold": 2,
+        "matched": 1,
+        "falsePositives": [
+          {
+            "description": "No test coverage for the new `TopicsController#unsubscribe` action or `Topic#unsubscribe_url`. There are no specs exercising muting from various notification levels or the case where no existing `TopicUser` row exists. A controller spec covering the no-existing-row path would have caught the nil-crash bug.",
+            "file": "spec/components/email/message_builder_spec.rb"
+          }
+        ],
+        "falseNegatives": [
+          {
+            "description": "Typo in property name: 'stopNotificiationsText' should be 'stopNotificationsText' (missing 'n' in 'Notifications')",
+            "severity": "low"
+          }
+        ],
+        "trace": {
+          "judgeModel": "anthropic/claude-sonnet-4-6",
+          "reviewText": "Adds a per-topic unsubscribe link/page: a new TopicsController#unsubscribe action, route, Topic#unsubscribe_url, and an Ember unsubscribe route/template, wired into the notification email footer. The plumbing is reasonable, but the controller action will crash for a common real case, and the new action has no test coverage.\n\n[inline app/controllers/topics_controller.rb:105] **[Critical] NoMethodError when no TopicUser row exists yet**\n\n`TopicUser.find_by` returns `nil` whenever the user hasn't already got a per-topic row (e.g. they're only watching via category defaults, or they've never visited the topic and only got notified from a mention/watched-category email). The very next line calls `tu.notification_level` on that `nil`, raising `NoMethodError` and 500ing — for exactly the flow this feature targets: clicking the unsubscribe link straight from an email without ever loading the topic. The rest of the codebase (e.g. `TopicUser.tracking` scope, line 9) already treats a missing row as `COALESCE(notification_level, :regular)`; this action needs the same fallback (or `find_or_initialize_by`) before comparing/mutating `notification_level`.\n\n```suggestion\n    tu = TopicUser.find_or_initialize_by(user_id: current_user.id, topic_id: params[:topic_id])\n```\n\n[inline spec/components/email/message_builder_spec.rb:173] **[Important] No test coverage for the new unsubscribe controller action**\n\nOnly the mailer spec was touched to pass `unsubscribe_url`; there's no spec exercising `TopicsController#unsubscribe` (e.g. muting from `regular`/`tracking`/`watching`, or the case with no existing `TopicUser` row) or `Topic#unsubscribe_url`. Given the nil-crash above, a controller spec covering the no-existing-row path would have caught it.",
+          "findings": [
+            {
+              "description": "NoMethodError when no TopicUser row exists: `TopicUser.find_by` returns `nil` when the user has no per-topic row (e.g. watching via category defaults or never visited the topic). The next line calls `tu.notification_level` on that `nil`, raising `NoMethodError` and returning a 500 — exactly the flow this feature targets (clicking unsubscribe from an email). Should use `find_or_initialize_by` instead.",
+              "file": "app/controllers/topics_controller.rb",
+              "matchedGold": 0
+            },
+            {
+              "description": "No test coverage for the new `TopicsController#unsubscribe` action or `Topic#unsubscribe_url`. There are no specs exercising muting from various notification levels or the case where no existing `TopicUser` row exists. A controller spec covering the no-existing-row path would have caught the nil-crash bug.",
+              "file": "spec/components/email/message_builder_spec.rb",
+              "matchedGold": null
+            }
+          ],
+          "gold": [
+            {
+              "description": "logic: Potential nil pointer exception - if no TopicUser record exists, tu will be nil and calling methods on it will crash",
+              "severity": "high",
+              "matchedFinding": 0
+            },
+            {
+              "description": "Typo in property name: 'stopNotificiationsText' should be 'stopNotificationsText' (missing 'n' in 'Notifications')",
+              "severity": "low",
+              "matchedFinding": null
+            }
+          ],
+          "rawExtract": "{\"findings\":[{\"description\":\"NoMethodError when no TopicUser row exists: `TopicUser.find_by` returns `nil` when the user has no per-topic row (e.g. watching via category defaults or never visited the topic). The next line calls `tu.notification_level` on that `nil`, raising `NoMethodError` and returning a 500 — exactly the flow this feature targets (clicking unsubscribe from an email). Should use `find_or_initialize_by` instead.\",\"file\":\"app/controllers/topics_controller.rb\"},{\"description\":\"No test coverage for the new `TopicsController#unsubscribe` action or `Topic#unsubscribe_url`. There are no specs exercising muting from various notification levels or the case where no existing `TopicUser` row exists. A controller spec covering the no-existing-row path would have caught the nil-crash bug.\",\"file\":\"spec/components/email/message_builder_spec.rb\"}]}",
+          "rawMatch": "{\"matches\":[{\"finding\":0,\"gold\":0}]}",
+          "usedDiff": false
+        }
+      },
+      "githubMutations": 1,
+      "sessionTrial": {
+        "trial": 1,
+        "full": "sessions/prreview__discourse-graphite-2__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+        "phases": [
+          {
+            "phase": "review",
+            "success": true,
+            "log": "sessions/prreview__discourse-graphite-2__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+          }
+        ]
+      },
+      "tier": "pr-review",
+      "sessions": [
+        {
+          "trial": 1,
+          "full": "sessions/prreview__discourse-graphite-2__anthropic-claude-sonnet-5/trial-1/full.jsonl",
+          "phases": [
+            {
+              "phase": "review",
+              "success": true,
+              "log": "sessions/prreview__discourse-graphite-2__anthropic-claude-sonnet-5/trial-1/01-review.jsonl"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "runId": "2026-07-05_095214-f2cc826",
+    "runType": "models",
+    "tiers": [
+      "pr-review"
+    ],
+    "models": [
+      "Claude Sonnet 5"
+    ],
+    "runs": 1,
+    "gitSha": "f2cc826",
+    "labels": {
+      "openai/gpt-5.5": "GPT-5.5",
+      "openai/gpt-5.4-mini": "GPT-5.4 mini",
+      "openai/gpt-5.3-codex": "GPT-5.3 Codex",
+      "anthropic/claude-opus-4-8": "Claude Opus 4.8",
+      "anthropic/claude-sonnet-5": "Claude Sonnet 5",
+      "anthropic/claude-sonnet-4-6": "Claude Sonnet 4.6",
+      "anthropic/claude-haiku-4-5": "Claude Haiku 4.5",
+      "fireworks/accounts/fireworks/models/glm-5p2": "GLM-5.2",
+      "fireworks/accounts/fireworks/models/deepseek-v4-pro": "DeepSeek V4 Pro",
+      "fireworks/accounts/fireworks/models/gpt-oss-120b": "GPT-OSS 120B"
+    },
+    "generatedAt": "2026-07-05T11:10:38.985Z",
+    "live": false,
+    "martian": {
+      "judgeModel": "anthropic/claude-opus-4-5-20251101",
+      "prCount": 10,
+      "coveredInstances": [
+        "prreview__discourse-graphite-1",
+        "prreview__discourse-graphite-10",
+        "prreview__discourse-graphite-2",
+        "prreview__discourse-graphite-3",
+        "prreview__discourse-graphite-4",
+        "prreview__discourse-graphite-5",
+        "prreview__discourse-graphite-6",
+        "prreview__discourse-graphite-7",
+        "prreview__discourse-graphite-8",
+        "prreview__discourse-graphite-9"
+      ],
+      "tools": [
+        {
+          "key": "augment",
+          "name": "Augment",
+          "tp": 18,
+          "fp": 19,
+          "fn": 10,
+          "precision": 0.4864864864864865,
+          "recall": 0.6428571428571429,
+          "f1": 0.5538461538461539
+        },
+        {
+          "key": "cubic-v2",
+          "name": "Cubic v2",
+          "tp": 16,
+          "fp": 14,
+          "fn": 12,
+          "precision": 0.5333333333333333,
+          "recall": 0.5714285714285714,
+          "f1": 0.5517241379310344
+        },
+        {
+          "key": "qodo-extended",
+          "name": "qodo-extended",
+          "tp": 20,
+          "fp": 30,
+          "fn": 8,
+          "precision": 0.4,
+          "recall": 0.7142857142857143,
+          "f1": 0.5128205128205129
+        },
+        {
+          "key": "qodo-extended-v2",
+          "name": "Qodo Extended",
+          "tp": 16,
+          "fp": 20,
+          "fn": 12,
+          "precision": 0.4444444444444444,
+          "recall": 0.5714285714285714,
+          "f1": 0.5
+        },
+        {
+          "key": "gemini",
+          "name": "Gemini",
+          "tp": 17,
+          "fp": 25,
+          "fn": 11,
+          "precision": 0.40476190476190477,
+          "recall": 0.6071428571428571,
+          "f1": 0.4857142857142857
+        },
+        {
+          "key": "propel",
+          "name": "Propel",
+          "tp": 12,
+          "fp": 10,
+          "fn": 16,
+          "precision": 0.5454545454545454,
+          "recall": 0.42857142857142855,
+          "f1": 0.4799999999999999
+        },
+        {
+          "key": "baz",
+          "name": "Baz",
+          "tp": 12,
+          "fp": 10,
+          "fn": 16,
+          "precision": 0.5454545454545454,
+          "recall": 0.42857142857142855,
+          "f1": 0.4799999999999999
+        },
+        {
+          "key": "macroscope",
+          "name": "Macroscope",
+          "tp": 12,
+          "fp": 12,
+          "fn": 16,
+          "precision": 0.5,
+          "recall": 0.42857142857142855,
+          "f1": 0.4615384615384615
+        },
+        {
+          "key": "bugbot",
+          "name": "Cursor Bugbot",
+          "tp": 13,
+          "fp": 17,
+          "fn": 15,
+          "precision": 0.43333333333333335,
+          "recall": 0.4642857142857143,
+          "f1": 0.4482758620689655
+        },
+        {
+          "key": "qodo-v2",
+          "name": "Qodo v2",
+          "tp": 16,
+          "fp": 28,
+          "fn": 12,
+          "precision": 0.36363636363636365,
+          "recall": 0.5714285714285714,
+          "f1": 0.4444444444444444
+        },
+        {
+          "key": "greptile-v4-1",
+          "name": "greptile-v4-1",
+          "tp": 14,
+          "fp": 22,
+          "fn": 14,
+          "precision": 0.3888888888888889,
+          "recall": 0.5,
+          "f1": 0.43750000000000006
+        },
+        {
+          "key": "propel-v2",
+          "name": "propel-v2",
+          "tp": 13,
+          "fp": 20,
+          "fn": 15,
+          "precision": 0.3939393939393939,
+          "recall": 0.4642857142857143,
+          "f1": 0.4262295081967213
+        },
+        {
+          "key": "claude-code",
+          "name": "Claude Code (CLI)",
+          "tp": 14,
+          "fp": 25,
+          "fn": 14,
+          "precision": 0.358974358974359,
+          "recall": 0.5,
+          "f1": 0.417910447761194
+        },
+        {
+          "key": "devin",
+          "name": "Devin",
+          "tp": 10,
+          "fp": 11,
+          "fn": 18,
+          "precision": 0.47619047619047616,
+          "recall": 0.35714285714285715,
+          "f1": 0.40816326530612246
+        },
+        {
+          "key": "kodus-v2",
+          "name": "Kodus",
+          "tp": 12,
+          "fp": 21,
+          "fn": 16,
+          "precision": 0.36363636363636365,
+          "recall": 0.42857142857142855,
+          "f1": 0.3934426229508197
+        },
+        {
+          "key": "copilot",
+          "name": "GitHub Copilot",
+          "tp": 13,
+          "fp": 33,
+          "fn": 15,
+          "precision": 0.2826086956521739,
+          "recall": 0.4642857142857143,
+          "f1": 0.35135135135135126
+        },
+        {
+          "key": "claude",
+          "name": "Claude Code",
+          "tp": 10,
+          "fp": 20,
+          "fn": 18,
+          "precision": 0.3333333333333333,
+          "recall": 0.35714285714285715,
+          "f1": 0.3448275862068965
+        },
+        {
+          "key": "sourcery",
+          "name": "Sourcery",
+          "tp": 12,
+          "fp": 35,
+          "fn": 16,
+          "precision": 0.2553191489361702,
+          "recall": 0.42857142857142855,
+          "f1": 0.32
+        },
+        {
+          "key": "codeant-v2",
+          "name": "CodeAnt v2",
+          "tp": 14,
+          "fp": 50,
+          "fn": 14,
+          "precision": 0.21875,
+          "recall": 0.5,
+          "f1": 0.30434782608695654
+        },
+        {
+          "key": "coderabbit",
+          "name": "CodeRabbit",
+          "tp": 14,
+          "fp": 62,
+          "fn": 14,
+          "precision": 0.18421052631578946,
+          "recall": 0.5,
+          "f1": 0.2692307692307692
+        },
+        {
+          "key": "kg",
+          "name": "KG",
+          "tp": 2,
+          "fp": 3,
+          "fn": 26,
+          "precision": 0.4,
+          "recall": 0.07142857142857142,
+          "f1": 0.12121212121212122
+        },
+        {
+          "key": "graphite",
+          "name": "Graphite",
+          "tp": 0,
+          "fp": 0,
+          "fn": 28,
+          "precision": 0,
+          "recall": 0,
+          "f1": 0
+        }
+      ],
+      "models": [
+        {
+          "key": "anthropic/claude-sonnet-5",
+          "name": "anthropic/claude-sonnet-5",
+          "tp": 10,
+          "fp": 15,
+          "fn": 18,
+          "precision": 0.4,
+          "recall": 0.35714285714285715,
+          "f1": 0.3773584905660378,
+          "rank": 16,
+          "of": 23
+        }
+      ]
+    }
+  }
+}

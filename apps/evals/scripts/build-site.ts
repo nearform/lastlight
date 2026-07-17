@@ -11,6 +11,13 @@
  * plus the dashboard SPA shell at the root. The result (`dist-site/`) is served
  * as static assets — no Worker code needed (the SPA uses hash routing, so every
  * app route resolves to `/index.html`). Re-run after new eval runs, then deploy.
+ *
+ * RESULTS SOURCE — prefer the live `eval-results/` (gitignored, present on a
+ * machine that has run evals); fall back to the vendored `sample-results/` (a
+ * committed run per tier) when it's absent or empty. That's what makes CI —
+ * which has no `eval-results/` — deploy a real, representative dashboard instead
+ * of an empty shell, WITHOUT running an eval in the build. A local `npm run
+ * deploy` with real results still wins; the sample is just the floor.
  */
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -20,8 +27,13 @@ import { buildIndex } from "../src/report.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dashboardDist = join(root, "dashboard", "dist");
-const resultsRoot = join(root, "eval-results");
 const out = join(root, "dist-site");
+
+// Prefer live eval-results/, fall back to the committed sample-results/.
+const liveRoot = join(root, "eval-results");
+const sampleRoot = join(root, "sample-results");
+const liveHasRuns = buildIndex(liveRoot, new Date().toISOString()).tiers.length > 0;
+const resultsRoot = liveHasRuns ? liveRoot : sampleRoot;
 
 if (!existsSync(join(dashboardDist, "index.html"))) {
   console.error("dashboard/dist is missing — run `npm run build:dashboard` first.");
@@ -44,4 +56,5 @@ writeFileSync(join(out, "api", "index"), JSON.stringify(index));
 
 const tiers = index.tiers.length;
 const runs = index.tiers.reduce((n, t) => n + t.runs.length, 0);
-console.log(`Built static site → dist-site/  (${tiers} tier-combos, ${runs} runs)`);
+const src = liveHasRuns ? "eval-results/" : "sample-results/ (vendored)";
+console.log(`Built static site → dist-site/  (${tiers} tier-combos, ${runs} runs from ${src})`);
