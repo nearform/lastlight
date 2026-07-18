@@ -52,8 +52,22 @@ export function hasProviderKey(): boolean {
       process.env.ANTHROPIC_API_KEY ||
       process.env.OPENROUTER_API_KEY ||
       process.env.FIREWORKS_API_KEY ||
-      process.env.DEEPSEEK_API_KEY,
+      process.env.DEEPSEEK_API_KEY ||
+      process.env.KIMI_API_KEY ||
+      process.env.MOONSHOT_API_KEY,
   );
+}
+
+/**
+ * Per-million-token price for a model, in USD — same shape and unit as pi-ai's
+ * model `cost` block, so the numbers are directly comparable to the real
+ * provider costs the transcript reports. `cacheRead`/`cacheWrite` default to 0.
+ */
+export interface ModelRate {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
 }
 
 export interface ModelEntry {
@@ -61,6 +75,15 @@ export interface ModelEntry {
   label?: string;
   provider?: string;
   envKey?: string;
+  /**
+   * Optional per-million-token price. A *fallback*: used only when the session
+   * transcript reports `$0` for this model (e.g. flat-rate/subscription plans
+   * like the kimi.com/code console, whose provider registry carries no
+   * pay-as-you-go price). When the transcript already has a real cost, this is
+   * ignored. Ships in the overlay's `evals/models.json`, so a deployment prices
+   * its own models without patching pi-ai. See {@link modelCost}.
+   */
+  cost?: ModelRate;
 }
 interface ModelsConfig {
   default: string;
@@ -94,6 +117,22 @@ export function modelLabels(): Record<string, string> {
   return out;
 }
 
+/**
+ * The fallback per-token price for a model id, from its `models.json` compare
+ * entry, or undefined if none is declared. The runner uses it to impute a cost
+ * only when the transcript reports `$0` (see {@link ModelEntry.cost} and
+ * `collectMetrics`). Matches the id exactly, else the same substring rule as
+ * {@link resolveModel} so `--model`-resolved ids still find their price.
+ */
+export function modelCost(id: string): ModelRate | undefined {
+  const all = modelsConfig().compare;
+  const v = id.toLowerCase();
+  const hit =
+    all.find((m) => m.id === id) ??
+    all.find((m) => m.id.toLowerCase().includes(v) || m.label?.toLowerCase().includes(v));
+  return hit?.cost;
+}
+
 /** Provider family (env-key) inferred from a `provider/model` id prefix. */
 export function familyForId(id: string): string {
   const provider = id.split("/")[0]?.toLowerCase() ?? "";
@@ -103,6 +142,9 @@ export function familyForId(id: string): string {
     fireworks: "FIREWORKS_API_KEY",
     openrouter: "OPENROUTER_API_KEY",
     deepseek: "DEEPSEEK_API_KEY",
+    "kimi-coding": "KIMI_API_KEY",
+    moonshotai: "MOONSHOT_API_KEY",
+    "moonshotai-cn": "MOONSHOT_API_KEY",
   };
   return map[provider] ?? "default";
 }

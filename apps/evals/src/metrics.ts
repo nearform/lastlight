@@ -12,6 +12,8 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import type { ModelRate } from "./env.js";
+
 export interface RunMetrics {
   inputTokens: number;
   /** Cached prompt tokens (Anthropic cache read + creation). Reported as its
@@ -152,7 +154,38 @@ function walkJsonl(dir: string, out: string[]): void {
   }
 }
 
-export function collectMetrics(sessionsDir: string): RunMetrics {
+/**
+ * Impute a USD cost for one `result` envelope from a per-million-token rate,
+ * matching pi-ai's `calculateCost`: `input`/`output`/`cacheRead`/`cacheWrite`
+ * are each `rate / 1e6 * tokens`. `total_input_tokens` is the *uncached* input
+ * (the shim splits cache read/creation out — see the module comment), so it maps
+ * to pi-ai's `input`. Cache-creation tokens are billed at the write rate.
+ */
+function imputeCost(
+  env: {
+    total_input_tokens?: number;
+    total_cache_read_input_tokens?: number;
+    total_cache_creation_input_tokens?: number;
+    total_output_tokens?: number;
+  },
+  rate: ModelRate,
+): number {
+  const input = (env.total_input_tokens ?? 0) * rate.input;
+  const output = (env.total_output_tokens ?? 0) * rate.output;
+  const cacheRead = (env.total_cache_read_input_tokens ?? 0) * (rate.cacheRead ?? 0);
+  const cacheWrite = (env.total_cache_creation_input_tokens ?? 0) * (rate.cacheWrite ?? 0);
+  return (input + output + cacheRead + cacheWrite) / 1_000_000;
+}
+
+/**
+ * @param fallbackRate When set, a `result` envelope that reports no cost
+ *   (`total_cost_usd` absent or `0`) has one imputed from this per-million-token
+ *   rate (see {@link imputeCost}). This is how flat-rate/subscription models —
+ *   whose provider registry has no pay-as-you-go price, so the transcript says
+ *   `$0` — still get a comparable cost. A real reported cost is always kept as-is.
+ *   The rate comes from the model's `models.json` `cost` entry (see `env.modelCost`).
+ */
+export function collectMetrics(sessionsDir: string, fallbackRate?: ModelRate): RunMetrics {
   const files: string[] = [];
   walkJsonl(join(sessionsDir, "projects"), files);
   // Fallback: some shim configs write directly under sessionsDir.
@@ -179,7 +212,8 @@ export function collectMetrics(sessionsDir: string): RunMetrics {
         metrics.cachedTokens +=
           (env.total_cache_read_input_tokens ?? 0) + (env.total_cache_creation_input_tokens ?? 0);
         metrics.outputTokens += env.total_output_tokens ?? 0;
-        metrics.costUsd += env.total_cost_usd ?? 0;
+        const reported = env.total_cost_usd ?? 0;
+        metrics.costUsd += reported > 0 || !fallbackRate ? reported : imputeCost(env, fallbackRate);
       } catch {
         /* ignore malformed lines */
       }

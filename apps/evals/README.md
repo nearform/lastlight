@@ -130,6 +130,12 @@ OPENROUTER_API_KEY=sk-or-...
 - The default run uses one model (`default` in `models.json`); `--compare` fans
   out across the `compare` set, **running only the models whose key is present**
   — so set the keys for the providers you care about and the rest are skipped.
+- A `compare` entry may carry an optional **`cost`** (USD per million tokens:
+  `input`/`output`/`cacheRead`/`cacheWrite`) — a *fallback* price used only when
+  the run transcript reports `$0`, e.g. flat-rate/subscription plans (like the
+  kimi.com/code console) whose provider registry has no pay-as-you-go price. Real
+  reported costs always win, so it's safe to leave on. Ships in the overlay's
+  `evals/models.json`, so a deployment prices its own models without patching pi-ai.
 - **No GitHub credentials are needed** — GitHub is mocked end to end. The harness
   sets a dummy `GITHUB_TOKEN` internally; don't put a real one in `.env`.
 - An `init`-scaffolded repo already gitignores `.env`, so your keys never get

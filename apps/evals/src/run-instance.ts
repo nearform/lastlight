@@ -35,6 +35,7 @@ import type { Arm } from "./arm.js";
 import { startFakeGitHub } from "./fake-github.js";
 import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, injectRepoContext, type SeedResult } from "./seed.js";
 import { collectMetrics, drainSessions, readSessionLog, listSessionFiles, concatJsonl } from "./metrics.js";
+import { modelCost } from "./env.js";
 import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview } from "./grade.js";
 
 export interface RunInstanceOptions {
@@ -501,7 +502,12 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // 5c. Metrics. Drain the fire-and-forget session flush first so the final
     // `result` envelope (cost/tokens) has landed before we read + clean up.
     await drainSessions(sessionsDir);
-    const m = collectMetrics(sessionsDir);
+    // Price with the executor model's declared fallback rate (models.json `cost`),
+    // applied only to phases whose transcript reports $0 — e.g. flat-rate plans
+    // like kimi-coding, which carry no pay-as-you-go price. `config` arms with a
+    // mixed per-phase model set are priced by their default model (best-effort;
+    // the fallback only ever fires for a zero-cost model in the price table).
+    const m = collectMetrics(sessionsDir, modelCost(prepared.model));
     result.inputTokens = m.inputTokens;
     result.cachedTokens = m.cachedTokens;
     result.outputTokens = m.outputTokens;

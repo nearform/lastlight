@@ -23,6 +23,7 @@ import { computeMartianRanking, type MartianSidecar } from "./report.js";
 import type { InstanceResult } from "./schema.js";
 import { loadMergedConfig, resolvePhaseModel } from "./config.js";
 import { modelsArm, configArm, releaseOverlayGuard } from "./arm.js";
+import { collectMetrics } from "./metrics.js";
 
 const staticAuth = { getToken: async () => "fake-token", expiresAt: null };
 
@@ -801,4 +802,55 @@ describe("git-source seeding (checkout a base commit, fully offline)", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe("collectMetrics — subscription-model cost fallback", () => {
+  function writeSession(dir: string, envelope: Record<string, unknown>): void {
+    const proj = join(dir, "projects", "slug");
+    mkdirSync(proj, { recursive: true });
+    writeFileSync(join(proj, "s.jsonl"), JSON.stringify({ type: "result", ...envelope }) + "\n");
+  }
+
+  it("imputes cost from the fallback rate when the transcript reports $0", () => {
+    const dir = mkdtempSync(join(tmpdir(), "metrics-"));
+    try {
+      // A flat-rate plan (e.g. kimi-coding): tokens present, cost reported as 0.
+      writeSession(dir, {
+        total_input_tokens: 1_000_000,
+        total_output_tokens: 1_000_000,
+        total_cache_read_input_tokens: 1_000_000,
+        total_cost_usd: 0,
+      });
+      const rate = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 };
+      const m = collectMetrics(dir, rate);
+      // 1M @ $3 + 1M @ $15 + 1M @ $0.3 (all per-million) = 18.30
+      expect(m.costUsd).toBeCloseTo(18.3, 6);
+      expect(m.inputTokens).toBe(1_000_000);
+      expect(m.outputTokens).toBe(1_000_000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a real reported cost and ignores the fallback rate", () => {
+    const dir = mkdtempSync(join(tmpdir(), "metrics-"));
+    try {
+      writeSession(dir, { total_input_tokens: 500, total_output_tokens: 500, total_cost_usd: 0.42 });
+      const m = collectMetrics(dir, { input: 999, output: 999 });
+      expect(m.costUsd).toBeCloseTo(0.42, 6);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves cost at $0 when no fallback rate is supplied", () => {
+    const dir = mkdtempSync(join(tmpdir(), "metrics-"));
+    try {
+      writeSession(dir, { total_input_tokens: 500, total_output_tokens: 500, total_cost_usd: 0 });
+      const m = collectMetrics(dir);
+      expect(m.costUsd).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
