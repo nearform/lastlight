@@ -39,7 +39,7 @@
     "cli": "tsx src/cli.ts"
   },
   "dependencies": {
-    "@clack/prompts": "^1.2.0",
+    "@clack/prompts": "^1.7.0",
     "lastlight-shared": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
     "chalk": "^5.6.2",
