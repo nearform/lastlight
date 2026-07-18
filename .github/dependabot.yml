@@ -1,0 +1,68 @@
+# Dependabot config for the nearform/lastlight monorepo (pnpm + Turborepo).
+#
+# One pnpm-lock.yaml lives at the repo root, but Dependabot must be pointed at
+# each workspace package's directory to update its package.json. The globs below
+# cover all ten tracked manifests and deliberately EXCLUDE the frozen eval
+# fixture under apps/evals/datasets/** (an intentionally-buggy eval case).
+#
+#   /                    -> lastlight-monorepo (root)
+#   /apps/*              -> server, www, evals
+#   /apps/*/dashboard    -> server/dashboard, evals/dashboard
+#   /packages/*          -> agentic-pi, cli, shared, workflow-engine
+version: 2
+
+updates:
+  # ── npm / pnpm: every workspace package ────────────────────────────────────
+  - package-ecosystem: "npm"
+    directories:
+      - "/"
+      - "/apps/*"
+      - "/apps/*/dashboard"
+      - "/packages/*"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    # Group minor/patch bumps to keep PR noise down; majors get their own PRs.
+    groups:
+      production-dependencies:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+      development-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+
+  # ── GitHub Actions: the workflows in .github/workflows ─────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "ci(deps)"
+
+  # ── Docker (disabled) ──────────────────────────────────────────────────────
+  # Base images are pinned on purpose (node:22-slim / node:20-slim, matching
+  # .nvmrc and engines.node), and the sandbox images build from a local
+  # ARG BASE_IMAGE that Dependabot can't resolve. Enable this only if you want
+  # PRs proposing new Node major tags (e.g. node:24-slim).
+  #
+  # - package-ecosystem: "docker"
+  #   directory: "/apps/server"
+  #   schedule:
+  #     interval: "weekly"
+  #     day: "monday"
+  #   commit-message:
+  #     prefix: "build(deps)"
