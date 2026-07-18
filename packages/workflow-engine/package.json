@@ -1,6 +1,6 @@
 {
   "name": "lastlight-workflow-engine",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Port-driven workflow engine extracted from Last Light — DAG scheduler, phase executor, DSL/schema, template + loop constructs.",
   "type": "module",
   "main": "dist/index.js",
