@@ -16,11 +16,14 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<div class="docs-callout tip">
 		<div class="docs-callout-body">
-			<strong>Permission profile:</strong> <code>repo-write</code> — needed only
-			for the <code>github_enable_auto_merge</code> tool. It never pushes code
-			and never merges directly: enabling auto-merge lets GitHub merge the PR
-			once its required checks pass, and GitHub refuses on a red or still-running
-			PR — that is the green gate.
+			<strong>Permission profile:</strong> <code>repo-write</code> — needed for
+			the <code>github_enable_auto_merge</code> and <code>github_merge_pull_request</code>
+			tools. It never pushes code. It prefers to enable auto-merge, which lets
+			GitHub merge the PR once its required checks pass and refuses on a red or
+			still-running PR — that is the green gate. It merges directly only in the
+			one case where GitHub has no checks to wait on, and only after confirming
+			the PR's <code>mergeable_state</code> is <code>clean</code> so a repo with
+			no <em>required</em> checks can't slip a red PR through.
 		</div>
 	</div>
 
@@ -37,10 +40,11 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>What it does</h2>
 
 	<ul>
-		<li>Inspects each PR through the <code>github_list_pull_request_files</code> tool (changed files + line counts) — no repository checkout is needed — and deliberately skips lockfile diffs, only pulling the full <code>github_get_pull_request_diff</code> for a small non-lockfile source change (reading whole lockfile diffs in scan mode used to overflow the model's context window)</li>
+		<li>Runs against a <strong>single PR</strong> at a time — its context is bounded, so it can't overflow. Inspects through the <code>github_list_pull_request_files</code> tool (changed files + line counts) — no repository checkout needed — deliberately skips lockfile diffs, and pulls <code>github_get_pull_request_diff</code> only for a small non-lockfile source change</li>
 		<li>Classifies the change conservatively: only lockfile / manifest bumps, GitHub Actions tag/SHA bumps, type-only or mechanical edits count as <strong>trivial</strong>; anything touching runtime logic, anything security-sensitive, and major-version bumps are <strong>functional</strong></li>
-		<li>If trivial, enables GitHub auto-merge (squash) so the PR merges once its checks pass. If GitHub refuses auto-merge because the PR is already mergeable with no required checks ("clean status"), it does a direct squash merge instead; if the repository disallows auto-merge outright, it comments for a maintainer. Functional PRs are left for a human with a comment</li>
+		<li>If trivial, enables GitHub auto-merge (squash) so the PR merges once its checks pass. If GitHub refuses auto-merge because the PR is already mergeable with no required checks ("clean status"), it direct-squash-merges instead — but only after confirming <code>mergeable_state</code> is <code>clean</code>, so it won't land a PR whose non-required checks are failing; if the repository disallows auto-merge outright, it comments for a maintainer. Functional PRs are left for a human with a comment</li>
 		<li>When in doubt, it does not auto-merge</li>
+		<li>Every run must sign off with a machine-readable completion marker; a run that inspects files but reaches no verdict and takes no action is recorded as <strong>failed</strong>, not a silent green</li>
 	</ul>
 
 	<div class="docs-callout note">
@@ -55,7 +59,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li><strong>GitHub webhook:</strong> a <code>check_suite.completed</code> event with a <code>success</code> conclusion on a dependency-update PR (surfaced internally as <code>pr.checks_passed</code>). The connector pre-filters to Dependabot / Renovate — by the head commit author or the <code>dependabot/</code> / <code>renovate/</code> branch prefix — so ordinary green PRs fire nothing. The router routes it deterministically to this workflow. Requires the GitHub App to subscribe to <strong>Check suite</strong> events (Checks: read).</li>
-		<li><strong>Cron sweep:</strong> a scheduled scan (<code>mode: scan</code>) sweeps every managed repo for open Dependabot / Renovate PRs and assesses each. Unlike the review scan, it runs <em>alongside</em> webhooks — a safety net that catches PRs which went green before boot or during a missed delivery. Enabling auto-merge is idempotent, so the overlap is harmless.</li>
+		<li><strong>Cron backstop:</strong> a daily job whose runner finds the green Dependabot / Renovate PRs across managed repos <em>in code</em> (no LLM) and fans out <strong>one bounded run per PR</strong> — the same single-PR shape as the webhook. Runs queue against the global concurrency cap. Unlike the review scan, it runs <em>alongside</em> webhooks — a safety net for PRs that went green before boot or during a missed delivery. Auto-merge is idempotent and per-PR runs dedup by (repo, PR), so the overlap is harmless. (This replaced an agent <code>mode: scan</code> sweep that assessed a whole repo in one session and overflowed its context on busy repos.)</li>
 	</ul>
 
 	<div class="docs-next">

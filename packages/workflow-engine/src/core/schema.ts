@@ -16,6 +16,17 @@ const OutputRuleSchema = z.object({
 const PhaseOnOutputSchema = z.object({
   contains_BLOCKED: OutputRuleSchema.optional(),
   contains_READY: OutputRuleSchema.optional(),
+  /**
+   * Postcondition marker. The phase FAILS if the agent's final output does not
+   * contain this literal substring. Guards against "silent no-op" runs: an
+   * agent that inspects context then stops without reaching a verdict or taking
+   * an action exits cleanly (`success: true`) today, so an empty run is
+   * reported as a false green. Requiring the phase to sign off with an agreed
+   * completion marker turns that empty run into a visible failure instead —
+   * for action-taking workflows where "the process exited 0" is the wrong
+   * success criterion (e.g. dependabot-pr-merge must reach a per-PR verdict).
+   */
+  requires_marker: z.string().min(1).optional(),
 });
 
 // ── Loop configuration ────────────────────────────────────────────────

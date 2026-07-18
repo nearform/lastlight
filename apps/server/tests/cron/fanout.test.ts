@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { dispatchCronWorkflow, type CronDispatcher } from "#src/cron/fanout.js";
+import { dispatchCronWorkflow, fanOutContexts, type CronDispatcher } from "#src/cron/fanout.js";
 
 describe("dispatchCronWorkflow", () => {
   it("dispatches once when context has no repos[]", async () => {
@@ -106,5 +106,40 @@ describe("dispatchCronWorkflow", () => {
     );
     expect(dispatch).toHaveBeenCalledTimes(2);
     expect(res).toEqual({ dispatched: 2, failures: 0 });
+  });
+});
+
+describe("fanOutContexts", () => {
+  it("dispatches each pre-built context verbatim (the per-PR fan-out engine)", async () => {
+    const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
+    const contexts = [
+      { repo: "cliftonc/a", prNumber: 1, title: "Bump a" },
+      { repo: "cliftonc/a", prNumber: 2, title: "Bump b" },
+    ];
+    const res = await fanOutContexts("dependabot-pr-merge", contexts, dispatch);
+    expect(res).toEqual({ dispatched: 2, failures: 0 });
+    expect(dispatch).toHaveBeenCalledWith("dependabot-pr-merge", { repo: "cliftonc/a", prNumber: 1, title: "Bump a" });
+    expect(dispatch).toHaveBeenCalledWith("dependabot-pr-merge", { repo: "cliftonc/a", prNumber: 2, title: "Bump b" });
+  });
+
+  it("returns zero for an empty context list", async () => {
+    const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
+    expect(await fanOutContexts("w", [], dispatch)).toEqual({ dispatched: 0, failures: 0 });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("bounds concurrency", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const dispatch = vi.fn<CronDispatcher>().mockImplementation(async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      return { success: true };
+    });
+    const contexts = Array.from({ length: 9 }, (_, i) => ({ prNumber: i }));
+    await fanOutContexts("w", contexts, dispatch, { concurrency: 2 });
+    expect(peak).toBeLessThanOrEqual(2);
   });
 });

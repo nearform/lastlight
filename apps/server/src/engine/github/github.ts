@@ -204,6 +204,31 @@ export class GitHubClient {
   }
 
   /**
+   * List a repo's open pull requests as light records (number / title / draft /
+   * author login). Deterministic discovery for the dependency-merge cron: it
+   * filters these by author + green status in code and fans out one bounded
+   * single-PR `dependabot-pr-merge` run per candidate — no agent sweep, so a
+   * repo with many open bumps can't overflow a single scan's context. Paginated.
+   */
+  async listOpenPullRequests(
+    owner: string,
+    repo: string,
+  ): Promise<Array<{ number: number; title: string; draft: boolean; authorLogin: string }>> {
+    const prs = await this.octokit.paginate(this.octokit.rest.pulls.list, {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    });
+    return prs.map((p) => ({
+      number: p.number,
+      title: p.title ?? "",
+      draft: !!p.draft,
+      authorLogin: p.user?.login ?? "",
+    }));
+  }
+
+  /**
    * The repo's default branch (e.g. `main`, `master`, `develop`). Used to
    * scope build runs to the real base branch instead of assuming `main` — a
    * `master`-default repo otherwise breaks every `git ... main..HEAD` the

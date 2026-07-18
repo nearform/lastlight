@@ -21,7 +21,7 @@ import {
 } from "./executors/orchestrator.js";
 // Re-exported for back-compat with existing importers (tests, dashboards,
 // workflow phase executor).
-export { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError } from "./executors/shared.js";
+export { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError, mapStopReason, reclassifySuccess } from "./executors/shared.js";
 export type { CommandSpec } from "./executors/orchestrator.js";
 
 /**

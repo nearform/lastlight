@@ -6,13 +6,16 @@ description: |
   checks pass. The companion to dependabot-ci-fix: that one repairs a RED bump
   and pushes a fix; this one merges a GREEN one that needs no fix at all.
 
-  Triggered by:
+  Always runs against a SINGLE PR (`{{prNumber}}`). Triggered by:
     - pr.checks_passed webhook (a check_suite completed with a success
       conclusion on a Dependabot/Renovate PR) → routed here by the router's
       deterministic intent lookup (src/engine/router.ts + this file's
-      `classification`). Runs against the single PR (`{{prNumber}}`).
-    - the cron-dependabot-merge scan (context `mode: scan`, no `prNumber`) which
-      sweeps every managed repo for open dependency PRs and assesses each.
+      `classification`).
+    - the cron-dependabot-merge backstop: the cron runner finds the green
+      dependency PRs across managed repos IN CODE
+      (src/cron/dependabot-discovery.ts) and fans out one run per PR — same
+      single-PR shape as the webhook. (This replaced an agent `mode: scan`
+      sweep that assessed a whole repo at once and overflowed on busy repos.)
 classification:
   intent: dependabot-pr-merge
   description: |
@@ -31,17 +34,24 @@ phases:
   # `github_enable_auto_merge` tool is available. Conservative by design: enable
   # auto-merge ONLY for trivial, non-functional dependency bumps; anything with
   # runtime-logic impact is left for a human. No repo checkout — the agent
-  # inspects each PR via `github_list_pull_request_files` (file list + line
+  # inspects the ONE PR via `github_list_pull_request_files` (file list + line
   # counts) and skips lockfile diffs, only pulling `github_get_pull_request_diff`
-  # for a small non-lockfile source change. Reading full lockfile diffs used to
-  # overflow the model context in scan mode; see prompts/dependabot-pr-merge.md.
+  # for a small non-lockfile source change. Because each run assesses a single
+  # PR, its context is bounded — the overflow that killed the old whole-repo
+  # scan can't happen. See prompts/dependabot-pr-merge.md.
   - name: assess
     label: Assess & maybe auto-merge
     prompt: prompts/dependabot-pr-merge.md
     # `code-review`: the finding-tier / what-to-check rubric for reading a diff.
     skill: code-review
     model: "{{models.review}}"
+    # Postcondition: the assess run MUST sign off with this marker (see the
+    # prompt's OUTPUT contract). Its absence means the agent inspected files then
+    # stopped without reaching a verdict or acting — a silent no-op that used to
+    # report a false green (e.g. after a context-overflow retry). Fail loudly.
+    on_output:
+      requires_marker: "ASSESSMENT_COMPLETE"
     messages:
-      on_start: "Assessing dependency PR(s) for auto-merge..."
-      on_success: "Assessed dependency PR(s) — auto-merge enabled for trivial, green updates; anything functional left for review."
-      on_failure: "Couldn't assess the dependency PR(s) — leaving for a human."
+      on_start: "Assessing dependency PR for auto-merge..."
+      on_success: "Assessed the dependency PR — auto-merge enabled if it's a trivial, green update; anything functional left for review."
+      on_failure: "Couldn't assess the dependency PR — leaving for a human."

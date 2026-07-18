@@ -578,6 +578,24 @@ export class PhaseExecutor {
         };
         return { results: [failResult], status: "failed", outputVars };
       }
+
+      // Postcondition marker: the run must sign off with an agreed completion
+      // marker. Its absence means the agent stopped without reaching an outcome
+      // — a silent no-op that would otherwise report success. Fail it like any
+      // phase failure (posts on_failure, records the error) so it shows red.
+      const marker = phase.on_output.requires_marker;
+      if (marker && !(pr.result.output ?? "").includes(marker)) {
+        const error = `phase produced no outcome — missing completion marker "${marker}"`;
+        await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
+        this.reporter.failWorkflow(error);
+        const failResult: PhaseResult = {
+          phase: phaseName,
+          success: false,
+          output: pr.result.output ?? "",
+          error,
+        };
+        return { results: [failResult], status: "failed", outputVars };
+      }
     }
 
     // Approval gate.

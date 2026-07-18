@@ -226,6 +226,16 @@ recovery) — soft = `stopReason` `unknown` / `error_truncated`; hard =
 terminated / `error_fatal` / `error_tool` / `error_exit_*`. Field absent ⇒
 today's behavior exactly (only `explore.yaml`'s socratic phase opts in).
 
+**No-op / empty-completion backstops.** Two guards stop a run that never
+produced a real result from passing green — see
+[`spec/06-workflow-engine.md`](../../spec/06-workflow-engine.md) for the
+contract: (1) `on_output.requires_marker: "<MARKER>"` fails a phase whose final
+output lacks the marker (a per-workflow postcondition — e.g. dependabot-pr-merge
+requires `ASSESSMENT_COMPLETE`); (2) `reclassifySuccess` (executors/shared.ts)
+demotes a terminal `agent_end` that carried **no final answer** (an empty
+completion, including agentic-pi's synthesized backstop) from `success` to the
+soft `unknown`, so it fails a plain phase and retries in a loop.
+
 ## Per-phase sandbox requirement (`requires_sandbox`)
 
 A phase can declare `requires_sandbox: docker | gondolin | none` to gate itself

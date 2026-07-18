@@ -52,7 +52,29 @@ export async function dispatchCronWorkflow(
     (r): r is string => typeof r === "string" && r.length > 0,
   );
 
-  if (repos.length === 0) {
+  return fanOutContexts(
+    workflowName,
+    repos.map((repo) => ({ ...rest, repo })),
+    dispatch,
+    options,
+  );
+}
+
+/**
+ * Fan out one dispatch per pre-built context, bounded by `concurrency` (default
+ * 3) so a large batch doesn't spin N concurrent sandboxes. Failures are
+ * isolated (`Promise.allSettled`). This is the shared engine behind both the
+ * per-repo cron fan-out (above) and the per-PR dependency-merge fan-out
+ * (`src/index.ts`, over `discoverGreenDependencyPrs`). Each context already
+ * carries everything `dispatch` needs — this helper adds nothing.
+ */
+export async function fanOutContexts(
+  workflowName: string,
+  contexts: Record<string, unknown>[],
+  dispatch: CronDispatcher,
+  options: FanOutOptions = {},
+): Promise<FanOutResult> {
+  if (contexts.length === 0) {
     return { dispatched: 0, failures: 0 };
   }
 
@@ -60,10 +82,10 @@ export async function dispatchCronWorkflow(
   let dispatched = 0;
   let failures = 0;
 
-  for (let i = 0; i < repos.length; i += concurrency) {
-    const batch = repos.slice(i, i + concurrency);
+  for (let i = 0; i < contexts.length; i += concurrency) {
+    const batch = contexts.slice(i, i + concurrency);
     const results = await Promise.allSettled(
-      batch.map((repo) => runOne(dispatch, workflowName, { ...rest, repo })),
+      batch.map((context) => runOne(dispatch, workflowName, context)),
     );
     for (const r of results) {
       dispatched++;

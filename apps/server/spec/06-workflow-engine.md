@@ -104,7 +104,7 @@ overlay) can add a new intent with no core change. See
   sandbox_image?: "default" | "qa";     // docker only: "qa" runs on lastlight-sandbox-qa (Playwright+Chromium+ffmpeg); skips if unbuilt
   loop?: PhaseLoop;                     // reviewer-fix loop
   generic_loop?: GenericLoop;           // until-condition loop
-  on_output?: OutputRule[];             // e.g. contains_BLOCKED → fail
+  on_output?: OutputRule[];             // contains_BLOCKED → fail; requires_marker → fail if final output lacks this marker (postcondition against silent no-op "successes")
   on_success?: { set_phase: string };   // terminal marker
   messages?: PhaseMessages;             // per-event reply templates
 }

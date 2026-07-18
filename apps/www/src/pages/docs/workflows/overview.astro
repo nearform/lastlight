@@ -142,7 +142,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">Dependabot PR merge</span>
 			</div>
-			<p>Finds already-green dependency-update PRs and enables auto-merge on the trivial ones — via webhook and a cron sweep.</p>
+			<p>Finds already-green dependency-update PRs and enables auto-merge on the trivial ones — via webhook and a daily per-PR cron backstop.</p>
 			<span class="workflow-card-meta">1 phase &middot; webhook + cron</span>
 		</a>
 
@@ -254,7 +254,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<tr>
 				<td><strong>Cron schedule</strong></td>
 				<td>issue-triage, pr-review, repo-health, security-review, dependabot-pr-merge</td>
-				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo. The dependabot-pr-merge sweep runs on a schedule even with webhooks on — a safety net for the real-time <code>pr.checks_passed</code> path.</td>
+				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo. The dependabot-pr-merge backstop runs daily even with webhooks on — it discovers green dependency PRs in code and fans out one bounded run per PR, a safety net for the real-time <code>pr.checks_passed</code> path.</td>
 			</tr>
 			<tr>
 				<td><strong>CLI</strong></td>

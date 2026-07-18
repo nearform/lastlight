@@ -15,7 +15,8 @@ import { configureGitAuth } from "./engine/github/git-auth.js";
 import { StateDb } from "./state/db.js";
 import { CronScheduler } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
-import { dispatchCronWorkflow } from "./cron/fanout.js";
+import { dispatchCronWorkflow, fanOutContexts } from "./cron/fanout.js";
+import { discoverGreenDependencyPrs } from "./cron/dependabot-discovery.js";
 import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
@@ -690,11 +691,33 @@ async function main() {
   // (after we know whether webhooks are enabled). The runner closes over
   // `dispatchWorkflow`, which is defined earlier in this file.
   const cron = new CronScheduler(db, async (workflowName, context) => {
-    const { dispatched, failures } = await dispatchCronWorkflow(
-      workflowName,
-      context,
-      dispatchWorkflow,
-    );
+    let dispatched: number;
+    let failures: number;
+    if (context.discover === "green-dependency-prs") {
+      // Deterministic per-PR fan-out (replaces the old `mode: scan` agent sweep,
+      // which buried the model in every open PR's lockfile churn until its
+      // context overflowed). Find the green dependency PRs in code, then dispatch
+      // one bounded single-PR run each — the same shape the `pr.checks_passed`
+      // webhook produces. Runs queue against the global concurrency cap.
+      const repos = Array.isArray(context.repos)
+        ? (context.repos as unknown[]).filter((r): r is string => typeof r === "string")
+        : [];
+      const prs = github
+        ? await discoverGreenDependencyPrs(repos, github, { log: (m) => console.log(m) })
+        : [];
+      console.log(
+        `[cron] ${workflowName}: ${prs.length} green dependency PR(s) across ${repos.length} repo(s)`,
+      );
+      const contexts = prs.map((pr) => ({
+        _triggerType: "cron",
+        repo: pr.repo,
+        prNumber: pr.prNumber,
+        title: pr.title,
+      }));
+      ({ dispatched, failures } = await fanOutContexts(workflowName, contexts, dispatchWorkflow));
+    } else {
+      ({ dispatched, failures } = await dispatchCronWorkflow(workflowName, context, dispatchWorkflow));
+    }
     if (failures > 0) {
       console.warn(
         `[cron] ${workflowName}: ${failures}/${dispatched} dispatches failed`,

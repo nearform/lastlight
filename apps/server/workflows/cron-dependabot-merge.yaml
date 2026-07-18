@@ -7,10 +7,18 @@ name: merge-green-dependency-prs
 schedule: "0 14 * * *"
 workflow: dependabot-pr-merge
 context:
-  mode: scan
-# NOTE: unlike cron-review, this scan intentionally has NO
+  # `discover: green-dependency-prs` makes the cron runner (src/index.ts) find
+  # the green dependency PRs across managed repos IN CODE
+  # (src/cron/dependabot-discovery.ts) and fan out one bounded single-PR
+  # `dependabot-pr-merge` run per PR — the same shape the pr.checks_passed
+  # webhook produces. This replaced the old `mode: scan` run, whose single agent
+  # tried to assess every open PR in a repo at once and overflowed its context
+  # on busy repos (merging nothing). One PR per run = overflow is impossible and
+  # one bad PR can't sink the others.
+  discover: green-dependency-prs
+# NOTE: unlike cron-review, this sweep intentionally has NO
 # `condition.unless: webhooksEnabled`. The pr.checks_passed webhook merges
-# newly-green PRs in real time; this cron is an additive *sweep* that also runs
+# newly-green PRs in real time; this cron is an additive backstop that also runs
 # with webhooks on, catching dependency PRs that went green before boot or
-# during a missed delivery. Enabling auto-merge is idempotent, so overlap with
-# the webhook path is harmless.
+# during a missed delivery. Enabling auto-merge is idempotent, and per-PR runs
+# dedup by (repo, PR), so overlap with the webhook path is harmless.
