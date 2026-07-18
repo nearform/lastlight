@@ -1,0 +1,99 @@
+---
+import DocsLayout from '../../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="workflows/dependabot-ci-fix"
+	description="The Dependabot CI fix workflow — react to a dependency-update PR whose checks failed, push a fix, and auto-merge trivial ones."
+>
+	<p>
+		Dependabot CI fix reacts when a dependency-update PR (Dependabot or Renovate)
+		goes red in CI. When a check suite completes with a failure, Last Light
+		diagnoses the breakage, pushes the smallest fix that makes CI pass, and —
+		only when the change is trivial — enables GitHub auto-merge so the update
+		lands once the re-run checks are green.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Permission profile:</strong> <code>repo-write</code> — can push
+			commits to the PR branch and enable auto-merge. It never merges a red PR:
+			auto-merge is gated on the required checks passing.
+		</div>
+	</div>
+
+	<h2>Pipeline</h2>
+
+	<div class="workflow-diagram">
+		<svg viewBox="0 0 320 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="12" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="77" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
+			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">diagnose + push</text>
+			<path d="M146 40 H172" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<path d="M168 36 L174 40 L168 44 Z" fill="var(--diag-line)"/>
+			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Assess</text>
+			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">trivial? → auto-merge</text>
+		</svg>
+	</div>
+
+	<h2>What it does</h2>
+
+	<ul>
+		<li>Clones the repo at the PR's head branch (the dependency bump is already committed there)</li>
+		<li>Reads the CI failures and diagnoses the cause — a stale lockfile, a breaking change in the new version, a call site or type that needs updating</li>
+		<li>Makes the smallest fix that turns CI green, runs the test / lint / typecheck gate, and pushes to the PR branch</li>
+		<li>Assesses the resulting diff: only lockfile / type-only / non-functional changes count as <strong>trivial</strong></li>
+		<li>If trivial, enables GitHub auto-merge (squash) so the PR merges once checks pass; otherwise it comments and leaves the PR for a human</li>
+	</ul>
+
+	<div class="docs-callout note">
+		<div class="docs-callout-body">
+			Auto-merge needs "Allow auto-merge" enabled on the repository and at least
+			one required status check. If it isn't available, the workflow comments
+			that the fix looks trivial and asks a maintainer to merge.
+		</div>
+	</div>
+
+	<h2>Triggers</h2>
+
+	<ul>
+		<li><strong>GitHub webhook:</strong> a <code>check_suite.completed</code> event with a <code>failure</code> / <code>timed_out</code> conclusion (surfaced internally as <code>pr.checks_failed</code>). The router runs it through the intent classifier, which routes a recognised dependency-update PR here. Requires the GitHub App to subscribe to <strong>Check suite</strong> events (Checks: read).</li>
+	</ul>
+
+	<p>
+		Because routing goes through the classifier rather than a fixed rule, other
+		workflows can react to the same failing-checks event by declaring their own
+		<code>classification</code> block — this workflow simply claims the
+		dependency-update case.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/workflows/pr-fix" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">PR fix</span>
+		</a>
+		<a href="/docs/workflows/repo-health" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Repo health</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.workflow-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	.workflow-diagram svg {
+		width: 100%;
+		max-width: 320px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+</style>
