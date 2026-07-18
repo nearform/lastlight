@@ -44,8 +44,8 @@ The terms used across this spec, in dependency order.
   [Workflow Engine](/spec/06-workflow-engine).
 - **Workflow Run** — one execution of a Workflow against a triggering
   event. Persisted in the `workflow_runs` table with `status` of
-  `running`, `paused`, `complete`, or `failed`. Resumable across process
-  restarts.
+  `queued` (held behind the global concurrency cap), `running`, `paused`,
+  `complete`, or `failed`. Resumable across process restarts.
 - **Phase** — a single step in a Workflow. Either a `context` checkpoint
   (no agent invocation), an `agent` phase (one agent session), a `bash` /
   `script` phase (a deterministic command run in the sandbox, no LLM), or a

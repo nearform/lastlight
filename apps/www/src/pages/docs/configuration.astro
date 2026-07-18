@@ -268,6 +268,18 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td>Label applied to issues that exist solely to set up missing guardrails in a target repo.</td>
 			</tr>
 			<tr>
+				<td><code>MAX_CONCURRENT_WORKFLOWS</code></td>
+				<td>No</td>
+				<td><code>4</code></td>
+				<td>Global cap on how many sandboxed workflow runs execute at once. Excess triggers are persisted as <code>queued</code> in <code>workflow_runs</code> and admitted FIFO as slots free — keeping a burst of events from swamping the host. Overlay key: <code>concurrency.maxWorkflows</code>.</td>
+			</tr>
+			<tr>
+				<td><code>MAX_QUEUE_WAIT_MS</code></td>
+				<td>No</td>
+				<td><code>1800000</code> (30 min)</td>
+				<td>How long a <code>queued</code> run may wait before it's dropped (cancelled with a "waited too long" notice). Overlay key: <code>concurrency.maxQueueWaitMs</code>.</td>
+			</tr>
+			<tr>
 				<td><code>LASTLIGHT_HOME</code></td>
 				<td>No</td>
 				<td><code>~/lastlight</code></td>

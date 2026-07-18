@@ -30,12 +30,14 @@ export async function runSimpleWorkflow(
   approvalConfig?: ApprovalGateConfig,
   bootstrapLabel = "lastlight:bootstrap",
   variants?: VariantConfig,
+  concurrency?: { maxWorkflows: number; maxQueueWaitMs: number },
 ): Promise<WorkflowResult>;
 
 interface WorkflowResult {
   success: boolean;
   phases: PhaseResult[];
   paused?: boolean;     // hit an approval or reply gate
+  queued?: boolean;     // held back by the concurrency cap (no phases ran)
   prNumber?: number;    // build cycle that produced a PR
 }
 ```
@@ -424,6 +426,49 @@ For reply gates the runner sets `currentPhase` to the phase *before*
 the loop owner so `nextPhaseAfter()` lands back on the looping phase
 for the next iteration.
 
+## Concurrency cap and admission
+
+A global cap bounds how many sandboxed runs execute at once, so a burst of
+triggers can't swamp the host. It is enforced at the single dispatch funnel
+(`runSimpleWorkflow`) and defaults to `concurrency.maxWorkflows` = 4
+(env `MAX_CONCURRENT_WORKFLOWS`; see [Configuration](/spec/02-configuration)).
+
+**Enqueue.** When a *fresh* trigger arrives and
+`countRunning() >= maxWorkflows`, the run row is created with status
+`queued` instead of `running`, `runSimpleWorkflow` posts an enqueue ack
+("…is queued — it'll start automatically when a slot frees"), and returns
+`{ success: true, queued: true, phases: [] }` — **no phases run**. A
+duplicate trigger on an already-`queued` run is a no-op (returns the same
+`queued` result; it must not fall through to `runWorkflow`, which would
+execute outside the cap). Resumes and orphan restarts **bypass** the cap:
+they re-enter `runWorkflow` directly, finishing in-flight work rather than
+re-queuing behind it.
+
+**Admission.** `createAdmissionController` (`src/workflows/admission.ts`)
+promotes queued runs to running as slots free, reusing `resumeSimpleRun`
+(a queued run's stored `context` is shaped exactly like a resume's, and no
+phase has run yet, so the ledger runs them all). Promotion is FIFO by
+`started_at` and guarded by a compare-and-set (`admitRun`:
+`WHERE status = 'queued'`), so its two triggers race safely:
+
+1. **Event-driven** — `admitNext()` runs in `dispatchWorkflow`'s `finally`
+   block, so a just-finished run immediately pulls the next queued one in.
+2. **Periodic sweep** — a `setInterval(sweep, 15s)` also **TTL-expires**
+   queued runs older than `concurrency.maxQueueWaitMs` (default 30 min;
+   env `MAX_QUEUE_WAIT_MS`) — transitioning them to `cancelled` with a
+   "dropped from queue after waiting too long" notice posted back to the
+   originating GitHub issue or Slack thread — before admitting. The sweeper
+   starts after boot's orphan recovery, so a run that was `queued` when the
+   harness crashed is picked up on the first tick.
+
+The `queued?: boolean` on `WorkflowResult` propagates up through
+`dispatchWorkflow` and the [dispatcher](/spec/06-workflow-engine): queued
+runs suppress the spurious "completed" reply, leave an in-progress PR check
+untouched (the terminal review comment lands once admission runs the
+workflow), and are cancellable like any live run. The dashboard shows a
+`queued` run with a neutral status badge and includes it in the `active`
+filter alongside `running`/`paused`.
+
 ## Loop expression evaluator
 
 ```ts
@@ -488,6 +533,7 @@ prevent template-after-render injection (`validateShellCommand`).
 | Until-condition evaluator | `src/workflows/loop-eval.ts` |
 | Template engine | `src/workflows/templates.ts` |
 | Resume + orphan recovery | `src/workflows/resume.ts` |
+| Concurrency cap + admission | `src/workflows/admission.ts` (cap enforced in `simple.ts`) |
 
 ## Rebuild notes
 

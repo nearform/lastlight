@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   issue_number INTEGER,
   current_phase TEXT NOT NULL,
   phase_history TEXT NOT NULL DEFAULT '[]',   -- JSON array of completed phases
-  status TEXT NOT NULL DEFAULT 'running',     -- running | paused | succeeded | failed | cancelled
+  status TEXT NOT NULL DEFAULT 'running',     -- queued | running | paused | succeeded | failed | cancelled
   context TEXT,                                -- immutable trigger context (JSON)
   scratch TEXT,                                -- mutable phase-to-phase state (JSON)
   node_statuses TEXT,                          -- DAG node status map (JSON)
@@ -103,6 +103,16 @@ CREATE INDEX idx_workflow_runs_name_started ON workflow_runs(workflow_name, star
 never changed. `phase_history` is technically a JSON array that the
 runner appends to. `restart_count` is the [Workflow Engine](/spec/06-workflow-engine)
 crash-loop circuit breaker.
+
+The `queued` status is the persisted form of the global concurrency cap
+(see [Workflow Engine](/spec/06-workflow-engine)): when a fresh trigger
+arrives while `countRunning() >= concurrency.maxWorkflows`, the run is
+created `queued` instead of `running` (the column is untyped `TEXT`, so no
+migration is needed). The admission controller promotes queued rows FIFO
+via a compare-and-set (`admitRun`: `UPDATE … WHERE id = ? AND status =
+'queued'`), so the event-driven and periodic-sweep admission paths can race
+safely — only the first writer wins a row. Queued rows older than
+`concurrency.maxQueueWaitMs` are transitioned to `cancelled` by the sweep.
 
 ### `workflow_approvals`
 

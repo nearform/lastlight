@@ -50,6 +50,10 @@ interface LastLightConfig {
   exploreDefaultRepo?: string;
   publicUrl?: string;
   reviewPostsCheck: boolean;
+  concurrency: {                          // global sandbox-run concurrency cap
+    maxWorkflows: number;                 //   max runs executing at once (default 4)
+    maxQueueWaitMs: number;               //   TTL before a queued run is dropped (default 30 min)
+  };
 }
 
 interface SlackConfig {
@@ -262,6 +266,8 @@ OpenRouter) are forwarded unconditionally.
 | `BOOTSTRAP_LABEL` | label for issues that set up missing guardrails | `lastlight:bootstrap` |
 | `EXPLORE_DEFAULT_REPO` | `owner/name` — destination for Slack-initiated explore publish | unset (must be set or run fails at publish phase) |
 | `REVIEW_POSTS_CHECK` | post a Check Run on PR head SHA after pr-review | `false` |
+| `MAX_CONCURRENT_WORKFLOWS` | global cap on sandboxed workflow runs executing at once; excess triggers are persisted as `queued` and admitted FIFO as slots free (overlay `concurrency.maxWorkflows`) | `4` |
+| `MAX_QUEUE_WAIT_MS` | how long a `queued` run may wait before it's dropped (cancelled with a "waited too long" notice) by the admission sweeper (overlay `concurrency.maxQueueWaitMs`) | `1800000` (30 min) |
 | `LASTLIGHT_GIT_CREDENTIALS` | inline credentials for private repos without App access | unset |
 | `LASTLIGHT_WRITE_GLOBAL_GIT` | when `"1"`, configure git globally not just per-repo | `0` |
 | `LASTLIGHT_GIT_SHA` | core git SHA baked into the image (Dockerfile `ARG`); surfaced by `GET /admin/api/server/info` for the dashboard drift banner | empty → "unknown" |

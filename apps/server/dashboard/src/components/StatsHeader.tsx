@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { Clock, LogOut, Moon, Radio, Sun } from "lucide-react";
+import { BookOpen, Clock, Github, LogOut, Moon, Radio, Sun } from "lucide-react";
 import type { StreamStatus } from "../hooks/useSessionStream";
 import { useTheme } from "../hooks/useTheme";
 import { NearformLogo } from "./NearformLogo";
@@ -114,6 +114,28 @@ export function StatsHeader({
       </div>
 
       <div className="flex-1" />
+
+      <a
+        href="https://lastlight.dev/docs"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
+        title="Documentation"
+        aria-label="Open the documentation in a new tab"
+      >
+        <BookOpen size={14} />
+      </a>
+
+      <a
+        href="https://github.com/nearform/lastlight/issues"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
+        title="GitHub issues"
+        aria-label="Open GitHub issues in a new tab"
+      >
+        <Github size={14} />
+      </a>
 
       <VersionPin />
 
