@@ -1300,16 +1300,45 @@ export function createAdminRoutes(
     };
   }
 
-  // List the run keys (issue-N / <workflow>-<id>) stored for ?repo=owner/repo.
-  app.get("/artifacts", (c) => {
+  // List the repos that actually have stored artifacts (search + paginate).
+  // This replaces the old config-driven repo picker, which showed nothing when
+  // `managedRepos` was empty even though the store held artifacts.
+  app.get("/artifact-repos", async (c) => {
+    if (!buildAssetStore) return c.json({ repos: [], total: 0 });
+    const q = c.req.query("q") || undefined;
+    const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "50", 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query("offset") ?? "0", 10) || 0, 0);
+    try {
+      return c.json(await buildAssetStore.listRepos({ q, limit, offset }));
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  // List the run keys (issue-N / <workflow>-<id>) stored for ?repo=owner/repo,
+  // newest first, with per-run age. Filterable by `?since=` (ISO, mirrors
+  // /workflow-runs) and `?q=`, paginated by `?limit=`/`?offset=`.
+  app.get("/artifacts", async (c) => {
     const repoParam = c.req.query("repo");
     if (!repoParam || !repoParam.includes("/")) {
       return c.json({ error: "missing or invalid ?repo=owner/repo" }, 400);
     }
-    if (!buildAssetStore) return c.json({ keys: [] });
+    if (!buildAssetStore) return c.json({ keys: [], total: 0 });
     const [owner, repo] = repoParam.split("/", 2);
+    const q = c.req.query("q") || undefined;
+    const sinceRaw = c.req.query("since");
+    const sinceMs = sinceRaw ? Date.parse(sinceRaw) : NaN;
+    const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "50", 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query("offset") ?? "0", 10) || 0, 0);
     try {
-      return c.json({ keys: buildAssetStore.listKeys(owner, repo) });
+      return c.json(
+        await buildAssetStore.listKeysDetailed(owner, repo, {
+          q,
+          sinceMs: Number.isNaN(sinceMs) ? undefined : sinceMs,
+          limit,
+          offset,
+        }),
+      );
     } catch (err: unknown) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
     }

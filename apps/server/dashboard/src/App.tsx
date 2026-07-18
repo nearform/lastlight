@@ -363,7 +363,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         <WorkflowDefinitions />
       ) : tab === "artifacts" ? (
         <Suspense fallback={<div className="p-6 text-sm text-base-content/50">Loading editor…</div>}>
-          <ArtifactsPage />
+          <ArtifactsPage timeRange={timeRange} query={debouncedQuery} />
         </Suspense>
       ) : tab === "config" ? (
         <ConfigPage />

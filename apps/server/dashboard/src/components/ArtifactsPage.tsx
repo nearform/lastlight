@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, isImageArtifact, isVideoArtifact } from "../api";
+import {
+  api,
+  isImageArtifact,
+  isVideoArtifact,
+  type ArtifactRepoEntry,
+  type ArtifactKeyEntry,
+} from "../api";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { ArtifactImageViewer } from "./ArtifactImageViewer";
 import { ArtifactVideoViewer } from "./ArtifactVideoViewer";
@@ -8,12 +14,22 @@ import {
   stringParser,
   stringSerializer,
 } from "../hooks/useUrlState";
+import { timeRangeToSince } from "../lib/timeRange";
 
 /**
  * Build-assets ("Artifacts") tab. Browses the server-mode handoff docs
  * (architect-plan.md, status.md, executor-summary.md, …) that live under
  * $STATE_DIR/build-assets/<owner>/<repo>/<issueKey>/*.md and lets an operator
  * edit + save them via the shared {@link ArtifactEditor}.
+ *
+ * The left pane is a two-level browser served entirely from the store:
+ *   • no repo selected → the repos that actually have artifacts (the header
+ *     search filters them; always shown regardless of age so it can't go empty
+ *     under the default 24h window);
+ *   • a repo selected → that repo's run keys, newest first, filtered by the
+ *     header time range + search, each showing its age.
+ * Both levels page in with "load more" so a busy store never dumps thousands of
+ * rows at once.
  *
  * Deep-link params (set by server-mode PR links):
  *   ?tab=artifacts&repo=<owner>/<repo>&key=<issueKey>&doc=<file>
@@ -22,69 +38,100 @@ import {
  * When no store is configured (repo mode) the list endpoints report empty and
  * the page degrades to a clear empty state rather than erroring.
  */
-export function ArtifactsPage() {
+
+const PAGE_SIZE = 50;
+
+/** Relative age of an ISO timestamp — "3h", "2d" (mirrors WorkflowList). */
+function timeAgo(iso: string): string {
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+  return `${Math.floor(secs / 86400)}d`;
+}
+
+interface ArtifactsPageProps {
+  /** Header date filter (hour/day/week/all/live) — scopes the run-key list. */
+  timeRange: string;
+  /** Header free-text search — filters the repo list, or the key list once a
+   *  repo is selected. */
+  query: string;
+}
+
+export function ArtifactsPage({ timeRange, query }: ArtifactsPageProps) {
   const [repo, setRepo] = useUrlState<string>("repo", "", stringParser, stringSerializer);
   const [key, setKey] = useUrlState<string>("key", "", stringParser, stringSerializer);
   const [doc, setDoc] = useUrlState<string>("doc", "", stringParser, stringSerializer);
 
-  const [managedRepos, setManagedRepos] = useState<string[]>([]);
   const [repoInput, setRepoInput] = useState(repo);
 
-  const [keys, setKeys] = useState<string[]>([]);
+  const [repos, setRepos] = useState<ArtifactRepoEntry[]>([]);
+  const [repoTotal, setRepoTotal] = useState(0);
+  const [repoLimit, setRepoLimit] = useState(PAGE_SIZE);
+
+  const [keys, setKeys] = useState<ArtifactKeyEntry[]>([]);
+  const [keyTotal, setKeyTotal] = useState(0);
+  const [keyLimit, setKeyLimit] = useState(PAGE_SIZE);
+
   const [files, setFiles] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const [owner, name] = repo.includes("/") ? repo.split("/", 2) : ["", ""];
+  const browsingRepos = !repo || !repo.includes("/");
 
-  // ── Populate the repo picker from the managed-repos config ───────────────
-  useEffect(() => {
-    let cancelled = false;
-    api.config()
-      .then((c) => {
-        if (cancelled) return;
-        const merged = c.merged as { managedRepos?: unknown };
-        const repos = Array.isArray(merged.managedRepos)
-          ? merged.managedRepos.filter((r): r is string => typeof r === "string")
-          : [];
-        setManagedRepos(repos);
-      })
-      .catch(() => { /* repo picker falls back to the text input */ });
-    return () => { cancelled = true; };
-  }, []);
+  // ── Reset paging when the search / repo / time window changes ────────────
+  useEffect(() => { setRepoLimit(PAGE_SIZE); }, [query]);
+  useEffect(() => { setKeyLimit(PAGE_SIZE); }, [repo, query, timeRange]);
 
-  // ── Load keys whenever the repo changes ──────────────────────────────────
+  // ── Load the repo list while no repo is selected ─────────────────────────
   useEffect(() => {
+    if (!browsingRepos) return;
     let cancelled = false;
     setError(null);
-    if (!repo || !repo.includes("/")) {
-      setKeys([]);
-      return;
-    }
-    api.listArtifactKeys(repo)
-      .then((res) => { if (!cancelled) setKeys(res.keys); })
+    api.listArtifactRepos({ q: query, limit: repoLimit })
+      .then((res) => { if (!cancelled) { setRepos(res.repos); setRepoTotal(res.total); } })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); });
     return () => { cancelled = true; };
-  }, [repo]);
+  }, [browsingRepos, query, repoLimit]);
 
-  // ── Load files whenever the key changes ──────────────────────────────────
+  // ── Load the run keys for the selected repo ──────────────────────────────
+  useEffect(() => {
+    if (browsingRepos) { setKeys([]); setKeyTotal(0); return; }
+    let cancelled = false;
+    setError(null);
+    api.listArtifactKeys(repo, { q: query, since: timeRangeToSince(timeRange), limit: keyLimit })
+      .then((res) => { if (!cancelled) { setKeys(res.keys); setKeyTotal(res.total); } })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); });
+    return () => { cancelled = true; };
+  }, [browsingRepos, repo, query, timeRange, keyLimit]);
+
+  // ── Load doc filenames for the expanded key ──────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    if (!repo || !repo.includes("/") || !key) {
-      setFiles([]);
-      return;
-    }
+    if (browsingRepos || !key) { setFiles([]); return; }
     api.listArtifactFiles(owner, name, key)
       .then((res) => { if (!cancelled) setFiles(res.files); })
       .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); });
     return () => { cancelled = true; };
-  }, [repo, key, owner, name]);
+  }, [browsingRepos, repo, key, owner, name]);
 
-  const applyRepo = useCallback(() => {
-    const next = repoInput.trim();
+  const openRepo = useCallback((slug: string) => {
+    setRepoInput(slug);
     setKey("");
     setDoc("");
-    setRepo(next);
-  }, [repoInput, setRepo, setKey, setDoc]);
+    setRepo(slug);
+  }, [setRepo, setKey, setDoc]);
+
+  const applyRepo = useCallback(() => {
+    openRepo(repoInput.trim());
+  }, [repoInput, openRepo]);
+
+  const backToRepos = useCallback(() => {
+    setRepoInput("");
+    setKey("");
+    setDoc("");
+    setRepo("");
+  }, [setRepo, setKey, setDoc]);
 
   return (
     <div className="flex flex-1 overflow-hidden bg-base-100">
@@ -99,12 +146,8 @@ export function ArtifactsPage() {
               onChange={(e) => setRepoInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") applyRepo(); }}
               placeholder="owner/repo"
-              list="artifact-managed-repos"
               className="flex-1 min-w-0 rounded border border-base-300 bg-base-200 px-2 py-1 text-xs"
             />
-            <datalist id="artifact-managed-repos">
-              {managedRepos.map((r) => <option key={r} value={r} />)}
-            </datalist>
             <button
               onClick={applyRepo}
               className="rounded bg-primary px-2 py-1 text-xs font-medium text-primary-content hover:bg-primary/90"
@@ -112,22 +155,13 @@ export function ArtifactsPage() {
               Go
             </button>
           </div>
-          {managedRepos.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {managedRepos.map((r) => (
-                <button
-                  key={r}
-                  onClick={() => { setRepoInput(r); setKey(""); setDoc(""); setRepo(r); }}
-                  className={`rounded px-1.5 py-0.5 text-[11px] ${
-                    r === repo
-                      ? "bg-primary/20 text-primary"
-                      : "bg-base-200 text-base-content/70 hover:bg-base-300"
-                  }`}
-                >
-                  {r}
-                </button>
-              ))}
-            </div>
+          {!browsingRepos && (
+            <button
+              onClick={backToRepos}
+              className="text-[11px] text-base-content/60 hover:text-base-content"
+            >
+              ← All repositories
+            </button>
           )}
         </div>
 
@@ -137,50 +171,91 @@ export function ArtifactsPage() {
               {error}
             </div>
           )}
-          {repo && keys.length === 0 && !error ? (
-            <div className="p-3 text-xs text-base-content/50">
-              No build assets stored for this repo.
-            </div>
+
+          {browsingRepos ? (
+            /* ── Repo list ─────────────────────────────────────────────── */
+            repos.length === 0 && !error ? (
+              <div className="p-3 text-xs text-base-content/50">
+                {query ? "No repositories match your search." : "No repositories have stored artifacts."}
+              </div>
+            ) : (
+              <>
+                <ul className="py-1">
+                  {repos.map((r) => (
+                    <li key={r.slug}>
+                      <button
+                        onClick={() => openRepo(r.slug)}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-base-content/80 hover:bg-base-300/50"
+                      >
+                        <span className="flex-1 truncate font-medium">{r.slug}</span>
+                        <span className="shrink-0 rounded bg-base-200 px-1 text-[10px] text-base-content/60">
+                          {r.keyCount}
+                        </span>
+                        <span className="shrink-0 text-[10px] text-base-content/40">
+                          {timeAgo(r.updatedAt)}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <ListFooter shown={repos.length} total={repoTotal} onLoadMore={() => setRepoLimit((l) => l + PAGE_SIZE)} />
+              </>
+            )
           ) : (
-            <ul className="py-1">
-              {keys.map((k) => {
-                const isOpen = k === key;
-                return (
-                  <li key={k}>
-                    <button
-                      onClick={() => { setDoc(""); setKey(isOpen ? "" : k); }}
-                      className={`w-full text-left px-3 py-1.5 text-xs font-medium truncate ${
-                        isOpen ? "bg-primary/10 text-primary" : "text-base-content/80 hover:bg-base-300/50"
-                      }`}
-                    >
-                      {k}
-                    </button>
-                    {isOpen && (
-                      <ul className="pb-1">
-                        {files.length === 0 ? (
-                          <li className="px-5 py-1 text-[11px] text-base-content/40">No docs</li>
-                        ) : (
-                          files.map((f) => (
-                            <li key={f}>
-                              <button
-                                onClick={() => setDoc(f)}
-                                className={`w-full text-left px-5 py-1 text-[11px] truncate ${
-                                  f === doc
-                                    ? "text-primary font-semibold"
-                                    : "text-base-content/60 hover:text-base-content"
-                                }`}
-                              >
-                                {f}
-                              </button>
-                            </li>
-                          ))
+            /* ── Run keys for the selected repo ────────────────────────── */
+            keys.length === 0 && !error ? (
+              <div className="p-3 text-xs text-base-content/50">
+                {query || timeRange !== "all"
+                  ? "No artifacts match the current search / time range."
+                  : "No build assets stored for this repo."}
+              </div>
+            ) : (
+              <>
+                <ul className="py-1">
+                  {keys.map((k) => {
+                    const isOpen = k.key === key;
+                    return (
+                      <li key={k.key}>
+                        <button
+                          onClick={() => { setDoc(""); setKey(isOpen ? "" : k.key); }}
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs font-medium ${
+                            isOpen ? "bg-primary/10 text-primary" : "text-base-content/80 hover:bg-base-300/50"
+                          }`}
+                        >
+                          <span className="flex-1 truncate">{k.key}</span>
+                          <span className="shrink-0 text-[10px] text-base-content/40">
+                            {timeAgo(k.updatedAt)}
+                          </span>
+                        </button>
+                        {isOpen && (
+                          <ul className="pb-1">
+                            {files.length === 0 ? (
+                              <li className="px-5 py-1 text-[11px] text-base-content/40">No docs</li>
+                            ) : (
+                              files.map((f) => (
+                                <li key={f}>
+                                  <button
+                                    onClick={() => setDoc(f)}
+                                    className={`w-full text-left px-5 py-1 text-[11px] truncate ${
+                                      f === doc
+                                        ? "text-primary font-semibold"
+                                        : "text-base-content/60 hover:text-base-content"
+                                    }`}
+                                  >
+                                    {f}
+                                  </button>
+                                </li>
+                              ))
+                            )}
+                          </ul>
                         )}
-                      </ul>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <ListFooter shown={keys.length} total={keyTotal} onLoadMore={() => setKeyLimit((l) => l + PAGE_SIZE)} />
+              </>
+            )
           )}
         </div>
       </div>
@@ -192,6 +267,23 @@ export function ArtifactsPage() {
         <ArtifactVideoViewer owner={owner} repo={name} docKey={key} doc={doc} />
       ) : (
         <ArtifactEditor owner={owner} repo={name} docKey={key} doc={doc} />
+      )}
+    </div>
+  );
+}
+
+/** Shared "{shown} / {total}" footer with a load-more button. */
+function ListFooter({ shown, total, onLoadMore }: { shown: number; total: number; onLoadMore: () => void }) {
+  if (total === 0) return null;
+  const hasMore = shown < total;
+  return (
+    <div className="sticky bottom-0 border-t border-base-300 bg-base-100 px-3 py-1.5 text-[11px] text-base-content/50">
+      {hasMore ? (
+        <button onClick={onLoadMore} className="text-primary hover:underline">
+          Load more · {shown} / {total}
+        </button>
+      ) : (
+        <span>{shown} / {total}</span>
       )}
     </div>
   );

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -1160,7 +1160,7 @@ describe("artifacts endpoints (server-mode build assets)", () => {
     const missing = await request(app, "/artifacts/acme/widget/issue-1/nope.md");
     expect(missing.status).toBe(404);
     const keys = await request(app, "/artifacts?repo=nobody/nothing");
-    expect(await keys.json()).toEqual({ keys: [] });
+    expect(await keys.json()).toEqual({ keys: [], total: 0 });
   });
 
   it("reports empty when no store dir is configured", async () => {
@@ -1187,7 +1187,7 @@ describe("artifacts endpoints (server-mode build assets)", () => {
     } as unknown as StateDb;
     const a = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
     const keys = await request(a, "/artifacts?repo=acme/widget");
-    expect(await keys.json()).toEqual({ keys: [] });
+    expect(await keys.json()).toEqual({ keys: [], total: 0 });
   });
 });
 
@@ -1259,5 +1259,62 @@ describe("public artifact image route (mountAdmin carve-out)", () => {
   it("the auth-gated artifacts route still requires a token (contrast)", async () => {
     const res = await get(mount(dir), "/admin/api/artifacts/acme/widget/issue-1/plan.md");
     expect(res.status).toBe(401);
+  });
+});
+
+describe("GET /artifact-repos + paginated /artifacts", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ll-artifacts-routes-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  function app() {
+    return createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({ adminPassword: "", buildAssetsDir: dir }));
+  }
+  async function json<T>(path: string) {
+    return (await (await request(app(), path)).json()) as T;
+  }
+
+  it("lists repos with artifacts, searchable", async () => {
+    const store = new BuildAssetStore(dir);
+    store.write({ owner: "acme", repo: "widget", issueKey: "issue-1" }, "status.md", "x");
+    store.write({ owner: "acme", repo: "gadget", issueKey: "issue-2" }, "status.md", "x");
+
+    const all = await json<{ repos: { slug: string; keyCount: number; updatedAt: string }[]; total: number }>("/artifact-repos");
+    expect(all.total).toBe(2);
+    expect(all.repos.map((r) => r.slug).sort()).toEqual(["acme/gadget", "acme/widget"]);
+    expect(typeof all.repos[0].updatedAt).toBe("string");
+
+    const filtered = await json<{ total: number }>("/artifact-repos?q=wid");
+    expect(filtered.total).toBe(1);
+  });
+
+  it("returns an empty list when no store is configured", async () => {
+    const noStore = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
+    const res = await request(noStore, "/artifact-repos");
+    expect(await res.json()).toEqual({ repos: [], total: 0 });
+  });
+
+  it("lists run keys with total and honours ?since / ?q", async () => {
+    const store = new BuildAssetStore(dir);
+    store.write({ owner: "acme", repo: "widget", issueKey: "issue-new" }, "status.md", "x");
+    store.write({ owner: "acme", repo: "widget", issueKey: "issue-old" }, "status.md", "x");
+    const old = new Date(Date.now() - 3 * 86400 * 1000);
+    utimesSync(store.dirFor({ owner: "acme", repo: "widget", issueKey: "issue-old" }), old, old);
+
+    const all = await json<{ keys: { key: string }[]; total: number }>("/artifacts?repo=acme/widget");
+    expect(all.total).toBe(2);
+    expect(all.keys.map((k) => k.key)).toEqual(["issue-new", "issue-old"]);
+
+    const since = new Date(Date.now() - 86400 * 1000).toISOString();
+    const recent = await json<{ keys: { key: string }[] }>(`/artifacts?repo=acme/widget&since=${encodeURIComponent(since)}`);
+    expect(recent.keys.map((k) => k.key)).toEqual(["issue-new"]);
+
+    const q = await json<{ keys: { key: string }[] }>("/artifacts?repo=acme/widget&q=old");
+    expect(q.keys.map((k) => k.key)).toEqual(["issue-old"]);
+  });
+
+  it("400s on a missing/invalid ?repo=", async () => {
+    const res = await request(app(), "/artifacts");
+    expect(res.status).toBe(400);
   });
 });

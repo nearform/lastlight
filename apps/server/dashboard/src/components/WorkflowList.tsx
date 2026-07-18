@@ -17,6 +17,7 @@ import {
   nullableStringParser,
   nullableStringSerializer,
 } from "../hooks/useUrlState";
+import { timeRangeToSince } from "../lib/timeRange";
 
 function timeAgo(iso: string): string {
   const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -411,23 +412,6 @@ function DetailPanel({ run, approvals, onCancel, onRetry, onApprovalResponded, o
 }
 
 const WORKFLOW_PAGE_SIZE = 20;
-
-/**
- * Map a header time-range key (`hour`, `day`, `week`, `all`, `live`) to an
- * ISO `since` value the API can filter on. `all` and `live` return undefined
- * — `live` is handled separately as a status filter, not a date filter.
- */
-function timeRangeToSince(timeRange: string): string | undefined {
-  if (timeRange === "all" || timeRange === "live") return undefined;
-  const cutoffs: Record<string, number> = {
-    hour: 3600 * 1000,
-    day: 86400 * 1000,
-    week: 604800 * 1000,
-  };
-  const ms = cutoffs[timeRange];
-  if (!ms) return undefined;
-  return new Date(Date.now() - ms).toISOString();
-}
 
 interface WorkflowListProps {
   /** Header date filter. */

@@ -401,6 +401,22 @@ export interface ArtifactMetadata {
   lock: ArtifactLock | null;
 }
 
+/** A repo that has stored artifacts, for the Artifacts tab's repo list. */
+export interface ArtifactRepoEntry {
+  owner: string;
+  repo: string;
+  slug: string;
+  keyCount: number;
+  updatedAt: string;
+}
+
+/** One run key (issue dir) within a repo, with its age + doc count. */
+export interface ArtifactKeyEntry {
+  key: string;
+  fileCount: number;
+  updatedAt: string;
+}
+
 export class ArtifactLockedError extends Error {
   lock: ArtifactLock;
 
@@ -589,8 +605,29 @@ export const api = {
     reqText(`/workflows/${encodeURIComponent(name)}/prompt?path=${encodeURIComponent(path)}`),
   skill: (name: string) => reqText(`/skills/${encodeURIComponent(name)}`),
   // ── Build assets (server-mode handoff docs) ──────────────────────────────
-  listArtifactKeys: (repo: string) =>
-    req<{ keys: string[] }>(`/artifacts?repo=${encodeURIComponent(repo)}`),
+  // Repos that actually have artifacts (search + paginate).
+  listArtifactRepos: (opts: { q?: string; limit?: number; offset?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.q) params.set("q", opts.q);
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts.offset !== undefined) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    return req<{ repos: ArtifactRepoEntry[]; total: number }>(
+      `/artifact-repos${qs ? `?${qs}` : ""}`,
+    );
+  },
+  // Run keys for one repo, newest first, with age. `since` is an ISO cutoff.
+  listArtifactKeys: (
+    repo: string,
+    opts: { q?: string; since?: string; limit?: number; offset?: number } = {},
+  ) => {
+    const params = new URLSearchParams({ repo });
+    if (opts.q) params.set("q", opts.q);
+    if (opts.since) params.set("since", opts.since);
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts.offset !== undefined) params.set("offset", String(opts.offset));
+    return req<{ keys: ArtifactKeyEntry[]; total: number }>(`/artifacts?${params.toString()}`);
+  },
   listArtifactFiles: (owner: string, repo: string, key: string) =>
     req<{ files: string[] }>(
       `/artifacts/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(key)}`,
