@@ -67,6 +67,54 @@ describe("renderTemplate — {{artifactUrl}} (build-assets mode)", () => {
   });
 });
 
+describe("renderTemplate — explore-context.md link (mode-gated)", () => {
+  // These are the exact template literals used in explore.yaml — keep them in
+  // sync so a future YAML edit that breaks the gating fails this test.
+  const ON_SUCCESS_TMPL =
+    "{{#if externalizeArtifacts}}Context doc ready — [explore-context.md]({{artifactUrl explore-context.md}}){{/if}}" +
+    "{{#if !externalizeArtifacts}}Context doc written to `{{issueDir}}/explore-context.md` (local to this run — set `buildAssets.location: server` to get a viewable/editable link).{{/if}}";
+
+  const GATE_MSG_TMPL =
+    "{{#if externalizeArtifacts}}_You can view or edit the research context doc I'm working from here: [explore-context.md]({{artifactUrl explore-context.md}})._\n" +
+    "{{/if}}_Just reply to this thread with your answers — no need to @mention me. I'll keep going until we have enough to write this up._\n" +
+    "_Say `we're done` at any point to jump straight to the spec draft._";
+
+  const SERVER_CTX = { ...BASE_CTX, externalizeArtifacts: true, publicUrl: "https://last.example.com/" };
+  const ARTIFACT_URL =
+    "https://last.example.com/admin/?tab=repos&rtab=assets&repo=acme%2Fwidget&key=issue-42&doc=explore-context.md";
+
+  describe("on_success", () => {
+    it("server mode: renders dashboard link and 'Context doc ready'", () => {
+      const result = renderTemplate(ON_SUCCESS_TMPL, SERVER_CTX);
+      expect(result).toContain(ARTIFACT_URL);
+      expect(result).toContain("Context doc ready");
+      expect(result).not.toContain("local to this run");
+    });
+
+    it("repo mode: renders 'local to this run' message without a blob URL", () => {
+      const result = renderTemplate(ON_SUCCESS_TMPL, BASE_CTX);
+      expect(result).toContain("local to this run");
+      expect(result).not.toContain("Context doc ready");
+      expect(result).not.toContain("blob/");
+    });
+  });
+
+  describe("gate_message", () => {
+    it("server mode: includes 'view or edit' line with dashboard link", () => {
+      const result = renderTemplate(GATE_MSG_TMPL, SERVER_CTX);
+      expect(result).toContain("view or edit");
+      expect(result).toContain(ARTIFACT_URL);
+    });
+
+    it("repo mode: omits 'view or edit' line entirely", () => {
+      const result = renderTemplate(GATE_MSG_TMPL, BASE_CTX);
+      expect(result).not.toContain("view or edit");
+      expect(result).not.toContain("blob/");
+      expect(result).toContain("Just reply to this thread");
+    });
+  });
+});
+
 describe("renderTemplate — {{approvalUrl}} (focused approval deep link)", () => {
   it("builds a focused-view link from publicUrl + approvalId", () => {
     const result = renderTemplate("{{approvalUrl}}", {

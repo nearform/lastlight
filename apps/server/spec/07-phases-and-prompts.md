@@ -157,7 +157,7 @@ Every file in `workflows/prompts/`.
 
 | File | Purpose | Output marker | Writes |
 |---|---|---|---|
-| `explore-read.md` | Clone if needed, read issue + codebase, produce baseline. | None | `{{issueDir}}/explore-context.md` |
+| `explore-read.md` | Clone if needed, read issue + codebase, produce baseline. | None | `{{issueDir}}/explore-context.md` (linked via `{{artifactUrl explore-context.md}}`, mode-gated on `externalizeArtifacts`: dashboard Assets view in server mode, local-path note in repo mode) |
 | `explore-ask.md` | Socratic loop iteration `{{iteration}}/{{maxIterations}}`. Reads baseline + `{{scratch.socratic.qa}}`, asks clarifying questions or signals `READY`. | `READY` on its own line ends the loop. | None (Q&A merged into scratch on gate pause) |
 | `explore-synthesize.md` | Write the spec from baseline + full Q&A. | None | `{{issueDir}}/explore-spec.md` |
 | `explore-publish.md` | Comment on issue (GitHub-scoped) or open a new issue (Slack-scoped). | None | GitHub comment or issue |

@@ -34,6 +34,7 @@ phases:
     web_search: true
     messages:
       on_start: "Cloning `{{owner}}/{{repo}}` and reading the codebase..."
+      on_success: "{{#if externalizeArtifacts}}Context doc ready — [explore-context.md]({{artifactUrl explore-context.md}}){{/if}}{{#if !externalizeArtifacts}}Context doc written to `{{issueDir}}/explore-context.md` (local to this run — set `buildAssets.location: server` to get a viewable/editable link).{{/if}}"
 
   - name: socratic
     label: Socratic questioning
@@ -54,7 +55,8 @@ phases:
         retries: 1
         then: complete
       gate_message: |
-        _Just reply to this thread with your answers — no need to @mention me. I'll keep going until we have enough to write this up._
+        {{#if externalizeArtifacts}}_You can view or edit the research context doc I'm working from here: [explore-context.md]({{artifactUrl explore-context.md}})._
+        {{/if}}_Just reply to this thread with your answers — no need to @mention me. I'll keep going until we have enough to write this up._
         _Say `we're done` at any point to jump straight to the spec draft._
 
   - name: synthesize
