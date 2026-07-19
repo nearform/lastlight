@@ -169,11 +169,25 @@ export async function runWorkflowCore(
     try {
       outcome = await executor.execute(node, outputs);
     } catch (err) {
-      // An agent call threw (OOM / unexpected). Mark the node failed so the
-      // failure cascades to downstream skips, mirroring a normal failure.
+      // An agent call threw (OOM / unexpected / provisioning failure). Mark the
+      // node failed so the failure cascades to downstream skips, mirroring a
+      // normal failure.
       console.error(`[runner] Phase "${node.name}" threw unexpectedly:`, err);
       phases.push({ phase: node.name, success: false, error: String(err), output: "" });
       node.status = "failed";
+      // Attribute the failure to THIS phase. `current_phase`/`phase_history`
+      // otherwise only advance on success (persistPhase hardcodes success:true),
+      // so a throw here would leave the run's PHASE pointing at the last phase
+      // that *succeeded* — mis-reporting which phase actually failed. Mirrors
+      // post-review's fail() handler.
+      if (db && workflowId) {
+        db.runs.appendPhase(workflowId, node.name, {
+          phase: node.name,
+          timestamp: new Date().toISOString(),
+          success: false,
+          summary: err instanceof Error ? err.message : String(err),
+        });
+      }
       continue;
     }
     for (const r of outcome.results) phases.push(r);

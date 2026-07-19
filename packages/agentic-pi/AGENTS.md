@@ -63,7 +63,7 @@ src/
     index.ts              loadGitHubExtension(profile) — entry. Returns {customTools, ...}.
     auth.ts               GitHub App JWT → installation token. Static-token fallback.
     client.ts             Octokit wrapper with retry/backoff (ported from mcp-github-app).
-    credentials.ts        git credential-store file writer (mode 600, regex-validated).
+    credentials.ts        gitAuthEnv() — github.com-scoped http.extraheader (GIT_CONFIG_*), no on-disk file.
     profiles.ts           4 profile names → tool name allowlists.
     tools.ts              ~32 defineTool() registrations, github_ prefix.
   extensions/skills/

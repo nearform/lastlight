@@ -7,10 +7,11 @@ set -euo pipefail
 
 AGENT_HOME="/home/agent"
 WORKSPACE="$AGENT_HOME/workspace"
-# LASTLIGHT_WORKSPACE and LASTLIGHT_GIT_CREDENTIALS are set as image-level
-# ENV in sandbox.Dockerfile so they're visible to every `docker exec` call
-# the harness makes (not just the entrypoint's PID-1 tree). They show up in
-# this shell's env via that mechanism; no export needed here.
+# LASTLIGHT_WORKSPACE is set as image-level ENV in sandbox.Dockerfile so it's
+# visible to every `docker exec` call the harness makes (not just the
+# entrypoint's PID-1 tree). It shows up in this shell's env via that
+# mechanism; no export needed here. (LASTLIGHT_GIT_CREDENTIALS is now inert —
+# git auth comes from GIT_CONFIG_* extraheader env, not a credentials file.)
 
 # ── Fix workspace ownership (bind-mounts may be root-owned on macOS) ──
 chown -R agent:agent "$WORKSPACE" 2>/dev/null || true
@@ -62,28 +63,13 @@ if [ ! -f "$WORKSPACE/AGENTS.md" ]; then
 fi
 chown agent:agent "$WORKSPACE/AGENTS.md" 2>/dev/null || true
 
-# ── Git identity and auth (system-wide so it applies regardless of exec user) ──
-git config --system user.name "last-light[bot]"
-git config --system user.email "last-light[bot]@users.noreply.github.com"
-
-if [ -n "${GIT_TOKEN:-}" ]; then
-  # Reject tokens containing characters that would break the URL line in
-  # the credentials file (newline, '@', ':', '/', whitespace). Real GitHub
-  # tokens are alphanumeric + underscore — the wider charset here is
-  # defensive against future format changes.
-  if ! printf %s "$GIT_TOKEN" | grep -Eq '^[A-Za-z0-9_-]+$'; then
-    echo "ERROR: GIT_TOKEN contains characters outside [A-Za-z0-9_-]; refusing to write credentials file" >&2
-    exit 1
-  fi
-  # Write the file as the agent user (mode 600) so the helper can read it
-  # after the entrypoint drops privileges. Path is set by us above; the
-  # `store --file=<path>` value goes into git's config as argv-split (no
-  # shell), so the only constraint is no-whitespace in the path.
-  install -m 600 -o agent -g agent /dev/null "$LASTLIGHT_GIT_CREDENTIALS"
-  printf 'https://x-access-token:%s@github.com\n' "$GIT_TOKEN" > "$LASTLIGHT_GIT_CREDENTIALS"
-  chown agent:agent "$LASTLIGHT_GIT_CREDENTIALS"
-  git config --system credential.helper "store --file=$LASTLIGHT_GIT_CREDENTIALS"
-fi
+# ── Git identity + auth ──
+# Nothing to configure here. The harness sets the bot identity
+# (GIT_AUTHOR_*/GIT_COMMITTER_*) and a github.com-scoped `http.extraheader`
+# (Basic x-access-token:<token>) via GIT_CONFIG_* env in `agentGitIdentityEnv`,
+# which reaches every `docker exec` the harness makes — no on-disk credentials
+# file, no --system git config, no charset guard needed. See
+# src/sandbox/git-http-auth.ts.
 
 # ── Sentinel for harness waitForReady() ──
 touch "$WORKSPACE/.ready"

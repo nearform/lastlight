@@ -126,6 +126,20 @@ lastlight approvals reject  &lt;id&gt; [--reason "..."]
 lastlight stats                                        # totals + per-skill success/fail
 lastlight stats --daily 14                             # cost / token rollups</code></pre>
 
+	<h3>Crons</h3>
+	<p>
+		List the instance's scheduled jobs, or fire one on demand — handy for
+		testing a cron's behaviour without waiting for its schedule. <code>trigger</code>
+		is fire-and-forget on the server: the cron fans out one workflow run per
+		managed repo (or per discovered PR), so watch it land with
+		<code>lastlight workflow list</code>. The same <em>Run now</em> button is on
+		the dashboard's Crons tab.
+	</p>
+	<pre><code>lastlight cron list                                    # schedule, next/last run, status
+lastlight cron trigger &lt;name&gt;                           # run a cron now (fire-and-forget)
+lastlight cron enable &lt;name&gt;                            # enable a disabled cron (idempotent)
+lastlight cron disable &lt;name&gt;                           # disable a cron (idempotent)</code></pre>
+
 	<h2>Server lifecycle (host-local)</h2>
 	<p>
 		Unlike the commands above (which target a remote instance over HTTP), these

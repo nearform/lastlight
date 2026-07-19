@@ -13,16 +13,15 @@ import { HomePage } from "./components/HomePage";
 import { CronsList } from "./components/CronsList";
 import { ConfigPage } from "./components/ConfigPage";
 import { UpdateBanner } from "./components/UpdateBanner";
-// Lazy — the Artifacts editor pulls in MDXEditor (Lexical + CodeMirror, ~1 MB),
-// which would otherwise triple the initial bundle. Code-split so it loads only
-// when the Artifacts tab is opened.
-const ArtifactsPage = lazy(() =>
-  import("./components/ArtifactsPage").then((m) => ({ default: m.ArtifactsPage })),
-);
-// Lazy for the same reason as ArtifactsPage — the focused approval view embeds
-// the MDXEditor in server mode.
+// Lazy — the focused approval view embeds the MDXEditor (Lexical + CodeMirror,
+// ~1 MB) in server mode, which would otherwise triple the initial bundle.
 const FocusedApprovalView = lazy(() =>
   import("./components/FocusedApprovalView").then((m) => ({ default: m.FocusedApprovalView })),
+);
+// Lazy for the same reason — ReposPage embeds ArtifactsPage (and thus the
+// MDXEditor) in its Assets sub-tab, so code-split it out of the initial bundle.
+const ReposPage = lazy(() =>
+  import("./components/ReposPage").then((m) => ({ default: m.ReposPage })),
 );
 import {
   HomeIcon,
@@ -32,7 +31,7 @@ import {
   ClockIcon,
   Cog6ToothIcon,
   RectangleGroupIcon,
-  DocumentTextIcon,
+  FolderIcon,
 } from "@heroicons/react/24/outline";
 import {
   useUrlState,
@@ -45,17 +44,39 @@ import {
 } from "./hooks/useUrlState";
 
 type AuthState = "checking" | "required" | "ok";
-type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "crons" | "config" | "artifacts";
+type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "repos" | "crons" | "config";
 
 const PAGE_SIZE = 50;
 
-const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "artifacts", "crons", "config"] as const;
+const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "repos", "crons", "config"] as const;
 
 const SESSION_SOURCE_PATHS: Record<"sessions" | "chat-sessions", string> = {
   sessions: "/admin/api/sessions",
   "chat-sessions": "/admin/api/chat-sessions",
 };
 const TIME_RANGES = ["hour", "day", "week", "all", "live"] as const;
+
+/**
+ * The Artifacts tab was folded into the Repos tab (its Assets sub-tab now hosts
+ * the artifact viewer). Old deep links — `?tab=artifacts&repo=&key=&doc=`, still
+ * live in past GitHub/Slack comments via `{{artifactUrl}}` — are rewritten in
+ * place to `?tab=repos&rtab=assets&…` so they keep resolving. Runs synchronously
+ * at module load, before any `useUrlState` reads the URL.
+ */
+function migrateLegacyArtifactsLink(): void {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("tab") !== "artifacts") return;
+  params.set("tab", "repos");
+  params.set("rtab", "assets");
+  const search = params.toString();
+  window.history.replaceState(
+    null,
+    "",
+    window.location.pathname + (search ? `?${search}` : "") + window.location.hash,
+  );
+}
+migrateLegacyArtifactsLink();
 
 function Dashboard({ onLogout }: { onLogout: () => void }) {
   // ── Filters & navigation, all persisted to the URL ─────────────────────
@@ -272,7 +293,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               { id: "runs", label: "Workflow Runs", Icon: PlayCircleIcon },
               { id: "sessions", label: "Sandbox Sessions", Icon: CubeTransparentIcon },
               { id: "chat-sessions", label: "Chat Sessions", Icon: ChatBubbleLeftRightIcon },
-              { id: "artifacts", label: "Artifacts", Icon: DocumentTextIcon },
+              { id: "repos", label: "Repos", Icon: FolderIcon },
               { id: "crons", label: "Crons", Icon: ClockIcon },
               { id: "config", label: "Config", Icon: Cog6ToothIcon },
             ] as const
@@ -361,12 +382,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         />
       ) : tab === "workflows" ? (
         <WorkflowDefinitions />
-      ) : tab === "artifacts" ? (
-        <Suspense fallback={<div className="p-6 text-sm text-base-content/50">Loading editor…</div>}>
-          <ArtifactsPage timeRange={timeRange} query={debouncedQuery} />
-        </Suspense>
       ) : tab === "config" ? (
         <ConfigPage />
+      ) : tab === "repos" ? (
+        <Suspense fallback={<div className="p-6 text-sm text-base-content/50">Loading…</div>}>
+          <ReposPage timeRange={timeRange} query={debouncedQuery} />
+        </Suspense>
       ) : (
         <WorkflowList
           timeRange={timeRange}

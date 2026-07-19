@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type WorkflowApproval, type ArtifactRef, type WorkflowRun } from "../api";
 import { ArtifactEditor } from "./ArtifactEditor";
+import { GhLink } from "./GhLink";
+import { repoUrl, issueUrl } from "../lib/githubLinks";
 
 interface Props {
   approvalId: string;
@@ -76,12 +78,40 @@ export function FocusedApprovalView({ approvalId, onClose }: Props) {
             <span className="text-sm font-semibold text-base-content">Approval</span>
             {approval && <span className="badge badge-warning badge-sm">{approval.gate}</span>}
           </div>
-          {run && (
-            <p className="truncate text-[11px] text-base-content/50">
-              {run.workflowName}{run.repo ? ` · ${run.repo}` : ""}
-              {run.issueNumber ? ` #${run.issueNumber}` : ""}
-            </p>
-          )}
+          {run &&
+            (() => {
+              const rHref = repoUrl(run.repo);
+              const iHref = issueUrl(run.repo, run.issueNumber, run.workflowName);
+              return (
+                <p className="truncate text-[11px] text-base-content/50">
+                  {run.workflowName}
+                  {run.repo && (
+                    <>
+                      {" · "}
+                      {rHref ? (
+                        <GhLink href={rHref} title={`Open ${run.repo} on GitHub`}>
+                          {run.repo}
+                        </GhLink>
+                      ) : (
+                        run.repo
+                      )}
+                    </>
+                  )}
+                  {run.issueNumber ? (
+                    <>
+                      {" "}
+                      {iHref ? (
+                        <GhLink href={iHref} title={`Open #${run.issueNumber} on GitHub`}>
+                          #{run.issueNumber}
+                        </GhLink>
+                      ) : (
+                        `#${run.issueNumber}`
+                      )}
+                    </>
+                  ) : null}
+                </p>
+              );
+            })()}
         </div>
       </div>
 

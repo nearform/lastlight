@@ -70,6 +70,10 @@ export const PACKAGE_REGISTRY_HOSTS: readonly string[] = [
   // npm / yarn / pnpm
   "npmjs.org",
   "yarnpkg.com",
+  // Node distributions — fnm fetches these to install a Node version on demand
+  // when a repo pins one via .nvmrc / .node-version (the sandbox base no longer
+  // pre-bakes extra Node versions; the system Node is the default).
+  "nodejs.org",
   // Python — pypi.org + files.pythonhosted.org are the two big ones.
   "pypi.org",
   "pythonhosted.org",

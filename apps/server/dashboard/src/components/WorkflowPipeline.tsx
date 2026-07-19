@@ -155,6 +155,9 @@ export function WorkflowPipeline({
       });
     }
 
+    const isTerminalRun =
+      run.status === "failed" || run.status === "succeeded" || run.status === "cancelled";
+
     const buildNode = (name: string, x: number, y: number): Node<PhaseNodeData> => {
       const label = declaredLabelByName.get(name) ?? name;
       const histEntry = historyMap.get(name);
@@ -173,8 +176,15 @@ export function WorkflowPipeline({
           duration = exec.durationMs / 1000;
         }
         if (exec.success === true) status = "done";
-        else if (exec.success === false) status = "failed";
-        else status = "active";
+        else if (exec.success === false)
+          // A cascade-skipped phase is stored as success=0 (so it re-evaluates
+          // on resume) but carries stopReason="skipped" — it never ran, so don't
+          // paint it red like a genuine failure.
+          status = exec.stopReason === "skipped" ? "skipped" : "failed";
+        // A row with no `success` is unfinished. On a live run that's "active";
+        // on a terminal run it's a never-finalized (dangling) row — show it as
+        // failed rather than a perpetually-pulsing "active".
+        else status = isTerminalRun ? "failed" : "active";
       } else if (histEntry) {
         status = histEntry.success ? "done" : "failed";
         timestamp = histEntry.timestamp;
@@ -192,9 +202,11 @@ export function WorkflowPipeline({
           .filter((e): e is WorkflowRunExecution => !!e);
         if (kidExecs.length > 0) {
           const lastExec = execByPhase.get(kids[kids.length - 1]!);
-          if (kidExecs.some((kx) => kx.success === undefined)) status = "active";
+          if (kidExecs.some((kx) => kx.success === undefined))
+            status = isTerminalRun ? "failed" : "active";
           else if (lastExec?.success === true) status = "done";
-          else if (lastExec?.success === false) status = "failed";
+          else if (lastExec?.success === false)
+            status = lastExec.stopReason === "skipped" ? "skipped" : "failed";
           // Span the loop: earliest iteration start + summed iteration durations.
           timestamp = kidExecs.reduce(
             (min, kx) => (kx.startedAt < min ? kx.startedAt : min),

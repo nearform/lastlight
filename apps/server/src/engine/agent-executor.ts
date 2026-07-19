@@ -21,7 +21,7 @@ import {
 } from "./executors/orchestrator.js";
 // Re-exported for back-compat with existing importers (tests, dashboards,
 // workflow phase executor).
-export { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError } from "./executors/shared.js";
+export { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError, mapStopReason, reclassifySuccess } from "./executors/shared.js";
 export type { CommandSpec } from "./executors/orchestrator.js";
 
 /**
@@ -42,6 +42,14 @@ async function prepareRun(
   ghEnv: Record<string, string>;
   mintedToken?: string;
   prePopulate?: PrePopulateSpec;
+  /**
+   * Set when a scoped GitHub token was expected (App configured + a github
+   * access profile requested) but the mint FAILED. The caller must not run a
+   * toolless agent in that case — without a token agentic-pi skips the entire
+   * github extension (no `github_*` tools) and any pre-clone would fail too, so
+   * the run can only flail. Callers fail the phase fast with this message.
+   */
+  mintError?: string;
 }> {
   const taskId = opts?.taskId || `task-${randomUUID().slice(0, 8)}`;
   const stateDir = config.stateDir || resolve("data");
@@ -61,6 +69,7 @@ async function prepareRun(
   // sandbox-side PEM is ever materialized.
   const ghEnv: Record<string, string> = {};
   let mintedToken: string | undefined;
+  let mintError: string | undefined;
   const access = opts?.githubAccess;
   const allowAppAuth = access?.allowMcpAppAuth === true;
   if (process.env.GITHUB_APP_ID && allowAppAuth) {
@@ -98,6 +107,10 @@ async function prepareRun(
       ghEnv.GIT_TOKEN = token;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      // A repo-scoped mint that 422s means the installation can't access this
+      // repo (deleted / transferred to another org / access revoked). Record it
+      // so the caller fails the phase loudly instead of running a toolless agent.
+      mintError = msg;
       console.warn(
         `[executor] Could not mint git token (repo=${access.repo || "none"}, ` +
         `profile=${access.profile}): ${msg}`,
@@ -206,7 +219,33 @@ async function prepareRun(
         }
       : undefined;
 
-  return { taskId, stateDir, backend, ghEnv, mintedToken, prePopulate };
+  return { taskId, stateDir, backend, ghEnv, mintedToken, prePopulate, mintError };
+}
+
+/**
+ * Build the failed {@link ExecutionResult} returned when a scoped GitHub token
+ * was expected but couldn't be minted (see `mintError`). Surfaced as a hard
+ * phase failure (`error_fatal`) so the run stops cleanly with an actionable
+ * message rather than handing the agent a session with no `github_*` tools.
+ */
+function mintFailureResult(
+  access: GitSandboxAccess | undefined,
+  mintError: string,
+): ExecutionResult {
+  const target = access ? `${access.owner}/${access.repo}` : "the target repo";
+  return {
+    success: false,
+    output: "",
+    turns: 0,
+    durationMs: 0,
+    stopReason: "error_fatal",
+    error:
+      `Could not mint a scoped GitHub token for ${target} ` +
+      `(profile=${access?.profile ?? "?"}): ${mintError}. The GitHub App ` +
+      `installation likely can't access this repo (deleted, transferred to ` +
+      `another org, or access revoked) — remove it from managedRepos or ` +
+      `reinstall the App on the repo.`,
+  };
 }
 
 export async function executeAgent(
@@ -225,8 +264,12 @@ export async function executeAgent(
     sandboxFactory?: SandboxFactory;
   },
 ): Promise<ExecutionResult> {
-  const { taskId, stateDir, backend, ghEnv, prePopulate } = await prepareRun(config, opts);
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError } = await prepareRun(config, opts);
   const access = opts?.githubAccess;
+
+  // Fail fast: an expected-but-failed token mint means no github_* tools (and a
+  // doomed pre-clone). Don't burn a sandbox on a toolless run.
+  if (mintError) return mintFailureResult(access, mintError);
 
   const spanAttrs = safeSpanAttributes({
     "agent.runtime": "agentic-pi",
@@ -286,8 +329,10 @@ export async function executeCommand(
     sandboxFactory?: SandboxFactory;
   },
 ): Promise<ExecutionResult> {
-  const { taskId, stateDir, backend, ghEnv, prePopulate } = await prepareRun(config, opts);
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError } = await prepareRun(config, opts);
   const access = opts?.githubAccess;
+
+  if (mintError) return mintFailureResult(access, mintError);
 
   const spanAttrs = safeSpanAttributes({
     "agent.runtime": spec.kind,

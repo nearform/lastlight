@@ -1,6 +1,11 @@
 {
   "name": "lastlight-shared",
-  "version": "0.1.0",
+  "version": "0.1.2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nearform/lastlight.git",
+    "directory": "packages/shared"
+  },
   "description": "Light modules shared by the Last Light CLI and lastlight-core — providers, oauth, overlay bootstrap/assets, core-pin, the workflow loader, and the config types it needs. No heavy runtime deps.",
   "type": "module",
   "main": "dist/index.js",

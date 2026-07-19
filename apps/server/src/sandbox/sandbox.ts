@@ -5,6 +5,7 @@ import { spawnSync } from "child_process";
 import type { run as agenticRunType, RunResult, ThinkingLevel } from "agentic-pi";
 import type { OtelConfig, SandboxBackend } from "../config/config.js";
 import { createTaskSandbox, setupTaskWorktree, prePopulateWorkspace } from "./index.js";
+import { GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue } from "./git-http-auth.js";
 import type { DockerSandbox as DockerDriver } from "./docker.js";
 import { SmolSandbox as SmolDriver, smolAvailable, SMOL_WORKSPACE_DIR } from "./smol.js";
 import { ALLOW_ALL_SENTINEL } from "./egress-allowlist.js";
@@ -186,10 +187,18 @@ export type SandboxFactory = (backend: SandboxBackend, opts: SandboxFactoryOpts)
  * resolved bot login (e.g. `last-light[bot]` / `nearform-lastlight[bot]`) so
  * agent commits are attributed to the actual App — including a `BOT_LOGIN`
  * override, which the caller resolves before passing it here.
+ *
+ * When `gitToken` is present it also injects the github.com-scoped
+ * `http.extraheader` (Basic `x-access-token:<token>`) via `GIT_CONFIG_*`, so
+ * both the agent's own `git push` and agentic-pi's in-sandbox
+ * `github_clone_repo` authenticate with no token ever touching disk or a clone
+ * URL. This env reaches every backend's agent git (docker `exec -e`, in-process
+ * child env — the same proven seam as `safe.directory`). See
+ * {@link githubExtraheaderValue}.
  */
-export function agentGitIdentityEnv(botLogin: string): Record<string, string> {
+export function agentGitIdentityEnv(botLogin: string, gitToken?: string): Record<string, string> {
   const login = botLogin;
-  return {
+  const env: Record<string, string> = {
     GIT_AUTHOR_NAME: login,
     GIT_AUTHOR_EMAIL: `${login}@users.noreply.github.com`,
     GIT_COMMITTER_NAME: login,
@@ -201,6 +210,12 @@ export function agentGitIdentityEnv(botLogin: string): Record<string, string> {
     GIT_CONFIG_KEY_0: "safe.directory",
     GIT_CONFIG_VALUE_0: "*",
   };
+  if (gitToken) {
+    env.GIT_CONFIG_COUNT = "2";
+    env.GIT_CONFIG_KEY_1 = GITHUB_EXTRAHEADER_KEY;
+    env.GIT_CONFIG_VALUE_1 = githubExtraheaderValue(gitToken);
+  }
+  return env;
 }
 
 /**

@@ -329,6 +329,108 @@ describe('routeEvent — comment.created', () => {
     }
   });
 
+  describe('dependency-PR mention comments (checks-aware routing)', () => {
+    /** Fake GitHub client exposing just what dependencyPrSignals() calls. */
+    function fakeGithub(pr: {
+      author?: string;
+      mergeable_state?: string;
+      checks?: 'passing' | 'failing' | 'pending' | 'none';
+    }) {
+      const getChecksConclusion = vi.fn().mockResolvedValue(pr.checks ?? 'none');
+      const getPullRequest = vi.fn().mockResolvedValue({
+        user: { login: pr.author ?? 'dependabot[bot]' },
+        head: { sha: 'headsha' },
+        mergeable_state: pr.mergeable_state ?? 'unstable',
+      });
+      return { deps: { github: { getPullRequest, getChecksConclusion } } as unknown as RouterDeps, getPullRequest, getChecksConclusion };
+    }
+
+    it('feeds the classifier the dep-PR author + red check state → dependabot-ci-fix', async () => {
+      mockGetWorkflowByIntent.mockReturnValue({ name: 'dependabot-ci-fix' } as any);
+      mockClassifyComment.mockResolvedValue({ intent: 'dependabot-ci-fix' } as any);
+      const { deps, getChecksConclusion } = fakeGithub({ mergeable_state: 'unstable', checks: 'failing' });
+
+      const result = await routeEvent(
+        makeEnvelope({
+          type: 'comment.created',
+          body: '@last-light can you look at this?',
+          authorAssociation: 'OWNER',
+          prNumber: 5,
+          issueAuthor: 'dependabot[bot]',
+          title: 'Bump lodash from 4.17.20 to 4.17.21',
+        }),
+        deps,
+      );
+
+      // The classifier was handed the disambiguating signals.
+      expect(mockClassifyComment).toHaveBeenCalledWith(
+        '@last-light can you look at this?',
+        expect.objectContaining({ prAuthor: 'dependabot[bot]', checksState: 'failing' }),
+      );
+      expect(getChecksConclusion).toHaveBeenCalledWith('cliftonc', 'drizzle-cube', 'headsha');
+      expect(result.action).toBe('handler');
+      if (result.action === 'handler') {
+        expect(result.handler).toBe('dependabot-ci-fix');
+        expect(result.context._routeKey).toBe('intent.dependabot-ci-fix');
+      }
+    });
+
+    it('a clean (green) dep PR → checksState passing (no checks call) → dependabot-pr-merge', async () => {
+      mockGetWorkflowByIntent.mockReturnValue({ name: 'dependabot-pr-merge' } as any);
+      mockClassifyComment.mockResolvedValue({ intent: 'dependabot-pr-merge' } as any);
+      const { deps, getChecksConclusion } = fakeGithub({ author: 'renovate[bot]', mergeable_state: 'clean' });
+
+      const result = await routeEvent(
+        makeEnvelope({
+          type: 'comment.created',
+          body: '@last-light can you look at this?',
+          authorAssociation: 'OWNER',
+          prNumber: 6,
+          issueAuthor: 'renovate[bot]',
+          title: 'chore(deps): bump vite',
+        }),
+        deps,
+      );
+
+      expect(mockClassifyComment).toHaveBeenCalledWith(
+        '@last-light can you look at this?',
+        expect.objectContaining({ prAuthor: 'renovate[bot]', checksState: 'passing' }),
+      );
+      // `clean` short-circuits — no need to hit the check-conclusion endpoint.
+      expect(getChecksConclusion).not.toHaveBeenCalled();
+      expect(result.action).toBe('handler');
+      if (result.action === 'handler') {
+        expect(result.handler).toBe('dependabot-pr-merge');
+      }
+    });
+
+    it('does not fetch or pass signals for a non-dependency PR comment', async () => {
+      mockClassifyComment.mockResolvedValue({ intent: 'chat' });
+      const { deps, getPullRequest } = fakeGithub({ author: 'alice' });
+
+      const result = await routeEvent(
+        makeEnvelope({
+          type: 'comment.created',
+          body: '@last-light can you look at this?',
+          authorAssociation: 'OWNER',
+          prNumber: 7,
+          issueAuthor: 'alice',
+          title: 'Add a feature',
+        }),
+        deps,
+      );
+
+      expect(getPullRequest).not.toHaveBeenCalled();
+      expect(mockClassifyComment).toHaveBeenCalledWith(
+        '@last-light can you look at this?',
+        expect.not.objectContaining({ prAuthor: expect.anything() }),
+      );
+      // Falls through to the normal PR-comment handler.
+      expect(result.action).toBe('handler');
+      if (result.action === 'handler') expect(result.handler).toBe('pr-comment');
+    });
+  });
+
   it('routes a structured "@last-light verify <claim>" on an issue to verify (no classifier)', async () => {
     const result = await routeEvent(makeEnvelope({
       type: 'comment.created',

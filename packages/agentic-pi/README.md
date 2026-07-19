@@ -47,8 +47,10 @@ with `github_`.
 
 Auth is opinionated: **GitHub App credentials preferred**, static
 `GITHUB_TOKEN` only as a low-trust fallback. JWT-minted installation tokens
-cached for ~50 minutes, 5-minute refresh buffer, `git credential-store`
-file written with mode 600 and a regex-validated token.
+cached for ~50 minutes, 5-minute refresh buffer. Git operations authenticate
+via a github.com-scoped `http.extraheader` (Basic `x-access-token:<token>`)
+injected as `GIT_CONFIG_*` env on the git children we spawn — nothing on disk,
+and the token can carry any character GitHub returns.
 
 ### 4. Permission profiles as a registration-time gate
 
@@ -736,7 +738,7 @@ which walks `test/` for `*.test.ts`.
 | `test/emitter.test.ts` | `Emitter`, `CollectorSink`, `TeeSink` contracts | — |
 | `test/models.test.ts` | `provider/id` parsing including openrouter triple-slash | — |
 | `test/extensions/github/profiles.test.ts` | Profile → tool allowlist (counts, superset structure, scope tiering) | — |
-| `test/extensions/github/credentials.test.ts` | `assertSafeToken` and `credentialsFilePath` validation | — |
+| `test/extensions/github/credentials.test.ts` | `gitAuthEnv` / `http.extraheader` construction + github.com scoping (verified via `git config --get-urlmatch`) | — |
 | `test/extensions/web-search/*.test.ts` | Provider selection, extension wiring, safe-fetch rails, HTML extraction, rate limiter, per-provider normalization (all with injected `fetchImpl`) | — |
 | `test/extensions/file-search/index.test.ts` | FFF extension wiring: mode → tool names, package resolution, disabled-by-flag + resolve-failed skips | — |
 | `test/sandbox/preflight.test.ts` | Preflight returns a structured ok\|error result | — |
@@ -807,7 +809,7 @@ src/
     index.ts                   loadGitHubExtension(profile) entry
     auth.ts                    GitHubAppAuth (JWT → installation token) + static fallback
     client.ts                  Octokit wrapper with retry/backoff
-    credentials.ts             git credential-store file writer (mode 600)
+    credentials.ts             gitAuthEnv() — github.com-scoped http.extraheader (GIT_CONFIG_*), no on-disk file
     profiles.ts                4 profiles → tool name allowlists
     tools.ts                   31 defineTool() registrations
   extensions/file-search/

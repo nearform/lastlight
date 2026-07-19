@@ -5,7 +5,7 @@
 # The heavy, stable toolchain (Debian deps, fnm + Node versions, semgrep/
 # gitleaks, uv, the `agent` user) lives in the shared sandbox-base image so it
 # stays cached across releases. This file adds only the THIN, frequently-changing
-# tail: the pinned agentic-pi install + the baked agent-context + the entrypoint.
+# tail: the vendored agentic-pi bundle + the baked agent-context + the entrypoint.
 # Keep it that way — the same tail is duplicated in sandbox-qa.Dockerfile so
 # Chromium stays a cached child of the base rather than of this churn.
 #
@@ -18,32 +18,51 @@
 # because the buildx docker-container driver resolves FROM from a registry, not
 # the local store. See .github/workflows/docker-publish.yml.
 ARG BASE_IMAGE=lastlight-sandbox-base:latest
+
+# ── agentic-pi build stage ───────────────────────────────────────────────────
+# The sandbox runs `agentic-pi run` (the harness `docker exec`s it per phase).
+# We VENDOR agentic-pi from the in-repo workspace — build it here from source and
+# COPY the deploy bundle below — instead of `npm install -g`ing the published
+# tarball. Now that agentic-pi lives in this monorepo, installing from npm bought
+# nothing but a drift hazard: `npm install -g` ignores pnpm-lock.yaml, so a caret
+# transitive (e.g. `pi-coding-agent@^0.80.x`) resolved to whatever was latest at
+# image-build time — which is how an upstream breaking change reached prod on a
+# routine rebuild. Building from the workspace pins the WHOLE tree to exactly what
+# CI resolved + tested. The npm package still publishes independently
+# (.github/workflows/agentic-pi-npm.yml) for external consumers — that stream is
+# now fully decoupled from what the sandbox runs.
+#
+# Mirrors the agent image's vendored build (apps/server/Dockerfile): manifests
+# first so the install layer caches until deps change, then source, then
+# `pnpm deploy` shapes a self-contained, lockfile-resolved tree.
+FROM node:24-slim AS agentic-pi-build
+# node:24 matches the sandbox base's runtime Node (node:24-slim), so any native
+# deps compile for the ABI agentic-pi actually runs under.
+# python3/make/g++ so optional native deps (e.g. ssh2's cpu-features, pulled in
+# transitively via gondolin) compile instead of erroring out of the install.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+WORKDIR /repo
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+COPY packages/agentic-pi/package.json packages/agentic-pi/package.json
+RUN pnpm install --frozen-lockfile --filter agentic-pi...
+COPY packages/agentic-pi/ packages/agentic-pi/
+RUN pnpm --filter agentic-pi build \
+ && pnpm --filter agentic-pi deploy --prod /bundle
+
+# ── Sandbox image ────────────────────────────────────────────────────────────
 FROM ${BASE_IMAGE}
 
-# Install agentic-pi globally so the harness can `docker exec ...
-# agentic-pi run ...` against this container. The version + integrity come from
-# `sandbox/agentic-pi.pin` (derived from packages/agentic-pi/package.json's
-# version + npm's published integrity by scripts/agentic-pi-pin.sh, drift-guarded
-# by tests/agentic-pi-pin.test.ts). We
-# COPY that tiny two-line file rather than the whole pnpm-lock.yaml on
-# purpose: the lockfile's hash changes on every release and would rebust this
-# layer (and sandbox-qa's Chromium) on every version bump; the pin changes only
-# when agentic-pi actually does. `npm install -g <tarball>` doesn't consult a
-# lockfile, hence the explicit integrity verification.
-COPY apps/server/sandbox/agentic-pi.pin /tmp/agentic-pi.pin
-RUN version=$(sed -n '1p' /tmp/agentic-pi.pin) \
- && expected=$(sed -n '2p' /tmp/agentic-pi.pin) \
- && echo "Installing agentic-pi@${version} (${expected})" \
- && curl -fsSL "https://registry.npmjs.org/agentic-pi/-/agentic-pi-${version}.tgz" -o /tmp/agentic-pi.tgz \
- && actual="sha512-$(node -e "const c=require('crypto'),f=require('fs');process.stdout.write(c.createHash('sha512').update(f.readFileSync('/tmp/agentic-pi.tgz')).digest('base64'))")" \
- && if [ "$actual" != "$expected" ]; then \
-      echo "agentic-pi tarball integrity mismatch:" >&2; \
-      echo "  expected: $expected" >&2; \
-      echo "  actual:   $actual" >&2; \
-      exit 1; \
-    fi \
- && npm install -g --no-audit --no-fund /tmp/agentic-pi.tgz \
- && rm /tmp/agentic-pi.tgz /tmp/agentic-pi.pin
+# agentic-pi, vendored from the build stage above. The bundle is a self-contained
+# package tree (dist + prod node_modules, deps resolved from the lockfile);
+# symlink its bin onto PATH so the harness can `docker exec … agentic-pi run …`.
+# This COPY layer is content-addressed on the bundle, so it only busts when
+# agentic-pi actually changes — sandbox-qa's Chromium (baked in the base) stays
+# cached across ordinary releases, exactly as with the old pin file.
+COPY --from=agentic-pi-build /bundle /opt/agentic-pi
+RUN chmod +x /opt/agentic-pi/dist/cli.js \
+ && ln -sf /opt/agentic-pi/dist/cli.js /usr/local/bin/agentic-pi
 
 # Agent context (baked at /app/ — entrypoint cats into workspace/AGENTS.md)
 COPY apps/server/agent-context/ /app/agent-context/

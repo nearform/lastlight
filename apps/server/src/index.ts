@@ -13,9 +13,15 @@ import { ChatRunner } from "./engine/chat/chat-runner.js";
 import { buildReadSkillTool, loadChatSkillCatalogue } from "./engine/chat/chat-skills.js";
 import { configureGitAuth } from "./engine/github/git-auth.js";
 import { StateDb } from "./state/db.js";
-import { CronScheduler } from "./cron/scheduler.js";
+import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
-import { dispatchCronWorkflow } from "./cron/fanout.js";
+import { dispatchCronWorkflow, fanOutContexts } from "./cron/fanout.js";
+import {
+  discoverGreenDependencyPrs,
+  discoverRedDependencyPrs,
+  type DependencyPr,
+  type PrDiscoveryClient,
+} from "./cron/dependabot-discovery.js";
 import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
@@ -685,22 +691,68 @@ async function main() {
     }
   }
 
+  // Dependency-PR discoverers keyed by a cron context's `discover` value. Each
+  // returns the eligible PRs (in code, no LLM); the runner fans out one run per
+  // PR. Add a discoverer + a `cron-*.yaml` with the matching `discover:` key to
+  // introduce a new backstop sweep.
+  const DEP_PR_DISCOVERERS: Record<
+    string,
+    (
+      repos: string[],
+      gh: PrDiscoveryClient,
+      opts: { log?: (msg: string) => void },
+    ) => Promise<DependencyPr[]>
+  > = {
+    "green-dependency-prs": discoverGreenDependencyPrs,
+    "red-dependency-prs": discoverRedDependencyPrs,
+  };
+
   // Construct the cron scheduler before mounting admin so the dashboard can
   // list/toggle/edit registered cron jobs. Jobs are registered further down
   // (after we know whether webhooks are enabled). The runner closes over
-  // `dispatchWorkflow`, which is defined earlier in this file.
-  const cron = new CronScheduler(db, async (workflowName, context) => {
-    const { dispatched, failures } = await dispatchCronWorkflow(
-      workflowName,
-      context,
-      dispatchWorkflow,
-    );
+  // `dispatchWorkflow`, which is defined earlier in this file. Named (not inline)
+  // so the admin `triggerCron` callback can reuse it to fire a cron on demand.
+  const cronRunner: WorkflowRunner = async (workflowName, context) => {
+    let dispatched: number;
+    let failures: number;
+    // A cron whose context sets `discover: <key>` fans out one bounded single-PR
+    // run per discovered PR (replaces the old `mode: scan` agent sweep, which
+    // buried the model in every open PR's lockfile churn until its context
+    // overflowed). Each discoverer finds the eligible dependency PRs in code, and
+    // we dispatch one run each — the same shape the pr.checks_passed /
+    // pr.checks_failed webhooks produce. Runs queue against the global cap.
+    const discoverKey = typeof context.discover === "string" ? context.discover : undefined;
+    const discoverer = discoverKey ? DEP_PR_DISCOVERERS[discoverKey] : undefined;
+    if (discoverer) {
+      const repos = Array.isArray(context.repos)
+        ? (context.repos as unknown[]).filter((r): r is string => typeof r === "string")
+        : [];
+      const prs = github
+        ? await discoverer(repos, github, { log: (m) => console.log(m) })
+        : [];
+      console.log(
+        `[cron] ${workflowName}: ${prs.length} ${discoverKey} across ${repos.length} repo(s)`,
+      );
+      const contexts = prs.map((pr) => ({
+        _triggerType: "cron",
+        repo: pr.repo,
+        prNumber: pr.prNumber,
+        title: pr.title,
+        // Present only for the red sweep — `dispatchWorkflow` pre-clones this
+        // head ref for dependabot-ci-fix's checkout (a PR_FIX_SHAPED_WORKFLOWS).
+        ...(pr.branch ? { branch: pr.branch } : {}),
+      }));
+      ({ dispatched, failures } = await fanOutContexts(workflowName, contexts, dispatchWorkflow));
+    } else {
+      ({ dispatched, failures } = await dispatchCronWorkflow(workflowName, context, dispatchWorkflow));
+    }
     if (failures > 0) {
       console.warn(
         `[cron] ${workflowName}: ${failures}/${dispatched} dispatches failed`,
       );
     }
-  });
+  };
+  const cron = new CronScheduler(db, cronRunner);
 
   // Options for the ledger-driven resume machinery (`resumeSimpleRun`). Shared
   // by the boot-time orphan sweep (`resumeOrphanedWorkflows`, below) AND the
@@ -744,6 +796,7 @@ async function main() {
   {
     mountAdmin(app, db, {
       cronScheduler: cron,
+      triggerCron: cronRunner,
       stateDir: config.stateDir,
       sessionsDir: config.sessionsDir,
       buildAssetsDir: config.buildAssetsDir,

@@ -104,6 +104,26 @@ export function migrate(db: Database.Database): void {
     // Column already exists — ignore
   }
 
+  // Explicit `owner` column. A run targets a GitHub repo identified by
+  // (owner, repo); `repo` stays a single path-safe segment (taskIds and
+  // workspace/session dirs derive from it), so the owner previously lived
+  // ONLY inside the `context` JSON blob. That left the runs list — which
+  // omits `context` for payload size — unable to reconstruct `owner/repo`,
+  // so the Repos tab showed a bare row + a managed `owner/repo` row for the
+  // same repo and the dashboard's GitHub links never resolved. Storing owner
+  // as its own column fixes both. Backfill existing rows from context.owner
+  // in the same guarded step (runs once, when the column is first added).
+  try {
+    db.exec(`ALTER TABLE workflow_runs ADD COLUMN owner TEXT`);
+    db.exec(
+      `UPDATE workflow_runs
+          SET owner = json_extract(context, '$.owner')
+        WHERE owner IS NULL AND context IS NOT NULL`,
+    );
+  } catch {
+    // Column already exists — ignore
+  }
+
   // Gate flavor: 'approve' (explicit approve/reject) vs 'reply' (resolves
   // on any free-form reply in the same thread — used by the socratic
   // explore loop).

@@ -485,7 +485,12 @@ lastlight logs search "<text>" [--scope errors|messages|all]
 lastlight server list                  # the lastlight-* docker containers
 lastlight server logs [svc|container] [--tail n] [--since 10m] [--follow]
 lastlight approvals list|approve <id>|reject <id> [--reason "..."]
+lastlight cron list                    # scheduled jobs: schedule, next/last run, status
+lastlight cron trigger <name>          # run a cron now (fire-and-forget; useful for testing)
+lastlight cron enable|disable <name>   # toggle a cron on/off (idempotent)
 lastlight stats [--daily n | --hourly n]
+# Per-command help: lastlight <cmd> help  (e.g. lastlight cron help) — the top-level
+# `lastlight` / `--help` is a compact index; detail lives under each command's help.
 lastlight setup                        # first-run wizard (asks: client | server)
 
 # Server lifecycle (HOST-LOCAL — run on the server, not over HTTP). Operate on a
@@ -829,10 +834,11 @@ sudo -u lastlight -i lastlight server update
    non-fatal `docker compose build sandbox-qa`. The CI publish workflow builds in
    the same order and passes `GIT_SHA=<release SHA>` so a pulled image's stamped
    version (`GET /admin/api/server/info` + the dashboard drift banner) is
-   correct. The sandbox images install agentic-pi from the committed
-   `sandbox/agentic-pi.pin` (not the whole lockfile), so an ordinary version bump
-   doesn't rebuild them — and sandbox-qa's ~300 MB Chromium stays cached unless
-   its own inputs change.
+   correct. The sandbox images **vendor** agentic-pi from the workspace (a
+   `pnpm deploy` bundle built in a builder stage inside `sandbox*.Dockerfile`,
+   lockfile-pinned — no npm round-trip), COPY'd in above the base's toolchain;
+   the COPY layer is content-addressed on the bundle, so an unchanged agentic-pi
+   doesn't rebuild the tail and sandbox-qa's ~300 MB Chromium stays cached.
 4. `docker compose up -d --remove-orphans` (recreates only what changed).
 5. Force-restarts the egress sidecars (`coredns-strict`, `coredns-open`,
    `nginx-egress-strict`, `nginx-egress-open`, `otel-collector`) so they

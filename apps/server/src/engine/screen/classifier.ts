@@ -44,6 +44,20 @@ export interface ClassifierContext {
   issueTitle?: string;
   /** True when the comment is on a PR rather than an issue. */
   isPullRequest?: boolean;
+  /**
+   * Login of the PR's author, when the comment is on a PR. Lets the classifier
+   * recognise a dependency-update PR (`dependabot[bot]` / `renovate[bot]`) that
+   * a maintainer is asking the bot to handle — the router supplies it (and
+   * `checksState`) only for dependency-authored PRs.
+   */
+  prAuthor?: string;
+  /**
+   * The PR's current check conclusion (`passing` / `failing` / `pending` /
+   * `none`), when known. The disambiguator between DEPENDABOTPRMERGE (green) and
+   * DEPENDABOTCIFIX (red) for an otherwise-ambiguous "@bot can you look at this?"
+   * on a dependency PR.
+   */
+  checksState?: string;
 }
 
 export interface ClassifierOptions {
@@ -249,8 +263,16 @@ export async function classifyComment(
   options: string | ClassifierOptions = {},
 ): Promise<ClassificationResult> {
   try {
-    const userPrompt = context?.issueTitle
-      ? `Classify this comment (replying on an existing ${context.isPullRequest ? "PR" : "issue"}):\n\nISSUE TITLE: ${context.issueTitle}\n\nCOMMENT: ${commentBody}`
+    // Compose the context header from whatever the router supplied. `prAuthor`
+    // + `checksState` are present only for a dependency-authored PR comment, and
+    // are what let the classifier pick DEPENDABOTCIFIX (red) vs DEPENDABOTPRMERGE
+    // (green) for an ambiguous "can you look at this?".
+    const contextLines: string[] = [];
+    if (context?.issueTitle) contextLines.push(`ISSUE TITLE: ${context.issueTitle}`);
+    if (context?.prAuthor) contextLines.push(`PR AUTHOR: ${context.prAuthor}`);
+    if (context?.checksState) contextLines.push(`PR CHECKS: ${context.checksState}`);
+    const userPrompt = contextLines.length
+      ? `Classify this comment (replying on an existing ${context?.isPullRequest ? "PR" : "issue"}):\n\n${contextLines.join("\n")}\n\nCOMMENT: ${commentBody}`
       : `Classify this comment:\n\n${commentBody}`;
 
     const resolvedOptions = typeof options === "string" ? { model: options } : options;

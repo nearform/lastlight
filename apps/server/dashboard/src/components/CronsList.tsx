@@ -32,6 +32,7 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
   const [editing, setEditing] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [triggered, setTriggered] = useState(false);
 
   useEffect(() => {
     setDraftSchedule(cron.schedule);
@@ -81,6 +82,23 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : "reset failed");
+    } finally {
+      setPending(false);
+    }
+  };
+
+  // Fire the cron now (fire-and-forget server-side). The 10s poll picks up the
+  // resulting run's status; show a brief "triggered" confirmation meanwhile.
+  const run = async () => {
+    setPending(true);
+    setError(null);
+    try {
+      await api.triggerCron(cron.name);
+      setTriggered(true);
+      setTimeout(() => setTriggered(false), 3000);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "trigger failed");
     } finally {
       setPending(false);
     }
@@ -184,6 +202,16 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
           <span className="text-base-content/30">0</span>
         )}
       </td>
+      <td className="text-right">
+        <button
+          className="btn btn-xs btn-ghost"
+          onClick={run}
+          disabled={pending}
+          title={`Run ${cron.workflow} now`}
+        >
+          {triggered ? "Triggered ✓" : "Run now"}
+        </button>
+      </td>
     </tr>
   );
 }
@@ -222,7 +250,8 @@ export function CronsList({ onOpenRuns }: { onOpenRuns: (workflow: string) => vo
     <div className="flex-1 overflow-auto p-4">
       <div className="text-xs text-base-content/60 mb-2">
         Toggle to enable/disable a cron, or edit its schedule. Overrides persist across restarts;
-        Reset reverts to the YAML default.
+        Reset reverts to the YAML default. Run now fires the cron immediately (runs in the
+        background — its run appears under Last run).
       </div>
       <table className="table table-xs">
         <thead>
@@ -233,6 +262,7 @@ export function CronsList({ onOpenRuns }: { onOpenRuns: (workflow: string) => vo
             <th>Next run</th>
             <th>Last run</th>
             <th className="text-right">Recent fails</th>
+            <th className="text-right">Actions</th>
           </tr>
         </thead>
         <tbody>

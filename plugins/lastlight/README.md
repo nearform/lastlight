@@ -16,6 +16,7 @@ Light's *internal* sandbox skills under the repo's top-level `skills/` dir
 | `lastlight-guide` | **Not sure which of the below you need** — orientation & router across all the Last Light skills. Start here (or `/lastlight-guide`). |
 | `lastlight-server` | Install & configure a Last Light **server** (the agent + docker stack) on a host. |
 | `lastlight-client` | Point the `lastlight` **CLI client** at an existing server and log in. |
+| `lastlight-debug` | **Debug a running instance** over its admin API (no SSH): find failed/stuck workflows, tail sessions, read server/docker logs, crons, approvals, stats. |
 | `lastlight-overlay` | Create a deployment **overlay** instance and fork/customize workflows, prompts, skills, or the agent persona. |
 | `lastlight-evals` | Scaffold and run a **Last Light Evals** workspace (datasets, models, model comparisons). |
 | `lastlight-evals-loop` | **Drive an eval toward a target score** with a disciplined, anti-gaming improvement loop — diagnose on a train split, validate on a blind held-out split, propose one generic fix at a time. |

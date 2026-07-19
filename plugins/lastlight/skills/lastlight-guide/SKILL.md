@@ -1,6 +1,6 @@
 ---
 name: lastlight-guide
-description: Orientation & router for the Last Light skills. Use ONLY when the user has NOT named a concrete Last Light task — i.e. they're unsure which skill/flow they need, ask "what can Last Light do / where do I start", say "help me with Last Light" with no specific goal, or want a guided tour across server / client / overlay / evals. Do NOT use when the ask already names a task — "set up/deploy a server" → lastlight-server, "connect/log in my CLI" → lastlight-client, "customize a workflow/prompt/persona/config" → lastlight-overlay, "run evals / compare models / author a case / build a PR-review dataset" → lastlight-evals, "iteratively improve an eval toward a target score" → lastlight-evals-loop: invoke that skill directly. This skill only routes and, when the goal is ambiguous, asks. Also invocable as /lastlight-guide.
+description: Orientation & router for the Last Light skills. Use ONLY when the user has NOT named a concrete Last Light task — i.e. they're unsure which skill/flow they need, ask "what can Last Light do / where do I start", say "help me with Last Light" with no specific goal, or want a guided tour across server / client / overlay / debug / evals. Do NOT use when the ask already names a task — "set up/deploy a server" → lastlight-server, "connect/log in my CLI" → lastlight-client, "customize a workflow/prompt/persona/config" → lastlight-overlay, "debug a failed/stuck workflow or run on an instance" → lastlight-debug, "run evals / compare models / author a case / build a PR-review dataset" → lastlight-evals, "iteratively improve an eval toward a target score" → lastlight-evals-loop: invoke that skill directly. This skill only routes and, when the goal is ambiguous, asks. Also invocable as /lastlight-guide.
 version: 1.0.0
 tags: [lastlight, guide, router, orientation, help]
 ---
@@ -43,6 +43,11 @@ first time; each is also usable on its own later.
    (`agent-context`), and tune `config.yaml` — overriding only what you name,
    layered over the packaged defaults. Reach for it whenever you want to change
    *what the agent does or how it behaves* on an existing deployment.
+4. **`lastlight-debug`** — inspect a **running** instance over its admin API
+   (no SSH): find a failed/stuck workflow, read the phase table, tail a session
+   transcript, search logs, read server/docker logs, trigger/pause crons,
+   resolve approvals, check stats. Reach for it when something already deployed
+   *misbehaved* and you need to see why.
 
 ## Flow 2 — measure quality with Last Light Evals
 
@@ -77,6 +82,7 @@ time (stopping for sign-off before it touches a gold answer).
 |---|---|
 | Stand up / install / deploy a server for the first time | **`lastlight-server`** |
 | Connect my CLI to a server / log in / run commands against it | **`lastlight-client`** |
+| Debug a failed/stuck workflow, tail a session, read logs, check crons/stats | **`lastlight-debug`** |
 | Customize a workflow, prompt, skill, or the agent's persona; tune config | **`lastlight-overlay`** |
 | Run evals, compare models, browse past runs | **`lastlight-evals`** |
 | Author an eval case from a GitHub PR or issue | **`lastlight-evals`** (§6) |

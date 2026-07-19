@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError } from "#src/engine/agent-executor.js";
+import { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError, reclassifySuccess } from "#src/engine/agent-executor.js";
 
 /**
  * A pi assistant `message_end` event carrying per-message usage. Mirrors the
@@ -325,6 +325,36 @@ describe("RunResultAccumulator truncation detection", () => {
   it("defaults to false before any assistant turn", () => {
     const acc = new RunResultAccumulator();
     expect(acc.endedOnToolCall()).toBe(false);
+  });
+});
+
+describe("reclassifySuccess — degenerate 'success' guard", () => {
+  const base = { hasAgentError: false, endedOnToolCall: false, finalText: "here is the answer" };
+
+  it("keeps a real answer as success", () => {
+    expect(reclassifySuccess("success", base)).toBe("success");
+  });
+
+  it("reclassifies an empty completion (agent_end, no answer, not mid-tool-call) as unknown", () => {
+    // The prod failure: after burying itself in giant tool output, the final
+    // turn comes back empty. mapStopReason called it "success" on agent_end
+    // alone — this must fail instead of passing green.
+    expect(reclassifySuccess("success", { ...base, finalText: "" })).toBe("unknown");
+    expect(reclassifySuccess("success", { ...base, finalText: "   \n" })).toBe("unknown");
+  });
+
+  it("reclassifies a run cut off mid-tool-call as error_truncated (takes precedence over empty)", () => {
+    expect(reclassifySuccess("success", { ...base, endedOnToolCall: true, finalText: "" })).toBe("error_truncated");
+    expect(reclassifySuccess("success", { ...base, endedOnToolCall: true })).toBe("error_truncated");
+  });
+
+  it("passes through a real agent error untouched", () => {
+    expect(reclassifySuccess("error_agent", { ...base, hasAgentError: true, finalText: "" })).toBe("error_agent");
+  });
+
+  it("passes through an already-non-success reason untouched", () => {
+    expect(reclassifySuccess("error_fatal", { ...base, finalText: "" })).toBe("error_fatal");
+    expect(reclassifySuccess("unknown", { ...base, finalText: "" })).toBe("unknown");
   });
 });
 

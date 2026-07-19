@@ -2,8 +2,10 @@ kind: pr-fix
 name: dependabot-ci-fix
 description: |
   Fix a dependency-update PR (Dependabot / Renovate) whose CI checks have
-  failed, push the fix, then assess how big the change was — enabling GitHub
-  auto-merge (merge-once-green) only when the fix is trivial.
+  failed: bring the branch up to date with its base, make CI green, and push.
+  It does NOT classify, label, or merge — once the pushed fix turns the checks
+  green the `pr.checks_passed` webhook hands off to `dependabot-pr-merge`, the
+  single owner of the classify → label → auto-merge decision.
 
   Triggered by:
     - pr.checks_failed webhook (a check_suite completed with a failure
@@ -19,10 +21,14 @@ classification:
     Renovate, e.g. "Bump <pkg> from X to Y", "chore(deps): update <pkg>") whose
     CI checks have FAILED and needs its build / lockfile / call sites repaired so
     the update can land. Choose this over REVIEW or BUILD when the subject is a
-    red dependency-bump PR.
+    red dependency-bump PR. Also choose it when a maintainer's comment asks the
+    bot to handle/look at/fix such a PR and `PR CHECKS` is `failing` (with a
+    `PR AUTHOR` of dependabot[bot]/renovate[bot]) — but keep REVIEW when they
+    explicitly ask for a review.
   examples:
     - 'PR "Bump lodash from 4.17.20 to 4.17.21" by dependabot[bot] — its CI checks have failed. → INTENT: DEPENDABOTCIFIX, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - 'PR "chore(deps): bump actions/checkout from 3 to 4" by dependabot[bot] — its CI checks have failed. → INTENT: DEPENDABOTCIFIX, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - 'PR AUTHOR: dependabot[bot], PR CHECKS: failing, COMMENT: "@bot can you take a look at this?" → INTENT: DEPENDABOTCIFIX, REPO: NONE, ISSUE: NONE, REASON: NONE'
 
 phases:
   - name: fix
@@ -36,16 +42,3 @@ phases:
       on_start: "On it — investigating the failing checks on PR #{{prNumber}}..."
       on_success: "**Fix pushed** to `{{branch}}`."
       on_failure: "**Couldn't auto-fix** the failing checks on PR #{{prNumber}} — leaving it for a human."
-
-  # Assess the size of the fix, then act. Runs under this workflow's repo-write
-  # profile, so agentic-pi's `github_enable_auto_merge` tool is available.
-  # Conservative by design: enable auto-merge ONLY for trivial, non-functional
-  # changes; anything with runtime-logic impact is left for a human.
-  - name: assess
-    label: Assess & maybe auto-merge
-    prompt: prompts/dependabot-assess.md
-    # `code-review`: the finding-tier / what-to-check rubric for reading a diff.
-    skill: code-review
-    model: "{{models.review}}"
-    messages:
-      on_success: "Assessed PR #{{prNumber}} — auto-merge enabled if the fix was trivial, else left for review."

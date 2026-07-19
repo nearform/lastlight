@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   id TEXT PRIMARY KEY,
   workflow_name TEXT NOT NULL,
   trigger_id TEXT NOT NULL,
-  repo TEXT,
+  owner TEXT,                                  -- GitHub org/user; composes owner/repo
+  repo TEXT,                                   -- BARE repo name (path-safe segment)
   issue_number INTEGER,
   current_phase TEXT NOT NULL,
   phase_history TEXT NOT NULL DEFAULT '[]',   -- JSON array of completed phases
@@ -103,6 +104,14 @@ CREATE INDEX idx_workflow_runs_name_started ON workflow_runs(workflow_name, star
 never changed. `phase_history` is technically a JSON array that the
 runner appends to. `restart_count` is the [Workflow Engine](/spec/06-workflow-engine)
 crash-loop circuit breaker.
+
+`owner` + `repo` together identify the target: `repo` is stored **bare**
+(a single path-safe segment — taskIds and workspace/session dirs derive
+from it), so the org/user is kept in its own `owner` column rather than
+inside `context` alone. That lets the runs-list query (which omits the
+heavy `context` blob) compose the qualified `owner/repo` for the Repos-tab
+grouping and the dashboard's GitHub links. Added by an additive migration
+that backfills existing rows from `context.owner`.
 
 The `queued` status is the persisted form of the global concurrency cap
 (see [Workflow Engine](/spec/06-workflow-engine)): when a fresh trigger

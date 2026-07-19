@@ -193,9 +193,10 @@ export function renderTemplate(template: string, ctx: TemplateContext): string {
   // 3b. Artifact URL helper: {{artifactUrl filename}} — mode-aware link to a
   // handoff doc. In repo mode it's identical to {{branchUrl}} (the doc is
   // committed on the branch). In server mode the doc lives on the Last Light
-  // host, so the link points at the admin dashboard's Artifacts view. Falls
-  // back to the branch URL when no publicUrl is configured so a server-mode
-  // deploy without PUBLIC_URL still produces a usable (if GitHub-less) link.
+  // host, so the link points at the admin dashboard's Repos view (the Assets
+  // sub-tab, which now hosts the artifact viewer). Falls back to the branch URL
+  // when no publicUrl is configured so a server-mode deploy without PUBLIC_URL
+  // still produces a usable (if GitHub-less) link.
   result = result.replace(/\{\{artifactUrl\s+(\S+)\}\}/g, (_match, file) => {
     const branchHref = `https://github.com/${ctx.owner}/${ctx.repo}/blob/${encodeURIComponent(ctx.branch)}/${ctx.issueDir}/${file}`;
     if (!ctx.externalizeArtifacts) return branchHref;
@@ -206,7 +207,7 @@ export function renderTemplate(template: string, ctx: TemplateContext): string {
       `repo=${encodeURIComponent(`${ctx.owner}/${ctx.repo}`)}` +
       `&key=${encodeURIComponent(issueKey)}` +
       `&doc=${encodeURIComponent(file)}`;
-    return `${base}/admin/?tab=artifacts&${q}`;
+    return `${base}/admin/?tab=repos&rtab=assets&${q}`;
   });
 
   // 3c. Approval URL helper: {{approvalUrl}} — deep link to the focused

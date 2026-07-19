@@ -12,6 +12,10 @@ export interface WorkflowRun {
   id: string;
   workflowName: string;
   triggerId: string;
+  /** GitHub org/user that owns {@link repo}. Stored as its own column so the
+   *  runs list (which omits `context`) can compose the qualified `owner/repo`. */
+  owner?: string;
+  /** BARE repo name (no owner) — kept path-safe for taskIds / workspace dirs. */
   repo?: string;
   issueNumber?: number;
   currentPhase: string;
@@ -82,12 +86,13 @@ export class WorkflowRunStore {
   createRun(run: Omit<WorkflowRun, "phaseHistory" | "updatedAt">): void {
     const now = new Date().toISOString();
     this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_name, trigger_id, repo, issue_number, current_phase, phase_history, status, context, scratch, started_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, phase_history, status, context, scratch, started_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)
     `).run(
       run.id,
       run.workflowName,
       run.triggerId,
+      run.owner ?? null,
       run.repo ?? null,
       run.issueNumber ?? null,
       run.currentPhase,
@@ -205,6 +210,7 @@ export class WorkflowRunStore {
     offset?: number;
     sinceIso?: string;
     workflowName?: string;
+    repo?: string;
     statuses?: string[];
   } = {}): { runs: WorkflowRun[]; total: number } {
     const limit = opts.limit ?? 20;
@@ -219,6 +225,21 @@ export class WorkflowRunStore {
     if (opts.workflowName) {
       where.push("workflow_name = ?");
       params.push(opts.workflowName);
+    }
+    if (opts.repo) {
+      // The Repos tab filters by the qualified `owner/repo`, but the column is
+      // the bare repo (+ a separate `owner`). Match EITHER shape: new rows
+      // (`owner` set, `repo` bare) via `owner = ? AND repo = ?`, OR legacy rows
+      // that stored the qualified string in `repo` itself via `repo = ?`. A
+      // bare filter value has no owner to split, so it just matches `repo`.
+      const slash = opts.repo.indexOf("/");
+      if (slash > 0) {
+        where.push("((owner = ? AND repo = ?) OR repo = ?)");
+        params.push(opts.repo.slice(0, slash), opts.repo.slice(slash + 1), opts.repo);
+      } else {
+        where.push("repo = ?");
+        params.push(opts.repo);
+      }
     }
     if (opts.statuses && opts.statuses.length > 0) {
       where.push(`status IN (${opts.statuses.map(() => "?").join(",")})`);
@@ -241,7 +262,7 @@ export class WorkflowRunStore {
     const rows = this.db
       .prepare(
         `SELECT
-           id, workflow_name, trigger_id, repo, issue_number,
+           id, workflow_name, trigger_id, owner, repo, issue_number,
            current_phase, phase_history, status,
            restart_count, started_at, updated_at, finished_at
          FROM workflow_runs
@@ -329,6 +350,34 @@ export class WorkflowRunStore {
       .prepare(`SELECT DISTINCT workflow_name FROM workflow_runs ORDER BY workflow_name ASC`)
       .all() as { workflow_name: string }[];
     return rows.map((r) => r.workflow_name);
+  }
+
+  /**
+   * Per-repo run activity — one row per distinct `owner/repo`, with the run
+   * count and the most-recent `started_at`. Powers the dashboard's Repos tab,
+   * which annotates the managed-repo list with recent activity and sorts by it.
+   * Ordered newest-activity first.
+   *
+   * The `repo` key is the QUALIFIED `owner/repo` (owner-less legacy rows fall
+   * back to the bare name) so it aligns with `getManagedRepos()` and the
+   * artifact-store slugs the `/repos` endpoint unions it against — without this
+   * a repo split into two rows (bare-with-runs vs qualified-managed-with-zero).
+   */
+  distinctRepos(): { repo: string; runCount: number; lastRunAt: string }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT owner, repo, COUNT(*) AS c, MAX(started_at) AS last
+           FROM workflow_runs
+          WHERE repo IS NOT NULL AND repo != ''
+          GROUP BY owner, repo
+          ORDER BY last DESC`,
+      )
+      .all() as { owner: string | null; repo: string; c: number; last: string }[];
+    return rows.map((r) => ({
+      repo: r.owner && !r.repo.includes("/") ? `${r.owner}/${r.repo}` : r.repo,
+      runCount: r.c,
+      lastRunAt: r.last,
+    }));
   }
 
   /**
@@ -445,6 +494,7 @@ export class WorkflowRunStore {
       id: row.id as string,
       workflowName: row.workflow_name as string,
       triggerId: row.trigger_id as string,
+      owner: (row.owner as string | null) ?? undefined,
       repo: row.repo as string | undefined,
       issueNumber: row.issue_number as number | undefined,
       currentPhase: row.current_phase as string,

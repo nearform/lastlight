@@ -8,6 +8,7 @@ import {
   removeInstallationRepos,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
+  getAccessibleManagedRepos,
   resetInstallationReposForTests,
 } from '#src/managed-repos.js';
 import { setRuntimeConfig, resetRuntimeConfigForTests, type LastLightConfig } from '#src/config/config.js';
@@ -66,6 +67,34 @@ describe('getManagedRepos / isManagedRepo', () => {
 
   it('returns false for empty string', () => {
     expect(isManagedRepo('')).toBe(false);
+  });
+});
+
+describe('getAccessibleManagedRepos (cron fan-out filter)', () => {
+  afterEach(() => {
+    resetRuntimeConfigForTests();
+    resetInstallationReposForTests();
+  });
+
+  it('drops configured repos the installation can no longer access', () => {
+    // e.g. cliftonc/lastlight-test-repo was transferred to nearform — the
+    // cliftonc installation no longer lists it, so it must not be scanned.
+    setRuntimeConfig(configWithRepos(['acme/live', 'acme/transferred']));
+    setInstallationRepos(['acme/live', 'acme/other']);
+    expect(getAccessibleManagedRepos()).toEqual(['acme/live']);
+  });
+
+  it('returns the configured list unfiltered when installation discovery is empty', () => {
+    // Before the boot fetch (or on a fetch failure) we must not drop everything.
+    setRuntimeConfig(configWithRepos(['acme/one', 'acme/two']));
+    resetInstallationReposForTests();
+    expect(getAccessibleManagedRepos()).toEqual(['acme/one', 'acme/two']);
+  });
+
+  it('keeps every configured repo when all are accessible', () => {
+    setRuntimeConfig(configWithRepos(['acme/one', 'acme/two']));
+    setInstallationRepos(['acme/one', 'acme/two', 'acme/three']);
+    expect(getAccessibleManagedRepos()).toEqual(['acme/one', 'acme/two']);
   });
 });
 

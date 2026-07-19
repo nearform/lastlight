@@ -13,6 +13,8 @@ import {
 import { api, type WorkflowRun, type ContainerStats } from "../api";
 import { useStatsSeries } from "../hooks/useDailyStats";
 import { useTheme } from "../hooks/useTheme";
+import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
+import { GhLink } from "./GhLink";
 import clsx from "clsx";
 
 type StatRange = "today" | "7d" | "30d";
@@ -221,6 +223,39 @@ function useRecentWorkflows() {
   return runs;
 }
 
+/**
+ * The `owner/repo #N` target of a run, linked to GitHub where possible. Falls
+ * back to plain text when the repo isn't a full `owner/repo` (no URL to build).
+ */
+function RunTarget({ run }: { run: WorkflowRun }) {
+  if (!run.repo && !run.issueNumber) return <span className="flex-1" />;
+  // `run.repo` is a BARE name; resolve the qualified `owner/repo` for the URL.
+  const repoPath = runRepoPath(run);
+  const rHref = repoUrl(repoPath);
+  const iHref = issueUrl(repoPath, run.issueNumber, run.workflowName);
+  return (
+    <span className="font-mono text-base-content/50 truncate flex-1">
+      {run.repo &&
+        (rHref ? (
+          <GhLink href={rHref} title={`Open ${run.repo} on GitHub`}>
+            {run.repo}
+          </GhLink>
+        ) : (
+          run.repo
+        ))}
+      {run.issueNumber ? (
+        iHref ? (
+          <GhLink href={iHref} title={`Open #${run.issueNumber} on GitHub`}>
+            #{run.issueNumber}
+          </GhLink>
+        ) : (
+          `#${run.issueNumber}`
+        )
+      ) : null}
+    </span>
+  );
+}
+
 function LiveActivitySection({
   workflowCount,
   liveWorkflows,
@@ -253,25 +288,27 @@ function LiveActivitySection({
         ) : (
           <div className="space-y-1">
             {liveWorkflows.map((run) => (
-              <button
+              <div
                 key={run.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => onSelect(run.id)}
-                className="flex items-center gap-2 px-3 py-2 bg-base-100 rounded text-xs w-full text-left hover:bg-base-300/60 transition-colors"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSelect(run.id);
+                  }
+                }}
+                className="flex items-center gap-2 px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors"
               >
                 <StatusBadge status={run.status} />
                 <span className="font-mono text-base-content/90 shrink-0">
                   {run.workflowName}
                 </span>
-                {(run.repo || run.issueNumber) && (
-                  <span className="font-mono text-base-content/50 truncate flex-1">
-                    {run.repo ?? ""}
-                    {run.issueNumber ? `#${run.issueNumber}` : ""}
-                  </span>
-                )}
-                {!run.repo && !run.issueNumber && <span className="flex-1" />}
+                <RunTarget run={run} />
                 <span className="text-base-content/50 shrink-0">{run.currentPhase}</span>
                 <span className="text-base-content/40 shrink-0">{timeAgo(run.startedAt)}</span>
-              </button>
+              </div>
             ))}
           </div>
         )}
@@ -307,27 +344,29 @@ function RecentWorkflowsSection({
                   : `${Math.floor(durationMs / 60000)}m${Math.round((durationMs % 60000) / 1000)}s`
                 : null;
               return (
-                <button
+                <div
                   key={run.id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onSelect(run.id)}
-                  className="flex items-center gap-2 px-3 py-2 bg-base-100 rounded text-xs w-full text-left hover:bg-base-300/60 transition-colors"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelect(run.id);
+                    }
+                  }}
+                  className="flex items-center gap-2 px-3 py-2 bg-base-100 rounded text-xs w-full text-left cursor-pointer hover:bg-base-300/60 transition-colors"
                 >
                   <StatusBadge status={run.status} />
                   <span className="font-mono text-base-content/90 shrink-0">
                     {run.workflowName}
                   </span>
-                  {(run.repo || run.issueNumber) && (
-                    <span className="font-mono text-base-content/50 truncate flex-1">
-                      {run.repo ?? ""}
-                      {run.issueNumber ? `#${run.issueNumber}` : ""}
-                    </span>
-                  )}
-                  {!run.repo && !run.issueNumber && <span className="flex-1" />}
+                  <RunTarget run={run} />
                   {duration && (
                     <span className="text-base-content/50 shrink-0">{duration}</span>
                   )}
                   <span className="text-base-content/40 shrink-0">{timeAgo(run.startedAt)}</span>
-                </button>
+                </div>
               );
             })}
           </div>

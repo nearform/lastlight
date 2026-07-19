@@ -131,8 +131,8 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">Dependabot CI fix</span>
 			</div>
-			<p>Fixes a dependency-update PR whose checks failed, then auto-merges the trivial ones once CI is green.</p>
-			<span class="workflow-card-meta">2 phases &middot; webhook</span>
+			<p>Fixes a dependency-update PR whose checks failed — brings the branch up to date, pushes the smallest fix, and hands the merge decision to dependabot-pr-merge once CI is green. Via webhook and a daily per-PR cron backstop.</p>
+			<span class="workflow-card-meta">2 phases &middot; webhook + cron</span>
 		</a>
 
 		<a href="/docs/workflows/dependabot-pr-merge" class="workflow-card">
@@ -142,7 +142,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">Dependabot PR merge</span>
 			</div>
-			<p>Finds already-green dependency-update PRs and enables auto-merge on the trivial ones — via webhook and a cron sweep.</p>
+			<p>Finds already-green dependency-update PRs and enables auto-merge on the trivial ones — via webhook and a daily per-PR cron backstop.</p>
 			<span class="workflow-card-meta">1 phase &middot; webhook + cron</span>
 		</a>
 
@@ -253,8 +253,8 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			</tr>
 			<tr>
 				<td><strong>Cron schedule</strong></td>
-				<td>issue-triage, pr-review, repo-health, security-review, dependabot-pr-merge</td>
-				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo. The dependabot-pr-merge sweep runs on a schedule even with webhooks on — a safety net for the real-time <code>pr.checks_passed</code> path.</td>
+				<td>issue-triage, pr-review, repo-health, security-review, dependabot-pr-merge, dependabot-ci-fix</td>
+				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo. The two dependency-PR backstops run daily even with webhooks on — <code>dependabot-pr-merge</code> (14:00) discovers green dependency PRs and <code>dependabot-ci-fix</code> (15:00) discovers settled-red ones, each fanning out one bounded run per PR as a safety net for the real-time <code>pr.checks_passed</code> / <code>pr.checks_failed</code> paths. Both skip PRs labelled <code>requires-human</code>.</td>
 			</tr>
 			<tr>
 				<td><strong>CLI</strong></td>
@@ -288,7 +288,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<tr>
 				<td><strong>repo-write</strong></td>
 				<td>build, pr-fix, dependabot-ci-fix, dependabot-pr-merge</td>
-				<td>Full read/write — can push commits, create branches, open PRs (dependabot-ci-fix and dependabot-pr-merge also enable auto-merge; dependabot-pr-merge only enables auto-merge and never pushes)</td>
+				<td>Full read/write — can push commits, create branches, open PRs (dependabot-ci-fix pushes fixes but never merges; dependabot-pr-merge enables auto-merge / merges and never pushes)</td>
 			</tr>
 			<tr>
 				<td><strong>repo-write</strong></td>

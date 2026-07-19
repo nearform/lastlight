@@ -1,5 +1,5 @@
 import type { CronJob } from "./scheduler.js";
-import { getManagedRepos } from "../managed-repos.js";
+import { getAccessibleManagedRepos } from "../managed-repos.js";
 import { getCronWorkflows } from "../workflows/loader.js";
 import type { StateDb } from "../state/db.js";
 
@@ -34,8 +34,11 @@ export function getJobs(opts?: { webhooksEnabled?: boolean; db?: StateDb }): Cro
       name: def.name,
       schedule: override?.schedule || def.schedule,
       workflow: def.workflow,
-      // Merge managed repos into the context the workflow receives
-      context: { repos: getManagedRepos(), ...def.context },
+      // Merge managed repos into the context the workflow receives. Use the
+      // installation-filtered list so a stale managedRepos entry (repo deleted /
+      // transferred / access revoked) doesn't fan out into a doomed scan run
+      // whose scoped-token mint 422s.
+      context: { repos: getAccessibleManagedRepos(), ...def.context },
     });
   }
 

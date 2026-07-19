@@ -3,9 +3,11 @@ name: Publish agentic-pi (npm)
 # Independent npm-release stream for the `agentic-pi` package, decoupled from the
 # monorepo's full `publish.yml` release (which fires on a `v*` GitHub Release and
 # rebuilds every Docker image). agentic-pi is a LEAF workspace package (no
-# `workspace:*` deps of its own), consumed by apps/server + apps/evals and baked
-# into the sandbox image via apps/server/sandbox/agentic-pi.pin — so it can be
-# published on its own without touching the rest of the release machinery.
+# `workspace:*` deps of its own), consumed by apps/server + apps/evals via
+# `workspace:*`. This npm publish is for EXTERNAL consumers only — the sandbox
+# images vendor agentic-pi from the workspace (a `pnpm deploy` bundle built in
+# sandbox*.Dockerfile), so what the sandbox runs is fully decoupled from this
+# publish; it can go out on its own without touching the release machinery.
 #
 # Trigger: push an `agentic-pi-v<version>` tag (matching packages/agentic-pi's
 # package.json version), or run via workflow_dispatch against an existing such
@@ -17,12 +19,6 @@ name: Publish agentic-pi (npm)
 # AND the workflow filename, so this file needs its own trusted-publisher entry
 # for the `agentic-pi` package on npmjs.com (repo nearform/lastlight, workflow
 # agentic-pi-npm.yml). Without it the publish step 403s.
-#
-# AFTER a successful publish, regenerate the sandbox pin so the docker sandbox
-# installs the new version: `apps/server/scripts/agentic-pi-pin.sh` (reads
-# `npm view agentic-pi@<version> dist.integrity`), commit apps/server/sandbox/
-# agentic-pi.pin, and rebuild lastlight-sandbox. The offline pin drift-guard
-# (apps/server/tests/agentic-pi-pin.test.ts) reds CI until that pin is bumped.
 on:
   push:
     tags:

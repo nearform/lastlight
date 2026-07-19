@@ -204,6 +204,50 @@ export class GitHubClient {
   }
 
   /**
+   * List a repo's open pull requests as light records (number / title / draft /
+   * author login / labels / head ref + sha). Deterministic discovery for the
+   * dependency-merge and dependency-ci-fix crons: they filter these by author +
+   * green/red status in code and fan out one bounded single-PR run per candidate
+   * — no agent sweep, so a repo with many open bumps can't overflow a single
+   * scan's context. `labels` drives the `requires-human` skip; `headRef` lets the
+   * red sweep pre-clone the PR head for ci-fix; `headSha` pins the exact commit
+   * the check-conclusion query reads. All fields ride the same paginated
+   * `pulls.list` response — no extra API call.
+   */
+  async listOpenPullRequests(
+    owner: string,
+    repo: string,
+  ): Promise<
+    Array<{
+      number: number;
+      title: string;
+      draft: boolean;
+      authorLogin: string;
+      labels: string[];
+      headRef: string;
+      headSha: string;
+    }>
+  > {
+    const prs = await this.octokit.paginate(this.octokit.rest.pulls.list, {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    });
+    return prs.map((p) => ({
+      number: p.number,
+      title: p.title ?? "",
+      draft: !!p.draft,
+      authorLogin: p.user?.login ?? "",
+      labels: (p.labels ?? [])
+        .map((l) => (typeof l === "string" ? l : l.name ?? ""))
+        .filter(Boolean),
+      headRef: p.head?.ref ?? "",
+      headSha: p.head?.sha ?? "",
+    }));
+  }
+
+  /**
    * The repo's default branch (e.g. `main`, `master`, `develop`). Used to
    * scope build runs to the real base branch instead of assuming `main` — a
    * `master`-default repo otherwise breaks every `git ... main..HEAD` the
@@ -365,6 +409,53 @@ export class GitHubClient {
       ...(review.comments && review.comments.length ? { comments: review.comments } : {}),
       ...(review.commitId ? { commit_id: review.commitId } : {}),
     });
+  }
+
+  /**
+   * Settle-aware check conclusion for a ref — the LIGHT counterpart to
+   * {@link getFailedChecks} (no job-log download). The red-dependency-PR cron
+   * uses it to decide whether to fire `dependabot-ci-fix` without pulling logs
+   * for every candidate.
+   *
+   * It combines check_runs (GitHub Actions et al.) with the combined commit
+   * status (classic contexts: CircleCI, external CI) so a repo whose CI reports
+   * only via statuses — exactly the kind the live `check_suite` webhook never
+   * sees — isn't invisible to the backstop.
+   *
+   *   "none"    — no check_runs AND no status contexts (nothing to judge).
+   *   "pending" — a check_run is queued/in_progress, or the combined status is
+   *               pending with ≥1 context. We do NOT fire ci-fix mid-flight.
+   *   "failing" — the suite has SETTLED (nothing pending) AND a check_run
+   *               concluded failure/timed_out OR the combined status is
+   *               failure/error. The conclusion set matches getFailedChecks so
+   *               discovery and the fix prompt agree on what "red" means.
+   *   "passing" — there ARE checks/statuses and none are failing or pending.
+   */
+  async getChecksConclusion(
+    owner: string,
+    repo: string,
+    ref: string,
+  ): Promise<"passing" | "failing" | "pending" | "none"> {
+    const [{ data: checks }, { data: status }] = await Promise.all([
+      this.octokit.rest.checks.listForRef({ owner, repo, ref, filter: "latest" }),
+      this.octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
+    ]);
+    const runs = checks.check_runs;
+    const statuses = status.statuses ?? [];
+
+    if (runs.length === 0 && statuses.length === 0) return "none";
+
+    const runPending = runs.some((r) => r.status === "queued" || r.status === "in_progress");
+    const statusPending = statuses.length > 0 && status.state === "pending";
+    if (runPending || statusPending) return "pending";
+
+    const runFailing = runs.some(
+      (r) => r.conclusion === "failure" || r.conclusion === "timed_out",
+    );
+    const statusFailing = status.state === "failure" || status.state === "error";
+    if (runFailing || statusFailing) return "failing";
+
+    return "passing";
   }
 
   /**

@@ -5,6 +5,8 @@ import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getWorkflowByIntent } from "../workflows/loader.js";
 import { getRoutes, getBotName } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
+import type { GitHubClient } from "./github/github.js";
+import { isDependencyPr } from "../cron/dependabot-discovery.js";
 
 /**
  * Resolve a classifier intent the router has no bespoke branch for to the
@@ -32,6 +34,14 @@ export type Route =
 /** Optional dependencies the router needs to short-circuit paused runs. */
 export interface RouterDeps {
   db?: StateDb;
+  /**
+   * GitHub client, used ONLY to enrich a dependency-PR mention comment with its
+   * check state before classification (so "@bot can you look at this?" on a
+   * Dependabot/Renovate PR routes to dependabot-ci-fix when red or
+   * dependabot-pr-merge when green). Absent → that enrichment is skipped and the
+   * comment classifies as normal.
+   */
+  github?: GitHubClient | null;
 }
 
 /** Friendly reply when a Slack/CLI command targets an unmanaged repo. */
@@ -83,6 +93,47 @@ function botMatchers(handle: string) {
     mention: new RegExp(`@${h}\\b`, "i"),
     command: (pattern: string) => new RegExp(`@${h}\\s+${pattern}`, "i"),
   };
+}
+
+/**
+ * For a comment on a dependency-update PR (Dependabot / Renovate), resolve the
+ * PR author + check state to feed the classifier. Returns `{}` when the comment
+ * isn't on a dependency-authored PR, when no GitHub client is available, or on
+ * any fetch error — so classification simply proceeds without the extra signal.
+ * `issueAuthor` on a PR comment is the PR opener (the bot), so the predicate
+ * needs no fetch; only a match triggers the PR + check-conclusion calls.
+ */
+async function dependencyPrSignals(
+  envelope: EventEnvelope,
+  github: GitHubClient | null | undefined,
+): Promise<{ prAuthor?: string; checksState?: string }> {
+  if (!github || !envelope.prNumber || !envelope.repo) return {};
+  if (
+    !isDependencyPr({
+      authorLogin: envelope.issueAuthor ?? "",
+      title: envelope.title ?? "",
+      draft: false,
+    })
+  ) {
+    return {};
+  }
+  const [owner, repo] = envelope.repo.split("/");
+  if (!owner || !repo) return {};
+  try {
+    const pr = await github.getPullRequest(owner, repo, envelope.prNumber);
+    // A `clean` PR is green with no checks to wait on; otherwise ask the light
+    // check-conclusion query (the same signal the red-PR cron uses).
+    const checksState =
+      pr.mergeable_state === "clean"
+        ? "passing"
+        : await github.getChecksConclusion(owner, repo, pr.head.sha);
+    return { prAuthor: pr.user?.login ?? envelope.issueAuthor, checksState };
+  } catch (err) {
+    console.warn(
+      `[router] dependency-PR signal fetch failed for ${envelope.repo}#${envelope.prNumber}: ${String(err)}`,
+    );
+    return {};
+  }
 }
 
 /**
@@ -412,6 +463,14 @@ export async function routeEvent(
         };
       }
 
+      // For a mention comment on a dependency-update PR (Dependabot / Renovate),
+      // hand the classifier the PR author + check state so it can route an
+      // ambiguous "@bot can you look at this?" the way the webhooks would: red →
+      // dependabot-ci-fix, green → dependabot-pr-merge. Gated on the cheap
+      // author/title predicate so ordinary PR comments pay no GitHub call, and
+      // best-effort — a fetch failure just falls back to normal classification.
+      const depSignals = await dependencyPrSignals(envelope, deps.github);
+
       // Classify intent + screen for injection in parallel. Both run on the
       // same comment text and have similar latency (single haiku call); doing
       // them in parallel keeps overall router latency at max(classifier, screener)
@@ -420,6 +479,7 @@ export async function routeEvent(
         classifyComment(envelope.body, {
           issueTitle: envelope.title,
           isPullRequest: !!envelope.prNumber,
+          ...depSignals,
         }),
         screenForInjection(envelope.body),
       ]);

@@ -376,6 +376,48 @@ describe("PhaseExecutor — on_output BLOCKED", () => {
   });
 });
 
+describe("PhaseExecutor — on_output requires_marker", () => {
+  const def: AgentWorkflowDefinition = {
+    kind: "agent",
+    name: "marked",
+    phases: [
+      makePhase({
+        name: "assess",
+        prompt: "prompts/assess.md",
+        on_output: { requires_marker: "ASSESSMENT_COMPLETE" },
+        messages: { on_failure: "left for a human" },
+      }),
+    ],
+  };
+
+  it("fails the node when the completion marker is absent (silent no-op run)", async () => {
+    // A clean-but-empty run: the agent inspected files then stopped without
+    // signing off. success:true today, so it must be forced RED by the marker.
+    mockExecuteAgent.mockResolvedValue(makeSuccessResult("Looked at the files."));
+    const reporter = makeReporter();
+    const db = makeMockDb();
+    const exec = makeExecutor(makeRun(def, db), reporter, makeResolver());
+
+    const outcome = await exec.execute(node("assess"), {});
+
+    expect(outcome.status).toBe("failed");
+    expect(outcome.results[0]).toMatchObject({ phase: "assess", success: false });
+    expect(outcome.results[0].error).toContain("ASSESSMENT_COMPLETE");
+    expect(reporter.failed.length).toBeGreaterThan(0);
+  });
+
+  it("succeeds when the completion marker is present", async () => {
+    mockExecuteAgent.mockResolvedValue(
+      makeSuccessResult("PR #12: TRIVIAL, auto-merge.\nASSESSMENT_COMPLETE: assessed=1 automerged=1 merged=0 left=0"),
+    );
+    const exec = makeExecutor(makeRun(def, makeMockDb()), makeReporter(), makeResolver());
+
+    const outcome = await exec.execute(node("assess"), {});
+
+    expect(outcome.status).toBe("succeeded");
+  });
+});
+
 describe("PhaseExecutor — approval gate", () => {
   const def: AgentWorkflowDefinition = {
     kind: "agent",

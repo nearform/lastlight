@@ -20,7 +20,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { GitHubAuth } from "./auth.js";
 import { GitHubClient, type GitHubClientOptions } from "./client.js";
-import { writeCredentialsFile } from "./credentials.js";
+import { gitAuthEnv } from "./credentials.js";
 
 interface MaybeHttpError extends Error {
   status?: number;
@@ -108,19 +108,17 @@ export function buildGitHubTools(
         const baseDir = process.env.LASTLIGHT_WORKSPACE || process.cwd();
         const requested = clonePath || repo;
         const dest = isAbsolute(requested) ? requested : join(baseDir, requested);
-        const credPath = writeCredentialsFile(token);
+        // Auth via a github.com-scoped http.extraheader on the child's env — no
+        // token in the URL, no credentials file on disk. Subsequent push/pull
+        // from the agent's bash pick up the same header from the sandbox's
+        // ambient GIT_CONFIG_* env (or, standalone, the operator's git config).
         const url = `https://github.com/${owner}/${repo}.git`;
         const branchArgs = branch ? ["--branch", branch] : [];
         execFileSync("git", ["clone", ...branchArgs, url, dest], {
           stdio: "pipe",
           timeout: 120_000,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+          env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
         });
-        execFileSync(
-          "git",
-          ["-C", dest, "config", "credential.helper", `store --file=${credPath}`],
-          { stdio: "pipe" },
-        );
         execFileSync("git", ["-C", dest, "config", "user.name", "last-light[bot]"], {
           stdio: "pipe",
         });
@@ -132,7 +130,6 @@ export function buildGitHubTools(
         return {
           cloned: `${owner}/${repo}`,
           path: dest,
-          credentials_file: credPath,
           branch: branch || "(default)",
           expires_at: auth.expiresAt?.toISOString(),
         };
@@ -141,17 +138,18 @@ export function buildGitHubTools(
 
     tool(
       "github_refresh_git_auth",
-      "Refresh the GitHub App token for an existing git clone. Call this if git push/pull fails with auth errors. Updates the credential helper with a fresh token.",
+      "Refresh the GitHub App token for an existing git clone. Call this if git push/pull fails with auth errors. Re-mints the installation token used by the github.com http.extraheader.",
       Type.Object({
         path: Type.String({ description: "Path to the git repository" }),
       }),
       async ({ path }) => {
-        const token = await auth.getToken();
-        const credPath = writeCredentialsFile(token);
+        // Refresh-if-expired; the (possibly new) token flows into every
+        // subsequent git child via gitAuthEnv (and the harness's ambient env in
+        // the sandbox). No file to rewrite.
+        await auth.getToken();
         return {
           refreshed: true,
           path,
-          credentials_file: credPath,
           expires_at: auth.expiresAt?.toISOString(),
         };
       },

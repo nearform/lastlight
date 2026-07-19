@@ -8,19 +8,28 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<p>
 		Dependabot PR merge is the proactive companion to
 		<a href="/docs/workflows/dependabot-ci-fix">Dependabot CI fix</a>. That one
-		repairs a dependency-update PR whose CI went <em>red</em>; this one handles
-		the PRs that are already <em>green</em> and need no fix — it reads the diff,
-		decides whether the bump is trivial, and enables GitHub auto-merge (squash)
-		so the safe ones land without a human in the loop.
+		repairs a dependency-update PR whose CI went <em>red</em> and then hands off to
+		this one; this workflow handles every <em>green</em> dependency PR — both the
+		naturally-green ones and the ones ci-fix just fixed — and is the single owner
+		of the merge decision: it reads the diff, decides whether the bump is trivial,
+		and enables GitHub auto-merge (squash) so the safe ones land without a human in
+		the loop.
 	</p>
 
 	<div class="docs-callout tip">
 		<div class="docs-callout-body">
-			<strong>Permission profile:</strong> <code>repo-write</code> — needed only
-			for the <code>github_enable_auto_merge</code> tool. It never pushes code
-			and never merges directly: enabling auto-merge lets GitHub merge the PR
-			once its required checks pass, and GitHub refuses on a red or still-running
-			PR — that is the green gate.
+			<strong>Permission profile:</strong> <code>repo-write</code> — needed for
+			the <code>github_enable_auto_merge</code> and <code>github_merge_pull_request</code>
+			tools. It never pushes code or rebases branches itself. It prefers to
+			enable auto-merge, which lets GitHub merge the PR once its required checks
+			pass and refuses on a red or still-running PR — that is the green gate. It
+			merges directly only in the one case where GitHub has no checks to wait on,
+			and only after confirming the PR's <code>mergeable_state</code> is
+			<code>clean</code> so a repo with no <em>required</em> checks can't slip a
+			red PR through. When a trivial PR is merely <em>behind</em> the base branch
+			or has a lockfile conflict, it asks the bot that opened the PR to rebase or
+			recreate its own branch (via <code>github_add_issue_comment</code> /
+			<code>github_add_labels</code>) rather than pushing a merge itself.
 		</div>
 	</div>
 
@@ -37,10 +46,12 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>What it does</h2>
 
 	<ul>
-		<li>Reads each PR's diff through the <code>github_get_pull_request_diff</code> tool — no repository checkout is needed</li>
+		<li>Runs against a <strong>single PR</strong> at a time — its context is bounded, so it can't overflow. Inspects through the <code>github_list_pull_request_files</code> tool (changed files + line counts) — no repository checkout needed — deliberately skips lockfile diffs, and pulls <code>github_get_pull_request_diff</code> only for a small non-lockfile source change</li>
 		<li>Classifies the change conservatively: only lockfile / manifest bumps, GitHub Actions tag/SHA bumps, type-only or mechanical edits count as <strong>trivial</strong>; anything touching runtime logic, anything security-sensitive, and major-version bumps are <strong>functional</strong></li>
-		<li>If trivial, enables GitHub auto-merge (squash) so the PR merges once its checks pass; otherwise it comments and leaves the PR for a human</li>
+		<li>If trivial, enables GitHub auto-merge (squash) so the PR merges once its checks pass. If GitHub refuses auto-merge because the PR is already mergeable with no required checks ("clean status"), it direct-squash-merges instead — but only after confirming <code>mergeable_state</code> is <code>clean</code>, so it won't land a PR whose non-required checks are failing; if the repository disallows auto-merge outright, it comments for a maintainer. Functional PRs are left for a human with a comment</li>
+		<li>If a trivial PR is <strong>behind</strong> the base branch or <strong>dirty</strong> (a lockfile conflict), it doesn't give up: it asks the bot that opened the PR to update its own branch — <code>@dependabot rebase</code> / <code>@dependabot recreate</code> for Dependabot, or Renovate's <code>rebase</code> label — because the bot regenerates lockfiles correctly. It enables auto-merge at the same time, so GitHub lands the PR once the rebase re-runs the checks green. A non-Dependabot/Renovate PR that's behind is left for a human to rebase</li>
 		<li>When in doubt, it does not auto-merge</li>
+		<li>Every run must sign off with a machine-readable completion marker; a run that inspects files but reaches no verdict and takes no action is recorded as <strong>failed</strong>, not a silent green</li>
 	</ul>
 
 	<div class="docs-callout note">
@@ -55,7 +66,8 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li><strong>GitHub webhook:</strong> a <code>check_suite.completed</code> event with a <code>success</code> conclusion on a dependency-update PR (surfaced internally as <code>pr.checks_passed</code>). The connector pre-filters to Dependabot / Renovate — by the head commit author or the <code>dependabot/</code> / <code>renovate/</code> branch prefix — so ordinary green PRs fire nothing. The router routes it deterministically to this workflow. Requires the GitHub App to subscribe to <strong>Check suite</strong> events (Checks: read).</li>
-		<li><strong>Cron sweep:</strong> a scheduled scan (<code>mode: scan</code>) sweeps every managed repo for open Dependabot / Renovate PRs and assesses each. Unlike the review scan, it runs <em>alongside</em> webhooks — a safety net that catches PRs which went green before boot or during a missed delivery. Enabling auto-merge is idempotent, so the overlap is harmless.</li>
+		<li><strong>Cron backstop:</strong> a daily job whose runner finds the green Dependabot / Renovate PRs across managed repos <em>in code</em> (no LLM) and fans out <strong>one bounded run per PR</strong> — the same single-PR shape as the webhook. Runs queue against the global concurrency cap. Unlike the review scan, it runs <em>alongside</em> webhooks — a safety net for PRs that went green before boot or during a missed delivery. Auto-merge is idempotent and per-PR runs dedup by (repo, PR), so the overlap is harmless. (This replaced an agent <code>mode: scan</code> sweep that assessed a whole repo in one session and overflowed its context on busy repos.)</li>
+		<li><strong>Maintainer mention:</strong> an <code>@last-light</code> comment on a green Dependabot / Renovate PR (e.g. "can you look at this?"). The router hands the PR author + check state to the classifier, which routes a green dependency PR here — the on-demand version of the webhook. (A red one routes to <a href="/docs/workflows/dependabot-ci-fix">dependabot-ci-fix</a> instead; an explicit "review this" still gets a normal review.)</li>
 	</ul>
 
 	<div class="docs-next">

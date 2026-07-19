@@ -2,13 +2,18 @@
 
 The monorepo publishes **six** npm packages plus **four** Docker images.
 Publishing is **automated**: cutting a GitHub Release fires `publish.yml`, which
-runs CI checks → builds+pushes the GHCR images → publishes the six npm packages
-in dependency order via npm **OIDC trusted publishing** (no `NPM_TOKEN` secret,
-provenance attestations on). The operator's job is to bump versions, tag, and cut
-the Release; the pipeline does the rest. (The manual `pnpm -r publish` sequence
-below is kept as the bootstrap/fallback path — e.g. the one-time first publish of
-a brand-new package name, which OIDC trusted publishing can't do until the
-package exists.)
+runs CI checks → builds+pushes the GHCR images → publishes **five** of the six
+npm packages (engine → shared → core → cli → evals) in dependency order via npm
+**OIDC trusted publishing** (no `NPM_TOKEN` secret, provenance attestations on).
+The sixth, **`agentic-pi`, is NOT published by `publish.yml`** — it has its own
+independent npm stream (`agentic-pi-npm.yml`, fired by an `agentic-pi-v*` tag),
+because its trusted-publisher entry on npmjs.com is scoped to that workflow, not
+`publish.yml`. So a release that bumps agentic-pi needs **two** tags: the
+`vX.Y.Z` release tag (five packages + images) **and** an `agentic-pi-vA.B.C` tag
+(agentic-pi). The operator's job is to bump versions, tag, and cut the Release;
+the pipeline does the rest. (The manual `pnpm -r publish` sequence below is kept
+as the bootstrap/fallback path — e.g. the one-time first publish of a brand-new
+package name, which OIDC trusted publishing can't do until the package exists.)
 
 This document is the runbook. Read it end-to-end before your first release.
 
@@ -20,7 +25,7 @@ This document is the runbook. Read it end-to-end before your first release.
 |---|---|---|---|
 | `lastlight-workflow-engine` | `packages/workflow-engine` | 0.1.x | zod-only; leaf of the graph |
 | `lastlight-shared` | `packages/shared` | 0.1.x | light modules used by cli + core |
-| `agentic-pi` | `packages/agentic-pi` | 0.2.x | the coding-agent harness; consumed by core/evals/dashboard via `workspace:*`, AND installed into the sandbox image from npm by `apps/server/sandbox/agentic-pi.pin`. Own semver line + its own `image-v*` VM-image release stream (`agentic-pi-image.yml`). No `exports` map on purpose (evals deep-imports `dist/`). |
+| `agentic-pi` | `packages/agentic-pi` | 0.2.x | the coding-agent harness; consumed by core/evals/dashboard via `workspace:*`, and **vendored** into the sandbox image from the workspace (a `pnpm deploy` bundle built in `sandbox*.Dockerfile` — no npm round-trip). Own semver line + its own `image-v*` VM-image release stream (`agentic-pi-image.yml`) + independent npm publish (`agentic-pi-npm.yml`, for external consumers). No `exports` map on purpose (evals deep-imports `dist/`). |
 | `lastlight-core` | `apps/server` | 0.16.x | the harness + server + `./evals` barrel + shipped assets |
 | `lastlight` | `packages/cli` | 0.16.x | the lean global CLI (`bin.lastlight`); ships `plugins/` + `.claude-plugin/` |
 | `lastlight-evals` | `apps/evals` | 0.7.x | eval harness; dep `lastlight-core: workspace:*` |
@@ -49,7 +54,11 @@ lastlight   lastlight-core ◀──┘                      │
 
 `agentic-pi` is a second leaf: it has no workspace dependencies, and
 `lastlight-core`, `lastlight-evals`, and the private `@lastlight/dashboard`
-consume it via `workspace:*`. So it must publish **before** core and evals.
+consume it via `workspace:*`. So it must publish **before** core and evals — but
+it publishes from a **separate workflow** (`agentic-pi-npm.yml`), so this
+ordering is a **cross-workflow** constraint: when a release bumps agentic-pi, get
+the new `agentic-pi@A.B.C` live on npm (push its `agentic-pi-vA.B.C` tag and let
+`agentic-pi-npm.yml` finish) **before** `publish.yml`'s `npm` job packs core/evals.
 
 pnpm rewrites every `workspace:*` dep to a **concrete version range at pack
 time**. So a dependency's new version must be **live on npm before** its
@@ -65,7 +74,7 @@ and every package that consumes it**, transitively:
 |---|---|
 | `lastlight-workflow-engine` | `lastlight-core`, `lastlight-shared` (if it consumes engine), `lastlight` (cli), `lastlight-evals` (via core) |
 | `lastlight-shared` | `lastlight-core`, `lastlight` (cli), `lastlight-evals` (via core) |
-| `agentic-pi` | `lastlight-core`, `lastlight-evals` (both consume it via `workspace:*`). Bump `lastlight-evals`'s `peerDependencies` range to match too. Also **regenerate the sandbox pin AFTER publishing** (see below). |
+| `agentic-pi` | `lastlight-core`, `lastlight-evals` (both consume it via `workspace:*`). Bump `lastlight-evals`'s `peerDependencies` range to match too. The sandbox picks up the change automatically on the next image build (it vendors agentic-pi from the workspace — no pin to bump). |
 | `lastlight-core` | `lastlight-evals` (its `workspace:*` dep) |
 | `lastlight` (cli) | — (nothing depends on the cli) |
 | `lastlight-evals` | — (nothing depends on evals) |
@@ -86,16 +95,24 @@ Rules:
   release (`v0.16.0` was the pre-migration tag; the CLI's first published
   version must exceed it — e.g. `0.17.0`).
 
-Bump a package with `pnpm --filter <name> version <patch|minor|major>
+Bump a package with `pnpm --filter <name> exec npm version <patch|minor|major>
 --no-git-tag-version` (or edit `package.json` directly), then re-run
 `pnpm install --lockfile-only` so `pnpm-lock.yaml` reflects the new versions.
+
+> **Do NOT use `pnpm --filter <name> version …`** — pnpm reads the bare word
+> `version` as an npm **script** name, finds none, and aborts with "None of the
+> selected packages has a 'version' script" *without bumping anything*. Route it
+> through `exec npm version` (runs in the package dir) or edit `package.json`
+> directly.
 
 ## Publish order (dependency order)
 
 Always: **engine → shared → agentic-pi → core → cli → evals.** The `publish.yml`
-`npm` job does exactly this on every Release; the commands below are the
-**manual fallback** (a bootstrap first-publish, or recovering a half-published
-release).
+`npm` job does this for **all but agentic-pi** on every Release (agentic-pi ships
+from `agentic-pi-npm.yml`); the commands below are the **manual fallback** (a
+bootstrap first-publish, or recovering a half-published release). agentic-pi
+still slots in at its graph position — publish it (or let its own workflow
+publish it) before core/evals.
 
 ```bash
 # From a clean `main`, in sync with origin, after the version bumps are committed
@@ -145,22 +162,27 @@ order automatically — no manual sequencing needed.
 `agentic-pi` moved into the monorepo (from the standalone `nearform/agentic-pi`)
 but stays a public npm package. Three things are unique to it:
 
-- **Trusted-publisher registration (one-time, manual on npmjs.com).** OIDC
-  trusted publishing is scoped to a repo + workflow. `agentic-pi`'s trusted
-  publisher must be re-pointed from `nearform/agentic-pi` to repo
-  `nearform/lastlight`, workflow `publish.yml` — otherwise the `npm` job's
-  `agentic-pi` publish fails. (Same setup every other package here already has.)
+- **Publishes from its OWN workflow, `agentic-pi-npm.yml` (not `publish.yml`).**
+  OIDC trusted publishing is scoped to a repo **+ workflow filename**.
+  `agentic-pi`'s trusted-publisher entry on npmjs.com is `nearform/lastlight` +
+  `agentic-pi-npm.yml`, so **only** that workflow can publish it — `publish.yml`
+  is deliberately *not* in the loop (it would 403/404). To ship an agentic-pi
+  bump to npm, push an **`agentic-pi-vA.B.C` tag** (matching
+  `packages/agentic-pi/package.json`); that fires `agentic-pi-npm.yml`. Because
+  core/evals pin agentic-pi's concrete version at pack time, do this **before**
+  cutting (or re-running the `npm` job of) the `vX.Y.Z` release.
 
-- **Sandbox pin is published-version-driven, so regenerate it AFTER publishing.**
-  The sandbox image installs the *published* `agentic-pi` from npm, pinned by
-  `apps/server/sandbox/agentic-pi.pin` (version + npm integrity). Since consumers
-  now use `workspace:*`, the lockfile no longer carries a registry integrity —
-  the pin is derived from `packages/agentic-pi/package.json` + `npm view`. So on
-  an `agentic-pi` version bump: **publish first, then**
-  `bash apps/server/scripts/agentic-pi-pin.sh` and commit the updated pin
-  (`tests/agentic-pi-pin.test.ts` guards that the pin's version matches the
-  package). Until the pin is bumped the sandbox keeps installing the previous
-  published version — safe, just stale.
+- **The sandbox vendors agentic-pi from the workspace — there is no pin to
+  regenerate.** `sandbox*.Dockerfile` builds agentic-pi from source in a builder
+  stage (`pnpm deploy --prod`, lockfile-pinned) and COPYs the bundle in, so the
+  sandbox always runs exactly the committed agentic-pi + the tree the lockfile
+  resolved. Any change — bumping agentic-pi's version or one of its deps + `pnpm
+  install` — flows into the sandbox on the next image build with no extra step.
+  This deliberately decouples the sandbox from the npm publish (previously the
+  sandbox installed the *published* tarball via a committed pin, and a caret
+  transitive could drift to whatever npm resolved at build time). The independent
+  `agentic-pi` npm publish (`agentic-pi-npm.yml`) is now for external consumers
+  only.
 
 - **VM image is a separate `image-v*` stream.** The gondolin VM sandbox image is
   built by `.github/workflows/agentic-pi-image.yml` on `image-v*` tags, wholly
@@ -179,9 +201,11 @@ Run on a clean `main`, up to date with origin.
    lockstep, refresh the lockfile, and commit as a dedicated release commit:
 
    ```bash
-   # bump each changed package + its dependents (example: a core-only change)
-   pnpm --filter lastlight-core version minor --no-git-tag-version
-   pnpm --filter lastlight-evals version patch --no-git-tag-version   # picks up core
+   # bump each changed package + its dependents (example: a core-only change).
+   # NOTE: `exec npm version` — a bare `pnpm --filter … version` is read as a
+   # missing "version" SCRIPT and bumps nothing.
+   pnpm --filter lastlight-core exec npm version minor --no-git-tag-version
+   pnpm --filter lastlight-evals exec npm version patch --no-git-tag-version   # picks up core
    # edit plugins/lastlight/.claude-plugin/plugin.json if the CLI bumped
    pnpm install --lockfile-only
    git add -A
@@ -193,10 +217,16 @@ Run on a clean `main`, up to date with origin.
 
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z"
+   # If this release bumped agentic-pi, ALSO tag its independent stream so
+   # `agentic-pi-npm.yml` publishes it (publish.yml no longer does). Push this
+   # tag first / let its run finish before the release npm job packs core+evals:
+   git tag -a agentic-pi-vA.B.C -m "agentic-pi-vA.B.C"
    git push origin main --follow-tags
    ```
 
    `vX.Y.Z` is the **CLI/core** version — it names the GHCR image tag hosts pull.
+   `agentic-pi-vA.B.C` is agentic-pi's own version (only push it when agentic-pi
+   changed).
 
 4. **Create the GitHub Release** on that tag — this fires `publish.yml`:
 
@@ -206,9 +236,10 @@ Run on a clean `main`, up to date with origin.
    ```
 
    `publish.yml` runs `checks` (reuses `ci.yml`) → `images` (`docker buildx bake
-   --push core`, then `sandbox-qa` non-fatal) → `npm` (publishes the six packages
-   in dependency order via OIDC trusted publishing). `:latest` moves only for a
-   real, non-prerelease Release.
+   --push core`, then `sandbox-qa` non-fatal) → `npm` (publishes the five
+   non-agentic-pi packages in dependency order via OIDC trusted publishing;
+   agentic-pi ships separately from `agentic-pi-npm.yml`, step 3's second tag).
+   `:latest` moves only for a real, non-prerelease Release.
 
    The same Release also fires the two Cloudflare site deploys —
    `deploy-www.yml` (→ lastlight.dev, re-rendering `apps/server/spec`) and

@@ -61,6 +61,11 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td>Post the <code>last-light/review</code> check on PRs and receive its "Re-run" requests.</td>
 			</tr>
 			<tr>
+				<td><strong>Workflows</strong></td>
+				<td>Read &amp; Write</td>
+				<td>Merge or push PRs that touch <code>.github/workflows/</code> — GitHub blocks the token otherwise. Needed for dependency PRs that bump GitHub Actions versions (e.g. <code>actions/checkout</code>), which the dependabot-pr-merge flow lands. Omit only if you never want the bot to touch Actions files.</td>
+			</tr>
+			<tr>
 				<td><strong>Metadata</strong></td>
 				<td>Read</td>
 				<td>Default — required to see repo details.</td>

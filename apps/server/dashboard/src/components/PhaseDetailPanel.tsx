@@ -8,16 +8,20 @@ import {
   type WorkflowRun,
   type WorkflowRunExecution,
 } from "../api";
+import { GhLink } from "./GhLink";
+import { repoUrl, issueUrl } from "../lib/githubLinks";
 
 /**
- * In-SPA navigation to the Artifacts editor for a specific doc. Pushes the
- * deep-link params and fires a synthetic popstate so every `useUrlState` hook
- * (App's `tab`, ArtifactsPage's repo/key/doc) re-reads — no full reload, no
- * callback threading through the run-detail component tree.
+ * In-SPA navigation to the artifact editor for a specific doc — the Repos tab's
+ * Assets sub-tab, which now hosts the viewer. Pushes the deep-link params and
+ * fires a synthetic popstate so every `useUrlState` hook (App's `tab`,
+ * ReposPage's `repo`/`rtab`, ArtifactsPage's key/doc) re-reads — no full reload,
+ * no callback threading through the run-detail component tree.
  */
 function openArtifact(repo: string, key: string, doc: string) {
   const url = new URL(window.location.href);
-  url.searchParams.set("tab", "artifacts");
+  url.searchParams.set("tab", "repos");
+  url.searchParams.set("rtab", "assets");
   url.searchParams.set("repo", repo);
   url.searchParams.set("key", key);
   url.searchParams.set("doc", doc);
@@ -139,7 +143,11 @@ export function PhaseDetailPanel({
     ? execution.success === true
       ? "succeeded"
       : execution.success === false
-        ? "failed"
+        ? // Cascade-skipped phases are stored success=0 with stopReason="skipped";
+          // they never ran, so label them "skipped" rather than "failed".
+          execution.stopReason === "skipped"
+          ? "skipped"
+          : "failed"
         : "running"
     : historyEntry
       ? historyEntry.success
@@ -156,7 +164,7 @@ export function PhaseDetailPanel({
     "badge-error": statusLabel === "failed",
     "badge-info": statusLabel === "active" || statusLabel === "running",
     "badge-warning": statusLabel === "paused",
-    "badge-ghost": statusLabel === "pending",
+    "badge-ghost": statusLabel === "pending" || statusLabel === "skipped",
   });
 
   // Second tab groups "what got loaded" for this run — agentic-pi extensions
@@ -452,8 +460,32 @@ function ApprovalDetail({
       )}
 
       <div className="text-2xs text-base-content/30 font-mono break-all">
-        {fullRepo}
-        {run.issueNumber ? `#${run.issueNumber}` : ""}
+        {(() => {
+          const rHref = repoUrl(fullRepo);
+          const iHref = issueUrl(fullRepo, run.issueNumber, run.workflowName);
+          return (
+            <>
+              {rHref ? (
+                <GhLink href={rHref} title={`Open ${fullRepo} on GitHub`}>
+                  {fullRepo}
+                </GhLink>
+              ) : (
+                fullRepo
+              )}
+              {run.issueNumber ? (
+                iHref ? (
+                  <GhLink href={iHref} title={`Open #${run.issueNumber} on GitHub`}>
+                    #{run.issueNumber}
+                  </GhLink>
+                ) : (
+                  `#${run.issueNumber}`
+                )
+              ) : (
+                ""
+              )}
+            </>
+          );
+        })()}
       </div>
     </div>
   );

@@ -12,7 +12,7 @@ import clsx from "clsx";
  * gates render as the diamond decision shape regardless of source.
  */
 
-export type PhaseStatus = "pending" | "active" | "paused" | "done" | "failed";
+export type PhaseStatus = "pending" | "active" | "paused" | "done" | "failed" | "skipped";
 
 export interface PhaseTag {
   label: string;
@@ -78,6 +78,9 @@ export function statusSurface(status: PhaseStatus): string {
     "border-info/60 bg-info/15": status === "active",
     "border-warning/60 bg-warning/15": status === "paused",
     "border-base-300 bg-base-300/70": status === "pending",
+    // Skipped: cascade-skipped by an upstream failure/gate — it never ran, so
+    // read it as muted-and-not-run (a dashed neutral), distinct from red failed.
+    "border-base-300 border-dashed bg-base-200/40": status === "skipped",
   });
 }
 
@@ -191,6 +194,7 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
     "bg-info animate-pulse": !brand && data.status === "active",
     "bg-warning": !brand && data.status === "paused",
     "bg-base-300": !brand && data.status === "pending",
+    "bg-base-300 opacity-60": !brand && data.status === "skipped",
   });
 
   const containerClass = clsx(

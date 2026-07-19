@@ -35,8 +35,11 @@ agent involved), or drop the event. The harness consumes the result in
 `src/index.ts:560–1124` and routes to the matching handler.
 
 `RouterDeps` carries the DB handle (for the reply-gate lookup), the
-managed-repos set, and optional model overrides for the classifier
-and screener.
+managed-repos set, optional model overrides for the classifier and
+screener, and a `github` client used solely to enrich a dependency-PR
+mention comment with its check state before classification (see the
+comment table). The router is otherwise side-effect-free — this one
+read-only fetch is gated to Dependabot / Renovate PR comments.
 
 Defined in `src/engine/router.ts:8–40`.
 
@@ -68,6 +71,7 @@ instead. Only the configured handle matches — there is no legacy fallback (see
 | `comment.created` matching `@last-light qa-test <target>` | `skill: qa-test` | Text after the keyword becomes `commentBody`; works on issues + PRs |
 | `comment.created` matching `@last-light demo <notes>` | `skill: demo` | Text after the keyword becomes `commentBody`; works on issues + PRs |
 | `comment.created` on issue with `security-scan` label | `skill: security-feedback` | Overrides classifier — every comment on a scan summary issue is feedback |
+| `@last-light`-mention on a Dependabot / Renovate PR | classifier → `dependabot-ci-fix` (red) / `dependabot-pr-merge` (green) | For a dependency-authored PR the router fetches the PR + `getChecksConclusion` and passes `prAuthor` + `checksState` to the classifier, so an ambiguous "@bot can you look at this?" routes like the webhooks would. Gated on the cheap author/title predicate (`isDependencyPr`) and best-effort — a fetch failure or an explicit "review this" falls back to normal classification. Needs `github` in `RouterDeps` |
 | `message` with pending reply gate on this Slack thread | `skill: explore-reply` | Same short-circuit as GitHub |
 | `pr_review.submitted` / `pr_review_comment.created` | `ignore` | "not yet handled" — placeholder |
 

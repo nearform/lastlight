@@ -45,10 +45,13 @@ lastlight/                     # repo root — private orchestration package (la
 **automated**: a GitHub Release fires `publish.yml`, which builds the GHCR images
 then publishes the six npm packages via OIDC trusted publishing (no secret).
 `agentic-pi` moved in from the standalone `nearform/agentic-pi` repo but stays a
-public npm package; it also carries its own `image-v*` VM-image release stream
-(`agentic-pi-image.yml`), and the sandbox installs its *published* build from npm
-via `apps/server/sandbox/agentic-pi.pin`. See
-[`docs/RELEASING.md`](docs/RELEASING.md).
+public npm package (published independently via `agentic-pi-npm.yml`); it also
+carries its own `image-v*` VM-image release stream (`agentic-pi-image.yml`). The
+sandbox images no longer install it from npm — they **vendor** it from the
+workspace (a `pnpm deploy` bundle built in `sandbox*.Dockerfile`), so the
+sandbox's whole dependency tree is exactly what the lockfile resolved and CI
+tested. The npm publish is for external consumers only, fully decoupled from what
+the sandbox runs. See [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Dependency graph (workspace edges)
 

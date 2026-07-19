@@ -106,13 +106,32 @@ without the CLI.
 | **Normalize** | None — cron jobs dispatch workflows directly. `_triggerType: "cron"` is added to the workflow context (`src/cron/fanout.ts:42`). |
 | **Event types** | n/a |
 | **Job source** | `workflows/cron-*.yaml` files. `getJobs({ webhooksEnabled, db })` (`src/cron/jobs.ts`) loads them, applies DB overrides from `cron_overrides`, and filters those marked `condition: { unless: webhooksEnabled }` when webhooks are active. |
-| **Fan-out** | `dispatchCronWorkflow()` (`src/cron/fanout.ts:36–76`) fans out across a `repos` array in the context with a concurrency limit (default 3). Each per-repo dispatch is its own workflow run with its own taskId. |
+| **Fan-out** | `dispatchCronWorkflow()` (`src/cron/fanout.ts:36–76`) fans out across a `repos` array in the context with a concurrency limit (default 3). Each per-repo dispatch is its own workflow run with its own taskId. A cron whose context sets `discover: <key>` instead fans out **per PR**: the runner (`src/index.ts`) resolves the key to a discoverer, finds the eligible dependency PRs in code (`src/cron/dependabot-discovery.ts`), and dispatches one bounded single-PR run each via `fanOutContexts`. |
 | **Reply** | Cron jobs don't reply per se. Output destined for humans flows through `SLACK_DELIVERY_CHANNEL` when configured. |
 
 The dual webhook/poll model is intentional: with webhooks enabled, the
 polling crons (`cron-triage`, `cron-review`) silently de-register; with
 webhooks disabled, they kick in to keep parity. The scheduled crons
 (`cron-health`, `cron-security`) run regardless.
+
+Two of the scheduled crons are **dependency-PR discovery backstops** for the
+`pr.checks_passed` / `pr.checks_failed` webhooks — additive (no
+`unless: webhooksEnabled`), so they also run with webhooks on:
+
+- `merge-green-dependency-prs` (`discover: green-dependency-prs`, daily 14:00) —
+  finds green (`mergeable_state === "clean"`) dependency PRs and fans out
+  `dependabot-pr-merge`.
+- `fix-red-dependency-prs` (`discover: red-dependency-prs`, daily 15:00) — finds
+  settled-red dependency PRs (a failing/timed-out check conclusion via
+  `GitHubClient.getChecksConclusion`, **not** `mergeable_state`, so it never
+  fires mid-flight) and fans out `dependabot-ci-fix` with the PR head `branch` so
+  the fix phase pre-clones the right ref.
+
+Both sweeps **skip any PR carrying the `requires-human` label** — the terminal
+flag the dependabot prompts apply when Last Light can't proceed (a functional
+merge, or a CI fix it couldn't complete) — so the nightly crons don't re-attempt
+what we already know we can't land. The webhooks stay label-blind, so a genuinely
+new bot push is always handled live and the success path clears the label.
 
 ## 5. Admin dashboard
 

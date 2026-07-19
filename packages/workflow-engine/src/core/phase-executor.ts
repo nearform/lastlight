@@ -331,6 +331,17 @@ async function runPhaseLedger(
         return { result, executionId, skipped: false };
       } catch (err) {
         observability.recordError("phase", err, attrs);
+        // `run(...)` threw before it could `recordFinish` — e.g. provisioning
+        // (prePopulateWorkspace) failed before the agent even started. Without
+        // this the `executions` row stays `started` forever (renders `…` in the
+        // CLI/dashboard instead of `✗`). The success path already finished the
+        // row and returned, so this only fires on a genuine throw — no
+        // double-finish.
+        db.executions.recordFinish(executionId, {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          stopReason: "error_fatal",
+        });
         throw err;
       }
     }
@@ -575,6 +586,24 @@ export class PhaseExecutor {
           success: false,
           output: pr.result.output ?? "",
           error: "BLOCKED",
+        };
+        return { results: [failResult], status: "failed", outputVars };
+      }
+
+      // Postcondition marker: the run must sign off with an agreed completion
+      // marker. Its absence means the agent stopped without reaching an outcome
+      // — a silent no-op that would otherwise report success. Fail it like any
+      // phase failure (posts on_failure, records the error) so it shows red.
+      const marker = phase.on_output.requires_marker;
+      if (marker && !(pr.result.output ?? "").includes(marker)) {
+        const error = `phase produced no outcome — missing completion marker "${marker}"`;
+        await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
+        this.reporter.failWorkflow(error);
+        const failResult: PhaseResult = {
+          phase: phaseName,
+          success: false,
+          output: pr.result.output ?? "",
+          error,
         };
         return { results: [failResult], status: "failed", outputVars };
       }

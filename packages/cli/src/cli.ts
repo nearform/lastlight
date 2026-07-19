@@ -231,44 +231,49 @@ function num(flag: string | boolean | undefined, fallback: number): number {
 
 // ── help ───────────────────────────────────────────────────────────────────
 
-const HELP = `
-${chalk.bold("Last Light CLI")} ${chalk.dim("v" + cliVersion())}
-
-${chalk.bold("Auth")}
-  lastlight login [url]              Authenticate via browser, save the token
-  lastlight logout                   Forget the saved instance + token
-  lastlight status                   Show instance, token validity, server health
-
-${chalk.bold("Chat")}
-  lastlight chat [message]              Chat with the bot (REPL if no message)
-
-${chalk.bold("Trigger")}
-  lastlight <github-url|owner/repo#N>   Triage that issue (default — cheap)
-  lastlight build <ref>                 Run the FULL build cycle (architect→PR)
-  lastlight triage <owner/repo[#N]>     Triage a repo (scan) or one issue
-  lastlight review <owner/repo[#N]>     Review a repo's PRs (scan) or one PR
-  lastlight verify <owner/repo#N> [-- "<claim>"]   Test a claim → CONFIRMED/REFUTED
-  lastlight qa-test <owner/repo#N> [-- "<steps>"]  Drive a flow → step pass/fail
-  lastlight health <owner/repo>         Weekly health report
-  lastlight security <owner/repo>       Security review
-
-${chalk.bold("Debug")} (read the running instance instead of SSH)
+// Per-command detail, shown by `lastlight <cmd> help` (or `<cmd> --help`). The
+// top-level HELP below stays a compact index; each subcommand-bearing command
+// keeps its full usage here so no single screen sprawls. Keys are command names.
+const HELP_TOPICS: Record<string, string> = {
+  workflow: `
+${chalk.bold("Workflow")} (inspect + retry workflow runs on the instance)
   lastlight workflow list [--status s] [--workflow name] [--limit n]
   lastlight workflow log <id> [--follow]
-  lastlight workflow retry <id>                (re-run a failed run from the phase that failed)
+  lastlight workflow retry <id>      Re-run a failed run from the phase that failed`,
+
+  session: `
+${chalk.bold("Session")} (read agent session transcripts)
   lastlight session list [--limit n]
-  lastlight session log <id> [--follow] [--since n] [--full]   (--full = raw, unformatted dump)
-  lastlight logs search "<text>" [--scope errors|messages|all] [--limit n]
-  lastlight server list                          (the lastlight-* containers)
-  lastlight server logs [service|container] [--tail n] [--since 10m] [--follow]
+  lastlight session log <id> [--follow] [--since n] [--full]   ${chalk.dim("(--full = raw, unformatted dump)")}`,
+
+  logs: `
+${chalk.bold("Logs")} (search the harness logs)
+  lastlight logs search "<text>" [--scope errors|messages|all] [--limit n]`,
+
+  approvals: `
+${chalk.bold("Approvals")} (resolve approval gates)
   lastlight approvals list
   lastlight approvals approve <id> [--reason "..."]
-  lastlight approvals reject <id> [--reason "..."]
-  lastlight stats [--daily n | --hourly n]
+  lastlight approvals reject <id> [--reason "..."]`,
 
+  stats: `
+${chalk.bold("Stats")}
+  lastlight stats [--daily n | --hourly n]`,
+
+  cron: `
+${chalk.bold("Cron")} (list + trigger scheduled jobs on the instance — handy for testing)
+  lastlight cron list                Table of crons: schedule, next/last run, status
+  lastlight cron trigger <name>      Run a cron now (fire-and-forget; fans out one run per repo/PR)
+  lastlight cron enable <name>       Enable a disabled cron
+  lastlight cron disable <name>      Disable a cron
+                                     ${chalk.dim("[--json on any]. Omit <name> for an interactive picker.")}`,
+
+  server: `
 ${chalk.bold("Server")} (host-local — run on the server; manages the docker stack)
   lastlight server setup             Scaffold/adopt the working dir; create or clone the overlay (+ gh repo)
   lastlight server build             Build the docker images from source (run before the first start)
+  lastlight server list              The lastlight-* containers
+  lastlight server logs [service|container] [--tail n] [--since 10m] [--follow]
   lastlight server start [service]   docker compose up -d
   lastlight server stop [service]    Stop one service, or the whole stack (down)
   lastlight server restart [service] Restart a service (default: agent)
@@ -276,8 +281,9 @@ ${chalk.bold("Server")} (host-local — run on the server; manages the docker st
                                      [--no-core] [--no-overlay] [--no-build] [--no-prune] [--local] [--yes]
                                      ${chalk.dim("(pulls prebuilt images from GHCR by default; --local builds from source; prunes old image versions unless --no-prune)")}
   lastlight server status            Compose state + core/overlay version drift
-  ${chalk.dim("Working dir resolves from --home, then LASTLIGHT_HOME, then ~/.lastlight, then ~/lastlight.")}
+  ${chalk.dim("Working dir resolves from --home, then LASTLIGHT_HOME, then ~/.lastlight, then ~/lastlight.")}`,
 
+  fork: `
 ${chalk.bold("Fork")} (host-local — copy built-in assets into the deployment overlay)
   lastlight fork                     List forkable workflows + agent-context (marks what's forked)
   lastlight fork all                 Copy every workflow + prompts + skills + agent-context
@@ -285,28 +291,61 @@ ${chalk.bold("Fork")} (host-local — copy built-in assets into the deployment o
   lastlight fork agent-context       Copy soul.md / rules.md / security.md into instance/
   lastlight fork agent-context <f>   Copy a single agent-context file (e.g. soul.md)
                                      [--home dir] [--force to overwrite existing]
-                                     Reads built-ins bundled with the CLI — no checkout needed.
+                                     Reads built-ins bundled with the CLI — no checkout needed.`,
 
+  skills: `
 ${chalk.bold("Skills")} (host-local — install the Last Light Claude Code skills)
   lastlight skills install           Install the skills into a local Claude Code
                                      [--scope user|project] [--no-marketplace]
   lastlight skills list              List bundled skills + where they're installed
-  lastlight skills uninstall         Remove the installed skills [--scope user|project]
+  lastlight skills uninstall         Remove the installed skills [--scope user|project]`,
 
+  oauth: `
 ${chalk.bold("OAuth")} (host-local — subscription logins for the model provider)
   lastlight oauth list               List OAuth providers + which are logged in
   lastlight oauth login [provider]   Log in via ChatGPT/Codex, Claude Pro, or Copilot
   lastlight oauth status             Show the credential store + token expiry
   lastlight oauth test <provider>    Verify a stored login still refreshes
   lastlight oauth logout [provider]  Remove one (or all) stored logins
-                                     Writes auth.json under $STATE_DIR; restart the agent after.
+                                     Writes auth.json under $STATE_DIR; restart the agent after.`,
+};
+// Aliases so `<alias> help` resolves to the same topic as the primary command.
+HELP_TOPICS.workflows = HELP_TOPICS.workflow;
+HELP_TOPICS.sessions = HELP_TOPICS.session;
+HELP_TOPICS.log = HELP_TOPICS.logs;
+HELP_TOPICS.crons = HELP_TOPICS.cron;
+HELP_TOPICS.auth = HELP_TOPICS.oauth;
+
+const HELP = `
+${chalk.bold("Last Light CLI")} ${chalk.dim("v" + cliVersion())}
+
+${chalk.bold("Auth")}
+  lastlight login [url] / logout / status      Authenticate, forget, or inspect the instance
+
+${chalk.bold("Chat")}
+  lastlight chat [message]                      Chat with the bot (REPL if no message)
+
+${chalk.bold("Trigger")} (run work on a repo)
+  lastlight <github-url|owner/repo#N>           Triage that issue (default — cheap)
+  lastlight build <ref>                         Run the FULL build cycle (architect→PR)
+  lastlight triage|review <owner/repo[#N]>      Triage/review a whole repo (scan) or one issue/PR
+  lastlight verify|qa-test <owner/repo#N>       Test a claim / drive a flow → pass/fail
+  lastlight health|security <owner/repo>        Weekly health report / security review
+
+${chalk.bold("Debug")} (read the running instance)   ${chalk.dim("→ lastlight <cmd> help")}
+  workflow · session · logs · approvals · stats · cron
+
+${chalk.bold("Server")} (host-local docker stack)   ${chalk.dim("→ lastlight server help")}
+  setup · build · list · logs · start · stop · restart · update · status
+
+${chalk.bold("Overlay / host-local")}   ${chalk.dim("→ lastlight <cmd> help")}
+  fork · skills · oauth
 
 ${chalk.bold("Other")}
-  lastlight setup                    First-run wizard — asks client (login) or server (stack)
-                                     [--client | --server to skip the prompt]
-  lastlight version                  Print the CLI version (also --version / -v)
+  lastlight setup                               First-run wizard — client (login) or server (stack)
+  lastlight version                             Print the CLI version (also --version / -v)
 
-${chalk.dim("Global flags: --json (machine output), --url <u>, --token <t>.")}
+${chalk.dim("Global flags: --json (machine output), --url <u>, --token <t>.  Command detail: lastlight <command> help")}
 ${chalk.dim("Target resolves from --url/--token, then LASTLIGHT_URL/LASTLIGHT_TOKEN, then ~/.lastlight, then " + DEFAULT_URL + ".")}
 `;
 
@@ -750,6 +789,82 @@ async function cmdStats(): Promise<void> {
   ]));
 }
 
+// ── debug: crons ──────────────────────────────────────────────────────────────
+
+/** Interactive picker over the crons (used when trigger/enable/disable has no name). */
+async function pickCron(action: string): Promise<string> {
+  if (!process.stdout.isTTY || JSON_OUT) die(`Usage: lastlight cron ${action} <name>`);
+  const data = await apiGet(`/admin/api/crons`);
+  const crons = data.crons as any[];
+  if (crons.length === 0) die("No crons registered.");
+  const choice = await p.select({
+    message: `Select a cron to ${action}`,
+    options: crons.map((c) => ({
+      value: c.name as string,
+      label: `${c.name}${c.enabled ? "" : chalk.dim(" (disabled)")}`,
+      hint: `${c.workflow} · ${c.schedule} · next ${age(c.nextRun)}`,
+    })),
+  });
+  if (p.isCancel(choice)) { p.cancel("Cancelled."); process.exit(1); }
+  return choice as string;
+}
+
+async function cmdCron(): Promise<void> {
+  const sub = positionals[1] ?? "list";
+  if (sub === "list") {
+    const data = await apiGet(`/admin/api/crons`);
+    if (JSON_OUT) return out("", data);
+    const crons = data.crons as any[];
+    const rows = crons.map((c) => ({
+      name: c.name,
+      workflow: c.workflow,
+      // A trailing * flags a schedule override (default in the OVERRIDE hint).
+      schedule: c.override ? `${c.schedule} *` : c.schedule,
+      enabled: checkmark(c.enabled),
+      next: c.registered ? age(c.nextRun) : chalk.dim("—"),
+      last: c.lastRun ? age(c.lastRun) : chalk.dim("never"),
+      status: colorStatus(c.lastStatus),
+      fails: c.recentFailures > 0 ? chalk.red(String(c.recentFailures)) : "0",
+    }));
+    console.log(table(rows, [
+      { key: "name", header: "NAME" },
+      { key: "workflow", header: "WORKFLOW" },
+      { key: "schedule", header: "SCHEDULE" },
+      { key: "enabled", header: "ON" },
+      { key: "next", header: "NEXT" },
+      { key: "last", header: "LAST" },
+      { key: "status", header: "STATUS" },
+      { key: "fails", header: "FAILS" },
+    ]));
+    console.log(chalk.dim(`\n${crons.length} crons. * = schedule override. Run one now: lastlight cron trigger <name>`));
+    return;
+  }
+  if (sub === "trigger" || sub === "run") {
+    const name = positionals[2] ?? (await pickCron("trigger"));
+    // Fire-and-forget on the server — a cron fans out one run per repo/PR.
+    const data = await apiPost(`/admin/api/crons/${name}/trigger`, {});
+    out(chalk.green(`✓ triggered ${name} (${data.workflow}) — watch: lastlight workflow list`), data);
+    return;
+  }
+  if (sub === "enable" || sub === "disable") {
+    const name = positionals[2] ?? (await pickCron(sub));
+    const desired = sub === "enable";
+    // The server endpoint is a flip; read the current state and only toggle when
+    // it differs so `enable`/`disable` are idempotent.
+    const data = await apiGet(`/admin/api/crons`);
+    const cron = (data.crons as any[]).find((c) => c.name === name);
+    if (!cron) die(`cron not found: ${name}`);
+    if (cron.enabled === desired) {
+      out(chalk.dim(`${name} already ${sub}d`), { name, enabled: cron.enabled });
+      return;
+    }
+    const res = await apiPost(`/admin/api/crons/${name}/toggle`, {});
+    out(chalk.green(`✓ ${res.enabled ? "enabled" : "disabled"} ${name}`), res);
+    return;
+  }
+  die("Usage: lastlight cron list|trigger <name>|enable <name>|disable <name>");
+}
+
 // ── debug: server logs ────────────────────────────────────────────────────────
 
 /** Interactive picker over the lastlight-* containers (used when `logs` has no
@@ -1068,6 +1183,19 @@ async function main() {
     process.exit(0);
   }
 
+  // `lastlight help [topic]` → the topic detail, or the compact index.
+  if (cmd === "help") {
+    const topic = positionals[1];
+    console.log(topic && HELP_TOPICS[topic] ? HELP_TOPICS[topic] : HELP);
+    process.exit(0);
+  }
+
+  // `lastlight <cmd> help` / `lastlight <cmd> --help` → that command's detail.
+  if (cmd && HELP_TOPICS[cmd] && (positionals[1] === "help" || flags.help)) {
+    console.log(HELP_TOPICS[cmd]);
+    process.exit(0);
+  }
+
   if (!cmd || flags.help) {
     console.log(HELP);
     process.exit(0);
@@ -1091,6 +1219,8 @@ async function main() {
       return;
     }
     case "approvals": return cmdApprovals();
+    case "cron":
+    case "crons": return cmdCron();
     case "fork": return cmdFork();
     case "skills": return cmdSkills();
     case "oauth":

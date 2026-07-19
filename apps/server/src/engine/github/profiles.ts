@@ -53,6 +53,7 @@ export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPer
     contents: "write",
     issues: "write",
     pull_requests: "write",
+    workflows: "write",
     metadata: "read",
   },
 };

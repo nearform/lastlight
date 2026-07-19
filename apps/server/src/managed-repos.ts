@@ -75,3 +75,24 @@ export function isManagedRepo(repo: string | undefined | null): boolean {
   if (!repo) return false;
   return getManagedRepos().includes(repo);
 }
+
+/**
+ * The managed repos the GitHub App installation can actually access right now.
+ *
+ * Filters the configured `managedRepos` down to the discovered installation set
+ * when that set is known, so a stale config entry — a repo that was deleted,
+ * transferred to another org, or had App access revoked — doesn't spawn doomed
+ * cron scan runs whose per-repo scoped-token mint 422s (which silently disables
+ * the agent's github_* tools). When installation discovery hasn't populated yet
+ * (empty set — e.g. before the boot fetch, or a fetch failure) this returns the
+ * configured list unfiltered rather than dropping every repo. Webhook routing
+ * still uses the raw configured list via {@link isManagedRepo}; only the cron
+ * fan-out (a best-effort backstop) narrows to what's reachable.
+ */
+export function getAccessibleManagedRepos(): string[] {
+  const configured = getManagedRepos();
+  const installed = getInstallationRepos();
+  if (installed.length === 0) return configured;
+  const accessible = new Set(installed);
+  return configured.filter((r) => accessible.has(r));
+}

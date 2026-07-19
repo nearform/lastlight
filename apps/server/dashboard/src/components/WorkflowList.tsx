@@ -18,6 +18,8 @@ import {
   nullableStringSerializer,
 } from "../hooks/useUrlState";
 import { timeRangeToSince } from "../lib/timeRange";
+import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
+import { GhLink } from "./GhLink";
 
 function timeAgo(iso: string): string {
   const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -361,12 +363,30 @@ function DetailPanel({ run, approvals, onCancel, onRetry, onApprovalResponded, o
           </button>
         )}
         <StatusBadge status={run.status} />
-        {run.repo && (
-          <span className="text-xs text-base-content/50 font-mono">{run.repo}</span>
-        )}
-        {run.issueNumber && (
-          <span className="text-xs text-base-content/50 font-mono">#{run.issueNumber}</span>
-        )}
+        {run.repo &&
+          (() => {
+            const href = repoUrl(runRepoPath(run));
+            const cls = "text-xs text-base-content/50 font-mono";
+            return href ? (
+              <GhLink href={href} className={cls} title={`Open ${run.repo} on GitHub`}>
+                {run.repo}
+              </GhLink>
+            ) : (
+              <span className={cls}>{run.repo}</span>
+            );
+          })()}
+        {run.issueNumber &&
+          (() => {
+            const href = issueUrl(runRepoPath(run), run.issueNumber, run.workflowName);
+            const cls = "text-xs text-base-content/50 font-mono";
+            return href ? (
+              <GhLink href={href} className={cls} title={`Open #${run.issueNumber} on GitHub`}>
+                #{run.issueNumber}
+              </GhLink>
+            ) : (
+              <span className={cls}>#{run.issueNumber}</span>
+            );
+          })()}
         {canCancel && (
           <button
             className="btn btn-xs btn-error btn-outline ml-auto"
@@ -418,11 +438,13 @@ interface WorkflowListProps {
   timeRange: string;
   /** Header free-text search — matches workflow name, repo, issue number. */
   query: string;
+  /** When set, server-side-filter the run list to this `owner/repo` (Repos tab). */
+  repo?: string;
   /** Optional handler for the "View workflow definition" icon next to the title. */
   onOpenDefinition?: (name: string) => void;
 }
 
-export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowListProps) {
+export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: WorkflowListProps) {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const [total, setTotal] = useState(0);
   const [approvals, setApprovals] = useState<WorkflowApproval[]>([]);
@@ -447,7 +469,21 @@ export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowLis
   // rows after the user narrows.
   useEffect(() => {
     setLimit(WORKFLOW_PAGE_SIZE);
-  }, [timeRange, workflowFilter]);
+  }, [timeRange, workflowFilter, repo]);
+
+  // Clear the selected run when the Repos tab switches to a different repo.
+  // WorkflowList isn't remounted on a repo switch (the `?run=` param survives),
+  // so without this a run selected under repo A stays visible after clicking
+  // repo B — even when B has no runs at all. Skip the first mount so a deep
+  // link like ?repo=A&run=… is still honored on load; the auto-select effect
+  // below then picks the new repo's first run (or nothing when it's empty).
+  const prevRepoRef = useRef(repo);
+  useEffect(() => {
+    if (prevRepoRef.current !== repo) {
+      prevRepoRef.current = repo;
+      setSelectedId(null);
+    }
+  }, [repo, setSelectedId]);
 
   const load = useCallback(async () => {
     try {
@@ -460,6 +496,7 @@ export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowLis
           since,
           status,
           workflow: workflowFilter ?? undefined,
+          repo,
         }),
         api.approvals().catch(() => ({ approvals: [] as WorkflowApproval[] })),
       ]);
@@ -470,7 +507,7 @@ export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowLis
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     }
-  }, [limit, timeRange, workflowFilter]);
+  }, [limit, timeRange, workflowFilter, repo]);
 
   useEffect(() => {
     load();
@@ -655,8 +692,28 @@ export function WorkflowList({ timeRange, query, onOpenDefinition }: WorkflowLis
                       {run.workflowName}
                     </div>
                     <div className="flex gap-2 text-2xs text-base-content/40 w-full font-mono">
-                      {run.repo && <span className="truncate">{run.repo}</span>}
-                      {run.issueNumber && <span>#{run.issueNumber}</span>}
+                      {run.repo &&
+                        (() => {
+                          const href = repoUrl(runRepoPath(run));
+                          return href ? (
+                            <GhLink href={href} className="truncate" title={`Open ${run.repo} on GitHub`}>
+                              {run.repo}
+                            </GhLink>
+                          ) : (
+                            <span className="truncate">{run.repo}</span>
+                          );
+                        })()}
+                      {run.issueNumber &&
+                        (() => {
+                          const href = issueUrl(runRepoPath(run), run.issueNumber, run.workflowName);
+                          return href ? (
+                            <GhLink href={href} title={`Open #${run.issueNumber} on GitHub`}>
+                              #{run.issueNumber}
+                            </GhLink>
+                          ) : (
+                            <span>#{run.issueNumber}</span>
+                          );
+                        })()}
                       <span className="ml-auto">{run.currentPhase}</span>
                     </div>
                     {canCancel && (

@@ -76,6 +76,9 @@ lastlight logs search "<text>"         # search errors / transcripts
 lastlight approvals list|approve|reject
 ```
 
+For a full debugging runbook (find a failed/stuck run, tail sessions, read
+server/docker logs, crons, stats) use **`lastlight-debug`**.
+
 ## Done when
 
 `lastlight status` reports the server healthy and the token valid. Report the

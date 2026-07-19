@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { isAbsolute, join, relative, resolve, sep } from "path";
 import { DockerSandbox, type WorkspaceMount } from "./docker.js";
 import { SANDBOX_IMAGE, isSandboxAvailable } from "./images.js";
+import { githubBasicAuthB64, githubExtraheaderArgs } from "./git-http-auth.js";
 
 export { DockerSandbox } from "./docker.js";
 export {
@@ -103,9 +104,10 @@ export async function createTaskSandbox(opts: {
    * workspace that's already checked out, avoiding a redundant
    * `clone_repo` MCP call inside the session.
    *
-   * Token must be alphanumeric (shape asserted upstream) and is embedded
-   * into the clone URL just for this one-shot operation — git's own
-   * credential.helper inside the sandbox covers subsequent push/pull.
+   * The token authenticates the host clone via a one-shot `-c
+   * http.extraheader` flag (never embedded in the URL, never persisted); the
+   * sandbox's own git picks up the same auth from the `GIT_CONFIG_*`
+   * extraheader in `agentGitIdentityEnv` for subsequent push/pull.
    */
   prePopulate?: {
     owner: string;
@@ -258,13 +260,13 @@ export function prePopulateWorkspace(
   workDir: string,
   pre: PrePopulate,
 ): void {
-  // Token shape is asserted in src/engine/git-auth.ts before we get here,
-  // but re-check the narrow set here too — defense in depth, this string
-  // crosses a process boundary into git's command line.
-  if (!/^[A-Za-z0-9_-]+$/.test(pre.token)) {
-    throw new Error("prePopulate: refusing to embed a token outside [A-Za-z0-9_-]");
-  }
-  const url = `https://x-access-token:${pre.token}@github.com/${pre.owner}/${pre.repo}.git`;
+  // Auth is a github.com-scoped `http.extraheader` passed as a one-shot `-c`
+  // flag (never embedded in the URL, never persisted). The token can now carry
+  // any character GitHub returns (`.`/`/`/`+`/`=`) — no charset guard needed,
+  // since it's carried as base64 inside a single argv element, not interpolated
+  // into a URL. See src/sandbox/git-http-auth.ts.
+  const url = `https://github.com/${pre.owner}/${pre.repo}.git`;
+  const authArgs = githubExtraheaderArgs(pre.token);
   // The agent's cwd is `workDir` (the workspace). The harness writes
   // `AGENTS.md` there, so cloning into the workDir root would collide.
   // Instead, clone into a `<repo>/` subdirectory — keeps the layout
@@ -273,8 +275,13 @@ export function prePopulateWorkspace(
   // the workspace root.
   const repoDir = join(workDir, pre.repo);
   const markerPath = join(workDir, RUN_MARKER);
+  // The raw token no longer appears anywhere in the URL, but the base64
+  // credential rides the `-c` argv git echoes on error — redact it too.
+  const b64 = githubBasicAuthB64(pre.token);
   const scrub = (s: unknown): string =>
-    typeof s === "string" ? s.replaceAll(pre.token, "[REDACTED-TOKEN]") : "";
+    typeof s === "string"
+      ? s.replaceAll(pre.token, "[REDACTED-TOKEN]").replaceAll(b64, "[REDACTED-AUTH]")
+      : "";
   // Repo dir might already exist — from a later phase of the same run, or a
   // *different* run reusing a stable per-target workspace (issue #107).
   if (existsSync(join(repoDir, ".git"))) {
@@ -317,15 +324,16 @@ export function prePopulateWorkspace(
   // default branch — never `clone --branch <feature>`, which would resurrect a
   // stale *pushed* feature branch from an earlier incomplete run (#153).
   if (pre.recreateFromBase) {
-    cloneDefaultAndCreateBranch(repoDir, url, depth, shallowArgs, pre, markerPath, start, scrub);
+    cloneDefaultAndCreateBranch(repoDir, url, authArgs, depth, shallowArgs, pre, markerPath, start, scrub);
     return;
   }
   try {
     execFileSync(
       "git",
-      ["clone", "--branch", pre.branch, "--depth", depth, ...shallowArgs, url, repoDir],
+      [...authArgs, "clone", "--branch", pre.branch, "--depth", depth, ...shallowArgs, url, repoDir],
       { stdio: "pipe", timeout: 120_000 },
     );
+    normalizeOrigin(repoDir, pre, scrub);
     writeMarker(markerPath, pre.runId);
     const ms = Date.now() - start;
     console.log(
@@ -340,15 +348,15 @@ export function prePopulateWorkspace(
       // and push it later. The remote doesn't have it yet at pre-clone time —
       // clone the default branch, then create the target branch locally so
       // the agent enters a workspace already on the right branch.
-      cloneDefaultAndCreateBranch(repoDir, url, depth, shallowArgs, pre, markerPath, start, scrub);
+      cloneDefaultAndCreateBranch(repoDir, url, authArgs, depth, shallowArgs, pre, markerPath, start, scrub);
       return;
     }
     // Don't kill the run on a failed pre-clone — fall through to an empty
     // workspace and let the agent clone via the MCP path as a backup.
     //
     // CRITICAL: execFileSync errors echo the failing command line, which
-    // includes the auth URL `https://x-access-token:<token>@github.com/…`.
-    // The token is scrubbed above before anything reaches the logs.
+    // includes the `-c http.extraheader=AUTHORIZATION: basic <b64>` arg. The
+    // base64 credential is scrubbed above before anything reaches the logs.
     console.warn(
       `[sandbox] Pre-clone of ${pre.owner}/${pre.repo}@${pre.branch} failed (${firstError}). ` +
       `Agent will need to clone via MCP.`,
@@ -368,6 +376,7 @@ export function prePopulateWorkspace(
 function cloneDefaultAndCreateBranch(
   repoDir: string,
   url: string,
+  authArgs: string[],
   depth: string,
   shallowArgs: string[],
   pre: PrePopulate,
@@ -378,7 +387,7 @@ function cloneDefaultAndCreateBranch(
   try {
     execFileSync(
       "git",
-      ["clone", "--depth", depth, ...shallowArgs, url, repoDir],
+      [...authArgs, "clone", "--depth", depth, ...shallowArgs, url, repoDir],
       { stdio: "pipe", timeout: 120_000 },
     );
     execFileSync(
@@ -386,6 +395,7 @@ function cloneDefaultAndCreateBranch(
       ["-C", repoDir, "checkout", "-B", pre.branch],
       { stdio: "pipe", timeout: 30_000 },
     );
+    normalizeOrigin(repoDir, pre, scrub);
     writeMarker(markerPath, pre.runId);
     const ms = Date.now() - start;
     console.log(
@@ -420,6 +430,34 @@ function writeMarker(markerPath: string, runId: string | undefined): void {
 }
 
 /**
+ * Point `origin` at the plain (credential-free) HTTPS URL. Runs on every clone
+ * path so no token ever persists in `.git/config` — including workspaces cloned
+ * by older code that baked `x-access-token:<token>@` into `remote.origin.url`
+ * and are now reused post-deploy. Auth for subsequent fetch/push comes from the
+ * `GIT_CONFIG_*` extraheader in the sandbox env, not the remote URL.
+ * Best-effort: a failure here must not fail provisioning.
+ */
+function normalizeOrigin(
+  repoDir: string,
+  pre: PrePopulate,
+  scrub: (s: unknown) => string,
+): void {
+  const url = `https://github.com/${pre.owner}/${pre.repo}.git`;
+  try {
+    execFileSync(
+      "git",
+      ["-C", repoDir, "remote", "set-url", "origin", url],
+      { stdio: "pipe", timeout: 15_000 },
+    );
+  } catch (err: any) {
+    console.warn(
+      `[sandbox] Could not normalize origin for ${repoDir} (${scrub(err?.message)}); ` +
+      `continuing (auth rides the GIT_CONFIG_* extraheader, not origin.url).`,
+    );
+  }
+}
+
+/**
  * Refresh a reused per-PR workspace in place: fetch the branch, hard-reset the
  * checkout to it, and `git clean` away stale tracked/untracked build output —
  * but **keep `node_modules`** (and any nested ones) so the next install is
@@ -434,17 +472,22 @@ function refreshExistingClone(
   markerPath: string,
   pre: PrePopulate,
 ): void {
+  const b64 = githubBasicAuthB64(pre.token);
   const scrub = (s: unknown): string =>
-    typeof s === "string" ? s.replaceAll(pre.token, "[REDACTED-TOKEN]") : "";
-  const url = `https://x-access-token:${pre.token}@github.com/${pre.owner}/${pre.repo}.git`;
+    typeof s === "string"
+      ? s.replaceAll(pre.token, "[REDACTED-TOKEN]").replaceAll(b64, "[REDACTED-AUTH]")
+      : "";
+  const url = `https://github.com/${pre.owner}/${pre.repo}.git`;
+  const authArgs = githubExtraheaderArgs(pre.token);
   const depth = pre.shallow ? ["--depth", "1"] : ["--depth", "50"];
   const start = Date.now();
   try {
-    // Fetch the branch from the authenticated URL directly so we don't depend
-    // on the stored remote (and never persist the token into .git/config).
+    // Fetch the branch from the plain URL directly (auth via the one-shot `-c`
+    // extraheader) so we don't depend on the stored remote — and never persist
+    // any credential into .git/config.
     execFileSync(
       "git",
-      ["-C", repoDir, "fetch", ...depth, url, pre.branch],
+      ["-C", repoDir, ...authArgs, "fetch", ...depth, url, pre.branch],
       { stdio: "pipe", timeout: 120_000 },
     );
     execFileSync(
@@ -465,6 +508,7 @@ function refreshExistingClone(
       ["-C", repoDir, "clean", "-fdx", "-e", "node_modules"],
       { stdio: "pipe", timeout: 60_000 },
     );
+    normalizeOrigin(repoDir, pre, scrub);
     writeMarker(markerPath, pre.runId);
     const ms = Date.now() - start;
     console.log(

@@ -3,21 +3,27 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 ---
 <DocsLayout
 	slug="workflows/dependabot-ci-fix"
-	description="The Dependabot CI fix workflow — react to a dependency-update PR whose checks failed, push a fix, and auto-merge trivial ones."
+	description="The Dependabot CI fix workflow — react to a dependency-update PR whose checks failed, bring the branch up to date, and push the smallest fix; the merge decision is handed off to dependabot-pr-merge."
 >
 	<p>
 		Dependabot CI fix reacts when a dependency-update PR (Dependabot or Renovate)
-		goes red in CI. When a check suite completes with a failure, Last Light
-		diagnoses the breakage, pushes the smallest fix that makes CI pass, and —
-		only when the change is trivial — enables GitHub auto-merge so the update
-		lands once the re-run checks are green.
+		goes red in CI. When a check suite completes with a failure, Last Light brings
+		the branch up to date with its base, diagnoses the breakage, and pushes the
+		smallest fix that makes CI pass. It is <strong>fix-only</strong>: it never
+		classifies, labels, or merges the PR. Once the push turns the checks green,
+		the <code>pr.checks_passed</code> webhook hands off to
+		<a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>, the
+		single owner of the trivial-vs-functional classification and the auto-merge
+		decision — so the two workflows never duplicate each other's work.
 	</p>
 
 	<div class="docs-callout tip">
 		<div class="docs-callout-body">
-			<strong>Permission profile:</strong> <code>repo-write</code> — can push
-			commits to the PR branch and enable auto-merge. It never merges a red PR:
-			auto-merge is gated on the required checks passing.
+			<strong>Permission profile:</strong> <code>repo-write</code> — it merges the
+			base branch into the PR branch and pushes commits, but always with a plain
+			(non-force) push so Dependabot / Renovate don't lose track of their own
+			branch. It never labels or merges — that's <code>dependabot-pr-merge</code>'s
+			job once the checks go green.
 		</div>
 	</div>
 
@@ -27,12 +33,12 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		<svg viewBox="0 0 320 80" fill="none" xmlns="http://www.w3.org/2000/svg">
 			<rect x="12" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
 			<text x="77" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
-			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">diagnose + push</text>
+			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">merge base + fix + push</text>
 			<path d="M146 40 H172" stroke="var(--diag-line)" stroke-width="1.5"/>
 			<path d="M168 36 L174 40 L168 44 Z" fill="var(--diag-line)"/>
-			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
-			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Assess</text>
-			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">trivial? → auto-merge</text>
+			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">pr-merge</text>
+			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">once green: classify + merge</text>
 		</svg>
 	</div>
 
@@ -40,17 +46,18 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li>Clones the repo at the PR's head branch (the dependency bump is already committed there)</li>
+		<li>Merges the base branch into the PR branch first (plain <code>git merge</code>, no rebase or force-push) so the fix is built on current base and a <code>behind</code> PR is brought up to date — resolving any lockfile conflict by regenerating it</li>
 		<li>Reads the CI failures and diagnoses the cause — a stale lockfile, a breaking change in the new version, a call site or type that needs updating</li>
-		<li>Makes the smallest fix that turns CI green, runs the test / lint / typecheck gate, and pushes to the PR branch</li>
-		<li>Assesses the resulting diff: only lockfile / type-only / non-functional changes count as <strong>trivial</strong></li>
-		<li>If trivial, enables GitHub auto-merge (squash) so the PR merges once checks pass; otherwise it comments and leaves the PR for a human</li>
+		<li>Makes the smallest fix that turns CI green, runs the test / lint / typecheck gate, and plain-pushes to the PR branch</li>
+		<li>Stops there — it does not classify, comment, label (except the give-up case below), or merge. The push re-runs CI, and when it goes green the <code>pr.checks_passed</code> webhook fires <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a> to make the one classify / auto-merge decision</li>
 	</ul>
 
 	<div class="docs-callout note">
 		<div class="docs-callout-body">
-			Auto-merge needs "Allow auto-merge" enabled on the repository and at least
-			one required status check. If it isn't available, the workflow comments
-			that the fix looks trivial and asks a maintainer to merge.
+			Because ci-fix brings the branch current with its base, the PR that
+			<code>dependabot-pr-merge</code> later sees is <code>clean</code> rather than
+			<code>behind</code> — so the merge workflow can act on it directly instead of
+			asking the bot to rebase.
 		</div>
 	</div>
 
@@ -58,6 +65,8 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li><strong>GitHub webhook:</strong> a <code>check_suite.completed</code> event with a <code>failure</code> / <code>timed_out</code> conclusion (surfaced internally as <code>pr.checks_failed</code>). The router runs it through the intent classifier, which routes a recognised dependency-update PR here. Requires the GitHub App to subscribe to <strong>Check suite</strong> events (Checks: read).</li>
+		<li><strong>Cron backstop:</strong> a daily job (<code>fix-red-dependency-prs</code>, 15:00 — one hour after the green sweep) whose runner finds the <em>settled-red</em> Dependabot / Renovate PRs across managed repos <em>in code</em> (a failing/timed-out check conclusion, not <code>mergeable_state</code>, so it never fires while checks are still running) and fans out <strong>one bounded run per PR</strong> — the same single-PR shape as the webhook, carrying the PR head branch so the fix phase pre-clones the right ref. It runs <em>alongside</em> webhooks — a safety net for PRs that went red before boot or during a missed delivery. Per-PR runs dedup by (repo, PR).</li>
+		<li><strong>Maintainer mention:</strong> an <code>@last-light</code> comment on a red Dependabot / Renovate PR (e.g. "can you look at this?"). The router hands the PR author + check state to the classifier, which routes a red dependency PR here — the on-demand version of the webhook. (A green one routes to <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a> instead; an explicit "review this" still gets a normal review.)</li>
 	</ul>
 
 	<p>
@@ -65,6 +74,24 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		workflows can react to the same failing-checks event by declaring their own
 		<code>classification</code> block — this workflow simply claims the
 		dependency-update case.
+	</p>
+
+	<h2>Labels</h2>
+
+	<p>
+		The dependency workflows share a small label state machine so status is
+		visible and the crons don't churn. ci-fix touches labels in only one case:
+		when it <strong>can't</strong> repair CI with a small, safe change, it applies
+		<code>requires-human</code> and stops. The verdict labels
+		(<code>dependency-trivial</code> / <code>dependency-functional</code>) — and
+		clearing a stale <code>requires-human</code> once a later fix lands green — are
+		owned entirely by <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>,
+		which keeps the classification in one place. Both the red and green cron sweeps
+		<strong>skip PRs labelled <code>requires-human</code></strong>, so they never
+		re-attempt what Last Light already gave up on — while the webhooks stay
+		label-blind, so a genuinely new bot push is handled live and the success path
+		clears the label. Labels are created on demand
+		(<code>github_ensure_labels</code>).
 	</p>
 
 	<div class="docs-next">

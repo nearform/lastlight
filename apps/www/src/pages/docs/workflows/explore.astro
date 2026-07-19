@@ -97,6 +97,11 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		This document captures architecture, key code excerpts, relevant patterns,
 		and what's unclear — it's the reference for all subsequent phases so they
 		don't have to re-explore the codebase from scratch.
+		In server mode (<code>buildAssets.location: server</code>), the workflow
+		posts a link to <code>explore-context.md</code> in the checklist update —
+		you can view or edit it directly in the dashboard's Assets view.
+		In repo mode (the default), the document stays local to the run and the
+		workflow notes the path instead.
 	</p>
 
 	<h3>2. Socratic questioning</h3>

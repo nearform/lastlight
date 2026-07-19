@@ -175,6 +175,13 @@ export interface AdminConfig {
    * environments where the scheduler isn't running (tests, CLI).
    */
   cronScheduler?: CronScheduler;
+  /**
+   * Fire a cron's workflow now (manual trigger — the "Run now" button + `lastlight
+   * cron trigger`). Wired in `src/index.ts` to the same runner the scheduler uses,
+   * so it drives the cron's real discovery + fan-out. Absent in environments
+   * without the runner (tests, CLI-only) → the trigger endpoint reports 503.
+   */
+  triggerCron?: (workflow: string, context: Record<string, unknown>) => Promise<void>;
   /** Slack OAuth config (optional — enables "Login with Slack" on dashboard) */
   slackOAuthClientId?: string;
   slackOAuthClientSecret?: string;
@@ -892,6 +899,7 @@ export function createAdminRoutes(
     const rawOffset = c.req.query("offset");
     const since = c.req.query("since") || undefined;
     const workflowName = c.req.query("workflow") || undefined;
+    const repo = c.req.query("repo") || undefined;
     const statusParam = c.req.query("status");
     const limit = Math.min(Math.max(parseInt(rawLimit ?? "20", 10) || 20, 1), 200);
     const offset = Math.max(parseInt(rawOffset ?? "0", 10) || 0, 0);
@@ -910,6 +918,7 @@ export function createAdminRoutes(
       offset,
       sinceIso: since,
       workflowName,
+      repo,
       statuses,
     });
     return c.json({ workflowRuns: runs, total });
@@ -1300,6 +1309,56 @@ export function createAdminRoutes(
     };
   }
 
+  // Repo-centric index for the dashboard's Repos tab: the union of the
+  // effective managed repos and every repo that has workflow-run activity (or
+  // stored artifacts), each annotated with its run count / last-activity /
+  // artifact-key count. Managed repos with no activity are included so the tab
+  // shows the full fleet; ordered newest-activity first, then name. Read-only —
+  // the server keeps returning global data (see issue #169).
+  app.get("/repos", async (c) => {
+    const managed = new Set(getManagedRepos());
+    const activity = new Map(
+      db.runs.distinctRepos().map((r) => [r.repo, r]),
+    );
+
+    // Fold in artifact-key counts (bounded scan — the tab is a browse view, not
+    // a report). A repo may have artifacts but no runs, so union it in too.
+    const artifactCounts = new Map<string, number>();
+    if (buildAssetStore) {
+      try {
+        const { repos } = await buildAssetStore.listRepos({ limit: 200 });
+        for (const r of repos) artifactCounts.set(r.slug, r.keyCount);
+      } catch {
+        /* store optional — degrade to run activity only */
+      }
+    }
+
+    const names = new Set<string>([
+      ...managed,
+      ...activity.keys(),
+      ...artifactCounts.keys(),
+    ]);
+
+    const repos = [...names]
+      .map((repo) => ({
+        repo,
+        managed: managed.has(repo),
+        runCount: activity.get(repo)?.runCount ?? 0,
+        lastRunAt: activity.get(repo)?.lastRunAt ?? null,
+        artifactKeyCount: artifactCounts.get(repo) ?? 0,
+      }))
+      .sort((a, b) => {
+        // Newest activity first; repos with no runs sink below active ones,
+        // then break ties alphabetically for a stable order.
+        if (a.lastRunAt && b.lastRunAt) return a.lastRunAt < b.lastRunAt ? 1 : -1;
+        if (a.lastRunAt) return -1;
+        if (b.lastRunAt) return 1;
+        return a.repo < b.repo ? -1 : 1;
+      });
+
+    return c.json({ repos });
+  });
+
   // List the repos that actually have stored artifacts (search + paginate).
   // This replaces the old config-driven repo picker, which showed nothing when
   // `managedRepos` was empty even though the store held artifacts.
@@ -1634,6 +1693,28 @@ export function createAdminRoutes(
       });
     }
     return c.json({ name, schedule: def.schedule, enabled: true });
+  });
+
+  // Fire a cron now, on demand (dashboard "Run now" / `lastlight cron trigger`).
+  // Fire-and-forget: a cron fans out one bounded workflow run per repo/PR, which
+  // can take minutes, so we return immediately and let it run in the background.
+  // Goes through the runner (not the scheduler's registered-job map), so it works
+  // even for crons that aren't registered — disabled ones, or the polling crons
+  // dropped when webhooks are live — which is exactly what manual testing needs.
+  // Bypasses the scheduler's per-job overlap guard (acceptable for a manual fire).
+  app.post("/crons/:name/trigger", (c) => {
+    const name = c.req.param("name");
+    const def = getCronWorkflows().find((d) => d.name === name);
+    if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
+    if (!config.triggerCron) {
+      return c.json({ error: "cron trigger not configured" }, 503);
+    }
+    // Same context shape the scheduler + toggle handler build.
+    const context = { repos: getManagedRepos(), ...def.context };
+    config.triggerCron(def.workflow, context).catch((err) => {
+      console.error(`[admin] cron trigger ${name} failed:`, err);
+    });
+    return c.json({ name, workflow: def.workflow, triggered: true });
   });
 
   return app;

@@ -227,7 +227,7 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
           thinking,
           profile,
           authFile,
-          sandboxEnv: agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`),
+          sandboxEnv: agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`, ctx.env.GIT_TOKEN),
           agentCwd: prov.agentCwd,
           skillDirs,
           webSearch: config.webSearch === true,

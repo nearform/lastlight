@@ -95,34 +95,43 @@ describe("git-auth — opt-in global writes use execFileSync safely", () => {
     }
   });
 
-  it("configureGitAuth writes the token to a 600-mode credentials file (no shell interp)", async () => {
+  it("configureGitAuth sets a github.com-scoped http.extraheader (no file, no token in URL)", async () => {
     const token = "ghs_testtoken123";
     mockFetchToken(token);
     await configureGitAuth(baseConfig);
 
-    const writeMock = vi.mocked(fs.writeFileSync);
-    expect(writeMock).toHaveBeenCalled();
-    const [path, contents, opts] = writeMock.mock.calls[0] as [string, string, { mode?: number }];
-    expect(typeof path).toBe("string");
-    expect(contents).toBe(`https://x-access-token:${token}@github.com\n`);
-    expect(opts?.mode).toBe(0o600);
+    // No credentials file is written any more.
+    expect(vi.mocked(fs.writeFileSync)).not.toHaveBeenCalled();
 
-    const credHelperCall = mockExecFileSync.mock.calls.find(
-      (c) => Array.isArray(c[1]) && (c[1] as string[]).includes("credential.helper")
+    const extraheaderCall = mockExecFileSync.mock.calls.find(
+      (c) => Array.isArray(c[1]) && (c[1] as string[]).includes("http.https://github.com/.extraheader"),
     );
-    expect(credHelperCall).toBeDefined();
-    const args = credHelperCall![1] as string[];
-    const valueArg = args[args.length - 1];
-    // Helper value is the non-shell `store --file=<path>` form (no `!f`,
-    // no quotes, no interpolation).
-    expect(valueArg).toMatch(/^store --file=/);
-    expect(valueArg).not.toContain("!f()");
-    expect(valueArg).not.toContain(token);
+    expect(extraheaderCall).toBeDefined();
+    const args = extraheaderCall![1] as string[];
+    expect(args.slice(0, 3)).toEqual(["config", "--global", "http.https://github.com/.extraheader"]);
+    const value = args[args.length - 1];
+    // Basic auth header — the raw token is base64'd, never present verbatim.
+    expect(value).toMatch(/^AUTHORIZATION: basic /);
+    expect(value).not.toContain(token);
+    const b64 = value.replace(/^AUTHORIZATION: basic /, "");
+    expect(Buffer.from(b64, "base64").toString("utf8")).toBe(`x-access-token:${token}`);
+    // No `credential.helper store` config any more.
+    const credHelperCall = mockExecFileSync.mock.calls.find(
+      (c) => Array.isArray(c[1]) && (c[1] as string[]).includes("credential.helper"),
+    );
+    expect(credHelperCall).toBeUndefined();
   });
 
-  it("configureGitAuth refuses tokens containing characters outside [A-Za-z0-9_-]", async () => {
-    mockFetchToken('ghs_evil";rm -rf /;"');
-    await expect(configureGitAuth(baseConfig)).rejects.toThrow(/outside \[A-Za-z0-9_-\]/);
+  it("configureGitAuth tolerates tokens with URL-unsafe characters (./ /+/=)", async () => {
+    const token = "ghs_weird.tok/en+v=";
+    mockFetchToken(token);
+    await expect(configureGitAuth(baseConfig)).resolves.toMatchObject({ token });
+    const extraheaderCall = mockExecFileSync.mock.calls.find(
+      (c) => Array.isArray(c[1]) && (c[1] as string[]).includes("http.https://github.com/.extraheader"),
+    );
+    const value = (extraheaderCall![1] as string[]).at(-1)!;
+    const b64 = value.replace(/^AUTHORIZATION: basic /, "");
+    expect(Buffer.from(b64, "base64").toString("utf8")).toBe(`x-access-token:${token}`);
   });
 
   it("refreshGitAuth does not use execSync", async () => {

@@ -29,6 +29,28 @@
 # GHCR ref because the buildx docker-container driver resolves FROM from a
 # registry, not the local store. See .github/workflows/docker-publish.yml.
 ARG BASE_IMAGE=lastlight-sandbox-base:latest
+
+# ── agentic-pi build stage (kept in lockstep with sandbox.Dockerfile) ─────────
+# Vendor agentic-pi from the in-repo workspace rather than `npm install -g`ing
+# the published tarball — see sandbox.Dockerfile for the full rationale (the npm
+# path ignored the lockfile and let a caret transitive drift into prod). Building
+# from the workspace pins the whole tree to what CI tested.
+FROM node:24-slim AS agentic-pi-build
+# node:24 matches the sandbox base's runtime Node (node:24-slim), so any native
+# deps compile for the ABI agentic-pi actually runs under.
+# python3/make/g++ so optional native deps (e.g. ssh2's cpu-features, pulled in
+# transitively via gondolin) compile instead of erroring out of the install.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+WORKDIR /repo
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json tsconfig.base.json ./
+COPY packages/agentic-pi/package.json packages/agentic-pi/package.json
+RUN pnpm install --frozen-lockfile --filter agentic-pi...
+COPY packages/agentic-pi/ packages/agentic-pi/
+RUN pnpm --filter agentic-pi build \
+ && pnpm --filter agentic-pi deploy --prod /bundle
+
 FROM ${BASE_IMAGE}
 
 # The base image ends as root; be explicit — we need root to apt-get install,
@@ -117,23 +139,13 @@ RUN mkdir -p /opt/agent-browser \
 RUN node -e "const pw = require(process.env.LASTLIGHT_PLAYWRIGHT); if (!pw.chromium) throw new Error('playwright.chromium export missing'); console.log('playwright ok via ' + process.env.LASTLIGHT_PLAYWRIGHT);"
 
 # ── Thin tail (kept in lockstep with sandbox.Dockerfile) ─────────────────────
-# agentic-pi install from the committed pin + baked agent-context + entrypoint.
-# These sit ABOVE the Chromium layers so an agent-context/agentic-pi change
-# doesn't re-download the browser. See sandbox.Dockerfile for the full rationale.
-COPY apps/server/sandbox/agentic-pi.pin /tmp/agentic-pi.pin
-RUN version=$(sed -n '1p' /tmp/agentic-pi.pin) \
- && expected=$(sed -n '2p' /tmp/agentic-pi.pin) \
- && echo "Installing agentic-pi@${version} (${expected})" \
- && curl -fsSL "https://registry.npmjs.org/agentic-pi/-/agentic-pi-${version}.tgz" -o /tmp/agentic-pi.tgz \
- && actual="sha512-$(node -e "const c=require('crypto'),f=require('fs');process.stdout.write(c.createHash('sha512').update(f.readFileSync('/tmp/agentic-pi.tgz')).digest('base64'))")" \
- && if [ "$actual" != "$expected" ]; then \
-      echo "agentic-pi tarball integrity mismatch:" >&2; \
-      echo "  expected: $expected" >&2; \
-      echo "  actual:   $actual" >&2; \
-      exit 1; \
-    fi \
- && npm install -g --no-audit --no-fund /tmp/agentic-pi.tgz \
- && rm /tmp/agentic-pi.tgz /tmp/agentic-pi.pin
+# Vendored agentic-pi bundle + baked agent-context + entrypoint. These sit ABOVE
+# the Chromium layers so an agent-context/agentic-pi change doesn't re-download
+# the browser (the COPY is content-addressed on the bundle). See
+# sandbox.Dockerfile for the full rationale.
+COPY --from=agentic-pi-build /bundle /opt/agentic-pi
+RUN chmod +x /opt/agentic-pi/dist/cli.js \
+ && ln -sf /opt/agentic-pi/dist/cli.js /usr/local/bin/agentic-pi
 
 # Agent context (baked at /app/ — entrypoint cats into workspace/AGENTS.md)
 COPY apps/server/agent-context/ /app/agent-context/

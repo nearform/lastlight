@@ -506,18 +506,15 @@ export function finalizeFromRunResult(
   // agent_end. Without this check the run would map to "success" and the
   // workflow would silently advance with no output. See message scan below.
   const agentError = extractAgentError(result);
-  let stopReason = agentError?.stopReason ?? mapStopReason(result);
-
-  // Truncation guard. A run that *would* map to "success" but whose final
-  // assistant turn ended on a tool call was cut off mid-task: the agent
-  // asked for a tool and the loop stopped before it could read the result
-  // and synthesize an answer (pi hit its internal step cap — agentic-pi
-  // v0.2.7 exposes no maxSteps knob to lift it). In that state `finalText`
-  // is the agent's "let me just check X" preamble, NOT an answer. Reclassify
-  // as a failure so the workflow fires `on_failure` instead of delivering
-  // the fragment as if it were the result.
-  const truncated = stopReason === "success" && !agentError && endedOnToolCall;
-  if (truncated) stopReason = "error_truncated";
+  const mappedStopReason = agentError?.stopReason ?? mapStopReason(result);
+  const stopReason = reclassifySuccess(mappedStopReason, {
+    hasAgentError: !!agentError,
+    endedOnToolCall,
+    finalText: result.finalText,
+  });
+  // `truncated` == cut off mid-tool-call (see reclassifySuccess) — drives the
+  // step-limit message below.
+  const truncated = stopReason === "error_truncated";
   const success = stopReason === "success";
   const truncationMessage =
     "Agent stopped mid-task before producing a final answer (hit the agent " +
@@ -577,7 +574,7 @@ export function finalizeFromRunResult(
     // `unknown` means the agent exited cleanly but emitted no final text and no
     // agent_end event — the bare word is opaque in the dashboard, so spell it out.
     (stopReason === "unknown"
-      ? "agent produced no output (no final text, no agent_end)"
+      ? "agent produced no final answer (empty completion — no usable output)"
       : stopReason);
   if (!success || accountError) {
     if (accountError) console.error(`  [executor] Account error: ${errorText}`);
@@ -608,6 +605,37 @@ export function mapStopReason(result: RunResult): string {
   if (!result.ok) return `error_exit_${result.exitCode}`;
   if (result.agentEnded || result.finalText.length > 0) return "success";
   return "unknown";
+}
+
+/**
+ * Reclassify a would-be "success" that produced no usable answer. `mapStopReason`
+ * maps a terminal `agent_end` to "success" on its own — but an `agent_end`
+ * (including agentic-pi's *synthesized* backstop, emitted when Pi resolves on an
+ * empty completion) can arrive with no final text at all. Two degenerate shapes
+ * hide behind that "success"; catch both so a run with no answer fails instead
+ * of passing green with empty output:
+ *
+ *   - **Cut off mid-tool-call** (`endedOnToolCall`) — Pi hit its internal step
+ *     cap right after requesting a tool; `finalText` is a "let me check X"
+ *     preamble, not an answer. → `error_truncated` (hard).
+ *   - **Empty completion** — a terminal `agent_end`, NOT mid-tool-call, whose
+ *     final answer is empty. The context-rot failure: the agent buries itself in
+ *     tool output (e.g. giant lockfile file-lists in a dependabot sweep) and its
+ *     final turn comes back empty. → `unknown` (soft: a plain phase still fails,
+ *     but a loop can retry). This is the generic backstop behind per-workflow
+ *     postconditions like `on_output.requires_marker`.
+ *
+ * Anything with a real answer, a real agent error, or an already-non-success
+ * reason passes through untouched.
+ */
+export function reclassifySuccess(
+  stopReason: string,
+  opts: { hasAgentError: boolean; endedOnToolCall: boolean; finalText: string },
+): string {
+  if (stopReason !== "success" || opts.hasAgentError) return stopReason;
+  if (opts.endedOnToolCall) return "error_truncated";
+  if (opts.finalText.trim().length === 0) return "unknown";
+  return stopReason;
 }
 
 /**

@@ -512,3 +512,81 @@ describe("listActive includes queued", () => {
     expect(active).toHaveLength(3);
   });
 });
+
+describe("repo-scoped queries", () => {
+  it("list({ repo }) returns only that repo's runs, with the post-filter total", () => {
+    makeRun({ repo: "acme/api" });
+    makeRun({ repo: "acme/api" });
+    makeRun({ repo: "acme/web" });
+    makeRun({ repo: undefined }); // repo-less run must not leak in
+
+    const { runs, total } = db.runs.list({ repo: "acme/api" });
+    expect(total).toBe(2);
+    expect(runs).toHaveLength(2);
+    expect(runs.every((r) => r.repo === "acme/api")).toBe(true);
+
+    // The filter composes with pagination.
+    const page = db.runs.list({ repo: "acme/api", limit: 1 });
+    expect(page.total).toBe(2);
+    expect(page.runs).toHaveLength(1);
+  });
+
+  it("distinctRepos() groups by repo with run counts, newest activity first", () => {
+    makeRun({ repo: "acme/web", startedAt: "2026-01-01T00:00:00.000Z" });
+    makeRun({ repo: "acme/api", startedAt: "2026-02-01T00:00:00.000Z" });
+    makeRun({ repo: "acme/api", startedAt: "2026-03-01T00:00:00.000Z" });
+    makeRun({ repo: undefined }); // excluded — no repo
+
+    const repos = db.runs.distinctRepos();
+    expect(repos.map((r) => r.repo)).toEqual(["acme/api", "acme/web"]);
+    const api = repos.find((r) => r.repo === "acme/api")!;
+    expect(api.runCount).toBe(2);
+    expect(api.lastRunAt).toBe("2026-03-01T00:00:00.000Z");
+  });
+
+  it("distinctRepos() qualifies a bare repo with its owner column", () => {
+    // The real create path stores repo BARE + owner separately; distinctRepos
+    // must recompose `owner/repo` so it aligns with managedRepos / artifact
+    // slugs in the /repos union (no bare-vs-qualified duplicate rows).
+    makeRun({ owner: "nearform", repo: "drizzle-cube-help", startedAt: "2026-04-01T00:00:00.000Z" });
+    const repos = db.runs.distinctRepos();
+    expect(repos.map((r) => r.repo)).toContain("nearform/drizzle-cube-help");
+  });
+
+  it("owner round-trips through create → list, and the list filter accepts owner/repo", () => {
+    makeRun({ owner: "nearform", repo: "lastlight-flue", issueNumber: 2 });
+    makeRun({ owner: "other", repo: "lastlight-flue" }); // same bare repo, different owner
+
+    // owner surfaces on the list payload (which omits `context`).
+    const all = db.runs.list();
+    const flue = all.runs.find((r) => r.owner === "nearform" && r.repo === "lastlight-flue");
+    expect(flue).toBeTruthy();
+
+    // A qualified filter matches only the right owner; a bare filter matches both.
+    expect(db.runs.list({ repo: "nearform/lastlight-flue" }).total).toBe(1);
+    expect(db.runs.list({ repo: "lastlight-flue" }).total).toBe(2);
+  });
+});
+
+describe("migrate() owner backfill", () => {
+  it("backfills owner from context.owner for pre-migration rows", () => {
+    // Simulate an old DB: a row whose owner lives only in the context JSON.
+    const raw = new Database(":memory:");
+    migrate(raw);
+    raw.exec(`ALTER TABLE workflow_runs DROP COLUMN owner`);
+    raw
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_name, trigger_id, repo, current_phase, status, context, started_at, updated_at)
+         VALUES ('r1', 'build', 'nearform/lastlight#1', 'lastlight', 'phase_0', 'succeeded', ?, '2026-01-01', '2026-01-01')`,
+      )
+      .run(JSON.stringify({ owner: "nearform" }));
+
+    // Re-running migrate() adds the column and backfills from context.owner.
+    migrate(raw);
+    const row = raw.prepare(`SELECT owner FROM workflow_runs WHERE id = 'r1'`).get() as {
+      owner: string | null;
+    };
+    expect(row.owner).toBe("nearform");
+    raw.close();
+  });
+});

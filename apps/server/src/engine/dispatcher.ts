@@ -73,7 +73,7 @@ export async function dispatch(
   envelope: EventEnvelope,
   deps: DispatchDeps,
 ): Promise<DispatchOutcome> {
-  const route = await (deps.route ?? routeEvent)(envelope, { db: deps.db });
+  const route = await (deps.route ?? routeEvent)(envelope, { db: deps.db, github: deps.github });
 
   if (route.action === "ignore") {
     return { kind: "ignored", reason: route.reason };

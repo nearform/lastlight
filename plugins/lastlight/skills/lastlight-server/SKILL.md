@@ -37,8 +37,10 @@ Ask for each of these (don't guess). Group the questions; explain what each is f
 - **GitHub App** — App ID, Installation ID, and the path to the App's private
   key `.pem` file. (If they don't have a GitHub App yet, point them at GitHub →
   Settings → Developer settings → GitHub Apps; it needs webhook + repo
-  contents/issues/pull-requests permissions. They install it on their repos to
-  get the Installation ID.)
+  contents/issues/pull-requests/checks permissions, plus **workflows** (read &
+  write) so it can merge/push PRs that touch `.github/workflows/` — e.g.
+  dependency PRs bumping GitHub Actions versions. They install it on their repos
+  to get the Installation ID.)
 - **Domain** — the public hostname for webhooks/dashboard, e.g.
   `lastlight.example.com`. Ask whether to use the bundled **Caddy** for
   automatic TLS (default yes). The GitHub App webhook URL will be

@@ -301,6 +301,7 @@ export async function runSimpleWorkflow(
       id: workflowId,
       workflowName,
       triggerId,
+      owner,
       repo,
       issueNumber: issueNumber ?? prNumber,
       currentPhase: definition.phases[0]?.name || "phase_0",

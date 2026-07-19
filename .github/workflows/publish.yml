@@ -5,11 +5,16 @@ name: Publish release
 # chained jobs (`images` needs `checks`, `npm` needs `images`).
 #
 # npm publishing is AUTOMATED here again (reversing migration decision 15): the
-# `npm` job publishes the workspace's six public packages (workflow-engine →
-# shared → agentic-pi → core → cli → evals) via npm OIDC TRUSTED PUBLISHING — no NPM_TOKEN
+# `npm` job publishes FIVE of the workspace's public packages (workflow-engine →
+# shared → core → cli → evals) via npm OIDC TRUSTED PUBLISHING — no NPM_TOKEN
 # secret, provenance attestations on. It needs `id-token: write` (set on the job)
 # and a trusted-publisher entry configured on npmjs.com for EACH package (repo
-# nearform/lastlight, workflow publish.yml). Images-before-npm is enforced by
+# nearform/lastlight, workflow publish.yml). `agentic-pi` is DELIBERATELY NOT
+# published here — it has its own independent npm stream (`agentic-pi-npm.yml`,
+# fired by an `agentic-pi-v*` tag), and its trusted-publisher entry is scoped to
+# that workflow, so publishing it from here would 403/404. The sandbox vendors
+# agentic-pi from the workspace regardless, so its npm publish is decoupled from
+# this release. Images-before-npm is enforced by
 # job-chaining (`npm` needs `images`): the CLI only reaches npm once the
 # `:vX.Y.Z` images it tells hosts to pull already exist in GHCR — otherwise a
 # `npm i -g lastlight@X.Y.Z && server update` in the gap would fail the pull.
@@ -186,7 +191,10 @@ jobs:
         run: |
           set -euo pipefail
           out="$(mktemp -d)"
-          for pkg in lastlight-workflow-engine lastlight-shared agentic-pi lastlight-core lastlight lastlight-evals; do
+          # NOTE: agentic-pi is intentionally absent — it publishes via its own
+          # `agentic-pi-npm.yml` stream (trusted-publisher scoped to that
+          # workflow). See the header comment.
+          for pkg in lastlight-workflow-engine lastlight-shared lastlight-core lastlight lastlight-evals; do
             echo "::group::publish $pkg"
             ver="$(pnpm --filter "$pkg" exec -- node -p "require('./package.json').version" | tail -1)"
             # Skip versions already on npm so a release that bumps only a SUBSET of

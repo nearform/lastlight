@@ -1,6 +1,11 @@
 {
   "name": "lastlight-workflow-engine",
-  "version": "0.1.0",
+  "version": "0.1.2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nearform/lastlight.git",
+    "directory": "packages/workflow-engine"
+  },
   "description": "Port-driven workflow engine extracted from Last Light — DAG scheduler, phase executor, DSL/schema, template + loop constructs.",
   "type": "module",
   "main": "dist/index.js",

@@ -1,50 +1,48 @@
 /**
- * git credential-store credentials file management.
+ * GitHub HTTP auth via git's `http.<url>.extraheader` config.
  *
- * Ported from mcp-github-app/src/index.js. Same shape, same guards.
- * The credentials file is shared with the sandbox entrypoint and any agent
- * git clone — we just rewrite the file with a fresh token when called.
+ * Replaces the old credentials-file approach. Instead of writing
+ * `https://x-access-token:${token}@github.com` to a mode-600 file and pointing
+ * `credential.helper store` at it — which needed a charset guard because the
+ * token was interpolated into a URL, and left a secret on disk — we inject a
+ * github.com-scoped `Authorization: Basic` header via `GIT_CONFIG_*` env on the
+ * git children we spawn. Nothing touches disk, and the token can carry any
+ * character GitHub returns (`.`/`/`/`+`/`=`) because it rides base64 inside an
+ * env value, never a URL.
+ *
+ * In the Last Light sandbox this is redundant — the harness already sets the
+ * same extraheader in the ambient env — but it makes a standalone-on-host run
+ * self-sufficient with nothing on disk. `git config --get-urlmatch` scopes the
+ * header to github.com only, so the token never leaks to other hosts.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+/** Git config key carrying the github.com-scoped Authorization header. */
+export const GITHUB_EXTRAHEADER_KEY = "http.https://github.com/.extraheader";
 
-/**
- * Conservative shape check on a GitHub installation token. The credentials
- * file contains `https://x-access-token:${token}@github.com`, so any `@`,
- * `:`, `/`, or newline in the token would break URL parsing or inject extra
- * entries. Real tokens are alphanumeric (plus `_-`); this catches any future
- * format change before we write a malformed file.
- */
-export function assertSafeToken(token: unknown): asserts token is string {
-  if (typeof token !== "string" || !/^[A-Za-z0-9_-]+$/.test(token)) {
-    throw new Error(
-      "Refusing to embed a token containing characters outside [A-Za-z0-9_-] into git credentials file",
-    );
-  }
+/** Base64 of `x-access-token:<token>` — the Basic-auth credential payload. */
+export function githubBasicAuthB64(token: string): string {
+  return Buffer.from(`x-access-token:${token}`).toString("base64");
+}
+
+/** Full `http.extraheader` value: `AUTHORIZATION: basic <b64>`. */
+export function githubExtraheaderValue(token: string): string {
+  return `AUTHORIZATION: basic ${githubBasicAuthB64(token)}`;
 }
 
 /**
- * Resolve the credentials-file path. Mirrors lastlight's LASTLIGHT_GIT_CREDENTIALS
- * convention but accepts an explicit override too.
+ * `GIT_CONFIG_*` env fragment that authenticates github.com git operations for
+ * any child spawned with it. Also re-asserts `safe.directory=*` so it composes
+ * cleanly over the harness's ambient `GIT_CONFIG_*` (a naive merge would
+ * otherwise clobber `GIT_CONFIG_COUNT` and drop that entry) — the values match
+ * what the sandbox already sets, so overwriting is a no-op there and correct
+ * standalone. Merge over `process.env` for the child, never into it.
  */
-export function credentialsFilePath(envVar = "LASTLIGHT_GIT_CREDENTIALS"): string {
-  const raw =
-    (process.env[envVar] || "").trim() ||
-    join(process.env.HOME || "/tmp", ".lastlight-git-credentials");
-  if (/\s/.test(raw)) {
-    throw new Error(`${envVar} contains whitespace; git's helper-arg parsing would break: ${raw}`);
-  }
-  return raw;
-}
-
-/**
- * Write the credentials file. Mode 600, single line, no shell anywhere.
- */
-export function writeCredentialsFile(token: string): string {
-  assertSafeToken(token);
-  const credPath = credentialsFilePath();
-  mkdirSync(dirname(credPath), { recursive: true, mode: 0o700 });
-  writeFileSync(credPath, `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
-  return credPath;
+export function gitAuthEnv(token: string): Record<string, string> {
+  return {
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "safe.directory",
+    GIT_CONFIG_VALUE_0: "*",
+    GIT_CONFIG_KEY_1: GITHUB_EXTRAHEADER_KEY,
+    GIT_CONFIG_VALUE_1: githubExtraheaderValue(token),
+  };
 }

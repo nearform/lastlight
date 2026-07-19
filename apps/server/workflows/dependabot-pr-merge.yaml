@@ -3,16 +3,23 @@ name: dependabot-pr-merge
 description: |
   Assess an already-GREEN dependency-update PR (Dependabot / Renovate) and, when
   the change is trivial, enable GitHub auto-merge (squash) so it lands once its
-  checks pass. The companion to dependabot-ci-fix: that one repairs a RED bump
-  and pushes a fix; this one merges a GREEN one that needs no fix at all.
+  checks pass. When a trivial bump is merely behind the base branch or has a
+  lockfile conflict, it asks the bot that opened the PR to rebase/recreate its
+  own branch (@dependabot rebase|recreate, or Renovate's rebase label) and enables
+  auto-merge to land it once green — it never pushes or rebases itself. The
+  companion to dependabot-ci-fix: that one repairs a RED bump and pushes a fix;
+  this one merges a GREEN one that needs no fix at all.
 
-  Triggered by:
+  Always runs against a SINGLE PR (`{{prNumber}}`). Triggered by:
     - pr.checks_passed webhook (a check_suite completed with a success
       conclusion on a Dependabot/Renovate PR) → routed here by the router's
       deterministic intent lookup (src/engine/router.ts + this file's
-      `classification`). Runs against the single PR (`{{prNumber}}`).
-    - the cron-dependabot-merge scan (context `mode: scan`, no `prNumber`) which
-      sweeps every managed repo for open dependency PRs and assesses each.
+      `classification`).
+    - the cron-dependabot-merge backstop: the cron runner finds the green
+      dependency PRs across managed repos IN CODE
+      (src/cron/dependabot-discovery.ts) and fans out one run per PR — same
+      single-PR shape as the webhook. (This replaced an agent `mode: scan`
+      sweep that assessed a whole repo at once and overflowed on busy repos.)
 classification:
   intent: dependabot-pr-merge
   description: |
@@ -21,24 +28,42 @@ classification:
     <pkg>") whose CI checks have PASSED and which may be safe to auto-merge with
     no code change. Choose this ONLY for a passing dependency-bump PR that needs
     no fix; prefer DEPENDABOTCIFIX when a dependency PR's checks have FAILED, and
-    REVIEW for a normal (non-dependency) PR.
+    REVIEW for a normal (non-dependency) PR. Also choose it when a maintainer's
+    comment asks the bot to handle/look at/land such a PR and `PR CHECKS` is
+    `passing` (with a `PR AUTHOR` of dependabot[bot]/renovate[bot]) — but keep
+    REVIEW when they explicitly ask for a review.
   examples:
     - 'PR "Bump lodash from 4.17.20 to 4.17.21" by dependabot[bot] — its CI checks have passed. → INTENT: DEPENDABOTPRMERGE, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - 'PR "chore(deps): bump actions/checkout from 3 to 4" by renovate[bot] — its CI checks have passed. → INTENT: DEPENDABOTPRMERGE, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    - 'PR AUTHOR: renovate[bot], PR CHECKS: passing, COMMENT: "@bot can you look at this?" → INTENT: DEPENDABOTPRMERGE, REPO: NONE, ISSUE: NONE, REASON: NONE'
 
 phases:
   # Single phase. Runs under this workflow's repo-write profile, so agentic-pi's
-  # `github_enable_auto_merge` tool is available. Conservative by design: enable
+  # `github_enable_auto_merge` (+ `github_add_issue_comment` / `github_add_labels`
+  # for the rebase nudge) tools are available. Conservative by design: enable
   # auto-merge ONLY for trivial, non-functional dependency bumps; anything with
-  # runtime-logic impact is left for a human. No repo checkout — the agent reads
-  # each diff via the `github_get_pull_request_diff` tool.
+  # runtime-logic impact is left for a human. No repo checkout — the agent
+  # inspects the ONE PR via `github_list_pull_request_files` (file list + line
+  # counts) and skips lockfile diffs, only pulling `github_get_pull_request_diff`
+  # for a small non-lockfile source change. It never pushes or rebases itself: a
+  # trivial PR that is `behind`/`dirty` is nudged to rebase via the bot's own
+  # command (@dependabot rebase|recreate) or Renovate's rebase label, with
+  # auto-merge enabled to land it once GitHub re-runs the checks green. Because
+  # each run assesses a single PR, its context is bounded — the overflow that
+  # killed the old whole-repo scan can't happen. See prompts/dependabot-pr-merge.md.
   - name: assess
     label: Assess & maybe auto-merge
     prompt: prompts/dependabot-pr-merge.md
     # `code-review`: the finding-tier / what-to-check rubric for reading a diff.
     skill: code-review
     model: "{{models.review}}"
+    # Postcondition: the assess run MUST sign off with this marker (see the
+    # prompt's OUTPUT contract). Its absence means the agent inspected files then
+    # stopped without reaching a verdict or acting — a silent no-op that used to
+    # report a false green (e.g. after a context-overflow retry). Fail loudly.
+    on_output:
+      requires_marker: "ASSESSMENT_COMPLETE"
     messages:
-      on_start: "Assessing dependency PR(s) for auto-merge..."
-      on_success: "Assessed dependency PR(s) — auto-merge enabled for trivial, green updates; anything functional left for review."
-      on_failure: "Couldn't assess the dependency PR(s) — leaving for a human."
+      on_start: "Assessing dependency PR for auto-merge..."
+      on_success: "Assessed the dependency PR — auto-merge enabled if it's a trivial, green update; anything functional left for review."
+      on_failure: "Couldn't assess the dependency PR — leaving for a human."
