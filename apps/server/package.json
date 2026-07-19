@@ -1,6 +1,6 @@
 {
   "name": "lastlight-core",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "GitHub repository maintenance agent — Agent SDK harness",
   "type": "module",
   "main": "dist/index.js",
