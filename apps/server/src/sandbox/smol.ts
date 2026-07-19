@@ -278,11 +278,15 @@ export class SmolSandbox {
     if (!PATH_RE.test(model)) {
       throw new Error(`Refusing to pass model "${model}" — bad charset`);
     }
-    // Passed as a single argv token each (no shell), so `KEY=VALUE` is literal.
+    // Git identity + auth env reaches the agent via real `machine exec -e KEY=VALUE`
+    // flags — NOT `agentic-pi --sandbox-env`, which is a no-op here: agentic-pi runs
+    // `--sandbox none`, and its buildSandbox only honours env on the gondolin backend.
+    // Mirror runCommand (values travel as argv, so no shell re-parse).
+    const envFlags: string[] = [];
     for (const [k, v] of Object.entries(opts?.sandboxEnv ?? {})) {
       if (!ENV_KEY_RE.test(k)) throw new Error(`Refusing sandbox-env key "${k}" — bad charset`);
       if (/[\n\r]/.test(v)) throw new Error(`Refusing sandbox-env value for "${k}" — contains newline`);
-      piArgs.push("--sandbox-env", `${k}=${v}`);
+      envFlags.push("-e", `${k}=${v}`);
     }
 
     const workdir = opts?.agentCwd ?? SMOL_WORKSPACE_DIR;
@@ -294,7 +298,7 @@ export class SmolSandbox {
     const argv = [
       "machine", "exec", "--name", info.machineName,
       "-w", workdir, "-i",
-      ...secretFlags,
+      ...envFlags, ...secretFlags,
       "--", ...piArgs,
     ];
 

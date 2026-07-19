@@ -383,16 +383,20 @@ export class DockerSandbox {
     if (!/^[A-Za-z0-9/_.-]+$/.test(model)) {
       throw new Error(`Refusing to pass model "${model}" — bad charset`);
     }
+    // Git identity + auth env (and anything else the orchestrator passes) reaches
+    // the agent via real `docker exec -e KEY=VALUE` argv flags — NOT `agentic-pi
+    // --sandbox-env`, which is a no-op here: agentic-pi runs `--sandbox none`, and
+    // its buildSandbox only honours env on the gondolin backend. Mirror runCommand
+    // (values travel as argv, so no shell re-parse — reject only newlines).
+    const envFlags: string[] = [];
     for (const [k, v] of Object.entries(opts?.sandboxEnv ?? {})) {
       if (!/^[A-Z_][A-Z0-9_]*$/.test(k)) {
         throw new Error(`Refusing sandbox-env key "${k}" — must be UPPER_SNAKE`);
       }
-      // Values are shell-quoted below. Reject newlines and the closing
-      // quote (single-quote) defensively — both would break the `'…'` wrap.
-      if (/[\n\r']/.test(v)) {
-        throw new Error(`Refusing sandbox-env value for "${k}" — contains newline or quote`);
+      if (/[\n\r]/.test(v)) {
+        throw new Error(`Refusing sandbox-env value for "${k}" — contains newline`);
       }
-      extraArgs.push("--sandbox-env", `${k}='${v}'`);
+      envFlags.push("-e", `${k}=${v}`);
     }
 
     const cmd = [
@@ -413,7 +417,7 @@ export class DockerSandbox {
     }
     // -i connects stdin so the prompt can be written to the container process.
     // Run as agent user so workspace writes land with the right ownership.
-    const args = ["exec", "-i", "--user", "agent", "-w", workdir, info.containerName, "sh", "-c", cmd];
+    const args = ["exec", "-i", "--user", "agent", "-w", workdir, ...envFlags, info.containerName, "sh", "-c", cmd];
 
     // The structured event stream is consumed line-by-line via `onLine` and
     // mirrored to the AgenticShim, which writes envelope jsonl to

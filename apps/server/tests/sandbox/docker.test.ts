@@ -113,6 +113,31 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
     expect(shCmd).not.toContain("--no-file-search");
     expect(shCmd).not.toContain("test prompt");
   });
+
+  it("forwards git-identity sandboxEnv via docker exec -e (reaches the agent's git)", async () => {
+    const sandboxEnv = {
+      GIT_AUTHOR_NAME: "nearform-lastlight[bot]",
+      GIT_AUTHOR_EMAIL: "nearform-lastlight[bot]@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "nearform-lastlight[bot]",
+      GIT_COMMITTER_EMAIL: "nearform-lastlight[bot]@users.noreply.github.com",
+    };
+    const runPromise = manager.runAgent("task-001", "test prompt", { sandboxEnv });
+    process.nextTick(() => fakeChild.emit("close", 0));
+    await runPromise;
+
+    const dockerArgs = mockSpawn.mock.calls[0][1] as string[];
+    // Real `-e KEY=VALUE` argv flags — the only channel that reaches the agent
+    // process under `--sandbox none` (agentic-pi's --sandbox-env is a no-op there).
+    for (const [k, v] of Object.entries(sandboxEnv)) {
+      const i = dockerArgs.indexOf("-e");
+      expect(i).toBeGreaterThanOrEqual(0);
+      expect(dockerArgs).toContain(`${k}=${v}`);
+    }
+    // Must NOT ride inside the agentic-pi command as --sandbox-env (dropped there).
+    const shCmd = dockerArgs[dockerArgs.length - 1];
+    expect(shCmd).not.toContain("--sandbox-env");
+    expect(shCmd).not.toContain("GIT_AUTHOR_NAME");
+  });
 });
 
 describe("DockerSandbox.create — shared package cache (issue #107)", () => {

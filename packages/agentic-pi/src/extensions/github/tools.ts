@@ -92,7 +92,7 @@ export function buildGitHubTools(
 
     tool(
       "github_clone_repo",
-      "Clone a repository with GitHub App authentication. Sets up credential helper and bot identity automatically. git push/pull/fetch will just work after cloning.",
+      "Clone a repository with GitHub App authentication. Sets up the credential helper automatically; commit identity comes from the ambient git config/environment. git push/pull/fetch will just work after cloning.",
       Type.Object({
         owner: Type.String({ description: "Repository owner" }),
         repo: Type.String({ description: "Repository name" }),
@@ -119,14 +119,11 @@ export function buildGitHubTools(
           timeout: 120_000,
           env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
         });
-        execFileSync("git", ["-C", dest, "config", "user.name", "last-light[bot]"], {
-          stdio: "pipe",
-        });
-        execFileSync(
-          "git",
-          ["-C", dest, "config", "user.email", "last-light[bot]@users.noreply.github.com"],
-          { stdio: "pipe" },
-        );
+        // Deliberately do NOT write a repo-local user.name/user.email. Commit
+        // identity comes from whatever is configured in the environment — the
+        // ambient GIT_AUTHOR_*/GIT_COMMITTER_* env the harness injects (so
+        // commits are attributed to the configured bot login), or the operator's
+        // own global git config for standalone use. No hardcoded default.
         return {
           cloned: `${owner}/${repo}`,
           path: dest,
