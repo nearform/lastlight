@@ -95,9 +95,15 @@ Rules:
   release (`v0.16.0` was the pre-migration tag; the CLI's first published
   version must exceed it — e.g. `0.17.0`).
 
-Bump a package with `pnpm --filter <name> version <patch|minor|major>
+Bump a package with `pnpm --filter <name> exec npm version <patch|minor|major>
 --no-git-tag-version` (or edit `package.json` directly), then re-run
 `pnpm install --lockfile-only` so `pnpm-lock.yaml` reflects the new versions.
+
+> **Do NOT use `pnpm --filter <name> version …`** — pnpm reads the bare word
+> `version` as an npm **script** name, finds none, and aborts with "None of the
+> selected packages has a 'version' script" *without bumping anything*. Route it
+> through `exec npm version` (runs in the package dir) or edit `package.json`
+> directly.
 
 ## Publish order (dependency order)
 
@@ -195,9 +201,11 @@ Run on a clean `main`, up to date with origin.
    lockstep, refresh the lockfile, and commit as a dedicated release commit:
 
    ```bash
-   # bump each changed package + its dependents (example: a core-only change)
-   pnpm --filter lastlight-core version minor --no-git-tag-version
-   pnpm --filter lastlight-evals version patch --no-git-tag-version   # picks up core
+   # bump each changed package + its dependents (example: a core-only change).
+   # NOTE: `exec npm version` — a bare `pnpm --filter … version` is read as a
+   # missing "version" SCRIPT and bumps nothing.
+   pnpm --filter lastlight-core exec npm version minor --no-git-tag-version
+   pnpm --filter lastlight-evals exec npm version patch --no-git-tag-version   # picks up core
    # edit plugins/lastlight/.claude-plugin/plugin.json if the CLI bumped
    pnpm install --lockfile-only
    git add -A
