@@ -6,9 +6,9 @@ import {
   FolderOpen,
   Search,
   GitBranch,
-  GitCommit,
+  GitCommitHorizontal,
   GitPullRequest,
-  Github,
+  GitFork,
   MessageSquare,
   Globe,
   Download,
@@ -123,15 +123,15 @@ const ICON_BY_TOOL: Record<string, LucideIcon> = {
   websearch: Search,
   task: Bot,
   skill_view: BookOpen,
-  commit: GitCommit,
+  commit: GitCommitHorizontal,
   add_issue_comment: MessageSquare,
 };
 
 const GIT_ICON_HINTS: Array<[RegExp, LucideIcon]> = [
   [/pull_request|pr_/, GitPullRequest],
-  [/commit/, GitCommit],
+  [/commit/, GitCommitHorizontal],
   [/branch/, GitBranch],
-  [/repo|repository/, Github],
+  [/repo|repository/, GitFork],
   [/issue|comment/, MessageSquare],
 ];
 
@@ -148,7 +148,7 @@ export function iconForTool(toolName: string, family: ToolFamily): LucideIcon {
     for (const [re, Icon] of GIT_ICON_HINTS) {
       if (re.test(stripped)) return Icon;
     }
-    return Github;
+    return GitFork;
   }
 
   return FAMILY_VISUAL[family].Icon;

@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { BookOpen, Clock, Github, LogOut, Moon, Radio, Sun } from "lucide-react";
+import { BookOpen, Clock, GitFork, LogOut, Moon, Radio, Sun } from "lucide-react";
 import type { StreamStatus } from "../hooks/useSessionStream";
 import { useTheme } from "../hooks/useTheme";
 import { NearformLogo } from "./NearformLogo";
@@ -134,7 +134,7 @@ export function StatsHeader({
         title="GitHub issues"
         aria-label="Open GitHub issues in a new tab"
       >
-        <Github size={14} />
+        <GitFork size={14} />
       </a>
 
       <VersionPin />
