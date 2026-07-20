@@ -19,10 +19,19 @@
  *     `mergeable_state === "clean"` — GitHub reports the PR mergeable with all
  *     checks passing, the exact signal the per-PR run itself re-checks before a
  *     direct merge, so discovery and assessment agree on what green means.
- *   - RED (`discoverRedDependencyPrs`) → `dependabot-ci-fix`. "Red" is a SETTLED
- *     failing check conclusion (see GitHubClient.getChecksConclusion) — not
- *     `mergeable_state`, which reports a red PR as mergeable on repos with no
- *     *required* checks and can't tell "failing" from "still running".
+ *   - RED (`discoverRedDependencyPrs`) → `dependabot-ci-fix`. "Red" is any
+ *     dependency PR that can't merge on its own and that ci-fix can push a fix
+ *     for: a SETTLED failing check conclusion (see
+ *     GitHubClient.getChecksConclusion — `mergeable_state` alone can't tell
+ *     "failing" from "still running", and reports a red PR mergeable on repos
+ *     with no *required* checks), OR a `mergeable_state` of `behind` (needs a
+ *     base merge), `dirty` (merge conflict), or `blocked` (a required gate
+ *     unmet). ci-fix brings the branch up to date and, once its push turns the
+ *     checks green, the `pr.checks_passed` webhook hands off to the green sweep
+ *     for the merge. A `blocked` PR ci-fix can't unblock (e.g. awaiting a
+ *     required human review) is flagged `requires-human` so it stops recurring.
+ *     `clean` is the green sweep's job; `unstable`/`unknown` are deliberately
+ *     left for the real-time webhook or the next tick.
  *
  * Both sweeps SKIP any PR carrying the `requires-human` label — the terminal
  * flag the dependabot prompts apply when Last Light can't proceed automatically
@@ -72,6 +81,9 @@ export interface PrDiscoveryClient {
   ): Promise<"passing" | "failing" | "pending" | "none">;
 }
 
+/** Why the red sweep summoned a PR — rendered into the ci-fix prompt as `{{reason}}`. */
+export type RedReason = "checks-failing" | "behind" | "dirty" | "blocked";
+
 /** A dependency PR, shaped to match the `pr.checks_passed`/`pr.checks_failed` webhook context. */
 export interface DependencyPr {
   /** `owner/repo` full name — the shape `dispatchWorkflow` expects in `context.repo`. */
@@ -84,6 +96,13 @@ export interface DependencyPr {
    * green sweep leaves it undefined (the merge workflow has no checkout).
    */
   branch?: string;
+  /**
+   * Why the red sweep picked this PR (`checks-failing` | `behind` | `dirty` |
+   * `blocked`) — set ONLY by the red sweep, threaded into the ci-fix prompt so
+   * the agent knows whether it's fixing CI or just un-blocking a merge. The
+   * green sweep leaves it undefined.
+   */
+  reason?: RedReason;
 }
 
 /** Bot logins that open dependency-update PRs. */
@@ -116,6 +135,15 @@ export interface DiscoverOptions {
 }
 
 const DEFAULT_MAX_PER_REPO = 25;
+
+/**
+ * `mergeable_state` values that keep a PR from merging but that `dependabot-ci-fix`
+ * can act on: `behind` (merge the base in), `dirty` (resolve the conflict, almost
+ * always the lockfile), `blocked` (a required gate is unmet — ci-fix pushes any
+ * fix it can, else flags `requires-human`). `clean` is the green sweep's; `unstable`
+ * is caught via the checks conclusion; `unknown` is left for a later tick.
+ */
+const MERGE_BLOCKED_STATES = new Set<RedReason>(["behind", "dirty", "blocked"]);
 
 /** One repo's dependency-PR candidate, carried through the per-sweep filter. */
 interface Candidate {
@@ -206,9 +234,14 @@ export async function discoverGreenDependencyPrs(
 }
 
 /**
- * Find every settled-RED dependency PR across `repos` (`owner/repo` full names),
- * EXCLUDING any carrying the `requires-human` label. Contexts carry `branch`
- * (the PR head ref) so `dependabot-ci-fix` pre-clones the PR head. Per-repo /
+ * Find every RED dependency PR across `repos` (`owner/repo` full names) that
+ * `dependabot-ci-fix` can act on, EXCLUDING any carrying the `requires-human`
+ * label. A PR qualifies when its checks are settled-FAILING, OR its
+ * `mergeable_state` is `behind` / `dirty` / `blocked` (a merge it can't make on
+ * its own but ci-fix can push toward — see `MERGE_BLOCKED_STATES`). Failing CI
+ * takes precedence in the reported `reason` (there's a concrete build to fix).
+ * Contexts carry `branch` (the PR head ref) so `dependabot-ci-fix` pre-clones
+ * the PR head, and `reason` so its prompt knows why it was summoned. Per-repo /
  * per-candidate failures are logged and skipped, never fatal.
  */
 export async function discoverRedDependencyPrs(
@@ -222,20 +255,27 @@ export async function discoverRedDependencyPrs(
   for (const full of repos) {
     for (const c of await listDependencyCandidates(full, gh, maxPerRepo, opts.log)) {
       let conclusion: Awaited<ReturnType<PrDiscoveryClient["getChecksConclusion"]>>;
+      let mergeableState: string | undefined;
       try {
         // Query the exact commit we listed (headSha) so a mid-sweep push can't
         // make us read a newer commit's checks; fall back to the ref if absent.
         conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef);
+        mergeableState = (await gh.getPullRequest(c.owner, c.repo, c.number)).mergeable_state;
       } catch (err) {
         opts.log?.(
-          `[dependabot-discovery] ${c.full}#${c.number}: checks fetch failed — ${String(err)}`,
+          `[dependabot-discovery] ${c.full}#${c.number}: fetch failed — ${String(err)}`,
         );
         continue;
       }
-      // Only settled-failing PRs. `pending` (mid-flight) / `passing` / `none`
-      // are left for the webhook or the next tick.
-      if (conclusion === "failing") {
-        out.push({ repo: c.full, prNumber: c.number, title: c.title, branch: c.headRef });
+      // Settled-failing CI (fix the build), OR a mergeable_state ci-fix can push
+      // toward (behind/dirty/blocked). `passing`/`pending`/`none` checks with a
+      // `clean`/`unstable`/`unknown` state are left for the webhook or next tick.
+      const blockedByMerge =
+        mergeableState !== undefined && MERGE_BLOCKED_STATES.has(mergeableState as RedReason);
+      if (conclusion === "failing" || blockedByMerge) {
+        const reason: RedReason =
+          conclusion === "failing" ? "checks-failing" : (mergeableState as RedReason);
+        out.push({ repo: c.full, prNumber: c.number, title: c.title, branch: c.headRef, reason });
       }
     }
   }

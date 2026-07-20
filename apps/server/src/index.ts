@@ -748,6 +748,9 @@ async function main() {
         // Present only for the red sweep — `dispatchWorkflow` pre-clones this
         // head ref for dependabot-ci-fix's checkout (a PR_FIX_SHAPED_WORKFLOWS).
         ...(pr.branch ? { branch: pr.branch } : {}),
+        // Also red-sweep only — why it was summoned (checks-failing | behind |
+        // dirty | blocked), threaded into the ci-fix prompt as `{{reason}}`.
+        ...(pr.reason ? { reason: pr.reason } : {}),
       }));
       ({ dispatched, failures } = await fanOutContexts(workflowName, contexts, dispatchWorkflow));
     } else {

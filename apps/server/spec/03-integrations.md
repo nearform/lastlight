@@ -122,10 +122,16 @@ Two of the scheduled crons are **dependency-PR discovery backstops** for the
   finds green (`mergeable_state === "clean"`) dependency PRs and fans out
   `dependabot-pr-merge`.
 - `fix-red-dependency-prs` (`discover: red-dependency-prs`, daily 15:00) — finds
-  settled-red dependency PRs (a failing/timed-out check conclusion via
-  `GitHubClient.getChecksConclusion`, **not** `mergeable_state`, so it never
-  fires mid-flight) and fans out `dependabot-ci-fix` with the PR head `branch` so
-  the fix phase pre-clones the right ref.
+  dependency PRs that can't merge on their own and that `dependabot-ci-fix` can
+  push toward: a settled-red check conclusion (failing/timed-out via
+  `GitHubClient.getChecksConclusion`, so it never fires on a mid-flight suite),
+  **or** a `mergeable_state` of `behind` (needs a base merge), `dirty` (merge
+  conflict), or `blocked` (a required gate unmet). Failing CI wins the reported
+  `reason` (`checks-failing` | `behind` | `dirty` | `blocked`). It fans out
+  `dependabot-ci-fix` with the PR head `branch` (pre-clone) and the `reason`
+  (threaded into the prompt as `{{reason}}`). `clean` is the green sweep's;
+  `unstable` is covered by the checks conclusion; `unknown` is left for a later
+  tick.
 
 Both sweeps **skip any PR carrying the `requires-human` label** — the terminal
 flag the dependabot prompts apply when Last Light can't proceed (a functional

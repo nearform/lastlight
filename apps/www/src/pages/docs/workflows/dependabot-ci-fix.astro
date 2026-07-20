@@ -65,7 +65,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li><strong>GitHub webhook:</strong> a <code>check_suite.completed</code> event with a <code>failure</code> / <code>timed_out</code> conclusion (surfaced internally as <code>pr.checks_failed</code>). The router runs it through the intent classifier, which routes a recognised dependency-update PR here. Requires the GitHub App to subscribe to <strong>Check suite</strong> events (Checks: read).</li>
-		<li><strong>Cron backstop:</strong> a daily job (<code>fix-red-dependency-prs</code>, 15:00 — one hour after the green sweep) whose runner finds the <em>settled-red</em> Dependabot / Renovate PRs across managed repos <em>in code</em> (a failing/timed-out check conclusion, not <code>mergeable_state</code>, so it never fires while checks are still running) and fans out <strong>one bounded run per PR</strong> — the same single-PR shape as the webhook, carrying the PR head branch so the fix phase pre-clones the right ref. It runs <em>alongside</em> webhooks — a safety net for PRs that went red before boot or during a missed delivery. Per-PR runs dedup by (repo, PR).</li>
+		<li><strong>Cron backstop:</strong> a daily job (<code>fix-red-dependency-prs</code>, 15:00 — one hour after the green sweep) whose runner finds, <em>in code</em>, the Dependabot / Renovate PRs across managed repos that can't merge on their own and that ci-fix can push toward: a <em>settled-red</em> check conclusion (failing/timed-out, so it never fires while checks are still running), <strong>or</strong> a <code>mergeable_state</code> of <code>behind</code> / <code>dirty</code> / <code>blocked</code>. It fans out <strong>one bounded run per PR</strong> — the same single-PR shape as the webhook, carrying the PR head branch (pre-clone) and the <code>reason</code> (<code>checks-failing</code> | <code>behind</code> | <code>dirty</code> | <code>blocked</code>; failing CI wins). It runs <em>alongside</em> webhooks — a safety net for PRs that went red, or fell out of a mergeable state, before boot or during a missed delivery. (<code>clean</code> is the green sweep's; <code>unknown</code> is left for a later tick.) Per-PR runs dedup by (repo, PR).</li>
 		<li><strong>Maintainer mention:</strong> an <code>@last-light</code> comment on a red Dependabot / Renovate PR (e.g. "can you look at this?"). The router hands the PR author + check state to the classifier, which routes a red dependency PR here — the on-demand version of the webhook. (A green one routes to <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a> instead; an explicit "review this" still gets a normal review.)</li>
 	</ul>
 
@@ -81,7 +81,9 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<p>
 		The dependency workflows share a small label state machine so status is
 		visible and the crons don't churn. ci-fix touches labels in only one case:
-		when it <strong>can't</strong> repair CI with a small, safe change, it applies
+		when it <strong>can't</strong> land the PR — it can't repair CI with a small,
+		safe change, or there's nothing to push and it can't unblock the PR (e.g. a
+		<code>blocked</code> PR awaiting a required human review) — it applies
 		<code>requires-human</code> and stops. The verdict labels
 		(<code>dependency-trivial</code> / <code>dependency-functional</code>) — and
 		clearing a stale <code>requires-human</code> once a later fix lands green — are

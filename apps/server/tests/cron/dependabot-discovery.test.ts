@@ -153,10 +153,15 @@ describe("discoverRedDependencyPrs", () => {
   function fakeGh(
     listing: Record<string, PrEntry[]>,
     conclusion: Record<string, "passing" | "failing" | "pending" | "none">,
+    mergeState: Record<string, string> = {},
   ): PrDiscoveryClient {
     return {
       listOpenPullRequests: vi.fn(async (owner, repo) => (listing[`${owner}/${repo}`] ?? []).map(normalize)),
-      getPullRequest: vi.fn(async () => ({ mergeable_state: "unstable" })),
+      // Default `unstable` (mergeable, non-required check red) so tests that only
+      // exercise the checks conclusion aren't swept in by mergeable_state.
+      getPullRequest: vi.fn(async (owner, repo, n) => ({
+        mergeable_state: mergeState[`${owner}/${repo}#${n}`] ?? "unstable",
+      })),
       // Keyed by the head SHA we queried (`sha-<n>` per normalize()).
       getChecksConclusion: vi.fn(async (_o, _r, ref) => conclusion[ref] ?? "none"),
     };
@@ -186,8 +191,52 @@ describe("discoverRedDependencyPrs", () => {
     const prs = await discoverRedDependencyPrs(["cliftonc/a"], gh);
 
     expect(prs).toEqual([
-      { repo: "cliftonc/a", prNumber: 3, title: "Bump a", branch: "dependabot/npm/pkg-3" },
-      { repo: "cliftonc/a", prNumber: 7, title: "Bump c", branch: "dependabot/npm/pkg-7" },
+      { repo: "cliftonc/a", prNumber: 3, title: "Bump a", branch: "dependabot/npm/pkg-3", reason: "checks-failing" },
+      { repo: "cliftonc/a", prNumber: 7, title: "Bump c", branch: "dependabot/npm/pkg-7", reason: "checks-failing" },
+    ]);
+  });
+
+  it("picks up green-CI PRs whose mergeable_state is behind / dirty / blocked, with the reason", async () => {
+    const gh = fakeGh(
+      {
+        "cliftonc/a": [
+          { number: 2, title: "Bump a", draft: false, authorLogin: "renovate[bot]" }, // behind
+          { number: 4, title: "Bump b", draft: false, authorLogin: "renovate[bot]" }, // dirty
+          { number: 6, title: "Bump c", draft: false, authorLogin: "renovate[bot]" }, // blocked
+          { number: 8, title: "Bump d", draft: false, authorLogin: "renovate[bot]" }, // clean → green sweep's
+          { number: 9, title: "Bump e", draft: false, authorLogin: "renovate[bot]" }, // unknown → skip
+        ],
+      },
+      // All checks green — mergeable_state is the only signal here.
+      { "sha-2": "passing", "sha-4": "passing", "sha-6": "passing", "sha-8": "passing", "sha-9": "passing" },
+      {
+        "cliftonc/a#2": "behind",
+        "cliftonc/a#4": "dirty",
+        "cliftonc/a#6": "blocked",
+        "cliftonc/a#8": "clean",
+        "cliftonc/a#9": "unknown",
+      },
+    );
+
+    const prs = await discoverRedDependencyPrs(["cliftonc/a"], gh);
+
+    expect(prs).toEqual([
+      { repo: "cliftonc/a", prNumber: 2, title: "Bump a", branch: "dependabot/npm/pkg-2", reason: "behind" },
+      { repo: "cliftonc/a", prNumber: 4, title: "Bump b", branch: "dependabot/npm/pkg-4", reason: "dirty" },
+      { repo: "cliftonc/a", prNumber: 6, title: "Bump c", branch: "dependabot/npm/pkg-6", reason: "blocked" },
+    ]);
+  });
+
+  it("prefers checks-failing over a blocking mergeable_state in the reason", async () => {
+    const gh = fakeGh(
+      { "cliftonc/a": [{ number: 3, title: "Bump a", draft: false, authorLogin: "dependabot[bot]" }] },
+      { "sha-3": "failing" },
+      { "cliftonc/a#3": "dirty" }, // both red CI and a conflict — CI wins the reason
+    );
+
+    const prs = await discoverRedDependencyPrs(["cliftonc/a"], gh);
+    expect(prs).toEqual([
+      { repo: "cliftonc/a", prNumber: 3, title: "Bump a", branch: "dependabot/npm/pkg-3", reason: "checks-failing" },
     ]);
   });
 
@@ -210,7 +259,7 @@ describe("discoverRedDependencyPrs", () => {
 
     const prs = await discoverRedDependencyPrs(["cliftonc/a"], gh);
     expect(prs).toEqual([
-      { repo: "cliftonc/a", prNumber: 3, title: "Bump a", branch: "dependabot/npm/pkg-3" },
+      { repo: "cliftonc/a", prNumber: 3, title: "Bump a", branch: "dependabot/npm/pkg-3", reason: "checks-failing" },
     ]);
     expect(gh.getChecksConclusion).not.toHaveBeenCalledWith("cliftonc", "a", "sha-4");
   });
@@ -230,7 +279,7 @@ describe("discoverRedDependencyPrs", () => {
 
     const prs = await discoverRedDependencyPrs(["cliftonc/a"], gh);
     expect(prs).toEqual([
-      { repo: "cliftonc/a", prNumber: 2, title: "Bump y", branch: "dependabot/npm/pkg-2" },
+      { repo: "cliftonc/a", prNumber: 2, title: "Bump y", branch: "dependabot/npm/pkg-2", reason: "checks-failing" },
     ]);
   });
 });

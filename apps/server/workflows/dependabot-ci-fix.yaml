@@ -1,16 +1,23 @@
 kind: pr-fix
 name: dependabot-ci-fix
 description: |
-  Fix a dependency-update PR (Dependabot / Renovate) whose CI checks have
-  failed: bring the branch up to date with its base, make CI green, and push.
-  It does NOT classify, label, or merge — once the pushed fix turns the checks
-  green the `pr.checks_passed` webhook hands off to `dependabot-pr-merge`, the
-  single owner of the classify → label → auto-merge decision.
+  Fix a dependency-update PR (Dependabot / Renovate) that can't merge on its
+  own — CI is red, or it's `behind` its base / `dirty` (merge conflict) /
+  `blocked`: bring the branch up to date with its base, make CI green, and push.
+  It never classifies or merges — once the pushed fix turns the checks green the
+  `pr.checks_passed` webhook hands off to `dependabot-pr-merge`, the single owner
+  of the classify → label → auto-merge decision. The one label it may apply is
+  `requires-human`, when it can't land the PR (a fix it can't complete, or a
+  `blocked` PR it can't unblock), so the nightly sweep stops re-attempting it.
 
   Triggered by:
     - pr.checks_failed webhook (a check_suite completed with a failure
       conclusion) → routed here by the classifier when it recognises a
       dependency-update PR (src/engine/router.ts + this file's `classification`).
+    - cron-dependabot-ci-fix backstop (`discover: red-dependency-prs`) → fans
+      out one run per PR whose checks are settled-failing OR whose
+      `mergeable_state` is `behind` / `dirty` / `blocked`
+      (src/cron/dependabot-discovery.ts). The `{{reason}}` says which.
 # One in-place task-list comment that updates as the fix/assess phases run,
 # rather than a comment per phase.
 status_checklist: true

@@ -254,7 +254,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<tr>
 				<td><strong>Cron schedule</strong></td>
 				<td>issue-triage, pr-review, repo-health, security-review, dependabot-pr-merge, dependabot-ci-fix</td>
-				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo. The two dependency-PR backstops run daily even with webhooks on — <code>dependabot-pr-merge</code> (14:00) discovers green dependency PRs and <code>dependabot-ci-fix</code> (15:00) discovers settled-red ones, each fanning out one bounded run per PR as a safety net for the real-time <code>pr.checks_passed</code> / <code>pr.checks_failed</code> paths. Both skip PRs labelled <code>requires-human</code>.</td>
+				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo. The two dependency-PR backstops run daily even with webhooks on — <code>dependabot-pr-merge</code> (14:00) discovers green (<code>clean</code>) dependency PRs and <code>dependabot-ci-fix</code> (15:00) discovers ones that can't merge on their own — settled-red checks, or a <code>behind</code> / <code>dirty</code> / <code>blocked</code> <code>mergeable_state</code> — each fanning out one bounded run per PR as a safety net for the real-time <code>pr.checks_passed</code> / <code>pr.checks_failed</code> paths. Both skip PRs labelled <code>requires-human</code>.</td>
 			</tr>
 			<tr>
 				<td><strong>CLI</strong></td>

@@ -1,4 +1,7 @@
-You are fixing a dependency-update pull request whose CI has gone red.
+You are fixing a dependency-update pull request that can't merge on its own —
+either its CI has gone red, or it's behind its base / has a merge conflict /
+is otherwise blocked. Your job is to get it into a mergeable, green state (or,
+if you can't, hand it to a human — see the end).
 
 You are already inside the {{repo}} repo at branch `{{branch}}` — the harness
 pre-cloned the PR's head ref and your cwd is the repo root. Git is configured to
@@ -7,9 +10,13 @@ guidance.
 
 CONTEXT:
 - PR #{{prNumber}}: {{issueTitle}}
+{{#if reason}}- Why you were summoned: `{{reason}}` (`checks-failing` = CI is red; `behind` =
+  branch out of date with base; `dirty` = merge conflict; `blocked` = a required
+  gate is unmet). CI may already be green — bringing the branch up to date (step
+  1) is often the whole fix.{{/if}}
 - This is an automated dependency update (Dependabot / Renovate). The dependency
   bump itself is already committed on this branch — do NOT revert it. Your job is
-  to make the update pass CI.
+  to make the update pass CI and mergeable.
 {{ciSection}}
 
 INSTRUCTIONS:
@@ -38,21 +45,30 @@ INSTRUCTIONS:
    it all passes locally.
 
 AFTER FIXING:
-1. git add -A && git commit -m "fix(deps): resolve CI failures for #{{prNumber}}"
+1. git add -A && git commit -m "fix(deps): make #{{prNumber}} mergeable"
+   (the merge from step 1 and/or your CI fix)
 2. git push origin HEAD
+   Once the push re-runs CI and it goes green, the `dependabot-pr-merge`
+   workflow takes over the merge — you do NOT merge or label a healthy PR.
 
-If you cannot make CI pass with a small, safe change, STOP without pushing a
-speculative fix and say so in your summary — a human will take it from here.
-Before you stop, flag the PR for a human so the nightly red-dependency sweep
-won't keep re-attempting it: ensure the `requires-human` label exists with one
-idempotent `github_ensure_labels` call (`{ owner: "{{owner}}", repo: "{{repo}}",
-labels: [{ name: "requires-human", color: "b60205", description: "Last Light
-can't proceed automatically; a maintainer must handle it." }] }`), then add it
-with `github_add_labels` (`{ owner: "{{owner}}", repo: "{{repo}}", issue_number:
-{{prNumber}}, labels: ["requires-human"] }`). If label writes are denied, just
-say so in your summary. (This isn't permanent: once a later fix lands and turns
-the checks green, the `dependabot-pr-merge` workflow re-assesses the PR and
-clears `requires-human` if the update is trivial.)
+STOP and flag for a human when you CAN'T land it, so the nightly red-dependency
+sweep won't keep re-attempting it. That covers two cases:
+- you can't make CI pass with a small, safe change (don't push a speculative
+  fix); or
+- there is **nothing to commit or push** and the PR still can't merge — e.g. it
+  was `blocked` on a required *human* review or a gate outside this repo that
+  you have no way to satisfy. Do NOT loop on it.
+
+To flag it: ensure the `requires-human` label exists with one idempotent
+`github_ensure_labels` call (`{ owner: "{{owner}}", repo: "{{repo}}", labels: [{
+name: "requires-human", color: "b60205", description: "Last Light can't proceed
+automatically; a maintainer must handle it." }] }`), then add it with
+`github_add_labels` (`{ owner: "{{owner}}", repo: "{{repo}}", issue_number:
+{{prNumber}}, labels: ["requires-human"] }`), and say so in your summary. If
+label writes are denied, just say so in your summary. (This isn't permanent:
+once a later fix lands and turns the checks green, the `dependabot-pr-merge`
+workflow re-assesses the PR and clears `requires-human` if the update is
+trivial.)
 
 OUTPUT: A brief summary of the root cause, exactly what you changed, and the
 local test/lint/typecheck results.
