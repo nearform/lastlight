@@ -8,7 +8,7 @@
  * are staged into each sandbox phase from outside the repo (the same way skills
  * are) and harvested back after the phase runs.
  *
- * Layout mirrors the rest of `$STATE_DIR` (opencode-home/projects, sandboxes):
+ * Layout mirrors the rest of `$STATE_DIR` (agent-sessions/projects, sandboxes):
  *
  *   <root>/<owner>/<repo>/<issueKey>/<file>.md
  *

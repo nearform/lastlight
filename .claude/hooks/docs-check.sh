@@ -38,9 +38,10 @@ staged="$(git diff --cached --name-only 2>/dev/null || true)"
 [ -z "$staged" ] && exit 0
 
 # High-signal paths whose documentation lives in apps/server/spec/*.md and/or
-# the apps/www site. Post-monorepo the server package sits under apps/server/ and
-# the CLI under packages/cli/, so the patterns are prefixed accordingly.
-trigger_re='^(apps/server/workflows/.*\.ya?ml|apps/server/config/default\.yaml|apps/server/skills/|apps/server/agent-context/|apps/server/src/connectors/|apps/server/src/state/|apps/server/src/engine/router\.ts|apps/server/src/engine/chat|apps/server/src/sandbox/|apps/server/src/config/|packages/cli/src/)'
+# the apps/www site. Post-monorepo the server package sits under apps/server/,
+# the CLI under packages/cli/, and the shared config/provider/overlay helpers
+# under packages/shared/, so the patterns are prefixed accordingly.
+trigger_re='^(apps/server/workflows/.*\.ya?ml|apps/server/config/default\.yaml|apps/server/skills/|apps/server/agent-context/|apps/server/src/connectors/|apps/server/src/state/|apps/server/src/engine/router\.ts|apps/server/src/engine/chat|apps/server/src/sandbox/|apps/server/src/config/|packages/cli/src/|packages/shared/src/(providers|overlay-bootstrap|overlay-assets|workflow-loader)\.ts)'
 
 doc_relevant="$(printf '%s\n' "$staged" | grep -E "$trigger_re" || true)"
 [ -z "$doc_relevant" ] && exit 0

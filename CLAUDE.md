@@ -8,16 +8,17 @@ eval harness. It was consolidated from three sibling repos
 migration plan and locked decisions.
 
 > **The full day-to-day dev guide lives in
-> [`apps/server/CLAUDE.md`](apps/server/CLAUDE.md)** (it moved there with core in
-> Phase 2). Read that for runtime, architecture, commands, env vars, and
-> deployment. Use this file only to find your way around the workspace.
+> [`apps/server/CLAUDE.md`](apps/server/CLAUDE.md)** (with `lastlight-core`). Read
+> that for runtime, architecture, commands, env vars, and deployment. Use this
+> file only to find your way around the workspace; each package has its own
+> `CLAUDE.md` for local detail.
 
 ## Workspace map
 
 ```
 lastlight/                     # repo root — private orchestration package (lastlight-monorepo)
 ├── pnpm-workspace.yaml  turbo.json  tsconfig.base.json  pnpm-lock.yaml  .nvmrc (22)
-├── instance/                  # deployment overlay — stays at repo root (prod hosts + auto-deploy)
+├── instance/                  # deployment overlay — gitignored, host-only (present on prod hosts, never in the tree)
 ├── docs/                      # cross-cutting docs (migration plan, RELEASING.md)
 ├── .github/workflows/         # ci / publish / deploy-www / deploy-evals
 ├── apps/
@@ -25,11 +26,11 @@ lastlight/                     # repo root — private orchestration package (la
 │   │   ├── CLAUDE.md          # ← the full dev guide
 │   │   ├── src/ config/ workflows/ skills/ agent-context/ deploy/ spec/ sandbox/ tests/
 │   │   ├── Dockerfile  sandbox*.Dockerfile  docker-compose.yml  docker-bake.hcl
-│   │   └── dashboard/         # @lastlight/dashboard — admin SPA (nested, private)
-│   ├── www/                   # lastlight-www (Astro) → lastlight.dev (private)
+│   │   └── dashboard/         # @lastlight/dashboard — admin SPA (nested, private; CLAUDE.md)
+│   ├── www/                   # lastlight-www (Astro) → lastlight.dev (private; CLAUDE.md)
 │   └── evals/                 # lastlight-evals → evals.lastlight.dev (its own CLAUDE.md)
-│       └── dashboard/         # @lastlight/evals-dashboard — nested, private
-└── packages/
+│       └── dashboard/         # @lastlight/evals-dashboard — nested, private (CLAUDE.md)
+└── packages/                  # each package has its own CLAUDE.md
     ├── cli/                   # published "lastlight" — the lean global bin + host-local server cmds
     ├── shared/                # lastlight-shared — light modules used by cli + core
     ├── workflow-engine/       # lastlight-workflow-engine — core/ ports/ test-support/
@@ -79,9 +80,23 @@ Node is pinned to 22 (`.nvmrc`, `engines.node >= 22.12`). Per-package commands
 ## Where the docs are
 
 - [`apps/server/CLAUDE.md`](apps/server/CLAUDE.md) — the full dev guide (runtime,
-  architecture, env, deployment).
+  architecture, env, deployment) for `lastlight-core`.
+- [`apps/server/src/workflows/CLAUDE.md`](apps/server/src/workflows/CLAUDE.md) —
+  the workflow runner internals.
 - [`apps/server/spec/`](apps/server/spec/) — the rebuild-grade specification.
 - [`apps/evals/CLAUDE.md`](apps/evals/CLAUDE.md) — the eval harness guide.
-- [`docs/RELEASING.md`](docs/RELEASING.md) — the manual publish + deploy runbook.
+- [`packages/cli/CLAUDE.md`](packages/cli/CLAUDE.md) — the `lastlight` CLI
+  (command catalogue + host-local `server` lifecycle / deploy flow).
+- [`packages/workflow-engine/CLAUDE.md`](packages/workflow-engine/CLAUDE.md) — the
+  runtime-agnostic workflow engine (scheduler + ports).
+- [`packages/shared/CLAUDE.md`](packages/shared/CLAUDE.md) — the light modules
+  shared by cli + core (provider registry, overlay/config helpers).
+- [`packages/agentic-pi/CLAUDE.md`](packages/agentic-pi/CLAUDE.md) — the
+  coding-agent harness (its `AGENTS.md` is a pointer here).
+- [`apps/www/CLAUDE.md`](apps/www/CLAUDE.md) and the two dashboard guides
+  ([server](apps/server/dashboard/CLAUDE.md), [evals](apps/evals/dashboard/CLAUDE.md)).
+- [`docs/RELEASING.md`](docs/RELEASING.md) — the automated publish + deploy runbook.
 - [`docs/plans/monorepo-migration/`](docs/plans/monorepo-migration/) — the
   migration plan.
+- `AGENTS.md` files across the repo are thin pointers to the co-located
+  `CLAUDE.md` (the single source of truth); never duplicate content into them.

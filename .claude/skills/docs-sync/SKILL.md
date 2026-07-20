@@ -1,6 +1,6 @@
 ---
 name: docs-sync
-description: Keep Last Light's docs in sync with the code. Use before committing changes to apps/server/workflows/, skills/, config/default.yaml, src/connectors, src/state, src/engine/router.ts, src/config.ts, packages/cli, or agent-context/ — or whenever the docs-check pre-commit hook fires. Maps each changed file to the doc surfaces it affects (the in-repo apps/server/spec/*.md AND the apps/www site) and updates them.
+description: Keep Last Light's docs in sync with the code. Use before committing changes to apps/server/workflows/, skills/, config/default.yaml, src/connectors, src/state, src/engine/router.ts, src/config/, packages/cli/src, packages/shared/src (providers/overlay helpers), or agent-context/ — or whenever the docs-check pre-commit hook fires. Maps each changed file to the doc surfaces it affects (the in-repo apps/server/spec/*.md AND the apps/www site) and updates them.
 ---
 
 # docs-sync
@@ -67,7 +67,8 @@ under `apps/www/`.
 | `apps/server/src/connectors/**` — new platform, event type, or reply formatting | **spec:** `03-integrations.md`, `04-event-model.md` |
 | `apps/server/src/state/**` — tables, indexes, or store split | **spec:** `10-state.md` (tables + "Current implementation" table) |
 | New / renamed **env var** (grep `process.env`) | **spec:** `02-configuration.md`. **site:** `docs/configuration.astro`, `docs/faq.astro`. Also `apps/server/CLAUDE.md` "Environment" |
-| `packages/cli/src/**` commands | **site:** `docs/local-dev.astro`, `docs/cli.astro`. Also `apps/server/CLAUDE.md` "Commands" |
+| `packages/shared/src/providers.ts` — new provider / model registry entry | **spec:** `02-configuration.md` (provider/env-key list). Also `apps/server/CLAUDE.md` "Runtime" + "Environment" provider lists, and `packages/shared/CLAUDE.md` |
+| `packages/cli/src/**` commands | **site:** `docs/local-dev.astro`, `docs/cli.astro`. Also `packages/cli/CLAUDE.md` (the canonical CLI command catalogue) |
 | `apps/server/src/engine/chat*.ts`, chat skills | **spec:** `11-chat.md`. **site:** `docs/` if user-facing |
 | Sandbox / egress / firewall (`apps/server/src/sandbox/**`) | **spec:** `09-sandbox.md` |
 

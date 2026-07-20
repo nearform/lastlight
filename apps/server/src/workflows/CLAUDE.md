@@ -106,11 +106,12 @@ phases:
         re_review_prompt: prompts/reviewer-rereview.md
 ```
 
-`model:` resolves through `OPENCODE_MODELS` (or the `default` fallback);
-`variant:` resolves through `OPENCODE_VARIANTS` (or `OPENCODE_VARIANT`).
+`model:` resolves through `LASTLIGHT_MODELS` (or the `default` fallback);
+`variant:` resolves through `LASTLIGHT_THINKINGS` (or `LASTLIGHT_THINKING`).
 Both are optional — omit the YAML entry and the runner uses the env-level
-default, omit env-level too and OpenCode picks its built-in default
-(model: `OPENCODE_MODEL`, variant: no `--variant` flag passed).
+default, omit env-level too and agentic-pi picks its built-in default
+(model: `LASTLIGHT_MODEL`, variant: no `--thinking`/`--variant` flag passed).
+(The legacy `OPENCODE_*` env names are still accepted as aliases.)
 
 Phase kinds the runner recognises:
 

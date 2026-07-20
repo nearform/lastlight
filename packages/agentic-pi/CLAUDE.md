@@ -1,83 +1,294 @@
-# CLAUDE.md
+# agentic-pi — the canonical agent guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This is the **canonical, detailed guide** for the `agentic-pi` package —
+codebase layout, hard rules, conventions, smoke commands, and known sharp edges.
+Read it before non-trivial work. `AGENTS.md` in this directory is a thin pointer
+back here; the full *user-facing* docs are in `README.md`.
 
-> **`AGENTS.md` is the canonical, detailed agent guide for this repo** — codebase layout, hard rules, conventions, smoke commands, and known sharp edges. Read it before non-trivial work. This file is the condensed orientation.
+> `agentic-pi` is published to npm independently and moved in from the standalone
+> `nearform/agentic-pi` repo; it stays a self-contained leaf (no workspace deps).
+> The monorepo consumes it via `workspace:*`; the sandbox images **vendor** it
+> from the workspace (not npm). See the [root `CLAUDE.md`](../../CLAUDE.md).
 
 ## What this project is
 
-`agentic-pi` is an opinionated wrapper around [earendil-works/pi](https://github.com/earendil-works/pi) that turns Pi into a one-shot, JSONL-emitting coding-agent worker for workflow orchestrators (target consumer: [lastlight](https://github.com/nearform/lastlight); designed to swap in for opencode). It is **not** a fork of Pi — it composes Pi's SDK (`@earendil-works/pi-coding-agent`) and adds extensions on top.
+A pre-configured, opinionated wrapper around
+[earendil-works/pi](https://github.com/earendil-works/pi) that turns Pi into
+a one-shot, JSONL-emitting coding-agent worker for workflow orchestrators
+(target consumer: [lastlight](https://github.com/nearform/lastlight); designed to
+swap in for opencode).
 
-Two entry points, same underlying behaviour:
-- **CLI** (`agentic-pi run`): reads stdin, emits JSONL on stdout, exits on `agent_end`.
-- **Library** (`import { run } from "agentic-pi"`): returns a `RunResult`, **never** touches `process.stdout`/`process.stderr`.
+It is **not** a fork of Pi. It does not modify Pi. It composes Pi's SDK
+(`@earendil-works/pi-coding-agent`) and adds extensions on top:
+
+1. Two entry points with the same underlying behaviour:
+   - A **CLI** (`agentic-pi run`) that reads stdin, emits JSONL on
+     stdout, exits on `agent_end`.
+   - A **library API** (`import { run } from "agentic-pi"`) that
+     returns a fully-derived `RunResult` and **never** touches
+     `process.stdout` / `process.stderr`.
+2. A native GitHub-tool extension (~32 tools, profile-gated) that
+   replaces the MCP server lastlight used to spawn separately.
+3. An optional Gondolin micro-VM sandbox for `read`/`write`/`edit`/`bash`.
+
+The flow is **sink-agnostic**: `runner.ts` drives Pi and emits events through an
+`Emitter`/`EmitterSink` (`emitter.ts`). The CLI wires a `StdoutSink`; the library
+wires a `CollectorSink`. This is what keeps `run()` silent on the process streams.
+
+## What to read first
+
+| If you're … | Read |
+| --- | --- |
+| Getting oriented end-to-end | `README.md` |
+| Understanding why decisions are opinionated | `README.md` — "What this is opinionated about" |
+| Calling agentic-pi from your own Node code | `README.md` — "Programmatic usage", then `src/run.ts` + `src/index.ts` |
+| Building or modifying the CLI | `src/cli.ts`, `src/args.ts`, `src/runner.ts` |
+| Touching the JSONL event stream | `src/emitter.ts`, `src/runner.ts` |
+| Adding or modifying a GitHub tool | `src/extensions/github/tools.ts` (one defineTool per tool) |
+| Understanding why we don't sandbox in Docker | `SPIKE-gondolin.md` |
+| Changing sandbox behavior | `src/sandbox/{index,preflight,gondolin}.ts` |
+
+## Codebase layout
+
+```
+src/
+  cli.ts                  CLI entry. Parses argv, reads stdin, calls runOnce with a StdoutSink.
+  index.ts                Public library API: run, RunResult, sinks, types.
+  run.ts                  Programmatic entry: run() — builds CollectorSink, returns RunResult.
+  args.ts                 Flag parser. Source of truth for the CLI surface.
+  stdin.ts                Stdin slurp.
+  emitter.ts              Sink abstraction (Stdout/Collector/Tee) + Emitter.
+                          The runner emits through this; CLI and run() wire different sinks.
+  models.ts               "provider/id" → getModel(provider, id) from pi-ai.
+  retry.ts                resolveRetrySettings() — flag > settings.json > our
+                          bumped defaults (5 retries / 4s base) for transient-
+                          error backoff. runner builds a SettingsManager and
+                          applyOverrides({retry}) so Pi rides out per-minute
+                          rate-limit windows (e.g. Fireworks TPM). Pure/testable.
+  runner.ts               Drives Pi: createAgentSession → subscribe → prompt → agent_end.
+                          Sink-agnostic — takes an EmitterSink + onWarn callback as deps.
+  extensions/github/
+    index.ts              loadGitHubExtension(profile) — entry. Returns {customTools, ...}.
+    auth.ts               GitHub App JWT → installation token. Static-token fallback.
+    client.ts             Octokit wrapper with retry/backoff (ported from mcp-github-app).
+    credentials.ts        gitAuthEnv() — github.com-scoped http.extraheader (GIT_CONFIG_*), no on-disk file.
+    profiles.ts           4 profile names → tool name allowlists.
+    tools.ts              ~32 defineTool() registrations, github_ prefix.
+  extensions/web-search/  Optional web_search / web_fetch via Tavily/Brave/Exa,
+                          with SSRF-safe fetch + rate limiting.
+  extensions/file-search/ Bundles FFF (@ff-labs/pi-fff), a Rust-backed fuzzy
+                          file/content search, as the DEFAULT. Contributes no
+                          customTools — a Pi-native resource (PI_FFF_MODE env).
+  extensions/skills/
+    index.ts              loadSkillsExtension() — normalizes --skill paths (tilde/
+                          relative → absolute, drops missing). Skills are a Pi-native
+                          RESOURCE, not customTools: fed into
+                          DefaultResourceLoader.additionalSkillPaths / noSkills. Pi
+                          discovers default-location skills on its own.
+                          buildSkillsStatusEvent() synthesizes a gated `skills_status`
+                          JSONL event (Pi emits none) — suppressed on a default run
+                          with zero skills so fixtures stay byte-identical.
+  sandbox/
+    index.ts              buildSandbox(backend) dispatcher. Returns ok|err.
+    preflight.ts          QEMU + accelerator detection. Returns structured result.
+    gondolin.ts           VM.create lifecycle + tool overrides for read/write/edit/bash.
+  telemetry/
+    index.ts              createTelemetry(deps) → TelemetryHandle. No-op + no SDK
+                          import when disabled; dynamic-imports sdk.ts when enabled.
+    config.ts             resolveTelemetryConfig() (enablement precedence) + redact().
+    sdk.ts                OTEL SDK construction (providers/exporters/propagator).
+                          Diagnostics routed to onWarn — never the console.
+    mapper.ts             Pi event stream → span tree (session/turn/tool/llm) + metrics.
+    semconv.ts            Centralized gen_ai.* / agentic_pi.* attribute + metric names.
+
+test/fixtures/            Golden JSONL streams from real runs. Treat as contract evidence.
+docker/                   Reserved for future container image work. Currently empty.
+
+README.md                 User docs.
+AGENTS.md                 Thin pointer to this file (the cross-tool standard entry).
+SPIKE-gondolin.md         Spike write-up: why sandbox is native-only.
+```
+
+## Hard rules — non-negotiable
+
+1. **No `mcp-github-app` re-introduction.** Pi has no MCP support and we
+   deliberately don't add it. GitHub tools are native Pi tools registered
+   via `defineTool()`. If you find yourself reaching for `@modelcontextprotocol/sdk`,
+   stop and check with the user first.
+
+2. **Don't touch the JSONL event shape without a fixture update.**
+   `test/fixtures/*.jsonl` are contract evidence. If you change emit
+   behavior, capture a new fixture in the same shape (run the smoke
+   commands at the bottom of this file) and replace the old one in the
+   same PR.
+
+3. **Pi SDK names (`createAgentSession`, `session.subscribe`,
+   `session.prompt`, `session.getSessionStats`, `defineTool`,
+   `getModel`, `createReadTool` and friends) are the public contract
+   with Pi.** If you need a Pi internal that's not in
+   `node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts`,
+   either find a public alternative or open a discussion — don't reach
+   into Pi internals via deep-path imports.
+
+4. **The CLI accepts opencode-shaped flags for caller-side compatibility.**
+   `--dangerously-skip-permissions` is a deliberate no-op. `--variant` is
+   an alias for `--thinking`. Do not "clean these up" — lastlight (and
+   any other opencode-shaped caller) still passes them. Removing them
+   would break the swap-in promise.
+
+5. **Profile is registration-time, not runtime.** The GitHub profile gate
+   removes tools from the customTools list before `createAgentSession`
+   runs. The LLM never sees disallowed tools in its system prompt. Don't
+   add runtime "is this allowed?" checks — they're strictly weaker.
+
+6. **The Gondolin sandbox is native-only.** Do not pretend it works in
+   Docker. See `SPIKE-gondolin.md` for the empirical evidence. The
+   preflight check exists *specifically* to refuse to run rather than
+   inherit upstream issue #51's silent-hang failure mode. Do not remove
+   it or downgrade it to a warning.
+
+7. **The library path (`run()`) must never write to `process.stdout` or
+   `process.stderr`.** A consumer importing agentic-pi from their own
+   Node code controls all I/O. The CLI is the one place we touch those
+   streams — by wiring `StdoutSink` and an `onWarn` callback into
+   `runOnce`. If you find yourself adding a `console.log` or
+   `process.stderr.write` *inside* the runner, sandbox, or extensions,
+   route it through the emitter or the warn callback instead. The
+   contract test `test/run.integration.test.ts` enforces this by running
+   `run()` in a child process and asserting empty stdout/stderr.
+
+8. **The GitHub App PEM must never enter the sandbox VM.** Only minted
+   installation tokens cross the host→guest boundary. The runner mints
+   the token via `github.auth.getToken()` *before* the sandbox boots
+   and passes only the resulting string to `buildSandbox({ env })`. If
+   you find yourself adding `GITHUB_APP_PRIVATE_KEY_PATH` or similar to
+   the `sandboxEnv` composition in `runner.ts`, stop — that path leaks
+   long-lived credentials into a short-lived sandbox, which defeats
+   the whole point. Use the existing `auth` exposed on
+   `GitHubExtensionResult` instead.
+
+## Style and conventions
+
+- **TypeScript, strict mode.** ESM. `moduleResolution: "NodeNext"`, so
+  relative imports must use `.js` extensions even though the source is
+  `.ts` (TypeScript resolves `./foo.js` → `./foo.ts` at compile time).
+  Don't drop the extensions.
+
+- **No comments that restate the code.** Comments earn their place by
+  explaining *why* — typically a constraint, a workaround, or a
+  reference to an external doc / upstream issue. If removing the comment
+  would not confuse a future reader, don't write it.
+
+- **Errors surface explicitly to the JSONL stream.** Catch at the runner
+  boundary and emit `fatal_error` / `usage_snapshot_error` / etc. Never
+  let a throw propagate to `process.exit(1)` without a stream record.
+
+- **Status fields are enumerated strings, not booleans.** See
+  `GitHubExtensionResult.status` (`"configured" | "skipped"`),
+  `extension_status.reason` (`"no-profile" | "no-credentials" | ...`),
+  `PreflightStatus`. Adding new states is cheap; refactoring booleans
+  to strings later is not.
+
+- **Mirror the shape of nearby code** rather than introducing a new pattern —
+  consistency across agent sessions is valued over local optimization.
 
 ## Commands
 
 ```bash
-npm install              # one-time
-npm run build            # tsc → dist/
-npm run check            # tsc --noEmit (type-check only)
-npm run lint             # biome lint — lint-only gate; this is what CI runs
-npm run format           # biome format --write (rewrite to formatter style)
-npm run fix              # biome check --write (safe lint fixes + format)
-npm test                 # full suite (integration auto-skips if env unset)
-npm run test:unit        # unit only (~170ms, no API keys / QEMU)
-npm run test:integration # needs OPENAI_API_KEY; sandbox tests need QEMU too
+npm install               # one-time
+npm run build             # tsc → dist/
+npm run check             # tsc --noEmit (type-check only)
+npm run lint              # biome lint — the lint-only gate CI runs
+npm run format            # biome format --write (rewrite to formatter style)
+npm run fix               # biome check --write (safe lint fixes + format)
+npm test                  # full suite — integration tests skip if env unset
+npm run test:unit         # unit only (~170 ms, no API keys, no QEMU)
+npm run test:integration  # integration only (needs OPENAI_API_KEY; sandbox needs QEMU too)
 ```
 
-Biome (`biome.json`) is the lint + format tool. CI runs `npm run lint`
-**lint-only** — formatting isn't CI-enforced (whitespace never reds a PR;
-keep it tidy with `npm run format`). Biome is scoped to `src|test/**/*.ts`
-+ `scripts/**/*.mjs` and **never touches `test/fixtures/*.jsonl`**.
-`noNonNullAssertion` and `noExplicitAny` are relaxed (both deliberate in
-this codebase).
+Run a single test file directly (the runner discovers `*.test.ts` via
+`scripts/run-tests.mjs`; `node --test` doesn't find `.ts`):
 
-Run a single test file directly (the runner discovers `*.test.ts`; `node --test` doesn't find `.ts`):
 ```bash
 npx tsx --test test/args.test.ts
 ```
 
-Smoke a run end-to-end:
+Biome is the lint + format tool (`biome.json`). CI runs `npm run lint`
+(**lint-only** — formatting is deliberately *not* enforced, so whitespace drift
+never reds a PR; keep it tidy with `npm run format`). Biome is scoped to
+`src|test/**/*.ts` + `scripts/**/*.mjs` and **never touches
+`test/fixtures/*.jsonl`** (contract evidence). `noNonNullAssertion` and
+`noExplicitAny` are relaxed (both deliberate here).
+
+### Smoke commands (re-capture fixtures with these)
+
 ```bash
+# Built-in tools only, no GitHub, no sandbox
 echo "list files in src/" | node dist/cli.js run \
   --model openai/gpt-5.4-nano --thinking off --no-session
+
+# GitHub tools (read profile)
+echo "list open PRs on owner/repo" | node dist/cli.js run \
+  --model openai/gpt-5.4-nano --thinking off --no-session --profile read
+
+# Gondolin sandbox (requires QEMU on host; native only)
+echo "create a file note.txt with 'hello' in it" | node dist/cli.js run \
+  --model openai/gpt-5.4-nano --thinking off --no-session \
+  --sandbox gondolin --cwd /tmp/scratch
 ```
 
-## Architecture
+Env vars typically needed when developing (mirror lastlight's `.env`):
 
-The flow is **sink-agnostic**: `runner.ts` drives Pi and emits events through an `Emitter`/`EmitterSink` (`emitter.ts`). The CLI wires a `StdoutSink`; the library wires a `CollectorSink`. This is what keeps `run()` silent on the process streams.
+```bash
+OPENAI_API_KEY=…              # or ANTHROPIC_API_KEY / OPENROUTER_API_KEY
+GITHUB_APP_ID=…
+GITHUB_APP_PRIVATE_KEY_PATH=/abs/path/to.pem
+GITHUB_APP_INSTALLATION_ID=…
+# or, for low-trust fallback:
+GITHUB_TOKEN=ghp_…
+```
 
-- `runner.ts` — drives Pi: `createAgentSession` → `subscribe` → `prompt` → `agent_end`. Takes an `EmitterSink` + `onWarn` callback as deps. Catches at the boundary and emits `fatal_error` / `usage_snapshot_error` rather than throwing to `process.exit`.
-- `cli.ts` / `run.ts` — the two entry points that wire different sinks into the runner.
-- `args.ts` — flag parser; **source of truth for the CLI surface**.
-- `models.ts` — `"provider/id"` string → `getModel(provider, id)` from pi-ai.
-- `retry.ts` — `resolveRetrySettings()` (flag > settings.json > bumped defaults). The runner builds a `SettingsManager` and `applyOverrides({retry})` so Pi's auto-retry rides out per-minute rate-limit windows (e.g. Fireworks TPM); tunable via `--max-retries` / `--retry-base-delay-ms`.
+## CI and releases
 
-Extensions live in `src/extensions/`, each "safe by default" (skip with an enumerated reason rather than aborting the run):
-- `github/` — ~32 native Pi tools (`github_` prefix, registered via `defineTool()`), gated by **profile** (`read` | `issues-write` | `review-write` | `repo-write`). Profile filtering happens at registration time — the LLM never sees disallowed tools. Auth mints a short-lived installation token from a GitHub App JWT.
-- `web-search/` — optional `web_search` / `web_fetch` via Tavily/Brave/Exa providers, with SSRF-safe fetch + rate limiting.
-- `file-search/` — bundles FFF (`@ff-labs/pi-fff`), a Rust-backed fuzzy file/content search, as the **default**. Unlike the others, it contributes no `customTools`; it's a full Pi extension loaded via Pi's resource loader (`PI_FFF_MODE` env).
-- `skills/` — wires the [Agent Skills standard](https://agentskills.io) into the run. Pi discovers `SKILL.md` skills from default locations natively; this module only normalizes operator-mapped `--skill <path>` folders (e.g. `~/.claude/skills`) into `DefaultResourceLoader.additionalSkillPaths` / `noSkills`. Like file-search, it's a Pi-native resource — **not** `customTools`. Pi emits no skill event, so the runner synthesizes a **gated** `skills_status` JSONL event (suppressed on a default run with zero skills, to keep fixtures byte-identical).
+Two GitHub Actions workflows ship with the package (they run in the monorepo's
+`.github/workflows/`):
 
-`sandbox/` — optional Gondolin micro-VM that routes Pi's `read`/`write`/`edit`/`bash` through a sandbox. **Native-only** (QEMU required); `preflight.ts` refuses to run rather than silently hang. See `SPIKE-gondolin.md`.
+- **CI** runs on every push to `main` and every PR: lint (Biome), type-check,
+  build, unit tests, integration tests (gated on the `OPENAI_API_KEY` secret —
+  auto-skipped if absent).
+- **`agentic-pi-npm.yml`** publishes to npm when a **GitHub Release is published**
+  (`release: published`) — pushing a tag alone does NOT publish. It verifies the
+  tag matches `package.json`, then `npm publish --provenance --access public` via
+  npm's OIDC trusted-publisher flow (no `NPM_TOKEN`). agentic-pi also carries an
+  `image-v*` VM-image release stream (`agentic-pi-image.yml`).
 
-## Critical constraints (see AGENTS.md "Hard rules" for the full list + rationale)
+To release: bump `package.json`, commit, `git tag vX.Y.Z && git push origin main
+vX.Y.Z`, then create the GitHub Release for that tag (`gh release create vX.Y.Z
+--title vX.Y.Z --notes …`) — publishing the release is the "ship it" signal.
 
-- **No MCP / no `mcp-github-app`.** Pi has no MCP support; GitHub tools are native `defineTool()` registrations. Don't reach for `@modelcontextprotocol/sdk`.
-- **`test/fixtures/*.jsonl` are contract evidence.** Don't change the JSONL event shape without re-capturing the matching fixture in the same PR.
-- **Pi is a black box via its public SDK names** (`createAgentSession`, `session.subscribe/prompt/getSessionStats`, `defineTool`, `getModel`, `createReadTool`, …). Don't deep-import Pi internals.
-- **`run()` must never write to `process.stdout`/`process.stderr`.** Route output through the emitter or the `onWarn` callback. Enforced by `test/run.integration.test.ts` (runs in a child process, asserts empty streams).
-- **The GitHub App PEM must never enter the sandbox VM.** The runner mints a token via `github.auth.getToken()` before the sandbox boots and passes only that string in. Don't add `GITHUB_APP_PRIVATE_KEY_PATH` to the sandbox env.
-- **opencode-shaped flags are intentional compat shims**, not cruft: `--dangerously-skip-permissions` is a deliberate no-op; `--variant` aliases `--thinking`. Don't remove them — callers still pass them.
+## How to contribute changes
 
-## Conventions
+1. **Read `README.md`** to understand the surface you're changing.
+2. **Make the smallest change that compiles and re-captures a fixture** for
+   affected smoke commands. Don't refactor adjacent code.
+3. **Run `npm run lint` and `npm run build`** — both must be clean (`npm run fix`
+   auto-resolves most nits).
+4. **Re-run the smoke command for whatever you touched** and replace the matching
+   fixture under `test/fixtures/`.
+5. **Update `README.md` only if user-visible behavior changed** — it's the
+   contract with the orchestrator (lastlight). Don't document internal refactors.
+6. **Update this file only if the development workflow itself changed** — new
+   build steps, layout, or hard rules. A new feature alone → the README is enough.
 
-- TypeScript strict, ESM, `moduleResolution: "NodeNext"` → **relative imports must use `.js` extensions** in `.ts` source. Don't drop them.
-- Comments explain *why* (a constraint, workaround, or upstream-issue reference), never restate the code.
-- Status fields are enumerated strings, not booleans (e.g. `status: "configured" | "skipped"`). Prefer adding a state to flipping a bool.
-- Mirror the shape of nearby code rather than introducing a new pattern — consistency across agent sessions is valued over local optimization.
+## Known sharp edges
 
-## Releasing
-
-Bump `package.json`, commit, `git tag vX.Y.Z && git push origin main vX.Y.Z`, then **create a GitHub Release** for the tag (`gh release create vX.Y.Z --title vX.Y.Z --notes …`). `.github/workflows/publish.yml` triggers on the *published release* — not the tag push — verifies the tag matches `package.json`, and publishes via npm OIDC trusted-publisher (no `NPM_TOKEN`). `ci.yml` runs lint/type-check/build/tests on push + PR (integration gated on the `OPENAI_API_KEY` secret).
+- Pi v0.75.x has its own `node_modules/@earendil-works/pi-agent-core`
+  nested inside `node_modules/@earendil-works/pi-coding-agent/node_modules/`.
+  Don't import from there directly — go through pi-coding-agent's re-exports.
+- Pi's typed model registry (`getModel("openai", "gpt-5.5")`) uses
+  literal-string indexed keys. We pass dynamic strings, so `models.ts`
+  casts via `as unknown as`. Don't try to make this strictly typed —
+  it'd require enumerating every model id at compile time.
+- The Gondolin guest image (~89 MB) downloads on first `VM.create` per
+  user. Cached at `~/.cache/gondolin/`. Blow the cache away and the first
+  run is slow again.

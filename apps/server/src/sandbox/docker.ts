@@ -102,7 +102,7 @@ export class DockerSandbox {
     const worktreePath = resolve(opts.worktreePath);
 
     // Shared data — mounted at /data inside the sandbox. Contains secrets
-    // (app.pem) and the opencode-home session-jsonl tree (see
+    // (app.pem) and the agent-sessions session-jsonl tree (see
     // deploy/sandbox-entrypoint.sh for the layout it expects).
     //
     // SANDBOX_DATA_VOLUME accepts either:
