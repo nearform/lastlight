@@ -190,18 +190,20 @@ lastlight fork classifier             # copy the base intent-classifier prompts 
 		plugin that teaches Claude Code to install, configure and operate Last Light
 		and Last Light Evals — ask it e.g. <em>"set up a Last Light server"</em> or
 		<em>"scaffold an evals workspace"</em>. <code>lastlight skills install</code>
-		(host-local) installs the bundled, version-matched skills: it uses the
-		<code>claude</code> plugin marketplace when present, otherwise copies the
-		skills into <code>~/.claude/skills</code>.
+		(host-local) installs the skills: when the <code>claude</code> CLI is present it registers the
+		<code>nearform/lastlight</code> plugin marketplace and installs from GitHub — so the skills
+		auto-update (<code>claude plugin update</code>) rather than being pinned to the CLI — otherwise
+		it copies the bundled skills into <code>~/.claude/skills</code>. Pass <code>--local</code> to
+		use the copy bundled with this CLI instead of the remote.
 	</p>
-	<pre><code>lastlight skills install              # → ~/.claude/skills (user) [--scope project] [--no-marketplace]
+	<pre><code>lastlight skills install              # → ~/.claude/skills (user) [--scope project] [--local] [--no-marketplace]
 lastlight skills list                 # bundled skills + where they're installed
 lastlight skills uninstall            # remove them [--scope user|project]</code></pre>
 	<p>
 		The bundle includes <code>lastlight-server</code>, <code>lastlight-client</code>,
 		<code>lastlight-overlay</code> and <code>lastlight-evals</code>. You can also
-		register the marketplace directly from a checkout:
-		<code>claude plugin marketplace add ./</code> then
+		register the marketplace directly:
+		<code>claude plugin marketplace add nearform/lastlight</code> then
 		<code>claude plugin install lastlight@lastlight-skills</code>.
 	</p>
 

@@ -51,6 +51,7 @@ const BOOLEAN_FLAGS = new Set([
   // `fork` — overwrite existing overlay assets
   "force",
   // `skills install` — skip the claude marketplace path, copy skill dirs directly
+  // (and `--local`, shared with `update`, forces the bundled marketplace source)
   "no-marketplace",
 ]);
 
@@ -296,7 +297,8 @@ ${chalk.bold("Fork")} (host-local — copy built-in assets into the deployment o
   skills: `
 ${chalk.bold("Skills")} (host-local — install the Last Light Claude Code skills)
   lastlight skills install           Install the skills into a local Claude Code
-                                     [--scope user|project] [--no-marketplace]
+                                     [--scope user|project] [--local] [--no-marketplace]
+                                     ${chalk.dim("(installs from the nearform/lastlight marketplace so skills auto-update; --local uses the bundled copy)")}
   lastlight skills list              List bundled skills + where they're installed
   lastlight skills uninstall         Remove the installed skills [--scope user|project]`,
 
@@ -1152,6 +1154,7 @@ async function cmdSkills(): Promise<void> {
   await skills(positionals.slice(1), {
     scope,
     noMarketplace: flags["no-marketplace"] === true,
+    local: flags.local === true,
   });
 }
 

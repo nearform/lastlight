@@ -267,8 +267,9 @@ plugins/                Claude Code plugin (distinct from the internal
                         The repo root is also a Claude Code marketplace
                         (.claude-plugin/marketplace.json). Installed via
                         `lastlight skills install` (src/cli/skills-install.ts):
-                        prefers `claude plugin marketplace add` of the
-                        bundled path, falls back to copying the skill dirs
+                        prefers `claude plugin marketplace add nearform/lastlight`
+                        (remote GitHub, so skills auto-update; `--local` uses the
+                        bundled path), falls back to copying the skill dirs
                         into ~/.claude/skills. Shipped in the npm package
                         (files: .claude-plugin + plugins).
 
@@ -529,9 +530,10 @@ lastlight fork classifier              # the base intent-classifier prompts (cla
                                         # [--home dir] [--force to overwrite existing]
 
 # Install the Last Light Claude Code skills into a local Claude Code (HOST-LOCAL;
-# src/cli/skills-install.ts). Prefers `claude plugin marketplace add` of the bundled
-# plugins/ path; falls back to copying skill dirs into the scope's .claude/skills.
-lastlight skills install               # → ~/.claude/skills (user) [--scope project] [--no-marketplace]
+# src/cli/skills-install.ts). Prefers `claude plugin marketplace add nearform/lastlight`
+# (remote GitHub → skills auto-update; `--local` uses the bundled plugins/ path);
+# falls back to copying skill dirs into the scope's .claude/skills.
+lastlight skills install               # → ~/.claude/skills (user) [--scope project] [--local] [--no-marketplace]
 lastlight skills list                  # bundled skills + where they're installed
 lastlight skills uninstall             # remove them [--scope user|project]
 

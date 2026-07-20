@@ -22,19 +22,22 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 
 	<h2>1. Install the CLI and skills</h2>
 
-	<p>Install the <code>lastlight</code> CLI, then install the bundled, version-matched skills:</p>
+	<p>Install the <code>lastlight</code> CLI, then install the Claude Code skills:</p>
 
 	<pre><code>npm i -g lastlight          # or run it via npx
 lastlight skills install    # → ~/.claude/skills (user scope)</code></pre>
 
 	<p>
-		<code>lastlight skills install</code> uses the <code>claude</code> plugin marketplace when
-		one is present, otherwise it copies the skills into <code>~/.claude/skills</code>. Add
+		When the <code>claude</code> CLI is present, <code>lastlight skills install</code> registers
+		the <code>nearform/lastlight</code> plugin marketplace and installs from GitHub, so the skills
+		stay current — run <code>claude plugin update</code> to pull newer versions. Without the
+		<code>claude</code> CLI it copies the bundled skills into <code>~/.claude/skills</code>. Add
 		<code>--scope project</code> to install them into <code>./.claude/skills</code> for a single
-		repo. From a Last Light checkout you can also register the marketplace directly:
+		repo, or <code>--local</code> to use the copy bundled with this CLI instead of the remote.
+		You can also register the marketplace directly:
 	</p>
 
-	<pre><code>claude plugin marketplace add ./
+	<pre><code>claude plugin marketplace add nearform/lastlight
 claude plugin install lastlight@lastlight-skills</code></pre>
 
 	<h2>2. Ask Claude to set it up</h2>
