@@ -24,6 +24,10 @@ import type { AgentSessionEvent, RetrySettings } from "@earendil-works/pi-coding
 
 import type { RunConfig } from "./args.js";
 import { Emitter, type EmitterRecord, type EmitterSink } from "./emitter.js";
+import { surfaceTerminalError, tailAssistantError } from "./terminal-error.js";
+
+/** The element type of an `agent_end` event's `messages` (Pi's `AgentMessage`). */
+type AgentMsg = Extract<AgentSessionEvent, { type: "agent_end" }>["messages"][number];
 import { loadGitHubExtension, isMisconfigurationSkip } from "./extensions/github/index.js";
 import {
   loadWebSearchExtension,
@@ -383,6 +387,12 @@ export async function runOnce(
   // retryable failure masquerade as a clean finish.
   let terminalAgentEndSeen = false;
 
+  // The most recent provider error observed on ANY agent_end (including
+  // willRetry:true attempts). If the run degenerates into an empty synthesized
+  // terminal (aborted mid retry-backoff), we resurface this so the real cause
+  // (quota/auth/5xx) isn't swallowed as an empty completion. See terminal-error.ts.
+  let capturedError: AgentMsg | undefined;
+
   // Step cap (config.maxSteps). Pi exposes no max-turns / shouldStopAfterTurn
   // hook through its SDK, so we enforce the cap from the event stream: count
   // completed turns and, once the agent has run maxSteps turns AND still
@@ -407,8 +417,12 @@ export async function runOnce(
       if (event.type === "tool_execution_end" && event.isError) {
         sawError = true;
       }
-      if (event.type === "agent_end" && !event.willRetry) {
-        terminalAgentEndSeen = true;
+      if (event.type === "agent_end") {
+        if (!event.willRetry) terminalAgentEndSeen = true;
+        // Remember a provider error from this attempt — even a retryable one,
+        // since a later abort can strand the run before a terminal agent_end.
+        const err = tailAssistantError(event.messages);
+        if (err) capturedError = err;
       }
       if (event.type === "turn_end") {
         stepCount++;
@@ -464,12 +478,16 @@ export async function runOnce(
   // Pi already emitted the terminal agent_end, so this is skipped and default
   // JSONL fixtures stay byte-identical.
   if (!terminalAgentEndSeen) {
-    let messages: unknown[] = [];
+    let messages: AgentMsg[] = [];
     try {
-      messages = session.messages;
+      messages = session.messages as AgentMsg[];
     } catch {
       // Never let the terminal guarantee itself throw.
     }
+    // If the run ended without a clean terminal answer but a provider error was
+    // observed en route, make it the terminal message so downstream reports the
+    // real cause instead of "empty completion — no usable output".
+    messages = surfaceTerminalError(messages, capturedError);
     emitter.event({
       type: "agent_end",
       messages,
