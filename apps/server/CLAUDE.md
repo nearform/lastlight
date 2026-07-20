@@ -784,16 +784,25 @@ holds `config.yaml` + asset overrides + `secrets/.env` + `secrets/*.pem`).
 
 ### Redeploy a code change
 
-Deploys are driven by the **`lastlight` CLI**, installed globally on the host
-and run as the `lastlight` user (with `LASTLIGHT_HOME=/home/lastlight/lastlight`,
-which is also `~lastlight/lastlight`, so the default resolves):
+**The normal path is fully automated — no SSH, no `npm i -g`.** Bump the
+overlay's `deploy.version` to the release tag and push; each overlay repo's
+"Deploy overlay" Action runs on the host and deploys for you (see "So a normal
+deploy is…" below). The Action's `ci-deploy.sh` **pins the host's global CLI**
+to `deploy.version` (`npm install -g lastlight@<tag>`) *before* running the
+deploy — because the CLI is versioned separately from the agent image and new
+deploy behaviour (e.g. the GHCR image-pull path) lives in the CLI, so a stale
+CLI silently uses the old path (builds locally, ignores a pin) — then runs
+`lastlight server update`. CLI + images land together.
+
+Deploys are driven by the **`lastlight` CLI**, run as the `lastlight` user (with
+`LASTLIGHT_HOME=/home/lastlight/lastlight`, which is also `~lastlight/lastlight`,
+so the default resolves). Only for a **hand-run** deploy (or a host without the
+Action) do you update the CLI yourself first:
 
 ```bash
 ssh <production-server>
-# ALWAYS update the global CLI FIRST — it's versioned separately from the agent
-# image, and new deploy behaviour (e.g. the GHCR image-pull path) lives in the
-# CLI. A stale CLI silently uses the old path (e.g. builds locally, ignores a
-# pin). Match the version you're deploying:
+# Hand-run only. The auto-deploy Action already does this step for you.
+# Update the global CLI FIRST to match the version you're deploying:
 npm i -g lastlight@<version>          # e.g. lastlight@0.12.0 (or @latest)
 sudo -u lastlight -i lastlight server update
 ```
@@ -869,13 +878,14 @@ it only warns "redeploy needed" when the running image's SHA is behind the
 pinned tag (pin bumped but not yet deployed), else shows a quiet "Pinned to
 vX.Y.Z" label.
 
-So a normal deploy is: **commit + push to `main`, then run `lastlight server
-update` on the host.** Code changes (anything under `src/`, `workflows/`,
-`skills/`, `agent-context/`, `config/default.yaml`) reach prod through a
-**published image**: cut a release (whose `publish.yml` `images` job builds them)
-and bump the overlay's `deploy.version` to that tag, then `server update` pulls it. To
-deploy un-released `main` (or local edits) build on the host with `server update
---local` (or `server build`). Deployment-only config (the `instance/` overlay)
+So a normal deploy is: **cut a release, then bump the overlay's `deploy.version`
+to that tag and push** — each overlay repo's auto-deploy Action runs `lastlight
+server update` on the host for you (no SSH, no manual CLI upgrade; see "Redeploy
+a code change"). Code changes (anything under `src/`, `workflows/`, `skills/`,
+`agent-context/`, `config/default.yaml`) reach prod through a **published
+image**: `publish.yml`'s `images` job builds it, and `server update` *pulls* the
+`deploy.version` tag. To deploy un-released `main` (or local edits) build on the
+host with `server update --local` (or `server build`). Deployment-only config (the `instance/` overlay)
 can instead be
 edited + committed to the `lastlight-instance` repo and applied with just
 `lastlight server restart agent` — no image rebuild. (Caveat: *removing* an
@@ -898,63 +908,11 @@ lastlight server restart agent     # after a config.yaml or .env add/edit
 lastlight server start agent       # after REMOVING an .env var (recreate)
 ```
 
-### Cutting a release (npm + GitHub)
+### Cutting a release
 
-**Release when the CLI *or* the `lastlight/evals` barrel surface changes.**
-Pure prod-facing harness/dashboard/asset/doc changes reach prod via `lastlight
-server update`, not npm — those alone don't need a release. But the standalone
-`lastlight-evals` repo (`~/work/lastlight-evals`) consumes core as an npm
-dependency through the `lastlight/evals` barrel (`src/evals-api.ts` — workflow
-driving + overlay bootstrap symbols), so a harness change that alters how those
-symbols run workflows (e.g. the workflow runner, `phase-executor.ts`, the
-sandbox port, config resolution) must be published for evals to pick it up —
-cut a release even though the CLI is untouched. When in doubt, if the change
-affects the workflow-execution path that evals drives, release it. (See the
-npm-release-policy note in local agent memory.) A release is a version bump + a
-`vX.Y.Z` tag + a GitHub release. **Publishing is automated** — creating the
-GitHub release fires the `publish.yml` workflow, which runs as two ordered jobs.
-First `images` builds + pushes the four Docker images to
-`ghcr.io/nearform/lastlight-*` tagged `vX.Y.Z` (via `docker buildx bake` +
-`docker-bake.hcl`; moves `:latest` for non-prerelease releases). Then `npm`
-(which `needs: images`) typechecks + tests + builds + publishes to npm using a
-repo token (no 2FA). **The order is deliberate:** the CLI only goes live once the
-`:vX.Y.Z` images it tells hosts to pull already exist in GHCR — otherwise a
-`npm i -g lastlight@X.Y.Z && server update` in the gap would fail the image pull.
-Do NOT run `npm publish` or prompt for an OTP; just watch the release run and
-confirm the version went live. The image build is what lets a deploy host
-`server update` *pull* the new version instead of building it — so after cutting
-the release, bump the overlay's `deploy.version` to the tag to roll it out.
-(`workflow_dispatch` on `publish.yml` rebuilds only the images for a given tag;
-the `npm` job is gated to `release` events.)
-
-Patch for fixes/doc tweaks to the CLI surface; minor for new user-facing
-commands/features. The dance (run on a clean `main`, up to date with origin):
-
-```bash
-npm version patch --no-git-tag-version   # bump package.json + package-lock.json (minor for new features)
-# keep the Claude Code plugin manifest version in lockstep:
-#   edit plugins/lastlight/.claude-plugin/plugin.json "version" to match
-npm run build                            # refresh dist/ (shipped via package `files`; not committed)
-git add package.json package-lock.json plugins/lastlight/.claude-plugin/plugin.json
-git commit -m "chore(release): vX.Y.Z"
-git tag -a vX.Y.Z -m "vX.Y.Z"           # annotated — this repo's git config rejects lightweight tags
-git push origin main --follow-tags       # pushes the release commit AND the tag
-gh release create vX.Y.Z --title "vX.Y.Z — <summary>" --latest --notes "<changelog>"
-#   notes convention: highlights + a compare link, vPREV...vX.Y.Z
-#   → this triggers publish.yml, which publishes to npm automatically.
-
-# Confirm the automated publish landed (plain `npm view` can serve a stale cache):
-gh run watch <run-id> --exit-status
-npm view lastlight@X.Y.Z version --prefer-online   # note: no `v` prefix on npm versions
-```
-
-Notes:
-- The version lives in THREE files — `package.json`, `package-lock.json`
-  (both handled by `npm version`), and `plugins/lastlight/.claude-plugin/plugin.json`
-  (manual). Keep all three in sync.
-- For an annotated tag, `git rev-parse vX.Y.Z` returns the tag object SHA, not
-  the commit — use `git rev-parse 'vX.Y.Z^{commit}'` to confirm it points at the
-  release commit.
+See **[`docs/RELEASING.md`](../../docs/RELEASING.md)** — the canonical runbook
+(when to release, graph-aware version bumps, publish order, the automated
+`publish.yml` pipeline, and rolling out to prod).
 
 ## Sub-folder docs
 

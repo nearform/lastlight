@@ -17,6 +17,22 @@ package name, which OIDC trusted publishing can't do until the package exists.)
 
 This document is the runbook. Read it end-to-end before your first release.
 
+## When to release
+
+**Essentially any prod-facing change.** `lastlight server update` deploys by
+*pulling* the `ghcr.io/nearform/lastlight-*` images, and only a GitHub Release
+builds them — so a harness / dashboard / asset / `config/default.yaml` change
+reaches prod only once it's released and the overlay's `deploy.version` is bumped
+to the tag. (`server update --local`, which builds from source on the host, is
+the sole no-release path — for deploying un-released `main` or local edits.) A
+**CLI**-only or `lastlight/evals` barrel (`apps/server/src/evals-api.ts`) change
+also needs a release so the published npm packages pick it up: the standalone
+`lastlight-evals` repo consumes core via npm, so a change to how those symbols
+run workflows (the workflow runner, phase executor, sandbox port, config
+resolution) must be published even when the CLI is untouched. When in doubt,
+release it. Semver: patch = fix/refactor/doc, minor = new user-facing capability,
+major = break.
+
 ## What ships
 
 **npm (public):**
@@ -270,29 +286,31 @@ Run on a clean `main`, up to date with origin.
 
 ## Rolling a release out to prod
 
-Prod hosts (drizby, nearform) run `lastlight server update` via each overlay
-repo's auto-deploy Action on push to `main`. The **global CLI on each host is
-versioned separately from the agent image** and must be updated *before* a
-deploy that changes CLI behaviour — a stale CLI silently uses the old code path.
+Prod hosts (drizby, nearform) auto-deploy via each overlay repo's "Deploy
+overlay" Action on push to `main`. **You do not SSH in or run `npm i -g`
+manually** — the Action handles both the CLI and the images:
 
-1. On **each** host, update the global CLI **first**:
-
-   ```bash
-   npm i -g lastlight@X.Y.Z
-   ```
-
-2. Bump `deploy.version: vX.Y.Z` in **both** overlay repos
+1. Bump `deploy.version: vX.Y.Z` in **both** overlay repos
    (`cliftonc/lastlight-instance` → drizby, `nearform/lastlight-nearform` →
-   nearform) and push. The auto-deploy Action runs `lastlight server update`,
-   which converges the host's core checkout to the tag and **pulls** the
-   `:vX.Y.Z` images.
+   nearform) and push. That's the whole rollout.
 
-3. Verify each host: `lastlight server status` (pinned vX.Y.Z, services up),
-   `curl http://127.0.0.1:8644/health`, `/admin` loads.
+   The Action's forced-command `ci-deploy.sh` runs a full deploy on any
+   `deploy.version` change: it first **pins the host's global CLI** to the tag
+   (`npm install -g lastlight@vX.Y.Z`) — because the global CLI is versioned
+   separately from the agent image and a stale CLI silently uses the old code
+   path — then runs `lastlight server update`, which converges the core checkout
+   to the tag and **pulls** the `:vX.Y.Z` GHCR images. CLI + images land together.
 
-Rollback: re-pin the overlay's `deploy.version` to the previous tag and push
-(the old images are still in GHCR), and `npm i -g lastlight@<old>` to restore
-the matching CLI.
+2. Verify each host (from the dashboard, or SSH if you want): `lastlight server
+   status` (pinned vX.Y.Z, services up), `curl http://127.0.0.1:8644/health`,
+   `/admin` loads.
+
+Rollback: re-pin the overlay's `deploy.version` to the previous tag and push —
+the Action re-pins the CLI and re-pulls the old images (still in GHCR).
+
+**Manual deploy (only for a hand-run deploy, or a host without the Action):**
+update the global CLI *first*, then run the deploy —
+`npm i -g lastlight@X.Y.Z && lastlight server update`.
 
 ## Cutting the FIRST post-migration release
 
