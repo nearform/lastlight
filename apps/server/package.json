@@ -74,7 +74,7 @@
     "@slack/web-api": "^7.16.0",
     "agentic-pi": "workspace:*",
     "arctic": "^3.7.0",
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.11.1",
     "croner": "^9.0.0",
     "hono": "^4.12.14",
     "octokit": "^5.0.5",
