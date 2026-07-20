@@ -59,7 +59,6 @@ describe("dispatchCronWorkflow", () => {
       "security-review",
       { repos: ["cliftonc/a", "cliftonc/b", "cliftonc/c"] },
       dispatch,
-      { concurrency: 3 },
     );
     expect(dispatch).toHaveBeenCalledTimes(3);
     expect(res).toEqual({ dispatched: 3, failures: 2 });
@@ -75,7 +74,7 @@ describe("dispatchCronWorkflow", () => {
     expect(res).toEqual({ dispatched: 1, failures: 0 });
   });
 
-  it("bounds concurrency — never more than N dispatches in flight", async () => {
+  it("fires all dispatches at once — no throttle (the run queue is the limiter)", async () => {
     let inFlight = 0;
     let peakInFlight = 0;
     const dispatch = vi.fn<CronDispatcher>().mockImplementation(async () => {
@@ -87,14 +86,10 @@ describe("dispatchCronWorkflow", () => {
     });
 
     const repos = Array.from({ length: 10 }, (_, i) => `cliftonc/repo-${i}`);
-    const res = await dispatchCronWorkflow(
-      "security-review",
-      { repos },
-      dispatch,
-      { concurrency: 3 },
-    );
+    const res = await dispatchCronWorkflow("security-review", { repos }, dispatch);
     expect(res).toEqual({ dispatched: 10, failures: 0 });
-    expect(peakInFlight).toBeLessThanOrEqual(3);
+    // All ten dispatched concurrently — nothing serialized on the dispatch side.
+    expect(peakInFlight).toBe(10);
   });
 
   it("drops non-string entries from repos[] silently", async () => {
@@ -128,7 +123,7 @@ describe("fanOutContexts", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it("bounds concurrency", async () => {
+  it("fires every context at once — no dispatch-side throttle", async () => {
     let inFlight = 0;
     let peak = 0;
     const dispatch = vi.fn<CronDispatcher>().mockImplementation(async () => {
@@ -139,7 +134,7 @@ describe("fanOutContexts", () => {
       return { success: true };
     });
     const contexts = Array.from({ length: 9 }, (_, i) => ({ prNumber: i }));
-    await fanOutContexts("w", contexts, dispatch, { concurrency: 2 });
-    expect(peak).toBeLessThanOrEqual(2);
+    await fanOutContexts("w", contexts, dispatch);
+    expect(peak).toBe(9);
   });
 });

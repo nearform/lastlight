@@ -78,8 +78,10 @@ using only labels that already exist and skip the rest.
 Then apply exactly the labels for your verdict via `github_add_labels`, and clear
 the superseded ones with `github_remove_label` (only ever touch the three labels
 above — never remove a label outside this vocabulary, e.g. Renovate's `rebase`):
-- **TRIVIAL** → add `dependency-trivial`; remove `dependency-functional` and
-  `requires-human` if present (it's landing, so any stale human-needed flag is cleared).
+- **TRIVIAL** → add `dependency-trivial`; remove `dependency-functional` if
+  present. Also remove `requires-human` for now — the default trivial path lands
+  automatically. (STEP 3 re-adds `requires-human` in the ONE case where a trivial
+  PR still can't land without a maintainer: auto-merge disabled on the repo.)
 - **FUNCTIONAL** → add `dependency-functional` and `requires-human`; remove
   `dependency-trivial` if present.
 
@@ -109,9 +111,17 @@ STEP 3 — Act on the classification.
     "squash" }) — this is the ONE case where a direct merge is correct. If
     `mergeable_state` is anything else, do NOT direct-merge: the PR is not green.
   - `reason` says auto-merge is **not allowed for this repository**: the repo has
-    "Allow auto-merge" turned off. Post a brief comment via
-    `github_add_issue_comment` saying the update looks trivial but auto-merge is
-    disabled, so a maintainer should merge it.
+    "Allow auto-merge" turned off, so Last Light can't land this itself — it needs
+    a maintainer. This is a `requires-human` situation, and it's the ONE trivial
+    case where you flag it: add the `requires-human` label via `github_add_labels`
+    (keep `dependency-trivial` — the bump IS trivial). The label is the durable
+    signal. Then post a brief comment saying the update looks trivial but
+    auto-merge is disabled, so a maintainer should merge it — **BUT ONLY the first
+    time**. This branch re-runs on every check-pass and the daily cron, so do NOT
+    re-comment the same nudge each run: skip the comment when `requires-human` was
+    already present before this run, or when you can see you've already left an
+    equivalent "auto-merge disabled, please merge" comment on this PR. When in
+    doubt, rely on the label and stay silent.
 
   CASE `behind` or `dirty` — the bump is trivial but the branch isn't mergeable
   as-is: it is behind the base branch (`behind`) or has merge conflicts (`dirty`,
@@ -135,8 +145,10 @@ STEP 3 — Act on the classification.
   (squash) so GitHub lands it automatically once the rebase makes it green. You do
   NOT wait for the rebase, and you NEVER direct-merge a `behind`/`dirty` PR. If
   auto-merge returns `{ ok: false }` with reason **"not allowed for this
-  repository"**, note in your comment that a maintainer will need to merge once
-  it's green.
+  repository"**, add the `requires-human` label (a maintainer must merge once it's
+  green) and note that in your rebase comment — but don't post a SEPARATE
+  auto-merge-disabled comment on top of the rebase nudge, and don't repeat it on
+  later runs once `requires-human` is set.
 
   CASE `unstable`, `blocked`, or `unknown` — a check is failing or still running
   (`unstable`), a required check/review is outstanding (`blocked`), or the state

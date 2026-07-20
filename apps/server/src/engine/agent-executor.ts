@@ -11,8 +11,13 @@ import type { SandboxBackend } from "../config/config.js";
 import type { PrePopulateSpec, SandboxFactory } from "../sandbox/sandbox.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
 import { DEFAULT_MODEL } from "./executors/shared.js";
-import { PROVIDER_ENV_KEYS } from "lastlight-shared/providers";
-import { oauthEnvVarForProvider, oauthProviderIdForModel, resolveOAuthApiKey } from "./oauth.js";
+import { PROVIDER_ENV_KEYS, providerByPrefix } from "lastlight-shared/providers";
+import {
+  OAUTH_ONLY_PROVIDERS,
+  oauthEnvVarForProvider,
+  oauthProviderIdForModel,
+  resolveOAuthApiKey,
+} from "./oauth.js";
 import {
   runSandboxedAgent,
   runSandboxedCommand,
@@ -174,10 +179,20 @@ async function prepareRun(
         if (res) {
           ghEnv[oauthEnvVar] = res.apiKey;
         } else {
-          console.warn(
-            `[executor] Model '${modelSpec}' needs an OAuth login for '${oauthId}' but none is ` +
-              `stored. Run: lastlight oauth login ${oauthId}`,
-          );
+          // No stored OAuth creds. Stay silent when the provider can fall back
+          // to an API key that's already present (e.g. `anthropic` via
+          // ANTHROPIC_API_KEY, forwarded above) — the sandbox authenticates
+          // fine, so warning about a missing OAuth login on every run was pure
+          // noise. Only warn when there's genuinely no usable credential: an
+          // oauth-only provider (Codex/Copilot) or no API key configured.
+          const apiKeyEnv = providerByPrefix(oauthId)?.envKey;
+          const hasApiKey = !!apiKeyEnv && (!!ghEnv[apiKeyEnv] || !!process.env[apiKeyEnv]);
+          if (OAUTH_ONLY_PROVIDERS.has(oauthId) || !hasApiKey) {
+            console.warn(
+              `[executor] Model '${modelSpec}' needs an OAuth login for '${oauthId}' but none is ` +
+                `stored. Run: lastlight oauth login ${oauthId}`,
+            );
+          }
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);

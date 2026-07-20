@@ -54,6 +54,9 @@ beforeEach(() => {
   resolveOAuthApiKeySpy.mockReset();
   delete process.env.ANTHROPIC_OAUTH_TOKEN;
   delete process.env.COPILOT_GITHUB_TOKEN;
+  // Clear the API-key fallback so the missing-login path is deterministic —
+  // individual tests set it back when they exercise the suppression.
+  delete process.env.ANTHROPIC_API_KEY;
 });
 afterEach(() => {
   process.env = { ...savedEnv };
@@ -86,6 +89,26 @@ describe("executor OAuth env injection (container backends)", () => {
   it("injects nothing for an Anthropic model with no stored login", async () => {
     resolveOAuthApiKeySpy.mockResolvedValue(null);
     const { fake } = await runWithModel("anthropic/claude-sonnet-4-6", { backend: "docker" });
+    expect(fake.env?.ANTHROPIC_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  it("warns about a missing OAuth login only when no API-key fallback exists", async () => {
+    resolveOAuthApiKeySpy.mockResolvedValue(null);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runWithModel("anthropic/claude-sonnet-4-6", { backend: "docker" });
+    expect(warn.mock.calls.some(([m]) => String(m).includes("needs an OAuth login"))).toBe(true);
+  });
+
+  it("stays silent about a missing OAuth login when ANTHROPIC_API_KEY is set (API-key auth works)", async () => {
+    // anthropic is oauthOnly:false — with a key present the sandbox authenticates
+    // fine, so the OAuth-login warning was pure per-run noise.
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    resolveOAuthApiKeySpy.mockResolvedValue(null);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { fake } = await runWithModel("anthropic/claude-sonnet-4-6", { backend: "docker" });
+    expect(warn.mock.calls.some(([m]) => String(m).includes("needs an OAuth login"))).toBe(false);
+    // The API key still rides into the sandbox env for pi-ai to use.
+    expect(fake.env?.ANTHROPIC_API_KEY).toBe("sk-ant-test");
     expect(fake.env?.ANTHROPIC_OAUTH_TOKEN).toBeUndefined();
   });
 

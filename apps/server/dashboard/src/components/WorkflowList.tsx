@@ -456,6 +456,10 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
   );
   const [error, setError] = useState<string | null>(null);
   const [limit, setLimit] = useState(WORKFLOW_PAGE_SIZE);
+  // Queued runs (parked by the concurrency cap) are hidden by default — they're
+  // pending, not activity. The count drives the show/hide toggle above the list.
+  const [showQueued, setShowQueued] = useState(false);
+  const [queuedTotal, setQueuedTotal] = useState(0);
   const [workflowFilter, setWorkflowFilter] = useUrlState<string | null>(
     "workflow",
     null,
@@ -490,7 +494,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
       const since = timeRangeToSince(timeRange);
       // "live" range maps to status=active (running+paused), no date filter.
       const status = timeRange === "live" ? "active" : undefined;
-      const [runsData, approvalsData] = await Promise.all([
+      const [runsData, approvalsData, queuedData] = await Promise.all([
         api.workflowRuns({
           limit,
           since,
@@ -499,10 +503,22 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
           repo,
         }),
         api.approvals().catch(() => ({ approvals: [] as WorkflowApproval[] })),
+        // Queued-run count, scoped to the same date/workflow/repo filters, for
+        // the show/hide toggle. Cheap (limit 1 — we only read `total`).
+        api
+          .workflowRuns({
+            status: "queued",
+            limit: 1,
+            since,
+            workflow: workflowFilter ?? undefined,
+            repo,
+          })
+          .catch(() => ({ total: 0, workflowRuns: [] as WorkflowRun[] })),
       ]);
       setRuns(runsData.workflowRuns);
       setTotal(runsData.total);
       setApprovals(approvalsData.approvals);
+      setQueuedTotal(queuedData.total);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
@@ -535,17 +551,22 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
   // date and workflow name; the search box is just a quick local filter so
   // the user doesn't have to wait for a server roundtrip on every keystroke.
   const visibleRuns = useMemo(() => {
-    if (!query) return runs;
-    const q = query.toLowerCase();
-    return runs.filter((r) => {
-      return (
-        r.workflowName.toLowerCase().includes(q) ||
-        (r.repo ?? "").toLowerCase().includes(q) ||
-        String(r.issueNumber ?? "").includes(q) ||
-        r.triggerId.toLowerCase().includes(q)
-      );
-    });
-  }, [runs, query]);
+    // Queued runs are hidden unless the toggle is on — they're pending work,
+    // not activity, and flood the list when a cron fans out a big batch.
+    let list = showQueued ? runs : runs.filter((r) => r.status !== "queued");
+    if (query) {
+      const q = query.toLowerCase();
+      list = list.filter((r) => {
+        return (
+          r.workflowName.toLowerCase().includes(q) ||
+          (r.repo ?? "").toLowerCase().includes(q) ||
+          String(r.issueNumber ?? "").includes(q) ||
+          r.triggerId.toLowerCase().includes(q)
+        );
+      });
+    }
+    return list;
+  }, [runs, query, showQueued]);
 
   // Auto-select the first run only when nothing is currently selected. We
   // intentionally do NOT clear an existing selectedId just because it's not
@@ -650,6 +671,24 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
         <aside className="w-80 shrink-0 border-r border-base-300 bg-base-200/40 overflow-y-auto flex flex-col">
           {error && (
             <div className="px-3 py-2 text-2xs text-error border-b border-base-300">{error}</div>
+          )}
+          {queuedTotal > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowQueued((v) => !v)}
+              title={showQueued ? "Hide queued workflow runs" : "Show queued workflow runs"}
+              className={clsx(
+                "flex items-center justify-between gap-2 px-3 py-1.5 text-2xs border-b border-base-300 transition-colors",
+                showQueued
+                  ? "bg-primary/10 text-primary"
+                  : "text-base-content/50 hover:bg-base-300/40",
+              )}
+            >
+              <span className="font-mono">
+                {queuedTotal} queued workflow{queuedTotal === 1 ? "" : "s"}
+              </span>
+              <span className="badge badge-ghost badge-xs">{showQueued ? "hide" : "show"}</span>
+            </button>
           )}
           <ul className="flex-1">
             {visibleRuns.map((run) => {

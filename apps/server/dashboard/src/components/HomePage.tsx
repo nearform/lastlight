@@ -97,6 +97,7 @@ const KIND_ICON: Record<ContainerKind | "host", LucideIcon> = {
 
 function StatusBadge({ status }: { status: WorkflowRun["status"] }) {
   const cls = clsx("badge badge-xs font-mono", {
+    "badge-neutral": status === "queued",
     "badge-info": status === "running",
     "badge-warning": status === "paused",
     "badge-success": status === "succeeded",
@@ -107,7 +108,11 @@ function StatusBadge({ status }: { status: WorkflowRun["status"] }) {
 }
 
 function useLiveActivity() {
+  // "Active" is running+paused only — the runs actually executing. Queued runs
+  // (parked by the concurrency cap) are counted separately so the two don't
+  // double-count, and the live list stays to what's really in flight.
   const [workflowCount, setWorkflowCount] = useState(0);
+  const [queuedCount, setQueuedCount] = useState(0);
   const [liveWorkflows, setLiveWorkflows] = useState<WorkflowRun[]>([]);
   const [containerCount, setContainerCount] = useState(0);
 
@@ -115,13 +120,15 @@ function useLiveActivity() {
     let cancelled = false;
     const load = async () => {
       try {
-        const [wf, ct] = await Promise.all([
-          api.workflowRuns({ status: "active", limit: 5 }),
+        const [wf, queued, ct] = await Promise.all([
+          api.workflowRuns({ status: "running,paused", limit: 5 }),
+          api.workflowRuns({ status: "queued", limit: 1 }),
           api.containers(),
         ]);
         if (!cancelled) {
           setWorkflowCount(wf.total);
           setLiveWorkflows(wf.workflowRuns);
+          setQueuedCount(queued.total);
           setContainerCount(ct.containers.length);
         }
       } catch {
@@ -133,7 +140,7 @@ function useLiveActivity() {
     return () => { cancelled = true; clearInterval(t); };
   }, []);
 
-  return { workflowCount, liveWorkflows, containerCount };
+  return { workflowCount, queuedCount, liveWorkflows, containerCount };
 }
 
 function useContainerStats() {
@@ -355,11 +362,13 @@ function RunTarget({ run }: { run: WorkflowRun }) {
 
 function LiveActivitySection({
   workflowCount,
+  queuedCount,
   liveWorkflows,
   containerCount,
   onSelect,
 }: {
   workflowCount: number;
+  queuedCount: number;
   liveWorkflows: WorkflowRun[];
   containerCount: number;
   onSelect: (id: string) => void;
@@ -374,6 +383,17 @@ function LiveActivitySection({
           <div className="stat bg-base-100 rounded-box p-3 flex-1">
             <div className="stat-title text-xs">Active Workflows</div>
             <div className="stat-value text-2xl text-primary">{workflowCount}</div>
+          </div>
+          <div className="stat bg-base-100 rounded-box p-3 flex-1">
+            <div className="stat-title text-xs">Queued Workflows</div>
+            <div
+              className={clsx(
+                "stat-value text-2xl",
+                queuedCount > 0 ? "text-warning" : "text-base-content/40",
+              )}
+            >
+              {queuedCount}
+            </div>
           </div>
           <div className="stat bg-base-100 rounded-box p-3 flex-1">
             <div className="stat-title text-xs">Running Containers</div>
@@ -650,7 +670,7 @@ function StatsChartsSection() {
 }
 
 export function HomePage({ onSelectWorkflow }: { onSelectWorkflow: (id: string) => void }) {
-  const { workflowCount, liveWorkflows, containerCount } = useLiveActivity();
+  const { workflowCount, queuedCount, liveWorkflows, containerCount } = useLiveActivity();
   const recentRuns = useRecentWorkflows();
   const { stats, host, loaded } = useContainerStats();
 
@@ -660,6 +680,7 @@ export function HomePage({ onSelectWorkflow }: { onSelectWorkflow: (id: string) 
         <div className="lg:col-span-2 space-y-4">
           <LiveActivitySection
             workflowCount={workflowCount}
+            queuedCount={queuedCount}
             liveWorkflows={liveWorkflows}
             containerCount={containerCount}
             onSelect={onSelectWorkflow}
