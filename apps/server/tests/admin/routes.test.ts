@@ -168,14 +168,11 @@ describe("GET /oauth/slack/callback", () => {
   it("returns 403 when workspace does not match", async () => {
     // Mock fetch to return a different team
     const originalFetch = global.fetch;
-    global.fetch = vi.fn(async () => new Response(
-      JSON.stringify({
-        sub: "U99999",
-        "https://slack.com/team_id": "T99999",
-        "https://slack.com/team_domain": "other-team",
-      }),
-      { headers: { "Content-Type": "application/json" } },
-    ));
+    global.fetch = mockSlackFetch({
+      sub: "U99999",
+      "https://slack.com/team_id": "T99999",
+      "https://slack.com/team_domain": "other-team",
+    });
 
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
       slackOAuthClientId: "C123",
@@ -197,14 +194,11 @@ describe("GET /oauth/slack/callback", () => {
 
   it("redirects with token when workspace matches by team_id", async () => {
     const originalFetch = global.fetch;
-    global.fetch = vi.fn(async () => new Response(
-      JSON.stringify({
-        sub: "U00001",
-        "https://slack.com/team_id": "T00001",
-        "https://slack.com/team_domain": "my-team",
-      }),
-      { headers: { "Content-Type": "application/json" } },
-    ));
+    global.fetch = mockSlackFetch({
+      sub: "U00001",
+      "https://slack.com/team_id": "T00001",
+      "https://slack.com/team_domain": "my-team",
+    });
 
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
       slackOAuthClientId: "C123",
@@ -227,14 +221,11 @@ describe("GET /oauth/slack/callback", () => {
 
   it("redirects with token when no workspace restriction set", async () => {
     const originalFetch = global.fetch;
-    global.fetch = vi.fn(async () => new Response(
-      JSON.stringify({
-        sub: "UANY",
-        "https://slack.com/team_id": "TANY",
-        "https://slack.com/team_domain": "any-team",
-      }),
-      { headers: { "Content-Type": "application/json" } },
-    ));
+    global.fetch = mockSlackFetch({
+      sub: "UANY",
+      "https://slack.com/team_id": "TANY",
+      "https://slack.com/team_domain": "any-team",
+    });
 
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
       slackOAuthClientId: "C123",
@@ -356,10 +347,17 @@ describe("GET /oauth/github/authorize", () => {
   });
 });
 
-/** Helper: mock global.fetch routing /user and /orgs/... to different responses */
+/** Helper: mock global.fetch routing the token exchange, /user and /orgs/... to different responses */
 function mockGithubFetch({ userLogin, orgStatus }: { userLogin: string; orgStatus?: number }) {
   return vi.fn(async (url: string | URL | Request) => {
     const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    // The confidential-client token exchange (exchangeOAuth2Code) POSTs here.
+    if (urlStr.includes("login/oauth/access_token")) {
+      return new Response(
+        JSON.stringify({ access_token: "gho_test_token" }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }
     if (urlStr.includes("/orgs/")) {
       return new Response(null, { status: orgStatus ?? 204 });
     }
@@ -369,6 +367,22 @@ function mockGithubFetch({ userLogin, orgStatus }: { userLogin: string; orgStatu
       { headers: { "Content-Type": "application/json" } },
     );
   });
+}
+
+/** Helper: mock global.fetch routing the Slack token exchange vs the userInfo endpoint. */
+function mockSlackFetch(userInfo: Record<string, unknown>) {
+  return vi.fn(async (url: string | URL | Request) => {
+    const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    // The confidential-client token exchange (exchangeOAuth2Code) POSTs here.
+    if (urlStr.includes("openid.connect.token")) {
+      return new Response(
+        JSON.stringify({ ok: true, access_token: "xoxp_test_token" }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }
+    // openid.connect.userInfo
+    return new Response(JSON.stringify(userInfo), { headers: { "Content-Type": "application/json" } });
+  }) as unknown as typeof fetch;
 }
 
 describe("GET /oauth/github/callback", () => {

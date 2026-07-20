@@ -390,6 +390,69 @@ function mountSessionRoutes(app: Hono, sessions: SessionSource, prefix: string):
   });
 }
 
+/** Token endpoints for the confidential-client OAuth2 code exchange. */
+export const GITHUB_TOKEN_ENDPOINT = "https://github.com/login/oauth/access_token";
+export const SLACK_TOKEN_ENDPOINT = "https://slack.com/api/openid.connect.token";
+
+/**
+ * Exchange an OAuth2 authorization code for an access token — our own tiny
+ * confidential-client (Basic-auth) exchange, used instead of arctic's
+ * `validateAuthorizationCode` for the dashboard's GitHub + Slack logins.
+ *
+ * Why not arctic: arctic's `createOAuth2Request` **pre-sets a `Content-Length`
+ * header** on the token POST. That's fine on Node's built-in fetch, but an
+ * in-process agent run (agentic-pi / pi-ai) replaces Node's global undici
+ * dispatcher with a non-default undici build ("poisons" the global fetch — see
+ * `sandbox.ts` + `chat-skills.ts`), and that dispatcher **rejects a manually-set
+ * Content-Length** with `UND_ERR_INVALID_ARG: invalid content-length header`.
+ * Result: once any in-process run has happened, every GitHub/Slack OAuth login
+ * throws `ArcticFetchError` and users can't sign in. The follow-up userInfo GETs
+ * work because they carry no body / no Content-Length.
+ *
+ * The fix is simply to not set Content-Length ourselves — undici computes it
+ * internally, which never trips the header validation. Semantics match arctic's
+ * confidential-client path exactly (grant_type=authorization_code, Basic auth,
+ * form body), so GitHub and Slack differ only by `tokenEndpoint`.
+ */
+export async function exchangeOAuth2Code(opts: {
+  tokenEndpoint: string;
+  code: string;
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  fetchImpl?: typeof fetch;
+}): Promise<string> {
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: opts.code,
+  });
+  if (opts.redirectUri) body.set("redirect_uri", opts.redirectUri);
+  const credentials = Buffer.from(`${opts.clientId}:${opts.clientSecret}`).toString("base64");
+
+  const doFetch = opts.fetchImpl ?? fetch;
+  const res = await doFetch(opts.tokenEndpoint, {
+    method: "POST",
+    // Deliberately NO Content-Length header — see the doc comment above.
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+      Authorization: `Basic ${credentials}`,
+      "User-Agent": "lastlight-admin",
+    },
+    body: body.toString(),
+  });
+
+  const data = (await res.json().catch(() => null)) as
+    | { access_token?: string; error?: string; error_description?: string; ok?: boolean }
+    | null;
+  const accessToken = data?.access_token;
+  if (res.status !== 200 || !accessToken) {
+    const detail = data?.error_description ?? data?.error ?? `status ${res.status}`;
+    throw new Error(`OAuth token exchange failed: ${detail}`);
+  }
+  return accessToken;
+}
+
 export function createAdminRoutes(
   db: StateDb,
   sessions: SessionSource,
@@ -535,17 +598,17 @@ export function createAdminRoutes(
     }
 
     try {
-      const slack = new Slack(
-        config.slackOAuthClientId!,
-        config.slackOAuthClientSecret!,
-        config.slackOAuthRedirectUri ?? "",
-      );
       // "Sign in with Slack" issues OIDC-scoped tokens (openid + profile),
       // which Slack's classic auth.test endpoint rejects with invalid_auth.
       // Use the OIDC userInfo endpoint instead — it returns a JWT-style
       // payload with claims under namespaced URLs.
-      const tokens = await slack.validateAuthorizationCode(code);
-      const accessToken = tokens.accessToken();
+      const accessToken = await exchangeOAuth2Code({
+        tokenEndpoint: SLACK_TOKEN_ENDPOINT,
+        code,
+        clientId: config.slackOAuthClientId!,
+        clientSecret: config.slackOAuthClientSecret!,
+        redirectUri: config.slackOAuthRedirectUri ?? "",
+      });
       const res = await fetch("https://slack.com/api/openid.connect.userInfo", {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
@@ -635,13 +698,13 @@ export function createAdminRoutes(
     }
 
     try {
-      const github = new GitHub(
-        config.githubOAuthClientId!,
-        config.githubOAuthClientSecret!,
-        config.githubOAuthRedirectUri ?? "",
-      );
-      const tokens = await github.validateAuthorizationCode(code);
-      const accessToken = tokens.accessToken();
+      const accessToken = await exchangeOAuth2Code({
+        tokenEndpoint: GITHUB_TOKEN_ENDPOINT,
+        code,
+        clientId: config.githubOAuthClientId!,
+        clientSecret: config.githubOAuthClientSecret!,
+        redirectUri: config.githubOAuthRedirectUri ?? "",
+      });
       const res = await fetch("https://api.github.com/user", {
         headers: {
           Authorization: `Bearer ${accessToken}`,
