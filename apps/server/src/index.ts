@@ -27,6 +27,7 @@ import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
 import { authMiddleware, authIsEnabled } from "./admin/auth.js";
+import { readPackageVersion } from "./admin/version.js";
 import { GitHubClient } from "./engine/github/github.js";
 import { setInstallationRepos } from "./managed-repos.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
@@ -80,7 +81,7 @@ function validateConfig(config: ReturnType<typeof loadConfig>): void {
 }
 
 async function main() {
-  console.log("Last Light v2.0 — Agent SDK Harness");
+  console.log(`Last Light v${readPackageVersion() ?? "unknown"} — Agent SDK Harness`);
   console.log("====================================");
 
   // Load and validate config + overlay assets before starting anything. These

@@ -21,14 +21,14 @@ function lineAccent(line: string): string {
   return "border-transparent";
 }
 
-// Ordered alternation, one pass per line. Groups: 1 url · 2 [tag] · 3 "quoted"
-// · 4 level word · 5 number-ish token. Everything else renders as plain text.
-const TOKEN_RE =
-  /(https?:\/\/\S+)|(\[[^\]\n]{0,80}\])|("[^"\n]*"|'[^'\n]*')|\b(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE)\b|(\b\d[\d.:_-]*\b)/gi;
+// Ordered alternation, one pass per line. Groups: 1 url · 2 [tag] · 3 level
+// word. Kept deliberately sparse — number/string tinting just added noise to
+// timestamps, versions, ports, and cron expressions.
+const TOKEN_RE = /(https?:\/\/\S+)|(\[[^\]\n]{0,40}\])|\b(FATAL|ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE)\b/gi;
 
 /**
  * Dependency-free syntax highlight for one `docker logs --timestamps` line —
- * dims the RFC3339 prefix and tints levels, tags, strings, URLs, and numbers.
+ * dims the RFC3339 prefix, anchors `[tag]` segments, tints levels and URLs.
  * Deliberately regex-based (no Prism/highlight.js) to keep the bundle lean.
  */
 function highlightLogLine(raw: string): ReactNode {
@@ -48,9 +48,8 @@ function highlightLogLine(raw: string): ReactNode {
     const tok = m[0];
     let cls = "";
     if (m[1]) cls = "text-info underline decoration-dotted";
-    else if (m[2]) cls = "text-secondary";
-    else if (m[3]) cls = "text-success";
-    else if (m[4])
+    else if (m[2]) cls = "text-primary font-medium";
+    else if (m[3])
       cls = /fatal|error/i.test(tok)
         ? "text-error font-semibold"
         : /warn/i.test(tok)
@@ -58,7 +57,6 @@ function highlightLogLine(raw: string): ReactNode {
           : /info/i.test(tok)
             ? "text-info"
             : "text-base-content/50";
-    else if (m[5]) cls = "text-accent";
     nodes.push(
       <span key={key++} className={cls}>
         {tok}
@@ -226,7 +224,8 @@ export function LogsPage() {
         </span>
       </div>
 
-      {/* Log body */}
+      {/* Log body — lines never wrap; the pane scrolls horizontally instead. The
+          inner min-w-max wrapper grows to the widest line so the scroll works. */}
       <div className="flex-1 overflow-auto bg-base-100 font-mono text-xs leading-relaxed p-3">
         {snapshotError && <div className="text-error mb-2">Failed to load logs: {snapshotError}</div>}
         {visible.length === 0 && !loading && (
@@ -234,12 +233,14 @@ export function LogsPage() {
             {filter.trim() ? "No lines match the filter." : "No log lines."}
           </div>
         )}
-        {visible.map((line, i) => (
-          <div key={i} className={`whitespace-pre-wrap break-all border-l-2 pl-2 ${lineAccent(line)}`}>
-            {highlightLogLine(line)}
-          </div>
-        ))}
-        <div ref={bottomRef} />
+        <div className="min-w-max">
+          {visible.map((line, i) => (
+            <div key={i} className={`whitespace-pre border-l-2 pl-2 ${lineAccent(line)}`}>
+              {highlightLogLine(line)}
+            </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
       </div>
     </div>
   );

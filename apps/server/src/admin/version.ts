@@ -73,7 +73,7 @@ function compare(current: string | null, latest: string | null): RepoVersion {
   return { current, latest, behind: !!current && !!latest && current !== latest };
 }
 
-function readPackageVersion(): string | null {
+export function readPackageVersion(): string | null {
   try {
     const pkg = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { version?: string };
     return pkg.version ?? null;
