@@ -17,15 +17,15 @@
     "lucide-react": "^1.25.0",
     "marked": "^11.2.0",
     "prismjs": "^1.30.0",
-    "react": "^18.3.1",
+    "react": "^19.2.7",
     "react-diff-view": "^3.3.3",
-    "react-dom": "^18.3.1"
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@types/dompurify": "^3.2.0",
     "@types/prismjs": "^1.26.5",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "daisyui": "^4.12.14",
