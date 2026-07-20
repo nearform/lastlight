@@ -76,14 +76,14 @@
     "arctic": "^3.7.0",
     "better-sqlite3": "^11.0.0",
     "croner": "^9.0.0",
-    "hono": "^4.12.14",
+    "hono": "^4.12.31",
     "octokit": "^5.0.5",
     "yaml": "^2.8.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.1.1",
     "concurrently": "^9.0.0",
     "dependency-cruiser": "^18.1.0",
     "tsx": "^4.0.0",

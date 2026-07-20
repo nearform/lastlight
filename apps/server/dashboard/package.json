@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@heroicons/react": "^2.2.0",
-    "@mdxeditor/editor": "^4.0.4",
+    "@mdxeditor/editor": "^4.1.0",
     "@xyflow/react": "^12.11.2",
     "agentic-pi": "workspace:*",
     "ansi-to-html": "^0.7.2",
