@@ -83,7 +83,12 @@ src/
                         scheduler and admin dashboard.
   evals-api.ts          Public barrel for `lastlight/evals` — workflow driving
                         + overlay bootstrap symbols for external eval harnesses.
-  managed-repos.ts      getManagedRepos / isManagedRepo helpers.
+  managed-repos.ts      getManagedRepos / isManagedRepo /
+                        unmanagedReposInContext helpers. The allowlist is
+                        enforced at ingress (webhook connector, router) AND at
+                        the dispatchWorkflow choke point, so direct CLI/API
+                        triggers (/api/run, /api/build) can't act on an
+                        unmanaged repo either.
   session-log.ts        SessionLog + projectSlugForCwd.
   (The `lastlight` CLI moved out to packages/cli/ — see packages/cli/CLAUDE.md.
    Its shared overlay/config helpers — overlay-assets.ts, overlay-bootstrap.ts,

@@ -77,6 +77,24 @@ export function isManagedRepo(repo: string | undefined | null): boolean {
 }
 
 /**
+ * The repos referenced by a dispatch context (`repo` and/or `repos[]`) that are
+ * NOT in the managed allowlist. Empty ⇒ safe to act on (or no repo at all, e.g.
+ * a Slack-triggered run). Used to gate CLI/API triggers and as the choke-point
+ * guard in dispatchWorkflow, so every path that acts on a repo — webhooks,
+ * router, cron, and the direct `/api/*` triggers — respects `managedRepos`.
+ */
+export function unmanagedReposInContext(
+  context: { repo?: unknown; repos?: unknown },
+): string[] {
+  const refs: string[] = [];
+  if (typeof context.repo === "string" && context.repo) refs.push(context.repo);
+  if (Array.isArray(context.repos)) {
+    for (const r of context.repos) if (typeof r === "string" && r) refs.push(r);
+  }
+  return refs.filter((r) => !isManagedRepo(r));
+}
+
+/**
  * The managed repos the GitHub App installation can actually access right now.
  *
  * Filters the configured `managedRepos` down to the discovered installation set

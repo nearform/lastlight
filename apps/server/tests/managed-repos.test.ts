@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   isManagedRepo,
+  unmanagedReposInContext,
   getManagedRepos,
   DEFAULT_MANAGED_REPOS,
   setInstallationRepos,
@@ -126,5 +127,49 @@ describe('installation-repo cache', () => {
     resetInstallationReposForTests();
     addInstallationRepos(['acme/one']);
     expect(getInstallationRepos()).toEqual(['acme/one']);
+  });
+});
+
+describe('unmanagedReposInContext (dispatch guard)', () => {
+  afterEach(() => {
+    resetRuntimeConfigForTests();
+    resetInstallationReposForTests();
+  });
+
+  it('returns [] for a managed singular repo', () => {
+    setRuntimeConfig(configWithRepos(['acme/one', 'acme/two']));
+    expect(unmanagedReposInContext({ repo: 'acme/one' })).toEqual([]);
+  });
+
+  it('flags an unmanaged singular repo', () => {
+    setRuntimeConfig(configWithRepos(['acme/one']));
+    expect(unmanagedReposInContext({ repo: 'evil/repo' })).toEqual(['evil/repo']);
+  });
+
+  it('returns only the unmanaged entries from a repos[] scan context', () => {
+    setRuntimeConfig(configWithRepos(['acme/one', 'acme/two']));
+    expect(
+      unmanagedReposInContext({ repos: ['acme/one', 'evil/repo', 'acme/two', 'other/x'] }),
+    ).toEqual(['evil/repo', 'other/x']);
+  });
+
+  it('returns [] when the context carries no repo (e.g. a Slack trigger)', () => {
+    setRuntimeConfig(configWithRepos(['acme/one']));
+    expect(unmanagedReposInContext({})).toEqual([]);
+    expect(unmanagedReposInContext({ repo: '', repos: [] })).toEqual([]);
+  });
+
+  it('ignores non-string repo/repos entries', () => {
+    setRuntimeConfig(configWithRepos(['acme/one']));
+    expect(
+      unmanagedReposInContext({ repo: 123, repos: [null, undefined, 'acme/one'] }),
+    ).toEqual([]);
+  });
+
+  it('honours the installation-list fallback when the configured list is empty', () => {
+    setRuntimeConfig(configWithRepos([]));
+    setInstallationRepos(['acme/one']);
+    expect(unmanagedReposInContext({ repo: 'acme/one' })).toEqual([]);
+    expect(unmanagedReposInContext({ repo: 'nope/repo' })).toEqual(['nope/repo']);
   });
 });

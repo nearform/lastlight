@@ -29,7 +29,7 @@ import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
 import { authMiddleware, authIsEnabled } from "./admin/auth.js";
 import { readPackageVersion } from "./admin/version.js";
 import { GitHubClient } from "./engine/github/github.js";
-import { setInstallationRepos } from "./managed-repos.js";
+import { setInstallationRepos, isManagedRepo, unmanagedReposInContext } from "./managed-repos.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
 import { runSimpleWorkflow, PR_HEADREF_PREPOPULATE_WORKFLOWS, PR_FIX_SHAPED_WORKFLOWS, type SimpleWorkflowRequest } from "./workflows/simple.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
@@ -283,6 +283,19 @@ async function main() {
     if (repoStr && (!owner || !repo)) {
       const msg = `dispatchWorkflow(${workflowName}): invalid repo format '${repoStr}'`;
       console.error(`[dispatch] ${msg}`);
+      return { success: false, error: msg };
+    }
+
+    // Choke-point managedRepos guard: every trigger path (webhook, router,
+    // cron, `/api/*`, resume) funnels through here, so this is the one place
+    // that guarantees no workflow acts on a repo outside the allowlist —
+    // notably the direct CLI/API triggers, which don't pass through the
+    // connector/router ingress filters. Contexts with no concrete repo (Slack
+    // triggers) yield an empty list and pass through untouched.
+    const unmanaged = unmanagedReposInContext(context);
+    if (unmanaged.length > 0) {
+      const msg = `dispatchWorkflow(${workflowName}): refusing unmanaged repo(s): ${unmanaged.join(", ")}`;
+      console.warn(`[dispatch] ${msg}`);
       return { success: false, error: msg };
     }
 
@@ -920,6 +933,14 @@ async function main() {
       return c.json({ error: "Missing 'workflow' (or 'skill') field" }, 400);
     }
 
+    // Reject unmanaged repos up front so the CLI caller gets an immediate,
+    // clear error. The dispatch below is fire-and-forget (returns 202 then runs
+    // async), so dispatchWorkflow's own guard alone would be invisible here.
+    const unmanaged = unmanagedReposInContext(context);
+    if (unmanaged.length > 0) {
+      return c.json({ error: `Repo not managed: ${unmanaged.join(", ")}` }, 403);
+    }
+
     console.log(`[api] CLI triggered: workflow=${workflowName}`);
 
     // Run asynchronously — return immediately with a stable id the caller
@@ -940,6 +961,9 @@ async function main() {
 
     if (!owner || !repo || !issueNumber) {
       return c.json({ error: "Missing owner, repo, or issueNumber" }, 400);
+    }
+    if (!isManagedRepo(`${owner}/${repo}`)) {
+      return c.json({ error: `Repo not managed: ${owner}/${repo}` }, 403);
     }
 
     console.log(`[api] CLI build triggered: ${owner}/${repo}#${issueNumber}`);

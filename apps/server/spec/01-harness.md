@@ -107,6 +107,17 @@ differ.
   poster, models, variants, approval config, bootstrap label, public URL,
   and state dir at construction time. Mutating any of these post-boot
   would not propagate.
+- **`managedRepos` enforced at the choke point.** `dispatchWorkflow()`
+  rejects any context whose `repo` (or `repos[]`) is outside the effective
+  managed-repo allowlist (`unmanagedReposInContext` → `isManagedRepo`),
+  returning `{ success: false }` without running. This is the last line of
+  defence: the webhook connector and router already drop unmanaged repos at
+  ingress, but the direct CLI/API triggers (`/api/run`, `/api/build`) do not
+  pass through those filters, so the guard lives here too. Those two API
+  handlers also short-circuit with `403 Repo not managed` before dispatching
+  (dispatch is fire-and-forget `202`, so the choke-point rejection alone
+  would be invisible to the CLI caller). Contexts with no concrete repo
+  (Slack triggers) pass through.
 - **HTTP server is provided by the GitHub webhook connector.** No
   standalone listener. The admin dashboard, `/api/run`, and `/api/build`
   all silently disappear if there is no GitHub App configured.
