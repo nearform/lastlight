@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS executions (
   api_duration_ms INTEGER,
   stop_reason TEXT,
   workflow_run_id TEXT,                 -- → workflow_runs.id
-  output_text TEXT                      -- large final assistant text for loop iterations
+  output_text TEXT,                     -- large final assistant text for loop iterations
+  triggered_by TEXT,                    -- actor login/handle (joins users.login)
+  trigger_actor_type TEXT               -- github | slack | cli | cron | admin | system
 );
 
 CREATE INDEX idx_executions_trigger      ON executions(trigger_type, trigger_id);
@@ -91,7 +93,9 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   restart_count INTEGER NOT NULL DEFAULT 0,
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  finished_at TEXT
+  finished_at TEXT,
+  triggered_by TEXT,                           -- ORIGINAL trigger's actor (joins users.login)
+  trigger_actor_type TEXT                       -- github | slack | cli | cron | admin | system
 );
 
 CREATE INDEX idx_workflow_runs_trigger      ON workflow_runs(trigger_id, status);
@@ -200,6 +204,48 @@ CREATE TABLE IF NOT EXISTS workflow_overrides (
 ```
 
 Workflow-level kill switch. Absence of a row = enabled by default.
+
+### `users`
+
+First-class user identity, populated on every dashboard login (GitHub +
+Slack OAuth). An **additive enrichment** table: every actor column elsewhere
+(`workflow_runs.triggered_by`, `executions.triggered_by`,
+`workflow_approvals.responded_by`, `cron_overrides.updated_by`) stays free-text
+`login`, and this row is resolved by LEFT-JOIN on `login`. `github_id` /
+`slack_user_id` are the stable upsert keys; `email` is captured as the future
+outbound-email hook (nothing sends yet) and is **indexed but NOT unique**
+(shared corporate mailboxes + many null Slack-only rows would collide a UNIQUE
+constraint).
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,                    -- randomUUID
+  github_id INTEGER UNIQUE,               -- stable numeric id (upsert key); null for Slack-only rows
+  login TEXT UNIQUE,                      -- GitHub login = the soft join key used everywhere
+  name TEXT,
+  email TEXT,                             -- future email hook; indexed, NOT unique
+  avatar_url TEXT,
+  slack_user_id TEXT UNIQUE,              -- U… id, linked lazily on Slack match
+  is_blocked INTEGER NOT NULL DEFAULT 0,
+  email_is_placeholder INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_login_at TEXT
+);
+CREATE INDEX idx_users_login ON users(login);
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_slack ON users(slack_user_id);
+```
+
+The GitHub OAuth callback upserts on `github_id` (falling back to
+`GET /user/emails` for the primary+verified address when the profile hides it);
+the Slack OAuth callback and the Slack connector match a user's email to an
+existing row and link `slack_user_id` onto it (else create a Slack-only row).
+The verified GitHub `login` then rides the session HMAC token so actor-hardcoded
+routes attribute an action to a real person. **Actor semantics:** a run's
+`triggered_by` is the ORIGINAL trigger; retry / cancel / approve actors land on
+the append-only `executions` ledger (and `workflow_approvals.responded_by`),
+never overwriting the run's origin value. See `src/state/user-store.ts`.
 
 ### `messaging_sessions` + `messaging_messages`
 
@@ -358,6 +404,7 @@ session recreation after timeouts.
 | `WorkflowRunStore` — `workflow_runs` + atomic lifecycle ops | `src/state/workflow-run-store.ts` |
 | `ExecutionStore` — `executions` table + ops | `src/state/execution-store.ts` |
 | `ApprovalStore` — `workflow_approvals` | `src/state/approval-store.ts` |
+| `UserStore` — `users` identity + Slack/email matching | `src/state/user-store.ts` |
 | JSONL writer + envelope translation | `src/engine/event-shim.ts` |
 | Sandbox session reader (dashboard) | `src/admin/SessionReader.ts` |
 | Chat session reader (dashboard, DB-backed) | `src/admin/ChatSessionReader.ts` |

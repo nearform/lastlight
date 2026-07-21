@@ -4,6 +4,7 @@ import { migrate } from "./migrate.js";
 import { ExecutionStore } from "./execution-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { WorkflowRunStore } from "./workflow-run-store.js";
+import { UserStore } from "./user-store.js";
 
 // Re-export the types that moved out to the per-table stores so existing
 // import sites (`import { WorkflowRun } from "../state/db.js"`, etc.) keep
@@ -13,9 +14,11 @@ import { WorkflowRunStore } from "./workflow-run-store.js";
 export type { ExecutionRecord } from "./execution-store.js";
 export type { WorkflowApproval } from "./approval-store.js";
 export type { WorkflowRun, PhaseHistoryEntry, PhaseMarker } from "./workflow-run-store.js";
+export type { User, TriggerActorType } from "./user-store.js";
 export { ExecutionStore } from "./execution-store.js";
 export { ApprovalStore } from "./approval-store.js";
 export { WorkflowRunStore } from "./workflow-run-store.js";
+export { UserStore } from "./user-store.js";
 
 const DEFAULT_DB_PATH = "lastlight.db";
 
@@ -62,6 +65,8 @@ export class StateDb {
   readonly approvals: ApprovalStore;
   /** Aggregate root for `workflow_runs` + the atomic lifecycle operations. */
   readonly runs: WorkflowRunStore;
+  /** First-class user identity — populated on dashboard login (issue #205). */
+  readonly users: UserStore;
 
   constructor(dbPath?: string) {
     // ":memory:" stays a real per-connection in-memory DB (used by tests for
@@ -77,6 +82,7 @@ export class StateDb {
     this.executions = new ExecutionStore(this.db);
     this.approvals = new ApprovalStore(this.db);
     this.runs = new WorkflowRunStore(this.db, { approvals: this.approvals });
+    this.users = new UserStore(this.db);
   }
 
   // ── Cron overrides ─────────────────────────────────────────────

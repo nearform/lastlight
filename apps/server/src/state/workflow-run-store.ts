@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { ApprovalStore } from "./approval-store.js";
+import type { TriggerActorType } from "./user-store.js";
 
 export interface PhaseHistoryEntry {
   phase: string;
@@ -18,6 +19,15 @@ export interface WorkflowRun {
   /** BARE repo name (no owner) — kept path-safe for taskIds / workspace dirs. */
   repo?: string;
   issueNumber?: number;
+  /**
+   * Who originally triggered this run (issue #205) — a GitHub login, a Slack
+   * display name, or `cli`/`cron`. The run's value is the ORIGINAL trigger;
+   * retry/cancel/approve actors land on the `executions` ledger, never
+   * overwriting this. Free-text, joined to `users` on `login` for enrichment.
+   */
+  triggeredBy?: string;
+  /** Coarse actor category for {@link triggeredBy}. */
+  triggerActorType?: TriggerActorType;
   currentPhase: string;
   phaseHistory: PhaseHistoryEntry[];
   status: "queued" | "running" | "paused" | "succeeded" | "failed" | "cancelled";
@@ -94,8 +104,8 @@ export class WorkflowRunStore {
   createRun(run: Omit<WorkflowRun, "phaseHistory" | "updatedAt">): void {
     const now = new Date().toISOString();
     this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, phase_history, status, context, scratch, started_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, phase_history, status, context, scratch, started_at, updated_at, triggered_by, trigger_actor_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)
     `).run(
       run.id,
       run.workflowName,
@@ -109,6 +119,8 @@ export class WorkflowRunStore {
       run.scratch ? JSON.stringify(run.scratch) : null,
       run.startedAt,
       now,
+      run.triggeredBy ?? null,
+      run.triggerActorType ?? null,
     );
   }
 
@@ -293,6 +305,7 @@ export class WorkflowRunStore {
            id, workflow_name, trigger_id, owner, repo, issue_number,
            current_phase, phase_history, status,
            restart_count, started_at, updated_at, finished_at,
+           triggered_by, trigger_actor_type,
            COALESCE(agg.total_cost_usd, 0) AS total_cost_usd,
            COALESCE(agg.total_tokens, 0)   AS total_tokens
          FROM workflow_runs
@@ -559,6 +572,8 @@ export class WorkflowRunStore {
       owner: (row.owner as string | null) ?? undefined,
       repo: row.repo as string | undefined,
       issueNumber: row.issue_number as number | undefined,
+      triggeredBy: (row.triggered_by as string | null) ?? undefined,
+      triggerActorType: (row.trigger_actor_type as TriggerActorType | null) ?? undefined,
       currentPhase: row.current_phase as string,
       phaseHistory: JSON.parse(row.phase_history as string) as PhaseHistoryEntry[],
       status: row.status as WorkflowRun["status"],

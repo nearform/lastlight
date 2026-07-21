@@ -17,7 +17,7 @@ import {
   getContainerLogs,
   streamContainerLogs,
 } from "./docker.js";
-import { authMiddleware, createToken, verifyTokenForRefresh, decodeToken } from "./auth.js";
+import { authMiddleware, createToken, verifyTokenForRefresh, decodeToken, actorFromContext } from "./auth.js";
 import { Cron } from "croner";
 import type { CronScheduler } from "../cron/scheduler.js";
 import { enumerateOverlayAssets } from "lastlight-shared/overlay-assets";
@@ -558,7 +558,8 @@ export function createAdminRoutes(
     if (!current || !verifyTokenForRefresh(current, config.adminSecret)) {
       return c.json({ error: "unauthorized" }, 401);
     }
-    return c.json({ token: createToken(config.adminSecret, decodeToken(current)?.method) });
+    const decoded = decodeToken(current);
+    return c.json({ token: createToken(config.adminSecret, decoded?.method, decoded?.login) });
   });
 
   // Slack OAuth routes (only active when Slack OAuth env vars are configured)
@@ -578,7 +579,10 @@ export function createAdminRoutes(
       path: "/",
       maxAge: 600, // 10 minutes
     });
-    const url = slack.createAuthorizationURL(state, ["openid", "profile"]);
+    // `email` is requested (issue #205) so the OIDC userInfo carries the
+    // address we match Slack logins to a `users` row on (and store as the
+    // future email hook).
+    const url = slack.createAuthorizationURL(state, ["openid", "profile", "email"]);
     return c.redirect(url.toString());
   });
 
@@ -616,6 +620,8 @@ export function createAdminRoutes(
         ok?: boolean;
         error?: string;
         sub?: string;
+        name?: string;
+        email?: string;
         "https://slack.com/team_id"?: string;
         "https://slack.com/team_domain"?: string;
         "https://slack.com/user_id"?: string;
@@ -641,7 +647,28 @@ export function createAdminRoutes(
         }
       }
 
-      const token = createToken(config.adminSecret, "slack");
+      // Capture / match a first-class user identity (issue #205): match the
+      // Slack email to an existing (GitHub) `users` row and link the Slack id
+      // onto it, else create a Slack-only row. When matched, the person's
+      // GitHub login rides the token so a Slack dashboard session attributes to
+      // the same user. Best-effort — never block a valid login on it.
+      let matchedLogin: string | undefined;
+      const slackUserId = userInfo["https://slack.com/user_id"];
+      if (slackUserId) {
+        try {
+          const user = db.users.upsertSlackUser({
+            slackUserId,
+            name: userInfo.name ?? null,
+            email: userInfo.email ?? null,
+          });
+          matchedLogin = user.login;
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[oauth] failed to persist Slack user ${slackUserId}: ${msg}`);
+        }
+      }
+
+      const token = createToken(config.adminSecret, "slack", matchedLogin);
       // Redirect to dashboard with token in URL; App.tsx strips it immediately.
       // Trailing slash matters: Vite serves the SPA with base "/admin/" so a
       // bare "/admin" 404s in dev. Production static serving accepts both.
@@ -712,7 +739,13 @@ export function createAdminRoutes(
           Accept: "application/vnd.github+json",
         },
       });
-      const userInfo = (await res.json()) as { login?: string };
+      const userInfo = (await res.json()) as {
+        id?: number;
+        login?: string;
+        name?: string | null;
+        email?: string | null;
+        avatar_url?: string | null;
+      };
 
       let memberStatus: number | undefined;
       if (userInfo.login && !githubAllowAnyUser) {
@@ -745,7 +778,54 @@ export function createAdminRoutes(
         return fail("github_org");
       }
 
-      const token = createToken(config.adminSecret, "github");
+      // Capture a first-class user identity (issue #205). A public GitHub
+      // profile often hides the email on GET /user, so fall back to the
+      // authenticated /user/emails list and pick the primary+verified one —
+      // this is the future outbound-email hook (nothing sends yet). Persisting
+      // is orthogonal to the org gate above, so it runs even for
+      // githubAllowAnyUser logins.
+      let email = userInfo.email ?? null;
+      if (!email) {
+        try {
+          const emailsRes = await fetch("https://api.github.com/user/emails", {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "User-Agent": "lastlight-admin",
+              Accept: "application/vnd.github+json",
+            },
+          });
+          if (emailsRes.ok) {
+            const emails = (await emailsRes.json()) as Array<{
+              email?: string;
+              primary?: boolean;
+              verified?: boolean;
+            }>;
+            email = emails.find((e) => e.primary && e.verified)?.email ?? null;
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[oauth] GitHub /user/emails lookup failed for ${login}: ${msg}`);
+        }
+      }
+      if (typeof userInfo.id === "number") {
+        try {
+          db.users.getOrCreateUserByGithub({
+            githubId: userInfo.id,
+            login,
+            name: userInfo.name ?? null,
+            email,
+            avatarUrl: userInfo.avatar_url ?? null,
+          });
+        } catch (err: unknown) {
+          // Identity capture is best-effort — never block a valid login on it.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[oauth] failed to persist user ${login}: ${msg}`);
+        }
+      }
+
+      // Carry the verified login in the token so actor-hardcoded routes
+      // attribute to this person.
+      const token = createToken(config.adminSecret, "github", login);
       return c.redirect(`/admin/?token=${encodeURIComponent(token)}`);
     } catch (err: unknown) {
       console.error("GitHub OAuth exchange failed:", err);
@@ -1053,6 +1133,10 @@ export function createAdminRoutes(
     if (run.status !== "running" && run.status !== "paused" && run.status !== "queued") {
       return c.json({ error: `cannot cancel a run with status '${run.status}'` }, 400);
     }
+    // Actor logging (issue #205): the canceller lands on the append-only
+    // executions ledger (via the finish error below), never overwriting the
+    // run's original `triggered_by`.
+    const actor = actorFromContext(c) ?? "admin";
     db.runs.cancelRun(id);
     // Flipping the DB row alone only stops the runner before the NEXT phase.
     // Kill any sandbox container currently executing a phase of this run so
@@ -1085,7 +1169,7 @@ export function createAdminRoutes(
         // raced before dedup closed.
         for (const e of db.executions.runningExecutions()) {
           if (e.workflowRunId === id) {
-            db.executions.recordFinish(e.id, { success: false, error: "cancelled via admin dashboard" });
+            db.executions.recordFinish(e.id, { success: false, error: `cancelled via admin dashboard by ${actor}` });
           }
         }
       } catch (err) {
@@ -1113,7 +1197,7 @@ export function createAdminRoutes(
     }
     // Fire-and-forget: restartRun (inside the callback) flips status→running
     // atomically, so a second immediate retry click 400s on the status guard.
-    config.retryWorkflow(run, "admin").catch((err) =>
+    config.retryWorkflow(run, actorFromContext(c) ?? "admin").catch((err) =>
       console.error(`[admin] retry ${id} failed:`, err));
     return c.json({ retrying: id });
   });
@@ -1590,9 +1674,12 @@ export function createAdminRoutes(
     const approval = db.approvals.getById(id);
     if (!approval) return c.json({ error: "approval not found" }, 404);
     if (approval.status !== "pending") return c.json({ error: `already ${approval.status}` }, 400);
+    // Actor logging (issue #205): attribute the approval to the authenticated
+    // user, falling back to `admin` for password/anonymous sessions.
+    const actor = actorFromContext(c) ?? "admin";
     if (body.decision === "rejected") {
       // One transaction: respond 'rejected' + fail the run.
-      db.runs.resolveGateAndFail(id, "admin", body.reason);
+      db.runs.resolveGateAndFail(id, actor, body.reason);
     } else {
       // Record the approval, then let resumeWorkflow flip the run back to
       // `running` — but only as part of an actual dispatch. resumeWorkflow
@@ -1607,13 +1694,13 @@ export function createAdminRoutes(
       // respond() is a compare-and-set on the still-pending row, so a racing
       // responder (the status check above is a TOCTOU read) changes 0 rows.
       // Only the winner resumes — the loser must not dispatch a second time.
-      const changed = db.approvals.respond(id, "approved", "admin", body.reason);
+      const changed = db.approvals.respond(id, "approved", actor, body.reason);
       if (changed !== 1) {
         return c.json({ error: "already resolved" }, 409);
       }
       const workflowRun = db.runs.getRun(approval.workflowRunId);
       if (workflowRun && config.resumeWorkflow) {
-        config.resumeWorkflow(workflowRun, "admin").catch((err) => {
+        config.resumeWorkflow(workflowRun, actor).catch((err) => {
           console.error(`[admin] Failed to resume workflow ${workflowRun.id}:`, err);
         });
       }
@@ -1774,8 +1861,11 @@ export function createAdminRoutes(
     if (!config.triggerCron) {
       return c.json({ error: "cron trigger not configured" }, 503);
     }
-    // Same context shape the scheduler + toggle handler build.
-    const context = { repos: getManagedRepos(), ...def.context };
+    // Same context shape the scheduler + toggle handler build, plus the
+    // acting user (issue #205) so a manually-fired cron attributes to the
+    // person who clicked "Run now" rather than the anonymous scheduler.
+    // `dispatchWorkflow` destructures `sender` for free.
+    const context = { repos: getManagedRepos(), sender: actorFromContext(c), ...def.context };
     config.triggerCron(def.workflow, context).catch((err) => {
       console.error(`[admin] cron trigger ${name} failed:`, err);
     });

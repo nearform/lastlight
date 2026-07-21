@@ -12,7 +12,7 @@ import { configureWorkflowAssets, validateAssets, getWorkflow } from "./workflow
 import { ChatRunner } from "./engine/chat/chat-runner.js";
 import { buildReadSkillTool, loadChatSkillCatalogue } from "./engine/chat/chat-skills.js";
 import { configureGitAuth } from "./engine/github/git-auth.js";
-import { StateDb } from "./state/db.js";
+import { StateDb, type TriggerActorType } from "./state/db.js";
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
 import { dispatchCronWorkflow, fanOutContexts } from "./cron/fanout.js";
@@ -26,7 +26,7 @@ import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
-import { authMiddleware, authIsEnabled } from "./admin/auth.js";
+import { authMiddleware, authIsEnabled, actorFromContext } from "./admin/auth.js";
 import { readPackageVersion } from "./admin/version.js";
 import { GitHubClient } from "./engine/github/github.js";
 import { setInstallationRepos, isManagedRepo, unmanagedReposInContext } from "./managed-repos.js";
@@ -316,8 +316,30 @@ async function main() {
       threadId,
       prePopulateBranch: ctxPrePopulateBranch,
       branch: ctxBranch,
+      triggeredBy: ctxTriggeredBy,
+      triggerActorType: ctxTriggerActorType,
+      source: ctxSource,
       ...rest
     } = context;
+
+    // Actor logging (issue #205): who triggered this run and how. Callers can
+    // set `triggerActorType` explicitly (the cron manual-fire / api routes);
+    // otherwise derive it from the dispatch shape. `triggeredBy` defaults to
+    // the acting handle (`sender`).
+    const triggeredBy =
+      (typeof ctxTriggeredBy === "string" && ctxTriggeredBy) ||
+      (typeof sender === "string" ? sender : undefined);
+    const triggerActorType: TriggerActorType =
+      (typeof ctxTriggerActorType === "string" ? (ctxTriggerActorType as TriggerActorType) : undefined) ??
+      (slackTriggerId || ctxSource === "slack"
+        ? "slack"
+        : _triggerType === "cron"
+        ? "cron"
+        : _triggerType === "api"
+        ? "cli"
+        : _triggerType === "chat"
+        ? "slack"
+        : "github");
 
     // Preserve channelId/threadId in extra so they're stored on the
     // workflow run context — needed by boot-time resume to rebuild the
@@ -406,6 +428,8 @@ async function main() {
       issueLabels: Array.isArray(labels) ? (labels as string[]) : undefined,
       commentBody: typeof commentBody === "string" ? commentBody : undefined,
       sender: typeof sender === "string" ? sender : "unknown",
+      triggeredBy,
+      triggerActorType,
       triggerId: slackTriggerId,
       extra,
       prePopulateBranch,
@@ -699,6 +723,9 @@ async function main() {
         honoApp: app,
         allowedUsers: config.slack.allowedUsers,
         deliveryChannel: config.slack.deliveryChannel,
+        // Match a Slack user's email to a `users` row so a Slack-initiated
+        // run/approval attributes to their GitHub login (issue #205).
+        users: db.users,
         botIdentifier: "", // Will be resolved from Slack API on connect
       },
       sessionManager
@@ -946,7 +973,15 @@ async function main() {
     // Run asynchronously — return immediately with a stable id the caller
     // can correlate with workflow_runs in the dashboard.
     const executionId = randomUUID();
-    dispatchWorkflow(workflowName, { ...context, _triggerType: "api" }).catch((err: unknown) => {
+    // Actor logging (issue #205): attribute to the authenticated CLI user when
+    // the token carries a login (OAuth), else dispatchWorkflow falls back to
+    // the context `sender` and the `cli` actor type (from `_triggerType: api`).
+    const apiActor = actorFromContext(c);
+    dispatchWorkflow(workflowName, {
+      ...context,
+      ...(apiActor ? { triggeredBy: apiActor } : {}),
+      _triggerType: "api",
+    }).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[api] workflow ${workflowName} failed: ${msg}`);
     });
@@ -988,6 +1023,9 @@ async function main() {
       body: issueBody || "",
       labels: resolvedLabels,
       sender: sender || "cli",
+      // Attribute to the authenticated CLI user when the token carries a login
+      // (OAuth); else falls back to the `sender` handle (issue #205).
+      ...(actorFromContext(c) ? { triggeredBy: actorFromContext(c) } : {}),
       _triggerType: "api",
     }).catch((err) => {
       console.error(`[api] Build failed:`, err);

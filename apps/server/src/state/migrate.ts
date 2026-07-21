@@ -85,7 +85,50 @@ export function migrate(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_approvals_workflow ON workflow_approvals(workflow_run_id);
     CREATE INDEX IF NOT EXISTS idx_approvals_status ON workflow_approvals(status);
+
+    -- First-class user identity (issue #205). An ADDITIVE enrichment table:
+    -- every actor column elsewhere stays free-text \`login\`, and \`users\` is
+    -- LEFT-JOINed on it to resolve a real person (name / email / avatar) for
+    -- the dashboard and future email. \`github_id\` / \`slack_user_id\` are the
+    -- stable upsert keys; \`login\` is the soft join key. \`email\` is indexed but
+    -- deliberately NOT unique (corporate shared mailboxes + many null Slack-only
+    -- rows would collide a UNIQUE constraint) — see issue #205 decisions.
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,                    -- randomUUID
+      github_id INTEGER UNIQUE,               -- stable numeric id (upsert key); null for Slack-only rows
+      login TEXT UNIQUE,                      -- GitHub login = the soft join key used everywhere
+      name TEXT,
+      email TEXT,                             -- captured for future email; indexed, NOT unique
+      avatar_url TEXT,
+      slack_user_id TEXT UNIQUE,              -- U… id, linked lazily on Slack match
+      is_blocked INTEGER NOT NULL DEFAULT 0,
+      email_is_placeholder INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_login_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_login ON users(login);
+    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+    CREATE INDEX IF NOT EXISTS idx_users_slack ON users(slack_user_id);
   `);
+
+  // Actor logging (issue #205): who triggered a run and how. Additive on both
+  // the append-only `executions` ledger and the `workflow_runs` aggregate. The
+  // run's `triggered_by` is the ORIGINAL trigger; retry/cancel/approve actors
+  // land on the executions ledger, never overwriting the run's origin value.
+  // `trigger_actor_type` is one of github | slack | cli | cron | admin | system.
+  for (const table of ["executions", "workflow_runs"]) {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN triggered_by TEXT`);
+    } catch {
+      // Column already exists — ignore
+    }
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN trigger_actor_type TEXT`);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
 
   // Mutable phase-to-phase state for features like the socratic explore
   // loop that accumulate data across reply-gate pauses.

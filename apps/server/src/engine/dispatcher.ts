@@ -525,6 +525,9 @@ async function handleBuild(
     repo: repoStr,
     issueNumber,
     startedAt: new Date().toISOString(),
+    // Actor logging (issue #205): who fired this build.
+    triggeredBy: (context.sender as string) || undefined,
+    triggerActorType: envelope.type === "message" ? "slack" : "github",
   });
 
   if (envelope.type === "message") {
@@ -881,6 +884,10 @@ export async function runChatTurn(
     triggerId: sessionId,
     skill: "chat",
     startedAt: new Date().toISOString(),
+    // Actor logging (issue #205): the chat sender (a Slack login/handle,
+    // resolved to a GitHub login when the user matched a `users` row).
+    triggeredBy: sender,
+    triggerActorType: "slack",
   });
 
   try {

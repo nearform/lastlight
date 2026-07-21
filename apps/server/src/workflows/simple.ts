@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
-import type { StateDb, WorkflowRun } from "../state/db.js";
+import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
 import { getBotName, type ModelConfig, type VariantConfig } from "../config/config.js";
 import { getWorkflow } from "./loader.js";
 import {
@@ -47,6 +47,13 @@ export interface SimpleWorkflowRequest {
   commentBody?: string;
   /** Originating user (or "cli" / "cron" etc.) */
   sender: string;
+  /**
+   * Actor logging (issue #205): who triggered this run and how, persisted on
+   * the `workflow_runs` row for the dashboard's "Triggered by". Defaults to
+   * `sender` / undefined when the dispatch layer doesn't supply them.
+   */
+  triggeredBy?: string;
+  triggerActorType?: TriggerActorType;
   /**
    * Explicit trigger id override. Slack-initiated workflows pass a
    * `slack:{teamId}:{channel}:{threadTs}` string here so pause/resume uses
@@ -306,6 +313,10 @@ export async function runSimpleWorkflow(
       issueNumber: issueNumber ?? prNumber,
       currentPhase: definition.phases[0]?.name || "phase_0",
       status: runStatus,
+      // Actor logging (issue #205): the ORIGINAL trigger. Falls back to
+      // `sender` so pre-actor callers still attribute to the acting handle.
+      triggeredBy: request.triggeredBy ?? request.sender,
+      triggerActorType: request.triggerActorType,
       context: {
         kind: definition.kind,
         owner,

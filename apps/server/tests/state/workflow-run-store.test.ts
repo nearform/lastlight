@@ -31,6 +31,28 @@ function makeRun(overrides: Partial<Parameters<WorkflowRunStore["createRun"]>[0]
   return id;
 }
 
+describe("actor logging (issue #205)", () => {
+  it("persists triggered_by / trigger_actor_type and surfaces them on read", () => {
+    const id = makeRun({ triggeredBy: "octocat", triggerActorType: "github" });
+    const run = db.runs.getRun(id);
+    expect(run?.triggeredBy).toBe("octocat");
+    expect(run?.triggerActorType).toBe("github");
+  });
+
+  it("surfaces the actor on the paginated list() rows too", () => {
+    makeRun({ triggeredBy: "alice", triggerActorType: "cli" });
+    const { runs } = db.runs.list();
+    expect(runs[0]?.triggeredBy).toBe("alice");
+    expect(runs[0]?.triggerActorType).toBe("cli");
+  });
+
+  it("leaves the actor undefined when not supplied (additive, back-compat)", () => {
+    const run = db.runs.getRun(makeRun());
+    expect(run?.triggeredBy).toBeUndefined();
+    expect(run?.triggerActorType).toBeUndefined();
+  });
+});
+
 describe("pauseForApproval", () => {
   it("creates the approval, appends the marker, merges scratch, and pauses — in one step", () => {
     const runId = makeRun();

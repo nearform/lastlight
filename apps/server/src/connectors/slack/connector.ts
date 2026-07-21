@@ -6,6 +6,7 @@ import { MessagingConnector } from "../messaging/base.js";
 import type { SessionManager } from "../messaging/session-manager.js";
 import type { MessagingConfig } from "../messaging/types.js";
 import type { EventEnvelope } from "../types.js";
+import type { UserStore } from "../../state/user-store.js";
 import { hasMarkdownImage, markdownToSlackBlocks, markdownToSlackMrkdwn } from "./mrkdwn.js";
 
 /**
@@ -52,6 +53,13 @@ export interface SlackConnectorConfig extends MessagingConfig {
    * present in webhook mode.
    */
   honoApp?: Hono;
+  /**
+   * User identity store (issue #205). When present, a Slack user is matched to
+   * a `users` row by email so a Slack-initiated run/approval attributes to the
+   * same person as their GitHub login. Optional — matching silently degrades to
+   * the Slack username without it (or without the `users:read.email` scope).
+   */
+  users?: UserStore;
 }
 
 /**
@@ -522,7 +530,17 @@ export class SlackConnector extends MessagingConnector {
     });
   }
 
-  /** Resolve a Slack user ID to a username (cached) */
+  /**
+   * Resolve a Slack user ID to an actor handle (cached).
+   *
+   * When a {@link UserStore} is wired (issue #205), this prefers the person's
+   * GitHub **login** so a Slack-initiated run/approval attributes to the same
+   * user as their dashboard login: fast-path on `slack_user_id`, else match the
+   * Slack profile email to a `users` row and link the Slack id onto it. It
+   * degrades to today's Slack username when there's no store, no
+   * `users:read.email` scope (email omitted), or no match — never blocking the
+   * run.
+   */
   private async resolveUsername(userId: string): Promise<string> {
     const cached = this.userCache.get(userId);
     if (cached) return cached;
@@ -530,11 +548,43 @@ export class SlackConnector extends MessagingConnector {
     try {
       const result = await this.web.users.info({ user: userId });
       const username = result.user?.name || result.user?.real_name || userId;
-      this.userCache.set(userId, username);
-      return username;
+      const resolved = this.matchActorLogin(userId, result) ?? username;
+      this.userCache.set(userId, resolved);
+      return resolved;
     } catch {
       return userId;
     }
+  }
+
+  /**
+   * Match a Slack user to a `users` row and return their GitHub login, or null
+   * to fall back to the Slack username. Best-effort: any store error is
+   * swallowed so identity matching can never fail a message.
+   */
+  private matchActorLogin(
+    userId: string,
+    info: Awaited<ReturnType<WebClient["users"]["info"]>>,
+  ): string | null {
+    const users = this.slackConfig.users;
+    if (!users) return null;
+    try {
+      // Fast path: already linked to a GitHub identity.
+      const linked = users.findBySlackUserId(userId);
+      if (linked?.login) return linked.login;
+
+      // `email` requires the `users:read.email` bot scope; absent otherwise.
+      const email = info.user?.profile?.email;
+      if (!email) return null;
+      const byEmail = users.findByEmail(email);
+      if (byEmail) {
+        if (byEmail.slackUserId !== userId) users.linkSlackUser(byEmail.id, userId);
+        return byEmail.login ?? null;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[slack] user identity match failed for ${userId}: ${msg}`);
+    }
+    return null;
   }
 }
 

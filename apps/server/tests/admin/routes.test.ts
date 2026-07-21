@@ -520,6 +520,168 @@ describe("GET /oauth/github/callback", () => {
   });
 });
 
+// Identity capture on login (issue #205). Uses a real in-memory StateDb so the
+// created `users` row can be asserted, and decodes the minted token to prove
+// the verified login rides it + survives refresh.
+describe("OAuth identity capture (issue #205)", () => {
+  /** GitHub fetch mock that returns a full /user profile + /user/emails list. */
+  function mockGithubFetchFull(opts: {
+    id: number;
+    login: string;
+    name?: string | null;
+    email?: string | null;
+    avatarUrl?: string | null;
+    primaryEmail?: string;
+    orgStatus?: number;
+  }) {
+    return vi.fn(async (url: string | URL | Request) => {
+      const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (urlStr.includes("login/oauth/access_token")) {
+        return new Response(JSON.stringify({ access_token: "gho_test" }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (urlStr.includes("/user/emails")) {
+        return new Response(
+          JSON.stringify([
+            { email: "unverified@example.com", primary: false, verified: false },
+            { email: opts.primaryEmail ?? "primary@example.com", primary: true, verified: true },
+          ]),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (urlStr.includes("/orgs/")) {
+        return new Response(null, { status: opts.orgStatus ?? 204 });
+      }
+      // /user
+      return new Response(
+        JSON.stringify({
+          id: opts.id,
+          login: opts.login,
+          name: opts.name ?? null,
+          email: opts.email ?? null,
+          avatar_url: opts.avatarUrl ?? null,
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+  }
+
+  function tokenFromRedirect(location: string): string {
+    return decodeURIComponent(new URL(location, "http://localhost").searchParams.get("token")!);
+  }
+
+  let realDb: StateDb;
+  beforeEach(async () => {
+    const { StateDb } = await import("#src/state/db.js");
+    realDb = new StateDb(":memory:");
+  });
+  afterEach(() => realDb.close());
+
+  it("GitHub login creates a users row + carries the login in the token", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = mockGithubFetchFull({
+      id: 4242,
+      login: "octocat",
+      name: "The Octocat",
+      avatarUrl: "https://avatars/oct.png",
+    });
+    const { decodeToken } = await import("#src/admin/auth.js");
+
+    const app = createAdminRoutes(realDb, mockSessions, mockSessions, makeConfig({
+      githubOAuthClientId: "GH_CLIENT",
+      githubOAuthClientSecret: "GH_SECRET",
+      githubOAuthRedirectUri: "http://localhost/callback",
+      githubAllowedOrg: "acme",
+    }));
+
+    const state = "s-gh-1";
+    const res = await app.fetch(
+      new Request(`http://localhost/oauth/github/callback?code=abc&state=${state}`, {
+        headers: { Cookie: `github_oauth_state=${state}` },
+      }),
+    );
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location") ?? "";
+    expect(location).toContain("/admin/?token=");
+
+    // A users row was created with the profile fields + the /user/emails fallback.
+    const user = realDb.users.findByGithubId(4242);
+    expect(user?.login).toBe("octocat");
+    expect(user?.name).toBe("The Octocat");
+    expect(user?.avatarUrl).toBe("https://avatars/oct.png");
+    expect(user?.email).toBe("primary@example.com"); // primary+verified from /user/emails
+
+    // The token carries the verified login.
+    expect(decodeToken(tokenFromRedirect(location))?.login).toBe("octocat");
+
+    global.fetch = originalFetch;
+  });
+
+  it("persists identity even under githubAllowAnyUser (no org gate)", async () => {
+    const originalFetch = global.fetch;
+    global.fetch = mockGithubFetchFull({ id: 7, login: "anyuser", email: "any@example.com" });
+
+    const app = createAdminRoutes(realDb, mockSessions, mockSessions, makeConfig({
+      githubOAuthClientId: "GH_CLIENT",
+      githubOAuthClientSecret: "GH_SECRET",
+      githubOAuthRedirectUri: "http://localhost/callback",
+      githubAllowedOrg: "*",
+    }));
+
+    const state = "s-gh-2";
+    const res = await app.fetch(
+      new Request(`http://localhost/oauth/github/callback?code=abc&state=${state}`, {
+        headers: { Cookie: `github_oauth_state=${state}` },
+      }),
+    );
+    expect(res.status).toBe(302);
+    expect(realDb.users.findByGithubId(7)?.login).toBe("anyuser");
+    expect(realDb.users.findByGithubId(7)?.email).toBe("any@example.com"); // from /user, no fallback
+
+    global.fetch = originalFetch;
+  });
+
+  it("Slack login whose email matches a GitHub row links slack_user_id + carries that login", async () => {
+    // Seed a GitHub identity first.
+    realDb.users.getOrCreateUserByGithub({ githubId: 99, login: "dev", email: "dev@corp.com" });
+
+    const originalFetch = global.fetch;
+    global.fetch = mockSlackFetch({
+      sub: "U777",
+      name: "Dev Eloper",
+      email: "dev@corp.com",
+      "https://slack.com/team_id": "TANY",
+      "https://slack.com/user_id": "U777",
+    });
+    const { decodeToken } = await import("#src/admin/auth.js");
+
+    const app = createAdminRoutes(realDb, mockSessions, mockSessions, makeConfig({
+      slackOAuthClientId: "C123",
+      slackOAuthClientSecret: "secret",
+      slackOAuthRedirectUri: "http://localhost/callback",
+    }));
+
+    const state = "s-slack-1";
+    const res = await app.fetch(
+      new Request(`http://localhost/oauth/slack/callback?code=abc&state=${state}`, {
+        headers: { Cookie: `slack_oauth_state=${state}` },
+      }),
+    );
+    expect(res.status).toBe(302);
+    const location = res.headers.get("location") ?? "";
+
+    // The Slack id linked onto the existing GitHub row (same person).
+    const linked = realDb.users.findBySlackUserId("U777");
+    expect(linked?.login).toBe("dev");
+    expect(linked?.githubId).toBe(99);
+    // The token carries the matched GitHub login.
+    expect(decodeToken(tokenFromRedirect(location))?.login).toBe("dev");
+
+    global.fetch = originalFetch;
+  });
+});
+
 describe("POST /login (password)", () => {
   it("still works with correct password", async () => {
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
@@ -634,7 +796,8 @@ describe("POST /workflow-runs/:id/cancel", () => {
     expect(killMock).toHaveBeenCalledWith("lastlight-sandbox-task-xyz-review-bbbbbbbb");
     expect(killMock).not.toHaveBeenCalledWith("lastlight-sandbox-other-cccccccc");
     expect(finishes.map((f) => f.id).sort()).toEqual(["e1", "e2"]);
-    expect(finishes.every((f) => f.error === "cancelled via admin dashboard")).toBe(true);
+    // Auth disabled in this test → no actor login, so it falls back to `admin`.
+    expect(finishes.every((f) => f.error === "cancelled via admin dashboard by admin")).toBe(true);
   });
 
   it("does NOT mark sibling-run executions as failed when cancelling a run with a shared triggerId", async () => {

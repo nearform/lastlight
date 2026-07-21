@@ -1,10 +1,19 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
+import type { TriggerActorType } from "./user-store.js";
 
 export interface ExecutionRecord {
   id: string;
   triggerType: "webhook" | "cron" | "chat" | "api";
   triggerId: string;
+  /**
+   * Who triggered/acted on this execution (issue #205) — a GitHub login, a
+   * Slack display name, or `cli`/`cron`/`admin`. Free-text; joined to `users`
+   * on `login` for enrichment. Null on rows written before the column existed.
+   */
+  triggeredBy?: string;
+  /** Coarse actor category for {@link triggeredBy}. */
+  triggerActorType?: TriggerActorType;
   skill: string;
   repo?: string;
   issueNumber?: number;
@@ -67,8 +76,8 @@ export class ExecutionStore {
 
   recordStart(record: Omit<ExecutionRecord, "finishedAt" | "success" | "error" | "turns" | "durationMs">): void {
     this.db.prepare(`
-      INSERT INTO executions (id, trigger_type, trigger_id, skill, repo, issue_number, started_at, workflow_run_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO executions (id, trigger_type, trigger_id, skill, repo, issue_number, started_at, workflow_run_id, triggered_by, trigger_actor_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.id,
       record.triggerType,
@@ -78,6 +87,8 @@ export class ExecutionStore {
       record.issueNumber,
       record.startedAt,
       record.workflowRunId ?? null,
+      record.triggeredBy ?? null,
+      record.triggerActorType ?? null,
     );
   }
 

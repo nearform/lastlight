@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import Database from "better-sqlite3";
 import { SlackConnector, verifySlackSignature } from "#src/connectors/slack/connector.js";
 import { SessionManager } from "#src/connectors/messaging/session-manager.js";
+import { StateDb } from "#src/state/db.js";
 import type { EventEnvelope } from "#src/connectors/types.js";
 
 function sign(secret: string, ts: string, body: string): string {
@@ -279,5 +280,62 @@ describe("SlackConnector webhook receiver", () => {
     await postInteraction(approvePayload()); // Slack retry, identical trigger_id
     await settle();
     expect(actions).toHaveLength(1);
+  });
+});
+
+// Slack → user identity matching (issue #205). resolveUsername prefers the
+// matched GitHub login so a Slack-initiated run attributes to the same person.
+describe("SlackConnector user identity matching", () => {
+  let db: Database.Database;
+  let store: StateDb;
+  let conn: SlackConnector;
+
+  function makeConn(profileEmail?: string): SlackConnector {
+    const sm = new SessionManager(db);
+    const c = new SlackConnector(
+      { botToken: "xoxb-test", mode: "socket", appToken: "xapp-test", botIdentifier: "", users: store.users } as never,
+      sm,
+    );
+    (c as any).web = {
+      users: {
+        info: async () => ({ user: { name: "slackname", real_name: "Real Name", profile: profileEmail ? { email: profileEmail } : {} } }),
+      },
+    };
+    return c;
+  }
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    store = new StateDb(":memory:");
+  });
+  afterEach(() => {
+    db.close();
+    store.close();
+  });
+
+  it("returns the GitHub login when the Slack email matches a users row + links the slack id", async () => {
+    store.users.getOrCreateUserByGithub({ githubId: 5, login: "ghdev", email: "dev@corp.com" });
+    conn = makeConn("dev@corp.com");
+    const resolved = await (conn as any).resolveUsername("U555");
+    expect(resolved).toBe("ghdev");
+    expect(store.users.findBySlackUserId("U555")?.login).toBe("ghdev");
+  });
+
+  it("fast-paths an already-linked slack id without needing the email again", async () => {
+    const u = store.users.getOrCreateUserByGithub({ githubId: 6, login: "linked", email: "l@corp.com" });
+    store.users.linkSlackUser(u.id, "U666");
+    conn = makeConn(undefined); // no email scope
+    expect(await (conn as any).resolveUsername("U666")).toBe("linked");
+  });
+
+  it("falls back to the Slack username when there's no match", async () => {
+    conn = makeConn("stranger@corp.com");
+    expect(await (conn as any).resolveUsername("U000")).toBe("slackname");
+  });
+
+  it("falls back to the Slack username when the email scope is missing", async () => {
+    store.users.getOrCreateUserByGithub({ githubId: 7, login: "hidden", email: "h@corp.com" });
+    conn = makeConn(undefined); // users:read.email not granted → no email
+    expect(await (conn as any).resolveUsername("U111")).toBe("slackname");
   });
 });

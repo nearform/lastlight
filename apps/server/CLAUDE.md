@@ -662,8 +662,16 @@ Slack (optional):
 - `SLACK_ALLOWED_USERS` — comma-separated user ids allowlist
 - `SLACK_OAUTH_CLIENT_ID`, `SLACK_OAUTH_CLIENT_SECRET`,
   `SLACK_OAUTH_REDIRECT_URI` — enables "Login with Slack" on the dashboard
-  (OIDC via arctic, uses `openid.connect.userInfo`)
+  (OIDC via arctic, uses `openid.connect.userInfo`; requests the `email` scope
+  so a Slack login matches a `users` row by email — issue #205)
 - `SLACK_ALLOWED_WORKSPACE` — restrict OAuth login to one team_id / domain
+- **Slack bot scope `users:read.email`** (setup step, issue #205) — required
+  for **Slack → user matching**: with it, `web.users.info` returns the user's
+  `profile.email` so a Slack-initiated run/approval attributes to the same
+  person as their GitHub login (matched by email, `slack_user_id` linked lazily).
+  Without it the address is omitted and matching silently degrades to the Slack
+  username fallback — never blocking the run. Re-consent the Slack app after
+  adding the scope.
 - `CHAT_BATCH_DEBOUNCE_MS` — settle window (ms, default 700; 0 disables) the
   `MessageBatcher` waits to coalesce a bursty thread before routing, so a rapid
   multi-message burst is classified once and answered as one ordered turn

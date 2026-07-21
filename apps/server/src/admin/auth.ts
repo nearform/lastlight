@@ -11,9 +11,19 @@ const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
  */
 export const REFRESH_GRACE_SECONDS = 60 * 60 * 24 * 7; // 7 days
 
-export function createToken(secret: string, method?: "password" | "slack" | "github"): string {
-  const payload: { exp: number; method?: string } = { exp: Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS };
+export function createToken(
+  secret: string,
+  method?: "password" | "slack" | "github",
+  login?: string,
+): string {
+  const payload: { exp: number; method?: string; login?: string } = {
+    exp: Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS,
+  };
   if (method) payload.method = method;
+  // The verified identity (issue #205) rides the token so actor-hardcoded
+  // routes can attribute an action to a real person. Additive and
+  // signature-compatible — existing 2-arg callers mint tokens without it.
+  if (login) payload.login = login;
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto.createHmac("sha256", secret).update(payloadB64).digest("base64url");
   return `${payloadB64}.${sig}`;
@@ -59,6 +69,9 @@ export function verifyTokenForRefresh(token: string, secret: string): boolean {
 export interface TokenPayload {
   exp: number;
   method?: "password" | "slack" | "github";
+  /** Verified identity carried across refresh (issue #205) — GitHub login, or
+   *  a Slack-matched login. Absent for password / unmatched-Slack sessions. */
+  login?: string;
 }
 
 /**
@@ -78,6 +91,7 @@ export function decodeToken(token: string): TokenPayload | null {
       exp: payload.exp,
       method:
         method === "password" || method === "slack" || method === "github" ? method : undefined,
+      login: typeof payload.login === "string" ? payload.login : undefined,
     };
   } catch {
     return null;
@@ -136,6 +150,21 @@ export function authMiddleware(enabled: boolean, secret: string) {
     if (!token || !verifyToken(token, secret)) {
       return c.json({ error: "unauthorized" }, 401);
     }
+    // Surface the verified identity to downstream routes (issue #205). The
+    // single seam every actor-hardcoded route reads via {@link actorFromContext}.
+    c.set("actorLogin", decodeToken(token)?.login);
     return next();
   };
+}
+
+/**
+ * The authenticated actor's GitHub login for the current request, or undefined
+ * when auth is disabled / the session carries no login (password or
+ * unmatched-Slack). `authMiddleware` sets `actorLogin` after verifying the
+ * token; this is the single read seam every actor-hardcoded admin route uses to
+ * attribute an action (retry / cancel / approve / CLI build) to a real person,
+ * falling back to `cli`/`admin` when it returns undefined (issue #205).
+ */
+export function actorFromContext(c: Context): string | undefined {
+  return c.get("actorLogin") as string | undefined;
 }

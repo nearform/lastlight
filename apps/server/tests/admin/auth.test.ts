@@ -109,6 +109,23 @@ describe("decodeToken", () => {
     expect(decodeToken(signToken({ exp: nowS() + 100, method: "evil" }))?.method).toBeUndefined();
   });
 
+  it("carries a verified login and survives decode (issue #205)", () => {
+    const token = createToken(SECRET, "github", "octocat");
+    expect(verifyToken(token, SECRET)).toBe(true);
+    const decoded = decodeToken(token);
+    expect(decoded?.method).toBe("github");
+    expect(decoded?.login).toBe("octocat");
+  });
+
+  it("login is absent for 2-arg (signature-compatible) callers", () => {
+    expect(decodeToken(createToken(SECRET, "password"))?.login).toBeUndefined();
+    expect(decodeToken(createToken(SECRET))?.login).toBeUndefined();
+  });
+
+  it("drops a non-string login", () => {
+    expect(decodeToken(signToken({ exp: nowS() + 100, login: 123 }))?.login).toBeUndefined();
+  });
+
   it("returns null when exp is missing", () => {
     expect(decodeToken(signToken({ method: "slack" }))).toBeNull();
   });
