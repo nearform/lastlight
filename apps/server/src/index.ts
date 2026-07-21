@@ -16,6 +16,7 @@ import { StateDb, isTriggerActorType, type TriggerActorType } from "./state/db.j
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
 import { dispatchCronWorkflow, fanOutContexts } from "./cron/fanout.js";
+import { sweepSandboxes } from "./cron/sandbox-sweep.js";
 import {
   discoverGreenDependencyPrs,
   discoverRedDependencyPrs,
@@ -1173,6 +1174,27 @@ async function main() {
     }
   } else {
     console.log("[cron] No GitHub client — skipping all cron jobs (chat-only mode)");
+  }
+
+  // Sandbox-workspace reaping backstop (issue #106) — a DIRECT (non-sandboxed)
+  // job, registered regardless of `github` so it runs in chat-only mode too.
+  // Reap-on-completion (workflows/simple.ts) handles the common case; this
+  // sweeps failed/crashed leftovers and bounds the reusable per-PR cache. It
+  // replaces the out-of-band host cron (scripts/cleanup-sandboxes.sh).
+  const sweepCfg = config.cleanup.sandbox;
+  if (sweepCfg.enabled) {
+    cron.registerDirect({
+      name: "sandbox-sweep",
+      schedule: sweepCfg.sweepSchedule,
+      handler: async () => {
+        sweepSandboxes({
+          stateDir: config.stateDir,
+          sandboxDir: config.sandboxDir,
+          retentionHours: sweepCfg.retentionHours,
+          maxDirs: sweepCfg.maxDirs,
+        });
+      },
+    });
   }
 
   // Start everything

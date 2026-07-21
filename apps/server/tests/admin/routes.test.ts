@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
@@ -896,6 +896,23 @@ describe("POST /workflow-runs/:id/cancel", () => {
     const res = await request(app, "/workflow-runs/r1/cancel", { method: "POST" });
     expect(res.status).toBe(200);
     expect(finishes.map((f) => f.id)).toEqual(["e1"]);
+  });
+
+  it("reaps the run's on-disk workspace after cancelling (issue #106)", async () => {
+    const dockerMod = await import("#src/admin/docker.js");
+    vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+
+    const stateDir = mkdtempSync(join(tmpdir(), "cancel-reap-"));
+    const taskId = "acme-7-build";
+    mkdirSync(join(stateDir, "sandboxes", taskId), { recursive: true });
+
+    const { db } = makeCancelDb({ run: { id: "r1", status: "running", triggerId: "t1", taskId } });
+    const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "", stateDir }));
+    const res = await request(app, "/workflow-runs/r1/cancel", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect((await res.json()).reapedWorkspace).toBe(true);
+    expect(existsSync(join(stateDir, "sandboxes", taskId))).toBe(false);
+    rmSync(stateDir, { recursive: true, force: true });
   });
 });
 

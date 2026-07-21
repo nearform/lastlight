@@ -404,8 +404,19 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
    workspace-root sibling beside the skill bundle
    (`.lastlight-scripts/<phase>/script.<ext>`) and run it with
    `node` (js/ts) or `uv run` (python).
-4. **Teardown** — `docker rm -f` on completion or error.
-5. **Boot-time cleanup** — `cleanupOrphanedSandboxes()` (`sandbox/index.ts:12–26`)
+4. **Teardown** — `docker rm -f` on completion or error (the *container* only).
+5. **Workspace reaping (issue #106)** — the on-disk clone under
+   `$STATE_DIR/sandboxes/<taskId>/` is reaped separately from the container, by
+   `reapSandboxWorkspace()` (`src/sandbox/reap.ts` — path-escape guard +
+   live-container skip). An *ephemeral* run's dir is removed on terminal success
+   (`reapOnSuccess`, `workflows/simple.ts`) and on admin cancel
+   (`admin/routes.ts`); failures and the reusable/recreate per-target classes
+   are left for the backstop. An hourly in-harness direct-cron sweep
+   (`src/cron/sandbox-sweep.ts`, config `cleanup.sandbox.*`) removes non-live
+   dirs older than `retentionHours` and LRU-evicts beyond `maxDirs`, bounding
+   the reusable per-PR cache. Replaces the retired host cron
+   (`scripts/cleanup-sandboxes.sh`, now manual-only).
+6. **Boot-time cleanup** — `cleanupOrphanedSandboxes()` (`sandbox/index.ts:12–26`)
    kills any leftover `lastlight-sandbox-*` containers from prior
    crashes.
 
@@ -443,6 +454,8 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
 | Docker container driver (wrapped by the DockerSandbox adapter) | `src/sandbox/docker.ts` |
 | smol micro-VM driver (wrapped by the SmolSandbox adapter, experimental) | `src/sandbox/smol.ts` |
 | Sandbox dispatch + orphan cleanup | `src/sandbox/index.ts` |
+| Workspace reaping (safe remove + live-container guard) | `src/sandbox/reap.ts` |
+| Backstop TTL/LRU sweep (hourly direct cron) | `src/cron/sandbox-sweep.ts` |
 | Sandbox image names + availability probe | `src/sandbox/images.ts` (`SANDBOX_IMAGE`, `SANDBOX_IMAGE_QA`, `qaImageAvailable`) |
 | Browser-QA image | `sandbox-qa.Dockerfile`; bundled driver `skills/browser-qa/scripts/agent-browser.mjs` |
 | Egress allowlist (source) | `src/sandbox/egress-allowlist.ts` |

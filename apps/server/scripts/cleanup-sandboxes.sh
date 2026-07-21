@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 #
-# cleanup-sandboxes.sh — prune stale per-task sandbox workspaces.
+# cleanup-sandboxes.sh — MANUAL emergency prune of stale sandbox workspaces.
+#
+# NOTE (issue #106): the harness now owns sandbox-workspace reaping. It reaps an
+# ephemeral run's clone on terminal success (workflows/simple.ts), reaps on
+# admin cancel, and runs an hourly in-harness TTL + LRU sweep
+# (src/cron/sandbox-sweep.ts, config `cleanup.sandbox.*`) that skips live
+# containers. This script and its host cron are RETIRED — keep it only as a
+# manual break-glass tool for an operator who needs to force a prune out-of-band
+# (e.g. before the next hourly sweep fires). Do NOT reinstall it as a host cron.
 #
 # Every agent task clones the target repo into $STATE_DIR/sandboxes/<taskId>/.
-# The harness tears down the sandbox *container* when a task finishes but never
-# the on-disk clone (see createTaskSandbox in src/sandbox/index.ts — its
-# `cleanup` only calls sandbox.destroy(taskId)). Each taskId is unique, so these
-# workspaces accumulate without bound — on prod they had grown to ~34G across
-# 700+ dirs. This script removes workspace dirs whose contents were last
-# modified more than RETENTION_DAYS ago, leaving recent and in-flight tasks
-# untouched (tasks complete in minutes/hours, never days).
+# This script removes workspace dirs whose contents were last modified more than
+# RETENTION_DAYS ago, leaving recent and in-flight tasks untouched.
+#
+# Caveat: GNU `find -mtime +N` keeps ~(N+1)*24h (day-count truncation), so
+# RETENTION_DAYS=1 effectively retains ~48h — the in-harness sweep uses an
+# explicit hours-based age check instead. Prefer the harness sweep; use this
+# only to force an immediate prune.
 #
 # Run it inside the agent container, where $STATE_DIR/sandboxes lives on the
 # named `agent-data` volume. The image doesn't bake scripts/, so pipe it in:
@@ -21,9 +29,6 @@
 #
 #   docker compose exec -e DRY_RUN=1 -T agent bash -s < scripts/cleanup-sandboxes.sh
 #   docker compose exec -e RETENTION_DAYS=7 -T agent bash -s < scripts/cleanup-sandboxes.sh
-#
-# Suggested cron on the host (daily 04:00, keep last 1 day):
-#   0 4 * * * cd /home/lastlight/lastlight && docker compose exec -T agent bash -s < scripts/cleanup-sandboxes.sh >> /var/log/cleanup-sandboxes.log 2>&1
 #
 set -euo pipefail
 

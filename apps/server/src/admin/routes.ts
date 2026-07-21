@@ -39,6 +39,7 @@ import {
   getInstallationReposRefreshedAt,
 } from "../managed-repos.js";
 import { getRuntimeConfig } from "../config/config.js";
+import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
 import type { WorkflowApproval } from "../state/approval-store.js";
@@ -1190,7 +1191,20 @@ export function createAdminRoutes(
         console.warn(`[cancel] container enumeration failed:`, err);
       }
     }
-    return c.json({ cancelled: id, killedContainers: killed });
+    // Reap the on-disk workspace too (issue #106) — the kills above stop the
+    // in-flight phase but leave the clone behind. Cancel is explicit and leaves
+    // a dirty checkout, so reap regardless of workflow class (a reusable per-PR
+    // dir just re-clones next time). The live-container guard defaults on, so a
+    // container still dying from the kills above is not raced.
+    let reaped = false;
+    if (typeof storedTaskId === "string" && storedTaskId) {
+      reaped = reapSandboxWorkspace({
+        taskId: storedTaskId,
+        stateDir: config.stateDir,
+        sandboxDir: getRuntimeConfig()?.sandboxDir,
+      }).removed;
+    }
+    return c.json({ cancelled: id, killedContainers: killed, reapedWorkspace: reaped });
   });
 
   // Retry a FAILED or CANCELLED workflow run — resume from where it stopped with

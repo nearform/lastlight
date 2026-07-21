@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { workflowScopedTaskId, resolveRunBranch, artifactIssueDir, PER_TARGET_REUSE_WORKFLOWS, PER_TARGET_RECREATE_WORKFLOWS, PREPOPULATE_SYNTH_WORKFLOWS, PR_HEADREF_PREPOPULATE_WORKFLOWS } from "#src/workflows/simple.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { workflowScopedTaskId, resolveRunBranch, artifactIssueDir, reapOnSuccess, PER_TARGET_REUSE_WORKFLOWS, PER_TARGET_RECREATE_WORKFLOWS, PREPOPULATE_SYNTH_WORKFLOWS, PR_HEADREF_PREPOPULATE_WORKFLOWS } from "#src/workflows/simple.js";
+import type { ExecutorConfig } from "#src/engine/github/profiles.js";
 
 const RUN = "abcdef12-3456-7890-abcd-ef1234567890";
 
@@ -173,5 +177,38 @@ describe("PR_HEADREF_PREPOPULATE_WORKFLOWS", () => {
 
   it("does not pin build — it creates the synth branch off the default branch", () => {
     expect(PR_HEADREF_PREPOPULATE_WORKFLOWS.has("build")).toBe(false);
+  });
+});
+
+describe("reapOnSuccess (issue #106)", () => {
+  const tmps: string[] = [];
+  afterEach(() => {
+    for (const d of tmps.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  // No live container in the unit env, so the reap probe resolves to "not live"
+  // (docker absent → false, or `docker ps` matches nothing).
+  function seed(taskId: string): { config: ExecutorConfig; workDir: string } {
+    const stateDir = mkdtempSync(join(tmpdir(), "reap-onsuccess-"));
+    tmps.push(stateDir);
+    const workDir = join(stateDir, "sandboxes", taskId);
+    mkdirSync(workDir, { recursive: true });
+    return { config: { stateDir } as ExecutorConfig, workDir };
+  }
+
+  it("reaps an ephemeral workflow's workspace on success", () => {
+    const taskId = "acme-1-triage-abcd1234";
+    const { config, workDir } = seed(taskId);
+    reapOnSuccess("triage", taskId, config);
+    expect(existsSync(workDir)).toBe(false);
+  });
+
+  it("keeps reusable per-target workspaces (they are a warm cache)", () => {
+    for (const wf of [...PER_TARGET_REUSE_WORKFLOWS, ...PER_TARGET_RECREATE_WORKFLOWS]) {
+      const taskId = `acme-9-${wf}`;
+      const { config, workDir } = seed(taskId);
+      reapOnSuccess(wf, taskId, config);
+      expect(existsSync(workDir)).toBe(true);
+    }
   });
 });

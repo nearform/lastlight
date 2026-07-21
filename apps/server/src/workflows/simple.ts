@@ -1,7 +1,8 @@
 import { randomUUID } from "crypto";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
-import { getBotName, type ModelConfig, type VariantConfig } from "../config/config.js";
+import { getBotName, getRuntimeConfig, type ModelConfig, type VariantConfig } from "../config/config.js";
+import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { getWorkflow } from "./loader.js";
 import {
   runWorkflow,
@@ -109,6 +110,32 @@ export function workflowScopedTaskId(
   return number !== undefined
     ? `${repo}-${number}-${workflowName}-${suffix}`
     : `${repo}-${workflowName}-${suffix}`;
+}
+
+/**
+ * Reap the sandbox workspace of a run that just finished **successfully**
+ * (issue #106). Only ephemeral per-run workspaces are removed here: the
+ * reusable per-target ones (`PER_TARGET_REUSE_WORKFLOWS` /
+ * `PER_TARGET_RECREATE_WORKFLOWS`) are a warm cache (issue #107) whose eviction
+ * is owned by the backstop TTL/LRU sweep, so re-review fanout keeps its warm
+ * `node_modules`. Failures are left for the sweep too (post-mortem debugging).
+ * Best-effort — never throws into the already-succeeded run.
+ */
+export function reapOnSuccess(workflowName: string, taskId: string, config: ExecutorConfig): void {
+  const rt = getRuntimeConfig();
+  if (rt?.cleanup?.sandbox?.reapOnCompletion === false) return;
+  if (PER_TARGET_REUSE_WORKFLOWS.has(workflowName) || PER_TARGET_RECREATE_WORKFLOWS.has(workflowName)) {
+    return;
+  }
+  try {
+    reapSandboxWorkspace({
+      taskId,
+      stateDir: config.stateDir ?? rt?.stateDir ?? "data",
+      sandboxDir: config.sandboxDir ?? rt?.sandboxDir,
+    });
+  } catch {
+    /* best effort — a reap failure must not fail a successful run */
+  }
 }
 
 /**
@@ -512,6 +539,7 @@ export async function runSimpleWorkflow(
 
     if (result.success && !result.paused) {
       db.runs.finishRun(workflowId, "succeeded");
+      reapOnSuccess(workflowName, taskId, config);
     } else if (!result.success && !result.paused) {
       db.runs.finishRun(workflowId, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed",

@@ -615,6 +615,35 @@ Sandbox workspace provisioning (issue #107):
   inherits a stale feature branch. A same-run resume still preserves the
   checkout. Policy sets: `src/workflows/target-policy.ts`.
 
+Sandbox workspace reaping (issue #106):
+
+- The harness OWNS cleanup of the on-disk clones under
+  `$STATE_DIR/sandboxes/<taskId>/` — the per-phase container teardown
+  (`docker rm -f`) never removed them, so they leaked until the disk filled
+  (prod hit 100%). Three cooperating mechanisms, all via
+  `reapSandboxWorkspace` (`src/sandbox/reap.ts`, the single safe-remove
+  authority: path-escape guard + live-container skip):
+  - **Reap-on-completion** — an *ephemeral* run's workspace is removed the
+    moment it finishes successfully (`reapOnSuccess` in
+    `src/workflows/simple.ts`). Failures are kept for post-mortem; the
+    reusable/recreate per-target classes (`PER_TARGET_REUSE_WORKFLOWS` /
+    `PER_TARGET_RECREATE_WORKFLOWS`) are NOT reaped here — they're a warm
+    cache (issue #107) bounded by the sweep.
+  - **Reap-on-cancel** — the admin cancel route
+    (`src/admin/routes.ts`) reaps the run's workspace after killing its
+    containers.
+  - **Backstop sweep** — an hourly in-harness direct cron
+    (`src/cron/sandbox-sweep.ts`, registered in `src/index.ts`) removes
+    non-live dirs older than `retentionHours` and, if more than `maxDirs`
+    remain, evicts the oldest (LRU) — bounding the reusable per-PR cache.
+    It uses an explicit hours-based age check (not `find -mtime`'s
+    day-truncation) and never touches a dir whose container is live.
+- Config: `cleanup.sandbox.{enabled,reapOnCompletion,sweepSchedule,retentionHours,maxDirs}`
+  in `config/default.yaml` (defaults: enabled, hourly, 12h, 40 dirs).
+- This replaces the out-of-band host cron. `scripts/cleanup-sandboxes.sh`
+  is retired to a manual break-glass tool only — do not reinstall it as a
+  host cron.
+
 OpenTelemetry (optional):
 
 - Disabled by default. Enable with `LASTLIGHT_OTEL_ENABLED=true`; standard `OTEL_EXPORTER_OTLP_*`, `OTEL_SERVICE_NAME`, and `OTEL_RESOURCE_ATTRIBUTES` env vars configure exporter endpoints/headers/resources.

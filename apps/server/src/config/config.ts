@@ -147,6 +147,28 @@ export interface LastLightConfig {
   publicUrl?: string;
   reviewPostsCheck: boolean;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
+  /**
+   * Sandbox-workspace reaping (issue #106). The harness owns cleanup of the
+   * on-disk clones under `$STATE_DIR/sandboxes/<taskId>/`: `reapOnCompletion`
+   * removes an ephemeral run's workspace on terminal success; the TTL sweep
+   * (`enabled`, `sweepSchedule`) is the backstop for failed/crashed leftovers
+   * and bounds the reusable per-PR cache via age (`retentionHours`) + an LRU
+   * dir cap (`maxDirs`). Replaces the out-of-band host cron.
+   */
+  cleanup: { sandbox: SandboxCleanupConfig };
+}
+
+export interface SandboxCleanupConfig {
+  /** Master switch for the in-harness TTL/LRU sweep. */
+  enabled: boolean;
+  /** Reap an ephemeral run's workspace on terminal success. */
+  reapOnCompletion: boolean;
+  /** Cron schedule for the backstop sweep (default hourly). */
+  sweepSchedule: string;
+  /** Sweep removes non-live dirs older than this many hours. */
+  retentionHours: number;
+  /** LRU cap on dir count — bounds the reusable per-PR cache. */
+  maxDirs: number;
 }
 
 let currentConfig: LastLightConfig | undefined;
@@ -413,6 +435,7 @@ export function loadConfig(): LastLightConfig {
     publicUrl: resolvePublicUrl(),
     reviewPostsCheck: fileCfg.reviewPostsCheck,
     concurrency: fileCfg.concurrency,
+    cleanup: fileCfg.cleanup,
   };
   setRuntimeConfig(config);
   return config;
@@ -439,6 +462,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   reviewPostsCheck: boolean;
   otel: OtelConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
+  cleanup: { sandbox: SandboxCleanupConfig };
 } {
   const managedRepos = stringArray(raw.managedRepos, "managedRepos");
   const botName = typeof raw.botName === "string" && raw.botName.trim() ? raw.botName.trim() : "last-light";
@@ -455,6 +479,8 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
   const otelRaw = isPlainObject(raw.otel) ? raw.otel : {};
   const concurrencyRaw = isPlainObject(raw.concurrency) ? raw.concurrency : {};
+  const cleanupRaw = isPlainObject(raw.cleanup) ? raw.cleanup : {};
+  const sandboxCleanupRaw = isPlainObject(cleanupRaw.sandbox) ? cleanupRaw.sandbox : {};
 
   const models: ModelConfig = { default: typeof modelsRaw.default === "string" ? modelsRaw.default : DEFAULT_MODEL };
   for (const [k, v] of Object.entries(modelsRaw)) if (typeof v === "string") models[k] = v;
@@ -479,6 +505,23 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
       ? concurrencyRaw.maxQueueWaitMs
       : 3_600_000;
 
+  const sandboxCleanup: SandboxCleanupConfig = {
+    enabled: sandboxCleanupRaw.enabled !== false,
+    reapOnCompletion: sandboxCleanupRaw.reapOnCompletion !== false,
+    sweepSchedule:
+      typeof sandboxCleanupRaw.sweepSchedule === "string" && sandboxCleanupRaw.sweepSchedule.trim()
+        ? sandboxCleanupRaw.sweepSchedule.trim()
+        : "0 * * * *",
+    retentionHours:
+      typeof sandboxCleanupRaw.retentionHours === "number" && sandboxCleanupRaw.retentionHours > 0
+        ? sandboxCleanupRaw.retentionHours
+        : 12,
+    maxDirs:
+      typeof sandboxCleanupRaw.maxDirs === "number" && sandboxCleanupRaw.maxDirs > 0
+        ? sandboxCleanupRaw.maxDirs
+        : 40,
+  };
+
   return {
     managedRepos,
     botName,
@@ -501,6 +544,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     reviewPostsCheck,
     otel: normalizeOtelFileConfig(otelRaw),
     concurrency: { maxWorkflows, maxQueueWaitMs },
+    cleanup: { sandbox: sandboxCleanup },
   };
 }
 
