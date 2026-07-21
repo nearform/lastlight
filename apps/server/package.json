@@ -75,7 +75,7 @@
     "agentic-pi": "workspace:*",
     "arctic": "^3.7.0",
     "better-sqlite3": "^12.11.1",
-    "croner": "^9.0.0",
+    "croner": "^10.0.1",
     "hono": "^4.12.31",
     "octokit": "^5.0.5",
     "yaml": "^2.8.3",
