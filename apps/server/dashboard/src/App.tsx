@@ -24,6 +24,10 @@ const FocusedApprovalView = lazy(() =>
 const ReposPage = lazy(() =>
   import("./components/ReposPage").then((m) => ({ default: m.ReposPage })),
 );
+// Lazy — pulls in React Flow (@xyflow/react); keep it out of the initial bundle.
+const RouterPlayground = lazy(() =>
+  import("./components/RouterPlayground").then((m) => ({ default: m.RouterPlayground })),
+);
 import {
   HomeIcon,
   PlayCircleIcon,
@@ -34,6 +38,7 @@ import {
   RectangleGroupIcon,
   FolderIcon,
   CommandLineIcon,
+  ShareIcon,
 } from "@heroicons/react/24/outline";
 import {
   useUrlState,
@@ -46,11 +51,11 @@ import {
 } from "./hooks/useUrlState";
 
 type AuthState = "checking" | "required" | "ok";
-type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "repos" | "crons" | "logs" | "config";
+type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "repos" | "crons" | "logs" | "config" | "router-playground";
 
 const PAGE_SIZE = 50;
 
-const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "repos", "crons", "logs", "config"] as const;
+const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "repos", "crons", "logs", "config", "router-playground"] as const;
 
 const SESSION_SOURCE_PATHS: Record<"sessions" | "chat-sessions", string> = {
   sessions: "/admin/api/sessions",
@@ -298,6 +303,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               { id: "repos", label: "Repos", Icon: FolderIcon },
               { id: "crons", label: "Crons", Icon: ClockIcon },
               { id: "logs", label: "Logs", Icon: CommandLineIcon },
+              { id: "router-playground", label: "Router Playground", Icon: ShareIcon },
               { id: "config", label: "Config", Icon: Cog6ToothIcon },
             ] as const
           ).map(({ id, label, Icon }) => {
@@ -385,6 +391,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         />
       ) : tab === "workflows" ? (
         <WorkflowDefinitions />
+      ) : tab === "router-playground" ? (
+        <Suspense fallback={<div className="p-6 text-sm text-base-content/50">Loading…</div>}>
+          <RouterPlayground />
+        </Suspense>
       ) : tab === "logs" ? (
         <LogsPage />
       ) : tab === "config" ? (

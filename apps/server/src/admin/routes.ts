@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import path from "node:path";
-import { timingSafeEqual, randomBytes } from "node:crypto";
+import { timingSafeEqual, randomBytes, randomUUID } from "node:crypto";
 import { streamSSE } from "hono/streaming";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { Slack, GitHub } from "arctic";
@@ -24,11 +24,15 @@ import { enumerateOverlayAssets } from "lastlight-shared/overlay-assets";
 import {
   getCronWorkflows,
   getWorkflow,
+  getWorkflowByIntent,
   listAgentWorkflows,
   loadWorkflowYamlRaw,
   loadPromptTemplate,
   loadSkillRaw,
 } from "../workflows/loader.js";
+import { routeEvent, type Route } from "../engine/router.js";
+import { classifyComment, type ClassificationResult } from "../engine/screen/classifier.js";
+import type { EventEnvelope, EventType } from "../connectors/types.js";
 import {
   getWorkflowTriggers,
   getWorkflowTriggerKinds,
@@ -38,7 +42,7 @@ import {
   getInstallationRepos,
   getInstallationReposRefreshedAt,
 } from "../managed-repos.js";
-import { getRuntimeConfig } from "../config/config.js";
+import { getRuntimeConfig, getRoutes, getBotName } from "../config/config.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
@@ -454,6 +458,130 @@ export async function exchangeOAuth2Code(opts: {
   return accessToken;
 }
 
+// ── Event Router Playground ──────────────────────────────────────────────────
+// Powers the admin "Event Router Playground" page (`/route-graph` +
+// `/route-test`): a visual, hermetic dry-run of the classifier + router. See
+// src/engine/router.ts — routeEvent performs NO side effects, so threading a
+// synthetic event through it (with empty deps) never starts a workflow.
+
+/** An event type a connector emits, tagged by how the router decides its handler. */
+interface PlaygroundEventType {
+  input: "github" | "slack";
+  type: EventType;
+  routing: "deterministic" | "classifier";
+  label: string;
+}
+
+/**
+ * The event-type taxonomy for the playground graph — GitHub + Slack only (cron
+ * and CLI bypass the router). `routing` mirrors the branches in router.ts:
+ * `deterministic` = a fixed code branch; `classifier` = a real LLM intent call.
+ */
+const PLAYGROUND_EVENT_TYPES: PlaygroundEventType[] = [
+  // `issue.opened` runs `classifyIssueIntent` (question vs work) to pick between
+  // the `answer` workflow and `issue-triage` — an LLM decides the handler, so it
+  // is classifier-routed, not deterministic (even though it needs no @mention).
+  { input: "github", type: "issue.opened", routing: "classifier", label: "Issue opened" },
+  { input: "github", type: "issue.reopened", routing: "deterministic", label: "Issue reopened" },
+  { input: "github", type: "pr.opened", routing: "deterministic", label: "PR opened" },
+  { input: "github", type: "pr.synchronize", routing: "deterministic", label: "PR synchronized" },
+  { input: "github", type: "pr.reopened", routing: "deterministic", label: "PR reopened" },
+  { input: "github", type: "pr.checks_passed", routing: "deterministic", label: "PR checks passed" },
+  { input: "github", type: "pr.checks_failed", routing: "classifier", label: "PR checks failed" },
+  { input: "github", type: "comment.created", routing: "classifier", label: "Comment created" },
+  { input: "github", type: "pr_review.submitted", routing: "classifier", label: "PR review submitted" },
+  { input: "slack", type: "message", routing: "classifier", label: "Message" },
+];
+
+/**
+ * Event types whose intent comes from `classifyComment` on free-form text — the
+ * ones the playground re-classifies (with `explain`) to surface the model's
+ * reasoning. `pr.checks_failed` is classifier-routed too, but via a check-state
+ * branch inside routeEvent, not comment text — so it isn't re-classified here.
+ */
+const COMMENT_CLASSIFIER_TYPES = new Set<EventType>([
+  "comment.created",
+  "message",
+  "pr_review.submitted",
+]);
+
+function playgroundRouting(type: EventType): "deterministic" | "classifier" {
+  return PLAYGROUND_EVENT_TYPES.find((e) => e.type === type)?.routing ?? "deterministic";
+}
+
+/**
+ * Resolve a classifier intent to the handler the router would pick, using the
+ * same `routes` map the router consults (slack keys use `_`, intents use `-`),
+ * falling back to the workflow that claims the intent, then the intent itself.
+ */
+function resolveIntentHandler(intent: string): string {
+  const routes = getRoutes();
+  const key = intent.replace(/-/g, "_");
+  return routes.slack[intent] ?? routes.slack[key] ?? getWorkflowByIntent(intent)?.name ?? intent;
+}
+
+/** Request body for POST /route-test — a synthetic event to dry-run. */
+interface RouteTestBody {
+  source?: string;
+  type: string;
+  body?: string;
+  title?: string;
+  sender?: string;
+  repo?: string;
+  issueNumber?: number;
+  prNumber?: number;
+  isPullRequest?: boolean;
+  prAuthor?: string;
+  checksState?: string;
+  labels?: string[];
+  authorAssociation?: string;
+  /** Original issue/PR author. Falls back to `prAuthor` for PR events (the
+   *  `pr.checks_failed` branch classifies "…by <issueAuthor>…"). */
+  issueAuthor?: string;
+}
+
+interface RouteExplanation {
+  routingKind: "deterministic" | "classifier";
+  branchLabel: string;
+  handler?: string;
+  routeKey?: string;
+  reason?: string;
+  notes: string[];
+}
+
+/** Compose a human-readable "why" from the event type, classifier result, and route. */
+function buildExplanation(
+  type: EventType,
+  classification: ClassificationResult | undefined,
+  route: Route,
+): RouteExplanation {
+  const routingKind = playgroundRouting(type);
+  const notes: string[] = [];
+  let handler: string | undefined;
+  let routeKey: string | undefined;
+
+  if (route.action === "handler") {
+    handler = route.handler;
+    const rk = (route.context as Record<string, unknown> | undefined)?._routeKey;
+    routeKey = typeof rk === "string" ? rk : undefined;
+  } else if (route.action === "reply") {
+    notes.push(`Replied directly: ${route.message}`);
+  } else {
+    notes.push(`Ignored: ${route.reason}`);
+  }
+
+  let branchLabel: string;
+  if (classification) {
+    branchLabel = `classified as '${classification.intent}'` + (handler ? ` → ${handler}` : "");
+  } else if (route.action === "handler") {
+    branchLabel = `${type} → ${handler}`;
+  } else {
+    branchLabel = `${type} → ${route.action}`;
+  }
+
+  return { routingKind, branchLabel, handler, routeKey, reason: classification?.reason, notes };
+}
+
 export function createAdminRoutes(
   db: StateDb,
   sessions: SessionSource,
@@ -510,6 +638,153 @@ export function createAdminRoutes(
       overrides: enumerateOverlayAssets({ coreRoot: config.builtInRoot, overlayRoot: config.overlayDir }),
     }),
   );
+
+  // ── Event Router Playground ────────────────────────────────────────────────
+  // Static graph description: inputs → event types → router → handlers. Built
+  // from the same sources the router uses (getRoutes + listAgentWorkflows) so the
+  // taxonomy isn't duplicated in the frontend.
+  app.get("/route-graph", (c) => {
+    const routes = getRoutes();
+    const defs = listAgentWorkflows();
+
+    const inputs = [
+      { id: "github" as const, label: "GitHub" },
+      { id: "slack" as const, label: "Slack" },
+    ];
+
+    const eventTypes = PLAYGROUND_EVENT_TYPES.map((e) => ({
+      input: e.input,
+      type: e.type,
+      routing: e.routing,
+      label: e.label,
+    }));
+
+    const handlers: { name: string; claimedIntent?: string; kind: "workflow" | "in-process" }[] =
+      defs.map((def) => ({
+        name: def.name,
+        claimedIntent: def.classification?.intent,
+        kind: "workflow" as const,
+      }));
+    // In-process handlers the router can dispatch to (not YAML workflows).
+    for (const name of ["chat", "chat-reset", "status-report", "approval-response", "explore-reply"]) {
+      handlers.push({ name, kind: "in-process" });
+    }
+
+    // Classifier intent → handler fan-out edges: each workflow's claimed intent,
+    // then any remaining slack-route intents (reserved controls, question, …).
+    const intentEdges: { intent: string; to: string }[] = [];
+    const seenIntent = new Set<string>();
+    for (const def of defs) {
+      const intent = def.classification?.intent;
+      if (!intent || seenIntent.has(intent)) continue;
+      seenIntent.add(intent);
+      intentEdges.push({ intent, to: resolveIntentHandler(intent) });
+    }
+    for (const [key, to] of Object.entries(routes.slack)) {
+      const intent = key.replace(/_/g, "-");
+      if (seenIntent.has(intent)) continue;
+      seenIntent.add(intent);
+      intentEdges.push({ intent, to });
+    }
+
+    // Deterministic event-type → handler edges, straight from the github routes.
+    const gh = routes.github;
+    const deterministicEdges = [
+      { from: "issue.opened", to: gh.issue_opened, via: "issue_opened" },
+      { from: "issue.reopened", to: gh.issue_reopened, via: "issue_reopened" },
+      { from: "pr.opened", to: gh.pr_opened, via: "pr_opened" },
+      { from: "pr.synchronize", to: gh.pr_synchronize, via: "pr_synchronize" },
+      { from: "pr.reopened", to: gh.pr_reopened, via: "pr_reopened" },
+      { from: "pr.checks_passed", to: getWorkflowByIntent("dependabot-pr-merge")?.name, via: "checks_passed" },
+    ].filter((e): e is { from: string; to: string; via: string } => Boolean(e.to));
+
+    // Ensure every edge target has a handler node (a route may point at a
+    // workflow not in the def list, e.g. a bare fallback name).
+    const handlerNames = new Set(handlers.map((h) => h.name));
+    for (const to of [...intentEdges.map((e) => e.to), ...deterministicEdges.map((e) => e.to)]) {
+      if (to && !handlerNames.has(to)) {
+        handlerNames.add(to);
+        handlers.push({ name: to, kind: "workflow" });
+      }
+    }
+
+    return c.json({ botName: getBotName(), inputs, eventTypes, handlers, deterministicEdges, intentEdges });
+  });
+
+  // Hermetic dry-run: thread a synthetic event through the REAL classifier +
+  // router and return the decision — WITHOUT starting any workflow. Calls
+  // routeEvent({}) (no db, no github → zero external reads/writes) and, for
+  // comment-text types, classifyComment(..., {explain:true}) for the reasoning.
+  // NEVER touches dispatch/dispatchWorkflow (structurally out of scope here).
+  app.post("/route-test", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as RouteTestBody | null;
+    if (!body || typeof body.type !== "string") {
+      return c.json({ error: "type is required" }, 400);
+    }
+    const type = body.type as EventType;
+    const isPr = body.isPullRequest ?? type.startsWith("pr");
+
+    const envelope: EventEnvelope = {
+      id: `route-test-${randomUUID()}`,
+      source: body.source ?? "github",
+      type,
+      repo: body.repo,
+      issueNumber: body.issueNumber,
+      prNumber: isPr ? body.prNumber ?? 1 : body.prNumber,
+      sender: body.sender || "playground-user",
+      // The PR/issue author — for PR events (e.g. pr.checks_failed) the router
+      // classifies "…by <issueAuthor>…", so a dependency PR needs the bot author.
+      issueAuthor: body.issueAuthor ?? (isPr ? body.prAuthor : undefined),
+      senderIsBot: false,
+      body: body.body ?? "",
+      title: body.title,
+      labels: body.labels ?? [],
+      authorAssociation: body.authorAssociation ?? "OWNER",
+      raw: {}, // empty → no Slack thread lookup
+      reply: async () => {}, // inert no-op — nothing is ever posted
+      timestamp: new Date(),
+    };
+
+    let classification: ClassificationResult | undefined;
+    if (COMMENT_CLASSIFIER_TYPES.has(type)) {
+      classification = await classifyComment(
+        envelope.body,
+        {
+          issueTitle: body.title,
+          isPullRequest: isPr,
+          prAuthor: body.prAuthor,
+          checksState: body.checksState,
+        },
+        { explain: true },
+      );
+    } else if (type === "pr.checks_failed") {
+      // The router classifies a SYNTHESIZED description for this event (not the
+      // body) — replicate it so the playground surfaces the same intent/reason
+      // (or a classifier error) the router's internal call would produce.
+      const text =
+        `Pull request #${envelope.prNumber} "${envelope.title || ""}" ` +
+        `by ${envelope.issueAuthor || "unknown"} — its CI checks have failed.`;
+      classification = await classifyComment(
+        text,
+        { issueTitle: envelope.title, isPullRequest: true },
+        { explain: true },
+      );
+    } else if (type === "issue.opened") {
+      // `classifyIssueIntent` classifies the combined title + body (question vs
+      // work) to choose `answer` vs `issue-triage` — mirror it so the why-panel
+      // shows the same intent/reason the router's internal call produced.
+      const combined = `${envelope.title || ""}\n\n${envelope.body || ""}`.trim();
+      classification = await classifyComment(
+        combined,
+        { issueTitle: envelope.title },
+        { explain: true },
+      );
+    }
+
+    const route = await routeEvent(envelope, {});
+    const explanation = buildExplanation(type, classification, route);
+    return c.json({ route, classification, explanation });
+  });
 
   // Auth endpoints
   app.get("/auth-required", (c) => {

@@ -10,8 +10,7 @@ export type TriggerInfo =
 
 function add(map: Map<string, TriggerInfo[]>, name: string | undefined, info: TriggerInfo): void {
   if (!name) return;
-  const effectiveName = name === "github-orchestrator" ? "build" : name;
-  map.set(effectiveName, [...(map.get(effectiveName) || []), info]);
+  map.set(name, [...(map.get(name) || []), info]);
 }
 
 function routeTriggers(): Map<string, TriggerInfo[]> {

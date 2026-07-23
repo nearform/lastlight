@@ -570,7 +570,7 @@ export async function routeEvent(
       }
       const issueNovelWf = fallbackWorkflowForIntent(intent);
       const { handler: issueSkill, routeKey: issueRouteKey } =
-        intent === "build" ? { handler: gh.issue_build || "github-orchestrator", routeKey: "github.issue_build" }
+        intent === "build" ? { handler: gh.issue_build || "build", routeKey: "github.issue_build" }
         : intent === "explore" ? { handler: gh.issue_explore || "explore", routeKey: "github.issue_explore" }
         : intent === "verify" ? { handler: gh.verify || "verify", routeKey: "github.verify" }
         : intent === "qa-test" ? { handler: gh.qa_test || "qa-test", routeKey: "github.qa_test" }
@@ -708,7 +708,7 @@ export async function routeEvent(
           }
           return {
             action: "handler",
-            handler: slack.build || "github-orchestrator",
+            handler: slack.build || "build",
             context: {
               _routeKey: "slack.build",
               repo: classifiedRepo,

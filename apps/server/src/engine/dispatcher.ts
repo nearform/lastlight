@@ -176,9 +176,9 @@ export async function dispatch(
     return handleApprovalResponse(envelope, context, deps);
   }
 
-  // Build requests → the programmatic orchestrator (the `build` workflow).
+  // Build requests → the programmatic build orchestrator (the `build` workflow).
   if (
-    (routeKey === "github.issue_build" || routeKey === "slack.build" || handler === "github-orchestrator") &&
+    (routeKey === "github.issue_build" || routeKey === "slack.build") &&
     context.issueNumber &&
     context.repo
   ) {
@@ -544,8 +544,7 @@ async function handleBuild(
     }
   }
 
-  const buildWorkflow = handler === "github-orchestrator" ? "build" : handler;
-  deps.dispatchWorkflow(buildWorkflow, {
+  deps.dispatchWorkflow(handler, {
     repo: repoStr,
     issueNumber,
     title: issueTitle || `Issue #${issueNumber}`,
@@ -568,7 +567,7 @@ async function handleBuild(
     deps.db.executions.recordFinish(executionId, { success: false, error: err.message, durationMs: 0 });
   });
 
-  return { kind: "dispatched", workflow: buildWorkflow };
+  return { kind: "dispatched", workflow: handler };
 }
 
 /**

@@ -339,15 +339,17 @@ export function loadAgentContext(): string {
     .join("\n\n---\n\n");
 }
 
+// Route targets that are IN-PROCESS handlers, not workflow YAML files — so
+// they're allowed even though `agentCache` (which only holds workflows) can't
+// vouch for them. `build` is deliberately absent: it's a real workflow
+// (`build.yaml`), validated the normal way via the cache.
 const INTERNAL_ROUTE_TARGETS: Record<string, ReadonlySet<string>> = {
   "github.approval_response": new Set(["approval-response"]),
-  "github.issue_build": new Set(["github-orchestrator"]),
   "github.explore_reply": new Set(["explore-reply"]),
   "slack.approve": new Set(["approval-response"]),
   "slack.reject": new Set(["approval-response"]),
   "slack.reset": new Set(["chat-reset"]),
   "slack.status": new Set(["status-report"]),
-  "slack.build": new Set(["github-orchestrator"]),
   "slack.chat": new Set(["chat"]),
   "slack.explore_reply": new Set(["explore-reply"]),
 };

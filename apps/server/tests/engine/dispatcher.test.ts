@@ -427,7 +427,7 @@ describe('dispatch — explore-reply handler', () => {
 describe('dispatch — build dispatch', () => {
   const buildRoute = (ctx: Record<string, unknown> = {}): Route => ({
     action: 'handler',
-    handler: 'github-orchestrator',
+    handler: 'build',
     context: {
       _routeKey: 'github.issue_build',
       repo: 'cliftonc/lastlight',

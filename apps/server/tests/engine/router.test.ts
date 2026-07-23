@@ -255,7 +255,7 @@ describe('routeEvent — comment.created', () => {
     }
   });
 
-  it('routes maintainer build intent on issue to github-orchestrator', async () => {
+  it('routes maintainer build intent on issue to build', async () => {
     mockClassifyComment.mockResolvedValue({ intent: 'build' });
     const result = await routeEvent(makeEnvelope({
       type: 'comment.created',
@@ -265,7 +265,7 @@ describe('routeEvent — comment.created', () => {
     }));
     expect(result.action).toBe('handler');
     if (result.action === 'handler') {
-      expect(result.handler).toBe('github-orchestrator');
+      expect(result.handler).toBe('build');
       expect(result.context._routeKey).toBe('github.issue_build');
     }
   });
@@ -606,12 +606,12 @@ describe('routeEvent — message events (classifier-driven)', () => {
     }
   });
 
-  it('routes build intent with managed repo to github-orchestrator', async () => {
+  it('routes build intent with managed repo to build', async () => {
     mockClassifyComment.mockResolvedValue({ intent: 'build', repo: 'cliftonc/drizzle-cube', issueNumber: 42 });
     const result = await routeEvent(makeEnvelope({ type: 'message', body: 'build cliftonc/drizzle-cube#42' }));
     expect(result.action).toBe('handler');
     if (result.action === 'handler') {
-      expect(result.handler).toBe('github-orchestrator');
+      expect(result.handler).toBe('build');
       expect(result.context._routeKey).toBe('slack.build');
       expect(result.context.repo).toBe('cliftonc/drizzle-cube');
       expect(result.context.issueNumber).toBe(42);
@@ -1040,7 +1040,7 @@ describe('routeEvent — security summary issue routing', () => {
     }));
     expect(result.action).toBe('handler');
     if (result.action === 'handler') {
-      expect(result.handler).toBe('github-orchestrator');
+      expect(result.handler).toBe('build');
     }
   });
 

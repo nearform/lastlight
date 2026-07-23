@@ -93,7 +93,7 @@ describe("workflow asset overlay", () => {
 
   it("allows configured internal route handlers", () => {
     mkdirSync(join(builtIn, "workflows"), { recursive: true });
-    expect(() => validateAssets({ github: { issue_build: "github-orchestrator" }, slack: { chat: "chat" } })).not.toThrow();
+    expect(() => validateAssets({ github: { approval_response: "approval-response" }, slack: { chat: "chat" } })).not.toThrow();
   });
 
   it("fails fast when a cron targets a missing workflow", () => {

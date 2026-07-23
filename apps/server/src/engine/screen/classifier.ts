@@ -36,6 +36,9 @@ export interface ClassificationResult {
   issueNumber?: number;
   /** Reason given for a reject intent. */
   reason?: string;
+  /** The resolved `provider/model` the classifier used (set in `explain` mode
+   *  only) — so introspection can show exactly what ran, incl. on a fallback. */
+  model?: string;
 }
 
 /** Optional surrounding context for a comment classification. */
@@ -64,6 +67,13 @@ export interface ClassifierOptions {
   model?: string;
   chat?: ChatFunction;
   defaultFastModel?: (taskType?: string) => string;
+  /**
+   * Test/introspection only: ask the model to fill `REASON` with a
+   * one-sentence justification for the chosen INTENT (not only for REJECT).
+   * Off in production, so classifier output + token cost are unchanged; the
+   * Event Router Playground sets it to surface the model's reasoning.
+   */
+  explain?: boolean;
 }
 
 // ── prompt composition ───────────────────────────────────────────────────────
@@ -262,6 +272,8 @@ export async function classifyComment(
   context?: ClassifierContext,
   options: string | ClassifierOptions = {},
 ): Promise<ClassificationResult> {
+  const explain = typeof options !== "string" && !!options.explain;
+  let resolvedModel = "";
   try {
     // Compose the context header from whatever the router supplied. `prAuthor`
     // + `checksState` are present only for a dependency-authored PR comment, and
@@ -271,16 +283,24 @@ export async function classifyComment(
     if (context?.issueTitle) contextLines.push(`ISSUE TITLE: ${context.issueTitle}`);
     if (context?.prAuthor) contextLines.push(`PR AUTHOR: ${context.prAuthor}`);
     if (context?.checksState) contextLines.push(`PR CHECKS: ${context.checksState}`);
-    const userPrompt = contextLines.length
-      ? `Classify this comment (replying on an existing ${context?.isPullRequest ? "PR" : "issue"}):\n\n${contextLines.join("\n")}\n\nCOMMENT: ${commentBody}`
-      : `Classify this comment:\n\n${commentBody}`;
-
     const resolvedOptions = typeof options === "string" ? { model: options } : options;
+    // Introspection-only: append one instruction so the model justifies its
+    // INTENT choice in REASON (which the parser below already lifts for every
+    // intent). Never set in production, so the cached system prompt — and thus
+    // the prompt cache — is untouched.
+    const explainLine = resolvedOptions.explain
+      ? "\n\nAlso fill REASON with a one-sentence justification for the chosen INTENT (not only for REJECT)."
+      : "";
+    const userPrompt = (contextLines.length
+      ? `Classify this comment (replying on an existing ${context?.isPullRequest ? "PR" : "issue"}):\n\n${contextLines.join("\n")}\n\nCOMMENT: ${commentBody}`
+      : `Classify this comment:\n\n${commentBody}`) + explainLine;
+
     const chat = resolvedOptions.chat ?? realChat;
     const defaultFastModel = resolvedOptions.defaultFastModel ?? realDefaultFastModel;
+    resolvedModel = resolvedOptions.model ?? defaultFastModel("classifier");
     const { prompt, tokenToIntent } = classifierState();
     const output = await chat(
-      resolvedOptions.model ?? defaultFastModel("classifier"),
+      resolvedModel,
       [
         { role: "system", content: prompt },
         { role: "user", content: userPrompt },
@@ -316,13 +336,37 @@ export async function classifyComment(
 
     // Extract reject reason
     const reasonMatch = output.match(/REASON:\s*(.+)/i);
-    const reason = reasonMatch && reasonMatch[1].trim().toUpperCase() !== "NONE"
+    let reason = reasonMatch && reasonMatch[1].trim().toUpperCase() !== "NONE"
       ? reasonMatch[1].trim()
       : undefined;
 
-    return { intent, repo, issueNumber, reason };
+    // Introspection: when no INTENT line parsed, the model returned empty or
+    // malformed output (e.g. a reasoning model whose small token budget was
+    // consumed by hidden reasoning before it emitted anything) — the parser then
+    // silently defaults to `chat`. Surface that instead of hiding it.
+    if (explain && !intentMatch) {
+      reason = `classifier returned no parseable INTENT — the model output was empty or malformed (raw: ${JSON.stringify(
+        output.slice(0, 160),
+      )}). A reasoning model with a small max-tokens budget can exhaust it on hidden reasoning before emitting output.`;
+    }
+
+    return explain
+      ? { intent, repo, issueNumber, reason, model: resolvedModel }
+      : { intent, repo, issueNumber, reason };
   } catch (err: any) {
     console.error(`[classifier] Error classifying comment: ${err.message}`);
-    return { intent: "chat" };
+    // Fail-safe: an error must never launch a workflow, so default to chat.
+    // In introspection/`explain` mode, though, surface the error (and which
+    // model it tried) in `reason` — otherwise a failed LLM call (e.g. a missing
+    // provider key, or a fallback to a model with no key) is indistinguishable
+    // from a genuine chat classification, exactly the confusion the Event Router
+    // Playground needs to avoid.
+    return explain
+      ? {
+          intent: "chat",
+          reason: `classifier error (fell back to chat): ${err.message}`,
+          model: resolvedModel || undefined,
+        }
+      : { intent: "chat" };
   }
 }

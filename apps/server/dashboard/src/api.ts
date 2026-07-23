@@ -797,6 +797,14 @@ export const api = {
   // Repo-centric index for the Repos tab — managed repos ∪ active repos, each
   // with run/artifact activity, newest-activity first.
   repos: () => req<{ repos: RepoEntry[] }>("/repos"),
+  // Event Router Playground: static graph + hermetic dry-run of a synthetic event.
+  routeGraph: () => req<RouteGraphResponse>("/route-graph"),
+  routeTest: (input: RouteTestRequest) =>
+    req<RouteTestResponse>("/route-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
 };
 
 export interface CronInfo {
@@ -812,4 +820,65 @@ export interface CronInfo {
   recentFailures: number;
   context: Record<string, unknown>;
   override: { updatedAt: string; updatedBy: string | null; hasScheduleOverride: boolean } | null;
+}
+
+// ── Event Router Playground ──────────────────────────────────────────────────
+
+export type RoutingKind = "deterministic" | "classifier";
+
+export interface RouteGraphResponse {
+  /** The configured bot handle (`GITHUB_APP_BOT_NAME`) — what a comment must
+   *  @-mention to trigger. Drives the playground's placeholders + mention tip. */
+  botName: string;
+  inputs: { id: "github" | "slack"; label: string }[];
+  eventTypes: { input: "github" | "slack"; type: string; routing: RoutingKind; label: string }[];
+  handlers: { name: string; claimedIntent?: string; kind: "workflow" | "in-process" }[];
+  deterministicEdges: { from: string; to: string; via: string }[];
+  intentEdges: { intent: string; to: string }[];
+}
+
+export interface RouteTestRequest {
+  source: "github" | "slack";
+  type: string;
+  body: string;
+  title?: string;
+  sender?: string;
+  repo?: string;
+  issueNumber?: number;
+  prNumber?: number;
+  isPullRequest?: boolean;
+  prAuthor?: string;
+  checksState?: string;
+  labels?: string[];
+  authorAssociation?: string;
+}
+
+/** Mirrors the server `Route` union in src/engine/router.ts. */
+export type Route =
+  | { action: "handler"; handler: string; context: Record<string, unknown> }
+  | { action: "reply"; message: string }
+  | { action: "ignore"; reason: string };
+
+export interface RouteClassification {
+  intent: string;
+  repo?: string;
+  issueNumber?: number;
+  reason?: string;
+  /** The provider/model the classifier resolved to (introspection only). */
+  model?: string;
+}
+
+export interface RouteExplanation {
+  routingKind: RoutingKind;
+  branchLabel: string;
+  handler?: string;
+  routeKey?: string;
+  reason?: string;
+  notes: string[];
+}
+
+export interface RouteTestResponse {
+  route: Route;
+  classification?: RouteClassification;
+  explanation: RouteExplanation;
 }

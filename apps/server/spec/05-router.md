@@ -238,7 +238,7 @@ and (b) Slack `message`. Never on deterministic events.
 ### Data-driven routing for new intents
 
 The router keeps its bespoke, context-dependent branches for the well-known
-intents (`build` → `pr-fix` on a PR vs `github-orchestrator` on an issue;
+intents (`build` → `pr-fix` on a PR vs `build` on an issue;
 `explore` is a no-op on a PR; the `security-scan` diversion). For an intent
 *outside* that well-known set — a new one an overlay workflow introduced — the
 trailing generic default falls back to `getWorkflowByIntent(intent)` (the
@@ -304,14 +304,39 @@ is handled in the harness:
 | `approval-response` | `839–893` — resume or fail paused run |
 | `explore-reply` | `750–836` — feed comment into paused explore loop |
 | `pr-fix`, `dependabot-ci-fix` | `handlePrFix` — lightweight fix-and-push (both are `PR_FIX_SHAPED_WORKFLOWS`; resolves the PR head branch + failed-check summary, skips fork PRs, dispatches the named workflow) |
-| `github-orchestrator` | `896–976` — full build cycle on an issue |
+| `build` | `896–976` — full build cycle on an issue |
 | `answer` | `982–1014` — generic `dispatchWorkflow()` for `answer.yaml`; answers a question issue directly (routed via `routes.github.issue_answer` / `routes.slack.answer`) |
 | `pr-review`, `pr-comment`, `issue-triage`, `issue-comment`, `explore`, `security-review`, `security-feedback`, `verify`, `qa-test`, `demo` | `982–1014` — generic `dispatchWorkflow()` + ack |
 
 The generic-dispatch lane runs the YAML workflow whose name matches
-the skill string. Anything bespoke (e.g. `github-orchestrator` first
+the skill string. Anything bespoke (e.g. `build` first
 records an `execution` row and reacts 🚀 on the comment before
 dispatching) gets its own branch.
+
+## Introspection — the route playground
+
+Because `routeEvent` performs no side effects, a synthetic event can be threaded
+through the *real* classifier and router to preview its decision without ever
+dispatching a workflow. Two admin endpoints expose this:
+
+- `GET /admin/api/route-graph` — the static map the dashboard draws: inputs
+  (GitHub + Slack), each connector's event types tagged `deterministic` vs
+  `classifier`, the handler set (workflows + in-process handlers), and the
+  deterministic + intent edges (derived from `getRoutes()` + `listAgentWorkflows()`).
+- `POST /admin/api/route-test` — a **hermetic dry-run**. It builds an
+  `EventEnvelope` from the request (with an inert `reply` no-op and empty `raw`),
+  calls `routeEvent(envelope, {})` — **no `db`, no `github`, so zero external
+  reads/writes** — and, for comment-text types, calls `classifyComment(…, {
+  explain: true })` to surface the model's one-sentence reasoning. It returns the
+  `Route`, the classification, and a composed explanation. It never touches
+  `dispatch` / `dispatchWorkflow` (structurally absent from the admin surface),
+  so the only external effect is the cheap classifier call. Powers the dashboard
+  **Router Playground** page.
+
+The `explain` option on `classifyComment` is test/introspection-only: the
+`REASON:` line is already parsed for every intent, so it only nudges the model to
+populate it — production never sets it, leaving classifier output and token cost
+unchanged.
 
 ## Invariants
 
@@ -349,6 +374,7 @@ dispatching) gets its own branch.
 | Direct provider calls + model auto-detect | `src/engine/llm.ts` |
 | Harness consumer (skill → handler) | `src/index.ts:560–1124` |
 | URL extraction fallback | `extractGithubRefFromText()` in `classifier.ts` |
+| Route playground endpoints (`/route-graph`, `/route-test`) | `src/admin/routes.ts` |
 
 ## Rebuild notes
 

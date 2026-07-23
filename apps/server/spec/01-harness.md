@@ -79,7 +79,7 @@ differ.
     routing callback. Every envelope arriving from any connector is
     routed through `routeEvent()` (the [Router](/spec/05-router)) and then
     dispatched to one of: chat, chat-reset, status-report, approval-response,
-    explore-reply, pr-fix, github-orchestrator, or a generic workflow.
+    explore-reply, pr-fix, build, or a generic workflow.
     (`560–1124`.)
 15. **Cron job registration** — `getJobs({ webhooksEnabled, db })` returns
     a different list depending on whether webhooks are active. With

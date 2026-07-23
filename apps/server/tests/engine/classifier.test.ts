@@ -111,12 +111,60 @@ describe("classifyComment — injected chat", () => {
     expect(r).toMatchObject({ intent: "security", repo: "foo/bar", issueNumber: 7 });
   });
 
+  it("with explain, keeps the model's REASON for a non-reject intent + appends the instruction", async () => {
+    const chat = vi
+      .fn()
+      .mockResolvedValue("INTENT: BUILD\nREPO: NONE\nISSUE: NONE\nREASON: the user asks to implement the feature now");
+    const r = await classifyComment(
+      "@last-light build a login page",
+      {},
+      { chat, defaultFastModel: () => "openai/test", explain: true },
+    );
+    // The parser already lifts REASON for every intent; explain just makes the
+    // model populate it (production leaves it NONE for non-reject).
+    expect(r).toMatchObject({ intent: "build", reason: "the user asks to implement the feature now" });
+    // The explain instruction is appended to the user prompt only.
+    expect(chat).toHaveBeenCalledWith(
+      "openai/test",
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("one-sentence justification"),
+        }),
+      ]),
+      { maxTokens: 128 },
+    );
+  });
+
+  it("without explain, does NOT append the reasoning instruction", async () => {
+    const chat = vi.fn().mockResolvedValue("INTENT: BUILD\nREPO: NONE\nISSUE: NONE\nREASON: NONE");
+    await classifyComment("@last-light build this", {}, { chat, defaultFastModel: () => "openai/test" });
+    const userMsg = (chat.mock.calls[0]![1] as { role: string; content: string }[]).find(
+      (m) => m.role === "user",
+    );
+    expect(userMsg?.content).not.toContain("one-sentence justification");
+  });
+
   it("falls back to chat intent when chat rejects", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("network"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const r = await classifyComment("@last-light can you build this?", {}, { chat, defaultFastModel: () => "openai/test" });
     expect(r).toEqual({ intent: "chat" });
     expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("with explain, surfaces the error in reason instead of a silent chat fallback", async () => {
+    const chat = vi.fn().mockRejectedValue(new Error("401 no api key"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const r = await classifyComment(
+      "@last-light can you review this?",
+      {},
+      { chat, defaultFastModel: () => "openai/test", explain: true },
+    );
+    expect(r.intent).toBe("chat");
+    expect(r.reason).toContain("classifier error");
+    expect(r.reason).toContain("401 no api key");
     errorSpy.mockRestore();
   });
 });
