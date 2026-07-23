@@ -173,6 +173,22 @@ async function getInstallationToken(config: {
   }
 
   const data = await res.json();
+
+  // Log the scope GitHub actually GRANTED the minted token (the executor already
+  // logs the *requested* profile before this call). The mint response carries
+  // `repository_selection` + `permissions` — the exact datapoint that
+  // distinguishes "the injected token is correctly write-scoped, so a downstream
+  // 403 is a transit/env narrowing" from "the mint itself came back read-only /
+  // wrong-repo" (issue #215). For a repo-scoped mint `repositories` names the
+  // covered repos; for a full-installation mint it's absent and selection="all".
+  const grantedRepos = Array.isArray(data.repositories)
+    ? data.repositories.map((r: { full_name?: string; name?: string }) => r.full_name ?? r.name).join(",")
+    : "(all)";
+  console.log(
+    `[git-auth] Mint granted: repository_selection=${data.repository_selection ?? "?"}, ` +
+      `permissions=${data.permissions ? JSON.stringify(data.permissions) : "?"}, repositories=${grantedRepos}`,
+  );
+
   return { token: data.token, expiresAt: data.expires_at };
 }
 
