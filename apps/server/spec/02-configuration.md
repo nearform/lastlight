@@ -292,7 +292,10 @@ production `deploy.sh` flow (pull overlay → converge core → **pull prebuilt
 images** → `up -d --remove-orphans` → restart egress sidecars → health-check).
 By default it *pulls* the four images from GHCR
 (`ghcr.io/nearform/lastlight-{agent,sandbox-base,sandbox,sandbox-qa}`, published
-on GitHub Release by the `images` job of `.github/workflows/publish.yml`) at the tag
+on GitHub Release by the `images` job of `.github/workflows/publish.yml`; the
+same job also publishes a fifth image, `lastlight-agent-qemu`, for the
+gondolin/k8s path, which the compose stack doesn't use and `server update`
+doesn't pull) at the tag
 `resolveImageTag` returns — the overlay `deploy.version` pin, else `:latest` —
 and re-tags each to its local name so compose + the harness (fixed names in
 `src/sandbox/images.ts`) find them unchanged; `--local` builds from source

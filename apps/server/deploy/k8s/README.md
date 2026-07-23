@@ -49,6 +49,11 @@ whole set and re-create the Secret — the pod stays pending until it exists.)
 kubectl apply -k .
 ```
 
+On the first apply the pod may sit `Pending` for a minute or two with an
+`Insufficient devic.es/kvm` event while the device-plugin DaemonSet starts and
+registers the resource on each node. Kubernetes reschedules automatically once
+it's advertised — no action needed.
+
 ## Known limitation
 
 Until [nearform/lastlight#210](https://github.com/nearform/lastlight/issues/210)
