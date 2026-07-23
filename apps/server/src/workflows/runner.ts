@@ -105,6 +105,7 @@ export function gitSandboxAccessForWorkflow(
   repo: string,
   prePopulateBranch?: string,
   runId?: string,
+  baseBranch?: string,
 ): GitSandboxAccess {
   const profile = gitAccessProfileForWorkflow(workflowName);
   return {
@@ -117,6 +118,10 @@ export function gitSandboxAccessForWorkflow(
     // entering the sandbox.
     allowMcpAppAuth: false,
     prePopulateBranch,
+    // The PR base ref, so the pre-clone can fetch it + deepen to the merge-base
+    // (see PrePopulate.baseBranch in src/sandbox/index.ts). Only meaningful for
+    // PR-diff workflows (pr-review / pr-fix); harmless elsewhere.
+    baseBranch,
     runId,
     // Read-only workflows never need git history — clone at --depth 1. Only
     // the code-pushing profiles (build / pr-fix / security-feedback) keep the
@@ -204,7 +209,15 @@ export async function runWorkflow(
   const prePopulateBranch = typeof ctx.prePopulateBranch === "string"
     ? ctx.prePopulateBranch
     : undefined;
-  const githubAccess = gitSandboxAccessForWorkflow(definition.name, ctx.owner, ctx.repo, prePopulateBranch, workflowId);
+  const baseBranch = typeof ctx.baseBranch === "string" ? ctx.baseBranch : undefined;
+  const githubAccess = gitSandboxAccessForWorkflow(
+    definition.name,
+    ctx.owner,
+    ctx.repo,
+    prePopulateBranch,
+    workflowId,
+    baseBranch,
+  );
   const notify = callbacks.postComment || (async () => {});
   const reporter = callbacks.reporter;
   const onStart = callbacks.onPhaseStart || (async () => {});

@@ -227,6 +227,7 @@ async function prepareRun(
           owner: access.owner,
           repo: access.repo,
           branch: access.prePopulateBranch,
+          baseBranch: access.baseBranch,
           token: mintedToken,
           runId: access.runId,
           shallow: access.shallow,

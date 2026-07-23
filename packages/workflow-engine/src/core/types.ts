@@ -256,6 +256,15 @@ export interface GitSandboxAccess {
    */
   prePopulateBranch?: string;
   /**
+   * The PR's base branch. When set (and different from the head branch), the
+   * pre-clone additionally fetches this branch and deepens both refs until they
+   * share a merge-base, so `git diff origin/<base>...HEAD` — the three-dot PR
+   * diff the review agent AND post-review anchor against — works in the
+   * workspace. A shallow `--depth 1 --single-branch` head clone otherwise omits
+   * the base entirely.
+   */
+  baseBranch?: string;
+  /**
    * The owning workflow run id. Stamped into a `<workDir>/.lastlight-run`
    * marker by the pre-clone so a reused per-PR workspace can tell "next phase
    * of the same run" from "a fresh run reusing an old PR dir".

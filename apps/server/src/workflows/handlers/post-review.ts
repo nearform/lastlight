@@ -208,42 +208,73 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
   /** Compute the base…head diff locally and parse it into a commentable set. */
   private gitCommentableDiff(repoDir: string, baseRef: string): Map<string, Set<string>> | null {
-    const diff = () =>
-      execFileSync("git", ["-C", repoDir, "diff", `origin/${baseRef}...HEAD`], {
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-      });
-    try {
+    const git = (...args: string[]): string =>
+      execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    const tryGit = (...args: string[]): void => {
       try {
-        execFileSync("git", ["-C", repoDir, "fetch", "origin", baseRef, "--depth", "50"], { stdio: "ignore" });
+        execFileSync("git", ["-C", repoDir, ...args], { stdio: "ignore" });
       } catch {
-        /* offline / already present — fall through to diff */
+        /* offline / already complete / already present — best-effort */
       }
-      try {
-        return parseDiff(diff());
-      } catch (err) {
-        // The `--depth 50` fetch above shallow-clones the base branch. When a PR
-        // forked far behind the branch's current tip (a long-lived / stale PR),
-        // the merge-base sits beyond that shallow boundary and the three-dot
-        // diff dies with "no merge base" — which would demote EVERY finding to
-        // the body. Deepen the base history and retry once so the review still
-        // anchors inline. Only on this rare failure path do we pay the full
-        // fetch. (`--unshallow` no-ops-then-throws on an already-complete repo,
-        // hence best-effort.)
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!/no merge base|shallow/i.test(msg)) throw err;
-        try {
-          execFileSync("git", ["-C", repoDir, "fetch", "origin", baseRef, "--unshallow"], { stdio: "ignore" });
-        } catch {
-          /* already complete / offline — retry the diff regardless */
-        }
-        return parseDiff(diff());
-      }
+    };
+
+    // The three-dot (merge-base…head) diff mirrors GitHub's own PR diff exactly,
+    // so it's the ideal anchor set — but it needs the merge-base present locally,
+    // which a shallow `--depth 1 --single-branch` pr-review clone doesn't have.
+    const threeDot = () => parseDiff(git("diff", `origin/${baseRef}...HEAD`));
+    // Two-dot compares the two end trees directly — no history walk — so it works
+    // on ANY clone depth (down to depth 1). It's a *superset* of the three-dot
+    // diff (it also shows changes the base picked up since the PR forked), which
+    // is a safe over-approximation for anchoring: the agent's findings sit on the
+    // PR's own changed lines (⊆ three-dot ⊆ two-dot), and any stray off-diff
+    // anchor is caught by the body-only POST retry.
+    const twoDot = () => parseDiff(git("diff", `origin/${baseRef}`, "HEAD"));
+
+    // Materialize origin/<base> as a real remote-tracking ref (a single-branch
+    // clone's refspec only covers the PR branch, so a bare `fetch origin <base>`
+    // updates FETCH_HEAD but may not create origin/<base>).
+    tryGit("fetch", "origin", `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`, "--depth", "50");
+    try {
+      return threeDot();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[post-review] git diff failed (${msg}); demoting all findings to the body`);
-      return null;
+      // A non-shallow failure (unknown base ref, corrupt repo) still gets the
+      // depth-agnostic two-dot before we give up to the body.
+      if (!/no merge base|shallow/i.test(msg)) {
+        try {
+          return twoDot();
+        } catch {
+          return this.diffFailed(msg);
+        }
+      }
+      // The shallow boundary hid the merge-base. Deepen BOTH sides: the base
+      // branch AND the depth-1 PR branch (HEAD). The earlier code only
+      // unshallowed the base, leaving HEAD with no reachable ancestor, so the
+      // three-dot retry still died with "no merge base" and demoted every
+      // finding to the body (recurred on nearform/skillspro#1598, #1599).
+      // `--unshallow` no-ops-then-throws on an already-complete repo, so both
+      // are best-effort; we only pay the full fetch on this rare failure path.
+      tryGit("fetch", "origin", "--unshallow"); // deepen the PR branch (the single-branch refspec)
+      tryGit("fetch", "origin", `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`, "--unshallow"); // deepen base
+      try {
+        return threeDot();
+      } catch (err2) {
+        // Genuinely unrelated histories, or a base we couldn't fully fetch (e.g.
+        // egress-blocked): fall back to the two-dot superset — still anchors the
+        // PR's own lines — before demoting everything to the body.
+        const msg2 = err2 instanceof Error ? err2.message : String(err2);
+        try {
+          return twoDot();
+        } catch {
+          return this.diffFailed(msg2);
+        }
+      }
     }
+  }
+
+  private diffFailed(msg: string): null {
+    console.warn(`[post-review] could not compute commentable diff (${msg}); demoting all findings to the body`);
+    return null;
   }
 }
 

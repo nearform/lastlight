@@ -66,6 +66,9 @@ export function setupTaskWorktree(opts: {
     owner: string;
     repo: string;
     branch: string;
+    /** The PR base branch — fetched + deepened to a merge-base with the head so
+     * `origin/<base>...HEAD` works in the workspace (see PrePopulate). */
+    baseBranch?: string;
     token: string;
     /** Owning run id — stamped into a marker so a reused per-PR workspace
      * refreshes across runs but is preserved between phases of one run. */
@@ -113,6 +116,9 @@ export async function createTaskSandbox(opts: {
     owner: string;
     repo: string;
     branch: string;
+    /** The PR base branch — fetched + deepened to a merge-base with the head so
+     * `origin/<base>...HEAD` works in the workspace (see PrePopulate). */
+    baseBranch?: string;
     token: string;
     /** Owning run id — stamped into a marker so a reused per-PR workspace
      * refreshes across runs but is preserved between phases of one run. */
@@ -227,6 +233,14 @@ type PrePopulate = {
   owner: string;
   repo: string;
   branch: string;
+  /**
+   * The PR's base branch. When set (and different from `branch`), the pre-clone
+   * additionally fetches it and deepens both refs until they share a merge-base,
+   * so `git diff origin/<baseBranch>...HEAD` — the three-dot PR diff the review
+   * agent AND post-review anchor against — resolves in the workspace. A shallow
+   * `--depth 1 --single-branch` head clone otherwise omits the base entirely.
+   */
+  baseBranch?: string;
   token: string;
   runId?: string;
   shallow?: boolean;
@@ -334,6 +348,7 @@ export function prePopulateWorkspace(
       { stdio: "pipe", timeout: 120_000 },
     );
     normalizeOrigin(repoDir, pre, scrub);
+    ensureBaseAvailable(repoDir, pre, authArgs, url, scrub);
     writeMarker(markerPath, pre.runId);
     const ms = Date.now() - start;
     console.log(
@@ -407,6 +422,70 @@ function cloneDefaultAndCreateBranch(
     console.warn(
       `[sandbox] Default-branch clone of ${pre.owner}/${pre.repo} failed (${reason}). ` +
       `Agent will need to clone via MCP.`,
+    );
+  }
+}
+
+/**
+ * Ensure the workspace can compute `origin/<base>...HEAD` — the three-dot PR
+ * diff GitHub anchors review comments against, and the same diff the review
+ * agent reads to understand the change. A read-only pr-review clone is
+ * `--depth 1 --single-branch` on the PR *head*, so the base branch isn't
+ * fetched at all; even a `--depth 50` clone can miss the merge-base when a PR
+ * forked far behind base. Both symptoms surface as `git diff … no merge base`,
+ * which used to demote every finding to the review body (recurred on
+ * nearform/skillspro#1598, #1599) and left the agent fumbling for the diff.
+ *
+ * We fetch the base as a real remote-tracking ref and deepen BOTH refs — the
+ * base AND the depth-1 head — until they share a merge-base, escalating depth
+ * and finally unshallowing. Best-effort throughout: a failure just leaves the
+ * plain clone (post-review's two-dot fallback still anchors the PR's own lines)
+ * and never fails provisioning. Runs only for PR-diff workflows (a `baseBranch`
+ * distinct from the head, never a recreate-from-base build).
+ */
+function ensureBaseAvailable(
+  repoDir: string,
+  pre: PrePopulate,
+  authArgs: string[],
+  url: string,
+  scrub: (s: unknown) => string,
+): void {
+  const base = pre.baseBranch;
+  if (!base || base === pre.branch || pre.recreateFromBase) return;
+  const dest = `+refs/heads/${base}:refs/remotes/origin/${base}`;
+  const run = (args: string[], timeout = 120_000): void => {
+    execFileSync("git", ["-C", repoDir, ...args], { stdio: "pipe", timeout });
+  };
+  const hasMergeBase = (): boolean => {
+    try {
+      run(["merge-base", `origin/${base}`, "HEAD"], 30_000);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // Deepen both the base ref and the head branch to the same absolute depth.
+  const fetchBoth = (depthArgs: string[]): void => {
+    try { run([...authArgs, "fetch", ...depthArgs, url, dest]); } catch { /* best-effort */ }
+    try { run([...authArgs, "fetch", ...depthArgs, url, pre.branch]); } catch { /* best-effort */ }
+  };
+  try {
+    fetchBoth(["--depth", "50"]);
+    if (hasMergeBase()) return;
+    // Stale PR forked >50 commits back — escalate, then fall back to full history.
+    fetchBoth(["--depth", "500"]);
+    if (hasMergeBase()) return;
+    fetchBoth(["--unshallow"]);
+    if (!hasMergeBase()) {
+      console.warn(
+        `[sandbox] ${pre.owner}/${pre.repo}: no merge-base between ${base} and ${pre.branch} ` +
+        `after deepening; post-review will anchor via its two-dot fallback.`,
+      );
+    }
+  } catch (err: any) {
+    console.warn(
+      `[sandbox] Could not ensure base ${base} for ${repoDir} (${scrub(err?.message)}); ` +
+      `continuing with the plain clone.`,
     );
   }
 }
@@ -509,6 +588,7 @@ function refreshExistingClone(
       { stdio: "pipe", timeout: 60_000 },
     );
     normalizeOrigin(repoDir, pre, scrub);
+    ensureBaseAvailable(repoDir, pre, authArgs, url, scrub);
     writeMarker(markerPath, pre.runId);
     const ms = Date.now() - start;
     console.log(

@@ -257,6 +257,98 @@ describe("prePopulateWorkspace clone depth + per-PR reuse (issue #107)", () => {
   });
 });
 
+describe("prePopulateWorkspace base merge-base availability (pr-review diff)", () => {
+  let workDir: string;
+  const REPO = "lastlight";
+  const BASE_DEST = "+refs/heads/main:refs/remotes/origin/main";
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "ll-basemb-"));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockExec.mockReturnValue(Buffer.from(""));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    mockExec.mockReset();
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  /** Every fetch invocation's argv. */
+  function fetches(): string[][] {
+    return calledArgs().filter((a) => gitVerb(a) === "fetch");
+  }
+
+  it("fetches the base + head and checks the merge-base after a shallow head clone", () => {
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "pr-head", baseBranch: "main", token: TOKEN,
+      runId: "run-1", shallow: true,
+    });
+    // Head clone, origin normalized, then base+head fetched and merge-base checked.
+    expect(gitVerbs()).toEqual(["clone", "remote", "fetch", "fetch", "merge-base"]);
+    // The base is materialized as a real remote-tracking ref at depth 50.
+    const baseFetch = fetches().find((a) => a.includes(BASE_DEST))!;
+    expect(baseFetch).toBeDefined();
+    expect(baseFetch[baseFetch.indexOf("--depth") + 1]).toBe("50");
+    // The depth-1 head branch is deepened too (otherwise it has no ancestor to
+    // share a merge-base with base).
+    expect(fetches().some((a) => a.includes("pr-head") && a.includes("50"))).toBe(true);
+    // Merge-base is computed against origin/<base> ↔ HEAD.
+    const mb = calledArgs().find((a) => gitVerb(a) === "merge-base")!;
+    expect(mb).toContain("origin/main");
+    expect(mb).toContain("HEAD");
+  });
+
+  it("escalates the fetch depth when the first merge-base check fails", () => {
+    let mergeBaseCalls = 0;
+    mockExec.mockImplementation((_cmd, args) => {
+      const verb = gitVerb((args as string[]) ?? []);
+      if (verb === "merge-base") {
+        mergeBaseCalls++;
+        if (mergeBaseCalls === 1) throw new Error("fatal: no merge base");
+      }
+      return Buffer.from("");
+    });
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "pr-head", baseBranch: "main", token: TOKEN,
+      runId: "run-1", shallow: true,
+    });
+    // Two deepen rounds: --depth 50 then --depth 500, each fetching base + head.
+    expect(fetches().some((a) => a.includes(BASE_DEST) && a.includes("500"))).toBe(true);
+    expect(fetches().some((a) => a.includes("pr-head") && a.includes("500"))).toBe(true);
+    // Stopped once the merge-base resolved — never reached --unshallow.
+    expect(fetches().some((a) => a.includes("--unshallow"))).toBe(false);
+    expect(mergeBaseCalls).toBe(2);
+  });
+
+  it("skips base handling when baseBranch equals the head branch", () => {
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "main", baseBranch: "main", token: TOKEN,
+      runId: "run-1", shallow: true,
+    });
+    // No base fetch / merge-base — just the plain shallow clone + origin normalize.
+    expect(gitVerbs()).toEqual(["clone", "remote"]);
+  });
+
+  it("never fails provisioning when the base fetch + merge-base all fail", () => {
+    mockExec.mockImplementation((_cmd, args) => {
+      const argv = (args as string[]) ?? [];
+      const verb = gitVerb(argv);
+      // Clone/remote succeed; every base-availability op fails.
+      if (verb === "fetch" || verb === "merge-base") throw new Error("network down");
+      return Buffer.from("");
+    });
+    expect(() =>
+      prePopulateWorkspace(workDir, {
+        owner: "cliftonc", repo: REPO, branch: "pr-head", baseBranch: "main", token: TOKEN,
+        runId: "run-1", shallow: true,
+      }),
+    ).not.toThrow();
+    // The clone still succeeded → marker stamped so the run proceeds.
+    expect(readFileSync(join(workDir, ".lastlight-run"), "utf-8")).toBe("run-1");
+  });
+});
+
 describe("prePopulateWorkspace recreate-from-base (build, issue #153)", () => {
   let workDir: string;
   const REPO = "lastlight";

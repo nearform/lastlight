@@ -602,6 +602,16 @@ Sandbox workspace provisioning (issue #107):
   at `--depth 1 --single-branch`; code-pushing workflows keep `--depth 50`.
   See `gitSandboxAccessForWorkflow` (`src/workflows/runner.ts`) →
   `prePopulateWorkspace` (`src/sandbox/index.ts`).
+- **Base merge-base fetch** — a `--depth 1 --single-branch` head clone omits
+  the base branch entirely, so `git diff origin/<base>...HEAD` (the three-dot PR
+  diff the review agent *and* `post-review` anchor against) dies with "no merge
+  base". For PR-diff workflows the pre-clone therefore threads the PR's
+  `baseBranch` (`GitSandboxAccess.baseBranch`, from `ctx.baseBranch`) through and
+  `ensureBaseAvailable` (`src/sandbox/index.ts`) fetches the base as a real
+  `origin/<base>` ref and deepens *both* refs (base + the depth-1 head) until
+  they share a merge-base — depth 50 → 500 → full unshallow. Best-effort: on
+  failure the plain clone stands and `post-review` demotes to its two-dot / body
+  fallback. Runs on both the fresh-clone and per-PR-reuse refresh paths.
 - **Per-PR workspace reuse** — `pr-review` / `pr-fix` workspaces are keyed
   by (repo, PR) and reused across runs. A `<workDir>/.lastlight-run` marker
   records the owning run: same run → preserve the checkout for the next
