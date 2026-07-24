@@ -30,10 +30,13 @@ each must leave the repo green before the next starts.
   — config slot, Dockerfile, docs-sync, prod cutover runbook, npm release
   *(risk: low-medium)*
 - [ ] **Phase 6** — [06-prod-postgres.md](06-prod-postgres.md) — **activate the
-  production Postgres runtime**: node-postgres pool + `pg` runtime dep, `open()`
-  builds a real PG client instead of throwing, full state suite green against a
-  real Postgres server, credential redaction, deploy docs + release. Amends
-  locked decision 3 (test-only → operator-selectable). *(risk: medium)*
+  production Postgres runtime**: driver-selectable PG pool (node-postgres default
+  **or** Neon serverless via `drizzle-orm/neon-serverless`) + `pg` /
+  `@neondatabase/serverless` runtime deps (lazy per-driver), `open()` builds a
+  real PG client instead of throwing, full state suite green against a real
+  Postgres server, `database.driver` slot, credential redaction, deploy docs +
+  release. Amends locked decision 3 (test-only → operator-selectable). *(risk:
+  medium)*
 
 Architecture reference (read before any phase):
 [00-architecture.md](00-architecture.md).
@@ -47,8 +50,9 @@ Architecture reference (read before any phase):
    accurate when written — if a reference has drifted, trust the described
    pattern over the line number and note the drift.
 4. Run the phase's **verification** section. Every phase must end with
-   `npm run build && npx vitest run` green (plus `cd dashboard && npx tsc -b`
-   where admin routes are touched).
+   `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+   green (plus `pnpm --filter @lastlight/dashboard typecheck` where admin
+   routes are touched).
 5. Tick the checkbox above, and record any deviations from the doc (what and
    why) in a short **Deviations** section appended to the phase doc itself.
 6. Commit the phase as one or more focused commits; do not start the next phase
@@ -119,6 +123,13 @@ Architecture reference (read before any phase):
     session-manager, the wire pin test).
 
 ## Hard constraints (verified against source at planning time)
+
+> Path/tooling note: the state layer, tests, and `drizzle/` live in the
+> **`apps/server/`** package (npm package name `lastlight-core`); the repo is
+> **pnpm + Turborepo**. Source paths below read `apps/server/src/…`, tests
+> `apps/server/tests/…`, and build/test/install commands are
+> `pnpm --filter lastlight-core …` (see each phase doc). `package-lock.json`
+> is now the repo-root `pnpm-lock.yaml` (one lockfile for the whole workspace).
 
 - **evals barrel** (`src/evals-api.ts`) exports no DB types; `runWorkflow`'s
   `db?: StateDb` param is type-erased. Do NOT change the exported shapes of

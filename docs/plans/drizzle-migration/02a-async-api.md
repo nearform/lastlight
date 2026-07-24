@@ -22,7 +22,9 @@
 
 Read first: [README.md](README.md) (locked decisions, hard constraints) and
 [00-architecture.md](00-architecture.md). This doc maps **the ripple**:
-every public method of the five state-owning classes becomes `async`.
+every public method of the six state-owning classes becomes `async`
+(`StateDb`, `ExecutionStore`, `ApprovalStore`, `WorkflowRunStore`,
+`UserStore`, `SessionManager`).
 
 Line references were verified against source at planning time (2026-07-06)
 and re-verified 2026-07-09 after the v0.10.0 changes (`346c50e`, GitHub-free
@@ -32,8 +34,9 @@ again, trust the described pattern.
 
 ## Goal
 
-- `StateDb`, `ExecutionStore`, `ApprovalStore`, `WorkflowRunStore`, and
-  `SessionManager` expose a fully `Promise`-returning public API (70 methods).
+- `StateDb`, `ExecutionStore`, `ApprovalStore`, `WorkflowRunStore`,
+  `UserStore`, and `SessionManager` expose a fully `Promise`-returning
+  public API (~78 methods — 70 in the original inventory + `UserStore`'s 8).
 - Every consumer awaits (or deliberately `void`s) those calls; no floating
   promises introduced.
 - ~~Constructors, the `db.database` getter, and all private helpers stay
@@ -42,7 +45,8 @@ again, trust the described pattern.
 - ~~The five named atomic ops keep their synchronous better-sqlite3
   transaction closures.~~ *(Combined phase: they become drizzle async
   transactions per 02b — no twins.)*
-- `npm run build && npx vitest run` green; evals barrel type shapes unchanged.
+- `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+  green; evals barrel type shapes unchanged.
 
 ## Preconditions
 
@@ -53,9 +57,9 @@ again, trust the described pattern.
 
 ## Approach
 
-1. **Flip the five classes first** (`src/state/db.ts`,
+1. **Flip the six classes first** (`src/state/db.ts`,
    `src/state/execution-store.ts`, `src/state/approval-store.ts`,
-   `src/state/workflow-run-store.ts`,
+   `src/state/workflow-run-store.ts`, `src/state/user-store.ts`,
    `src/connectors/messaging/session-manager.ts`): add `async` + `Promise<T>`
    return types to every public method listed in the inventory. Bodies are
    unchanged (better-sqlite3 calls run sync inside the async function).
@@ -68,7 +72,7 @@ again, trust the described pattern.
    participant parameters — see 02b's "Transaction plumbing". No twins are
    ever built. (`StateDb.setCronOverride` :110 internally calls
    `this.getCronOverride` — just `await` it; no transaction involved.)
-3. **`npm run build` and chase compiler errors outward.** tsc finds every
+3. **`pnpm --filter lastlight-core build` and chase compiler errors outward.** tsc finds every
    call site whose *result is used* (`.length`, `.map`, `if (x)`, property
    access on `Promise<T>`). It does NOT find statement-position calls whose
    result is discarded — those are the floating-promise audit below.
@@ -135,6 +139,18 @@ drizzle transactions (`client.transaction(async (tx) => …)`) whose
 participants take the trailing `dbc` parameter — see 02b's Transaction
 plumbing (no sync twins; Approach step 2 is struck).
 
+### UserStore — `src/state/user-store.ts` (8 methods, issue #205)
+
+`getOrCreateUserByGithub`, `upsertSlackUser`, `linkSlackUser`, `getById`,
+`findByGithubId`, `findByLogin`, `findByEmail`, `findBySlackUserId`. Private
+`deserialize` stays private. All read/write the `users` table; no
+transactions, no sql-specific SQL beyond plain CRUD + a `findByEmail`
+`ORDER BY created_at ASC LIMIT 1` — all portable. Consumers are the
+dashboard GitHub/Slack login paths and the actor-attribution code (issue
+#205); each becomes an `await`. `TriggerActorType` / `TRIGGER_ACTOR_TYPES` /
+`isTriggerActorType` are plain type/const helpers (not store methods) — no
+async change.
+
 ### SessionManager — `src/connectors/messaging/session-manager.ts` (9 methods)
 
 `getSession` :136, `getOrCreateSession` :142, `setAgentSessionId` :190,
@@ -152,7 +168,7 @@ and 17 `PhaseReporter` callback sites affected by signature flips. Per file:
 
 | File | Sites | Nature |
 |---|---|---|
-| `src/admin/routes.ts` | 27 store + 10 StateDb-own + 7 SessionSource | ~14 sync GET handlers flip to `async (c)`; two landmines (L5, L6) |
+| `src/admin/routes.ts` | 27 store + 10 StateDb-own + 7 SessionSource + 3 `db.users.*` (issue #205, ≈935/1088/1360: `upsertSlackUser` / `getOrCreateUserByGithub` / `findByLogin`) | ~14 sync GET handlers flip to `async (c)`; two landmines (L5, L6); the `db.users.*` sites sit in already-async login/detail handlers — plain awaits |
 | `src/engine/dispatcher.ts` | 20 store + 3 sessionManager (:98, :776, :793) | all handlers already async; one `.then`-chain landmine (L8) |
 | `src/workflows/phase-executor.ts` | 15 store | all in async methods; `onSessionId` landmine (L1); 17 `reporter.persistPhase/failWorkflow` sites (L4) |
 | `src/workflows/resume.ts` | 10 store (:167, :258, :259, :311, :313, :320, :342, :354, :366, :370) | async fns; `persist` closure landmine (L3) |
@@ -168,7 +184,7 @@ and 17 `PhaseReporter` callback sites affected by signature flips. Per file:
 | `src/admin/sessions.ts` | 0 store, but `SessionSource` :72-79 + `SessionReader` impls flip | **not in the original ripple list — discovered transitive file** (L6) |
 | `src/engine/chat/chat.ts` | 0 | `_sessionManager` param :125 is unused — no edits |
 | `src/connectors/messaging/index.ts` | 0 | re-export barrel — no edits |
-| `src/connectors/slack/connector.ts` | 0 | passes sessionManager to `super()` :73-74 — no edits |
+| `src/connectors/slack/connector.ts` | 4 `users.*` (issue #205, ≈572/578/580: `findBySlackUserId` / `findByEmail` / `linkSlackUser`) | the Slack-user match sits inside an already-async handler (right after `await this.web.users.info`) — plain awaits; still passes sessionManager to `super()` |
 | `src/admin/index.ts` | 0 | wiring only (:18, :22) — no edits |
 
 ### Signature flips (sync functions whose type must change)
@@ -282,7 +298,7 @@ No exported shape changes: `runWorkflow` is already `async` (:21 re-export;
 `RunnerCallbacks` fields were Promise-returning already (`runner.ts:43-57`);
 `WorkflowResult` / `ExecutorConfig` / `TemplateContext` /
 `WorkflowAssetConfig` untouched. Verify by diffing
-`npx tsc --emitDeclarationOnly` output for `evals-api` before/after, or simply
+`pnpm --filter lastlight-core exec tsc --emitDeclarationOnly` output for `evals-api` before/after, or simply
 confirm no edits land in the files behind those five exports' type shapes.
 
 ## Floating-promise audit
@@ -321,6 +337,7 @@ need no changes. Only **typed** mock surfaces break compilation.
 |---|---|
 | `tests/state/db.test.ts` | 34 tests, ~82 real-StateDb call sites: mechanical `await` + `async ()` test callbacks; `db.close()` in teardown gains await |
 | `tests/state/workflow-run-store.test.ts` | 17 tests, ~45 sites: awaits, plus 6 throw assertions flip to `await expect(…).rejects.toThrow(…)` — :101, :160, :176, :196, :292, :312 |
+| `tests/state/user-store.test.ts` | mechanical `await` on `users.*` upsert/find calls + `async ()` test callbacks (issue #205 suite; folds into the Phase 3 factory later) |
 | `tests/connectors/messaging/session-manager.test.ts` | awaits on `manager.*` (:26-27, :33-35, :151, …). The legacy-rebuild fixtures and `expect(() => …).toThrow(/FOREIGN KEY|UNIQUE/)` at :98, :133, :159 wrap **raw better-sqlite3 statements** — unchanged. `new SessionManager(legacy)` (:87, :136) stays sync — unchanged |
 | `tests/connectors/slack/connector.test.ts` | constructs a real `SessionManager` (:64) but never calls it directly — expect compile-only/no edits; re-run to confirm event-emission timing (base.ts now awaits before `emit`) |
 | `tests/admin/routes.test.ts` | `mockDb` (:41-57) is cast `as unknown as StateDb` — no edits needed; handlers exercised via `await app.request(…)` already |
@@ -341,14 +358,14 @@ sweep).
 ## Verification
 
 ```bash
-npm run build            # zero errors — the compiler is the primary tool
-npx vitest run           # full suite green, same test count as before
-cd dashboard && npx tsc -b   # admin routes touched (handler asyncification);
-                             # wire shapes unchanged, this is the proof
+pnpm --filter lastlight-core build   # zero errors — the compiler is the primary tool
+pnpm --filter lastlight-core test    # full suite green, same test count as before
+pnpm --filter @lastlight/dashboard typecheck   # admin routes touched (handler
+                             # asyncification); wire shapes unchanged, this is the proof
 ```
 
-Optional prod-shape sanity (cheap, recommended): `npm run dev` against a
-scratch `STATE_DIR`, hit `GET /admin/api/executions` and
+Optional prod-shape sanity (cheap, recommended): `pnpm --filter lastlight-core dev`
+against a scratch `STATE_DIR`, hit `GET /admin/api/executions` and
 `GET /admin/api/workflow-runs` and confirm snake_case rows still flow (this
 phase must not change the wire format — that contract is pinned in 2b).
 
@@ -384,7 +401,8 @@ phase must not change the wire format — that contract is pinned in 2b).
 > **Done criteria below are folded into 02b's** — verify there, once, at the
 > end of the combined phase. The twin criterion is struck (locked decision 7).
 
-- [ ] All 70 public methods across the five classes return `Promise<…>`.
+- [ ] All ~78 public methods across the six classes (incl. `UserStore`'s 8,
+      issue #205) return `Promise<…>`.
 - [ ] ~~Sync twins…~~ struck — transaction closures are async drizzle
       transactions (02b).
 - [ ] `PhaseReporter`, `SessionSource`, and `getJobs` signatures flipped;
@@ -394,7 +412,8 @@ phase must not change the wire format — that contract is pinned in 2b).
 - [ ] Floating-promise greps reviewed; every un-awaited store call is on the
       fire-and-forget table.
 - [ ] `src/evals-api.ts` untouched; no exported type shape changed.
-- [ ] `npm run build && npx vitest run` green; `cd dashboard && npx tsc -b`
-      green; test count unchanged.
+- [ ] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+      green; `pnpm --filter @lastlight/dashboard typecheck` green; test count
+      unchanged.
 - [ ] Covered by README.md's single **Phase 2** checkbox (ticked via 02b's
       done criteria); deviations (if any) appended to 02b's Deviations section.

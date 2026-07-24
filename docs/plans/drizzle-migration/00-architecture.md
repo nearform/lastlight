@@ -15,11 +15,12 @@ Read together with [README.md](README.md) (locked decisions + hard constraints).
   self-migrates `messaging_sessions` + `messaging_messages`, including a legacy
   table-rebuild (`rebuildWithoutTableUnique`) that sniffs `sqlite_master` for an
   old `UNIQUE(platform,…)` constraint.
-- Three stores share the one connection (transactions are per-connection):
+- Four stores share the one connection (transactions are per-connection):
   `ExecutionStore` (`executions`), `ApprovalStore` (`workflow_approvals`),
   `WorkflowRunStore` (`workflow_runs`, injected with the approval store for
-  cross-table atomic ops). `StateDb` itself owns `cron_overrides` +
-  `workflow_overrides`.
+  cross-table atomic ops), and `UserStore` (`users` — first-class user
+  identity, issue #205, wired in `db.ts` ≈85). `StateDb` itself owns
+  `cron_overrides` + `workflow_overrides`.
 - Timestamps are ISO-8601 TEXT everywhere; booleans are INTEGER 0/1; JSON is
   stringified TEXT; PKs are `randomUUID()` TEXT except
   `messaging_messages.id AUTOINCREMENT`.
@@ -27,8 +28,8 @@ Read together with [README.md](README.md) (locked decisions + hard constraints).
 ## Target file layout
 
 ```
-src/state/
-  schema/sqlite.ts   # sqliteTable defs — 7 tables (5 state + 2 messaging), all indexes
+apps/server/src/state/
+  schema/sqlite.ts   # sqliteTable defs — 8 tables (6 state + 2 messaging), all indexes
   schema/pg.ts       # pgTable mirror: identical export names + column property names
   client.ts          # StateClient (LibSQLDatabase<typeof sqliteSchema>), StateTx,
                      # asStateClient() cast seam for the PG instance, Dialect type
@@ -36,10 +37,10 @@ src/state/
                      # isUniqueViolation(err) / likeEscape() / dayBucket() / hourBucket()
   legacy-sqlite.ts   # pre-drizzle compat pre-step (runs before the migrator; see below)
   db.ts              # StateDb — async factory: static open(url) / fromClient(client, dialect)
-  execution-store.ts / approval-store.ts / workflow-run-store.ts   # async, drizzle
-drizzle/sqlite/0000_baseline.sql (+ meta/)   # hand-edited idempotent baseline
-drizzle/pg/0000_init.sql (+ meta/)           # generated, fresh-DB only (PGlite)
-drizzle-sqlite.config.ts / drizzle-pg.config.ts
+  execution-store.ts / approval-store.ts / workflow-run-store.ts / user-store.ts  # async, drizzle
+apps/server/drizzle/sqlite/0000_baseline.sql (+ meta/)   # hand-edited idempotent baseline
+apps/server/drizzle/pg/0000_init.sql (+ meta/)           # generated, fresh-DB only (PGlite)
+apps/server/drizzle-sqlite.config.ts / apps/server/drizzle-pg.config.ts  # at the package root
 ```
 
 ## Dual-dialect strategy (the honest version)
@@ -152,7 +153,14 @@ list verbatim.
      upgrading from versions older than the current column set (where
      `CREATE TABLE IF NOT EXISTS` would no-op without adding their missing
      columns). Guard by column presence, not try/catch — libsql errors are
-     async.
+     async. This includes the issue-#205 actor columns
+     (`executions`/`workflow_runs`: `triggered_by`, `trigger_actor_type`) and
+     `workflow_runs.owner` — and `owner` carries a one-time **data backfill**
+     in the same guarded step (`UPDATE workflow_runs SET owner =
+     json_extract(context, '$.owner') WHERE owner IS NULL AND context IS NOT
+     NULL`, `migrate.ts` ≈159-168). `json_extract` is sqlite-only, which is
+     fine — this pre-step is sqlite-only; the backfill is idempotent
+     (`WHERE owner IS NULL`).
   2. The messaging `UNIQUE(platform,…)` table rebuild ported from
      `session-manager.ts` (sniff `sqlite_master`, `PRAGMA foreign_keys`
      toggle, copy, drop, rename, `foreign_key_check`). Keep one more release
@@ -212,6 +220,11 @@ unaffected.
 `StateDb.open` recognizes a `postgres://` URL and throws an informative "PG
 runtime not enabled" error; PG entry is `fromClient` (tests) only, keeping `pg`
 out of runtime deps. **Phase 6 removes this non-goal** —
-[06-prod-postgres.md](06-prod-postgres.md) replaces the throw with a real
-node-postgres pool client and adds `pg` as a runtime dep (lazily imported, so
-sqlite deployments still never load it), making Postgres operator-selectable.
+[06-prod-postgres.md](06-prod-postgres.md) replaces the throw with a real,
+**driver-selectable** Postgres pool client — standard **node-postgres** (default)
+or **Neon serverless** (`drizzle-orm/neon-serverless`, WebSocket) — adding `pg` +
+`@neondatabase/serverless` as runtime deps (each lazily imported by its own
+driver branch, so sqlite deployments load neither and neither driver loads the
+other). Both sit behind the unchanged `"postgres"` dialect seam, making Postgres
+operator-selectable. (Neon's `neon-http` driver is deliberately excluded — it
+can't run the interactive transactions the five atomic ops require.)

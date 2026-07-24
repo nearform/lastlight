@@ -8,7 +8,7 @@ column modes, hand-edited idempotent baseline).
 
 Introduce Drizzle into the repo **without touching any runtime code path**:
 install the dependencies, write the complete `sqliteTable` schema for all
-seven tables (five state + two messaging), generate the `0000_baseline.sql`
+eight tables (six state + two messaging), generate the `0000_baseline.sql`
 migration and hand-edit it to full idempotency, and prove — mechanically, in
 a test — that the Drizzle-migrated schema is equivalent to what the legacy
 `migrate()` + `SessionManager` DDL produces today. This phase is the only
@@ -19,19 +19,20 @@ can swap engines under a database whose shape is byte-for-byte accounted for.
 ## Preconditions
 
 None — this is the first phase. The repo must be green before starting:
-`npm run build && npx vitest run` passes on a clean checkout of `main`.
+`pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+passes on a clean checkout of `main`.
 
 ## Files created / modified
 
 | File | Change |
 |---|---|
-| `package.json` | deps: `drizzle-orm`, `@libsql/client`; devDep: `drizzle-kit`; script `db:generate:sqlite` |
-| `package-lock.json` | npm install side effect |
-| `src/state/schema/sqlite.ts` | **new** — all 7 tables, all 12 indexes |
-| `drizzle-sqlite.config.ts` | **new** — repo root, drizzle-kit config |
-| `drizzle/sqlite/0000_baseline.sql` | **new** — generated, then hand-edited |
-| `drizzle/sqlite/meta/_journal.json` + `meta/0000_snapshot.json` | **new** — generated, committed as-is |
-| `tests/state/schema-equivalence.test.ts` | **new** — the proof artifact |
+| `apps/server/package.json` | deps: `drizzle-orm`, `@libsql/client`; devDep: `drizzle-kit`; script `db:generate:sqlite` |
+| `pnpm-lock.yaml` | pnpm install side effect (repo-root, one lockfile for the workspace) |
+| `apps/server/src/state/schema/sqlite.ts` | **new** — all 8 tables, all 15 indexes |
+| `apps/server/drizzle-sqlite.config.ts` | **new** — `apps/server/` package root, drizzle-kit config |
+| `apps/server/drizzle/sqlite/0000_baseline.sql` | **new** — generated, then hand-edited |
+| `apps/server/drizzle/sqlite/meta/_journal.json` + `meta/0000_snapshot.json` | **new** — generated, committed as-is |
+| `apps/server/tests/state/schema-equivalence.test.ts` | **new** — the proof artifact |
 
 Nothing else. No store, no `db.ts`, no `migrate.ts` changes — the legacy path
 stays the production path until Phase 2b.
@@ -39,8 +40,8 @@ stays the production path until Phase 2b.
 ## Step 1 — Dependencies
 
 ```bash
-npm i drizzle-orm @libsql/client
-npm i -D drizzle-kit
+pnpm --filter lastlight-core add drizzle-orm @libsql/client
+pnpm --filter lastlight-core add -D drizzle-kit
 ```
 
 Pin the latest **stable** lines (locked decision 5 — the finius reference is
@@ -48,24 +49,26 @@ on a v1.0.0-rc; do NOT copy that). At last verification (2026-07-09) that
 meant `drizzle-orm ^0.45` (0.45.2 — note `^0.44` would never resolve to it),
 `drizzle-kit ^0.31` (0.31.10), `@libsql/client ^0.17` (0.17.4); drizzle v1
 was still RC-only (`1.0.0-rc.4`). Check npm at execution time and take the
-newest non-RC. Add to `package.json` scripts
-(currently `package.json:48-61`):
+newest non-RC. Add to `apps/server/package.json` scripts
+(currently `package.json` ≈48-61):
 
 ```json
 "db:generate:sqlite": "drizzle-kit generate --config drizzle-sqlite.config.ts"
 ```
 
-Note `tsconfig.json` includes only `src/**/*`, so the root-level
-`drizzle-sqlite.config.ts` is not compiled by `npm run build` — drizzle-kit
-loads it with its own loader. No tsconfig change needed.
+Note `apps/server/tsconfig.json` includes only `src/**/*`, so the
+package-root `drizzle-sqlite.config.ts` is not compiled by
+`pnpm --filter lastlight-core build` — drizzle-kit loads it with its own
+loader. No tsconfig change needed.
 
-## Step 2 — `src/state/schema/sqlite.ts`
+## Step 2 — `apps/server/src/state/schema/sqlite.ts`
 
-Source of truth for the shape: `src/state/migrate.ts` (all of it — the
-CREATEs at lines 17-88 **plus** every historical `ALTER TABLE ADD COLUMN` at
-lines 92-169 and the late index at line 172) and
-`src/connectors/messaging/session-manager.ts:21-69` (messaging tables +
-indexes + the partial unique index). Transcribe faithfully:
+Source of truth for the shape: `apps/server/src/state/migrate.ts` (all of it
+— the CREATEs at ≈17-112 including the `users` table **plus** every
+historical `ALTER TABLE ADD COLUMN` at ≈120-232 and the late index at ≈235)
+and `apps/server/src/connectors/messaging/session-manager.ts` ≈21-69
+(messaging tables + indexes + the partial unique index). Transcribe
+faithfully:
 
 - **Column declaration order must match the legacy physical order** — CREATE
   columns first, then the ALTER-added columns in the order migrate.ts adds
@@ -101,8 +104,12 @@ in this phase. Type imports (type-only, so no runtime coupling):
 
 ### `executions` (full snippet)
 
-Legacy DDL: `migrate.ts:18-31`; ALTERs `:128` (session_id) and the loop at
-`:136-169`; indexes `:33-34,172`.
+Legacy DDL: `migrate.ts` ≈18-31; the issue-#205 actor ALTERs at ≈120-131
+(`triggered_by`, `trigger_actor_type`) — **added BEFORE the `session_id`
+ALTER**, so their physical position is immediately after `duration_ms`; then
+`session_id` ≈191 and the usage-metric loop at ≈199-232; indexes
+≈33-34, ≈235. The two actor columns are plain `text()` — NOT json, NOT
+boolean.
 
 ```ts
 import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
@@ -126,6 +133,10 @@ export const executions = sqliteTable(
     turns: integer("turns"),
     durationMs: integer("duration_ms"),
     // ── historical ALTERs, in migrate.ts order ──
+    // issue #205 actor columns — ALTER-added BEFORE session_id, so they sit
+    // right after duration_ms; plain text() (NOT json, NOT boolean).
+    triggeredBy: text("triggered_by"),
+    triggerActorType: text("trigger_actor_type"),
     sessionId: text("session_id"),
     costUsd: real("cost_usd"),
     inputTokens: integer("input_tokens"),
@@ -149,8 +160,10 @@ export const executions = sqliteTable(
 
 ### `workflow_runs`
 
-Legacy DDL `migrate.ts:36-49`; ALTERs `:93` (scratch), `:102` (restart_count);
-indexes `:50-57`.
+Legacy DDL `migrate.ts` ≈36-49; ALTERs in physical order: `triggered_by`,
+`trigger_actor_type` (issue #205, ≈120), `scratch` (≈136), `restart_count`
+(≈145), `owner` (≈160); indexes ≈50-57. The two actor columns and `owner`
+are plain `text()`.
 
 | property | column | builder |
 |---|---|---|
@@ -166,8 +179,11 @@ indexes `:50-57`.
 | startedAt | `started_at` | `text().notNull()` |
 | updatedAt | `updated_at` | `text().notNull()` |
 | finishedAt | `finished_at` | `text()` |
+| triggeredBy | `triggered_by` | `text()` — issue #205; ALTER-added before scratch |
+| triggerActorType | `trigger_actor_type` | `text()` — issue #205; ALTER-added before scratch |
 | scratch | `scratch` | `text({mode:"json"}).$type<Record<string, unknown>>()` |
 | restartCount | `restart_count` | `integer().notNull().default(0)` |
+| owner | `owner` | `text()` — issue #205; ALTER-added after restart_count (carries a data backfill — see the legacy pre-step in Phase 2b) |
 
 Indexes: `index("idx_workflow_runs_trigger").on(t.triggerId, t.status)`,
 `index("idx_workflow_runs_status").on(t.status)`,
@@ -213,6 +229,44 @@ indexes `:86-87`.
 Indexes: `index("idx_approvals_workflow").on(t.workflowRunId)`,
 `index("idx_approvals_status").on(t.status)`.
 
+### `users` (issue #205)
+
+Legacy DDL `migrate.ts` ≈96-112 (a plain `CREATE TABLE IF NOT EXISTS`, not
+an ALTER — the whole table is additive). First-class user identity, an
+enrichment table LEFT-JOINed on `login`. Physical column order:
+
+| property | column | builder |
+|---|---|---|
+| id | `id` | `text().primaryKey()` |
+| githubId | `github_id` | `integer("github_id").unique()` |
+| login | `login` | `text("login").unique()` |
+| name | `name` | `text()` |
+| email | `email` | `text()` — indexed, **NOT** unique |
+| avatarUrl | `avatar_url` | `text("avatar_url")` |
+| slackUserId | `slack_user_id` | `text("slack_user_id").unique()` |
+| isBlocked | `is_blocked` | `integer("is_blocked",{mode:"boolean"}).notNull().default(false)` |
+| emailIsPlaceholder | `email_is_placeholder` | `integer("email_is_placeholder",{mode:"boolean"}).notNull().default(false)` |
+| createdAt | `created_at` | `text("created_at").notNull()` |
+| updatedAt | `updated_at` | `text("updated_at").notNull()` |
+| lastLoginAt | `last_login_at` | `text("last_login_at")` |
+
+Indexes (3): `index("idx_users_login").on(t.login)`,
+`index("idx_users_email").on(t.email)`,
+`index("idx_users_slack").on(t.slackUserId)`.
+
+**Equivalence-test note (important — no methodology change needed).** The
+three column-level `UNIQUE` constraints (`github_id`, `login`,
+`slack_user_id`) create `sqlite_autoindex_users_*` entries whose `sql IS
+NULL` in `sqlite_master` — exactly like PK autoindexes. Step 4's index
+extraction already filters `WHERE ... AND sql IS NOT NULL`, so those
+autoindexes are **excluded on BOTH legs**: a legacy column-level `UNIQUE`
+and a Drizzle `.unique()` both emit the same inline autoindex with NULL sql.
+The users table therefore needs only the added expectations below (the three
+named `idx_users_*` indexes, which DO have non-NULL sql), not any change to
+how the test compares indexes. `is_blocked` / `email_is_placeholder` stay
+`{mode:"boolean"}` — INTEGER DDL, so no equivalence impact (like every other
+boolean).
+
 ### `messaging_sessions` (full snippet)
 
 Legacy DDL `session-manager.ts:22-33`; indexes `:44-45` and the partial
@@ -256,13 +310,17 @@ Legacy DDL `session-manager.ts:35-42`; index `:46-47`. Columns: `id`
 `text().notNull()`; `platformMessageId` `text("platform_message_id")`.
 Index: `index("idx_msg_messages_session").on(t.sessionId, t.timestamp)`.
 
-Index tally: 3 (executions) + 4 (workflow_runs) + 2 (approvals) + 3
+Index tally: 3 (executions) + 4 (workflow_runs) + 2 (approvals) + 3 (users:
+`idx_users_login` / `idx_users_email` / `idx_users_slack`) + 3
 (messaging_sessions incl. the partial unique) + 1 (messaging_messages) =
-**12 named indexes**, one of them partial-unique, two with DESC keys.
+**15 named indexes**, one of them partial-unique, two with DESC keys. (The
+three `users` column-level `UNIQUE` autoindexes are NOT in this count — they
+have NULL sql and are filtered out on both legs; see the users note above.)
 
 ## Step 3 — drizzle-kit config + baseline generation
 
-`drizzle-sqlite.config.ts` (repo root; shape after
+`drizzle-sqlite.config.ts` (the `apps/server/` package root; `schema:`/`out:`
+paths are relative to that package root; shape after
 `/Users/clifton/Documents/finius/drizzle.config.ts`, minus the RC pin):
 
 ```ts
@@ -321,7 +379,7 @@ Extract from each leg and deep-equal after normalization:
 
 1. **Table list**: `SELECT name FROM sqlite_master WHERE type='table'`,
    excluding `sqlite_%` and `__drizzle_migrations` (and their autoindexes).
-   Must be exactly the 7 tables.
+   Must be exactly the 8 tables (incl. `users`).
 2. **Columns**: per table, `PRAGMA table_info(<t>)` in cid order, normalized
    to `{ name, type: upper, notNull: notnull === 1 || pk > 0, dflt:
    normalizeDefault(dflt_value), pk: pk > 0 }`. The `|| pk > 0` matters:
@@ -362,13 +420,13 @@ equivalence is purely about the SQL shape.
 ## Verification
 
 ```bash
-npm run build            # tsc green; schema file compiles under strict
-npx vitest run           # full suite green, incl. the new equivalence test
-git diff --stat          # confirms no runtime source file changed
-                         # (src/ delta = schema/sqlite.ts only)
+pnpm --filter lastlight-core build   # tsc green; schema file compiles under strict
+pnpm --filter lastlight-core test    # full suite green, incl. the new equivalence test
+git diff --stat                      # confirms no runtime source file changed
+                                     # (apps/server/src delta = schema/sqlite.ts only)
 ```
 
-Dashboard tsc not needed (no admin routes touched).
+Dashboard typecheck not needed (no admin routes touched).
 
 ## Risk watch-items
 
@@ -404,13 +462,15 @@ Dashboard tsc not needed (no admin routes touched).
 - [ ] `drizzle-orm` + `@libsql/client` in dependencies, `drizzle-kit` in
       devDependencies — all latest stable, no RC pins.
 - [ ] `db:generate:sqlite` script in package.json.
-- [ ] `src/state/schema/sqlite.ts` defines all 7 tables, 12 indexes (incl.
-      the partial unique + both DESC indexes), with the JSON/boolean mode
-      decisions recorded above.
-- [ ] `drizzle/sqlite/0000_baseline.sql` exists, fully `IF NOT EXISTS`-
-      idempotent, with the required header comment; `meta/` committed.
-- [ ] `tests/state/schema-equivalence.test.ts` green: legacy vs drizzle
-      schema equal after normalization; migrator-twice no-op; migrator
-      succeeds on a legacy-seeded file DB with data intact.
-- [ ] `npm run build && npx vitest run` green; no runtime code path changed.
+- [ ] `apps/server/src/state/schema/sqlite.ts` defines all 8 tables, 15
+      named indexes (incl. the partial unique + both DESC indexes), with the
+      JSON/boolean mode decisions recorded above.
+- [ ] `apps/server/drizzle/sqlite/0000_baseline.sql` exists, fully
+      `IF NOT EXISTS`-idempotent, with the required header comment; `meta/`
+      committed.
+- [ ] `apps/server/tests/state/schema-equivalence.test.ts` green: legacy vs
+      drizzle schema equal after normalization; migrator-twice no-op;
+      migrator succeeds on a legacy-seeded file DB with data intact.
+- [ ] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+      green; no runtime code path changed.
 - [ ] README.md Phase 1 checkbox ticked; deviations (if any) appended below.

@@ -4,7 +4,7 @@
 > first. This phase proves the dialect seam: a `pgTable` mirror schema,
 > generated PG migrations, a types-excluded parity test, and the Phase-3
 > state suite running green against real Postgres (PGlite, WASM) in the
-> ordinary `npx vitest run`.
+> ordinary `pnpm --filter lastlight-core test`.
 
 ## Goal
 
@@ -19,7 +19,8 @@ is `StateDb.fromClient()` from tests.
 ## Preconditions
 
 - [ ] Phases 1, 2 (combined), 3 checked off in [README.md](README.md).
-- `src/state/schema/sqlite.ts` exists with all 7 tables + indexes (Phase 1).
+- `apps/server/src/state/schema/sqlite.ts` exists with all 8 tables + indexes
+  (Phase 1, incl. `users`).
 - Stores are async, Drizzle-backed, and route all raw SQL / rows-affected
   reads through `dialect.ts`'s `rows()` / `changes()` (Phase 2b).
 - `tests/state/store-suite.ts` exports `runStateDbSuite(makeDb, { dialect })`
@@ -35,19 +36,20 @@ is `StateDb.fromClient()` from tests.
 
 | File | Action |
 |---|---|
-| `src/state/schema/pg.ts` | create — pgTable mirror |
-| `drizzle-pg.config.ts` | create — drizzle-kit config, PG dialect |
-| `drizzle/pg/0000_init.sql` (+ `meta/`) | generate — never hand-edit |
-| `package.json` | `@electric-sql/pglite` devDep + `db:generate:pg` script |
-| `tests/state/schema-parity.test.ts` | create — structural drift guard |
-| `tests/state/db.pg.test.ts` | create — PGlite behavioral leg |
-| `src/state/db.ts` | small edit — `open()` rejects `postgres://` URLs |
+| `apps/server/src/state/schema/pg.ts` | create — pgTable mirror |
+| `apps/server/drizzle-pg.config.ts` | create — `apps/server/` package root, drizzle-kit config, PG dialect |
+| `apps/server/drizzle/pg/0000_init.sql` (+ `meta/`) | generate — never hand-edit |
+| `apps/server/package.json` | `@electric-sql/pglite` devDep + `db:generate:pg` script |
+| `apps/server/tests/state/schema-parity.test.ts` | create — structural drift guard |
+| `apps/server/tests/state/db.pg.test.ts` | create — PGlite behavioral leg |
+| `apps/server/src/state/db.ts` | small edit — `open()` rejects `postgres://` URLs |
 
 ## 1. `src/state/schema/pg.ts`
 
 Source of truth for the table inventory is the same one Phase 1 used:
-`src/state/migrate.ts` (5 state tables, all historically-ALTERed columns
-included) + `src/connectors/messaging/session-manager.ts:21-69` (the 2
+`apps/server/src/state/migrate.ts` (6 state tables incl. `users`, all
+historically-ALTERed columns included) +
+`apps/server/src/connectors/messaging/session-manager.ts` ≈21-69 (the 2
 messaging tables + partial unique index). **Do not re-derive from those
 files — mirror `schema/sqlite.ts` exactly**: same export names, same column
 property names, same column *names* (snake_case strings), same index names.
@@ -74,6 +76,7 @@ Per-table notes (everything not listed is `text()` in both dialects):
 | `cron_overrides` | `enabled` → `boolean().notNull().default(true)`. |
 | `workflow_overrides` | `enabled` → `boolean().notNull().default(true)`. |
 | `workflow_approvals` | all text; `kind` `.notNull().default("approve")`; `artifact` stays plain text (filename, not JSON — per Phase 1's audit). Indexes: `idx_approvals_workflow`, `idx_approvals_status`. |
+| `users` (issue #205) | `github_id` → `integer("github_id").unique()`; `is_blocked`, `email_is_placeholder` → `boolean().notNull().default(false)`; `login` → `text("login").unique()`, `slack_user_id` → `text("slack_user_id").unique()` (the pg equivalents of the sqlite `.unique()` columns); `email` stays plain `text()` (indexed, NOT unique); all other columns `text()`. Indexes: `idx_users_login`, `idx_users_email`, `idx_users_slack`. |
 | `messaging_sessions` | `message_count` → `integer().default(0)` (nullable — the legacy DDL has no NOT NULL); `active` → `boolean().default(true)` (nullable, same reason). Indexes: `idx_msg_sessions_lookup` + partial unique `idx_msg_sessions_unique_active`. |
 | `messaging_messages` | `id` → identity PK; `session_id` keeps the FK `.references(() => messagingSessions.id)`. Index: `idx_msg_messages_session`. |
 
@@ -190,8 +193,9 @@ porting: for each column, copy the property name + name string from
 
 ## 2. drizzle-kit config + generation
 
-`drizzle-pg.config.ts` (repo root, sibling of Phase 1's
-`drizzle-sqlite.config.ts`):
+`drizzle-pg.config.ts` (the `apps/server/` package root, sibling of Phase 1's
+`drizzle-sqlite.config.ts`; `schema:`/`out:` paths relative to that package
+root):
 
 ```ts
 import { defineConfig } from "drizzle-kit";
@@ -219,9 +223,13 @@ new migration; during this phase, before anything ships, prefer deleting
 `drizzle/pg/` and regenerating a clean `0000_init`.
 
 Spot-check the generated SQL contains: `jsonb` for the five JSON columns,
-`boolean` for the four flag columns, `double precision` for `cost_usd`,
-`GENERATED ALWAYS AS IDENTITY` on `messaging_messages.id`, and the partial
-`CREATE UNIQUE INDEX … WHERE active`.
+`boolean` for the six flag columns (`executions.success`,
+`cron_overrides.enabled`, `workflow_overrides.enabled`,
+`messaging_sessions.active`, plus `users.is_blocked` /
+`users.email_is_placeholder`), `double precision` for `cost_usd`,
+`GENERATED ALWAYS AS IDENTITY` on `messaging_messages.id`, the partial
+`CREATE UNIQUE INDEX … WHERE active`, and the three column-level `UNIQUE`
+constraints on `users` (`github_id`, `login`, `slack_user_id`).
 
 ## 3. `tests/state/schema-parity.test.ts`
 
@@ -242,7 +250,7 @@ import * as pgSchema from "../../src/state/schema/pg.js";
 
 const TABLES = [
   "executions", "workflowRuns", "cronOverrides", "workflowOverrides",
-  "workflowApprovals", "messagingSessions", "messagingMessages",
+  "workflowApprovals", "users", "messagingSessions", "messagingMessages",
 ] as const;
 ```
 
@@ -360,15 +368,17 @@ substring) — it can live in the existing `db` test file or `db.pg.test.ts`.
 
 ## 6. package.json + CI
 
-- `npm i -D @electric-sql/pglite` — devDependency, latest stable. Nothing
-  under `dependencies`; `src/state/schema/pg.ts` imports only
-  `drizzle-orm/pg-core` (drizzle-orm is already a runtime dep from Phase 1),
-  so shipping pg.ts in `dist/` is harmless.
+- `pnpm --filter lastlight-core add -D @electric-sql/pglite` — devDependency,
+  latest stable. Nothing under `dependencies`;
+  `apps/server/src/state/schema/pg.ts` imports only `drizzle-orm/pg-core`
+  (drizzle-orm is already a runtime dep from Phase 1), so shipping pg.ts in
+  `dist/` is harmless.
 - Guard the boundary: `grep -rn "schema/pg\|@electric-sql/pglite\|drizzle-orm/pglite" src/`
-  must hit only `src/state/schema/pg.ts` itself (and nothing importing it).
-  Importers live in `tests/` + `drizzle-pg.config.ts` only.
+  (from `apps/server/`) must hit only `src/state/schema/pg.ts` itself (and
+  nothing importing it). Importers live in `tests/` + `drizzle-pg.config.ts`
+  only.
 - **CI: no pipeline change.** Both legs are ordinary `tests/**/*.test.ts`
-  files picked up by the existing `npx vitest run` glob
+  files picked up by the existing `pnpm --filter lastlight-core test` glob
   (`vitest.config.ts`). PGlite is pure WASM — no postgres service, no
   docker, no opt-in env var.
 
@@ -414,16 +424,20 @@ fails, check this list before suspecting PGlite (it is real Postgres):
 ## Verification
 
 ```bash
-npm run build && npx vitest run          # whole suite: sqlite leg + PG leg + parity
-npx vitest run tests/state/              # focused: both legs + parity together
-npm run db:generate:pg && git status     # regeneration is a no-op (deterministic)
+# whole suite: sqlite leg + PG leg + parity
+pnpm --filter lastlight-core build && pnpm --filter lastlight-core test
+# focused: both legs + parity together
+pnpm --filter lastlight-core exec vitest run tests/state/
+# regeneration is a no-op (deterministic)
+pnpm --filter lastlight-core run db:generate:pg && git status
+# → empty: pg schema not in the runtime import graph (from apps/server/)
 grep -rn "schema/pg\|pglite" src/ --include='*.ts' | grep -v "src/state/schema/pg.ts"
-                                         # → empty: pg schema not in the runtime import graph
 ```
 
-Plus: `npm run typecheck:test`, and confirm the parity test *fails
-correctly* once — temporarily add a throwaway column to `pg.ts`, watch the
-"exists in pg but not sqlite" message, revert.
+Plus: `pnpm --filter lastlight-core exec tsc --noEmit` (or the package's
+test-typecheck script), and confirm the parity test *fails correctly* once —
+temporarily add a throwaway column to `pg.ts`, watch the "exists in pg but
+not sqlite" message, revert.
 
 ## Risk watch-items
 
@@ -449,21 +463,24 @@ correctly* once — temporarily add a throwaway column to `pg.ts`, watch the
 
 ## Done criteria
 
-- [ ] `src/state/schema/pg.ts` mirrors `sqlite.ts` — 7 tables, identical
-      export/property/column/index names; jsonb + boolean + identity +
-      doublePrecision mappings applied; identical `$type<T>` params.
-- [ ] `drizzle-pg.config.ts` + `db:generate:pg` script added;
-      `drizzle/pg/0000_init.sql` + `meta/` committed, purely generated.
-- [ ] `tests/state/schema-parity.test.ts` green; compares names /
+- [ ] `apps/server/src/state/schema/pg.ts` mirrors `sqlite.ts` — 8 tables
+      (incl. `users`), identical export/property/column/index names; jsonb +
+      boolean + identity + doublePrecision mappings applied; identical
+      `$type<T>` params.
+- [ ] `apps/server/drizzle-pg.config.ts` + `db:generate:pg` script added;
+      `apps/server/drizzle/pg/0000_init.sql` + `meta/` committed, purely
+      generated.
+- [ ] `apps/server/tests/state/schema-parity.test.ts` green; compares names /
       nullability / PKs / index name+unique+partial / FKs; excludes types;
-      failure messages name the missing column and side.
-- [ ] `tests/state/db.pg.test.ts` green: fresh PGlite per test → pg
+      failure messages name the missing column and side; 8 tables covered.
+- [ ] `apps/server/tests/state/db.pg.test.ts` green: fresh PGlite per test → pg
       migrator → `StateDb.fromClient(..., "postgres")` → full
       `runStateDbSuite`, plus the cross-dialect stats bucket-key test.
 - [ ] `StateDb.open("postgres://…")` throws the "PG runtime not enabled"
       error; covered by a test.
 - [ ] `@electric-sql/pglite` in devDependencies only; no runtime module
       imports `schema/pg.ts` or any PG driver.
-- [ ] `npm run build && npx vitest run` green — both dialect legs in the
-      one run (that IS the CI wiring; no pipeline change).
+- [ ] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+      green — both dialect legs in the one run (that IS the CI wiring; no
+      pipeline change).
 - [ ] README checkbox ticked; deviations recorded below.

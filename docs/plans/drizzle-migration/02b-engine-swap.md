@@ -18,8 +18,8 @@
 
 ## Goal
 
-Delete `better-sqlite3` from `src/`. `StateDb`, the three stores
-(`ExecutionStore` / `ApprovalStore` / `WorkflowRunStore`), and
+Delete `better-sqlite3` from `apps/server/src/`. `StateDb`, the four stores
+(`ExecutionStore` / `ApprovalStore` / `WorkflowRunStore` / `UserStore`), and
 `SessionManager` run on `drizzle-orm/libsql` + `@libsql/client` behind a
 fully async API — established in this same phase via the 02a ripple
 (combined phase, locked decision 7). Consumers change in two ways at once:
@@ -47,15 +47,17 @@ Also in scope, because they fall out of the swap:
 
 ## Preconditions
 
-- [ ] **Phase 1 done**: `src/state/schema/sqlite.ts` exists (7 tables, all
-  indexes, `{mode:'json'}` / `{mode:'boolean'}` columns),
+- [ ] **Phase 1 done**: `apps/server/src/state/schema/sqlite.ts` exists
+  (8 tables incl. `users`, all 15 named indexes, `{mode:'json'}` /
+  `{mode:'boolean'}` columns),
   `drizzle/sqlite/0000_baseline.sql` is idempotent, and
   `tests/state/schema-equivalence.test.ts` is green (legacy `migrate()` DDL
   ≡ Drizzle migrator output).
 - [ ] ~~**Phase 2a done**~~ **In-scope instead (combined phase)**: the async
   ripple is executed as part of this phase, using
   [02a-async-api.md](02a-async-api.md) as the map — every method of
-  `StateDb`, the three stores, and `SessionManager` becomes `async`; all
+  `StateDb`, the four stores (incl. `UserStore`), and `SessionManager`
+  becomes `async`; all
   ~15 consumer files and ~10 test files `await` them (02a's inventories,
   landmines L1–L6/L8/L9, fire-and-forget table, floating-promise audit).
   Suggested order: rewrite the state layer on drizzle first (this doc), then
@@ -228,23 +230,28 @@ from versions older than the current column set, where the baseline's
 `CREATE TABLE IF NOT EXISTS` would no-op without adding their missing
 columns. Guard by column presence, **not** try/catch (libsql errors are
 async and we don't want to swallow real failures). The exact historical
-column set, enumerated from `src/state/migrate.ts:92-169`:
+column set, enumerated from `apps/server/src/state/migrate.ts` ≈120-232:
 
 ```ts
 import type { Client } from "@libsql/client";
 
 const LEGACY_COLUMNS: Record<string, string[]> = {
   workflow_runs: [
-    "scratch TEXT",                                    // migrate.ts:93
-    "restart_count INTEGER NOT NULL DEFAULT 0",        // migrate.ts:102
+    "triggered_by TEXT",                               // migrate.ts ≈120 (issue #205)
+    "trigger_actor_type TEXT",                         // migrate.ts ≈120 (issue #205)
+    "scratch TEXT",                                    // migrate.ts ≈136
+    "restart_count INTEGER NOT NULL DEFAULT 0",        // migrate.ts ≈145
+    "owner TEXT",                                      // migrate.ts ≈160 (issue #205; + backfill below)
   ],
   workflow_approvals: [
-    "kind TEXT NOT NULL DEFAULT 'approve'",            // migrate.ts:111
-    "artifact TEXT",                                   // migrate.ts:120
+    "kind TEXT NOT NULL DEFAULT 'approve'",            // migrate.ts ≈174
+    "artifact TEXT",                                   // migrate.ts ≈183
   ],
   executions: [
-    "session_id TEXT",                                 // migrate.ts:128
-    "cost_usd REAL",                                   // migrate.ts:137-162 (loop)
+    "triggered_by TEXT",                               // migrate.ts ≈120 (issue #205)
+    "trigger_actor_type TEXT",                         // migrate.ts ≈120 (issue #205)
+    "session_id TEXT",                                 // migrate.ts ≈191
+    "cost_usd REAL",                                   // migrate.ts ≈199-232 (loop)
     "input_tokens INTEGER",
     "cache_creation_input_tokens INTEGER",
     "cache_read_input_tokens INTEGER",
@@ -271,6 +278,15 @@ export async function applyLegacySqliteCompat(client: Client): Promise<void> {
       const name = def.split(" ")[0];
       if (!cols.has(name)) {
         await client.execute(`ALTER TABLE ${table} ADD COLUMN ${def}`);
+        // owner (issue #205) carries a one-time data backfill in the same
+        // guarded step (migrate.ts ≈159-168). sqlite-only json_extract — fine
+        // here (this pre-step is sqlite-only); idempotent via WHERE owner IS NULL.
+        if (table === "workflow_runs" && name === "owner") {
+          await client.execute(
+            `UPDATE workflow_runs SET owner = json_extract(context, '$.owner')
+              WHERE owner IS NULL AND context IS NOT NULL`,
+          );
+        }
       }
     }
   }
@@ -278,8 +294,10 @@ export async function applyLegacySqliteCompat(client: Client): Promise<void> {
 }
 ```
 
-(The `idx_executions_workflow_run` index from `migrate.ts:170-176` needs no
-compat step — the baseline's `CREATE INDEX IF NOT EXISTS` handles it.)
+(The `idx_executions_workflow_run` index from `migrate.ts` ≈233-239 needs no
+compat step — the baseline's `CREATE INDEX IF NOT EXISTS` handles it. The
+`users` table is a plain `CREATE TABLE IF NOT EXISTS` (not an ALTER), so the
+baseline creates it complete — no per-column compat entry is needed for it.)
 
 **2. The messaging `UNIQUE(platform,…)` table rebuild**, ported verbatim in
 spirit from `src/connectors/messaging/session-manager.ts:89-133` (SQLite's
@@ -351,9 +369,12 @@ covers it, same boot, before any writes.)
 
 ## `src/state/db.ts` rewrite
 
-Keep the re-export block (`db.ts:13-18`) exactly as is — `db.ts` stays the
+Keep the re-export block (`db.ts` ≈13-21) exactly as is — `db.ts` stays the
 single import surface for `ExecutionRecord` / `WorkflowApproval` /
-`WorkflowRun` / the store classes. The class becomes an async factory:
+`WorkflowRun` / `User` / `TriggerActorType` / `TRIGGER_ACTOR_TYPES` /
+`isTriggerActorType` / the store classes (incl. `UserStore`, issue #205). The
+class becomes an async factory (import `UserStore` from `./user-store.js`
+alongside the other stores):
 
 ```ts
 import { createClient, type Client } from "@libsql/client";
@@ -365,13 +386,14 @@ import * as sqliteSchema from "./schema/sqlite.js";
 import { applyLegacySqliteCompat } from "./legacy-sqlite.js";
 import type { StateClient, Dialect } from "./client.js";
 
-// Resolves from BOTH src/state/ and dist/state/ to the repo-root drizzle/sqlite.
+// Resolves from BOTH src/state/ and dist/state/ to the apps/server/ package-root drizzle/sqlite.
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../drizzle/sqlite", import.meta.url));
 
 export class StateDb {
   readonly executions: ExecutionStore;
   readonly approvals: ApprovalStore;
   readonly runs: WorkflowRunStore;
+  readonly users: UserStore;   // issue #205
 
   private constructor(
     private readonly _client: StateClient,
@@ -381,6 +403,7 @@ export class StateDb {
     this.executions = new ExecutionStore(_client);
     this.approvals = new ApprovalStore(_client);
     this.runs = new WorkflowRunStore(_client, { approvals: this.approvals });
+    this.users = new UserStore(_client);   // issue #205
   }
 
   /**
@@ -560,6 +583,29 @@ normalization where the record types use optionals.
 | `incrementRestartCount` :338 | builder update with `sql\`COALESCE(${t.restartCount}, 0) + 1\`` + `.returning({ restartCount })` (sqlite RETURNING — portable to pg) — collapses the update+select pair (:340-347) | |
 | `deserialize` :350 | drop `JSON.parse` ×3; keep `restartCount ?? 0`; `nullsToUndefined` | |
 | named ops :403-479 | see Transaction plumbing | |
+
+### `UserStore` (`src/state/user-store.ts`, issue #205)
+
+All plain CRUD — no transactions, no sql-specific SQL — so every method moves
+to the query builder. Both upserts key on **stable ids** (never on `email`,
+which is non-unique): `getOrCreateUserByGithub` on `github_id`,
+`upsertSlackUser` on `slack_user_id` / email-match / insert. Port the
+read-then-write upserts to `.onConflictDoUpdate({ target, set })` on the
+unique column (mirrors the cron/workflow-override upserts), or keep the
+existing find-then-update/insert shape awaited — either is portable.
+
+| Method (line) | Port | Notes |
+|---|---|---|
+| `getOrCreateUserByGithub` :74 | builder find-by-`github_id` then update-or-insert, OR `.onConflictDoUpdate({ target: users.githubId, set })` | refreshes login/name/email/avatar + `last_login_at`/`updated_at`; boolean flags mapped |
+| `upsertSlackUser` :130 | builder: fast-path find by `slack_user_id` → update; else `findByEmail` → `linkSlackUser` + update; else insert a Slack-only row | `email` match is a plain `eq`, NOT unique |
+| `linkSlackUser` :173 | builder update | |
+| `getById` :180 / `findByGithubId` :187 / `findByLogin` :195 / `findBySlackUserId` :214 | builder select limit 1 | |
+| `findByEmail` :207 | builder `orderBy(asc(users.createdAt)).limit(1)` — deterministic earliest match (`email` is non-unique) | |
+| `deserialize` :221 | shrink to `nullsToUndefined` — builder rows are camelCase and `is_blocked` / `email_is_placeholder` arrive as real booleans (drop the `=== 1` compares at :230-231) | boolean columns |
+
+No transactions or raw sql, so `UserStore` needs no `dbc` parameter and no
+`rows()`/`run()` usage. Its `tests/state/user-store.test.ts` folds into the
+Phase 3 factory.
 
 ### `SessionManager` (`src/connectors/messaging/session-manager.ts`)
 
@@ -771,20 +817,23 @@ text, fix the snapshot, not the code.
 
 Order matters — remove code first, then the package:
 
-1. `grep -rn better-sqlite3 src tests` → must return **empty**. Known
-   stragglers to sweep: `src/index.ts:422-430` (comment),
+1. `grep -rn better-sqlite3 src tests` (from `apps/server/`) → must return
+   **empty**. Known stragglers to sweep: `src/index.ts:422-430` (comment),
    `tests/connectors/slack/connector.test.ts:4`,
    `tests/connectors/messaging/session-manager.test.ts:2`,
-   `tests/state/workflow-run-store.test.ts:2`, and the deleted
-   `src/state/migrate.ts`.
-2. `npm rm better-sqlite3 @types/better-sqlite3`.
-3. `npm run build && npx vitest run` — full suite green without the module
-   installed (catches any dynamic import).
+   `tests/state/workflow-run-store.test.ts:2`,
+   `src/state/user-store.ts:1` (its `import type Database` — issue #205; the
+   store's `db: Database.Database` field becomes `StateClient`), and the
+   deleted `src/state/migrate.ts`.
+2. `pnpm --filter lastlight-core remove better-sqlite3 @types/better-sqlite3`.
+3. `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test` —
+   full suite green without the module installed (catches any dynamic import).
 
 ## Verification
 
-Beyond the standard `npm run build && npx vitest run` +
-`cd dashboard && npx tsc -b` (admin routes touched):
+Beyond the standard `pnpm --filter lastlight-core build &&
+pnpm --filter lastlight-core test` +
+`pnpm --filter @lastlight/dashboard typecheck` (admin routes touched):
 
 ### Prod-shape smoke (mandatory — this is the phase that touches prod data)
 
@@ -797,7 +846,8 @@ Beyond the standard `npm run build && npx vitest run` +
 2. Boot the state layer against it:
 
    ```bash
-   npx tsx --eval '
+   # from apps/server/
+   pnpm --filter lastlight-core exec tsx --eval '
      const { StateDb } = await import("./src/state/db.ts");
      const db = await StateDb.open(process.env.SMOKE_DB);
      console.log("runs:", (await db.runs.list({ limit: 5 })).total);
@@ -812,7 +862,7 @@ Beyond the standard `npm run build && npx vitest run` +
    present) and the migrator should apply exactly the baseline.
 3. `sqlite3 <copy> 'SELECT * FROM __drizzle_migrations;'` → exactly one row.
    `sqlite3 <copy> 'PRAGMA integrity_check;'` → `ok`.
-4. Optional full boot: `DB_PATH=<copy> npm run dev`, open the dashboard,
+4. Optional full boot: `DB_PATH=<copy> pnpm --filter lastlight-core dev`, open the dashboard,
    confirm the workflow-runs list, a run's phase detail, and the chat
    sessions tab all show **historical** data (this exercises the wire-format
    mapping against real rows, including pre-`workflow_run_id` legacy rows).
@@ -911,9 +961,11 @@ transactions too (where the mutex is equally harmless).
   install needed any fallback.
 - **Migrations folder resolution**: `new URL("../../drizzle/sqlite",
   import.meta.url)` must resolve from `src/state/` (tsx dev) AND
-  `dist/state/` (compiled) to the repo-root `drizzle/`. Verify both:
-  `npm run dev` boot and `npm run build && node -e 'import("./dist/state/db.js").then(m => m.StateDb.open(":memory:"))'`.
-  (npm-tarball resolution is Phase 5's `files` change.)
+  `dist/state/` (compiled) to the `apps/server/` package-root `drizzle/`.
+  Verify both: `pnpm --filter lastlight-core dev` boot and
+  `pnpm --filter lastlight-core build && node -e 'import("./dist/state/db.js").then(m => m.StateDb.open(":memory:"))'`
+  (the `node -e` run from `apps/server/`). (npm-tarball resolution is
+  Phase 5's `files` change.)
 - **Timestamps**: everything stays ISO-8601 TEXT — no `Date` objects should
   appear in any row type. If a builder column was accidentally declared with
   a timestamp mode in Phase 1, rows will come back as `Date` and comparisons
@@ -928,15 +980,17 @@ transactions too (where the mutex is equally harmless).
 - [ ] `StateDb.open(dbPath?)` / `StateDb.fromClient(client, dialect)` are the
   only construction paths; `get client()` / `get dialect()` replace
   `get database()`; `src/index.ts:142-146` updated.
-- [ ] All three stores + SessionManager contain zero `better-sqlite3` types,
-  zero manual `JSON.parse`/`stringify` for json-mode columns, zero
-  `=== 0`/`=== 1` boolean compares on mapped rows.
+- [ ] All four stores (incl. `UserStore`) + SessionManager contain zero
+  `better-sqlite3` types, zero manual `JSON.parse`/`stringify` for json-mode
+  columns, zero `=== 0`/`=== 1` boolean compares on mapped rows (UserStore's
+  `is_blocked` / `email_is_placeholder` `=== 1` compares are gone).
 - [ ] The five named ops run in `client.transaction`; the trailing-`dbc`
   participants are exactly the listed methods; rollback + double-responder
   tests green.
 - [ ] `/admin/api/executions` returns snake_case (pin test green);
   `/workflow-runs*` responses byte-identical in shape to before;
-  `cd dashboard && npx tsc -b` green with **zero dashboard changes**.
+  `pnpm --filter @lastlight/dashboard typecheck` green with **zero dashboard
+  changes**.
 - [ ] `grep -rn better-sqlite3 src tests` empty; `better-sqlite3` +
   `@types/better-sqlite3` removed from package.json; full suite green.
 - [ ] Prod-shape smoke passed (twice, idempotent; `__drizzle_migrations` =
