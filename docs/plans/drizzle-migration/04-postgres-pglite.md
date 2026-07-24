@@ -346,11 +346,17 @@ if (/^postgres(ql)?:\/\//i.test(url)) {
 }
 ```
 
-This is what keeps `pg`/PGlite out of runtime dependencies: `open()` never
-constructs a PG client, so no runtime module imports a PG driver, and a
-misconfigured `DATABASE_URL` (Phase 5 adds the slot) fails loudly at boot
+This is what keeps `pg`/PGlite out of runtime dependencies *through Phase 5*:
+`open()` never constructs a PG client, so no runtime module imports a PG driver,
+and a misconfigured `DATABASE_URL` (Phase 5 adds the slot) fails loudly at boot
 instead of half-working. Add a small test for the throw (message
 substring) — it can live in the existing `db` test file or `db.pg.test.ts`.
+
+> **Phase 6 replaces this throw** with a real node-postgres branch
+> ([06-prod-postgres.md](06-prod-postgres.md) §2): the throw is the correct,
+> intended behavior for phases 4–5 (PG is test-only via `fromClient`), and its
+> removal in Phase 6 is a deliberate scope extension, not drift. Keep the throw
+> test until Phase 6, then swap it for the postgres-branch boot test.
 
 ## 6. package.json + CI
 

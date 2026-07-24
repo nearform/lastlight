@@ -203,8 +203,15 @@ dispatch after the atomic op returns).
 
 ## Non-goals
 
-No sqlite→pg data migration tooling. No production Postgres service —
+No sqlite→pg data migration tooling (stays an optional follow-on — see
+[06-prod-postgres.md](06-prod-postgres.md) §8). CLI untouched. Dashboard code
+untouched (wire format preserved server-side). Sandbox/docker integration tests
+unaffected.
+
+**Through Phase 5**, also a non-goal: a production Postgres service —
 `StateDb.open` recognizes a `postgres://` URL and throws an informative "PG
 runtime not enabled" error; PG entry is `fromClient` (tests) only, keeping `pg`
-out of runtime deps. CLI untouched. Dashboard code untouched (wire format
-preserved server-side). Sandbox/docker integration tests unaffected.
+out of runtime deps. **Phase 6 removes this non-goal** —
+[06-prod-postgres.md](06-prod-postgres.md) replaces the throw with a real
+node-postgres pool client and adds `pg` as a runtime dep (lazily imported, so
+sqlite deployments still never load it), making Postgres operator-selectable.

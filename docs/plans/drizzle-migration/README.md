@@ -29,6 +29,11 @@ each must leave the repo green before the next starts.
 - [ ] **Phase 5** — [05-config-packaging-release.md](05-config-packaging-release.md)
   — config slot, Dockerfile, docs-sync, prod cutover runbook, npm release
   *(risk: low-medium)*
+- [ ] **Phase 6** — [06-prod-postgres.md](06-prod-postgres.md) — **activate the
+  production Postgres runtime**: node-postgres pool + `pg` runtime dep, `open()`
+  builds a real PG client instead of throwing, full state suite green against a
+  real Postgres server, credential redaction, deploy docs + release. Amends
+  locked decision 3 (test-only → operator-selectable). *(risk: medium)*
 
 Architecture reference (read before any phase):
 [00-architecture.md](00-architecture.md).
@@ -57,9 +62,12 @@ Architecture reference (read before any phase):
    natively async so SQLite and PG code paths share one shape (including async
    transactions); prebuilt binaries let us drop `python3 make g++` from the
    Dockerfile; reads the existing `lastlight.db` via `file:` URL.
-3. **PG scope**: working `pgTable` schema + dialect-ported SQL, state test
-   suite green on PGlite in CI. **No prod PG deployment, no sqlite→pg data
-   migration.**
+3. **PG scope** *(amended by Phase 6 — see below)*: working `pgTable` schema +
+   dialect-ported SQL, state test suite green on PGlite in CI. **Through Phase 5:
+   no prod PG deployment, no sqlite→pg data migration.** Phase 6 lifts the "no
+   prod PG deployment" half of this (activates a real node-postgres runtime so
+   operators can select Postgres); the "no sqlite→pg data migration" half still
+   holds (that stays an optional follow-on CLI, [06](06-prod-postgres.md) §8).
 4. **Real JSON columns on Postgres** — `jsonb` (paired with sqlite
    `text({mode:'json'})`), not text-blob JSON.
 5. Pin the latest **stable** drizzle-orm / drizzle-kit (the finius reference
