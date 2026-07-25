@@ -72,6 +72,30 @@ describe("git-auth — global ~/.gitconfig writes are opt-in", () => {
     expect(out.token).toBe("ghs_testtoken123");
     expect(out.expiresAt).toBe("2099-01-01T00:00:00Z");
   });
+
+  it("logs the GRANTED repository_selection + permissions from the mint response (issue #215)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          token: "ghs_scoped",
+          expires_at: "2099-01-01T00:00:00Z",
+          repository_selection: "selected",
+          permissions: { issues: "write", pull_requests: "write", contents: "write" },
+          repositories: [{ full_name: "owner/private-repo-a" }],
+        }),
+      }),
+    );
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await refreshGitAuth({ ...baseConfig, repositories: ["private-repo-a"] });
+
+    const line = log.mock.calls.map((c) => String(c[0])).find((s) => s.includes("Mint granted"))!;
+    expect(line).toContain("repository_selection=selected");
+    expect(line).toContain('"issues":"write"');
+    expect(line).toContain("owner/private-repo-a");
+    log.mockRestore();
+  });
 });
 
 describe("git-auth — opt-in global writes use execFileSync safely", () => {
