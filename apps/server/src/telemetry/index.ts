@@ -1,7 +1,9 @@
 import { context, SpanStatusCode, trace, metrics, type Span, type SpanOptions } from "@opentelemetry/api";
 import { NodeSDK } from "@opentelemetry/sdk-node";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { OTLPTraceExporter as OTLPTraceExporterProto } from "@opentelemetry/exporter-trace-otlp-proto";
+import { OTLPTraceExporter as OTLPTraceExporterJson } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPMetricExporter as OTLPMetricExporterProto } from "@opentelemetry/exporter-metrics-otlp-proto";
+import { OTLPMetricExporter as OTLPMetricExporterJson } from "@opentelemetry/exporter-metrics-otlp-http";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
@@ -59,6 +61,34 @@ const EXPLICIT_CONTENT_ATTR_ALLOWLIST = new Set([
 let sdk: NodeSDK | undefined;
 let enabled = false;
 let includeContent = false;
+
+/**
+ * Resolve the OTLP/HTTP encoding for a signal from the standard env vars —
+ * signal-specific (`OTEL_EXPORTER_OTLP_{TRACES,METRICS}_PROTOCOL`) wins over the
+ * generic `OTEL_EXPORTER_OTLP_PROTOCOL`, defaulting to `http/protobuf` (the OTLP
+ * spec default). We bundle only the two HTTP transports; `grpc` (or anything
+ * unrecognized) warns and falls back to protobuf. Protobuf is the right default:
+ * many OTLP backends (e.g. Arize Phoenix) accept protobuf only and 415 on JSON.
+ */
+export function resolveOtlpProtocol(signalEnv: string | undefined): "http/protobuf" | "http/json" {
+  const raw = (signalEnv || process.env.OTEL_EXPORTER_OTLP_PROTOCOL || "").trim().toLowerCase();
+  if (raw === "http/json") return "http/json";
+  if (raw === "" || raw === "http/protobuf") return "http/protobuf";
+  console.warn(`[otel] unsupported OTEL_EXPORTER_OTLP_PROTOCOL "${raw}"; using http/protobuf`);
+  return "http/protobuf";
+}
+
+function makeTraceExporter() {
+  return resolveOtlpProtocol(process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL) === "http/json"
+    ? new OTLPTraceExporterJson()
+    : new OTLPTraceExporterProto();
+}
+
+function makeMetricExporter() {
+  return resolveOtlpProtocol(process.env.OTEL_EXPORTER_OTLP_METRICS_PROTOCOL) === "http/json"
+    ? new OTLPMetricExporterJson()
+    : new OTLPMetricExporterProto();
+}
 const tracer = () => trace.getTracer("lastlight");
 const meter = () => metrics.getMeter("lastlight");
 
@@ -110,8 +140,8 @@ export async function initTelemetry(config: OtelConfig, opts: { packageVersion?:
     });
     sdk = new NodeSDK({
       resource,
-      traceExporter: new OTLPTraceExporter(),
-      metricReader: new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter() }),
+      traceExporter: makeTraceExporter(),
+      metricReader: new PeriodicExportingMetricReader({ exporter: makeMetricExporter() }),
     });
     await sdk.start();
     enabled = true;

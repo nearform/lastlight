@@ -1,11 +1,31 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, isTelemetryEnabled, safeMetricAttributes, shutdownTelemetry, withSpan } from "#src/telemetry/index.js";
+import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, isTelemetryEnabled, resolveOtlpProtocol, safeMetricAttributes, shutdownTelemetry, withSpan } from "#src/telemetry/index.js";
 import { OTEL_COLLECTOR_SANDBOX_ENDPOINT } from "#src/sandbox/egress-firewall-config.js";
 
 describe("telemetry helpers", () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
     await shutdownTelemetry();
+  });
+
+  it("defaults OTLP protocol to http/protobuf (Phoenix and most backends reject JSON)", () => {
+    expect(resolveOtlpProtocol(undefined)).toBe("http/protobuf");
+  });
+
+  it("honors OTEL_EXPORTER_OTLP_PROTOCOL=http/json (opt-in)", () => {
+    vi.stubEnv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json");
+    expect(resolveOtlpProtocol(undefined)).toBe("http/json");
+  });
+
+  it("lets a signal-specific protocol override the generic one", () => {
+    vi.stubEnv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json");
+    // signal arg (e.g. OTEL_EXPORTER_OTLP_TRACES_PROTOCOL) wins
+    expect(resolveOtlpProtocol("http/protobuf")).toBe("http/protobuf");
+  });
+
+  it("falls back to protobuf for grpc/unknown protocols", () => {
+    expect(resolveOtlpProtocol("grpc")).toBe("http/protobuf");
+    expect(resolveOtlpProtocol("nonsense")).toBe("http/protobuf");
   });
 
   it("is no-op safe when disabled", async () => {
