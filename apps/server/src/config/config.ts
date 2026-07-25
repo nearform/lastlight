@@ -689,6 +689,7 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   setBoolEnv(otel, "includeContent", env.LASTLIGHT_OTEL_INCLUDE_CONTENT);
   setBoolEnv(otel, "forwardToSandbox", env.LASTLIGHT_OTEL_FORWARD_TO_SANDBOX);
   setBoolEnv(otel, "strict", env.LASTLIGHT_OTEL_STRICT);
+  setBoolEnv(otel, "metrics", env.LASTLIGHT_OTEL_METRICS_ENABLED);
   if (Object.keys(otel).length) layer.otel = otel;
 
   const concurrency: Record<string, unknown> = {};
@@ -738,6 +739,7 @@ function normalizeOtelFileConfig(raw: Record<string, unknown>): OtelConfig {
     includeContent: raw.includeContent === true,
     forwardToSandbox: raw.forwardToSandbox === false ? false : true,
     strict: raw.strict === true,
+    metrics: raw.metrics === false ? false : true,
     collectorHosts: parseCollectorHosts(raw.collectorHosts, "otel.collectorHosts"),
   };
 }

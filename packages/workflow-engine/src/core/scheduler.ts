@@ -3,6 +3,7 @@ import type { TemplateContext } from "./templates.js";
 import { renderTemplate } from "./templates.js";
 import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
 import { PhaseExecutor, type PhaseRunContext } from "./phase-executor.js";
+import { OPENINFERENCE_CHAIN, OPENINFERENCE_SPAN_KIND } from "./types.js";
 import type {
   EnginePorts,
   PhaseReporter,
@@ -64,6 +65,18 @@ export async function runWorkflowCore(
 ): Promise<WorkflowResult> {
   const { definition, ctx, config, triggerId, githubAccess, workflowId } = runScope;
   const { reporter, resolver, ports, store: db, reporterActive, capabilities } = deps;
+
+  // The run-level span — the CHAIN root the phase (CHAIN) and agent (AGENT) spans
+  // nest under, so a Phoenix trace renders workflow → phase → agent → turn → tool.
+  const runSpanAttrs = {
+    "workflow.name": definition.name,
+    "workflow.run_id": workflowId,
+    "trigger.id": triggerId,
+    repo: githubAccess.repo,
+    "sandbox.backend": config.sandbox,
+    [OPENINFERENCE_SPAN_KIND]: OPENINFERENCE_CHAIN,
+  };
+  return ports.observability.withSpan("lastlight.workflow.run", runSpanAttrs, async () => {
 
   const phases: PhaseResult[] = [];
 
@@ -269,6 +282,8 @@ export async function runWorkflowCore(
   }
 
   return { success, phases, prNumber };
+
+  });
 }
 
 export type { AgentWorkflowDefinition, TemplateContext };

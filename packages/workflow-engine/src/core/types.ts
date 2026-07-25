@@ -12,6 +12,20 @@
  * `../config`, etc. — the dependency-cruiser boundary gate enforces that.
  */
 
+// ── OpenInference span vocabulary ────────────────────────────────────────────
+//
+// The engine tags its workflow/phase spans as OpenInference `CHAIN` spans so an
+// OpenInference-aware backend (e.g. Arize Phoenix) renders a run as a proper
+// tree (workflow → phase → agent). The engine depends only on zod, so it can't
+// import the app's `telemetry/openinference.ts`; it passes these string literals
+// through the injected `ObservabilityPort.withSpan` attrs instead. Keep the
+// key/value in sync with `apps/server/src/telemetry/openinference.ts`.
+
+/** OpenInference span-kind attribute key. */
+export const OPENINFERENCE_SPAN_KIND = "openinference.span.kind";
+/** OpenInference span kind for a deterministic step that orchestrates children. */
+export const OPENINFERENCE_CHAIN = "CHAIN";
+
 // ── Config sub-types (were in config/config.ts) ──────────────────────────────
 
 /** Workflow sandbox backend. */
@@ -28,6 +42,13 @@ export interface OtelConfig {
   forwardToSandbox: boolean;
   strict: boolean;
   collectorHosts: string[];
+  /**
+   * Export OTLP metrics. Default true. Set false for a traces-only backend that
+   * rejects the metrics signal (e.g. Arize Phoenix ingests traces but not OTLP
+   * metrics) — the metric reader is then never started, so nothing is exported
+   * to a metrics endpoint that would 404/415.
+   */
+  metrics: boolean;
 }
 
 // ── ExecutorConfig (was in engine/github/profiles.ts) ────────────────────────

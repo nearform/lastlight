@@ -228,6 +228,7 @@ describe('loadConfig — otel', () => {
       includeContent: false,
       forwardToSandbox: true,
       strict: false,
+      metrics: true,
       collectorHosts: [],
     });
   });

@@ -528,6 +528,12 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td>Throw on OTEL init/export-setup failure instead of warning and continuing without telemetry.</td>
 			</tr>
 			<tr>
+				<td><code>LASTLIGHT_OTEL_METRICS_ENABLED</code></td>
+				<td>No</td>
+				<td><code>true</code></td>
+				<td>Export OTLP metrics. Set <code>false</code> for a traces-only backend that rejects the metrics signal (e.g. Arize Phoenix) — the metric reader is never started, so nothing hits a metrics endpoint that would 404/415. Traces still flow. Overlay key: <code>otel.metrics</code>.</td>
+			</tr>
+			<tr>
 				<td><code>LASTLIGHT_OTEL_COLLECTOR_HOSTS</code></td>
 				<td>No</td>
 				<td>—</td>

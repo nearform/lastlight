@@ -10,6 +10,7 @@ import {
 import type { SandboxBackend } from "../config/config.js";
 import type { PrePopulateSpec, SandboxFactory } from "../sandbox/sandbox.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
+import { OI, SpanKind, splitProviderModel } from "../telemetry/openinference.js";
 import { DEFAULT_MODEL } from "./executors/shared.js";
 import { PROVIDER_ENV_KEYS, providerByPrefix } from "lastlight-shared/providers";
 import {
@@ -287,18 +288,26 @@ export async function executeAgent(
   // doomed pre-clone). Don't burn a sandbox on a toolless run.
   if (mintError) return mintFailureResult(access, mintError);
 
+  const runModel = config.model || DEFAULT_MODEL;
+  const { system, modelName } = splitProviderModel(runModel);
   const spanAttrs = safeSpanAttributes({
     "agent.runtime": "agentic-pi",
     "sandbox.backend": backend,
     "task.id": taskId,
     repo: access?.repo,
     "github.profile": access?.profile,
-    model: config.model || DEFAULT_MODEL,
+    model: runModel,
     variant: config.variant,
     "web_search.enabled": config.webSearch === true,
     unrestricted_egress: config.unrestrictedEgress === true,
     "workflow.name": config.telemetry?.workflowName,
     "phase.name": config.telemetry?.phaseName,
+    // OpenInference: render this as an AGENT span (model/tokens/cost) in Phoenix.
+    // The keys survive safeSpanAttributes (they don't match the content scrubber);
+    // per-turn tokens + cost are set later via the AgentSpanTree + setSpanAttributes.
+    [OI.SPAN_KIND]: SpanKind.AGENT,
+    ...(modelName ? { [OI.LLM_MODEL_NAME]: modelName } : {}),
+    ...(system ? { [OI.LLM_SYSTEM]: system } : {}),
   });
 
   const ctx: SandboxRunContext = {
@@ -312,7 +321,7 @@ export async function executeAgent(
     onSessionId: opts?.onSessionId,
     sandboxFactory: opts?.sandboxFactory,
   };
-  return withSpan("lastlight.agent.execute", spanAttrs, () => runSandboxedAgent(prompt, ctx));
+  return withSpan("lastlight.agent.execute", spanAttrs, (span) => runSandboxedAgent(prompt, ctx, span));
 }
 
 // ── Deterministic command path (type: bash / type: script) ───────────

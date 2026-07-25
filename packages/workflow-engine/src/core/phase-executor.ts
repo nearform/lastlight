@@ -5,6 +5,7 @@ import type {
   GitSandboxAccess,
   CommandSpec,
 } from "./types.js";
+import { OPENINFERENCE_CHAIN, OPENINFERENCE_SPAN_KIND } from "./types.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "./schema.js";
 import { phaseSkillNames } from "./schema.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
@@ -381,6 +382,7 @@ export async function runPhase(
     "issue.number": issueNumberFromTrigger(triggerId),
     "sandbox.backend": config.sandbox,
     model: modelOverride || config.model,
+    [OPENINFERENCE_SPAN_KIND]: OPENINFERENCE_CHAIN,
   };
   const baseConfig = modelOverride ? { ...config, model: modelOverride } : config;
   const phaseConfigBase = variantOverride ? { ...baseConfig, variant: variantOverride } : baseConfig;
@@ -422,6 +424,7 @@ export async function runCommandPhase(
     "issue.number": issueNumberFromTrigger(triggerId),
     "sandbox.backend": config.sandbox,
     model: spec.kind,
+    [OPENINFERENCE_SPAN_KIND]: OPENINFERENCE_CHAIN,
   };
   const phaseConfig: ExecutorConfig = { ...config, telemetry: { workflowName, phaseName, triggerId, workflowRunId } };
   return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, workflowRunId }, deps, (onSessionId) =>

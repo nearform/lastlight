@@ -107,6 +107,32 @@ export function telemetryIncludesContent(): boolean {
   return includeContent;
 }
 
+/**
+ * Set attributes DIRECTLY on a span, bypassing {@link safeSpanAttributes}' content
+ * scrubber. Use only for values that are non-sensitive by construction (span
+ * kinds, token counts, cost, model ids) or that the caller has already gated
+ * behind the include-content flag — the scrubber's `token`/`prompt`/`content`
+ * regex would otherwise silently strip OpenInference keys like
+ * `llm.token_count.prompt` and `input.value`. No-op when telemetry is disabled or
+ * the span is undefined. Strings are truncated to a generous limit; non-finite
+ * numbers and other non-primitives are skipped.
+ */
+export function setSpanAttributes(span: Span | undefined, attrs: TelemetryAttributes = {}): void {
+  // A defined span implies telemetry is enabled (withSpan hands out undefined
+  // when it isn't), so gating on the span alone is sufficient — and keeps this
+  // unit-testable with a stub span without booting the SDK.
+  if (!span) return;
+  for (const [key, value] of Object.entries(attrs)) {
+    if (typeof value === "string") {
+      span.setAttribute(key, value.length > 4096 ? value.slice(0, 4095) + "…" : value);
+    } else if (typeof value === "number" && Number.isFinite(value)) {
+      span.setAttribute(key, value);
+    } else if (typeof value === "boolean") {
+      span.setAttribute(key, value);
+    }
+  }
+}
+
 export function safeSpanAttributes(attrs: TelemetryAttributes = {}): Record<string, TelemetryPrimitive> {
   const out: Record<string, TelemetryPrimitive> = {};
   for (const [key, value] of Object.entries(attrs)) {
@@ -138,11 +164,19 @@ export async function initTelemetry(config: OtelConfig, opts: { packageVersion?:
       [ATTR_SERVICE_NAME]: config.serviceName,
       ...(opts.packageVersion ? { [ATTR_SERVICE_VERSION]: opts.packageVersion } : {}),
     });
+    // Metrics are opt-out: a traces-only backend (e.g. Arize Phoenix) rejects the
+    // OTLP metrics signal, so skip the reader entirely when disabled — the meter()
+    // API then hands back a no-op meter and recordExecutionMetrics/… silently do
+    // nothing, while traces still flow.
+    const metricsEnabled = config.metrics !== false;
     sdk = new NodeSDK({
       resource,
       traceExporter: makeTraceExporter(),
-      metricReader: new PeriodicExportingMetricReader({ exporter: makeMetricExporter() }),
+      ...(metricsEnabled
+        ? { metricReader: new PeriodicExportingMetricReader({ exporter: makeMetricExporter() }) }
+        : {}),
     });
+    if (!metricsEnabled) console.log("[otel] metrics disabled (traces only)");
     await sdk.start();
     enabled = true;
   } catch (err) {

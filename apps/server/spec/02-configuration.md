@@ -54,6 +54,17 @@ interface LastLightConfig {
     maxWorkflows: number;                 //   max runs executing at once (default 4)
     maxQueueWaitMs: number;               //   TTL before a queued run is dropped (default 1 hr)
   };
+  otel: OtelConfig;                       // OpenTelemetry export (off by default)
+}
+
+interface OtelConfig {
+  enabled: boolean;                       // master switch (LASTLIGHT_OTEL_ENABLED)
+  serviceName: string;                    // OTEL service.name (default "lastlight")
+  includeContent: boolean;                // attach prompt/message/tool content (default false)
+  forwardToSandbox: boolean;              // also emit telemetry from inside the sandbox (default true)
+  strict: boolean;                        // throw on OTEL init failure instead of warning (default false)
+  metrics: boolean;                       // export OTLP metrics (default true; false = traces only)
+  collectorHosts: string[];               // extra collector hosts for the gondolin egress allowlist
 }
 
 interface SlackConfig {
@@ -258,6 +269,28 @@ phase declared `web_search: true` in its YAML
 (`src/engine/agent-executor.ts:116–123`). Auto-detection precedence:
 Tavily > Exa > Brave. Provider API keys (Anthropic / OpenAI /
 OpenRouter) are forwarded unconditionally.
+
+### Telemetry (OpenTelemetry)
+
+Off by default; `LASTLIGHT_OTEL_ENABLED=true` is the master switch (a bare
+`OTEL_EXPORTER_OTLP_ENDPOINT` does **not** enable it). Standard `OTEL_*` vars
+configure the exporter endpoint/headers/resources. A run exports a nested
+OpenInference span tree — `lastlight.workflow.run` (CHAIN) → `.workflow.phase`
+(CHAIN) → `.agent.execute` (AGENT) → per-turn (LLM) → per-tool (TOOL) — with
+per-turn/per-run tokens + cost, so an OpenInference backend (e.g. Arize Phoenix)
+renders a proper agent tree. Constants: `src/telemetry/openinference.ts`; tree:
+`AgentSpanTree` (`src/telemetry/pi-events.ts`).
+
+| Var | Purpose | Default |
+|---|---|---|
+| `LASTLIGHT_OTEL_ENABLED` | master switch for all telemetry export | `false` |
+| `LASTLIGHT_OTEL_SERVICE_NAME` | OTEL `service.name` (also `OTEL_SERVICE_NAME`) | `lastlight` |
+| `LASTLIGHT_OTEL_INCLUDE_CONTENT` | attach (truncated) prompt/message/tool content to spans | `false` |
+| `LASTLIGHT_OTEL_FORWARD_TO_SANDBOX` | emit telemetry from inside the sandbox too | `true` |
+| `LASTLIGHT_OTEL_STRICT` | throw on OTEL init/export-setup failure instead of warning | `false` |
+| `LASTLIGHT_OTEL_METRICS_ENABLED` | export OTLP metrics; `false` = traces only, for a backend that rejects metrics (e.g. Phoenix) (overlay `otel.metrics`) | `true` |
+| `LASTLIGHT_OTEL_COLLECTOR_HOSTS` | extra collector hosts added to the gondolin egress allowlist | unset |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | OTLP/HTTP encoding: `http/protobuf` (default) or `http/json` | `http/protobuf` |
 
 ### Misc
 

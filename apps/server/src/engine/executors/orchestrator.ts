@@ -24,8 +24,10 @@ import {
 } from "../github/profiles.js";
 import { AgenticShim } from "../event-shim.js";
 import { projectSlugForCwd } from "../../session-log.js";
-import { recordError, recordExecutionMetrics } from "../../telemetry/index.js";
-import { recordPiEvent } from "../../telemetry/pi-events.js";
+import type { Span } from "@opentelemetry/api";
+import { recordError, recordExecutionMetrics, setSpanAttributes } from "../../telemetry/index.js";
+import { AgentSpanTree, recordPiEvent } from "../../telemetry/pi-events.js";
+import { OI, llmTokenAttributes } from "../../telemetry/openinference.js";
 import {
   DEFAULT_MODEL,
   RunResultAccumulator,
@@ -153,10 +155,15 @@ function hostRepoDirFor(
  * `executeSmol` / `executeInProcess` — the three slightly-different fallback
  * paths are converged into the single catch below.
  */
-export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext): Promise<ExecutionResult> {
+export async function runSandboxedAgent(
+  prompt: string,
+  ctx: SandboxRunContext,
+  span?: Span,
+): Promise<ExecutionResult> {
   const { config, access } = ctx;
   const startTime = Date.now();
   const model = config.model || DEFAULT_MODEL;
+  const includeContent = config.otel?.includeContent === true;
   const thinking = coerceThinking(config.variant);
   const profile = access ? AGENTIC_PROFILE_FOR[access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
@@ -188,12 +195,17 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
       initialPrompt: prompt,
     });
     const acc = new RunResultAccumulator();
+    // OpenInference span tree (turn = LLM, tool = TOOL) nested under the active
+    // `lastlight.agent.execute` (AGENT) span. No-ops when telemetry is off (span
+    // undefined). The flat pi.* events (recordPiEvent) stay as a fallback.
+    const tree = new AgentSpanTree({ parent: span, includeContent, model });
     let notifiedSessionId = false;
     const onEvent = (record: SandboxEvent): void => {
       acc.feed(record);
       shim.feed(record as Parameters<typeof shim.feed>[0]);
+      tree.feed(record);
       recordPiEvent(record, {
-        includeContent: config.otel?.includeContent === true,
+        includeContent,
         surface: "agent",
         workflowName: config.telemetry?.workflowName,
         phaseName: config.telemetry?.phaseName,
@@ -250,6 +262,7 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
       };
       recordError("agent", err, tags);
       recordExecutionMetrics("agent", { ...tags, durationMs });
+      tree.end();
       const synthesizedId = await shim
         .finalizeWithFallback(emptyResult("error_sandbox", durationMs), `exec-${basename(ctx.taskId)}`, msg)
         .catch(() => null);
@@ -266,6 +279,8 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
     }
 
     harvestArtifactsOut(artifacts);
+    // Close any turn/tool spans still open before we decorate the agent span.
+    tree.end();
 
     // Reconstruct the RunResult: the in-process adapter returns its
     // authoritative one; docker/smol return undefined → build from the
@@ -296,6 +311,26 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
       outputTokens: finalResult.outputTokens,
       "workflow.name": config.telemetry?.workflowName,
       "phase.name": config.telemetry?.phaseName,
+    });
+    // Decorate the AGENT span with the run's total tokens + cost (so Phoenix
+    // shows real figures, not $0) via the scrubber-bypassing path. input/output
+    // text are content — gated behind LASTLIGHT_OTEL_INCLUDE_CONTENT.
+    setSpanAttributes(span, {
+      ...llmTokenAttributes({
+        input: finalResult.inputTokens,
+        output: finalResult.outputTokens,
+        cacheRead: finalResult.cacheReadInputTokens,
+        cacheWrite: finalResult.cacheCreationInputTokens,
+        cost: finalResult.costUsd,
+      }),
+      ...(includeContent
+        ? {
+            [OI.INPUT_VALUE]: prompt,
+            [OI.INPUT_MIME_TYPE]: "text/plain",
+            [OI.OUTPUT_VALUE]: finalResult.output,
+            [OI.OUTPUT_MIME_TYPE]: "text/plain",
+          }
+        : {}),
     });
     return finalResult;
   });
