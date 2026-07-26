@@ -25,7 +25,7 @@ import { loadMergedConfig, resolvePhaseModel } from "./config.js";
 import { modelsArm, configArm, releaseOverlayGuard } from "./arm.js";
 import { collectMetrics } from "./metrics.js";
 
-const staticAuth = { getToken: async () => "fake-token", expiresAt: null };
+const staticAuth = { getToken: async () => "fake-token", expiresAt: null, canRefresh: false };
 
 describe("fake GitHub + agentic-pi github tools (baseUrl seam)", () => {
   it("serves seeded issues and records mutations made through the real GitHubClient", async () => {

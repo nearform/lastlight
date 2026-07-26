@@ -15,6 +15,15 @@ export interface GitHubAuth {
   getToken(): Promise<string>;
   /** When the cached App token expires (null for static-token mode). */
   readonly expiresAt: Date | null;
+  /**
+   * Whether this auth can mint a NEW token. App auth can (re-mint from the
+   * installation); a static injected `GITHUB_TOKEN` cannot — it's fixed for the
+   * life of the process. Consumers use this to report honestly from
+   * `github_refresh_git_auth` (which otherwise claims success while changing
+   * nothing) and to avoid advising a refresh that can't help — e.g. a sandbox
+   * run, where the harness injects a scoped token and clears the App key.
+   */
+  readonly canRefresh: boolean;
 }
 
 export interface GitHubAppAuthOptions {
@@ -81,6 +90,11 @@ export class GitHubAppAuth implements GitHubAuth {
   get expiresAt(): Date | null {
     return this._expiresAt;
   }
+
+  /** App auth re-mints installation tokens from the private key on demand. */
+  get canRefresh(): boolean {
+    return true;
+  }
 }
 
 class StaticTokenAuth implements GitHubAuth {
@@ -90,6 +104,10 @@ class StaticTokenAuth implements GitHubAuth {
   }
   get expiresAt(): Date | null {
     return null;
+  }
+  /** A fixed injected token has no private key to re-mint from — it's stuck. */
+  get canRefresh(): boolean {
+    return false;
   }
 }
 

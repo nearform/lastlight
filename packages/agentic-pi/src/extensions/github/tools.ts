@@ -39,7 +39,7 @@ function jsonContent(data: unknown) {
  * Wrap a handler so errors become structured JSON results instead of throws.
  * Matches mcp-github-app's `run()` helper exactly.
  */
-async function safeRun<T>(fn: () => Promise<T>) {
+async function safeRun<T>(fn: () => Promise<T>, canRefresh = true) {
   try {
     return jsonContent(await fn());
   } catch (err) {
@@ -54,7 +54,9 @@ async function safeRun<T>(fn: () => Promise<T>) {
       hint: isTransient
         ? "This is a transient error. The request was retried automatically but still failed. Wait and try again."
         : status === 401
-          ? "Authentication failed. Call github_refresh_git_auth to get a fresh token."
+          ? canRefresh
+            ? "Authentication failed. Call github_refresh_git_auth to get a fresh token."
+            : "Authentication failed and the token CANNOT be refreshed here — a fixed GITHUB_TOKEN was injected for this run, so github_refresh_git_auth can't re-mint it. Do not retry in a loop; report the auth failure."
           : null,
     });
   }
@@ -83,7 +85,7 @@ export function buildGitHubTools(
       description,
       parameters,
       async execute(_id, params) {
-        return safeRun(() => handler(params));
+        return safeRun(() => handler(params), auth.canRefresh);
       },
     });
 
@@ -140,7 +142,19 @@ export function buildGitHubTools(
         path: Type.String({ description: "Path to the git repository" }),
       }),
       async ({ path }) => {
-        // Refresh-if-expired; the (possibly new) token flows into every
+        // A static injected token has no private key to re-mint from — calling
+        // getToken() would hand back the SAME value. Report that honestly rather
+        // than a misleading `refreshed: true`, so the agent stops looping on a
+        // credential that can't change (the sandbox case).
+        if (!auth.canRefresh) {
+          return {
+            refreshed: false,
+            path,
+            reason:
+              "This run uses a fixed GITHUB_TOKEN that cannot be re-minted here; the credential is unchanged. If calls keep 401-ing the token is stuck — report the failure rather than retrying.",
+          };
+        }
+        // App auth: refresh-if-expired; the (possibly new) token flows into every
         // subsequent git child via gitAuthEnv (and the harness's ambient env in
         // the sandbox). No file to rewrite.
         await auth.getToken();

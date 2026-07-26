@@ -9,6 +9,7 @@ import type { GitHubAuth } from "../../../src/extensions/github/auth.js";
 const staticAuth: GitHubAuth = {
   getToken: async () => "test-token",
   expiresAt: null,
+  canRefresh: false,
 };
 
 /** A throwaway HTTP server that records the paths it was asked for. */

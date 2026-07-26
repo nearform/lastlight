@@ -3,6 +3,19 @@ name: check-prs-awaiting-review
 schedule: "*/30 * * * *"
 workflow: pr-review
 context:
-  mode: scan
+  # `discover: prs-awaiting-review` makes the cron runner (src/index.ts) find the
+  # open PRs needing review across managed repos IN CODE
+  # (src/cron/review-discovery.ts) and fan out one bounded single-PR `pr-review`
+  # run per PR — with prNumber + head ref set, the same shape the pr.opened
+  # webhook produces. This replaced the old `mode: scan` run: that single agent
+  # listed and reviewed PRs itself inside the sandbox, where it couldn't reliably
+  # authenticate (a static token it couldn't re-mint), couldn't pre-clone (no PR
+  # known up front), and had no way to hand its chosen PR to the post-review step
+  # — so it could never actually post a review. One PR per run fixes all three
+  # (real prNumber, fresh per-repo scoped token, pre-cloned head).
+  discover: prs-awaiting-review
 condition:
+  # Real-time review comes from the pr.opened webhook; this sweep is the fallback
+  # for deployments without webhooks configured (and a backstop for missed
+  # deliveries). Filtered out when webhooks are enabled.
   unless: webhooksEnabled

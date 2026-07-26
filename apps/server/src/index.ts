@@ -21,8 +21,8 @@ import {
   discoverGreenDependencyPrs,
   discoverRedDependencyPrs,
   type DependencyPr,
-  type PrDiscoveryClient,
 } from "./cron/dependabot-discovery.js";
+import { discoverPrsAwaitingReview } from "./cron/review-discovery.js";
 import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
@@ -742,20 +742,28 @@ async function main() {
     }
   }
 
-  // Dependency-PR discoverers keyed by a cron context's `discover` value. Each
-  // returns the eligible PRs (in code, no LLM); the runner fans out one run per
-  // PR. Add a discoverer + a `cron-*.yaml` with the matching `discover:` key to
-  // introduce a new backstop sweep.
-  const DEP_PR_DISCOVERERS: Record<
+  // PR discoverers keyed by a cron context's `discover` value. Each returns the
+  // eligible PRs (in code, no LLM) and the runner fans out one bounded single-PR
+  // run each (with prNumber + head ref) — the shape the pr.* webhooks produce.
+  // Add a discoverer + a `cron-*.yaml` with the matching `discover:` key to
+  // introduce a new sweep. The harness `github` client (App auth) is passed to
+  // every discoverer, so a discoverer only needs the subset of it it uses.
+  const PR_DISCOVERERS: Record<
     string,
     (
       repos: string[],
-      gh: PrDiscoveryClient,
+      gh: GitHubClient,
       opts: { log?: (msg: string) => void },
     ) => Promise<DependencyPr[]>
   > = {
     "green-dependency-prs": discoverGreenDependencyPrs,
     "red-dependency-prs": discoverRedDependencyPrs,
+    // The pr-review cron: find open PRs awaiting review and fan out one single-PR
+    // pr-review run each. Replaces the old `mode: scan` review run, which ran the
+    // whole listing/reviewing inside the sandbox with a static token it couldn't
+    // re-mint and no way to hand its chosen PR to post-review.
+    "prs-awaiting-review": (repos, gh, opts) =>
+      discoverPrsAwaitingReview(repos, gh, { ...opts, botLogin: config.botLogin }),
   };
 
   // Construct the cron scheduler before mounting admin so the dashboard can
@@ -773,7 +781,7 @@ async function main() {
     // we dispatch one run each — the same shape the pr.checks_passed /
     // pr.checks_failed webhooks produce. Runs queue against the global cap.
     const discoverKey = typeof context.discover === "string" ? context.discover : undefined;
-    const discoverer = discoverKey ? DEP_PR_DISCOVERERS[discoverKey] : undefined;
+    const discoverer = discoverKey ? PR_DISCOVERERS[discoverKey] : undefined;
     if (discoverer) {
       const repos = Array.isArray(context.repos)
         ? (context.repos as unknown[]).filter((r): r is string => typeof r === "string")

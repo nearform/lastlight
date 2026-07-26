@@ -32,6 +32,35 @@ export interface PostReviewRunScope {
 }
 
 /**
+ * Build post-review's own GitHub client from STABLE config, never the live
+ * `process.env`. A concurrent in-process (gondolin) run clears `GITHUB_APP_*`
+ * in the shared `process.env` (agent-executor `applyEnv`, hard rule #8) for the
+ * duration of its agent turn; reading the PEM path from `process.env` mid-clear
+ * yields `""` → `resolve("")` = the cwd (a directory) → `readFileSync` EISDIR.
+ * The pr-review cron surfaced this by fanning out concurrent runs, but it bites
+ * any two overlapping in-process runs. `getRuntimeConfig()` is loaded once at
+ * boot, so its `githubApp`/`githubToken` are immune to the race. Exported for
+ * the concurrent-clear regression test.
+ */
+export function resolveReviewGitHubClient(runConfig: { githubApiBaseUrl?: string }): GitHubClient {
+  const baseUrl = runConfig.githubApiBaseUrl;
+  if (baseUrl) {
+    // Eval / test path: the mock ignores auth; any bearer token works.
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "eval-fake-token";
+    return GitHubClient.withToken(token, baseUrl);
+  }
+  const cfg = getRuntimeConfig();
+  if (cfg?.githubApp) return new GitHubClient(cfg.githubApp);
+  if (cfg?.githubToken) return GitHubClient.withToken(cfg.githubToken);
+  // Last resort — runtime config not loaded (shouldn't happen in a live harness).
+  return new GitHubClient({
+    appId: process.env.GITHUB_APP_ID || "",
+    privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
+    installationId: process.env.GITHUB_APP_INSTALLATION_ID || "",
+  });
+}
+
+/**
  * The `type: post-review` phase — the one workflow body genuinely coupled to
  * GitHub, lifted out of the engine into an app-registered {@link PhaseTypeHandler}.
  *
@@ -185,17 +214,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
   /** Build the GitHub client for the post: token+baseUrl in evals, App auth in prod. */
   private buildReviewClient(): GitHubClient {
-    const baseUrl = this.run.config.githubApiBaseUrl;
-    if (baseUrl) {
-      // Eval / test path: the mock ignores auth; any bearer token works.
-      const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "eval-fake-token";
-      return GitHubClient.withToken(token, baseUrl);
-    }
-    return new GitHubClient({
-      appId: process.env.GITHUB_APP_ID || "",
-      privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
-      installationId: process.env.GITHUB_APP_INSTALLATION_ID || "",
-    });
+    return resolveReviewGitHubClient(this.run.config);
   }
 
   private gitHeadSha(repoDir: string): string | undefined {
