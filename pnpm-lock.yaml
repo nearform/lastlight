@@ -64,8 +64,8 @@ importers:
         specifier: ^1.27.0
         version: 1.27.0(react@19.2.8)
       marked:
-        specifier: ^11.2.0
-        version: 11.2.0
+        specifier: ^18.0.7
+        version: 18.0.7
       prismjs:
         specifier: ^1.30.0
         version: 1.30.0
@@ -246,8 +246,8 @@ importers:
         specifier: ^1.27.0
         version: 1.27.0(react@19.2.8)
       marked:
-        specifier: ^11.2.0
-        version: 11.2.0
+        specifier: ^18.0.7
+        version: 18.0.7
       prismjs:
         specifier: ^1.30.0
         version: 1.30.0
@@ -5028,13 +5028,13 @@ packages:
   markdown-table@3.0.4:
     resolution: {integrity: sha512-wiYz4+JrLyb/DqW2hkFJxP7Vd7JuTDm77fvbM8VfEQdmSMqcImWeeRbHwZjBjIFki/VaMK2BhFi7oUUZeM5bqw==}
 
-  marked@11.2.0:
-    resolution: {integrity: sha512-HR0m3bvu0jAPYiIvLUUQtdg1g6D247//lvcekpHO1WMvbwDlwSkZAX9Lw4F4YHE1T0HaaNve0tuAWuV1UJ6vtw==}
-    engines: {node: '>= 18'}
-    hasBin: true
-
   marked@18.0.5:
     resolution: {integrity: sha512-S6GcvALHg6K4ohtu4E7x0a1AqhAjp6cV8KhLSyN9qVapnzJkusVBxZRcIU9AeYsbe6P1hKDusSbEOzGyyuce6w==}
+    engines: {node: '>= 20'}
+    hasBin: true
+
+  marked@18.0.7:
+    resolution: {integrity: sha512-iDVQ5ldaiKXn6b2JroX5kgRfmwgqolW7NpaEzTl1k/2Zh1njIEN9yniyLV/mOvWwtsE8OGgkjsCYvijuPk1dtA==}
     engines: {node: '>= 20'}
     hasBin: true
 
@@ -11790,9 +11790,9 @@ snapshots:
 
   markdown-table@3.0.4: {}
 
-  marked@11.2.0: {}
-
   marked@18.0.5: {}
+
+  marked@18.0.7: {}
 
   math-intrinsics@1.1.0: {}
 
