@@ -22,7 +22,7 @@
     "prismjs": "^1.30.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "recharts": "^2.15.0"
+    "recharts": "^3.10.1"
   },
   "devDependencies": {
     "@types/dompurify": "^3.2.0",
