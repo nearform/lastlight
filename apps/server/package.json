@@ -73,7 +73,7 @@
     "@opentelemetry/semantic-conventions": "^1.41.1",
     "@sinclair/typebox": "^0.34.49",
     "@slack/bolt": "^5.0.0",
-    "@slack/web-api": "^7.16.0",
+    "@slack/web-api": "^8.0.0",
     "agentic-pi": "workspace:*",
     "arctic": "^3.7.0",
     "better-sqlite3": "^12.11.1",
