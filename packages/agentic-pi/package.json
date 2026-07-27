@@ -68,9 +68,9 @@
     "jsonwebtoken": "^9.0.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.3",
+    "@biomejs/biome": "2.5.5",
     "@types/node": "^26.1.1",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.1",
     "typescript": "^5.7.2"
   },
   "engines": {
