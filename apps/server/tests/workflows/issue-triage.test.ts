@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getWorkflow, getWorkflowByIntent } from "#src/workflows/loader.js";
+import { getWorkflow, getWorkflowByIntent, getCronWorkflows } from "#src/workflows/loader.js";
 
 /**
  * Contract test for the built-in issue-triage workflow. Loads the REAL
@@ -25,5 +25,17 @@ describe("issue-triage — built-in workflow", () => {
 
   it("is resolvable by the triage intent", () => {
     expect(getWorkflowByIntent("triage")?.name).toBe("issue-triage");
+  });
+
+  it("is dispatched by the triage-new-issues cron, so the marker covers cron runs too", () => {
+    // The every-15-min scan (webhooks-disabled backstop) is exactly the
+    // batch/cron path that produced the false-green bail this marker fixes. If
+    // this `workflow:` wiring drifts — a rename, an accidental edit — the marker
+    // enforcement silently stops applying to cron-triggered runs, and nothing
+    // else catches it. (Mirrors dependabot-pr-merge.test.ts's cron coverage.)
+    const cron = getCronWorkflows().find((c) => c.workflow === "issue-triage");
+    expect(cron).toBeDefined();
+    expect(cron!.name).toBe("triage-new-issues");
+    expect(cron!.context?.mode).toBe("scan");
   });
 });
