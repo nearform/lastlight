@@ -417,7 +417,20 @@ harness's own Hono app.
   (present only when the run has a token) best-effort tars `.lastlight/` and
   `curl -X POST`s it to the route after the agent exits (`|| true` — an
   upload hiccup must never turn a successful agent run into a reported
-  failure), bearer-authenticated with the same token pattern in reverse.
+  failure), bearer-authenticated with the same token pattern in reverse. The
+  `artifactStore` is **host-local on every backend** (`LocalArtifactBackend`),
+  so the uploaded bytes land at `<sandboxDir>/<taskId>/.lastlight/` on the
+  *harness*, not in-cluster — which is why they need harness-side reclaiming
+  (see below), independent of the Pod/PVC teardown.
+
+**Host-side artifact reclaim.** Because those bytes are host-local, three paths
+reclaim them: reap-on-success (`simple.ts`, ephemeral runs) and the admin
+cancel route both `artifactStore.gc(taskId)` explicitly, and the backstop sweep
+(`sweepK8sSandboxes`, below) age/LRU-reaps `<sandboxDir>/<taskId>` for the rest
+(cancel-missed / failed / reuse-success) — since the host-dir sweep
+(`src/cron/sandbox-sweep.ts`) is disabled on this backend, the k8s sweep covers
+that surface too, not just cluster PVCs. Without it, host artifact storage would
+grow unbounded on k8s.
 
 All three routes 401 on a missing/wrong/unregistered token and are otherwise
 backend-agnostic — with no k8s runs in flight, nothing is ever registered, so

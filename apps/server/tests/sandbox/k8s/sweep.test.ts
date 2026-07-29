@@ -1,5 +1,22 @@
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { describe, it, expect, vi } from "vitest";
 import { sweepK8sSandboxes } from "#src/sandbox/k8s/sweep.js";
+
+/** A fake `apis` whose PVC list is empty, so the cluster half of the sweep is a
+ *  no-op and the test isolates the host-artifact half. */
+function emptyApis() {
+  return {
+    core: {
+      listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }),
+      listNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({ items: [] }),
+      deleteNamespacedPod: vi.fn(),
+      deleteNamespacedPersistentVolumeClaim: vi.fn(),
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+}
 
 // Off-cluster / client-build failure: makeK8sApis() always throws here, so
 // any test that omits `opts.apis` exercises the "no kubeconfig" catch path.
@@ -87,6 +104,43 @@ describe("sweepK8sSandboxes", () => {
     // No `apis` supplied — falls through to the (mocked, throwing) makeK8sApis().
     await expect(
       sweepK8sSandboxes({ retentionHours: 12, maxIdlePVCs: 40, namespace: "ns" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("also age-sweeps host-local artifact dirs when stateDir is given", async () => {
+    // The artifact store is host-local on EVERY backend, so a k8s pod's uploaded
+    // `.lastlight/` lands at `<sandboxDir>/<taskId>` on the harness. The host-dir
+    // sweep is disabled on k8s (this runs instead), so this backstop must reap
+    // those dirs too — otherwise cancelled / failed / reuse-success runs leak
+    // artifact storage on the host indefinitely.
+    const stateDir = mkdtempSync(join(tmpdir(), "k8s-hostsweep-"));
+    const stale = join(stateDir, "sandboxes", "old-run");
+    const fresh = join(stateDir, "sandboxes", "live-run");
+    mkdirSync(join(stale, ".lastlight"), { recursive: true });
+    mkdirSync(join(fresh, ".lastlight"), { recursive: true });
+    const past = (Date.now() - 48 * 3_600_000) / 1000; // 48h old → beyond 12h retention
+    utimesSync(stale, past, past);
+
+    await sweepK8sSandboxes({
+      retentionHours: 12,
+      maxIdlePVCs: 40,
+      maxDirs: 40,
+      stateDir,
+      apis: emptyApis(),
+      namespace: "ns",
+      isLive: () => false, // no docker on a k8s host; keep the unit test hermetic
+    });
+
+    expect(existsSync(stale)).toBe(false); // aged out
+    expect(existsSync(fresh)).toBe(true); // recent → kept
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("leaves host artifact dirs untouched when stateDir is omitted (cluster-only sweep)", async () => {
+    // Back-compat: the existing call sites that pass no stateDir must not gain a
+    // host-dir sweep — the param opting into it is explicit.
+    await expect(
+      sweepK8sSandboxes({ retentionHours: 12, maxIdlePVCs: 40, apis: emptyApis(), namespace: "ns" }),
     ).resolves.toBeUndefined();
   });
 });

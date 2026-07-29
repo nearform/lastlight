@@ -968,6 +968,55 @@ describe("POST /workflow-runs/:id/cancel", () => {
       );
     });
 
+    it("gc's the run's host-side artifacts on cancel (the artifact store is host-local even on k8s)", async () => {
+      setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
+      const dockerMod = await import("#src/admin/docker.js");
+      vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+      const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+      vi.mocked(reclaimSandbox).mockClear();
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 1, pvcsDeleted: 0 });
+
+      // reclaimSandbox handles the cluster pod + PVC; the pod's uploaded
+      // `.lastlight/` lands host-side under `<sandboxDir>/<taskId>` even on k8s,
+      // and nothing else reaps it (the host-dir sweep is disabled on k8s), so
+      // cancel must gc it directly — same call the host `else` branch makes.
+      const { artifactStore } = await import("#src/sandbox/artifact-store.js");
+      const gcSpy = vi.spyOn(artifactStore, "gc").mockResolvedValue();
+
+      const { db } = makeCancelDb({
+        run: { id: "r1", status: "running", triggerId: "t1", taskId: "task-xyz" },
+      });
+      const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
+      const res = await request(app, "/workflow-runs/r1/cancel", { method: "POST" });
+
+      expect(res.status).toBe(200);
+      expect(gcSpy).toHaveBeenCalledWith("task-xyz");
+      gcSpy.mockRestore();
+    });
+
+    it("still returns success when artifact gc throws on k8s cancel (best-effort)", async () => {
+      setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
+      const dockerMod = await import("#src/admin/docker.js");
+      vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+      const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+      vi.mocked(reclaimSandbox).mockClear();
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 0, pvcsDeleted: 0 });
+
+      const { artifactStore } = await import("#src/sandbox/artifact-store.js");
+      const gcSpy = vi.spyOn(artifactStore, "gc").mockRejectedValueOnce(new Error("disk gone"));
+
+      const { db, cancels } = makeCancelDb({
+        run: { id: "r1", status: "running", triggerId: "t1", taskId: "task-xyz" },
+      });
+      const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
+      const res = await request(app, "/workflow-runs/r1/cancel", { method: "POST" });
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).cancelled).toBe("r1");
+      expect(cancels).toEqual(["r1"]);
+      gcSpy.mockRestore();
+    });
+
     it("still returns success when the k8s reclaim throws (best-effort)", async () => {
       setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
       const dockerMod = await import("#src/admin/docker.js");

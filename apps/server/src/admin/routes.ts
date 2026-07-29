@@ -1502,6 +1502,19 @@ export function createAdminRoutes(
         } catch (err) {
           console.warn(`[cancel] k8s reclaim failed for run ${run.id}:`, err);
         }
+        // The pod's uploaded `.lastlight/` artifacts live host-side under
+        // `<sandboxDir>/<taskId>` even on k8s (the artifact store is host-local
+        // on every backend). `reclaimSandbox` above only touches the cluster pod
+        // + PVC, and the k8s backstop sweep only reclaims PVCs — so nothing else
+        // reaps those bytes. gc them directly here, mirroring the host `else`
+        // branch. No `reaped` gate: k8s has no host clone, so the artifact dir is
+        // the only thing to reclaim. Best-effort — a gc failure must not fail the
+        // cancel response.
+        try {
+          await artifactStore.gc(storedTaskId);
+        } catch (err) {
+          console.warn(`[cancel] artifact gc failed for ${storedTaskId}:`, err);
+        }
       } else {
         reaped = reapSandboxWorkspace({
           taskId: storedTaskId,

@@ -1205,9 +1205,11 @@ async function main() {
   // Reap-on-completion (workflows/simple.ts) handles the common case; this
   // sweeps failed/crashed leftovers and bounds the reusable per-PR cache. It
   // replaces the out-of-band host cron (scripts/cleanup-sandboxes.sh).
-  // The `kubernetes` backend has no host clones to sweep — it reclaims idle
-  // PVCs instead (Plan 5, `sweepK8sSandboxes`); every other backend keeps the
-  // original host-dir sweep.
+  // The `kubernetes` backend reclaims idle cluster PVCs (Plan 5) AND sweeps the
+  // host-local artifact dirs its pods upload to (`<sandboxDir>/<taskId>`, since
+  // the artifact store is host-local on every backend) — both via
+  // `sweepK8sSandboxes`, which stands in for the host-dir sweep that's disabled
+  // on k8s. Every other backend keeps the original host-dir sweep.
   const sweepCfg = config.cleanup.sandbox;
   if (sweepCfg.enabled) {
     cron.registerDirect({
@@ -1218,6 +1220,9 @@ async function main() {
           await sweepK8sSandboxes({
             retentionHours: sweepCfg.retentionHours,
             maxIdlePVCs: sweepCfg.maxDirs,
+            maxDirs: sweepCfg.maxDirs,
+            stateDir: config.stateDir,
+            sandboxDir: config.sandboxDir,
           });
           return;
         }
