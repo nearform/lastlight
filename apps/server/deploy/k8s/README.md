@@ -7,7 +7,9 @@ instead of in a QEMU micro-VM inside the harness process (the default
 guidance if that's what you're running instead). The harness is a Kubernetes
 client (`@kubernetes/client-node`); it creates a Pod per phase, streams its
 JSONL stdout, and reaps it. See the [sandbox spec](../../spec/09-sandbox.md)
-(the `kubernetes` backend section) for the full architecture and rationale.
+(the `kubernetes` backend section) for the full architecture and rationale, and
+[`architecture.md`](./architecture.md) for the same in diagrams (topology, pod
+lifecycle, and the domain-model information flow).
 
 ## Requirements / dependencies matrix
 
