@@ -26,6 +26,13 @@ import type { StateDb } from "../state/db.js";
 import type { WorkflowRun } from "../state/workflow-run-store.js";
 import { resumeSimpleRun, type ResumeOptions } from "./resume.js";
 
+/**
+ * Absurdly-high runaway-loop backstop for the k8s backend. NOT a tuned
+ * concurrency limit — the namespace ResourceQuota is the real authority
+ * (spec/09-sandbox.md (Concurrency)). Mirrors the workflow engine's 1000-agent cap: a fuse, not a knob.
+ */
+export const K8S_SANITY_FUSE = 1000;
+
 export interface AdmissionDeps {
   db: StateDb;
   resumeOpts: ResumeOptions;
@@ -33,6 +40,12 @@ export interface AdmissionDeps {
   maxQueueWaitMs: number;
   /** How often the background sweep runs. Defaults to 15 000 ms. */
   sweepIntervalMs?: number;
+  /**
+   * k8s backpressure mode (spec/09-sandbox.md (Concurrency)): gate on `K8S_SANITY_FUSE` instead of
+   * `maxWorkflows`, and promote at most ONE queued run per `admitNext` (each
+   * promote is a quota probe; the run re-queues if the ResourceQuota is full).
+   */
+  backpressureMode?: boolean;
 }
 
 export interface AdmissionController {
@@ -48,6 +61,8 @@ export interface AdmissionController {
 
 export function createAdmissionController(deps: AdmissionDeps): AdmissionController {
   const { db, resumeOpts, maxWorkflows, maxQueueWaitMs } = deps;
+  const backpressureMode = deps.backpressureMode ?? false;
+  const cap = backpressureMode ? K8S_SANITY_FUSE : maxWorkflows;
   const sweepIntervalMs = deps.sweepIntervalMs ?? 15_000;
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -55,7 +70,7 @@ export function createAdmissionController(deps: AdmissionDeps): AdmissionControl
     // Re-read the running count and queued list on each iteration so we don't
     // race against concurrent admits or ongoing resumes changing the count.
     for (;;) {
-      if (db.runs.countRunning() >= maxWorkflows) break;
+      if (db.runs.countRunning() >= cap) break;
       const queued = db.runs.listQueued();
       if (queued.length === 0) break;
       const next = queued[0];
@@ -70,7 +85,9 @@ export function createAdmissionController(deps: AdmissionDeps): AdmissionControl
       if (admitted) {
         dispatchAdmitted(admitted, resumeOpts);
       }
-      // Re-loop to admit more if additional slots are free.
+      // Backpressure mode: promote ONE probe per invocation. In app-count mode,
+      // keep filling up to `cap` (the old behavior).
+      if (backpressureMode) break;
     }
   }
 

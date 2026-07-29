@@ -23,12 +23,29 @@ export type {
  * pass through unchanged. Kept as an explicit map so renames on either
  * side surface as a type error rather than a silent runtime mismatch.
  */
-export const AGENTIC_PROFILE_FOR: Record<GitAccessProfile, string> = {
+export const AGENTIC_PROFILE_FOR: Record<GitAccessProfile, GitAccessProfile> = {
   read: "read",
   "issues-write": "issues-write",
   "review-write": "review-write",
   "repo-write": "repo-write",
 };
+
+/**
+ * The closed set of valid `--profile` values — the single source of truth for
+ * every sandbox adapter's `runAgent` guard. `RunAgentOpts.profile` is typed to
+ * the `GitAccessProfile` union, so a caller inside the codebase can't construct
+ * an invalid value; this set exists as defence-in-depth against values that
+ * arrive already erased to `string` (an `any`-cast test double, a future
+ * untyped caller) before they reach the agentic-pi CLI. Was previously
+ * hand-rolled as an identical `Set` in both the k8s and docker adapters —
+ * centralized here, next to `GitAccessProfile`, to kill that triplication.
+ */
+export const AGENTIC_PROFILES: ReadonlySet<GitAccessProfile> = new Set<GitAccessProfile>([
+  "read",
+  "issues-write",
+  "review-write",
+  "repo-write",
+]);
 
 export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPermissions> = {
   read: {

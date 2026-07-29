@@ -4,12 +4,15 @@ import { tmpdir } from "os";
 import { spawnSync } from "child_process";
 import type { run as agenticRunType, RunResult, ThinkingLevel } from "agentic-pi";
 import type { OtelConfig, SandboxBackend } from "../config/config.js";
+import { resolveKubernetesConfig } from "../config/config.js";
 import { createTaskSandbox, setupTaskWorktree, prePopulateWorkspace } from "./index.js";
 import { GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue } from "./git-http-auth.js";
 import type { DockerSandbox as DockerDriver } from "./docker.js";
 import { SmolSandbox as SmolDriver, smolAvailable, SMOL_WORKSPACE_DIR } from "./smol.js";
 import { ALLOW_ALL_SENTINEL } from "./egress-allowlist.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox } from "../telemetry/index.js";
+import { KubernetesSandbox } from "./k8s/kubernetes-sandbox.js";
+import type { GitAccessProfile } from "../engine/github/profiles.js";
 import {
   DOCKER_WORKSPACE_DIR,
   SKILL_BUNDLE_ROOT,
@@ -103,6 +106,15 @@ export interface PrePopulateSpec {
   repo: string;
   branch: string;
   token: string;
+  /**
+   * The PR's base branch. When set (and different from the head `branch`), the
+   * pre-clone additionally fetches it and deepens both refs until they share a
+   * merge-base, so `git diff origin/<baseBranch>...HEAD` — the three-dot PR diff
+   * the review agent AND post-review anchor against — resolves in the workspace.
+   * A shallow head clone otherwise omits the base entirely. Only meaningful for
+   * PR-diff workflows (pr-review / pr-fix); harmless elsewhere.
+   */
+  baseBranch?: string;
   runId?: string;
   shallow?: boolean;
   /**
@@ -130,7 +142,7 @@ export interface RunAgentOpts {
   model: string;
   thinking?: ThinkingLevel;
   /** agentic-pi github profile (`read` | `issues-write` | … ). */
-  profile?: string;
+  profile?: GitAccessProfile;
   /** Base inner-run env (git identity); adapters merge their own OTEL/HOME. */
   sandboxEnv: Record<string, string>;
   agentCwd: string;
@@ -234,6 +246,23 @@ export function sandboxFor(backend: SandboxBackend, opts: SandboxFactoryOpts): S
       return new InProcessSandbox("gondolin", opts);
     case "none":
       return new InProcessSandbox("none", opts);
+    case "kubernetes": {
+      const k = resolveKubernetesConfig();
+      return new KubernetesSandbox(opts, {
+        namespace: k.namespace,
+        image: opts.imageName ?? k.image,
+        storageClassName: k.storageClassName,
+        workspaceSize: k.workspaceSize,
+        runAsUser: k.runAsUser,
+        harnessEndpoint: k.harnessEndpoint,
+        harnessNamespace: k.harnessNamespace,
+        harnessPodLabels: k.harnessPodLabels,
+      });
+    }
+    default: {
+      const _exhaustive: never = backend;
+      throw new Error(`unhandled sandbox backend: ${String(backend)}`);
+    }
   }
 }
 
@@ -578,6 +607,9 @@ export interface FakeBehavior {
   commandResult?: RawCommandResult;
   /** Throw from `runCommand`. */
   throwOnRunCommand?: Error | string;
+  /** Throw from `provision` — e.g. a k8s ResourceQuota rejection at pod-create
+   *  time, which happens during provisioning, outside `runAgent`/`runCommand`. */
+  throwOnProvision?: Error | string;
 }
 
 /**
@@ -622,6 +654,7 @@ export class FakeSandbox implements Sandbox {
 
   async provision(pre?: PrePopulateSpec): Promise<ProvisionResult> {
     this.provisionCalls += 1;
+    if (this.behavior.throwOnProvision) throw asError(this.behavior.throwOnProvision);
     const dir = mkdtempSync(join(tmpdir(), "fake-sbx-"));
     this.hostWorkspaceDir = dir;
     this.agentCwd = pre ? join(dir, pre.repo) : dir;
@@ -678,7 +711,7 @@ function asError(e: Error | string): Error {
  * subprocess (docker/smol) drivers: apply the cheap `{`-prefix guard, parse
  * JSON, and forward the parsed record. Non-JSON / malformed lines are dropped.
  */
-function parseLine(onEvent: (record: SandboxEvent) => void): (line: string) => void {
+export function parseLine(onEvent: (record: SandboxEvent) => void): (line: string) => void {
   return (line: string) => {
     if (!line.startsWith("{")) return;
     let record: SandboxEvent;

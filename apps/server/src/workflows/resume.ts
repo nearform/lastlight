@@ -318,6 +318,11 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
 
     if (result.success) {
       opts.db.runs.finishRun(run.id, "succeeded");
+    } else if (result.backpressure) {
+      // Same backpressure requeue as the fresh-dispatch path: a promoted run
+      // that re-hits the quota goes back to `queued` for the next admission tick.
+      opts.db.runs.requeueRunning(run.id);
+      console.log(`[resume] ${run.workflowName} run ${run.id} requeued — cluster at capacity`);
     } else if (!result.paused) {
       opts.db.runs.finishRun(run.id, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed during resume",

@@ -8,6 +8,12 @@ import { mountAdmin } from "#src/admin/index.js";
 import { BuildAssetStore } from "#src/state/build-assets.js";
 import type { StateDb } from "#src/state/db.js";
 import type { SessionReader } from "#src/admin/sessions.js";
+import {
+  setRuntimeConfig,
+  resetRuntimeConfigForTests,
+  type LastLightConfig,
+} from "#src/config/config.js";
+import { RunId } from "#src/sandbox/k8s/run-id.js";
 
 // Mock docker so tests don't need a running daemon
 vi.mock("#src/admin/docker.js", () => ({
@@ -15,6 +21,16 @@ vi.mock("#src/admin/docker.js", () => ({
   killContainer: vi.fn(async () => {}),
   getContainerStats: vi.fn(async () => []),
   getHostStats: vi.fn(async () => null),
+}));
+
+// Mock the k8s client + reclaim modules so the cancel-route tests never touch
+// a real cluster: `makeK8sApis` would throw off-cluster (no kubeconfig)
+// before the route even reaches `reclaimSandbox`.
+vi.mock("#src/sandbox/k8s/client.js", () => ({
+  makeK8sApis: vi.fn(() => ({}) as unknown),
+}));
+vi.mock("#src/sandbox/k8s/reclaim.js", () => ({
+  reclaimSandbox: vi.fn(async () => ({ podsDeleted: 0, pvcsDeleted: 0 })),
 }));
 
 // Pin the cron definitions the /crons routes resolve against, so the trigger
@@ -901,6 +917,8 @@ describe("POST /workflow-runs/:id/cancel", () => {
   it("reaps the run's on-disk workspace after cancelling (issue #106)", async () => {
     const dockerMod = await import("#src/admin/docker.js");
     vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+    const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+    vi.mocked(reclaimSandbox).mockClear();
 
     const stateDir = mkdtempSync(join(tmpdir(), "cancel-reap-"));
     const taskId = "acme-7-build";
@@ -912,7 +930,66 @@ describe("POST /workflow-runs/:id/cancel", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).reapedWorkspace).toBe(true);
     expect(existsSync(join(stateDir, "sandboxes", taskId))).toBe(false);
+    // Non-k8s backend (no runtime config set → `sandbox` is undefined): the
+    // host reap path runs and the k8s reclaim is never invoked.
+    expect(reclaimSandbox).not.toHaveBeenCalled();
     rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  describe("kubernetes backend", () => {
+    afterEach(() => resetRuntimeConfigForTests());
+
+    it("reclaims the run's pod + PVC via reclaimSandbox with the sanitized run id", async () => {
+      setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
+      const dockerMod = await import("#src/admin/docker.js");
+      vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+      const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+      vi.mocked(reclaimSandbox).mockClear();
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 1, pvcsDeleted: 1 });
+
+      const runId = "Run With!Odd.Chars";
+      const { db } = makeCancelDb({
+        run: { id: runId, status: "running", triggerId: "t1", taskId: "task-xyz" },
+      });
+      const app = createAdminRoutes(
+        db, mockSessions, mockSessions,
+        makeConfig({ adminPassword: "" }),
+      );
+      const res = await request(app, `/workflow-runs/${encodeURIComponent(runId)}/cancel`, {
+        method: "POST",
+      });
+
+      expect(res.status).toBe(200);
+      expect(reclaimSandbox).toHaveBeenCalledTimes(1);
+      expect(reclaimSandbox).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        { kind: "run", runId: RunId.from(runId) },
+      );
+    });
+
+    it("still returns success when the k8s reclaim throws (best-effort)", async () => {
+      setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
+      const dockerMod = await import("#src/admin/docker.js");
+      vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+      const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+      vi.mocked(reclaimSandbox).mockClear();
+      vi.mocked(reclaimSandbox).mockRejectedValueOnce(new Error("ECONNREFUSED"));
+
+      const { db, cancels } = makeCancelDb({
+        run: { id: "r1", status: "running", triggerId: "t1", taskId: "task-xyz" },
+      });
+      const app = createAdminRoutes(
+        db, mockSessions, mockSessions,
+        makeConfig({ adminPassword: "" }),
+      );
+      const res = await request(app, "/workflow-runs/r1/cancel", { method: "POST" });
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).cancelled).toBe("r1");
+      expect(cancels).toEqual(["r1"]);
+      expect(reclaimSandbox).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

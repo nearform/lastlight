@@ -17,6 +17,7 @@ import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
 import { dispatchCronWorkflow, fanOutContexts } from "./cron/fanout.js";
 import { sweepSandboxes } from "./cron/sandbox-sweep.js";
+import { sweepK8sSandboxes } from "./sandbox/k8s/sweep.js";
 import {
   discoverGreenDependencyPrs,
   discoverRedDependencyPrs,
@@ -25,6 +26,12 @@ import {
 import { discoverPrsAwaitingReview } from "./cron/review-discovery.js";
 import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
+import { mountSkillBundle } from "./sandbox/k8s/skill-bundle-route.js";
+import { skillBundleRegistry } from "./sandbox/k8s/skill-bundle.js";
+import { mountAgentContext } from "./sandbox/k8s/agent-context-route.js";
+import { agentContextRegistry } from "./sandbox/k8s/agent-context-registry.js";
+import { mountArtifactUpload } from "./sandbox/k8s/artifact-upload-route.js";
+import { artifactStore } from "./sandbox/artifact-store.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
 import { authMiddleware, authIsEnabled, actorFromContext } from "./admin/auth.js";
@@ -631,8 +638,9 @@ async function main() {
         : onRunStart,
     };
 
+    let result: Awaited<ReturnType<typeof runSimpleWorkflow>> | undefined;
     try {
-      const result = await runSimpleWorkflow(
+      result = await runSimpleWorkflow(
         workflowName,
         request,
         {
@@ -671,12 +679,16 @@ async function main() {
       return { success: false, error: msg };
     } finally {
       // Event-driven admission: after each dispatch settles, pull the next
-      // queued run into a free slot (if any). Fire-and-forget — a slow
-      // admission must not stall the caller.
-      admissionController?.admitNext().catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[admission] admitNext error: ${msg}`);
-      });
+      // queued run into a free slot. Skip it when THIS dispatch just requeued
+      // on quota backpressure — re-promoting instantly would re-hit the full
+      // quota in a tight loop; the periodic sweep + real completions pace the
+      // retry.
+      if (!result?.backpressure) {
+        admissionController?.admitNext().catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[admission] admitNext error: ${msg}`);
+        });
+      }
     }
   };
 
@@ -693,6 +705,9 @@ async function main() {
   // (src/cli/cli.ts, cli-server.ts).
   const app = new Hono();
   app.get("/health", (c) => c.json({ status: "ok" }));
+  mountSkillBundle(app, skillBundleRegistry);
+  mountAgentContext(app, agentContextRegistry);
+  mountArtifactUpload(app, artifactStore);
 
   // GitHub webhook connector (optional — requires both webhook secret and GitHub
   // App). It registers /webhooks/github onto the shared app; it no longer owns
@@ -852,6 +867,7 @@ async function main() {
     resumeOpts,
     maxWorkflows: config.concurrency.maxWorkflows,
     maxQueueWaitMs: config.concurrency.maxQueueWaitMs,
+    backpressureMode: config.sandbox === "kubernetes",
   });
 
   // Mount admin dashboard on the shared HTTP server (always available).
@@ -1189,12 +1205,22 @@ async function main() {
   // Reap-on-completion (workflows/simple.ts) handles the common case; this
   // sweeps failed/crashed leftovers and bounds the reusable per-PR cache. It
   // replaces the out-of-band host cron (scripts/cleanup-sandboxes.sh).
+  // The `kubernetes` backend has no host clones to sweep — it reclaims idle
+  // PVCs instead (Plan 5, `sweepK8sSandboxes`); every other backend keeps the
+  // original host-dir sweep.
   const sweepCfg = config.cleanup.sandbox;
   if (sweepCfg.enabled) {
     cron.registerDirect({
       name: "sandbox-sweep",
       schedule: sweepCfg.sweepSchedule,
       handler: async () => {
+        if (config.sandbox === "kubernetes") {
+          await sweepK8sSandboxes({
+            retentionHours: sweepCfg.retentionHours,
+            maxIdlePVCs: sweepCfg.maxDirs,
+          });
+          return;
+        }
         sweepSandboxes({
           stateDir: config.stateDir,
           sandboxDir: config.sandboxDir,

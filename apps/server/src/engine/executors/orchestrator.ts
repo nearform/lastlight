@@ -23,6 +23,7 @@ import {
   type GitSandboxAccess,
 } from "../github/profiles.js";
 import { AgenticShim } from "../event-shim.js";
+import { QuotaExceededError } from "../../sandbox/k8s/quota.js";
 import { projectSlugForCwd } from "../../session-log.js";
 import type { Span } from "@opentelemetry/api";
 import { recordError, recordExecutionMetrics, setSpanAttributes } from "../../telemetry/index.js";
@@ -118,7 +119,10 @@ export async function withSandbox<T>(
   }
 }
 
-/** Drop AGENTS.md into the workspace — agentic-pi reads it as system context. */
+/** Drop AGENTS.md into the workspace — agentic-pi reads it as system context.
+ *  Host-shared backends only (docker/gondolin/none/smol); the k8s backend has
+ *  no host-visible workspace to write into — see the call site's guard and
+ *  `KubernetesSandbox.runAgent`'s pod-side delivery instead. */
 function writeAgentsMd(hostWorkspaceDir: string, config: ExecutorConfig): void {
   try {
     const md = loadAgentContext(config.agentContextDir);
@@ -170,7 +174,11 @@ export async function runSandboxedAgent(
 
   return withSandbox(ctx, async (sandbox, prov) => {
     console.log(`  [executor] Running agent (task: ${ctx.taskId}, sandbox: ${ctx.backend})`);
-    writeAgentsMd(prov.hostWorkspaceDir, config);
+    // `prov.hostWorkspaceDir` on k8s is an in-pod path (WORKSPACE_DIR) that
+    // doesn't exist on the harness host, so this write would always ENOENT.
+    // The k8s adapter delivers AGENTS.md pod-side instead (the per-run prompt
+    // Secret carries it; see KubernetesSandbox.runAgent).
+    if (ctx.backend !== "kubernetes") writeAgentsMd(prov.hostWorkspaceDir, config);
 
     // Stage this phase's skills (adapter decides symlink/copy + path mapping).
     let skillDirs: string[] | undefined;
@@ -252,19 +260,24 @@ export async function runSandboxedAgent(
       // The single converged fallback path (was three near-identical catches).
       const msg = err instanceof Error ? err.message : String(err);
       const durationMs = Date.now() - startTime;
+      // A k8s ResourceQuota rejection is backpressure, not a sandbox failure:
+      // a distinct stop reason lets the runner requeue the run (spec/09-sandbox.md (Concurrency)).
+      const stopReason = err instanceof QuotaExceededError ? "error_quota" : "error_sandbox";
       const tags = {
         "sandbox.backend": ctx.backend,
         model,
         success: false,
-        stop_reason: "error_sandbox",
+        stop_reason: stopReason,
         "workflow.name": config.telemetry?.workflowName,
         "phase.name": config.telemetry?.phaseName,
       };
-      recordError("agent", err, tags);
+      // A quota rejection is backpressure, not an error — don't pollute the
+      // error telemetry with it (the run requeues; see the outer .catch).
+      if (!(err instanceof QuotaExceededError)) recordError("agent", err, tags);
       recordExecutionMetrics("agent", { ...tags, durationMs });
       tree.end();
       const synthesizedId = await shim
-        .finalizeWithFallback(emptyResult("error_sandbox", durationMs), `exec-${basename(ctx.taskId)}`, msg)
+        .finalizeWithFallback(emptyResult(stopReason, durationMs), `exec-${basename(ctx.taskId)}`, msg)
         .catch(() => null);
       harvestArtifactsOut(artifacts);
       return {
@@ -274,7 +287,7 @@ export async function runSandboxedAgent(
         error: msg,
         durationMs,
         sessionId: synthesizedId ?? undefined,
-        stopReason: "error_sandbox",
+        stopReason,
       } satisfies ExecutionResult;
     }
 
@@ -333,6 +346,24 @@ export async function runSandboxedAgent(
         : {}),
     });
     return finalResult;
+  }).catch((err: unknown): ExecutionResult => {
+    // A ResourceQuota rejection during PROVISIONING (pod-create) throws OUTSIDE
+    // the in-callback runAgent catch above — `withSandbox` provisions before it
+    // runs `fn`. Surface it as an error_quota RESULT (not a throw) so the runner
+    // flags backpressure and requeues, instead of the run terminal-failing red.
+    // Mirrors runSandboxedCommand's outer catch; every other provision failure
+    // propagates unchanged (withSandbox already disposed).
+    if (err instanceof QuotaExceededError) {
+      return {
+        success: false,
+        output: "",
+        turns: 0,
+        error: err.message,
+        durationMs: Date.now() - startTime,
+        stopReason: "error_quota",
+      };
+    }
+    throw err;
   });
 }
 
@@ -403,61 +434,80 @@ export async function runSandboxedCommand(
   const displayPrompt =
     spec.kind === "bash" ? `$ ${spec.command}` : `${spec.runtime} script: ${spec.name}\n\n${spec.script}`;
 
-  return withSandbox(ctx, async (sandbox, prov) => {
-    // Per-phase script-bundle dir, a workspace-root sibling of the skill bundle.
-    const scriptDir = spec.kind === "script" ? `${SCRIPT_BUNDLE_ROOT}/${spec.name}` : SCRIPT_BUNDLE_ROOT;
+  try {
+    return await withSandbox(ctx, async (sandbox, prov) => {
+      // Per-phase script-bundle dir, a workspace-root sibling of the skill bundle.
+      const scriptDir = spec.kind === "script" ? `${SCRIPT_BUNDLE_ROOT}/${spec.name}` : SCRIPT_BUNDLE_ROOT;
 
-    let command: string;
-    let toolInput: Record<string, unknown>;
-    if (spec.kind === "bash") {
-      command = spec.command;
-      toolInput = { command: spec.command };
-    } else {
-      const { fileName, run } = scriptInvocation(spec);
-      mkdirSync(join(prov.hostWorkspaceDir, scriptDir), { recursive: true });
-      writeFileSync(join(prov.hostWorkspaceDir, scriptDir, fileName), spec.script);
-      command = run(sandbox.sandboxPathFor(`${scriptDir}/${fileName}`));
-      toolInput = { command, runtime: spec.runtime };
-    }
+      let command: string;
+      let toolInput: Record<string, unknown>;
+      if (spec.kind === "bash") {
+        command = spec.command;
+        toolInput = { command: spec.command };
+      } else {
+        const { fileName, run } = scriptInvocation(spec);
+        mkdirSync(join(prov.hostWorkspaceDir, scriptDir), { recursive: true });
+        writeFileSync(join(prov.hostWorkspaceDir, scriptDir, fileName), spec.script);
+        command = run(sandbox.sandboxPathFor(`${scriptDir}/${fileName}`));
+        toolInput = { command, runtime: spec.runtime };
+      }
 
-    // Git identity + auth, same as the agent path (runSandboxedAgent) — so a
-    // commit made by a deterministic bash/script phase (e.g. a status-doc commit)
-    // is authored as the configured botLogin, not left identity-less. The
-    // caller's sandboxEnv (upstream phase outputs) wins on key collision.
-    //
-    // Also forward the GitHub API base-url override (evals fake): the agent path
-    // threads `githubApiBaseUrl` too, so a GitHub-mutating script (e.g.
-    // pr-review's post-review step) hits the fake in evals. Prod-inert —
-    // `githubApiBaseUrl` is undefined outside the eval harness.
-    const sandboxEnv = {
-      ...agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`, ctx.env.GIT_TOKEN),
-      ...(cmdOpts.sandboxEnv ?? {}),
-      ...(config.githubApiBaseUrl ? { GITHUB_API_URL: config.githubApiBaseUrl } : {}),
-    };
-    const res = await sandbox.runCommand(ctx.taskId, command, {
-      cwd: prov.agentCwd,
-      sandboxEnv,
-      timeoutSeconds,
+      // Git identity + auth, same as the agent path (runSandboxedAgent) — so a
+      // commit made by a deterministic bash/script phase (e.g. a status-doc commit)
+      // is authored as the configured botLogin, not left identity-less. The
+      // caller's sandboxEnv (upstream phase outputs) wins on key collision.
+      //
+      // Also forward the GitHub API base-url override (evals fake): the agent path
+      // threads `githubApiBaseUrl` too, so a GitHub-mutating script (e.g.
+      // pr-review's post-review step) hits the fake in evals. Prod-inert —
+      // `githubApiBaseUrl` is undefined outside the eval harness.
+      const sandboxEnv = {
+        ...agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`, ctx.env.GIT_TOKEN),
+        ...(cmdOpts.sandboxEnv ?? {}),
+        ...(config.githubApiBaseUrl ? { GITHUB_API_URL: config.githubApiBaseUrl } : {}),
+      };
+      const res = await sandbox.runCommand(ctx.taskId, command, {
+        cwd: prov.agentCwd,
+        sandboxEnv,
+        timeoutSeconds,
+      });
+      const durationMs = Date.now() - startTime;
+      const sessionId =
+        cmdOpts.writeSession === false
+          ? null
+          : await writeCommandSession({
+              sessionsDir,
+              projectSlug: projectSlugForCwd(prov.agentCwd),
+              model,
+              displayPrompt,
+              toolName: "bash",
+              toolInput,
+              stdout: res.stdout,
+              stderr: res.stderr,
+              exitCode: res.exitCode,
+              durationMs,
+            });
+      if (sessionId && ctx.onSessionId) ctx.onSessionId(sessionId);
+      return buildCommandResult(res, durationMs, sessionId);
     });
-    const durationMs = Date.now() - startTime;
-    const sessionId =
-      cmdOpts.writeSession === false
-        ? null
-        : await writeCommandSession({
-            sessionsDir,
-            projectSlug: projectSlugForCwd(prov.agentCwd),
-            model,
-            displayPrompt,
-            toolName: "bash",
-            toolInput,
-            stdout: res.stdout,
-            stderr: res.stderr,
-            exitCode: res.exitCode,
-            durationMs,
-          });
-    if (sessionId && ctx.onSessionId) ctx.onSessionId(sessionId);
-    return buildCommandResult(res, durationMs, sessionId);
-  });
+  } catch (err: unknown) {
+    // A k8s ResourceQuota rejection on a bash/script phase is backpressure too:
+    // surface it as an error_quota RESULT so the runner requeues (spec/09-sandbox.md (Concurrency)).
+    // Every other throw propagates exactly as before (the engine records it as a
+    // failed phase) — we do NOT swallow real command failures.
+    if (err instanceof QuotaExceededError) {
+      const durationMs = Date.now() - startTime;
+      return {
+        success: false,
+        output: "",
+        turns: 0,
+        error: err.message,
+        durationMs,
+        stopReason: "error_quota",
+      } satisfies ExecutionResult;
+    }
+    throw err;
+  }
 }
 
 /**

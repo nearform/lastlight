@@ -3,6 +3,7 @@ import { promisify } from "util";
 import { existsSync, readFileSync } from "fs";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { randomUUID } from "crypto";
+import { AGENTIC_PROFILES, type GitAccessProfile } from "../engine/github/profiles.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -292,7 +293,7 @@ export class DockerSandbox {
        */
       thinking?: string;
       /** agentic-pi GitHub profile: `read | issues-write | review-write | repo-write`. */
-      profile?: string;
+      profile?: GitAccessProfile;
       /**
        * Env forwarded INTO the sandboxed run via repeated `--sandbox-env`
        * flags. Used to inject git identity. Keys / values are charset-asserted
@@ -339,7 +340,6 @@ export class DockerSandbox {
     // a tight allowlist before embedding — defense in depth in case any
     // of these ever gets sourced from user input.
     const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
-    const PROFILES = new Set(["read", "issues-write", "review-write", "repo-write"]);
     const WEB_SEARCH_PROVIDERS = new Set(["tavily", "brave", "exa"]);
 
     const extraArgs: string[] = [];
@@ -350,8 +350,10 @@ export class DockerSandbox {
       extraArgs.push("--thinking", opts.thinking);
     }
     if (opts?.profile) {
-      if (!PROFILES.has(opts.profile)) {
-        throw new Error(`Refusing to pass profile "${opts.profile}" — must be one of ${[...PROFILES].join("|")}`);
+      if (!AGENTIC_PROFILES.has(opts.profile)) {
+        throw new Error(
+          `Refusing to pass profile "${opts.profile}" — must be one of ${[...AGENTIC_PROFILES].join("|")}`,
+        );
       }
       extraArgs.push("--profile", opts.profile);
     }

@@ -20,3 +20,9 @@ phases:
     label: Triage
     skill: issue-triage
     model: "{{models.triage}}"
+    # Postcondition: the triage skill must end with the TRIAGE_COMPLETE marker,
+    # emitted only after the work is actually done (see skills/issue-triage).
+    # An agent that bails — no github_* tools, repo inaccessible, "re-invoke me" —
+    # never prints it, so the phase fails instead of greening a silent no-op.
+    on_output:
+      requires_marker: "TRIAGE_COMPLETE"

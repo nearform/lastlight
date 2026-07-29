@@ -429,6 +429,36 @@ describe("requeue — refresh a queued orphan's clock on boot", () => {
   });
 });
 
+describe("requeueRunning — backpressure requeue on quota rejection", () => {
+  it("requeueRunning flips a running run back to queued and re-stamps the clock", () => {
+    const id = "run-bp-1";
+    db.runs.createRun({
+      id, workflowName: "build", triggerId: "t1", owner: "o", repo: "r",
+      issueNumber: 1, currentPhase: "phase_0", status: "running",
+      startedAt: new Date(Date.now() - 3_600_000).toISOString(), // 1h ago
+    } as any);
+
+    const before = db.runs.getRun(id)!;
+    const changed = db.runs.requeueRunning(id);
+
+    expect(changed).toBe(1);
+    const after = db.runs.getRun(id)!;
+    expect(after.status).toBe("queued");
+    expect(Date.parse(after.startedAt)).toBeGreaterThan(Date.parse(before.startedAt));
+  });
+
+  it("requeueRunning is a no-op on a non-running run (CAS guard)", () => {
+    const id = "run-bp-2";
+    db.runs.createRun({
+      id, workflowName: "build", triggerId: "t2", owner: "o", repo: "r",
+      issueNumber: 2, currentPhase: "phase_0", status: "queued",
+      startedAt: new Date().toISOString(),
+    } as any);
+    expect(db.runs.requeueRunning(id)).toBe(0);
+    expect(db.runs.getRun(id)!.status).toBe("queued");
+  });
+});
+
 describe("latestSucceededForTrigger", () => {
   it("returns the newest SUCCEEDED run for the workflow+trigger, ignoring others", () => {
     const trigger = "acme/widgets#190";

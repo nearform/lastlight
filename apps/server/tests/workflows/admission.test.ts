@@ -14,7 +14,7 @@ vi.mock("#src/workflows/runner.js", () => ({
   runWorkflow: vi.fn(async () => ({ success: true, phases: [] })),
 }));
 
-import { createAdmissionController } from "#src/workflows/admission.js";
+import { createAdmissionController, K8S_SANITY_FUSE } from "#src/workflows/admission.js";
 import { StateDb } from "#src/state/db.js";
 import { resumeSimpleRun } from "#src/workflows/resume.js";
 import type { ResumeOptions } from "#src/workflows/resume.js";
@@ -50,6 +50,17 @@ function makeQueuedRun(db: StateDb, id: string, startedAt: string): void {
     currentPhase: "socratic",
     status: "queued",
     startedAt,
+  });
+}
+
+function makeRunningRun(db: StateDb, id: string): void {
+  db.runs.createRun({
+    id,
+    workflowName: "build",
+    triggerId: `acme/widgets#${id.slice(-2)}`,
+    currentPhase: "architect",
+    status: "running",
+    startedAt: new Date().toISOString(),
   });
 }
 
@@ -233,5 +244,58 @@ describe("createAdmissionController", () => {
     });
     ctrl.start();
     ctrl.stop(); // should not throw
+  });
+
+  it("backpressure mode promotes at most one queued run per admitNext", async () => {
+    makeQueuedRun(db, "run-01", "2024-01-01T00:00:00.000Z");
+    makeQueuedRun(db, "run-02", "2024-01-01T00:01:00.000Z");
+    makeQueuedRun(db, "run-03", "2024-01-01T00:02:00.000Z");
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: makeResumeOpts(db),
+      maxWorkflows: 1,
+      maxQueueWaitMs: 60_000,
+      backpressureMode: true,
+    });
+    await ctrl.admitNext();
+
+    expect(db.runs.countRunning()).toBe(1); // only ONE promoted despite 3 queued
+  });
+
+  it("default mode still fills up to maxWorkflows", async () => {
+    makeQueuedRun(db, "run-01", "2024-01-01T00:00:00.000Z");
+    makeQueuedRun(db, "run-02", "2024-01-01T00:01:00.000Z");
+    makeQueuedRun(db, "run-03", "2024-01-01T00:02:00.000Z");
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: makeResumeOpts(db),
+      maxWorkflows: 2,
+      maxQueueWaitMs: 60_000,
+      // backpressureMode omitted
+    });
+    await ctrl.admitNext();
+
+    expect(db.runs.countRunning()).toBe(2);
+  });
+
+  it("backpressure mode gates on the sanity fuse, not maxWorkflows", async () => {
+    // maxWorkflows=1 with one already running would block default mode;
+    // backpressure mode admits because countRunning (1) < K8S_SANITY_FUSE.
+    makeRunningRun(db, "running-1");
+    makeQueuedRun(db, "run-01", "2024-01-01T00:00:00.000Z");
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: makeResumeOpts(db),
+      maxWorkflows: 1,
+      maxQueueWaitMs: 60_000,
+      backpressureMode: true,
+    });
+    await ctrl.admitNext();
+
+    expect(db.runs.countRunning()).toBe(2);
+    expect(K8S_SANITY_FUSE).toBeGreaterThan(100);
   });
 });

@@ -147,3 +147,20 @@ closing, creating labels. Never `gh` CLI, `curl`, or raw HTTP.
 - Don't close aggressively — when genuinely in doubt, leave it open as `needs-triage`.
 - Don't change priority or state on issues a maintainer already triaged.
 - Check existing labels before adding — don't duplicate.
+
+## Completion
+
+When you have finished — every target issue classified and labelled, or a
+batch/cron scan that confirmed there was nothing new to triage — end your final
+message with a single marker line:
+
+```
+TRIAGE_COMPLETE: repo=<owner/repo> triaged=<N> labelled=<N> commented=<N>
+```
+
+Emit it **only after actually doing the work** with the `github_*` tools (a scan
+that legitimately found nothing to do still counts — set the counts to 0). If you
+**cannot** triage — the `github_*` tools aren't available, the repo is
+inaccessible, or an error you can't recover from — **do not** emit the marker.
+Stop and explain what blocked you, so the run is recorded as failed rather than a
+silent no-op green.
