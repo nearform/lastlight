@@ -173,6 +173,324 @@ and doesn't expose the egress allowlist.
 - `SMOLVM_BIN` overrides the binary path; `smolAvailable()` self-skips when
   absent. Teardown is `machine delete -f`.
 
+### `kubernetes` — Kubernetes backend, in development
+
+> **In development, not yet the default.** Enable with
+> `LASTLIGHT_SANDBOX=kubernetes`. See
+> [`deploy/k8s/README.md`](https://github.com/nearform/lastlight/blob/main/apps/server/deploy/k8s/README.md)
+> for the cluster prerequisites and a ready-to-apply manifest set.
+
+Runs each workflow phase as its own bare Pod via `KubernetesSandbox`
+(`src/sandbox/k8s/kubernetes-sandbox.ts`) — a structural peer of `docker`
+and `smol` behind the same `Sandbox` port, using per-namespace Pod
+isolation instead of a shared host. `KubernetesSandbox` is a thin
+orchestrator: it wires the collaborators that own the real work —
+`WorkspaceProvisioner` (PVC vs `emptyDir`), `RunSecrets` (creds/prompt
+Secret lifecycle), `EgressEnsurer` (the `CiliumNetworkPolicy` pair), and
+the free functions in `pod-lifecycle.ts` (wait/stream/reap) — behind the
+same `provision` / `stageSkills` / `runAgent` / `runCommand` / `dispose`
+shape every other backend implements.
+
+#### Pod lifecycle
+
+Each `runAgent`/`runCommand` call becomes exactly one Pod, built by
+`buildPodManifest` (`pod.ts`) and driven through `pod-lifecycle.ts`'s free
+functions:
+
+1. **Create** — `runPod` (`kubernetes-sandbox.ts`) creates the run's Secret(s)
+   first (a Pod naming a missing Secret fails to start — see Credentials),
+   builds the manifest, then calls `createNamespacedPod`. A `403 exceeded
+   quota` rejection is caught and rethrown as a typed `QuotaExceededError`
+   (see Concurrency below) instead of surfacing as an ordinary failure; on any
+   other create failure the already-created Secret(s) are best-effort deleted
+   so a rejected create never orphans one.
+2. **Wait for container start** — `waitForContainerStart` polls
+   `readNamespacedPodStatus` (budget ~180×1s ≈ 180s — sized for a cold pull of
+   the ~400 MB sandbox image straight from GHCR to a node with no
+   Spegel-mirrored layer yet) until the container leaves `waiting` with a
+   non-fatal reason. A fatal `waiting` reason (bad image, config error) or a
+   failed clone initContainer fails fast with the real reason instead of
+   waiting out the whole budget. This gate exists because the kubelet log
+   endpoint 400s until the container has actually started, so it's what makes
+   the next step safe to call.
+3. **Stream** — `streamPodLog` (`log-stream.ts`) follows the Pod's stdout and
+   hands each line to a per-call callback: for `runAgent` that's agentic-pi's
+   JSONL event stream (the container runs `agentic-pi run --sandbox none`),
+   parsed through the same `parseLine` path the docker backend uses; for
+   `runCommand` it's the command's raw stdout, captured verbatim.
+4. **Reap** — `dispose()` deletes the Pod (Secrets cascade-GC via ownerRef —
+   see Credentials), then `waitForPodGone` polls until the API 404s it
+   (budget ~30×1s) before returning, so a sequential next-phase Pod reusing
+   the same RWO PVC on a different node never races the still-detaching
+   volume (an RWO Multi-Attach failure).
+
+**Bare Pod, not a Job.** The workflow runner already owns run lifecycle —
+ledger-driven resume, cancellation, admission — so a Job's own
+retry/backoff/TTL semantics would duplicate and fight that. One Pod, created
+and deleted by the harness (`restartPolicy: Never`), keeps a single source of
+truth for "what's running."
+
+**`activeDeadlineSeconds`** is a wall-clock cap stamped on every Pod
+(`runCommand`'s `opts.timeoutSeconds`, or `runAgent`'s factory-level timeout,
+default 1800s), so the kubelet itself kills a hung Pod at the budget;
+`streamPodLog` resolves once the Pod terminates, so no separate
+application-level timeout watchdog is needed.
+
+#### Credentials
+
+Every run's secrets travel in a **per-run creds Secret**, created before the
+Pod (`RunSecrets.create`, `run-secrets.ts`) and consumed via `envFrom:
+[{ secretRef }]` on both the agent container and every init container — never
+inline pod-spec env, which is `kubectl get pod -o yaml`-visible (issue #223).
+A `runAgent` call also creates a second **prompt Secret** holding the prompt
+text, mounted read-only as a file at `/lastlight/prompt` and piped into
+`agentic-pi run`'s stdin — never a CLI arg (`ps`-visible) or inline env.
+
+- **Cascade GC.** Once the Pod exists, `RunSecrets.patchOwnerRefs` patches
+  each Secret's `ownerReferences` to the Pod's uid, so deleting the Pod
+  cascades to its Secret(s) automatically; `dispose()` also best-effort
+  deletes them directly as a backstop.
+- **Hard rule #8: the App PEM never crosses.** Only the harness, host-side,
+  holds the GitHub App private key;
+  per phase it mints a short-lived scoped installation token via
+  `refreshGitAuth()` — identical to every other backend, see [Permissions and
+  tokens](#permissions-and-tokens) above — and that minted token, never the
+  PEM, is the only GitHub credential written into the creds Secret
+  (`GIT_TOKEN`/`GITHUB_TOKEN`), alongside provider keys and whichever
+  skill/agent-context/artifact fetch tokens the run needs. The k8s adapter
+  has no code path that mounts, copies, or forwards the PEM into a sandbox
+  Pod.
+- **`automountServiceAccountToken: false`** on every sandbox Pod — an agent
+  has no business calling the Kubernetes API, so it gets no ServiceAccount
+  token at all. A compromised agent inside a Pod cannot talk to the API
+  server, full stop.
+
+#### Egress
+
+The harness renders a strict/open **`CiliumNetworkPolicy`** pair per
+namespace from the *same* `egress-allowlist.ts` every backend reads
+(`egress-policy.ts` → `egress-apply.ts`, applied via `EgressEnsurer.ensure`,
+once per namespace per harness process). Each sandbox Pod is labeled
+`egress-policy: strict|open` (`egressModeFor`, derived from the phase's
+intent-only `EgressPolicy.unrestricted`) — the label both policies'
+`endpointSelector` match against.
+
+- **Strict** = a DNS-proxy rule (port 53 to kube-dns, with `rules.dns:
+  [{matchPattern:"*"}]` — load-bearing: without it Cilium's `toFQDNs` never
+  learns an IP to allow) plus the allowlist's `toFQDNs` (apex `matchName` +
+  `*.`-prefixed `matchPattern` per host) on 443/TCP. Default-deny everything
+  else.
+- **Open** = the same DNS rule plus a broad `0.0.0.0/0`/`::/0` allow on
+  80/443, **minus** an except-list of private/link-local/loopback CIDRs
+  (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`,
+  `127.0.0.0/8`, plus the IPv6 equivalents) — the private-CIDR SSRF floor.
+  Because Cilium's DNS proxy only ever permits connecting to an IP a Pod was
+  *allowed to resolve*, a hostname whose A record points into private space
+  is unreachable even in open mode — closing the gap the docker backend's
+  SNI-peek firewall admits it cannot (see its Honest caveat above).
+- Both policies add a **`toEndpoints` identity rule** scoping sandbox→harness
+  traffic to the harness Pod's namespace + labels on the harness port — an
+  identity selector, not a CIDR hole — so a sandbox Pod (under either egress
+  mode) can always reach the three HTTP channels below.
+
+**Current mechanism, not a permanent hard requirement.** Applying a
+`CiliumNetworkPolicy` needs the `cilium.io` CRD verb on the harness's Role. On
+a cluster where it's missing (no Cilium, or the verb isn't granted),
+`EgressEnsurer.ensure` catches the resulting `403`, logs one warning per
+namespace, and the run proceeds on the cluster's default network posture
+instead of failing — no regression, just no enforcement; the identical code
+enforces the moment the RBAC verb exists. A CNI-agnostic egress path (a plain
+`NetworkPolicy` plus an out-of-band forward proxy, or a Gateway API
+implementation) is a tracked follow-up, not yet built — see
+`deploy/k8s/README.md`'s requirements matrix, which frames Cilium the same
+way: today's implementation, not a design commitment.
+
+#### Workspace
+
+Two shapes, chosen per run by whether `provision()` receives a pre-clone
+descriptor (`WorkspaceProvisioner`, `workspace-provisioner.ts`):
+
+- **No pre-clone descriptor** → an ephemeral `emptyDir`, nothing touched
+  cluster-side.
+- **A pre-clone descriptor** → a stable **per-(repo,PR) RWO PVC**, named
+  `ws-<owner>-<repo>-pr<N>` (sanitized, `pvcNameFor`), created once
+  (404-then-create) and **reused by every later Pod for that PR** — RWO is
+  safe because only one sandbox Pod per PR runs at a time. The agent's cwd
+  becomes `<WORKSPACE_DIR>/<repo>`, the path the clone initContainer writes
+  into.
+
+The **clone initContainer** (`buildCloneInitContainer`, `init-clone.ts`) does
+the checkout: shallow-clones the PR branch (falling back to cloning the
+default branch and cutting the branch locally, for a build-style first run
+with no remote branch yet). Owner/repo/branch/cwd/base/runId — the branch name
+is attacker-controlled for an external PR — arrive as `sh` positional args
+(`$1`..`$7`) to a fixed script, never interpolated into shell text, the same
+command-injection-safe contract `run-agent-script.ts` uses.
+
+**Reuse is marker-gated**, mirroring the host `prePopulateWorkspace`
+(`src/sandbox/index.ts`). When the PVC already holds a checkout (`.git`
+exists) the script compares a `<WORKSPACE_DIR>/.lastlight-run` marker (stamped
+with the owning run id, kept outside the repo so `git clean` can't touch it)
+against the run id passed as argv:
+
+- **Same run** (marker matches, or no run id) → **preserve** the checkout
+  untouched. Each workflow phase is its own Pod against the shared per-(repo,PR)
+  PVC, so a later phase must read what an earlier one wrote (the architect's
+  `plan.md`, the executor's edits) — an unconditional refresh would destroy that
+  handoff.
+- **Different run** (a fresh run reusing the PR's dir) → **refresh the head**:
+  `git fetch` the head ref, `checkout -B` + `reset --hard` to it, then
+  `git clean -fdx -e node_modules` (keeping the dependency tree warm). This is
+  best-effort — a failed fetch preserves the existing checkout rather than
+  leaving a half-reset tree — and closes the stale-checkout gap where a re-review
+  after new commits reviewed the old head.
+- **Different run + `recreateFromBase`** (`build`, issue #153) → discard the
+  stale checkout and re-clone the default branch, cutting the feature branch
+  locally off it, so a re-triggered incomplete build starts again off current
+  `main` rather than a stale feature branch.
+
+For PR-diff workflows the base branch (`PrePopulateSpec.baseBranch`, threaded
+into the clone init) is fetched as a real `origin/<base>` ref and both refs are
+deepened until they share a merge-base (depth 50 → 500 → `--unshallow`), on both
+the fresh-clone and refresh paths, so `git diff origin/<base>...HEAD` — the
+three-dot PR diff the review agent and post-review anchor against — resolves.
+Best-effort throughout (mirrors the host `ensureBaseAvailable`); skipped for a
+`recreateFromBase` run.
+
+RWO-only is a consequence of the reference deployment's storage: the
+cluster's block/local `StorageClass` (see `deploy/k8s/README.md`'s
+requirements matrix) supports `ReadWriteOnce` but not `ReadWriteMany`, which
+pushed the whole design toward a stateless-pod model instead of a shared
+harness↔pod volume. `fsGroup: <runAsUser>` +
+`fsGroupChangePolicy: OnRootMismatch` on the Pod's `securityContext` lets the
+non-root agent UID write a root-owned-by-default PVC mount without paying a
+full recursive chown on every reuse. Idle PVCs are bounded by the same
+reclaim/sweep machinery covered under Deployment below — there's no separate
+workspace-specific cleanup path.
+
+#### Harness↔pod HTTP channels
+
+A sandbox Pod can't see the harness's filesystem, so three things ride the
+same pattern: a per-run bearer token minted by the harness, carried into the
+Pod's creds Secret, and redeemed against an `/internal/*` route on the
+harness's own Hono app.
+
+| Channel | Route | Direction | Token env var | In-pod consumer |
+|---|---|---|---|---|
+| Skill bundle | `GET /internal/skill-bundle` | harness → pod | `LASTLIGHT_SKILL_TOKEN` | `skills` initContainer (`init-skills.ts`) |
+| Agent context (`AGENTS.md`) | `GET /internal/agent-context` | harness → pod | `LASTLIGHT_AGENT_CONTEXT_TOKEN` | `agent-context` initContainer (`init-agent-context.ts`) |
+| Build artifacts | `POST /internal/sandbox-artifacts` | pod → harness | `LASTLIGHT_ARTIFACT_TOKEN` | tail of the generated run script (`run-agent-script.ts`) |
+
+- **Skill bundle.** `stageSkills()` tars the phase's resolved skill dirs (core
+  or overlay — resolution stays on the harness) via the system `tar` binary
+  and registers the bytes under a fresh token in the (injectable,
+  TTL-backstopped) `skillBundleRegistry` (`skill-bundle.ts`). The `skills`
+  initContainer `curl`s the route with the token and unpacks into a shared
+  `skills` emptyDir (`/lastlight-skills`) the agent reads via `--skill <dir>`.
+- **Agent context.** This is the Task 14b addition (nearform#240) that
+  replaced an earlier prompt-Secret ride-along: k8s has no host-shared
+  workspace to write `AGENTS.md` into directly the way docker's entrypoint
+  does (`cat /app/agent-context/*.md > $WORKSPACE/AGENTS.md`), so `runAgent`
+  resolves the agent-context once (`loadAgentContext()`), registers the text
+  with `agentContextRegistry` (`agent-context-registry.ts`) — a dedicated
+  registry, not a reuse of the skills one, because agent-context is
+  **per-run-constant and must reach a no-skills phase too** — and the
+  `agent-context` initContainer fetches it and writes it to
+  `<WORKSPACE_DIR>/AGENTS.md` (the workspace root, never a cwd-relative path,
+  so a repo-write phase's `git add -A` can't accidentally commit the bot's own
+  persona file). An empty context registers no token and adds no
+  initContainer.
+- **Build artifacts.** `runAgent` also mints an artifact-upload token from the
+  (injectable) `artifactStore` up front; the generated run script's tail
+  (present only when the run has a token) best-effort tars `.lastlight/` and
+  `curl -X POST`s it to the route after the agent exits (`|| true` — an
+  upload hiccup must never turn a successful agent run into a reported
+  failure), bearer-authenticated with the same token pattern in reverse.
+
+All three routes 401 on a missing/wrong/unregistered token and are otherwise
+backend-agnostic — with no k8s runs in flight, nothing is ever registered, so
+every request is rejected. `dispose()` evicts whichever tokens the run minted
+(skill, agent-context, artifact) from their registries regardless of
+success/failure. The `toEndpoints` egress rule (see Egress above) is what
+makes all three channels reachable from inside either egress policy.
+
+#### Concurrency
+
+The backend enforces no concurrency cap of its own — the cluster
+namespace's `ResourceQuota` is the sole authority, and the app never reads
+or tunes its value:
+
+- The harness admits k8s-backend runs freely, gated only by an
+  absurdly-high sanity fuse (`K8S_SANITY_FUSE = 1000`,
+  `src/workflows/admission.ts`) — a runaway-loop backstop, not a tuned
+  concurrency limit.
+- Each phase attempts its own Pod create. When the namespace
+  `ResourceQuota` is full, the API server rejects the create with
+  `403 ... exceeded quota ...` (or, for a compute quota the pod doesn't meter,
+  `403 ... failed quota: ... must specify ...`); `isQuotaExceeded`
+  (`src/sandbox/k8s/quota.ts`) matches both phrasings and `KubernetesSandbox`
+  maps the rejection to a typed `QuotaExceededError`, distinct from every other
+  create failure. Sandbox pods (and their init containers) declare CPU/memory
+  **requests** (no limits — `SANDBOX_AGENT_REQUESTS` / `SANDBOX_INIT_REQUESTS`
+  in `pod.ts`) so a compute `ResourceQuota` can meter them and the scheduler can
+  bin-pack; the per-namespace concurrency ceiling stays the quota's job.
+- The orchestrator (`src/engine/executors/orchestrator.ts`) catches
+  `QuotaExceededError` and stamps the phase result
+  `stopReason: "error_quota"` instead of failing the run.
+- `runWorkflow` (`src/workflows/runner.ts`) detects
+  `stopReason: "error_quota"` and returns a
+  `WorkflowResult & { backpressure: true }` — a server-layer
+  intersection, not an engine change (see [Workflow Engine → Concurrency
+  cap and
+  admission](/spec/06-workflow-engine#concurrency-cap-and-admission)).
+  `simple.ts` reacts to `backpressure` by calling
+  `db.runs.requeueRunning()`, flipping the run `running → queued` instead
+  of `failed` — the run stays live and waits for a slot instead of
+  terminating.
+  - **Ordering invariant.** The engine is backend-agnostic: on any phase
+    failure it calls the `failWorkflow` reporter port, which normally
+    finalizes the run `failed`. Because `requeueRunning` is CAS-guarded on
+    `status = 'running'`, that finalize MUST be suppressed for a backpressure
+    failure — otherwise the row is already `failed` when `simple.ts`/`resume.ts`
+    calls `requeueRunning`, the CAS matches nothing, and the run is stuck
+    `failed` instead of re-queued. `runner.ts` tracks a `quota.hit` flag (set
+    the moment a phase returns `error_quota` OR throws `QuotaExceededError`) and
+    makes both `failWorkflow` and the terminal `❌ failed` ping no-op while it
+    is set, so the run is left `running` for the requeue to win. The same
+    `runWorkflow` wrapper backs the fresh-dispatch and admission-drain
+    (`resume.ts`) paths, so both are covered. (This is the fail-flip #8/#11
+    missed: they converted the quota RESULT/THROW to backpressure but not the
+    `failWorkflow` finalize that ran first.)
+- The `AdmissionController` (`src/workflows/admission.ts`) runs in a
+  **backpressure mode** for this backend
+  (`backpressureMode: config.sandbox === "kubernetes"`): it gates
+  promotion on `K8S_SANITY_FUSE` instead of `maxWorkflows`, and promotes
+  at most **one** queued run per `admitNext()` call — each promotion is
+  itself a quota probe (the promoted run re-queues immediately if the
+  quota is still full), so probing one at a time avoids a burst of
+  simultaneously rejected creates. Backlog drains at the periodic sweep
+  cadence (15 s) plus real completions, whichever frees a slot first.
+
+Real enforcement needs a namespace `ResourceQuota` object to actually exist —
+see `deploy/k8s/sandbox-quota.yaml` for a ready-to-apply example (pod-count
+only, paired with a `LimitRange` so the harness's deliberately
+resource-request-only pod spec stays schedulable). Without one applied, the
+mechanism is still build- and unit-tested, plus validated against a quota
+staged manually via admin cluster credentials (the opt-in `KubernetesSandbox
+Plan 6 quota-backpressure` case in
+`tests/sandbox/k8s/kubernetes.integration.test.ts`, gated behind
+`RUN_K8S_IT=1`).
+
+#### Deployment
+
+See [`apps/server/deploy/k8s/README.md`](https://github.com/nearform/lastlight/blob/main/apps/server/deploy/k8s/README.md)
+for the full cluster-prerequisites matrix (RBAC, namespace/PodSecurity, the
+`ResourceQuota`+`LimitRange` pair, an RWO `StorageClass`, Cilium, harness
+reachability) and the `kubectl apply -k`-able manifest set
+(`sandbox-namespace.yaml`, `sandbox-rbac.yaml`, `sandbox-quota.yaml`,
+`harness-deployment.yaml`, `configmap.yaml`) that ships in
+`apps/server/deploy/k8s/`.
+
 ### `none` — in-process
 
 For local development. agentic-pi runs in the harness process with
