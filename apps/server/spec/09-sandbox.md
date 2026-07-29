@@ -236,6 +236,18 @@ default 1800s), so the kubelet itself kills a hung Pod at the budget;
 `streamPodLog` resolves once the Pod terminates, so no separate
 application-level timeout watchdog is needed.
 
+**`type: bash` only, for now.** Deterministic phases run through `runCommand`
+(`sh -c <cmd>`, stdout captured verbatim). A `type: script` phase is **rejected
+up front** on this backend (`runSandboxedCommand`, `engine/executors/orchestrator.ts`):
+the harness stages a script by writing its bytes into the run's host-shared
+workspace, which every other backend bind-mounts into the guest — k8s has no
+host-shared workspace (skills and `AGENTS.md` reach the pod over the HTTP
+init-fetch channels below), and no channel yet stages the script into the pod,
+so the phase fails fast with an actionable error rather than letting the Pod hit
+`No such file or directory` at runtime. Delivering script bytes into the pod
+(mirroring the skill bundle) is a tracked follow-up. No built-in workflow uses
+`type: script` today.
+
 #### Credentials
 
 Every run's secrets travel in a **per-run creds Secret**, created before the

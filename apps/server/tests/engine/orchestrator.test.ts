@@ -285,6 +285,47 @@ describe("Sandbox orchestrator (FakeSandbox)", () => {
     );
   });
 
+  it("rejects a type:script phase on the kubernetes backend with a clear error", async () => {
+    // k8s has no host-shared workspace to stage the script into the pod (skills +
+    // AGENTS.md reach the pod over HTTP init-fetch channels instead), so the
+    // host-side writeFileSync would land on the harness FS and the pod would hit
+    // a confusing `No such file or directory`. Fail fast with an actionable
+    // message instead. FakeSandbox hands back a REAL host dir regardless of
+    // backend, so the write WOULD succeed here if attempted — proving the
+    // rejection below is the guard firing, not an ENOENT accident.
+    const fake = new FakeSandbox({
+      commandResult: { exitCode: 0, stdout: "", stderr: "", timedOut: false },
+    });
+
+    await expect(
+      executeCommand(
+        { kind: "script", script: "console.log(1)", runtime: "js", name: "probe" },
+        { sandbox: "kubernetes", stateDir, sessionsDir },
+        { sandboxFactory: fake.asFactory() },
+      ),
+    ).rejects.toThrow(/type:script phases are not yet supported on the kubernetes backend/);
+
+    // Fails fast: it never entered the sandbox bracket, so nothing was provisioned.
+    expect(fake.provisionCalls).toBe(0);
+  });
+
+  it("allows a type:bash phase on the kubernetes backend (the guard is script-only)", async () => {
+    // The guard must be narrow: bash phases stage no file (they run the command
+    // directly), so they work on k8s exactly as on every other backend.
+    const fake = new FakeSandbox({
+      commandResult: { exitCode: 0, stdout: "ok\n", stderr: "", timedOut: false },
+    });
+
+    const result = await executeCommand(
+      { kind: "bash", command: "echo ok" },
+      { sandbox: "kubernetes", stateDir, sessionsDir },
+      { sandboxFactory: fake.asFactory() },
+    );
+
+    expect(result.success).toBe(true);
+    expect(fake.provisionCalls).toBe(1);
+  });
+
   it("forwards config.githubApiBaseUrl into the command env as GITHUB_API_URL", async () => {
     // The eval harness sets githubApiBaseUrl to the fake GitHub URL. Command/
     // script phases (e.g. pr-review's post-review) must receive it so a

@@ -426,6 +426,22 @@ export async function runSandboxedCommand(
   ctx: SandboxRunContext,
   cmdOpts: CommandRunOpts,
 ): Promise<ExecutionResult> {
+  // A type:script phase stages the script bytes into the sandbox by writing them
+  // to `prov.hostWorkspaceDir` — correct for every host-shared backend
+  // (docker/smol/none), where that dir is bind-mounted into the guest. The k8s
+  // backend has no host-shared workspace (skills + AGENTS.md reach the pod over
+  // HTTP init-fetch channels instead), and nothing stages the script into the
+  // pod, so the write would land on the harness FS and the pod would hit a
+  // confusing `No such file or directory`. Fail fast with an actionable message.
+  // type:bash is unaffected — it runs the command directly, staging no file.
+  if (ctx.backend === "kubernetes" && spec.kind === "script") {
+    throw new Error(
+      "type:script phases are not yet supported on the kubernetes backend " +
+        "(no host-shared workspace to stage the script into the pod); use a " +
+        "type:bash phase, or run this workflow on the docker/gondolin backend",
+    );
+  }
+
   const { config } = ctx;
   const model = config.model || DEFAULT_MODEL;
   const sessionsDir = resolveSessionsDir(config);
