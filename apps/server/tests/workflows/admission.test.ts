@@ -53,6 +53,38 @@ function makeQueuedRun(db: StateDb, id: string, startedAt: string): void {
   });
 }
 
+/**
+ * A queued GitHub-triggered run that left an enqueue ack behind — the shape
+ * `simple.ts` persists when it posts the "…is queued" comment (#244).
+ */
+function makeQueuedRunWithAck(
+  db: StateDb,
+  id: string,
+  startedAt: string,
+  commentId: number,
+): void {
+  db.runs.createRun({
+    id,
+    workflowName: "issue-triage",
+    triggerId: `acme/widgets#${id.slice(-2)}`,
+    owner: "acme",
+    repo: "widgets",
+    issueNumber: 215,
+    currentPhase: "triage",
+    status: "queued",
+    startedAt,
+  });
+  db.runs.mergeScratch(id, { queuedAck: { commentId } });
+}
+
+function makeGithubStub() {
+  return {
+    postComment: vi.fn(async () => 1),
+    updateComment: vi.fn(async () => {}),
+    deleteComment: vi.fn(async () => {}),
+  };
+}
+
 function makeRunningRun(db: StateDb, id: string): void {
   db.runs.createRun({
     id,
@@ -232,6 +264,94 @@ describe("createAdmissionController", () => {
 
     expect(db.runs.getRun("gh-stale")!.status).toBe("cancelled");
     expect(postComment).not.toHaveBeenCalled();
+  });
+
+  // ── enqueue-ack lifecycle (issue #244) ──────────────────────────────────
+  //
+  // The ack promises "it'll start automatically when a slot frees", so it must
+  // not survive the run leaving the queue — otherwise a run that starts and
+  // then legitimately no-ops leaves that comment as its only visible trace.
+
+  it("admitNext: deletes the enqueue ack once the run is admitted", async () => {
+    makeQueuedRunWithAck(db, "run-ack", "2024-01-01T00:00:00.000Z", 5060108290);
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.admitNext();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(db.runs.getRun("run-ack")!.status).toBe("running");
+    expect(github.deleteComment).toHaveBeenCalledWith("acme", "widgets", 5060108290);
+    // Retracted, not rewritten — the run's own output is the real answer now.
+    expect(github.updateComment).not.toHaveBeenCalled();
+  });
+
+  it("admitNext: admits normally when no ack was recorded (Slack / failed post)", async () => {
+    makeQueuedRun(db, "run-noack", "2024-01-01T00:00:00.000Z");
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.admitNext();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(db.runs.getRun("run-noack")!.status).toBe("running");
+    expect(github.deleteComment).not.toHaveBeenCalled();
+  });
+
+  it("admitNext: a failing retract does not block the run from dispatching", async () => {
+    makeQueuedRunWithAck(db, "run-boom", "2024-01-01T00:00:00.000Z", 42);
+    const github = makeGithubStub();
+    github.deleteComment.mockRejectedValue(new Error("404 comment gone"));
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.admitNext();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(db.runs.getRun("run-boom")!.status).toBe("running");
+    expect(mockResumeSimpleRun).toHaveBeenCalledOnce();
+  });
+
+  it("sweep: rewrites the stale ack IN PLACE on TTL expiry rather than posting anew", async () => {
+    const oldTime = new Date(Date.now() - 3_600_000).toISOString();
+    makeQueuedRunWithAck(db, "gh-ack-stale", oldTime, 777);
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.sweep();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(db.runs.getRun("gh-ack-stale")!.status).toBe("cancelled");
+    expect(github.updateComment).toHaveBeenCalledOnce();
+    const [owner, repo, commentId, body] = github.updateComment.mock.calls[0] as unknown as [
+      string,
+      string,
+      number,
+      string,
+    ];
+    expect([owner, repo, commentId]).toEqual(["acme", "widgets", 777]);
+    expect(body).toMatch(/waiting too long/);
+    // Editing an existing comment, never adding one — that was the noise source.
+    expect(github.postComment).not.toHaveBeenCalled();
   });
 
   it("start/stop: can start the interval and stop it without throwing", () => {

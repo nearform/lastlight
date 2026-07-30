@@ -89,6 +89,21 @@ export class GitHubClient {
   }
 
   /**
+   * Delete an issue/PR comment the bot posted earlier. Used to retract a
+   * *transient* status comment once it stops being true — currently the
+   * concurrency-cap enqueue ack, which promises "it'll start automatically when
+   * a slot frees" and is meaningless (issue #244) the moment the run is
+   * admitted. Only ever call this on a comment id this harness created.
+   */
+  async deleteComment(owner: string, repo: string, commentId: number): Promise<void> {
+    await this.octokit.rest.issues.deleteComment({
+      owner,
+      repo,
+      comment_id: commentId,
+    });
+  }
+
+  /**
    * Add an emoji reaction to a specific issue comment. Used as an immediate
    * (silent) acknowledgment that the agent has accepted a request, before
    * any actual work — and any chatty bot comments — start.

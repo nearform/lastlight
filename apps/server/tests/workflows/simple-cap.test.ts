@@ -143,6 +143,65 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     expect(callbacks.postComment).toHaveBeenCalledOnce();
   });
 
+  it("stashes the enqueue ack's comment id so admission can retract it (#244)", async () => {
+    db.runs.createRun({
+      id: "blocker",
+      workflowName: "build",
+      triggerId: "acme/widgets#100",
+      currentPhase: "architect",
+      status: "running",
+      startedAt: new Date().toISOString(),
+    });
+
+    // A GitHub surface resolves the new comment id; Slack resolves void.
+    const callbacks = { ...makeCallbacks(), postComment: vi.fn(async () => 5060108290) };
+    await runSimpleWorkflow(
+      "explore",
+      makeRequest({ issueNumber: 215 }),
+      makeConfig(),
+      callbacks,
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1, maxQueueWaitMs: 1_800_000 },
+    );
+
+    const run = db.runs.getByTrigger("acme/widgets#215")!;
+    expect(run.status).toBe("queued");
+    expect(run.scratch?.queuedAck).toEqual({ commentId: 5060108290 });
+  });
+
+  it("records no ack handle when the surface returns no comment id (Slack)", async () => {
+    db.runs.createRun({
+      id: "blocker",
+      workflowName: "build",
+      triggerId: "acme/widgets#100",
+      currentPhase: "architect",
+      status: "running",
+      startedAt: new Date().toISOString(),
+    });
+
+    const callbacks = makeCallbacks(); // postComment resolves void
+    await runSimpleWorkflow(
+      "explore",
+      makeRequest({ issueNumber: 216 }),
+      makeConfig(),
+      callbacks,
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1, maxQueueWaitMs: 1_800_000 },
+    );
+
+    const run = db.runs.getByTrigger("acme/widgets#216")!;
+    expect(run.status).toBe("queued");
+    expect(run.scratch?.queuedAck).toBeUndefined();
+  });
+
   it("dedup: a duplicate trigger on a queued run returns queued without executing", async () => {
     // Create a queued run for the trigger
     db.runs.createRun({

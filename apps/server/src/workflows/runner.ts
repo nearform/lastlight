@@ -50,7 +50,14 @@ export type ApprovalGateConfig = Record<string, boolean>;
 export interface RunnerCallbacks {
   onPhaseStart?: (phase: string) => Promise<void>;
   onPhaseEnd?: (phase: string, result: PhaseResult) => Promise<void>;
-  postComment?: (body: string) => Promise<void>;
+  /**
+   * Post a one-off comment to whichever surface triggered the run. Resolves to
+   * the created GitHub comment id when the surface is a GitHub issue/PR and the
+   * id is known, so a caller can retract or edit that comment later — the
+   * enqueue ack does this (issue #244). Resolves to `void` for Slack and for
+   * any post that failed; callers posting a permanent comment ignore it.
+   */
+  postComment?: (body: string) => Promise<number | void>;
   /**
    * In-place "task list" progress surface. When set (workflows that opt in via
    * `status_checklist: true`), the runner drives this instead of posting a new

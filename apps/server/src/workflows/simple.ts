@@ -388,10 +388,19 @@ export async function runSimpleWorkflow(
         config.sandbox === "kubernetes"
           ? `the safety fuse (${admitCap}) is reached`
           : `the concurrency limit (${admitCap}) is reached`;
-      await notify(
+      const ackId = await notify(
         `\`${workflowName}\` is queued — ${capReason}.` +
         ` It'll start automatically when a slot frees.`,
       );
+      // The ack is TRANSIENT: it promises the run will start, so it stops being
+      // true the moment the run leaves the queue. Stash the comment handle so
+      // the admission controller can retract it on admit / rewrite it on TTL
+      // expiry (issue #244) — otherwise a run that starts and then legitimately
+      // no-ops leaves this comment as the only trace, reading as "it queued and
+      // never came back". Only GitHub surfaces return an id; Slack resolves void.
+      if (typeof ackId === "number") {
+        db.runs.mergeScratch(workflowId, { queuedAck: { commentId: ackId } });
+      }
       return { success: true, queued: true, phases: [] };
     }
   }
@@ -598,7 +607,7 @@ export async function runSimpleWorkflow(
 async function handleExistingRun(
   run: WorkflowRun,
   definition: ReturnType<typeof getWorkflow>,
-  notify: (msg: string) => Promise<void>,
+  notify: (msg: string) => Promise<number | void>,
   db: StateDb,
 ): Promise<WorkflowResult | null> {
   // Dedup: a duplicate trigger on an already-queued run must be a no-op.
