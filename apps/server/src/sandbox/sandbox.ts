@@ -18,9 +18,7 @@ import {
   SKILL_BUNDLE_ROOT,
   stageSkillBundle,
   excludeFromGit,
-  applyEnv,
   githubAuthEnvFrom,
-  withoutGitHubCredentials,
 } from "../engine/executors/shared.js";
 
 /**
@@ -459,8 +457,11 @@ class SmolSandbox implements Sandbox {
 /**
  * **One** adapter for the two in-process backends, parameterized by
  * `mode: 'gondolin' | 'none'`. The two differ only in agentic-pi's `sandbox`
- * arg and a `HOME` override. Owns the `applyEnv`/restore `process.env` splice
- * and the lazy `import("agentic-pi")`.
+ * arg and a `HOME` override. Owns the lazy `import("agentic-pi")`.
+ *
+ * Because the agent runs **in the harness process**, this adapter never writes
+ * to `process.env` — everything per-run is an explicit `agenticRun()` argument.
+ * See `runAgent` (issue #215).
  *
  * The `mode` flag is a **tombstone** for gondolin's planned removal — when
  * gondolin is retired it collapses to single-mode `none`.
@@ -527,48 +528,50 @@ class InProcessSandbox implements Sandbox {
     opts: RunAgentOpts,
     onEvent: (record: SandboxEvent) => void,
   ): Promise<RunResult | undefined> {
-    // agentic-pi reads provider keys from process.env, so splice our values in
-    // for the call and restore after. GitHub credentials are deliberately NOT in
-    // that splice: this adapter runs the agent *in the harness process*, where
-    // `process.env` is shared with every other concurrent run, so a per-run
-    // token there is readable (and clobberable) by all of them — issue #215.
-    // They go down the per-run `githubAuthEnv` channel below instead. Everything
-    // that remains in `opts.env` is a verbatim copy of the harness env, so the
-    // splice is a no-op for the live harness and only matters to embedders (the
-    // evals harness) that build a different env.
-    const restore = applyEnv(withoutGitHubCredentials(this.opts.env));
+    // This adapter does NOT write to `process.env`. It used to splice the whole
+    // sandbox env in for the call and restore it after, which was unsound: the
+    // agent runs *in the harness process*, so that env is shared with every
+    // other concurrent run — a per-run value written there is readable and
+    // clobberable by all of them, and interleaved restores don't converge
+    // (issue #215). Anything genuinely per-run therefore travels as an explicit
+    // argument: `githubAuthEnv` (this run's GitHub credential), `authFile` (the
+    // model credential store), `sandboxEnv` (git identity + the gondolin VM's
+    // env), `cwd`, `allowedHttpHosts`.
+    //
+    // What the splice actually carried — provider API keys, web-search keys,
+    // OTEL config — is process-wide harness configuration that `prepareRun`
+    // copies verbatim out of `process.env` (see `getOtelEnvForSandbox`), so
+    // writing it back was a no-op with a race attached. agentic-pi and pi-ai
+    // read that same ambient env directly, which is correct for values that are
+    // identical for every run.
     const allowedHttpHosts = this.opts.egress.unrestricted ? [ALLOW_ALL_SENTINEL] : this.opts.egress.hosts;
-    try {
-      // Loaded lazily: agentic-pi transitively poisons the global undici
-      // dispatcher on import, which would break the harness's own fetch. The
-      // dynamic import keeps the harness clean unless an in-process run happens.
-      const { run: agenticRun }: { run: typeof agenticRunType } = await import("agentic-pi");
-      return await agenticRun({
-        model: opts.model,
-        prompt,
-        thinking: opts.thinking,
-        profile: opts.profile,
-        authFile: opts.authFile,
-        githubApiBaseUrl: opts.githubApiBaseUrl,
-        // This run's GitHub credential, threaded per-run rather than through the
-        // shared process.env. Authoritative even when empty — agentic-pi must
-        // never fall back to the harness's ambient App PEM / host PAT for an
-        // agent whose profile was downscoped.
-        githubAuthEnv: githubAuthEnvFrom(this.opts.env),
-        sandbox: this.mode === "gondolin" ? "gondolin" : "none",
-        sandboxEnv: this.innerAgentEnv(opts.sandboxEnv),
-        cwd: opts.agentCwd,
-        noSession: true,
-        skillPaths: opts.skillDirs,
-        allowedHttpHosts,
-        webSearch: opts.webSearch === true,
-        webSearchProvider: opts.webSearchProvider,
-        onEvent,
-        onWarn: (msg) => console.warn(`[agentic] ${msg}`),
-      });
-    } finally {
-      restore();
-    }
+    // Loaded lazily: agentic-pi transitively poisons the global undici
+    // dispatcher on import, which would break the harness's own fetch. The
+    // dynamic import keeps the harness clean unless an in-process run happens.
+    const { run: agenticRun }: { run: typeof agenticRunType } = await import("agentic-pi");
+    return await agenticRun({
+      model: opts.model,
+      prompt,
+      thinking: opts.thinking,
+      profile: opts.profile,
+      authFile: opts.authFile,
+      githubApiBaseUrl: opts.githubApiBaseUrl,
+      // This run's GitHub credential, threaded per-run rather than through the
+      // shared process.env. Authoritative even when empty — agentic-pi must
+      // never fall back to the harness's ambient App PEM / host PAT for an
+      // agent whose profile was downscoped.
+      githubAuthEnv: githubAuthEnvFrom(this.opts.env),
+      sandbox: this.mode === "gondolin" ? "gondolin" : "none",
+      sandboxEnv: this.innerAgentEnv(opts.sandboxEnv),
+      cwd: opts.agentCwd,
+      noSession: true,
+      skillPaths: opts.skillDirs,
+      allowedHttpHosts,
+      webSearch: opts.webSearch === true,
+      webSearchProvider: opts.webSearchProvider,
+      onEvent,
+      onWarn: (msg) => console.warn(`[agentic] ${msg}`),
+    });
   }
 
   async runCommand(_taskId: string, command: string, opts: RunCommandOpts): Promise<RawCommandResult> {
@@ -591,8 +594,8 @@ class InProcessSandbox implements Sandbox {
   }
 
   dispose(): void {
-    // No isolation primitive to tear down — the env splice is restored inside
-    // runAgent, and the worktree is reaped elsewhere.
+    // No isolation primitive to tear down, and no process state to undo (the
+    // run mutates no globals); the worktree is reaped elsewhere.
   }
 
   /** Git identity + OTEL env + (gondolin only) a HOME override into the VM. */

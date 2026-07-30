@@ -33,8 +33,11 @@ describe("resolveReviewGitHubClient — stable config, immune to the process.env
       githubApp: { appId: "1", privateKeyPath: pem, installationId: "2" },
     } as unknown as ReturnType<typeof getRuntimeConfig>);
 
-    // Simulate a concurrent gondolin run having cleared the shared process.env
-    // (agent-executor applyEnv sets GITHUB_APP_* to "" for in-process runs).
+    // Simulate the shared process.env being blanked mid-run. A concurrent
+    // gondolin run used to do exactly this (agent-executor spliced
+    // `GITHUB_APP_* = ""`); that splice is gone as of #215, so today this stands
+    // for any future env mutation — reading auth from boot config is what makes
+    // this handler immune to all of them.
     process.env.GITHUB_APP_PRIVATE_KEY_PATH = "";
 
     // Must NOT throw EISDIR: reading process.env="" resolves to the cwd (a

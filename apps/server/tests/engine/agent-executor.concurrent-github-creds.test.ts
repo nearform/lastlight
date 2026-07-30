@@ -141,4 +141,20 @@ describe("executeAgent — per-run GitHub credentials (issue #215)", () => {
     // could otherwise mint itself a full-installation token.
     expect(Object.keys(captured[0].githubAuthEnv ?? {})).toEqual(["GITHUB_TOKEN"]);
   });
+
+  it("leaves process.env byte-identical — an in-process run mutates no globals", async () => {
+    // The broader invariant the credential fix rests on: this adapter runs the
+    // agent in the harness process, so it treats `process.env` as read-only and
+    // passes everything per-run as an explicit argument. Provider/web-search/OTEL
+    // values are process-wide config the executor copies verbatim OUT of this env
+    // (`getOtelEnvForSandbox`), so there was never anything to write back — only
+    // a race to inherit.
+    process.env.ANTHROPIC_API_KEY = "sk-ant-fixture";
+    const before = { ...process.env };
+
+    await runFor("run-A", "repo-a", "repo-write");
+
+    expect({ ...process.env }).toEqual(before);
+    delete process.env.ANTHROPIC_API_KEY;
+  });
 });

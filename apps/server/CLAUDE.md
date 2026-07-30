@@ -128,7 +128,7 @@ src/
                         executeDocker/executeSmol/executeInProcess twins).
       shared.ts         Backend-agnostic building blocks (RunResultAccumulator,
                         skill-bundle staging, server-artifact stage/harvest,
-                        finalizeFromRunResult, env splice).
+                        finalizeFromRunResult, githubAuthEnvFrom).
     dispatcher.ts       Routes classified events to workflow or chat handler.
     event-shim.ts       Translates agentic-pi events → Claude-SDK envelope jsonl.
     llm.ts              One-shot LLM helper for screen/ + classifier —

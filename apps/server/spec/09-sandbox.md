@@ -670,25 +670,32 @@ Per phase:
 The triage profile literally cannot push code, even if a prompt-
 injected attacker convinced the agent to try.
 
-### Invariant: per-run credentials never travel through `process.env`
+### Invariant: an in-process run mutates no globals
 
 The container backends hand each run its own env, so they were always isolated.
 The **in-process** backends (`gondolin` / `none`) are the sharp edge: the agent
 runs *in the harness process*, and up to `concurrency.maxWorkflows` runs are live
-in that one `process.env` at once. Credentials therefore move on **per-run
-channels only**:
+in that one `process.env` at once. So `InProcessSandbox.runAgent` treats
+`process.env` as **read-only** and passes everything per-run as an explicit
+`agenticRun()` argument:
 
-| Credential | Channel |
+| Per-run value | Channel |
 |---|---|
 | The agent's `github_*` token | agentic-pi `githubAuthEnv` (`githubAuthEnvFrom(ctx.env)`) — **replaces** `process.env` inside agentic-pi, so an empty value means "no credential", not "fall back to the ambient env" |
-| Git push/clone auth | `http.extraheader` via `GIT_CONFIG_*` in `agentGitIdentityEnv` (per-child env) |
+| Git push/clone auth | `http.extraheader` via `GIT_CONFIG_*` in `agentGitIdentityEnv` (per-child env / the gondolin VM env) |
 | The pre-clone | `PrePopulateSpec.token` (explicit argument) |
-| Whether to mint | boot config (`getRuntimeConfig().githubApp`) |
+| Model credentials (OAuth store) | `authFile` (explicit argument) |
+| Whether to mint at all | boot config (`getRuntimeConfig().githubApp`) |
 
-`InProcessSandbox.runAgent` still splices the *rest* of the sandbox env
-(`applyEnv`) because agentic-pi reads provider keys from `process.env`, but it
-strips `GITHUB_CREDENTIAL_ENV_KEYS` first (`withoutGitHubCredentials`,
-`executors/shared.ts`).
+The distinction that matters: a **credential scoped to one run** must be an
+argument, whereas **process-wide configuration** — provider API keys, web-search
+keys, OTEL settings — is ambient by nature. `prepareRun` copies those verbatim
+*out of* `process.env` (see `getOtelEnvForSandbox`) for the container backends to
+inject; agentic-pi and pi-ai read the same ambient env directly on the in-process
+path. There is deliberately **no** write-back: the adapter used to splice that env
+in and restore it afterwards, which was a no-op on the values (they were already
+identical) with a race attached, and it made the env look per-run scoped when it
+could not be. Deleting it removes the trap rather than narrowing it.
 
 This is issue #215. The executor used to splice each run's token — plus
 `GITHUB_APP_* = ""` — into the shared env for the duration of the agent turn,
@@ -699,8 +706,9 @@ making every `github_*` write 403 with "Resource not accessible by integration"
 while `git push` kept working; and interleaved restores permanently poisoned the
 harness env (run B saved what run A had spliced, so B's restore reinstated A's),
 leaving `GITHUB_APP_ID` falsy for good — after which the mint was **skipped
-entirely** and a stale token forwarded to every subsequent run. Regression test:
-`tests/engine/agent-executor.concurrent-github-creds.test.ts`.
+entirely** and a stale token forwarded to every subsequent run. Regression tests:
+`tests/engine/agent-executor.concurrent-github-creds.test.ts` (overlapping runs
+keep their own credential; `process.env` comes back byte-identical).
 
 ## Agent-side tools
 
