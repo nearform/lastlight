@@ -494,6 +494,12 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
       "lastlight.cron.fire",
       { "cron.name": cronName, "cron.workflow": workflowName, "cron.source": source },
       async (span) => {
+        // trace_id/span_id as logfmt fields → a Grafana derived-field link jumps
+        // from the Loki line straight to the Tempo span (the one real benefit of
+        // OTLP logs, without adopting an OTLP logs signal). Empty when telemetry
+        // is off (no active span), so the line degrades cleanly.
+        const sc = span?.spanContext();
+        const traceFields = sc ? ` trace_id=${sc.traceId} span_id=${sc.spanId}` : "";
         try {
           const o = await runFire(workflowName, context, { github, discoverers, dispatch, log });
           const status = o.failures > 0 ? "partial" : "ok";
@@ -509,7 +515,7 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
           const line =
             `[cron] cron=${cronName} workflow=${workflowName} source=${source} status=${status} ` +
             `scanned=${o.reposScanned ?? 0} discovered=${o.discovered ?? "-"} ` +
-            `dispatched=${o.dispatched} failures=${o.failures}`;
+            `dispatched=${o.dispatched} failures=${o.failures}${traceFields}`;
           if (status === "ok") console.log(line);
           else console.warn(line);
         } catch (err) {
@@ -519,8 +525,10 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
             status: "failed", reposScanned: null, discovered: null, dispatched: 0, failures: 0, error: message,
           });
           recordCronFire({ "cron.name": cronName, "cron.status": "failed" });
+          // error value is JSON.stringify'd so a message with spaces/quotes stays
+          // one logfmt token (the one field where logfmt needs explicit quoting).
           console.error(
-            `[cron] cron=${cronName} workflow=${workflowName} source=${source} status=failed error=${JSON.stringify(message)}`,
+            `[cron] cron=${cronName} workflow=${workflowName} source=${source} status=failed error=${JSON.stringify(message)}${traceFields}`,
           );
           throw err; // withSpan records the exception + sets span status ERROR, then rethrows
         }

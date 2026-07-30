@@ -159,8 +159,17 @@ parses the fields directly:
 
 ```
 [cron] cron=<name> workflow=<wf> source=<schedule|manual> status=<ok|partial|failed> \
-       scanned=<N> discovered=<M|-> dispatched=<K> failures=<F>
+       scanned=<N> discovered=<M|-> dispatched=<K> failures=<F> \
+       trace_id=<hex> span_id=<hex>
 ```
+
+`trace_id`/`span_id` come from the active `lastlight.cron.fire` span
+(`span.spanContext()`), so a Grafana **derived field** on the Loki datasource
+links the log line straight to the Tempo span — the one real benefit of OTLP
+logs, without adopting an OTLP logs signal. Both fields are omitted when
+telemetry is disabled (no active span). Free-text values (the `error=` field)
+are `JSON.stringify`'d so a message with spaces/quotes stays a single logfmt
+token.
 
 Level tracks status: `console.log` for `ok`, `console.warn` for `partial`,
 `console.error` for `failed` (with `error=<message>`). The `[cron]` prefix keeps
