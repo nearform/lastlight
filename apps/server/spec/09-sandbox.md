@@ -625,11 +625,23 @@ export type GitAccessProfile = "read" | "issues-write" | "review-write" | "repo-
 // :130–155
 export const GITHUB_PERMISSION_PROFILES = {
   read:           { contents: "read",  issues: "read",  pull_requests: "read",  metadata: "read" },
-  "issues-write": { contents: "read",  issues: "write", pull_requests: "read",  metadata: "read" },
+  "issues-write": { contents: "read",  issues: "write", pull_requests: "write", metadata: "read" },
   "review-write": { contents: "read",  issues: "write", pull_requests: "write", metadata: "read" },
   "repo-write":   { contents: "write", issues: "write", pull_requests: "write", workflows: "write", metadata: "read" },
 };
 ```
+
+`issues-write` and `review-write` carry the **same token scopes**. Commenting
+or labelling on a pull request requires `pull_requests: write` — GitHub
+resolves `POST /repos/:owner/:repo/issues/:n/comments` against the *target's*
+type (an issue checks `issues`, a PR checks `pull_requests`), and `write` is
+the coarsest grain it offers. Without it a `pr-comment` / `verify` / `qa-test`
+/ `demo` run 403s with "Resource not accessible by integration" the moment it
+tries to post (issue #239). The two profiles stay distinct in the **tool set**
+agentic-pi registers: only `review-write`+ gets
+`github_create_pull_request` / `github_create_pull_request_review`. That
+registration gate — not the token scope — is what stops a comment workflow
+submitting a formal review.
 
 Per phase:
 

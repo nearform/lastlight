@@ -88,7 +88,8 @@ export function gitAccessProfileForWorkflow(workflowName: string): GitAccessProf
     case "answer":
     case "security-review":
     // verify / qa-test / demo read the repo and post a findings/demo comment —
-    // they never push code, so issues-write (contents:read + issues:write) is
+    // they never push code, so issues-write (contents:read + issues:write +
+    // pull_requests:write, the last needed to comment on a PR at all) is
     // enough.
     case "verify":
     case "qa-test":
