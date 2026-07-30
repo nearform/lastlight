@@ -138,6 +138,26 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
     expect(shCmd).not.toContain("--sandbox-env");
     expect(shCmd).not.toContain("GIT_AUTHOR_NAME");
   });
+
+  it("passes --profile to agentic-pi when a valid profile is given", async () => {
+    const runPromise = manager.runAgent("task-001", "test prompt", { profile: "issues-write" });
+    process.nextTick(() => fakeChild.emit("close", 0));
+    await runPromise;
+
+    const dockerArgs = mockSpawn.mock.calls[0][1] as string[];
+    const shCmd = dockerArgs[dockerArgs.length - 1];
+    expect(shCmd).toContain("--profile issues-write");
+  });
+
+  it("rejects when profile is not one of the closed set", async () => {
+    // The `as any` simulates a value that reached here already erased to
+    // `string` (e.g. an untyped caller) — the runtime guard is the last
+    // line of defence once `GitAccessProfile` narrowing is bypassed.
+    await expect(
+      manager.runAgent("task-001", "test prompt", { profile: "admin" as any }),
+    ).rejects.toThrow(/Refusing to pass profile "admin"/);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
 });
 
 describe("DockerSandbox.create — shared package cache (issue #107)", () => {

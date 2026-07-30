@@ -38,6 +38,24 @@ interface RecordedReview {
   body: unknown;
 }
 
+// The GitHub-API fallback (#2) fetches these when there's no local checkout
+// (k8s). PR_DIFF is a minimal unified diff where src/foo.ts gains a line at
+// new-line 10 — parseDiff yields RIGHT:10, so a finding at that line anchors
+// inline instead of being demoted to the body.
+const HEAD_SHA = "abc1234def5678901234567890abcdef12345678";
+const PR_DIFF = [
+  "diff --git a/src/foo.ts b/src/foo.ts",
+  "index 1111111..2222222 100644",
+  "--- a/src/foo.ts",
+  "+++ b/src/foo.ts",
+  "@@ -7,3 +7,4 @@",
+  " line7",
+  " line8",
+  " line9",
+  "+line10-added",
+  "",
+].join("\n");
+
 function startMock(): { server: Server; url: string; reviews: RecordedReview[] } {
   const reviews: RecordedReview[] = [];
   const server = createServer((req, res) => {
@@ -56,6 +74,21 @@ function startMock(): { server: Server; url: string; reviews: RecordedReview[] }
     if (req.method === "GET" && m) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end("[]");
+      return;
+    }
+    // pulls.get — the GitHub-API fallback for head SHA (JSON) or the PR diff
+    // (Accept: application/vnd.github.diff). Used when there's no local checkout.
+    const pm = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/([^/]+)$/.exec(req.url || "");
+    if (req.method === "GET" && pm) {
+      if (String(req.headers.accept || "").includes("diff")) {
+        // charset=utf-8 so Octokit parses the body as text (a string), matching
+        // real GitHub — without it Octokit returns an ArrayBuffer.
+        res.writeHead(200, { "content-type": "application/vnd.github.diff; charset=utf-8" });
+        res.end(PR_DIFF);
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ number: Number(pm[3]), head: { sha: HEAD_SHA } }));
       return;
     }
     res.writeHead(404).end("{}");
@@ -182,6 +215,40 @@ describe("post-review action (runPostReview)", () => {
     expect(rep.failed).toHaveLength(0);
     expect(reviews).toHaveLength(1);
     expect(reviews[0]!.pr).toBe("42");
+  });
+
+  it("anchors a finding inline via the GitHub API diff when there is no local checkout (k8s)", async () => {
+    // On k8s the harness has no repo checkout — only the artifact store's
+    // `.lastlight/`. The local `git diff` fails, so pre-#2 every finding was
+    // demoted to the body. The fallback fetches the PR diff + head SHA from the
+    // GitHub API, so an on-diff finding posts as an inline comment. seedFindings
+    // writes findings.json but no `.git`, exactly reproducing the k8s state.
+    const taskId = "widget-42-apidiff";
+    seedFindings(taskId, "widget", {
+      summary: "One issue.",
+      event: "REQUEST_CHANGES",
+      findings: [
+        { path: "src/foo.ts", line: 10, side: "RIGHT", severity: "Important", title: "bug", body: "fix this" },
+      ],
+    });
+    const { executor, rep } = makeExecutor(taskId);
+    const outcome = await executor.execute(NODE, {});
+    expect(outcome.status).toBe("succeeded");
+    expect(rep.failed).toHaveLength(0);
+    expect(reviews).toHaveLength(1);
+    const body = reviews[0]!.body as {
+      event: string;
+      body: string;
+      commit_id?: string;
+      comments: { path: string; line: number }[];
+    };
+    // Anchored inline (not demoted into the body's "Additional findings"), and
+    // the review carries the API-fetched head SHA that inline comments require.
+    expect(body.comments).toHaveLength(1);
+    expect(body.comments[0]!.path).toBe("src/foo.ts");
+    expect(body.comments[0]!.line).toBe(10);
+    expect(body.commit_id).toBe(HEAD_SHA);
+    expect(body.body).not.toContain("Additional findings");
   });
 
   it("skips (no post) when the agent recorded skip:true", async () => {

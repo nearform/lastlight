@@ -4,10 +4,21 @@ metadata:
   name: lastlight-config
   namespace: lastlight
 data:
-  # Overlay layered over the image's config/default.yaml. At minimum set the
-  # repos the bot manages. EDIT managedRepos before applying.
+  # Overlay layered over the image's config/default.yaml. EDIT managedRepos
+  # before applying. The sandbox.kubernetes.* block below is written out
+  # explicitly for clarity — every key here already matches K8S_DEFAULTS
+  # (apps/server/src/config/config.ts), so this is a no-op default you can
+  # trim once you've reviewed it; only storageClassName typically needs a
+  # real edit (see the README's requirements matrix).
   config.yaml: |
     managedRepos:
       - your-org/your-repo
     sandbox:
-      backend: gondolin
+      backend: kubernetes
+      kubernetes:
+        namespace: lastlight-sandboxes
+        image: ghcr.io/nearform/lastlight-sandbox:latest
+        # EDIT: an RWO block/local StorageClass (not NFS — see README).
+        # Empty uses the cluster's default StorageClass.
+        storageClassName: ""
+        workspaceSize: 5Gi

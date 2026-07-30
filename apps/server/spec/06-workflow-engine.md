@@ -42,6 +42,13 @@ interface WorkflowResult {
 }
 ```
 
+The engine's own `WorkflowResult` (above) is unchanged. `runWorkflow`
+(`src/workflows/runner.ts`) returns a server-only intersection,
+`WorkflowResult & { backpressure?: boolean }` — see [Concurrency cap and
+admission](#concurrency-cap-and-admission) below. `backpressure` is set
+only on the [k8s sandbox backend](/spec/09-sandbox#kubernetes--kubernetes-backend-in-development);
+it never appears on gondolin/docker/smol/none runs.
+
 `src/workflows/simple.ts:84–310` is the entry point everything funnels
 through — webhook dispatch, CLI, cron, admin resume.
 
@@ -468,6 +475,26 @@ untouched (the terminal review comment lands once admission runs the
 workflow), and are cancellable like any live run. The dashboard shows a
 `queued` run with a neutral status badge and includes it in the `active`
 filter alongside `running`/`paused`.
+
+**k8s backpressure requeue.** The [Kubernetes sandbox
+backend](/spec/09-sandbox#kubernetes--kubernetes-backend-in-development)
+has no tuned concurrency cap of its own — the cluster namespace's
+`ResourceQuota` is the authority, so the harness admits freely (gated only
+by a sanity-fuse `K8S_SANITY_FUSE = 1000`, not `maxWorkflows`) and finds
+out capacity is exhausted only when a phase's Pod create is rejected.
+`runWorkflow` surfaces that as `backpressure: true` on its result (a
+server-layer intersection on `WorkflowResult` — the engine type itself is
+unchanged). `simple.ts` reacts by calling `db.runs.requeueRunning()`,
+transitioning the run **`running → queued`** instead of `failed` — a
+third transition alongside the fresh-trigger `→ queued` enqueue and the
+approval-gate `→ paused` pause. The `AdmissionController` then promotes it
+again like any other queued run, in a **backpressure mode**
+(`backpressureMode: config.sandbox === "kubernetes"`) that gates on
+`K8S_SANITY_FUSE` and promotes one queued run per `admitNext()` call
+instead of filling up to `maxWorkflows` — each promotion doubles as a
+quota probe. See [Sandbox → Concurrency](/spec/09-sandbox#concurrency)
+for the k8s-side half of this mechanism (the `QuotaExceededError` →
+`stopReason: "error_quota"` mapping).
 
 ## Loop expression evaluator
 

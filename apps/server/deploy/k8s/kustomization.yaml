@@ -1,12 +1,14 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# The Secret is intentionally NOT here — it carries the GitHub App key + .env and
-# is created out-of-band (see README). Everything the pod otherwise depends on,
-# including the KVM device plugin, ships in this set.
+# The Secret (lastlight-secrets: GitHub App PEM + .env) is intentionally NOT
+# here — it carries credentials and is created out-of-band (see README).
+# Everything else the harness and its sandbox pods depend on ships in this
+# set. Apply order is handled by kubectl/kustomize dependency ordering
+# (namespaces before namespaced objects); see the README for the explicit
+# sequence if you're applying files individually instead of `kubectl apply -k`.
 resources:
-  - namespace.yaml
-  - generic-device-plugin.yaml
+  - sandbox-namespace.yaml
+  - sandbox-quota.yaml
+  - sandbox-rbac.yaml
   - configmap.yaml
-  - pvc.yaml
-  - deployment.yaml
-  - service.yaml
+  - harness-deployment.yaml

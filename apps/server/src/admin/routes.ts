@@ -42,8 +42,17 @@ import {
   getInstallationRepos,
   getInstallationReposRefreshedAt,
 } from "../managed-repos.js";
-import { getRuntimeConfig, getRoutes, getBotName } from "../config/config.js";
+import {
+  getRuntimeConfig,
+  getRoutes,
+  getBotName,
+  resolveKubernetesConfig,
+} from "../config/config.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
+import { artifactStore } from "../sandbox/artifact-store.js";
+import { reclaimSandbox } from "../sandbox/k8s/reclaim.js";
+import { makeK8sApis } from "../sandbox/k8s/client.js";
+import { RunId } from "../sandbox/k8s/run-id.js";
 import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
 import type { WorkflowApproval } from "../state/approval-store.js";
@@ -1466,18 +1475,66 @@ export function createAdminRoutes(
         console.warn(`[cancel] container enumeration failed:`, err);
       }
     }
-    // Reap the on-disk workspace too (issue #106) — the kills above stop the
-    // in-flight phase but leave the clone behind. Cancel is explicit and leaves
-    // a dirty checkout, so reap regardless of workflow class (a reusable per-PR
-    // dir just re-clones next time). The live-container guard defaults on, so a
+    // Reap the workspace too (issue #106) — the kills above stop the in-flight
+    // phase but leave the clone (or, on the `kubernetes` backend, the Pod +
+    // PVC) behind. Cancel is explicit and leaves a dirty checkout, so on the
+    // host backend reap regardless of workflow class (a reusable per-PR dir
+    // just re-clones next time). The live-container guard defaults on, so a
     // container still dying from the kills above is not raced.
     let reaped = false;
     if (typeof storedTaskId === "string" && storedTaskId) {
-      reaped = reapSandboxWorkspace({
-        taskId: storedTaskId,
-        stateDir: config.stateDir,
-        sandboxDir: getRuntimeConfig()?.sandboxDir,
-      }).removed;
+      if (getRuntimeConfig()?.sandbox === "kubernetes") {
+        // On k8s, reclaim the run's pod + PVC by run-id label. An EPHEMERAL
+        // (per-run) PVC matches and is deleted. A REUSED per-(repo,PR) PVC
+        // keeps its first run's label, so it is intentionally left as a warm
+        // cache (issue #107) and reclaimed later by the age/LRU sweep —
+        // unlike the host reap above, which removes reused dirs on cancel.
+        // `RunId.from(run.id)` sanitizes identically to the label Task 1
+        // stamped on those objects (F7 — stamp/select symmetry is now
+        // type-enforced), so the selector always matches. Best-effort: an
+        // unreachable cluster / transport error must never fail the cancel
+        // response.
+        try {
+          await reclaimSandbox(makeK8sApis(), resolveKubernetesConfig().namespace, {
+            kind: "run",
+            runId: RunId.from(run.id),
+          });
+        } catch (err) {
+          console.warn(`[cancel] k8s reclaim failed for run ${run.id}:`, err);
+        }
+        // The pod's uploaded `.lastlight/` artifacts live host-side under
+        // `<sandboxDir>/<taskId>` even on k8s (the artifact store is host-local
+        // on every backend). `reclaimSandbox` above only touches the cluster pod
+        // + PVC, and the k8s backstop sweep only reclaims PVCs — so nothing else
+        // reaps those bytes. gc them directly here, mirroring the host `else`
+        // branch. No `reaped` gate: k8s has no host clone, so the artifact dir is
+        // the only thing to reclaim. Best-effort — a gc failure must not fail the
+        // cancel response.
+        try {
+          await artifactStore.gc(storedTaskId);
+        } catch (err) {
+          console.warn(`[cancel] artifact gc failed for ${storedTaskId}:`, err);
+        }
+      } else {
+        reaped = reapSandboxWorkspace({
+          taskId: storedTaskId,
+          stateDir: config.stateDir,
+          sandboxDir: getRuntimeConfig()?.sandboxDir,
+        }).removed;
+        // GC the artifact-store namespace too (Plan 8), same "only when the
+        // workspace dir actually went away" rule as reapOnSuccess (simple.ts)
+        // — redundant with the rmSync above for the local backend, but the
+        // hook a future S3 backend needs. Cancel is a full-run abort (not a
+        // per-phase dispose), so this can never race a still-in-flight
+        // post-review the way an eager dispose-time gc would.
+        if (reaped) {
+          try {
+            await artifactStore.gc(storedTaskId);
+          } catch (err) {
+            console.warn(`[cancel] artifact gc failed for ${storedTaskId}:`, err);
+          }
+        }
+      }
     }
     return c.json({ cancelled: id, killedContainers: killed, reapedWorkspace: reaped });
   });

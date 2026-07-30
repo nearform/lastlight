@@ -3,6 +3,7 @@ import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
 import { getBotName, getRuntimeConfig, type ModelConfig, type VariantConfig } from "../config/config.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
+import { artifactStore } from "../sandbox/artifact-store.js";
 import { getWorkflow } from "./loader.js";
 import {
   runWorkflow,
@@ -11,6 +12,7 @@ import {
   type WorkflowResult,
 } from "./runner.js";
 import { PhaseRef } from "./phase-ref.js";
+import { K8S_SANITY_FUSE } from "./admission.js";
 import type { TemplateContext } from "./templates.js";
 import { slugify } from "./templates.js";
 import { wrapUntrusted } from "../engine/screen/screen.js";
@@ -120,6 +122,16 @@ export function workflowScopedTaskId(
  * is owned by the backstop TTL/LRU sweep, so re-review fanout keeps its warm
  * `node_modules`. Failures are left for the sweep too (post-mortem debugging).
  * Best-effort — never throws into the already-succeeded run.
+ *
+ * Also GCs the run's `.lastlight/` artifact-store namespace (Plan 8), but
+ * ONLY when the workspace dir was actually removed above — this runs well
+ * after `post-review` (the run has already finished), and the reuse/recreate
+ * early-return above means a per-target run (pr-review, pr-fix, build) skips
+ * gc here too, exactly like it skips the workspace reap: those artifacts stay
+ * on disk as part of the same warm cache. For the local backend this is
+ * redundant with the `rmSync` above (both remove the same on-disk tree); the
+ * real payoff is a future S3 backend, where `gc` is the only thing that
+ * reaches the remote objects.
  */
 export function reapOnSuccess(workflowName: string, taskId: string, config: ExecutorConfig): void {
   const rt = getRuntimeConfig();
@@ -128,11 +140,16 @@ export function reapOnSuccess(workflowName: string, taskId: string, config: Exec
     return;
   }
   try {
-    reapSandboxWorkspace({
+    const { removed } = reapSandboxWorkspace({
       taskId,
       stateDir: config.stateDir ?? rt?.stateDir ?? "data",
       sandboxDir: config.sandboxDir ?? rt?.sandboxDir,
     });
+    if (removed) {
+      artifactStore.gc(taskId).catch((err: unknown) => {
+        console.warn(`[reap] artifact gc failed for ${taskId}:`, err);
+      });
+    }
   } catch {
     /* best effort — a reap failure must not fail a successful run */
   }
@@ -234,7 +251,7 @@ export async function runSimpleWorkflow(
   bootstrapLabel = "lastlight:bootstrap",
   variants?: VariantConfig,
   concurrency?: { maxWorkflows: number; maxQueueWaitMs: number },
-): Promise<WorkflowResult> {
+): Promise<WorkflowResult & { backpressure?: boolean }> {
   // Kill switch — if an admin has disabled this workflow in the dashboard,
   // skip every trigger source (cron, webhooks, mentions, Slack) without
   // creating a workflow_runs row. Returning success=true keeps callers
@@ -329,7 +346,13 @@ export async function runSimpleWorkflow(
       buildAssetIssueKey(workflowName, number, workflowId),
       !!effectivePrePopulateBranch,
     );
-    const overCap = concurrency !== undefined && db.runs.countRunning() >= concurrency.maxWorkflows;
+    // Concurrency authority differs by backend: docker/gondolin use the tuned
+    // app-level `maxWorkflows`; the k8s backend defers to the namespace
+    // ResourceQuota (spec/09-sandbox.md (Concurrency)) and keeps only an absurdly-high sanity fuse,
+    // so it admits freely here and requeues later if a pod-create is quota-rejected.
+    const admitCap =
+      config.sandbox === "kubernetes" ? K8S_SANITY_FUSE : concurrency?.maxWorkflows ?? Infinity;
+    const overCap = db.runs.countRunning() >= admitCap;
     const runStatus: "running" | "queued" = overCap ? "queued" : "running";
     db.runs.createRun({
       id: workflowId,
@@ -359,9 +382,14 @@ export async function runSimpleWorkflow(
     });
     console.log(`[simple] Created workflow run ${workflowId} (${workflowName}) status=${runStatus}`);
     if (overCap) {
+      // On k8s the cap is the runaway-loop sanity fuse (the ResourceQuota is the
+      // real authority), not a tuned concurrency limit — word it accurately.
+      const capReason =
+        config.sandbox === "kubernetes"
+          ? `the safety fuse (${admitCap}) is reached`
+          : `the concurrency limit (${admitCap}) is reached`;
       await notify(
-        `\`${workflowName}\` is queued — the concurrency limit` +
-        ` (${concurrency!.maxWorkflows}) is reached.` +
+        `\`${workflowName}\` is queued — ${capReason}.` +
         ` It'll start automatically when a slot frees.`,
       );
       return { success: true, queued: true, phases: [] };
@@ -540,6 +568,14 @@ export async function runSimpleWorkflow(
     if (result.success && !result.paused) {
       db.runs.finishRun(workflowId, "succeeded");
       reapOnSuccess(workflowName, taskId, config);
+    } else if (result.backpressure) {
+      // k8s ResourceQuota rejected a pod-create: requeue, don't fail. The
+      // AdmissionController promotes it again as capacity frees (spec/09-sandbox.md (Concurrency)).
+      db.runs.requeueRunning(workflowId);
+      await notify(
+        `\`${workflowName}\` is waiting for cluster capacity — it'll start automatically when a slot frees.`,
+      );
+      return { success: true, queued: true, backpressure: true, phases: result.phases };
     } else if (!result.success && !result.paused) {
       db.runs.finishRun(workflowId, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed",

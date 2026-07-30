@@ -595,6 +595,20 @@ Sandbox (smolvm `smol` backend — experimental, opt-in):
   path → direct share). See `spec/09-sandbox.md`. Opt-in IT:
   `RUN_SMOL_IT=1 SMOLVM_IMAGE=<archive> npx vitest run tests/sandbox/smol.integration.test.ts`.
 
+Sandbox (`kubernetes` backend — in development, opt-in):
+
+- `LASTLIGHT_SANDBOX=kubernetes` runs each workflow phase as its own bare Pod
+  in a dedicated namespace — the harness itself is a Kubernetes client
+  (`@kubernetes/client-node`), a structural peer of the docker/smol backends
+  behind the same `Sandbox` port, driven by `KubernetesSandbox`
+  (`src/sandbox/k8s/kubernetes-sandbox.ts`). Not the default;
+  `config/default.yaml` stays `gondolin`. See `deploy/k8s/README.md` for the
+  cluster prerequisites and a ready-to-apply `kubectl apply -k` manifest set,
+  and `spec/09-sandbox.md` for the full contract (pod lifecycle, credentials,
+  egress via `CiliumNetworkPolicy`, per-PR workspace PVCs, quota-based
+  backpressure). Opt-in IT: `RUN_K8S_IT=1 npx vitest run
+  tests/sandbox/k8s/kubernetes.integration.test.ts`.
+
 Sandbox workspace provisioning (issue #107):
 
 - **Shallow clone** — read-only workflows (everything except the
@@ -785,9 +799,13 @@ sudo -u lastlight -i lastlight server update
    `ghcr.io/nearform/lastlight-{agent,sandbox-base,sandbox,sandbox-qa}` via the
    `images` job of `.github/workflows/publish.yml` (on GitHub Release +
    `workflow_dispatch`, amd64, public). (The release also publishes a fifth
-   image, `lastlight-agent-qemu` — `agent` + QEMU for the gondolin/k8s path,
-   see `deploy/k8s/` — which the compose stack doesn't use, so it isn't pulled
-   here.) `server update` pulls the tag `resolveImageTag` returns — the
+   image, `lastlight-agent-qemu` — `agent` + QEMU for the `gondolin` backend
+   on a bare-metal/VM host — which the compose stack doesn't use, so it isn't
+   pulled here. `deploy/k8s/` is a separate deploy example, unrelated to that
+   image: it's the **kubernetes sandbox backend** (`sandbox.backend:
+   kubernetes`, see above), which runs the plain `agent`/`sandbox` images as
+   ordinary Pods — no QEMU/KVM, no privileged containers, no device plugin.)
+   `server update` pulls the tag `resolveImageTag` returns — the
    overlay's `deploy.version` pin (e.g. `v0.11.0`) when set, else `:latest` — and
    re-tags each to its **local** name (`lastlight-agent`,
    `lastlight-sandbox:latest`, …), which is what `docker-compose.yml` and the

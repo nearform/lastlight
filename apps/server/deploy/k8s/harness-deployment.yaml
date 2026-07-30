@@ -1,0 +1,111 @@
+# The harness namespace, its data PVC, the Deployment wired for
+# sandbox.backend: kubernetes, and the Service the sandbox pods reach it
+# through. Distinct from lastlight-sandboxes (sandbox-namespace.yaml), where
+# the ephemeral per-phase sandbox pods run — see README.md (this directory)
+# and apps/server/spec/09-sandbox.md for the full architecture.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lastlight
+  # No pod-security label: the agent image's entrypoint starts as root, then
+  # `exec gosu lastlight` (UID 10001) — restricted PSA requires
+  # runAsNonRoot=true at admission, which this pod spec doesn't declare. The
+  # isolation boundary for untrusted work is the sandbox namespace's pods, not
+  # the harness pod itself, so this namespace runs at the cluster's default
+  # PSA level (unset here — set your own baseline if your cluster requires it).
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lastlight-data
+  namespace: lastlight
+spec:
+  accessModes: ["ReadWriteOnce"] # single embedded-SQLite writer
+  resources:
+    requests:
+      storage: 20Gi
+  # EDIT: a local/block StorageClass so SQLite file locking is safe (not NFS).
+  # Leaving this unset uses the cluster's default StorageClass.
+  # storageClassName: your-block-storage-class
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lastlight
+  namespace: lastlight
+  labels: { app.kubernetes.io/name: lastlight }
+spec:
+  replicas: 1
+  strategy: { type: Recreate } # single embedded-SQLite writer on an RWO PVC
+  selector:
+    matchLabels: { app.kubernetes.io/name: lastlight }
+  template:
+    metadata:
+      # This label is what sandbox.kubernetes.harnessPodLabels defaults to
+      # (K8S_DEFAULTS in apps/server/src/config/config.ts) — it's how the
+      # harness-generated CiliumNetworkPolicy `toEndpoints` rule finds this
+      # pod for the sandbox->harness skill/context/artifact channel. Change
+      # both together if you relabel.
+      labels: { app.kubernetes.io/name: lastlight }
+    spec:
+      serviceAccountName: lastlight # sandbox-rbac.yaml — RBAC to manage sandbox pods
+      containers:
+        - name: agent
+          # EDIT: pin to a release tag, e.g. :v0.21.8. This is the PLAIN agent
+          # image (no QEMU) — the kubernetes sandbox backend isolates at the
+          # Pod level (KubernetesSandbox), not gondolin's in-harness micro-VM,
+          # so it needs neither QEMU nor a docker socket in this pod.
+          image: ghcr.io/nearform/lastlight-agent:latest
+          # No runAsUser/runAsNonRoot, no added capabilities, no
+          # privileged:true, no /dev/kvm device: the entrypoint starts as
+          # root then `exec gosu lastlight` (UID 10001).
+          ports:
+            - { name: http, containerPort: 8644 }
+          env:
+            - { name: LASTLIGHT_OVERLAY_DIR, value: /app/instance }
+            - { name: STATE_DIR, value: /app/data }
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          volumeMounts:
+            - { name: data, mountPath: /app/data }
+            - { name: secrets, mountPath: /app/instance/secrets, readOnly: true }
+            - { name: config, mountPath: /app/instance/config.yaml, subPath: config.yaml, readOnly: true }
+          startupProbe:
+            httpGet: { path: /health, port: 8644 }
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /health, port: 8644 }
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: /health, port: 8644 }
+            periodSeconds: 30
+            failureThreshold: 4
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: lastlight-data }
+        - name: secrets
+          secret: { secretName: lastlight-secrets }
+        - name: config
+          configMap: { name: lastlight-config }
+---
+# Reached by sandbox pods' initContainers (skill bundle + agent-context fetch)
+# and by the main container's artifact POST-back — see the README's
+# "harness Service reachability" section. This Service's DNS name
+# (lastlight.lastlight.svc.cluster.local:8644) is exactly
+# sandbox.kubernetes.harnessEndpoint's default, so no override is needed if
+# you keep this namespace/name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lastlight
+  namespace: lastlight
+spec:
+  selector: { app.kubernetes.io/name: lastlight }
+  ports:
+    - { name: http, port: 8644, targetPort: 8644 }

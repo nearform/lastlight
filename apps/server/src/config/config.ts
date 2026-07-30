@@ -110,6 +110,15 @@ export interface LastLightConfig {
   variants: VariantConfig;
   maxTurns: number;
   sandbox: SandboxBackend;
+  /**
+   * The `kubernetes` backend's own config block (namespace/image/PVC/security
+   * context), normalized from `sandbox.kubernetes` in the YAML config. Kept as
+   * a separate field rather than reshaping `sandbox` above, which many call
+   * sites read as the plain backend string. `undefined` when the block is
+   * absent from config — {@link resolveKubernetesConfig} applies env
+   * overrides and defaults on top.
+   */
+  kubernetes?: Partial<KubernetesConfig>;
   /** Where build handoff docs live: "repo" (committed) | "server" (externalized). */
   buildAssets: BuildAssetsLocation;
   /** Filesystem root for server-mode build assets (default $STATE_DIR/build-assets). */
@@ -156,6 +165,26 @@ export interface LastLightConfig {
    * dir cap (`maxDirs`). Replaces the out-of-band host cron.
    */
   cleanup: { sandbox: SandboxCleanupConfig };
+}
+
+/** The `kubernetes` sandbox backend's own config surface — namespace, image,
+ *  and the PVC/security-context knobs later Plan-2 tasks wire into the
+ *  adapter. Resolved by {@link resolveKubernetesConfig}, never read directly
+ *  off `LastLightConfig` (kept off the `sandbox` field, which many call sites
+ *  read as the plain `SandboxBackend` string). */
+export interface KubernetesConfig {
+  namespace: string;
+  image: string;
+  storageClassName: string;
+  workspaceSize: string;
+  runAsUser: number;
+  /** Base URL the sandbox's skills initContainer fetches the bundle from
+   *  (the harness Service, cross-namespace). */
+  harnessEndpoint: string;
+  /** The harness Pod's namespace — the `toEndpoints` egress selector. */
+  harnessNamespace: string;
+  /** The harness Pod's Cilium selector labels — the `toEndpoints` egress rule. */
+  harnessPodLabels: Record<string, string>;
 }
 
 export interface SandboxCleanupConfig {
@@ -413,6 +442,7 @@ export function loadConfig(): LastLightConfig {
     variants,
     maxTurns,
     sandbox,
+    kubernetes: fileCfg.kubernetes,
     buildAssets,
     buildAssetsDir,
     deploy: fileCfg.deploy,
@@ -454,6 +484,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   models: ModelConfig;
   variants: VariantConfig;
   sandbox: { backend: SandboxBackend; maxTurns: number };
+  kubernetes?: Partial<KubernetesConfig>;
   buildAssets: BuildAssetsLocation;
   deploy: { version: string | null };
   approval: Record<string, boolean>;
@@ -471,6 +502,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const modelsRaw = isPlainObject(raw.models) ? raw.models : {};
   const variantsRaw = isPlainObject(raw.variants) ? raw.variants : {};
   const sandboxRaw = isPlainObject(raw.sandbox) ? raw.sandbox : {};
+  const kubernetesRaw = isPlainObject(sandboxRaw.kubernetes) ? sandboxRaw.kubernetes : undefined;
   const buildAssetsRaw = isPlainObject(raw.buildAssets) ? raw.buildAssets : {};
   const deployRaw = isPlainObject(raw.deploy) ? raw.deploy : {};
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {};
@@ -491,6 +523,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
 
   const backend = sandboxBackend(sandboxRaw.backend, "sandbox.backend");
   const maxTurns = typeof sandboxRaw.maxTurns === "number" ? sandboxRaw.maxTurns : 200;
+  const kubernetes = kubernetesRaw ? normalizeKubernetesFileConfig(kubernetesRaw) : undefined;
   const buildAssets = buildAssetsLocation(buildAssetsRaw.location, "buildAssets.location");
   const deployVersion = typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
   const bootstrapLabel = typeof bootstrapRaw.label === "string" ? bootstrapRaw.label : "lastlight:bootstrap";
@@ -536,6 +569,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     models,
     variants,
     sandbox: { backend, maxTurns },
+    kubernetes,
     buildAssets,
     deploy: { version: deployVersion },
     approval,
@@ -546,6 +580,33 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     concurrency: { maxWorkflows, maxQueueWaitMs },
     cleanup: { sandbox: sandboxCleanup },
   };
+}
+
+/**
+ * Guard the `sandbox.kubernetes` YAML block field-by-field, keeping only the
+ * present, correctly-typed fields — never fills in defaults (that's
+ * {@link resolveKubernetesConfig}'s job, so env can still override a value
+ * this block leaves unset).
+ */
+function normalizeKubernetesFileConfig(raw: Record<string, unknown>): Partial<KubernetesConfig> {
+  const out: Partial<KubernetesConfig> = {};
+  if (typeof raw.namespace === "string" && raw.namespace.trim()) out.namespace = raw.namespace.trim();
+  if (typeof raw.image === "string" && raw.image.trim()) out.image = raw.image.trim();
+  if (typeof raw.storageClassName === "string" && raw.storageClassName.trim()) {
+    out.storageClassName = raw.storageClassName.trim();
+  }
+  if (typeof raw.workspaceSize === "string" && raw.workspaceSize.trim()) out.workspaceSize = raw.workspaceSize.trim();
+  if (typeof raw.runAsUser === "number" && Number.isFinite(raw.runAsUser)) out.runAsUser = raw.runAsUser;
+  if (typeof raw.harnessEndpoint === "string" && raw.harnessEndpoint.trim()) {
+    out.harnessEndpoint = raw.harnessEndpoint.trim();
+  }
+  if (typeof raw.harnessNamespace === "string" && raw.harnessNamespace.trim()) {
+    out.harnessNamespace = raw.harnessNamespace.trim();
+  }
+  if (isPlainObject(raw.harnessPodLabels)) {
+    out.harnessPodLabels = stringRecord(raw.harnessPodLabels, "kubernetes.harnessPodLabels");
+  }
+  return out;
 }
 
 function normalizeRoutes(raw: unknown): RouteConfig {
@@ -616,8 +677,8 @@ function optionalStringArray(raw: unknown, path: string): string[] {
 }
 
 function sandboxBackend(raw: unknown, path: string): SandboxBackend {
-  if (raw === "gondolin" || raw === "docker" || raw === "smol" || raw === "none") return raw;
-  throw new Error(`${path} must be one of gondolin, docker, smol, none`);
+  if (raw === "gondolin" || raw === "docker" || raw === "smol" || raw === "none" || raw === "kubernetes") return raw;
+  throw new Error(`${path} must be one of gondolin, docker, smol, none, kubernetes`);
 }
 
 function buildAssetsLocation(raw: unknown, path: string): BuildAssetsLocation {
@@ -663,7 +724,13 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
 
   const sandbox: Record<string, unknown> = {};
   const backend = (env.LASTLIGHT_SANDBOX || "").trim().toLowerCase();
-  if (backend === "gondolin" || backend === "docker" || backend === "smol" || backend === "none") {
+  if (
+    backend === "gondolin" ||
+    backend === "docker" ||
+    backend === "smol" ||
+    backend === "none" ||
+    backend === "kubernetes"
+  ) {
     sandbox.backend = backend;
   } else if (backend) {
     console.warn(`[config] Unknown LASTLIGHT_SANDBOX value "${backend}" — using the file/default backend`);
@@ -794,6 +861,72 @@ export function resolveModel(models: ModelConfig, taskType: string): string {
 
 export function resolveVariant(variants: VariantConfig, taskType: string): string | undefined {
   return variants[taskType] || variants.default;
+}
+
+/** Hardcoded fallback for every {@link KubernetesConfig} field, used only when
+ *  neither an env override nor the runtime `sandbox.kubernetes` block supplies
+ *  a value. The image is registry-qualified (nearform's `publish.yml` pushes
+ *  it to GHCR) — the `kubernetes` backend runs on a real cluster, which can't
+ *  resolve the docker-local `lastlight-sandbox:latest` tag the other backends
+ *  use. `storageClassName` defaults to `""`, which {@link buildPvcManifest}
+ *  (`sandbox/k8s/pvc.ts`) omits from the PVC spec so k8s falls back to the
+ *  cluster's annotated default StorageClass — any cluster-specific class
+ *  (e.g. a fork's `truenas-iscsi`) is set via `LASTLIGHT_K8S_STORAGE_CLASS`
+ *  or the `sandbox.kubernetes.storageClassName` overlay key. */
+const K8S_DEFAULTS: KubernetesConfig = {
+  namespace: "lastlight-sandboxes",
+  image: "ghcr.io/nearform/lastlight-sandbox:latest",
+  storageClassName: "",
+  workspaceSize: "5Gi",
+  runAsUser: 10001,
+  harnessEndpoint: "http://lastlight.lastlight.svc.cluster.local:8644",
+  harnessNamespace: "lastlight",
+  harnessPodLabels: { "app.kubernetes.io/name": "lastlight" },
+};
+
+/** Parse a `k=v,k=v` env string into a label map; empty/malformed → `undefined`
+ *  so callers fall through to the runtime block, then {@link K8S_DEFAULTS}. */
+function parseLabels(raw: string | undefined): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const out: Record<string, string> = {};
+  for (const pair of raw.split(",")) {
+    const [k, v] = pair.split("=").map((s) => s.trim());
+    if (k && v) out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Resolve the `kubernetes` sandbox backend's config: env override → the
+ * runtime `sandbox.kubernetes` block (if config has been loaded) → hardcoded
+ * defaults. `getRuntimeConfig()` returns `undefined` rather than throwing
+ * when no config is loaded, so this is safe to call from tests or any code
+ * path that runs before `loadConfig()`.
+ */
+export function resolveKubernetesConfig(): KubernetesConfig {
+  const k = getRuntimeConfig()?.kubernetes ?? {};
+  const runAsUserEnv = parseInt(process.env.LASTLIGHT_K8S_RUN_AS_USER ?? "", 10);
+  return {
+    namespace: process.env.LASTLIGHT_K8S_NAMESPACE ?? k.namespace ?? K8S_DEFAULTS.namespace,
+    image: process.env.K8S_SANDBOX_IMAGE ?? k.image ?? K8S_DEFAULTS.image,
+    storageClassName:
+      process.env.LASTLIGHT_K8S_STORAGE_CLASS ?? k.storageClassName ?? K8S_DEFAULTS.storageClassName,
+    workspaceSize:
+      process.env.LASTLIGHT_K8S_WORKSPACE_SIZE ?? k.workspaceSize ?? K8S_DEFAULTS.workspaceSize,
+    runAsUser: Number.isFinite(runAsUserEnv) ? runAsUserEnv : (k.runAsUser ?? K8S_DEFAULTS.runAsUser),
+    harnessEndpoint:
+      process.env.LASTLIGHT_K8S_HARNESS_ENDPOINT ??
+      k.harnessEndpoint ??
+      K8S_DEFAULTS.harnessEndpoint,
+    harnessNamespace:
+      process.env.LASTLIGHT_K8S_HARNESS_NAMESPACE ??
+      k.harnessNamespace ??
+      K8S_DEFAULTS.harnessNamespace,
+    harnessPodLabels:
+      parseLabels(process.env.LASTLIGHT_K8S_HARNESS_POD_LABELS) ??
+      k.harnessPodLabels ??
+      K8S_DEFAULTS.harnessPodLabels,
+  };
 }
 
 /**

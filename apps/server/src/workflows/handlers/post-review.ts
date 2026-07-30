@@ -150,7 +150,11 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
     // Head SHA + base ref come from the checkout / run context, never the agent.
     const baseRef = typeof ctx.baseBranch === "string" && ctx.baseBranch ? ctx.baseBranch : undefined;
-    const headSha = this.gitHeadSha(hostRepoDir);
+    let headSha = this.gitHeadSha(hostRepoDir);
+    // No local checkout (k8s: only the artifact store's `.lastlight/`) — fetch
+    // the head SHA from the GitHub API so the idempotency check below and inline
+    // comments (which require a commit id) both work.
+    if (!headSha) headSha = await github.getPullRequestHeadSha(owner, repo, prNumber).catch(() => undefined);
 
     // Idempotency: skip if a bot review already exists on this head SHA (guards
     // resume / re-entry from double-posting).
@@ -165,7 +169,11 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
     // Commentable line set from the local checkout diff. Failure → null → all
     // findings demoted to the body (the review still posts).
-    const commentable = baseRef ? this.gitCommentableDiff(hostRepoDir, baseRef) : null;
+    let commentable = baseRef ? this.gitCommentableDiff(hostRepoDir, baseRef) : null;
+    // No local checkout (or no base ref) — fall back to GitHub's own PR diff
+    // (the same merge-base diff) so findings still anchor inline on k8s instead
+    // of demoting to the body.
+    if (!commentable) commentable = await this.apiCommentableDiff(github, owner, repo, prNumber);
     const review = buildReview(doc, commentable);
 
     try {
@@ -294,6 +302,24 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
   private diffFailed(msg: string): null {
     console.warn(`[post-review] could not compute commentable diff (${msg}); demoting all findings to the body`);
     return null;
+  }
+
+  /** Fetch the PR's diff from the GitHub API and parse it into a commentable
+   *  set — the fallback when there's no local checkout (k8s). GitHub's PR diff
+   *  is the same merge-base…head diff the local three-dot path targets, so the
+   *  anchor set is identical. Best-effort: any failure returns null and every
+   *  finding demotes to the body (the review still posts). */
+  private async apiCommentableDiff(
+    github: GitHubClient,
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Map<string, Set<string>> | null> {
+    try {
+      return parseDiff(await github.getPullRequestDiff(owner, repo, prNumber));
+    } catch (err) {
+      return this.diffFailed(err instanceof Error ? err.message : String(err));
+    }
   }
 }
 

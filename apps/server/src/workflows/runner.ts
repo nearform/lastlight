@@ -20,6 +20,7 @@ import { runWorkflowCore } from "lastlight-workflow-engine";
 import type {
   EnginePorts,
   EngineSpan,
+  ExecutionResult,
   ObservabilityPort,
   PhaseReporter,
   PhaseResolver,
@@ -31,6 +32,7 @@ import type {
 } from "lastlight-workflow-engine";
 import { makePostReviewHandler } from "./handlers/post-review.js";
 import { fileVerdictReader } from "./handlers/verdict-reader.js";
+import { QuotaExceededError } from "../sandbox/k8s/quota.js";
 import type { ProgressReporter } from "../notify/types.js";
 import { collapseDetail } from "../notify/render.js";
 
@@ -137,12 +139,8 @@ export function gitSandboxAccessForWorkflow(
 //
 // Thin delegations to the real app functions; injected into the engine so the
 // core stays domain-agnostic. Built once at module load (they hold no run
-// state) except the post-review handler, which is per-run.
-
-const defaultAgentPort: EnginePorts["agent"] = {
-  runAgent: (prompt, config, opts) => executeAgent(prompt, config, opts),
-  runCommand: (spec, config, opts) => executeCommand(spec, config, opts),
-};
+// state) except the post-review handler and the agent/command port (both
+// per-run — the latter closes over a per-run quota-detection flag, below).
 
 const defaultAssetLoader: EnginePorts["assets"] = {
   loadPromptTemplate: (relativePath) => loadPromptTemplate(relativePath),
@@ -191,7 +189,7 @@ export async function runWorkflow(
   approvalConfig?: ApprovalGateConfig,
   workflowId?: string,
   variants?: VariantConfig,
-): Promise<WorkflowResult> {
+): Promise<WorkflowResult & { backpressure?: boolean }> {
   const outputs: Record<string, unknown> = {};
   const { taskId } = ctx;
   // Slack-originated runs carry an explicit `slack:` trigger id — everything
@@ -318,8 +316,23 @@ export async function runWorkflow(
     }
   };
 
+  // Backpressure flag (k8s ResourceQuota, spec/09-sandbox.md (Concurrency)). Set by `noteStopReason`
+  // / `flagQuotaThrow` (wired into the agent port below) the moment a phase comes
+  // back `error_quota` or throws `QuotaExceededError`. Declared HERE — above
+  // `failWorkflow`/`noteTerminal` — because both must defer to the backpressure
+  // requeue: the engine treats `error_quota` as an ordinary phase failure and
+  // calls `failWorkflow`, but if that finalized the run `failed` the later
+  // `requeueRunning` (CAS on `status = 'running'`) would no-op and the run would
+  // be stuck failed instead of re-queued. This is the root cause #8/#11 missed:
+  // they converted the RESULT/THROW to backpressure but not the fail-flip that
+  // ran first.
+  const quota = { hit: false };
+
   /** Mark the workflow run as failed. */
   const failWorkflow = (errorMsg?: string) => {
+    // Backpressure, not a failure: leave the run `running` so the caller
+    // (`simple.ts`/`resume.ts`) can requeue it for the next admission probe.
+    if (quota.hit) return;
     if (db && workflowId) {
       db.runs.finishRun(workflowId, "failed", { error: errorMsg });
     }
@@ -337,6 +350,9 @@ export async function runWorkflow(
 
   /** Post the run's completion ping — terminal-ping surfaces (Slack) only. */
   const noteTerminal = async (markdown: string): Promise<void> => {
+    // On backpressure the run is being re-queued, not finished — suppress the
+    // `❌ … failed` ping so a quota-deferred run doesn't look like a failure.
+    if (quota.hit) return;
     if (reporter) await reporter.noteTerminal(markdown);
   };
 
@@ -373,8 +389,34 @@ export async function runWorkflow(
     gateEnabled,
   };
 
+  // Backpressure detection: a phase whose ExecutionResult carries
+  // `stopReason: "error_quota"` means the k8s ResourceQuota rejected its pod
+  // (spec/09-sandbox.md (Concurrency)). `quota.hit` (declared above, next to `failWorkflow`) is
+  // flipped here so the terminal handlers defer to the requeue instead of
+  // failing. The engine (runWorkflowCore) stays backend-agnostic — this lives
+  // entirely in the server-owned port wrapper.
+  const noteStopReason = (r: ExecutionResult): ExecutionResult => {
+    if (r.stopReason === "error_quota") quota.hit = true;
+    return r;
+  };
+  // A quota rejection usually surfaces as a resolved `error_quota` ExecutionResult
+  // (noteStopReason above), but on some paths it propagates as a THROWN
+  // QuotaExceededError — the `.then` is skipped, so flag it here too. Re-throw so
+  // the phase still fails; the run is converted to backpressure (requeue) at the
+  // return AND the catch below, both gated on `quota.hit`.
+  const flagQuotaThrow = (err: unknown): never => {
+    if (err instanceof QuotaExceededError) quota.hit = true;
+    throw err;
+  };
+  const agentPort: EnginePorts["agent"] = {
+    runAgent: (prompt, cfg, opts) =>
+      executeAgent(prompt, cfg, opts).then(noteStopReason).catch(flagQuotaThrow),
+    runCommand: (spec, cfg, opts) =>
+      executeCommand(spec, cfg, opts).then(noteStopReason).catch(flagQuotaThrow),
+  };
+
   const ports: EnginePorts = {
-    agent: defaultAgentPort,
+    agent: agentPort,
     assets: defaultAssetLoader,
     liveness: dockerLivenessPort,
     observability: telemetryObservability,
@@ -384,12 +426,26 @@ export async function runWorkflow(
     ]),
   };
 
-  return runWorkflowCore(runScope, {
-    reporter: phaseReporter,
-    resolver: phaseResolver,
-    ports,
-    store: db,
-    reporterActive: !!reporter,
-    capabilities: { qaImageAvailable, qaImageName: SANDBOX_IMAGE_QA },
-  }, outputs);
+  try {
+    const result = await runWorkflowCore(runScope, {
+      reporter: phaseReporter,
+      resolver: phaseResolver,
+      ports,
+      store: db,
+      reporterActive: !!reporter,
+      capabilities: { qaImageAvailable, qaImageName: SANDBOX_IMAGE_QA },
+    }, outputs);
+    return quota.hit ? { ...result, backpressure: true } : result;
+  } catch (err) {
+    // A hard phase failure — notably a single-phase workflow (e.g. issue-triage)
+    // whose only phase fails — throws OUT of the engine, bypassing the quota.hit
+    // check above. `noteStopReason` already flagged quota.hit on the resolved
+    // `error_quota` result, so convert it to backpressure here too — otherwise
+    // the run terminal-fails red instead of requeuing. Every other error (a real
+    // failure) propagates unchanged.
+    if (quota.hit || err instanceof QuotaExceededError) {
+      return { success: false, phases: [], backpressure: true };
+    }
+    throw err;
+  }
 }

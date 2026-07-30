@@ -547,6 +547,26 @@ export class WorkflowRunStore {
   }
 
   /**
+   * Backpressure requeue: flip a RUNNING run back to `queued` and re-stamp its
+   * enqueue clock. Used by the k8s backend when a pod-create is rejected by the
+   * namespace `ResourceQuota` (spec/09-sandbox.md (Concurrency)) — the run isn't failed, it's waiting
+   * for capacity, and the AdmissionController promotes it again as slots free.
+   * Re-stamping `started_at` gives it a fresh `maxQueueWaitMs` window so the TTL
+   * sweep doesn't instantly expire a run that had been running for a while.
+   * CAS-guarded on `status = 'running'`; returns rows changed (0 = safe no-op,
+   * e.g. the run already finished or was cancelled between phases).
+   */
+  requeueRunning(id: string): number {
+    const now = new Date().toISOString();
+    const info = this.db.prepare(`
+      UPDATE workflow_runs
+      SET status = 'queued', started_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'running'
+    `).run(now, now, id);
+    return info.changes;
+  }
+
+  /**
    * Increment the restart counter and return the new value. Used by
    * `resumeOrphanedWorkflows` to enforce a retry budget so a run that
    * crashes the host (agent OOM, etc.) eventually self-terminates instead

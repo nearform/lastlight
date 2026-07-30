@@ -173,4 +173,63 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     // Status stays queued, not changed
     expect(db.runs.getRun("queued-run-id")!.status).toBe("queued");
   });
+
+  it("k8s backend admits freely at dispatch (fuse, not maxWorkflows)", async () => {
+    // One run already 'running' + maxWorkflows=1 would queue the next on docker/none.
+    // On the k8s backend the dispatch gate uses the sanity fuse, so it dispatches 'running'.
+    db.runs.createRun({
+      id: "running-k8s-0",
+      workflowName: "build",
+      triggerId: "acme/widgets#200",
+      currentPhase: "architect",
+      status: "running",
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await runSimpleWorkflow(
+      "explore",
+      makeRequest(),
+      { ...makeConfig(), sandbox: "kubernetes" as const },
+      makeCallbacks(),
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1, maxQueueWaitMs: 1_800_000 },
+    );
+
+    expect(result.queued).toBeFalsy(); // NOT capped by maxWorkflows on k8s
+    // Prove it actually admitted + dispatched (not a silent early return): the
+    // workflow ran, so runWorkflow was invoked and the result reflects it.
+    expect(mockRunWorkflow).toHaveBeenCalledOnce();
+    expect(result.success).toBe(true);
+  });
+
+  it("requeues the run (running -> queued) when runWorkflow reports backpressure", async () => {
+    mockRunWorkflow.mockResolvedValue({
+      success: false,
+      phases: [{ phase: "socratic", success: false, error: "exceeded quota" }],
+      backpressure: true,
+    });
+
+    const result = await runSimpleWorkflow(
+      "explore",
+      makeRequest(),
+      { ...makeConfig(), sandbox: "kubernetes" as const },
+      makeCallbacks(),
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1000, maxQueueWaitMs: 1_800_000 },
+    );
+
+    expect(result.queued).toBe(true);
+    expect(result.backpressure).toBe(true);
+    // The row was created 'running', then requeued back to 'queued' by requeueRunning.
+    const runs = db.runs.listActive();
+    expect(runs.find((r) => r.workflowName === "explore")!.status).toBe("queued");
+  });
 });

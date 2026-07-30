@@ -1,0 +1,60 @@
+# The harness authenticates as this ServiceAccount (attached to the harness
+# Deployment in harness-deployment.yaml); @kubernetes/client-node's
+# KubeConfig.loadFromCluster() reads its mounted token in-cluster — nothing to
+# configure in app config beyond the namespace it lives in.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lastlight
+  namespace: lastlight
+---
+# Least-privilege management of ephemeral sandbox objects, confined to the
+# lastlight-sandboxes namespace (a Role, not a ClusterRole). Every verb below
+# maps to a real call the harness makes against
+# apps/server/src/sandbox/k8s/*.ts — no get/watch on pods (only
+# readNamespacedPodStatus + readNamespacedPodLog are used), no get on secrets
+# (write-only: create/patch/delete), no delete on CiliumNetworkPolicy (the
+# egress policy pair is created once per namespace and updated in place, never
+# torn down per run). Nothing here is speculative — this is the audited
+# minimum, not the design doc's original pre-implementation draft.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lastlight-sandbox-manager
+  namespace: lastlight-sandboxes
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["create", "get", "update"]
+---
+# The RoleBinding lives in the sandbox namespace (same as the Role); the
+# subject ServiceAccount lives in the harness namespace — a cross-namespace
+# subject reference is valid RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lastlight-sandbox-manager
+  namespace: lastlight-sandboxes
+subjects:
+  - kind: ServiceAccount
+    name: lastlight
+    namespace: lastlight
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lastlight-sandbox-manager
