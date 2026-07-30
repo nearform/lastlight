@@ -19,6 +19,8 @@ import {
   stageSkillBundle,
   excludeFromGit,
   applyEnv,
+  githubAuthEnvFrom,
+  withoutGitHubCredentials,
 } from "../engine/executors/shared.js";
 
 /**
@@ -525,9 +527,16 @@ class InProcessSandbox implements Sandbox {
     opts: RunAgentOpts,
     onEvent: (record: SandboxEvent) => void,
   ): Promise<RunResult | undefined> {
-    // agentic-pi reads its own env (provider keys, App PEM, …) from
-    // process.env. Splice in our scoped values for the call, then restore.
-    const restore = applyEnv(this.opts.env);
+    // agentic-pi reads provider keys from process.env, so splice our values in
+    // for the call and restore after. GitHub credentials are deliberately NOT in
+    // that splice: this adapter runs the agent *in the harness process*, where
+    // `process.env` is shared with every other concurrent run, so a per-run
+    // token there is readable (and clobberable) by all of them — issue #215.
+    // They go down the per-run `githubAuthEnv` channel below instead. Everything
+    // that remains in `opts.env` is a verbatim copy of the harness env, so the
+    // splice is a no-op for the live harness and only matters to embedders (the
+    // evals harness) that build a different env.
+    const restore = applyEnv(withoutGitHubCredentials(this.opts.env));
     const allowedHttpHosts = this.opts.egress.unrestricted ? [ALLOW_ALL_SENTINEL] : this.opts.egress.hosts;
     try {
       // Loaded lazily: agentic-pi transitively poisons the global undici
@@ -541,6 +550,11 @@ class InProcessSandbox implements Sandbox {
         profile: opts.profile,
         authFile: opts.authFile,
         githubApiBaseUrl: opts.githubApiBaseUrl,
+        // This run's GitHub credential, threaded per-run rather than through the
+        // shared process.env. Authoritative even when empty — agentic-pi must
+        // never fall back to the harness's ambient App PEM / host PAT for an
+        // agent whose profile was downscoped.
+        githubAuthEnv: githubAuthEnvFrom(this.opts.env),
         sandbox: this.mode === "gondolin" ? "gondolin" : "none",
         sandboxEnv: this.innerAgentEnv(opts.sandboxEnv),
         cwd: opts.agentCwd,

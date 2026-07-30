@@ -86,8 +86,12 @@ export async function runOnce(
   // token before the sandbox boots — the token is one of the env values
   // we hand to the VM. Building the extension is cheap (no LLM, no IO
   // except reading the PEM); failures surface as a warning, not an exit.
+  // `githubAuthEnv`, when the caller sets it, is the ONLY credential source —
+  // process.env is not consulted. That's what lets a host run several agents
+  // concurrently in one process without their tokens crossing (lastlight #215).
   const github = loadGitHubExtension(config.profile, {
     baseUrl: config.githubApiBaseUrl ?? process.env.GITHUB_API_URL,
+    env: config.githubAuthEnv,
   });
 
   // Loud about misconfigurations (partial App creds, unreadable PEM) — the

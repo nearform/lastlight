@@ -699,6 +699,53 @@ export function emptyResult(stopReason: string, durationMs: number) {
   };
 }
 
+/**
+ * The GitHub credential keys the executor threads to an in-process agent
+ * **explicitly**, never through the shared `process.env`.
+ *
+ * `process.env` is one global for the whole harness, but up to
+ * `concurrency.maxWorkflows` in-process runs (gondolin/none) are live in it at
+ * once — so splicing a run's repo-scoped, profile-downscoped token there let
+ * another run read it (issue #215: `github_*` writes 403'd with "Resource not
+ * accessible by integration"), and interleaved restores left the harness with a
+ * dead token and a falsy `GITHUB_APP_ID` permanently. These keys travel via
+ * agentic-pi's `githubAuthEnv` / the container env instead, which are per-run.
+ */
+export const GITHUB_CREDENTIAL_ENV_KEYS = [
+  "GITHUB_APP_ID",
+  "GITHUB_APP_INSTALLATION_ID",
+  "GITHUB_APP_PRIVATE_KEY_PATH",
+  "GITHUB_TOKEN",
+  "GIT_TOKEN",
+] as const;
+
+/** The sandbox env minus {@link GITHUB_CREDENTIAL_ENV_KEYS} — safe to splice. */
+export function withoutGitHubCredentials(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  const excluded = new Set<string>(GITHUB_CREDENTIAL_ENV_KEYS);
+  for (const [k, v] of Object.entries(env)) {
+    if (!excluded.has(k)) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * The run's GitHub credentials, pulled back out of the sandbox env to hand
+ * agentic-pi as `githubAuthEnv`. Always authoritative — an empty object means
+ * "this run has no GitHub credential", NOT "fall back to `process.env`" (which
+ * is how a host PAT or the App PEM would otherwise reach an agent whose profile
+ * was downscoped). Empty-string values (the App keys when
+ * `allowMcpAppAuth` is off) are dropped, matching agentic-pi's own truthiness.
+ */
+export function githubAuthEnvFrom(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of GITHUB_CREDENTIAL_ENV_KEYS) {
+    if (k === "GIT_TOKEN") continue; // git-only alias; not a github_* credential
+    if (env[k]) out[k] = env[k];
+  }
+  return out;
+}
+
 /** Splice values into process.env for the duration of a sync block. */
 export function applyEnv(env: Record<string, string>): () => void {
   const saved: Record<string, string | undefined> = {};

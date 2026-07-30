@@ -532,6 +532,7 @@ result = await agenticRun({
   profile,                  // GitHub access profile — see below
   sandbox: backend === "gondolin" ? "gondolin" : "none",
   sandboxEnv,               // env forwarded into the agent's bash
+  githubAuthEnv,            // THIS run's GitHub credential (see below) — never process.env
   cwd: agentCwd,            // the pre-cloned repo (workspace root if not pre-cloned)
   noSession: true,
   skillPaths,               // per-phase skill bundle dirs, absolute (see Skills §)
@@ -647,7 +648,9 @@ Per phase:
 
 1. `refreshGitAuth()` (`git-auth.ts`) mints a GitHub App installation
    token downscoped to the profile's permissions. Optionally scoped to
-   a specific repository allowlist.
+   a specific repository allowlist. **Whether to mint at all is decided from
+   boot config** (`getRuntimeConfig().githubApp`, via `resolveGithubApp`), never
+   from live `process.env` — see the invariant below.
 2. The token (not the PEM) is forwarded into the sandbox via
    `GIT_TOKEN` and `GITHUB_TOKEN` env vars. Git operations authenticate
    with it through a **github.com-scoped `http.extraheader`** (Basic
@@ -660,14 +663,44 @@ Per phase:
    inside the header, so no charset guard is needed. See
    `sandbox/git-http-auth.ts`.
 3. The PEM only reaches the sandbox if the profile sets
-   `allowMcpAppAuth: true` — currently only `repo-write` does. The
-   container entrypoint then copies `/data/secrets/app.pem` into the
-   agent's home directory.
-4. Low-trust sandboxes get `GITHUB_APP_PRIVATE_KEY_PATH=""` explicitly
-   to short-circuit any inadvertent reads (`agent-executor.ts:80–82`).
+   `allowMcpAppAuth: true` — currently no profile does (see
+   `gitSandboxAccessForWorkflow`). The container entrypoint would then copy
+   `/data/secrets/app.pem` into the agent's home directory.
 
 The triage profile literally cannot push code, even if a prompt-
 injected attacker convinced the agent to try.
+
+### Invariant: per-run credentials never travel through `process.env`
+
+The container backends hand each run its own env, so they were always isolated.
+The **in-process** backends (`gondolin` / `none`) are the sharp edge: the agent
+runs *in the harness process*, and up to `concurrency.maxWorkflows` runs are live
+in that one `process.env` at once. Credentials therefore move on **per-run
+channels only**:
+
+| Credential | Channel |
+|---|---|
+| The agent's `github_*` token | agentic-pi `githubAuthEnv` (`githubAuthEnvFrom(ctx.env)`) — **replaces** `process.env` inside agentic-pi, so an empty value means "no credential", not "fall back to the ambient env" |
+| Git push/clone auth | `http.extraheader` via `GIT_CONFIG_*` in `agentGitIdentityEnv` (per-child env) |
+| The pre-clone | `PrePopulateSpec.token` (explicit argument) |
+| Whether to mint | boot config (`getRuntimeConfig().githubApp`) |
+
+`InProcessSandbox.runAgent` still splices the *rest* of the sandbox env
+(`applyEnv`) because agentic-pi reads provider keys from `process.env`, but it
+strips `GITHUB_CREDENTIAL_ENV_KEYS` first (`withoutGitHubCredentials`,
+`executors/shared.ts`).
+
+This is issue #215. The executor used to splice each run's token — plus
+`GITHUB_APP_* = ""` — into the shared env for the duration of the agent turn,
+which broke two ways: agentic-pi reads the env *late* (after `ModelRuntime.create()`
++ a `models.json` refresh), so a run starting inside that window captured a
+sibling run's token — wrong repo, and read-only if that run's profile was narrower,
+making every `github_*` write 403 with "Resource not accessible by integration"
+while `git push` kept working; and interleaved restores permanently poisoned the
+harness env (run B saved what run A had spliced, so B's restore reinstated A's),
+leaving `GITHUB_APP_ID` falsy for good — after which the mint was **skipped
+entirely** and a stale token forwarded to every subsequent run. Regression test:
+`tests/engine/agent-executor.concurrent-github-creds.test.ts`.
 
 ## Agent-side tools
 
@@ -676,8 +709,10 @@ injected attacker convinced the agent to try.
 The standalone `mcp-github-app` MCP server has been **removed** in the
 agentic-pi migration. The agent now uses agentic-pi's built-in
 `github_*` tools, gated by the `profile` option passed to `agenticRun()`.
-agentic-pi auto-injects `GITHUB_TOKEN` / `GH_TOKEN` when the profile is
-set.
+Their credential comes from `githubAuthEnv` (the harness's minted, downscoped
+token — see the invariant above); on the gondolin backend agentic-pi also
+auto-injects that same token into the VM as `GITHUB_TOKEN` / `GH_TOKEN` for the
+agent's own `bash`.
 
 ### Web search — opt-in per phase
 
@@ -803,7 +838,7 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
 | `executeAgent` / `executeCommand` + `prepareRun` (token mint, env) | `src/engine/agent-executor.ts` |
 | Sandbox port + `sandboxFor` factory + adapters + `FakeSandbox` | `src/sandbox/sandbox.ts` |
 | Orchestrator (`withSandbox` / `runSandboxedAgent` / `runSandboxedCommand`) | `src/engine/executors/orchestrator.ts` |
-| Shared executor helpers (staging, accumulator, finalize) | `src/engine/executors/shared.ts` |
+| Shared executor helpers (staging, accumulator, finalize, `withoutGitHubCredentials` / `githubAuthEnvFrom`) | `src/engine/executors/shared.ts` |
 | `ExecutorConfig`, `GitAccessProfile`, profiles | `src/engine/github/profiles.ts` |
 | Token minting + downscope | `src/engine/github/git-auth.ts` |
 | Docker container driver (wrapped by the DockerSandbox adapter) | `src/sandbox/docker.ts` |

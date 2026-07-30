@@ -6,6 +6,8 @@
  * shape — see the plan doc for why.
  */
 
+import type { GitHubAuthEnv } from "./extensions/github/auth.js";
+
 export interface RunConfig {
   /** "provider/model_id", e.g. "anthropic/claude-haiku-4-5" */
   model: string;
@@ -32,6 +34,21 @@ export interface RunConfig {
    * server. Falls back to `GITHUB_API_URL`. Production leaves it unset.
    */
   githubApiBaseUrl?: string;
+  /**
+   * GitHub credentials for the `github_*` extension, **replacing** `process.env`
+   * for this run (not merged with it). Library-only — there is no CLI flag; the
+   * CLI reads the ambient env.
+   *
+   * An embedder running several `run()` calls concurrently in ONE process can't
+   * give each run its own credential via `process.env`: the global is shared, so
+   * one run's value is visible to every other in-flight run. lastlight #215 was
+   * exactly that — a run picked up a *different* run's repo-scoped token and
+   * every `github_*` write 403'd with "Resource not accessible by integration".
+   * Pass the run's own credential here instead. Because it replaces the ambient
+   * env rather than layering over it, App creds present in the host process
+   * can't leak into a run that was handed a downscoped token.
+   */
+  githubAuthEnv?: GitHubAuthEnv;
   /** Working directory for the agent. Default: process.cwd(). */
   cwd: string;
   /** Whether to persist the session to disk. Default: true (Pi's default). */
