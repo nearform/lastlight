@@ -251,6 +251,45 @@ describe("post-review action (runPostReview)", () => {
     expect(body.body).not.toContain("Additional findings");
   });
 
+  it("does NOT shell out to the local git diff when there is no checkout, even with a base ref (k8s)", async () => {
+    // Robin's homelab hit this: a real PR carries `baseBranch` ("main"), so
+    // pre-fix `gitCommentableDiff` ran against the harness path — which on k8s
+    // holds only the harvested `.lastlight/`, never a `.git`. Every git call
+    // failed with `fatal: not a git repository`, dumping the giant `git diff`
+    // usage block + a FALSE "demoting all findings to the body" (the API
+    // fallback then rescued the findings). The handler must detect the absent
+    // checkout and skip straight to the API diff — no failing subprocess, no
+    // misleading log. seedFindings writes findings.json but no `.git`, exactly
+    // reproducing the k8s state; the base ref present is what triggers the bug.
+    const gitDiffSpy = vi.spyOn(
+      GitHubPostReviewHandler.prototype as unknown as { gitCommentableDiff: () => unknown },
+      "gitCommentableDiff",
+    );
+    try {
+      const taskId = "widget-42-nogit-baseref";
+      seedFindings(taskId, "widget", {
+        summary: "One issue.",
+        event: "REQUEST_CHANGES",
+        findings: [
+          { path: "src/foo.ts", line: 10, side: "RIGHT", severity: "Important", title: "bug", body: "fix this" },
+        ],
+      });
+      const { executor, rep } = makeExecutor(taskId, { baseBranch: "main" });
+      const outcome = await executor.execute(NODE, {});
+      expect(outcome.status).toBe("succeeded");
+      expect(rep.failed).toHaveLength(0);
+      // The crux: with no local `.git`, the local git diff must never run.
+      expect(gitDiffSpy).not.toHaveBeenCalled();
+      // …and the finding still anchors inline via the GitHub API diff.
+      const body = reviews[0]!.body as { comments: { path: string; line: number }[] };
+      expect(body.comments).toHaveLength(1);
+      expect(body.comments[0]!.path).toBe("src/foo.ts");
+      expect(body.comments[0]!.line).toBe(10);
+    } finally {
+      gitDiffSpy.mockRestore();
+    }
+  });
+
   it("skips (no post) when the agent recorded skip:true", async () => {
     const taskId = "widget-42-skip";
     seedFindings(taskId, "widget", { skip: true, summary: "already reviewed" });
