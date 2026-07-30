@@ -212,3 +212,18 @@ all keyed by `cron.name` / `cron.status` for cross-signal correlation.
 - **OTel-only** — insufficient alone: the dashboard reads SQLite, and a homelab
   with no OTel backend would still be blind. OTel is added as a complement, not
   the primary surface.
+- **JSON log lines instead of logfmt** — rejected for this feature. The harness
+  logs freeform human text everywhere; a lone JSON line would be unreadable in
+  `kubectl logs` (the resilient stdout floor this design leans on) *and* still
+  un-`| json`-able as a pod-wide pipeline because every other line is text.
+  logfmt is human-readable, Loki-parseable (`| logfmt`), and consistent with the
+  existing lines; the one free-text field (`error=`) is `JSON.stringify`'d to
+  stay a single token. JSON becomes the right call only as an app-wide
+  structured-logging migration (pino/winston + a `| json`-everywhere pipeline) —
+  a separate, cross-cutting decision, not cron-scoped.
+- **OTLP logs signal (app → collector → Loki)** — rejected for this feature.
+  Its one real benefit, trace↔log correlation, is achieved cheaply by emitting
+  `trace_id`/`span_id` as logfmt fields + a Grafana derived field. OTLP-only logs
+  would forfeit the stdout floor (`kubectl logs`, survival of a collector
+  outage) and, done for cron alone, be inconsistent with the rest of the
+  harness. Revisit only as an app-wide logging migration.
