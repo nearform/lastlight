@@ -651,7 +651,7 @@ function StatsChartsSection() {
                   />
                   <Tooltip
                     contentStyle={{ fontSize: 11, background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}` }}
-                    formatter={(v: number) => formatTokens(v)}
+                    formatter={(v) => formatTokens(Number(v ?? 0))}
                     cursor={{ fill: "rgba(255,255,255,0.04)" }}
                   />
                   <Bar yAxisId="io" dataKey="inputTokens" stackId="t" fill={CHART.primary} name="input" />
@@ -672,7 +672,7 @@ function StatsChartsSection() {
                   <YAxis yAxisId="spacer" orientation="right" width={48} tick={false} axisLine={false} tickLine={false} />
                   <Tooltip
                     contentStyle={{ fontSize: 11, background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}` }}
-                    formatter={(v: number) => formatCost(v)}
+                    formatter={(v) => formatCost(Number(v ?? 0))}
                     cursor={{ fill: "rgba(255,255,255,0.04)" }}
                   />
                   <Bar dataKey="cost" fill={CHART.info} name="cost" />
