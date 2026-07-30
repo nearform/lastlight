@@ -54,12 +54,28 @@ export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPer
     pull_requests: "read",
     metadata: "read",
   },
+  // `pull_requests: "write"` is NOT an over-grant — it is what "comment on a
+  // PR" costs. GitHub resolves `POST /repos/:o/:r/issues/:n/comments` against
+  // the *target's* type: an issue checks `issues`, a pull request checks
+  // `pull_requests`. So an issues-write token could comment on issues but 403'd
+  // ("Resource not accessible by integration") on every PR — breaking
+  // `pr-comment`, and `verify` / `qa-test` / `demo` / `issue-comment` whenever
+  // they land on a PR (issue #239). The same rule governs labels + assignees on
+  // a PR. The profile's tool set (`ISSUES_WRITE_TOOLS` in agentic-pi) is
+  // unchanged and stays the behavioural boundary: no PR-review or
+  // PR-creation tool is registered here — that's still `review-write`.
   "issues-write": {
     contents: "read",
     issues: "write",
-    pull_requests: "read",
+    pull_requests: "write",
     metadata: "read",
   },
+  // Same token scope as `issues-write` since #239 — GitHub has no finer grain
+  // than `pull_requests: write` for "comment on a PR" vs "submit a review".
+  // The two profiles stay distinct because the *tool set* differs:
+  // `REVIEW_WRITE_TOOLS` adds `github_create_pull_request` +
+  // `github_create_pull_request_review`, which the comment workflows must not
+  // be able to call.
   "review-write": {
     contents: "read",
     issues: "write",
