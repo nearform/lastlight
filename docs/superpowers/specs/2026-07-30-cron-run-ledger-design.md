@@ -152,6 +152,29 @@ admission queue (possibly minutes later), so the cron-span's context will not be
 live when they run. They remain independent trace roots, correlated by the
 `cron.name` attribute rather than by span parentage.
 
+### 6. Logging
+
+One structured completion line per fire, in **logfmt** so Loki's `| logfmt`
+parses the fields directly:
+
+```
+[cron] cron=<name> workflow=<wf> source=<schedule|manual> status=<ok|partial|failed> \
+       scanned=<N> discovered=<M|-> dispatched=<K> failures=<F>
+```
+
+Level tracks status: `console.log` for `ok`, `console.warn` for `partial`,
+`console.error` for `failed` (with `error=<message>`). The `[cron]` prefix keeps
+grep parity with the existing cron lines; `status=` is the query key, so
+severity querying does not depend on stream/level. The pre-dispatch discovery
+line (`[cron] <wf>: N green-dependency-prs across M repo(s)`) is retained for
+progress visibility before the fan-out.
+
+This is plain `console` output — it reaches Loki through the cluster's stdout
+log agent (Grafana Alloy / promtail / the collector's filelog receiver), **not**
+via an OTLP logs signal (the harness does not emit OTLP log records). The three
+signals therefore route: span → Tempo, counter → Prometheus, log line → Loki,
+all keyed by `cron.name` / `cron.status` for cross-signal correlation.
+
 ## Testing (TDD)
 
 - `CronRunStore` unit tests: `start` inserts `running`; `finish` stamps terminal

@@ -485,33 +485,47 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
     const actor = typeof context._cronActor === "string" ? context._cronActor : null;
 
     const id = db.cronRuns.start({ cronName, workflow: workflowName, source, actor });
-    try {
-      const outcome = await withSpan(
-        "lastlight.cron.fire",
-        { "cron.name": cronName, "cron.workflow": workflowName, "cron.source": source },
-        async (span) => {
+    // One fire → one span (→ Tempo), one counter increment (→ Prometheus), and
+    // one logfmt completion line (→ Loki via the cluster's stdout log agent).
+    // Everything lives inside the withSpan callback so `cron.status` lands on the
+    // span for ALL outcomes (ok/partial/failed); withSpan adds the ERROR status
+    // code + recorded exception on throw, then rethrows for the caller.
+    await withSpan(
+      "lastlight.cron.fire",
+      { "cron.name": cronName, "cron.workflow": workflowName, "cron.source": source },
+      async (span) => {
+        try {
           const o = await runFire(workflowName, context, { github, discoverers, dispatch, log });
+          const status = o.failures > 0 ? "partial" : "ok";
           span?.setAttribute("cron.repos_scanned", o.reposScanned ?? 0);
           if (o.discovered !== null) span?.setAttribute("cron.discovered", o.discovered);
           span?.setAttribute("cron.dispatched", o.dispatched);
           span?.setAttribute("cron.failures", o.failures);
-          return o;
-        },
-      );
-      const status = outcome.failures > 0 ? "partial" : "ok";
-      db.cronRuns.finish(id, { status, ...outcome });
-      recordCronFire({ "cron.name": cronName, "cron.status": status });
-      if (outcome.failures > 0) {
-        console.warn(`[cron] ${workflowName}: ${outcome.failures}/${outcome.dispatched} dispatches failed`);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      db.cronRuns.finish(id, {
-        status: "failed", reposScanned: null, discovered: null, dispatched: 0, failures: 0, error: message,
-      });
-      recordCronFire({ "cron.name": cronName, "cron.status": "failed" });
-      throw err;
-    }
+          span?.setAttribute("cron.status", status);
+          db.cronRuns.finish(id, { status, ...o });
+          recordCronFire({ "cron.name": cronName, "cron.status": status });
+          // logfmt key=value pairs so Loki's `| logfmt` parses the fields; the
+          // `[cron]` prefix keeps grep parity with the other cron log lines.
+          const line =
+            `[cron] cron=${cronName} workflow=${workflowName} source=${source} status=${status} ` +
+            `scanned=${o.reposScanned ?? 0} discovered=${o.discovered ?? "-"} ` +
+            `dispatched=${o.dispatched} failures=${o.failures}`;
+          if (status === "ok") console.log(line);
+          else console.warn(line);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          span?.setAttribute("cron.status", "failed");
+          db.cronRuns.finish(id, {
+            status: "failed", reposScanned: null, discovered: null, dispatched: 0, failures: 0, error: message,
+          });
+          recordCronFire({ "cron.name": cronName, "cron.status": "failed" });
+          console.error(
+            `[cron] cron=${cronName} workflow=${workflowName} source=${source} status=failed error=${JSON.stringify(message)}`,
+          );
+          throw err; // withSpan records the exception + sets span status ERROR, then rethrows
+        }
+      },
+    );
   };
 }
 
@@ -571,7 +585,7 @@ Expected: PASS (5 tests).
 
 ```bash
 git add apps/server/src/telemetry/index.ts apps/server/src/cron/runner.ts apps/server/tests/cron/runner.test.ts
-git commit -m "feat(cron): record every cron fire to the ledger + OTel via makeCronRunner"
+git commit -m "feat(cron): record every cron fire to the ledger + OTel span/counter + logfmt line via makeCronRunner"
 ```
 
 ---
@@ -821,7 +835,8 @@ git commit -m "docs: note cron_runs table in the dev guide"
 
 ## Self-review notes (author)
 
-- **Spec coverage:** table (Task 1) · CronRunStore + start/finish/latest/recentFailures (Task 1) · choke-point write with status semantics (Task 2) · source/actor + cronName plumbing (Task 3) · dashboard rewiring + counts (Task 4) · OTel span + counter (Task 2, `recordCronFire` + `withSpan`) · non-goals respected (no unified log, no `WorkflowRunner` signature change, no downstream span parentage, no history view, no synchronous toast).
+- **Spec coverage:** table (Task 1) · CronRunStore + start/finish/latest/recentFailures (Task 1) · choke-point write with status semantics (Task 2) · source/actor + cronName plumbing (Task 3) · dashboard rewiring + counts (Task 4) · OTel span (with `cron.status` on ALL outcomes) + counter (Task 2, `recordCronFire` + `withSpan`) · logfmt completion line → Loki (Task 2) · non-goals respected (no unified log, no `WorkflowRunner` signature change, no downstream span parentage, no history view, no synchronous toast, no OTLP logs signal).
+- **Three-signal routing (Robin's LGTM stack):** span `lastlight.cron.fire` → Tempo; counter `lastlight.cron.fire` → Prometheus; logfmt line → Loki (via stdout log agent, not OTLP). All keyed by `cron.name`/`cron.status` for cross-signal correlation. `cron.status` is set on the span for `ok`/`partial`/`failed` (failed also carries span status ERROR + recorded exception via `withSpan`).
 - **Status derivation** is identical everywhere: threw → `failed`; `failures > 0` → `partial`; else `ok`. `finish()` only accepts terminal statuses; `start()` writes `running`.
 - **Type consistency:** `CronRunStore.finish` result shape matches `FireOutcome` spread (`reposScanned`/`discovered`/`dispatched`/`failures`) + `status` + optional `error`; `makeCronRunner` spreads `...outcome` into `finish`. `CronDiscoverer` matches `PR_DISCOVERERS`'s value type.
 - **Edges covered:** empty discovery (`ok`, 0/0), github null (discoverer skipped → discovered 0), dispatch failure (`partial`), discovery throw (`failed` + rethrow, so the scheduler's existing `catch` still logs), non-discovery cron (`discovered` null), running-row exclusion from `recentFailures`, `_cron*` markers stripped from dispatched contexts.
