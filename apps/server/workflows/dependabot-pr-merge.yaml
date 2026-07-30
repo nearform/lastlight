@@ -3,12 +3,15 @@ name: dependabot-pr-merge
 description: |
   Assess an already-GREEN dependency-update PR (Dependabot / Renovate) and, when
   the change is trivial, enable GitHub auto-merge (squash) so it lands once its
-  checks pass. When a trivial bump is merely behind the base branch or has a
-  lockfile conflict, it asks the bot that opened the PR to rebase/recreate its
-  own branch (@dependabot rebase|recreate, or Renovate's rebase label) and enables
-  auto-merge to land it once green — it never pushes or rebases itself. The
-  companion to dependabot-ci-fix: that one repairs a RED bump and pushes a fix;
-  this one merges a GREEN one that needs no fix at all.
+  checks pass. When a bump is merely behind the base branch or has a lockfile
+  conflict, it asks the bot that opened the PR to rebase/recreate its own branch
+  (@dependabot rebase|recreate, or Renovate's rebase label) — it never pushes or
+  rebases itself. That branch request is independent of the merge verdict: a
+  non-trivial bump (e.g. a major version) still gets its branch regenerated,
+  since regenerating is safe and pre-empts no review, but does NOT get
+  auto-merge — only trivial bumps do. The companion to dependabot-ci-fix: that
+  one repairs a RED bump and pushes a fix; this one merges a GREEN one that
+  needs no fix at all.
 
   Always runs against a SINGLE PR (`{{prNumber}}`). Triggered by:
     - pr.checks_passed webhook (a check_suite completed with a success
@@ -46,9 +49,11 @@ phases:
   # inspects the ONE PR via `github_list_pull_request_files` (file list + line
   # counts) and skips lockfile diffs, only pulling `github_get_pull_request_diff`
   # for a small non-lockfile source change. It never pushes or rebases itself: a
-  # trivial PR that is `behind`/`dirty` is nudged to rebase via the bot's own
-  # command (@dependabot rebase|recreate) or Renovate's rebase label, with
-  # auto-merge enabled to land it once GitHub re-runs the checks green. Because
+  # PR that is `behind`/`dirty` is nudged to rebase via the bot's own command
+  # (@dependabot rebase|recreate) or Renovate's rebase label. That nudge is NOT
+  # gated on the verdict — regenerating a bot's own branch is safe and says
+  # nothing about merge-safety — but only a trivial PR also gets auto-merge
+  # enabled to land it once GitHub re-runs the checks green. Because
   # each run assesses a single PR, its context is bounded — the overflow that
   # killed the old whole-repo scan can't happen. See prompts/dependabot-pr-merge.md.
   - name: assess

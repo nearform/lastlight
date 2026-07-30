@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { getWorkflow, getCronWorkflows, getWorkflowByIntent } from "#src/workflows/loader.js";
+import {
+  getWorkflow,
+  getCronWorkflows,
+  getWorkflowByIntent,
+  loadPromptTemplate,
+} from "#src/workflows/loader.js";
 
 /**
  * Contract test for the built-in dependabot-pr-merge workflow + its cron sweep.
@@ -20,6 +25,21 @@ describe("dependabot-pr-merge — built-in workflow + cron", () => {
     // false green — its absence is the bug this workflow keeps hitting.
     const def = getWorkflow("dependabot-pr-merge");
     expect(def.phases[0].on_output?.requires_marker).toBe("ASSESSMENT_COMPLETE");
+  });
+
+  it("keeps the branch-rebase request independent of the merge verdict (#245)", () => {
+    // The assess prompt used to say "If FUNCTIONAL: do NOT merge, and do NOT
+    // request a rebase", fusing two unrelated decisions. A conflicted major bump
+    // then got neither: no auto-merge (correct) AND no `@dependabot recreate`
+    // (wrong — regenerating a bot's own branch merges nothing and pre-empts no
+    // review), so it sat conflicted until a human ran the command by hand.
+    const prompt = loadPromptTemplate("prompts/dependabot-pr-merge.md");
+
+    expect(prompt).not.toMatch(/do NOT request a rebase/i);
+    // FUNCTIONAL must still refuse to land it...
+    expect(prompt).toMatch(/If \*\*FUNCTIONAL\*\*: do NOT merge and do NOT enable auto-merge/);
+    // ...while the marker vocabulary can express "rebased AND left for a human".
+    expect(prompt).toContain("rebase-and-human");
   });
 
   it("is resolvable by intent (the router's deterministic pr.checks_passed route)", () => {
