@@ -609,7 +609,9 @@ async function main() {
         ?? (github && issueNumber
           ? async (msg) => {
               try {
-                await github.postComment(owner, repo, issueNumber as number, msg);
+                // Return the new comment id: a transient comment (the enqueue
+                // ack) needs a handle to retract itself with later (#244).
+                return await github.postComment(owner, repo, issueNumber as number, msg);
               } catch (err: unknown) {
                 const m = err instanceof Error ? err.message : String(err);
                 console.warn(`[dispatch] Failed to post comment: ${m}`);

@@ -451,6 +451,16 @@ execute outside the cap). Resumes and orphan restarts **bypass** the cap:
 they re-enter `runWorkflow` directly, finishing in-flight work rather than
 re-queuing behind it.
 
+**The enqueue ack is transient.** It is a promise about the future, so it
+must not outlive the run's stay in the queue. `RunnerCallbacks.postComment`
+resolves to the created GitHub comment id (`void` on Slack, or when the post
+failed), and `simple.ts` stashes it at `scratch.queuedAck.commentId`.
+Whichever way the run then leaves the queue, the admission controller
+resolves that comment — see below. Without this the ack is the *only*
+visible trace of a run that starts and then legitimately no-ops (e.g. a
+re-triage of an already-triaged issue), which reads as "it queued and never
+came back".
+
 **Admission.** `createAdmissionController` (`src/workflows/admission.ts`)
 promotes queued runs to running as slots free, reusing `resumeSimpleRun`
 (a queued run's stored `context` is shaped exactly like a resume's, and no
@@ -461,12 +471,24 @@ phase has run yet, so the ledger runs them all). Promotion is FIFO by
 1. **Event-driven** — `admitNext()` runs in `dispatchWorkflow`'s `finally`
    block, so a just-finished run immediately pulls the next queued one in.
 2. **Periodic sweep** — a `setInterval(sweep, 15s)` also **TTL-expires**
-   queued runs older than `concurrency.maxQueueWaitMs` (default 30 min;
+   queued runs older than `concurrency.maxQueueWaitMs` (default 1 hr;
    env `MAX_QUEUE_WAIT_MS`) — transitioning them to `cancelled` with a
-   "dropped from queue after waiting too long" notice posted back to the
-   originating GitHub issue or Slack thread — before admitting. The sweeper
-   starts after boot's orphan recovery, so a run that was `queued` when the
-   harness crashed is picked up on the first tick.
+   "dropped from queue after waiting too long" reason in `context.error` —
+   before admitting. The sweeper starts after boot's orphan recovery, so a
+   run that was `queued` when the harness crashed is picked up on the first
+   tick.
+
+Both exits resolve the enqueue ack, so it never lingers as a stale promise:
+
+- **Admitted** → `retractQueuedAck` **deletes** the ack comment. It has been
+  honoured, and whatever the run itself posts is now the real answer.
+- **TTL-expired** → `postExpiryAck` **rewrites the ack in place** to the drop
+  notice. Editing adds nothing to the thread and GitHub does not notify
+  watchers on edits, so this does not reintroduce the comment flood that made
+  expiry silent on GitHub in the first place. A **Slack**-originated run
+  instead gets a normal thread reply (a human explicitly asked for the work);
+  a GitHub run that left no ack stays silent, its drop visible only in the
+  dashboard and `lastlight workflow list`.
 
 The `queued?: boolean` on `WorkflowResult` propagates up through
 `dispatchWorkflow` and the [dispatcher](/spec/06-workflow-engine): queued
