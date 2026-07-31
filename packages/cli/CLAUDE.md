@@ -161,14 +161,26 @@ Three rules the commands enforce and explain in their output:
 were factored out of `lastlight-core`'s `src/config/repo-config.ts` precisely so
 the CLI can validate offline without an edge to core). It checks against the
 *shipped default* bounds — `DEFAULT_REPO_CONFIG_ALLOW_KEYS` = `models`,
-`variants`, `crons`, `disabled.workflows`, `disabled.crons`, `approval` — since it
-can't know a deployment's narrowing; `repo config show` is the authoritative
+`variants`, `crons`, `disabled.workflows`, `disabled.crons`, `approval`, `fix`,
+`dependencies`, `review` — since it can't know a deployment's narrowing; `repo
+config show` is the authoritative
 per-server answer. It errors if there's no `.lastlight/` directory at all, and
 prints three blocks: the accepted files grouped by role (config / prompt / skill
 / agent-context), the **effective config overrides** it would apply, and every
 rejection with its warning code. A `crons:` block is deliberately absent from the
 overrides block — it's read off the raw layer by the scheduler at tick time, not
 merged into the per-run config — and the "no config overrides" line says so.
+
+Offline validation of the three **policy blocks** (`fix` / `dependencies` /
+`review`, issues #251/#252) is deliberately the *widest* answer, not a guess:
+merging against an empty base clamps them against the shipped values, which is
+the loosest any deployment can be. So a value `validate` accepts may still be
+clamped by a stricter operator — `repo config show` is where you find out. The
+new warning code is **`policy-downgrade`** (`WARNING_LABEL` → "policy
+downgrade"): the repo tried to be *less* conservative than the operator, so the
+leaf was dropped and the operator's value stands. `repo config show` grew the
+matching **Fix policy** / **Dependencies policy** / **Review policy** sections,
+each with the same per-leaf provenance as Models / Approval gates.
 
 `--dir <repo>` overrides the git-root discovery for `repo fork` / `repo config
 validate` (mostly for tests); it still refuses a directory with no `.git`.

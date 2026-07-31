@@ -4,10 +4,16 @@ import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
 import type { DisabledConfig } from "lastlight-shared/config-types";
 import {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
   getBotName,
   getRuntimeConfig,
+  type DependenciesConfig,
+  type FixConfig,
   type ModelConfig,
   type RepoConfigPolicy,
+  type ReviewConfig,
   type VariantConfig,
 } from "../config/config.js";
 import type { ConfigSource } from "../config/config-resolve.js";
@@ -90,6 +96,14 @@ export interface RunRepoConfig {
   approval: Record<string, boolean>;
   /** Effective disables. `workflows` is enforced at dispatch (see below). */
   disabled: DisabledConfig;
+  /**
+   * Effective fix/dependency/review policy (issues #251, #252). Clamped at
+   * resolve time so these are never looser than the operator's own values —
+   * a consumer can read them directly without re-checking the bounds.
+   */
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
+  review: ReviewConfig;
   /** Per-leaf provenance — which layer won each key (`default`/`overlay`/`env`/`repo`). */
   sources: RepoConfigSources;
   /** Everything the layer dropped, fetching + validating. Never thrown. */
@@ -223,6 +237,9 @@ export async function resolveRepoRunConfig(
       variants: resolved.merged.variants,
       approval: resolved.merged.approval,
       disabled: resolved.merged.disabled,
+      fix: resolved.merged.fix,
+      dependencies: resolved.merged.dependencies,
+      review: resolved.merged.review,
       sources: resolved.sources,
       warnings: resolved.warnings,
     },
@@ -248,6 +265,14 @@ export interface RepoConfigRunRecord {
     variants?: Record<string, string>;
     approval?: Record<string, boolean>;
     disabled?: Partial<Record<keyof DisabledConfig, string[]>>;
+    /**
+     * The clamped leaves the repo won in `fix:` / `dependencies:` / `review:`.
+     * Loosely typed on purpose: this is a persisted JSON projection, and the
+     * restore path re-applies it over whatever the operator's block says today.
+     */
+    fix?: Record<string, unknown>;
+    dependencies?: Record<string, unknown>;
+    review?: Record<string, unknown>;
   };
   assets: string[];
   warnings: RepoConfigWarning[];
@@ -281,6 +306,9 @@ export function repoConfigRunRecord(cfg: RunRepoConfig): RepoConfigRunRecord {
       variants: wonBy(cfg.variants, cfg.sources.variants),
       approval: wonBy(cfg.approval, cfg.sources.approval),
       disabled: Object.keys(disabled).length > 0 ? disabled : undefined,
+      fix: wonBy(cfg.fix as unknown as Record<string, unknown>, cfg.sources.fix),
+      dependencies: wonBy(cfg.dependencies as unknown as Record<string, unknown>, cfg.sources.dependencies),
+      review: wonBy(cfg.review as unknown as Record<string, unknown>, cfg.sources.review),
     },
     assets: cfg.assets,
     warnings: cfg.warnings,
@@ -309,6 +337,15 @@ export interface RestoreRepoRunConfigOptions {
   variants?: VariantConfig;
   approval?: Record<string, boolean>;
   disabled?: DisabledConfig;
+  /**
+   * Operator policy blocks to re-apply the repo's clamped leaves onto. Default:
+   * the boot config's own blocks (the shipped defaults when config isn't
+   * loaded), which is what every production caller wants — unlike models and
+   * variants, these are not persisted on the run row in effective form.
+   */
+  fix?: FixConfig;
+  dependencies?: DependenciesConfig;
+  review?: ReviewConfig;
   /** Layer lookup seam (tests). Defaults to the cache, then one conditional refetch. */
   resolveLayer?: (repo: string) => Promise<RepoLayer | undefined>;
 }
@@ -320,6 +357,21 @@ const EMPTY_DISABLED: DisabledConfig = {
   skills: [],
   agentContext: [],
 };
+
+/**
+ * The operator's `fix:` / `dependencies:` / `review:` blocks from boot config,
+ * or the shipped defaults when config isn't loaded (unit tests, pre-boot paths).
+ * Mirrors `repoConfigPolicy()`'s "never throw, always answer" contract.
+ */
+function operatorFix(): FixConfig {
+  return getRuntimeConfig()?.fix ?? defaultFixConfig();
+}
+function operatorDependencies(): DependenciesConfig {
+  return getRuntimeConfig()?.dependencies ?? defaultDependenciesConfig();
+}
+function operatorReview(): ReviewConfig {
+  return getRuntimeConfig()?.review ?? defaultReviewConfig();
+}
 
 /**
  * The unpacked `.lastlight/` tree for `repo` **at the exact tree sha a run
@@ -395,6 +447,16 @@ export async function restoreRepoRunConfig(
     ...(options.disabled ?? {}),
     ...(applied.disabled ?? {}),
   };
+  // Same reasoning as `approval` above: the repo's leaves are already CLAMPED
+  // (only ever more conservative), so re-applying them over the operator's
+  // current block reproduces the original effective policy — and a budget the
+  // operator has since tightened still binds the resumed run.
+  const fix: FixConfig = { ...(options.fix ?? operatorFix()), ...(applied.fix ?? {}) };
+  const dependencies: DependenciesConfig = {
+    ...(options.dependencies ?? operatorDependencies()),
+    ...(applied.dependencies ?? {}),
+  };
+  const review: ReviewConfig = { ...(options.review ?? operatorReview()), ...(applied.review ?? {}) };
 
   const sourcesOf = (values: Record<string, unknown>, won?: Record<string, unknown>): Record<string, ConfigSource> => {
     const out: Record<string, ConfigSource> = {};
@@ -442,11 +504,17 @@ export async function restoreRepoRunConfig(
       variants,
       approval,
       disabled,
+      fix,
+      dependencies,
+      review,
       sources: {
         models: sourcesOf(models, applied.models),
         variants: sourcesOf(variants, applied.variants),
         disabled: disabledSources,
         approval: sourcesOf(approval, applied.approval),
+        fix: sourcesOf(fix as unknown as Record<string, unknown>, applied.fix),
+        dependencies: sourcesOf(dependencies as unknown as Record<string, unknown>, applied.dependencies),
+        review: sourcesOf(review as unknown as Record<string, unknown>, applied.review),
       },
       // The original fetch/merge warnings, plus this restore's own if it dropped
       // the asset layer — so a resumed run explains itself as fully as the first.
@@ -716,6 +784,14 @@ export async function runSimpleWorkflow(
   const effectiveModels = repoConfig?.models ?? models;
   const effectiveVariants = repoConfig?.variants ?? variants;
   const effectiveApproval = repoConfig?.approval ?? approvalConfig;
+  // The policy blocks have no caller-supplied counterpart (they aren't runner
+  // parameters — `runWorkflow.length` is frozen at 9), so the un-overridden case
+  // reads the operator's boot config directly. `review` gets no substitution
+  // here: nothing in a run consumes it (Phase 7 resolves the trigger mode at
+  // dispatch, before a run exists), and it must not reach the template context —
+  // see the note on `ctx` below.
+  const effectiveFix = repoConfig?.fix ?? operatorFix();
+  const effectiveDependencies = repoConfig?.dependencies ?? operatorDependencies();
 
   // Identify the trigger uniquely. Issue/PR-scoped workflows include the
   // number; repo-scoped workflows (e.g. health) just identify by repo+name;
@@ -996,6 +1072,20 @@ export async function runSimpleWorkflow(
     // Reasoning-effort overrides per phase. Empty/undefined entries skip
     // the --variant flag (model uses its default effort). Effective, as above.
     variants: effectiveVariants as unknown as Record<string, unknown> | undefined,
+    // EFFECTIVE policy blocks (issues #251, #252), so a prompt can render
+    // `{{fix.maxAttempts}}` / `{{dependencies.autoMergeMaxImpact}}` and state the
+    // budget it is actually running under rather than a number frozen in prose.
+    //
+    // `review` is deliberately NOT seeded here. `renderTemplate` resolves a
+    // dotted key against `ctx` FIRST and only falls back to `ctx.phaseOutputs`
+    // when the first segment is absent — and `build.yaml`'s reviewer loop emits
+    // `output_var: review`, which `prompts/pr.md` reads as `{{review.approved}}`
+    // / `{{review.cycles}}`. A top-level `review` object would shadow it and
+    // make every build PR claim unresolved reviewer issues. The review policy
+    // has no prompt consumer anyway: Phase 7 reads it in code, off
+    // `RunRepoConfig.review` / the runtime config.
+    fix: effectiveFix as unknown as Record<string, unknown>,
+    dependencies: effectiveDependencies as unknown as Record<string, unknown>,
     // Slack-initiated runs need the runner to pause/resume on the thread id,
     // not on owner/repo#N. Passing the override through here keeps the
     // runner's triggerId derivation in one place.

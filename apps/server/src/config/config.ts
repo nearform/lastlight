@@ -77,6 +77,35 @@ export type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-
 import type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types";
 export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types";
 
+// The `fix:` / `dependencies:` / `review:` policy blocks (issues #251/#252).
+// They live in `lastlight-shared` for the same reason as the two above PLUS one
+// more: they are repo-settable, so the repo-layer sanitizer — which the CLI also
+// compiles — has to name their shape and their shipped defaults. Imported for
+// in-file use and re-exported so `../config/config.js` stays the one import
+// surface for the runtime config shape.
+import {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+  isDependencyImpact,
+  isReviewTrigger,
+  type DependenciesConfig,
+  type FixConfig,
+  type ReviewConfig,
+} from "lastlight-shared/config-types";
+export type {
+  DependenciesConfig,
+  DependencyImpact,
+  FixConfig,
+  ReviewConfig,
+  ReviewTrigger,
+} from "lastlight-shared/config-types";
+export {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+} from "lastlight-shared/config-types";
+
 export interface PublicConfigBundle {
   default: Record<string, unknown>;
   overlay: Record<string, unknown> | null;
@@ -166,7 +195,26 @@ export interface LastLightConfig {
   bootstrapLabel: string;
   exploreDefaultRepo?: string;
   publicUrl?: string;
+  /**
+   * `review.postsCheck`, flattened. Predates the `review:` block below and is
+   * still what `src/index.ts` hands the dispatcher; kept as the same value read
+   * two ways rather than a second source of truth.
+   */
   reviewPostsCheck: boolean;
+  /**
+   * When `pr-review` runs, plus the draft/label rules (Phase 7 of the
+   * dependency-PR-resilience plan). Repo-settable and add-only where it matters
+   * — see `packages/shared/src/repo-config-schema.ts`.
+   */
+  review: ReviewConfig;
+  /**
+   * Retry/escalation budgets for the PR_FIX_SHAPED workflows (issue #251) and
+   * the major-bump auto-merge policy (issue #252). Both blocks resolve through
+   * all four layers (default → overlay → env → repo) and are clamped so a repo
+   * can only ever be more conservative than the operator.
+   */
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   /**
    * Sandbox-workspace reaping (issue #106). The harness owns cleanup of the
@@ -539,7 +587,10 @@ export function loadConfig(): LastLightConfig {
     bootstrapLabel: fileCfg.bootstrapLabel,
     exploreDefaultRepo: fileCfg.exploreDefaultRepo,
     publicUrl: resolvePublicUrl(),
-    reviewPostsCheck: fileCfg.reviewPostsCheck,
+    reviewPostsCheck: fileCfg.review.postsCheck,
+    review: fileCfg.review,
+    fix: fileCfg.fix,
+    dependencies: fileCfg.dependencies,
     concurrency: fileCfg.concurrency,
     cleanup: fileCfg.cleanup,
     repoConfig: fileCfg.repoConfig,
@@ -568,7 +619,9 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   approval: Record<string, boolean>;
   bootstrapLabel: string;
   exploreDefaultRepo?: string;
-  reviewPostsCheck: boolean;
+  review: ReviewConfig;
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
   otel: OtelConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   cleanup: { sandbox: SandboxCleanupConfig };
@@ -587,6 +640,8 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {};
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
+  const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
+  const dependenciesRaw = isPlainObject(raw.dependencies) ? raw.dependencies : {};
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
   const otelRaw = isPlainObject(raw.otel) ? raw.otel : {};
   const cronsRaw = isPlainObject(raw.crons) ? raw.crons : {};
@@ -609,7 +664,60 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const deployVersion = typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
   const bootstrapLabel = typeof bootstrapRaw.label === "string" ? bootstrapRaw.label : "lastlight:bootstrap";
   const exploreDefaultRepo = typeof exploreRaw.defaultRepo === "string" ? exploreRaw.defaultRepo : undefined;
-  const reviewPostsCheck = reviewRaw.postsCheck === true;
+  // ── The fix / dependencies / review policy blocks (issues #251, #252) ──────
+  //
+  // Lenient, like `crons` and `repoConfig.allowKeys` above and for the same
+  // reason: the SAME blocks are also read out of an untrusted repo layer, so a
+  // malformed leaf must degrade to the documented default rather than take the
+  // harness down at boot — and the two paths must not disagree about shape. The
+  // shipped defaults come from `lastlight-shared` so `config/default.yaml`,
+  // this normaliser and the repo-layer clamps can't drift apart.
+  const fixDefaults = defaultFixConfig();
+  const fix: FixConfig = {
+    maxAttempts: positiveNumber(fixRaw.maxAttempts) ?? fixDefaults.maxAttempts,
+    localIterations: positiveNumber(fixRaw.localIterations) ?? fixDefaults.localIterations,
+    gateTimeoutSeconds: positiveNumber(fixRaw.gateTimeoutSeconds) ?? fixDefaults.gateTimeoutSeconds,
+    // 0 is meaningful here ("escalate the model from the first retry"), so this
+    // one accepts zero where the budgets above require a positive number.
+    escalateModelAfterAttempt:
+      nonNegativeNumber(fixRaw.escalateModelAfterAttempt) ?? fixDefaults.escalateModelAfterAttempt,
+    // An explicit `null` is the documented "no ceiling" value, distinct from an
+    // absent/typo'd key which falls back to the shipped ceiling.
+    maxCostUsd:
+      fixRaw.maxCostUsd === null ? null : nonNegativeNumber(fixRaw.maxCostUsd) ?? fixDefaults.maxCostUsd,
+    maxFlakyDeferrals: nonNegativeNumber(fixRaw.maxFlakyDeferrals) ?? fixDefaults.maxFlakyDeferrals,
+    retryableClasses: nonEmptyStringList(fixRaw.retryableClasses) ?? fixDefaults.retryableClasses,
+  };
+
+  const dependenciesDefaults = defaultDependenciesConfig();
+  const dependencies: DependenciesConfig = {
+    autoMergeMaxImpact: isDependencyImpact(dependenciesRaw.autoMergeMaxImpact)
+      ? dependenciesRaw.autoMergeMaxImpact
+      : dependenciesDefaults.autoMergeMaxImpact,
+    requireSettledChecks:
+      typeof dependenciesRaw.requireSettledChecks === "boolean"
+        ? dependenciesRaw.requireSettledChecks
+        : dependenciesDefaults.requireSettledChecks,
+    minSettledChecks: nonNegativeNumber(dependenciesRaw.minSettledChecks) ?? dependenciesDefaults.minSettledChecks,
+    auditComment:
+      typeof dependenciesRaw.auditComment === "boolean"
+        ? dependenciesRaw.auditComment
+        : dependenciesDefaults.auditComment,
+  };
+
+  const reviewDefaults = defaultReviewConfig();
+  const review: ReviewConfig = {
+    // Historically `review.postsCheck` defaulted OFF for anything that wasn't
+    // literally `true`; keep that exact reading.
+    postsCheck: reviewRaw.postsCheck === true,
+    trigger: isReviewTrigger(reviewRaw.trigger) ? reviewRaw.trigger : reviewDefaults.trigger,
+    requestLabel:
+      typeof reviewRaw.requestLabel === "string" && reviewRaw.requestLabel.trim()
+        ? reviewRaw.requestLabel.trim()
+        : null,
+    skipDraft: typeof reviewRaw.skipDraft === "boolean" ? reviewRaw.skipDraft : reviewDefaults.skipDraft,
+  };
+
   const maxWorkflows =
     typeof concurrencyRaw.maxWorkflows === "number" && concurrencyRaw.maxWorkflows > 0
       ? concurrencyRaw.maxWorkflows
@@ -687,7 +795,9 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     approval,
     bootstrapLabel,
     exploreDefaultRepo,
-    reviewPostsCheck,
+    review,
+    fix,
+    dependencies,
     otel: normalizeOtelFileConfig(otelRaw),
     concurrency: { maxWorkflows, maxQueueWaitMs },
     cleanup: { sandbox: sandboxCleanup },
@@ -710,6 +820,19 @@ function nonEmptyStringList(raw: unknown): string[] | undefined {
   return raw
     .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
     .map((v) => v.trim());
+}
+
+/**
+ * A finite number > 0, or `undefined` so the caller can apply its own default.
+ * Lenient sibling of {@link nonEmptyStringList} for the numeric policy leaves.
+ */
+function positiveNumber(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : undefined;
+}
+
+/** As {@link positiveNumber}, but 0 is a legal value rather than a fallback trigger. */
+function nonNegativeNumber(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
 }
 
 /** De-duplicate a name list, preserving first-seen order (used for unioned lists). */

@@ -192,6 +192,10 @@ Effective config overrides
 				<td><code>disabled.crons</code></td>
 				<td>Older spelling of <code>crons.disable</code>; still works, and is merged into it.</td>
 			</tr>
+			<tr>
+				<td><code>fix</code> / <code>dependencies</code> / <code>review</code></td>
+				<td>The <a href="/docs/configuration#workflow-policy">workflow policy blocks</a> — retry budgets, major-bump auto-merge, and when a review runs. <strong>One-way</strong>: a repo may only ever be <em>more</em> conservative than the operator. See <a href="#policy">below</a>.</td>
+			</tr>
 		</tbody>
 	</table>
 
@@ -200,6 +204,86 @@ Effective config overrides
 		between the packaged defaults and your overlay — so a repo's
 		<code>disabled.workflows</code> is the whole list for that repo.
 	</p>
+
+	<h2 id="policy">Policy blocks: a repo may only be more careful</h2>
+
+	<p>
+		<code>fix</code>, <code>dependencies</code> and <code>review</code> aren't
+		preferences — they're budgets and blast radius. Admitting them the way
+		<code>models</code> is admitted would let any repo vote itself a bigger
+		share of your money and your machines. So they follow the rule
+		<code>approval</code> already established, generalised: <strong>a repo may
+		only ever be more conservative than the operator.</strong>
+	</p>
+
+	<p>
+		A value that would loosen is simply <em>dropped</em> — and dropping is the
+		clamp, because the operator's value is what's underneath, so the leaf
+		resolves straight back to it. The repo is told why, with a
+		<code>policy-downgrade</code> warning; the run carries on regardless.
+	</p>
+
+	<pre><code># .lastlight/lastlight.yml — in a repo that wants to be careful
+
+fix:
+  maxAttempts: 1               # ✓ lower than the operator's 3 — accepted
+  maxCostUsd: 10.0             # ✗ higher than the operator's 5.0 — dropped, stays 5.0
+  gateTimeoutSeconds: 3600     # ✗ operator-only — dropped
+
+dependencies:
+  autoMergeMaxImpact: none     # ✓ never auto-merge a major in this repo
+
+review:
+  trigger: on-request          # ✓ this repo opts itself out of automatic reviews
+  skipDraft: false             # ✗ add-only — dropped, drafts stay skipped</code></pre>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Key</th><th>A repo may…</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>fix.maxAttempts</code>, <code>fix.localIterations</code>, <code>fix.maxFlakyDeferrals</code></td>
+				<td>lower them only.</td>
+			</tr>
+			<tr>
+				<td><code>fix.maxCostUsd</code></td>
+				<td>lower the ceiling only — and never set <code>null</code>, which means "no ceiling" and is the loosest value there is.</td>
+			</tr>
+			<tr>
+				<td><code>fix.retryableClasses</code></td>
+				<td>keep a <strong>subset</strong> of your list. Naming a class you don't retry would add a retryable failure mode, so it's dropped; retrying <em>less</em> is always fine.</td>
+			</tr>
+			<tr>
+				<td><code>fix.escalateModelAfterAttempt</code>, <code>fix.gateTimeoutSeconds</code></td>
+				<td><strong>nothing</strong> — operator-only. One is spend, the other a shared-resource budget; neither is a "how careful is this repo" dial.</td>
+			</tr>
+			<tr>
+				<td><code>dependencies.autoMergeMaxImpact</code></td>
+				<td>move it <em>down</em> the <code>none &lt; low &lt; medium &lt; high</code> scale, all the way to <code>none</code>.</td>
+			</tr>
+			<tr>
+				<td><code>dependencies.requireSettledChecks</code></td>
+				<td>turn it <strong>on</strong>. A repo can demand settled checks; it can't waive yours.</td>
+			</tr>
+			<tr>
+				<td><code>dependencies.minSettledChecks</code></td>
+				<td><strong>nothing</strong> — operator-only. Clamping it upward would weld the escape hatch shut for a repo with no CI at all, which could then only ever <em>raise</em> the number of checks it must show; that case is settled on the facts of the PR instead.</td>
+			</tr>
+			<tr>
+				<td><code>dependencies.auditComment</code></td>
+				<td>set it freely — the evidence comment is cosmetic, and the paper trail it silences is its own.</td>
+			</tr>
+			<tr>
+				<td><code>review.trigger</code>, <code>review.requestLabel</code></td>
+				<td>set them freely. All three modes are equally safe, and a repo choosing <code>on-request</code> is opting <em>itself</em> out of automation — its call.</td>
+			</tr>
+			<tr>
+				<td><code>review.postsCheck</code>, <code>review.skipDraft</code></td>
+				<td>turn them <strong>on</strong>. A repo may ask for the check run and may skip drafts; it may not suppress a check a branch-protection rule is requiring, or force reviews onto drafts.</td>
+			</tr>
+		</tbody>
+	</table>
 
 	<h2>Cron participation</h2>
 
@@ -256,7 +340,8 @@ Effective config overrides
 
 repoConfig:
   enabled: true                  # false ignores every repo's .lastlight/ entirely
-  allowKeys: [models, variants, crons, disabled.workflows, disabled.crons, approval]
+  allowKeys: [models, variants, crons, disabled.workflows, disabled.crons, approval,
+              fix, dependencies, review]
   allowedModels: null            # null = any model whose provider you've configured;
                                  # a list restricts repos to exactly those model specs
   allowAssets: true              # false keeps lastlight.yml only — no repo prompts,
@@ -274,8 +359,8 @@ repoConfig:
 			</tr>
 			<tr>
 				<td><code>repoConfig.allowKeys</code></td>
-				<td>the six keys above</td>
-				<td>Dotted config paths a repo may set. An entry admits itself and everything under it — <code>models</code> admits <code>models.review</code>, while <code>disabled.workflows</code> does <strong>not</strong> admit <code>disabled.prompts</code>. Narrow this to shrink the blast radius.</td>
+				<td>the nine keys above</td>
+				<td>Dotted config paths a repo may set. An entry admits itself and everything under it — <code>models</code> admits <code>models.review</code>, while <code>disabled.workflows</code> does <strong>not</strong> admit <code>disabled.prompts</code>. Narrow this to shrink the blast radius. Note that admitting <code>fix</code> / <code>dependencies</code> / <code>review</code> is not the same as trusting them: those blocks are clamped one-way on top (see <a href="#policy">above</a>).</td>
 			</tr>
 			<tr>
 				<td><code>repoConfig.allowedModels</code></td>
@@ -315,6 +400,15 @@ Models
 Approval gates
   post_architect = true  (repo)
 
+Fix policy
+  maxAttempts = 1  (repo)
+  localIterations = 2  (default)
+  maxCostUsd = 5  (default)
+
+Dependencies policy
+  autoMergeMaxImpact = "none"  (repo)
+  requireSettledChecks = true  (default)
+
 Repo assets
   ✓ agent-context/payments-house-rules.md
   ✓ workflows/prompts/review.md
@@ -326,7 +420,9 @@ Values marked (repo) came from this repo's .lastlight/.</code></pre>
 		(<code>default</code> / <code>overlay</code> / <code>env</code> /
 		<code>repo</code>), the raw file the repo committed, its warnings and its
 		assets — is a <strong>Config</strong> tab on each repo's page in the admin
-		dashboard.
+		dashboard. (One gap for now: that tab doesn't yet render the
+		<code>fix</code> / <code>dependencies</code> / <code>review</code> blocks,
+		though the API returns them — use <code>repo config show</code> for those.)
 	</p>
 
 	<h2 id="caching">Caching</h2>

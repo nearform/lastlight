@@ -420,6 +420,7 @@ const WARNING_LABEL: Record<string, string> = {
   "model-not-allowed": "model not allowed",
   "unknown-provider": "unknown provider",
   "approval-downgrade": "approval downgrade",
+  "policy-downgrade": "policy downgrade",
   "path-escape": "path escape",
   symlink: "symlink",
   "size-cap": "size cap",
@@ -525,6 +526,9 @@ interface RepoConfigShowResponse {
     variants?: Record<string, string>;
     disabled?: Record<string, string[]>;
     approval?: Record<string, boolean>;
+    fix?: Record<string, unknown>;
+    dependencies?: Record<string, unknown>;
+    review?: Record<string, unknown>;
   };
   sources?: Record<string, Record<string, ConfigSource> | ConfigSource>;
   repoLayer?: Record<string, unknown>;
@@ -585,6 +589,9 @@ async function repoConfigShow(ref: string | undefined, opts: RepoOpts): Promise<
   printSection("Variants", data.merged?.variants, data.sources?.variants);
   printSection("Disabled", data.merged?.disabled, data.sources?.disabled);
   printSection("Approval gates", data.merged?.approval, data.sources?.approval);
+  printSection("Fix policy", data.merged?.fix, data.sources?.fix);
+  printSection("Dependencies policy", data.merged?.dependencies, data.sources?.dependencies);
+  printSection("Review policy", data.merged?.review, data.sources?.review);
 
   if (data.assets?.length) {
     console.log(chalk.bold("\nRepo assets"));

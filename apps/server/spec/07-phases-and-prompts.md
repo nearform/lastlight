@@ -83,6 +83,7 @@ extras at each phase boundary in `runner.ts:385, 528, 837`.
 | `bootstrapLabel` | From config; default `lastlight:bootstrap` |
 | `contextSnapshot` | Wrapped untrusted user content + branch + sender, built at `simple.ts:229–246` |
 | `models`, `variants` | The model/variant maps from config — `{{models.architect}}` resolves to the override or default |
+| `fix`, `dependencies` | The **effective** policy blocks (repo layer already clamped in), so a prompt can render `{{fix.maxAttempts}}` / `{{dependencies.autoMergeMaxImpact}}` and state the budget it is actually running under rather than a number frozen in prose |
 | `prePopulateBranch` | Branch to pre-clone (PR reviews / builds) |
 | `triggerIdOverride` | Slack `slack:{teamId}:{channel}:{thread}` override |
 | `phaseOutputs` | Built up during execution, keyed by phase name or `output_var` |
@@ -90,6 +91,14 @@ extras at each phase boundary in `runner.ts:385, 528, 837`.
 | `fixCycle` | Loop only — 0-indexed (first fix is `fixCycle: 0`) |
 | `iteration`, `maxIterations`, `previousOutput` | `generic_loop` only |
 | `...request.extra` | Workflow-specific extras spread in last (e.g. `failedChecks`, `ciSection` for `pr-fix`) |
+
+The third policy block, `review`, is deliberately **not** seeded here. A dotted
+key resolves against the context first and only falls back to `phaseOutputs` when
+its first segment is absent — and `build.yaml`'s reviewer loop emits
+`output_var: review`, which `prompts/pr.md` reads as `{{review.approved}}` /
+`{{review.cycles}}`. A top-level `review` object would shadow it and make every
+build PR claim unresolved reviewer issues. The review policy has no prompt
+consumer anyway: it is read in code, off the run's config.
 
 ## Phase rendering pipeline
 

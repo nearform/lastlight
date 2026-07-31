@@ -25,6 +25,11 @@ import { executeAgent } from "#src/engine/agent-executor.js";
 import { StateDb } from "#src/state/db.js";
 import { configureWorkflowAssets, clearWorkflowCache } from "#src/workflows/loader.js";
 import { runSimpleWorkflow, type RunRepoConfig } from "#src/workflows/simple.js";
+import {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+} from "#src/config/config.js";
 import type { ExecutorConfig } from "#src/engine/github/profiles.js";
 
 const mockExecuteAgent = vi.mocked(executeAgent);
@@ -78,6 +83,9 @@ function runRepoConfig(overrides: Partial<RunRepoConfig> & { repo: string }): Ru
     variants: {},
     approval: {},
     disabled: { workflows: [], crons: [], prompts: [], skills: [], agentContext: [] },
+    fix: defaultFixConfig(),
+    dependencies: defaultDependenciesConfig(),
+    review: defaultReviewConfig(),
     sources: {
       models: { default: "default" },
       variants: {},
@@ -89,6 +97,9 @@ function runRepoConfig(overrides: Partial<RunRepoConfig> & { repo: string }): Ru
         agentContext: "default",
       },
       approval: {},
+      fix: {},
+      dependencies: {},
+      review: {},
     },
     warnings: [],
     ...overrides,

@@ -381,8 +381,28 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   - **Operator bounds** — the `repoConfig:` block in config
     (`enabled`, `allowKeys`, `allowedModels`, `allowAssets`). Default allow-list:
     `models`, `variants`, `crons`, `disabled.workflows`, `disabled.crons`,
-    `approval` (add-only — a repo may raise a gate, never clear one). Inert out
+    `approval` (add-only — a repo may raise a gate, never clear one), `fix`,
+    `dependencies`, `review` (one-way clamped — next bullet). Inert out
     of the box: nothing changes until a repo actually commits `.lastlight/`.
+  - **Policy blocks** (`fix` / `dependencies` / `review`, issues #251/#252) —
+    budgets and blast-radius dials, so they generalise `approval`'s add-only
+    rule: **a repo may only ever be MORE conservative than the operator.** A
+    loosening leaf is *dropped* with a `policy-downgrade` warning, and dropping
+    IS the clamp (the base carries the operator's value, so the leaf resolves
+    back to it). Per-key directions live with the sanitizers in
+    `packages/shared/src/repo-config-schema.ts` — `min()` for the fix budgets,
+    subset-only for `retryableClasses`, the lower tier for
+    `autoMergeMaxImpact`, add-only `true` for `requireSettledChecks` /
+    `postsCheck` / `skipDraft`, free for `auditComment` / `trigger` /
+    `requestLabel`. Three leaves are **operator-only** and answer
+    `key-not-allowed` instead: `fix.escalateModelAfterAttempt` (spend),
+    `fix.gateTimeoutSeconds` (shared resource), and
+    `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
+    weld the escape hatch shut for a repo with no CI at all. Currently **inert**:
+    the blocks resolve through all four layers and reach `RunRepoConfig` + the
+    template context (`{{fix.maxAttempts}}`), but no workflow consumes them yet.
+    `review` is deliberately NOT seeded onto the template context — `build.yaml`
+    already emits `output_var: review` and a top-level object would shadow it.
   - **Cron participation** — a `crons: { enable, disable }` block, valid at
     EVERY layer. Operator `crons.disable` = off *by default* (the tick stays
     registered); a repo's `crons.enable` opts in even when globally off,
@@ -411,6 +431,10 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     powers the dashboard's per-repo **Config** tab; the CLI side is
     `lastlight repo fork` / `repo config validate` / `repo config show`
     (see `packages/cli/CLAUDE.md`). Full contract: `spec/02-configuration.md`.
+    **Known gap:** the dashboard hand-mirrors `RepoMergedConfig` /
+    `RepoConfigSources` in `dashboard/src/api.ts` (no import edge to core) and
+    those copies don't carry `fix` / `dependencies` / `review` yet, so the tab
+    doesn't render them even though the endpoint returns them with provenance.
 - **Two execution modes**:
   - **Sandbox** — workflow phases run inside a Docker sandbox
     (`src/sandbox`) with a minted per-run GitHub token. Each phase invokes

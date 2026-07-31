@@ -3,6 +3,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+} from "lastlight-shared/config-types";
+import {
   DEFAULT_REPO_CONFIG_ALLOW_KEYS,
   defaultRepoConfigPolicy,
   mergeLayer,
@@ -26,13 +31,15 @@ import { mergeLayer as coreMergeLayer } from "#src/config/config-resolve.js";
  * tests pin the copies to one another and to `config/default.yaml`.
  */
 
+/** The shipped `config/default.yaml`, parsed. */
+function defaultYaml(): Record<string, unknown> {
+  const path = fileURLToPath(new URL("../../config/default.yaml", import.meta.url));
+  return parseYaml(readFileSync(path, "utf-8")) as Record<string, unknown>;
+}
+
 /** `repoConfig.allowKeys` as the shipped deployment config actually declares it. */
 function defaultYamlAllowKeys(): string[] {
-  const path = fileURLToPath(new URL("../../config/default.yaml", import.meta.url));
-  const parsed = parseYaml(readFileSync(path, "utf-8")) as {
-    repoConfig?: { allowKeys?: string[] };
-  };
-  return parsed.repoConfig?.allowKeys ?? [];
+  return (defaultYaml().repoConfig as { allowKeys?: string[] } | undefined)?.allowKeys ?? [];
 }
 
 function base(): RepoConfigBase {
@@ -84,6 +91,38 @@ describe("default allow-list", () => {
 
   it("is the same constant core re-exports — one definition, not two", () => {
     expect(CORE_ALLOW_KEYS).toBe(DEFAULT_REPO_CONFIG_ALLOW_KEYS);
+  });
+
+  it("admits the fix / dependencies / review policy blocks", () => {
+    // Each is allow-listed AND has a validator in `sanitizeRepoConfigLayer`: an
+    // allow-listed key with no validator is silently dropped as
+    // `key-not-allowed`, which reads to a repo owner exactly like "not allowed".
+    for (const key of ["fix", "dependencies", "review"]) {
+      expect(DEFAULT_REPO_CONFIG_ALLOW_KEYS).toContain(key);
+      const { warnings } = sanitizeRepoConfigLayer({ [key]: {} }, defaultRepoConfigPolicy(), base(), "acme/widget");
+      expect(warnings).toEqual([]);
+    }
+  });
+});
+
+describe("the fix / dependencies / review defaults", () => {
+  // Same rule as the allow-list above: `config/default.yaml` is the operator's
+  // documentation, the exported `default*Config()` functions are what the
+  // clamps and the offline CLI validator compare against when a base carries no
+  // block. Two spellings of one thing — pinned so they can't drift.
+  it("match the blocks shipped in config/default.yaml", () => {
+    expect(defaultYaml().fix).toEqual(defaultFixConfig());
+    expect(defaultYaml().dependencies).toEqual(defaultDependenciesConfig());
+    expect(defaultYaml().review).toEqual(defaultReviewConfig());
+  });
+
+  it("ship the decided values (a change here is a behaviour change for every deployment)", () => {
+    expect(defaultFixConfig()).toMatchObject({ maxAttempts: 3, maxCostUsd: 5.0, maxFlakyDeferrals: 2 });
+    expect(defaultDependenciesConfig()).toMatchObject({ autoMergeMaxImpact: "medium", minSettledChecks: 1 });
+    expect(defaultReviewConfig()).toMatchObject({ trigger: "after-checks", skipDraft: true });
+    // 09 locked decision 14 deleted `review.afterChecks`; it must not come back.
+    expect(defaultReviewConfig()).not.toHaveProperty("afterChecks");
+    expect(defaultYaml().review).not.toHaveProperty("afterChecks");
   });
 });
 

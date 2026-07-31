@@ -40,7 +40,18 @@
 import { join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { providerByPrefix, oauthProviderByModelPrefix } from "./providers.js";
-import type { DisabledConfig } from "./config-types.js";
+import {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+  dependencyImpactRank,
+  isDependencyImpact,
+  isReviewTrigger,
+  type DependenciesConfig,
+  type DisabledConfig,
+  type FixConfig,
+  type ReviewConfig,
+} from "./config-types.js";
 
 // ---------------------------------------------------------------------------
 // Bounds
@@ -117,6 +128,9 @@ export const DEFAULT_REPO_CONFIG_ALLOW_KEYS: readonly string[] = [
   "disabled.workflows",
   "disabled.crons",
   "approval",
+  "fix",
+  "dependencies",
+  "review",
 ];
 
 /**
@@ -157,6 +171,12 @@ export type RepoConfigWarningCode =
   | "unknown-provider"
   /** An `approval` entry that would clear a gate — the layer is add-only. */
   | "approval-downgrade"
+  /**
+   * A `fix` / `dependencies` / `review` entry that would make the repo LESS
+   * conservative than the operator (issues #251/#252). Clamped to the operator's
+   * value — the repo keeps running, it just doesn't get the looser setting.
+   */
+  | "policy-downgrade"
   /** A file path that escapes the layer root. */
   | "path-escape"
   /** A symlink (or other non-regular blob) in the layer. */
@@ -250,6 +270,17 @@ export interface RepoMergedConfig {
    */
   disabled: DisabledConfig;
   approval: Record<string, boolean>;
+  /**
+   * Retry policy for the PR_FIX_SHAPED workflows (issue #251) and major-bump
+   * auto-merge policy (issue #252), each already clamped so the repo is never
+   * looser than the operator. Always present: a base that carries no `fix:` /
+   * `dependencies:` / `review:` node (an older boot config, or the CLI's offline
+   * validator) falls back leaf-by-leaf to the shipped defaults, so consumers
+   * never have to reason about a partially-populated block.
+   */
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
+  review: ReviewConfig;
 }
 
 /** Provenance mirror of {@link RepoMergedConfig} — each leaf tagged with its winning layer. */
@@ -258,6 +289,9 @@ export interface RepoConfigSources {
   variants: Record<string, ConfigSource>;
   disabled: Record<keyof DisabledConfig, ConfigSource>;
   approval: Record<string, ConfigSource>;
+  fix: Record<string, ConfigSource>;
+  dependencies: Record<string, ConfigSource>;
+  review: Record<string, ConfigSource>;
 }
 
 /** Result of {@link resolveRepoConfig}. */
@@ -560,6 +594,15 @@ export function sanitizeRepoConfigLayer(
       case "approval":
         assignIfAny(layer, "approval", sanitizeApproval(value, policy, base, warn));
         break;
+      case "fix":
+        assignIfAny(layer, "fix", sanitizeFix(value, policy, base, warn));
+        break;
+      case "dependencies":
+        assignIfAny(layer, "dependencies", sanitizeDependencies(value, policy, base, warn));
+        break;
+      case "review":
+        assignIfAny(layer, "review", sanitizeReview(value, policy, base, warn));
+        break;
       default:
         // Allow-listed by the operator but not a key this module knows how to
         // bound. Refusing is the safe direction: an unbounded pass-through
@@ -714,6 +757,330 @@ function sanitizeApproval(
 }
 
 // ---------------------------------------------------------------------------
+// Policy blocks: fix / dependencies / review (issues #251, #252)
+// ---------------------------------------------------------------------------
+//
+// One rule governs all three: **a repo may only ever be MORE conservative than
+// the operator.** Structurally this is `sanitizeApproval` again — validate the
+// leaf, compare it with the operator's effective value, and DROP anything that
+// loosens (with a `policy-downgrade` warning so the repo learns why nothing
+// happened). Dropping IS the clamp: the base already carries the operator's
+// value, so a dropped leaf resolves to exactly it.
+//
+// A handful of leaves are operator-only rather than clamped — they control spend
+// (`fix.escalateModelAfterAttempt`), a shared resource (`fix.gateTimeoutSeconds`)
+// or an escape hatch that a `max()` clamp would weld shut for CI-less repos
+// (`dependencies.minSettledChecks`). Those are reported as `key-not-allowed`,
+// the same code an operator narrowing `allowKeys` produces, because from the
+// repo's point of view it is the same answer: this key is not yours to set.
+
+/**
+ * The operator's effective value for one policy block — the boot config's node
+ * over the shipped defaults, leaf by leaf.
+ *
+ * Falling back per leaf (rather than only when the whole node is missing) is
+ * what lets the CLI's offline validator work: it merges against an empty base
+ * and still clamps against the shipped values, which is the widest policy any
+ * deployment can have.
+ */
+function operatorBlockNode(base: RepoConfigBase, key: string): Record<string, unknown> {
+  return isPlainObject(base.value[key]) ? base.value[key] : {};
+}
+
+/** A positive-integer leaf, or `undefined` when the value isn't one. */
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function sanitizeFix(
+  raw: unknown,
+  policy: RepoConfigPolicy,
+  base: RepoConfigBase,
+  warn: Warn,
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(raw)) {
+    warn("invalid-value", "fix", `Ignored "fix" in .lastlight/${REPO_CONFIG_FILE}: it must be a mapping.`);
+    return undefined;
+  }
+  const defaults = defaultFixConfig();
+  const operatorRaw = operatorBlockNode(base, "fix");
+  const out: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(raw)) {
+    const path = `fix.${key}`;
+    if (!isAllowedKey(path, policy.allowKeys)) {
+      warn("key-not-allowed", path, `Ignored "${path}": a repo may not set this key.`);
+      continue;
+    }
+    switch (key) {
+      // Budget caps. `min(repo, operator)`: a repo may buy itself fewer
+      // attempts/iterations against its own PRs, never more.
+      case "maxAttempts":
+      case "localIterations":
+      case "maxFlakyDeferrals": {
+        const n = positiveInt(value);
+        if (n === undefined) {
+          warn("invalid-value", path, `Ignored "${path}": it must be a non-negative whole number.`);
+          continue;
+        }
+        const operator = positiveInt(operatorRaw[key]) ?? (defaults[key] as number);
+        if (n > operator) {
+          warn(
+            "policy-downgrade",
+            path,
+            `Ignored "${path}: ${n}": a repo may only lower this — this deployment allows at most ${operator}.`,
+          );
+          continue;
+        }
+        out[key] = n;
+        break;
+      }
+      // The cumulative cost brake. `null` means unbounded, so it is the LOOSEST
+      // value there is: a repo may only ever propose a real number, and only one
+      // at or below the operator's own ceiling.
+      case "maxCostUsd": {
+        const operator =
+          typeof operatorRaw.maxCostUsd === "number" || operatorRaw.maxCostUsd === null
+            ? (operatorRaw.maxCostUsd as number | null)
+            : defaults.maxCostUsd;
+        if (value === null) {
+          if (operator === null) {
+            warn("invalid-value", path, `Ignored "${path}: null": this deployment already sets no cost ceiling.`);
+          } else {
+            warn(
+              "policy-downgrade",
+              path,
+              `Ignored "${path}: null": null means "no ceiling", which is looser than this deployment's ${operator}.`,
+            );
+          }
+          continue;
+        }
+        if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+          warn("invalid-value", path, `Ignored "${path}": it must be a non-negative number (or null for no ceiling).`);
+          continue;
+        }
+        if (operator !== null && value > operator) {
+          warn(
+            "policy-downgrade",
+            path,
+            `Ignored "${path}: ${value}": a repo may only lower this — this deployment's ceiling is ${operator}.`,
+          );
+          continue;
+        }
+        out.maxCostUsd = value;
+        break;
+      }
+      // Subset only. Naming a class the operator doesn't retry would ADD a
+      // retryable failure mode, which is the loosening direction; the remaining
+      // (possibly empty) subset stands, because retrying less is always allowed.
+      case "retryableClasses": {
+        if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || !v.trim())) {
+          warn("invalid-value", path, `Ignored "${path}": it must be an array of non-empty strings.`);
+          continue;
+        }
+        const operator = Array.isArray(operatorRaw.retryableClasses)
+          ? (operatorRaw.retryableClasses as unknown[]).filter((v): v is string => typeof v === "string")
+          : defaults.retryableClasses;
+        const names = (value as string[]).map((v) => v.trim());
+        const added = names.filter((n) => !operator.includes(n));
+        if (added.length > 0) {
+          warn(
+            "policy-downgrade",
+            path,
+            `Dropped ${added.map((n) => `"${n}"`).join(", ")} from "${path}": a repo may only narrow the retryable ` +
+              `classes — this deployment retries ${operator.join(", ") || "(none)"}.`,
+          );
+        }
+        out.retryableClasses = names.filter((n) => operator.includes(n));
+        break;
+      }
+      case "escalateModelAfterAttempt":
+      case "gateTimeoutSeconds":
+        // Operator-only: one is spend control, the other is a shared-resource
+        // budget. Neither is a "how careful is this repo" dial.
+        warn(
+          "key-not-allowed",
+          path,
+          `Ignored "${path}": this key is set by the deployment operator only.`,
+        );
+        break;
+      default:
+        warn("invalid-value", path, `Ignored "${path}": it is not a key of the fix policy.`);
+    }
+  }
+  return out;
+}
+
+function sanitizeDependencies(
+  raw: unknown,
+  policy: RepoConfigPolicy,
+  base: RepoConfigBase,
+  warn: Warn,
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(raw)) {
+    warn(
+      "invalid-value",
+      "dependencies",
+      `Ignored "dependencies" in .lastlight/${REPO_CONFIG_FILE}: it must be a mapping.`,
+    );
+    return undefined;
+  }
+  const defaults = defaultDependenciesConfig();
+  const operatorRaw = operatorBlockNode(base, "dependencies");
+  const out: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(raw)) {
+    const path = `dependencies.${key}`;
+    if (!isAllowedKey(path, policy.allowKeys)) {
+      warn("key-not-allowed", path, `Ignored "${path}": a repo may not set this key.`);
+      continue;
+    }
+    switch (key) {
+      // The lower tier on `none < low < medium < high` wins, so a repo can pull
+      // its own auto-merge ceiling down (all the way to `none`) but never up.
+      case "autoMergeMaxImpact": {
+        if (!isDependencyImpact(value)) {
+          warn("invalid-value", path, `Ignored "${path}": it must be one of none, low, medium, high.`);
+          continue;
+        }
+        const operator = isDependencyImpact(operatorRaw.autoMergeMaxImpact)
+          ? operatorRaw.autoMergeMaxImpact
+          : defaults.autoMergeMaxImpact;
+        if (dependencyImpactRank(value) > dependencyImpactRank(operator)) {
+          warn(
+            "policy-downgrade",
+            path,
+            `Ignored "${path}: ${value}": a repo may only lower this — this deployment auto-merges majors up to ` +
+              `"${operator}".`,
+          );
+          continue;
+        }
+        out.autoMergeMaxImpact = value;
+        break;
+      }
+      // Add-only `true`, exactly like an approval gate: a repo may demand that
+      // checks have settled before anything merges; it may not waive the
+      // operator's requirement.
+      case "requireSettledChecks": {
+        if (typeof value !== "boolean") {
+          warn("invalid-value", path, `Ignored "${path}": it must be true or false.`);
+          continue;
+        }
+        if (value === false) {
+          const code = operatorRaw.requireSettledChecks === true ? "policy-downgrade" : "invalid-value";
+          warn(
+            code,
+            path,
+            `Ignored "${path}: false": this key is add-only — a repo can require settled checks, never waive them.`,
+          );
+          continue;
+        }
+        out.requireSettledChecks = true;
+        break;
+      }
+      case "auditComment": {
+        // Free: the audit comment is cosmetic either way, and a repo that finds
+        // it noisy silencing it costs nothing but a paper trail it owns.
+        if (typeof value !== "boolean") {
+          warn("invalid-value", path, `Ignored "${path}": it must be true or false.`);
+          continue;
+        }
+        out.auditComment = value;
+        break;
+      }
+      case "minSettledChecks":
+        // Operator-only (09 locked decision 18). §6.2 originally proposed
+        // `max(repo, operator)`, but that direction welds the escape hatch shut:
+        // a repo with no CI at all could only ever RAISE the number of settled
+        // checks an auto-merge needs, never lower it to 0.
+        warn(
+          "key-not-allowed",
+          path,
+          `Ignored "${path}": this key is set by the deployment operator only.`,
+        );
+        break;
+      default:
+        warn("invalid-value", path, `Ignored "${path}": it is not a key of the dependencies policy.`);
+    }
+  }
+  return out;
+}
+
+function sanitizeReview(
+  raw: unknown,
+  policy: RepoConfigPolicy,
+  base: RepoConfigBase,
+  warn: Warn,
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(raw)) {
+    warn("invalid-value", "review", `Ignored "review" in .lastlight/${REPO_CONFIG_FILE}: it must be a mapping.`);
+    return undefined;
+  }
+  const operatorRaw = operatorBlockNode(base, "review");
+  const out: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(raw)) {
+    const path = `review.${key}`;
+    if (!isAllowedKey(path, policy.allowKeys)) {
+      warn("key-not-allowed", path, `Ignored "${path}": a repo may not set this key.`);
+      continue;
+    }
+    switch (key) {
+      case "trigger":
+        // Free — all three modes are equally "safe". A repo choosing
+        // `on-request` is opting itself out of automation, which is its call.
+        if (!isReviewTrigger(value)) {
+          warn("invalid-value", path, `Ignored "${path}": it must be one of eager, after-checks, on-request.`);
+          continue;
+        }
+        out.trigger = value;
+        break;
+      case "requestLabel": {
+        // Free, but it is a LABEL name, never a path — same guard
+        // `sanitizeDisabled` applies to workflow/cron names.
+        if (value === null) {
+          out.requestLabel = null;
+          break;
+        }
+        if (typeof value !== "string" || !value.trim()) {
+          warn("invalid-value", path, `Ignored "${path}": it must be a non-empty label name (or null).`);
+          continue;
+        }
+        const label = value.trim();
+        if (label.includes("/") || label.includes("..")) {
+          warn("invalid-value", path, `Ignored "${path}": "${label}" is not a valid label name.`);
+          continue;
+        }
+        out.requestLabel = label;
+        break;
+      }
+      // Both add-only `true`: a repo may skip drafts and may ask for the check
+      // run; it may not force reviews onto drafts or suppress an operator's
+      // check (which a branch-protection rule may be requiring).
+      case "skipDraft":
+      case "postsCheck": {
+        if (typeof value !== "boolean") {
+          warn("invalid-value", path, `Ignored "${path}": it must be true or false.`);
+          continue;
+        }
+        if (value === false) {
+          const code = operatorRaw[key] === true ? "policy-downgrade" : "invalid-value";
+          warn(code, path, `Ignored "${path}: false": this key is add-only — a repo may only turn it on.`);
+          continue;
+        }
+        out[key] = true;
+        break;
+      }
+      default:
+        warn("invalid-value", path, `Ignored "${path}": it is not a key of the review policy.`);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
 
@@ -805,7 +1172,58 @@ function shapeMerged(value: Record<string, unknown>): RepoMergedConfig {
       agentContext: stringList(disabled.agentContext),
     },
     approval: boolMap(value.approval),
+    fix: shapeFix(value.fix),
+    dependencies: shapeDependencies(value.dependencies),
+    review: shapeReview(value.review),
   };
+}
+
+/**
+ * Project a merged `fix:` / `dependencies:` / `review:` node onto its full
+ * shape, falling back leaf-by-leaf to the shipped default.
+ *
+ * Total by design: a base built before these blocks existed (or the CLI's empty
+ * offline base) still yields a complete, usable policy, so no consumer has to
+ * carry its own "if undefined then" branch.
+ */
+function shapeFix(raw: unknown): FixConfig {
+  const d = defaultFixConfig();
+  const node = isPlainObject(raw) ? raw : {};
+  return {
+    maxAttempts: num(node.maxAttempts, d.maxAttempts),
+    localIterations: num(node.localIterations, d.localIterations),
+    gateTimeoutSeconds: num(node.gateTimeoutSeconds, d.gateTimeoutSeconds),
+    escalateModelAfterAttempt: num(node.escalateModelAfterAttempt, d.escalateModelAfterAttempt),
+    maxCostUsd: node.maxCostUsd === null ? null : num(node.maxCostUsd, d.maxCostUsd ?? 0),
+    maxFlakyDeferrals: num(node.maxFlakyDeferrals, d.maxFlakyDeferrals),
+    retryableClasses: Array.isArray(node.retryableClasses) ? stringList(node.retryableClasses) : d.retryableClasses,
+  };
+}
+
+function shapeDependencies(raw: unknown): DependenciesConfig {
+  const d = defaultDependenciesConfig();
+  const node = isPlainObject(raw) ? raw : {};
+  return {
+    autoMergeMaxImpact: isDependencyImpact(node.autoMergeMaxImpact) ? node.autoMergeMaxImpact : d.autoMergeMaxImpact,
+    requireSettledChecks: typeof node.requireSettledChecks === "boolean" ? node.requireSettledChecks : d.requireSettledChecks,
+    minSettledChecks: num(node.minSettledChecks, d.minSettledChecks),
+    auditComment: typeof node.auditComment === "boolean" ? node.auditComment : d.auditComment,
+  };
+}
+
+function shapeReview(raw: unknown): ReviewConfig {
+  const d = defaultReviewConfig();
+  const node = isPlainObject(raw) ? raw : {};
+  return {
+    postsCheck: typeof node.postsCheck === "boolean" ? node.postsCheck : d.postsCheck,
+    trigger: isReviewTrigger(node.trigger) ? node.trigger : d.trigger,
+    requestLabel: typeof node.requestLabel === "string" && node.requestLabel.trim() ? node.requestLabel.trim() : null,
+    skipDraft: typeof node.skipDraft === "boolean" ? node.skipDraft : d.skipDraft,
+  };
+}
+
+function num(raw: unknown, fallback: number): number {
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : fallback;
 }
 
 function shapeSources(sources: Record<string, unknown>): RepoConfigSources {
@@ -822,6 +1240,9 @@ function shapeSources(sources: Record<string, unknown>): RepoConfigSources {
       agentContext: pick("agentContext"),
     },
     approval: sourceMap(sources.approval),
+    fix: sourceMap(sources.fix),
+    dependencies: sourceMap(sources.dependencies),
+    review: sourceMap(sources.review),
   };
 }
 

@@ -41,6 +41,11 @@ import {
   type RunRepoConfig,
 } from "#src/workflows/simple.js";
 import { resetRepoConfigForTests, type RepoConfigBase } from "#src/config/repo-config.js";
+import {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+} from "#src/config/config.js";
 import type { GitHubClient, RepoConfigTreeResult } from "#src/engine/github/github.js";
 import type { ExecutorConfig } from "#src/engine/github/profiles.js";
 
@@ -123,6 +128,9 @@ function runRepoConfig(overrides: Partial<RunRepoConfig> & { repo: string }): Ru
     variants: {},
     approval: {},
     disabled: { workflows: [], crons: [], prompts: [], skills: [], agentContext: [] },
+    fix: defaultFixConfig(),
+    dependencies: defaultDependenciesConfig(),
+    review: defaultReviewConfig(),
     sources: {
       models: { default: "default" },
       variants: {},
@@ -134,6 +142,9 @@ function runRepoConfig(overrides: Partial<RunRepoConfig> & { repo: string }): Ru
         agentContext: "default",
       },
       approval: {},
+      fix: {},
+      dependencies: {},
+      review: {},
     },
     warnings: [],
     ...overrides,
@@ -148,12 +159,20 @@ function baseConfig(): RepoConfigBase {
       variants: {},
       disabled: { workflows: [], crons: [], prompts: [], skills: [], agentContext: [] },
       approval: { post_review: false },
+      // The policy blocks a repo layer is clamped against, exactly as
+      // `repoConfigBaseFromRuntime` projects them.
+      fix: { ...defaultFixConfig() },
+      dependencies: { ...defaultDependenciesConfig() },
+      review: { ...defaultReviewConfig() },
     },
     sources: {
       models: { default: "default" },
       variants: {},
       disabled: { workflows: "default", crons: "default" },
       approval: { post_review: "default" },
+      fix: { maxAttempts: "default" },
+      dependencies: { autoMergeMaxImpact: "default" },
+      review: { trigger: "default" },
     },
   };
 }
@@ -276,6 +295,9 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
           agentContext: "default",
         },
         approval: { post_review: "repo" },
+        fix: {},
+        dependencies: {},
+        review: {},
       },
       warnings: [
         { code: "key-not-allowed", repo: "acme/widgets", path: "sandbox", message: "Ignored \"sandbox\"." },
@@ -312,6 +334,81 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
       default: "anthropic/operator-default",
       "pr-review": "openai/gpt-5-repo",
     });
+  });
+
+  it("renders and persists the repo's clamped fix/dependencies policy (issues #251, #252)", async () => {
+    // The blocks are inert config for now, so the assertion is the plumbing:
+    // does a repo's clamped value reach the template context a prompt renders
+    // from, and the run row anyone later asks "under which budget did this
+    // run?" — not what any phase does with it.
+    writePrompt(
+      builtIn,
+      "review.md",
+      // `{{review.*}}` deliberately resolves to NOTHING from the policy block:
+      // `build.yaml`'s reviewer loop owns that name via `output_var: review`
+      // (read by prompts/pr.md as `{{review.approved}}`), so seeding the review
+      // policy onto ctx would shadow it. Pinned here because the failure is
+      // silent — a shadowed `{{#if !review.approved}}` renders the wrong branch.
+      "attempts={{fix.maxAttempts}} impact={{dependencies.autoMergeMaxImpact}} trigger=[{{review.trigger}}]",
+    );
+    clearWorkflowCache();
+
+    const repoConfig = runRepoConfig({
+      repo: "acme/widgets",
+      // As `resolveRepoConfig` would have produced it: the repo tightened
+      // maxAttempts to 1 and its bid for `high` was clamped back to the
+      // operator's `medium`.
+      fix: { ...defaultFixConfig(), maxAttempts: 1 },
+      dependencies: defaultDependenciesConfig(),
+      sources: {
+        ...runRepoConfig({ repo: "acme/widgets" }).sources,
+        fix: { maxAttempts: "repo" },
+      },
+    });
+
+    const { callbacks, runId } = capturingCallbacks();
+    await runSimpleWorkflow(
+      "pr-review",
+      baseRequest({ repoConfig }),
+      makeConfig(),
+      callbacks,
+      db,
+      { default: "anthropic/operator-default" },
+      {},
+      "lastlight:bootstrap",
+      {},
+    );
+
+    expect(mockExecuteAgent.mock.calls[0]![0]).toBe("attempts=1 impact=medium trigger=[]");
+
+    const stored = db.runs.getRun(runId())?.context?.repoConfig as ReturnType<typeof repoConfigRunRecord>;
+    // Only the leaf the repo actually won is recorded…
+    expect(stored.applied.fix).toEqual({ maxAttempts: 1 });
+    // …and a block it won nothing in contributes nothing at all.
+    expect(stored.applied.dependencies).toBeUndefined();
+  });
+
+  it("falls back to the operator's policy blocks when no repo layer applies", async () => {
+    writePrompt(builtIn, "review.md", "attempts={{fix.maxAttempts}} impact={{dependencies.autoMergeMaxImpact}}");
+    clearWorkflowCache();
+
+    await runSimpleWorkflow(
+      "pr-review",
+      baseRequest(),
+      makeConfig(),
+      {},
+      db,
+      { default: "anthropic/operator-default" },
+      {},
+      "lastlight:bootstrap",
+      {},
+    );
+
+    // No boot config is loaded in this suite, so the shipped defaults answer —
+    // the same values `config/default.yaml` documents.
+    expect(mockExecuteAgent.mock.calls[0]![0]).toBe(
+      `attempts=${defaultFixConfig().maxAttempts} impact=${defaultDependenciesConfig().autoMergeMaxImpact}`,
+    );
   });
 
   it("pauses on an approval gate the repo raised but the operator left off", async () => {
@@ -554,6 +651,29 @@ describe("resolveRepoRunConfig — the dispatch choke point", () => {
     expect(result.refusal).toBeUndefined();
     expect(result.repoConfig?.models["pr-review"]).toBe("openai/gpt-5");
     expect(result.repoConfig?.sources.models["pr-review"]).toBe("repo");
+  });
+
+  it("clamps a repo's fix/dependencies block at the choke point, end to end", async () => {
+    const client = fakeClient(() =>
+      treeOf({
+        "lastlight.yml":
+          "fix:\n  maxAttempts: 1\n  gateTimeoutSeconds: 60\n" +
+          "dependencies:\n  autoMergeMaxImpact: high\n  auditComment: false\n",
+      }),
+    );
+    const result = await resolve("pr-review", { repo: "acme/widgets" }, client);
+
+    expect(result.refusal).toBeUndefined();
+    // Tightened: kept, and attributed to the repo.
+    expect(result.repoConfig?.fix.maxAttempts).toBe(1);
+    expect(result.repoConfig?.sources.fix.maxAttempts).toBe("repo");
+    // Loosened: clamped back to the operator's tier.
+    expect(result.repoConfig?.dependencies.autoMergeMaxImpact).toBe("medium");
+    // Operator-only: refused even though 60 < 900.
+    expect(result.repoConfig?.fix.gateTimeoutSeconds).toBe(defaultFixConfig().gateTimeoutSeconds);
+    // Free key: applied as asked.
+    expect(result.repoConfig?.dependencies.auditComment).toBe(false);
+    expect(result.repoConfig?.warnings.map((w) => w.code).sort()).toEqual(["key-not-allowed", "policy-downgrade"]);
   });
 
   it("degrades to the operator config when the fetch fails, rather than failing the run", async () => {

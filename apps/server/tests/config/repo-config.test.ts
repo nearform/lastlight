@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -22,7 +22,14 @@ import {
   type RepoLayer,
 } from "#src/config/repo-config.js";
 import { resolveConfigLayers, resolveWithExtraLayer } from "#src/config/config-resolve.js";
-import { loadConfig, resetRuntimeConfigForTests, DEFAULT_REPO_CONFIG_ALLOW_KEYS } from "#src/config/config.js";
+import {
+  loadConfig,
+  resetRuntimeConfigForTests,
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+  DEFAULT_REPO_CONFIG_ALLOW_KEYS,
+} from "#src/config/config.js";
 import type { RepoConfigPolicy } from "#src/config/config.js";
 import type { GitHubClient, RepoConfigFile, RepoConfigTreeResult } from "#src/engine/github/github.js";
 
@@ -140,6 +147,76 @@ describe("loadConfig — repoConfig bounds", () => {
     expect(result.sources.models.triage).toBe("env");
     expect(result.sources.models.architect).toBe("repo");
     expect(result.merged.models.triage).toBe("anthropic/claude-haiku-4-5-20251001");
+  });
+});
+
+describe("loadConfig — the fix / dependencies / review blocks", () => {
+  beforeEach(() => {
+    vi.stubEnv("GITHUB_APP_ID", "");
+    vi.stubEnv("SLACK_BOT_TOKEN", "");
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", "");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetRuntimeConfigForTests();
+  });
+
+  it("normalizes the shipped blocks and keeps reviewPostsCheck a mirror of review.postsCheck", () => {
+    const config = loadConfig();
+    expect(config.fix).toEqual(defaultFixConfig());
+    expect(config.dependencies).toEqual(defaultDependenciesConfig());
+    expect(config.review).toEqual(defaultReviewConfig());
+    expect(config.reviewPostsCheck).toBe(config.review.postsCheck);
+  });
+
+  it("degrades a malformed overlay value to the default rather than throwing", () => {
+    // Lenient on purpose: the SAME blocks are read out of an untrusted repo
+    // layer, so a typo must cost the typo'd leaf, not the boot.
+    const overlay = mkdtempSync(join(tmpdir(), "lastlight-policy-overlay-"));
+    writeFileSync(
+      join(overlay, "config.yaml"),
+      [
+        "fix:",
+        "  maxAttempts: lots",
+        "  localIterations: 1",
+        "  maxCostUsd: null",
+        "  retryableClasses: nope",
+        "dependencies:",
+        "  autoMergeMaxImpact: catastrophic",
+        "  auditComment: false",
+        "review:",
+        "  trigger: whenever",
+        "  skipDraft: false",
+        "",
+      ].join("\n"),
+    );
+    vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+
+    const config = loadConfig();
+    expect(config.fix.maxAttempts).toBe(defaultFixConfig().maxAttempts);
+    expect(config.fix.retryableClasses).toEqual(defaultFixConfig().retryableClasses);
+    expect(config.dependencies.autoMergeMaxImpact).toBe(defaultDependenciesConfig().autoMergeMaxImpact);
+    expect(config.review.trigger).toBe(defaultReviewConfig().trigger);
+    // …while the well-formed leaves beside them still apply, including an
+    // explicit `null` cost ceiling (the documented "no ceiling" value) and an
+    // explicit `false` an operator is entitled to set.
+    expect(config.fix.localIterations).toBe(1);
+    expect(config.fix.maxCostUsd).toBeNull();
+    expect(config.dependencies.auditComment).toBe(false);
+    expect(config.review.skipDraft).toBe(false);
+  });
+
+  it("projects both blocks into the repo-merge base, with provenance", () => {
+    // The trap: a block missing from `repoConfigBaseFromRuntime` has no operator
+    // value at merge time, so every clamp silently falls back to the shipped
+    // default and an overlay's own tightening is ignored.
+    const projected = repoConfigBaseFromRuntime(loadConfig());
+    expect(projected.value.fix).toEqual(defaultFixConfig());
+    expect(projected.value.dependencies).toEqual(defaultDependenciesConfig());
+    expect(projected.value.review).toEqual(defaultReviewConfig());
+    expect((projected.sources.fix as Record<string, string>).maxAttempts).toBe("default");
+    expect((projected.sources.dependencies as Record<string, string>).autoMergeMaxImpact).toBe("default");
+    expect((projected.sources.review as Record<string, string>).trigger).toBe("default");
   });
 });
 
@@ -266,6 +343,249 @@ describe("resolveRepoConfig — approval is add-only", () => {
   it("drops a non-boolean gate value", () => {
     const result = resolveRepoConfig(base(), policy(), layerWith({ approval: { post_architect: "yes" } }));
     expect(result.warnings.find((w) => w.path === "approval.post_architect")?.code).toBe("invalid-value");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fix / dependencies / review policy blocks (issues #251, #252)
+// ---------------------------------------------------------------------------
+
+/** The shipped bounds, which admit the three policy blocks. */
+function policyBlocks(): RepoConfigPolicy {
+  return policy({ allowKeys: [...POLICY.allowKeys, "fix", "dependencies", "review"] });
+}
+
+/**
+ * A base carrying explicit operator values for the three blocks, with the
+ * per-leaf provenance `repoConfigBaseFromRuntime` builds for them — so a leaf
+ * the repo fails to win keeps its real boot source rather than vanishing.
+ */
+function policyBase(overrides: Record<string, unknown> = {}): RepoConfigBase {
+  const value = {
+    fix: { ...defaultFixConfig() },
+    dependencies: { ...defaultDependenciesConfig() },
+    review: { ...defaultReviewConfig() },
+    ...overrides,
+  };
+  const allDefault = (node: object) => Object.fromEntries(Object.keys(node).map((k) => [k, "default"]));
+  return base(value, {
+    fix: allDefault(value.fix),
+    dependencies: allDefault(value.dependencies),
+    review: allDefault(value.review),
+  });
+}
+
+describe("resolveRepoConfig — fix policy is clamped one way", () => {
+  it("honours a repo tightening every budget it may set", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({
+        fix: { maxAttempts: 1, localIterations: 1, maxCostUsd: 0.5, maxFlakyDeferrals: 0, retryableClasses: ["flaky"] },
+      }),
+    );
+
+    expect(result.merged.fix.maxAttempts).toBe(1);
+    expect(result.merged.fix.localIterations).toBe(1);
+    expect(result.merged.fix.maxCostUsd).toBe(0.5);
+    expect(result.merged.fix.maxFlakyDeferrals).toBe(0);
+    expect(result.sources.fix.maxAttempts).toBe("repo");
+    // `flaky` is not in the operator's retryable list, so the subset rule drops
+    // it — tightening in one key and loosening in another are judged separately.
+    expect(result.merged.fix.retryableClasses).toEqual([]);
+    expect(codes(result.warnings)).toEqual(["policy-downgrade"]);
+  });
+
+  it("rejects raising a budget above the operator's and keeps the operator value", () => {
+    const result = resolveRepoConfig(
+      policyBase({ fix: { ...defaultFixConfig(), maxAttempts: 2 } }),
+      policyBlocks(),
+      layerWith({ fix: { maxAttempts: 9 } }),
+    );
+
+    expect(result.merged.fix.maxAttempts).toBe(2);
+    expect(result.sources.fix.maxAttempts).toBe("default");
+    expect(result.warnings.find((w) => w.path === "fix.maxAttempts")?.code).toBe("policy-downgrade");
+  });
+
+  it("rejects `maxCostUsd: null` — no ceiling is the loosest value there is", () => {
+    const result = resolveRepoConfig(policyBase(), policyBlocks(), layerWith({ fix: { maxCostUsd: null } }));
+
+    expect(result.merged.fix.maxCostUsd).toBe(defaultFixConfig().maxCostUsd);
+    expect(result.warnings.find((w) => w.path === "fix.maxCostUsd")?.code).toBe("policy-downgrade");
+  });
+
+  it("accepts a ceiling under an unbounded operator", () => {
+    const result = resolveRepoConfig(
+      policyBase({ fix: { ...defaultFixConfig(), maxCostUsd: null } }),
+      policyBlocks(),
+      layerWith({ fix: { maxCostUsd: 2 } }),
+    );
+
+    expect(result.merged.fix.maxCostUsd).toBe(2);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("keeps retryableClasses a subset of the operator's list", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ fix: { retryableClasses: ["reproducible", "infra-dependent"] } }),
+    );
+
+    expect(result.merged.fix.retryableClasses).toEqual(["reproducible"]);
+    expect(result.warnings.find((w) => w.path === "fix.retryableClasses")?.code).toBe("policy-downgrade");
+  });
+
+  it("refuses the operator-only keys outright", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ fix: { escalateModelAfterAttempt: 9, gateTimeoutSeconds: 60 } }),
+    );
+
+    expect(result.merged.fix.escalateModelAfterAttempt).toBe(defaultFixConfig().escalateModelAfterAttempt);
+    // 60 is *tighter* than the operator's 900 and still refused: this is not a
+    // clamp, it is "not your key" — the gate budget is a shared resource.
+    expect(result.merged.fix.gateTimeoutSeconds).toBe(defaultFixConfig().gateTimeoutSeconds);
+    expect(codes(result.warnings)).toEqual(["key-not-allowed", "key-not-allowed"]);
+  });
+
+  it("drops an unknown leaf and a malformed value without failing the layer", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ fix: { maxAttempts: "lots", nonsense: true } }),
+    );
+
+    expect(result.merged.fix.maxAttempts).toBe(defaultFixConfig().maxAttempts);
+    expect(codes(result.warnings)).toEqual(["invalid-value", "invalid-value"]);
+  });
+});
+
+describe("resolveRepoConfig — dependencies policy is clamped one way", () => {
+  it("honours a repo lowering its auto-merge ceiling", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ dependencies: { autoMergeMaxImpact: "none", auditComment: false } }),
+    );
+
+    expect(result.merged.dependencies.autoMergeMaxImpact).toBe("none");
+    expect(result.sources.dependencies.autoMergeMaxImpact).toBe("repo");
+    // auditComment is free — cosmetic either way.
+    expect(result.merged.dependencies.auditComment).toBe(false);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("rejects raising the ceiling above the operator's tier", () => {
+    const result = resolveRepoConfig(
+      policyBase({ dependencies: { ...defaultDependenciesConfig(), autoMergeMaxImpact: "low" } }),
+      policyBlocks(),
+      layerWith({ dependencies: { autoMergeMaxImpact: "high" } }),
+    );
+
+    expect(result.merged.dependencies.autoMergeMaxImpact).toBe("low");
+    expect(result.warnings.find((w) => w.path === "dependencies.autoMergeMaxImpact")?.code).toBe("policy-downgrade");
+  });
+
+  it("rejects an impact tier that isn't one of the four", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ dependencies: { autoMergeMaxImpact: "catastrophic" } }),
+    );
+
+    expect(result.merged.dependencies.autoMergeMaxImpact).toBe(defaultDependenciesConfig().autoMergeMaxImpact);
+    expect(codes(result.warnings)).toEqual(["invalid-value"]);
+  });
+
+  it("treats requireSettledChecks as add-only", () => {
+    const off = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ dependencies: { requireSettledChecks: false } }),
+    );
+    expect(off.merged.dependencies.requireSettledChecks).toBe(true);
+    expect(off.warnings.find((w) => w.path === "dependencies.requireSettledChecks")?.code).toBe("policy-downgrade");
+
+    const on = resolveRepoConfig(
+      policyBase({ dependencies: { ...defaultDependenciesConfig(), requireSettledChecks: false } }),
+      policyBlocks(),
+      layerWith({ dependencies: { requireSettledChecks: true } }),
+    );
+    expect(on.merged.dependencies.requireSettledChecks).toBe(true);
+    expect(on.warnings).toEqual([]);
+  });
+
+  it("refuses minSettledChecks in either direction — it is operator-only", () => {
+    // 09 locked decision 18: a `max(repo, operator)` clamp would weld the escape
+    // hatch shut for a repo with no CI, so the key simply isn't repo-settable.
+    const raise = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ dependencies: { minSettledChecks: 5 } }),
+    );
+    const lower = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ dependencies: { minSettledChecks: 0 } }),
+    );
+
+    expect(raise.merged.dependencies.minSettledChecks).toBe(1);
+    expect(lower.merged.dependencies.minSettledChecks).toBe(1);
+    expect(codes(raise.warnings)).toEqual(["key-not-allowed"]);
+    expect(codes(lower.warnings)).toEqual(["key-not-allowed"]);
+  });
+});
+
+describe("resolveRepoConfig — review policy", () => {
+  it("lets a repo pick any trigger mode and its own request label", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ review: { trigger: "on-request", requestLabel: "please-review" } }),
+    );
+
+    expect(result.merged.review.trigger).toBe("on-request");
+    expect(result.merged.review.requestLabel).toBe("please-review");
+    expect(result.sources.review.trigger).toBe("repo");
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("rejects an unknown trigger mode and a label that looks like a path", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ review: { trigger: "whenever", requestLabel: "../etc/passwd" } }),
+    );
+
+    expect(result.merged.review.trigger).toBe(defaultReviewConfig().trigger);
+    expect(result.merged.review.requestLabel).toBeNull();
+    expect(codes(result.warnings)).toEqual(["invalid-value", "invalid-value"]);
+  });
+
+  it("treats skipDraft and postsCheck as add-only", () => {
+    const result = resolveRepoConfig(
+      policyBase({ review: { ...defaultReviewConfig(), postsCheck: true } }),
+      policyBlocks(),
+      layerWith({ review: { skipDraft: false, postsCheck: false } }),
+    );
+
+    expect(result.merged.review.skipDraft).toBe(true);
+    expect(result.merged.review.postsCheck).toBe(true);
+    expect(codes(result.warnings)).toEqual(["policy-downgrade", "policy-downgrade"]);
+  });
+
+  it("is dropped wholesale when the operator narrows it out of allowKeys", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policy({ allowKeys: [...POLICY.allowKeys, "fix", "dependencies"] }),
+      layerWith({ review: { trigger: "eager" } }),
+    );
+
+    expect(result.merged.review.trigger).toBe(defaultReviewConfig().trigger);
+    expect(codes(result.warnings)).toEqual(["key-not-allowed"]);
   });
 });
 

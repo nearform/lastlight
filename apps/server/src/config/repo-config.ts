@@ -113,6 +113,13 @@ export function repoConfigPolicy(): RepoConfigPolicy {
  * takes. `publicConfig.sources` is the provenance tree `loadConfig` already
  * built, so a leaf the repo does NOT override keeps its real boot provenance
  * ("overlay", "env", …) rather than being flattened to "default".
+ *
+ * EVERY repo-settable block must appear in BOTH `value` and `sources`. A block
+ * missing from `value` has no operator value to merge onto or clamp against at
+ * resolve time (the clamps then fall back to the shipped defaults, silently
+ * ignoring an operator's own overlay); one missing from `sources` loses its
+ * provenance. Adding a key to `repoConfig.allowKeys` without adding it here is
+ * the quiet half of that mistake.
  */
 export function repoConfigBaseFromRuntime(config: LastLightConfig): RepoConfigBase {
   const bootSources = isPlainObject(config.publicConfig?.sources) ? config.publicConfig.sources : {};
@@ -122,12 +129,20 @@ export function repoConfigBaseFromRuntime(config: LastLightConfig): RepoConfigBa
       variants: { ...config.variants },
       disabled: { ...config.disabled },
       approval: { ...(config.approval ?? {}) },
+      fix: { ...config.fix },
+      dependencies: { ...config.dependencies },
+      review: { ...config.review },
     },
     sources: {
       models: expandSourceNode(bootSources.models, Object.keys(config.models)),
       variants: expandSourceNode(bootSources.variants, Object.keys(config.variants)),
       disabled: expandSourceNode(bootSources.disabled, Object.keys(config.disabled)),
       approval: expandSourceNode(bootSources.approval, Object.keys(config.approval ?? {})),
+      // `?? {}` guards the partially-built configs tests cast into place; a real
+      // boot config always carries all three blocks.
+      fix: expandSourceNode(bootSources.fix, Object.keys(config.fix ?? {})),
+      dependencies: expandSourceNode(bootSources.dependencies, Object.keys(config.dependencies ?? {})),
+      review: expandSourceNode(bootSources.review, Object.keys(config.review ?? {})),
     },
   };
 }

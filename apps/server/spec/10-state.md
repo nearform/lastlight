@@ -114,8 +114,12 @@ the run's **effective** maps — the target repo's `.lastlight/lastlight.yml`
 already folded in (see [Configuration](/spec/02-configuration)). When a repo
 layer applied, `context.repoConfig` additionally carries a `RepoConfigRunRecord`:
 `repo`, `defaultBranch`, `treeSha`, `fetchedAt`, `applied` (only the leaves whose
-provenance is `repo` — models / variants / approval / disabled), `assets`, and
-`warnings`. It is *persisted* rather than re-derived on read because the layer is
+provenance is `repo` — models / variants / approval / disabled, plus the clamped
+leaves it won in the `fix` / `dependencies` / `review` policy blocks), `assets`,
+and `warnings`. The policy leaves are recorded already clamped, so a resume
+re-applies them over whatever the operator's block says *today*: a budget the
+operator has since tightened still binds the resumed run, and one they have
+loosened doesn't retroactively widen it. It is *persisted* rather than re-derived on read because the layer is
 TTL-cached and mutable: by the time anyone asks why a run picked a model, the
 repo's default branch may have moved on. **Resume reads this record instead of
 re-resolving**, so an edit made while a run was paused/queued/dead can't
