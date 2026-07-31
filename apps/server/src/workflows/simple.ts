@@ -1,7 +1,28 @@
 import { randomUUID } from "crypto";
+import { existsSync } from "fs";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
-import { getBotName, getRuntimeConfig, type ModelConfig, type VariantConfig } from "../config/config.js";
+import type { DisabledConfig } from "lastlight-shared/config-types";
+import {
+  getBotName,
+  getRuntimeConfig,
+  type ModelConfig,
+  type RepoConfigPolicy,
+  type VariantConfig,
+} from "../config/config.js";
+import type { ConfigSource } from "../config/config-resolve.js";
+import type { GitHubClient } from "../engine/github/github.js";
+import {
+  fetchRepoLayer,
+  getCachedRepoLayer,
+  repoConfigBaseFromRuntime,
+  repoConfigPolicy,
+  resolveRepoConfig,
+  type RepoConfigBase,
+  type RepoConfigSources,
+  type RepoConfigWarning,
+  type RepoLayer,
+} from "../config/repo-config.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { artifactStore } from "../sandbox/artifact-store.js";
 import { getWorkflow } from "./loader.js";
@@ -25,6 +46,415 @@ import {
   PR_HEADREF_PREPOPULATE_WORKFLOWS,
   PR_FIX_SHAPED_WORKFLOWS,
 } from "./target-policy.js";
+
+// ---------------------------------------------------------------------------
+// Per-repository config layer (issue #180)
+// ---------------------------------------------------------------------------
+
+/**
+ * A managed repo's `.lastlight/` layer, already merged onto the boot config and
+ * frozen for the duration of ONE run.
+ *
+ * Resolved once at the dispatch choke point (`resolveRepoRunConfig`, driven from
+ * `dispatchWorkflow` in src/index.ts) and then carried explicitly through the
+ * run — never installed into a module global. Up to `concurrency.maxWorkflows`
+ * runs plus a cron fan-out across every managed repo are in flight at once, so a
+ * global would race and hand repo B's model override to repo A's run.
+ *
+ * `models` / `variants` / `approval` are the EFFECTIVE maps (base ⊕ repo), not
+ * the repo's deltas, so every consumer can use them as a drop-in replacement for
+ * the boot config's maps. The deltas are recoverable from {@link sources}.
+ */
+export interface RunRepoConfig {
+  /** `owner/repo` the layer was read from. */
+  repo: string;
+  /** The ref the layer was read from — always the repo's default branch. */
+  defaultBranch: string;
+  /** Git tree SHA of `.lastlight/` — the content identity of these values. */
+  treeSha: string;
+  /** ISO timestamp of the last successful download of the layer. */
+  fetchedAt: string;
+  /**
+   * Absolute host path of the unpacked layer, when the repo contributed assets
+   * AND the operator allows them. Undefined otherwise — the run then keeps the
+   * module-level (built-in + overlay) asset resolver untouched.
+   */
+  assetRoot?: string;
+  /** Asset paths the repo contributed, relative to {@link assetRoot}. */
+  assets: string[];
+  /** Effective per-task model map. */
+  models: ModelConfig;
+  /** Effective per-task reasoning-effort map. */
+  variants: VariantConfig;
+  /** Effective approval gates. Add-only: the repo can raise a gate, never clear one. */
+  approval: Record<string, boolean>;
+  /** Effective disables. `workflows` is enforced at dispatch (see below). */
+  disabled: DisabledConfig;
+  /** Per-leaf provenance — which layer won each key (`default`/`overlay`/`env`/`repo`). */
+  sources: RepoConfigSources;
+  /** Everything the layer dropped, fetching + validating. Never thrown. */
+  warnings: RepoConfigWarning[];
+}
+
+/** Options for {@link resolveRepoRunConfig}. */
+export interface RepoRunConfigOptions {
+  /**
+   * GitHub client to fetch through. `null` means chat-only mode (no App, no
+   * PAT) — there is nothing to fetch through, so the layer is skipped entirely.
+   * Omitted means "let `fetchRepoLayer` resolve the harness client itself".
+   */
+  client?: GitHubClient | null;
+  /** Operator bounds. Defaults to the boot config's `repoConfig` block. */
+  policy?: RepoConfigPolicy;
+  /** Config the layer merges onto. Defaults to the boot runtime config. */
+  base?: RepoConfigBase;
+  /** Cache root override, forwarded to `fetchRepoLayer` (tests). */
+  cacheRoot?: string;
+}
+
+/** Result of {@link resolveRepoRunConfig}. */
+export interface RepoRunConfigResult {
+  /** Present only when a repo layer actually applies to this dispatch. */
+  repoConfig?: RunRepoConfig;
+  /**
+   * Set when the repo's own `disabled.workflows` refuses this workflow. The
+   * caller must abandon the dispatch — no `workflow_runs` row, no agent call.
+   */
+  refusal?: string;
+}
+
+/**
+ * The single repo a dispatch context names, or `undefined` for none/many.
+ *
+ * A repo layer is per-REPO, so it is only meaningful when the run acts on
+ * exactly one: a repo-less Slack explore has nothing to read, and a multi-repo
+ * context (a cron fan-out envelope that hasn't been split yet) would have to
+ * pick a winner — silently applying one repo's model override to a run that
+ * touches another is worse than applying none.
+ */
+export function soleRepoInContext(context: { repo?: unknown; repos?: unknown }): string | undefined {
+  const refs = new Set<string>();
+  if (typeof context.repo === "string" && context.repo) refs.add(context.repo);
+  if (Array.isArray(context.repos)) {
+    for (const r of context.repos) if (typeof r === "string" && r) refs.add(r);
+  }
+  return refs.size === 1 ? [...refs][0] : undefined;
+}
+
+/**
+ * Resolve a dispatch's per-repository config layer (issue #180).
+ *
+ * Called from the `dispatchWorkflow` choke point in `src/index.ts`, right beside
+ * the unmanaged-repo guard, so every trigger path — webhook, router, cron, the
+ * direct `/api/run` + `/api/build` triggers, approval resume — gets the same
+ * answer from one place.
+ *
+ * **Never throws and never fails a run.** Every degenerate case (feature off, no
+ * repo, several repos, chat-only mode, a GitHub outage, a malformed
+ * `lastlight.yml`) returns "no layer applies" or a layer with warnings attached,
+ * and the run proceeds on the un-overridden operator config. The one refusal it
+ * CAN return is the repo's own `disabled.workflows` — the repo opting itself out
+ * of a workflow, which is a deliberate answer rather than a failure.
+ */
+export async function resolveRepoRunConfig(
+  workflowName: string,
+  context: { repo?: unknown; repos?: unknown },
+  options: RepoRunConfigOptions = {},
+): Promise<RepoRunConfigResult> {
+  const policy = options.policy ?? repoConfigPolicy();
+  if (!policy.enabled) return {};
+  // Chat-only mode: no App and no PAT, so there is no client to read the
+  // default branch through. Skip rather than serve a possibly-stale disk cache.
+  if (options.client === null) return {};
+
+  const repo = soleRepoInContext(context);
+  if (!repo) return {};
+
+  const runtime = getRuntimeConfig();
+  const base = options.base ?? (runtime ? repoConfigBaseFromRuntime(runtime) : undefined);
+  // No boot config (unit tests, pre-boot paths) means no base to merge onto.
+  if (!base) return {};
+
+  let layer;
+  try {
+    layer = await fetchRepoLayer(repo, {
+      client: options.client ?? undefined,
+      policy,
+      cacheRoot: options.cacheRoot,
+    });
+  } catch (err: unknown) {
+    // `fetchRepoLayer` is documented never to reject; this is the belt to its
+    // braces. A repo config problem must never be the thing that fails a run.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[repo-config] ${repo}: layer resolution failed (${msg}) — running with the operator config`);
+    return {};
+  }
+  if (!layer) return {};
+
+  const resolved = resolveRepoConfig(base, policy, layer);
+  for (const warning of resolved.warnings) {
+    console.warn(`[repo-config] ${repo}: ${warning.message}`);
+  }
+
+  // The repo opting ITSELF out of a workflow. Enforced here, next to the
+  // unmanaged-repo guard, so every dispatch path honours it — including the
+  // direct CLI/API triggers that bypass the connector/router ingress filters.
+  if (resolved.merged.disabled.workflows.includes(workflowName)) {
+    return {
+      refusal:
+        `${repo} disables the "${workflowName}" workflow in .lastlight/lastlight.yml ` +
+        `(disabled.workflows, read from ${layer.defaultBranch}@${layer.treeSha.slice(0, 7)})`,
+    };
+  }
+
+  const hasAssets = policy.allowAssets && layer.assets.length > 0;
+  return {
+    repoConfig: {
+      repo,
+      defaultBranch: layer.defaultBranch,
+      treeSha: layer.treeSha,
+      fetchedAt: layer.fetchedAt,
+      assetRoot: hasAssets ? layer.root : undefined,
+      assets: hasAssets ? [...layer.assets] : [],
+      // The merge only ever ADDS keys on top of the boot config, so the
+      // `default` entry `ModelConfig` requires is still there — the resolver
+      // just types its output as a plain string map.
+      models: resolved.merged.models as ModelConfig,
+      variants: resolved.merged.variants,
+      approval: resolved.merged.approval,
+      disabled: resolved.merged.disabled,
+      sources: resolved.sources,
+      warnings: resolved.warnings,
+    },
+  };
+}
+
+/**
+ * The JSON projection of a {@link RunRepoConfig} persisted on
+ * `workflow_runs.context.repoConfig`, so a specific run stays explainable long
+ * after the TTL cache has moved on.
+ *
+ * `applied` holds ONLY the leaves the repo actually won (provenance `repo`) —
+ * the effective full maps are already on `context.models` / `context.variants`,
+ * and a diff of the two is exactly what the dashboard wants to render.
+ */
+export interface RepoConfigRunRecord {
+  repo: string;
+  defaultBranch: string;
+  treeSha: string;
+  fetchedAt: string;
+  applied: {
+    models?: Record<string, string>;
+    variants?: Record<string, string>;
+    approval?: Record<string, boolean>;
+    disabled?: Partial<Record<keyof DisabledConfig, string[]>>;
+  };
+  assets: string[];
+  warnings: RepoConfigWarning[];
+}
+
+/** Project a {@link RunRepoConfig} into its persisted form. */
+export function repoConfigRunRecord(cfg: RunRepoConfig): RepoConfigRunRecord {
+  const wonBy = <T>(
+    values: Record<string, T | undefined>,
+    sources: Record<string, ConfigSource>,
+  ): Record<string, T> | undefined => {
+    const out: Record<string, T> = {};
+    for (const [key, value] of Object.entries(values)) {
+      if (sources[key] === "repo" && value !== undefined) out[key] = value;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  };
+
+  const disabled: Partial<Record<keyof DisabledConfig, string[]>> = {};
+  for (const key of Object.keys(cfg.disabled) as Array<keyof DisabledConfig>) {
+    if (cfg.sources.disabled[key] === "repo") disabled[key] = cfg.disabled[key];
+  }
+
+  return {
+    repo: cfg.repo,
+    defaultBranch: cfg.defaultBranch,
+    treeSha: cfg.treeSha,
+    fetchedAt: cfg.fetchedAt,
+    applied: {
+      models: wonBy(cfg.models, cfg.sources.models),
+      variants: wonBy(cfg.variants, cfg.sources.variants),
+      approval: wonBy(cfg.approval, cfg.sources.approval),
+      disabled: Object.keys(disabled).length > 0 ? disabled : undefined,
+    },
+    assets: cfg.assets,
+    warnings: cfg.warnings,
+  };
+}
+
+/** Result of {@link restoreRepoRunConfig}. */
+export interface RestoredRepoConfig {
+  /** The layer as the original dispatch resolved it, minus anything unrecoverable. */
+  repoConfig: RunRepoConfig;
+  /**
+   * Set when the repo's ASSET layer could not be restored (see
+   * {@link restoreRepoRunConfig}). The run still proceeds — on the operator's
+   * prompts/skills/agent-context — and the caller is expected to record this
+   * where the run is explained.
+   */
+  warning?: RepoConfigWarning;
+}
+
+/** Options for {@link restoreRepoRunConfig}. */
+export interface RestoreRepoRunConfigOptions {
+  /** Effective maps to re-apply the repo's leaves onto. Normally the run's own
+   *  persisted `context.models` / `context.variants`; the operator's boot maps
+   *  for a row written before those were stored. */
+  models?: ModelConfig;
+  variants?: VariantConfig;
+  approval?: Record<string, boolean>;
+  disabled?: DisabledConfig;
+  /** Layer lookup seam (tests). Defaults to the cache, then one conditional refetch. */
+  resolveLayer?: (repo: string) => Promise<RepoLayer | undefined>;
+}
+
+const EMPTY_DISABLED: DisabledConfig = {
+  workflows: [],
+  crons: [],
+  prompts: [],
+  skills: [],
+  agentContext: [],
+};
+
+/**
+ * The unpacked `.lastlight/` tree for `repo` **at the exact tree sha a run
+ * recorded**, or undefined.
+ *
+ * Content identity is the whole point: a repo's default branch moves, and the
+ * layer cache is a TTL/eviction cache, so "the layer for this repo" today is not
+ * necessarily the layer the run started under. Only an exact `treeSha` match
+ * (with the unpacked files still on disk) is accepted; anything else is a
+ * different config and the caller degrades rather than silently swapping it in.
+ * The refetch is the cheap conditional one — a 304 just re-hydrates from disk.
+ */
+async function repoLayerForTree(
+  repo: string,
+  treeSha: string,
+  resolveLayer?: (repo: string) => Promise<RepoLayer | undefined>,
+): Promise<RepoLayer | undefined> {
+  const usable = (layer?: RepoLayer): RepoLayer | undefined =>
+    layer && layer.treeSha === treeSha && existsSync(layer.root) ? layer : undefined;
+  try {
+    if (resolveLayer) return usable(await resolveLayer(repo));
+    return usable(getCachedRepoLayer(repo)) ?? usable(await fetchRepoLayer(repo));
+  } catch (err: unknown) {
+    // `fetchRepoLayer` is documented never to reject; belt to its braces. A
+    // resume must never die because a repo's config couldn't be re-read.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[repo-config] ${repo}: could not restore the cached layer (${msg})`);
+    return undefined;
+  }
+}
+
+/**
+ * Rebuild a {@link RunRepoConfig} from the {@link RepoConfigRunRecord} persisted
+ * on a run row — the inverse of {@link repoConfigRunRecord}, used when
+ * *continuing* a run rather than starting one (`resume.ts`).
+ *
+ * Why restore instead of re-resolving: a resume (boot orphan recovery, the
+ * dashboard's Retry, an admission promotion) is a continuation of a run that
+ * already executed phases under a specific config. Re-reading `.lastlight/` from
+ * the repo's default branch would let an edit made while the run was
+ * paused/queued/dead retarget it mid-flight — half the phases on one model, half
+ * on another. The record holds everything needed for a faithful continuation and
+ * needs no network.
+ *
+ * Two things are NOT in the record, by design:
+ *  - **The unpacked asset root.** It's a cache path with its own lifetime, so it
+ *    is recovered by content identity ({@link repoLayerForTree}) and dropped —
+ *    with a warning — when the tree the run used is gone. Prompts/skills/agent
+ *    context then come from the operator's layers: a degraded run, never a
+ *    crashed one, and never a *different* repo config.
+ *  - **Per-leaf provenance for the leaves the repo did NOT win.** `applied` only
+ *    records the repo's own leaves, so the restored `sources` marks those `repo`
+ *    and everything else `default`. Nothing on the resume path reads `sources`
+ *    (it exists to build a record, which a resume never re-derives), so the
+ *    approximation stays inside this type.
+ */
+export async function restoreRepoRunConfig(
+  record: RepoConfigRunRecord,
+  options: RestoreRepoRunConfigOptions = {},
+): Promise<RestoredRepoConfig> {
+  const applied = record.applied ?? {};
+  // Re-applying the repo's leaves is idempotent when `options.models` is the
+  // run's own persisted EFFECTIVE map (it already contains them); it matters for
+  // an older row that only has the operator's maps to offer.
+  const models = { ...(options.models ?? {}), ...(applied.models ?? {}) } as ModelConfig;
+  const variants: VariantConfig = { ...(options.variants ?? {}), ...(applied.variants ?? {}) };
+  // Approval is add-only for a repo layer (enforced at resolve time), so the
+  // repo's raised gates over the operator's CURRENT map reproduces the original
+  // effective map — and a gate the operator has since raised still applies.
+  const approval = { ...(options.approval ?? {}), ...(applied.approval ?? {}) };
+  const disabled: DisabledConfig = {
+    ...EMPTY_DISABLED,
+    ...(options.disabled ?? {}),
+    ...(applied.disabled ?? {}),
+  };
+
+  const sourcesOf = (values: Record<string, unknown>, won?: Record<string, unknown>): Record<string, ConfigSource> => {
+    const out: Record<string, ConfigSource> = {};
+    for (const key of Object.keys(values)) out[key] = won && key in won ? "repo" : "default";
+    return out;
+  };
+  const disabledSources = Object.fromEntries(
+    (Object.keys(EMPTY_DISABLED) as Array<keyof DisabledConfig>).map((key) => [
+      key,
+      applied.disabled && key in applied.disabled ? "repo" : "default",
+    ]),
+  ) as Record<keyof DisabledConfig, ConfigSource>;
+
+  let assetRoot: string | undefined;
+  let warning: RepoConfigWarning | undefined;
+  if (record.assets.length > 0) {
+    const layer = await repoLayerForTree(record.repo, record.treeSha, options.resolveLayer);
+    assetRoot = layer?.root;
+    if (!assetRoot) {
+      warning = {
+        code: "fetch-failed",
+        repo: record.repo,
+        path: ".lastlight",
+        message:
+          `The .lastlight/ assets this run started with (tree ${record.treeSha.slice(0, 7)}) are no longer ` +
+          `available — the default branch has moved on, or the cache was evicted. The rest of the run used ` +
+          `the operator's prompts, skills and agent context.`,
+      };
+      console.warn(`[repo-config] ${record.repo}: ${warning.message}`);
+    }
+  }
+
+  return {
+    repoConfig: {
+      repo: record.repo,
+      defaultBranch: record.defaultBranch,
+      treeSha: record.treeSha,
+      fetchedAt: record.fetchedAt,
+      assetRoot,
+      // The paths the repo contributed stay on the record even when the tree is
+      // gone — they describe what the run USED, which is the question anyone
+      // reading a resumed run's provenance is asking.
+      assets: record.assets,
+      models,
+      variants,
+      approval,
+      disabled,
+      sources: {
+        models: sourcesOf(models, applied.models),
+        variants: sourcesOf(variants, applied.variants),
+        disabled: disabledSources,
+        approval: sourcesOf(approval, applied.approval),
+      },
+      // The original fetch/merge warnings, plus this restore's own if it dropped
+      // the asset layer — so a resumed run explains itself as fully as the first.
+      warnings: warning ? [...record.warnings, warning] : record.warnings,
+    },
+    warning,
+  };
+}
 
 /**
  * Lightweight invocation request for any agent workflow. The runner handles
@@ -78,6 +508,13 @@ export interface SimpleWorkflowRequest {
    * session.
    */
   prePopulateBranch?: string;
+  /**
+   * The target repo's own `.lastlight/` layer, already merged onto the boot
+   * config by {@link resolveRepoRunConfig} at the dispatch choke point (issue
+   * #180). Absent ⇒ no layer applies and the run behaves exactly as it did
+   * before the feature existed.
+   */
+  repoConfig?: RunRepoConfig;
 }
 
 // Per-target workspace provisioning policy lives in `./target-policy.js` (a
@@ -267,6 +704,19 @@ export async function runSimpleWorkflow(
   const { owner, repo, issueNumber, prNumber } = request;
   const notify = callbacks.postComment || (async () => {});
 
+  // ── Effective (base ⊕ repo) config for this run ────────────────────────────
+  //
+  // The repo layer was resolved once at dispatch (issue #180). From here down,
+  // ONLY the effective maps are used — they're already the merged result, so
+  // every downstream consumer (the `{{models.x}}` template chain seeded on
+  // `ctx` below, the runner's PhaseResolver, the approval gate) sees one
+  // consistent view without re-deriving the merge. No layer ⇒ these are the
+  // caller's own maps by identity, so behaviour is unchanged.
+  const repoConfig = request.repoConfig;
+  const effectiveModels = repoConfig?.models ?? models;
+  const effectiveVariants = repoConfig?.variants ?? variants;
+  const effectiveApproval = repoConfig?.approval ?? approvalConfig;
+
   // Identify the trigger uniquely. Issue/PR-scoped workflows include the
   // number; repo-scoped workflows (e.g. health) just identify by repo+name;
   // Slack-initiated runs pass an explicit `slack:*` id for thread scoping.
@@ -374,8 +824,14 @@ export async function runSimpleWorkflow(
         taskId,
         issueDir,
         prePopulateBranch: effectivePrePopulateBranch,
-        models: models as Record<string, unknown> | undefined,
-        variants: variants as Record<string, unknown> | undefined,
+        models: effectiveModels as Record<string, unknown> | undefined,
+        variants: effectiveVariants as Record<string, unknown> | undefined,
+        // What the repo's own `.lastlight/` contributed to THIS run — the tree
+        // sha it came from, the leaves it actually won, and everything that was
+        // dropped. Persisted (rather than re-derived on read) because the layer
+        // is TTL-cached and mutable: by the time anyone asks why a run picked a
+        // model, the repo's default branch may have moved on.
+        repoConfig: repoConfig ? repoConfigRunRecord(repoConfig) : undefined,
         ...request.extra,
       },
       startedAt: new Date().toISOString(),
@@ -533,10 +989,13 @@ export async function runSimpleWorkflow(
     // the agent starts. Stored on the workflow_run row above; also lives
     // on ctx so the runner can read it without an extra DB lookup.
     prePopulateBranch: effectivePrePopulateBranch,
-    models: models as unknown as Record<string, unknown>,
+    // EFFECTIVE models — the repo layer is already folded in, so the existing
+    // `{{models.<phase>}}` chain in the engine's `resolveModelVariant` needs no
+    // knowledge of repo config at all.
+    models: effectiveModels as unknown as Record<string, unknown>,
     // Reasoning-effort overrides per phase. Empty/undefined entries skip
-    // the --variant flag (model uses its default effort).
-    variants: variants as unknown as Record<string, unknown> | undefined,
+    // the --variant flag (model uses its default effort). Effective, as above.
+    variants: effectiveVariants as unknown as Record<string, unknown> | undefined,
     // Slack-initiated runs need the runner to pause/resume on the thread id,
     // not on owner/repo#N. Passing the override through here keeps the
     // runner's triggerId derivation in one place.
@@ -568,10 +1027,14 @@ export async function runSimpleWorkflow(
       runConfig,
       callbacks,
       db,
-      models,
-      approvalConfig,
+      effectiveModels,
+      effectiveApproval,
       workflowId,
-      variants,
+      effectiveVariants,
+      // 10th arg: the repo layer itself, for the per-run asset resolver. The
+      // merged config above is already effective; this carries the on-disk
+      // layer root the runner appends to the asset stack.
+      repoConfig,
     );
 
     if (result.success && !result.paused) {

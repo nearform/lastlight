@@ -23,6 +23,16 @@ export type { RunnerCallbacks, WorkflowResult } from "./workflows/runner.js";
 export type { ExecutorConfig } from "./engine/github/profiles.js";
 export type { TemplateContext } from "./workflows/templates.js";
 
+// ── per-repo config layer (issue #180) ──────────────────────────────────────
+// A harness that wants to exercise a managed repo's own `.lastlight/` layer
+// drives the same entry point `dispatchWorkflow` uses, then hands the result to
+// `runWorkflow`'s repo-config parameter. `invalidateRepoLayer` is exported
+// because the fetch is cached per repo with a ~60s TTL — an A/B across two
+// arms in one process would otherwise reuse the first arm's layer.
+export { resolveRepoRunConfig } from "./workflows/simple.js";
+export type { RunRepoConfig, RepoRunConfigOptions } from "./workflows/simple.js";
+export { invalidateRepoLayer } from "./config/repo-config.js";
+
 // ── overlay/evals repo bootstrap (reused by `lastlight-evals init`) ──────────
 export {
   detectGh,

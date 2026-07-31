@@ -10,8 +10,18 @@
  * Only the endpoints our workflows actually hit are implemented; anything else
  * returns 404 so gaps surface loudly rather than silently passing. The server
  * binds to 127.0.0.1 on an ephemeral port.
+ *
+ * ONE method is not a REST route: {@link FakeGitHub.fetchRepoConfigTree}. The
+ * per-repo config layer (issue #180) is read by the HARNESS, not by an agent
+ * tool, through `GitHubClient.fetchRepoConfigTree` — core's own seam for exactly
+ * this ("lives on the client rather than raw octokit at the call site because
+ * the evals harness swaps this whole seam for fixtures"). So the fake implements
+ * that method rather than the two git-tree + blob endpoints underneath it, and
+ * `FakeGitHub` is structurally a `GitHubClient` for the one call
+ * `fetchRepoLayer` makes. See `src/repo-config.ts` for the injection.
  */
 
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { type AddressInfo } from "node:net";
 
@@ -30,6 +40,50 @@ export interface SubmittedReview {
   event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT" | "PENDING";
   comments: { path: string; line?: number; side?: "LEFT" | "RIGHT"; body: string }[];
 }
+
+/**
+ * One blob of a fixture `.lastlight/` tree, as a case declares it.
+ *
+ * `path` is relative to `.lastlight/` — exactly what GitHub's tree API returns
+ * for the subtree, and what `sanitizeRepoFiles` classifies. `mode` defaults to a
+ * regular file; set it explicitly (`"120000"`) to seed the symlink a case wants
+ * the sanitizer to reject.
+ */
+export interface RepoConfigSeedFile {
+  path: string;
+  mode?: string;
+  content: string | Buffer;
+}
+
+/** A materialized blob, in the shape core's `RepoConfigFile` declares. */
+export interface RepoConfigTreeFile {
+  path: string;
+  mode: string;
+  size: number;
+  content: Buffer;
+}
+
+/** Structural mirror of core's `RepoConfigTreeOptions`. */
+export interface RepoConfigTreeQuery {
+  etag?: string;
+  treeSha?: string;
+  maxFiles?: number;
+  maxBytes?: number;
+  includePath?: (path: string) => boolean;
+}
+
+/** Structural mirror of core's `RepoConfigTreeResult` — the three outcomes. */
+export type RepoConfigTreeAnswer =
+  | { status: "absent"; defaultBranch: string }
+  | { status: "not-modified"; defaultBranch: string; treeSha: string; etag?: string }
+  | {
+      status: "ok";
+      defaultBranch: string;
+      treeSha: string;
+      etag?: string;
+      files: RepoConfigTreeFile[];
+      truncated: boolean;
+    };
 
 interface Label {
   name: string;
@@ -124,6 +178,31 @@ export interface FakeGitHub {
   /** Register the changed-file set served at `GET /pulls/:n/files`. Called after
    * the workspace is seeded (the diff isn't known at construction time). */
   setPullFiles: (prNumber: number, files: PullFile[]) => void;
+  /**
+   * The `GitHubClient.fetchRepoConfigTree` seam — the repo's committed
+   * `.lastlight/` subtree, always "from the default branch" (there is only one
+   * ref here, which is exactly the production trust rule). Serves whatever
+   * {@link FakeGitHubOptions.repoConfig} declared:
+   *
+   *  - no fixture           → `{ status: "absent" }` (the common case, and what
+   *                           every pre-existing eval instance gets);
+   *  - a matching `treeSha` → `{ status: "not-modified" }`, the conditional path
+   *                           a warm cache takes;
+   *  - otherwise            → `{ status: "ok" }` with the blobs, after applying
+   *                           the caller's `includePath` / `maxFiles` /
+   *                           `maxBytes` bounds exactly as the real client does.
+   *
+   * The signature matches the real method, so a `FakeGitHub` can be handed
+   * straight to `fetchRepoLayer({ client })` (see `src/repo-config.ts`).
+   */
+  fetchRepoConfigTree: (
+    owner: string,
+    repo: string,
+    options?: RepoConfigTreeQuery,
+  ) => Promise<RepoConfigTreeAnswer>;
+  /** How many times {@link FakeGitHub.fetchRepoConfigTree} was called — a
+   * mechanism signal (>0 proves the harness actually consulted the seam). */
+  repoConfigFetches: () => number;
 }
 
 export interface FakeGitHubOptions {
@@ -136,6 +215,12 @@ export interface FakeGitHubOptions {
   pulls?: PullSeed[];
   /** Repo labels that already exist (createLabel on these returns 422). */
   existingLabels?: string[];
+  /**
+   * The repo's committed `.lastlight/` tree (issue #180). Absent or empty ⇒ the
+   * repo has no per-repo config layer, which is what every other eval case
+   * declares and what `fetchRepoConfigTree` reports as `absent`.
+   */
+  repoConfig?: RepoConfigSeedFile[];
 }
 
 const NOW = "2026-01-01T00:00:00Z";
@@ -232,6 +317,68 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         html_url: `https://github.com/${owner}/${repo}/pull/${seed.number}`,
       });
     }
+  }
+
+  // ── The repo-config layer seam (issue #180) ───────────────────────────────
+  // Not a REST route (see the file header): the harness reads a repo's
+  // `.lastlight/` through `GitHubClient.fetchRepoConfigTree`, so that method is
+  // what the fake implements — the tree/blob endpoints underneath it are the
+  // real client's business, not the contract `fetchRepoLayer` depends on.
+  const repoConfigFiles: RepoConfigTreeFile[] = (opts.repoConfig ?? []).map((f) => {
+    const content = Buffer.isBuffer(f.content) ? f.content : Buffer.from(f.content, "utf8");
+    return { path: f.path, mode: f.mode ?? "100644", size: content.length, content };
+  });
+  // Content identity standing in for git's tree SHA. The only property
+  // `fetchRepoLayer`'s conditional refetch relies on is "same bytes ⇒ same sha".
+  const repoConfigTreeSha = repoConfigFiles.length
+    ? createHash("sha1")
+        .update(
+          [...repoConfigFiles]
+            .sort((a, b) => a.path.localeCompare(b.path))
+            .map((f) => `${f.mode} ${f.path} ${f.content.toString("base64")}`)
+            .join("\n"),
+        )
+        .digest("hex")
+    : undefined;
+  const repoConfigEtag = repoConfigTreeSha ? `W/"${repoConfigTreeSha}"` : undefined;
+  let repoConfigFetches = 0;
+
+  async function fetchRepoConfigTree(
+    reqOwner: string,
+    reqRepo: string,
+    options: RepoConfigTreeQuery = {},
+  ): Promise<RepoConfigTreeAnswer> {
+    repoConfigFetches++;
+    // Loud, like an unimplemented REST route: being asked for a repo this fake
+    // was never seeded with is a wiring bug, not "no config". `fetchRepoLayer`
+    // catches it, warns and runs on the operator config, so it can't fail a run.
+    if (reqOwner !== owner || reqRepo !== repo) {
+      throw new Error(`fake-github: no repo-config fixture for ${reqOwner}/${reqRepo} (seeded ${owner}/${repo})`);
+    }
+    if (!repoConfigTreeSha) return { status: "absent", defaultBranch };
+    // Both conditionals the real client offers: the root-tree ETag (which octokit
+    // surfaces as a 304) and the content-exact subtree SHA.
+    if ((options.etag === repoConfigEtag && options.treeSha) || options.treeSha === repoConfigTreeSha) {
+      return { status: "not-modified", defaultBranch, treeSha: repoConfigTreeSha, etag: repoConfigEtag };
+    }
+    // The same pre-download bounds the real client applies, in the same order:
+    // the path filter first (so build-handoff docs sharing `.lastlight/` never
+    // eat the budget), then the file/byte caps.
+    const maxFiles = options.maxFiles ?? 200;
+    const maxBytes = options.maxBytes ?? 2 * 1024 * 1024;
+    const files: RepoConfigTreeFile[] = [];
+    let bytes = 0;
+    let truncated = false;
+    for (const file of repoConfigFiles) {
+      if (options.includePath && !options.includePath(file.path)) continue;
+      if (files.length >= maxFiles || bytes + file.size > maxBytes) {
+        truncated = true;
+        continue;
+      }
+      bytes += file.size;
+      files.push(file);
+    }
+    return { status: "ok", defaultBranch, treeSha: repoConfigTreeSha, etag: repoConfigEtag, files, truncated };
   }
 
   const repoBase = `/repos/${owner}/${repo}`;
@@ -550,6 +697,8 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         comments: r.comments.map((c) => ({ path: c.path, line: c.line, side: c.side, body: c.body })),
       })),
     setPullFiles: (n, files) => pullFiles.set(n, files),
+    fetchRepoConfigTree,
+    repoConfigFetches: () => repoConfigFetches,
   };
 }
 

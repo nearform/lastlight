@@ -17,7 +17,8 @@ import { SANDBOX_IMAGE_QA } from "../../sandbox/index.js";
 import { DEFAULT_ALLOWLIST, mergeAllowlist } from "../../sandbox/egress-allowlist.js";
 import {
   AGENTIC_PROFILE_FOR,
-  loadAgentContext,
+  agentContextFor,
+  provideAgentContext,
   type ExecutorConfig,
   type ExecutionResult,
   type GitSandboxAccess,
@@ -119,17 +120,44 @@ export async function withSandbox<T>(
   }
 }
 
-/** Drop AGENTS.md into the workspace — agentic-pi reads it as system context.
- *  Host-shared backends only (docker/gondolin/none/smol); the k8s backend has
- *  no host-visible workspace to write into — see the call site's guard and
- *  `KubernetesSandbox.runAgent`'s pod-side delivery instead. */
-function writeAgentsMd(hostWorkspaceDir: string, config: ExecutorConfig): void {
+/**
+ * Deliver the run's agent context (the bot's persona + hard rules) to the agent
+ * as `AGENTS.md`.
+ *
+ * ONE composition, two deliveries. The text comes from {@link agentContextFor},
+ * which prefers the value the runner resolved for this run — the only one that
+ * includes the target repo's additive `agent-context/*.md` (issue #180) — and
+ * falls back to the module-level loader when no repo layer applies. Composing it
+ * here rather than in each delivery path is what keeps the host-shared and
+ * kubernetes backends from drifting apart, and what stops a repo's own
+ * `security.md` sneaking in unfiltered: the additive-only rule was applied once,
+ * upstream, to the value we are handed.
+ *
+ *   - host-shared backends (docker/gondolin/none/smol): written into the
+ *     workspace, a sibling of any checkout. An empty context writes no file, so
+ *     the sandbox entrypoint's baked `cat /app/agent-context/*.md` fallback
+ *     still applies — a file written here always wins over it.
+ *   - kubernetes: `hostWorkspaceDir` is an in-pod path that doesn't exist on the
+ *     harness host, so a write here would always ENOENT. The adapter takes the
+ *     text through the {@link provideAgentContext} sink instead and serves it
+ *     over its own per-run init-fetch channel (see `KubernetesSandbox.runAgent`).
+ *     Offered even when empty, so the adapter never falls back to re-composing a
+ *     value we have already resolved.
+ *
+ * Best-effort: a failure here degrades the agent's context, it must never fail
+ * the phase.
+ */
+function deliverAgentContext(sandbox: Sandbox, ctx: SandboxRunContext, prov: ProvisionResult): void {
   try {
-    const md = loadAgentContext(config.agentContextDir);
-    if (md) writeFileSync(join(hostWorkspaceDir, "AGENTS.md"), md);
+    const md = agentContextFor(ctx.config);
+    if (ctx.backend === "kubernetes") {
+      provideAgentContext(sandbox, md);
+      return;
+    }
+    if (md) writeFileSync(join(prov.hostWorkspaceDir, "AGENTS.md"), md);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[executor] Could not write AGENTS.md: ${msg}`);
+    console.warn(`[executor] Could not deliver AGENTS.md: ${msg}`);
   }
 }
 
@@ -174,11 +202,9 @@ export async function runSandboxedAgent(
 
   return withSandbox(ctx, async (sandbox, prov) => {
     console.log(`  [executor] Running agent (task: ${ctx.taskId}, sandbox: ${ctx.backend})`);
-    // `prov.hostWorkspaceDir` on k8s is an in-pod path (WORKSPACE_DIR) that
-    // doesn't exist on the harness host, so this write would always ENOENT.
-    // The k8s adapter delivers AGENTS.md pod-side instead (the per-run prompt
-    // Secret carries it; see KubernetesSandbox.runAgent).
-    if (ctx.backend !== "kubernetes") writeAgentsMd(prov.hostWorkspaceDir, config);
+    // AGENTS.md — composed once, delivered the way this backend needs it
+    // (workspace write, or the k8s adapter's own init-fetch channel).
+    deliverAgentContext(sandbox, ctx, prov);
 
     // Stage this phase's skills (adapter decides symlink/copy + path mapping).
     let skillDirs: string[] | undefined;

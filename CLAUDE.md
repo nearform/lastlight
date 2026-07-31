@@ -62,7 +62,12 @@ workspace deps) consumed by `lastlight-core` + `lastlight-evals` (and the privat
 dashboard) via `workspace:*`. Invariants: **no edge from
 `shared`/`workflow-engine` back to `core`** (dep-cruiser gate, runs in
 `typecheck`); **the cli never gains an edge to `core`**. Turbo `^build` orders
-builds; there are no TS project references.
+builds; there are no TS project references. Those invariants are why some logic
+lives in `shared` rather than where you'd first look — e.g. the per-repository
+`.lastlight/` config schema + bounds + merge
+(`packages/shared/src/repo-config-schema.ts`, issue #180): core needs it at
+runtime and the CLI needs it offline for `lastlight repo config validate`, and
+`shared` is the only package both can reach.
 
 ## Commands (from the repo root)
 

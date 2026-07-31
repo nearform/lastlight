@@ -109,6 +109,22 @@ never changed. `phase_history` is technically a JSON array that the
 runner appends to. `restart_count` is the [Workflow Engine](/spec/06-workflow-engine)
 crash-loop circuit breaker.
 
+**Per-repository config on the row.** `context.models` / `context.variants` are
+the run's **effective** maps — the target repo's `.lastlight/lastlight.yml`
+already folded in (see [Configuration](/spec/02-configuration)). When a repo
+layer applied, `context.repoConfig` additionally carries a `RepoConfigRunRecord`:
+`repo`, `defaultBranch`, `treeSha`, `fetchedAt`, `applied` (only the leaves whose
+provenance is `repo` — models / variants / approval / disabled), `assets`, and
+`warnings`. It is *persisted* rather than re-derived on read because the layer is
+TTL-cached and mutable: by the time anyone asks why a run picked a model, the
+repo's default branch may have moved on. **Resume reads this record instead of
+re-resolving**, so an edit made while a run was paused/queued/dead can't
+retarget it mid-flight. Asset-level drops discovered while running (a repo
+`agent-context/*.md` ignored because a higher-trust layer owns that basename)
+land on the mutable side, at `scratch.repoConfig.assetWarnings`; a resume that
+could not restore the repo's unpacked asset tree records
+`scratch.repoConfig.restoreWarnings`.
+
 `owner` + `repo` together identify the target: `repo` is stored **bare**
 (a single path-safe segment — taskIds and workspace/session dirs derive
 from it), so the org/user is kept in its own `owner` column rather than

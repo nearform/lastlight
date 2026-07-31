@@ -118,6 +118,18 @@ differ.
   (dispatch is fire-and-forget `202`, so the choke-point rejection alone
   would be invisible to the CLI caller). Contexts with no concrete repo
   (Slack triggers) pass through.
+- **The per-repository config layer resolves at the same choke point.** Right
+  after the managed-repo guard, `dispatchWorkflow()` calls
+  `resolveRepoRunConfig(workflowName, context, { client: github })`
+  (`src/workflows/simple.ts`) so every trigger path — webhook, router, cron,
+  `/api/run`, `/api/build`, approval resume — gets one answer from one place. The
+  result is carried on the `SimpleWorkflowRequest` as `repoConfig`, never
+  installed into a module global (concurrent runs and cron fan-outs share the
+  process). It never throws and never fails a run; the single refusal it can
+  return is the repo disabling that workflow for itself in
+  `.lastlight/lastlight.yml`, reported in the same `{ success: false }` shape as
+  the unmanaged-repo guard. Only a context naming exactly one repo resolves a
+  layer. See [Configuration](/spec/02-configuration).
 - **HTTP server is provided by the GitHub webhook connector.** No
   standalone listener. The admin dashboard, `/api/run`, and `/api/build`
   all silently disappear if there is no GitHub App configured.

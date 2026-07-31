@@ -18,6 +18,76 @@ export type ReactionContent =
   | "eyes";
 
 /**
+ * One file fetched out of a repo's `.lastlight/` subtree.
+ *
+ * `path` is relative to `.lastlight/` itself (`lastlight.yml`,
+ * `workflows/prompts/plan.md`, …) so the result drops straight onto disk in the
+ * same shape as a deployment overlay. `mode` is the raw git filemode from the
+ * tree entry — kept verbatim so the consumer can reject symlinks (`120000`)
+ * without a second round-trip.
+ */
+export interface RepoConfigFile {
+  path: string;
+  mode: string;
+  size: number;
+  content: Buffer;
+}
+
+/**
+ * Result of {@link GitHubClient.fetchRepoConfigTree}. Three outcomes, none of
+ * them exceptional:
+ *  - `absent`       — the repo has no `.lastlight/` (the common case; cheap).
+ *  - `not-modified` — the caller's `etag`/`treeSha` still matches, so nothing
+ *                     was downloaded and the caller's cached copy stands.
+ *  - `ok`           — the subtree, fully materialized.
+ *
+ * `defaultBranch` is always reported because it IS the trust boundary: the
+ * subtree only ever comes from there.
+ */
+export type RepoConfigTreeResult =
+  | { status: "absent"; defaultBranch: string }
+  | { status: "not-modified"; defaultBranch: string; treeSha: string; etag?: string }
+  | {
+      status: "ok";
+      defaultBranch: string;
+      treeSha: string;
+      etag?: string;
+      files: RepoConfigFile[];
+      /** GitHub truncated the subtree listing — treat the result as incomplete. */
+      truncated: boolean;
+    };
+
+/** Options for {@link GitHubClient.fetchRepoConfigTree}. */
+export interface RepoConfigTreeOptions {
+  /** ETag of the root-tree read from the previous fetch — enables a 304. */
+  etag?: string;
+  /** `.lastlight/` tree SHA from the previous fetch — a content-exact conditional. */
+  treeSha?: string;
+  /** Hard cap on files materialized (default 200). Extra entries are skipped. */
+  maxFiles?: number;
+  /** Hard cap on total bytes downloaded (default 2 MiB). Oversized entries are skipped. */
+  maxBytes?: number;
+  /**
+   * Blob filter applied BEFORE downloading, on the path relative to
+   * `.lastlight/`. Matters because `.lastlight/` is shared real estate: in
+   * `buildAssets.location: repo` mode the build workflow commits its handoff
+   * docs to `.lastlight/<issueKey>/*.md` there too. Without a filter those docs
+   * would eat the byte budget and crowd out the config layer.
+   */
+  includePath?: (path: string) => boolean;
+}
+
+const REPO_CONFIG_DIR = ".lastlight";
+const REPO_CONFIG_DEFAULT_MAX_FILES = 200;
+const REPO_CONFIG_DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+
+/** octokit surfaces HTTP failures as errors carrying the numeric `status`. */
+function httpStatus(err: unknown): number | undefined {
+  const status = (err as { status?: unknown })?.status;
+  return typeof status === "number" ? status : undefined;
+}
+
+/**
  * GitHub client for the harness — uses GitHub App auth.
  * Used by the orchestrator to post comments, not by agent sessions.
  */
@@ -271,6 +341,123 @@ export class GitHubClient {
   async getDefaultBranch(owner: string, repo: string): Promise<string> {
     const { data } = await this.octokit.rest.repos.get({ owner, repo });
     return data.default_branch;
+  }
+
+  /**
+   * Fetch a repo's committed `.lastlight/` subtree — its per-repo configuration
+   * layer (issue #180) — from the repo's **default branch**.
+   *
+   * SECURITY — the default branch is the entire trust model here. This subtree
+   * can re-point models, disable workflows and add approval gates for every run
+   * against the repo, so it must only ever be read from a ref that already
+   * passed the repo's own review/branch-protection. It is resolved live from the
+   * repo metadata on every call (never assumed to be `main`), and NEVER read
+   * from a PR head or from the sandbox checkout — otherwise a pull request could
+   * rewrite the configuration of the agent reviewing it.
+   *
+   * Cheap by design, because a cron fanning out over N repos calls this N times:
+   *  - `options.etag` (the previous call's root-tree ETag) short-circuits an
+   *    untouched repo at a conditional 304 — 2 requests, no downloads.
+   *  - `options.treeSha` (the previous `.lastlight/` tree SHA) short-circuits a
+   *    repo that has committed elsewhere since. A git tree SHA is the content
+   *    hash of the whole subtree, so equality means byte-identical.
+   *  - a repo with no `.lastlight/` returns `{ status: "absent" }` — the common
+   *    case is a normal negative result, not an exception.
+   * Only when both conditionals miss does it download blobs, bounded by
+   * `maxFiles` / `maxBytes` so a hostile repo can't make the harness pull an
+   * unbounded tree.
+   *
+   * Lives on the client (rather than raw octokit at the call site) because the
+   * evals harness swaps this whole seam for fixtures.
+   */
+  async fetchRepoConfigTree(
+    owner: string,
+    repo: string,
+    options: RepoConfigTreeOptions = {},
+  ): Promise<RepoConfigTreeResult> {
+    const maxFiles = options.maxFiles ?? REPO_CONFIG_DEFAULT_MAX_FILES;
+    const maxBytes = options.maxBytes ?? REPO_CONFIG_DEFAULT_MAX_BYTES;
+
+    // The trust ref. Resolved every time — a repo can rename its default branch,
+    // and caching the name would silently keep reading a stale (possibly
+    // unprotected) ref.
+    const { data: repoData } = await this.octokit.rest.repos.get({ owner, repo });
+    const defaultBranch = repoData.default_branch;
+
+    // Conditional read of the branch's root tree. `If-None-Match` is only worth
+    // sending when we also hold the previous tree SHA — a 304 tells us "nothing
+    // changed", which we can only turn into a useful answer if we can name what
+    // didn't change.
+    const conditional = options.etag && options.treeSha;
+    let rootTree;
+    try {
+      rootTree = await this.octokit.rest.git.getTree({
+        owner,
+        repo,
+        tree_sha: defaultBranch,
+        ...(conditional ? { headers: { "if-none-match": options.etag! } } : {}),
+      });
+    } catch (err: unknown) {
+      const status = httpStatus(err);
+      // octokit surfaces a conditional-request hit as a thrown HttpError with
+      // status 304 (anything non-2xx throws) — that's the cheap path, not a
+      // failure. `If-None-Match` is only ever sent alongside a stored tree SHA
+      // (see `conditional` above), so there is always one to hand back.
+      if (status === 304 && options.treeSha) {
+        return { status: "not-modified", defaultBranch, treeSha: options.treeSha, etag: options.etag };
+      }
+      // 404 = no commits yet (a brand-new empty repo); 409 = "Git Repository is
+      // empty". Neither is an error worth propagating — there is simply no
+      // config to read.
+      if (status === 404 || status === 409) return { status: "absent", defaultBranch };
+      throw err;
+    }
+    const etag = typeof rootTree.headers?.etag === "string" ? rootTree.headers.etag : undefined;
+
+    const dirEntry = rootTree.data.tree.find((e) => e.path === REPO_CONFIG_DIR && e.type === "tree");
+    if (!dirEntry?.sha) return { status: "absent", defaultBranch };
+    const treeSha = dirEntry.sha;
+    // Content-exact conditional: same subtree SHA ⇒ same bytes, whatever else
+    // the repo committed since.
+    if (options.treeSha && options.treeSha === treeSha) {
+      return { status: "not-modified", defaultBranch, treeSha, etag };
+    }
+
+    let subtree;
+    try {
+      subtree = await this.octokit.rest.git.getTree({
+        owner,
+        repo,
+        tree_sha: treeSha,
+        recursive: "1",
+      });
+    } catch (err: unknown) {
+      if (httpStatus(err) === 404) return { status: "absent", defaultBranch };
+      throw err;
+    }
+
+    const files: RepoConfigFile[] = [];
+    let bytes = 0;
+    let truncated = subtree.data.truncated === true;
+    for (const entry of subtree.data.tree) {
+      // `commit` entries are submodules (no blob to read); `tree` entries are
+      // directories, implied by their children's paths.
+      if (entry.type !== "blob" || !entry.path || !entry.sha) continue;
+      if (options.includePath && !options.includePath(entry.path)) continue;
+      const size = typeof entry.size === "number" ? entry.size : 0;
+      if (files.length >= maxFiles || bytes + size > maxBytes) {
+        // Stop materializing rather than throwing: the caller decides how to
+        // report an over-cap repo, and a partial tree is still flagged.
+        truncated = true;
+        continue;
+      }
+      const { data: blob } = await this.octokit.rest.git.getBlob({ owner, repo, file_sha: entry.sha });
+      const content = Buffer.from(blob.content ?? "", (blob.encoding as BufferEncoding) ?? "base64");
+      bytes += content.length;
+      files.push({ path: entry.path, mode: entry.mode ?? "100644", size, content });
+    }
+
+    return { status: "ok", defaultBranch, treeSha, etag, files, truncated };
   }
 
   /** Convenience: fetch only the PR's head commit SHA. Used by check-run code. */

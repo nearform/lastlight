@@ -1,5 +1,5 @@
 import type { GitHubTokenPermissions } from "./git-auth.js";
-import type { GitAccessProfile } from "lastlight-workflow-engine";
+import type { ExecutorConfig, GitAccessProfile } from "lastlight-workflow-engine";
 import { loadAgentContext as loadResolvedAgentContext } from "../../workflows/loader.js";
 
 // The shared execution vocabulary (ExecutorConfig / ExecutionResult /
@@ -91,6 +91,60 @@ export const GITHUB_PERMISSION_PROFILES: Record<GitAccessProfile, GitHubTokenPer
   },
 };
 
+/**
+ * The operator-only agent context, composed from the module-level asset layers
+ * (built-in ⊕ overlay). `_dir` is accepted for call-site compatibility and
+ * deliberately ignored — agent context is resolved layer-wise by the loader, not
+ * from a single directory. Prefer {@link agentContextFor}, which honours a run's
+ * own resolved value.
+ */
 export function loadAgentContext(_dir?: string): string {
   return loadResolvedAgentContext();
+}
+
+/**
+ * The agent context (AGENTS.md body) for ONE run.
+ *
+ * `config.agentContext` is the text the runner composed off this run's asset
+ * resolver — the only value that includes the target repo's additive
+ * `agent-context/*.md` (issue #180), and the only one that has had the
+ * additive-only rule applied to it. It is used verbatim: re-composing here would
+ * silently drop the repo layer (the module-level loader has never heard of it).
+ *
+ * Absent ⇒ the module-level facade, byte-identical to the pre-repo-layer
+ * behaviour, which is every run that carries no repo layer.
+ */
+export function agentContextFor(config: Pick<ExecutorConfig, "agentContext" | "agentContextDir">): string {
+  return config.agentContext ?? loadAgentContext(config.agentContextDir);
+}
+
+/**
+ * A sandbox adapter that DELIVERS the agent context itself instead of reading it
+ * off a host-shared workspace.
+ *
+ * Only the kubernetes backend implements it: its `hostWorkspaceDir` is an in-pod
+ * path, so the orchestrator can't write `AGENTS.md` there — the adapter serves
+ * the text over its own authenticated init-fetch channel instead. Declared here,
+ * beside the agent-context loader, rather than on the `Sandbox` port: it is a
+ * capability of one backend, and every other adapter is served by the plain
+ * workspace write.
+ *
+ * The orchestrator constructs one adapter per run (see `withSandbox`), so the
+ * value handed over is per-instance run state — never shared between runs.
+ */
+export interface AgentContextSink {
+  setAgentContext(text: string): void;
+}
+
+/**
+ * Hand `text` to `sandbox` if it implements {@link AgentContextSink}. Returns
+ * whether it did, so a caller can tell "delivered" from "this backend doesn't
+ * take it" (in which case the adapter keeps its own module-level fallback and
+ * the run is exactly as it was before this seam existed).
+ */
+export function provideAgentContext(sandbox: unknown, text: string): boolean {
+  const sink = sandbox as Partial<AgentContextSink> | null;
+  if (typeof sink?.setAgentContext !== "function") return false;
+  sink.setAgentContext(text);
+  return true;
 }

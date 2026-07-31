@@ -349,7 +349,8 @@ by name with **overlay > user (`--datasets`) > built-in** precedence:
 - **built-in** (shipped here): `triage` → `issue-triage`, `code-fix` → `build`,
   `pr-review` → `pr-review` (ships empty — populate with
   `scripts/import-martian.ts`; see [PR-review tier](#pr-review-tier-code-review-bench)
-  below and `datasets/pr-review/README.md`).
+  below and `datasets/pr-review/README.md`), `repo-config` → `answer` (see
+  [Per-repo config layer](#per-repo-config-layer-lastlight) below).
 - **user**: `--datasets <dir>` / `LASTLIGHT_EVALS_DATASETS`.
 - **overlay**: `<overlay>/evals/datasets/*`.
 
@@ -411,6 +412,42 @@ tests run real code — only use trusted repos.
 A new tier just needs a directory with an `instances.json` and a `tier.json`
 (`{ "name", "defaultWorkflow", "description" }`); per-instance `workflow` wins
 when present.
+
+### Per-repo config layer (`.lastlight/`)
+
+A managed repo can commit a `.lastlight/` directory that overrides a bounded
+subset of config **for runs against that repo** — models, variants, cron
+participation, `disabled.workflows`, approval gates, plus prompt / skill /
+agent-context overrides. A case declares one by dropping the tree at
+`<tier>/lastlight/<instance_id>/`, laid out exactly as the repo commits it:
+
+```
+<tier>/lastlight/<id>/lastlight.yml               # the config override
+<tier>/lastlight/<id>/workflows/prompts/*.md      # prompt overrides
+<tier>/lastlight/<id>/skills/<name>/SKILL.md      # skill overrides
+<tier>/lastlight/<id>/agent-context/*.md          # persona/rules additions (add-only)
+```
+
+No instance field and no flag: the directory's presence *is* the declaration, and
+a case without one runs on the plain operator config (which is every other tier).
+The mock serves the tree through the same `fetchRepoConfigTree` seam the real
+GitHub client exposes, and the harness then runs the production resolver over it
+unmodified — so a run measures the real feature, not a re-implementation. What the
+layer contributed lands on the result as `repoLayer` (`applied`, `assets`,
+`warnings`, and `refused` when the repo opted the workflow out).
+
+The shipped **`repo-config`** tier is the end-to-end proof: two cases, same
+question, on the `answer` workflow — one repo whose `.lastlight/` prompt override
+tells the agent to add a marker label, one with no `.lastlight/` at all. It's
+cheap (one agent call each, no clone, no judge) and opt-in:
+
+```bash
+lastlight-evals run repo-config --model haiku
+```
+
+A fixture that sets `models:` overrides the run's arm for that case. That's
+faithful to production and occasionally the point, but it makes the case's model
+column stop describing the arm — so only do it deliberately.
 
 ## PR-review tier (Code Review Bench)
 

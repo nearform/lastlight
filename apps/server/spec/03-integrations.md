@@ -105,14 +105,30 @@ without the CLI.
 | **Auth** | None — cron jobs run with implicit process trust. |
 | **Normalize** | None — cron jobs dispatch workflows directly. `_triggerType: "cron"` is added to the workflow context (`src/cron/fanout.ts:42`). |
 | **Event types** | n/a |
-| **Job source** | `workflows/cron-*.yaml` files. `getJobs({ webhooksEnabled, db })` (`src/cron/jobs.ts`) loads them, applies DB overrides from `cron_overrides`, and filters those marked `condition: { unless: webhooksEnabled }` when webhooks are active. |
-| **Fan-out** | `dispatchCronWorkflow()` (`src/cron/fanout.ts:36–76`) fans out across a `repos` array in the context with a concurrency limit (default 3). Each per-repo dispatch is its own workflow run with its own taskId. A cron whose context sets `discover: <key>` instead fans out **per PR**: the runner (`src/index.ts`) resolves the key to a discoverer, finds the eligible dependency PRs in code (`src/cron/dependabot-discovery.ts`), and dispatches one bounded single-PR run each via `fanOutContexts`. |
+| **Job source** | `workflows/cron-*.yaml` files. `getJobs({ webhooksEnabled, db, crons })` (`src/cron/jobs.ts`) loads them, applies DB overrides from `cron_overrides` **and** the operator's `crons.disable` list, and filters those marked `condition: { unless: webhooksEnabled }` when webhooks are active. A cron turned off by either lever stays **registered**, carrying `_cronGloballyEnabled: false` — see "Per-repo cron participation" below. |
+| **Fan-out** | `dispatchCronWorkflow()` (`src/cron/fanout.ts`) fans out across a `repos` array in the context — **all at once, with no dispatch-side throttle**. Bounding concurrency is entirely the global admission cap's job (`concurrency.maxWorkflows`): each dispatch just creates a `workflow_runs` row, and an over-cap row is persisted `queued` and promoted as slots free. Each per-repo dispatch is its own workflow run with its own taskId. A cron whose context sets `discover: <key>` instead fans out **per PR**: the runner (`src/index.ts`) resolves the key to a discoverer, finds the eligible dependency PRs in code (`src/cron/dependabot-discovery.ts`), and dispatches one bounded single-PR run each via `fanOutContexts`. |
 | **Reply** | Cron jobs don't reply per se. Output destined for humans flows through `SLACK_DELIVERY_CHANNEL` when configured. |
 
 The dual webhook/poll model is intentional: with webhooks enabled, the
 polling crons (`cron-triage`, `cron-review`) silently de-register; with
 webhooks disabled, they kick in to keep parity. The scheduled crons
 (`cron-health`, `cron-security`) run regardless.
+
+**Per-repo cron participation (issue #180).** WHICH repos a tick fans out over is
+resolved at **tick** time, not at registration: a managed repo may opt out of (or
+into) a cron in its `.lastlight/lastlight.yml`, and that must take effect without
+re-registering croner jobs. `jobs.ts` therefore carries two control keys on every
+scheduled tick's context — `_cronName` (the only channel by which the tick learns
+which cron it is; several crons can share one workflow) and
+`_cronGloballyEnabled` — which `resolveCronRepos` (`src/cron/repo-crons.ts`)
+consumes and the fan-out strips before dispatch, so a dispatched run's context is
+byte-for-byte what it was before the feature existed. An empty resolved list is a
+legitimate no-op tick: no dispatch, no run, no failure. The discovery crons
+bypass `dispatchCronWorkflow` (they fan out per PR, not per repo), so
+`src/index.ts` narrows their repo list through the same `resolveCronRepos` before
+discovering anything. Cost: warm layers come from the in-memory cache, misses are
+fetched concurrently and conditionally, and one repo's failure degrades to its
+inherited behaviour. See [Configuration](/spec/02-configuration).
 
 Two of the scheduled crons are **dependency-PR discovery backstops** for the
 `pr.checks_passed` / `pr.checks_failed` webhooks — additive (no
@@ -153,7 +169,7 @@ that the guard does **not** gate.
 | **Normalize** | None — dashboard actions dispatch workflows directly. Workflows triggered this way see `_triggerType: "admin"`. |
 | **Event types** | n/a |
 | **Resume** | When an operator approves a paused workflow, `/admin/approvals/:id/respond` calls `config.resumeWorkflow(workflowRun, "admin")` — the same callback the GitHub `@last-light approve` comment and Slack `/approve` slash command use. (`src/admin/routes.ts:813–831`, callback wired at `src/index.ts:453–476`) |
-| **Cron management** | Schedule overrides and enable/disable land in `cron_overrides`; the scheduler applies them on next tick without a process restart. |
+| **Cron management** | Schedule overrides and enable/disable land in `cron_overrides`; the scheduler applies them on next tick without a process restart. **Disable re-registers rather than unregisters** — the job keeps ticking with `_cronGloballyEnabled: false` so a repo that opted into that cron from its `.lastlight/` is still honoured; usually the fan-out resolves to nobody and the tick costs nothing. "Run now" carries `_cronName` (so a repo's opt-out is respected however the tick was started) but deliberately *not* `_cronGloballyEnabled`, so the button still works on a globally-disabled cron. |
 
 ## Invariants
 

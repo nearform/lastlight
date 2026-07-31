@@ -71,6 +71,27 @@ export interface ExecutorConfig {
   variant?: string;
   /** Path to agent context directory. */
   agentContextDir?: string;
+  /**
+   * The run's already-composed agent context — the body of the `AGENTS.md` the
+   * sandbox hands the agent as system context (persona + hard rules).
+   *
+   * The seam exists because agent-context is resolved LAYER-WISE and a run may
+   * carry an extra, per-run layer the module-level loader knows nothing about:
+   * the target repo's own `.lastlight/agent-context/*.md` (issue #180). The
+   * runner composes the text ONCE off that run's asset resolver and threads it
+   * here, so both delivery paths — the host-shared backends' workspace write and
+   * the kubernetes per-run init-fetch channel — serve the same bytes.
+   *
+   * **Security-critical.** The value MUST come from a resolver built with
+   * `agentContextAdditiveOnly: true` for the repo layer, which is what stops a
+   * managed repo neutering the operator's `security.md` / `rules.md` by
+   * committing a file of the same name. Consumers use this value as-is and never
+   * re-compose it.
+   *
+   * Absent (every run without a repo layer) ⇒ consumers fall back to the
+   * module-level loader exactly as they always did.
+   */
+  agentContext?: string;
   /** Directory for persistent state. */
   stateDir?: string;
   /** Directory for agent sandboxes (cloned repos). */

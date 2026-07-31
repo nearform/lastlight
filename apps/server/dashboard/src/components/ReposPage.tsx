@@ -4,6 +4,7 @@ import { ArrowTopRightOnSquareIcon } from "@heroicons/react/24/outline";
 import { api, type RepoEntry } from "../api";
 import { WorkflowList } from "./WorkflowList";
 import { ArtifactsPage } from "./ArtifactsPage";
+import { RepoConfigPane } from "./RepoConfigPane";
 import { GhLink } from "./GhLink";
 import { repoUrl } from "../lib/githubLinks";
 import {
@@ -18,18 +19,20 @@ import {
  * Repos tab — a repo-centric way to navigate the instance. The left pane lists
  * the effective managed repos (∪ repos with activity), annotated with run +
  * artifact counts and sorted newest-activity first (served by GET /repos).
- * Selecting one opens a detail pane with two sub-tabs that REUSE the existing
+ * Selecting one opens a detail pane with three sub-tabs that REUSE the existing
  * views, scoped to the repo:
  *   • Workflows → {@link WorkflowList} with a server-side `repo` filter;
- *   • Assets    → {@link ArtifactsPage} locked to the repo (picker hidden).
+ *   • Assets    → {@link ArtifactsPage} locked to the repo (picker hidden);
+ *   • Config    → {@link RepoConfigPane} — the repo's effective config, its
+ *     committed `.lastlight/` layer, and what the bounds dropped (issue #180).
  *
  * A team filter (GitHub team → repo grants) is a follow-up that rides on the
  * team tables from issue #169 — see the placeholder above the list.
  *
- * Deep-link params: ?tab=repos&repo=<owner/repo>&rtab=workflows|assets.
+ * Deep-link params: ?tab=repos&repo=<owner/repo>&rtab=workflows|assets|config.
  */
 
-const REPO_TABS = ["workflows", "assets"] as const;
+const REPO_TABS = ["workflows", "assets", "config"] as const;
 type RepoTab = (typeof REPO_TABS)[number];
 
 /** Relative age of an ISO timestamp — "3h", "2d" (mirrors WorkflowList). */
@@ -147,6 +150,17 @@ export function ReposPage({ timeRange, query }: ReposPageProps) {
                       <div className="flex items-center gap-2 text-[10px] text-base-content/50">
                         <span>{r.runCount} run{r.runCount === 1 ? "" : "s"}</span>
                         {r.artifactKeyCount > 0 && <span>· {r.artifactKeyCount} asset{r.artifactKeyCount === 1 ? "" : "s"}</span>}
+                        {/* Makes the Config sub-tab discoverable: this repo ships
+                            its own .lastlight/ layer (cache-only hint — a repo
+                            without the badge may simply not be fetched yet). */}
+                        {r.hasRepoConfig && (
+                          <span
+                            className="rounded bg-secondary/20 px-1 text-[9px] font-medium text-secondary"
+                            title="This repo commits a .lastlight/ config layer"
+                          >
+                            .lastlight
+                          </span>
+                        )}
                         {!r.managed && (
                           <span className="ml-auto rounded bg-base-200 px-1 text-[9px] text-base-content/40">
                             unmanaged
@@ -196,6 +210,10 @@ export function ReposPage({ timeRange, query }: ReposPageProps) {
           <div className="flex flex-1 overflow-hidden">
             {rtab === "workflows" ? (
               <WorkflowList repo={repo} timeRange={timeRange} query={query} />
+            ) : rtab === "config" ? (
+              // Keyed by repo so switching repos remounts rather than showing
+              // the previous repo's config while the new fetch is in flight.
+              <RepoConfigPane key={repo} repo={repo} />
             ) : (
               <ArtifactsPage lockedRepo={repo} timeRange={timeRange} query={query} />
             )}

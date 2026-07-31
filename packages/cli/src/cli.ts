@@ -48,8 +48,10 @@ const BOOLEAN_FLAGS = new Set([
   "no-core", "no-overlay", "no-build", "no-prune", "yes", "local",
   // `setup` mode selectors (skip the interactive client/server prompt)
   "client", "server",
-  // `fork` — overwrite existing overlay assets
+  // `fork` / `repo fork` — overwrite existing assets
   "force",
+  // `repo config show` — make the server bypass its repo-layer TTL
+  "refresh",
   // `skills install` — skip the claude marketplace path, copy skill dirs directly
   // (and `--local`, shared with `update`, forces the bundled marketplace source)
   "no-marketplace",
@@ -294,6 +296,23 @@ ${chalk.bold("Fork")} (host-local — copy built-in assets into the deployment o
                                      [--home dir] [--force to overwrite existing]
                                      Reads built-ins bundled with the CLI — no checkout needed.`,
 
+  repo: `
+${chalk.bold("Repo")} (a managed repo's own .lastlight/ config layer — run inside your code repo)
+  lastlight repo fork                List what a repo may override into ./.lastlight/
+  lastlight repo fork all            Every workflow's prompts + skills + agent-context + classifier
+  lastlight repo fork <workflow>     A workflow's PROMPTS + SKILLS ${chalk.dim("(never its YAML — that stays the operator's)")}
+  lastlight repo fork agent-context [file]
+                                     Copy agent-context/*.md ${chalk.dim("(ADDITIVE only — rename before committing)")}
+  lastlight repo fork classifier     The base intent-classifier prompts
+                                     ${chalk.dim("[--home <core checkout>] [--force]")}
+  lastlight repo config validate     Check ./.lastlight/ offline, exactly as the server would ${chalk.dim("[--json]")}
+                                     ${chalk.dim("Exits non-zero if anything would be rejected.")}
+  lastlight repo config show <owner/repo>
+                                     The effective post-bounds config + provenance from the server
+                                     ${chalk.dim("[--refresh to bypass the server's 60s layer TTL] [--json]")}
+  ${chalk.dim("Writes to <git repo root>/.lastlight — refuses outside a git repo. Only the layer on your")}
+  ${chalk.dim("DEFAULT BRANCH is ever read (a PR head can never reconfigure the agent reviewing it).")}`,
+
   skills: `
 ${chalk.bold("Skills")} (host-local — install the Last Light Claude Code skills)
   lastlight skills install           Install the skills into a local Claude Code
@@ -342,6 +361,9 @@ ${chalk.bold("Server")} (host-local docker stack)   ${chalk.dim("→ lastlight s
 
 ${chalk.bold("Overlay / host-local")}   ${chalk.dim("→ lastlight <cmd> help")}
   fork · skills · oauth
+
+${chalk.bold("Repo")} (your code repo's own .lastlight/ layer)   ${chalk.dim("→ lastlight repo help")}
+  repo fork · repo config validate · repo config show
 
 ${chalk.bold("Other")}
   lastlight setup                               First-run wizard — client (login) or server (stack)
@@ -1140,6 +1162,28 @@ async function cmdFork(): Promise<void> {
   await fork(positionals.slice(1), { home, force: flags.force === true });
 }
 
+// ── repo (a managed repo's own .lastlight/ layer) ──────────────────────────
+
+/**
+ * `lastlight repo <fork|config> …` — the per-repo config layer (issue #180)
+ * from the repo's side. `fork` + `config validate` are offline and operate on
+ * `<git repo root>/.lastlight`; `config show` reads a connected server's admin
+ * API, so `apiGet` is injected rather than reimplemented there. See
+ * src/repo-cli.ts.
+ */
+async function cmdRepo(): Promise<void> {
+  const { repoCommand } = await import("./repo-cli.js");
+  const code = await repoCommand(positionals.slice(1), {
+    home: typeof flags.home === "string" ? flags.home : undefined,
+    force: flags.force === true,
+    json: JSON_OUT,
+    refresh: flags.refresh === true,
+    dir: typeof flags.dir === "string" ? flags.dir : undefined,
+    apiGet,
+  }).catch((err: unknown) => die(err instanceof Error ? err.message : String(err)));
+  if (code !== 0) process.exit(code);
+}
+
 // ── skills (host-local) ──────────────────────────────────────────────────────
 
 /**
@@ -1225,6 +1269,7 @@ async function main() {
     case "cron":
     case "crons": return cmdCron();
     case "fork": return cmdFork();
+    case "repo": return cmdRepo();
     case "skills": return cmdSkills();
     case "oauth":
     case "auth": return cmdOAuth();

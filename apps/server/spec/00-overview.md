@@ -85,6 +85,16 @@ The terms used across this spec, in dependency order.
   from `agent-context/*.md` (`soul.md`, `rules.md`, `security.md`).
   Materialized into the sandbox at session start; also injected into the
   chat path's system prompt.
+- **Deployment overlay** — the operator's private `instance/` directory
+  (`$LASTLIGHT_OVERLAY_DIR`): a `config.yaml` layered over the packaged
+  defaults, plus asset overrides (`workflows/`, `workflows/prompts/`,
+  `skills/`, `agent-context/`) that win by logical name. See
+  [Configuration](/spec/02-configuration).
+- **Per-repository config layer** (`.lastlight/`) — a *managed repo's* own,
+  bounded override of config and assets for runs against itself. Same on-disk
+  shape as the overlay, always read from the repo's **default branch** (never a
+  PR head), bounded by the operator's `repoConfig` block, and applied last:
+  `default → overlay → env → repo`. See [Configuration](/spec/02-configuration).
 - **Approval gate** — a pause point declared on a phase. When hit, the
   run persists with `status: paused` and a row in `workflow_approvals`.
   The user resolves it via GitHub comment, Slack slash command, or the

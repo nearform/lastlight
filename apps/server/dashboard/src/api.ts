@@ -77,6 +77,12 @@ export interface ManagedRepos {
   source: "config" | "installation";
   /** ISO timestamp of the last installation-repo cache update, or null. */
   refreshedAt: string | null;
+  /**
+   * Per-effective-repo `.lastlight/` presence, read from the harness's in-memory
+   * cache only (no network). `hasRepoConfig: false` means "nothing cached yet",
+   * not necessarily "no repo config" — opening the repo's Config tab settles it.
+   */
+  repoConfig: { repo: string; hasRepoConfig: boolean; fetchedAt: string | null }[];
 }
 
 /**
@@ -95,6 +101,12 @@ export interface RepoEntry {
   lastRunAt: string | null;
   /** Number of stored artifact run-keys (build assets) for this repo. */
   artifactKeyCount: number;
+  /**
+   * True when the harness has a cached `.lastlight/` layer for this repo — a
+   * cache-only hint (no network) that makes the repo's Config tab discoverable.
+   * False can also mean "not fetched yet"; the Config tab is always available.
+   */
+  hasRepoConfig: boolean;
 }
 
 export type OverlayAssetType = "workflow" | "cron" | "prompt" | "skill" | "agent-context";
@@ -109,6 +121,65 @@ export interface OverlayAsset {
 export interface OverridesBundle {
   overlayDir: string | null;
   overrides: OverlayAsset[];
+}
+
+// ── Per-repository configuration (issue #180) ────────────────────────────────
+
+/** Which layer a resolved config leaf came from. `repo` is the `.lastlight/` layer. */
+export type ConfigSource = "default" | "overlay" | "env" | "repo";
+
+/** One thing the harness dropped out of a repo's `.lastlight/`, and why. */
+export interface RepoConfigWarning {
+  /** Machine code — `invalid-yaml`, `key-not-allowed`, `model-not-allowed`, … */
+  code: string;
+  repo?: string;
+  /** The config path (`models.architect`) or file path (`workflows/x.yaml`) at fault. */
+  path: string;
+  message: string;
+}
+
+/** The operator's bounds on what a repo may set (overlay `repoConfig:`). */
+export interface RepoConfigPolicy {
+  enabled: boolean;
+  allowKeys: string[];
+  /** Exact-match model allow-list, or null for "any wireable provider/model". */
+  allowedModels: string[] | null;
+  allowAssets: boolean;
+}
+
+/** The effective, repo-specific values for the keys a repo is allowed to touch. */
+export interface RepoMergedConfig {
+  models: Record<string, string>;
+  variants: Record<string, string>;
+  disabled: Record<string, string[]>;
+  approval: Record<string, boolean>;
+}
+
+/** Provenance mirror of {@link RepoMergedConfig} — each leaf tagged with its winning layer. */
+export interface RepoConfigSources {
+  models: Record<string, ConfigSource>;
+  variants: Record<string, ConfigSource>;
+  disabled: Record<string, ConfigSource>;
+  approval: Record<string, ConfigSource>;
+}
+
+/** Response of `GET /repos/:owner/:repo/config`. */
+export interface RepoConfigBundle {
+  repo: string;
+  /** Effective config for THIS repo, post-bounds. */
+  merged: RepoMergedConfig;
+  /** Per-leaf provenance mirroring {@link merged}. */
+  sources: RepoConfigSources;
+  /** The repo's `lastlight.yml` as committed, PRE-validation. Absent when the
+   *  repo has no `.lastlight/` — a normal state, not an error. */
+  repoLayer?: Record<string, unknown>;
+  warnings: RepoConfigWarning[];
+  /** Prompts / skills / agent-context the repo contributes, and what each shadows. */
+  assets: OverlayAsset[];
+  policy: RepoConfigPolicy;
+  fetchedAt: string | null;
+  treeSha: string | null;
+  defaultBranch: string | null;
 }
 
 export interface WorkflowRun {
@@ -797,6 +868,13 @@ export const api = {
   // Repo-centric index for the Repos tab — managed repos ∪ active repos, each
   // with run/artifact activity, newest-activity first.
   repos: () => req<{ repos: RepoEntry[] }>("/repos"),
+  // Effective config for ONE repo: the instance layers with that repo's
+  // committed `.lastlight/` applied on top, within the operator's bounds.
+  // `refresh` bypasses the harness's 60s repo-layer TTL.
+  repoConfig: (repo: string, opts: { refresh?: boolean } = {}) =>
+    req<RepoConfigBundle>(
+      `/repos/${repo.split("/").map(encodeURIComponent).join("/")}/config${opts.refresh ? "?refresh=1" : ""}`,
+    ),
   // Event Router Playground: static graph + hermetic dry-run of a synthetic event.
   routeGraph: () => req<RouteGraphResponse>("/route-graph"),
   routeTest: (input: RouteTestRequest) =>
@@ -818,6 +896,14 @@ export interface CronInfo {
   lastRun: string | null;
   lastStatus: string | null;
   recentFailures: number;
+  /**
+   * Managed repos that opted INTO this cron from their own `.lastlight/`
+   * (issue #180). Only meaningful when `enabled` is false: a globally-off cron
+   * keeps its scheduler tick so these repos can still be served, which is why
+   * `registered`/`nextRun` stay populated while the toggle reads off.
+   * Cache-only server-side, so it can under-report until a tick warms the cache.
+   */
+  optedInRepos: string[];
   context: Record<string, unknown>;
   override: { updatedAt: string; updatedBy: string | null; hasScheduleOverride: boolean } | null;
 }

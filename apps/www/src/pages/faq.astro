@@ -138,7 +138,15 @@ const description = "Frequently asked questions about Last Light — the self-ho
 			<details class="faq-item">
 				<summary>How do I add more repos?</summary>
 				<div class="faq-answer">
-					<p>Just install the GitHub App on additional repos — no code changes needed. The bot handles all installed repos automatically. If you want different behavior per repo, you'd need to add conditional logic to the skill files (check <code>repository.full_name</code> in the webhook payload).</p>
+					<p>Just install the GitHub App on additional repos — no code changes needed. The bot handles all installed repos automatically.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Can a single repo have its own settings?</summary>
+				<div class="faq-answer">
+					<p>Yes — a managed repo can commit a <code>.lastlight/</code> directory that overrides a bounded subset of config for runs against itself: models and reasoning effort, extra approval gates, which scheduled jobs it takes part in, and its own prompts, skills and agent-context files. Same on-disk shape as the deployment overlay, so <code>lastlight repo fork</code> scaffolds it from the real built-ins and <code>lastlight repo config validate</code> checks it offline before you push.</p>
+					<p>It is always read from the repo's <strong>default branch</strong>, never a pull-request head — so a PR can't reconfigure the agent reviewing it. A repo can never contribute workflow YAML (phases, permission profiles and gates stay yours), can only <em>add</em> approval gates rather than remove them, and can only add agent-context files rather than shadow your <code>rules.md</code>/<code>security.md</code>. What's on offer at all is bounded by a <code>repoConfig:</code> block you control, and the whole feature can be switched off with <code>repoConfig.enabled: false</code>. See <a href="/docs/repo-config">Per-repo config</a>.</p>
 				</div>
 			</details>
 		</div>

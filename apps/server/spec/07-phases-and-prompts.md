@@ -111,7 +111,11 @@ string":
    here, so loop fix/re-review cycles inherit the parent phase's
    skills automatically.
 7. `buildPhasePrompt(phase, ctx)`:
-   - If `prompt:` set — `loadPromptTemplate(path)`, render against ctx.
+   - If `prompt:` set — `loadPromptTemplate(path)`, render against ctx. The
+     runner resolves this (and step 6's `resolveSkillPaths`) through the **run's**
+     `AssetResolver` when the target repo commits a `.lastlight/` layer, and
+     through the module-level facade otherwise — see
+     [Configuration](/spec/02-configuration).
    - Else if `skills:`/`skill:` set — emit a short auto-generated
      nudge: `Use the **<primary>** skill … Other skills available: …` followed by the workflow context as `key: value` lines.
    - Otherwise — error.
@@ -121,8 +125,10 @@ string":
    `none`, recursive copy in docker/gondolin — gondolin mounts only cwd,
    so a symlink would dangle outside the guest mount) — a sibling of the `<repo>/`
    subdir, never in its git tree — then maps it to the agent via absolute
-   `--skill` (docker) / `skillPaths` (in-process). It writes `AGENTS.md`,
-   then invokes the [Sandbox](/spec/09-sandbox) with the rendered prompt.
+   `--skill` (docker) / `skillPaths` (in-process). It delivers `AGENTS.md` —
+   a workspace write on the host-shared backends, the `AgentContextSink` channel
+   on kubernetes (see [Skills](/spec/08-skills)) — then invokes the
+   [Sandbox](/spec/09-sandbox) with the rendered prompt.
    The agent's `read` tool pulls SKILL.md content on demand —
    [Skills](/spec/08-skills).
 9. Output is parsed for verdict / status markers and stored in

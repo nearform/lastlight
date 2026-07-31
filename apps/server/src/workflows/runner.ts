@@ -8,8 +8,17 @@ import type { PhaseHistoryEntry } from "../state/db.js";
 import type { ModelConfig, VariantConfig } from "../config/config.js";
 import { resolveModel, resolveVariant, getBotName } from "../config/config.js";
 import type { AgentWorkflowDefinition } from "./schema.js";
-import { loadPromptTemplate, resolveSkillPaths } from "./loader.js";
+import {
+  createAssetResolver,
+  getAssetLayers,
+  getDisabledAssets,
+  loadPromptTemplate,
+  makeLayer,
+  resolveSkillPaths,
+  type AssetResolver,
+} from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
+import type { RunRepoConfig } from "./simple.js";
 import { PER_TARGET_RECREATE_WORKFLOWS } from "./target-policy.js";
 import { qaImageAvailable, SANDBOX_IMAGE_QA } from "../sandbox/images.js";
 import { executeAgent, executeCommand } from "../engine/agent-executor.js";
@@ -155,6 +164,72 @@ const defaultAssetLoader: EnginePorts["assets"] = {
   resolveSkillPaths: (names) => resolveSkillPaths(names),
 };
 
+/**
+ * The asset resolver for one run.
+ *
+ * With no repo layer this is `undefined` and every asset call goes through the
+ * module-level facade exactly as before — the no-repo path must stay
+ * bit-identical, since it is every run today.
+ *
+ * With a repo layer we build a resolver over `globals + the repo layer` and use
+ * THAT for the whole run. Not `configureWorkflowAssets` — several workflows (and
+ * a cron fan-out across every managed repo) are in flight at once, so mutating
+ * the module globals would let one run's repo layer leak into another's prompts.
+ *
+ * `agentContextAdditiveOnly` is non-negotiable for a repo layer: without it a
+ * repo could neuter the operator's `security.md` / `rules.md` for every run
+ * against itself simply by committing a file of the same name.
+ */
+function runAssetResolver(repoConfig?: RunRepoConfig): AssetResolver | undefined {
+  if (!repoConfig?.assetRoot) return undefined;
+  try {
+    return createAssetResolver(
+      [...getAssetLayers(), makeLayer("repo", repoConfig.assetRoot)],
+      getDisabledAssets(),
+      { agentContextAdditiveOnly: true },
+    );
+  } catch (err: unknown) {
+    // Warn, drop the layer, run anyway — the repo-config failure rule. A repo
+    // whose cache dir vanished mid-run must not take the run down with it.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[repo-config] ${repoConfig.repo}: could not build the per-run asset resolver (${msg})`);
+    return undefined;
+  }
+}
+
+/**
+ * Compose this run's agent context (the AGENTS.md body) off the per-run
+ * resolver, ONCE.
+ *
+ * This is the only path by which a target repo's `.lastlight/agent-context/*.md`
+ * reaches the agent: every downstream composition site (the orchestrator's
+ * workspace write, the kubernetes init-fetch channel) reads
+ * `ExecutorConfig.agentContext` and never re-derives the text, because the
+ * module-level loader has no knowledge of a per-run repo layer.
+ *
+ * **Security boundary.** `assets` was built with `agentContextAdditiveOnly` (see
+ * `runAssetResolver`), so a repo file whose basename an operator layer already
+ * owns — `soul.md`, `rules.md`, `security.md` — is DROPPED here rather than
+ * replacing it. Composing once, here, is what makes that structural: nothing
+ * downstream can reach the repo layer except through this value, so a repo
+ * cannot neuter the operator's rules by naming a file after one of them. The
+ * drops are recorded as resolver warnings and surfaced on the run by
+ * {@link recordAssetWarnings}.
+ *
+ * Best-effort, like the resolver itself: a read failure drops back to the
+ * operator-only context (`undefined` ⇒ the module-level facade downstream)
+ * rather than failing the run.
+ */
+function runAgentContext(assets: AssetResolver, repoConfig?: RunRepoConfig): string | undefined {
+  try {
+    return assets.loadAgentContext();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[repo-config] ${repoConfig?.repo ?? "?"}: could not compose the run's agent context (${msg})`);
+    return undefined;
+  }
+}
+
 const dockerLivenessPort: EnginePorts["liveness"] = {
   isPhaseContainerAlive: async (taskId) => {
     const containers = await listRunningContainers();
@@ -197,6 +272,12 @@ export async function runWorkflow(
   approvalConfig?: ApprovalGateConfig,
   workflowId?: string,
   variants?: VariantConfig,
+  // The target repo's `.lastlight/` layer (issue #180), resolved at dispatch.
+  // DEFAULTED rather than optional on purpose: `runWorkflow.length` is the
+  // frozen `lastlight/evals` surface (evals-contract.test.ts pins it at 9), and
+  // a parameter with a default doesn't count toward it. Existing callers are
+  // unaffected — omitting it reproduces today's behaviour exactly.
+  repoConfig: RunRepoConfig | undefined = undefined,
 ): Promise<WorkflowResult & { backpressure?: boolean }> {
   const outputs: Record<string, unknown> = {};
   const { taskId } = ctx;
@@ -235,14 +316,35 @@ export async function runWorkflow(
     .reverse()
     .find((p) => (p.type ?? "agent") !== "context")?.name;
 
+  // Effective (base ⊕ repo) config. `simple.ts` already hands us the merged
+  // maps, but re-applying here is idempotent (the repo maps ARE the merged
+  // ones) and makes the runner correct for any caller that passes a repo layer
+  // without pre-merging — notably `resume.ts` when it grows the same wiring.
+  const effectiveModels = repoConfig?.models ?? models;
+  const effectiveVariants = repoConfig?.variants ?? variants;
+  const effectiveApproval = repoConfig?.approval ?? approvalConfig;
+
+  // Per-run asset stack. `assets` is undefined for every run without a repo
+  // layer, in which case the module-level functions are used unchanged.
+  const assets = runAssetResolver(repoConfig);
+  const loadPrompt = assets ? assets.loadPromptTemplate : loadPromptTemplate;
+
+  // The config every phase of this run executes with. Identical to the caller's
+  // unless a repo layer applies, in which case it carries this run's composed
+  // agent context (see `runAgentContext`) — the only channel through which a
+  // repo's `agent-context/*.md` reaches AGENTS.md.
+  const runConfig: ExecutorConfig = assets
+    ? { ...config, agentContext: runAgentContext(assets, repoConfig) }
+    : config;
+
   const modelFor = (taskType: string): string | undefined =>
-    models ? resolveModel(models, taskType) : undefined;
+    effectiveModels ? resolveModel(effectiveModels, taskType) : undefined;
   const variantFor = (taskType: string): string | undefined =>
-    variants ? resolveVariant(variants, taskType) : undefined;
+    effectiveVariants ? resolveVariant(effectiveVariants, taskType) : undefined;
 
   /** Render a prompt template with current context + outputs. */
   const renderPrompt = (promptPath: string, extraCtx?: Partial<TemplateContext>): string => {
-    const template = loadPromptTemplate(promptPath);
+    const template = loadPrompt(promptPath);
     return renderTemplate(template, { ...ctx, phaseOutputs: outputs, ...(extraCtx || {}) });
   };
 
@@ -346,9 +448,14 @@ export async function runWorkflow(
     }
   };
 
-  /** Should an approval gate with this name actually pause the workflow? */
+  /**
+   * Should an approval gate with this name actually pause the workflow?
+   * Reads the EFFECTIVE map, so a repo that raised a gate for runs against
+   * itself pauses here. The repo layer is add-only (enforced in
+   * `config/repo-config.ts`), so this can never drop an operator's gate.
+   */
   const gateEnabled = (gateName: string | undefined): boolean =>
-    !!gateName && approvalConfig?.[gateName] === true;
+    !!gateName && effectiveApproval?.[gateName] === true;
 
   /** Fold a workflow's final synthesized result into the checklist footer. */
   const footer = async (markdown: string): Promise<void> => {
@@ -369,7 +476,7 @@ export async function runWorkflow(
   const runScope: PhaseRunContext = {
     definition,
     ctx,
-    config,
+    config: runConfig,
     taskId,
     triggerId,
     githubAccess,
@@ -425,12 +532,22 @@ export async function runWorkflow(
 
   const ports: EnginePorts = {
     agent: agentPort,
-    assets: defaultAssetLoader,
+    // The repo's prompt/skill overrides reach the agent through this port:
+    // `resolveSkillPaths` returns HOST paths (the repo-config cache dir is just
+    // another one), which the orchestrator stages into the sandbox exactly like
+    // a built-in or overlay skill — copy for docker, tar for kubernetes. No
+    // backend needs to know a repo layer exists.
+    assets: assets
+      ? {
+          loadPromptTemplate: (relativePath) => assets.loadPromptTemplate(relativePath),
+          resolveSkillPaths: (names) => assets.resolveSkillPaths(names),
+        }
+      : defaultAssetLoader,
     liveness: dockerLivenessPort,
     observability: telemetryObservability,
     verdictReader: fileVerdictReader,
     handlers: new Map([
-      ["post-review", makePostReviewHandler({ ctx, config, taskId, store: db, workflowId }, phaseReporter)],
+      ["post-review", makePostReviewHandler({ ctx, config: runConfig, taskId, store: db, workflowId }, phaseReporter)],
     ]),
   };
 
@@ -455,5 +572,38 @@ export async function runWorkflow(
       return { success: false, phases: [], backpressure: true };
     }
     throw err;
+  } finally {
+    // Asset-level drops are only knowable once the resolver has been exercised,
+    // so they can't ride along on the run row's `context.repoConfig` (written at
+    // creation). Record them beside it, on scratch, on every exit path —
+    // including a failed run, where "the repo's prompt override was ignored" is
+    // exactly the thing someone will want to see.
+    recordAssetWarnings(assets, repoConfig, db, workflowId);
+  }
+}
+
+/**
+ * Persist the per-run resolver's warnings (e.g. a repo `agent-context/*.md`
+ * dropped because a higher-trust layer already owns that filename) to
+ * `workflow_runs.scratch.repoConfig.assetWarnings`, next to the config-time
+ * warnings on `context.repoConfig.warnings`.
+ *
+ * Best-effort and silent when there's nothing to say — this is reporting, and a
+ * reporting failure must never surface as a run failure.
+ */
+function recordAssetWarnings(
+  assets: AssetResolver | undefined,
+  repoConfig: RunRepoConfig | undefined,
+  db?: StateDb,
+  workflowId?: string,
+): void {
+  const warnings = assets?.warnings ?? [];
+  if (!warnings.length || !db || !workflowId) return;
+  try {
+    for (const w of warnings) console.warn(`[repo-config] ${repoConfig?.repo ?? "?"}: ${w.message}`);
+    db.runs.mergeScratch(workflowId, { repoConfig: { assetWarnings: [...warnings] } });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[repo-config] Could not record asset warnings for run ${workflowId}: ${msg}`);
   }
 }

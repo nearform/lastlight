@@ -16,6 +16,7 @@ import { StateDb, isTriggerActorType, type TriggerActorType } from "./state/db.j
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
 import { dispatchCronWorkflow, fanOutContexts } from "./cron/fanout.js";
+import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, resolveCronRepos } from "./cron/repo-crons.js";
 import { sweepSandboxes } from "./cron/sandbox-sweep.js";
 import { sweepK8sSandboxes } from "./sandbox/k8s/sweep.js";
 import {
@@ -39,7 +40,13 @@ import { readPackageVersion } from "./admin/version.js";
 import { GitHubClient } from "./engine/github/github.js";
 import { setInstallationRepos, isManagedRepo, unmanagedReposInContext } from "./managed-repos.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
-import { runSimpleWorkflow, PR_HEADREF_PREPOPULATE_WORKFLOWS, PR_FIX_SHAPED_WORKFLOWS, type SimpleWorkflowRequest } from "./workflows/simple.js";
+import {
+  runSimpleWorkflow,
+  resolveRepoRunConfig,
+  PR_HEADREF_PREPOPULATE_WORKFLOWS,
+  PR_FIX_SHAPED_WORKFLOWS,
+  type SimpleWorkflowRequest,
+} from "./workflows/simple.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
 import { createAdmissionController, type AdmissionController } from "./workflows/admission.js";
@@ -307,6 +314,22 @@ async function main() {
       return { success: false, error: msg };
     }
 
+    // Per-repository config layer (issue #180). Resolved at the SAME choke
+    // point and for the same reason as the guard above: every trigger path
+    // funnels through here, so one call covers webhook, router, cron, `/api/*`
+    // and approval-resume alike. Never throws and never fails a run — a GitHub
+    // outage or a malformed `.lastlight/lastlight.yml` degrades to the
+    // un-overridden operator config with a warning. `github` is `null` in
+    // chat-only mode, which skips the layer entirely.
+    const { repoConfig, refusal } = await resolveRepoRunConfig(workflowName, context, { client: github });
+    if (refusal) {
+      // The repo opting itself out via `disabled.workflows`. Same refusal shape
+      // as the unmanaged-repo guard, so every caller already handles it.
+      const msg = `dispatchWorkflow(${workflowName}): refusing repo-disabled workflow: ${refusal}`;
+      console.warn(`[dispatch] ${msg}`);
+      return { success: false, error: msg };
+    }
+
     // Pluck the standard fields, leave the rest in `extra` for the workflow
     // template to consume.
     const {
@@ -444,6 +467,7 @@ async function main() {
       triggerId: slackTriggerId,
       extra,
       prePopulateBranch,
+      repoConfig,
     };
 
     // For workflows where the architect/agent needs to see the full issue
@@ -800,10 +824,39 @@ async function main() {
     const discoverKey = typeof context.discover === "string" ? context.discover : undefined;
     const discoverer = discoverKey ? PR_DISCOVERERS[discoverKey] : undefined;
     if (discoverer) {
-      const repos = Array.isArray(context.repos)
+      const candidates = Array.isArray(context.repos)
         ? (context.repos as unknown[]).filter((r): r is string => typeof r === "string")
         : [];
-      const prs = github
+      // Narrow to the repos that actually participate in THIS cron before
+      // discovering anything (issue #180). A discovery cron bypasses
+      // `dispatchCronWorkflow` — it fans out per discovered PR, not per repo —
+      // so without this it would never consult a repo's `.lastlight/` cron
+      // opt-out and a repo that dropped out of e.g. `dependabot-merge` would
+      // still get runs. Resolved exactly the way `cron/fanout.ts` resolves it:
+      // the cron's name arrives in the context (`jobs.ts`), a missing name means
+      // a caller that built its own context and the list is used verbatim, and
+      // an absent `_cronGloballyEnabled` means "on". Non-blocking by
+      // construction — warm layers come from cache, misses are fetched
+      // concurrently, and one repo's failure degrades to its inherited
+      // behaviour rather than aborting the tick.
+      const cronName = typeof context[CRON_NAME_KEY] === "string" ? (context[CRON_NAME_KEY] as string) : "";
+      const repos = cronName
+        ? (
+            await resolveCronRepos({
+              cron: cronName,
+              repos: candidates,
+              globallyEnabled: context[CRON_GLOBALLY_ENABLED_KEY] !== false,
+            })
+          ).repos
+        : candidates;
+      if (repos.length !== candidates.length) {
+        console.log(
+          `[cron] ${cronName}: ${repos.length}/${candidates.length} repo(s) participate in this cron`,
+        );
+      }
+      // Every repo opted out (or a globally-off cron nobody opted into) — no
+      // discovery calls, no dispatches, no failure. A cheap no-op tick.
+      const prs = github && repos.length
         ? await discoverer(repos, github, { log: (m) => console.log(m) })
         : [];
       console.log(
