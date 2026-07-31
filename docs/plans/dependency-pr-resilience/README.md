@@ -11,8 +11,16 @@ cause and a config surface.
 
 This directory is the executable plan. Each phase doc is self-sufficient: an
 agent with no prior context should be able to execute its phase from that doc
-plus this README alone. **Nothing here has been implemented yet** — this is a
-design record written for reconsideration before any code lands.
+plus this README alone.
+
+> **Status: all phases are implemented** on `feat/dependency-pr-resilience`.
+> Phase 8 is deferred by design (09 §S5). The phase docs are kept as the design
+> record — where execution diverged from a doc, the divergence is recorded in
+> [BREAKING-CHANGES.md](BREAKING-CHANGES.md), which is the running account of
+> everything a deployment notices on upgrade, and
+> [RELEASE-NOTES.md](RELEASE-NOTES.md) is assembled from it. What is left is
+> verification that needs credentials this work could not use: see
+> [06-config.md](06-config.md) §6.5 items 5 and 6.
 
 > **Read [09-state-machine.md](09-state-machine.md) before executing any
 > phase.** A design review of the PR state machine found three defects that
@@ -63,7 +71,7 @@ Both were discovered while researching this plan and are documented in full in
 | 5 | New **`fix:` and `dependencies:` config blocks**, overlay-overridable and repo-settable, clamped so a repo can only be *more* conservative | Mirrors the existing add-only `approval` precedent from #180 |
 | 6 | Low/medium-impact major → **auto-merge + one audit comment**; high keeps `requires-human` | The audit comment is the record of *why* it was safe |
 | 7 | Everything keys off **`PR_FIX_SHAPED_WORKFLOWS`**, so `pr-fix` and `dependabot-ci-fix` improve together | They are already the same shape; divergence would be accidental |
-| 8 | **No changes to `packages/workflow-engine/`** | Every capability needed already exists; the two genuine gaps are routed around at the dispatch layer |
+| 8 | ~~**No changes to `packages/workflow-engine/`**~~ — **not held**, three times over | It rested on "every capability needed already exists". It did not: the engine had no phase-level conditional skip, `generic_loop` silently ignored `on_output.requires_marker`, and loop phases never emitted their `messages`. See [BREAKING-CHANGES.md](BREAKING-CHANGES.md) → Deviations |
 | 9 | **One `PrState`, resolved once at `dispatchWorkflow`**; every decision is a pure function over it returning `{decision, reason}` | State was scattered across seven stores and read from six sites free to disagree — see [09-state-machine.md](09-state-machine.md) |
 | 10 | **One run per PR**, across every PR-scoped workflow; the loser is dropped with a reason | Two fix workflows could otherwise clone and push the same branch concurrently |
 | 11 | **`failed` means malfunction**; a crash never consumes a retry attempt | Otherwise one bad hour escalates every open PR in the fleet to `requires-human` |
@@ -73,27 +81,30 @@ Both were discovered while researching this plan and are documented in full in
 
 Execute in order — each leaves the repo green before the next starts.
 
-- [ ] **Phase 0** — [00-current-behaviour.md](00-current-behaviour.md) —
+- [x] **Phase 0** — [00-current-behaviour.md](00-current-behaviour.md) —
   research record: how the two workflows actually behave today, the trigger
   matrix, and the two findings. *No code.* Read this first.
-- [ ] **Phase 1** — [01-ci-evidence.md](01-ci-evidence.md) — `Actions: read`,
+- [x] **Phase 1** — [01-ci-evidence.md](01-ci-evidence.md) — `Actions: read`,
   a structured CI failure report, and Actions read tools in agentic-pi
   *(risk: medium — needs App re-consent + an agentic-pi release)*
-- [ ] **Phase 2** — [02-diagnosis.md](02-diagnosis.md) — the `fixing` skill and
+- [x] **Phase 2** — [02-diagnosis.md](02-diagnosis.md) — the `fixing` skill and
   the `diagnose` phase with its five failure classes *(risk: medium — the
   design crux)*
-- [ ] **Phase 3** — [03-signals.md](03-signals.md) — deterministic signals in
+- [x] **Phase 3** — [03-signals.md](03-signals.md) — deterministic signals in
   code: preflight, check-state guards, context enrichment, three latent bugs
   *(risk: low)*
-- [ ] **Phase 4** — [04-retry.md](04-retry.md) — the cross-run attempt counter,
+- [x] **Phase 4** — [04-retry.md](04-retry.md) — the cross-run attempt counter,
   escalation policy, model escalation, and the within-run local gate loop
   *(risk: medium — `until_bash` has no production consumer yet)*
-- [ ] **Phase 5** — [05-impact.md](05-impact.md) — major-bump impact
+- [x] **Phase 4b** — [10-pr-memory.md](10-pr-memory.md) — `PrState.notes`, a
+  bounded agent-written journal riding Phase 4's marker harvest. Added during
+  execution, not in the original plan *(risk: low)*
+- [x] **Phase 5** — [05-impact.md](05-impact.md) — major-bump impact
   classification and the auto-merge gate *(risk: low)*
-- [ ] **Phase 6** — [06-config.md](06-config.md) — the `fix:` / `dependencies:`
+- [x] **Phase 6** — [06-config.md](06-config.md) — the `fix:` / `dependencies:`
   config blocks through all four layers, plus docs and verification
   *(risk: low, but touches many files)*
-- [ ] **Phase 7** — [07-review-triggers.md](07-review-triggers.md) —
+- [x] **Phase 7** — [07-review-triggers.md](07-review-triggers.md) —
   configurable `pr-review` trigger modes: `eager` / `after-checks` /
   `on-request` *(risk: medium — contains a must-fix deadlock)*
 - [x] ~~**Phase 8**~~ — [08-remove-backstop-crons.md](08-remove-backstop-crons.md)
@@ -101,7 +112,7 @@ Execute in order — each leaves the repo green before the next starts.
   [09-state-machine.md](09-state-machine.md) §S5 for why the review sweep is
   load-bearing; `ready_for_review` mapping and the queued-run expiry policy are
   lifted out as independent work.
-- [ ] **Phase 3′** — [09-state-machine.md](09-state-machine.md) — the normative
+- [x] **Phase 3′** — [09-state-machine.md](09-state-machine.md) — the normative
   state machine: `PrState`, the four pure decision functions, and the three
   defects they fix *(risk: medium — restructures Phase 3)*
 
@@ -121,6 +132,14 @@ rather than hardcoded" thesis. With Phase 8 deferred, §7.4b (generalising
 
 > [09-state-machine.md](09-state-machine.md) settles 4, 7 and 9, makes 6 moot,
 > and partly settles 5. Statuses are marked inline below.
+>
+> **These are the questions as they stood before execution, kept as the design
+> record.** Three were settled by the operator at execution time in the opposite
+> direction to what this section recommends — `autoMergeMaxImpact: medium`,
+> `review.trigger: after-checks` and `review.skipDraft: true` all ship
+> **packaged**. What actually shipped is
+> [BREAKING-CHANGES.md](BREAKING-CHANGES.md) → "Policy defaults chosen at
+> execution time"; read that, not the wording of questions 3 and 5 below.
 
 1. **App re-consent.** `Actions: read` requires every existing installation to
    re-consent. Acceptable? The plan degrades explicitly (a visible "logs

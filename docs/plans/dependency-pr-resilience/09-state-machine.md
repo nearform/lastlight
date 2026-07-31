@@ -629,9 +629,9 @@ withheld.
 |---|---|---|
 | 1 | App re-consent for `Actions: read` | **Open** — unchanged |
 | 2 | agentic-pi scope / release timing | **Open** — unchanged |
-| 3 | `autoMergeMaxImpact` packaged default | **Open** — still `low` packaged, `medium` in the overlay |
+| 3 | `autoMergeMaxImpact` packaged default | **Settled at execution time** — ships **`medium`** packaged, not `low`. The operator's call, overriding this doc's own recommendation, on the basis that it is #252's actual ask and Last Light has few deployments. See BREAKING-CHANGES → "Policy defaults chosen at execution time" |
 | 4 | Broadening `pr.checks_failed` | **Resolved** — D5; deterministic routing bounds the volume and sends it to the right workflow |
-| 5 | `pr-review` default trigger mode | **Partial** — `passing` deleted (§S2); `eager` vs `after-checks` as the packaged default, and the `skipDraft: true` default, are still open |
+| 5 | `pr-review` default trigger mode | **Settled at execution time** — `passing` deleted (§S2); ships **`after-checks`** with **`skipDraft: true`**, both packaged. So `pr-review` no longer fires on push, and drafts are skipped on the webhook path as the cron has always done |
 | 6 | Webhook-less deployments | **Moot** — Phase 8 deferred, crons kept |
 | 7 | Queued run that expires | **Resolved** — the crons re-pick it up; lifted out of Phase 8 as work worth doing on its own merits |
 | 8 | Should bot-authored PRs be reviewable? | **Open** — not examined |
