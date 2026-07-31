@@ -1,6 +1,6 @@
 {
   "name": "lastlight-evals",
-  "version": "0.7.30",
+  "version": "0.8.0",
   "description": "Eval harness for Last Light workflows — drives the real production workflows against a mocked GitHub and grades deterministically (SWE-bench compatible).",
   "type": "module",
   "bin": {
