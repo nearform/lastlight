@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { GitHubClient } from "#src/engine/github/github.js";
 
 /**
@@ -67,5 +67,24 @@ describe("GitHubClient.getChecksConclusion", () => {
       fakeOctokit([run("completed", "success")], { state: "success", statuses: [{ context: "ci/circle" }] }),
     );
     expect(await c.getChecksConclusion("o", "r", "sha")).toBe("passing");
+  });
+});
+
+describe("GitHubClient.getBaseChecksState", () => {
+  it("delegates to getChecksConclusion against the base ref", async () => {
+    const c = clientWith(fakeOctokit([run("completed", "failure")], noStatus));
+    const spy = vi.spyOn(c, "getChecksConclusion");
+
+    // A red base branch is the whole `upstream-broken` signal: the PR isn't at
+    // fault, so no amount of retrying it can help.
+    expect(await c.getBaseChecksState("o", "r", "main")).toBe("failing");
+    expect(spy).toHaveBeenCalledWith("o", "r", "main");
+  });
+
+  it("passes a branch name straight through as the ref", async () => {
+    const c = clientWith(fakeOctokit([], noStatus));
+    const spy = vi.spyOn(c, "getChecksConclusion");
+    expect(await c.getBaseChecksState("o", "r", "release/2.x")).toBe("none");
+    expect(spy).toHaveBeenCalledWith("o", "r", "release/2.x");
   });
 });

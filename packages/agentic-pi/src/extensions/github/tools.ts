@@ -19,8 +19,14 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { GitHubAuth } from "./auth.js";
-import { GitHubClient, type GitHubClientOptions } from "./client.js";
+import { GitHubClient, isActionsDenied, type GitHubClientOptions } from "./client.js";
 import { gitAuthEnv } from "./credentials.js";
+import {
+  DEFAULT_LOG_EXCERPT_BYTES,
+  MAX_LOG_EXCERPT_BYTES,
+  MIN_LOG_EXCERPT_BYTES,
+  excerptJobLog,
+} from "./log-excerpt.js";
 
 interface MaybeHttpError extends Error {
   status?: number;
@@ -544,6 +550,83 @@ export function buildGitHubTools(
         per_page: Type.Optional(Type.Number()),
       }),
       ({ owner, repo, ...opts }) => gh.listCommits(owner, repo, opts),
+    ),
+
+    // ── Actions (CI) ──────────────────────────────────────────────────
+    //
+    // Read-only CI evidence. The harness pre-fetches a failure summary into the
+    // prompt, but that snapshot is static: diagnosing a red PR often means
+    // asking a question the harness didn't anticipate — "did this same job pass
+    // on the previous commit?", "which step actually failed?", "what does the
+    // log say 200 lines before the error?". These three answer those.
+    //
+    // All three need the App's `Actions: read` permission and return
+    // `{ ok: false, reason }` rather than throwing when it is absent.
+
+    tool(
+      "github_list_workflow_runs",
+      "List GitHub Actions workflow runs for a repository, newest first. Filter by branch, head_sha, status, or workflow_id (a workflow file name like 'ci.yml', or its numeric id) to find how the SAME workflow behaved on an earlier commit — the comparison that separates a flaky failure from a reproducible one. Returns a trimmed projection of each run, not the full API object. Requires the App's 'Actions: read' permission; returns { ok: false, reason } when it is missing — do not retry in that case.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        workflow_id: Type.Optional(
+          Type.String({ description: "Workflow file name (e.g. 'ci.yml') or numeric id" }),
+        ),
+        branch: Type.Optional(Type.String()),
+        head_sha: Type.Optional(Type.String()),
+        event: Type.Optional(Type.String({ description: "e.g. 'push', 'pull_request'" })),
+        status: Type.Optional(
+          Type.String({ description: "e.g. 'completed', 'in_progress', 'failure', 'success'" }),
+        ),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+      }),
+      ({ owner, repo, ...opts }) => gh.listWorkflowRuns(owner, repo, opts),
+    ),
+
+    tool(
+      "github_list_workflow_run_jobs",
+      "List the jobs of one GitHub Actions workflow run, each with its steps and per-step conclusions. Use it to locate the exact step that failed before spending a log fetch on the whole job. Requires the App's 'Actions: read' permission; returns { ok: false, reason } when it is missing — do not retry in that case.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        run_id: Type.Number({ description: "Workflow run id (from github_list_workflow_runs)" }),
+        filter: Type.Optional(
+          Type.Union([Type.Literal("latest"), Type.Literal("all")], {
+            description: "'latest' (default) returns only the last attempt of each job",
+          }),
+        ),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+      }),
+      ({ owner, repo, run_id, ...opts }) => gh.listWorkflowRunJobs(owner, repo, run_id, opts),
+    ),
+
+    tool(
+      "github_get_job_logs",
+      "Fetch one GitHub Actions job's log, EXCERPTED — timestamps stripped, anchored on the error lines with surrounding context, and hard-capped in bytes with a truncation notice. Use it when the CI failure summary in your prompt is inconclusive. The full log can be megabytes, so this never returns all of it; narrow with github_list_workflow_run_jobs first. Requires the App's 'Actions: read' permission; returns { ok: false, reason } when it is missing — do not retry in that case.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        job_id: Type.Number({ description: "Job id (from github_list_workflow_run_jobs)" }),
+        max_bytes: Type.Optional(
+          Type.Number({
+            description: `Byte cap on the returned excerpt (default ${DEFAULT_LOG_EXCERPT_BYTES}, clamped to ${MIN_LOG_EXCERPT_BYTES}–${MAX_LOG_EXCERPT_BYTES})`,
+          }),
+        ),
+      }),
+      async ({ owner, repo, job_id, max_bytes }) => {
+        const log = await gh.getJobLogs(owner, repo, job_id);
+        if (isActionsDenied(log)) return log;
+        const excerpt = excerptJobLog(log, max_bytes ?? DEFAULT_LOG_EXCERPT_BYTES);
+        return {
+          job_id,
+          truncated: excerpt.truncated,
+          bytes: excerpt.bytes,
+          original_bytes: excerpt.originalBytes,
+          log: excerpt.text,
+        };
+      },
     ),
 
     // ── Search ────────────────────────────────────────────────────────

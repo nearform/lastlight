@@ -60,6 +60,61 @@ function omitFalsy<T extends Record<string, unknown>>(opts: T | undefined): Part
   return out;
 }
 
+/**
+ * Reading Actions runs, jobs and logs needs the App's `Actions: read`
+ * permission, which lastlight documents as optional-but-recommended — every
+ * installation predating that doc lacks it, and GitHub answers 403.
+ *
+ * A throw would reach the agent as a generic transient-looking error that it is
+ * likely to retry in a loop. A terminal, self-explaining result stops it dead
+ * and tells it what evidence it does and doesn't have.
+ */
+const ACTIONS_FORBIDDEN =
+  "not permitted — the App lacks Actions: read. GitHub Actions runs, jobs and logs are unreadable for this installation. Do not retry: no amount of retrying will grant the permission. Work from the CI evidence already in your prompt (check-run annotations) and say that the job logs were unavailable.";
+
+/** The non-throwing shape every Actions read degrades to on 403. */
+export type ActionsDenied = { ok: false; reason: string };
+
+export function isActionsDenied(r: unknown): r is ActionsDenied {
+  return typeof r === "object" && r !== null && (r as ActionsDenied).ok === false;
+}
+
+/**
+ * The fields of a workflow run worth spending context on: what ran, on which
+ * commit, and how it ended. `path` is the workflow file; `head_sha` +
+ * `conclusion` are what turn "did this job pass on an earlier SHA?" — the
+ * flaky-vs-reproducible question — into a single comparison.
+ */
+function workflowRunSummary(run: {
+  id: number;
+  name?: string | null;
+  path?: string;
+  head_branch?: string | null;
+  head_sha: string;
+  event: string;
+  status?: string | null;
+  conclusion: string | null;
+  run_number: number;
+  run_attempt?: number;
+  created_at: string;
+  html_url: string;
+}) {
+  return {
+    id: run.id,
+    name: run.name,
+    path: run.path,
+    head_branch: run.head_branch,
+    head_sha: run.head_sha,
+    event: run.event,
+    status: run.status,
+    conclusion: run.conclusion,
+    run_number: run.run_number,
+    run_attempt: run.run_attempt,
+    created_at: run.created_at,
+    html_url: run.html_url,
+  };
+}
+
 export interface GitHubClientOptions {
   /**
    * Override the GitHub REST API base URL (Octokit's `baseUrl`). Defaults to
@@ -638,6 +693,111 @@ export class GitHubClient {
         ...opts,
       } as Parameters<typeof ok.repos.listCommits>[0]);
       return data;
+    });
+  }
+
+  // ── Actions (CI) ──────────────────────────────────────────────────
+
+  /**
+   * Wrap an Actions read so a missing permission becomes a terminal RESULT
+   * instead of a throw. See {@link ACTIONS_FORBIDDEN} for why that matters.
+   */
+  private async actionsRead<T>(fn: () => Promise<T>): Promise<T | ActionsDenied> {
+    try {
+      return await this.withRetry(fn);
+    } catch (err) {
+      const e = err as MaybeHttpError;
+      if ((e?.status ?? e?.response?.status) === 403) {
+        return { ok: false, reason: ACTIONS_FORBIDDEN };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Workflow runs, newest first, optionally scoped to one workflow file.
+   *
+   * Projected down to {@link workflowRunSummary}'s fields: the raw API objects
+   * are ~4 KB each, so an unprojected page of 20 would cost more context than
+   * the log the agent is actually chasing.
+   */
+  async listWorkflowRuns(
+    owner: string,
+    repo: string,
+    opts: { workflow_id?: string | number } & Record<string, unknown> = {},
+  ) {
+    return this.actionsRead(async () => {
+      const ok = await this.octokit();
+      const { workflow_id, ...filters } = opts;
+      const params = { owner, repo, per_page: 20, ...omitFalsy(filters) };
+      const { data } =
+        workflow_id !== undefined && workflow_id !== ""
+          ? await ok.actions.listWorkflowRuns({ ...params, workflow_id } as Parameters<
+              typeof ok.actions.listWorkflowRuns
+            >[0])
+          : await ok.actions.listWorkflowRunsForRepo(
+              params as Parameters<typeof ok.actions.listWorkflowRunsForRepo>[0],
+            );
+      return {
+        total_count: data.total_count,
+        workflow_runs: data.workflow_runs.map(workflowRunSummary),
+      };
+    });
+  }
+
+  /**
+   * Jobs of one workflow run, each with its steps — how the agent locates the
+   * exact step that failed before spending a log fetch on the job.
+   */
+  async listWorkflowRunJobs(
+    owner: string,
+    repo: string,
+    run_id: number,
+    opts: Record<string, unknown> = {},
+  ) {
+    return this.actionsRead(async () => {
+      const ok = await this.octokit();
+      const { data } = await ok.actions.listJobsForWorkflowRun({
+        owner,
+        repo,
+        run_id,
+        per_page: 50,
+        ...omitFalsy(opts),
+      } as Parameters<typeof ok.actions.listJobsForWorkflowRun>[0]);
+      return {
+        total_count: data.total_count,
+        jobs: data.jobs.map((job) => ({
+          id: job.id,
+          run_id: job.run_id,
+          name: job.name,
+          status: job.status,
+          conclusion: job.conclusion,
+          started_at: job.started_at,
+          completed_at: job.completed_at,
+          html_url: job.html_url,
+          steps: (job.steps ?? []).map((s) => ({
+            number: s.number,
+            name: s.name,
+            status: s.status,
+            conclusion: s.conclusion,
+          })),
+        })),
+      };
+    });
+  }
+
+  /**
+   * Raw text of one job's log. Returned verbatim — capping is the tool's job,
+   * so the client stays a thin, honest wrapper (and a non-tool caller can pick
+   * its own budget).
+   */
+  async getJobLogs(owner: string, repo: string, job_id: number) {
+    return this.actionsRead(async () => {
+      const ok = await this.octokit();
+      // Octokit follows the 302 to the log blob and hands back the body; it is
+      // text/plain, so the generic `data` type is unhelpful here.
+      const { data } = await ok.actions.downloadJobLogsForWorkflowRun({ owner, repo, job_id });
+      return typeof data === "string" ? data : String(data);
     });
   }
 

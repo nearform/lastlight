@@ -39,8 +39,11 @@ Ask for each of these (don't guess). Group the questions; explain what each is f
   Settings → Developer settings → GitHub Apps; it needs webhook + repo
   contents/issues/pull-requests/checks permissions, plus **workflows** (read &
   write) so it can merge/push PRs that touch `.github/workflows/` — e.g.
-  dependency PRs bumping GitHub Actions versions. They install it on their repos
-  to get the Installation ID.)
+  dependency PRs bumping GitHub Actions versions. Recommend **actions** (read)
+  too — a different permission from workflows: it lets the fix workflow read
+  the actual Actions job logs instead of only check annotations. It is optional,
+  so an app without it still works; the CI evidence is just weaker, and the
+  prompt says so. They install it on their repos to get the Installation ID.)
 - **Domain** — the public hostname for webhooks/dashboard, e.g.
   `lastlight.example.com`. Ask whether to use the bundled **Caddy** for
   automatic TLS (default yes). The GitHub App webhook URL will be

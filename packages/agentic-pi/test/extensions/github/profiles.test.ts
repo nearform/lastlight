@@ -62,11 +62,26 @@ describe("PROFILE_TOOLS", () => {
     }
   });
 
+  test("the Actions/CI read tools are in every profile", () => {
+    // They ride READ_TOOLS so all four profiles get them: any workflow that can
+    // see a PR should be able to see why its CI went red.
+    const actionsTools = [
+      "github_list_workflow_runs",
+      "github_list_workflow_run_jobs",
+      "github_get_job_logs",
+    ];
+    for (const profile of Object.keys(PROFILE_TOOLS) as (keyof typeof PROFILE_TOOLS)[]) {
+      for (const t of actionsTools) {
+        assert.ok(PROFILE_TOOLS[profile].includes(t), `${profile} missing ${t}`);
+      }
+    }
+  });
+
   test("expected tool counts per profile", () => {
-    assert.equal(PROFILE_TOOLS.read.length, 18);
-    assert.equal(PROFILE_TOOLS["issues-write"].length, 25);
-    assert.equal(PROFILE_TOOLS["review-write"].length, 27);
-    assert.equal(PROFILE_TOOLS["repo-write"].length, 33);
+    assert.equal(PROFILE_TOOLS.read.length, 21);
+    assert.equal(PROFILE_TOOLS["issues-write"].length, 28);
+    assert.equal(PROFILE_TOOLS["review-write"].length, 30);
+    assert.equal(PROFILE_TOOLS["repo-write"].length, 36);
   });
 });
 

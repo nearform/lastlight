@@ -43,6 +43,13 @@ const READ_TOOLS = [
   "github_get_pull_request_diff",
   "github_list_pull_request_reviews",
   "github_list_pull_request_review_comments",
+  // Actions / CI read. Read-only evidence about why CI failed, so it belongs in
+  // the base profile even though the underlying App permission (`Actions: read`)
+  // is separate and optional — the tools degrade to a "not permitted" result
+  // rather than an error when it is absent.
+  "github_list_workflow_runs",
+  "github_list_workflow_run_jobs",
+  "github_get_job_logs",
   // search
   "github_search_repositories",
   "github_search_issues",

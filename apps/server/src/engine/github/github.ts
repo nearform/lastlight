@@ -81,6 +81,38 @@ const REPO_CONFIG_DIR = ".lastlight";
 const REPO_CONFIG_DEFAULT_MAX_FILES = 200;
 const REPO_CONFIG_DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 
+/**
+ * One failed check run, resolved as far as the App's permissions allow.
+ *
+ * The optional fields are exactly the ones that need `Actions: read`. They are
+ * the difference between "CI is red" and "CI is red *here*, in *this* step of
+ * *this* workflow file" — `workflowPath` is what lets a fix agent open the CI
+ * definition in its checkout and compare CI's toolchain against the sandbox's.
+ */
+export interface CiJobFailure {
+  /** Check-run name, e.g. `CI / build (22)`. */
+  name: string;
+  /** `failure` | `timed_out` — the conclusions {@link GitHubClient.getChecksConclusion} calls red. */
+  conclusion: string;
+  /** e.g. `.github/workflows/ci.yml`. Undefined for non-Actions checks or when Actions is unreadable. */
+  workflowPath?: string;
+  /** Name of the step that failed, from the job's `steps[]`. Same availability as `workflowPath`. */
+  failingStep?: string;
+  /** {@link extractErrorExcerpt} over the real job log, or the annotation fallback. */
+  logExcerpt: string;
+  /** The check run's `details_url` — where an agent can dig further via `github_get_job_logs`. */
+  jobUrl?: string;
+  /** True only when `logExcerpt` came from the REAL Actions job log. */
+  logsAvailable: boolean;
+}
+
+/** Structured result of {@link GitHubClient.getCiFailureReport}. */
+export interface CiFailureReport {
+  jobs: CiJobFailure[];
+  /** False when NO job could supply a real log — everything below is annotations. */
+  logsAvailable: boolean;
+}
+
 /** octokit surfaces HTTP failures as errors carrying the numeric `status`. */
 function httpStatus(err: unknown): number | undefined {
   const status = (err as { status?: unknown })?.status;
@@ -673,52 +705,131 @@ export class GitHubClient {
   }
 
   /**
-   * Get failed check runs for a PR's head SHA.
-   * Fetches the actual job logs (not just annotations) to show real errors.
+   * Check state of a PR's BASE branch head — a branch name is a valid `ref` for
+   * the checks API, so this is {@link getChecksConclusion} pointed at the base
+   * tip.
+   *
+   * It has its own name because the *question* is different: "is the PR at
+   * fault, or was `main` already red?". A red base makes retrying the PR
+   * pointless, and call sites asking that shouldn't have to know it's the same
+   * query as "is this PR red".
+   */
+  async getBaseChecksState(
+    owner: string,
+    repo: string,
+    baseRef: string,
+  ): Promise<"passing" | "failing" | "pending" | "none"> {
+    return this.getChecksConclusion(owner, repo, baseRef);
+  }
+
+  /**
+   * Structured CI failure evidence for a ref — the HEAVY counterpart to
+   * {@link getChecksConclusion}: one Actions job-log download per failed check
+   * run, plus the job and workflow-run metadata that says *where* it failed.
+   *
+   * Every Actions read here needs the App's optional `Actions: read`
+   * permission. None of them is required: each degrades independently to
+   * `undefined` / the annotation fallback, and the per-job + report-level
+   * `logsAvailable` flags are what let the renderer say so out loud instead of
+   * passing annotations off as job logs (issue #251).
+   *
+   * Throws if the check-run listing itself fails — a report cannot represent
+   * "I couldn't look". {@link getFailedChecks} catches that for prompt callers.
+   */
+  async getCiFailureReport(owner: string, repo: string, ref: string): Promise<CiFailureReport> {
+    const { data } = await this.octokit.rest.checks.listForRef({
+      owner,
+      repo,
+      ref,
+      filter: "latest",
+    });
+
+    const failed = data.check_runs.filter(
+      (r) => r.conclusion === "failure" || r.conclusion === "timed_out"
+    );
+
+    // A failing matrix shares one workflow run, so `path` is one lookup for all
+    // of its shards, not one per shard. Memoized per report, not per client —
+    // a workflow file can be edited between runs.
+    const workflowPaths = new Map<number, Promise<string | undefined>>();
+    const workflowPathFor = (runId: number): Promise<string | undefined> => {
+      let pending = workflowPaths.get(runId);
+      if (!pending) {
+        pending = this.octokit.rest.actions
+          .getWorkflowRun({ owner, repo, run_id: runId })
+          .then((res) => res.data.path as string | undefined)
+          .catch(() => undefined);
+        workflowPaths.set(runId, pending);
+      }
+      return pending;
+    };
+
+    const jobs = await Promise.all(failed.map(async (run): Promise<CiJobFailure> => {
+      const jobId = actionsJobIdFromDetailsUrl(run.details_url);
+      const runId = actionsRunIdFromDetailsUrl(run.details_url);
+
+      let logExcerpt = "";
+      let logsAvailable = false;
+      let failingStep: string | undefined;
+      let workflowPath: string | undefined;
+
+      if (jobId !== null) {
+        // The three Actions reads are independent — a permission denial or an
+        // expired log on one must not cost us the other two.
+        const [logData, job, path] = await Promise.all([
+          this.octokit.rest.actions
+            .downloadJobLogsForWorkflowRun({ owner, repo, job_id: jobId })
+            .then((res) => res.data as unknown)
+            .catch(() => null),
+          this.octokit.rest.actions
+            .getJobForWorkflowRun({ owner, repo, job_id: jobId })
+            .then((res) => res.data)
+            .catch(() => null),
+          runId !== null ? workflowPathFor(runId) : Promise.resolve(undefined),
+        ]);
+
+        if (logData !== null) {
+          logExcerpt = extractErrorExcerpt(
+            typeof logData === "string" ? logData : String(logData)
+          );
+        }
+        // An excerpt we can't show is not evidence: treat an empty one as "no
+        // logs" so it falls through to annotations AND reports honestly, rather
+        // than claiming real logs and rendering nothing.
+        logsAvailable = logExcerpt.length > 0;
+
+        failingStep = job?.steps?.find(
+          (s) => s.conclusion === "failure" || s.conclusion === "timed_out"
+        )?.name;
+        workflowPath = path;
+      }
+
+      if (!logExcerpt) {
+        logExcerpt = await fetchAnnotationExcerpt(this.octokit, owner, repo, run.id);
+      }
+
+      return {
+        name: run.name,
+        conclusion: run.conclusion as string,
+        ...(workflowPath ? { workflowPath } : {}),
+        ...(failingStep ? { failingStep } : {}),
+        logExcerpt,
+        ...(run.details_url ? { jobUrl: run.details_url } : {}),
+        logsAvailable,
+      };
+    }));
+
+    return { jobs, logsAvailable: jobs.some((j) => j.logsAvailable) };
+  }
+
+  /**
+   * Get failed check runs for a PR's head SHA as the markdown blob
+   * `{{ciSection}}` has always carried — a thin renderer over
+   * {@link getCiFailureReport}, kept so prompt-only callers are unchanged.
    */
   async getFailedChecks(owner: string, repo: string, ref: string): Promise<string> {
     try {
-      const { data } = await this.octokit.rest.checks.listForRef({
-        owner,
-        repo,
-        ref,
-        filter: "latest",
-      });
-
-      const failed = data.check_runs.filter(
-        (r) => r.conclusion === "failure" || r.conclusion === "timed_out"
-      );
-
-      if (failed.length === 0) return "No failed checks found.";
-
-      const summaries = await Promise.all(failed.map(async (run) => {
-        let logExcerpt = "";
-
-        // Try to fetch the actual Actions job log using the job id from details_url.
-        const jobId = actionsJobIdFromDetailsUrl(run.details_url);
-        if (jobId !== null) {
-          try {
-            const { data: logData } = await this.octokit.rest.actions.downloadJobLogsForWorkflowRun({
-              owner,
-              repo,
-              job_id: jobId,
-            });
-            const fullLog = typeof logData === "string" ? logData : String(logData);
-            logExcerpt = extractErrorExcerpt(fullLog);
-          } catch {
-            // Job logs may not be available — fall back to annotations
-          }
-        }
-
-        // Fall back to annotations if no job logs
-        if (!logExcerpt) {
-          logExcerpt = await fetchAnnotationExcerpt(this.octokit, owner, repo, run.id);
-        }
-
-        return `### ${run.name}: ${run.conclusion}\n${logExcerpt || "No log details available."}`;
-      }));
-
-      return summaries.join("\n\n");
+      return renderCiFailureReport(await this.getCiFailureReport(owner, repo, ref));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return `Could not fetch check runs: ${message}`;
@@ -745,6 +856,67 @@ export function actionsJobIdFromDetailsUrl(url: string | null | undefined): numb
   if (!url) return null;
   const m = url.match(/\/job\/(\d+)/);
   return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * Parse the Actions *run* id out of the same `details_url`. The run — not the
+ * job — is what knows the workflow file's `path`, and the URL already carries
+ * it, so resolving `workflowPath` costs no extra lookup to discover the id.
+ * Returns `null` for non-Actions checks or unparseable URLs.
+ */
+export function actionsRunIdFromDetailsUrl(url: string | null | undefined): number | null {
+  if (!url) return null;
+  const m = url.match(/\/actions\/runs\/(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * The three-line banner that fires when the report degraded to annotations.
+ *
+ * This is the actual fix for issue #251's "Finding 1". The missing permission
+ * was never the real damage — the damage was that its absence looked exactly
+ * like normal operation, so every install that followed our own setup docs has
+ * been diagnosing CI failures from truncated annotations without anyone
+ * noticing. Saying so in the prompt makes the degradation legible to both the
+ * agent and whoever reads the transcript.
+ */
+const LOGS_UNAVAILABLE_NOTE = [
+  "NOTE: GitHub Actions job logs are unavailable (the App lacks `Actions: read`).",
+  "The excerpts below are check-run annotations only, which are usually truncated.",
+  "Grant Actions: read for full CI output.",
+].join("\n");
+
+/**
+ * Render a {@link CiFailureReport} as the markdown `{{ciSection}}` carries.
+ *
+ * The "No failed checks found." sentinel is load-bearing: `dispatchWorkflow`
+ * tests the rendered string for `"No failed checks"` to decide whether to
+ * populate `ciSection` at all.
+ */
+export function renderCiFailureReport(report: CiFailureReport): string {
+  if (report.jobs.length === 0) return "No failed checks found.";
+
+  const sections = report.jobs.map((job) => {
+    const locators = [
+      job.workflowPath ? `workflow: ${job.workflowPath}` : null,
+      job.failingStep ? `failing step: ${job.failingStep}` : null,
+    ].filter(Boolean);
+    return [
+      `### ${job.name}: ${job.conclusion}`,
+      locators.length ? `(${locators.join(" — ")})` : null,
+      job.logExcerpt || "No log details available.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  });
+
+  // Only blame the permission when there was an Actions job whose logs we could
+  // have read. A CircleCI-only repo has no Actions logs to be missing, and
+  // telling its operator to grant `Actions: read` would be a lie.
+  const hadActionsJob = report.jobs.some((j) => actionsJobIdFromDetailsUrl(j.jobUrl) !== null);
+  return report.logsAvailable || !hadActionsJob
+    ? sections.join("\n\n")
+    : [LOGS_UNAVAILABLE_NOTE, ...sections].join("\n\n");
 }
 
 /**
