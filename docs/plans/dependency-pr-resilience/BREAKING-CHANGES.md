@@ -24,6 +24,13 @@ Three of the README's open questions were settled by the operator before any cod
 
 <!-- PHASES -->
 
+## Pre-existing bugs found during execution (not introduced by this work)
+
+- **The dispatcher's double-dispatch guard has never worked.** `dispatcher.ts:133` calls `db.executions.isRunning(handler, triggerId)` with a bare workflow name (`"pr-fix"`) and a bare issue number (`"42"`), but every phase row is written by `phase-executor.ts` with `skill = "<workflow>:<phase>"` and `trigger_id = "owner/repo#N"`. No row can ever match on both predicates, so the guard whose comment reads *"Guard against double-dispatching the same work"* has been a no-op for every workflow. Phase 3′'s PR-scoped lock replaces it, and this is why that lock matters more than the plan assumed.
+- **`apps/www/src/pages/docs/configuration.astro` documents a `WORKFLOW_DIR` env var that does not exist.** `spec/02-configuration.md` states explicitly that there is no `WORKFLOW_DIR` and no `workflowDir` field — assets resolve layer-wise. Left as-is (out of scope), but it misleads anyone setting up an instance.
+- **The site claimed the wrong phase counts for both fix workflows** — `pr-fix` was described as single-phase and the workflows overview card said "1 phase", while the `dependabot-ci-fix` card claimed "2 phases" when it had one. Corrected as part of Phase 2's docs.
+- **The dashboard's mirrored `RepoMergedConfig` / `RepoConfigSources` types** (`apps/server/dashboard/src/api.ts`) do not carry the new policy blocks, so the per-repo Config tab will not render them. Display-only; recorded as a follow-up.
+
 ## Phase 6 — the `fix:` / `dependencies:` config blocks
 
 - **`dependencies.autoMergeMaxImpact` ships `medium`**, so low- and medium-impact major bumps auto-merge on every deployment (see the table above). Set it to `none` in an overlay to keep today's escalate-every-major behaviour.
