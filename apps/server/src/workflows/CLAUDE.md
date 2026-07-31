@@ -273,6 +273,28 @@ it), recorded as the same non-failing skip. So the phase runs only where browser
 QA is genuinely possible; otherwise it no-ops. This is the Tier B browser-QA
 mechanism — see `docs/tier-b-browser-qa-scope.md` and `skills/browser-qa/`.
 
+## Conditional skip (`skip_if`)
+
+A phase can declare `skip_if:` — one expression, or a list (OR-ed) — evaluated
+when the node becomes *ready*, against `{ ...ctx, phaseOutputs, scratch }`. A
+match takes the **same non-failing skip path** as `requires_sandbox` above, so
+the run still records `succeeded`. The grammar is the `until:` one
+(`core/loop-eval.ts`); the useful form is a dotted `.contains()` against an
+upstream phase's output, e.g.
+`phaseOutputs.diagnosis.contains('class=flaky')` on `pr-fix`/`dependabot-ci-fix`.
+
+`requires_sandbox` gates on the phase being *unavailable*; `skip_if` gates on it
+being *unnecessary*. The distinction from `on_output.contains_BLOCKED:
+{action: fail}` is the whole point: a phase whose correct outcome is "there is
+nothing downstream to do" must not paint the run red — a red run posts
+`messages.on_failure`, offers a Retry that cannot succeed, pollutes the cost and
+failure stats, and defeats the SHA dedup (which ignores failed runs).
+
+Two scoping notes: `phaseOutputs` is empty across a resume boundary (see the
+caveat above), so a guard that must survive resume should read `scratch`; and
+every expression fails **open** — an unrecognised form or an absent variable
+runs the phase. The `all_success` caveat for downstream phases applies here too.
+
 ## Per-phase egress policy
 
 Any phase can declare `unrestricted_egress: true` to bypass the sandbox

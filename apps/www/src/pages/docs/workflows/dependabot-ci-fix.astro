@@ -7,14 +7,26 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 >
 	<p>
 		Dependabot CI fix reacts when a dependency-update PR (Dependabot or Renovate)
-		goes red in CI. When a check suite completes with a failure, Last Light brings
-		the branch up to date with its base, diagnoses the breakage, and pushes the
-		smallest fix that makes CI pass. It is <strong>fix-only</strong>: it never
-		classifies, labels, or merges the PR. Once the push turns the checks green,
-		the <code>pr.checks_passed</code> webhook hands off to
+		goes red in CI. When a check suite completes with a failure, Last Light works
+		out <em>why</em> it broke, brings the branch up to date with its base, and
+		pushes the smallest fix that makes CI pass. It is <strong>fix-only</strong>:
+		it never classifies, labels, or merges the PR. Once the push turns the checks
+		green, the <code>pr.checks_passed</code> webhook hands off to
 		<a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>, the
 		single owner of the trivial-vs-functional classification and the auto-merge
 		decision — so the two workflows never duplicate each other's work.
+	</p>
+
+	<p>
+		The diagnosis is its own phase, and it runs first. Not every red dependency
+		PR is broken in a way a bot can repair — the tests may need a database this
+		sandbox doesn't have, or the base branch may already be red — and a blind
+		repair attempt on one of those spends a full install and test cycle to learn
+		nothing. So <strong>diagnose</strong> classifies the failure cheaply against
+		the already-cloned workspace, and <strong>fix</strong> runs only when the
+		verdict says a repair is worth attempting. It shares the
+		<a href="/docs/workflows/pr-fix">same two phases and the same five failure
+		classes</a> as PR fix.
 	</p>
 
 	<div class="docs-callout tip">
@@ -30,15 +42,20 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>Pipeline</h2>
 
 	<div class="workflow-diagram">
-		<svg viewBox="0 0 320 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+		<svg viewBox="0 0 486 80" fill="none" xmlns="http://www.w3.org/2000/svg">
 			<rect x="12" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
-			<text x="77" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
-			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">merge base + fix + push</text>
+			<text x="77" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Diagnose</text>
+			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">classify the failure</text>
 			<path d="M146 40 H172" stroke="var(--diag-line)" stroke-width="1.5"/>
 			<path d="M168 36 L174 40 L168 44 Z" fill="var(--diag-line)"/>
-			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
-			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">pr-merge</text>
-			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">once green: classify + merge</text>
+			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
+			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">merge base + fix + push</text>
+			<path d="M312 40 H338" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<path d="M334 36 L340 40 L334 44 Z" fill="var(--diag-line)"/>
+			<rect x="344" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+			<text x="409" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">pr-merge</text>
+			<text x="409" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">once green: classify + merge</text>
 		</svg>
 	</div>
 
@@ -46,9 +63,9 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li>Clones the repo at the PR's head branch (the dependency bump is already committed there)</li>
+		<li><strong>Diagnoses</strong> the cause before touching anything — reads the CI failures and the repo's own <code>.github/workflows/*.yml</code>, names what differs between CI and the sandbox, reproduces the exact failing command, and classifies the result: a stale lockfile, a breaking change in the new version, a call site or type that needs updating — or a failure nothing here can repair, in which case it stops and the fix phase never runs</li>
 		<li>Merges the base branch into the PR branch first (plain <code>git merge</code>, no rebase or force-push) so the fix is built on current base and a <code>behind</code> PR is brought up to date — resolving any lockfile conflict by regenerating it</li>
-		<li>Reads the CI failures and diagnoses the cause — a stale lockfile, a breaking change in the new version, a call site or type that needs updating</li>
-		<li>Makes the smallest fix that turns CI green, runs the test / lint / typecheck gate, and plain-pushes to the PR branch</li>
+		<li>Makes the smallest fix that turns CI green, runs the test / lint / typecheck gate, and plain-pushes to the PR branch — only once that gate is green, never speculatively</li>
 		<li>Stops there — it does not classify, comment, label (except the give-up case below), or merge. The push re-runs CI, and when it goes green the <code>pr.checks_passed</code> webhook fires <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a> to make the one classify / auto-merge decision</li>
 	</ul>
 
@@ -84,7 +101,12 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		when it <strong>can't</strong> land the PR — it can't repair CI with a small,
 		safe change, or there's nothing to push and it can't unblock the PR (e.g. a
 		<code>blocked</code> PR awaiting a required human review) — it applies
-		<code>requires-human</code> and stops. The verdict labels
+		<code>requires-human</code> and stops. A <em>stopping diagnosis</em> is the
+		opposite case: when the verdict is <code>flaky</code>,
+		<code>infra-dependent</code> or <code>upstream-broken</code> the fix phase
+		is skipped outright, so nothing is labelled and the run still finishes
+		successfully. A flaky test or a base branch that is red on its own account
+		shouldn't leave the PR permanently marked as needing a human. The verdict labels
 		(<code>dependency-trivial</code> / <code>dependency-functional</code>) — and
 		clearing a stale <code>requires-human</code> once a later fix lands green — are
 		owned entirely by <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>,
@@ -120,7 +142,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	.workflow-diagram svg {
 		width: 100%;
-		max-width: 320px;
+		max-width: 486px;
 		height: auto;
 		display: block;
 		margin: 0 auto;

@@ -17,7 +17,18 @@ CONTEXT:
 - This is an automated dependency update (Dependabot / Renovate). The dependency
   bump itself is already committed on this branch — do NOT revert it. Your job is
   to make the update pass CI and mergeable.
+{{#if attempt}}- This is attempt {{attempt}}{{/if}}{{#if maxAttempts}} of {{maxAttempts}}{{/if}}
+{{#if priorAttempts}}- What earlier attempts tried:
+```
+{{priorAttempts}}
+```
+Don't repeat a repair recorded there as tried and failed.{{/if}}
 {{ciSection}}
+{{#if phaseOutputs.diagnosis}}
+DIAGNOSIS (from the previous phase — this is your starting point, not a
+hypothesis to re-derive):
+{{phaseOutputs.diagnosis}}
+{{/if}}
 
 INSTRUCTIONS:
 Work efficiently and stay focused — you are on a time budget, so spend it on the
@@ -37,21 +48,17 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    lockfile. If the branch is already up to date this is a no-op. (The workspace
    is a shallow clone; if the merge base isn't reachable, run `git fetch --deepen
    100 origin {{baseBranch}}` — or `--unshallow` — and retry the merge.)
-2. Read the CI failures above (and the workspace) to understand WHY the update
-   broke the build — common causes for a dependency bump:
+2. Work from the diagnosis above. It already names the cause and which checks
+   can't be reproduced here — don't re-derive either. If reproducing
+   contradicts it, trust what you observe and say so in your summary. The
+   common causes for a dependency bump are:
    - the lockfile is stale or inconsistent with the manifest (regenerate it with
      the repo's package manager),
    - a breaking change in the new version needs call sites / types updated,
    - a peer-dependency or engines constraint needs a matching bump.
-   Triage the failing checks first: some **can't run in this sandbox at all** —
-   they need secrets, a live service, a browser, or infra you don't have (e.g.
-   Firebase credentials, a real database, an e2e suite against a deployed
-   backend). Don't burn budget trying to turn those green. Fix and verify what
-   you *can* reproduce here (build, unit tests, lint, typecheck) and note the
-   unreproducible checks for a human in your summary.
-3. Make the **smallest** change that makes CI pass. Prefer a lockfile
-   regeneration or a mechanical call-site/type update over a behavioural change.
-   Do NOT widen the scope beyond making this update green.
+3. Make the **smallest** change that makes CI pass, per the **fixing** skill.
+   Prefer a lockfile regeneration or a mechanical call-site/type update over a
+   behavioural change. Do NOT widen the scope beyond making this update green.
 4. Follow the **building** skill: install dependencies with the repo's package
    manager, then run the full gate (mirror CI — build + test + lint + typecheck). Do NOT commit until
    it all passes locally.
@@ -62,6 +69,9 @@ AFTER FIXING:
 2. git push origin HEAD
    Once the push re-runs CI and it goes green, the `dependabot-pr-merge`
    workflow takes over the merge — you do NOT merge or label a healthy PR.
+
+Push only on a green local gate. If the gate is still red, do NOT push a
+speculative fix — flag it for a human instead (below).
 
 STOP and flag for a human when you CAN'T land it, so the nightly red-dependency
 sweep won't keep re-attempting it. That covers two cases:
@@ -84,4 +94,6 @@ trivial.)
 
 OUTPUT: A brief summary of the root cause, exactly what you changed, the
 local test/lint/typecheck results, and any checks you couldn't reproduce in the
-sandbox (so a human knows what still needs confirming).
+sandbox (so a human knows what still needs confirming). Then the
+`CI_FIX_COMPLETE` marker on its own final line, exactly as the **fixing** skill
+specifies.

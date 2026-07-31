@@ -1,6 +1,8 @@
 import type { AgentWorkflowDefinition } from "./schema.js";
+import { phaseSkipIfExpressions } from "./schema.js";
 import type { TemplateContext } from "./templates.js";
 import { renderTemplate } from "./templates.js";
+import { evalSkipIf } from "./loop-eval.js";
 import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
 import { PhaseExecutor, type PhaseRunContext } from "./phase-executor.js";
 import { OPENINFERENCE_CHAIN, OPENINFERENCE_SPAN_KIND } from "./types.js";
@@ -124,15 +126,21 @@ export async function runWorkflowCore(
 
     const ready = getReadyNodes(dag);
 
-    // Capability gate: skip any ready node whose declared capability isn't
-    // available on this host. Safe-by-default graceful degradation — a gated
-    // phase (e.g. the browser-QA step that needs the docker image) silently
-    // no-ops instead of failing the workflow. Two reasons trigger a skip:
+    // Capability / conditional gate: skip any ready node that shouldn't run.
+    // Safe-by-default graceful degradation — a gated phase (e.g. the browser-QA
+    // step that needs the docker image) silently no-ops instead of failing the
+    // workflow. Three reasons trigger a skip:
     //   1. `requires_sandbox` names a backend other than the one running.
     //   2. `sandbox_image: qa` but the browser-QA image isn't built here (only
     //      checked on docker — on other backends the field is inert).
+    //   3. `skip_if` matches the run's render context — the phase is not
+    //      *unavailable*, it is *unnecessary* (the fix phase after a diagnosis
+    //      that says there is nothing to fix here). Evaluated only once the
+    //      node is ready, so an upstream phase's output is already in `outputs`.
     // Uses the same non-failing skip mechanics as the trigger-rule skip above,
-    // plus the phase's `on_skipped_done` message so the user sees why.
+    // plus the phase's `on_skipped_done` message so the user sees why. All
+    // three keep the RUN `succeeded`: a correct "nothing to do" is not a
+    // failure (see `skip_if` in core/schema.ts for why that matters).
     const gatedSkip: { node: (typeof ready)[number]; reason: string }[] = [];
     for (const node of ready) {
       const phaseDef = phaseByName.get(node.name);
@@ -145,6 +153,12 @@ export async function runWorkflowCore(
         !capabilities.qaImageAvailable()
       ) {
         gatedSkip.push({ node, reason: `requires the ${capabilities.qaImageName} image, not built on this host` });
+      } else if (phaseDef) {
+        const exprs = phaseSkipIfExpressions(phaseDef);
+        const matched = exprs.length
+          ? evalSkipIf(exprs, { ...ctx, phaseOutputs: outputs, scratch: runScope.scratch, output: "" })
+          : undefined;
+        if (matched) gatedSkip.push({ node, reason: `skip_if matched: ${matched}` });
       }
     }
     if (gatedSkip.length > 0) {

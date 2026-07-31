@@ -18,7 +18,7 @@ description: |
       out one run per PR whose checks are settled-failing OR whose
       `mergeable_state` is `behind` / `dirty` / `blocked`
       (src/cron/dependabot-discovery.ts). The `{{reason}}` says which.
-# One in-place task-list comment that updates as the fix/assess phases run,
+# One in-place task-list comment that updates as the diagnose/fix phases run,
 # rather than a comment per phase.
 status_checklist: true
 classification:
@@ -38,14 +38,47 @@ classification:
     - 'PR AUTHOR: dependabot[bot], PR CHECKS: failing, COMMENT: "@bot can you take a look at this?" → INTENT: DEPENDABOTCIFIX, REPO: NONE, ISSUE: NONE, REASON: NONE'
 
 phases:
+  # Diagnose before repairing: classify the failure against the pre-cloned
+  # workspace (cheap) BEFORE the install + test cycle (expensive), so a failure
+  # no amount of fixing can address costs one short call. See the `fixing` skill.
+  - name: diagnose
+    label: Diagnose the failing checks
+    prompt: prompts/diagnose-ci.md
+    skill: fixing
+    # Cheap by intent — it reads logs and reproduces a command, it doesn't write
+    # code. Unset in config/default.yaml, so this falls through to models.default
+    # until an operator pins a cheaper model for it.
+    model: "{{models.diagnose}}"
+    output_var: diagnosis
+    on_output:
+      requires_marker: "DIAGNOSIS_COMPLETE"
+    messages:
+      on_start: "Diagnosing the failing checks on PR #{{prNumber}}..."
+      on_failure: "**Couldn't diagnose** the failing checks on PR #{{prNumber}}."
+
   - name: fix
     label: Fix failing checks
     prompt: prompts/dependabot-ci-fix.md
+    # `fixing` is primary (minimal repair + push discipline + the markers);
     # `building`: install deps with the repo's package manager, then run the
     # test/lint/typecheck gate before committing.
-    skill: building
+    skills: [fixing, building]
     model: "{{models.pr-fix}}"
+    # The three stopping classes: there is nothing here for a fix phase to do,
+    # so it must not provision a sandbox and run a 900-second gate for one. A
+    # non-failing skip — the RUN still records `succeeded`, so `on_failure`
+    # below ("leaving it for a human") does NOT post and the PR is never
+    # poisoned with `requires-human` for a failure that isn't its fault.
+    skip_if:
+      - "phaseOutputs.diagnosis.contains('class=flaky')"
+      - "phaseOutputs.diagnosis.contains('class=infra-dependent')"
+      - "phaseOutputs.diagnosis.contains('class=upstream-broken')"
+    # Closes the missing-postcondition gap: without a marker, a run that
+    # inspects the PR and stops without pushing or labelling reports green.
+    on_output:
+      requires_marker: "CI_FIX_COMPLETE"
     messages:
       on_start: "On it — investigating the failing checks on PR #{{prNumber}}..."
       on_success: "**Fix pushed** to `{{branch}}`."
       on_failure: "**Couldn't auto-fix** the failing checks on PR #{{prNumber}} — leaving it for a human."
+      on_skipped_done: "**No fix attempted** — the diagnosis says this isn't fixable from here. See the verdict above."

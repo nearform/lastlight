@@ -19,7 +19,7 @@ depending on whether it declares `loop:` or `generic_loop:`.
 | Type | Used for | Required fields | Optional fields |
 |---|---|---|---|
 | `context` | Dashboard checkpoints — no agent runs | `name`, `label`, `type: "context"` | — |
-| `agent` (default) | One agent session | `name`; at least one of `prompt:`, `skill:`, `skills:` | `model`, `variant`, `loop`, `generic_loop`, `approval_gate`, `output_var`, `on_output`, `messages`, `depends_on`, `unrestricted_egress`, `web_search`, `requires_sandbox`, `sandbox_image` |
+| `agent` (default) | One agent session | `name`; at least one of `prompt:`, `skill:`, `skills:` | `model`, `variant`, `loop`, `generic_loop`, `approval_gate`, `output_var`, `on_output`, `messages`, `depends_on`, `unrestricted_egress`, `web_search`, `requires_sandbox`, `sandbox_image`, `skip_if` |
 | `bash` | Deterministic shell command in the sandbox (no LLM) | `name`, `type: "bash"`, `command:` | `timeout_seconds`, `output_var`, `approval_gate`, `messages`, `depends_on`, `unrestricted_egress`, `sandbox_image` |
 | `script` | Inline JS/TS (`node`) or Python (`uv run`) in the sandbox | `name`, `type: "script"`, `script:` | `runtime` (default `js`), `timeout_seconds`, `output_var`, `approval_gate`, `messages`, `depends_on`, `unrestricted_egress`, `sandbox_image` |
 
@@ -56,7 +56,7 @@ Agent phases iterate when a loop is declared:
 | `{{varName}}` | Substitution. Empty if missing. |
 | `{{dotted.key}}` | Nested object access. First segment falls back to `phaseOutputs` if not on the base context. |
 | `${phaseName.output}` | Inline phase-output substitution at the top level. |
-| `{{#if varName}}…{{/if}}` | Conditional block. Truthy = non-empty string / non-zero number / non-empty array / `true`. |
+| `{{#if varName}}…{{/if}}` | Conditional block. Truthy = non-empty string / non-zero number / non-empty array / `true`. **Does not nest** — see Invariants. |
 | `{{#if !varName}}…{{/if}}` | Negated conditional. |
 | `{{slugify varName}}` | Helper — lowercase, hyphen-separated, max 40 chars. |
 | `{{branchUrl filename}}` | Helper — produces `https://github.com/{owner}/{repo}/blob/{branch}/{issueDir}/{filename}`. |
@@ -151,12 +151,32 @@ Every file in `workflows/prompts/`.
 | `re-reviewer.md` | Re-review after fix cycle. | Same `VERDICT:` marker | Appends `## Re-review after Fix Cycle {{fixCycle}}` to `reviewer-verdict.md` |
 | `pr.md` | Open the PR. Uses `{{branchUrl}}` for links to planning docs. | None | GitHub PR; comment back on issue |
 
-### PR fix (no architect, no review)
+### PR fix (diagnose → fix; no architect, no review)
+
+Both `pr-fix.yaml` and `dependabot-ci-fix.yaml` run **two** phases,
+`diagnose` then `fix`, and stage `skills: [fixing, building]` on the
+fix phase. The split exists to gate spend: `diagnose` runs against the
+already-pre-cloned workspace *before* the install + test cycle, so a
+failure no amount of fixing can address costs one short call rather
+than a full gate run. `fixing` owns *why did this fail and can it be
+fixed here*; `building` owns *install and run the gate*. See
+[Skills](/spec/08-skills).
+
+Each phase carries a `requires_marker` postcondition —
+`DIAGNOSIS_COMPLETE` on `diagnose`, `CI_FIX_COMPLETE` on `fix` — and
+the marker line is the interface between them. `diagnose` writes
+`class=<one of five>` into its marker; `fix` declares a `skip_if` that
+reads it (`phaseOutputs.diagnosis.contains('class=flaky')` and the two
+other stopping classes) and is skipped, non-failing, when it matches.
+`dependabot-ci-fix` previously had *no* postcondition at all, so a run
+that inspected the PR and stopped without pushing or labelling reported
+green.
 
 | File | Purpose | Writes |
 |---|---|---|
-| `pr-fix.md` | Read maintainer comment + CI section, fix issues, run guardrails, push. | Commits on PR branch |
-| `dependabot-ci-fix.md` | Fix-only: first merge the base branch into a dependency-update PR that can't merge on its own (plain, no force-push — so a `behind` PR is made current, a `dirty` conflict is resolved by regenerating the lockfile), then make the smallest fix (lockfile / call-site / type) if CI is red, run the gate, and push. It does **not** classify or merge — once the push turns checks green the `pr.checks_passed` webhook hands off to `dependabot-pr-merge` (the single owner of the classify → label → auto-merge decision). If it can't land the PR — a fix it can't complete, **or** a `blocked` PR with nothing to push that it can't unblock (e.g. awaiting a required human review) — it stops and applies the `requires-human` label so the nightly red-PR sweep won't re-attempt it. **Triggered by the `pr.checks_failed` webhook, or by the daily `fix-red-dependency-prs` cron whose runner finds Dependabot / Renovate PRs that are settled-red **or** `behind`/`dirty`/`blocked` in code (`src/cron/dependabot-discovery.ts`) and fans out one bounded run per PR (carrying the `{{reason}}`).** | Commits on PR branch / labels (give-up only) |
+| `diagnose-ci.md` | Shared by both fix workflows. Read the CI report (pulling a full job log only when an excerpt is inconclusive), read `.github/workflows/*.yml`, name the differences between CI and this sandbox, reproduce the exact failing command, and classify into exactly one of the `fixing` skill's five classes. **Changes nothing** — no edits, commits, pushes, labels or comments; the repair is the fix phase's job, and only if the verdict says one is worth attempting. Renders `{{ciSection}}`, `{{baseChecksState}}`, `{{reason}}`, `{{attempt}}`/`{{maxAttempts}}` and `{{priorAttempts}}` (the earlier attempts' marker lines). | Nothing — verdict + `DIAGNOSIS_COMPLETE` marker only (`output_var: diagnosis`) |
+| `pr-fix.md` | Read maintainer comment + CI section + the diagnosis, fix issues, run guardrails, push. Signs off with `CI_FIX_COMPLETE`. | Commits on PR branch |
+| `dependabot-ci-fix.md` | Fix-only: first merge the base branch into a dependency-update PR that can't merge on its own (plain, no force-push — so a `behind` PR is made current, a `dirty` conflict is resolved by regenerating the lockfile), then make the smallest fix (lockfile / call-site / type) if CI is red, run the gate, and push. It does **not** classify or merge — once the push turns checks green the `pr.checks_passed` webhook hands off to `dependabot-pr-merge` (the single owner of the classify → label → auto-merge decision). If it can't land the PR — a fix it can't complete, **or** a `blocked` PR with nothing to push that it can't unblock (e.g. awaiting a required human review) — it stops and applies the `requires-human` label so the nightly red-PR sweep won't re-attempt it. **Triggered by the `pr.checks_failed` webhook, or by the daily `fix-red-dependency-prs` cron whose runner finds Dependabot / Renovate PRs that are settled-red **or** `behind`/`dirty`/`blocked` in code (`src/cron/dependabot-discovery.ts`) and fans out one bounded run per PR (carrying the `{{reason}}`).** Runs only when the preceding `diagnose` verdict says a repair is worth attempting, and signs off with a `CI_FIX_COMPLETE` marker. | Commits on PR branch / labels (give-up only) |
 | `dependabot-pr-merge.md` | For an **already-green** dependency PR (no fix needed): inspect via `github_list_pull_request_files` (file list + line counts, no checkout), **skipping lockfile diffs** — only pull `github_get_pull_request_diff` for a small non-lockfile source change — read `mergeable_state`, classify trivial vs functional, and enable auto-merge on the trivial ones — falling back to a direct squash merge only when GitHub refuses auto-merge because the PR is already mergeable (`clean`) with no required checks ("clean status"), and to a maintainer comment when the repo disallows auto-merge outright. For a PR that is `behind`/`dirty` it never rebases or pushes itself — it asks the bot that opened the PR to update its own branch (`@dependabot rebase`/`recreate` via `github_add_issue_comment`, or Renovate's `rebase` label via `github_add_labels`). **That branch request is independent of the verdict:** regenerating a bot's own branch merges nothing and pre-empts no review, so a FUNCTIONAL bump gets it too — it just doesn't also get auto-merge, which stays trivial-only (issue #245). A trivial PR gets both, so GitHub lands it once the re-run checks go green. Records the verdict as a label — `dependency-trivial` (clearing any stale `requires-human`) or `dependency-functional` + `requires-human`. Signs off with an `ASSESSMENT_COMPLETE` marker (`on_output.requires_marker`) so a silent no-op run fails instead of passing green. **Always single-PR:** triggered by the `pr.checks_passed` webhook, or by the daily cron whose runner finds green Dependabot / Renovate PRs in code (`src/cron/dependabot-discovery.ts`) and fans out one bounded run per PR (retiring the old `mode: scan` whole-repo sweep, which overflowed the model context on busy repos). | Enables auto-merge / requests a rebase / posts a comment / labels |
 
 ### Explore (Socratic + publish)
@@ -265,6 +285,19 @@ filesystem + `read` tool path.
   reviewer prompt that says "the previous verdict was APPROVED" early
   in its output and `VERDICT: REQUEST_CHANGES` later will be misread.
   Reviewer prompts are written to produce the marker first.
+- **`{{#if}}` blocks do not nest.** The regex is lazy to the *first*
+  `{{/if}}` (`templates.ts:8`), so an inner conditional's closing tag
+  terminates the outer block and the outer block's tail leaks into the
+  prompt as raw mustache — silently, since nothing validates a rendered
+  prompt. Write sibling conditionals instead; the fix prompts' nested
+  ones were flattened for exactly this reason.
+- **`class=` is a parsed token, not prose.** The `fix` phase's `skip_if`
+  substring-matches `class=flaky` (and the other two stopping classes)
+  anywhere in the diagnosis output, so a "this is not `class=flaky`
+  because…" aside changes what the workflow does. The `fixing` skill
+  therefore tells the agent to write the token *only* on its marker
+  line. Any future marker field that a guard reads inherits the same
+  constraint.
 - **Skill content reaches the agent via the `read` tool, not the
   prompt.** The runner never embeds SKILL.md text in either the user
   prompt or the system prompt. Only name + description appear in the

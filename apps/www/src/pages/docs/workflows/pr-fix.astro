@@ -6,11 +6,20 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	description="The PR fix workflow — lightweight fix-and-push for PR issues without the full architect/reviewer cycle."
 >
 	<p>
-		PR fix is a lightweight single-phase workflow for quick fixes on existing
+		PR fix is a lightweight two-phase workflow for quick fixes on existing
 		pull requests. When a maintainer comments on a PR asking Last Light to fix
 		something, and the classifier detects a BUILD intent, this workflow runs
-		instead of the full build cycle — it fixes the issue and pushes directly
-		to the PR branch.
+		instead of the full build cycle — it works out <em>why</em> the PR is red,
+		then fixes it and pushes directly to the PR branch.
+	</p>
+
+	<p>
+		The two phases exist because retrying is only useful if you know why
+		something failed. A blind second attempt on a PR whose tests need a
+		database, or whose base branch is already red, spends a full install and
+		test cycle to learn nothing. So <strong>diagnose</strong> classifies first,
+		cheaply, against the already-cloned workspace — and <strong>fix</strong>
+		runs only if the verdict says a repair is worth attempting.
 	</p>
 
 	<div class="docs-callout tip">
@@ -23,10 +32,15 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>Pipeline</h2>
 
 	<div class="workflow-diagram">
-		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
-			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
-			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
-			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">fix + push to branch</text>
+		<svg viewBox="0 0 320 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="12" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="77" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Diagnose</text>
+			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">classify the failure</text>
+			<path d="M146 40 H172" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<path d="M168 36 L174 40 L168 44 Z" fill="var(--diag-line)"/>
+			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
+			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">if fixable: fix + push</text>
 		</svg>
 	</div>
 
@@ -44,7 +58,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<tr>
 				<td>Phases</td>
 				<td>6 (guardrails → architect → executor → reviewer → PR)</td>
-				<td>1 (fix and push)</td>
+				<td>2 (diagnose → fix)</td>
 			</tr>
 			<tr>
 				<td>Approval gates</td>
@@ -73,11 +87,68 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li>Clones the repo at the PR's head branch</li>
-		<li>Reads the PR description, comment thread, and any CI failures</li>
-		<li>Implements the fix</li>
+		<li><strong>Diagnose</strong> — reads the PR description, comment thread and CI failures, reads the repo's own <code>.github/workflows/*.yml</code>, names the differences between CI and the sandbox (toolchain version, OS, absent services or secrets), reproduces the exact failing command, and classifies the failure. It changes nothing: no edits, no commits, no pushes, no labels</li>
+		<li><strong>Fix</strong> — implements the smallest change that lands the PR, guided by the diagnosis</li>
 		<li>Runs tests, lint, and typecheck</li>
-		<li>Pushes the fix commit to the PR branch</li>
+		<li>Pushes the fix commit to the PR branch — <em>only</em> on a green local gate. If the gate is still red when it runs out of iterations it says so rather than pushing a speculative fix, which would cost a full CI cycle to prove nothing</li>
 	</ul>
+
+	<h2>The five failure classes</h2>
+
+	<p>
+		The diagnosis lands in exactly one class, and the class decides what
+		happens next. Both PR fix and
+		<a href="/docs/workflows/dependabot-ci-fix">Dependabot CI fix</a> share the
+		same vocabulary — it lives in the <code>fixing</code> skill.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr>
+				<th>Class</th>
+				<th>Meaning</th>
+				<th>What happens next</th>
+			</tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>reproducible</code></td>
+				<td>The same command fails in the sandbox too</td>
+				<td>Fix it</td>
+			</tr>
+			<tr>
+				<td><code>env-mismatch</code></td>
+				<td>Passes locally, fails in CI on a version / OS / flag difference</td>
+				<td>Align to CI and re-verify — often a config change, not a code one</td>
+			</tr>
+			<tr>
+				<td><code>flaky</code></td>
+				<td>A timeout or network blip, or the same job passed on an earlier commit</td>
+				<td>Change nothing</td>
+			</tr>
+			<tr>
+				<td><code>infra-dependent</code></td>
+				<td>The check needs secrets, a live service, a deployed backend or a browser</td>
+				<td>Can't be fixed here — escalate, naming the checks</td>
+			</tr>
+			<tr>
+				<td><code>upstream-broken</code></td>
+				<td>The base branch is red too</td>
+				<td>Not this PR's fault — it self-heals when the base goes green</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<div class="docs-callout note">
+		<div class="docs-callout-body">
+			The last three are <strong>stopping</strong> verdicts: the fix phase is
+			skipped and the run finishes <strong>successfully</strong>. Correctly
+			working out that a PR can't be fixed from here <em>is</em> the job, so
+			it isn't recorded as a failure — a red run would comment "couldn't
+			auto-fix, leaving it for a human" on a flaky test, offer a Retry that
+			cannot succeed, and skew the cost and failure stats.
+		</div>
+	</div>
 
 	<h2>Triggers</h2>
 
@@ -109,7 +180,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	.workflow-diagram svg {
 		width: 100%;
-		max-width: 200px;
+		max-width: 320px;
 		height: auto;
 		display: block;
 		margin: 0 auto;

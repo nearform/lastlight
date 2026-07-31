@@ -6,12 +6,44 @@ trigger: pr-fix
 status_checklist: true
 
 phases:
+  # Diagnose before repairing: classify the failure against the pre-cloned
+  # workspace (cheap) BEFORE the install + test cycle (expensive), so a failure
+  # no amount of fixing can address costs one short call. See the `fixing` skill.
+  - name: diagnose
+    label: Diagnose the failure
+    prompt: prompts/diagnose-ci.md
+    skill: fixing
+    # Cheap by intent — it reads logs and reproduces a command, it doesn't write
+    # code. Unset in config/default.yaml, so this falls through to models.default
+    # until an operator pins a cheaper model for it.
+    model: "{{models.diagnose}}"
+    output_var: diagnosis
+    on_output:
+      requires_marker: "DIAGNOSIS_COMPLETE"
+    messages:
+      on_start: "Diagnosing the failure on PR #{{prNumber}}..."
+      on_failure: "**Couldn't diagnose** the failure on PR #{{prNumber}}."
+
   - name: fix
     label: Fix
     prompt: prompts/pr-fix.md
-    skill: building
+    # `fixing` is primary (minimal repair + push discipline + the markers);
+    # `building` stays available for the install / gate mechanics.
+    skills: [fixing, building]
     model: "{{models.pr-fix}}"
+    # The three stopping classes: there is nothing here for a fix phase to do,
+    # so it must not provision a sandbox and run a 900-second gate for one. A
+    # non-failing skip — the RUN still records `succeeded`, because correctly
+    # determining the PR can't be fixed here IS the job. One expression per
+    # class, so the list reads as the class list it is.
+    skip_if:
+      - "phaseOutputs.diagnosis.contains('class=flaky')"
+      - "phaseOutputs.diagnosis.contains('class=infra-dependent')"
+      - "phaseOutputs.diagnosis.contains('class=upstream-broken')"
+    on_output:
+      requires_marker: "CI_FIX_COMPLETE"
     messages:
       on_start: "On it — fixing PR #{{prNumber}}..."
       on_success: "**Fix pushed** to `{{branch}}`. CI should re-run automatically."
       on_failure: "**Fix failed** — I wasn't able to resolve this automatically."
+      on_skipped_done: "**No fix attempted** — the diagnosis says this isn't fixable from here. See the verdict above."

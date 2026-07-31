@@ -303,7 +303,7 @@ is handled in the harness:
 | `status-report` | `664–675` — list running executions |
 | `approval-response` | `839–893` — resume or fail paused run |
 | `explore-reply` | `750–836` — feed comment into paused explore loop |
-| `pr-fix`, `dependabot-ci-fix` | `handlePrFix` — lightweight fix-and-push (both are `PR_FIX_SHAPED_WORKFLOWS`; resolves the PR head branch + failed-check summary, skips fork PRs, dispatches the named workflow) |
+| `pr-fix`, `dependabot-ci-fix` | `handlePrFix` — lightweight diagnose-then-fix-and-push (both are `PR_FIX_SHAPED_WORKFLOWS`, and both run the same two phases — see [Phases & Prompts](/spec/07-phases-and-prompts); the handler resolves the PR head branch + failed-check summary, skips fork PRs, dispatches the named workflow) |
 | `build` | `896–976` — full build cycle on an issue |
 | `answer` | `982–1014` — generic `dispatchWorkflow()` for `answer.yaml`; answers a question issue directly (routed via `routes.github.issue_answer` / `routes.slack.answer`) |
 | `pr-review`, `pr-comment`, `issue-triage`, `issue-comment`, `explore`, `security-review`, `security-feedback`, `verify`, `qa-test`, `demo` | `982–1014` — generic `dispatchWorkflow()` + ack |

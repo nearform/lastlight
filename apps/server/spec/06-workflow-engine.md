@@ -109,6 +109,7 @@ overlay) can add a new intent with no core change. See
   web_search?: boolean;                 // enable agentic-pi web tools
   requires_sandbox?: "docker" | "gondolin" | "none";  // skip phase (non-failing) if active backend differs
   sandbox_image?: "default" | "qa";     // docker only: "qa" runs on lastlight-sandbox-qa (Playwright+Chromium+ffmpeg); skips if unbuilt
+  skip_if?: string | string[];          // skip phase (non-failing) when any expression matches the render context
   loop?: PhaseLoop;                     // reviewer-fix loop
   generic_loop?: GenericLoop;           // until-condition loop
   on_output?: OutputRule[];             // contains_BLOCKED → fail; requires_marker → fail if final output lacks this marker (postcondition against silent no-op "successes")
@@ -212,6 +213,65 @@ array in order (`runner.ts:457–1033`).
 
 Loop iterations always run sequentially even inside DAG-mode workflows
 (fix cycles read the prior reviewer verdict).
+
+## Gated skips
+
+Before running the ready nodes, the scheduler filters them
+(`core/scheduler.ts`). Three declarations can take a node out:
+
+| Field | Gates on | Example |
+|---|---|---|
+| `requires_sandbox` | The named backend isn't the one running | the browser-QA step that only works on docker |
+| `sandbox_image: qa` | The heavier QA image isn't built on this host (docker only; inert elsewhere) | same |
+| `skip_if` | An expression matches the run's render context | the `fix` phase after a diagnosis that says there is nothing to fix |
+
+The first two gate on the phase being **unavailable**; `skip_if` gates on
+it being **unnecessary**. All three take the *same* path: the node records
+`skipped`, a `recordSkippedPhase` row lands, `messages.on_skipped_done` is
+surfaced so a human sees why, and **the run still records `succeeded`**.
+
+That last part is the whole reason `skip_if` exists rather than being
+expressed with the pre-existing `on_output.contains_BLOCKED: { action:
+fail }`. A phase whose *correct* outcome is "there is nothing for the next
+phase to do" must not paint the run red, because `failed` has four
+mechanical consequences: `messages.on_failure` posts to the PR (actively
+wrong — "leaving it for a human" on a flaky test), the dashboard's **Retry**
+button targets `failed`/`cancelled` and so offers a retry that cannot
+succeed, the cost and failure stats are polluted, and
+`latestSucceededForTrigger` ignores failed runs, which defeats the
+already-handled-this-SHA dedup so the same dead end is re-diagnosed on
+every webhook re-fire. Recording the skip `succeeded` fixes all four, and
+turns the fourth into a positive: the dedup starts working for exactly the
+cases that must not be re-attempted.
+
+```yaml
+- name: fix
+  skip_if:                                          # one string, or a list (OR-ed)
+    - "phaseOutputs.diagnosis.contains('class=flaky')"
+    - "phaseOutputs.diagnosis.contains('class=infra-dependent')"
+    - "phaseOutputs.diagnosis.contains('class=upstream-broken')"
+```
+
+Expressions use the `until:` grammar (see *Loop expression evaluator*
+below), evaluated against `{ ...ctx, phaseOutputs, scratch }` — the same
+values a prompt template can render. `output` is empty here (the phase has
+not run), so a bare `output.contains(...)` is meaningless; read an upstream
+phase instead. AND is expressible by collapsing to a single expression; the
+production consumer is a class list, which is why one expression per class
+reads better than one compound one.
+
+Two scoping rules:
+
+- **Evaluated when the node becomes *ready***, i.e. after its dependencies
+  are terminal — which is what makes reading an upstream phase's output
+  well-defined.
+- **`phaseOutputs` is empty across a resume boundary** (a phase skipped as
+  already-`done` contributes nothing to the in-memory map), so a guard that
+  must survive resume should read `scratch`, which the run store rehydrates.
+
+Every expression fails **open**: an unrecognised form and an absent variable
+both evaluate false, so a malformed or not-yet-populated guard *runs* the
+phase rather than silently swallowing it.
 
 ## Loops
 
@@ -523,17 +583,29 @@ for the k8s-side half of this mechanism (the `QuotaExceededError` →
 ```ts
 // src/workflows/loop-eval.ts
 export function evalUntilExpression(expr: string, ctx: LoopEvalContext): boolean;
+export function evalSkipIf(exprs: readonly string[], ctx: LoopEvalContext): string | undefined;
 ```
 
 A custom mini-DSL (not `eval()`). Accepts:
 
 - `output.contains('text')` — substring match on the iteration's output
+- `a.b.c.contains('text')` — the same against any dotted path in the
+  context (`output` is the degenerate one-segment case). Strings and
+  numbers only: stringifying an object yields `"[object Object]"`, which
+  is a substring match waiting to surprise someone
 - `variable == 'value'` / `variable != 'value'` — equality / inequality
 - `variable == true` / `== false` — boolean coercion of bare literals
 - Dotted keys for nested access: `scratch.socratic.ready == true`
 
 Unrecognised expressions return `false` (safe default — the loop runs
-until `max_iterations`).
+until `max_iterations`; a `skip_if` guard runs its phase).
+
+One grammar, two consumers. `evalUntilExpression` drives a
+`generic_loop`'s `until:`; `evalSkipIf` OR-s a phase's `skip_if` list and
+returns the **first matching expression**, so the scheduler can name it in
+the skip reason. The longer dotted path exists for `skip_if`, which needs
+to read a *sibling* value (`phaseOutputs.diagnosis.contains(…)`) that the
+loop never did.
 
 `until_bash` is the alternative: a shell command whose exit code (0 →
 stop) drives the loop. It runs **inside the sandbox** (via `executeCommand`
@@ -568,6 +640,15 @@ prevent template-after-render injection (`validateShellCommand`).
 - **Restart-count is the circuit breaker.** Three failed resumes and
   the run is failed permanently. Resist the urge to raise the limit
   without thinking about what's actually crashing.
+- **A gated skip keeps the run green.** `requires_sandbox`,
+  `sandbox_image` and `skip_if` all record the node `skipped` and leave
+  the run `succeeded`. `failed` is reserved for **malfunction** — a
+  correct "there is nothing to do here" is not one, and recording it as
+  one mis-fires four downstream mechanisms (see *Gated skips*).
+- **A skipped node is not `succeeded`.** So an `all_success`
+  `trigger_rule` downstream of a gated phase will not fire. That caveat
+  is identical for all three gates; a graph that must proceed past one
+  needs `all_done` or `none_failed_min_one_success`.
 - **A run's config is frozen at dispatch.** `runWorkflow` takes the target
   repo's `.lastlight/` layer as a trailing, *defaulted* parameter (defaulted so
   `runWorkflow.length` stays 9 — the frozen `lastlight/evals` surface pinned by

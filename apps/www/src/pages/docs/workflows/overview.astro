@@ -120,8 +120,8 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">PR fix</span>
 			</div>
-			<p>Lightweight fix-and-push — no architect or reviewer, just fix the issue and push.</p>
-			<span class="workflow-card-meta">1 phase &middot; webhook</span>
+			<p>Lightweight diagnose-then-fix-and-push — no architect or reviewer. Classifies why the PR is red first, then fixes it and pushes, or stops if nothing here can repair it.</p>
+			<span class="workflow-card-meta">2 phases &middot; webhook</span>
 		</a>
 
 		<a href="/docs/workflows/dependabot-ci-fix" class="workflow-card">
@@ -131,7 +131,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">Dependabot CI fix</span>
 			</div>
-			<p>Fixes a dependency-update PR whose checks failed — brings the branch up to date, pushes the smallest fix, and hands the merge decision to dependabot-pr-merge once CI is green. Via webhook and a daily per-PR cron backstop.</p>
+			<p>Fixes a dependency-update PR whose checks failed — diagnoses the breakage first, brings the branch up to date, pushes the smallest fix, and hands the merge decision to dependabot-pr-merge once CI is green. Via webhook and a daily per-PR cron backstop.</p>
 			<span class="workflow-card-meta">2 phases &middot; webhook + cron</span>
 		</a>
 

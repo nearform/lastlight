@@ -269,7 +269,8 @@ chat runtime:
 | `repo-health` | Weekly health report (open / stale / velocity / labels) | `repo-health.yaml`, `cron-health.yaml`, chat |
 | `security-review` | Diff-based security scan since last review | `security-review.yaml`, `cron-security.yaml` |
 | `security-feedback` | Break out scan findings into individual issues | `security-feedback.yaml` |
-| `building` | Shared craft: install deps + run the repo's CI gate (build + test + lint + typecheck, mirroring `.github/workflows` / AGENTS.md) in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml` |
+| `building` | Shared craft: install deps + run the repo's CI gate (build + test + lint + typecheck, mirroring `.github/workflows` / AGENTS.md) in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml`, `dependabot-ci-fix.yaml` |
+| `fixing` | Diagnose a red PR **before** repairing it: read the real failure, read the CI definition, name the CI-versus-sandbox differences explicitly, reproduce the exact failing command, then classify into exactly one of five classes — `reproducible`, `env-mismatch`, `flaky`, `infra-dependent`, `upstream-broken`. Also owns push discipline (push only on a green local gate; never a speculative push), the runtime-written `../.lastlight-verify.sh` gate script, and the `DIAGNOSIS_COMPLETE` / `CI_FIX_COMPLETE` marker formats | `pr-fix.yaml`, `dependabot-ci-fix.yaml` (primary on both, both phases) |
 | `code-review` | Shared review rubric, precision-first: post **only Critical / Important** (Suggestions / Nits are dropped as noise), each with a concrete-impact line, past a self-refutation confidence gate + what to check (correctness incl. silent-default/dropped-output as a bug, security, edge cases, complexity, duplication, type-safety, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
 | `issue-answer` | Answer a question directly: sourced neutral reply to a GitHub issue or Slack thread; research repo docs + web; label `question` (GitHub only); never write a brief, mark ready-for-agent, or change code | `answer.yaml` |
 | `verify` | Test a behaviour claim as an investigator: install + run the code in the sandbox, capture bash/text evidence, report CONFIRMED / REFUTED / INCONCLUSIVE; never fabricate or stage evidence | `verify.yaml` (text phase) |
@@ -280,10 +281,46 @@ chat runtime:
 
 `building` and `code-review` are not optional libraries — they're live
 shared building blocks staged into multiple workflows (`code-review` in the
-build cycle and `pr-review`; `building` in the build cycle and `pr-fix`), the
-same way `issue-triage` is reused across webhook and cron. The "Used by"
-column lists every workflow that stages each. Note `pr-review` stages
-`code-review` but **not** `building` — it's a pure code review.
+build cycle and `pr-review`; `building` in the build cycle and both fix
+workflows), the same way `issue-triage` is reused across webhook and cron.
+The "Used by" column lists every workflow that stages each. Note `pr-review`
+stages `code-review` but **not** `building` — it's a pure code review.
+
+### `fixing` vs `building`
+
+They divide by tense. `building` is about *implementing* — it assumes you
+know what you are trying to build. `fixing` is about **a failure that
+already happened**: find out why, decide whether it can be fixed here at
+all, and only then repair it, minimally. So on both fix workflows the
+`diagnose` phase stages `skill: fixing` alone and the `fix` phase stages
+`skills: [fixing, building]` — `fixing` first, so it is the primary, and
+`building` alongside it for the install + gate mechanics `fixing` defers
+to. Both phases set `prompt:` as well, and both prompts name the skill
+explicitly rather than relying on the auto-generated nudge.
+
+The five classes are the skill's load-bearing output, because the workflow
+branches on them:
+
+| Class | Meaning | Disposition |
+|---|---|---|
+| `reproducible` | The same command fails here too | Fix it |
+| `env-mismatch` | Passes here, fails in CI on a version / OS / flag difference | Align to CI and re-verify — the repair is often config, not code |
+| `flaky` | A timeout or network blip, or the same job passed on a prior SHA | Change nothing |
+| `infra-dependent` | Needs secrets, a live service, a deployed backend, a browser | Cannot be fixed here — escalate, naming the checks |
+| `upstream-broken` | The base branch is red too | Not this PR's fault; self-heals when the base goes green |
+
+The last three are **stopping** verdicts. Reaching one is a *correct*
+outcome, not a failure — stopping cheaply is the entire point of diagnosing
+first — which is why the `fix` phase's `skip_if` skips rather than fails on
+them and the run still records `succeeded`
+([Workflow Engine](/spec/06-workflow-engine)). The skill says so explicitly,
+because an agent's natural bias is to round a stopping verdict up to
+`reproducible` in order to look useful.
+
+Markdown cannot import, so the class vocabulary is pinned from the code side
+instead: `tests/skills/fixing.test.ts` asserts all five names appear verbatim
+in `SKILL.md`, the same pattern (and for the same reason) as
+`tests/cron/label-vocab.test.ts`.
 
 Nested skill directories (`skills/software-development/architect`,
 `skills/github/github-pr-workflow`, etc.) exist as a category library —

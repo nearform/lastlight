@@ -278,6 +278,42 @@ const PhaseDefinitionSchema = z
      */
     requires_sandbox: z.enum(["docker", "gondolin", "none"]).optional(),
     /**
+     * Conditional gate: skip this phase when any of these expressions matches
+     * the run's render context. One string, or a list (OR-ed).
+     *
+     * Same non-failing skip as `requires_sandbox` above — the node goes
+     * `skipped`, a `recordSkippedPhase` row lands, `messages.on_skipped_done`
+     * is surfaced, and the **run still records `succeeded`**. That last part is
+     * the whole point, and is why this exists rather than being expressed with
+     * the pre-existing `on_output.contains_BLOCKED: { action: fail }`: a phase
+     * whose *correct* outcome is "there is nothing for the next phase to do"
+     * must not paint the run red. A red run posts `messages.on_failure` to the
+     * PR, offers the dashboard's Retry button for something that cannot
+     * succeed, pollutes the cost/failure stats, and — because
+     * `latestSucceededForTrigger` ignores failed runs — defeats the
+     * already-handled-this-SHA dedup, so the same dead end is re-diagnosed on
+     * every webhook re-fire.
+     *
+     * Expressions use the `until:` grammar (see `core/loop-eval.ts`) evaluated
+     * against `{ ...ctx, phaseOutputs, scratch }` — the same values a prompt
+     * template can render. `output` is empty here (the phase has not run), so
+     * only bare `output.contains(...)` is meaningless; read an upstream phase
+     * instead, e.g. `phaseOutputs.diagnosis.contains('class=flaky')`.
+     *
+     * Two scoping notes:
+     *   - `phaseOutputs` is empty across a **resume** boundary (a phase skipped
+     *     as already-`done` contributes nothing to the in-memory map), so a
+     *     guard that must survive resume should read `scratch`, which the run
+     *     store rehydrates.
+     *   - The guard is evaluated when the node becomes *ready*, i.e. after its
+     *     dependencies are terminal — which is what makes reading an upstream
+     *     phase's output well-defined.
+     *
+     * A skipped node is not `succeeded`, so the same `trigger_rule` caveat as
+     * `requires_sandbox` applies to anything downstream of a guarded phase.
+     */
+    skip_if: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
+    /**
      * Which docker sandbox image this phase runs in. `default` (or omitted) uses
      * the lean `lastlight-sandbox:latest`; `qa` uses the heavier
      * `lastlight-sandbox-qa:latest` (Playwright + Chromium baked in) for the
@@ -371,6 +407,15 @@ export function phaseSkillNames(phase: PhaseDefinition): string[] {
   if (phase.skills?.length) return phase.skills;
   if (phase.skill) return [phase.skill];
   return [];
+}
+
+/**
+ * Normalize a phase's `skip_if` declaration to a list of expressions.
+ * Returns `[]` for phases with no guard. Mirrors {@link phaseSkillNames}.
+ */
+export function phaseSkipIfExpressions(phase: PhaseDefinition): string[] {
+  if (phase.skip_if === undefined) return [];
+  return typeof phase.skip_if === "string" ? [phase.skip_if] : phase.skip_if;
 }
 export type PhaseLoop = z.infer<typeof PhaseLoopSchema>;
 export type GenericLoop = z.infer<typeof GenericLoopSchema>;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { evalUntilExpression } from "#src/workflows/loop-eval.js";
+import { evalUntilExpression, evalSkipIf } from "#src/workflows/loop-eval.js";
 
 describe("evalUntilExpression — output.contains", () => {
   it("returns true when output contains the target string", () => {
@@ -92,6 +92,77 @@ describe("evalUntilExpression — prototype chain guard", () => {
   it("returns false when path traverses prototype", () => {
     const ctx = { output: "", obj: {} };
     expect(evalUntilExpression("obj.prototype.x == 'y'", ctx)).toBe(false);
+  });
+});
+
+describe("evalUntilExpression — dotted-path .contains()", () => {
+  const diagnosis =
+    "The lockfile is stale.\nDIAGNOSIS_COMPLETE: pr=7 attempt=1 class=flaky cause=network blip ci_vs_local=none unreproducible=";
+  const ctx = { output: "", phaseOutputs: { diagnosis }, scratch: { diagnosis: { class: "flaky" } } };
+
+  it("matches a substring of an upstream phase's output", () => {
+    expect(evalUntilExpression("phaseOutputs.diagnosis.contains('class=flaky')", ctx)).toBe(true);
+  });
+
+  it("does not match a different class", () => {
+    expect(evalUntilExpression("phaseOutputs.diagnosis.contains('class=reproducible')", ctx)).toBe(false);
+  });
+
+  it("returns false when the path is absent (the safe default)", () => {
+    expect(evalUntilExpression("phaseOutputs.diagnosis.contains('class=flaky')", { output: "" })).toBe(false);
+  });
+
+  it("returns false when the path resolves to an object, not a string", () => {
+    expect(evalUntilExpression("scratch.diagnosis.contains('flaky')", ctx)).toBe(false);
+  });
+
+  it("keeps the bare output.contains form working (the generic-loop case)", () => {
+    expect(evalUntilExpression("output.contains('PASS')", { output: "tests PASS" })).toBe(true);
+  });
+
+  it("returns false when the path traverses the prototype chain", () => {
+    expect(evalUntilExpression("__proto__.contains('x')", { output: "" })).toBe(false);
+  });
+});
+
+describe("evalSkipIf — phase-level skip guard", () => {
+  const ctxFor = (diagnosis: string) => ({ output: "", phaseOutputs: { diagnosis } });
+  const NON_FIXABLE = [
+    "phaseOutputs.diagnosis.contains('class=flaky')",
+    "phaseOutputs.diagnosis.contains('class=infra-dependent')",
+    "phaseOutputs.diagnosis.contains('class=upstream-broken')",
+  ];
+
+  it("returns the first matching expression so the caller can name it", () => {
+    expect(evalSkipIf(NON_FIXABLE, ctxFor("class=upstream-broken"))).toBe(
+      "phaseOutputs.diagnosis.contains('class=upstream-broken')",
+    );
+  });
+
+  it("ORs the list — any match skips", () => {
+    for (const cls of ["flaky", "infra-dependent", "upstream-broken"]) {
+      expect(evalSkipIf(NON_FIXABLE, ctxFor(`class=${cls}`))).toBeDefined();
+    }
+  });
+
+  it("does not fire for the two fixable classes", () => {
+    for (const cls of ["reproducible", "env-mismatch"]) {
+      expect(evalSkipIf(NON_FIXABLE, ctxFor(`class=${cls}`))).toBeUndefined();
+    }
+  });
+
+  it("does not fire when the upstream output is missing (resume boundary)", () => {
+    // `{{phaseOutputs}}` is empty across a resume — the guard must fail OPEN
+    // (run the phase), never swallow it.
+    expect(evalSkipIf(NON_FIXABLE, { output: "" })).toBeUndefined();
+  });
+
+  it("fails open on a malformed expression", () => {
+    expect(evalSkipIf(["diagnosis is flaky"], ctxFor("class=flaky"))).toBeUndefined();
+  });
+
+  it("returns undefined for an empty list", () => {
+    expect(evalSkipIf([], ctxFor("class=flaky"))).toBeUndefined();
   });
 });
 
