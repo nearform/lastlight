@@ -649,6 +649,11 @@ const result = await run({
     CI_BUILD_REF: process.env.GITHUB_SHA ?? "",
   },
 
+  // This run's GitHub credential, REPLACING process.env for the github_*
+  // tools. Pass it whenever runs can overlap in one process — see
+  // "Notes for in-process callers".
+  githubAuthEnv: { GITHUB_TOKEN: scopedTokenForThisRun },
+
   // Optional observability hooks. Both are pure callbacks — no I/O happens
   // unless you do something with the values.
   onEvent: (record) => myShim.writeJsonl(record),
@@ -703,9 +708,26 @@ console.log(result.records.length);      // full event log
 
 ### Notes for in-process callers
 
-- agentic-pi reuses the host process's env vars (`OPENAI_API_KEY`,
-  `GITHUB_APP_ID`, …). If your orchestrator runs multiple
-  workflows with different credentials, `process.env` is the seam to vary.
+- agentic-pi reads the host process's env vars (`OPENAI_API_KEY`,
+  `GITHUB_APP_ID`, …) for anything not passed explicitly.
+- **Do not vary GitHub credentials through `process.env` when runs can
+  overlap.** `process.env` is one global: a token written there for run A is
+  visible to run B, and the extension reads it *late* (after the model runtime
+  and registry are built), so B can capture A's token — wrong repo, and
+  read-only if A's profile was narrower, which surfaces as every `github_*`
+  write failing with `403 Resource not accessible by integration` while `git`
+  keeps working. Interleaved restores can also leave the host env permanently
+  wrong. Pass **`githubAuthEnv`** instead: it replaces `process.env` for that
+  run, so each concurrent run gets exactly the credential you handed it (and
+  the host's App PEM can't leak into a run given a downscoped token).
+
+  ```ts
+  await Promise.all([
+    run({ ...a, profile: "repo-write", githubAuthEnv: { GITHUB_TOKEN: tokenA } }),
+    run({ ...b, profile: "read",       githubAuthEnv: { GITHUB_TOKEN: tokenB } }),
+  ]);
+  ```
+
 - `cwd` is per-call; you can run multiple agents in parallel against
   different working directories from the same orchestrator process.
 - Sessions are created fresh each call. Pass `noSession: true` if you

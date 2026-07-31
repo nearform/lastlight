@@ -12,7 +12,12 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-import { buildAuthFromEnv, type AuthFailureReason, type GitHubAuth } from "./auth.js";
+import {
+  buildAuthFromEnv,
+  type AuthFailureReason,
+  type GitHubAuth,
+  type GitHubAuthEnv,
+} from "./auth.js";
 import { buildGitHubTools } from "./tools.js";
 import { PROFILE_TOOLS, isGitAccessProfile, type GitAccessProfile } from "./profiles.js";
 
@@ -54,10 +59,14 @@ export interface GitHubExtensionResult {
  * - PEM file missing or partial creds → status:"skipped" with a specific reason
  *   and a message the caller should surface (these are misconfigurations,
  *   not opt-outs).
+ *
+ * `opts.env` (from `RunConfig.githubAuthEnv`) **replaces** `process.env` as the
+ * credential source — the seam an embedder needs when several runs share one
+ * process. See that field's doc for why.
  */
 export function loadGitHubExtension(
   profileName?: string,
-  opts: { baseUrl?: string } = {},
+  opts: { baseUrl?: string; env?: GitHubAuthEnv } = {},
 ): GitHubExtensionResult {
   if (!profileName) {
     return {
@@ -73,7 +82,7 @@ export function loadGitHubExtension(
     );
   }
 
-  const { auth, reason, message } = buildAuthFromEnv();
+  const { auth, reason, message } = buildAuthFromEnv(opts.env ?? process.env);
   if (!auth) {
     return {
       customTools: [],

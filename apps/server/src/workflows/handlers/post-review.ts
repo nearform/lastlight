@@ -33,14 +33,18 @@ export interface PostReviewRunScope {
 
 /**
  * Build post-review's own GitHub client from STABLE config, never the live
- * `process.env`. A concurrent in-process (gondolin) run clears `GITHUB_APP_*`
- * in the shared `process.env` (agent-executor `applyEnv`, hard rule #8) for the
- * duration of its agent turn; reading the PEM path from `process.env` mid-clear
- * yields `""` → `resolve("")` = the cwd (a directory) → `readFileSync` EISDIR.
- * The pr-review cron surfaced this by fanning out concurrent runs, but it bites
- * any two overlapping in-process runs. `getRuntimeConfig()` is loaded once at
- * boot, so its `githubApp`/`githubToken` are immune to the race. Exported for
- * the concurrent-clear regression test.
+ * `process.env`. An in-process (gondolin) run used to clear `GITHUB_APP_*` in the
+ * shared `process.env` for the duration of its agent turn; reading the PEM path
+ * mid-clear yielded `""` → `resolve("")` = the cwd (a directory) →
+ * `readFileSync` EISDIR. The pr-review cron surfaced it by fanning out
+ * concurrent runs, but it bit any two overlapping in-process runs.
+ *
+ * That splice is gone — per-run GitHub credentials are threaded explicitly now
+ * (issue #215, `githubAuthEnvFrom` + agentic-pi's `githubAuthEnv`) — so nothing
+ * writes those keys at runtime any more. This stays config-first regardless:
+ * `getRuntimeConfig()` is loaded once at boot, so it cannot be raced by anything
+ * that mutates the process env in future. Exported for the concurrent-clear
+ * regression test.
  */
 export function resolveReviewGitHubClient(runConfig: { githubApiBaseUrl?: string }): GitHubClient {
   const baseUrl = runConfig.githubApiBaseUrl;

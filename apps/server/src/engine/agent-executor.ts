@@ -7,7 +7,7 @@ import {
   type ExecutionResult,
   type GitSandboxAccess,
 } from "./github/profiles.js";
-import type { SandboxBackend } from "../config/config.js";
+import { getRuntimeConfig, type SandboxBackend } from "../config/config.js";
 import type { PrePopulateSpec, SandboxFactory } from "../sandbox/sandbox.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, safeSpanAttributes, withSpan } from "../telemetry/index.js";
 import { OI, SpanKind, splitProviderModel } from "../telemetry/openinference.js";
@@ -29,6 +29,38 @@ import {
 // workflow phase executor).
 export { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError, mapStopReason, reclassifySuccess } from "./executors/shared.js";
 export type { CommandSpec } from "./executors/orchestrator.js";
+
+/** The GitHub App credentials a run mints from, or undefined for the PAT path. */
+type GithubAppCreds = { appId: string; privateKeyPath: string; installationId: string };
+
+/**
+ * Resolve the App credentials to mint with from **boot config**, falling back to
+ * `process.env` only when no config has been loaded (unit tests, embedders).
+ *
+ * Never gate the mint on live `process.env.GITHUB_APP_ID`. That was the second
+ * half of issue #215: concurrent in-process runs used to splice `GITHUB_APP_* =
+ * ""` into the shared env, and an interleaved restore could leave it falsy for
+ * good — after which every run silently *skipped* the mint and forwarded whatever
+ * stale `GITHUB_TOKEN` the last splice had left behind (wrong repo, wrong
+ * profile, expired within the hour). `getRuntimeConfig()` is loaded once at boot,
+ * so it can't be raced. Same reasoning as `resolveReviewGitHubClient` in
+ * `workflows/handlers/post-review.ts`.
+ *
+ * `githubApiBaseUrl` set means GitHub is mocked (the evals harness points it at
+ * an in-process fake and unsets the App env deliberately) — never mint against a
+ * real installation for those runs; the static eval token is used instead.
+ */
+function resolveGithubApp(config: ExecutorConfig): GithubAppCreds | undefined {
+  if (config.githubApiBaseUrl) return undefined;
+  const fromConfig = getRuntimeConfig()?.githubApp;
+  if (fromConfig) return fromConfig;
+  if (!process.env.GITHUB_APP_ID) return undefined;
+  return {
+    appId: process.env.GITHUB_APP_ID,
+    privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
+    installationId: process.env.GITHUB_APP_INSTALLATION_ID || "",
+  };
+}
 
 /**
  * Shared run preparation for {@link executeAgent} and {@link executeCommand}:
@@ -73,38 +105,38 @@ async function prepareRun(
   // below — which also stops agents minting elevated tokens themselves. The
   // branch is retained so per-profile App auth can be re-enabled if the
   // sandbox-side PEM is ever materialized.
+  //
+  // `ghEnv` is the run's ONLY GitHub credential carrier: the container backends
+  // pass it as the container env, and the in-process ones hand the same keys to
+  // agentic-pi as `githubAuthEnv` (see `githubAuthEnvFrom` — an absent key means
+  // "no credential", so nothing has to be blanked out here to suppress the
+  // harness's own env any more; that blanking was issue #215).
   const ghEnv: Record<string, string> = {};
   let mintedToken: string | undefined;
   let mintError: string | undefined;
   const access = opts?.githubAccess;
   const allowAppAuth = access?.allowMcpAppAuth === true;
-  if (process.env.GITHUB_APP_ID && allowAppAuth) {
-    ghEnv.GITHUB_APP_ID = process.env.GITHUB_APP_ID;
-    if (process.env.GITHUB_APP_INSTALLATION_ID) {
-      ghEnv.GITHUB_APP_INSTALLATION_ID = process.env.GITHUB_APP_INSTALLATION_ID;
-    }
-    if (process.env.GITHUB_APP_PRIVATE_KEY_PATH) {
-      ghEnv.GITHUB_APP_PRIVATE_KEY_PATH = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
-    }
-  } else {
-    // Suppress for in-process runs that inherit our env. Empty strings
-    // override the inherited value via `applyEnv()`.
-    ghEnv.GITHUB_APP_ID = "";
-    ghEnv.GITHUB_APP_INSTALLATION_ID = "";
-    ghEnv.GITHUB_APP_PRIVATE_KEY_PATH = "";
+  const app = resolveGithubApp(config);
+  if (app && allowAppAuth) {
+    ghEnv.GITHUB_APP_ID = app.appId;
+    ghEnv.GITHUB_APP_INSTALLATION_ID = app.installationId;
+    ghEnv.GITHUB_APP_PRIVATE_KEY_PATH = app.privateKeyPath;
   }
-  if (process.env.GITHUB_APP_ID && access) {
+  if (app && access) {
     try {
       const permissions = GITHUB_PERMISSION_PROFILES[access.profile];
       const repositories = access.repo ? [access.repo] : undefined;
+      // `task=` matters when runs overlap: several in-process runs interleave
+      // their mints in one log, and without the task id you can't tell which
+      // credential belongs to the run that later 403s (issue #215).
       console.log(
-        `[executor] Minting git token: profile=${access.profile}, ` +
+        `[executor] Minting git token: task=${taskId}, profile=${access.profile}, ` +
         `repo=${access.repo || "(unscoped)"}, permissions=${permissions ? Object.keys(permissions).join(",") : "all"}`,
       );
       const { token } = await refreshGitAuth({
-        appId: process.env.GITHUB_APP_ID,
-        privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
-        installationId: process.env.GITHUB_APP_INSTALLATION_ID || "",
+        appId: app.appId,
+        privateKeyPath: app.privateKeyPath,
+        installationId: app.installationId,
         permissions,
         repositories,
       });
@@ -122,23 +154,28 @@ async function prepareRun(
         `profile=${access.profile}): ${msg}`,
       );
     }
-  } else if (process.env.GITHUB_TOKEN && access) {
+  } else if (access) {
     // PAT fallback: no GitHub App, but a static Personal Access Token is set.
     // Forward it directly — a PAT can't be per-run downscoped like an App
     // installation token, so it carries whatever scopes GitHub granted. A
     // read-only fine-grained PAT is the safe default; warn on repo-write
     // profiles so an operator running build/pr-fix under a PAT knows the
     // requested downscope isn't being applied.
-    if (GITHUB_PERMISSION_PROFILES[access.profile]?.contents === "write") {
-      console.warn(
-        `[executor] Using a static GITHUB_TOKEN for a repo-write workflow ` +
-        `(profile=${access.profile}, repo=${access.repo || "none"}) — the PAT's ` +
-        `own scopes apply (no per-run downscoping).`,
-      );
+    const pat = getRuntimeConfig()?.githubToken || process.env.GITHUB_TOKEN;
+    if (pat) {
+      if (GITHUB_PERMISSION_PROFILES[access.profile]?.contents === "write") {
+        console.warn(
+          `[executor] Using a static, operator-supplied GITHUB_TOKEN for a ` +
+          `repo-write workflow (task=${taskId}, profile=${access.profile}, ` +
+          `repo=${access.repo || "none"}) — no App is configured, so this token ` +
+          `was NOT minted for this run and the PAT's own scopes apply (no ` +
+          `per-run downscoping).`,
+        );
+      }
+      mintedToken = pat;
+      ghEnv.GITHUB_TOKEN = pat;
+      ghEnv.GIT_TOKEN = pat;
     }
-    mintedToken = process.env.GITHUB_TOKEN;
-    ghEnv.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-    ghEnv.GIT_TOKEN = process.env.GITHUB_TOKEN;
   }
 
   // Provider API keys. Forwarded in registry order — see `src/providers.ts`

@@ -128,7 +128,7 @@ src/
                         executeDocker/executeSmol/executeInProcess twins).
       shared.ts         Backend-agnostic building blocks (RunResultAccumulator,
                         skill-bundle staging, server-artifact stage/harvest,
-                        finalizeFromRunResult, env splice).
+                        finalizeFromRunResult, githubAuthEnvFrom).
     dispatcher.ts       Routes classified events to workflow or chat handler.
     event-shim.ts       Translates agentic-pi events → Claude-SDK envelope jsonl.
     llm.ts              One-shot LLM helper for screen/ + classifier —
@@ -339,12 +339,19 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
 - **Permission profiles** (`src/engine/github/profiles.ts`) — each workflow maps to
   a `GitAccessProfile`: `read`, `issues-write`, `review-write`, `repo-write`.
   `runner.ts` picks one per workflow name and the agent-executor mints a
-  downscoped installation token for the sandbox. Only `repo-write` runs see
-  the App PEM; everything else uses a pre-minted scoped token, which
+  downscoped installation token for the sandbox (minting is gated on **boot
+  config**, `getRuntimeConfig().githubApp`, never live `process.env`). No profile
+  forwards the App PEM today; every run uses that pre-minted scoped token, which
   agentic-pi's built-in github tools (its `github` extension — the
-  `github_*` tools, gated per profile) read from the sandbox env. The
-  standalone `mcp-github-app` MCP server that used to expose these tools was
-  removed with the OpenCode→agentic-pi migration.
+  `github_*` tools, gated per profile) read from a **per-run** credential
+  channel: the container backends get it in the container env, and the
+  in-process backends (gondolin/none) get it via agentic-pi's `githubAuthEnv`
+  argument. It is **never** spliced into the harness's shared `process.env` —
+  concurrent in-process runs live in that one env, so a token there crossed
+  between runs and 403'd every `github_*` write (issue #215; see
+  `spec/09-sandbox.md` → "Invariant: per-run credentials never travel through
+  `process.env`"). The standalone `mcp-github-app` MCP server that used to
+  expose these tools was removed with the OpenCode→agentic-pi migration.
 - **Approval gates** — phases can declare `approval_gate: post_architect`.
   When hit, the run persists with `status: paused`, a row in
   `workflow_approvals`, and the user can resolve it via GitHub comment

@@ -46,3 +46,5 @@ export type { EmitterSink, EmitterRecord, EmitterContext } from "./emitter.js";
 
 export { isGitAccessProfile } from "./extensions/github/index.js";
 export type { GitAccessProfile } from "./extensions/github/index.js";
+/** Credential shape for `RunOptions.githubAuthEnv` (the per-run GitHub creds). */
+export type { GitHubAuthEnv } from "./extensions/github/auth.js";

@@ -699,17 +699,40 @@ export function emptyResult(stopReason: string, durationMs: number) {
   };
 }
 
-/** Splice values into process.env for the duration of a sync block. */
-export function applyEnv(env: Record<string, string>): () => void {
-  const saved: Record<string, string | undefined> = {};
-  for (const [k, v] of Object.entries(env)) {
-    saved[k] = process.env[k];
-    process.env[k] = v;
+/**
+ * The GitHub credential keys agentic-pi's github extension recognises. The
+ * executor hands these to an in-process agent **as an argument**, never through
+ * the shared `process.env`.
+ *
+ * `process.env` is one global for the whole harness, but up to
+ * `concurrency.maxWorkflows` in-process runs (gondolin/none) are live in it at
+ * once — so writing a run's repo-scoped, profile-downscoped token there let
+ * another run read it (issue #215: `github_*` writes 403'd with "Resource not
+ * accessible by integration"), and interleaved restores left the harness with a
+ * dead token and a falsy `GITHUB_APP_ID` permanently. `GIT_TOKEN` is the
+ * git-only alias of the same secret (it rides `GIT_CONFIG_*`, see
+ * `agentGitIdentityEnv`), so it is listed here but not forwarded as a github
+ * credential.
+ */
+const GITHUB_CREDENTIAL_ENV_KEYS = [
+  "GITHUB_APP_ID",
+  "GITHUB_APP_INSTALLATION_ID",
+  "GITHUB_APP_PRIVATE_KEY_PATH",
+  "GITHUB_TOKEN",
+] as const;
+
+/**
+ * The run's GitHub credentials, pulled out of the sandbox env to hand agentic-pi
+ * as `githubAuthEnv`. Always authoritative — an empty object means "this run has
+ * no GitHub credential", NOT "fall back to `process.env`" (which is how a host
+ * PAT or the App PEM would otherwise reach an agent whose profile was
+ * downscoped). Empty-string values are dropped, matching agentic-pi's own
+ * truthiness check.
+ */
+export function githubAuthEnvFrom(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of GITHUB_CREDENTIAL_ENV_KEYS) {
+    if (env[k]) out[k] = env[k];
   }
-  return () => {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  };
+  return out;
 }
