@@ -104,13 +104,47 @@ export interface CiJobFailure {
   jobUrl?: string;
   /** True only when `logExcerpt` came from the REAL Actions job log. */
   logsAvailable: boolean;
+  /**
+   * WHY the real log is missing, when it is. Set only for an Actions job we
+   * actually tried to read — see {@link CiLogUnavailableCause}.
+   */
+  logUnavailableCause?: CiLogUnavailableCause;
 }
+
+/**
+ * Why an Actions job log could not be used as evidence.
+ *
+ * Every one of these used to collapse into a single `.catch(() => null)`, and
+ * the banner then asserted the one cause we had never checked ("the App lacks
+ * `Actions: read`"). Telling an operator to grant a permission they already
+ * granted is a smaller version of exactly the damage issue #251's Finding 1 was
+ * about: a degradation that reads as normal operation. So the cause is
+ * CLASSIFIED at the point of failure and rendered verbatim.
+ *
+ *  - `forbidden`   — HTTP 403. The genuine missing-permission case, and the
+ *                    only one where "grant Actions: read" is the fix. App-wide,
+ *                    so one job saying it settles it for the whole report.
+ *  - `expired`     — HTTP 410 Gone. Actions retains logs for a bounded window;
+ *                    on an older PR this is the COMMON case, and there is
+ *                    nothing to grant.
+ *  - `unavailable` — anything else: 429/secondary rate limit, 5xx, the report
+ *                    deadline firing, or a body we could not decode. Transient.
+ *  - `empty`       — the download succeeded and carried nothing usable. Not a
+ *                    fetch problem at all.
+ */
+export type CiLogUnavailableCause = "forbidden" | "expired" | "unavailable" | "empty";
 
 /** Structured result of {@link GitHubClient.getCiFailureReport}. */
 export interface CiFailureReport {
   jobs: CiJobFailure[];
   /** False when NO job could supply a real log — everything below is annotations. */
   logsAvailable: boolean;
+  /**
+   * The cause the banner speaks with when `logsAvailable` is false — the most
+   * actionable one across the jobs (see {@link dominantLogUnavailableCause}).
+   * Undefined when logs were available or when no Actions job was even tried.
+   */
+  logUnavailableCause?: CiLogUnavailableCause;
 }
 
 /** Options shared by the three settle-aware check queries. */
@@ -141,6 +175,26 @@ export interface ChecksQueryOptions {
 function httpStatus(err: unknown): number | undefined {
   const status = (err as { status?: unknown })?.status;
   return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * Apply {@link ChecksQueryOptions.excludeApp} to a check-run list.
+ *
+ * One helper rather than the same `filter` inline at each query, because
+ * "which reads drop our own checks" is a correctness property (07 §7.2) that
+ * should be greppable — `getCiFailureReport` was the one settle-path read that
+ * silently didn't, and our own `CHANGES_REQUESTED` review check concludes
+ * `failure` (../review-check.ts), so the fix agent was handed its own
+ * reviewer's verdict as CI evidence to fix.
+ *
+ * Only check runs carry an `app`; commit statuses do not, and we never post
+ * one, so there is nothing to exclude on that side.
+ */
+function excludingApp<T extends { app?: { slug?: string | null } | null }>(
+  runs: T[],
+  opts: ChecksQueryOptions,
+): T[] {
+  return opts.excludeApp ? runs.filter((r) => r.app?.slug !== opts.excludeApp) : runs;
 }
 
 /**
@@ -790,12 +844,8 @@ export class GitHubClient {
       this.octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
     ]);
     // Drop OUR OWN check runs when the caller is deciding whether to TRIGGER
-    // work — see {@link ChecksQueryOptions.excludeApp}. Only check runs carry an
-    // `app`; commit statuses do not, and we never post one, so there is nothing
-    // to exclude on that side.
-    const runs = opts.excludeApp
-      ? checks.check_runs.filter((r) => r.app?.slug !== opts.excludeApp)
-      : checks.check_runs;
+    // work — see {@link ChecksQueryOptions.excludeApp}.
+    const runs = excludingApp(checks.check_runs, opts);
     const statuses = status.statuses ?? [];
 
     const runPendingCount = runs.filter(
@@ -872,8 +922,24 @@ export class GitHubClient {
    *
    * Throws if the check-run listing itself fails — a report cannot represent
    * "I couldn't look". {@link getFailedChecks} catches that for prompt callers.
+   *
+   * **Bounded on purpose.** `resolvePrState` awaits this synchronously on the
+   * dispatch path a webhook handler takes, BEFORE any disposition is taken — so
+   * it is paid in full even on dispatches that go on to skip as
+   * `already-reviewed` / `human-hold` / `run-in-flight`. `checks.listForRef`
+   * returns up to 30 runs, and the first cut of this method downloaded every
+   * failed one's FULL log concurrently, uncapped and with no deadline: thirty
+   * multi-megabyte strings resident at once, on a host with a 2 GB agent cap and
+   * no swap. Hence {@link CI_LOG_FETCH_CONCURRENCY},
+   * {@link CI_REPORT_DEADLINE_MS} and the byte cap inside
+   * {@link extractErrorExcerpt}.
    */
-  async getCiFailureReport(owner: string, repo: string, ref: string): Promise<CiFailureReport> {
+  async getCiFailureReport(
+    owner: string,
+    repo: string,
+    ref: string,
+    opts: ChecksQueryOptions = {},
+  ): Promise<CiFailureReport> {
     const { data } = await this.octokit.rest.checks.listForRef({
       owner,
       repo,
@@ -881,9 +947,18 @@ export class GitHubClient {
       filter: "latest",
     });
 
-    const failed = data.check_runs.filter(
+    const failed = excludingApp(data.check_runs, opts).filter(
       (r) => r.conclusion === "failure" || r.conclusion === "timed_out"
     );
+    if (failed.length === 0) return { jobs: [], logsAvailable: false };
+
+    // ONE deadline for the whole report rather than one per request: what the
+    // dispatch path can afford is a total wall-clock budget, and per-request
+    // timeouts multiply by the number of concurrency waves. An aborted read is
+    // classified `unavailable` like any other fetch failure, so a slow GitHub
+    // costs us evidence, never the dispatch.
+    const signal = AbortSignal.timeout(CI_REPORT_DEADLINE_MS);
+    const request = { signal };
 
     // A failing matrix shares one workflow run, so `path` is one lookup for all
     // of its shards, not one per shard. Memoized per report, not per client —
@@ -893,7 +968,7 @@ export class GitHubClient {
       let pending = workflowPaths.get(runId);
       if (!pending) {
         pending = this.octokit.rest.actions
-          .getWorkflowRun({ owner, repo, run_id: runId })
+          .getWorkflowRun({ owner, repo, run_id: runId, request })
           .then((res) => res.data.path as string | undefined)
           .catch(() => undefined);
         workflowPaths.set(runId, pending);
@@ -901,62 +976,82 @@ export class GitHubClient {
       return pending;
     };
 
-    const jobs = await Promise.all(failed.map(async (run): Promise<CiJobFailure> => {
-      const jobId = actionsJobIdFromDetailsUrl(run.details_url);
-      const runId = actionsRunIdFromDetailsUrl(run.details_url);
+    const jobs = await mapWithConcurrency(
+      failed,
+      CI_LOG_FETCH_CONCURRENCY,
+      async (run): Promise<CiJobFailure> => {
+        const jobId = actionsJobIdFromDetailsUrl(run.details_url);
+        const runId = actionsRunIdFromDetailsUrl(run.details_url);
 
-      let logExcerpt = "";
-      let logsAvailable = false;
-      let failingStep: string | undefined;
-      let workflowPath: string | undefined;
+        let logExcerpt = "";
+        let logsAvailable = false;
+        let cause: CiLogUnavailableCause | undefined;
+        let failingStep: string | undefined;
+        let workflowPath: string | undefined;
 
-      if (jobId !== null) {
-        // The three Actions reads are independent — a permission denial or an
-        // expired log on one must not cost us the other two.
-        const [logData, job, path] = await Promise.all([
-          this.octokit.rest.actions
-            .downloadJobLogsForWorkflowRun({ owner, repo, job_id: jobId })
-            .then((res) => res.data as unknown)
-            .catch(() => null),
-          this.octokit.rest.actions
-            .getJobForWorkflowRun({ owner, repo, job_id: jobId })
-            .then((res) => res.data)
-            .catch(() => null),
-          runId !== null ? workflowPathFor(runId) : Promise.resolve(undefined),
-        ]);
+        if (jobId !== null) {
+          // The three Actions reads are independent — a permission denial or an
+          // expired log on one must not cost us the other two. Only the LOG
+          // read's failure is classified: it is the one the banner speaks about.
+          const [log, job, path] = await Promise.all([
+            this.octokit.rest.actions
+              .downloadJobLogsForWorkflowRun({ owner, repo, job_id: jobId, request })
+              .then((res) => ({ ok: true as const, data: res.data as unknown }))
+              .catch((err: unknown) => ({ ok: false as const, cause: logFetchCause(err) })),
+            this.octokit.rest.actions
+              .getJobForWorkflowRun({ owner, repo, job_id: jobId, request })
+              .then((res) => res.data)
+              .catch(() => null),
+            runId !== null ? workflowPathFor(runId) : Promise.resolve(undefined),
+          ]);
 
-        if (logData !== null) {
-          logExcerpt = extractErrorExcerpt(
-            typeof logData === "string" ? logData : String(logData)
-          );
+          if (!log.ok) {
+            cause = log.cause;
+          } else {
+            const text = decodeJobLog(log.data);
+            // A body in a shape we don't recognise is not evidence — and it is
+            // specifically the shape that used to stringify to
+            // "[object ArrayBuffer]" and pass for a real log. See decodeJobLog.
+            if (text === null) cause = "unavailable";
+            else {
+              logExcerpt = extractErrorExcerpt(text);
+              // An excerpt we can't show is not evidence either: treat a blank
+              // one as "no logs" so it falls through to annotations AND says so,
+              // rather than claiming real logs and rendering nothing.
+              if (logExcerpt.trim().length === 0) {
+                logExcerpt = "";
+                cause = "empty";
+              }
+            }
+          }
+          logsAvailable = logExcerpt.length > 0;
+
+          failingStep = job?.steps?.find(
+            (s) => s.conclusion === "failure" || s.conclusion === "timed_out"
+          )?.name;
+          workflowPath = path;
         }
-        // An excerpt we can't show is not evidence: treat an empty one as "no
-        // logs" so it falls through to annotations AND reports honestly, rather
-        // than claiming real logs and rendering nothing.
-        logsAvailable = logExcerpt.length > 0;
 
-        failingStep = job?.steps?.find(
-          (s) => s.conclusion === "failure" || s.conclusion === "timed_out"
-        )?.name;
-        workflowPath = path;
-      }
+        if (!logExcerpt) {
+          logExcerpt = await fetchAnnotationExcerpt(this.octokit, owner, repo, run.id);
+        }
 
-      if (!logExcerpt) {
-        logExcerpt = await fetchAnnotationExcerpt(this.octokit, owner, repo, run.id);
-      }
+        return {
+          name: run.name,
+          conclusion: run.conclusion as string,
+          ...(workflowPath ? { workflowPath } : {}),
+          ...(failingStep ? { failingStep } : {}),
+          logExcerpt,
+          ...(run.details_url ? { jobUrl: run.details_url } : {}),
+          logsAvailable,
+          ...(cause ? { logUnavailableCause: cause } : {}),
+        };
+      },
+    );
 
-      return {
-        name: run.name,
-        conclusion: run.conclusion as string,
-        ...(workflowPath ? { workflowPath } : {}),
-        ...(failingStep ? { failingStep } : {}),
-        logExcerpt,
-        ...(run.details_url ? { jobUrl: run.details_url } : {}),
-        logsAvailable,
-      };
-    }));
-
-    return { jobs, logsAvailable: jobs.some((j) => j.logsAvailable) };
+    const logsAvailable = jobs.some((j) => j.logsAvailable);
+    const cause = logsAvailable ? undefined : dominantLogUnavailableCause(jobs);
+    return { jobs, logsAvailable, ...(cause ? { logUnavailableCause: cause } : {}) };
   }
 
   /**
@@ -964,9 +1059,14 @@ export class GitHubClient {
    * `{{ciSection}}` has always carried — a thin renderer over
    * {@link getCiFailureReport}, kept so prompt-only callers are unchanged.
    */
-  async getFailedChecks(owner: string, repo: string, ref: string): Promise<string> {
+  async getFailedChecks(
+    owner: string,
+    repo: string,
+    ref: string,
+    opts: ChecksQueryOptions = {},
+  ): Promise<string> {
     try {
-      return renderCiFailureReport(await this.getCiFailureReport(owner, repo, ref));
+      return renderCiFailureReport(await this.getCiFailureReport(owner, repo, ref, opts));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return `Could not fetch check runs: ${message}`;
@@ -983,6 +1083,117 @@ const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s/;
 
 /** Lines that carry no actionable signal on their own. */
 const NOISE_RE = /Process completed with exit code|##\[error\]Process completed|^##\[error\]$/i;
+
+/**
+ * Hard BYTE cap on one job's excerpt.
+ *
+ * `buildContextExcerpt` bounds LINES (50), and the no-anchor path bounds them
+ * at 30 — neither bounds bytes, and a minified bundle, a base64 blob or a
+ * single-line JSON dump is ONE line of arbitrary length. Roughly 4k tokens:
+ * enough for a stack trace plus its build context, small enough that several of
+ * these don't crowd out the prompt.
+ *
+ * Same cap, for the same reason, as agentic-pi's `excerptJobLog`
+ * (`packages/agentic-pi/src/extensions/github/log-excerpt.ts`, whose header
+ * explains the strategy). Duplicated rather than imported: that module is not
+ * on agentic-pi's public entry (`src/index.ts`) and widening a published
+ * package's API to share one constant is the wrong trade. Keep the two in step.
+ */
+const MAX_CI_LOG_EXCERPT_BYTES = 16_000;
+
+/**
+ * Cap on how much of a raw log we even SCAN. Beyond this we keep the TAIL —
+ * the failure that stopped the job is the last one, and a long log's early
+ * errors are usually retried-and-recovered noise. Without it a 100 MB log costs
+ * a 100 MB `split("\n")` plus a regex per line before the excerpt cap above
+ * ever gets a chance to apply.
+ */
+const MAX_CI_LOG_SCAN_BYTES = 512 * 1024;
+
+/**
+ * How many failed checks we resolve at once. `checks.listForRef` defaults to 30
+ * runs and each resolution holds a whole job log in memory, so unbounded
+ * `Promise.all` means up to 30 concurrent multi-megabyte strings — see
+ * {@link GitHubClient.getCiFailureReport} for why that lands on the dispatch
+ * path whether or not the dispatch goes anywhere.
+ */
+const CI_LOG_FETCH_CONCURRENCY = 4;
+
+/**
+ * Total wall-clock budget for every Actions read in one report. A webhook
+ * handler is waiting on this, and the report is best-effort evidence: losing it
+ * to a deadline costs the fix agent context, while hanging on it costs the
+ * dispatch.
+ */
+const CI_REPORT_DEADLINE_MS = 20_000;
+
+/**
+ * `Promise.all` with a ceiling on how many run at once. Results stay in input
+ * order, so the report reads in check-run order however the waves interleaved.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = next++; i < items.length; i = next++) {
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/**
+ * Decode an Actions job-log response body into text, or `null` when it isn't
+ * one we recognise.
+ *
+ * Octokit only hands back a `string` when the response carried a `text/*`
+ * content type or a utf-8 charset; **anything else lands as an `ArrayBuffer`**
+ * (`@octokit/request`'s `getResponseData`). This endpoint 302s to blob storage
+ * whose content type we do not control, so that branch is reachable — and the
+ * `typeof data === "string" ? data : String(data)` this replaces would have
+ * turned it into the literal `"[object ArrayBuffer]"`: non-empty, so
+ * `logsAvailable` went TRUE, the annotation fallback was skipped and the
+ * degradation banner suppressed. That is precisely the silent degradation this
+ * phase exists to kill, so an unrecognised shape is reported, not stringified.
+ */
+function decodeJobLog(data: unknown): string | null {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+  // Buffer / Uint8Array — a view over someone else's ArrayBuffer, so the
+  // offset+length matter.
+  if (ArrayBuffer.isView(data)) {
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8");
+  }
+  return null;
+}
+
+/** Classify a failed job-log download — see {@link CiLogUnavailableCause}. */
+function logFetchCause(err: unknown): CiLogUnavailableCause {
+  const status = httpStatus(err);
+  if (status === 403) return "forbidden";
+  if (status === 410) return "expired";
+  // 429 / 5xx / an aborted request / a network error all land here: we could
+  // not fetch, and we do not know more than that.
+  return "unavailable";
+}
+
+/**
+ * The cause the report-level banner speaks with, in decreasing order of "what
+ * should the operator do about it".
+ *
+ * `forbidden` leads because a 403 is App-wide — one job reporting it settles
+ * the question for every job — and it is the only cause with an action attached.
+ * `empty` trails because it is not a fetch failure at all.
+ */
+function dominantLogUnavailableCause(jobs: CiJobFailure[]): CiLogUnavailableCause | undefined {
+  const order: CiLogUnavailableCause[] = ["forbidden", "expired", "unavailable", "empty"];
+  return order.find((c) => jobs.some((j) => j.logUnavailableCause === c));
+}
 
 /**
  * Parse the Actions job id from a check-run's `details_url`.
@@ -1008,7 +1219,8 @@ export function actionsRunIdFromDetailsUrl(url: string | null | undefined): numb
 }
 
 /**
- * The three-line banner that fires when the report degraded to annotations.
+ * The three-line banner that fires when the report degraded to annotations —
+ * one per {@link CiLogUnavailableCause}.
  *
  * This is the actual fix for issue #251's "Finding 1". The missing permission
  * was never the real damage — the damage was that its absence looked exactly
@@ -1016,12 +1228,35 @@ export function actionsRunIdFromDetailsUrl(url: string | null | undefined): numb
  * been diagnosing CI failures from truncated annotations without anyone
  * noticing. Saying so in the prompt makes the degradation legible to both the
  * agent and whoever reads the transcript.
+ *
+ * Which is exactly why there are four of these and not one. A banner that
+ * names the wrong cause reintroduces the same failure in miniature: an operator
+ * told to grant a permission they already granted stops reading, and the run
+ * that produced a 410 or a rate limit goes on looking normal. Only `forbidden`
+ * may mention the permission, because only a 403 is evidence of it.
  */
-const LOGS_UNAVAILABLE_NOTE = [
-  "NOTE: GitHub Actions job logs are unavailable (the App lacks `Actions: read`).",
-  "The excerpts below are check-run annotations only, which are usually truncated.",
-  "Grant Actions: read for full CI output.",
-].join("\n");
+const LOGS_UNAVAILABLE_NOTES: Record<CiLogUnavailableCause, string> = {
+  forbidden: [
+    "NOTE: GitHub Actions job logs are unavailable (the App lacks `Actions: read`).",
+    "The excerpts below are check-run annotations only, which are usually truncated.",
+    "Grant Actions: read for full CI output.",
+  ].join("\n"),
+  expired: [
+    "NOTE: GitHub Actions job logs are unavailable — GitHub has expired them (410 Gone; Actions keeps logs for a limited retention window).",
+    "The excerpts below are check-run annotations only, which are usually truncated.",
+    "This is NOT a permission problem and nothing needs granting: only a fresh CI run can produce readable logs.",
+  ].join("\n"),
+  unavailable: [
+    "NOTE: GitHub Actions job logs could not be fetched (the request failed or timed out — e.g. a rate limit or a GitHub 5xx).",
+    "The excerpts below are check-run annotations only, which are usually truncated.",
+    "This is NOT a permission problem and is usually transient: a later attempt may well get them.",
+  ].join("\n"),
+  empty: [
+    "NOTE: GitHub Actions returned an EMPTY job log for every failed check.",
+    "The excerpts below are check-run annotations only, which are usually truncated.",
+    "This is NOT a permission problem — the job produced no output GitHub kept.",
+  ].join("\n"),
+};
 
 /**
  * Render a {@link CiFailureReport} as the markdown `{{ciSection}}` carries.
@@ -1051,9 +1286,13 @@ export function renderCiFailureReport(report: CiFailureReport): string {
   // have read. A CircleCI-only repo has no Actions logs to be missing, and
   // telling its operator to grant `Actions: read` would be a lie.
   const hadActionsJob = report.jobs.some((j) => actionsJobIdFromDetailsUrl(j.jobUrl) !== null);
-  return report.logsAvailable || !hadActionsJob
-    ? sections.join("\n\n")
-    : [LOGS_UNAVAILABLE_NOTE, ...sections].join("\n\n");
+  if (report.logsAvailable || !hadActionsJob) return sections.join("\n\n");
+
+  // No recorded cause means nobody classified the failure, so the honest banner
+  // is the one that claims least — never the permission one, which is a claim
+  // about a status code we would not have seen.
+  const note = LOGS_UNAVAILABLE_NOTES[report.logUnavailableCause ?? "unavailable"];
+  return [note, ...sections].join("\n\n");
 }
 
 /**
@@ -1067,9 +1306,20 @@ function stripTimestamp(line: string): string {
  * Given the full text of an Actions job log, return a compact excerpt
  * highlighting the real error lines with surrounding context.
  * Timestamps are stripped; pure noise lines are deprioritised.
+ *
+ * Bounded in BYTES as well as lines ({@link MAX_CI_LOG_EXCERPT_BYTES}), because
+ * the line bounds below are no bound at all on a log whose failure is one
+ * 8 MB minified line — and this excerpt is held on `PrState.ciReport` and
+ * rendered into a prompt. The cap is applied here rather than at the call site
+ * so every caller is bounded by construction.
  */
-export function extractErrorExcerpt(fullLog: string): string {
-  const rawLines = fullLog.split("\n");
+export function extractErrorExcerpt(
+  fullLog: string,
+  maxBytes: number = MAX_CI_LOG_EXCERPT_BYTES,
+): string {
+  // Scan-window first: everything below is O(log size), and the byte cap can
+  // only help once we have already paid for the split.
+  const rawLines = tailBytes(fullLog, MAX_CI_LOG_SCAN_BYTES).split("\n");
   const lines = rawLines.map(stripTimestamp);
 
   // Collect indices of real (non-noise) error lines
@@ -1089,12 +1339,19 @@ export function extractErrorExcerpt(fullLog: string): string {
   // Prefer real error lines; fall back to noise-only if that's all we have
   const anchorIndices = realErrorIndices.length > 0 ? realErrorIndices : noiseOnlyIndices;
 
-  if (anchorIndices.length > 0) {
-    return buildContextExcerpt(lines, anchorIndices);
-  }
+  const excerpt =
+    anchorIndices.length > 0
+      ? buildContextExcerpt(lines, anchorIndices)
+      : // No error lines at all — return the last 30 lines as a tail
+        lines.slice(-30).join("\n");
 
-  // No error lines at all — return the last 30 lines as a tail
-  return lines.slice(-30).join("\n");
+  const capped = tailBytes(excerpt, maxBytes);
+  if (capped === excerpt) return excerpt;
+  // Say so in-band: a silently truncated excerpt reads like a complete one, and
+  // the agent would reason about a stack trace it can't see the top of.
+  const shown = Buffer.byteLength(capped, "utf8");
+  const total = Buffer.byteLength(excerpt, "utf8");
+  return `[truncated — showing the last ${shown} of ${total} bytes of this excerpt]\n${capped}`;
 }
 
 /**
@@ -1109,6 +1366,27 @@ function buildContextExcerpt(lines: string[], anchorIndices: number[]): string {
   }
   const sorted = Array.from(included).sort((a, b) => a - b);
   return sorted.slice(0, 50).map((i) => lines[i]).join("\n");
+}
+
+/**
+ * Keep the last `maxBytes` bytes, then drop the leading partial line. That
+ * second step also repairs the mojibake a byte-exact cut through a multi-byte
+ * character would otherwise leave at the front. Cutting from the END because
+ * the failure that stopped a job is the last thing in it.
+ *
+ * Mirrors agentic-pi's `tailBytes` (see {@link MAX_CI_LOG_EXCERPT_BYTES}).
+ */
+function tailBytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.byteLength <= maxBytes) return text;
+  const tail = buf.subarray(buf.byteLength - maxBytes).toString("utf8");
+  const nl = tail.indexOf("\n");
+  if (nl === -1) return tail;
+  const whole = tail.slice(nl + 1);
+  // One enormous line followed by a newline leaves nothing after the cut. A
+  // ragged first line beats reporting the log as empty, which is a different
+  // (and wrong) claim about why there is no evidence.
+  return whole.trim().length > 0 ? whole : tail;
 }
 
 /**

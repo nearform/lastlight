@@ -421,9 +421,15 @@ export async function resolvePrState(
       // The heavy read (one Actions job-log download per failed check) only
       // when there is a failure to explain. Phase 1's `logsAvailable` flag
       // rides along so the prompt can say the evidence degraded.
+      //
+      // `checkOpts` for the same reason the reads above take it, one step
+      // further on: `concludeReviewCheck` writes `conclusion: "failure"` for a
+      // CHANGES_REQUESTED review, so without it our own reviewer's verdict is
+      // picked up as a failed check and handed to the fix agent as CI evidence
+      // to fix.
       if (state.checksState === "failing") {
         state.ciReport = await github
-          .getCiFailureReport(owner, repo, state.headSha)
+          .getCiFailureReport(owner, repo, state.headSha, checkOpts)
           .catch((err: unknown) => {
             note("getCiFailureReport", err);
             return null;
