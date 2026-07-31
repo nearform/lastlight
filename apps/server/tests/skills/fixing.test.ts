@@ -206,8 +206,11 @@ describe("fixing skill — the non-fixable classes gate the fix phase", () => {
   it.each(["pr-fix", "dependabot-ci-fix"])("%s skip_if covers exactly the three", (name) => {
     const fix = getWorkflow(name).phases.find((p) => p.name === "fix")!;
     const exprs = Array.isArray(fix.skip_if) ? fix.skip_if : [fix.skip_if!];
+    // The PARSED class off the harvest, not a substring of the diagnose output:
+    // the output form matched an agent's prose, matched a replayed prior-attempt
+    // line, and evaluated empty across a resume boundary.
     expect(exprs).toEqual(
-      NON_FIXABLE.map((cls) => `phaseOutputs.diagnosis.contains('class=${cls}')`),
+      NON_FIXABLE.map((cls) => `scratch.fixMarkers.diagnosis.class == '${cls}'`),
     );
   });
 
@@ -216,7 +219,7 @@ describe("fixing skill — the non-fixable classes gate the fix phase", () => {
     const joined = (Array.isArray(fix.skip_if) ? fix.skip_if : [fix.skip_if!]).join(" ");
     const nonFixable: readonly string[] = NON_FIXABLE;
     for (const cls of CLASSES.filter((c) => !nonFixable.includes(c))) {
-      expect(joined).not.toContain(`class=${cls}`);
+      expect(joined).not.toContain(`'${cls}'`);
     }
   });
 });

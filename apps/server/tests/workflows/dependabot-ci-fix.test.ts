@@ -36,11 +36,12 @@ describe("dependabot-ci-fix — built-in workflow + cron", () => {
     const fix = def.phases.find((p) => p.name === "fix")!;
     // A NON-FAILING skip, deliberately not `on_output.contains_BLOCKED:
     // {action: fail}`: `failed` is reserved for malfunction, and correctly
-    // determining a PR can't be fixed here is a succeeded run.
+    // determining a PR can't be fixed here is a succeeded run. Read off the
+    // harvested class, which survives a resume and cannot be forged by prose.
     expect(fix.skip_if).toEqual([
-      "phaseOutputs.diagnosis.contains('class=flaky')",
-      "phaseOutputs.diagnosis.contains('class=infra-dependent')",
-      "phaseOutputs.diagnosis.contains('class=upstream-broken')",
+      "scratch.fixMarkers.diagnosis.class == 'flaky'",
+      "scratch.fixMarkers.diagnosis.class == 'infra-dependent'",
+      "scratch.fixMarkers.diagnosis.class == 'upstream-broken'",
     ]);
     expect(fix.messages?.on_skipped_done).toBeTruthy();
   });

@@ -166,6 +166,76 @@ describe("evalSkipIf — phase-level skip guard", () => {
   });
 });
 
+/**
+ * The form the packaged fix workflows now declare — the PARSED class off the
+ * marker harvest, compared with `==`.
+ *
+ * The `phaseOutputs` form above is retained as a general capability but was
+ * wrong for this guard four ways: it matched prose, it matched a replayed
+ * prior-attempt line, it matched by prefix, and it evaluated empty across a
+ * resume boundary. `scratch` is reloaded from the run row, so it survives resume.
+ */
+describe("evalSkipIf — the harvested diagnosis class", () => {
+  const HARVESTED = [
+    "scratch.fixMarkers.diagnosis.class == 'flaky'",
+    "scratch.fixMarkers.diagnosis.class == 'infra-dependent'",
+    "scratch.fixMarkers.diagnosis.class == 'upstream-broken'",
+  ];
+  /** The superseded form, kept here only to pin what it got wrong. */
+  const OUTPUT_FORM = [
+    "phaseOutputs.diagnosis.contains('class=flaky')",
+    "phaseOutputs.diagnosis.contains('class=infra-dependent')",
+    "phaseOutputs.diagnosis.contains('class=upstream-broken')",
+  ];
+  const ctxFor = (cls: string | null, output = "") => ({
+    output: "",
+    phaseOutputs: { diagnosis: output },
+    scratch: { fixMarkers: { diagnosis: cls === null ? null : { class: cls } } },
+  });
+
+  it("ORs the list — any harvested stopping class skips", () => {
+    for (const cls of ["flaky", "infra-dependent", "upstream-broken"]) {
+      expect(evalSkipIf(HARVESTED, ctxFor(cls))).toBe(
+        `scratch.fixMarkers.diagnosis.class == '${cls}'`,
+      );
+    }
+  });
+
+  it("does not fire for the two fixable classes", () => {
+    for (const cls of ["reproducible", "env-mismatch"]) {
+      expect(evalSkipIf(HARVESTED, ctxFor(cls))).toBeUndefined();
+    }
+  });
+
+  it("ignores prose in the phase output that names a stopping class", () => {
+    const prose = "This is NOT class=flaky — it reproduces every time. class=upstream-broken? No.";
+    expect(evalSkipIf(HARVESTED, ctxFor("reproducible", prose))).toBeUndefined();
+    // The old form reads the same context and gets it wrong — the defect, pinned.
+    expect(evalSkipIf(OUTPUT_FORM, ctxFor("reproducible", prose))).toBeDefined();
+  });
+
+  it("is an exact comparison, not a prefix match", () => {
+    // `class=flaky-timeout` used to match `class=flaky`; `class=probably-flaky`
+    // did not. Neither is `flaky`, and now neither matches.
+    expect(evalSkipIf(HARVESTED, ctxFor("flaky-timeout"))).toBeUndefined();
+    expect(evalSkipIf(HARVESTED, ctxFor("probably-flaky"))).toBeUndefined();
+  });
+
+  it("fails open when nothing was harvested", () => {
+    expect(evalSkipIf(HARVESTED, ctxFor(null))).toBeUndefined();
+    expect(evalSkipIf(HARVESTED, { output: "" })).toBeUndefined();
+    expect(evalSkipIf(HARVESTED, { output: "", scratch: {} })).toBeUndefined();
+  });
+
+  it("survives a resume boundary, where phaseOutputs is empty", () => {
+    // The case the move exists for: a deduplicated phase contributes no
+    // `outputVars`, so the old guard failed open and ran a full sandbox + gate.
+    const resumed = { output: "", scratch: { fixMarkers: { diagnosis: { class: "flaky" } } } };
+    expect(evalSkipIf(HARVESTED, resumed)).toBeDefined();
+    expect(evalSkipIf(OUTPUT_FORM, resumed)).toBeUndefined();
+  });
+});
+
 describe("evalUntilExpression — invalid / unrecognised expressions", () => {
   it("returns false for an empty string", () => {
     expect(evalUntilExpression("", { output: "anything" })).toBe(false);

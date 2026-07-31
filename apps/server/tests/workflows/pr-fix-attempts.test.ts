@@ -27,6 +27,7 @@ vi.mock("#src/admin/docker.js", () => ({
 }));
 
 import { executeAgent, executeCommand } from "#src/engine/agent-executor.js";
+import { harvestFixMarkers } from "#src/engine/fix-harvest.js";
 import { StateDb } from "#src/state/db.js";
 import { getWorkflow } from "#src/workflows/loader.js";
 import {
@@ -142,8 +143,8 @@ describe("promoteFlakyDiagnosis — the flaky deferral cap", () => {
     for (const name of ["pr-fix", "dependabot-ci-fix"]) {
       const promoted = promoteFlakyDiagnosis(getWorkflow(name), 2, fix());
       expect(fixPhase(promoted).skip_if).toEqual([
-        "phaseOutputs.diagnosis.contains('class=infra-dependent')",
-        "phaseOutputs.diagnosis.contains('class=upstream-broken')",
+        "scratch.fixMarkers.diagnosis.class == 'infra-dependent'",
+        "scratch.fixMarkers.diagnosis.class == 'upstream-broken'",
       ]);
     }
   });
@@ -267,7 +268,16 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
         ...(repoConfig ? { repoConfig } : {}),
       },
       makeConfig(),
-      { onRunStart: async (id: string) => { runId = id; } },
+      {
+        onRunStart: async (id: string) => { runId = id; },
+        // The REAL harvest, wired exactly as `src/index.ts` wires it. The
+        // `fix` phase's `skip_if` reads `scratch.fixMarkers.diagnosis.class`,
+        // so a test that omitted this would drive a workflow whose guard can
+        // never match — and would have gone green while asserting nothing.
+        onPhaseEnd: async (phase, phaseResult) => {
+          harvestFixMarkers(db, runId, "pr-fix", phase, phaseResult.output ?? "");
+        },
+      },
       db,
       models ?? { default: OPERATOR },
       {},

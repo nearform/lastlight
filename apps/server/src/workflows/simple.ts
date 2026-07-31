@@ -825,9 +825,16 @@ export function escalateFixModel(
  *
  * Matched literally rather than by pattern: the promotion has to be greppable
  * from the YAML, and a fuzzy match would also strip an overlay's own unrelated
- * `class=flaky…` guard.
+ * `flaky` guard.
+ *
+ * It reads the PARSED class off the marker harvest rather than substring-matching
+ * the diagnose phase's output, because the output form matched an agent's prose
+ * ("this is not `class=flaky`…"), matched a `{{priorAttempts}}` line replayed
+ * from an EARLIER attempt, and evaluated empty across a resume boundary — so the
+ * guard silently ran the full sandbox on exactly the verdicts it exists to stop.
+ * Keep this string byte-identical to the row in both fix workflow YAMLs.
  */
-export const FLAKY_SKIP_IF_EXPRESSION = "phaseOutputs.diagnosis.contains('class=flaky')";
+export const FLAKY_SKIP_IF_EXPRESSION = "scratch.fixMarkers.diagnosis.class == 'flaky'";
 
 /**
  * Promote a third consecutive `flaky` diagnosis to `reproducible` by dropping

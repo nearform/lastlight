@@ -35,10 +35,14 @@ describe("pr-fix — built-in workflow", () => {
 
   it("skips the fix phase on the three non-fixable diagnosis classes", () => {
     const fix = def.phases.find((p) => p.name === "fix")!;
+    // Read off the harvested, PARSED class — not off the diagnose phase's
+    // output, which matched an agent's prose ("not class=flaky, it's
+    // reproducible"), matched a replayed `{{priorAttempts}}` line, and was
+    // empty across a resume boundary.
     expect(fix.skip_if).toEqual([
-      "phaseOutputs.diagnosis.contains('class=flaky')",
-      "phaseOutputs.diagnosis.contains('class=infra-dependent')",
-      "phaseOutputs.diagnosis.contains('class=upstream-broken')",
+      "scratch.fixMarkers.diagnosis.class == 'flaky'",
+      "scratch.fixMarkers.diagnosis.class == 'infra-dependent'",
+      "scratch.fixMarkers.diagnosis.class == 'upstream-broken'",
     ]);
     expect(fix.messages?.on_skipped_done).toBeTruthy();
   });

@@ -43,6 +43,15 @@ phases:
     # determining the PR can't be fixed here IS the job. One expression per
     # class, so the list reads as the class list it is.
     #
+    # Read off the PARSED class the marker harvest persisted
+    # (`scratch.fixMarkers.diagnosis.class`), not off the diagnose phase's whole
+    # output. Substring-matching the output was wrong three ways: prose like
+    # "this is not class=flaky, it's reproducible" skipped the fix; a replayed
+    # `{{priorAttempts}}` line from an earlier attempt matched too; and
+    # `phaseOutputs` is EMPTY across a resume boundary, so the guard failed open
+    # and ran the full sandbox + gate on a verdict that said not to. `scratch`
+    # is reloaded from the run row, so it survives resume.
+    #
     # `class=flaky` is the one BOUNDED row: after `fix.maxFlakyDeferrals` (2)
     # consecutive `flaky` verdicts on the same problem the harness drops this
     # expression for that run, so the third one is attempted as `reproducible`
@@ -51,9 +60,9 @@ phases:
     # `promoteFlakyDiagnosis` in src/workflows/simple.ts matches the expression
     # below LITERALLY; the other two rows always apply.
     skip_if:
-      - "phaseOutputs.diagnosis.contains('class=flaky')"
-      - "phaseOutputs.diagnosis.contains('class=infra-dependent')"
-      - "phaseOutputs.diagnosis.contains('class=upstream-broken')"
+      - "scratch.fixMarkers.diagnosis.class == 'flaky'"
+      - "scratch.fixMarkers.diagnosis.class == 'infra-dependent'"
+      - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
     # Load-bearing, not cosmetic: `runUntilBash` defaults to
     # `timeout_seconds ?? 30`, and thirty seconds kills any real test suite
     # mid-run and reports a false red. Mirrors `fix.gateTimeoutSeconds` (900) in

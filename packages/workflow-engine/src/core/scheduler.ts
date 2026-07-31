@@ -98,13 +98,28 @@ export async function runWorkflowCore(
   const activeBackend = config.sandbox ?? "gondolin";
 
   while (!isComplete(dag)) {
-    // Honour a cancel that landed during the previous phase's execution.
+    // Honour a cancel that landed during the previous phase's execution, and
+    // re-read the run row's scratch while we are here.
     if (db && workflowId) {
       const latest = db.runs.getRun(workflowId);
       if (latest?.status === "cancelled") {
         console.log(`[runner] ${definition.name} cancelled — stopping`);
         return { success: false, phases };
       }
+      // `runScope.scratch` is loaded ONCE, before the first phase. The HOST also
+      // writes to the row mid-run through `mergeScratch` from its `onPhaseEnd`
+      // hook — lastlight-core's fix-marker harvest does exactly that — and this
+      // process cannot see those writes. So the `skip_if` gate below would
+      // evaluate `scratch.*` against the pre-run snapshot on a fresh run and only
+      // see the real value across a resume (where the row is re-read at startup):
+      // a guard that silently does nothing on the path it was written for, which
+      // is the failure shape `skip_if` exists to avoid.
+      //
+      // Mutated in place, never replaced: `ctx.scratch` aliases this object so
+      // `{{scratch.*}}` templates and the loop nodes' own slots keep resolving.
+      // The row is authoritative because every in-engine scratch write is paired
+      // with a `mergeScratch` of the same value.
+      if (latest?.scratch) Object.assign(runScope.scratch, latest.scratch);
     }
 
     // Skip nodes whose trigger rule fails (deps terminal, rule unsatisfied).
