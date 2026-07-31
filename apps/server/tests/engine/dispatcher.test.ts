@@ -1143,6 +1143,24 @@ describe('applyPrDispatchGate — the cron / api route crosses the same gate', (
       ).decision,
     ).toBe('run');
   });
+
+  it('reviews a never-settling PR on the sweep route — the release mechanism it claims to be', async () => {
+    const db = mockDb();
+    const github = prGithubStub({ checksState: 'pending' });
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'pr-review',
+        state: prState({ checksState: 'pending' }),
+        policy: { ...policy(), review: { ...defaultReviewConfig(), trigger: 'after-checks' } },
+        route: 'sweep',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(d.decision).toBe('run');
+    expect(d.review).toBe('dispatch');
+  });
 });
 
 describe('prPolicyConfig — one config for both gates', () => {

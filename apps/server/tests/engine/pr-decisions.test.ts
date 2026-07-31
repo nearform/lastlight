@@ -570,6 +570,44 @@ describe("resolveReviewTrigger", () => {
       /sweep route, checks failing$/,
     ],
     [
+      // A check run that never CONCLUDES — a fork PR's `workflow_run` awaiting
+      // maintainer approval, a dead self-hosted runner, a third-party app that
+      // opened a check and crashed — leaves the aggregate `pending` with no
+      // further `check_suite` ever coming. `pending` used to be evaluated
+      // before the route, so the sweep deferred too and the PR was never
+      // reviewed by ANY route; with `postsCheck` on, the `queued` placeholder
+      // then sat there permanently and a repo that made `last-light/review`
+      // required had an unmergeable PR. This is the packaged default.
+      "the sweep releases a PR whose checks never settle",
+      { checksState: "pending" },
+      { trigger: "after-checks" },
+      { route: "sweep" },
+      "dispatch",
+      /sweep route, checks pending$/,
+    ],
+    [
+      // The exemption is the SWEEP's alone. A settle event that somehow arrives
+      // with the aggregate still pending is a genuine "not yet" — another suite
+      // is still running and one is coming.
+      "a settle event still waits while another suite is running",
+      { checksState: "pending" },
+      { trigger: "after-checks" },
+      { route: "checks-settled" },
+      "defer",
+      /^checks-pending:/,
+    ],
+    [
+      // The lock outranks the explicit request, unlike every other review skip:
+      // it is not policy but a physical constraint (one workspace, one branch,
+      // one agent). The dispatcher replies to the human instead.
+      "an explicit @bot review does NOT override the run lock",
+      { runInFlight: { workflow: "pr-fix", runId: "4821" } },
+      { trigger: "eager" },
+      { explicitRequest: true },
+      "skip",
+      /^run-in-flight: pr-fix 4821/,
+    ],
+    [
       // The cron is a candidate FINDER; the mode is still enforced here, so a
       // repo on `on-request` gets no sweep-driven review. That is the property
       // that made a third implementation of `review.trigger` unnecessary.

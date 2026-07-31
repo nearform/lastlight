@@ -2,8 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 import type { WorkflowRun } from "#src/state/workflow-run-store.js";
 import {
   REVIEW_CHECK_NAME,
+  bindQueuedReviewCheck,
   concludeReviewCheck,
   installReviewCheckObserver,
+  openAndBindReviewCheck,
   openReviewCheck,
   postReviewCheckForSkip,
   readReviewCheck,
@@ -39,6 +41,12 @@ function fakeDb() {
     rows,
     runs: {
       getRun: vi.fn((id: string) => rows.get(id) ?? null),
+      getByTrigger: vi.fn(
+        (triggerId: string) =>
+          [...rows.values()].find(
+            (r) => r.triggerId === triggerId && ["queued", "running", "paused"].includes(r.status),
+          ) ?? null,
+      ),
       mergeScratch: vi.fn((id: string, patch: Record<string, unknown>) => {
         const run = rows.get(id);
         if (!run) return;
@@ -109,6 +117,115 @@ describe("openReviewCheck + recordReviewCheck", () => {
   it("creates nothing without a head SHA or a client", async () => {
     expect(await openReviewCheck({ owner: "o", repo: "r", headSha: "" }, { github: fakeGithub() })).toBeNull();
     expect(await openReviewCheck({ owner: "o", repo: "r", headSha: "s" }, { github: null })).toBeNull();
+  });
+});
+
+describe("openAndBindReviewCheck + bindQueuedReviewCheck — creation and persistence are one step", () => {
+  it("records the ref in the same call that creates it", async () => {
+    const db = fakeDb();
+    const run = makeRun();
+    db.rows.set(run.id, run);
+    const github = fakeGithub();
+
+    const ref = await openAndBindReviewCheck(
+      db,
+      run.id,
+      { owner: "cliftonc", repo: "lastlight", headSha: "sha-1", detailsUrl: "https://x/runs/run-1" },
+      { github },
+    );
+
+    expect(ref).toMatchObject({ checkRunId: 4242 });
+    expect(readReviewCheck(db.rows.get(run.id))).toEqual(ref);
+    expect(github.updateCheckRun).toHaveBeenCalledWith(
+      "cliftonc",
+      "lastlight",
+      4242,
+      expect.objectContaining({ detailsUrl: "https://x/runs/run-1" }),
+    );
+  });
+
+  it("binds a QUEUED run's check — the path that used to strand one on every capped review", async () => {
+    // `runSimpleWorkflow` returns `{ queued: true }` BEFORE it invokes
+    // `onRunStart`, and admission promotes the run through `resumeSimpleRun`,
+    // which takes no callbacks at all. So the check was created at dispatch,
+    // never written to `scratch.reviewCheck`, never seen by the terminal
+    // observer and never concluded — and the 30-minute sweep cannot repair it,
+    // because a `queued` run counts as active for its trigger, so the sweep
+    // resolves `run-in-flight` → placement `none` and posts nothing.
+    const db = fakeDb();
+    const queued = makeRun({ id: "run-q", status: "queued", scratch: {} });
+    db.rows.set(queued.id, queued);
+    const github = fakeGithub();
+
+    const ref = await bindQueuedReviewCheck(
+      db,
+      {
+        triggerId: "cliftonc/lastlight#8",
+        workflowName: "pr-review",
+        owner: "cliftonc",
+        repo: "lastlight",
+        headSha: "sha-1",
+        detailsUrl: (id) => `https://x/runs/${id}`,
+      },
+      { github },
+    );
+
+    expect(ref).toMatchObject({ checkRunId: 4242, headSha: "sha-1" });
+    expect(readReviewCheck(db.rows.get("run-q"))).toEqual(ref);
+
+    // ...and it is therefore CONCLUDED when the queued run reaches a terminal
+    // status — the TTL expiry (`expireQueued`) notifies the same observer.
+    const observers: Array<(r: WorkflowRun, s: any) => void> = [];
+    db.runs.setTerminalObserver.mockImplementation((fn: any) => observers.push(fn));
+    installReviewCheckObserver(db, { github });
+    observers[0](db.rows.get("run-q")!, "cancelled");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(github.updateCheckRun).toHaveBeenCalledWith(
+      "cliftonc",
+      "lastlight",
+      4242,
+      expect.objectContaining({ status: "completed", conclusion: "cancelled" }),
+    );
+  });
+
+  it("creates nothing when the queued row already owns a check, or is not ours", async () => {
+    const db = fakeDb();
+    const existing = { checkRunId: 7, owner: "cliftonc", repo: "lastlight", headSha: "sha-0" };
+    db.rows.set("run-q", makeRun({ id: "run-q", status: "queued", scratch: { reviewCheck: existing } }));
+    db.rows.set(
+      "run-other",
+      makeRun({ id: "run-other", status: "queued", triggerId: "cliftonc/lastlight#9", workflowName: "pr-fix" }),
+    );
+    const github = fakeGithub();
+    const args = { owner: "cliftonc", repo: "lastlight", headSha: "sha-1" };
+
+    // A duplicate trigger on an already-queued run: a second check would orphan
+    // the first rather than supersede it.
+    expect(
+      await bindQueuedReviewCheck(
+        db,
+        { ...args, triggerId: "cliftonc/lastlight#8", workflowName: "pr-review" },
+        { github },
+      ),
+    ).toBeNull();
+    // A queued run of a DIFFERENT workflow does not get a review check.
+    expect(
+      await bindQueuedReviewCheck(
+        db,
+        { ...args, triggerId: "cliftonc/lastlight#9", workflowName: "pr-review" },
+        { github },
+      ),
+    ).toBeNull();
+    // No row at all (the run started immediately, or the dispatch failed).
+    expect(
+      await bindQueuedReviewCheck(
+        db,
+        { ...args, triggerId: "cliftonc/lastlight#404", workflowName: "pr-review" },
+        { github },
+      ),
+    ).toBeNull();
+    expect(github.createCheckRun).not.toHaveBeenCalled();
+    expect(readReviewCheck(db.rows.get("run-q"))).toEqual(existing);
   });
 });
 

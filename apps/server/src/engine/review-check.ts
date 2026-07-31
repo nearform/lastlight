@@ -134,6 +134,83 @@ export async function openReviewCheck(
 }
 
 /**
+ * Open the check AND bind it to a run, as one step.
+ *
+ * The two halves must not be separable, and that is a defect report rather than
+ * a preference: the check used to be created at the top of `dispatchWorkflow`
+ * and recorded only inside the runner's `onRunStart` callback — which
+ * `runSimpleWorkflow` never reaches when the run is over the concurrency cap
+ * (it returns `{ queued: true }` first). The check was created, never
+ * persisted, never seen by the terminal observer, and never concluded; and the
+ * accidental repair that used to hide this is gone, because a `queued` run
+ * counts as active for its trigger, so the 30-minute sweep resolves
+ * `run-in-flight` → placement `none` and posts no superseding check.
+ *
+ * Best-effort throughout: a failed create returns null and the review proceeds
+ * without a check. Losing the check is a UI gap; refusing the review over it
+ * would not be.
+ */
+export async function openAndBindReviewCheck(
+  db: StateDb,
+  runId: string,
+  args: { owner: string; repo: string; headSha: string; detailsUrl?: string },
+  deps: ReviewCheckDeps,
+): Promise<PersistedReviewCheck | null> {
+  const ref = await openReviewCheck(args, deps);
+  if (!ref) return null;
+  db.runs.mergeScratch(runId, { [REVIEW_CHECK_SCRATCH_KEY]: ref });
+  if (args.detailsUrl) linkReviewCheck(ref, args.detailsUrl, deps).catch(() => {});
+  return ref;
+}
+
+/** What {@link bindQueuedReviewCheck} needs to find the row and describe the check. */
+export interface QueuedReviewCheckArgs {
+  /** `owner/repo#N` — exactly the id `simple.ts` derived for the run. */
+  triggerId: string;
+  workflowName: string;
+  owner: string;
+  repo: string;
+  headSha: string;
+  /** Dashboard deep link for whichever run turns out to own the check. */
+  detailsUrl?: (runId: string) => string | undefined;
+}
+
+/**
+ * Bind a check to the run a dispatch just QUEUED.
+ *
+ * A queued run never reaches `onRunStart` — `runSimpleWorkflow` writes the row
+ * and returns — and admission promotes it through `resumeSimpleRun`, which
+ * takes no callbacks at all. So this is the only moment at which a queued
+ * review's check can be attached to its run, and attaching it is what makes the
+ * TTL expiry, the admin cancel and the eventual completion resolve it for free.
+ *
+ * Returns null (creating nothing) when there is no queued row of this workflow
+ * to own it, or when the row already carries one — a duplicate trigger on an
+ * already-queued run also returns `queued`, and a second check would orphan the
+ * first rather than supersede it.
+ */
+export async function bindQueuedReviewCheck(
+  db: StateDb,
+  args: QueuedReviewCheckArgs,
+  deps: ReviewCheckDeps,
+): Promise<PersistedReviewCheck | null> {
+  const run = db.runs.getByTrigger(args.triggerId);
+  if (!run || run.workflowName !== args.workflowName || run.status !== "queued") return null;
+  if (readReviewCheck(run)) return null;
+  return openAndBindReviewCheck(
+    db,
+    run.id,
+    {
+      owner: args.owner,
+      repo: args.repo,
+      headSha: args.headSha,
+      detailsUrl: args.detailsUrl?.(run.id),
+    },
+    deps,
+  );
+}
+
+/**
  * Post the placeholder a DEFERRED review leaves behind — see
  * `reviewCheckPlacement`.
  *

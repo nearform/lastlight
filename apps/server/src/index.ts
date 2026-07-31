@@ -56,10 +56,9 @@ import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./engine/pr-s
 import { renderContext, type ReviewTriggerOptions } from "./engine/pr-decisions.js";
 import {
   REVIEW_WORKFLOW,
+  bindQueuedReviewCheck,
   installReviewCheckObserver,
-  linkReviewCheck,
-  openReviewCheck,
-  recordReviewCheck,
+  openAndBindReviewCheck,
 } from "./engine/review-check.js";
 import { runDashboardUrl } from "./notify/model.js";
 import { harvestFixMarkers } from "./engine/fix-harvest.js";
@@ -450,22 +449,81 @@ async function main() {
 
     // ── The `last-light/review` check (09 → S2) ─────────────────────────────
     //
-    // Created HERE, at the one choke point every route crosses, rather than in
-    // the webhook branch of the dispatcher — a cron-, comment-, Slack- or
-    // CLI-triggered review used to get no check at all. It is persisted on the
-    // run row by `onRunStart` below and completed from the run's TERMINAL
-    // TRANSITION, so it can no longer strand `in_progress` across a deploy.
-    // Reaching this line means some gate already said "run", so the check and
-    // the run are created together or not at all.
-    const reviewCheckRef =
+    // Created at the one choke point every route crosses, rather than in the
+    // webhook branch of the dispatcher — a cron-, comment-, Slack- or
+    // CLI-triggered review used to get no check at all — and completed from the
+    // run's TERMINAL TRANSITION, so it can no longer strand `in_progress` across
+    // a deploy. Reaching this line means some gate already said "run".
+    //
+    // CREATION AND PERSISTENCE ARE ONE STEP, and that is the whole of this
+    // helper. The check used to be created here, unconditionally, and recorded
+    // on `scratch.reviewCheck` only inside `onRunStart` — but `runSimpleWorkflow`
+    // returns `{ queued: true }` BEFORE it invokes `onRunStart` when the run is
+    // over the concurrency cap (and again on a duplicate trigger for an
+    // already-queued run). The check was then created, never persisted, never
+    // observed by the terminal observer, and never concluded. The old accidental
+    // repair is gone too: while the run is `queued` it counts as active for the
+    // trigger, so the 30-minute sweep resolves `run-in-flight` → placement
+    // `none` and posts no superseding check. That is precisely the bug 09 → S2
+    // exists to fix, reintroduced through the one path that skips `onRunStart`.
+    //
+    // So: nothing is created until a run ROW exists to hang it on, and it is
+    // recorded in the same breath. `onRunStart` covers the ordinary path; the
+    // queued path binds after the fact, below, against the row `runSimpleWorkflow`
+    // did create before returning.
+    const wantsReviewCheck =
       workflowName === REVIEW_WORKFLOW &&
       (repoConfig?.review ?? config.review).postsCheck &&
-      prState?.headSha
-        ? await openReviewCheck(
-            { owner, repo, headSha: prState.headSha },
-            { github, botLogin: config.botLogin },
-          )
-        : null;
+      !!prState?.headSha;
+    let reviewCheckBound = false;
+    const reviewCheckDeps = { github, botLogin: config.botLogin };
+    const reviewCheckDetailsUrl = (runId: string) =>
+      runDashboardUrl(config.publicUrl, runId, workflowName);
+    const bindReviewCheck = async (runId: string): Promise<void> => {
+      if (!wantsReviewCheck || reviewCheckBound) return;
+      reviewCheckBound = true;
+      await openAndBindReviewCheck(
+        db,
+        runId,
+        {
+          owner,
+          repo,
+          headSha: prState!.headSha,
+          detailsUrl: reviewCheckDetailsUrl(runId),
+        },
+        reviewCheckDeps,
+      );
+    };
+    /**
+     * The queued half. `runSimpleWorkflow` writes the `queued` row and returns
+     * before `onRunStart`, so the run id never reaches us — but the ROW exists,
+     * keyed by exactly the trigger id `simple.ts` derived from this same
+     * context.
+     */
+    const bindReviewCheckForQueuedRun = async (): Promise<void> => {
+      if (!wantsReviewCheck || reviewCheckBound) return;
+      const number =
+        typeof context.issueNumber === "number"
+          ? context.issueNumber
+          : typeof context.prNumber === "number"
+          ? context.prNumber
+          : undefined;
+      const triggerId = slackTriggerId ?? (number !== undefined ? `${owner}/${repo}#${number}` : undefined);
+      if (!triggerId) return;
+      reviewCheckBound = true;
+      await bindQueuedReviewCheck(
+        db,
+        {
+          triggerId,
+          workflowName,
+          owner,
+          repo,
+          headSha: prState!.headSha,
+          detailsUrl: reviewCheckDetailsUrl,
+        },
+        reviewCheckDeps,
+      );
+    };
 
     // Pluck the standard fields, leave the rest in `extra` for the workflow
     // template to consume.
@@ -840,20 +898,15 @@ async function main() {
         // write the harvest. This callback fires synchronously before the first
         // phase, so the assignment is always in place by the time it is read.
         harvestRunId = runId;
-        // Bind the review check to the run the moment the row exists — this is
+        // Synchronous notifier setup must finish before simple.ts calls
+        // reporter.start() (the next statement after it invokes this), so it
+        // runs FIRST — before the first `await` in this callback, which is now
+        // the check creation below.
+        if (notifierOnRunStart) notifierOnRunStart(runId);
+        // Create AND bind the review check the moment the row exists — this is
         // what makes it a projection of run state rather than of an in-memory
         // promise, and it is why every terminal path resolves it for free.
-        if (reviewCheckRef) {
-          recordReviewCheck(db, runId, reviewCheckRef);
-          const detailsUrl = runDashboardUrl(config.publicUrl, runId, workflowName);
-          if (detailsUrl) {
-            linkReviewCheck(reviewCheckRef, detailsUrl, { github }).catch(() => {});
-          }
-        }
-        // Synchronous notifier setup must finish before simple.ts calls
-        // reporter.start() (the next statement after it invokes this), so
-        // run it first, then chain any caller-provided onRunStart.
-        if (notifierOnRunStart) notifierOnRunStart(runId);
+        await bindReviewCheck(runId);
         if (onRunStart) await onRunStart(runId);
       },
     };
@@ -885,6 +938,14 @@ async function main() {
       const summary = result.phases.map((p) => `${p.phase}=${p.success ? "ok" : "fail"}`).join(", ");
       if (result.queued) {
         console.log(`[dispatch] ${workflowName} queued (concurrency cap reached)`);
+        // A queued run never reaches `onRunStart` — `runSimpleWorkflow` returns
+        // the moment it writes the `queued` row — so bind the check here instead
+        // of leaving the run's only PR-visible artifact unowned. The row is
+        // found the same way `simple.ts` found (or created) it: by trigger id.
+        // Admission promotes it through `resumeSimpleRun`, which takes no
+        // callbacks at all, so this is the ONLY point at which a queued review's
+        // check can be bound to its run.
+        await bindReviewCheckForQueuedRun();
       } else if (result.paused) {
         console.log(`[dispatch] ${workflowName} paused (${summary})`);
       } else if (result.success) {

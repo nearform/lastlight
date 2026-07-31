@@ -579,7 +579,31 @@ export function resolveReviewTrigger(
     // gave up on never goes green, so under `passing` the escalated PRs — the
     // ones most needing human eyes — would be the only ones with no review at
     // all. Either colour is also what lets the review cite the CI failure.
-    if (state.checksState === "pending") {
+    //
+    // THE SWEEP IS EXEMPT FROM THE PENDING DEFERRAL — the `route !== "sweep"`
+    // below is the whole of that decision.
+    //
+    // `pending` used to defer on every route, the sweep included — and a check
+    // run that never CONCLUDES is then deferred by every route, forever. That is not a hypothetical: a fork PR's `workflow_run`
+    // awaiting maintainer approval, a dead self-hosted runner, or a third-party
+    // app that opens a check and crashes all leave the aggregate `pending` with
+    // no further `check_suite` ever coming. `check-prs-awaiting-review` calls
+    // itself the RELEASE MECHANISM, and it was not one for this case; with
+    // `review.postsCheck` on, the `queued` placeholder then sits there
+    // permanently and a repo that made `last-light/review` required has an
+    // unmergeable PR. This ships as the DEFAULT (`review.trigger:
+    // after-checks`), so it is the packaged behaviour.
+    //
+    // The sweep cannot tell "CI is still running" from "this check will never
+    // conclude" — nothing in the snapshot dates the pending state — so it must
+    // choose which error to make. It dispatches: a review posted 30 minutes into
+    // a still-running CI run costs TIMING (the review cannot cite a failure that
+    // has not happened yet, and the next push re-arms `botReviewAtHead`
+    // anyway), while a PR that is never reviewed and possibly never mergeable
+    // costs CORRECTNESS. `after-checks` is "on settle, either colour" — the
+    // COLOUR was never the gate, and on the one route that exists precisely to
+    // pick up what no webhook will ever fire for, neither is settling.
+    if (state.checksState === "pending" && route !== "sweep") {
       return { decision: "defer", reason: "checks-pending: waiting for CI to settle", inputs };
     }
     if (route === "attention") {
