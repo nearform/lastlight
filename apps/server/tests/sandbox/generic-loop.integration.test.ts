@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import { execFileSync } from "child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -105,6 +105,16 @@ describe.skipIf(!RUN)("generic_loop + until_bash (integration)", () => {
       else process.env[k] = v;
     }
     if (stateDir) rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  // Each case asserts on the ITERATION COUNT, which is the whole point of the
+  // loop — so the mock has to start each one at zero. Without this the second
+  // case reads the first case's two calls as its own and the counts silently
+  // accumulate down the file. `mockReset` (not `mockClear`) also drops the
+  // `mockImplementationOnce` queue, so a case that ends early cannot leak a
+  // pending implementation into the next one.
+  beforeEach(() => {
+    mockExecuteAgent.mockReset();
   });
 
   it("iterates once more when the gate script fails, and stops when it passes", async () => {
