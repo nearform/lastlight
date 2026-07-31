@@ -106,27 +106,31 @@ the agent's bash and read tools.
 
 ## Skill loader
 
-```ts
-// src/workflows/loader.ts:208
-export function resolveSkillPaths(names: readonly string[]): string[] {
-  return names.map((name) => {
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      throw new Error(`Invalid skill name: ${name}`);
-    }
-    for (const base of SKILL_BASES) {
-      const dir = join(base, name);
-      if (existsSync(join(dir, "SKILL.md"))) return dir;
-    }
-    throw new Error(`Skill not found: skills/${name}/SKILL.md`);
-  });
-}
-```
+`resolveSkillPaths(names)` lives in `packages/shared/src/workflow-loader.ts`
+(re-exported by `src/workflows/loader.ts`). It validates each name against
+`/^[a-zA-Z0-9_-]+$/`, refuses a name in `disabled.skills`, and walks the **layer
+stack in reverse** — last layer wins — returning the first
+`<base>/<name>/SKILL.md` that exists, with an `isInside` escape check per
+candidate.
 
-Returns absolute **directory** paths — one per declared skill. Search
-order: `skills/<name>/`, then `.claude/skills/<name>/` (legacy). The
-loader does **not** recurse into nested directories —
+The stack is built by `configureWorkflowAssets`: `built-in` (the packaged root),
+then `overlay` (`$LASTLIGHT_OVERLAY_DIR`) when one is configured. A run against a
+repo that commits `.lastlight/skills/<name>/` gets a **third, per-run** layer on
+top, via a resolver built with `createAssetResolver([...getAssetLayers(),
+makeLayer("repo", …)], …)` — see [Configuration](/spec/02-configuration). Each
+layer has a `skillRoot` (`<root>/skills`); the built-in and legacy layers also
+carry a `claudeSkillRoot` (`.claude/skills`) fallback, which the overlay and repo
+layers deliberately do not.
+
+Returns absolute **directory** paths — one per declared skill. The loader does
+**not** recurse into nested directories —
 `skills/software-development/architect` is not addressable as
 `software-development/architect`. Names are flat and alphanumeric.
+
+Because a repo skill resolves to an ordinary host path (inside the repo-config
+cache), the orchestrator stages it exactly like a built-in or overlay skill —
+copy for docker, tar for kubernetes. No sandbox backend knows a repo layer
+exists.
 
 `loadSkillRaw(name)` (same file) is retained for the admin dashboard's
 skill viewer — it returns the raw SKILL.md text for display. The
@@ -303,23 +307,50 @@ Three files in `agent-context/`, read in alphabetical order:
   (Architect / Executor / Reviewer). GitHub-first coordination,
   delegation model.
 
-## AGENTS.md materialization
+## Composition
 
-Two surfaces, with a subtle inconsistency.
+`loadAgentContext()` walks the layer stack **forwards**, keyed by **basename**,
+so a later layer's `rules.md` replaces an earlier one's, then joins the surviving
+files (alphabetically) with `\n\n---\n\n`. `disabled.agentContext` removes a file
+by exact filename (`rules.md`) or stem (`rules`).
+
+**A repo layer is additive only.** A resolver built with
+`agentContextAdditiveOnly: true` — which is the only way the runner ever builds
+one for a repo — keeps last-wins for built-in ⊕ overlay but *drops* a `repo`
+file whose basename an operator-owned layer already provides, recording an
+`agent-context-dropped` `AssetWarning`. Without that rule, committing a
+`security.md` would neuter the operator's security boundaries for every run
+against that repo. A repo can still **add** context under any other filename.
+See [Configuration](/spec/02-configuration).
+
+## AGENTS.md materialization
 
 ### Sandbox
 
-The harness writes `AGENTS.md` into the workspace before each agent
-run (`src/engine/agent-executor.ts`):
+The runner composes the run's context **once**, off that run's asset resolver,
+and threads it as `ExecutorConfig.agentContext`. The orchestrator's
+`deliverAgentContext` (`src/engine/executors/orchestrator.ts`) then picks the
+delivery, reading the value through `agentContextFor(config)` —
+`config.agentContext ?? loadAgentContext(...)`, so a run with no repo layer is
+byte-identical to the pre-#180 behaviour:
 
-```ts
-const md = loadAgentContext(config.agentContextDir);
-if (md) writeFileSync(join(workDir, "AGENTS.md"), md);
-```
+- **host-shared backends** (docker / gondolin / none / smol) — written to
+  `<hostWorkspaceDir>/AGENTS.md`. An empty context writes no file.
+- **kubernetes** — `hostWorkspaceDir` is an in-pod path, so the text goes to the
+  adapter through the `AgentContextSink` capability
+  (`provideAgentContext(sandbox, md)` → `KubernetesSandbox.setAgentContext`) and
+  is served over its own per-run init-fetch channel. See
+  [Sandbox](/spec/09-sandbox).
 
-`loadAgentContext()` (`src/engine/github/profiles.ts`) joins
-`agent-context/*.md` with `\n\n---\n\n`. pi-coding-agent's discovery
-walks up from cwd and reads it.
+Best-effort on both paths: a failure degrades the agent's context, it never
+fails the phase. The value is used **verbatim** downstream — re-composing it
+anywhere else would drop the repo layer, or include it without the
+additive-only filter.
+
+`loadAgentContext(_dir?)` (`src/engine/github/profiles.ts`) is the
+operator-only composition; its directory argument is accepted for call-site
+compatibility and ignored, because agent context is resolved layer-wise rather
+than from one directory.
 
 ### In-process (chat)
 
@@ -328,15 +359,14 @@ walks up from cwd and reads it.
 systemPrompt: loadAgentContext() + CHAT_SYSTEM_SUFFIX + chatSkills.catalogueXml
 ```
 
-Same `loadAgentContext()` helper, but injected directly into the
-chat system prompt rather than dropped on disk. The chat-specific
-suffix and the skill catalogue XML are appended.
+The same helper, injected directly into the chat system prompt rather than
+dropped on disk, with the chat-specific suffix and the skill catalogue XML
+appended. Chat is not repo-scoped, so it carries **no** repo layer.
 
-Both paths use the same `\n\n---\n\n` separator now. The legacy
-sandbox-entrypoint `cat /app/agent-context/*.md` (raw concatenation)
-applies only to the docker backend's container entrypoint and is on
-its way out — the in-process AGENTS.md write happens first, so the
-on-disk file is canonical.
+The docker sandbox image's entrypoint still ships a
+`cat /app/agent-context/*.md` fallback, but it is guarded by
+`[ ! -f "$WORKSPACE/AGENTS.md" ]` and the orchestrator's write overwrites the
+same path — so it only ever applies when the composition was empty.
 
 ## Skills vs prompts vs full workflows
 
@@ -383,7 +413,8 @@ state belongs in `workflows/prompts/`.
 
 | Piece | File |
 |---|---|
-| Skill name validation + path resolution | `src/workflows/loader.ts` (`resolveSkillPaths`, `loadSkillRaw`) |
+| Skill name validation + path resolution | `packages/shared/src/workflow-loader.ts` (`resolveSkillPaths`, `loadSkillRaw`), re-exported by `src/workflows/loader.ts` |
+| Layer stack + per-run resolver | `packages/shared/src/workflow-loader.ts` (`AssetLayer`, `makeLayer`, `configureWorkflowAssets`, `getAssetLayers`, `getDisabledAssets`, `createAssetResolver`, `AssetWarning`) |
 | Phase config overlay (resolves `skill:`/`skills:` into `ExecutorConfig.skillPaths`) | `src/workflows/runner.ts` (`phaseConfigFor`) |
 | User prompt generation | `src/workflows/runner.ts` (`buildPhasePrompt`) |
 | Per-phase bundle staging (symlink/copy) | `src/engine/agent-executor.ts` (`stageSkillBundle`, `skillBundleKey`, `excludeFromGit`) |
@@ -391,7 +422,8 @@ state belongs in `workflows/prompts/`.
 | Chat catalogue wiring | `src/index.ts` (ChatRunner boot) |
 | Skills | `skills/<name>/SKILL.md` |
 | Agent context layer | `agent-context/{rules,security,soul}.md` |
-| In-process `loadAgentContext()` | `src/engine/github/profiles.ts` |
+| In-process `loadAgentContext()` / per-run `agentContextFor()` / `AgentContextSink` | `src/engine/github/profiles.ts` |
+| AGENTS.md delivery (workspace write vs k8s sink) | `src/engine/executors/orchestrator.ts` (`deliverAgentContext`) |
 
 ## Rebuild notes
 

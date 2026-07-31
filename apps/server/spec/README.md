@@ -25,7 +25,7 @@ reference once you know the shape.
 |---|---|---|
 | 00 | `00-overview.md` | Visual architecture, glossary, rebuild checklist |
 | 01 | `01-harness.md` | Entry, boot, lifecycle, supervisor |
-| 02 | `02-configuration.md` | Env vars, config schema, model/variant overrides, secrets |
+| 02 | `02-configuration.md` | Env vars, config schema, the default/overlay/env/repo layer precedence, the per-repository `.lastlight/` layer, model/variant overrides, secrets |
 | 03 | `03-integrations.md` | Event sources: GitHub App, Slack, CLI, cron, dashboard |
 | 04 | `04-event-model.md` | `EventEnvelope` schema + normalization contract |
 | 05 | `05-router.md` | Deterministic routing + LLM build-intent classifier |

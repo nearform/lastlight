@@ -25,6 +25,9 @@ cli-format.ts     Table / age / color helpers for CLI output.
 cli-timeline.ts   Session timeline renderer.
 setup.ts          First-run setup wizard (client | server).
 fork-cli.ts       `lastlight fork` — copy built-in assets into the overlay.
+repo-cli.ts       `lastlight repo` — a managed repo's own `.lastlight/` config layer
+                  (fork prompts/skills into it, validate it offline, show the server's
+                  effective view). Reuses fork-cli's copy + core-root helpers.
 oauth-cli.ts      `lastlight oauth login|list|status|test|logout` (subscription logins).
 skills-install.ts `lastlight skills install` — install the Claude Code skills/plugin.
 ```
@@ -120,6 +123,55 @@ lastlight fork agent-context [file]    # all agent-context/*.md (soul/rules/secu
 lastlight fork classifier              # the base intent-classifier prompts (classifier.md +
                                         # classify-adds-info.md) [--home dir] [--force]
 ```
+
+## Per-repo config layer (`repo-cli.ts`, issue #180)
+
+A **managed repo** may commit a `.lastlight/` directory that overrides a bounded
+subset of config for runs against itself — same on-disk shape as an instance
+overlay (`lastlight.yml`, `workflows/prompts/*.md`, `skills/<name>/SKILL.md`,
+`agent-context/*.md`). These commands are that layer's authoring side and run
+**inside your own code repo**, writing `<git repo root>/.lastlight/`.
+
+```bash
+lastlight repo fork                    # list what a repo may override
+lastlight repo fork all                # every workflow's prompts + skills + agent-context + classifier
+lastlight repo fork <workflow>         # a workflow's PROMPTS + SKILLS — never its YAML
+lastlight repo fork agent-context [f]  # agent-context/*.md (ADDITIVE only — rename before committing)
+lastlight repo fork classifier         # the base intent-classifier prompts [--home dir] [--force]
+lastlight repo config validate         # check ./.lastlight/ offline; non-zero exit if anything is rejected [--json]
+lastlight repo config show <owner/repo>  # the server's effective post-bounds config + provenance
+                                        # (GET /admin/api/repos/:owner/:repo/config) [--refresh] [--json]
+```
+
+Three rules the commands enforce and explain in their output:
+
+- **No workflow YAML.** A repo may retune a workflow's prompts and skills, never
+  its definition (phases, permission profiles, approval gates) — `repo fork
+  <workflow>` copies the prompts + skills only. Use `lastlight fork <workflow>`
+  to change the definition in the *deployment overlay*.
+- **agent-context is additive.** A repo file whose basename matches a built-in
+  (`soul.md`, `rules.md`, …) is ignored at runtime, so `repo fork agent-context`
+  warns to rename what it just copied.
+- **No guessed destination.** Unlike `fork`, this never falls back to the server
+  home's `instance/` — it refuses outside a git repo. (`--home` still points at
+  a core checkout to read the *built-ins* from.)
+
+`validate` runs the SAME pure validators the server runs
+(`lastlight-shared/repo-config-schema` — the schema, operator bounds and merger
+were factored out of `lastlight-core`'s `src/config/repo-config.ts` precisely so
+the CLI can validate offline without an edge to core). It checks against the
+*shipped default* bounds — `DEFAULT_REPO_CONFIG_ALLOW_KEYS` = `models`,
+`variants`, `crons`, `disabled.workflows`, `disabled.crons`, `approval` — since it
+can't know a deployment's narrowing; `repo config show` is the authoritative
+per-server answer. It errors if there's no `.lastlight/` directory at all, and
+prints three blocks: the accepted files grouped by role (config / prompt / skill
+/ agent-context), the **effective config overrides** it would apply, and every
+rejection with its warning code. A `crons:` block is deliberately absent from the
+overrides block — it's read off the raw layer by the scheduler at tick time, not
+merged into the per-run config — and the "no config overrides" line says so.
+
+`--dir <repo>` overrides the git-root discovery for `repo fork` / `repo config
+validate` (mostly for tests); it still refuses a directory with no `.git`.
 
 ## Install the Claude Code skills (`skills-install.ts`)
 

@@ -87,6 +87,30 @@ deploy:
 
 approval: {}
 
+# Per-repository configuration (issue #180). A managed repo may commit a
+# `.lastlight/` directory — mirroring the instance overlay's on-disk shape
+# (`lastlight.yml`, `workflows/prompts/*.md`, `skills/<name>/SKILL.md`,
+# `agent-context/*.md`) — that overrides a BOUNDED subset of this config for
+# runs against that repo. Precedence: default -> overlay -> env -> repo.
+#
+# The block below is the OPERATOR's bounds on that layer; a repo can never widen
+# them. It is inert out of the box: nothing changes for an existing deployment
+# until a repo actually commits `.lastlight/lastlight.yml`.
+#
+# SECURITY: the repo layer is ALWAYS read from the repo's DEFAULT BRANCH, never
+# a PR head and never the sandbox checkout — otherwise a PR could rewrite the
+# configuration of the agent reviewing it. See src/config/repo-config.ts.
+repoConfig:
+  enabled: true                  # master switch; false ignores every repo's .lastlight/
+  # Config keys a repo may set, as dotted paths. Anything outside this list is
+  # dropped with a warning (the run still proceeds — a repo's config file can
+  # never fail a run). Narrow it to tighten the blast radius. Removing `crons`
+  # makes the operator's `crons:` block below un-overridable — the kill switch.
+  allowKeys: [models, variants, crons, disabled.workflows, disabled.crons, approval]
+  allowedModels: null            # null = any model whose provider prefix is configured;
+                                 # a list restricts repos to exactly those model specs
+  allowAssets: true              # allow the repo's prompt/skill/agent-context overrides
+
 bootstrap:
   label: "lastlight:bootstrap"
 
@@ -96,8 +120,34 @@ explore:
 review:
   postsCheck: false
 
+# Which crons participate (issue #180). The SAME block is valid here, in your
+# overlay's config.yaml, and in a managed repo's .lastlight/lastlight.yml — the
+# meaning depends on the layer:
+#
+#   operator (here / overlay)  disable: [x]  → cron x is off globally
+#                              enable:  [x]  → no-op; a cron is on by default
+#   repo (.lastlight/)         disable: [x]  → THIS repo drops out of x's fan-out
+#                              enable:  [x]  → THIS repo opts in even when x is
+#                                              off globally
+#
+# A name in BOTH lists is disabled, at every layer — a cron that doesn't run is
+# the safe reading of a contradictory config.
+#
+# `disabled.crons` below is the LEGACY spelling of `crons.disable` and still
+# works exactly as before: it is unioned into this list (and additionally drops
+# the cron's definition at asset-load time, so it is the harder kill).
+#
+# NOTE: `crons.disable` here means "off BY DEFAULT" — a repo listed in
+# `repoConfig.allowKeys` can still opt itself back in. If you want a kill switch
+# no repo can override, drop `crons` from repoConfig.allowKeys (below); that
+# leaves this list as the only word on the subject.
+crons:
+  enable: []
+  disable: []
+
 disabled:
   workflows: []
+  # Legacy alias for `crons.disable` above — kept working, not deprecated.
   crons: []
   prompts: []
   skills: []

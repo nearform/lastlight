@@ -184,6 +184,32 @@ lastlight fork classifier             # copy the base intent-classifier prompts 
 		default" or "added".
 	</p>
 
+	<h2 id="repo-config">A repo's own <code>.lastlight/</code> layer</h2>
+	<p>
+		The mirror image of forking: instead of an operator customising the instance,
+		a <strong>managed repo</strong> commits a <code>.lastlight/</code> directory
+		that overrides a bounded subset of config for runs against itself. These
+		commands run <strong>inside your own code repo</strong> and write to
+		<code>&lt;git repo root&gt;/.lastlight/</code> — they never fall back to a
+		server's <code>instance/</code> overlay, and refuse to run outside a git repo.
+		See <a href="/docs/repo-config">Per-repo config</a> for the full contract.
+	</p>
+	<pre><code>lastlight repo fork                      # list what a repo may override
+lastlight repo fork all                  # every workflow's prompts + skills + agent-context + classifier
+lastlight repo fork &lt;workflow&gt;           # one workflow's PROMPTS + SKILLS — never its YAML
+lastlight repo fork agent-context [file] # persona files (ADDITIVE — rename before committing)
+lastlight repo fork classifier           # the base intent-classifier prompts [--home dir] [--force]
+lastlight repo config validate           # check ./.lastlight/ offline, exactly as the server would [--json]
+lastlight repo config show &lt;owner/repo&gt;  # the effective post-bounds config + provenance [--refresh] [--json]</code></pre>
+	<p>
+		<code>repo config validate</code> is fully offline — it runs the same
+		validators the server runs, against the <em>shipped default</em> bounds — and
+		exits non-zero if anything in the layer would be rejected, so it drops
+		straight into CI. <code>repo config show</code> asks a connected server what
+		it actually applies for that repo, tagging each value with the layer it came
+		from; <code>--refresh</code> makes the server bypass its 60-second cache.
+	</p>
+
 	<h2 id="claude-code-skills">Claude Code skills</h2>
 	<p>
 		Last Light ships a <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a>

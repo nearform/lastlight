@@ -37,7 +37,7 @@ import {
 import { QuotaExceededError, isQuotaExceeded, quotaMessage } from "./quota.js";
 import { WorkspaceProvisioner, type Provisioned } from "./workspace-provisioner.js";
 import { RunSecrets, type RunSecretsResult } from "./run-secrets.js";
-import { AGENTIC_PROFILES } from "../../engine/github/profiles.js";
+import { AGENTIC_PROFILES, type AgentContextSink } from "../../engine/github/profiles.js";
 
 /** Valid `--thinking` reasoning-effort levels. Mirrors the docker backend's
  *  guard (`docker.ts`) — a shared-set consolidation (the same move F8 made
@@ -113,6 +113,10 @@ export interface K8sAdapterConfig {
  * agent-context registry, carries the fetch token into the creds Secret, and
  * adds an agent-context initContainer that pulls it from the harness's
  * `/internal/agent-context` route and writes it to `<WORKSPACE_DIR>/AGENTS.md`.
+ * The text is handed in by the orchestrator through {@link setAgentContext} — the
+ * same composition the host-shared backends write to disk, so a run's repo layer
+ * (issue #180) reaches both — and only falls back to the module-level loader when
+ * no caller offered one.
  * A dedicated route (not the skills bundle) because agent-context is
  * per-run-constant and a no-skills phase must still receive `AGENTS.md`.
  * `stageSkills` tars the resolved skill dirs and registers the bundle with the
@@ -125,7 +129,7 @@ export interface K8sAdapterConfig {
  * so an upload hiccup never masks the agent's real exit code — `dispose` evicts
  * the token afterward.
  */
-export class KubernetesSandbox implements Sandbox {
+export class KubernetesSandbox implements Sandbox, AgentContextSink {
   readonly backend: SandboxBackend = "kubernetes";
   private readonly apis: K8sApis;
   private readonly ns: string;
@@ -160,6 +164,12 @@ export class KubernetesSandbox implements Sandbox {
    *  via env to authenticate the `.lastlight/` upload; `dispose` evicts it from
    *  the store. Never minted for `runCommand` (nothing to upload). */
   private artifactToken?: string;
+  /** The agent context the orchestrator resolved for THIS run (issue #180) —
+   *  set through {@link setAgentContext} before `runAgent`. Per-instance, and a
+   *  sandbox instance is per-run, so it can't leak between runs. Undefined when
+   *  the caller never offered one; `runAgent` then falls back to the
+   *  module-level loader exactly as it did before the seam existed. */
+  private agentContext?: string;
 
   constructor(
     private readonly opts: SandboxFactoryOpts,
@@ -183,6 +193,23 @@ export class KubernetesSandbox implements Sandbox {
       taskId: opts.taskId,
     });
     this.runSecrets = new RunSecrets(this.apis.core, cfg.namespace);
+  }
+
+  /**
+   * {@link AgentContextSink} — take the run's already-composed agent context
+   * (persona + hard rules) from the orchestrator.
+   *
+   * The kubernetes backend is the one adapter that can't be served by the
+   * orchestrator's plain workspace write (its `hostWorkspaceDir` is an in-pod
+   * path), so it receives the SAME text through this seam and serves it over the
+   * init-fetch channel below. Security-relevant: the value is used verbatim.
+   * Re-composing it here would drop the target repo's additive
+   * `agent-context/*.md` — and, worse, a naive re-compose that *did* include the
+   * repo layer would bypass the additive-only filter the orchestrator's value has
+   * already been through.
+   */
+  setAgentContext(text: string): void {
+    this.agentContext = text;
   }
 
   async provision(pre?: PrePopulateSpec): Promise<ProvisionResult> {
@@ -261,7 +288,10 @@ export class KubernetesSandbox implements Sandbox {
     // agent-context initContainer pulls it into `<WORKSPACE_DIR>/AGENTS.md`
     // before the agent runs. Empty context ⇒ no token, no init container.
     this.artifactToken = this.artifactStore.register(this.opts.taskId);
-    const agentContext = loadAgentContext();
+    // The run's own context when the orchestrator supplied one (it carries the
+    // target repo's additive agent-context; see `setAgentContext`), else the
+    // operator-only module-level composition — the pre-issue-#180 behaviour.
+    const agentContext = this.agentContext ?? loadAgentContext();
     if (agentContext) this.agentContextToken = this.agentContextRegistry.register(agentContext);
 
     // Untrusted / free-form values (model, harness endpoint, profile, thinking

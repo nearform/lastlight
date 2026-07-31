@@ -1,7 +1,7 @@
 ---
 title: "Configuration"
 order: 2
-description: "Every env var the harness reads, the typed config schema, model and variant overrides, sandbox backend selection, approval-gate enablement, secrets layout, and the STATE_DIR tree."
+description: "Every env var the harness reads, the typed config schema, the default/overlay/env/repo layer precedence, the per-repository .lastlight/ layer and its operator bounds, model and variant overrides, sandbox backend selection, approval-gate enablement, secrets layout, and the STATE_DIR tree."
 ---
 
 ## Purpose
@@ -27,23 +27,32 @@ interface LastLightConfig {
                                           // Derives the @mention handle, botLogin, and git author.
   botLogin: string;                       // "<botName>[bot]" unless BOT_LOGIN overrides
   dbPath: string;
-  workflowDir: string;
+  overlayDir?: string;                    // resolved $LASTLIGHT_OVERLAY_DIR, if set
+  builtInRoot: string;                    // packaged asset root (parent of config/default.yaml)
   stateDir: string;
-  sandboxDir: string;
+  sandboxDir: string;                     // $STATE_DIR/sandboxes
   sessionsDir: string;
   model: string;                          // provider/model, e.g. "anthropic/claude-sonnet-4-6"
   models: ModelConfig;                    // { default: string; [taskType: string]: string }
   variants: VariantConfig;                // { default?: string; [taskType: string]: string | undefined }
   maxTurns: number;
-  sandbox: "gondolin" | "docker" | "smol" | "none";
+  sandbox: SandboxBackend;                // "gondolin" | "docker" | "smol" | "none" | "kubernetes"
+  kubernetes?: Partial<KubernetesConfig>; // the `sandbox.kubernetes` block, normalized
   buildAssets: "repo" | "server";         // where build handoff docs live
   buildAssetsDir: string;                  // server-mode store root ($STATE_DIR/build-assets)
   deploy: { version: string | null };      // core-version pin (git tag/ref) or null = track main
+  managedRepos: string[];                 // empty = source the list from the App installation
+  routes: RouteConfig;                    // { github: Record<string,string>; slack: Record<string,string> }
+  disabled: DisabledConfig;               // { workflows, crons, prompts, skills, agentContext }: string[]
+  crons: CronsConfig;                     // { enable: string[]; disable: string[] } — cron participation
+  otel: OtelConfig;                       // OpenTelemetry export (off by default)
+  publicConfig: PublicConfigBundle;       // redacted default/overlay/merged + provenance, for the dashboard
   githubApp?: {
     appId: string;
     privateKeyPath: string;
     installationId: string;
   };
+  githubToken?: string;                   // PAT fallback — ONLY when no App is configured
   slack?: SlackConfig;
   approval?: Record<string, boolean>;     // gate-name → enabled
   bootstrapLabel: string;
@@ -54,7 +63,8 @@ interface LastLightConfig {
     maxWorkflows: number;                 //   max runs executing at once (default 4)
     maxQueueWaitMs: number;               //   TTL before a queued run is dropped (default 1 hr)
   };
-  otel: OtelConfig;                       // OpenTelemetry export (off by default)
+  cleanup: { sandbox: SandboxCleanupConfig };  // sandbox-workspace reaping
+  repoConfig: RepoConfigPolicy;           // operator bounds on the per-repository layer
 }
 
 interface OtelConfig {
@@ -69,16 +79,212 @@ interface OtelConfig {
 
 interface SlackConfig {
   botToken: string;
-  appToken: string;
+  mode: "webhook" | "socket";             // auto: webhook when a signing secret is set, else socket
+  appToken?: string;                      // required only for socket mode
+  signingSecret?: string;                 // required only for webhook mode
   allowedUsers: string[];
   deliveryChannel?: string;
 }
+
+interface SandboxCleanupConfig {
+  enabled: boolean;                       // master switch for the TTL/LRU sweep (default true)
+  reapOnCompletion: boolean;              // reap an ephemeral workspace on terminal success (default true)
+  sweepSchedule: string;                  // cron expr for the backstop sweep (default "0 * * * *")
+  retentionHours: number;                 // sweep dirs older than this (default 12)
+  maxDirs: number;                        // LRU cap on workspace dirs (default 40)
+}
+
+interface CronsConfig {                   // valid at EVERY layer (default / overlay / repo)
+  enable: string[];
+  disable: string[];                      // the legacy `disabled.crons` list is unioned in here
+}
+
+interface RepoConfigPolicy {              // lastlight-shared/repo-config-schema
+  enabled: boolean;                       // false ignores every repo's .lastlight/ (no fetch)
+  allowKeys: string[];                    // dotted config paths a repo may set
+  allowedModels: string[] | null;         // null = any model whose provider prefix is known
+  allowAssets: boolean;                   // unpack the repo's prompt/skill/agent-context overrides
+}
+
+interface KubernetesConfig {              // resolved by resolveKubernetesConfig(), env > block > defaults
+  namespace: string; image: string; storageClassName: string; workspaceSize: string;
+  runAsUser: number; harnessEndpoint: string; harnessNamespace: string;
+  harnessPodLabels: Record<string, string>;
+}
 ```
 
-Defined in `src/config/config.ts:74–143`. Loaded once at boot, never mutated. A
+Defined in `src/config/config.ts` (`LastLightConfig` + the interfaces above;
+`RepoConfigPolicy` is imported and re-exported from
+`lastlight-shared/repo-config-schema`, and `DisabledConfig` / `RouteConfig` from
+`lastlight-shared/config-types`). Loaded once at boot, never mutated. A
 re-implementation should treat this object as effectively `Readonly` —
 any per-task overrides are layered *over* the base config at dispatch
-time, not back into it.
+time, not back into it. The one exception is the **per-repository layer**
+(below), which is resolved per dispatch and carried explicitly through the run,
+never merged back into this object.
+
+## Layers and precedence
+
+Configuration resolves in four layers, last wins, key by key:
+
+```
+config/default.yaml  →  $LASTLIGHT_OVERLAY_DIR/config.yaml  →  env  →  <target repo>/.lastlight/lastlight.yml
+    (packaged)                  (operator overlay)           (env)              (per-repo, bounded)
+```
+
+The first three are the **boot** layers, resolved once by `resolveConfigLayers`
+(`src/config/config-resolve.ts`) into the merged tree *plus* a parallel
+provenance tree (each leaf tagged `default` / `overlay` / `env`), which the
+dashboard's Config view is derived from. Merge semantics are one definition,
+`mergeLayer` in `lastlight-shared/repo-config-schema`, re-exported by
+`config-resolve.ts`: **plain objects deep-merge key by key; arrays and scalars
+replace wholesale.** So `models` / `variants` / `routes` / `approval` merge,
+while `managedRepos` and every `disabled.*` list replace.
+
+Two documented exceptions to plain key-by-key precedence, handled in
+`loadConfig` rather than in the resolver:
+
+- `approval` — `APPROVAL_GATES` replaces the file map *wholesale*, not merged.
+- `otel.collectorHosts` — env hosts are *unioned* with file hosts, not replaced,
+  so an OTLP endpoint env var adds to rather than drops overlay hosts.
+
+Secrets are **env-only** and never read from YAML. `publicConfig` carries a
+redacted (`SENSITIVE_KEY_RE` / `redactPublic`) copy of default / overlay /
+merged / sources for the dashboard.
+
+## The per-repository layer (`.lastlight/`)
+
+A **managed repo** may commit a `.lastlight/` directory that overrides a bounded
+subset of config *for runs against that repo only*. It is the fourth layer above
+— applied after env, bounded by the operator's `repoConfig` block.
+
+```
+.lastlight/
+├── lastlight.yml              # the config override
+├── workflows/prompts/*.md     # prompt overrides — a repo may NOT contribute workflow YAML
+├── skills/<name>/SKILL.md     # skill overrides
+└── agent-context/*.md         # ADDITIVE ONLY — may not shadow a built-in/overlay file by basename
+```
+
+The layout mirrors a deployment overlay exactly, so the unpacked tree is handed
+to the same layer-aware asset loader with no second code path.
+
+**Trust rule.** The layer is always read from the repo's **default branch**,
+resolved live from the repo metadata — never a PR head, never the sandbox
+checkout. Without that rule a pull request could commit a `lastlight.yml` that
+re-points the model, disables the review workflow and drops the approval gates of
+the very agent reviewing it. Enforced in `src/config/repo-config.ts`.
+
+**Failure rule.** Warn, drop the offending bits, run anyway. Invalid YAML drops
+the whole file; an unknown or out-of-bounds key drops just that key; a fetch
+error falls back to the last good cached copy, or to no layer at all. Every
+rejection becomes a structured `RepoConfigWarning` (codes: `invalid-yaml`,
+`not-a-mapping`, `key-not-allowed`, `invalid-value`, `model-not-allowed`,
+`unknown-provider`, `approval-downgrade`, `path-escape`, `symlink`, `size-cap`,
+`file-count-cap`, `workflow-not-allowed`, `assets-not-allowed`,
+`unrecognised-asset`, `fetch-failed`) surfaced on the run row, the admin API and
+the CLI. A repo's config file can never fail a run.
+
+### Operator bounds (`repoConfig` in `config/default.yaml`)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `repoConfig.enabled` | `true` | Master switch. `false` ignores every repo's `.lastlight/` — no fetch at all. |
+| `repoConfig.allowKeys` | `[models, variants, crons, disabled.workflows, disabled.crons, approval]` | Dotted config paths a repo may set. An entry admits itself and everything beneath it (`models` admits `models.architect`; `disabled.workflows` does **not** admit `disabled.prompts`). |
+| `repoConfig.allowedModels` | `null` | `null` = any model whose `provider/` prefix is a provider Last Light can wire. A list restricts to exactly those specs (exact match, never a prefix rule). |
+| `repoConfig.allowAssets` | `true` | Unpack and use the repo's `workflows/prompts/`, `skills/`, `agent-context/` overrides. `false` keeps `lastlight.yml` only. |
+
+`DEFAULT_REPO_CONFIG_ALLOW_KEYS` (`packages/shared/src/repo-config-schema.ts`) is
+the fallback when config isn't in reach, and must stay identical to
+`repoConfig.allowKeys` in `config/default.yaml` — pinned by
+`tests/config/repo-config-shared.test.ts`.
+
+### What a repo may set
+
+| Key | Semantics |
+|---|---|
+| `models` | Per-task model map. Each leaf must be a `provider/model` string with a known provider prefix, and must pass `allowedModels`. |
+| `variants` | Per-task reasoning-effort map (non-empty strings). |
+| `crons` | `{ enable, disable }` — cron participation (see below). Accepted and validated, but **not** part of the merged per-run config: it is read off the raw layer by the scheduler at tick time. |
+| `disabled.workflows` | A repo opting *itself* out of a workflow. Enforced at the `dispatchWorkflow` choke point — the dispatch is refused before any `workflow_runs` row exists. |
+| `disabled.crons` | Legacy spelling of `crons.disable`, unioned into it. |
+| `approval` | **Add-only.** A repo may raise a gate for runs against itself (`true`); every `false` is dropped with a warning (`approval-downgrade` when the operator had set that gate). A repo can never remove oversight the operator asked for. |
+
+Arrays replace, per the merge semantics above — so a repo's `disabled.workflows`
+list replaces the operator's rather than adding to it. Operators who don't want
+that remove the key from `allowKeys`.
+
+Anything outside `allowKeys` — and anything inside it that this schema has no
+validator for — is dropped with a `key-not-allowed` warning. Refusing unknown
+keys is deliberate: an unbounded pass-through would let an operator widen the
+layer past what has been reviewed.
+
+### Cron participation (`crons:`)
+
+The `crons: { enable, disable }` block is valid at **every** layer, read with a
+layer-specific meaning:
+
+| Layer | `disable: [x]` | `enable: [x]` |
+|---|---|---|
+| operator (`default.yaml` / overlay) | cron `x` is off **by default**, globally | no-op — a cron is on unless something disables it |
+| repo (`.lastlight/lastlight.yml`) | this repo drops out of `x`'s fan-out | this repo opts **in**, even when `x` is off globally |
+
+A name in both lists is disabled, at every layer — a cron that doesn't run is the
+safe reading of a contradictory config. The legacy `disabled.crons` list is
+unioned into `crons.disable` by the normaliser (and additionally drops the cron's
+definition at asset-load time, so it is the harder kill).
+
+"Off globally" means "off by default", **not** "structurally removed": the tick
+stays registered (`src/cron/jobs.ts` marks it `_cronGloballyEnabled: false`) so a
+repo's opt-in can be resolved at fan-out time (`resolveCronRepos`,
+`src/cron/repo-crons.ts`) without re-registering croner jobs. A tick whose repo
+list resolves empty is a cheap no-op. **The operator's un-overridable kill switch
+is removing `crons` from `repoConfig.allowKeys`** — `repoLayerMayVote()` then
+short-circuits with zero fetches and the operator's `crons.disable` is final.
+
+### Fetch, cache, and per-run wiring
+
+- **Fetch** — through the App-authenticated GitHub client
+  (`GitHubClient.fetchRepoConfigTree`), so private repos work. A PAT is used when
+  no App is configured; chat-only mode (neither) skips the layer entirely.
+- **Cache** — `<stateDir>/repo-config/<owner>/<repo>/`, holding `meta.json` (a
+  sidecar: default branch, tree sha, etag, warnings) beside `files/` (the
+  unpacked tree; written to `files.tmp` and renamed, so a crash can't leave a
+  half-written layer). TTL `REPO_CONFIG_TTL_MS` = 60 s; past it a **conditional**
+  request goes out (etag / tree sha), so a cron fanning out over N repos costs N
+  conditional requests and zero downloads. Caps: `REPO_CONFIG_MAX_FILES` = 200,
+  `REPO_CONFIG_MAX_BYTES` = 2 MiB. Symlinks and non-regular blobs are rejected on
+  sight.
+- **Resolution** — once per dispatch, at the `dispatchWorkflow` choke point in
+  `src/index.ts` (beside the unmanaged-repo guard), so webhook, router, cron,
+  `/api/run`, `/api/build` and approval resume all get the same answer.
+  Only a context naming exactly **one** repo resolves a layer
+  (`soleRepoInContext`).
+- **Per-run carriage** — the result (`RunRepoConfig`, `src/workflows/simple.ts`)
+  is carried explicitly through the run, never installed into a module global:
+  up to `concurrency.maxWorkflows` runs plus a cron fan-out are in flight at
+  once. Assets resolve through a **per-run `AssetResolver`**
+  (`createAssetResolver` in `packages/shared/src/workflow-loader.ts`) built over
+  `globals + makeLayer("repo", <cache root>)` with
+  `agentContextAdditiveOnly: true`. The composed agent context travels as
+  `ExecutorConfig.agentContext` (see [Sandbox](/spec/09-sandbox)).
+- **Persistence + resume** — what the repo actually won is persisted on
+  `workflow_runs.context.repoConfig` (`RepoConfigRunRecord`: repo, default
+  branch, tree sha, the leaves whose provenance is `repo`, asset paths,
+  warnings). A **resume reuses that record** rather than re-resolving, so an edit
+  made while a run was paused/queued/dead can't retarget it mid-flight. The one
+  unpinnable part is the unpacked asset root — recovered by exact tree-sha match,
+  and dropped with a warning (never silently swapped) when that tree is gone.
+- **Reporting** — asset-level drops (a repo `agent-context/*.md` ignored because
+  a higher-trust layer owns that basename) land on
+  `workflow_runs.scratch.repoConfig.assetWarnings`.
+
+Surfaces: `GET /admin/api/repos/:owner/:repo/config` (merged config + per-leaf
+provenance + the raw, redacted repo layer + warnings + assets + the effective
+policy; `?refresh=1` bypasses the TTL) powers the dashboard's per-repo **Config**
+tab and `lastlight repo config show <owner/repo>`. `lastlight repo fork` and
+`lastlight repo config validate` are the authoring side, offline, running the
+same pure validators from `lastlight-shared/repo-config-schema`.
 
 ## Env vars, by group
 
@@ -90,15 +296,17 @@ missing `GITHUB_APP_ID` is fine for a chat-only deployment.
 
 | Var | Required for | Default |
 |---|---|---|
-| `GITHUB_APP_ID` | GitHub integration | — |
-| `GITHUB_APP_INSTALLATION_ID` | GitHub integration | — |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | GitHub integration | `./secrets/app.pem` |
+| `GITHUB_APP_ID` | GitHub integration | — (its presence is what gates the whole `githubApp` block) |
+| `GITHUB_APP_INSTALLATION_ID` | GitHub integration | — (**required** once `GITHUB_APP_ID` is set) |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | GitHub integration | — (**required** once `GITHUB_APP_ID` is set; the deploy stack points it at `secrets/app.pem`) |
+| `GITHUB_TOKEN` | PAT **fallback** — read-only GitHub in chat + CLI-driven read-only workflows without the App. Ignored whenever a GitHub App is configured (App always wins). | — |
 | `WEBHOOK_SECRET` | webhook signature verification | empty (verification **disabled**) |
 | `GITHUB_APP_BOT_NAME` | bot slug — `@mention` handle + `botLogin` + git author (also overlay `botName`) | `last-light` |
 | `BOT_LOGIN` | self-event filtering (overrides the `<botName>[bot]` derivation) | `<botName>[bot]` |
 
-The PEM is validated at boot: must exist and parse as PEM (`src/index.ts:42–51`).
-Missing or malformed PEM exits `78`.
+The PEM is validated at boot (`validateConfig()` in `src/index.ts`): it must exist and
+parse as PEM. Missing or malformed PEM exits `78` (`EX_CONFIG`).
+`resolveGithubAuth()` is the single place the App-vs-PAT precedence lives.
 
 ### Slack
 
@@ -157,27 +365,37 @@ LASTLIGHT_THINKINGS={
 
 Keys are phase names from YAML workflows (e.g. `architect`, `reviewer`)
 or skill types (e.g. `chat`, `triage`). `default` is the catch-all.
-Resolution at dispatch (`src/config/config.ts:296`): per-type if present, else
-`default`, else the base `LASTLIGHT_MODEL`. Thinking values are pi-ai's
+Resolution at dispatch (`resolveModel` / `resolveVariant`, `src/config/config.ts`):
+per-type if present, else `default`, else the base `LASTLIGHT_MODEL`.
+A repo's `.lastlight/lastlight.yml` can add per-task entries on top for runs
+against that repo (see the per-repository layer above). Thinking values are pi-ai's
 `ThinkingLevel`: `off | minimal | low | medium | high | xhigh`.
 
 ### Sandbox
 
 | Var | Purpose | Default |
 |---|---|---|
-| `LASTLIGHT_SANDBOX` | backend: `gondolin` / `docker` / `smol` / `none` | `gondolin` |
-| `MAX_TURNS` | agent loop budget per session | `200` |
+| `LASTLIGHT_SANDBOX` | backend: `gondolin` / `docker` / `smol` / `none` / `kubernetes` | `gondolin` (config `sandbox.backend`) |
+| `MAX_TURNS` | agent loop budget per session | `200` (config `sandbox.maxTurns`) |
 | `SANDBOX_MEMORY_LIMIT` | docker only | `2g` |
 | `SANDBOX_DATA_VOLUME` | docker only — named volume or bind-mount path | `lastlight_agent-data` |
 | `LASTLIGHT_SANDBOX_NETWORK` | docker only | `lastlight_sandbox-egress` |
 | `SMOLVM_BIN` | smol only — `smolvm` CLI path | `smolvm` |
 | `SMOLVM_IMAGE` | smol only — OCI ref OR local `docker save` archive | `lastlight-sandbox:latest` |
+| `LASTLIGHT_K8S_NAMESPACE` / `K8S_SANDBOX_IMAGE` / `LASTLIGHT_K8S_STORAGE_CLASS` / `LASTLIGHT_K8S_WORKSPACE_SIZE` / `LASTLIGHT_K8S_RUN_AS_USER` / `LASTLIGHT_K8S_HARNESS_ENDPOINT` / `LASTLIGHT_K8S_HARNESS_NAMESPACE` / `LASTLIGHT_K8S_HARNESS_POD_LABELS` | kubernetes only — override the matching `sandbox.kubernetes.*` config key | see `K8S_DEFAULTS` in `src/config/config.ts` |
 
-Unknown `LASTLIGHT_SANDBOX` values log a warning and fall back to
-`gondolin`. `none` is for local dev only — no isolation. `smol`
+Unknown `LASTLIGHT_SANDBOX` values log a warning and fall back to the
+file/default backend. `none` is for local dev only — no isolation. `smol`
 (experimental) runs agent work in a smolvm micro-VM; it needs a host
 hypervisor + the `smolvm` CLI, and its `--allow-host` egress is
-IP-pinned per host rather than apex+subdomain — see `09-sandbox.md`.
+IP-pinned per host rather than apex+subdomain. `kubernetes` runs each phase as a
+bare Pod in a dedicated namespace. See `09-sandbox.md` for both.
+
+The `kubernetes` block is the one config sub-tree resolved lazily rather than at
+boot: `sandbox.kubernetes` in YAML is guarded field-by-field into
+`config.kubernetes` (present fields only, no defaults), and
+`resolveKubernetesConfig()` applies **env override → that block → `K8S_DEFAULTS`**
+at each call site.
 
 ### Build assets
 
@@ -221,8 +439,13 @@ file/default location.
 | `DB_PATH` | SQLite file | `$STATE_DIR/lastlight.db` |
 | `LASTLIGHT_SESSIONS_DIR` | JSONL session envelopes (dashboard reads here) | `$STATE_DIR/agent-sessions` |
 | `BUILD_ASSETS_DIR` | server-mode build-asset store root | `$STATE_DIR/build-assets` |
-| `WORKFLOW_DIR` | YAML workflow definitions | `./workflows` |
+| `LASTLIGHT_OVERLAY_DIR` | deployment overlay root — `config.yaml` + asset overrides (`workflows/`, `workflows/prompts/`, `skills/`, `agent-context/`) + `secrets/`. Boot fails loudly if it's set but missing or unpopulated. | unset (no overlay) |
 | `WEBHOOK_PORT` / `PORT` | webhook listener port | `8644` |
+
+There is **no** `WORKFLOW_DIR` env var and no `workflowDir` config field: assets
+resolve layer-wise (built-in root ⊕ overlay root, plus a per-run repo layer), not
+from a single directory. `builtInRoot` is derived from the location of
+`config/default.yaml`.
 
 ### Approval gates
 
@@ -230,7 +453,9 @@ file/default location.
 |---|---|
 | `APPROVAL_GATES` | comma-separated gate names, e.g. `post_architect,post_triage` |
 
-Parsed into `Record<string, boolean>` (`src/config/config.ts:242–248`). A phase
+Parsed into `Record<string, boolean>` (`parseApprovalGates`, `src/config/config.ts`) —
+and, unlike every other key, it *replaces* the file `approval` map wholesale
+rather than merging over it. A phase
 declaring `approval_gate: post_architect` only pauses if `post_architect`
 appears in the map. Missing names are *implicitly disabled* — there is no
 "enable all" mode.
@@ -266,7 +491,8 @@ no password is set.
 
 These are forwarded into the sandbox env *only when* the dispatching
 phase declared `web_search: true` in its YAML
-(`src/engine/agent-executor.ts:116–123`). Auto-detection precedence:
+(`executeAgent` in `src/engine/agent-executor.ts`, gated on `config.webSearch`).
+Auto-detection precedence:
 Tavily > Exa > Brave. Provider API keys (Anthropic / OpenAI /
 OpenRouter) are forwarded unconditionally.
 
@@ -309,7 +535,7 @@ renders a proper agent tree. Constants: `src/telemetry/openinference.ts`; tree:
 
 ### CLI client
 
-The `npm run cli` thin client (`src/cli/cli.ts`) reads its own env:
+The published `lastlight` thin client (`packages/cli/src/cli.ts`) reads its own env:
 
 | Var | Purpose | Default |
 |---|---|---|
@@ -354,7 +580,7 @@ means "pin bumped, redeploy needed", and an already-pinned instance shows a
 quiet "pinned vX.Y.Z" label instead of an update nudge. This makes bumping
 `deploy.version` in the overlay repo the declarative trigger for a CI/CD deploy.
 
-`lastlight fork <workflow>` (host-local, `src/cli/fork-cli.ts`) copies a built-in
+`lastlight fork <workflow>` (host-local, `packages/cli/src/fork-cli.ts`) copies a built-in
 workflow YAML plus every prompt and skill its phases reference into the
 `instance/` overlay so they can be edited per-deployment (the overlay wins by
 logical name at startup). `lastlight fork agent-context [file]` does the same
@@ -363,7 +589,45 @@ assets are then surfaced as overrides: `lastlight server status` prints an
 **Overrides** section (each asset tagged *shadows default* or *added*) and the
 dashboard's Config tab gains an **Overrides** pane reading
 `GET /admin/api/overrides` — both backed by the shared
-`enumerateOverlayAssets` enumerator (`src/config/overlay-assets.ts`).
+`enumerateOverlayAssets` enumerator (`packages/shared/src/overlay-assets.ts`), which
+also backs the per-repo asset list on `GET /admin/api/repos/:owner/:repo/config`.
+
+## YAML-only config keys
+
+These have no env var — they're set in `config/default.yaml` or the overlay's
+`config.yaml` (a repo may set only the subset marked below, within
+`repoConfig.allowKeys`).
+
+| Key | Type / default | Meaning | Repo-settable |
+|---|---|---|---|
+| `managedRepos` | `string[]`, `[]` | The repos Last Light acts on. **Empty is meaningful**: the effective list is then sourced from the GitHub App *installation* (fetched at boot, kept live by `installation` / `installation_repositories` webhooks). A non-empty list wins and restricts to exactly those repos. Enforced at ingress **and** at the `dispatchWorkflow` choke point. Surfaced by `GET /admin/api/managed-repos` (configured / installation / effective / source). | no |
+| `botName` | `string`, `last-light` | The GitHub App slug, no `[bot]` suffix. Single source of truth for the bot's identity — derives the `@mention` handle the router triggers on, `botLogin` (`<botName>[bot]`, the self-comment/self-review filter), and the git commit author. Env: `GITHUB_APP_BOT_NAME`. | no |
+| `routes` | `{ github, slack }` maps | Deterministic event/intent → workflow name routing. Deep-merges over the defaults, so an overlay adds or repoints one key without restating the table. See `05-router.md`. | no |
+| `disabled.workflows` | `string[]`, `[]` | Workflow names dropped at asset-load time. | **yes** (a repo opting *itself* out; refused at dispatch) |
+| `disabled.crons` | `string[]`, `[]` | Legacy spelling of `crons.disable`, unioned into it — and additionally drops the cron's definition at load time, so it is the harder kill. | **yes** |
+| `disabled.prompts` / `disabled.skills` / `disabled.agentContext` | `string[]`, `[]` | Drop a prompt (by path or basename), a skill, or an agent-context file (exact filename or stem). | no |
+| `crons` | `{ enable, disable }`, both `[]` | Cron participation — see the per-repository layer above for the per-layer meaning. | **yes** |
+| `approval` | `Record<string, boolean>`, `{}` | Gate name → enabled. `APPROVAL_GATES` replaces this wholesale. | **yes**, add-only |
+| `models` / `variants` | maps | Per-task model / reasoning-effort. | **yes** |
+| `sandbox.backend` / `sandbox.maxTurns` / `sandbox.kubernetes` | see Sandbox above | Backend selection + the k8s block. | no |
+| `buildAssets.location` | `repo` \| `server` | Where build handoff docs live. | no |
+| `concurrency.maxWorkflows` / `.maxQueueWaitMs` | `4` / `3600000` | Global admission cap. | no |
+| `cleanup.sandbox.{enabled,reapOnCompletion,sweepSchedule,retentionHours,maxDirs}` | `true` / `true` / `"0 * * * *"` / `12` / `40` | Sandbox-workspace reaping: reap an ephemeral run's workspace on terminal success, plus an hourly TTL + LRU backstop sweep that bounds the reusable per-PR cache. See `09-sandbox.md`. | no |
+| `repoConfig.{enabled,allowKeys,allowedModels,allowAssets}` | see the per-repository layer above | The operator's bounds on the repo layer. | **never** — a repo can't widen its own bounds |
+| `deploy.version` | `string \| null`, `null` | Core-version pin (git tag/ref). Deployment config, not runtime behaviour. Env: `LASTLIGHT_CORE_VERSION`. | no |
+| `bootstrap.label` / `explore.defaultRepo` / `review.postsCheck` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO` / `REVIEW_POSTS_CHECK`. | no |
+| `otel.*` | see Telemetry | Env-overridable per key; `collectorHosts` is *unioned* with env, not replaced. | no |
+| `cron.webhooksEnabledCondition` | `true` | Present in `default.yaml` but **inert** — `normalizeFileConfig` never reads a `cron:` block. The real condition is declared per cron YAML (`condition.unless: webhooksEnabled`) and applied by `getJobs`, with `webhooksEnabled` derived in `src/index.ts` as `webhookSecret && githubApp`. | no |
+
+The lenient-vs-strict split matters: blocks whose job is to **bound untrusted
+input** (`crons`, `repoConfig.allowKeys`, `repoConfig.allowedModels`) degrade a
+malformed value to the documented default rather than throwing, because the same
+shapes are also read out of an untrusted repo layer and the two paths must not
+disagree. `managedRepos` and `routes`, by contrast, throw on a malformed value —
+they're operator-only.
+
+`publicConfig` isn't a knob: it's the redacted default / overlay / merged /
+provenance bundle `loadConfig` builds for `GET /admin/api/config`.
 
 ## Secrets layout
 
@@ -384,12 +648,17 @@ access profile sets `allowMcpAppAuth: true` (currently only the
 `repo-write` profile for the build cycle), and even then via the shared
 secrets volume — never inlined in env or sandbox args.
 
-Low-trust sandboxes get `GITHUB_APP_PRIVATE_KEY_PATH=""` explicitly to
-short-circuit any inadvertent PEM reads (`src/engine/agent-executor.ts:80–82`).
+Low-trust sandboxes are simply never *given* the App env at all: the executor
+builds a per-run credential map and only writes `GITHUB_APP_ID` /
+`GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` into it when the
+profile sets `allowMcpAppAuth`. An absent key means "no credential", so nothing
+has to be blanked out — and the map is never spliced into the harness's shared
+`process.env` (issue #215; see `09-sandbox.md`).
 
 ## STATE_DIR tree
 
-Created at boot (`src/index.ts:78`):
+`sessions/`, `logs/` and `sandboxes/` are created at boot (`main()` in
+`src/index.ts`); the rest appear on first use:
 
 ```
 $STATE_DIR/
@@ -403,16 +672,25 @@ $STATE_DIR/
 ├── build-assets/          server-mode build handoff docs (when
 │                          buildAssets.location = server):
 │                          <owner>/<repo>/<issueKey>/*.md
+├── repo-config/           per-repository config layer cache (see above):
+│   └── <owner>/<repo>/
+│       ├── meta.json      sidecar — default branch, tree sha, etag, warnings
+│       └── files/         the unpacked .lastlight/ tree
 └── proxy/                 generated egress firewall configs
     ├── nginx-strict.conf
     ├── nginx-open.conf
     ├── Corefile.strict
-    └── Corefile.open
+    ├── Corefile.open
+    └── otel-collector.yaml   in-network collector config (mode 0600 —
+                              may hold backend auth headers)
 ```
 
 `proxy/` is regenerated on every harness boot from the allowlist in
-`src/sandbox/egress-allowlist.ts` — bind-mounted read-only into the
-firewall containers.
+`src/sandbox/egress-allowlist.ts` (plus the harness `OTEL_*` env for the
+collector config) — bind-mounted read-only into the firewall + collector
+containers. `repo-config/` is a *cache*: safe to delete, refilled by the next
+conditional fetch. It holds untrusted bytes from managed repos, so nothing in it
+is ever executed — only read as prompts / skills / agent-context / YAML.
 
 ## Invariants
 
@@ -437,17 +715,58 @@ firewall containers.
 - **`OPENCODE_*` aliases stay.** They are the legacy names from when the
   runtime was OpenCode; they will keep working. New env should use
   `LASTLIGHT_*` for clarity.
+- **The repo layer is read from the default branch, never a PR head.** This is
+  the whole security model of `.lastlight/`. A re-implementation that resolves it
+  from the checkout under review has handed every contributor the agent's
+  configuration.
+- **A repo's config file can never fail a run.** Every rejection is a warning +
+  a drop. The single exception is `disabled.workflows`, where the repo is
+  deliberately refusing the run — reported the same way the unmanaged-repo guard
+  refuses one.
+- **The repo layer is bounded by the operator, and can't widen itself.**
+  `repoConfig` is operator-only; an allow-listed key with no validator is still
+  dropped, so widening requires a code change that has been reviewed, not a
+  config edit.
+- **Repo `agent-context` is additive only.** A repo file whose basename an
+  operator-owned layer already provides is dropped, so committing `security.md`
+  or `rules.md` can't neuter the operator's rules. Enforced once, at composition
+  time (`agentContextAdditiveOnly`); every downstream consumer uses the composed
+  value verbatim.
+- **Repo `approval` is add-only.** A repo may raise a gate for runs against
+  itself, never clear one.
+- **Per-run config is per-run state, never a global.** The repo layer is carried
+  on the run (and on a per-run `AssetResolver`), because concurrent runs and cron
+  fan-outs share the process — a module-level install would hand one repo's
+  overrides to another repo's run.
 
 ## Current implementation
 
-Single file: `src/config/config.ts`. Schema at `74–143`. JSON parsers for
-models/variants at `265–281` and `313–327`. Approval-gate parser at
-`242–248`. Public URL resolution at `229–234`. Sandbox backend selection
-at `206–214`.
+Boot config is `src/config/config.ts` — `loadConfig()` (dotenv → default YAML →
+overlay YAML → the materialized env layer → `normalizeFileConfig`), plus
+`buildEnvConfigLayer` (the single home for env-var→config-path knowledge,
+legacy `OPENCODE_*` aliases included), `parseApprovalGates`, `resolvePublicUrl`,
+`sandboxBackend`, `resolveKubernetesConfig`, `resolveGithubAuth`, and the
+redaction pair `SENSITIVE_KEY_RE` / `redactPublic`. Layer merging is
+`src/config/config-resolve.ts`, which re-exports `mergeLayer` from
+`lastlight-shared/repo-config-schema` rather than carrying its own copy.
 
-Per-task resolvers — `resolveModel(models, taskType)`, `resolveVariant()` —
-sit alongside the schema (`296–297`, `336–340`) and are called from the
-runner and dispatch closure, not from the config loader itself.
+Per-task resolvers — `resolveModel(models, taskType)`, `resolveVariant()` — sit
+alongside the schema and are called from the runner and dispatch closure, not
+from the config loader itself.
+
+The per-repository layer is split across three files, by purity:
+
+| File | Owns |
+|---|---|
+| `packages/shared/src/repo-config-schema.ts` | The **pure** half — bounds (`RepoConfigPolicy`, `DEFAULT_REPO_CONFIG_ALLOW_KEYS`, the size/file caps), path classification (`repoLayerPathKind`, `isRepoWorkflowPath`), the file-level guard (`sanitizeRepoFiles`), the config-level guard (`parseRepoConfigYaml`, `sanitizeRepoConfigLayer`), the merge (`mergeLayer`, `resolveRepoConfig`), and the warning vocabulary. In the leaf package because the CLI validates `.lastlight/` offline and may never gain an edge to core. |
+| `apps/server/src/config/repo-config.ts` | The **impure** half — `fetchRepoLayer` / `refreshRepoLayer` / `invalidateRepoLayer` / `getCachedRepoLayer`, the TTL + sidecar cache, the atomic unpack, `repoConfigPolicy()`, `repoConfigBaseFromRuntime()`. Re-exports the pure half wholesale, so it is the single import surface for core. |
+| `apps/server/src/workflows/simple.ts` | The **per-run** projection — `resolveRepoRunConfig` (called from the dispatch choke point), `RunRepoConfig`, `repoConfigRunRecord` (persist) / `restoreRepoRunConfig` (resume), `soleRepoInContext`. |
+
+Cron participation lives beside the scheduler instead
+(`apps/server/src/cron/repo-crons.ts`: `resolveCronRepos`, `repoCronPrefs`,
+`cronVote`, `repoLayerMayVote`, `operatorCrons`) because it decides *which repos*
+a cron fans out over — a decision made before any run, and therefore before any
+merged per-run config, exists.
 
 The cheap one-shot helpers (`classifier`, `screener` in `src/engine/llm.ts`)
 also honour the `models:` map: `defaultFastModel(taskType)` reads

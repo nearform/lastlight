@@ -568,6 +568,23 @@ prevent template-after-render injection (`validateShellCommand`).
 - **Restart-count is the circuit breaker.** Three failed resumes and
   the run is failed permanently. Resist the urge to raise the limit
   without thinking about what's actually crashing.
+- **A run's config is frozen at dispatch.** `runWorkflow` takes the target
+  repo's `.lastlight/` layer as a trailing, *defaulted* parameter (defaulted so
+  `runWorkflow.length` stays 9 — the frozen `lastlight/evals` surface pinned by
+  `evals-contract.test.ts`) and derives the effective models / variants /
+  approval gates from it. A **resume restores** that layer from the run row
+  rather than re-resolving it from the repo's default branch, so an edit made
+  while the run was paused, queued or dead can't retarget it half-way through.
+  See [Configuration](/spec/02-configuration) and
+  [State](/spec/10-state).
+- **Per-run asset resolution never mutates the module globals.** When a repo
+  layer applies, the runner builds an `AssetResolver` over
+  `getAssetLayers() + makeLayer("repo", …)` and passes *that* through
+  `EnginePorts.assets` (`loadPromptTemplate` / `resolveSkillPaths`) for the whole
+  run — not `configureWorkflowAssets`, which would leak one run's repo layer into
+  another's prompts. `populateCache()` additionally refuses to read workflow or
+  cron YAML from a `repo` layer, so "a repo may not define workflows" is
+  structural rather than conventional.
 
 ## Current implementation
 
@@ -583,6 +600,8 @@ prevent template-after-render injection (`validateShellCommand`).
 | Template engine | `src/workflows/templates.ts` |
 | Resume + orphan recovery | `src/workflows/resume.ts` |
 | Concurrency cap + admission | `src/workflows/admission.ts` (cap enforced in `simple.ts`) |
+| Per-repo layer: dispatch-time resolve, persist, restore | `src/workflows/simple.ts` (`resolveRepoRunConfig`, `repoConfigRunRecord`, `restoreRepoRunConfig`) |
+| Per-run asset resolver | `createAssetResolver` / `makeLayer` / `getAssetLayers` in `packages/shared/src/workflow-loader.ts`, wired in `runner.ts` |
 
 ## Rebuild notes
 

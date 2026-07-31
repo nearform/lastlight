@@ -4,6 +4,10 @@ import { fileURLToPath } from "url";
 import { parse as parseYaml } from "yaml";
 import { normalizeAllowlistHost } from "../sandbox/egress-allowlist.js";
 import { resolveConfigLayers } from "./config-resolve.js";
+import {
+  DEFAULT_REPO_CONFIG_ALLOW_KEYS,
+  type RepoConfigPolicy,
+} from "lastlight-shared/repo-config-schema";
 import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-workflow-engine";
 
 /**
@@ -134,6 +138,14 @@ export interface LastLightConfig {
   managedRepos: string[];
   routes: RouteConfig;
   disabled: DisabledConfig;
+  /**
+   * Which crons participate, per layer (issue #180). Normalized here from the
+   * `crons:` block; the legacy `disabled.crons` list is unioned into
+   * {@link CronsConfig.disable} so both spellings mean the same thing. Read by
+   * `src/cron/jobs.ts` (global on/off) and `src/cron/repo-crons.ts` (per-repo
+   * fan-out). Always present — an empty pair is the "everything runs" default.
+   */
+  crons: CronsConfig;
   otel: OtelConfig;
   publicConfig: PublicConfigBundle;
   githubApp?: {
@@ -165,7 +177,58 @@ export interface LastLightConfig {
    * dir cap (`maxDirs`). Replaces the out-of-band host cron.
    */
   cleanup: { sandbox: SandboxCleanupConfig };
+  /**
+   * Operator bounds on the per-repository config layer (issue #180) — what a
+   * managed repo's committed `.lastlight/lastlight.yml` is allowed to override
+   * for runs against that repo. Always normalized (never undefined) and inert
+   * by default: it only starts mattering once a repo commits `.lastlight/`.
+   */
+  repoConfig: RepoConfigPolicy;
 }
+
+/**
+ * Which crons a config layer opts in / out of (issue #180). Valid in
+ * `config/default.yaml`, in an overlay's `config.yaml`, and in a managed repo's
+ * `.lastlight/lastlight.yml` — the SAME block at every layer, read with a
+ * layer-specific meaning:
+ *
+ *   operator (default + overlay)  disable → the cron is off globally
+ *                                 enable  → a no-op re-affirmation of the default
+ *   repo (`.lastlight/`)          disable → this repo drops out of that cron's fan-out
+ *                                 enable  → this repo opts IN even when it's off globally
+ *
+ * A name listed in BOTH wins as `disable` at every layer — a cron that doesn't
+ * run is always the safe reading of a contradictory config.
+ *
+ * "Off globally" now means "off by default", not "structurally removed": the
+ * tick is still registered so a repo's opt-in can be resolved at fan-out time
+ * (see `src/cron/jobs.ts`). An operator who wants a kill switch repos can NOT
+ * override drops `crons` from `repoConfig.allowKeys` instead.
+ */
+export interface CronsConfig {
+  /** Cron names turned ON at this layer. */
+  enable: string[];
+  /**
+   * Cron names turned OFF at this layer. The legacy `disabled.crons` list is
+   * unioned in here by the normaliser, so existing deployments keep working
+   * unchanged and both spellings are read from one place.
+   */
+  disable: string[];
+}
+
+/**
+ * The per-repo config layer's bounds, re-exported from `lastlight-shared` so
+ * `src/config/config.js` stays the single import surface for the runtime config
+ * shape — but with exactly ONE definition, in the leaf package. The CLI
+ * validates a `.lastlight/` offline against the same type and constant and may
+ * never gain an edge to core, so shared is the only place both can reach; a
+ * structural copy here would be free to drift from the bounds actually enforced
+ * at resolve time. {@link DEFAULT_REPO_CONFIG_ALLOW_KEYS} must also stay in step
+ * with `repoConfig.allowKeys` in `config/default.yaml` (pinned by
+ * `tests/config/repo-config-shared.test.ts`).
+ */
+export type { RepoConfigPolicy } from "lastlight-shared/repo-config-schema";
+export { DEFAULT_REPO_CONFIG_ALLOW_KEYS } from "lastlight-shared/repo-config-schema";
 
 /** The `kubernetes` sandbox backend's own config surface — namespace, image,
  *  and the PVC/security-context knobs later Plan-2 tasks wire into the
@@ -275,12 +338,24 @@ function clonePublic(obj: Record<string, unknown> | null): Record<string, unknow
  * read from YAML, so the public config bundle should never legitimately
  * contain these — but an operator could paste one into config.yaml by mistake.
  * Redact defensively so the dashboard /config view can't echo it back.
+ *
+ * SINGLE SOURCE — do not copy this rule. It guards every surface that echoes
+ * YAML back to the dashboard: the global bundle here, and the admin routes'
+ * `GET /config` + `GET /repos/:owner/:repo/config` (the latter echoes a repo's
+ * UNTRUSTED, pre-validation `.lastlight/lastlight.yml`, so it is the one place a
+ * pasted credential could round-trip out). A second copy that fell behind this
+ * one would be a leak, not a style problem, so both are exported and imported
+ * rather than mirrored by hand.
  */
-const SENSITIVE_KEY_RE =
+export const SENSITIVE_KEY_RE =
   /secret|token|password|passwd|credential|private[-_]?key|signing[-_]?key|api[-_]?key|key[-_]?path|\bpem\b/i;
 
-/** Recursively redact secret-looking keys from a public (non-secret) config tree. */
-function redactPublic<T>(value: T): T {
+/**
+ * Recursively redact secret-looking keys from a public (non-secret) config tree.
+ * Exported alongside {@link SENSITIVE_KEY_RE} for the admin routes — same rule,
+ * same walk, one definition.
+ */
+export function redactPublic<T>(value: T): T {
   if (Array.isArray(value)) return value.map((v) => redactPublic(v)) as unknown as T;
   if (isPlainObject(value)) {
     const out: Record<string, unknown> = {};
@@ -449,6 +524,7 @@ export function loadConfig(): LastLightConfig {
     managedRepos: fileCfg.managedRepos,
     routes: fileCfg.routes,
     disabled: fileCfg.disabled,
+    crons: fileCfg.crons,
     otel,
     publicConfig: {
       default: redactPublic(clonePublic(defaultRaw)!),
@@ -466,6 +542,7 @@ export function loadConfig(): LastLightConfig {
     reviewPostsCheck: fileCfg.reviewPostsCheck,
     concurrency: fileCfg.concurrency,
     cleanup: fileCfg.cleanup,
+    repoConfig: fileCfg.repoConfig,
   };
   setRuntimeConfig(config);
   return config;
@@ -481,6 +558,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   botName: string;
   routes: RouteConfig;
   disabled: DisabledConfig;
+  crons: CronsConfig;
   models: ModelConfig;
   variants: VariantConfig;
   sandbox: { backend: SandboxBackend; maxTurns: number };
@@ -494,6 +572,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   otel: OtelConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   cleanup: { sandbox: SandboxCleanupConfig };
+  repoConfig: RepoConfigPolicy;
 } {
   const managedRepos = stringArray(raw.managedRepos, "managedRepos");
   const botName = typeof raw.botName === "string" && raw.botName.trim() ? raw.botName.trim() : "last-light";
@@ -510,9 +589,11 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
   const otelRaw = isPlainObject(raw.otel) ? raw.otel : {};
+  const cronsRaw = isPlainObject(raw.crons) ? raw.crons : {};
   const concurrencyRaw = isPlainObject(raw.concurrency) ? raw.concurrency : {};
   const cleanupRaw = isPlainObject(raw.cleanup) ? raw.cleanup : {};
   const sandboxCleanupRaw = isPlainObject(cleanupRaw.sandbox) ? cleanupRaw.sandbox : {};
+  const repoConfigRaw = isPlainObject(raw.repoConfig) ? raw.repoConfig : {};
 
   const models: ModelConfig = { default: typeof modelsRaw.default === "string" ? modelsRaw.default : DEFAULT_MODEL };
   for (const [k, v] of Object.entries(modelsRaw)) if (typeof v === "string") models[k] = v;
@@ -555,17 +636,48 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         : 40,
   };
 
+  // Cron participation (issue #180). Lenient like the blocks above — a
+  // mistyped `crons.disable` degrades to "nothing listed" rather than taking
+  // the harness down at boot, because the same block is also read out of an
+  // untrusted repo layer and the two paths must not disagree about shape.
+  //
+  // The legacy `disabled.crons` list is UNIONED into `crons.disable` rather
+  // than replaced by it: existing deployments (and the asset loader, which
+  // still drops a `disabled.crons` cron at load time) are unaffected, and
+  // downstream code only has to read one list. `crons.enable` at the operator
+  // layer is accepted and kept for provenance/symmetry with the repo layer,
+  // but changes nothing — a cron is on unless something disables it.
+  const disabledCrons = optionalStringArray(disabledRaw.crons, "disabled.crons");
+  const crons: CronsConfig = {
+    enable: nonEmptyStringList(cronsRaw.enable) ?? [],
+    disable: uniqueNames([...(nonEmptyStringList(cronsRaw.disable) ?? []), ...disabledCrons]),
+  };
+
+  // Per-repo config bounds (issue #180). Defaults are deliberately inert: an
+  // upgrading deployment that says nothing gets exactly the shipped allow-list
+  // and no behaviour change until a repo commits `.lastlight/`. A malformed
+  // `allowKeys` / `allowedModels` falls back to the default rather than
+  // throwing — this block bounds an untrusted layer, so failing closed on a
+  // typo would be worse than the documented default.
+  const repoConfig: RepoConfigPolicy = {
+    enabled: repoConfigRaw.enabled !== false,
+    allowKeys: nonEmptyStringList(repoConfigRaw.allowKeys) ?? [...DEFAULT_REPO_CONFIG_ALLOW_KEYS],
+    allowedModels: nonEmptyStringList(repoConfigRaw.allowedModels) ?? null,
+    allowAssets: repoConfigRaw.allowAssets !== false,
+  };
+
   return {
     managedRepos,
     botName,
     routes,
     disabled: {
       workflows: optionalStringArray(disabledRaw.workflows, "disabled.workflows"),
-      crons: optionalStringArray(disabledRaw.crons, "disabled.crons"),
+      crons: disabledCrons,
       prompts: optionalStringArray(disabledRaw.prompts, "disabled.prompts"),
       skills: optionalStringArray(disabledRaw.skills, "disabled.skills"),
       agentContext: optionalStringArray(disabledRaw.agentContext, "disabled.agentContext"),
     },
+    crons,
     models,
     variants,
     sandbox: { backend, maxTurns },
@@ -579,7 +691,30 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     otel: normalizeOtelFileConfig(otelRaw),
     concurrency: { maxWorkflows, maxQueueWaitMs },
     cleanup: { sandbox: sandboxCleanup },
+    repoConfig,
   };
+}
+
+/**
+ * The trimmed non-empty strings of an array value, or `undefined` when the
+ * value isn't an array at all (absent / null / scalar) — so the caller can
+ * apply its own default. An explicitly empty array stays empty rather than
+ * falling back, so `allowKeys: []` means "a repo may set nothing".
+ *
+ * Deliberately lenient (unlike {@link stringArray}, which throws): this backs
+ * config blocks whose job is to BOUND untrusted input, where a typo should
+ * degrade to the documented default rather than take the harness down at boot.
+ */
+function nonEmptyStringList(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim());
+}
+
+/** De-duplicate a name list, preserving first-seen order (used for unioned lists). */
+function uniqueNames(names: string[]): string[] {
+  return [...new Set(names)];
 }
 
 /**

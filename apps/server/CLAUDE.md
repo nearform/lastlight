@@ -98,9 +98,26 @@ src/
     config.ts           Layered config load: config/default.yaml +
                         optional $LASTLIGHT_OVERLAY_DIR/config.yaml + env
                         overrides. Secrets stay env-only. Exposes
-                        getRuntimeConfig / getManagedRepos / getRoutes /
-                        getPublicConfig.
-    config-resolve.ts   Pure config layer resolution (default / overlay / env).
+                        getRuntimeConfig / getRoutes / getPublicConfig /
+                        getBotName / resolveGithubAuth /
+                        resolveKubernetesConfig, plus the single redaction
+                        rule (SENSITIVE_KEY_RE + redactPublic) every
+                        YAML-echoing surface imports.
+    config-resolve.ts   Pure config layer resolution (default / overlay / env),
+                        plus resolveWithExtraLayer — the seam the per-repo
+                        layer merges through. Re-exports mergeLayer from
+                        lastlight-shared rather than carrying a second copy.
+    repo-config.ts      The IMPURE half of the per-repo `.lastlight/` layer
+                        (issue #180): fetchRepoLayer / refreshRepoLayer /
+                        invalidateRepoLayer / getCachedRepoLayer, the
+                        <stateDir>/repo-config/<owner>/<repo>/ TTL+ETag cache
+                        (60s, sidecar meta.json + atomically-renamed files/),
+                        repoConfigPolicy(), repoConfigBaseFromRuntime().
+                        Re-exports the PURE half wholesale from
+                        packages/shared/src/repo-config-schema.ts (schema,
+                        bounds, validators, merger) — which lives there
+                        because the CLI validates `.lastlight/` offline and
+                        may never gain an edge to core.
   connectors/           Platform abstraction — every event source emits an
                         EventEnvelope so the engine never sees raw payloads.
     github-webhook.ts   GitHub App webhook → EventEnvelope.
@@ -209,8 +226,29 @@ src/
     db.ts               SQLite tables: executions, workflow_runs,
                         workflow_approvals, messaging_sessions,
                         messaging_messages, plus daily/hourly stat rollups.
-  cron/                 node-cron scheduler. Each tick dispatches a
+  cron/                 croner scheduler. Each tick dispatches a
                         cron-kind workflow via the same runner.
+    scheduler.ts        register/update/unregister/has + the tick → runner.
+    jobs.ts             Build the job list from workflows/cron-*.yaml +
+                        cron_overrides rows + the operator `crons:` block.
+                        A globally-OFF cron stays REGISTERED, marked
+                        `_cronGloballyEnabled: false`, so a repo opt-in can
+                        be honoured at tick time.
+    fanout.ts           One dispatch per repo (`context.repos`) — and the
+                        shared engine behind the per-PR dependency-merge
+                        fan-out. Narrows the repo list via repo-crons first.
+    repo-crons.ts       Per-repo cron participation (issue #180):
+                        resolveCronRepos / repoCronPrefs / cronVote /
+                        repoLayerMayVote / operatorCrons, plus the
+                        `_cronName` + `_cronGloballyEnabled` context keys the
+                        fan-out consumes and strips. Resolved at TICK time so
+                        a repo's `.lastlight/` edit lands on the next tick
+                        with no scheduler churn.
+    sandbox-sweep.ts    Hourly TTL/LRU workspace sweep (issue #106).
+    dependabot-discovery.ts / review-discovery.ts
+                        PR discoverers for the discovery crons (which fan out
+                        per discovered PR, so src/index.ts narrows their repo
+                        list through resolveCronRepos itself).
 
 workflows/              YAML workflow definitions consumed by the loader.
                         build.yaml, pr-fix.yaml, pr-review.yaml,
@@ -281,9 +319,11 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   `src/workflows/CLAUDE.md`.
 - **Configuration & deployment overlay** (`src/config/config.ts`, `config/default.yaml`,
   issue #61) — non-secret config (managed repos, routes, models, variants,
-  approvals, disables) is loaded at startup from the packaged
+  approvals, disables, cron participation) is loaded at startup from the packaged
   `config/default.yaml`, then an optional `$LASTLIGHT_OVERLAY_DIR/config.yaml`
-  is layered on, then legacy env vars override. Maps deep-merge; arrays
+  is layered on, then legacy env vars override. **A fourth layer, the target
+  repo's own `.lastlight/`, is applied per dispatch — see "Per-repo config
+  layer" below.** Maps deep-merge; arrays
   (`managedRepos`, `disabled.*`) replace; secrets stay env-only. The same
   `LASTLIGHT_OVERLAY_DIR` root also overlays assets — `workflows/`,
   `workflows/prompts/`, `skills/`, `agent-context/` — resolved layer-aware by
@@ -317,6 +357,60 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   config, not runtime behaviour: `lastlight server update|setup` checks core out
   at that tag instead of tracking `main`. Read host-side and in-container by
   `readCorePin()` (`src/config/core-pin.ts`); see "Redeploy a code change".
+- **Per-repo config layer** (`src/config/repo-config.ts` +
+  `packages/shared/src/repo-config-schema.ts`, issue #180) — a **managed repo**
+  may commit a `.lastlight/` directory that overrides a **bounded** subset of
+  config *for runs against that repo only*. Precedence becomes
+  `default → overlay → env → repo`. The directory mirrors the instance overlay's
+  shape exactly — `lastlight.yml`, `workflows/prompts/*.md`,
+  `skills/<name>/SKILL.md`, `agent-context/*.md` — so the unpacked tree is handed
+  to the same layer-aware asset loader with no second code path. **A repo may
+  never contribute workflow YAML** (phases, permission profiles and approval
+  gates stay the operator's; `populateCache()` skips `repo` layers structurally),
+  and its `agent-context/*.md` is **additive only** — a file whose basename an
+  operator-owned layer already provides is dropped, so a repo can't neuter
+  `security.md` / `rules.md`.
+  - **Trust rule.** The layer is ALWAYS read from the repo's **default branch**,
+    never a PR head and never the sandbox checkout — otherwise a PR could
+    reconfigure the agent reviewing it.
+  - **Failure rule.** Warn, drop the offending keys, run anyway. A repo's config
+    file can never fail a run. Every rejection is a structured
+    `RepoConfigWarning` surfaced on the run row / admin API / CLI. The one
+    "refusal" is a repo's own `disabled.workflows`, enforced at the
+    `dispatchWorkflow` choke point.
+  - **Operator bounds** — the `repoConfig:` block in config
+    (`enabled`, `allowKeys`, `allowedModels`, `allowAssets`). Default allow-list:
+    `models`, `variants`, `crons`, `disabled.workflows`, `disabled.crons`,
+    `approval` (add-only — a repo may raise a gate, never clear one). Inert out
+    of the box: nothing changes until a repo actually commits `.lastlight/`.
+  - **Cron participation** — a `crons: { enable, disable }` block, valid at
+    EVERY layer. Operator `crons.disable` = off *by default* (the tick stays
+    registered); a repo's `crons.enable` opts in even when globally off,
+    `crons.disable` opts out, disable wins if both. The legacy `disabled.crons`
+    is unioned into `crons.disable`. **The operator's un-overridable kill switch
+    is removing `crons` from `repoConfig.allowKeys`** — `repoLayerMayVote()` then
+    short-circuits with zero fetches.
+  - **Fetch/cache** — through the App-authenticated client (private repos work),
+    cached under `<stateDir>/repo-config/<owner>/<repo>/` with a 60 s TTL +
+    ETag/tree-sha conditional requests, so a cron fan-out over N repos costs N
+    conditional requests and zero downloads. Caps: 200 files / 2 MiB; symlinks
+    rejected.
+  - **Concurrency** — resolved once per dispatch (`resolveRepoRunConfig`) and
+    carried explicitly on the run as `RunRepoConfig`, never installed into a
+    module global. Assets go through a **per-run `AssetResolver`**
+    (`createAssetResolver` in `packages/shared/src/workflow-loader.ts`); the
+    composed agent context travels as `ExecutorConfig.agentContext` and is used
+    verbatim by both delivery paths (workspace write, or the k8s
+    `AgentContextSink`).
+  - **Resume** reuses the run's persisted `context.repoConfig` record instead of
+    re-resolving, so an edit made while a run was paused can't retarget it
+    mid-flight.
+  - **Surfaces** — `GET /admin/api/repos/:owner/:repo/config` (merged config +
+    per-leaf provenance `default`/`overlay`/`env`/`repo`, the raw redacted repo
+    layer, warnings, assets, effective policy; `?refresh=1` bypasses the TTL)
+    powers the dashboard's per-repo **Config** tab; the CLI side is
+    `lastlight repo fork` / `repo config validate` / `repo config show`
+    (see `packages/cli/CLAUDE.md`). Full contract: `spec/02-configuration.md`.
 - **Two execution modes**:
   - **Sandbox** — workflow phases run inside a Docker sandbox
     (`src/sandbox`) with a minted per-run GitHub token. Each phase invokes
@@ -423,6 +517,13 @@ data/
                             buildAssets.location=server):
                             <owner>/<repo>/<issueKey>/*.md — never committed
                             into the target repo. Store: src/state/build-assets.ts.
+  repo-config/              Per-repo `.lastlight/` layer cache (issue #180):
+                            <owner>/<repo>/meta.json (sidecar: default branch,
+                            tree sha, etag, warnings) + <owner>/<repo>/files/
+                            (the unpacked tree, written to files.tmp and
+                            renamed). Pure cache — safe to delete; refilled by
+                            the next conditional fetch. Holds untrusted bytes
+                            from managed repos, so nothing in it is executed.
   logs/                     Structured harness logs.
   proxy/                    Generated egress firewall configs (docker
                             backend): nginx-strict.conf, nginx-open.conf,

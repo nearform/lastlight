@@ -12,7 +12,8 @@ const PANE_LABELS: Record<Pane, string> = {
   repos: "Managed repos",
 };
 
-function pretty(value: unknown): string {
+/** The one JSON renderer for every config view — shared with the per-repo pane. */
+export function pretty(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 

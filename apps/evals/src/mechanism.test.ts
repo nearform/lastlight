@@ -8,13 +8,20 @@
  *   - workspace seeding + execution grading flip red→green correctly.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import { GitHubClient } from "agentic-pi/dist/extensions/github/client.js";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { startFakeGitHub } from "./fake-github.js";
+import {
+  appliedRepoConfigKeys,
+  loadRepoConfigFixture,
+  resolveEvalRepoConfig,
+  type RepoConfigClient,
+} from "./repo-config.js";
 import { seedWorkspace, seedWorkspaceFromGit, prFilesFromGit, injectRepoContext } from "./seed.js";
 import { gitDiffAgainstBase } from "./run-instance.js";
 import { execFileSync } from "node:child_process";
@@ -26,6 +33,9 @@ import { modelsArm, configArm, releaseOverlayGuard } from "./arm.js";
 import { collectMetrics } from "./metrics.js";
 
 const staticAuth = { getToken: async () => "fake-token", expiresAt: null, canRefresh: false };
+
+/** The shipped `datasets/` root — resolved from this file, not the cwd. */
+const DATASETS = join(fileURLToPath(new URL(".", import.meta.url)), "..", "datasets");
 
 describe("fake GitHub + agentic-pi github tools (baseUrl seam)", () => {
   it("serves seeded issues and records mutations made through the real GitHubClient", async () => {
@@ -219,6 +229,196 @@ describe("fake GitHub — PR + review endpoints (pr-review tier)", () => {
 
       // Unknown PR still 404s (the route only serves seeded PRs).
       expect((await fetch(`${fake.url}/repos/acme/widget/pulls/999/files`)).status).toBe(404);
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
+describe("fake GitHub — the repo-config layer seam (issue #180)", () => {
+  const seed = (repoConfig?: Parameters<typeof startFakeGitHub>[0]["repoConfig"]) =>
+    startFakeGitHub({ owner: "acme", repo: "widget", defaultBranch: "trunk", repoConfig });
+
+  it("reports `absent` for a repo with no .lastlight/ — the pre-#180 default", async () => {
+    // Every eval case that predates this feature takes this path, so it has to
+    // be a plain negative answer (never an error) AND report the trust ref.
+    const fake = await seed();
+    try {
+      expect(await fake.fetchRepoConfigTree("acme", "widget")).toEqual({
+        status: "absent",
+        defaultBranch: "trunk",
+      });
+      expect(fake.repoConfigFetches()).toBe(1);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("serves a seeded tree as `ok`, honouring includePath and the file cap", async () => {
+    const fake = await seed([
+      { path: "lastlight.yml", content: "models: {}\n" },
+      { path: "workflows/prompts/answer.md", content: "repo prompt" },
+      // Shared real estate: build-handoff docs live under `.lastlight/` too, and
+      // `fetchRepoLayer` filters them out BEFORE spending the byte budget.
+      { path: "issue-42/architect-plan.md", content: "not part of the layer" },
+    ]);
+    try {
+      const all = await fake.fetchRepoConfigTree("acme", "widget");
+      expect(all.status).toBe("ok");
+      if (all.status !== "ok") return;
+      expect(all.defaultBranch).toBe("trunk");
+      expect(all.treeSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(all.files.map((f) => f.path)).toEqual([
+        "lastlight.yml",
+        "workflows/prompts/answer.md",
+        "issue-42/architect-plan.md",
+      ]);
+      expect(all.files[0].mode).toBe("100644");
+      expect(all.files[1].content.toString("utf8")).toBe("repo prompt");
+      expect(all.truncated).toBe(false);
+
+      const filtered = await fake.fetchRepoConfigTree("acme", "widget", {
+        includePath: (p) => p.startsWith("workflows/"),
+      });
+      expect(filtered.status === "ok" && filtered.files.map((f) => f.path)).toEqual([
+        "workflows/prompts/answer.md",
+      ]);
+
+      const capped = await fake.fetchRepoConfigTree("acme", "widget", { maxFiles: 1 });
+      expect(capped.status === "ok" && capped.files).toHaveLength(1);
+      expect(capped.status === "ok" && capped.truncated).toBe(true);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("answers `not-modified` to a matching treeSha/etag (the warm-cache path)", async () => {
+    const fake = await seed([{ path: "lastlight.yml", content: "models: {}\n" }]);
+    try {
+      const first = await fake.fetchRepoConfigTree("acme", "widget");
+      if (first.status !== "ok") throw new Error("expected ok");
+      // Content-exact conditional: same subtree sha ⇒ nothing downloaded.
+      const again = await fake.fetchRepoConfigTree("acme", "widget", { treeSha: first.treeSha });
+      expect(again).toEqual({ status: "not-modified", defaultBranch: "trunk", treeSha: first.treeSha, etag: first.etag });
+      // Root-tree ETag conditional (what octokit surfaces as a 304).
+      const byEtag = await fake.fetchRepoConfigTree("acme", "widget", { etag: first.etag, treeSha: first.treeSha });
+      expect(byEtag.status).toBe("not-modified");
+      // A stale sha still downloads.
+      expect((await fake.fetchRepoConfigTree("acme", "widget", { treeSha: "stale" })).status).toBe("ok");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("is loud about a repo it was never seeded with (a wiring bug, not 'no config')", async () => {
+    const fake = await seed([{ path: "lastlight.yml", content: "models: {}\n" }]);
+    try {
+      await expect(fake.fetchRepoConfigTree("other", "repo")).rejects.toThrow(/no repo-config fixture/);
+    } finally {
+      await fake.close();
+    }
+  });
+});
+
+describe("repo-config layer — fixture → core's real resolver (issue #180)", () => {
+  const cacheRoots: string[] = [];
+  const cacheRoot = () => {
+    const dir = mkdtempSync(join(tmpdir(), "ll-eval-repocfg-"));
+    cacheRoots.push(dir);
+    return dir;
+  };
+  afterAll(() => {
+    for (const dir of cacheRoots) rmSync(dir, { recursive: true, force: true });
+  });
+
+  const resolve = (fake: Awaited<ReturnType<typeof startFakeGitHub>>, repo: string, workflowName = "answer") =>
+    resolveEvalRepoConfig({
+      repo,
+      workflowName,
+      client: fake as unknown as RepoConfigClient,
+      defaultModel: "anthropic/claude-haiku-4-5",
+      cacheRoot: cacheRoot(),
+    });
+
+  it("reads a case's fixture from <datasetDir>/lastlight/<id>/, laid out as the repo commits it", () => {
+    const files = loadRepoConfigFixture(join(DATASETS, "repo-config"), "repoconfig__prompt-override");
+    expect(files?.map((f) => f.path)).toEqual([
+      "agent-context/repo-notes.md",
+      "lastlight.yml",
+      "workflows/prompts/answer.md",
+    ]);
+    // No fixture directory ⇒ no declaration. This is how every other tier stays
+    // on the operator config without knowing the feature exists.
+    expect(loadRepoConfigFixture(join(DATASETS, "repo-config"), "repoconfig__no-layer")).toBeUndefined();
+    expect(loadRepoConfigFixture(undefined, "anything")).toBeUndefined();
+  });
+
+  it("unpacks the shipped fixture, merges the in-bounds keys and drops the rest", async () => {
+    // The real production chain: fetchRepoLayer → sanitizeRepoFiles → unpack →
+    // resolveRepoConfig. We assert its OUTPUT, not a re-implementation of it.
+    const files = loadRepoConfigFixture(join(DATASETS, "repo-config"), "repoconfig__prompt-override");
+    const fake = await startFakeGitHub({ owner: "lastlight-evals", repo: "lantern", repoConfig: files });
+    try {
+      const { repoConfig, refusal } = await resolve(fake, "lastlight-evals/lantern");
+      expect(refusal).toBeUndefined();
+      expect(repoConfig).toBeDefined();
+      // Always the default branch — the trust ref, never a PR head.
+      expect(repoConfig!.defaultBranch).toBe("main");
+      // The assets the repo contributed, unpacked under a real host path the
+      // runner's per-run asset resolver layers on top of the built-ins.
+      expect(repoConfig!.assets).toEqual(["agent-context/repo-notes.md", "workflows/prompts/answer.md"]);
+      const prompt = join(repoConfig!.assetRoot!, "workflows", "prompts", "answer.md");
+      expect(readFileSync(prompt, "utf8")).toContain("REPO PROMPT APPLIED");
+      // In-bounds config merged, with `repo` provenance…
+      expect(repoConfig!.disabled.crons).toEqual(["weekly-security-scan"]);
+      expect(appliedRepoConfigKeys(repoConfig!)).toEqual(["disabled.crons"]);
+      // …and the out-of-bounds key dropped with a warning, not an exception.
+      expect(repoConfig!.warnings.map((w) => w.code)).toContain("key-not-allowed");
+      // The arm's model survives a layer that doesn't set `models:` — otherwise
+      // a repo layer would silently rewrite the comparison axis.
+      expect(repoConfig!.models.default).toBe("anthropic/claude-haiku-4-5");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("degrades to the operator config for a repo with no layer, and when the seam throws", async () => {
+    const plain = await startFakeGitHub({ owner: "lastlight-evals", repo: "plain" });
+    try {
+      // `absent` ⇒ no layer at all ⇒ `runWorkflow` is called exactly as it was
+      // before the feature existed.
+      expect(await resolve(plain, "lastlight-evals/plain")).toEqual({});
+      // A client that FAILS, and one that doesn't implement the seam at all
+      // (a third-party mock predating #180 — a synchronous TypeError, not a
+      // rejection), must both degrade rather than take the run down.
+      for (const broken of [{ fetchRepoConfigTree: () => Promise.reject(new Error("boom")) }, {}]) {
+        const out = await resolveEvalRepoConfig({
+          repo: "lastlight-evals/plain",
+          workflowName: "answer",
+          client: broken as unknown as RepoConfigClient,
+          defaultModel: "anthropic/claude-haiku-4-5",
+          cacheRoot: cacheRoot(),
+        });
+        expect(out.repoConfig).toBeUndefined();
+        expect(out.refusal).toBeUndefined();
+      }
+    } finally {
+      await plain.close();
+    }
+  });
+
+  it("surfaces a repo's own disabled.workflows as a refusal, not a layer", async () => {
+    const fake = await startFakeGitHub({
+      owner: "acme",
+      repo: "widget",
+      repoConfig: [{ path: "lastlight.yml", content: "disabled:\n  workflows:\n    - answer\n" }],
+    });
+    try {
+      const { repoConfig, refusal } = await resolve(fake, "acme/widget", "answer");
+      expect(repoConfig).toBeUndefined();
+      expect(refusal).toMatch(/disables the "answer" workflow/);
+      // A workflow the repo did NOT opt out of still resolves normally.
+      expect((await resolve(fake, "acme/widget", "pr-review")).refusal).toBeUndefined();
     } finally {
       await fake.close();
     }

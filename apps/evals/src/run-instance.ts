@@ -5,7 +5,9 @@
  *   1. Start the fake GitHub (seeded from the instance's issue fixtures).
  *   2. (code-fix) Deterministically seed the workspace: fixture repo @ base
  *      commit + a local bare `origin` so `git push` works offline.
- *   3. Load the REAL workflow YAML (build / issue-triage / …) via the loader.
+ *   3. Load the REAL workflow YAML (build / issue-triage / …) via the loader,
+ *      and resolve the target repo's committed `.lastlight/` config layer (if
+ *      the case declares one) through core's own dispatch-time resolver.
  *   4. runWorkflow with `sandbox` (default `"none"`; `"gondolin"` isolates the
  *      agent's tools in a QEMU micro-VM — see `opts.sandbox`), `githubApiBaseUrl
  *      → fake GitHub`, and an EMPTY approvalConfig so gates never pause. No real
@@ -33,6 +35,7 @@ import {
 import type { SweBenchInstance, InstanceResult, PhaseSession } from "./schema.js";
 import type { Arm } from "./arm.js";
 import { startFakeGitHub } from "./fake-github.js";
+import { appliedRepoConfigKeys, loadRepoConfigFixture, resolveEvalRepoConfig, type RepoConfigClient } from "./repo-config.js";
 import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, injectRepoContext, type SeedResult } from "./seed.js";
 import { collectMetrics, drainSessions, readSessionLog, listSessionFiles, concatJsonl } from "./metrics.js";
 import { modelCost } from "./env.js";
@@ -156,13 +159,17 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       ? inst.pr?.head_ref ?? "main"
       : "main";
 
-  // 1. Fake GitHub, seeded with the issue and/or PR.
+  // 1. Fake GitHub, seeded with the issue and/or PR — plus the repo's committed
+  //    `.lastlight/` tree when the case ships one at
+  //    `<datasetDir>/lastlight/<instance_id>/`. No fixture ⇒ the mock reports the
+  //    repo as having no layer, which is every case that predates issue #180.
   const fake = await startFakeGitHub({
     owner,
     repo: name,
     issues: inst.issue ? [inst.issue] : [],
     pulls: inst.pr ? [inst.pr] : [],
     existingLabels: inst.issue?.labels ?? [],
+    repoConfig: loadRepoConfigFixture(opts.datasetDir, inst.instance_id),
   });
 
   // Static-token mode: no App creds (so no real mint), a dummy token so the
@@ -292,6 +299,42 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // context untouched and return just their forced id.
     const prepared = opts.arm.prepare(ctx as Record<string, unknown>);
 
+    // 3b. The target repo's `.lastlight/` config layer (issue #180), resolved
+    //     through core's OWN dispatch-time resolver against the mock — fetch →
+    //     sanitize → unpack → merge, unmodified. Undefined for a repo with no
+    //     `.lastlight/`, in which case `runWorkflow` below is called exactly as
+    //     it was before the feature existed. Never throws: the resolver's whole
+    //     contract is "warn, drop the bad bits, run anyway".
+    const repoRun = await resolveEvalRepoConfig({
+      repo: `${owner}/${name}`,
+      workflowName,
+      client: fake as unknown as RepoConfigClient,
+      models: prepared.models,
+      variants: prepared.variants,
+      defaultModel: prepared.model,
+      cacheRoot: join(stateDir, "repo-config"),
+    });
+    if (repoRun.repoConfig) {
+      result.repoLayer = {
+        repo: repoRun.repoConfig.repo,
+        defaultBranch: repoRun.repoConfig.defaultBranch,
+        treeSha: repoRun.repoConfig.treeSha,
+        assets: [...repoRun.repoConfig.assets],
+        applied: appliedRepoConfigKeys(repoRun.repoConfig),
+        warnings: repoRun.repoConfig.warnings.map((w) => `${w.code}: ${w.message}`),
+      };
+    }
+    // The repo opting ITSELF out of this workflow in `.lastlight/lastlight.yml`.
+    // Production abandons the dispatch here — no run, no agent call — so the
+    // case is `blocked` (a deliberate measured outcome), not an error.
+    if (repoRun.refusal) {
+      result.blocked = true;
+      result.repoLayer = { ...(result.repoLayer ?? { repo: `${owner}/${name}` }), refused: repoRun.refusal };
+      result.behavioral = gradeBehavioral(inst.expect_github, fake, { issueNumber, branch });
+      result.githubMutations = fake.calls.length;
+      return result;
+    }
+
     const config: ExecutorConfig = {
       sandbox: opts.sandbox ?? "none",
       stateDir,
@@ -343,7 +386,9 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // 4. Run. Empty approvalConfig (7th arg) → every approval gate is disabled.
     // The arm's prepared maps go to args 6 (models) and 9 (variants), matching
     // prod's runWorkflow call; `models` arms leave both undefined so every phase
-    // falls back to config.model (one model everywhere).
+    // falls back to config.model (one model everywhere). The 10th arg is the
+    // repo layer — `undefined` for a repo with no `.lastlight/`, which is the
+    // pre-#180 call byte-for-byte.
     const flushTimer = fullFile ? setInterval(flushFull, 1000) : undefined;
     let wf;
     try {
@@ -357,6 +402,7 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
         {},
         undefined,
         prepared.variants,
+        repoRun.repoConfig,
       );
     } finally {
       if (flushTimer) clearInterval(flushTimer);

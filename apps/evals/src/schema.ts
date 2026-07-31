@@ -326,4 +326,21 @@ export interface InstanceResult {
    * which context produced which score — without re-reading the workspace. See
    * `injectRepoContext` in seed.ts. */
   injectedContext?: { source: "overlay" | "instance"; path: string; bytes: number }[];
+  /** The target repo's committed `.lastlight/` config layer (issue #180), when
+   * the case declared one at `<datasetDir>/lastlight/<instance_id>/`. Absent for
+   * every case without a fixture — i.e. the whole pre-#180 corpus, which runs on
+   * the operator config exactly as before. `applied` lists the dotted config
+   * paths the repo actually WON (the same projection production persists on
+   * `workflow_runs.context.repoConfig`); `warnings` is everything the layer
+   * dropped on the way in. `refused` is set when the repo's own
+   * `disabled.workflows` opted this workflow out — the run never started. */
+  repoLayer?: {
+    repo: string;
+    defaultBranch?: string;
+    treeSha?: string;
+    assets?: string[];
+    applied?: string[];
+    warnings?: string[];
+    refused?: string;
+  };
 }

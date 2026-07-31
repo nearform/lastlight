@@ -47,32 +47,35 @@ export async function executeAgent(
 ): Promise<ExecutionResult>;
 ```
 
-`ExecutorConfig` (`src/engine/github/profiles.ts:17–64`) carries:
+`ExecutorConfig` (defined in `packages/workflow-engine/src/core/types.ts`,
+re-exported through `src/engine/github/profiles.ts`) carries:
 
 | Field | Meaning |
 |---|---|
 | `cwd?` | Agent's working directory |
 | `model?` | Provider/model — e.g. `anthropic/claude-sonnet-4-6` |
 | `variant?` | Reasoning effort — `off | minimal | low | medium | high | xhigh` |
-| `sandbox?` | Backend — `gondolin` (default) / `docker` / `smol` / `none` |
+| `sandbox?` | Backend — `gondolin` (default) / `docker` / `smol` / `none` / `kubernetes` |
 | `sessionsDir?` | Where the JSONL event log lands |
 | `unrestrictedEgress?` | Opt out of the strict allowlist |
 | `webSearch?` | Enable agentic-pi's web tools for this phase |
 | `webSearchProvider?` | Force a specific provider (Tavily / Brave / Exa) |
-| `agentContextDir?` | Where `agent-context/*.md` is read from |
+| `agentContextDir?` | Legacy — a single `agent-context/` directory. Accepted for call-site compatibility and ignored by `loadAgentContext`, which resolves layer-wise |
+| `agentContext?` | **The run's already-composed `AGENTS.md` body.** Set by the runner when a repo layer applies; used verbatim by every delivery path (issue #180 — see "Agent context" below) |
 
-`ExecutionResult` (`profiles.ts:69–91`) returns `success`, `output`,
+`ExecutionResult` (`profiles.ts`) returns `success`, `output`,
 `turns`, `error`, `durationMs`, `sessionId`, `costUsd`, token counts,
 and `stopReason`.
 
 ## Backends
 
-Four modes, all behind the **Sandbox port** (`src/sandbox/sandbox.ts`):
+Five backends, all behind the **Sandbox port** (`src/sandbox/sandbox.ts`):
 `provision` / `stageSkills` / `runAgent` / `runCommand` / `dispose`. The
-`sandboxFor(backend, opts)` factory returns one of four adapters —
-`DockerSandbox`, `SmolSandbox`, `InProcessSandbox` (`mode: gondolin | none`),
-or the test-only `FakeSandbox`. Each adapter owns its isolation mechanism and
-translates the intent-only `EgressPolicy` to its own controls.
+`sandboxFor(backend, opts)` factory returns `DockerSandbox`, `SmolSandbox`,
+`InProcessSandbox` (`mode: gondolin | none`, so it covers two backends),
+`KubernetesSandbox`, or the test-only `FakeSandbox`. Each adapter owns its
+isolation mechanism and translates the intent-only `EgressPolicy` to its own
+controls.
 
 The **orchestrator** (`src/engine/executors/orchestrator.ts`) drives any
 adapter through that port: `withSandbox` brackets provision → work → dispose,
@@ -402,16 +405,38 @@ harness's own Hono app.
 - **Agent context.** This is the Task 14b addition (nearform#240) that
   replaced an earlier prompt-Secret ride-along: k8s has no host-shared
   workspace to write `AGENTS.md` into directly the way docker's entrypoint
-  does (`cat /app/agent-context/*.md > $WORKSPACE/AGENTS.md`), so `runAgent`
-  resolves the agent-context once (`loadAgentContext()`), registers the text
-  with `agentContextRegistry` (`agent-context-registry.ts`) — a dedicated
-  registry, not a reuse of the skills one, because agent-context is
+  does (`cat /app/agent-context/*.md > $WORKSPACE/AGENTS.md`). The text is
+  **not** re-composed here — it is handed to the adapter by the orchestrator
+  through the `AgentContextSink` capability (`setAgentContext(text)`, declared in
+  `src/engine/github/profiles.ts` beside the loader rather than on the `Sandbox`
+  port, because exactly one backend needs it). `runAgent` registers whatever was
+  handed over with `agentContextRegistry` (`agent-context-registry.ts`) — a
+  dedicated registry, not a reuse of the skills one, because agent-context is
   **per-run-constant and must reach a no-skills phase too** — and the
   `agent-context` initContainer fetches it and writes it to
   `<WORKSPACE_DIR>/AGENTS.md` (the workspace root, never a cwd-relative path,
   so a repo-write phase's `git add -A` can't accidentally commit the bot's own
-  persona file). An empty context registers no token and adds no
-  initContainer.
+  persona file). Only when no caller offered a value does it fall back to the
+  module-level `loadAgentContext()` — the pre-issue-#180 behaviour. An empty
+  context registers no token and adds no initContainer.
+
+  **Why the sink exists.** Agent context is resolved *layer-wise*, and a run may
+  carry a layer the module-level loader has never heard of: the target repo's
+  own `.lastlight/agent-context/*.md` (issue #180, see
+  [Configuration](/spec/02-configuration)). The runner composes the text **once**,
+  off that run's `AssetResolver` — built with `agentContextAdditiveOnly: true`,
+  which is what drops a repo file whose basename an operator-owned layer already
+  provides — and threads it as `ExecutorConfig.agentContext`. The orchestrator's
+  `deliverAgentContext` then picks the delivery for the backend:
+  `provideAgentContext(sandbox, text)` for kubernetes, a plain
+  `writeFileSync(<hostWorkspaceDir>/AGENTS.md)` for every host-shared backend
+  (docker / gondolin / none / smol), whose `hostWorkspaceDir` is a real host path.
+  **Security-relevant:** the value is used verbatim on both paths. Re-composing
+  it in an adapter would either drop the repo layer or — worse — include it
+  without the additive-only filter, letting a managed repo neuter the operator's
+  `security.md` / `rules.md` by committing a file of the same name. The
+  per-instance field is per-run state (the orchestrator constructs one adapter
+  per run), so it cannot leak between concurrent runs.
 - **Build artifacts.** `runAgent` also mints an artifact-upload token from the
   (injectable) `artifactStore` up front; the generated run script's tail
   (present only when the run has a token) best-effort tars `.lastlight/` and
@@ -768,7 +793,14 @@ Per-phase model and variant overrides resolve through
 2. **Materialize app.pem if high-trust** — copy
    `/data/secrets/app.pem` to `$AGENT_HOME/.config/app.pem` only when
    `ALLOW_APP_PEM=1`. Otherwise `GITHUB_APP_PRIVATE_KEY_PATH=""`.
-3. **Write AGENTS.md** — `cat /app/agent-context/*.md > "$WORKSPACE/AGENTS.md"`.
+3. **Write AGENTS.md, if absent** — `cat /app/agent-context/*.md >
+   "$WORKSPACE/AGENTS.md"`, guarded by `[ ! -f "$WORKSPACE/AGENTS.md" ]`. This is
+   the **image-baked fallback**, not the normal path. The orchestrator writes the
+   run's own composed context into the same host-shared path
+   (`deliverAgentContext`, unconditionally overwriting) — and that is the only
+   version that can include the target repo's additive `agent-context/*.md`, see
+   "Agent context" above. An empty composition writes no file, which is exactly
+   when this fallback matters.
 4. **Signal readiness** — `touch "$WORKSPACE/.ready"`. The harness
    waits up to 15 s for this file before sending the first command.
 5. **Drop privileges** — `exec gosu agent "$@"`.

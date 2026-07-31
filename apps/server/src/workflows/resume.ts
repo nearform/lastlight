@@ -4,7 +4,12 @@ import type { GitHubClient } from "../engine/github/github.js";
 import type { ModelConfig, VariantConfig } from "../config/config.js";
 import { runWorkflow, type ApprovalGateConfig, type RunnerCallbacks } from "./runner.js";
 import { getWorkflow } from "./loader.js";
-import { workflowScopedTaskId } from "./simple.js";
+import {
+  restoreRepoRunConfig,
+  workflowScopedTaskId,
+  type RepoConfigRunRecord,
+  type RunRepoConfig,
+} from "./simple.js";
 import { slugify, type TemplateContext } from "./templates.js";
 import {
   ProgressNotifier,
@@ -125,6 +130,93 @@ function makeCallbacks(
   };
 }
 
+/** A JSON-decoded `Record<string, string>` off a run row, or undefined. */
+function storedStringMap(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, v] of Object.entries(value)) if (typeof v === "string") out[key] = v;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The persisted repo-config record, if the row has a well-formed one. */
+function storedRepoConfigRecord(stored: Record<string, unknown>): RepoConfigRunRecord | undefined {
+  const record = stored.repoConfig as RepoConfigRunRecord | undefined;
+  if (!record || typeof record !== "object") return undefined;
+  if (typeof record.repo !== "string" || typeof record.treeSha !== "string") return undefined;
+  return { ...record, assets: record.assets ?? [], warnings: record.warnings ?? [] };
+}
+
+/** The effective config a resumed run continues under. */
+interface ResumedRunConfig {
+  models?: ModelConfig;
+  variants?: VariantConfig;
+  approval?: ApprovalGateConfig;
+  repoConfig?: RunRepoConfig;
+}
+
+/**
+ * The effective (base ⊕ repo) config for a run being CONTINUED (issue #180).
+ *
+ * A resume is not a new dispatch: `resumeSimpleRun` re-enters a run that has
+ * already executed phases, and those phases used the models, variants, gates and
+ * assets resolved at its FIRST dispatch. So we reuse what that dispatch
+ * persisted — `context.models` / `context.variants` (already the effective maps)
+ * and `context.repoConfig` (the repo layer, pinned by tree sha) — instead of
+ * re-resolving from the repo's default branch. Re-resolving would let an edit
+ * made while the run was paused, queued or dead retarget it mid-flight, so half
+ * a build ran on one model and half on another; it would also mean a network
+ * round-trip on every boot-recovery sweep.
+ *
+ * The one thing that genuinely can't be pinned is the unpacked ASSET root (a
+ * cache path — see `restoreRepoRunConfig`): when the tree the run used is gone,
+ * the layer degrades to the operator's assets with a warning recorded on the
+ * run, never a crash and never a silent swap to whatever the repo says today.
+ *
+ * Falls back to the operator's boot maps for rows written before any of this was
+ * persisted, which is byte-identical to the pre-issue-#180 resume path.
+ */
+async function resumedRunConfig(run: WorkflowRun, opts: ResumeOptions): Promise<ResumedRunConfig> {
+  const stored = (run.context || {}) as Record<string, unknown>;
+  const models = (storedStringMap(stored.models) as ModelConfig | undefined) ?? opts.models;
+  const variants = (storedStringMap(stored.variants) as VariantConfig | undefined) ?? opts.variants;
+  const base: ResumedRunConfig = { models, variants, approval: opts.approvalConfig };
+
+  const record = storedRepoConfigRecord(stored);
+  if (!record) return base;
+
+  try {
+    const { repoConfig, warning } = await restoreRepoRunConfig(record, {
+      models,
+      variants,
+      approval: opts.approvalConfig,
+    });
+    if (warning) {
+      // Recorded on the run so "why did this resumed run ignore the repo's
+      // prompt?" is answerable from the row alone. `mergeScratch` replaces the
+      // whole `repoConfig` node, but the two writers can't collide: this one
+      // only fires when the asset layer was DROPPED, and the runner's
+      // `assetWarnings` only when it was applied.
+      try {
+        opts.db.runs.mergeScratch(run.id, { repoConfig: { restoreWarnings: [warning] } });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[resume] Could not record the repo-config restore warning for ${run.id}: ${msg}`);
+      }
+    }
+    return {
+      models: repoConfig.models,
+      variants: repoConfig.variants,
+      approval: repoConfig.approval,
+      repoConfig,
+    };
+  } catch (err: unknown) {
+    // The repo-config failure rule: warn, drop the layer, run anyway.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[resume] ${record.repo}: could not restore the repo config for ${run.id} (${msg})`);
+    return base;
+  }
+}
+
 /**
  * Resume a workflow run by calling runWorkflow directly with the existing
  * workflowId. We bypass runSimpleWorkflow because that wrapper always creates a
@@ -174,6 +266,11 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     ? await refetchIssue(opts.github, owner, repo, issueNumber)
     : { title: "", body: "", labels: [] as string[] };
 
+  // What this run has been executing under all along — its own effective models,
+  // variants, gates and repo asset layer, not whatever the operator/repo config
+  // says right now. See `resumedRunConfig`.
+  const effective = await resumedRunConfig(run, opts);
+
   // Reconstruct the template context using the bits we stored on creation +
   // refreshed issue data. taskId/branch/issueDir were saved on the original
   // row, fall back to deterministic defaults if the row is older.
@@ -211,7 +308,9 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     prePopulateBranch: typeof stored.prePopulateBranch === "string"
       ? stored.prePopulateBranch
       : undefined,
-    models: opts.models as unknown as Record<string, unknown>,
+    // EFFECTIVE maps — the repo layer this run started under is already folded
+    // in, so `{{models.<phase>}}` renders exactly what the first dispatch did.
+    models: effective.models as unknown as Record<string, unknown>,
     triggerIdOverride: isSlack ? run.triggerId : undefined,
   };
 
@@ -310,10 +409,14 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
       runConfig,
       callbacks,
       opts.db,
-      opts.models,
-      opts.approvalConfig,
+      effective.models,
+      effective.approval,
       run.id,           // <-- key bit: reuse the existing workflow run id
-      opts.variants,
+      effective.variants,
+      // 10th arg: the repo layer, restored from the run row rather than
+      // re-resolved, so a resumed run keeps the prompts/skills/agent-context
+      // (and the models above) it started with.
+      effective.repoConfig,
     );
 
     if (result.success) {

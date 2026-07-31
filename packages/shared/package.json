@@ -43,6 +43,10 @@
       "types": "./dist/config-types.d.ts",
       "import": "./dist/config-types.js"
     },
+    "./repo-config-schema": {
+      "types": "./dist/repo-config-schema.d.ts",
+      "import": "./dist/repo-config-schema.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

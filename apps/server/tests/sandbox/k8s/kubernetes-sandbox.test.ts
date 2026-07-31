@@ -834,6 +834,47 @@ describe("KubernetesSandbox (agent-context delivery — HTTP init-fetch, nearfor
     const promptVol = pod.spec.volumes.find((v: any) => v.name === "prompt");
     expect(promptVol.secret.items).toEqual([{ key: "prompt", path: "prompt" }]);
   });
+
+  /**
+   * The kubernetes half of issue #180: a run whose target repo contributed
+   * `agent-context/*.md` must serve the SAME composed text the host-shared
+   * backends write to disk. The orchestrator hands it over through
+   * `setAgentContext`; the adapter must use it verbatim rather than re-composing
+   * from the module-level layers, which know nothing about a per-run repo layer.
+   */
+  it("serves the agent context the orchestrator resolved for the run, not the module-level one", async () => {
+    ctxRoot = mkdtempSync(join(tmpdir(), "ll-agent-ctx-run-"));
+    mkdirSync(join(ctxRoot, "agent-context"), { recursive: true });
+    writeFileSync(join(ctxRoot, "agent-context", "security.md"), "OPERATOR SECURITY RULES");
+    configureWorkflowAssets({ builtInRoot: ctxRoot });
+
+    const { apis, secretsCreated } = fakeApis();
+    const agentContextRegistry = new AgentContextRegistry();
+    const sbx = new KubernetesSandbox(
+      {
+        taskId: "t1",
+        egress: { unrestricted: false, hosts: [] },
+        env: {},
+        stateDir: "/tmp",
+        timeoutSeconds: 60,
+      } as any,
+      cfg(apis, { agentContextRegistry }),
+    );
+    // What a per-run resolver produces for a repo that ADDED a file: the
+    // operator's rules plus the repo's own, never the repo replacing them.
+    sbx.setAgentContext("OPERATOR SECURITY RULES\n\n---\n\nREPO CONVENTIONS");
+    await sbx.provision(pre as any);
+    await sbx.runAgent(
+      "t1",
+      "hello",
+      { model: "openai/x", sandboxEnv: {}, agentCwd: "/home/agent/workspace/web" } as any,
+      () => {},
+    );
+
+    const creds = secretsCreated.find((s: any) => s.metadata.name.endsWith("-creds"));
+    const token = creds.stringData.LASTLIGHT_AGENT_CONTEXT_TOKEN;
+    expect(agentContextRegistry.get(token)).toBe("OPERATOR SECURITY RULES\n\n---\n\nREPO CONVENTIONS");
+  });
 });
 
 describe("KubernetesSandbox (creds + workspace + prompt)", () => {

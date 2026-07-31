@@ -10,9 +10,14 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		<code>config/default.yaml</code> (non-secret defaults), then an optional
 		<code>$LASTLIGHT_OVERLAY_DIR/config.yaml</code> overlay, then environment
 		variables (via <code>.env</code> in local dev, or <code>instance/secrets/.env</code>
-		in production). The authoritative source is <code>src/config.ts</code> in the repo;
-		this page mirrors it.
+		in production). A fourth layer — a managed repo's own
+		<code>.lastlight/</code> — is applied per run, on top of all three; see
+		<a href="/docs/repo-config">Per-repo config</a>. The authoritative source is
+		<code>apps/server/src/config/config.ts</code> in the repo; this page mirrors it.
 	</p>
+
+	<pre><code>config/default.yaml  →  instance/config.yaml  →  env  →  &lt;repo&gt;/.lastlight/lastlight.yml
+     (packaged)            (your overlay)        (env)          (per-repo, bounded)</code></pre>
 
 	<h2>Config files &amp; overlay</h2>
 
@@ -52,6 +57,25 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		(GitHub App key, provider API keys, Slack tokens, admin secret) stay env-only and
 		never appear in the dashboard <strong>Config</strong> tab, which shows the
 		Default / Overlay / Merged non-secret config.
+	</p>
+
+	<h2>Per-repo config</h2>
+
+	<p>
+		A <strong>managed repo</strong> can commit a <code>.lastlight/</code>
+		directory that overrides a bounded subset of the above — models, reasoning
+		effort, approval gates, cron participation, prompts, skills, agent context —
+		<em>for runs against that repo only</em>. It's always read from the repo's
+		<strong>default branch</strong>, so a pull request can never reconfigure the
+		agent reviewing it, and it's bounded by a <code>repoConfig:</code> block you
+		control (ship it disabled with <code>repoConfig.enabled: false</code> if you'd
+		rather keep every knob central). Out of the box it's inert: nothing changes
+		until a repo actually commits one.
+	</p>
+
+	<p>
+		Full contract, worked example and the <code>lastlight repo</code> commands:
+		<a href="/docs/repo-config">Per-repo config</a>.
 	</p>
 
 	<h2>GitHub App</h2>
@@ -565,9 +589,9 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			<span class="label">← Previous</span>
 			<span class="title">Slack integration</span>
 		</a>
-		<a href="/docs/observability" class="next">
+		<a href="/docs/repo-config" class="next">
 			<span class="label">Next →</span>
-			<span class="title">Observability</span>
+			<span class="title">Per-repo config</span>
 		</a>
 	</div>
 </DocsLayout>

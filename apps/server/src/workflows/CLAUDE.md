@@ -473,6 +473,49 @@ different id → refresh for pr-review/pr-fix, recreate-from-base for build). Th
 workspace-provisioning policy sets live in `src/workflows/target-policy.ts`; the
 clone logic is in `src/sandbox/index.ts`.
 
+## Per-repo config layer (issue #180)
+
+The target repo may commit a `.lastlight/` directory that overrides a bounded
+subset of config for runs against itself (full contract:
+`apps/server/CLAUDE.md` → "Per-repo config layer", `spec/02-configuration.md`).
+What the runner has to know:
+
+- **Where it enters.** `resolveRepoRunConfig` (`simple.ts`) runs once at the
+  `dispatchWorkflow` choke point in `src/index.ts` and the result rides
+  `SimpleWorkflowRequest.repoConfig`. `runWorkflow` takes it as a trailing,
+  **defaulted** 10th parameter — defaulted so `runWorkflow.length` stays 9, the
+  frozen `lastlight/evals` surface pinned by `evals-contract.test.ts`.
+- **Effective maps, not deltas.** `repoConfig.models` / `.variants` / `.approval`
+  are already `base ⊕ repo`, so `simple.ts` and `runWorkflow` just substitute
+  them (`effectiveModels`, `effectiveVariants`, `effectiveApproval`) — the
+  `{{models.<phase>}}` template chain and `gateEnabled` need no knowledge of the
+  layer. No repo layer ⇒ these are the caller's own maps by identity.
+- **Per-run asset resolver, never a global.** `runAssetResolver()` builds
+  `createAssetResolver([...getAssetLayers(), makeLayer("repo", assetRoot)],
+  getDisabledAssets(), { agentContextAdditiveOnly: true })` and that resolver
+  backs `EnginePorts.assets` (`loadPromptTemplate` + `resolveSkillPaths`) for the
+  whole run. **Not** `configureWorkflowAssets` — several workflows and a cron
+  fan-out are in flight at once, so mutating the module globals would leak one
+  repo's prompts into another run.
+- **Agent context is composed once, here.** `runAgentContext()` calls
+  `assets.loadAgentContext()` and the result is threaded as
+  `ExecutorConfig.agentContext`. This is the *only* channel by which a repo's
+  `agent-context/*.md` reaches `AGENTS.md`, and `agentContextAdditiveOnly` is
+  what stops a repo shadowing `soul.md` / `rules.md` / `security.md`. Downstream
+  (the orchestrator's workspace write, the k8s `AgentContextSink`) uses the value
+  verbatim.
+- **Failure rule.** Every step above is best-effort: a missing cache dir or an
+  unreadable file drops the layer with a `console.warn` and the run continues on
+  the operator's assets. A repo's config can never fail a run.
+- **Reporting.** Resolver warnings (a dropped repo agent-context file) are
+  written to `workflow_runs.scratch.repoConfig.assetWarnings` in `runWorkflow`'s
+  `finally`, so a failed run still explains what was ignored.
+- **Resume restores, never re-resolves.** `resume.ts` rebuilds the layer from
+  `context.repoConfig` (`restoreRepoRunConfig`), pinning the asset tree by exact
+  tree sha; an edit made while the run was paused/queued/dead cannot retarget it
+  mid-flight. If the tree is gone, the asset layer is dropped with a
+  `scratch.repoConfig.restoreWarnings` note rather than swapped for today's.
+
 ## Templates
 
 `templates.ts` renders phase prompts, approval-gate messages, and
@@ -481,7 +524,8 @@ notification strings. Variables come from two places:
 - **Run-scoped context** built in `simple.ts`: `owner`, `repo`,
   `issueNumber`, `issueTitle`, `issueBody`, `issueLabels`, `commentBody`,
   `sender`, `branch`, `taskId`, `issueDir`, `contextSnapshot`, plus the
-  `models` map and `...request.extra`.
+  **effective** `models` / `variants` maps (the repo layer already folded in)
+  and `...request.extra`.
 - **Phase-scoped context** assembled inside `runPhase`: `phaseOutputs`
   (a map keyed by declared `output_var` in each phase), `fixCycle`
   (loop only), and the most recent `previousOutput`.

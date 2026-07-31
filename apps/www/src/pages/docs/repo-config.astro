@@ -1,0 +1,386 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="repo-config"
+	description="Let a managed repo commit its own .lastlight/ directory — a bounded, default-branch-only override of models, gates, crons, prompts, skills and agent context for runs against that repo."
+>
+	<p>
+		Everything on the <a href="/docs/configuration">Configuration</a> page is
+		<strong>instance-wide</strong>: one operator, one overlay, one set of models
+		and gates for every repo the bot watches. That breaks down as soon as one
+		repo wants a cheaper model, one repo wants an approval gate nobody else
+		needs, and one repo wants to sit out the nightly health cron.
+	</p>
+
+	<p>
+		So a <strong>managed repo</strong> may commit a <code>.lastlight/</code>
+		directory of its own. It overrides a <em>bounded</em> subset of config —
+		only for runs against that repo — and it lands last in the precedence chain:
+	</p>
+
+	<pre><code>config/default.yaml  →  instance/config.yaml  →  env  →  &lt;repo&gt;/.lastlight/lastlight.yml
+     (packaged)            (your overlay)        (env)          (the repo itself)</code></pre>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>Only the default branch is ever read.</strong> Never a pull-request
+			head, never the checkout the agent is working in. Without that rule a PR
+			could commit a <code>lastlight.yml</code> that re-points the model, turns
+			off the review workflow and drops the approval gates — of the very agent
+			reviewing it.
+		</div>
+	</div>
+
+	<h2>Layout</h2>
+
+	<p>
+		The directory mirrors a deployment overlay exactly, so anything you already
+		know about forking assets applies unchanged:
+	</p>
+
+	<pre><code>.lastlight/
+├── lastlight.yml              # the config override
+├── workflows/
+│   └── prompts/*.md           # prompt overrides — never workflow YAML
+├── skills/
+│   └── &lt;name&gt;/SKILL.md        # skill overrides
+└── agent-context/*.md         # ADDITIVE persona/rules files</code></pre>
+
+	<p>
+		Three rules are baked in, and the tooling tells you about each one:
+	</p>
+
+	<ul>
+		<li>
+			<strong>No workflow YAML.</strong> A repo may retune what an agent is
+			<em>told</em>, never which phases run, with which skills, under which
+			GitHub permission profile, behind which approval gates. A
+			<code>workflows/*.yaml</code> file in the layer is rejected with a
+			<code>workflow-not-allowed</code> warning. Changing a workflow definition
+			is an operator action — <code>lastlight fork &lt;workflow&gt;</code> into
+			the instance overlay.
+		</li>
+		<li>
+			<strong><code>agent-context/</code> is additive only.</strong> A repo file
+			whose name matches one the instance already provides
+			(<code>soul.md</code>, <code>rules.md</code>, <code>security.md</code>) is
+			<em>ignored</em> — otherwise committing a <code>security.md</code> would
+			switch off the operator's security boundaries for every run against that
+			repo. Add context under a repo-specific name instead, e.g.
+			<code>project-notes.md</code>.
+		</li>
+		<li>
+			<strong>Everything else in <code>.lastlight/</code> is simply not part of
+			the layer.</strong> In the default <code>buildAssets.location: repo</code>
+			mode the build workflow commits its handoff docs to
+			<code>.lastlight/&lt;issue-key&gt;/</code>; those are left alone.
+		</li>
+	</ul>
+
+	<h2>A worked example</h2>
+
+	<p>
+		Say <code>acme/payments</code> is a small, high-stakes service. It wants a
+		stronger model for reviews, a cheap one for triage, a human gate before any
+		agent-written code is pushed, no nightly health report, and a house style
+		note in every agent session. That whole policy is one file plus one prompt:
+	</p>
+
+	<pre><code>.lastlight/
+├── lastlight.yml
+├── agent-context/payments-house-rules.md
+└── workflows/prompts/review.md</code></pre>
+
+	<pre><code># .lastlight/lastlight.yml
+
+models:
+  # A stronger reviewer for this repo only.
+  review: anthropic/claude-opus-4-8
+  # …and a cheap one for triage.
+  triage: anthropic/claude-haiku-4-5
+
+variants:
+  review: high
+
+approval:
+  # Add-only: this repo demands a human before the executor pushes.
+  post_architect: true
+
+crons:
+  disable: [repo-health]     # sit out the nightly health report
+  enable:  [security-scan]   # …but opt in to this one even if it's off globally
+
+disabled:
+  workflows: [demo]          # this repo never wants the demo workflow</code></pre>
+
+	<p>
+		Validate it before you push — the check is offline and runs the
+		<em>same</em> validators the server runs:
+	</p>
+
+	<pre><code>cd ~/code/payments
+lastlight repo config validate</code></pre>
+
+	<pre><code>Validating /Users/you/code/payments/.lastlight
+
+  agent-context
+    ✓ agent-context/payments-house-rules.md
+  config
+    ✓ lastlight.yml
+  prompt
+    ✓ workflows/prompts/review.md
+
+Effective config overrides
+  approval.post_architect = true
+  disabled.workflows = ["demo"]
+  models.review = "anthropic/claude-opus-4-8"
+  models.triage = "anthropic/claude-haiku-4-5"
+  variants.review = "high"
+
+✓ Everything in this layer is within the shipped default bounds.</code></pre>
+
+	<p>
+		Then commit it to your <strong>default branch</strong> — that is the only ref
+		Last Light reads. The next run against the repo picks it up (within about a
+		minute; see <a href="#caching">Caching</a>).
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<code>lastlight repo fork</code> scaffolds the layer for you — it copies a
+			workflow's prompts and skills (never its YAML) into
+			<code>&lt;git repo root&gt;/.lastlight/</code>, so you start from the real
+			built-ins rather than a blank file. <code>lastlight repo fork</code> with
+			no argument lists what's forkable.
+		</div>
+	</div>
+
+	<h2>What a repo may set</h2>
+
+	<p>
+		Only these keys, and only within the bounds the operator configures. Anything
+		else is dropped with a warning — the run still proceeds.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Key</th><th>What it does</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>models</code></td>
+				<td>Per-task model overrides, keyed by phase or helper name. Each value must be a <code>provider/model</code> string whose provider Last Light knows how to wire, and must satisfy the operator's <code>repoConfig.allowedModels</code>.</td>
+			</tr>
+			<tr>
+				<td><code>variants</code></td>
+				<td>Per-task reasoning effort (<code>minimal</code> / <code>medium</code> / <code>high</code> / …), same key scheme.</td>
+			</tr>
+			<tr>
+				<td><code>approval</code></td>
+				<td><strong>Add-only.</strong> A repo may <em>raise</em> a gate for runs against itself; every <code>false</code> is dropped with a warning. A repo can never remove oversight the operator asked for.</td>
+			</tr>
+			<tr>
+				<td><code>disabled.workflows</code></td>
+				<td>The repo opting <em>itself</em> out of a workflow. The dispatch is refused before any run is created.</td>
+			</tr>
+			<tr>
+				<td><code>crons</code></td>
+				<td><code>&#123; enable, disable &#125;</code> — which scheduled jobs this repo takes part in. See below.</td>
+			</tr>
+			<tr>
+				<td><code>disabled.crons</code></td>
+				<td>Older spelling of <code>crons.disable</code>; still works, and is merged into it.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<p>
+		Arrays <strong>replace</strong> rather than append, exactly as they do
+		between the packaged defaults and your overlay — so a repo's
+		<code>disabled.workflows</code> is the whole list for that repo.
+	</p>
+
+	<h2>Cron participation</h2>
+
+	<p>
+		The <code>crons:</code> block is valid at every layer, but it means something
+		different depending on who wrote it:
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Written in</th><th><code>disable: [x]</code></th><th><code>enable: [x]</code></th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td>the instance config / overlay</td>
+				<td>cron <code>x</code> is off <strong>by default</strong>, everywhere</td>
+				<td>no-op — a cron is on unless something disables it</td>
+			</tr>
+			<tr>
+				<td>a repo's <code>.lastlight/</code></td>
+				<td>this repo drops out of <code>x</code>'s fan-out</td>
+				<td>this repo opts <strong>in</strong>, even when <code>x</code> is off by default</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<p>
+		A name in both lists is disabled, at every layer — a cron that doesn't run is
+		the safe reading of a contradictory config. Participation is resolved on each
+		tick, so a repo's edit takes effect on the next run of the cron with no
+		restart.
+	</p>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			Because a repo can opt back <em>in</em>, <code>crons.disable</code> in your
+			overlay is a default, not a lock. If you need a cron no repo can turn on,
+			remove <code>crons</code> from <code>repoConfig.allowKeys</code> — that is
+			the un-overridable kill switch.
+		</div>
+	</div>
+
+	<h2>Operator bounds</h2>
+
+	<p>
+		Everything above is gated by a <code>repoConfig:</code> block in your
+		instance config. It ships enabled but <strong>inert</strong> — nothing
+		changes for an existing deployment until a repo actually commits a
+		<code>.lastlight/</code>. A repo can never widen these; only narrow itself
+		within them.
+	</p>
+
+	<pre><code># instance/config.yaml
+
+repoConfig:
+  enabled: true                  # false ignores every repo's .lastlight/ entirely
+  allowKeys: [models, variants, crons, disabled.workflows, disabled.crons, approval]
+  allowedModels: null            # null = any model whose provider you've configured;
+                                 # a list restricts repos to exactly those model specs
+  allowAssets: true              # false keeps lastlight.yml only — no repo prompts,
+                                 # skills or agent-context</code></pre>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Key</th><th>Default</th><th>Effect</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>repoConfig.enabled</code></td>
+				<td><code>true</code></td>
+				<td>Master switch. <code>false</code> and no repo's <code>.lastlight/</code> is even fetched.</td>
+			</tr>
+			<tr>
+				<td><code>repoConfig.allowKeys</code></td>
+				<td>the six keys above</td>
+				<td>Dotted config paths a repo may set. An entry admits itself and everything under it — <code>models</code> admits <code>models.review</code>, while <code>disabled.workflows</code> does <strong>not</strong> admit <code>disabled.prompts</code>. Narrow this to shrink the blast radius.</td>
+			</tr>
+			<tr>
+				<td><code>repoConfig.allowedModels</code></td>
+				<td><code>null</code></td>
+				<td>An exact-match list of model specs repos may select. <code>null</code> means any model whose <code>provider/</code> prefix is one you've configured — a repo still can't invent a provider.</td>
+			</tr>
+			<tr>
+				<td><code>repoConfig.allowAssets</code></td>
+				<td><code>true</code></td>
+				<td>Whether a repo's prompt / skill / agent-context files are used at all.</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<h2>When something is wrong</h2>
+
+	<p>
+		A repo's config file <strong>can never fail a run</strong>. Every problem
+		degrades: invalid YAML drops the whole file, an out-of-bounds key drops just
+		that key, a GitHub outage falls back to the last cached copy — and the run
+		proceeds on the instance config. Each rejection is recorded against the run
+		and shown by both <code>repo config validate</code> (offline) and
+		<code>repo config show</code> (what the server actually applied), so a drop
+		is never silent.
+	</p>
+
+	<pre><code>lastlight repo config show acme/payments</code></pre>
+
+	<pre><code>Effective config for acme/payments
+  .lastlight/ from main@3f1c9ab, fetched 2026-07-31T09:12:04.117Z
+
+Models
+  default = "anthropic/claude-sonnet-4-6"  (default)
+  review = "anthropic/claude-opus-4-8"  (repo)
+  triage = "anthropic/claude-haiku-4-5"  (repo)
+
+Approval gates
+  post_architect = true  (repo)
+
+Repo assets
+  ✓ agent-context/payments-house-rules.md
+  ✓ workflows/prompts/review.md
+
+Values marked (repo) came from this repo's .lastlight/.</code></pre>
+
+	<p>
+		The same view — merged config with per-value provenance
+		(<code>default</code> / <code>overlay</code> / <code>env</code> /
+		<code>repo</code>), the raw file the repo committed, its warnings and its
+		assets — is a <strong>Config</strong> tab on each repo's page in the admin
+		dashboard.
+	</p>
+
+	<h2 id="caching">Caching</h2>
+
+	<p>
+		The layer is fetched with the same GitHub App credentials as everything else,
+		so <strong>private repos work</strong>, and cached on the Last Light host
+		under <code>$STATE_DIR/repo-config/&lt;owner&gt;/&lt;repo&gt;/</code>. A
+		cached layer is trusted for about a minute; after that the next fetch is
+		<em>conditional</em>, so a cron fanning out over fifty repos costs fifty
+		cheap "not modified" checks and no downloads. The layer is capped at 200
+		files / 2 MiB, and symlinks are rejected.
+	</p>
+
+	<p>
+		Just merged a <code>.lastlight/</code> change and don't want to wait out the
+		minute? <code>lastlight repo config show &lt;owner/repo&gt; --refresh</code>
+		forces a re-read.
+	</p>
+
+	<p>
+		One thing that deliberately does <em>not</em> refresh: a run already in
+		flight. If a run pauses at an approval gate, resuming it reuses the exact
+		config it started with rather than re-reading the repo — otherwise an edit
+		made while it was paused could send the second half of a build to a different
+		model than the first.
+	</p>
+
+	<h2>Commands</h2>
+
+	<pre><code>lastlight repo fork                      # list what a repo may override
+lastlight repo fork all                  # every workflow's prompts + skills + agent-context
+lastlight repo fork &lt;workflow&gt;           # one workflow's prompts + skills (never its YAML)
+lastlight repo fork agent-context [file] # persona files — ADDITIVE, rename before committing
+lastlight repo fork classifier           # the base intent-classifier prompts
+lastlight repo config validate           # check ./.lastlight/ offline; non-zero exit if rejected
+lastlight repo config show &lt;owner/repo&gt;  # what a server actually applies, with provenance</code></pre>
+
+	<p>
+		These run <strong>inside your own code repo</strong> and write to
+		<code>&lt;git repo root&gt;/.lastlight/</code> — unlike
+		<code>lastlight fork</code>, they never fall back to a server's
+		<code>instance/</code> overlay, and refuse to run outside a git repo. Full
+		flags on the <a href="/docs/cli">CLI</a> page.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/configuration">
+			<span class="label">← Previous</span>
+			<span class="title">Configuration</span>
+		</a>
+		<a href="/docs/observability" class="next">
+			<span class="label">Next →</span>
+			<span class="title">Observability</span>
+		</a>
+	</div>
+</DocsLayout>

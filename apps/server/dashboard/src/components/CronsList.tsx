@@ -41,6 +41,19 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
   const dirty = editing && draftSchedule.trim() !== cron.schedule;
   const hasOverride = !!cron.override;
 
+  // A globally-disabled cron KEEPS its scheduler tick (issue #180): a managed
+  // repo can opt itself back in from its committed `.lastlight/lastlight.yml`,
+  // and that participation is resolved at tick time — so the server can't drop
+  // the timer without breaking opt-in. The tick therefore reports a real
+  // `nextRun` even while this toggle reads off, which on its own looks like a
+  // contradiction. Split the three honest cases:
+  //   enabled                       → the timestamp, exactly as before
+  //   disabled, nobody opted in     → "—"; the tick fires but dispatches nothing
+  //   disabled, someone opted in    → the timestamp + who it actually runs for
+  const optedIn = cron.optedInRepos ?? [];
+  const optInOnly = !cron.enabled && optedIn.length > 0;
+  const showNextRun = !!cron.nextRun && (cron.enabled || optInOnly);
+
   const toggle = async () => {
     setPending(true);
     setError(null);
@@ -165,10 +178,15 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
         />
       </td>
       <td>
-        <div className="text-xs">{cron.nextRun ? formatRel(cron.nextRun) : "—"}</div>
+        <div className="text-xs">{showNextRun ? formatRel(cron.nextRun) : "—"}</div>
         <div className="text-2xs text-base-content/40">
-          {cron.nextRun ? new Date(cron.nextRun).toLocaleString() : ""}
+          {showNextRun && cron.nextRun ? new Date(cron.nextRun).toLocaleString() : ""}
         </div>
+        {optInOnly && (
+          <div className="text-2xs text-warning" title={`Opted in via .lastlight/: ${optedIn.join(", ")}`}>
+            opt-in only · {optedIn.length} repo{optedIn.length === 1 ? "" : "s"}
+          </div>
+        )}
       </td>
       <td>
         <button

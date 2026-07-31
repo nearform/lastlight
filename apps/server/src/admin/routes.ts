@@ -20,6 +20,13 @@ import {
 import { authMiddleware, createToken, verifyTokenForRefresh, decodeToken, actorFromContext } from "./auth.js";
 import { Cron } from "croner";
 import type { CronScheduler } from "../cron/scheduler.js";
+import {
+  CRON_GLOBALLY_ENABLED_KEY,
+  CRON_NAME_KEY,
+  cronVote,
+  repoCronPrefs,
+  repoLayerMayVote,
+} from "../cron/repo-crons.js";
 import { enumerateOverlayAssets } from "lastlight-shared/overlay-assets";
 import {
   getCronWorkflows,
@@ -41,13 +48,29 @@ import {
   getManagedRepos,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
+  isManagedRepo,
 } from "../managed-repos.js";
 import {
   getRuntimeConfig,
   getRoutes,
   getBotName,
   resolveKubernetesConfig,
+  // The redaction rule for every surface that echoes YAML back to the
+  // dashboard. IMPORTED, never mirrored: `GET /repos/:owner/:repo/config`
+  // returns a repo's UNTRUSTED `.lastlight/lastlight.yml` raw and
+  // pre-validation, so a copy that drifted behind config.ts's would leak a
+  // pasted credential. It must stay single-source (see config.ts).
+  redactPublic,
+  type RepoConfigPolicy,
 } from "../config/config.js";
+import {
+  fetchRepoLayer,
+  refreshRepoLayer,
+  getCachedRepoLayer,
+  repoConfigPolicy,
+  repoConfigBaseFromRuntime,
+  resolveRepoConfig,
+} from "../config/repo-config.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { artifactStore } from "../sandbox/artifact-store.js";
 import { reclaimSandbox } from "../sandbox/k8s/reclaim.js";
@@ -628,12 +651,21 @@ export function createAdminRoutes(
   // events (config wins when set, else installation). See src/managed-repos.ts.
   app.get("/managed-repos", (c) => {
     const configured = getRuntimeConfig()?.managedRepos ?? [];
+    const effective = getManagedRepos();
     return c.json({
       configured,
       installation: getInstallationRepos(),
-      effective: getManagedRepos(),
+      effective,
       source: configured.length > 0 ? "config" : "installation",
       refreshedAt: getInstallationReposRefreshedAt(),
+      // Which of the effective repos have committed a `.lastlight/` layer.
+      // Read from the in-memory cache ONLY (`getCachedRepoLayer`) so this stays
+      // a cheap no-network list route — a repo not yet fetched simply reports
+      // false, and the per-repo endpoint below is what actually goes to GitHub.
+      repoConfig: effective.map((repo) => {
+        const layer = getCachedRepoLayer(repo);
+        return { repo, hasRepoConfig: Boolean(layer), fetchedAt: layer?.fetchedAt ?? null };
+      }),
     });
   });
 
@@ -1855,6 +1887,10 @@ export function createAdminRoutes(
         runCount: activity.get(repo)?.runCount ?? 0,
         lastRunAt: activity.get(repo)?.lastRunAt ?? null,
         artifactKeyCount: artifactCounts.get(repo) ?? 0,
+        // Cache-only (no network) so the index stays cheap — it just makes the
+        // per-repo Config tab discoverable. False here means "nothing cached
+        // yet", not "no .lastlight/"; opening the tab settles it.
+        hasRepoConfig: Boolean(getCachedRepoLayer(repo)),
       }))
       .sort((a, b) => {
         // Newest activity first; repos with no runs sink below active ones,
@@ -1866,6 +1902,85 @@ export function createAdminRoutes(
       });
 
     return c.json({ repos });
+  });
+
+  /**
+   * The prompts / skills / agent-context a repo's `.lastlight/` contributes,
+   * each tagged with whether it shadows something the instance already has.
+   *
+   * A repo layer's unpacked root mirrors an overlay root exactly, so this is
+   * the same enumerator `GET /overrides`, `lastlight fork` and `server status`
+   * use — pointed at the repo's tree instead. It's run twice because a repo
+   * asset can shadow either a built-in OR an overlay fork, and "shadows" should
+   * mean "replaces something that was already in force".
+   */
+  function repoLayerAssets(root: string) {
+    const assets = enumerateOverlayAssets({ coreRoot: config.builtInRoot, overlayRoot: root });
+    const shadowsOverlay = new Set(
+      enumerateOverlayAssets({ coreRoot: config.overlayDir, overlayRoot: root })
+        .filter((a) => a.shadowsDefault)
+        .map((a) => `${a.type}:${a.name}`),
+    );
+    return assets.map((a) => ({
+      ...a,
+      shadowsDefault: a.shadowsDefault || shadowsOverlay.has(`${a.type}:${a.name}`),
+    }));
+  }
+
+  // The effective config for ONE repo — the instance layers with that repo's
+  // committed `.lastlight/` applied on top, within the operator's `repoConfig`
+  // bounds (issue #180). Powers the Repos → Config tab and `lastlight repo
+  // config show`.
+  //
+  // A repo with no `.lastlight/` is a perfectly normal 200: `repoLayer` is
+  // absent and `merged`/`sources` are simply the inherited instance config.
+  // That's the whole point of the view — "what does Last Light actually do for
+  // this repo", not "does this repo have a config file".
+  //
+  // `?refresh=1` bypasses the 60s TTL (the operator has just merged a
+  // `.lastlight/` change and doesn't want to wait it out).
+  app.get("/repos/:owner/:repo/config", async (c) => {
+    const { owner, repo: name } = c.req.param();
+    const repo = `${owner}/${name}`;
+    // Same allowlist that gates every other repo-touching path. Without it this
+    // endpoint would be an unauthenticated-by-proxy way to make the harness
+    // fetch from an arbitrary repo.
+    if (!isManagedRepo(repo)) {
+      return c.json({ error: `${repo} is not a managed repository` }, 404);
+    }
+    const runtime = getRuntimeConfig();
+    if (!runtime) return c.json({ error: "Runtime config is not loaded" }, 503);
+
+    const policy = repoConfigPolicy();
+    const refresh = c.req.query("refresh");
+    const force = refresh === "1" || refresh === "true";
+    // Both calls degrade to `undefined` rather than throwing — a GitHub failure
+    // must not turn this read-only view into a 500.
+    const layer = force
+      ? await refreshRepoLayer(repo, { policy })
+      : await fetchRepoLayer(repo, { policy });
+
+    const { merged, sources, warnings } = resolveRepoConfig(
+      repoConfigBaseFromRuntime(runtime),
+      policy,
+      layer,
+    );
+
+    return c.json({
+      repo,
+      merged: redactPublic(merged),
+      sources,
+      // RAW and pre-validation on purpose: the repo needs to see what it wrote
+      // next to the warnings explaining what was dropped. Redacted, since this
+      // is untrusted YAML.
+      repoLayer: layer?.config ? redactPublic(layer.config) : undefined,
+      warnings,
+      assets: layer ? repoLayerAssets(layer.root) : [],
+      policy,
+      fetchedAt: layer?.fetchedAt ?? null,
+      treeSha: layer?.treeSha ?? null,
+      defaultBranch: layer?.defaultBranch ?? null,
+    });
   });
 
   // List the repos that actually have stored artifacts (search + paginate).
@@ -2070,6 +2185,63 @@ export function createAdminRoutes(
 
   // ── Crons ──────────────────────────────────────────────────────
 
+  /**
+   * The context a cron tick carries, built exactly as `src/cron/jobs.ts` builds
+   * it at boot — including the two control keys the fan-out consumes
+   * (`_cronName`, `_cronGloballyEnabled`) and strips before dispatch.
+   *
+   * They are not optional decoration. `_cronName` is the ONLY channel by which
+   * the tick learns which cron it is (several crons can share one workflow), so
+   * a context without it makes `resolveCronRepos` a no-op and the tick ignores
+   * every repo's `.lastlight/` cron opt-out. These routes re-register jobs at
+   * runtime, so a context built here that omitted them would silently drop
+   * per-repo participation until the next restart re-registered from `jobs.ts` —
+   * the worst kind of bug, one that fixes itself while you're looking at it.
+   */
+  const cronContext = (
+    def: { name: string; context?: Record<string, unknown> },
+    globallyEnabled: boolean,
+  ): Record<string, unknown> => ({
+    repos: getManagedRepos(),
+    // Spread ahead of the control keys, deliberately: a cron YAML MAY pin its
+    // own `context.repos`. It may NOT pin the control keys — those are injected
+    // after it, so operator YAML can't spoof the cron's identity or its
+    // globally-enabled state (same ordering as `jobs.ts`).
+    ...def.context,
+    [CRON_NAME_KEY]: def.name,
+    [CRON_GLOBALLY_ENABLED_KEY]: globallyEnabled,
+  });
+
+  /**
+   * The managed repos that have opted INTO one cron from their own
+   * `.lastlight/lastlight.yml` (`crons: { enable: [...] }`).
+   *
+   * Why the list endpoint needs this at all: a globally-OFF cron still keeps its
+   * scheduler tick (see the toggle route below), so it reports a real
+   * `registered`/`nextRun`. Without naming the repos that opted in, the dashboard
+   * shows "next run in 20m" beside an off switch and the operator can't tell
+   * whether that's a real firing or a leftover timer. With them, the two
+   * disabled cases are distinguishable: nobody opted in → the tick is a no-op and
+   * the UI can honestly say "—"; somebody did → the cron genuinely runs, for
+   * exactly these repos.
+   *
+   * CACHE-ONLY, deliberately. `GET /crons` is a list endpoint polled every 10s by
+   * the dashboard; resolving this the way a tick does (`resolveCronRepos`, which
+   * falls through to `fetchRepoLayer`) would turn one page load into
+   * crons × repos conditional GitHub requests. A repo with no cached layer is
+   * simply not counted — the display is then merely conservative (it under-reports
+   * an opt-in until the next tick warms the cache), never wrong about a repo it
+   * does name.
+   */
+  const optedInRepos = (
+    cron: string,
+    repos: readonly string[],
+    policy: RepoConfigPolicy,
+  ): string[] =>
+    repos.filter(
+      (repo) => cronVote(cron, repoCronPrefs(getCachedRepoLayer(repo)?.config, policy)) === "enable",
+    );
+
   // List every cron defined in workflows/cron-*.yaml, merged with the
   // override row (if any) and the live scheduler state.
   app.get("/crons", (c) => {
@@ -2078,6 +2250,12 @@ export function createAdminRoutes(
       (config.cronScheduler?.list() ?? []).map((j) => [j.name, j]),
     );
     const defs = getCronWorkflows();
+    const managedRepos = getManagedRepos();
+    // The operator's kill switch (repo-config off, or `crons` dropped from
+    // `allowKeys`) means no repo can opt into anything — short-circuit to zero
+    // cache lookups rather than asking each repo a question with one answer.
+    const policy = repoConfigPolicy();
+    const mayVote = repoLayerMayVote(policy);
     const crons = defs.map((def) => {
       const override = overrides.get(def.name) ?? null;
       const enabled = override ? override.enabled : true;
@@ -2096,7 +2274,8 @@ export function createAdminRoutes(
         lastRun: recent?.startedAt ?? null,
         lastStatus: recent?.status ?? null,
         recentFailures,
-        context: { repos: getManagedRepos(), ...def.context },
+        optedInRepos: mayVote ? optedInRepos(def.name, managedRepos, policy) : [],
+        context: { repos: managedRepos, ...def.context },
         override: override
           ? {
               updatedAt: override.updatedAt,
@@ -2122,26 +2301,25 @@ export function createAdminRoutes(
     const currentlyEnabled = override ? override.enabled : true;
     const nextEnabled = !currentlyEnabled;
     db.setCronOverride(name, { enabled: nextEnabled, updatedBy: "admin" });
-    if (nextEnabled) {
-      // Re-register with the (possibly overridden) schedule
-      const schedule = override?.schedule || def.schedule;
-      if (config.cronScheduler.has(name)) {
-        config.cronScheduler.update({
-          name,
-          schedule,
-          workflow: def.workflow,
-          context: { repos: getManagedRepos(), ...def.context },
-        });
-      } else {
-        config.cronScheduler.register({
-          name,
-          schedule,
-          workflow: def.workflow,
-          context: { repos: getManagedRepos(), ...def.context },
-        });
-      }
+    // Off is "off BY DEFAULT", not "unregistered" (issue #180): a managed repo
+    // may opt itself back into a globally-off cron from its `.lastlight/`, and
+    // that is resolved at TICK time — so the tick has to keep running. It just
+    // carries `_cronGloballyEnabled: false`, which narrows the fan-out to the
+    // repos that opted in (usually none, making it a cheap no-op tick). This
+    // mirrors `jobs.ts`, which registers a globally-off cron the same way at
+    // boot; unregistering here instead would make an opt-in do nothing until
+    // the next restart, and then quietly start working.
+    const schedule = override?.schedule || def.schedule;
+    const job = {
+      name,
+      schedule,
+      workflow: def.workflow,
+      context: cronContext(def, nextEnabled),
+    };
+    if (config.cronScheduler.has(name)) {
+      config.cronScheduler.update(job);
     } else {
-      config.cronScheduler.unregister(name);
+      config.cronScheduler.register(job);
     }
     return c.json({ name, enabled: nextEnabled });
   });
@@ -2174,7 +2352,7 @@ export function createAdminRoutes(
         name,
         schedule,
         workflow: def.workflow,
-        context: { repos: getManagedRepos(), ...def.context },
+        context: cronContext(def, true),
       });
     }
     return c.json({ name, schedule });
@@ -2189,20 +2367,18 @@ export function createAdminRoutes(
     const def = getCronWorkflows().find((d) => d.name === name);
     if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
     db.clearCronOverride(name);
+    const job = {
+      name,
+      schedule: def.schedule,
+      workflow: def.workflow,
+      // Dropping the override returns the cron to its YAML default, which is
+      // globally on.
+      context: cronContext(def, true),
+    };
     if (config.cronScheduler.has(name)) {
-      config.cronScheduler.update({
-        name,
-        schedule: def.schedule,
-        workflow: def.workflow,
-        context: { repos: getManagedRepos(), ...def.context },
-      });
+      config.cronScheduler.update(job);
     } else {
-      config.cronScheduler.register({
-        name,
-        schedule: def.schedule,
-        workflow: def.workflow,
-        context: { repos: getManagedRepos(), ...def.context },
-      });
+      config.cronScheduler.register(job);
     }
     return c.json({ name, schedule: def.schedule, enabled: true });
   });
@@ -2225,7 +2401,26 @@ export function createAdminRoutes(
     // acting user (issue #205) so a manually-fired cron attributes to the
     // person who clicked "Run now" rather than the anonymous scheduler.
     // `dispatchWorkflow` destructures `sender` for free.
-    const context = { repos: getManagedRepos(), sender: actorFromContext(c), ...def.context };
+    //
+    // `_cronName` is carried so a manual fire honours the same per-repo
+    // participation a scheduled tick does — a repo that opted out of this cron
+    // in its `.lastlight/` stays out, however the tick was started. What is
+    // deliberately NOT carried is `_cronGloballyEnabled`: absent means "on", so
+    // "Run now" keeps working for a cron that is globally disabled, which is
+    // exactly what the button is for.
+    //
+    // Which is why the YAML's own context is spread ahead of `_cronName` AND has
+    // `_cronGloballyEnabled` stripped out of it first: here absence is the
+    // signal, so simply re-injecting the key after the spread would defeat the
+    // button. A cron YAML pinning `context.repos` still overrides the managed
+    // list, as everywhere else.
+    const { [CRON_GLOBALLY_ENABLED_KEY]: _yamlEnabled, ...defContext } = def.context ?? {};
+    const context = {
+      repos: getManagedRepos(),
+      ...defContext,
+      [CRON_NAME_KEY]: def.name,
+      sender: actorFromContext(c),
+    };
     config.triggerCron(def.workflow, context).catch((err) => {
       console.error(`[admin] cron trigger ${name} failed:`, err);
     });

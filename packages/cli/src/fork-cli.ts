@@ -44,7 +44,7 @@ export interface ForkOpts {
 
 // ── path resolution ────────────────────────────────────────────────────────
 
-function isDir(p: string): boolean {
+export function isDir(p: string): boolean {
   try {
     return fs.statSync(p).isDirectory();
   } catch {
@@ -53,7 +53,7 @@ function isDir(p: string): boolean {
 }
 
 /** A directory that ships the built-in assets we fork *from*. */
-function hasBuiltins(dir: string): boolean {
+export function hasBuiltins(dir: string): boolean {
   return isDir(path.join(dir, "workflows")) && isDir(path.join(dir, "skills"));
 }
 
@@ -64,7 +64,7 @@ function hasBuiltins(dir: string): boolean {
  * from a server checkout), so there is no self-bundled fallback: when no
  * candidate qualifies we error with a pointer at `--home <server checkout>`.
  */
-function resolveCoreRoot(...candidates: string[]): string {
+export function resolveCoreRoot(...candidates: string[]): string {
   for (const c of candidates) {
     if (!c) continue;
     // Monorepo layout (Phase 2): a checkout's built-ins live under
@@ -142,15 +142,15 @@ export function resolveForkTarget(opts: ForkOpts): ForkTarget {
 
 // ── copy helpers ───────────────────────────────────────────────────────────
 
-type Action = "copied" | "skipped" | "overwritten";
-interface CopyResult {
-  /** Overlay-relative path of the asset. */
+export type Action = "copied" | "skipped" | "overwritten";
+export interface CopyResult {
+  /** Destination-relative path of the asset. */
   rel: string;
   action: Action;
 }
 
 /** Copy a single file, honouring skip-existing / `--force`. */
-function copyFile(src: string, destAbs: string, rel: string, force: boolean): CopyResult {
+export function copyFile(src: string, destAbs: string, rel: string, force: boolean): CopyResult {
   const exists = fs.existsSync(destAbs);
   if (exists && !force) return { rel, action: "skipped" };
   fs.mkdirSync(path.dirname(destAbs), { recursive: true });
@@ -159,7 +159,7 @@ function copyFile(src: string, destAbs: string, rel: string, force: boolean): Co
 }
 
 /** Copy a directory tree, honouring skip-existing / `--force`. */
-function copyDir(src: string, destAbs: string, rel: string, force: boolean): CopyResult {
+export function copyDir(src: string, destAbs: string, rel: string, force: boolean): CopyResult {
   const exists = fs.existsSync(destAbs);
   if (exists && !force) return { rel, action: "skipped" };
   fs.mkdirSync(path.dirname(destAbs), { recursive: true });
@@ -169,19 +169,16 @@ function copyDir(src: string, destAbs: string, rel: string, force: boolean): Cop
 
 // ── fork actions ───────────────────────────────────────────────────────────
 
-/** Copy a workflow YAML + every prompt and skill its phases reference. */
-function forkWorkflow(t: ForkTarget, name: string, force: boolean): CopyResult[] {
+/**
+ * The assets one workflow travels with: the prompt templates its phases
+ * reference and the skills they declare (templated `{{…}}` refs are skipped —
+ * they resolve per-run, not per-fork).
+ *
+ * Shared with `repo-cli.ts`, which forks the same prompts + skills into a
+ * repo's `.lastlight/` but deliberately NOT the YAML.
+ */
+export function workflowAssetRefs(name: string): { prompts: string[]; skills: string[] } {
   const def = getWorkflow(name); // throws if unknown — caller lists + exits
-  const origin = getWorkflowOrigin(name);
-  const results: CopyResult[] = [];
-
-  // The workflow YAML itself (origin handles .yaml vs .yml).
-  if (origin) {
-    const file = path.basename(origin.filePath);
-    results.push(copyFile(origin.filePath, path.join(t.instanceDir, "workflows", file), `workflows/${file}`, force));
-  }
-
-  // Prompt templates referenced by phases (skip empties + templated refs).
   const prompts = new Set<string>();
   const skillNames = new Set<string>();
   for (const phase of def.phases) {
@@ -192,14 +189,28 @@ function forkWorkflow(t: ForkTarget, name: string, force: boolean): CopyResult[]
       if (!s.includes("{{")) skillNames.add(s);
     }
   }
+  return { prompts: [...prompts].sort(), skills: [...skillNames].sort() };
+}
 
-  for (const rel of [...prompts].sort()) {
+/** Copy a workflow YAML + every prompt and skill its phases reference. */
+function forkWorkflow(t: ForkTarget, name: string, force: boolean): CopyResult[] {
+  const { prompts, skills } = workflowAssetRefs(name);
+  const origin = getWorkflowOrigin(name);
+  const results: CopyResult[] = [];
+
+  // The workflow YAML itself (origin handles .yaml vs .yml).
+  if (origin) {
+    const file = path.basename(origin.filePath);
+    results.push(copyFile(origin.filePath, path.join(t.instanceDir, "workflows", file), `workflows/${file}`, force));
+  }
+
+  for (const rel of prompts) {
     const src = path.join(t.coreRoot, "workflows", rel);
     if (!fs.existsSync(src)) continue; // overlay-only prompt, nothing to fork
     results.push(copyFile(src, path.join(t.instanceDir, "workflows", rel), `workflows/${rel}`, force));
   }
 
-  for (const skill of [...skillNames].sort()) {
+  for (const skill of skills) {
     let src: string;
     try {
       src = resolveSkillPaths([skill])[0];
@@ -248,7 +259,7 @@ function forkAgentContext(t: ForkTarget, files: string[], force: boolean): CopyR
  * YAML, so it already travels with `fork <workflow>`; these are the standalone
  * base prompts a deployment forks to retune the router's classification.
  */
-const CLASSIFIER_PROMPTS = ["prompts/classifier.md", "prompts/classify-adds-info.md"];
+export const CLASSIFIER_PROMPTS = ["prompts/classifier.md", "prompts/classify-adds-info.md"];
 
 /** Copy the base classifier prompt files into the overlay (skip any absent from core). */
 function forkClassifier(t: ForkTarget, force: boolean): CopyResult[] {
@@ -262,7 +273,7 @@ function forkClassifier(t: ForkTarget, force: boolean): CopyResult[] {
 }
 
 /** Built-in agent-context filenames (e.g. soul.md, rules.md, security.md). */
-function builtinAgentContext(coreRoot: string): string[] {
+export function builtinAgentContext(coreRoot: string): string[] {
   const dir = path.join(coreRoot, "agent-context");
   if (!isDir(dir)) return [];
   return fs.readdirSync(dir).filter((n) => n.endsWith(".md")).sort();
