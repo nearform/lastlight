@@ -86,11 +86,14 @@ describe("fixing skill — the completion markers", () => {
     expect(skill).toContain(FIX_MARKER);
   });
 
-  it("matches what the workflows enforce with requires_marker", () => {
+  it("matches what the workflows enforce with requires_marker — colon included", () => {
+    // The postcondition is a bare substring test, so it must name the tag WITH
+    // its colon: the parser only recognises `<TAG>:`, and the bare tag let an
+    // output that merely mentioned it pass a gate it then parsed to nothing.
     for (const name of ["pr-fix", "dependabot-ci-fix"]) {
       const byPhase = new Map(getWorkflow(name).phases.map((p) => [p.name, p]));
-      expect(byPhase.get("diagnose")?.on_output?.requires_marker).toBe(DIAGNOSIS_MARKER);
-      expect(byPhase.get("fix")?.on_output?.requires_marker).toBe(FIX_MARKER);
+      expect(byPhase.get("diagnose")?.on_output?.requires_marker).toBe(`${DIAGNOSIS_MARKER}:`);
+      expect(byPhase.get("fix")?.on_output?.requires_marker).toBe(`${FIX_MARKER}:`);
     }
   });
 

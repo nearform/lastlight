@@ -18,13 +18,17 @@ describe("dependabot-ci-fix — built-in workflow + cron", () => {
     expect(def.phases.map((p) => p.name)).toEqual(["diagnose", "fix"]);
   });
 
-  it("gates both phases on a completion marker", () => {
+  it("gates both phases on the PARSEABLE completion marker", () => {
     const def = getWorkflow("dependabot-ci-fix");
     const byName = new Map(def.phases.map((p) => [p.name, p]));
-    expect(byName.get("diagnose")?.on_output?.requires_marker).toBe("DIAGNOSIS_COMPLETE");
+    // With the colon, because the engine's postcondition is a bare substring
+    // test while the parser only recognises `<TAG>:`. The bare tag let an output
+    // that merely mentioned `DIAGNOSIS_COMPLETE` pass the gate and parse to
+    // nothing, which pinned the attempt counter at 1 for the life of the PR.
+    expect(byName.get("diagnose")?.on_output?.requires_marker).toBe("DIAGNOSIS_COMPLETE:");
     // Closes the missing-postcondition gap: a run that inspects the PR and
     // stops without pushing or labelling used to report green.
-    expect(byName.get("fix")?.on_output?.requires_marker).toBe("CI_FIX_COMPLETE");
+    expect(byName.get("fix")?.on_output?.requires_marker).toBe("CI_FIX_COMPLETE:");
   });
 
   it("skips the fix phase on the three non-fixable diagnosis classes", () => {

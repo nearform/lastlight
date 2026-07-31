@@ -82,8 +82,12 @@ Fix phase:
 CI_FIX_COMPLETE: pr=<N> attempt=<K> outcome=<pushed|no-change|gave-up> tried=<one line> gate=<green|red|skipped>
 ```
 
-Three rules, all load-bearing — these lines are parsed:
+Four rules, all load-bearing — these lines are parsed:
 
+- **The tag, then a colon, then the fields, on one line.** `DIAGNOSIS_COMPLETE`
+  on its own — in a sentence, in a heading, promised and not delivered — is not
+  a marker: the phase **fails** on a missing sign-off rather than passing with
+  nothing recorded. Write the whole line or don't write the tag.
 - **One line, bounded.** Each marker is persisted per attempt and replayed into
   the next attempt's prompt. `cause=` is *why CI failed*; `ci_vs_local=` is
   *what differs between CI and this sandbox* (write `none` when nothing does).

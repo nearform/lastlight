@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { getWorkflow } from "#src/workflows/loader.js";
+import {
+  CI_FIX_MARKER_POSTCONDITION,
+  DIAGNOSIS_MARKER_POSTCONDITION,
+} from "#src/engine/fix-markers.js";
 
 /**
  * Contract test for the built-in pr-fix workflow. It carries the same
@@ -16,10 +20,17 @@ describe("pr-fix — built-in workflow", () => {
     expect(def.phases.map((p) => p.name)).toEqual(["diagnose", "fix"]);
   });
 
-  it("gates both phases on a completion marker", () => {
+  it("gates both phases on the PARSEABLE completion marker", () => {
+    // Colon included, and pinned to the parser's own constants: the engine
+    // enforces `requires_marker` as a bare substring while `lastMarkerLine`
+    // only recognises `<TAG>:`, so declaring the bare tag let an output that
+    // merely mentioned it pass a gate it then parsed to nothing — a green phase
+    // with a null diagnosis, and an attempt counter that never advanced.
     const byName = new Map(def.phases.map((p) => [p.name, p]));
-    expect(byName.get("diagnose")?.on_output?.requires_marker).toBe("DIAGNOSIS_COMPLETE");
-    expect(byName.get("fix")?.on_output?.requires_marker).toBe("CI_FIX_COMPLETE");
+    expect(byName.get("diagnose")?.on_output?.requires_marker).toBe(DIAGNOSIS_MARKER_POSTCONDITION);
+    expect(byName.get("fix")?.on_output?.requires_marker).toBe(CI_FIX_MARKER_POSTCONDITION);
+    expect(DIAGNOSIS_MARKER_POSTCONDITION).toBe("DIAGNOSIS_COMPLETE:");
+    expect(CI_FIX_MARKER_POSTCONDITION).toBe("CI_FIX_COMPLETE:");
   });
 
   it("skips the fix phase on the three non-fixable diagnosis classes", () => {
@@ -82,7 +93,7 @@ describe.each(["pr-fix", "dependabot-ci-fix"])("%s — the local push gate", (na
   it("keeps the CI_FIX_COMPLETE postcondition on the looped phase", () => {
     // A `generic_loop` used to silently drop `on_output` — the marker is what
     // the cross-attempt memory is harvested from, so it must survive the loop.
-    expect(fix.on_output?.requires_marker).toBe("CI_FIX_COMPLETE");
+    expect(fix.on_output?.requires_marker).toBe(CI_FIX_MARKER_POSTCONDITION);
   });
 
   it("resolves the gate script inside the checkout on every backend", () => {

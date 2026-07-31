@@ -17,6 +17,12 @@ vi.mock("#src/workflows/loader.js", () => ({
 vi.mock("child_process", () => ({ execSync: vi.fn() }));
 
 import { executeAgent, executeCommand } from "#src/engine/agent-executor.js";
+import {
+  CI_FIX_MARKER_POSTCONDITION,
+  DIAGNOSIS_MARKER_POSTCONDITION,
+  parseDiagnosisMarker,
+  parseFixOutcomeMarker,
+} from "#src/engine/fix-markers.js";
 import { runWorkflow } from "#src/workflows/runner.js";
 
 const mockExecuteAgent = vi.mocked(executeAgent);
@@ -157,6 +163,31 @@ describe("generic_loop — postcondition + phase messages", () => {
     expect(comments.join("\n")).toContain("gave up after 2 local iterations");
   });
 
+  it("rejects the bare tag when the postcondition names the parseable form", async () => {
+    // The gate and the parser must agree on what a marker IS. The engine tests
+    // `output.includes(marker)` while `lastMarkerLine` only recognises `<TAG>:`,
+    // so a postcondition naming the bare tag passed an output that merely
+    // MENTIONED it — and then parsed to nothing. Green phase, null diagnosis,
+    // attempt counter frozen. Naming the tag WITH its colon closes that.
+    const bare = `I'm going to finish with ${MARKER} once I understand this.`;
+    mockExecuteAgent.mockResolvedValue(ok(bare));
+    mockExecuteCommand.mockResolvedValue(cmdFail());
+
+    const def = gatedLoopWorkflow();
+    def.phases[1].on_output = { requires_marker: CI_FIX_MARKER_POSTCONDITION };
+    const result = await runWorkflow(def, CTX, {} as never, {});
+
+    expect(result.success).toBe(false);
+    expect(result.phases.find((p) => !p.success)?.error).toContain(
+      `missing completion marker "${CI_FIX_MARKER_POSTCONDITION}"`,
+    );
+    // …and the parser agrees: this output carries no marker to harvest, which
+    // is exactly the disagreement the bare tag hid.
+    expect(parseFixOutcomeMarker(bare)).toBeNull();
+    // The bare tag would have let it through — the defect, pinned.
+    expect(bare.includes(MARKER)).toBe(true);
+  });
+
   it("threads the phase timeout_seconds into the until_bash check", async () => {
     mockExecuteAgent.mockResolvedValueOnce(ok(`${MARKER}: pr=7 attempt=1 outcome=pushed tried=x gate=green`));
     mockExecuteCommand.mockResolvedValueOnce(cmdOk());
@@ -167,5 +198,57 @@ describe("generic_loop — postcondition + phase messages", () => {
     // kills a real test suite mid-run, reporting a false red.
     const opts = mockExecuteCommand.mock.calls[0]?.[2] as { timeoutSeconds?: number } | undefined;
     expect(opts?.timeoutSeconds).toBe(900);
+  });
+});
+
+/**
+ * The same postcondition on an UNLOOPED phase — the shape `diagnose` has.
+ *
+ * `diagnose` is where the disagreement between the gate and the parser did real
+ * damage: a bare-tag output passed the phase, the harvest wrote
+ * `diagnosis: null`, `didSpendAttempt` read a non-null harvest with nothing in
+ * it and returned `false`, and the PR stayed on attempt 1 for its whole life
+ * with `fix.maxCostUsd` as the only brake.
+ */
+describe("requires_marker on a standard phase — the parseable form", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const diagnoseWorkflow = (): AgentWorkflowDefinition => ({
+    kind: "pr-fix",
+    name: "diagnose-only",
+    phases: [
+      {
+        name: "diagnose",
+        type: "agent",
+        prompt: "prompts/diagnose-ci.md",
+        output_var: "diagnosis",
+        on_output: { requires_marker: DIAGNOSIS_MARKER_POSTCONDITION },
+      },
+    ],
+  });
+
+  it("fails the phase on a bare tag with no colon", async () => {
+    const bare = "I looked at DIAGNOSIS_COMPLETE and could not decide. class=flaky maybe?";
+    mockExecuteAgent.mockResolvedValue(ok(bare));
+
+    const result = await runWorkflow(diagnoseWorkflow(), CTX, {} as never, {});
+
+    expect(result.success).toBe(false);
+    expect(result.phases.find((p) => !p.success)?.error).toContain(
+      'missing completion marker "DIAGNOSIS_COMPLETE:"',
+    );
+    expect(parseDiagnosisMarker(bare)).toBeNull();
+  });
+
+  it("passes once the colon and the fields are there", async () => {
+    const line = "DIAGNOSIS_COMPLETE: pr=7 attempt=1 class=flaky cause=timeout ci_vs_local=none";
+    mockExecuteAgent.mockResolvedValue(ok(`had a look\n${line}`));
+
+    const result = await runWorkflow(diagnoseWorkflow(), CTX, {} as never, {});
+
+    expect(result.success).toBe(true);
+    expect(parseDiagnosisMarker(line)?.class).toBe("flaky");
   });
 });

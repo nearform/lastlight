@@ -189,6 +189,36 @@ describe("applyDerivedState — the attempt counter", () => {
     expect(h.dispatch().state.attempt).toBe(2);
   });
 
+  it("a run that HARVESTED but parsed nothing still charges the attempt", () => {
+    // The counter that could never advance. `harvestFixMarkers` writes its
+    // namespace unconditionally for the fix family, so a malformed marker leaves
+    // a NON-null harvest carrying `diagnosis: null` — and reading that as "no
+    // harvest happened, so nothing was spent" pinned the PR at attempt 1 for its
+    // whole life, with `fix.maxCostUsd` as the only remaining brake.
+    //
+    // The ledger decides instead: a SUCCEEDED `diagnose` row cannot exist
+    // without a well-formed marker, because the phase carries
+    // `requires_marker: "DIAGNOSIS_COMPLETE:"`.
+    const h = harness({ ledgerSaysDiagnosed: true });
+    const first = h.dispatch();
+    h.finish(first.id, "diagnose", "DIAGNOSIS_COMPLETE without a colon, so nothing parses");
+
+    // The harvest DID run — this is not the "no namespace" case.
+    expect(readHarvestedMarkers(h.db.runs.getRun(first.id))).not.toBeNull();
+    expect(readHarvestedMarkers(h.db.runs.getRun(first.id))?.diagnosis).toBeNull();
+    expect(h.dispatch().state.attempt).toBe(2);
+  });
+
+  it("…but a genuinely crashed diagnose still costs nothing", () => {
+    // Same shape on the harvest side, opposite answer, and the ledger is what
+    // tells them apart: a run whose `diagnose` never finished has no succeeded
+    // row. Failing closed here is only safe because of that.
+    const h = harness({ ledgerSaysDiagnosed: false });
+    const first = h.dispatch();
+    h.finish(first.id, "diagnose", "the sandbox failed to provision");
+    expect(h.dispatch().state.attempt).toBe(1);
+  });
+
   it("a `flaky` verdict costs no attempt", () => {
     // 09 → S1's class table. `fix.maxFlakyDeferrals` is the bound instead — and
     // that counter would be unreachable if `flaky` also spent an attempt.

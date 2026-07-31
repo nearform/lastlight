@@ -71,5 +71,7 @@ you learned that the marker has no field for — one line each, appended to
 the highest-value thing you can write here. Writing nothing is fine; `.lastlight-notes`
 is not a log of what you did.
 
-End with the `DIAGNOSIS_COMPLETE` marker on its own final line, exactly as the
-**fixing** skill specifies. Write `class=` nowhere else.
+End with the `DIAGNOSIS_COMPLETE:` marker on its own final line — the tag, a
+colon, then the fields — exactly as the **fixing** skill specifies. The tag
+without its colon and fields is not a marker, and this phase fails on a missing
+one. Write `class=` nowhere else.

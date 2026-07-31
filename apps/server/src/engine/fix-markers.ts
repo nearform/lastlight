@@ -119,6 +119,26 @@ export interface AttemptMarkers {
 export const DIAGNOSIS_MARKER = "DIAGNOSIS_COMPLETE";
 export const CI_FIX_MARKER = "CI_FIX_COMPLETE";
 
+/**
+ * What a fix phase's `on_output.requires_marker` must name — the tag **with its
+ * colon**, which is the same string {@link lastMarkerLine} looks for.
+ *
+ * The engine enforces the postcondition as a bare `output.includes(marker)`, so
+ * declaring the tag alone made the gate and the parser disagree about what a
+ * marker IS. An output that merely *mentions* `DIAGNOSIS_COMPLETE` — an agent
+ * narrating "I'll close with DIAGNOSIS_COMPLETE" and then not, or fencing the
+ * word in prose — passed the postcondition and parsed to nothing. The phase went
+ * green, the harvest recorded a diagnosis of `null`, and the attempt counter
+ * never advanced: the PR sat at attempt 1 for its whole life with
+ * `fix.maxCostUsd` as the only remaining brake.
+ *
+ * Requiring the parseable form instead makes a malformed marker fail the phase
+ * loudly, which is what a postcondition is for. Exported so the YAML can be
+ * asserted against it rather than against a hand-copied literal.
+ */
+export const DIAGNOSIS_MARKER_POSTCONDITION = `${DIAGNOSIS_MARKER}:`;
+export const CI_FIX_MARKER_POSTCONDITION = `${CI_FIX_MARKER}:`;
+
 // ---------------------------------------------------------------------------
 // Bounds
 // ---------------------------------------------------------------------------

@@ -670,22 +670,30 @@ function nextAttempt(
  *
  * Two fallbacks, in order:
  *
- * - **No harvest namespace at all** — the run predates the harvest (an upgrade
- *   with fix runs already in flight) or died before its first `onPhaseEnd`.
- *   Fall back to the ledger probe: `diagnose` carries
- *   `on_output.requires_marker: DIAGNOSIS_COMPLETE`, so a SUCCEEDED `diagnose`
- *   row cannot exist without the marker having been emitted. Same fact, read
- *   less directly, and without the class.
+ * - **No PARSED diagnosis** — the ledger decides. Two very different runs land
+ *   here and it is deliberate that they are NOT told apart: one has no harvest
+ *   namespace at all (it predates the harvest, or died before its first
+ *   `onPhaseEnd`), the other harvested and parsed nothing. Reading the second as
+ *   "spent nothing" was the defect — `harvestFixMarkers` writes the namespace
+ *   unconditionally for the fix family, so a malformed marker produces a
+ *   non-null harvest carrying `diagnosis: null`, and treating that as a free run
+ *   pinned the PR at attempt 1 for its whole life with `fix.maxCostUsd` as the
+ *   only remaining brake.
+ *
+ *   The probe is `diagnose`'s own ledger row: the phase carries
+ *   `on_output.requires_marker: "DIAGNOSIS_COMPLETE:"`, so a SUCCEEDED
+ *   `diagnose` cannot exist without a well-formed marker having been emitted.
+ *   Same fact, read less directly, and without the class. Failing CLOSED here
+ *   costs a crashed run nothing, because a run whose `diagnose` genuinely never
+ *   finished has no succeeded row for the probe to find.
  * - **A read error** — fail CLOSED (count it). A read failure must not silently
  *   grant a free attempt forever; the cost cap is the backstop, and the
  *   alternative is an unbounded retry loop.
  */
 function didSpendAttempt(prior: WorkflowRun, deps: PrStateDeps): boolean {
   try {
-    const harvest = readHarvestedMarkers(prior);
-    if (!harvest) return deps.db.executions.phaseSucceededInRun(prior.id, "diagnose");
-    const diagnosis = harvest.diagnosis;
-    if (!diagnosis) return false;
+    const diagnosis = readHarvestedMarkers(prior)?.diagnosis ?? null;
+    if (!diagnosis) return deps.db.executions.phaseSucceededInRun(prior.id, "diagnose");
     return !(diagnosis.class && ATTEMPT_FREE_CLASSES.has(diagnosis.class));
   } catch {
     return true;

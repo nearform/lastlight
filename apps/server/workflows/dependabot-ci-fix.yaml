@@ -50,8 +50,14 @@ phases:
     # until an operator pins a cheaper model for it.
     model: "{{models.diagnose}}"
     output_var: diagnosis
+    # The tag WITH its colon, which is what the parser looks for
+    # (`lastMarkerLine`). The engine enforces the postcondition as a plain
+    # substring, so the bare tag let an output that merely MENTIONS
+    # `DIAGNOSIS_COMPLETE` pass a gate it then parsed to nothing — a green phase,
+    # a null diagnosis, and an attempt counter that never advanced. Pinned to
+    # `DIAGNOSIS_MARKER_POSTCONDITION` in src/engine/fix-markers.ts by test.
     on_output:
-      requires_marker: "DIAGNOSIS_COMPLETE"
+      requires_marker: "DIAGNOSIS_COMPLETE:"
     messages:
       on_start: "Diagnosing the failing checks on PR #{{prNumber}}..."
       on_failure: "**Couldn't diagnose** the failing checks on PR #{{prNumber}}."
@@ -89,8 +95,9 @@ phases:
     timeout_seconds: 900
     # Closes the missing-postcondition gap: without a marker, a run that
     # inspects the PR and stops without pushing or labelling reports green.
+    # The tag WITH its colon — see the `diagnose` phase above.
     on_output:
-      requires_marker: "CI_FIX_COMPLETE"
+      requires_marker: "CI_FIX_COMPLETE:"
     # The within-run local gate loop (04-retry.md §4.5). The gate command isn't
     # statically knowable — package manager from the lockfile, commands from the
     # repo's CI workflow — so the `fixing` skill has the agent write it to

@@ -119,8 +119,9 @@ trivial.)
 OUTPUT: A brief summary of the root cause, exactly what you changed, the
 local test/lint/typecheck results, and any checks you couldn't reproduce in the
 sandbox (so a human knows what still needs confirming). Then the
-`CI_FIX_COMPLETE` marker on its own final line, exactly as the **fixing** skill
-specifies.
+`CI_FIX_COMPLETE:` marker on its own final line — the tag, a colon, then the
+fields — exactly as the **fixing** skill specifies. The tag without its colon
+and fields is not a marker and fails this phase.
 
 If you learned something durable the marker has no field for — a repair you
 verified does *not* work, a constraint this repo imposes — append one line per
