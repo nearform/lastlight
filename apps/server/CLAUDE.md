@@ -158,6 +158,15 @@ src/
                         persisted on `context.prState`. Never throws: every
                         read is best-effort and degrades to a value that
                         cannot cause a skip.
+    pr-notes.ts         The PR journal — the agent-written half of that
+                        snapshot (`PrState.notes`). Pure: kinds, the parse of
+                        the `<kind>: <line>` grammar, the bounds (20 notes /
+                        240 chars / 4 KiB, newest kept), staleness marking,
+                        and the fenced render. Notes are HINTS: no decision
+                        function reads them, `renderContext` projects them to
+                        one string (`{{priorNotes}}`), and a note containing
+                        `class=` or a marker tag is rejected on ingest.
+                        Impure half lives in `fix-harvest.ts` (the drain).
     pr-escalation.ts    What a TERMINAL skip does to the PR: applies
                         requires-human + one comment naming the case, the
                         attempts spent and each attempt's class/cause — and
@@ -174,6 +183,16 @@ src/
                         escalation comment and the admin panel are three
                         renderings of one source. Table-testable with no
                         GitHub mock and no sandbox.
+    review-check.ts     The `last-light/review` Check Run as a PROJECTION of
+                        run state: created at the dispatchWorkflow choke
+                        point (so a cron/comment/Slack/CLI review gets one
+                        too), persisted on `scratch.reviewCheck`, and
+                        COMPLETED FROM THE RUN'S TERMINAL TRANSITION via the
+                        run store's TerminalRunObserver — so simple.ts,
+                        resume.ts, the queued-run TTL expiry and the admin
+                        cancel all resolve it for free. It used to be
+                        completed inside a `.then()` on an in-memory promise
+                        and stranded `in_progress` on every deploy.
     event-shim.ts       Translates agentic-pi events → Claude-SDK envelope jsonl.
     llm.ts              One-shot LLM helper for screen/ + classifier —
                         direct fetch to Anthropic Messages or OpenAI Chat
@@ -363,8 +382,14 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   (attempts or cost exhausted, or a diagnosis outside `fix.retryableClasses`)
   is not dropped silently: `pr-escalation.ts` records a run row, labels the PR
   `requires-human` and posts one comment. The row is the load-bearing part —
-  see its module header. Contract: `spec/05-router.md` → "The PR-scoped
-  dispatch gate".
+  see its module header. `pr-review` crosses the same gate, through
+  `resolveReviewTrigger` — **the only implementation of `review.trigger`
+  anywhere**, so `review-discovery.ts` is a candidate finder that knows nothing
+  about modes, drafts or settled checks, an explicit `@bot review` is a decision
+  rather than an accident of which code paths the comment route crossed, and the
+  `last-light/review` check is a projection of run state (`review-check.ts`)
+  instead of a `.then()` on an in-memory promise. Contract:
+  `spec/05-router.md` → "The PR-scoped dispatch gate".
 - **Configuration & deployment overlay** (`src/config/config.ts`, `config/default.yaml`,
   issue #61) — non-secret config (managed repos, routes, models, variants,
   approvals, disables, cron participation) is loaded at startup from the packaged
@@ -450,10 +475,9 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     `dependencies` are now **live**: the PR dispatch gate (below) enforces
     `fix.maxAttempts` / `fix.maxCostUsd` and `dependencies.requireSettledChecks`
     / `minSettledChecks`, and the green dependency cron reads the latter pair
-    too. `review` is still inert — `resolveReviewTrigger` exists and is tested
-    but nothing calls it, because switching the packaged
-    `review.trigger: after-checks` on today would silently stop every human PR
-    being reviewed on push.
+    too. **`review` is live as well**: `resolveReviewTrigger` is the one
+    implementation of `review.trigger` on every route, and
+    `src/cron/review-discovery.ts` is back to being a pure candidate finder.
     `review` is deliberately NOT seeded onto the template context — `build.yaml`
     already emits `output_var: review` and a top-level object would shadow it.
   - **Cron participation** — a `crons: { enable, disable }` block, valid at

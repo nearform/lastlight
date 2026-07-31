@@ -64,12 +64,27 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<h2>Triggers</h2>
 
+	<p>
+		<em>When</em> a review runs is an operator (and per-repo) decision —
+		<a href="/docs/configuration#workflow-policy"><code>review.trigger</code></a>,
+		which ships <code>after-checks</code>. Every route below crosses the same
+		gate, so the mode has one meaning everywhere.
+	</p>
+
 	<ul>
-		<li><strong>GitHub webhook:</strong> <code>pr.opened</code> event</li>
-		<li><strong>Cron fallback:</strong> Every 30 minutes (only when webhooks are not configured)</li>
+		<li><strong>GitHub webhook:</strong> <code>pr.opened</code> / <code>pr.synchronize</code> / <code>pr.reopened</code>, and <strong>Ready for review</strong> on a draft — under <code>eager</code>. Under <code>after-checks</code> these defer and the review instead runs once the head SHA's checks <em>settle</em>, either colour</li>
+		<li><strong>By request:</strong> the <code>review.requestLabel</code> label, an <code>@last-light review</code> comment, a review requested from the bot, or <strong>Re-run</strong> on the <code>last-light/review</code> check. An explicit request always runs — it overrides the mode, the draft skip and the "already reviewed this commit" check</li>
+		<li><strong>Cron sweep:</strong> every 30 minutes, <em>including</em> when webhooks are configured. It is the only route that reaches a PR whose fix chain stopped without pushing a commit, since no further check-suite event will fire for it</li>
 		<li><strong>Slack:</strong> <code>review cliftonc/repo</code></li>
 		<li><strong>CLI:</strong> <code>npm run cli -- review owner/repo</code></li>
 	</ul>
+
+	<p>
+		Skipped without a run: draft PRs (<code>review.skipDraft</code>, matching
+		what the sweep has always done), a commit we already reviewed, and a PR
+		another Last Light run is currently working on — reviewing a tree a fix run
+		is rewriting produces a review that is stale before it lands.
+	</p>
 
 	<div class="docs-next">
 		<a href="/docs/workflows/pr-comment" class="prev">

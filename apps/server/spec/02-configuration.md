@@ -297,9 +297,12 @@ hatch shut for a repo with **no CI at all**, which could then only ever raise th
 number of settled checks an auto-merge needs and never lower it to `0`. That case
 belongs to the merge decision (a `checksState` of `none`), not to a config clamp.
 
-`review.postsCheck` predates the block and is still read flat as
-`config.reviewPostsCheck` (the `REVIEW_POSTS_CHECK` env var below), so it is one
-value read two ways rather than a second source of truth.
+`review.postsCheck` predates the block and is still **mirrored** flat as
+`config.reviewPostsCheck` (the `REVIEW_POSTS_CHECK` env var below) for the
+public-config surface — one value projected two ways rather than a second source
+of truth. Nothing reads the flat copy any more: the check lifecycle resolves
+`review.postsCheck` off the run's repo-clamped config, so a repo that asked for
+the check gets it.
 
 ### Cron participation (`crons:`)
 
@@ -714,7 +717,7 @@ These have no env var — they're set in `config/default.yaml` or the overlay's
 | `repoConfig.{enabled,allowKeys,allowedModels,allowAssets}` | see the per-repository layer above | The operator's bounds on the repo layer. | **never** — a repo can't widen its own bounds |
 | `deploy.version` | `string \| null`, `null` | Core-version pin (git tag/ref). Deployment config, not runtime behaviour. Env: `LASTLIGHT_CORE_VERSION`. | no |
 | `bootstrap.label` / `explore.defaultRepo` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO`. | no |
-| `review.{postsCheck,trigger,requestLabel,skipDraft}` | `false` / `after-checks` / `null` / `true` | When a `pr-review` run is triggered, and whether it posts the `last-light/review` check. `after-checks` means "once the head SHA's checks **settle**, either colour" — so the review can read and cite the CI result, and a push-storm collapses to one review per settled SHA. There is no settled-*and-passing* sub-mode: a PR whose CI never goes green would then never be reviewed at all. **`trigger` / `requestLabel` / `skipDraft` are not enforced yet:** `resolveReviewTrigger` (`src/engine/pr-decisions.ts`) implements exactly this table and is tested, but nothing calls it — the [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate) leaves `pr-review` ungated on purpose, since switching the packaged `after-checks` on today would silently stop every human PR being reviewed on push. `postsCheck` is live. Env: `REVIEW_POSTS_CHECK` (`postsCheck` only). | **yes** — `postsCheck`/`skipDraft` add-only, the rest free |
+| `review.{postsCheck,trigger,requestLabel,skipDraft}` | `false` / `after-checks` / `null` / `true` | When a `pr-review` run is triggered, and whether it posts the `last-light/review` check. `after-checks` means "once the head SHA's checks **settle**, either colour" — so the review can read and cite the CI result, and a push-storm collapses to one review per settled SHA. There is no settled-*and-passing* sub-mode: a PR whose CI never goes green would then never be reviewed at all. Enforced by `resolveReviewTrigger` (`src/engine/pr-decisions.ts`) at the [dispatch gate](/spec/05-router#reviewtrigger--one-resolver-every-route) — **one** implementation, on every route, with `src/cron/review-discovery.ts` reduced to a candidate finder. `on-request` is served by `requestLabel`, an `@bot review` comment, and the Re-run button on the check; `review_requested` is opportunistic only, since GitHub App bot users are not selectable in the reviewer picker. Env: `REVIEW_POSTS_CHECK` (`postsCheck` only). | **yes** — `postsCheck`/`skipDraft` add-only, the rest free |
 | `fix.{maxAttempts,localIterations,gateTimeoutSeconds,escalateModelAfterAttempt,maxCostUsd,maxFlakyDeferrals,retryableClasses}` | `3` / `2` / `900` / `1` / `5.0` / `2` / `[reproducible, env-mismatch]` | Retry budgets shared by every PR_FIX_SHAPED workflow (`pr-fix`, `dependabot-ci-fix`). `maxAttempts` counts *across runs* for one PR, `localIterations` *within* one attempt; the cost ceiling is cumulative per PR and ships **on**. A diagnosis class outside `retryableClasses` escalates immediately rather than burning budget on a retry that can't help. | **yes**, clamped one-way (`escalateModelAfterAttempt` / `gateTimeoutSeconds` operator-only) |
 | `dependencies.{autoMergeMaxImpact,requireSettledChecks,minSettledChecks,auditComment}` | `medium` / `true` / `1` / `true` | How far up the impact scale a **major** dependency bump may auto-merge. Impact, not semver magnitude, is the gate: a `@types/*` major is not a framework rewrite. | **yes**, clamped one-way (`minSettledChecks` operator-only) |
 | `otel.*` | see Telemetry | Env-overridable per key; `collectorHosts` is *unioned* with env, not replaced. | no |

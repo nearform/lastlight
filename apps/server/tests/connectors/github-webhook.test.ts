@@ -400,6 +400,7 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
   /** A connector whose aggregate check-conclusion lookup is stubbed. */
   function connectorWithChecks(
     conclusion: "passing" | "failing" | "pending" | "none",
+    trigger: "eager" | "after-checks" | "on-request" = "eager",
   ): { conn: GitHubWebhookConnector; calls: Array<[string, string, string]> } {
     const calls: Array<[string, string, string]> = [];
     const conn = new GitHubWebhookConnector({
@@ -410,6 +411,7 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
         calls.push([owner, repo, ref]);
         return conclusion;
       },
+      reviewTrigger: () => trigger,
     });
     return { conn, calls };
   }
@@ -478,6 +480,85 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
     expect(json.filtered).toBe(true);
     expect(emitted).toBeNull();
     expect(calls).toEqual([["acme", "widgets", "cafe1234"]]);
+  });
+
+  it("does not broaden past dependency PRs unless review.trigger is after-checks", async () => {
+    // Emitting is what costs event volume, so the broadening is gated on the
+    // operator's mode actually having a consumer for the settle event.
+    const { conn, calls } = connectorWithChecks("passing", "eager");
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it("emits pr.checks_settled for a settled-GREEN non-dependency PR under after-checks", async () => {
+    const { conn } = connectorWithChecks("passing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+      headSha: "beef0001",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+    expect(emitted.headSha).toBe("beef0001");
+  });
+
+  it("emits pr.checks_settled for a settled-RED human PR too — either colour", async () => {
+    // 09 locked decision 14: the `passing` variant was deleted. A red result is
+    // useful review input, and a PR we gave up on never goes green.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "failure",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+  });
+
+  it("FIX OUTRANKS REVIEW — a red dependency PR stays pr.checks_failed under after-checks", async () => {
+    // One envelope per delivery is all `normalize()` can return, so the
+    // precedence is the shape of the pipeline, not a policy bolted on later.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "failure",
+      prNumber: 190,
+      commitAuthor: "dependabot[bot]",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+  });
+
+  it("a green dependency PR still routes to the MERGE path, not a review", async () => {
+    const { conn } = connectorWithChecks("passing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 190,
+      commitAuthor: "dependabot[bot]",
+    });
+    expect(emitted?.type).toBe("pr.checks_passed");
+  });
+
+  it("still drops a settle whose aggregate has not settled", async () => {
+    const { conn } = connectorWithChecks("pending", "after-checks");
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
   });
 
   it("skips the settle lookup entirely for a non-dependency red PR", async () => {
@@ -631,5 +712,196 @@ describe("GitHubWebhookConnector — issue_comment normalization", () => {
     expect(emitted.issueAuthor).toBe("reporter");
     expect(emitted.sender).toBe("someone-else");
     expect(emitted.labels).toContain("needs-info");
+  });
+});
+
+/**
+ * Phase 7's new PR-review signals. `normalize()` is the first of the four
+ * places `review.trigger` used to be enforceable, and the only one that decides
+ * whether a GitHub action becomes an event AT ALL — before this, `labeled`,
+ * `review_requested` and `ready_for_review` all produced nothing and the
+ * delivery was answered `{ filtered: true, reason: "unmapped event" }`.
+ */
+describe("GitHubWebhookConnector — review-request signals", () => {
+  beforeEach(() => {
+    setRuntimeConfig({ managedRepos: [REPO] } as unknown as LastLightConfig);
+  });
+  afterEach(() => resetRuntimeConfigForTests());
+
+  async function postPr(
+    conn: GitHubWebhookConnector,
+    payloadOver: Record<string, unknown>,
+  ): Promise<{ json: any; emitted: any | null }> {
+    let emitted: any = null;
+    conn.on("event", (e) => { emitted = e; });
+    const payload = {
+      repository: { full_name: REPO },
+      sender: { login: "maintainer", type: "User" },
+      pull_request: {
+        number: 42,
+        title: "Add X",
+        body: "",
+        labels: [{ name: "enhancement" }],
+        draft: false,
+        user: { login: "alice" },
+      },
+      ...payloadOver,
+    };
+    const body = JSON.stringify(payload);
+    const res = await conn.honoApp.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": sign(body),
+        "x-github-event": "pull_request",
+        "x-github-delivery": "d",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    const json = await res.json();
+    await new Promise((r) => setImmediate(r));
+    return { json, emitted };
+  }
+
+  it("maps ready_for_review to pr.opened SEMANTICS — the event that un-defers a draft", async () => {
+    // With `review.skipDraft: true` and nothing else, a PR opened as a draft and
+    // later marked ready would get no webhook-driven review at all.
+    const { emitted } = await postPr(connector(), { action: "ready_for_review" });
+    expect(emitted?.type).toBe("pr.opened");
+    expect(emitted.prNumber).toBe(42);
+  });
+
+  it("maps labeled to pr.labeled, carrying the label that was just added", async () => {
+    const { emitted } = await postPr(connector(), {
+      action: "labeled",
+      label: { name: "lastlight:review" },
+    });
+    expect(emitted?.type).toBe("pr.labeled");
+    expect(emitted.addedLabel).toBe("lastlight:review");
+  });
+
+  it("maps review_requested to pr.review_requested, carrying the reviewer", async () => {
+    const { emitted } = await postPr(connector(), {
+      action: "review_requested",
+      requested_reviewer: { login: "last-light[bot]" },
+    });
+    expect(emitted?.type).toBe("pr.review_requested");
+    expect(emitted.requestedReviewer).toBe("last-light[bot]");
+  });
+
+  it("carries a TEAM request too — the router decides it isn't ours", async () => {
+    const { emitted } = await postPr(connector(), {
+      action: "review_requested",
+      requested_team: { slug: "reviewers" },
+    });
+    expect(emitted?.requestedReviewer).toBe("team/reviewers");
+  });
+
+  it("still never reviews a PR the bot itself authored, on either new signal", async () => {
+    for (const over of [
+      { action: "labeled", label: { name: "lastlight:review" } },
+      { action: "review_requested", requested_reviewer: { login: BOT_LOGIN } },
+    ]) {
+      const { json, emitted } = await postPr(connector(), {
+        ...over,
+        pull_request: {
+          number: 42,
+          title: "Bot PR",
+          body: "",
+          labels: [],
+          draft: false,
+          user: { login: BOT_LOGIN },
+        },
+      });
+      expect(json.filtered).toBe(true);
+      expect(emitted).toBeNull();
+    }
+  });
+
+  it("a label with no name produces nothing rather than an event with an empty label", async () => {
+    const { json, emitted } = await postPr(connector(), { action: "labeled", label: {} });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
+  it("a Re-run on OUR check is a review REQUEST, not a synchronize", async () => {
+    // `pr.synchronize` is an attention event, which `after-checks`/`on-request`
+    // defer — so routing the Re-run there would make the check's own button a
+    // no-op, which is precisely what it is advertised as.
+    const conn = connector();
+    let emitted: any = null;
+    conn.on("event", (e) => { emitted = e; });
+    const payload = {
+      action: "rerequested",
+      repository: { full_name: REPO },
+      sender: { login: "maintainer", type: "User" },
+      check_run: { name: "last-light/review", pull_requests: [{ number: 42 }] },
+    };
+    const body = JSON.stringify(payload);
+    await conn.honoApp.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": sign(body),
+        "x-github-event": "check_run",
+        "x-github-delivery": "d",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(emitted?.type).toBe("pr.review_requested");
+    expect(emitted.requestedReviewer).toBe(BOT_LOGIN);
+  });
+
+  it("a Re-run on somebody ELSE's check still means 'the checks changed'", async () => {
+    const conn = connector();
+    let emitted: any = null;
+    conn.on("event", (e) => { emitted = e; });
+    const payload = {
+      action: "rerequested",
+      repository: { full_name: REPO },
+      sender: { login: "maintainer", type: "User" },
+      check_run: { name: "CI / build", pull_requests: [{ number: 42 }] },
+    };
+    const body = JSON.stringify(payload);
+    await conn.honoApp.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": sign(body),
+        "x-github-event": "check_run",
+        "x-github-delivery": "d",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(emitted?.type).toBe("pr.synchronize");
+  });
+
+  it("an ISSUE label is still nothing — the widening costs a normalize, not a dispatch", async () => {
+    const conn = connector();
+    let emitted: any = null;
+    conn.on("event", (e) => { emitted = e; });
+    const payload = {
+      action: "labeled",
+      repository: { full_name: REPO },
+      sender: { login: "maintainer", type: "User" },
+      issue: { number: 9, title: "t", body: "", labels: [], user: { login: "alice" } },
+      label: { name: "bug" },
+    };
+    const body = JSON.stringify(payload);
+    const res = await conn.honoApp.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": sign(body),
+        "x-github-event": "issues",
+        "x-github-delivery": "d",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    expect((await res.json()).filtered).toBe(true);
+    await new Promise((r) => setImmediate(r));
+    expect(emitted).toBeNull();
   });
 });

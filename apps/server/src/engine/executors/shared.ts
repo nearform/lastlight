@@ -9,6 +9,7 @@ import {
 } from "../github/profiles.js";
 import { AgenticShim, truncateForLog, safeStringify } from "../event-shim.js";
 import { BuildAssetStore, type BuildAssetRef } from "../../state/build-assets.js";
+import { PR_NOTES_FILE_NAME } from "../pr-notes.js";
 
 /**
  * Shared building blocks for the per-backend executors
@@ -84,6 +85,49 @@ export function resetVerifyScript(repoDir: string): void {
     console.warn(`[sandbox] Could not remove a stale ${VERIFY_SCRIPT_NAME}: ${msg}`);
   }
   excludeFromGit(repoDir, VERIFY_SCRIPT_NAME, "file");
+}
+
+// ── The PR journal ──────────────────────────────────────────────────
+//
+// The agent's outbox for `PrState.notes` (10-pr-memory.md). Same placement as
+// the push gate above and for the same reasons: it lives at the ROOT OF THE
+// CHECKOUT on EVERY backend, because gondolin is the packaged default and
+// mounts only cwd (so a `../` sibling is unreachable in the guest), and because
+// one uniform path is what lets the prompt state a literal filename while the
+// harvest resolves the same path from the run row without knowing the backend.
+//
+// What keeps it out of a dependency PR is `.git/info/exclude`, not living
+// outside the tree — and here that matters more than it does for the gate: the
+// journal must never be committed on ANY backend in ANY `buildAssets` mode,
+// which is precisely why `artifactIssueDir`'s relocation (conditional on
+// `buildAssets === "server"` AND a non-gondolin backend) could not be reused.
+// The full argument is in `../fix-harvest.ts`.
+
+export const PR_NOTES_FILE = PR_NOTES_FILE_NAME;
+
+/**
+ * Start-of-run reset for the journal: delete anything a crashed earlier attempt
+ * left behind, then register it in the checkout's local `.git/info/exclude` so
+ * the agent's own `git add -A` can never commit it into the PR.
+ *
+ * The delete is a belt for the harvest's own drain (`drainPrNotes` removes the
+ * file after each phase). It matters for exactly one case — a run that died
+ * between the agent writing a note and `onPhaseEnd` reading it — where the file
+ * would otherwise be re-attributed to the NEXT run, with that run's id stamped
+ * on a claim it never made. Provenance that lies is worse than a lost note.
+ *
+ * The `excludeFromGit` half is the load-bearing one and is idempotent, so this
+ * is safe to call on every provisioning path. Best-effort and non-fatal, like
+ * {@link resetVerifyScript}; no-op when `repoDir` isn't a checkout.
+ */
+export function resetPrNotesJournal(repoDir: string): void {
+  try {
+    rmSync(join(repoDir, PR_NOTES_FILE_NAME), { force: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[sandbox] Could not remove a stale ${PR_NOTES_FILE_NAME}: ${msg}`);
+  }
+  excludeFromGit(repoDir, PR_NOTES_FILE_NAME, "file");
 }
 
 /**

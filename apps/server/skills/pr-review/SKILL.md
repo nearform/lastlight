@@ -1,7 +1,7 @@
 ---
 name: pr-review
 description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. A pure code review — no building. Use when asked to review a PR or on a cron PR scan.
-version: 7.0.0
+version: 7.1.0
 tags: [github, review, code-quality]
 ---
 
@@ -17,7 +17,7 @@ volume.
 You do **not** post the review yourself. You write your findings to a JSON file
 (`.lastlight/pr-review/findings.json`) and a deterministic follow-up step posts
 one formal review, anchoring each finding to its diff line as an inline comment
-(§4).
+(§5).
 
 This skill is the PR-specific procedure. It uses the **code-review** skill for
 the precision bar and what-to-check rubric.
@@ -42,11 +42,10 @@ tool — you write the findings file and the follow-up step posts it.
 
 ### 1. Confirm the target
 
-If `prNumber` (or `issueNumber`) is set in the Context block, **that is your
-target** — go straight to `github_get_pull_request` with it. Do **not** call
+`prNumber` (or `issueNumber`) in the Context block **is your target** — go
+straight to `github_get_pull_request` with it. Do **not** call
 `github_list_pull_requests` to "find" or "confirm" it; you were handed it, and
-listing dumps a large payload for nothing. Only when no PR is given (a repo-wide
-`mode: scan`) do you list open PRs and pick the most recent unreviewed one.
+listing dumps a large payload for nothing.
 
 **Stop conditions** (check before reviewing):
 - PR authored by `last-light[bot]` → skip. Never self-review.
@@ -72,12 +71,30 @@ git diff --stat origin/<baseRef>...HEAD    # churn
 git diff origin/<baseRef>...HEAD           # the patch
 ```
 
-### 4. Assess and write your findings
+### 4. Read what CI said
+
+Your Context block carries `checksState` — `passing` / `failing` / `pending` /
+`none` — for this PR's head commit, and when it is `failing`, `ciSection` holds
+the actual failure report (job, step, log excerpt). **CI has already run: do not
+speculate about whether this builds.**
+
+- `checksState: passing` — the change compiles and the tests pass. Say nothing
+  about whether it builds; spend the whole review on judgement.
+- `checksState: failing` — `ciSection` is **evidence**, not a finding. Do not
+  restate what CI already surfaced (a human sees the red check first). Do use
+  it: cite it when it confirms a finding of your own — *"this fails typecheck on
+  line 42, which is the same issue as finding 2"* — and let it steer you toward
+  the part of the diff that is actually wrong.
+- `checksState: pending` / `none` — no CI evidence either way. Review the code
+  as written; still don't build or run it.
+
+### 5. Assess and write your findings
 
 Apply the **code-review** skill's rubric — read each changed file in context;
 check correctness / edge-cases / security / regression-risk / test-coverage.
-Reason about the code statically; **don't build or run it** — trust CI to catch
-what only running reveals, and spend your effort on what a human reviewer sees.
+Reason about the code statically; **don't build or run it** — CI is the build
+gate and it has already spoken (§4); spend your effort on what a human reviewer
+sees.
 Follow that skill's **precision-first** rule: keep **only Critical and Important**
 findings, each anchored to a `path:line` with a one-line concrete impact (what
 breaks, for which input or caller). Drop Suggestions and Nits.

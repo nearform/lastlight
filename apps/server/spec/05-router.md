@@ -58,7 +58,10 @@ instead. Only the configured handle matches — there is no legacy fallback (see
 | Trigger | Result | Notes |
 |---|---|---|
 | `issue.opened` / `issue.reopened` | `skill: issue-triage` | `reopened=true` for the latter |
-| `pr.opened` / `pr.synchronize` / `pr.reopened` | `skill: pr-review` | |
+| `pr.opened` / `pr.synchronize` / `pr.reopened` | `skill: pr-review` | `ready_for_review` on a draft normalizes to `pr.opened` — it is the moment the PR first asks to be looked at, and the event that un-defers a review `review.skipDraft` held back |
+| `pr.checks_settled` | `skill: pr-review` | The head SHA's checks have settled — either colour — on a PR that neither check-outcome route below claimed. This is `review.trigger: after-checks`'s trigger. **Not config-aware:** the router's job is `event → { workflow, context }`, and a deferred review is still *routed* to `pr-review`; the mode is enforced once, at the [dispatch gate](#the-pr-scoped-dispatch-gate) |
+| `pr.labeled` | `skill: pr-review`, or `ignore` | Routed **only** when the added label equals `review.requestLabel` (the real `on-request` mechanism — a GitHub App bot user cannot be picked in the reviewer dropdown). Every other label is a hard router-level ignore, so routine labelling never costs a `PrState` resolve |
+| `pr.review_requested` | `skill: pr-review`, or `ignore` | Routed only when the request names **us** — either through GitHub's reviewer picker (opportunistic: App bot users are not generally selectable there, so `on-request` must not *depend* on it) or through the Re-run button on our own `last-light/review` check, which the connector normalizes to this type. An explicit request, so it overrides mode, draft and dedup |
 | `pr.checks_failed` | `dependabot-ci-fix` (dependency PR) / `pr-fix` (anything else) | A failing `check_suite`. Routed **deterministically** off `envelope.isDependencyPr` — the discriminator the connector already computed to decide whether to emit at all (see [Integrations](/spec/03-integrations)) — with no classifier call, exactly like the green path below. It used to go through the classifier, which could only ever land on `dependabot-ci-fix`: `fallbackWorkflowForIntent` resolves a workflow by its `classification.intent` and `pr-fix.yaml` has no `classification:` block, so `pr-fix` was structurally unselectable. That was harmless only while the connector's gate was dependency-only; now that a PR whose head **we** pushed also emits the event, a human's red PR would have run a dependency-bump prompt, the `dependency-*` label vocabulary and a `requires-human` preflight it was never designed for |
 | `pr.checks_passed` | the workflow claiming the `dependabot-pr-merge` intent (else `ignore`) | A green `check_suite` on a dependency-update PR (the connector already pre-filtered to Dependabot / Renovate). Routed **deterministically** via `getWorkflowByIntent("dependabot-pr-merge")` — no classifier call, since the dependency-PR gate is the connector's job |
 | `comment.created` with pending reply gate | `skill: explore-reply` | Reply-gate short-circuit — see below |
@@ -378,6 +381,35 @@ is that run's harvested markers (`scratch.fixMarkers` — see
 A fresh problem clears all four together: a prompt that says "attempt
 1" while recounting three earlier attempts is incoherent.
 
+- **`notes`** is the PR's **journal** — a bounded, agent-written memory
+  (`src/engine/pr-notes.ts`). The four other fields above are things the
+  harness derives; this is the one thing the *agent* can choose to
+  remember. It rides the same harvest hook: the agent appends
+  `<kind>: <one line>` to `.lastlight-notes` in the checkout, and
+  `onPhaseEnd` drains the file onto `scratch.fixMarkers.notes`. Unlike
+  the four, it is keyed across every PR-scoped workflow rather than the
+  fix family alone, so `pr-review` reads what `dependabot-ci-fix`
+  learned. Bounds: 20 notes per PR (oldest evicted), 240 characters
+  each, 4 KiB rendered (newest kept). Four kinds — `finding`,
+  `constraint`, `ruled-out`, `todo` — of which only `ruled-out` records
+  a verified negative and reads as durable. A fresh problem **marks**
+  every note stale rather than clearing it: a claim about the old head
+  is not evidence about the new one, but deleting it silently would be
+  indistinguishable from never having written it.
+
+  Two rules make the journal safe to replay into a later, privileged
+  prompt. **It cannot forge anything**: notes are flattened to one line
+  on ingest (so a note can never emit a line of its own, and therefore
+  can never forge the fence it renders inside), and any note containing
+  `class=` or a marker tag is rejected outright — those tokens are
+  parsed, and a note able to write one could change what the workflow
+  does. **It cannot authorise anything**: no decision function reads
+  `notes`. `renderContext` projects it to a single fenced string,
+  `{{priorNotes}}`, and that is its only consumer — there is no boolean
+  or per-kind list a `skip_if` expression or a gate could branch on. A
+  note may tell an agent something; it can never make a code path
+  reachable, stand in for the local push gate, or cause a push.
+
 Every policy question is then a **pure function over that snapshot**
 (`src/engine/pr-decisions.ts`) returning `{ decision, reason, inputs }`
 rather than a bare enum — `mayMerge`, `resolveFixDisposition`,
@@ -447,12 +479,105 @@ Two properties are load-bearing:
   a permanent override.
 
 An explicit human request (`comment.created` / `pr_review_comment.created`
-/ Slack `message`) overrides the escalation guard, the not-retryable
-verdict and the per-SHA dedup — a maintainer asking directly is an
-intentional override — but not the facts: a fork PR, a red base branch and
-an exhausted budget do not care how nicely you ask. Fork PRs are the one
-skip the author is owed an explanation for, so the gate posts a comment
-saying we have no branch to push to.
+/ `pr.review_requested` / Slack `message` / `/api/run`) overrides the
+escalation guard, the not-retryable verdict and the per-SHA dedup — a
+maintainer asking directly is an intentional override — but not the facts:
+a fork PR, a red base branch and an exhausted budget do not care how nicely
+you ask. Fork PRs are the one skip the author is owed an explanation for,
+so the gate posts a comment saying we have no branch to push to.
+
+### `review.trigger` — one resolver, every route
+
+`resolveReviewTrigger` is the gate for `pr-review`, and it is the only
+implementation of `review.trigger` anywhere. That is the whole point: the
+trigger surface used to be spread across four places — the connector's
+`normalize()`, the router's hardcoded `pr.* → pr-review`, the cron's
+`condition.unless: webhooksEnabled`, and the dispatcher's check-posting
+block — of which exactly one was config-aware. Keeping the crons would
+otherwise have required *three* independent implementations, in a change
+whose thesis is "make the policy configurable rather than hardcoded".
+
+The split is **discovery vs. policy**, not cron vs. webhook.
+`src/cron/review-discovery.ts` is now a pure candidate finder — open PRs in
+managed repos that we did not author — and knows nothing about modes,
+drafts or settled checks. Its old draft filter and its per-candidate
+`getLatestBotReview` call are `PrState` fields (`isDraft`,
+`botReviewAtHead`), resolved once, checked once, for every route.
+
+The resolver returns three values, because "do not run" and "what should
+the check say" are different questions:
+
+| Decision | When | `last-light/review` (only when `review.postsCheck`) |
+|---|---|---|
+| `dispatch` | an explicit request, the `review.requestLabel`, `eager` on PR attention, or a settled suite under `after-checks` | `in_progress`, completed from the run's terminal transition |
+| `defer` | `on-request` with nobody asking; `after-checks` waiting for CI, or reached on PR attention rather than a settle | `queued` under `after-checks`, `neutral` under `on-request` — and only on a PR-attention event, since a placeholder is a statement about a head SHA and the 30-minute sweep would otherwise re-post one per tick |
+| `skip` | draft (`review.skipDraft`), already reviewed at this head, or another PR-scoped run in flight | **nothing.** A run that never dispatches must not create a check and immediately conclude it |
+
+Two consequences worth stating outright:
+
+- **An explicit `@bot review` always dispatches**, overriding mode, draft
+  *and* dedup. Today that carve-out is accidental — the comment path simply
+  never crossed these code paths — and as one branch of the resolver it
+  becomes a decision.
+- **Fix outranks review** on a settled-failing suite, and it needs no new
+  state. `normalize()` returns one envelope per delivery and `route()`
+  returns one handler, so a `check_suite.completed` fan-out into both
+  `pr.checks_failed` and a review trigger is not expressible; the connector
+  emits `pr.checks_settled` only for what the fix and merge routes did not
+  claim. The gap that leaves is the fix chain that ends **without pushing**
+  — attempts exhausted, `infra-dependent`, a `flaky` deferral,
+  `upstream-broken`, or a crash — where no new commit exists and no further
+  `check_suite` will ever fire. `check-prs-awaiting-review` is the release
+  mechanism for all five, which is the strongest single reason it still runs
+  with webhooks enabled.
+
+### The `last-light/review` check is a projection of run state
+
+The check used to be created in the dispatcher's webhook branch and
+completed inside a `.then()` chained onto the in-memory workflow promise,
+with `updateCheckRun` appearing nowhere else. Two defects followed. A
+cron-, comment-, Slack- or CLI-triggered review got **no check at all**.
+And the one that did got stranded `in_progress` on every server restart
+mid-review (i.e. every deploy), every queued-then-resumed run, every
+`expireStaleRuns` cancellation and every crash — invisible only because
+`check-prs-awaiting-review` re-reviewed within 30 minutes and posted a
+*superseding* check under the same name. That accidental repair is
+incompatible with the per-SHA review dedup: a check strands most often on a
+review that ran and posted, which is precisely the state the dedup skips.
+
+The fix is durability, not routing (`src/engine/review-check.ts`):
+
+1. The check is created at the **`dispatchWorkflow` choke point every route
+   crosses**, immediately after some gate said "run", so the check and the
+   run are created together or not at all.
+2. Its id — plus owner, repo and head SHA — is persisted on the run row
+   (`scratch.reviewCheck`) the moment the row exists.
+3. It is completed from the run's **terminal transition**, via a
+   `TerminalRunObserver` on the run store — the same place that writes
+   `succeeded` / `failed` / `cancelled`. `simple.ts`, `resume.ts`,
+   `expireQueued` and the admin cancel therefore all resolve it for free,
+   and a ninth terminal path cannot be added without one.
+
+The conclusion is read from the review we actually **posted** at that head
+SHA, not from the run's exit code: a `succeeded` run that legitimately
+skipped must not claim an approval it never gave. `neutral` is the honest
+answer whenever there is no verdict, and branch protection treats it as
+passing, so a review that failed to run never blocks a merge on its own.
+Boot-time reconciliation is deliberately not needed — terminal-transition
+completion plus the existing `MAX_RESTART_RESUMES` resume path covers
+restart.
+
+**The self-gating deadlock.** `getChecksConclusion` aggregates every check
+run on the head SHA, ours included, so a `last-light/review` sitting
+`queued` (waiting for CI under `after-checks`) or `in_progress` pins the
+aggregate at `pending` — the settle event never fires, the review never
+runs, and a repo that made the check *required* has an unmergeable PR
+forever. The identical loop reaches `pr.checks_passed` on a Dependabot PR.
+So the three settle queries take `{ excludeApp }` and every **trigger-side**
+caller passes `botName`: the PR snapshot, the webhook connector's settle
+gate, the router's dependency-comment enrichment, and both dependency
+sweeps. Commit statuses carry no app and we never post one, so nothing is
+excluded on that side, and excluding ours can never turn red into green.
 
 ### Escalation — the skips that are not silent
 

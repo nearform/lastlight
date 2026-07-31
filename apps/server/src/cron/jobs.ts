@@ -5,6 +5,50 @@ import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, operatorCrons } from "./repo-
 import type { CronsConfig } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
 
+/** What a `condition.unless` predicate is evaluated against. */
+export interface CronConditionContext {
+  webhooksEnabled: boolean;
+}
+
+/**
+ * `condition.unless: <name>` → the predicate that name means.
+ *
+ * `jobs.ts` used to compare the field against the literal string
+ * `"webhooksEnabled"`, so a cron YAML could express exactly one condition and
+ * any other value was silently ignored — a typo turned a conditional cron into
+ * an unconditional one with no error. 07-review-triggers.md §7.4b asked for this
+ * generalisation and Phase 8 briefly made it moot by deleting the only consumer;
+ * 09-state-machine.md → S5 keeps the crons, so it is live again.
+ *
+ * **An unknown name keeps the cron.** Registration is the safe direction: a
+ * globally-off cron still ticks (a repo may opt back in), whereas a silently
+ * dropped one produces no ticks, no rows and no error — the exact failure the
+ * literal comparison already had.
+ */
+const CRON_CONDITION_PREDICATES: Record<string, (ctx: CronConditionContext) => boolean> = {
+  webhooksEnabled: (ctx) => ctx.webhooksEnabled,
+};
+
+/** Names already warned about, so a bad `condition.unless` logs once per boot. */
+const warnedConditions = new Set<string>();
+
+/** Should this cron be REGISTERED, given its `condition.unless`? */
+function conditionAllows(unless: string | undefined, ctx: CronConditionContext): boolean {
+  if (!unless) return true;
+  const predicate = CRON_CONDITION_PREDICATES[unless];
+  if (!predicate) {
+    if (!warnedConditions.has(unless)) {
+      warnedConditions.add(unless);
+      console.warn(
+        `[cron] unknown condition.unless "${unless}" — registering the cron anyway ` +
+        `(known: ${Object.keys(CRON_CONDITION_PREDICATES).join(", ")})`,
+      );
+    }
+    return true;
+  }
+  return !predicate(ctx);
+}
+
 /**
  * Get cron jobs based on configuration.
  *
@@ -34,10 +78,9 @@ export function getJobs(opts?: {
 
   let cronDefs = getCronWorkflows();
 
-  // Apply conditions
-  if (opts?.webhooksEnabled) {
-    cronDefs = cronDefs.filter((def) => def.condition?.unless !== "webhooksEnabled");
-  }
+  // Apply conditions through the predicate map, not a literal string compare.
+  const conditionCtx: CronConditionContext = { webhooksEnabled: !!opts?.webhooksEnabled };
+  cronDefs = cronDefs.filter((def) => conditionAllows(def.condition?.unless, conditionCtx));
 
   const overrides = opts?.db?.getAllCronOverrides() ?? new Map();
   // Already includes the legacy `disabled.crons` names (unioned by the config

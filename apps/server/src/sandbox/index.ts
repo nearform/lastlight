@@ -4,7 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "path";
 import { DockerSandbox, type WorkspaceMount } from "./docker.js";
 import { SANDBOX_IMAGE, isSandboxAvailable } from "./images.js";
 import { githubBasicAuthB64, githubExtraheaderArgs } from "./git-http-auth.js";
-import { resetVerifyScript } from "../engine/executors/shared.js";
+import { resetPrNotesJournal, resetVerifyScript } from "../engine/executors/shared.js";
 
 export { DockerSandbox } from "./docker.js";
 export {
@@ -269,11 +269,14 @@ type PrePopulate = {
  *     the default branch — a re-triggered incomplete build starts again off
  *     current `main` (issue #153).
  *
- * Every path that starts a NEW run also calls `resetVerifyScript` on the
- * checkout: it deletes any `.lastlight-verify.sh` an earlier attempt left
- * behind and registers it in `.git/info/exclude`. The same-run preserve path
- * deliberately does not — the fix loop's later iterations keep the gate the
- * first one wrote. See `engine/executors/shared.ts` → the push gate.
+ * Every path that starts a NEW run also calls `resetVerifyScript` and
+ * `resetPrNotesJournal` on the checkout: each deletes the file an earlier
+ * attempt left behind (`.lastlight-verify.sh`, `.lastlight-notes`) and
+ * registers it in `.git/info/exclude`, so neither can ever be committed into
+ * the PR. The same-run preserve path deliberately does not — the fix loop's
+ * later iterations keep the gate the first one wrote, and the journal is
+ * drained per phase by the harvest rather than per run. See
+ * `engine/executors/shared.ts` → the push gate and the PR journal.
  */
 export { prePopulateWorkspace as __prePopulateWorkspaceForTest };
 
@@ -341,6 +344,7 @@ export function prePopulateWorkspace(
       // the other fix workflow) is still sitting there. Outside the refresh's
       // try/catch on purpose — a failed fetch skips its `git clean` entirely.
       resetVerifyScript(repoDir);
+      resetPrNotesJournal(repoDir);
       return;
     }
   }
@@ -366,6 +370,7 @@ export function prePopulateWorkspace(
     // Nothing to delete on a fresh clone; this registers the push gate in the
     // checkout's `.git/info/exclude` so it can never be committed into the PR.
     resetVerifyScript(repoDir);
+    resetPrNotesJournal(repoDir);
     const ms = Date.now() - start;
     console.log(
       `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${repoDir} ` +
@@ -429,6 +434,7 @@ function cloneDefaultAndCreateBranch(
     normalizeOrigin(repoDir, pre, scrub);
     writeMarker(markerPath, pre.runId);
     resetVerifyScript(repoDir);
+    resetPrNotesJournal(repoDir);
     const ms = Date.now() - start;
     console.log(
       `[sandbox] Pre-cloned ${pre.owner}/${pre.repo} (default branch) into ${repoDir} ` +

@@ -8,13 +8,20 @@ import { routeEvent, type Route, type RouterDeps } from "./router.js";
 import { runDashboardUrl } from "../notify/model.js";
 import {
   getRuntimeConfig,
+  getBotName,
   defaultFixConfig,
   defaultDependenciesConfig,
   defaultReviewConfig,
 } from "../config/config.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
 import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./pr-state.js";
-import { resolveDispatchDisposition, type PrPolicyConfig } from "./pr-decisions.js";
+import {
+  resolveDispatchDisposition,
+  reviewCheckPlacement,
+  type PrPolicyConfig,
+  type ReviewTriggerOptions,
+} from "./pr-decisions.js";
+import { postReviewCheckForSkip } from "./review-check.js";
 import { escalatePr } from "./pr-escalation.js";
 
 /**
@@ -48,7 +55,6 @@ export interface DispatchDeps {
   sessionManager: SessionManager;
   runChat: RunChatFn;
   route?: (envelope: EventEnvelope, deps: RouterDeps) => Promise<Route>;
-  reviewPostsCheck: boolean;
   publicUrl?: string;
 }
 
@@ -151,7 +157,16 @@ export async function dispatch(
   const explicitRequest =
     envelope.type === "message" ||
     envelope.type === "comment.created" ||
-    envelope.type === "pr_review_comment.created";
+    envelope.type === "pr_review_comment.created" ||
+    // A review requested BY NAME — the reviewer picker, or the Re-run button on
+    // our own `last-light/review` check. Both are a human pointing at us, so
+    // both override mode, draft and dedup exactly as `@bot review` does. The
+    // router has already dropped requests naming somebody else.
+    envelope.type === "pr.review_requested";
+  // Which route this dispatch arrived on, for `resolveReviewTrigger`. Only
+  // `checks-settled` satisfies `after-checks`; `attention` is what defers.
+  const reviewRoute: ReviewTriggerOptions["route"] =
+    envelope.type === "pr.checks_settled" ? "checks-settled" : "attention";
   const prState = await resolvePrStateForDispatch(handler, context, deps);
   if (prState) context._prState = prState;
 
@@ -210,11 +225,30 @@ export async function dispatch(
     const disposition = resolveDispatchDisposition(handler, prState, policy, {
       explicitRequest,
       dedupOnHeadSha: true,
+      route: reviewRoute,
     });
     console.log(
       `[event] ${handler} ${prState.repo}#${prState.prNumber}: ${disposition.decision} — ${disposition.reason}`,
     );
     if (disposition.decision === "skip") {
+      // A DEFERRED review ("not yet") leaves a placeholder check saying so, when
+      // `review.postsCheck` is on — the same call, from the same decision, as
+      // the cron/API route in `dispatchWorkflow`. A plain skip leaves nothing.
+      if (disposition.review) {
+        await postReviewCheckForSkip(
+          {
+            workflowName: handler,
+            placement: reviewCheckPlacement(disposition.review, policy.review),
+            postsCheck: policy.review.postsCheck,
+            route: reviewRoute,
+            owner: prState.repo.split("/")[0] ?? "",
+            repo: prState.repo.split("/")[1] ?? "",
+            headSha: prState.headSha,
+          },
+          { github: deps.github, botLogin: getRuntimeConfig()?.botLogin, botMention: `@${getBotName()}` },
+        );
+        return { kind: "skipped", reason: `${handler}: ${disposition.reason}` };
+      }
       // A fork PR is the one skip a human is owed an explanation for on the PR
       // itself: there is nothing wrong with their change, we simply have no
       // branch to push to. Keyed on the snapshot field, never on the reason
@@ -268,7 +302,7 @@ export async function dispatch(
   }
 
   // Webhook-triggered workflows (the remaining default path).
-  return handleWebhookDispatch(envelope, handler, routeKey, workflowContext, deps);
+  return handleWebhookDispatch(handler, workflowContext, deps);
 }
 
 /**
@@ -435,136 +469,29 @@ async function handleMessageDispatch(
 }
 
 /**
- * Webhook-triggered workflow dispatch. When `reviewPostsCheck` is on and this
- * is a PR-attention event routed to pr-review, posts an in-progress
- * `last-light/review` Check Run on the PR head SHA so branch protection can
- * gate the merge, then completes it from the workflow's terminal result.
+ * Webhook-triggered workflow dispatch.
+ *
+ * It used to own the `last-light/review` Check Run too — created here for the
+ * three PR-attention routes only, and completed inside a `.then()` chained onto
+ * the in-memory workflow promise. Both halves were wrong (09 → S2): a
+ * cron-, comment-, Slack- or CLI-triggered review never got a check at all, and
+ * the one that did got stranded `in_progress` on every deploy, every
+ * queued-then-resumed run, every cancellation and every crash. The lifecycle now
+ * lives in `./review-check.ts` — created once at the `dispatchWorkflow` choke
+ * point every route crosses, completed from the run's terminal transition — so
+ * this function is back to doing one thing.
  */
 async function handleWebhookDispatch(
-  envelope: EventEnvelope,
   handler: string,
-  routeKey: string | undefined,
   workflowContext: Record<string, unknown>,
   deps: DispatchDeps,
 ): Promise<DispatchOutcome> {
-  const { github } = deps;
-  const isPrReviewEvent =
-    envelope.type === "pr.opened" ||
-    envelope.type === "pr.synchronize" ||
-    envelope.type === "pr.reopened";
-  const wantReviewCheck =
-    deps.reviewPostsCheck &&
-    isPrReviewEvent &&
-    (routeKey === "github.pr_opened" ||
-      routeKey === "github.pr_synchronize" ||
-      routeKey === "github.pr_reopened" ||
-      handler === "pr-review") &&
-    !!github &&
-    !!envelope.repo &&
-    typeof envelope.prNumber === "number";
-
-  let prCheckRunId: number | undefined;
-  let prOwner = "";
-  let prRepoName = "";
-  let prNumberForCheck = 0;
-  if (wantReviewCheck && github) {
-    [prOwner, prRepoName] = envelope.repo!.split("/");
-    prNumberForCheck = envelope.prNumber as number;
-    try {
-      const prHeadSha = await github.getPullRequestHeadSha(prOwner, prRepoName, prNumberForCheck);
-      prCheckRunId = await github.createCheckRun(prOwner, prRepoName, prHeadSha, "last-light/review", {
-        output: {
-          title: "Review in progress",
-          summary:
-            "Last Light is reviewing this PR. The conclusion will land here when the review completes.",
-        },
-      });
-      console.log(
-        `[check] Posted in-progress check ${prCheckRunId} for ${prOwner}/${prRepoName}#${prNumberForCheck} on ${prHeadSha.slice(0, 7)}`,
-      );
-    } catch (err: unknown) {
+  deps
+    .dispatchWorkflow(handler, { ...workflowContext, _triggerType: "webhook" })
+    .catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[check] failed to create in-progress check: ${msg}`);
-    }
-  }
-
-  // As soon as the run row exists, point the in-progress check at its dashboard
-  // deep link so a reviewer can click the check's "Details" straight through to
-  // the live run. Best-effort + only when the check and a public URL both exist.
-  const onRunStart = async (runId: string) => {
-    if (prCheckRunId === undefined || !github) return;
-    const detailsUrl = runDashboardUrl(deps.publicUrl, runId, handler);
-    if (!detailsUrl) return;
-    try {
-      await github.updateCheckRun(prOwner, prRepoName, prCheckRunId, { detailsUrl });
-      console.log(`[check] linked check ${prCheckRunId} → ${detailsUrl}`);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[check] failed to set details_url on check ${prCheckRunId}: ${msg}`);
-    }
-  };
-  const workflowPromise = deps.dispatchWorkflow(
-    handler,
-    { ...workflowContext, _triggerType: "webhook" },
-    onRunStart,
-  );
-
-  if (prCheckRunId !== undefined && github) {
-    const checkId = prCheckRunId;
-    const owner = prOwner;
-    const repo = prRepoName;
-    const prNumber = prNumberForCheck;
-    workflowPromise
-      .then(async (result) => {
-        // Queued: the run hasn't started yet — leave the in-progress check as-is
-        // rather than completing it with a misleading conclusion. The admission
-        // path's resume will run the full workflow and the terminal review
-        // comment will eventually update the PR. (Documented limitation: the
-        // check stays in-progress until admission fires.)
-        if (result.queued) return;
-        try {
-          // Re-fetch head SHA in case the PR was rebased mid-review.
-          const headSha = await github.getPullRequestHeadSha(owner, repo, prNumber);
-          const review = await github.getLatestBotReview(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin);
-          const conclusion: "success" | "failure" | "neutral" = !result.success
-            ? "neutral"
-            : review?.state === "APPROVED"
-            ? "success"
-            : review?.state === "CHANGES_REQUESTED"
-            ? "failure"
-            : "neutral";
-          await github.updateCheckRun(owner, repo, checkId, {
-            status: "completed",
-            conclusion,
-            output: {
-              title: `Review ${conclusion === "success" ? "approved" : conclusion === "failure" ? "requested changes" : "completed"}`,
-              summary: review?.body?.slice(0, 65000) || "Review complete.",
-            },
-          });
-          console.log(`[check] Completed check ${checkId} → ${conclusion}`);
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[check] failed to complete check ${checkId}: ${msg}`);
-        }
-      })
-      .catch(async (err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        try {
-          await github.updateCheckRun(owner, repo, checkId, {
-            status: "completed",
-            conclusion: "neutral",
-            output: { title: "Review errored", summary: `Workflow threw: ${msg.slice(0, 1000)}` },
-          });
-        } catch {
-          /* ignore — best effort */
-        }
-      });
-  }
-
-  workflowPromise.catch((err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[event] Unhandled error in workflow ${handler}: ${msg}`);
-  });
+      console.error(`[event] Unhandled error in workflow ${handler}: ${msg}`);
+    });
 
   return { kind: "dispatched", workflow: handler };
 }

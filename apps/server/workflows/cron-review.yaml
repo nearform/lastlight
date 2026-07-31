@@ -14,8 +14,17 @@ context:
   # — so it could never actually post a review. One PR per run fixes all three
   # (real prNumber, fresh per-repo scoped token, pre-cloned head).
   discover: prs-awaiting-review
-condition:
-  # Real-time review comes from the pr.opened webhook; this sweep is the fallback
-  # for deployments without webhooks configured (and a backstop for missed
-  # deliveries). Filtered out when webhooks are enabled.
-  unless: webhooksEnabled
+# NO `condition:` — this sweep runs WITH webhooks enabled (09-state-machine.md
+# → S2/S5). It used to be `unless: webhooksEnabled`, on the reasoning that the
+# `pr.opened` webhook covers the real-time case. Three things turned out to
+# depend on it running anyway:
+#
+#   1. It is the RELEASE MECHANISM for every PR whose fix chain ended without
+#      pushing — attempts exhausted, `infra-dependent`, a `flaky` deferral,
+#      `upstream-broken`, or a crash. No new commit exists, so no further
+#      `check_suite` will ever fire, and `review.trigger: after-checks` would
+#      otherwise never review exactly the PRs a human most wants reviewed.
+#   2. It is the RE-PICKUP that makes the PR-scoped run lock's drop-on-conflict
+#      safe: the loser of the lock is dropped with a reason, not queued.
+#   3. It supersedes any `queued` `last-light/review` placeholder left by a
+#      deferred review whose settle event was never delivered.

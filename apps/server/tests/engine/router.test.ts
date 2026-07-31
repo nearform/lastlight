@@ -154,6 +154,75 @@ describe('routeEvent — PR events', () => {
   });
 });
 
+describe('routeEvent — the Phase 7 review signals', () => {
+  it('routes pr.checks_settled to pr-review — the after-checks trigger', async () => {
+    // Deliberately NOT config-aware: the router's job is
+    // `event → { workflow, context }`, and a deferred review is still routed to
+    // pr-review, it just runs later. The mode is enforced once, at the gate.
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.checks_settled', prNumber: 5, headSha: 'sha-1' }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-review');
+      expect(result.context._routeKey).toBe('github.pr_checks_settled');
+      expect(result.context.headSha).toBe('sha-1');
+    }
+    expect(mockClassifyComment).not.toHaveBeenCalled();
+  });
+
+  it('routes the configured request label to pr-review', async () => {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      review: { postsCheck: false, trigger: 'on-request', requestLabel: 'lastlight:review', skipDraft: true },
+    } as unknown as LastLightConfig);
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'lastlight:review' }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.handler).toBe('pr-review');
+  });
+
+  it('IGNORES every other label — routine labelling must not cost a PrState resolve', async () => {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      review: { postsCheck: false, trigger: 'on-request', requestLabel: 'lastlight:review', skipDraft: true },
+    } as unknown as LastLightConfig);
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'bug' }),
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it('ignores a label event when no requestLabel is configured at all', async () => {
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'lastlight:review' }),
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it('routes a review requested from US to pr-review', async () => {
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.review_requested', prNumber: 5, requestedReviewer: 'last-light[bot]' }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-review');
+      expect(result.context._routeKey).toBe('github.pr_review_requested');
+    }
+  });
+
+  it('ignores a review requested from somebody else', async () => {
+    // 07 §7.1's caveat: App bot users are not selectable in the reviewer
+    // picker, so `on-request` must not DEPEND on this route — but answering
+    // another human's review request would be worse than not handling it.
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.review_requested', prNumber: 5, requestedReviewer: 'alice' }),
+    );
+    expect(result.action).toBe('ignore');
+  });
+});
+
 describe('routeEvent — pr.checks_failed', () => {
   it('routes a dependency PR to dependabot-ci-fix without a classifier call', async () => {
     mockGetWorkflowByIntent.mockReturnValue({ name: 'dependabot-ci-fix' } as any);
@@ -393,7 +462,11 @@ describe('routeEvent — comment.created', () => {
         '@last-light can you look at this?',
         expect.objectContaining({ prAuthor: 'dependabot[bot]', checksState: 'failing' }),
       );
-      expect(getChecksConclusion).toHaveBeenCalledWith('cliftonc', 'drizzle-cube', 'headsha');
+      expect(getChecksConclusion).toHaveBeenCalledWith('cliftonc', 'drizzle-cube', 'headsha', {
+        // Our own in-progress `last-light/review` check must not make the PR
+        // read `pending` and route the comment to neither branch (07 §7.2).
+        excludeApp: 'last-light',
+      });
       expect(result.action).toBe('handler');
       if (result.action === 'handler') {
         expect(result.handler).toBe('dependabot-ci-fix');

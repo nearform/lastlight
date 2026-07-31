@@ -221,6 +221,14 @@ routes:
     pr_opened: pr-review
     pr_synchronize: pr-review
     pr_reopened: pr-review
+    # `review.trigger: after-checks` — the head SHA's checks have settled on a
+    # PR that neither the fix nor the merge route claimed.
+    pr_checks_settled: pr-review
+    # `review.requestLabel` was applied (the `on-request` mechanism).
+    pr_labeled: pr-review
+    # A review was requested from the bot by name, or the `last-light/review`
+    # check's Re-run button was pressed.
+    pr_review_requested: pr-review
     approval_response: approval-response
     security_review: security-review
     verify: verify

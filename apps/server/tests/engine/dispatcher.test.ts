@@ -1,5 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { EventEnvelope } from '#src/connectors/types.js';
+import { setRuntimeConfig, resetRuntimeConfigForTests } from '#src/config/config.js';
+import {
+  defaultFixConfig,
+  defaultDependenciesConfig,
+  defaultReviewConfig,
+} from 'lastlight-shared/config-types';
 import type { Route } from '#src/engine/router.js';
 import { dispatch, type DispatchDeps } from '#src/engine/dispatcher.js';
 
@@ -147,7 +153,6 @@ function makeDeps(route: Route, overrides: Partial<DispatchDeps> = {}): Dispatch
     sessionManager: {} as any,
     runChat: vi.fn(),
     route: vi.fn().mockResolvedValue(route),
-    reviewPostsCheck: false,
     ...overrides,
   };
 }
@@ -791,94 +796,190 @@ describe('dispatch — generic messaging dispatch', () => {
   });
 });
 
-describe('dispatch — webhook dispatch', () => {
-  it('dispatches the workflow with a webhook trigger and no review check by default', async () => {
-    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
+describe('dispatch — the pr-review trigger gate (Phase 7)', () => {
+  // `review.trigger` used to be enforceable in four places, only one of which
+  // was config-aware. It is now ONE pure function over the PR snapshot, called
+  // from the single dispatch choke point — so these cases are the webhook
+  // route's half of a contract the cron and comment routes share by
+  // construction (09 → S2).
+  afterEach(() => resetRuntimeConfigForTests());
+
+  function withReview(over: Partial<ReturnType<typeof defaultReviewConfig>> = {}) {
+    setRuntimeConfig({
+      botName: 'last-light',
+      botLogin: 'last-light[bot]',
+      fix: defaultFixConfig(),
+      dependencies: defaultDependenciesConfig(),
+      review: { ...defaultReviewConfig(), ...over },
+    } as any);
+  }
+
+  function reviewDeps(github: any, dispatchWorkflow: any, envType = 'pr.opened') {
+    return {
+      envelope: makeEnvelope({ type: envType as any, repo: 'cliftonc/lastlight', prNumber: 8 }),
+      deps: makeDeps(
+        {
+          action: 'handler',
+          handler: 'pr-review',
+          context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 },
+        },
+        { db: mockDb() as any, github, dispatchWorkflow },
+      ),
+    };
+  }
+
+  it('eager reviews on PR attention, in parallel with CI', async () => {
+    withReview({ trigger: 'eager' });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
-    const github = { createCheckRun: vi.fn() };
-    const deps = makeDeps(
-      { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: false },
+    const github = prGithubStub({ checksState: 'pending' });
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
+
+    expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
+    expect(dispatchWorkflow).toHaveBeenCalledWith(
+      'pr-review',
+      expect.objectContaining({ _triggerType: 'webhook' }),
     );
+    // The dispatcher no longer owns the check at all — creation moved to the
+    // one choke point every route crosses (09 → S2).
+    expect(github.createCheckRun).toBeUndefined();
+  });
+
+  it('after-checks defers on PR attention and posts a `queued` check', async () => {
+    withReview({ trigger: 'after-checks', postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub(
+      { checksState: 'pending' },
+      { createCheckRun: vi.fn().mockResolvedValue(4242) },
+    );
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
 
     const outcome = await dispatch(envelope, deps);
+    expect(outcome.kind).toBe('skipped');
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.createCheckRun).toHaveBeenCalledWith(
+      'cliftonc',
+      'lastlight',
+      'sha-current',
+      'last-light/review',
+      expect.objectContaining({ status: 'queued' }),
+    );
+  });
 
-    expect(outcome).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
-    expect(dispatchWorkflow).toHaveBeenCalledWith('pr-review', expect.objectContaining({ _triggerType: 'webhook' }), expect.any(Function));
+  it('on-request skips and posts a `neutral` check whose Re-run is the affordance', async () => {
+    withReview({ trigger: 'on-request', postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub({}, { createCheckRun: vi.fn().mockResolvedValue(4242) });
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
+
+    expect((await dispatch(envelope, deps)).kind).toBe('skipped');
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.createCheckRun).toHaveBeenCalledWith(
+      'cliftonc',
+      'lastlight',
+      'sha-current',
+      'last-light/review',
+      expect.objectContaining({ status: 'completed', conclusion: 'neutral' }),
+    );
+  });
+
+  it('a settled check suite is what after-checks actually fires on', async () => {
+    withReview({ trigger: 'after-checks' });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub({ checksState: 'failing' });
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow, 'pr.checks_settled');
+
+    expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
+  });
+
+  it('skips a DRAFT PR on the webhook path — which had no draft check at all before', async () => {
+    withReview({ trigger: 'eager', skipDraft: true, postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub(
+      { draft: true, checksState: 'passing' },
+      { createCheckRun: vi.fn() },
+    );
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
+
+    const outcome = await dispatch(envelope, deps);
+    expect(outcome).toEqual({
+      kind: 'skipped',
+      reason: 'pr-review: draft: review.skipDraft is on',
+    });
+    // A run that never dispatches creates NO check, rather than creating one and
+    // immediately concluding it (09 → S2).
     expect(github.createCheckRun).not.toHaveBeenCalled();
   });
 
-  it('posts an in-progress review check when reviewPostsCheck is enabled', async () => {
-    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
-    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
-    const github = {
-      getPullRequestHeadSha: vi.fn().mockResolvedValue('headsha'),
-      createCheckRun: vi.fn().mockResolvedValue(4242),
-      updateCheckRun: vi.fn().mockResolvedValue(undefined),
-      getLatestBotReview: vi.fn().mockResolvedValue({ state: 'APPROVED', body: 'lgtm' }),
-    };
-    const deps = makeDeps(
-      { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: true },
+  it('skips a head we already reviewed — one API call, not a sandbox run', async () => {
+    withReview({ trigger: 'eager', postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub(
+      { botReview: { state: 'APPROVED' } },
+      { createCheckRun: vi.fn() },
     );
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
 
     const outcome = await dispatch(envelope, deps);
-
-    expect(outcome).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
-    expect(github.createCheckRun).toHaveBeenCalledWith(
-      'cliftonc', 'lastlight', 'headsha', 'last-light/review', expect.anything(),
-    );
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as { reason: string }).reason).toMatch(/already-reviewed/);
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.createCheckRun).not.toHaveBeenCalled();
   });
 
-  it('links the review check to the run dashboard URL once the run starts', async () => {
-    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
-    // dispatchWorkflow fires onRunStart with the new run id, like the real runner.
-    const dispatchWorkflow = vi.fn().mockImplementation(async (_wf, _ctx, onRunStart?: (id: string) => Promise<void>) => {
-      if (onRunStart) await onRunStart('run-abc123');
-      return { success: true };
+  it('an explicit @bot review always dispatches — overriding mode, draft AND dedup', async () => {
+    withReview({ trigger: 'on-request', skipDraft: true });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub({ draft: true, botReview: { state: 'APPROVED' } });
+    const envelope = makeEnvelope({
+      type: 'comment.created',
+      repo: 'cliftonc/lastlight',
+      prNumber: 8,
+      body: '@last-light review',
     });
-    const github = {
-      getPullRequestHeadSha: vi.fn().mockResolvedValue('headsha'),
-      createCheckRun: vi.fn().mockResolvedValue(4242),
-      updateCheckRun: vi.fn().mockResolvedValue(undefined),
-      getLatestBotReview: vi.fn().mockResolvedValue({ state: 'APPROVED', body: 'lgtm' }),
-    };
     const deps = makeDeps(
-      { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: true, publicUrl: 'https://dash.example' },
+      {
+        action: 'handler',
+        handler: 'pr-review',
+        context: { _routeKey: 'github.pr_review', repo: 'cliftonc/lastlight', prNumber: 8 },
+      },
+      { db: mockDb() as any, github, dispatchWorkflow },
     );
 
-    await dispatch(envelope, deps);
-
-    expect(github.updateCheckRun).toHaveBeenCalledWith(
-      'cliftonc', 'lastlight', 4242,
-      expect.objectContaining({ detailsUrl: 'https://dash.example/admin/?run=run-abc123&tab=runs&wf=pr-review' }),
-    );
+    expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
   });
 
-  it('skips the details link when no public URL is configured', async () => {
-    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
-    const dispatchWorkflow = vi.fn().mockImplementation(async (_wf, _ctx, onRunStart?: (id: string) => Promise<void>) => {
-      if (onRunStart) await onRunStart('run-abc123');
-      return { success: true };
+  it('a review requested from us by name is an explicit request too', async () => {
+    withReview({ trigger: 'on-request' });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub();
+    const envelope = makeEnvelope({
+      type: 'pr.review_requested',
+      repo: 'cliftonc/lastlight',
+      prNumber: 8,
+      requestedReviewer: 'last-light[bot]',
     });
-    const github = {
-      getPullRequestHeadSha: vi.fn().mockResolvedValue('headsha'),
-      createCheckRun: vi.fn().mockResolvedValue(4242),
-      updateCheckRun: vi.fn().mockResolvedValue(undefined),
-      getLatestBotReview: vi.fn().mockResolvedValue({ state: 'APPROVED', body: 'lgtm' }),
-    };
     const deps = makeDeps(
-      { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: true }, // no publicUrl
+      {
+        action: 'handler',
+        handler: 'pr-review',
+        context: { _routeKey: 'github.pr_review_requested', repo: 'cliftonc/lastlight', prNumber: 8 },
+      },
+      { db: mockDb() as any, github, dispatchWorkflow },
     );
 
-    await dispatch(envelope, deps);
+    expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
+  });
 
-    // No updateCheckRun call carries a detailsUrl (completion call omits it too).
-    for (const call of github.updateCheckRun.mock.calls) {
-      expect(call[3]).not.toHaveProperty('detailsUrl');
-    }
+  it('does not post a placeholder on the 30-minute sweep route — that would be one check per tick', async () => {
+    withReview({ trigger: 'on-request', postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub({}, { createCheckRun: vi.fn() });
+    // A sweep dispatch never crosses `dispatch()`; the closest webhook analogue
+    // is a settle event, which is also not PR attention.
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow, 'pr.checks_settled');
+
+    expect((await dispatch(envelope, deps)).kind).toBe('skipped');
+    expect(github.createCheckRun).not.toHaveBeenCalled();
   });
 });
 

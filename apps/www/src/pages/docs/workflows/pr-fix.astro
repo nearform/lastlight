@@ -193,6 +193,48 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		reset — the world moved, so it is a fresh problem.
 	</p>
 
+	<h3>Notes the agent leaves for itself</h3>
+
+	<p>
+		The marker line has fixed fields. Anything the agent works out that
+		doesn't fit them would be lost — so it can also write a short
+		<strong>note</strong> to the pull request's journal, one line at a time:
+	</p>
+
+	<pre><code set:text={'ruled-out: regenerating the lockfile changes nothing — the failure is in the source\nconstraint: the e2e job needs a postgres service; it can never run in this sandbox'}/></pre>
+
+	<p>
+		Four kinds — <code>finding</code>, <code>constraint</code>,
+		<code>ruled-out</code>, <code>todo</code>. <code>ruled-out</code> is the
+		one that earns its keep: it records a negative result the agent actually
+		checked, which is exactly what stops the next attempt spending itself
+		repeating it. The journal is keyed on the <em>pull request</em>, not on
+		the workflow, so a review of the PR reads what the fix runs learned.
+	</p>
+
+	<p>
+		The <strong>cap is the feature</strong>: twenty notes per PR (oldest
+		dropped), 240 characters each, 4 KiB rendered. Anything replayed into
+		every later prompt has to be small, or attempt 3 pays for attempt 1's
+		verbosity. Notes carry their provenance — which run, which phase, which
+		day — and once someone else pushes they are marked <strong>stale</strong>
+		rather than deleted: a claim about the old commit isn't evidence about
+		the new one, but it's still worth seeing.
+	</p>
+
+	<div class="docs-callout note">
+		<div class="docs-callout-body">
+			<strong>Notes are hints, never instructions.</strong> A fix agent reads
+			PR content written by whoever opened it, so anything it remembers could
+			carry that content into a later run's prompt. The journal is therefore
+			fenced and stripped: each note is one line and cannot forge the fence
+			it renders inside, a note containing a token the harness parses is
+			discarded outright, and nothing in the fix loop can be reached because
+			a note said so — no note substitutes for the local gate, and no note
+			can cause a push.
+		</div>
+	</div>
+
 	<h2>When it gives up, it says so</h2>
 
 	<p>

@@ -391,12 +391,26 @@ dependencies:
 		the CI result instead of guessing at it, and a push storm collapses to one
 		review per settled SHA. There is deliberately no settled-<em>and-passing</em>
 		mode: a PR whose CI never goes green would then never be reviewed, which is
-		exactly the PR most worth a look. One caveat while this lands:
-		<code>trigger</code>, <code>requestLabel</code> and <code>skipDraft</code>
-		are <strong>not enforced yet</strong> — reviews still fire when a PR opens
-		or is pushed to. Turning the packaged <code>after-checks</code> on before
-		the rest of the machinery is wired would silently stop every human PR being
-		reviewed on push. <code>postsCheck</code> is live today.
+		exactly the PR most worth a look.
+	</p>
+
+	<p>
+		<code>on-request</code> means the review runs only when somebody asks. Three
+		ways to ask: apply the <code>requestLabel</code>, comment
+		<code>@last-light review</code>, or — with <code>postsCheck</code> on —
+		press <strong>Re-run</strong> on the <code>last-light/review</code> check,
+		which is posted as a <code>neutral</code> conclusion so it never blocks a
+		merge. (GitHub's reviewer picker doesn't offer App bot users, so
+		"request a review from the bot" is handled opportunistically but is not
+		the mechanism to rely on.) Under <code>after-checks</code> with
+		<code>postsCheck</code> on, the check is posted <code>queued</code> while CI
+		runs, so branch protection can require it without racing.
+	</p>
+
+	<p>
+		<code>skipDraft</code> matches what the review sweep has always done. A
+		draft PR is skipped on the webhook path too, and marking it
+		<strong>Ready for review</strong> is the event that un-defers it.
 	</p>
 
 	<p>

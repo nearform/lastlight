@@ -753,3 +753,74 @@ describe("migrate() owner backfill", () => {
     raw.close();
   });
 });
+
+/**
+ * The terminal-transition observer (09 → S2). It exists so the
+ * `last-light/review` check can be a projection of run state rather than of an
+ * in-memory promise — hung on the STORE rather than on the eight `finishRun`
+ * call sites, which is what makes `simple.ts`, `resume.ts`, the queued-run TTL
+ * expiry and the admin cancel all resolve an open check for free, and what
+ * stops a ninth call site being added without one.
+ */
+describe("terminal run observer", () => {
+  function observed() {
+    const seen: Array<[string, string]> = [];
+    db.runs.setTerminalObserver((run, status) => seen.push([run.id, status]));
+    return seen;
+  }
+
+  it("fires on every finishRun status", () => {
+    const seen = observed();
+    for (const status of ["succeeded", "failed", "cancelled"] as const) {
+      const id = makeRun();
+      db.runs.finishRun(id, status);
+      expect(seen.at(-1)).toEqual([id, status]);
+    }
+  });
+
+  it("fires AFTER the row is written, so the observer reads terminal state", () => {
+    let statusAtNotify: string | undefined;
+    const id = makeRun();
+    db.runs.setTerminalObserver((run) => { statusAtNotify = run.status; });
+    db.runs.finishRun(id, "succeeded");
+    expect(statusAtNotify).toBe("succeeded");
+  });
+
+  it("fires for a queued run dropped by the TTL sweep — the case that used to strand a check", () => {
+    const seen = observed();
+    const id = makeRun({ status: "queued" });
+    expect(db.runs.expireQueued(id, "dropped from queue after waiting too long")).toBe(1);
+    expect(seen).toEqual([[id, "cancelled"]]);
+  });
+
+  it("does NOT fire when the expiry CAS loses the race", () => {
+    const id = makeRun({ status: "running" });
+    const seen = observed();
+    expect(db.runs.expireQueued(id, "too long")).toBe(0);
+    expect(seen).toEqual([]);
+  });
+
+  it("fires for the admin cancel", () => {
+    const seen = observed();
+    const id = makeRun();
+    db.runs.cancelRun(id);
+    expect(seen).toEqual([[id, "cancelled"]]);
+  });
+
+  it("a throwing observer never fails the transition it observes", () => {
+    const id = makeRun();
+    db.runs.setTerminalObserver(() => { throw new Error("boom"); });
+    expect(() => db.runs.finishRun(id, "succeeded")).not.toThrow();
+    expect(db.runs.getRun(id)?.status).toBe("succeeded");
+  });
+
+  it("still commits the terminal marker transaction before notifying", () => {
+    const seen = observed();
+    const id = makeRun();
+    db.runs.finishRun(id, "succeeded", {
+      terminalMarker: { phase: "complete", summary: "done" },
+    });
+    expect(seen).toEqual([[id, "succeeded"]]);
+    expect(db.runs.getRun(id)?.phaseHistory.at(-1)?.phase).toBe("complete");
+  });
+});

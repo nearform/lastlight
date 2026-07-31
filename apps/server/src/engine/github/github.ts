@@ -113,6 +113,30 @@ export interface CiFailureReport {
   logsAvailable: boolean;
 }
 
+/** Options shared by the three settle-aware check queries. */
+export interface ChecksQueryOptions {
+  /**
+   * Drop check runs produced by this GitHub App slug — in practice always our
+   * own `botName`.
+   *
+   * **This is the self-gating deadlock fix** (07-review-triggers.md §7.2). The
+   * aggregate is computed over *every* check run on the head SHA, ours
+   * included, so a `last-light/review` check sitting `queued` (waiting for CI,
+   * under `review.trigger: after-checks`) or `in_progress` (a review actually
+   * running) makes the aggregate permanently `pending`. The settle event then
+   * never fires, the review never runs, the check never concludes — and if the
+   * repo made it a *required* check, the PR is unmergeable forever. The same
+   * loop reaches `pr.checks_passed` on a Dependabot PR whose review check is
+   * still open, so the rule is uniform: **exclude our own checks from every
+   * TRIGGER-side settle computation**, and let GitHub's required-check gate do
+   * the real merge gating.
+   *
+   * It is deliberately opt-in rather than always-on: a caller reporting check
+   * state to a *human* (or to the merge prompt) should show what GitHub shows.
+   */
+  excludeApp?: string;
+}
+
 /** octokit surfaces HTTP failures as errors carrying the numeric `status`. */
 function httpStatus(err: unknown): number | undefined {
   const status = (err as { status?: unknown })?.status;
@@ -553,21 +577,37 @@ export class GitHubClient {
    * `name` in their list will gate merges on the eventual conclusion.
    *
    * Requires the GitHub App to have `Checks: Read and write` permission.
+   *
+   * `status` defaults to `in_progress` (the historical behaviour). The other
+   * two exist for the review PLACEHOLDERS: `queued` says "waiting for CI"
+   * under `review.trigger: after-checks`, and `completed` + `conclusion:
+   * neutral` says "available on request" under `on-request` — see
+   * `reviewCheckPlacement` in ../pr-decisions.ts.
    */
   async createCheckRun(
     owner: string,
     repo: string,
     headSha: string,
     name: string,
-    options: { detailsUrl?: string; output?: { title: string; summary: string } } = {},
+    options: {
+      status?: "queued" | "in_progress" | "completed";
+      conclusion?: "success" | "failure" | "neutral" | "cancelled" | "timed_out" | "action_required" | "skipped";
+      detailsUrl?: string;
+      output?: { title: string; summary: string };
+    } = {},
   ): Promise<number> {
+    const status = options.status ?? "in_progress";
     const { data } = await this.octokit.rest.checks.create({
       owner,
       repo,
       name,
       head_sha: headSha,
-      status: "in_progress",
-      started_at: new Date().toISOString(),
+      status,
+      // `queued` has not started, so it must not claim a start time.
+      ...(status === "queued" ? {} : { started_at: new Date().toISOString() }),
+      ...(status === "completed"
+        ? { conclusion: options.conclusion ?? "neutral", completed_at: new Date().toISOString() }
+        : {}),
       ...(options.detailsUrl ? { details_url: options.detailsUrl } : {}),
       ...(options.output ? { output: options.output } : {}),
     });
@@ -713,8 +753,9 @@ export class GitHubClient {
     owner: string,
     repo: string,
     ref: string,
+    opts: ChecksQueryOptions = {},
   ): Promise<"passing" | "failing" | "pending" | "none"> {
-    return (await this.getChecksSummary(owner, repo, ref)).state;
+    return (await this.getChecksSummary(owner, repo, ref, opts)).state;
   }
 
   /**
@@ -738,6 +779,7 @@ export class GitHubClient {
     owner: string,
     repo: string,
     ref: string,
+    opts: ChecksQueryOptions = {},
   ): Promise<{
     state: "passing" | "failing" | "pending" | "none";
     settledCount: number;
@@ -747,7 +789,13 @@ export class GitHubClient {
       this.octokit.rest.checks.listForRef({ owner, repo, ref, filter: "latest" }),
       this.octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
     ]);
-    const runs = checks.check_runs;
+    // Drop OUR OWN check runs when the caller is deciding whether to TRIGGER
+    // work — see {@link ChecksQueryOptions.excludeApp}. Only check runs carry an
+    // `app`; commit statuses do not, and we never post one, so there is nothing
+    // to exclude on that side.
+    const runs = opts.excludeApp
+      ? checks.check_runs.filter((r) => r.app?.slug !== opts.excludeApp)
+      : checks.check_runs;
     const statuses = status.statuses ?? [];
 
     const runPendingCount = runs.filter(
@@ -806,8 +854,9 @@ export class GitHubClient {
     owner: string,
     repo: string,
     baseRef: string,
+    opts: ChecksQueryOptions = {},
   ): Promise<"passing" | "failing" | "pending" | "none"> {
-    return this.getChecksConclusion(owner, repo, baseRef);
+    return this.getChecksConclusion(owner, repo, baseRef, opts);
   }
 
   /**

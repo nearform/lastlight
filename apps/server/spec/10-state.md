@@ -166,6 +166,23 @@ ran and the agent emitted nothing" from a row written before the harvest
 existed; the latter falls back to the `diagnose` ledger row, which cannot exist
 without the marker having been emitted.
 
+**The journal rides the same hook.** The markers are the only thing an agent
+can leave behind *in its output*; the **PR journal** is the only thing it can
+leave behind by choosing to. It travels the workspace instead: the agent
+appends one line per note to `.lastlight-notes` in the checkout, and the same
+`onPhaseEnd` harvest drains the file — reading it and deleting it, so it is a
+per-phase outbox rather than an accumulator — into `scratch.fixMarkers.notes`,
+where the next dispatch folds it onto `PrState.notes`. One hook and one scratch
+namespace on purpose: a second hook is a second thing to wire at three call
+sites and a second thing to forget at the fourth. Unlike the markers the
+journal is open to *every* PR-scoped workflow, gated on the run carrying a
+`context.prState` (which is precisely what makes a run PR-scoped), so
+`pr-review` reads what `dependabot-ci-fix` learned. The file lives at the root
+of the **checkout** on every backend and is registered in that checkout's
+`.git/info/exclude`, so it is never committed into the target repo — see
+[Sandbox](/spec/09-sandbox). Bounds, kinds, staleness and the trust rules are
+in the [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
+
 **The escalation row.** Almost every row here is created by
 `runSimpleWorkflow` and describes a run that executed. One is not: when the
 [dispatch gate](/spec/05-router#escalation--the-skips-that-are-not-silent)

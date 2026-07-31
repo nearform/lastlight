@@ -110,6 +110,7 @@ export interface PrDiscoveryClient {
     owner: string,
     repo: string,
     ref: string,
+    opts?: { excludeApp?: string },
   ): Promise<"passing" | "failing" | "pending" | "none">;
 }
 
@@ -189,6 +190,16 @@ export interface DiscoverOptions {
    * green candidate, which is why it is config-gated rather than unconditional.
    */
   requireSettledChecks?: boolean;
+  /**
+   * Our own App slug (`botName`), excluded from every check aggregate here.
+   *
+   * Both sweeps are TRIGGER-side settle computations, so the uniform rule of
+   * 07 §7.2 applies: a `last-light/review` check that is queued or in progress
+   * on the head SHA would otherwise report the suite `pending` and strand the
+   * PR on both sweeps — the green one because `pending` is not `passing`, the
+   * red one because it is not `failing` either.
+   */
+  botName?: string;
 }
 
 const DEFAULT_MAX_PER_REPO = 25;
@@ -341,7 +352,9 @@ export async function discoverGreenDependencyPrs(
       if (opts.requireSettledChecks) {
         let conclusion: Awaited<ReturnType<PrDiscoveryClient["getChecksConclusion"]>>;
         try {
-          conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef);
+          conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef, {
+          excludeApp: opts.botName,
+        });
         } catch (err) {
           // Fail CLOSED here, uniquely: every other read in this module fails
           // open because a dropped candidate costs one tick, whereas a
@@ -390,7 +403,9 @@ export async function discoverRedDependencyPrs(
       try {
         // Query the exact commit we listed (headSha) so a mid-sweep push can't
         // make us read a newer commit's checks; fall back to the ref if absent.
-        conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef);
+        conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef, {
+          excludeApp: opts.botName,
+        });
         // A settled-failing build is reason enough (and makes the mergeable
         // signal moot), so skip the potentially-slow `unknown` re-poll for it;
         // otherwise warm the read so a cold `unknown` that's really behind/dirty/

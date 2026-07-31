@@ -33,6 +33,7 @@ import {
   renderAttemptLine,
   type DiagnosisClass,
 } from "./fix-markers.js";
+import { boundNotes, coerceNotes, markNotesStale, type PrNote } from "./pr-notes.js";
 
 /** Aggregate check state for a ref, as {@link GitHubClient.getChecksConclusion} reports it. */
 export type ChecksState = "passing" | "failing" | "pending" | "none";
@@ -168,6 +169,27 @@ export interface PrState {
   /** One marker line per prior attempt, oldest first — rendered as `{{priorAttempts}}`. */
   priorAttempts: string[];
   /**
+   * The PR's journal — short, bounded notes agents left for later runs
+   * (10-pr-memory.md, `./pr-notes.ts`).
+   *
+   * A FIELD of the snapshot, never a store beside it. That is the whole point:
+   * 09's thesis is that state scattered across stores and free to disagree is
+   * the defect, and a free-form scratchpad alongside `PrState` would recreate
+   * it. As a field it is resolved once, persisted with the rest of the snapshot,
+   * and rendered wherever the snapshot is.
+   *
+   * Keyed on the PR like everything else here, so `pr-review` reads what
+   * `dependabot-ci-fix` learned.
+   *
+   * **Hints, never instructions.** Nothing in this array may authorise anything.
+   * No decision function reads it — `renderContext` projects it to a single
+   * FENCED STRING for the prompts and that is its only consumer, so a note can
+   * inform an agent and can never make a code path reachable. See
+   * `./pr-notes.ts` → the fence, and the rejection of any note carrying a token
+   * the marker parser reads.
+   */
+  notes: PrNote[];
+  /**
    * The class the IMMEDIATELY PRECEDING run diagnosed, or null.
    *
    * The only prior-run verdict any dispatch decision is allowed to read, and it
@@ -245,6 +267,24 @@ export interface PrStateDeps {
   db: StateDb;
   /** `<botName>[bot]` — the git author name our own commits carry. */
   botLogin: string;
+  /**
+   * The App SLUG (`botName`, no `[bot]` suffix) — the `app.slug` GitHub stamps
+   * on the check runs WE post.
+   *
+   * Every check read below is a TRIGGER-side settle computation, so our own
+   * `last-light/review` check must be excluded from it or a queued/in-progress
+   * review deadlocks the aggregate at `pending` forever (see
+   * {@link ChecksQueryOptions.excludeApp}). Optional, and derived from
+   * {@link botLogin} when absent, so a caller that only knows the login (every
+   * existing test) still gets the exclusion.
+   */
+  botName?: string;
+}
+
+/** The App slug behind a `<slug>[bot]` login. */
+function appSlug(deps: PrStateDeps): string | undefined {
+  const slug = deps.botName || deps.botLogin.replace(/\[bot\]$/, "");
+  return slug || undefined;
 }
 
 /**
@@ -300,6 +340,7 @@ export async function resolvePrState(
     escalatedAtSha: null,
     escalatedBy: null,
     priorAttempts: [],
+    notes: [],
     priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
     assessedHeadShaByWorkflow: {},
@@ -334,15 +375,21 @@ export async function resolvePrState(
     // that read failed there is nothing to point them at, and issuing them
     // against an empty ref would 404 four more times for no information.
     if (state.headSha) {
+      // Both check reads gate DISPATCH, so neither may see our own review
+      // check: a `last-light/review` sitting queued/in-progress would pin the
+      // aggregate at `pending`, and `pending` is a skip in `mayMerge`,
+      // `resolveMergeDisposition` and `resolveReviewTrigger` alike — the review
+      // would be waiting on itself (07 §7.2).
+      const checkOpts = { excludeApp: appSlug(deps) };
       const [summary, baseState, review, author] = await Promise.all([
         github
-          .getChecksSummary(owner, repo, state.headSha)
+          .getChecksSummary(owner, repo, state.headSha, checkOpts)
           .catch((err: unknown) => {
             note("getChecksSummary", err);
             return null;
           }),
         state.baseRef
-          ? github.getBaseChecksState(owner, repo, state.baseRef).catch((err: unknown) => {
+          ? github.getBaseChecksState(owner, repo, state.baseRef, checkOpts).catch((err: unknown) => {
               note("getBaseChecksState", err);
               // "none" and not "failing": a base we could not read must never
               // be reported as upstream-broken, which would skip the fix.
@@ -431,6 +478,13 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   const hasLabel = state.labels.includes(REQUIRES_HUMAN_LABEL);
   state.escalatedBy = !hasLabel ? null : state.escalatedAtSha ? "us" : "human";
 
+  // The journal is derived from the latest PR-SCOPED run, not the latest FIX
+  // run: it is keyed on the PR (10-pr-memory.md), so a `pr-review` that ran
+  // between two fix attempts carries the accumulation forward and may have
+  // added to it. Falls back to the fix-family row when there is no wider one.
+  const priorAny = deps.db.runs.latestForTrigger([...PR_SCOPED_WORKFLOWS], triggerId) ?? prior;
+  state.notes = deriveNotes(state, priorAny, priorPrState(priorAny?.context));
+
   const history = deriveAttemptHistory(
     state,
     priorState,
@@ -441,6 +495,35 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   state.priorAttempts = history.priorAttempts;
   state.flakyDeferrals = history.flakyDeferrals;
   state.priorDiagnosisClass = history.priorDiagnosisClass;
+}
+
+/**
+ * Fold the PR's journal forward: what the prior run carried, plus what its own
+ * agent wrote, capped — and marked stale when the world moved under it.
+ *
+ * Deliberately NOT part of {@link deriveAttemptHistory}, and the reason is the
+ * one interesting thing about this function. Those three fields move together
+ * because a fresh problem CLEARS all three; the journal does not clear. 09 → S1's
+ * third row (a head SHA change authored by someone else) is still the boundary
+ * that matters, but here it MARKS rather than deletes: a claim about the old
+ * head is not evidence about the new one, yet "attempt 1 believed the lockfile
+ * was stale" is still worth a later run seeing, and deleting it silently would
+ * be indistinguishable from never having written it. Staleness is sticky —
+ * `markNotesStale` never unsets — because a second push does not re-validate
+ * what the first invalidated.
+ *
+ * Both sources are re-sanitized on the way through (`coerceNotes`), so a row
+ * written by an older build cannot carry a note past today's rejection rules.
+ */
+function deriveNotes(
+  state: PrState,
+  priorRun: WorkflowRun | null | undefined,
+  prior: PersistedPrState | null,
+): PrNote[] {
+  const carried = coerceNotes(prior?.notes);
+  const harvested = coerceNotes(priorRun ? readHarvestedMarkers(priorRun)?.notes : null);
+  const merged = boundNotes([...carried, ...harvested]);
+  return sameProblem(state, prior) ? merged : markNotesStale(merged);
 }
 
 /** The four history fields {@link deriveAttemptHistory} produces together. */

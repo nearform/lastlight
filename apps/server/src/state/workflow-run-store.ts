@@ -89,13 +89,59 @@ export interface PhaseMarker {
  * better-sqlite3 transactions are synchronous. The atomic boundary is the DB
  * mutations only; the caller dispatches after the transaction commits.
  */
+/**
+ * Notified once a run reaches a TERMINAL status, whichever path took it there.
+ *
+ * The one consumer today is the `last-light/review` check run
+ * (`src/engine/review-check.ts`). 09-state-machine.md → S2 found that check
+ * being completed inside a `.then()` chained onto an in-memory promise in
+ * `dispatcher.ts` — so it stranded `in_progress` on every server restart
+ * mid-review (i.e. **every deploy**), every queued-then-resumed run, every
+ * `expireStaleRuns` cancellation and every crash. The fix is not routing but
+ * DURABILITY: make the check a projection of persisted run state, resolved
+ * wherever that state becomes terminal. Hanging the hook here rather than at
+ * the eight `finishRun` call sites is what makes `simple.ts`, `resume.ts`,
+ * `expireQueued` and the admin cancel all resolve it for free — and what stops
+ * a ninth call site being added without one.
+ *
+ * Contract: **synchronous, never throws, never re-enters the store.** It is
+ * called after the row is written (outside any transaction), and an
+ * implementation that needs I/O fires it and returns.
+ */
+export type TerminalRunObserver = (
+  run: WorkflowRun,
+  status: "succeeded" | "failed" | "cancelled",
+) => void;
+
 export class WorkflowRunStore {
   private db: Database.Database;
   private approvals: ApprovalStore;
+  private terminalObserver?: TerminalRunObserver;
 
   constructor(db: Database.Database, deps: { approvals: ApprovalStore }) {
     this.db = db;
     this.approvals = deps.approvals;
+  }
+
+  /** Install the {@link TerminalRunObserver}. Wired once, at boot. */
+  setTerminalObserver(fn: TerminalRunObserver): void {
+    this.terminalObserver = fn;
+  }
+
+  /**
+   * Fire the terminal observer for a row that has just been written. Swallows
+   * everything: a terminal transition is already persisted by the time we get
+   * here, and no projection of it may undo that.
+   */
+  private notifyTerminal(id: string, status: "succeeded" | "failed" | "cancelled"): void {
+    if (!this.terminalObserver) return;
+    try {
+      const run = this.getRun(id);
+      if (run) this.terminalObserver(run, status);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[runs] terminal observer failed for ${id}: ${msg}`);
+    }
   }
 
   // ── Plain single-mutation operations ───────────────────────────
@@ -472,6 +518,10 @@ export class WorkflowRunStore {
          WHERE id = ? AND status = 'queued'`,
       )
       .run(now, now, reason, id);
+    // A queued run that expires never ran a phase, but it may already own a
+    // `last-light/review` check — the whole point of hanging the projection off
+    // the terminal transition is that this path resolves it for free.
+    if (info.changes === 1) this.notifyTerminal(id, "cancelled");
     return info.changes;
   }
 
@@ -539,6 +589,8 @@ export class WorkflowRunStore {
     } else {
       apply();
     }
+    // AFTER the transaction commits — the observer reads the row back.
+    this.notifyTerminal(id, status);
   }
 
   private flipFinished(id: string, status: "succeeded" | "failed" | "cancelled", error?: string): void {
@@ -557,6 +609,7 @@ export class WorkflowRunStore {
     this.db.prepare(`
       UPDATE workflow_runs SET status = 'cancelled', updated_at = ?, finished_at = ? WHERE id = ?
     `).run(now, now, id);
+    this.notifyTerminal(id, "cancelled");
   }
 
   /** Pause a workflow run (waiting for approval) */

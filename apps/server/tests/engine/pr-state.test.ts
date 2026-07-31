@@ -45,6 +45,7 @@ function liveState(over: Partial<PrState> = {}): PrState {
     escalatedAtSha: null,
     escalatedBy: null,
     priorAttempts: [],
+    notes: [],
     priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
     assessedHeadShaByWorkflow: {},

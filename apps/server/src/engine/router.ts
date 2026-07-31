@@ -3,7 +3,7 @@ import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent, WELL_KNO
 import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getWorkflowByIntent } from "../workflows/loader.js";
-import { getRoutes, getBotName } from "../config/config.js";
+import { getRoutes, getBotName, getReviewConfig } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
 import type { GitHubClient } from "./github/github.js";
 import { isDependencyPr } from "../cron/dependabot-discovery.js";
@@ -123,10 +123,15 @@ async function dependencyPrSignals(
     const pr = await github.getPullRequest(owner, repo, envelope.prNumber);
     // A `clean` PR is green with no checks to wait on; otherwise ask the light
     // check-conclusion query (the same signal the red-PR cron uses).
+    // `excludeApp`: this conclusion decides which workflow the comment TRIGGERS,
+    // so our own in-progress `last-light/review` check must not read as
+    // "pending" and route a red PR to neither branch (07 §7.2).
     const checksState =
       pr.mergeable_state === "clean"
         ? "passing"
-        : await github.getChecksConclusion(owner, repo, pr.head.sha);
+        : await github.getChecksConclusion(owner, repo, pr.head.sha, {
+            excludeApp: getBotName(),
+          });
     return { prAuthor: pr.user?.login ?? envelope.issueAuthor, checksState };
   } catch (err) {
     console.warn(
@@ -214,6 +219,89 @@ export async function routeEvent(
           labels: envelope.labels,
         },
       };
+
+    case "pr.checks_settled": {
+      // `review.trigger: after-checks`. The connector emitted this only for a
+      // PR neither `pr.checks_failed` (fix) nor `pr.checks_passed` (merge)
+      // claimed, so there is no precedence left to apply here — routing is
+      // unconditional and the MODE is enforced once, at the dispatch gate, by
+      // `resolveReviewTrigger`. Deliberately NOT config-aware: the router's job
+      // is `event → { workflow, context }`, and a review that is deferred is
+      // still routed to `pr-review`, it just runs later (07 §7.4).
+      return {
+        action: "handler",
+        handler: gh.pr_checks_settled || gh.pr_review || "pr-review",
+        context: {
+          _routeKey: "github.pr_checks_settled",
+          repo: envelope.repo,
+          prNumber: envelope.prNumber,
+          issueNumber: envelope.issueNumber,
+          title: envelope.title,
+          body: envelope.body,
+          sender: envelope.sender,
+          labels: envelope.labels,
+          headSha: envelope.headSha,
+        },
+      };
+    }
+
+    case "pr.labeled": {
+      // `review.requestLabel` — the REAL `on-request` mechanism, since a GitHub
+      // App bot user cannot be picked in the reviewer dropdown. Every other
+      // label is dropped here rather than at the dispatch gate: this is the
+      // router-level hard ignore `pr_review.submitted` below already models, and
+      // it is what stops routine labelling costing a `resolvePrState` each time.
+      const requestLabel = getReviewConfig().requestLabel;
+      if (!requestLabel || envelope.addedLabel !== requestLabel) {
+        return {
+          action: "ignore",
+          reason: `label ${envelope.addedLabel ?? "(none)"} does not request a review`,
+        };
+      }
+      return {
+        action: "handler",
+        handler: gh.pr_labeled || gh.pr_review || "pr-review",
+        context: {
+          _routeKey: "github.pr_labeled",
+          repo: envelope.repo,
+          prNumber: envelope.prNumber,
+          issueNumber: envelope.issueNumber,
+          title: envelope.title,
+          body: envelope.body,
+          sender: envelope.sender,
+          labels: envelope.labels,
+        },
+      };
+    }
+
+    case "pr.review_requested": {
+      // Opportunistic, per 07 §7.1's caveat: GitHub's reviewer picker does not
+      // offer App bot users, so `on-request` must not DEPEND on this — but the
+      // Re-run button on our own `last-light/review` check arrives here too, and
+      // that one is the documented affordance. Either way, a request naming
+      // somebody else is not ours to answer.
+      const botLogin = `${getBotName()}[bot]`;
+      if (envelope.requestedReviewer !== botLogin && envelope.requestedReviewer !== getBotName()) {
+        return {
+          action: "ignore",
+          reason: `review requested from ${envelope.requestedReviewer ?? "(unknown)"}, not us`,
+        };
+      }
+      return {
+        action: "handler",
+        handler: gh.pr_review_requested || gh.pr_review || "pr-review",
+        context: {
+          _routeKey: "github.pr_review_requested",
+          repo: envelope.repo,
+          prNumber: envelope.prNumber,
+          issueNumber: envelope.issueNumber,
+          title: envelope.title,
+          body: envelope.body,
+          sender: envelope.sender,
+          labels: envelope.labels,
+        },
+      };
+    }
 
     case "pr.checks_failed": {
       // CI went red on a PR the connector decided we should act on: a

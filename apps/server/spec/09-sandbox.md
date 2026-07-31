@@ -822,6 +822,23 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
    persisted), and `origin` is normalized to the credential-free URL on
    every path. Pre-clone errors are scrubbed (token **and** its base64)
    before logging (`sandbox/index.ts`).
+
+   Every path that starts a **new** run also resets the two harness-owned
+   files that live *inside* the checkout — the fix loop's push gate
+   (`.lastlight-verify.sh`, `resetVerifyScript`) and the PR journal
+   (`.lastlight-notes`, `resetPrNotesJournal`). Each is deleted, so a
+   superseded run's file can never be inherited, and each is registered in
+   the checkout's local `.git/info/exclude`, so the agent's own `git add -A`
+   can never commit it into the PR. Both live at the **root of the
+   checkout on every backend** rather than as a workspace-root sibling:
+   gondolin is the packaged default and mounts only cwd, so a `../` path is
+   unreachable in the guest — a sibling gate would silently never run, and a
+   sibling journal would silently never be written. `.git/info/exclude` (not
+   living outside the tree) is what keeps them out of the PR, the same
+   backstop the gondolin skill bundle relies on. The *same-run* preserve
+   path deliberately skips both: a later phase of one run keeps the gate the
+   first phase wrote, and the journal is drained per phase by the marker
+   harvest rather than per run (see [State](/spec/10-state)).
 2. **Spawn** — `docker run -d` or VM start. Container/VM mapped to the
    `taskId` in `activeContainers`.
 3. **Run** — `docker exec -i -w <cwd> {container} sh -c "agentic-pi run ..."`

@@ -77,6 +77,11 @@ export type EventType =
   | "pr.checks_failed"    // checks settled RED (aggregate) on a dependency PR,
                           // or on any PR whose head commit the bot pushed
   | "pr.checks_passed"    // a dependency PR's checks settled GREEN (aggregate)
+  | "pr.checks_settled"   // checks settled EITHER COLOUR on a PR neither of the
+                          // two above claimed — `review.trigger: after-checks`
+  | "pr.labeled"          // a label was added; carries `addedLabel`
+  | "pr.review_requested" // a review was asked of us by name, or our own
+                          // `last-light/review` check's Re-run was pressed
   | "comment.created"
   | "pr_review.submitted"
   | "pr_review_comment.created"
@@ -101,8 +106,13 @@ The order of events through the system:
 1. Connector receives a platform payload.
 2. Connector runs auth (HMAC, allowlist, etc.).
 3. Connector decides whether the payload should produce an envelope at
-   all. Many GitHub actions (`labeled`, `edited`, etc.) drop here. See
-   [Integrations](/spec/03-integrations).
+   all. Many GitHub actions (`edited`, `unlabeled`, `assigned`, …) drop
+   here. `labeled` no longer does — `review.requestLabel` is the real
+   `on-request` review mechanism, since a GitHub App bot user cannot be
+   picked in the reviewer dropdown — but a label on an *issue* still falls
+   out with a null type, and the router hard-ignores every PR label that is
+   not the configured one, so the widening costs a `normalize()` call
+   rather than a dispatch. See [Integrations](/spec/03-integrations).
 4. Connector constructs the envelope and emits `event`.
 5. `ConnectorRegistry` forwards it to the central handler in the
    harness.
@@ -119,8 +129,10 @@ the workflow context where dispatched code may pull fields from it.
 | `repo` | always | never |
 | `issueNumber` | issues + PRs + comments + reviews | never |
 | `prNumber` | PR events + PR comments only | never |
-| `headSha` | `pr.checks_passed` / `pr.checks_failed` (the settled suite's head SHA) | never |
-| `isDependencyPr` | `pr.checks_passed` (always `true`) / `pr.checks_failed` (`true` for a bump, `false` for a PR the bot pushed to) | never |
+| `headSha` | `pr.checks_passed` / `pr.checks_failed` / `pr.checks_settled` (the settled suite's head SHA) | never |
+| `isDependencyPr` | `pr.checks_passed` (always `true`) / `pr.checks_failed` (`true` for a bump, `false` for a PR the bot pushed to) / `pr.checks_settled` | never |
+| `addedLabel` | `pr.labeled` only — the label just added, matched against `review.requestLabel` | never |
+| `requestedReviewer` | `pr.review_requested` only — a login, or `team/<slug>` for a team request; set to our own `botLogin` when the request arrived as a Re-run on the `last-light/review` check | never |
 | `title` | issues + PRs (+ comments via parent) | never |
 | `issueAuthor` | issues + PRs + comments (parent author) | never |
 | `labels` | issues + PRs (snapshot at event time) | never |

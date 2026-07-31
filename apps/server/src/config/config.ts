@@ -349,6 +349,22 @@ export function getBotName(): string {
   return currentConfig?.botName || "last-light";
 }
 
+/**
+ * The OPERATOR's `review:` block, with the packaged defaults when config isn't
+ * loaded yet (unit tests).
+ *
+ * The router uses it for exactly one thing — dropping a `pr.labeled` whose
+ * label is not `review.requestLabel` — because that is a hard ROUTER-level
+ * ignore, not a mode decision: a label nobody configured is not an event about
+ * us at all, and resolving a whole `PrState` to discover that would make
+ * routine labelling cost a handful of GitHub calls per label per PR. Every
+ * actual trigger-mode decision stays in `resolveReviewTrigger`, at the dispatch
+ * gate, where the repo layer has been folded in.
+ */
+export function getReviewConfig(): ReviewConfig {
+  return currentConfig?.review || defaultReviewConfig();
+}
+
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
 function defaultConfigPath(): string {
@@ -885,6 +901,12 @@ function defaultRouteConfig(): RouteConfig {
       pr_opened: "pr-review",
       pr_synchronize: "pr-review",
       pr_reopened: "pr-review",
+      // Phase 7's three new PR-review routes. Each falls back to `pr_review`
+      // when unset, so an overlay that pins only `pr_review` still redirects
+      // all of them.
+      pr_checks_settled: "pr-review",
+      pr_labeled: "pr-review",
+      pr_review_requested: "pr-review",
       approval_response: "approval-response",
       security_review: "security-review",
       pr_fix: "pr-fix",

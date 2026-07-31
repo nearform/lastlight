@@ -19,6 +19,7 @@ import {
   resolveMergeDisposition,
   resolveReviewTrigger,
   resolveDispatchDisposition,
+  reviewCheckPlacement,
   renderContext,
 } from "#src/engine/pr-decisions.js";
 import {
@@ -53,6 +54,7 @@ function state(over: Partial<PrState> = {}): PrState {
     escalatedAtSha: null,
     escalatedBy: null,
     priorAttempts: [],
+    notes: [],
     priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
     assessedHeadShaByWorkflow: {},
@@ -440,7 +442,7 @@ describe("resolveMergeDisposition", () => {
 });
 
 describe("resolveReviewTrigger", () => {
-  const cases: Array<[string, Partial<PrState>, Partial<typeof review>, Parameters<typeof resolveReviewTrigger>[2], "dispatch" | "skip", RegExp]> = [
+  const cases: Array<[string, Partial<PrState>, Partial<typeof review>, Parameters<typeof resolveReviewTrigger>[2], "dispatch" | "defer" | "skip", RegExp]> = [
     [
       // Today this carve-out is accidental — the comment path simply never
       // crosses these code paths. As one branch of the resolver it is a decision.
@@ -459,7 +461,9 @@ describe("resolveReviewTrigger", () => {
       "dispatch",
       /^requested: the `needs-review` label/,
     ],
-    ["on-request with nobody asking skips", {}, { trigger: "on-request" }, {}, "skip", /^on-request:/],
+    // DEFER, not skip: a label, a comment or the check's own Re-run button can
+    // still ask, and `postsCheck` advertises exactly that with a `neutral` check.
+    ["on-request with nobody asking defers", {}, { trigger: "on-request" }, {}, "defer", /^on-request:/],
     ["a draft is skipped when skipDraft is on", { isDraft: true }, { trigger: "eager" }, {}, "skip", /^draft:/],
     [
       // FIX OUTRANKS REVIEW — a consequence of the PR-scoped lock, not a
@@ -493,7 +497,7 @@ describe("resolveReviewTrigger", () => {
       { checksState: "pending" },
       { trigger: "after-checks" },
       { route: "checks-settled" },
-      "skip",
+      "defer",
       /^checks-pending:/,
     ],
     [
@@ -501,7 +505,7 @@ describe("resolveReviewTrigger", () => {
       { checksState: "passing" },
       { trigger: "after-checks" },
       { route: "attention" },
-      "skip",
+      "defer",
       /^after-checks:/,
     ],
     [
@@ -524,6 +528,26 @@ describe("resolveReviewTrigger", () => {
       { route: "sweep" },
       "dispatch",
       /sweep route, checks failing$/,
+    ],
+    [
+      // The cron is a candidate FINDER; the mode is still enforced here, so a
+      // repo on `on-request` gets no sweep-driven review. That is the property
+      // that made a third implementation of `review.trigger` unnecessary.
+      "the sweep respects on-request — no mode is enforced in the discoverer",
+      { checksState: "passing" },
+      { trigger: "on-request" },
+      { route: "sweep" },
+      "defer",
+      /^on-request:/,
+    ],
+    [
+      // The cron's old draft filter, now decided here for every route.
+      "the sweep respects skipDraft too",
+      { isDraft: true, checksState: "passing" },
+      { trigger: "after-checks" },
+      { route: "sweep" },
+      "skip",
+      /^draft:/,
     ],
   ];
 
@@ -550,14 +574,41 @@ describe("resolveDispatchDisposition", () => {
     expect(d.reason).toMatch(/^checks-pending:/);
   });
 
-  it("leaves pr-review ungated — the run lock covers it, the trigger modes are Phase 7", () => {
+  it("routes pr-review through the review trigger — every route crosses ONE gate", () => {
     const d = resolveDispatchDisposition(
       "pr-review",
       state({ isDraft: true, botReviewAtHead: { state: "APPROVED" } }),
       cfg,
     );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^draft:/);
+    // The UNDEGRADED verdict rides along, because "do not run" and "what should
+    // the check say" are different questions with different answers.
+    expect(d.review).toBe("skip");
+  });
+
+  it("collapses a review `defer` to skip for dispatch, while carrying it for the check", () => {
+    const d = resolveDispatchDisposition(
+      "pr-review",
+      state({ checksState: "passing" }),
+      { ...cfg, review: { ...review, trigger: "after-checks" } },
+      { route: "attention" },
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.review).toBe("defer");
+    expect(reviewCheckPlacement(d.review!, { ...review, trigger: "after-checks" })).toBe("queued");
+  });
+
+  it("dispatches a review on a settled suite, and asks for an in-progress check", () => {
+    const d = resolveDispatchDisposition(
+      "pr-review",
+      state({ checksState: "failing" }),
+      { ...cfg, review: { ...review, trigger: "after-checks" } },
+      { route: "checks-settled" },
+    );
     expect(d.decision).toBe("run");
-    expect(d.reason).toMatch(/^ungated:/);
+    expect(d.review).toBe("dispatch");
+    expect(reviewCheckPlacement(d.review!, review)).toBe("in-progress");
   });
 
   it("never blocks a workflow it knows nothing about", () => {

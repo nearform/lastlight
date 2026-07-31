@@ -130,7 +130,11 @@ describe("discoverGreenDependencyPrs", () => {
 
     expect(await discoverGreenDependencyPrs(["cliftonc/a"], gh, { requireSettledChecks: true })).toEqual([]);
     // ...and asks the checks about the exact commit it listed.
-    expect(gh.getChecksConclusion).toHaveBeenCalledWith("cliftonc", "a", "sha-2");
+    expect(gh.getChecksConclusion).toHaveBeenCalledWith("cliftonc", "a", "sha-2", {
+      // Uniform rule: our own review check never counts toward a TRIGGER-side
+      // settle computation, or a queued review strands the sweep (07 §7.2).
+      excludeApp: undefined,
+    });
   });
 
   it("keeps today's behaviour when requireSettledChecks is off — no extra call", async () => {

@@ -30,6 +30,7 @@ import type { PrState } from "./pr-state.js";
 import { renderCiFailureReport } from "./github/github.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
 import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
+import { PR_NOTES_FILE_NAME, renderPrNotes } from "./pr-notes.js";
 
 /**
  * A skip that must be ESCALATED on the pull request — labelled `requires-human`
@@ -71,6 +72,18 @@ export interface Decision<T> {
    * other skip.
    */
   escalation?: EscalationCase;
+  /**
+   * Set ONLY when the decision came from {@link resolveReviewTrigger}, carrying
+   * its UNDEGRADED three-valued verdict.
+   *
+   * `resolveDispatchDisposition` has to answer one question — run or not — but
+   * `defer` and `skip` are the same answer to it and different answers to "what
+   * should the `last-light/review` check say". Carrying the finer verdict here
+   * keeps the caller reading a TYPED field rather than re-deriving the case
+   * from the reason prose, which is the same rule {@link EscalationCase}
+   * follows.
+   */
+  review?: ReviewTriggerDecision;
 }
 
 // ---------------------------------------------------------------------------
@@ -353,8 +366,52 @@ export function resolveFixDisposition(
 // resolveReviewTrigger — 09 → S2
 // ---------------------------------------------------------------------------
 
-/** Should a `pr-review` run be dispatched? */
-export type ReviewTriggerDecision = "dispatch" | "skip";
+/**
+ * Should a `pr-review` run be dispatched?
+ *
+ * `defer` and `skip` both mean "no run right now" — the dispatch gate treats
+ * them identically. They differ only in what they say about the FUTURE, which
+ * is what the `last-light/review` check run has to render:
+ *
+ * - **`defer`** — the answer is "not yet". CI has not settled, or the mode is
+ *   `on-request` and nobody has asked. Something later (a settled check suite,
+ *   the sweep, a label, the check's Re-run button) can still turn it into a
+ *   review, so `postsCheck` posts a placeholder saying so.
+ * - **`skip`** — there is nothing to do. It is a draft, we already reviewed
+ *   this head, or another run owns the PR. No check: 09 → S2 is explicit that a
+ *   run which never dispatches must not create one "rather than creating and
+ *   immediately concluding one".
+ */
+export type ReviewTriggerDecision = "dispatch" | "defer" | "skip";
+
+/**
+ * What `last-light/review` check (if any) a review decision should leave on the
+ * PR — the projection of {@link ReviewTriggerDecision} onto the check run.
+ *
+ * - `in-progress` — a run is starting; the check is created here and completed
+ *   from that run's TERMINAL TRANSITION (`./review-check.ts`), never from a
+ *   `.then()` on an in-memory promise.
+ * - `queued` — `after-checks` is waiting for CI. Branch protection can already
+ *   see the check, so a repo may require it without racing the settle event.
+ * - `neutral` — `on-request` is waiting for a human. `neutral` counts as
+ *   passing for branch protection, so it never blocks a merge, and the check's
+ *   own Re-run button becomes the request affordance.
+ * - `none` — leave the PR alone.
+ */
+export type ReviewCheckPlacement = "in-progress" | "queued" | "neutral" | "none";
+
+/**
+ * Which check the decision implies. Keyed on the TYPED decision plus the mode,
+ * never on the reason prose — the same rule the escalation applier follows.
+ */
+export function reviewCheckPlacement(
+  decision: ReviewTriggerDecision,
+  cfg: ReviewConfig,
+): ReviewCheckPlacement {
+  if (decision === "dispatch") return "in-progress";
+  if (decision === "skip") return "none";
+  return cfg.trigger === "on-request" ? "neutral" : "queued";
+}
 
 /** Everything `resolveReviewTrigger` needs beyond the snapshot. */
 export interface ReviewTriggerOptions {
@@ -422,8 +479,10 @@ export function resolveReviewTrigger(
   }
 
   if (cfg.trigger === "on-request") {
+    // `defer`, not `skip`: a label, a comment, or the check's own Re-run button
+    // can still ask for this review, and `postsCheck` advertises exactly that.
     return {
-      decision: "skip",
+      decision: "defer",
       reason: "on-request: review.trigger is `on-request` and nobody asked",
       inputs,
     };
@@ -455,11 +514,11 @@ export function resolveReviewTrigger(
     // ones most needing human eyes — would be the only ones with no review at
     // all. Either colour is also what lets the review cite the CI failure.
     if (state.checksState === "pending") {
-      return { decision: "skip", reason: "checks-pending: waiting for CI to settle", inputs };
+      return { decision: "defer", reason: "checks-pending: waiting for CI to settle", inputs };
     }
     if (route === "attention") {
       return {
-        decision: "skip",
+        decision: "defer",
         reason: "after-checks: review.trigger waits for a settled check suite, not PR attention",
         inputs,
       };
@@ -579,10 +638,11 @@ export type DispatchDispositionOptions = FixDispositionOptions & ReviewTriggerOp
  * lives here, once, as a pure function — the call sites differ only in what they
  * DO with a `skip` (reply to the human who asked, versus log and record nothing).
  *
- * `pr-review` is deliberately ungated: {@link resolveReviewTrigger} is Phase 7's
- * wiring, and switching the packaged `review.trigger: after-checks` on today
- * would silently stop every human PR being reviewed on push. It is still
- * PR-scoped, so the run LOCK covers it — that part is this phase's.
+ * `pr-review` crosses {@link resolveReviewTrigger}. Its three-valued verdict
+ * collapses to two here — `defer` and `skip` are both "do not spend a run now"
+ * — but the caller keeps the undegraded decision on {@link Decision.review},
+ * because the CHECK RUN each should leave behind differs: see
+ * {@link reviewCheckPlacement}.
  */
 export function resolveDispatchDisposition(
   workflowName: string,
@@ -595,6 +655,15 @@ export function resolveDispatchDisposition(
   }
   if (workflowName === "dependabot-pr-merge") {
     return resolveMergeDisposition(state, cfg.dependencies, opts);
+  }
+  if (workflowName === "pr-review") {
+    const review = resolveReviewTrigger(state, cfg.review, opts);
+    return {
+      decision: review.decision === "dispatch" ? "run" : "skip",
+      reason: review.reason,
+      inputs: review.inputs,
+      review: review.decision,
+    };
   }
   return {
     decision: "run",
@@ -677,6 +746,23 @@ export function renderContext(
     attempt: state.attempt,
     maxAttempts: fix?.maxAttempts,
     priorAttempts: state.priorAttempts,
+
+    // The PR journal (10-pr-memory.md), projected to ONE fenced string.
+    //
+    // A string, not the array, and that is the enforcement rather than a
+    // convenience: this is the only consumer `PrState.notes` has, so a note can
+    // reach an agent's eyes and can reach nothing else. There is no
+    // `notesSayFlaky` boolean, no `hasNotes` flag, no per-kind list — nothing a
+    // YAML `skip_if` / `until` expression or a decision function could branch
+    // on. Notes inform; they never authorise. The fence and the trust statement
+    // are emitted by `renderPrNotes` itself rather than written into the
+    // (forkable) prompt templates, so no fork can drop them.
+    priorNotes: renderPrNotes(state.notes),
+    // Where the agent appends a new note. A template variable rather than a
+    // literal in each prompt so the placement stays resolvable in ONE place —
+    // it is a bare relative path because the agent's cwd is the checkout on
+    // every backend, which is the same reason `.lastlight-verify.sh` is one.
+    notesFile: PR_NOTES_FILE_NAME,
 
     // Flaky-deferral state. The PROMOTION itself (a third consecutive `flaky`
     // is treated as `reproducible`, 09 → S1) is ACTED ON elsewhere —
