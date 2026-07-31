@@ -454,8 +454,11 @@ LASTLIGHT_THINKINGS={
 Keys are phase names from YAML workflows (e.g. `architect`, `reviewer`)
 or skill types (e.g. `chat`, `triage`). `default` is the catch-all.
 `config/default.yaml`'s commented examples also name `diagnose` (the CI-failure
-classifier that opens both fix workflows) and `pr-fix-retry` (used for attempts
-above `fix.escalateModelAfterAttempt`). `diagnose` is left **unset** on purpose:
+classifier that opens both fix workflows) and `pr-fix-retry` — which, when set,
+`escalateFixModel` (`src/workflows/simple.ts`) substitutes for `models["pr-fix"]`
+on any attempt above `fix.escalateModelAfterAttempt`, before the map is persisted
+on the run context, so the admin panel shows the model that attempt actually used.
+Unset, nothing changes at any attempt number. `diagnose` is left **unset** on purpose:
 those examples are Anthropic models, and pinning one packaged would send that
 phase at a provider a deployment overriding only `models.default` has no key for.
 Unset it falls through to `default` — a cheap model there is the whole point of

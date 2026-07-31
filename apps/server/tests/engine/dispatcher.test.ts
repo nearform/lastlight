@@ -47,6 +47,9 @@ function mockDb(over: Record<string, any> = {}) {
     latestForTrigger: vi.fn().mockReturnValue(null),
     activeForTrigger: vi.fn().mockReturnValue(null),
     latestSucceededForTriggers: vi.fn().mockReturnValue({}),
+    // workflow-run-store — the escalation record a terminal skip writes
+    createRun: vi.fn(),
+    finishRun: vi.fn(),
     // approval-store
     respond: vi.fn(),
     getPendingByTrigger: vi.fn(),
@@ -72,6 +75,8 @@ function mockDb(over: Record<string, any> = {}) {
       latestForTrigger: m.latestForTrigger,
       activeForTrigger: m.activeForTrigger,
       latestSucceededForTriggers: m.latestSucceededForTriggers,
+      createRun: m.createRun,
+      finishRun: m.finishRun,
     },
     approvals: {
       respond: m.respond,
@@ -124,6 +129,7 @@ function prGithubStub(
     getCommitAuthorName: vi.fn().mockResolvedValue(pr.headAuthor ?? 'octocat'),
     getCiFailureReport: vi.fn().mockResolvedValue({ jobs: [], logsAvailable: false }),
     postComment: vi.fn().mockResolvedValue(1),
+    addLabels: vi.fn().mockResolvedValue(undefined),
     ...over,
   } as any;
 }
@@ -895,6 +901,64 @@ describe('dispatch — passthrough decisions', () => {
 
     expect(outcome).toEqual({ kind: 'replied', message: 'only maintainers can do that' });
     expect(envelope.reply).toHaveBeenCalledWith('only maintainers can do that');
+  });
+});
+
+describe('dispatch — escalating a terminal skip', () => {
+  const fixRoute = (): Route => ({
+    action: 'handler',
+    handler: 'dependabot-ci-fix',
+    context: { repo: 'cliftonc/lastlight', prNumber: 190 },
+  });
+
+  /** A prior fix run that took the PR to its last allowed attempt. */
+  const exhausted = () =>
+    mockDb({
+      latestForTrigger: vi.fn().mockReturnValue({
+        id: 'r1',
+        context: { prState: { attempt: 3, headSha: 'sha-current' } },
+      }),
+    });
+
+  it('labels, comments and RECORDS the skip — silence is what this replaces', async () => {
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 190 });
+    const github = prGithubStub({ headSha: 'sha-current' });
+    const db = exhausted();
+    const deps = makeDeps(fixRoute(), { github, db: db as any });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toContain('attempts-exhausted');
+    expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.addLabels).toHaveBeenCalledWith('cliftonc', 'lastlight', 190, ['requires-human']);
+    expect(github.postComment).toHaveBeenCalledTimes(1);
+    // The row is the load-bearing part: without it `escalatedAtSha` never
+    // persists, and the next dispatch reads our own label as a human's
+    // permanent hold (09 → D1).
+    expect(db.runs.createRun).toHaveBeenCalledTimes(1);
+    const row = (db.runs.createRun as any).mock.calls[0][0];
+    expect(row.workflowName).toBe('dependabot-ci-fix');
+    expect(row.triggerId).toBe('cliftonc/lastlight#190');
+    expect(row.context.prState.escalatedAtSha).toBe('sha-current');
+    // `succeeded`, not `failed` — 09 → S1 reserves `failed` for malfunction.
+    expect(db.runs.finishRun).toHaveBeenCalledWith(row.id, 'succeeded', expect.anything());
+  });
+
+  it('applies nothing on a non-escalating skip', async () => {
+    // A red base is not this PR's fault and self-heals — labelling it would
+    // poison `requires-human` with a condition that resolves itself.
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 190 });
+    const github = prGithubStub({ headSha: 'sha-current', baseChecksState: 'failing' });
+    const db = exhausted();
+    const deps = makeDeps(fixRoute(), { github, db: db as any });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect((outcome as any).reason).toContain('upstream-broken');
+    expect(github.addLabels).not.toHaveBeenCalled();
+    expect(github.postComment).not.toHaveBeenCalled();
+    expect(db.runs.createRun).not.toHaveBeenCalled();
   });
 });
 

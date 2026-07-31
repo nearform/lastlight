@@ -260,6 +260,18 @@ phase instead. AND is expressible by collapsing to a single expression; the
 production consumer is a class list, which is why one expression per class
 reads better than one compound one.
 
+There is no negation, and a *conditional* row — "skip on `class=flaky`,
+unless this PR has already deferred twice" — is therefore not expressible
+at all. The `flaky` cap needs exactly that, and resolves it without an
+operator: its second term is a fact about the PR's history known *before*
+the run starts, so the harness composes the run's guard list from it —
+`promoteFlakyDiagnosis` (`src/workflows/simple.ts`) drops the `flaky`
+expression once `flakyDeferrals >= fix.maxFlakyDeferrals`, on a shallow
+copy of the loader's cached definition. The other two rows are
+unconditional. This is the general shape for any guard whose second term
+is run-level rather than phase-level: compose the list, don't grow the
+grammar.
+
 Two scoping rules:
 
 - **Evaluated when the node becomes *ready***, i.e. after its dependencies
@@ -611,7 +623,26 @@ loop never did.
 stop) drives the loop. It runs **inside the sandbox** (via `executeCommand`
 with `writeSession: false`) against the persisted workspace — not on the
 harness host. `{{}}` markers in the command are rejected before execution to
-prevent template-after-render injection (`validateShellCommand`).
+prevent template-after-render injection (`validateShellCommand`), so the
+command is necessarily a **literal** string — it cannot be varied per backend.
+
+Its budget is `phase.timeout_seconds ?? 30`. **Thirty seconds is a trap**: it
+kills any real build/test suite mid-run and reports a false red, so a phase
+whose gate is the repo's own CI commands must carry an explicit value. Both fix
+workflows set `timeout_seconds: 900`, mirroring `fix.gateTimeoutSeconds` — the
+config key cannot be templated in, because the schema parses `timeout_seconds`
+and `max_iterations` as plain numbers.
+
+**A loop node honours the phase's `on_output.requires_marker` and its
+`messages.on_start` / `on_success`.** The postcondition is checked once, against
+the **last** iteration's output (the turn that reports the outcome; an earlier
+one is by definition mid-loop), and its absence fails the phase exactly as it
+does for a non-loop phase. Reaching `max_iterations` without the condition is
+**not** a failure — a fix loop that runs out of iterations reports
+`outcome=gave-up`, which is a correct outcome — only the absent sign-off is. Two
+paths are exempt because they produce no fresh turn to sign off: a deduplicated
+(already-completed) phase on resume, and the `on_soft_failure: complete`
+advance.
 
 ## Invariants
 

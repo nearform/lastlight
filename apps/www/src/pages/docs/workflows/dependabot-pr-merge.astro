@@ -21,17 +21,86 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<strong>Permission profile:</strong> <code>repo-write</code> — needed for
 			the <code>github_enable_auto_merge</code> and <code>github_merge_pull_request</code>
 			tools. It never pushes code or rebases branches itself. It prefers to
-			enable auto-merge, which lets GitHub merge the PR once its required checks
-			pass and refuses on a red or still-running PR — that is the green gate. It
-			merges directly only in the one case where GitHub has no checks to wait on,
-			and only after confirming the PR's <code>mergeable_state</code> is
-			<code>clean</code> so a repo with no <em>required</em> checks can't slip a
-			red PR through. When a trivial PR is merely <em>behind</em> the base branch
-			or has a lockfile conflict, it asks the bot that opened the PR to rebase or
-			recreate its own branch (via <code>github_add_issue_comment</code> /
-			<code>github_add_labels</code>) rather than pushing a merge itself.
+			enable auto-merge, which handles the race between the decision and a
+			late-created check, and merges directly only in the one case where GitHub
+			refuses auto-merge because there is nothing left to wait for. Both are
+			gated on the same fact — see <em>The merge gate</em> below. When a PR is
+			merely <em>behind</em> the base branch or has a lockfile conflict, it asks
+			the bot that opened the PR to rebase or recreate its own branch (via
+			<code>github_add_issue_comment</code> / <code>github_add_labels</code>)
+			rather than pushing a merge itself.
 		</div>
 	</div>
+
+	<h2>The merge gate</h2>
+
+	<p>
+		Whether the PR may be landed <em>at all</em> is decided by the head commit's
+		own check runs and statuses, resolved in code before the run starts, not by
+		GitHub's <code>mergeable_state</code>. On a repository with no
+		<em>required</em> checks a PR whose checks are failing still reports as
+		mergeable — that is how a red PR once got merged. So the gate is: checks
+		settled <code>passing</code>, and at least
+		<code>dependencies.minSettledChecks</code> of them.
+	</p>
+
+	<p>
+		The same gate covers <strong>both</strong> mechanisms. Auto-merge used to be
+		treated as the inherently safe one, on the reasoning that GitHub's
+		required-checks gate would catch anything wrong — but that reasoning is
+		circular: auto-merge merges as soon as GitHub's merge <em>requirements</em>
+		are satisfied, and on an unprotected repository there are none beyond
+		mergeability, so it lands an already-mergeable PR immediately. Enabling
+		auto-merge <em>is</em> merging there.
+	</p>
+
+	<p>
+		A consequence worth knowing before you upgrade: a repository with no CI at
+		all (<code>checksState: none</code>) no longer has its dependency PRs
+		auto-merged. <code>mergeable_state</code> survives in the prompt only for
+		branch hygiene — <em>behind</em> / <em>dirty</em> — and for choosing between
+		the two merge mechanisms.
+	</p>
+
+	<h2>Major bumps: impact, not magnitude</h2>
+
+	<p>
+		A major version bump is not one thing. <code>@types/node</code> 20&rarr;21
+		and a runtime framework rewrite are both "major", and the version number
+		can't tell them apart — yet every major used to be escalated to a human on
+		that basis alone. Instead the run applies the <code>dependency-impact</code>
+		skill's rubric and reaches one tier, from evidence it can gather without a
+		checkout:
+	</p>
+
+	<ul>
+		<li><strong>low</strong> — a dev-only dependency, a GitHub Actions tag bump, or zero direct import sites; no documented breaking changes; CI settled passing</li>
+		<li><strong>medium</strong> — a runtime dependency, CI settled passing, breaking changes documented but none matching this repo's actual usage, and not security-sensitive</li>
+		<li><strong>high</strong> — a security-sensitive package, many import sites, breaking changes plausibly touching APIs this repo uses, CI not settled passing, or release notes missing or unparseable</li>
+	</ul>
+
+	<p>
+		The evidence is the PR body's release notes, the manifest change
+		(<code>dependencies</code> vs <code>devDependencies</code>), a
+		<code>github_search_code</code> count of direct import sites, the package's
+		domain, and the settled check result. That last one is the pivot that makes
+		any of this safe: <strong>the suite already ran against the bump</strong>.
+		<strong>Unknown counts as high</strong> — being unable to gather the
+		evidence is itself a signal, never a reason to guess low.
+	</p>
+
+	<p>
+		A major at or below <code>dependencies.autoMergeMaxImpact</code>
+		(<code>medium</code> by default) is auto-merged, and — when
+		<code>dependencies.auditComment</code> is on — gets one comment recording
+		the tier and the evidence behind it, which is the durable answer to "why did
+		this land unreviewed". Anything above the ceiling keeps the old path:
+		<code>dependency-functional</code> + <code>requires-human</code>. The run
+		also labels the tier itself: <code>dependency-major-low</code> /
+		<code>-medium</code> / <code>-high</code>, exactly one at a time.
+		Set <code>autoMergeMaxImpact: none</code> to keep every major in front of a
+		human.
+	</p>
 
 	<h2>Pipeline</h2>
 
@@ -47,18 +116,21 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li>Runs against a <strong>single PR</strong> at a time — its context is bounded, so it can't overflow. Inspects through the <code>github_list_pull_request_files</code> tool (changed files + line counts) — no repository checkout needed — deliberately skips lockfile diffs, and pulls <code>github_get_pull_request_diff</code> only for a small non-lockfile source change</li>
-		<li>Classifies the change conservatively: only lockfile / manifest bumps, GitHub Actions tag/SHA bumps, type-only or mechanical edits count as <strong>trivial</strong>; anything touching runtime logic, anything security-sensitive, and major-version bumps are <strong>functional</strong></li>
-		<li>If trivial, enables GitHub auto-merge (squash) so the PR merges once its checks pass. If GitHub refuses auto-merge because the PR is already mergeable with no required checks ("clean status"), it direct-squash-merges instead — but only after confirming <code>mergeable_state</code> is <code>clean</code>, so it won't land a PR whose non-required checks are failing; if the repository disallows auto-merge outright, it comments for a maintainer. Functional PRs are left for a human with a comment</li>
-		<li>If a trivial PR is <strong>behind</strong> the base branch or <strong>dirty</strong> (a lockfile conflict), it doesn't give up: it asks the bot that opened the PR to update its own branch — <code>@dependabot rebase</code> / <code>@dependabot recreate</code> for Dependabot, or Renovate's <code>rebase</code> label — because the bot regenerates lockfiles correctly. It enables auto-merge at the same time, so GitHub lands the PR once the rebase re-runs the checks green. A non-Dependabot/Renovate PR that's behind is left for a human to rebase</li>
+		<li>Classifies the change conservatively: only lockfile / manifest bumps, GitHub Actions tag/SHA bumps, type-only or mechanical edits count as <strong>trivial</strong>; anything touching runtime logic or anything security-sensitive is <strong>functional</strong>. A major-version bump branches into the impact rubric above rather than being functional by definition. "Trivial" here means <em>safe to land without a human</em>, not <em>small</em></li>
+		<li>If trivial <em>and</em> the merge gate is open, enables GitHub auto-merge (squash). If GitHub refuses auto-merge because the PR is already mergeable with nothing to wait for ("clean status"), it direct-squash-merges instead — the gate is already the proof the checks are green; if the repository disallows auto-merge outright, it comments for a maintainer. Functional PRs are left for a human with a comment</li>
+		<li>If a PR is <strong>behind</strong> the base branch or <strong>dirty</strong> (a lockfile conflict), it doesn't give up: it asks the bot that opened the PR to update its own branch — <code>@dependabot rebase</code> / <code>@dependabot recreate</code> for Dependabot, or Renovate's <code>rebase</code> label — because the bot regenerates lockfiles correctly. For a trivial PR it enables auto-merge at the same time, so GitHub lands it once the rebase re-runs the checks green. A non-Dependabot/Renovate PR that's behind is left for a human to rebase</li>
 		<li>When in doubt, it does not auto-merge</li>
-		<li>Every run must sign off with a machine-readable completion marker; a run that inspects files but reaches no verdict and takes no action is recorded as <strong>failed</strong>, not a silent green</li>
+		<li>Every run must sign off with a machine-readable completion marker carrying the verdict, the impact tier and the action taken; a run that inspects files but reaches no verdict and takes no action is recorded as <strong>failed</strong>, not a silent green</li>
 	</ul>
 
 	<div class="docs-callout note">
 		<div class="docs-callout-body">
-			Auto-merge needs "Allow auto-merge" enabled on the repository and at least
-			one required status check. If it isn't available, the workflow comments
-			that the update looks trivial and asks a maintainer to merge.
+			Auto-merge needs "Allow auto-merge" enabled on the repository. If it isn't
+			available, the workflow labels the PR <code>requires-human</code> and — once
+			only — comments that the update looks safe and asks a maintainer to merge.
+			Separately, the merge gate needs at least
+			<code>dependencies.minSettledChecks</code> settled, passing checks, so a
+			repository with no CI at all gets nothing merged automatically.
 		</div>
 	</div>
 

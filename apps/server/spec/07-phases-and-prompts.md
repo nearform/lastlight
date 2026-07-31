@@ -181,12 +181,57 @@ other stopping classes) and is skipped, non-failing, when it matches.
 that inspected the PR and stopped without pushing or labelling reported
 green.
 
+Two of those three rows are unconditional. The `flaky` row is
+**bounded**: once the snapshot reports `flakyDeferrals >=
+fix.maxFlakyDeferrals` (packaged `2`), the harness drops that expression
+for the run, so the *third* consecutive `flaky` verdict is treated as
+`reproducible` and spends a normal attempt — three flaky reports running
+is an intermittent real failure, and the alternative is an unbounded
+series of free full runs on one flaky test. The conjunction lives in
+`promoteFlakyDiagnosis` rather than in the guard because `skip_if`'s
+grammar has no negation (see
+[Workflow engine](/spec/06-workflow-engine#gated-skips)).
+
+The model the `fix` phase runs on is escalated on the same axis. Above
+`fix.escalateModelAfterAttempt`, `escalateFixModel`
+(`src/workflows/simple.ts`) substitutes `models["pr-fix-retry"]` for
+`models["pr-fix"]` for that run — the `model:` template renders against
+the run context only, so `{{attempt}}` inside it could never work, and
+rewriting the map is the same result with no engine change. It is done
+*before* the map is persisted on `context.models`, so the admin panel
+shows which model an attempt actually used and `resume.ts` reads that
+same map back rather than re-deriving one.
+An operator who configures no `pr-fix-retry` key gets today's behaviour
+exactly, and a per-repo `models` override composes for free because the
+map is already the merged `base ⊕ repo` one.
+
+The marker lines are also the interface between *attempts*, not only
+between phases. `{{phaseOutputs}}` is empty across a run boundary and
+the shared per-PR workspace is `reset --hard`-ed between runs, so the
+harness **harvests** each marker as its phase completes — parsing it in
+`RunnerCallbacks.onPhaseEnd` (`src/engine/fix-markers.ts` for the
+grammar, `fix-harvest.ts` for the write) onto the run's
+`scratch.fixMarkers`, where the next dispatch reads it back (see
+[State](/spec/10-state) and the
+[dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate)). Three
+properties matter. The parser splits each value at the **next known
+key**, not at the next space, because `cause=` is a sentence that may
+contain `=`; an unrecognised `class=` / `outcome=` / `gate=` value stays
+`null` rather than being coerced to the nearest legal one; and nothing
+in the parse can throw, because the input is agent prose and a failed
+harvest must never fail the phase that produced it. Each harvested
+attempt is rendered as **one bounded line** —
+`attempt 2: class=env-mismatch cause=… | outcome=pushed gate=green` —
+and the accumulated lines are what `{{priorAttempts}}` renders, so
+attempt 3 knows what was tried and what was ruled out without replaying
+two agent sessions.
+
 | File | Purpose | Writes |
 |---|---|---|
 | `diagnose-ci.md` | Shared by both fix workflows. Read the CI report (pulling a full job log only when an excerpt is inconclusive), read `.github/workflows/*.yml`, name the differences between CI and this sandbox, reproduce the exact failing command, and classify into exactly one of the `fixing` skill's five classes. **Changes nothing** — no edits, commits, pushes, labels or comments; the repair is the fix phase's job, and only if the verdict says one is worth attempting. Renders `{{ciSection}}`, `{{baseChecksState}}`, `{{reason}}`, `{{attempt}}`/`{{maxAttempts}}` and `{{priorAttempts}}` (the earlier attempts' marker lines). | Nothing — verdict + `DIAGNOSIS_COMPLETE` marker only (`output_var: diagnosis`) |
 | `pr-fix.md` | Read maintainer comment + CI section + the diagnosis, fix issues, run guardrails, push. Signs off with `CI_FIX_COMPLETE`. | Commits on PR branch |
 | `dependabot-ci-fix.md` | Fix-only: first merge the base branch into a dependency-update PR that can't merge on its own (plain, no force-push — so a `behind` PR is made current, a `dirty` conflict is resolved by regenerating the lockfile), then make the smallest fix (lockfile / call-site / type) if CI is red, run the gate, and push. It does **not** classify or merge — once the push turns checks green the `pr.checks_passed` webhook hands off to `dependabot-pr-merge` (the single owner of the classify → label → auto-merge decision). If it can't land the PR — a fix it can't complete, **or** a `blocked` PR with nothing to push that it can't unblock (e.g. awaiting a required human review) — it stops and applies the `requires-human` label. The label is the *notification*; what actually stops a re-attempt is the escalation record on the run (`escalatedAtSha`), which the [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate) reads on every route — so a maintainer's push re-arms the PR with no label to remove, and the sweeps need no filter of their own. **Triggered by the `pr.checks_failed` webhook, or by the daily `fix-red-dependency-prs` cron whose runner finds Dependabot / Renovate PRs that are settled-red **or** `behind`/`dirty`/`blocked` in code (`src/cron/dependabot-discovery.ts`) and fans out one bounded run per PR (carrying the `{{reason}}`).** Runs only when the preceding `diagnose` verdict says a repair is worth attempting, and signs off with a `CI_FIX_COMPLETE` marker. | Commits on PR branch / labels (give-up only) |
-| `dependabot-pr-merge.md` | For an **already-green** dependency PR (no fix needed): inspect via `github_list_pull_request_files` (file list + line counts, no checkout), **skipping lockfile diffs** — only pull `github_get_pull_request_diff` for a small non-lockfile source change — read `mergeable_state`, classify trivial vs functional, and enable auto-merge on the trivial ones — falling back to a direct squash merge only when GitHub refuses auto-merge because the PR is already mergeable (`clean`) with no required checks ("clean status"), and to a maintainer comment when the repo disallows auto-merge outright. For a PR that is `behind`/`dirty` it never rebases or pushes itself — it asks the bot that opened the PR to update its own branch (`@dependabot rebase`/`recreate` via `github_add_issue_comment`, or Renovate's `rebase` label via `github_add_labels`). **That branch request is independent of the verdict:** regenerating a bot's own branch merges nothing and pre-empts no review, so a FUNCTIONAL bump gets it too — it just doesn't also get auto-merge, which stays trivial-only (issue #245). A trivial PR gets both, so GitHub lands it once the re-run checks go green. Records the verdict as a label — `dependency-trivial` (clearing any stale `requires-human`) or `dependency-functional` + `requires-human`. Signs off with an `ASSESSMENT_COMPLETE` marker (`on_output.requires_marker`) so a silent no-op run fails instead of passing green. **Always single-PR:** triggered by the `pr.checks_passed` webhook, or by the daily cron whose runner finds green Dependabot / Renovate PRs in code (`src/cron/dependabot-discovery.ts`) and fans out one bounded run per PR (retiring the old `mode: scan` whole-repo sweep, which overflowed the model context on busy repos). | Enables auto-merge / requests a rebase / posts a comment / labels |
+| `dependabot-pr-merge.md` | For an **already-green** dependency PR (no fix needed): inspect via `github_list_pull_request_files` (file list + line counts, no checkout), **skipping lockfile diffs** — only pull `github_get_pull_request_diff` for a small non-lockfile source change — classify trivial vs functional, and enable auto-merge on the trivial ones — falling back to a direct squash merge only when GitHub refuses auto-merge because the PR is already mergeable with no checks to wait on ("clean status"), and to a maintainer comment when the repo disallows auto-merge outright. **The merge gate is the code-computed check state, not `mergeable_state`** — the prompt renders `{{checksState}}` / `{{settledCheckCount}}` against `dependencies.{requireSettledChecks,minSettledChecks}` and applies it to *both* mechanisms, because auto-merge is a merge (on a repo with no required checks it lands an already-mergeable PR immediately, so it is not the safe path it was credited as being — 09 → D10). `mergeable_state` survives only for branch hygiene and for choosing the mechanism. For a PR that is `behind`/`dirty` it never rebases or pushes itself — it asks the bot that opened the PR to update its own branch (`@dependabot rebase`/`recreate` via `github_add_issue_comment`, or Renovate's `rebase` label via `github_add_labels`). **That branch request is independent of the verdict:** regenerating a bot's own branch merges nothing and pre-empts no review, so a FUNCTIONAL bump gets it too — it just doesn't also get auto-merge, which stays trivial-only (issue #245). A trivial PR gets both, so GitHub lands it once the re-run checks go green. **A MAJOR bump branches into the `dependency-impact` rubric** rather than being FUNCTIONAL by definition: `low` / `medium` / `high` judged from evidence with no checkout, auto-merged when at or below `{{dependencies.autoMergeMaxImpact}}`, with one audit comment recording the tier and the evidence when `{{dependencies.auditComment}}` (issue #252). Records the verdict as a label — `dependency-trivial` (clearing any stale `requires-human`) or `dependency-functional` + `requires-human` — plus, for a major, exactly one of `dependency-major-low` / `-medium` / `-high`, clearing the other two. Signs off with an `ASSESSMENT_COMPLETE` marker (`on_output.requires_marker`) carrying `verdict=`, `impact=` and `action=`, so a silent no-op run fails instead of passing green. **Always single-PR:** triggered by the `pr.checks_passed` webhook, or by the daily cron whose runner finds green Dependabot / Renovate PRs in code (`src/cron/dependabot-discovery.ts`) and fans out one bounded run per PR (retiring the old `mode: scan` whole-repo sweep, which overflowed the model context on busy repos). | Enables auto-merge / requests a rebase / posts a comment / labels |
 
 ### Explore (Socratic + publish)
 

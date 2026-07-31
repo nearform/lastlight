@@ -59,6 +59,32 @@ export const DEP_TRIVIAL_LABEL = "dependency-trivial";
 export const DEP_FUNCTIONAL_LABEL = "dependency-functional";
 export const REQUIRES_HUMAN_LABEL = "requires-human";
 
+/**
+ * MAJOR-bump impact tiers (issue #252, 05-impact.md §5.4). Additive: the two
+ * labels above keep their meaning, because both are load-bearing for discovery
+ * — `dependency-functional` + `requires-human` still means "high impact, a
+ * human decides", so nothing about the escalated case changed.
+ *
+ * These say what the trivial/functional pair cannot: WHY a major was safe to
+ * land, or why it was not. Exactly one is ever applied at a time; the merge
+ * prompt clears the other two in the same idempotent pass.
+ *
+ * The hex colours are part of the contract — `github_ensure_labels` creates a
+ * missing label with them, so a rename here without the same edit in
+ * `workflows/prompts/dependabot-pr-merge.md` produces two label vocabularies on
+ * the same repo. `tests/cron/label-vocab.test.ts` pins names and colours
+ * against that prompt.
+ */
+/** Green, matching `dependency-trivial` — a major that reads as trivial. */
+export const DEP_MAJOR_LOW_LABEL = "dependency-major-low";
+export const DEP_MAJOR_LOW_COLOR = "0e8a16";
+/** Amber, matching `dependency-functional` — landed, but worth a glance. */
+export const DEP_MAJOR_MEDIUM_LABEL = "dependency-major-medium";
+export const DEP_MAJOR_MEDIUM_COLOR = "fbca04";
+/** Red, matching `requires-human` — never auto-merged. */
+export const DEP_MAJOR_HIGH_LABEL = "dependency-major-high";
+export const DEP_MAJOR_HIGH_COLOR = "b60205";
+
 /** The subset of the harness GitHub client this module needs — keeps it fake-able. */
 export interface PrDiscoveryClient {
   listOpenPullRequests(

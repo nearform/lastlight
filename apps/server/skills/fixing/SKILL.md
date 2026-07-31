@@ -107,9 +107,19 @@ lint + typecheck, run per the **building** skill. If it is still red when you
 run out of iterations, emit `outcome=gave-up` and **do not push a speculative
 fix** — an unverified push costs a full CI cycle to prove nothing.
 
-**Write the gate command to `../.lastlight-verify.sh`.** The right command is
-whatever CI runs, with the package manager detected from the lockfile — so it is
-knowable only at runtime, by you. Write it at the workspace root (a sibling of
-the checkout, outside the git tree, so `git clean` cannot remove it and you
-cannot commit it), and rewrite it on every attempt: a stale script from a
-superseded diagnosis silently gates the wrong thing. Exit 0 means green.
+**Write the gate command to `.lastlight-verify.sh` in the repo root** — your
+cwd, alongside `package.json`. The right command is whatever CI runs, with the
+package manager detected from the lockfile, so it is knowable only at runtime,
+by you. Exit 0 means green.
+
+Three rules about that file:
+
+- **Write it first, before you start repairing.** The harness runs it after each
+  fix iteration; with no script there is no gate, and no gate means no push.
+- **It is yours alone.** The harness deletes it and re-registers it in
+  `.git/info/exclude` at the start of every attempt, so it can never be
+  committed into the PR and a stale script from a superseded diagnosis can never
+  gate this one. Write it fresh; never assume one is already there.
+- **No gate is a RED gate.** If you did not write the script, or you could not
+  run it, report `gate=skipped` — and treat that exactly as `gate=red`: it does
+  **not** authorise a push. Only a script that actually exited 0 does.

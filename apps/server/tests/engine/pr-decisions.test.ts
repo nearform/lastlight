@@ -53,6 +53,7 @@ function state(over: Partial<PrState> = {}): PrState {
     escalatedAtSha: null,
     escalatedBy: null,
     priorAttempts: [],
+    priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
     assessedHeadShaByWorkflow: {},
     runInFlight: null,
@@ -234,6 +235,62 @@ describe("resolveFixDisposition", () => {
       /^attempts-exhausted: attempt 4 exceeds fix\.maxAttempts 3/,
     ],
     [
+      // The ONE prior-run verdict allowed to gate dispatch — and only because
+      // this skip WRITES A RUN ROW (09 → D1's general rule). Expressed against
+      // `fix.retryableClasses`, whose contract is exactly "classes another
+      // attempt may help with; every other class escalates immediately".
+      "a prior `infra-dependent` escalates rather than spending the rest of the budget",
+      { attempt: 2, priorDiagnosisClass: "infra-dependent" },
+      {},
+      {},
+      "skip",
+      /^not-retryable: attempt 1 diagnosed `infra-dependent`/,
+    ],
+    [
+      // Same two classes that cost no attempt: one is a deferral bounded by
+      // `fix.maxFlakyDeferrals`, the other is not this PR's fault.
+      "a prior `flaky` is a deferral, not a verdict",
+      { attempt: 2, priorDiagnosisClass: "flaky" },
+      {},
+      {},
+      "run",
+      /^attempt/,
+    ],
+    [
+      "a prior `upstream-broken` never escalates — 09 → D1",
+      { attempt: 2, priorDiagnosisClass: "upstream-broken" },
+      {},
+      {},
+      "run",
+      /^attempt/,
+    ],
+    [
+      "a retryable class is exactly what the remaining attempts are for",
+      { attempt: 2, priorDiagnosisClass: "reproducible" },
+      {},
+      {},
+      "run",
+      /^attempt/,
+    ],
+    [
+      // The leaf is configurable: an operator who narrows it narrows what a
+      // second attempt is spent on.
+      "an operator who drops a class from retryableClasses escalates it instead",
+      { attempt: 2, priorDiagnosisClass: "env-mismatch" },
+      { retryableClasses: ["reproducible"] },
+      {},
+      "skip",
+      /^not-retryable:.*`env-mismatch`/,
+    ],
+    [
+      "...which an explicit @bot request still overrides",
+      { attempt: 2, priorDiagnosisClass: "infra-dependent" },
+      {},
+      { explicitRequest: true },
+      "run",
+      /^attempt/,
+    ],
+    [
       // A re-fired suite on a multi-app repo, or the daily cron overlapping the
       // webhook. SUCCEEDED runs only — a crash at this SHA records nothing and
       // is attempted again.
@@ -278,12 +335,44 @@ describe("resolveFixDisposition", () => {
 
   it("orders the guards cheapest-first: a fork is refused before the budget is even read", () => {
     // A fork PR that is ALSO over budget and escalated must report the fork —
-    // it is the reason a human can act on.
+    // it is the reason a human can act on — and must NOT be labelled
+    // `requires-human` for a problem that is not its author's to fix.
     const d = resolveFixDisposition(
       state({ isFork: true, headRepoFullName: "octocat/lastlight", cumulativeCostUsd: 99, attempt: 9 }),
       fix,
     );
     expect(d.reason).toMatch(/^fork-pr:/);
+    expect(d.escalation).toBeUndefined();
+  });
+
+  it("marks exactly the three TERMINAL skips as escalating, and nothing else", () => {
+    // The escalation case travels on the decision as a typed field, produced by
+    // the branch that decided — so the applier never string-matches the prose.
+    // What must not creep in here is a skip that is temporary (`upstream-broken`
+    // self-heals), not this PR's problem (`fork-pr`), already escalated
+    // (`human-hold` / `escalated`), or a duplicate delivery
+    // (`already-assessed`): each would put a label on a PR nobody needs to look
+    // at, or comment again on every subsequent event.
+    const escalating = (over: Partial<PrState>, opts = {}) =>
+      resolveFixDisposition(state(over), fix, opts).escalation;
+
+    expect(escalating({ attempt: 4 })).toBe("attempts-exhausted");
+    expect(escalating({ cumulativeCostUsd: 99 })).toBe("budget-exhausted");
+    expect(escalating({ attempt: 2, priorDiagnosisClass: "infra-dependent" })).toBe("not-retryable");
+
+    expect(escalating({ baseChecksState: "failing" })).toBeUndefined();
+    expect(escalating({ isFork: true })).toBeUndefined();
+    expect(escalating({ labels: ["requires-human"], escalatedBy: "human" })).toBeUndefined();
+    expect(
+      escalating({ escalatedBy: "us", escalatedAtSha: "abcdef1234567890", attempt: 9 }),
+    ).toBeUndefined();
+    expect(
+      escalating(
+        { assessedHeadShaByWorkflow: { "pr-fix": "abcdef1234567890" } },
+        { dedupOnHeadSha: true },
+      ),
+    ).toBeUndefined();
+    expect(escalating({})).toBeUndefined(); // a plain `run`
   });
 
   it("does not let an explicit request override upstream-broken or the budget", () => {
@@ -523,5 +612,67 @@ describe("renderContext", () => {
     const ctx = renderContext(state({ checksState: "passing", ciReport: null }));
     expect(ctx.ciSection).toBe("");
     expect(ctx.checksSettledPassing).toBe(true);
+  });
+
+  it("supplies the budget variables the fix prompts already render", () => {
+    // All three fix prompts render `{{#if maxAttempts}} of {{maxAttempts}}{{/if}}`
+    // — dead until this projection provided it, so every prompt said "this is
+    // attempt 2" and never "of 3", which is the half that says spend or stop.
+    const ctx = renderContext(state({ attempt: 2, flakyDeferrals: 1 }), fix);
+    expect(ctx.attempt).toBe(2);
+    expect(ctx.maxAttempts).toBe(fix.maxAttempts);
+    expect(ctx.maxFlakyDeferrals).toBe(fix.maxFlakyDeferrals);
+    expect(ctx.flakyPromoted).toBe(false);
+  });
+
+  it("flags the flaky promotion once the deferrals reach the cap", () => {
+    const ctx = renderContext(state({ flakyDeferrals: fix.maxFlakyDeferrals }), fix);
+    expect(ctx.flakyPromoted).toBe(true);
+  });
+
+  it("omits the budget variables when no policy is passed", () => {
+    // `{{#if maxAttempts}}` must render nothing rather than "of undefined".
+    const ctx = renderContext(state());
+    expect(ctx.maxAttempts).toBeUndefined();
+    expect(ctx.flakyPromoted).toBe(false);
+  });
+
+  // The merge prompt used to re-derive the gate from `checksSettledPassing`.
+  // Projecting the decision itself is what stops the prompt's reading drifting
+  // from the predicate's — these are the two cases where they disagreed.
+  it("projects the merge gate as one decision, with the reason it produced", () => {
+    const deps = defaultDependenciesConfig();
+    const ctx = renderContext(
+      state({ checksState: "passing", settledCheckCount: 3 }),
+      fix,
+      deps,
+    );
+    expect(ctx.mayMerge).toBe(true);
+    expect(ctx.mayMergeReason).toBe(mayMerge(state({ checksState: "passing", settledCheckCount: 3 }), deps).reason);
+  });
+
+  it("projects a gate that disagrees with checksSettledPassing in both directions", () => {
+    // Green checks, but fewer than the operator's floor: passing, yet shut.
+    const strict = renderContext(
+      state({ checksState: "passing", settledCheckCount: 1 }),
+      fix,
+      { ...defaultDependenciesConfig(), minSettledChecks: 3 },
+    );
+    expect(strict.checksSettledPassing).toBe(true);
+    expect(strict.mayMerge).toBe(false);
+
+    // Red checks, but this deployment turned the gate off: failing, yet open.
+    const off = renderContext(state({ checksState: "failing" }), fix, {
+      ...defaultDependenciesConfig(),
+      requireSettledChecks: false,
+    });
+    expect(off.checksSettledPassing).toBe(false);
+    expect(off.mayMerge).toBe(true);
+  });
+
+  it("omits the gate entirely when no dependencies policy is passed", () => {
+    const ctx = renderContext(state({ checksState: "passing" }));
+    expect(ctx.mayMerge).toBeUndefined();
+    expect(ctx.mayMergeReason).toBeUndefined();
   });
 });

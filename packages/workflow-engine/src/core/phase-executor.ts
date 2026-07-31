@@ -1094,8 +1094,23 @@ export class PhaseExecutor {
       (scratchSlot.lastOutputExecutionId && db
         ? db.executions.getExecutionOutput(scratchSlot.lastOutputExecutionId as string) ?? ""
         : (scratchSlot.lastOutput as string | undefined) ?? "");
+    // The LAST iteration's raw output — what the phase signs off with, and so
+    // what the `on_output.requires_marker` postcondition is checked against
+    // below. `previousOutput` can't stand in: it's the accumulated, truncated
+    // transcript and it's empty under `fresh_context`.
+    let lastIterOutput = "";
+    // Set only once an iteration has produced a real turn. Left false on every
+    // path that ends the loop WITHOUT one — a deduplicated (already-completed)
+    // phase on resume, the `on_soft_failure: complete` advance, and a resume
+    // that re-enters already at `max_iterations` — so none of them can trip the
+    // postcondition below. `runStandard` exempts the same dedup case by
+    // returning before its own marker check.
+    let markerApplies = false;
 
-    await this.reporter.step(phaseName, "running");
+    await this.reporter.step(phaseName, "running", phase.messages?.on_start, {
+      iteration: resumeFromIter,
+      maxIterations: MAX_ITER,
+    });
 
     while (!complete && iteration < MAX_ITER) {
       iteration++;
@@ -1179,6 +1194,8 @@ export class PhaseExecutor {
       }
 
       const iterOutput = ir.result.output || "";
+      lastIterOutput = iterOutput;
+      markerApplies = true;
       if (!loop.fresh_context) {
         const combined = previousOutput ? `${previousOutput}\n${iterOutput}` : iterOutput;
         previousOutput = combined.length > MAX_PREV_OUTPUT_BYTES ? combined.slice(-MAX_PREV_OUTPUT_BYTES) : combined;
@@ -1213,7 +1230,10 @@ export class PhaseExecutor {
           scratch[scratchKey] = slot;
         }
         this.reporter.persistPhase(iterLabel, `iteration ${iteration} — condition met`);
-        await this.reporter.step(phaseName, "done");
+        await this.reporter.step(phaseName, "done", phase.messages?.on_success, {
+          iteration,
+          maxIterations: MAX_ITER,
+        });
         break;
       }
 
@@ -1285,6 +1305,29 @@ export class PhaseExecutor {
     const outputVars = phase.output_var
       ? { [phase.output_var]: { completed: complete, iterations: iteration } }
       : undefined;
+
+    // Postcondition marker — the same rule `runStandard` enforces, which a loop
+    // node silently ignored: a phase that declared `on_output.requires_marker`
+    // and then grew a `generic_loop` lost the postcondition without a word,
+    // which is precisely the silent-no-op the marker exists to catch. Checked
+    // against the LAST iteration's output: that turn is the one reporting the
+    // outcome, and an earlier iteration is by definition mid-loop.
+    //
+    // Reaching `max_iterations` without the condition is NOT a failure here (a
+    // fix loop that runs out of iterations reports `outcome=gave-up`, which is
+    // a correct outcome); only the absent sign-off is.
+    const marker = phase.on_output?.requires_marker;
+    if (marker && markerApplies && !lastIterOutput.includes(marker)) {
+      const error = `phase produced no outcome — missing completion marker "${marker}"`;
+      await this.reporter.step(phaseName, "failed", phase.messages?.on_failure, {
+        iteration,
+        maxIterations: MAX_ITER,
+      });
+      this.reporter.failWorkflow(error);
+      results.push({ phase: phaseName, success: false, output: lastIterOutput, error });
+      return { results, status: "failed", outputVars };
+    }
+
     return { results, status: "succeeded", outputVars };
   }
 }

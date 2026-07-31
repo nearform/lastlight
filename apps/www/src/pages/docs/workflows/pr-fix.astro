@@ -124,7 +124,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<tr>
 				<td><code>flaky</code></td>
 				<td>A timeout or network blip, or the same job passed on an earlier commit</td>
-				<td>Change nothing</td>
+				<td>Change nothing — but only twice in a row; the third is taken at face value and fixed</td>
 			</tr>
 			<tr>
 				<td><code>infra-dependent</code></td>
@@ -149,6 +149,82 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			cannot succeed, and skew the cost and failure stats.
 		</div>
 	</div>
+
+	<h2>What each attempt remembers</h2>
+
+	<p>
+		Attempts are separate runs, days apart — the next one starts when CI goes
+		red again. Nothing carries over on its own: the phase outputs are gone and
+		the workspace is reset between runs. So each phase signs off with a single
+		machine-readable line, and the harness keeps <strong>one bounded line per
+		attempt</strong>:
+	</p>
+
+	<pre><code set:text={'attempt 1: class=reproducible cause=lockfile stale vs package.json | outcome=pushed gate=green\nattempt 2: class=env-mismatch cause=CI runs node 22, sandbox node 20 | outcome=gave-up gate=red'}/></pre>
+
+	<p>
+		Attempt 3 therefore knows what was tried and what was ruled out, without
+		replaying two agent sessions. The prompt is told which attempt it is on
+		<em>and of how many</em>, so it can choose between spending and stopping.
+	</p>
+
+	<p>
+		Later attempts can also run on a <strong>stronger model</strong>. Set a
+		<code>pr-fix-retry</code> entry in <code>models</code> and every attempt
+		above <code>fix.escalateModelAfterAttempt</code> uses it instead of
+		<code>pr-fix</code> — the cheap model gets the first shot, the expensive
+		one gets the problem it couldn't solve. The model each attempt actually
+		used is recorded on the run, so it is visible in the dashboard afterwards.
+		Leave the entry unset and nothing changes.
+	</p>
+
+	<p>
+		The same lines drive the budget. An attempt is only counted when the
+		diagnosis actually landed — a run that crashed on a sandbox failure, a
+		quota rejection or a model API error costs <strong>nothing</strong>,
+		because otherwise one bad hour would escalate every open PR across every
+		repo to <code>requires-human</code> and a human would have to un-stick each
+		one by hand. <code>flaky</code> and <code>upstream-broken</code> cost
+		nothing either — they are verdicts about something other than this PR's
+		code. Repeated <code>flaky</code> verdicts are bounded separately by
+		<code>fix.maxFlakyDeferrals</code>: three in a row means the job is not
+		flaky, it is intermittently really failing, and it gets a real attempt.
+		And if <em>anyone else</em> pushes to the PR, the counter and the history
+		reset — the world moved, so it is a fresh problem.
+	</p>
+
+	<h2>When it gives up, it says so</h2>
+
+	<p>
+		When the budget really is spent — every attempt used, the
+		<code>fix.maxCostUsd</code> ceiling reached, or a diagnosis of something
+		no further attempt can fix (needs secrets, a live service, a browser) —
+		Last Light stops <em>and tells you</em>. It applies
+		<code>requires-human</code> and posts <strong>one</strong> comment naming
+		which of those it was, how many attempts were spent, and what each of them
+		found. A PR quietly abandoned with nothing on it is worse than a labelled
+		one: nobody can tell the difference between "still working on it" and
+		"gave up three days ago".
+	</p>
+
+	<p>
+		The label is a <strong>notification, not a one-way door</strong>. Push a
+		commit and Last Light picks the PR up again with a fresh attempt counter —
+		nobody has to remove the label by hand, and asking in a comment works too.
+		A commit Last Light itself pushed doesn't count; it is someone
+		<em>else's</em> change that says the situation moved. The one case that
+		stays permanent is the reverse: a <code>requires-human</code> label a
+		maintainer applied by hand, with no give-up of ours behind it, means "stay
+		out" and is honoured until it is removed.
+	</p>
+
+	<p>
+		Two stopping cases deliberately stay quiet. A failing <em>base</em> branch
+		is not this PR's problem and heals itself the moment the base goes green,
+		and a fork PR gets its own explanation (there is no branch we can push
+		to) — labelling either would poison <code>requires-human</code> with
+		conditions nobody needs to act on.
+	</p>
 
 	<h2>Triggers</h2>
 

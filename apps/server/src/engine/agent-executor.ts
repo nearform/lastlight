@@ -27,7 +27,7 @@ import {
 } from "./executors/orchestrator.js";
 // Re-exported for back-compat with existing importers (tests, dashboards,
 // workflow phase executor).
-export { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError, mapStopReason, reclassifySuccess } from "./executors/shared.js";
+export { RunResultAccumulator, stageSkillBundle, excludeFromGit, resetVerifyScript, VERIFY_SCRIPT_NAME, detectAccountError, mapStopReason, reclassifySuccess } from "./executors/shared.js";
 export type { CommandSpec } from "./executors/orchestrator.js";
 
 /** The GitHub App credentials a run mints from, or undefined for the PAT path. */

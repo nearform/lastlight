@@ -60,7 +60,12 @@ phases:
     label: Assess & maybe auto-merge
     prompt: prompts/dependabot-pr-merge.md
     # `code-review`: the finding-tier / what-to-check rubric for reading a diff.
-    skill: code-review
+    # `dependency-impact`: the low/medium/high rubric for a MAJOR bump (#252) —
+    # a skill rather than more prompt prose because it is needed ONLY when the
+    # PR is a major, and pi surfaces skills as an on-demand catalogue. It is
+    # also per-repo overridable (`.lastlight/skills/dependency-impact/SKILL.md`)
+    # without the operator having to widen `repoConfig.allowKeys`.
+    skills: [code-review, dependency-impact]
     model: "{{models.review}}"
     # Postcondition: the assess run MUST sign off with this marker (see the
     # prompt's OUTPUT contract). Its absence means the agent inspected files then

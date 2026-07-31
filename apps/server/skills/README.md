@@ -25,6 +25,7 @@ or editing a skill.
 | [`building`](building/) | build (executor, reviewer), `pr-fix.yaml`, `dependabot-ci-fix.yaml` | Shared craft: install-first + package-manager detection, the test/lint/typecheck gate, and TDD discipline in the sandbox. |
 | [`fixing`](fixing/) | `pr-fix.yaml`, `dependabot-ci-fix.yaml` | Diagnose a red PR before repairing it — compare the CI definition against the sandbox, classify into five failure classes, then make the minimal repair. Emits the `DIAGNOSIS_COMPLETE` / `CI_FIX_COMPLETE` markers. |
 | [`code-review`](code-review/) | build (reviewer), `pr-review.yaml` | Shared rubric: finding tiers (Critical/Important/Suggestions/Nits) and what-to-check. Referenced by both the branch-diff reviewer and the PR reviewer. |
+| [`dependency-impact`](dependency-impact/) | `dependabot-pr-merge.yaml` | Judge a MAJOR dependency bump by blast radius, not semver magnitude — low / medium / high from evidence gathered with no checkout. Unknown counts as high. |
 | [`verify`](verify/) | `verify.yaml` | Test a behaviour claim as an investigator — CONFIRMED / REFUTED / INCONCLUSIVE with bash-captured evidence. |
 | [`qa-test`](qa-test/) | `qa-test.yaml` | Run an automated QA flow against a CLI or locally-served app and report step-level pass/fail with evidence. |
 | [`browser-qa`](browser-qa/) | `verify.yaml`, `qa-test.yaml`, `demo.yaml` | Drive a real headless browser against a locally-served web UI and capture screenshot (and, for `demo`, video) evidence. Gated to the docker QA image. |

@@ -335,6 +335,49 @@ independently best-effort and degrades to a value that *cannot* cause a
 skip, with the failures listed on `readErrors`. It rides down to
 `dispatchWorkflow` on the context, so nothing is fetched twice.
 
+The derived half is a **fold over the PR's own run history**, read off
+the most recent run of the fix family (`latestForTrigger`, keyed on the
+family rather than on one workflow, because "how many times have we
+tried to fix this PR" is a fact about the pull request and routing
+between `pr-fix` and `dependabot-ci-fix` genuinely varies). Its source
+is that run's harvested markers (`scratch.fixMarkers` — see
+[Phases & Prompts](/spec/07-phases-and-prompts)):
+
+- **`attempt`** advances only when the prior run produced a
+  `DIAGNOSIS_COMPLETE` marker *and* its class costs an attempt. A
+  crashed run — sandbox provisioning failure, quota rejection, model
+  API error — must not consume budget; without that rule one bad hour
+  silently escalates every open dependency PR in every managed repo to
+  `requires-human` and a human un-sticks each one by hand. `flaky` and
+  `upstream-broken` are correct stopping verdicts about something other
+  than this PR's code, so they cost nothing either; `infra-dependent`
+  does cost an attempt, and escalates immediately. Someone *else's*
+  push resets the counter to 1 — the world moved, so it is a fresh
+  problem.
+- **`flakyDeferrals`** counts *consecutive* `flaky` diagnoses and
+  resets on any other class. It exists precisely because `flaky` is
+  free: `fix.maxFlakyDeferrals` is the bound instead, and a third
+  consecutive `flaky` means the job is not flaky but intermittently
+  really failing. At the bound the verdict is **promoted to
+  `reproducible`** — the harness drops the `class=flaky` row from the
+  `fix` phase's `skip_if` for that run, so it is attempted normally
+  (see [Phases & Prompts](/spec/07-phases-and-prompts)).
+- **`priorAttempts`** accumulates one rendered line per attempt, oldest
+  first, and is replayed into every later prompt — so it is bounded on
+  both axes (line length and line count) rather than growing with the
+  PR's age.
+- **`priorDiagnosisClass`** is the *immediately preceding* run's class,
+  and the only prior-run verdict any dispatch decision reads (see the
+  escalation section below for why that is allowed). Unlike
+  `flakyDeferrals` it is **not** carried across a run that diagnosed
+  nothing — including our own escalation row — which is what keeps the
+  manual exit working: a maintainer who removes `requires-human` by hand
+  gets a genuine retry rather than an instant re-escalation that puts the
+  label straight back.
+
+A fresh problem clears all four together: a prompt that says "attempt
+1" while recounting three earlier attempts is incoherent.
+
 Every policy question is then a **pure function over that snapshot**
 (`src/engine/pr-decisions.ts`) returning `{ decision, reason, inputs }`
 rather than a bare enum — `mayMerge`, `resolveFixDisposition`,
@@ -345,6 +388,29 @@ decision and rendered in the log line, the escalation comment and the run
 detail panel: one source, several renderings, instead of three prose
 variants that drift. Purity is the point — the whole gate is table-testable
 against literal fixtures with no GitHub mock and no sandbox.
+
+`mayMerge` is the one that does **not** gate dispatch, deliberately. It gates the
+*action* — may this PR be landed at all, by either mechanism — and that decision
+belongs inside the `dependabot-pr-merge` run, where the bump's impact tier is
+known. It still runs *here*: `renderContext` evaluates it once and projects the
+`{decision, reason}` pair as `{{mayMerge}}` / `{{mayMergeReason}}`, and the merge
+prompt **reads that verdict rather than restating the predicate**.
+
+The distinction matters, and it was learned the expensive way. Carrying the
+*facts* (`checksState`, `checksSettledPassing`, `settledCheckCount`) and letting
+the prompt state the rule over them is one predicate with two readings, free to
+disagree — and they did, in both directions. A prompt gated on
+`checksSettledPassing` alone misses `settledCheckCount < minSettledChecks`, so
+raising `minSettledChecks` reports an open gate over a shut one; and it ignores
+the `requireSettledChecks: false` exemption, so a deployment that turned the gate
+off is still told not to merge. Projecting the decision is what makes the log
+line, the prompt and the admin panel three renderings of one source.
+
+What the dispatch gate does instead is the cheap subset —
+`resolveMergeDisposition` refuses only `pending`, since a still-running suite has
+nothing to decide yet; using the full predicate there would additionally refuse
+every CI-less repo, which is reserved for **major** bumps rather than the whole
+route.
 
 Two properties are load-bearing:
 
@@ -365,12 +431,15 @@ Two properties are load-bearing:
   (`merge-green-dependency-prs`, `fix-red-dependency-prs`,
   `check-prs-awaiting-review`); converting drop-on-lock into queue-on-lock
   is a prerequisite for retiring any of them.
-- **No prior run's verdict may gate dispatch.** A skip writes *no* run row,
-  so a gate on "what did the last run conclude" reads the same stale row
-  forever and the PR is dead with no label, no comment and nothing on the
-  PR explaining why. Every gate here is therefore a **live precondition**
-  (`baseChecksState === "failing"` is `upstream-broken`, not a remembered
-  diagnosis) or a fact about the PR that a human action can change.
+- **No prior run's verdict may gate dispatch — unless the skipping path
+  writes a run row.** A skip returns `{ kind: "skipped" }` and writes *no*
+  row, so a gate on "what did the last run conclude" reads the same stale
+  row forever and the PR is dead with no label, no comment and nothing on
+  the PR explaining why. Almost every gate here is therefore a **live
+  precondition** (`baseChecksState === "failing"` is `upstream-broken`, not
+  a remembered diagnosis) or a fact about the PR that a human action can
+  change. The single exception is `priorDiagnosisClass`, and it is allowed
+  exactly because its skip *escalates* — which records a row (below).
   `requires-human` follows the same rule: the *state* is "we escalated at
   head SHA X" (`escalatedAtSha` on the run context), so a maintainer's push
   re-arms the loop automatically, while the same label with no escalating
@@ -378,17 +447,67 @@ Two properties are load-bearing:
   a permanent override.
 
 An explicit human request (`comment.created` / `pr_review_comment.created`
-/ Slack `message`) overrides the escalation guard and the per-SHA dedup —
-a maintainer asking directly is an intentional override — but not the
-facts: a fork PR, a red base branch and an exhausted budget do not care how
-nicely you ask. Fork PRs are the one skip the author is owed an explanation
-for, so the gate posts a comment saying we have no branch to push to.
+/ Slack `message`) overrides the escalation guard, the not-retryable
+verdict and the per-SHA dedup — a maintainer asking directly is an
+intentional override — but not the facts: a fork PR, a red base branch and
+an exhausted budget do not care how nicely you ask. Fork PRs are the one
+skip the author is owed an explanation for, so the gate posts a comment
+saying we have no branch to push to.
+
+### Escalation — the skips that are not silent
+
+Three of `resolveFixDisposition`'s skips are **terminal for the current
+problem**: the attempt budget is spent (`fix.maxAttempts`), the cost budget
+is spent (`fix.maxCostUsd`), or the last diagnosis names a class outside
+`fix.retryableClasses` (packaged: anything but `reproducible` /
+`env-mismatch`, so in practice `infra-dependent`). No further event will
+change the answer until a human or a new commit does something, so leaving
+them silent is *worse* than `requires-human` — which is at least visible.
+
+Each of those decisions carries a typed **escalation case** beside its
+reason, produced by the branch that decided rather than reconstructed from
+the prose, and `src/engine/pr-escalation.ts` applies it: it records a run
+row, applies `requires-human`, and posts **one** comment naming the case,
+the attempt count and each attempt's `class=` / `cause=` (the same rendered
+`priorAttempts` lines the next prompt would have replayed). Every other
+skip stays silent, and the difference is structural — `upstream-broken`
+self-heals and is not this PR's fault, `fork-pr` gets its own explanation,
+`human-hold` / `escalated` are already escalated, and `already-assessed` is
+a duplicate delivery.
+
+The **run row is the load-bearing part**, not bookkeeping.
+`escalatedAtSha` is read back off the *prior run's* persisted
+`context.prState`; a dispatch-time skip writes no row, so an escalation
+that stayed row-less would never persist it — and the next dispatch,
+seeing `requires-human` with no `escalatedAtSha` behind it, would classify
+our own label as a human's **permanent** hold and latch the PR dead. That
+is the one-way door the stateful guard exists to remove, reintroduced by
+the feature meant to remove it. The row is recorded `succeeded` (`failed`
+is reserved for malfunction) with the resolved snapshot on it, so the run
+detail panel explains the stop.
+
+Three consequences follow from that ordering:
+
+- **The row is written before the label.** Row-then-crash leaves an
+  escalation with no label, so the guard does not bind and the next event
+  simply escalates again; label-then-crash would leave a label with no
+  record, which is the permanent misclassification above.
+- **The comment is posted only behind a label that landed**, so a failed
+  label write retries cleanly instead of commenting once per attempt.
+- **Once-only is a property of the record, not of an API scan.** Neither
+  `postComment` nor `addLabels` de-duplicates; the next dispatch at the
+  same head resolves `escalatedBy: "us"` and takes the `escalated:` skip,
+  which carries no escalation case and therefore applies nothing.
 
 `dispatchWorkflow` runs the same gate for the routes that never cross the
 dispatcher — the cron fan-outs and `/api/run` — and persists the snapshot
 on the run row (see [State](/spec/10-state)). That is what makes a nightly
 `fix-red-dependency-prs` run and a live webhook carry byte-identical
-context.
+context, and it is why the escalation above is one shared call rather than
+two call-site implementations: a skip that labels the PR on the webhook
+route and stays silent on the cron route would be the same divergence this
+whole gate exists to remove — and the daily sweep is the route that reaches
+most exhausted PRs.
 
 ## Introspection — the route playground
 
@@ -460,6 +579,7 @@ unchanged.
 | Intent → workflow fallback | `getWorkflowByIntent()` in `src/workflows/loader.ts` |
 | PR snapshot + `PR_SCOPED_WORKFLOWS` (the run lock's span) | `src/engine/pr-state.ts` |
 | Pure decisions over the snapshot | `src/engine/pr-decisions.ts` |
+| Escalation (label + one comment + the run row) | `src/engine/pr-escalation.ts` |
 | Dispatch gate (router result → workflow) | `src/engine/dispatcher.ts` |
 | Injection screener | `src/engine/screen/screen.ts` |
 | Direct provider calls + model auto-detect | `src/engine/llm.ts` |

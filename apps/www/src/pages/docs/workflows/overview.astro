@@ -142,7 +142,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">Dependabot PR merge</span>
 			</div>
-			<p>Finds already-green dependency-update PRs and enables auto-merge on the trivial ones — via webhook and a daily per-PR cron backstop.</p>
+			<p>Finds already-green dependency-update PRs and enables auto-merge on the safe ones — including a major bump whose <em>impact</em> is low enough — via webhook and a daily per-PR cron backstop.</p>
 			<span class="workflow-card-meta">1 phase &middot; webhook + cron</span>
 		</a>
 

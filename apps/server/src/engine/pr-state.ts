@@ -21,10 +21,18 @@
  */
 
 import type { StateDb } from "../state/db.js";
+import type { WorkflowRun } from "../state/workflow-run-store.js";
 import type { GitHubClient } from "./github/github.js";
 import type { CiFailureReport } from "./github/github.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
 import { REQUIRES_HUMAN_LABEL } from "../cron/dependabot-discovery.js";
+import { readHarvestedMarkers, type HarvestedFixMarkers } from "./fix-harvest.js";
+import {
+  ATTEMPT_FREE_CLASSES,
+  boundAttemptLines,
+  renderAttemptLine,
+  type DiagnosisClass,
+} from "./fix-markers.js";
 
 /** Aggregate check state for a ref, as {@link GitHubClient.getChecksConclusion} reports it. */
 export type ChecksState = "passing" | "failing" | "pending" | "none";
@@ -159,6 +167,22 @@ export interface PrState {
   escalatedBy: "us" | "human" | null;
   /** One marker line per prior attempt, oldest first — rendered as `{{priorAttempts}}`. */
   priorAttempts: string[];
+  /**
+   * The class the IMMEDIATELY PRECEDING run diagnosed, or null.
+   *
+   * The only prior-run verdict any dispatch decision is allowed to read, and it
+   * is allowed only because the skip it produces WRITES A RUN ROW (09 → D1's
+   * general rule; see `resolveFixDisposition`). Null when that run produced no
+   * `DIAGNOSIS_COMPLETE`, when the token was unrecognised, or when the problem
+   * is fresh.
+   *
+   * Deliberately NOT carried across a run that diagnosed nothing — unlike
+   * {@link flakyDeferrals}, which persists. That asymmetry is what keeps the
+   * manual exit working: a maintainer who removes `requires-human` by hand is
+   * asking for another try, and a remembered `infra-dependent` would re-escalate
+   * on the next event and put the label straight back.
+   */
+  priorDiagnosisClass: DiagnosisClass | null;
   /** Cumulative USD across every fix-family run for this PR (`fix.maxCostUsd`). */
   cumulativeCostUsd: number;
   /**
@@ -276,6 +300,7 @@ export async function resolvePrState(
     escalatedAtSha: null,
     escalatedBy: null,
     priorAttempts: [],
+    priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
     assessedHeadShaByWorkflow: {},
     runInFlight: null,
@@ -389,14 +414,15 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
 
   const prior = deps.db.runs.latestForTrigger(family, triggerId);
   const priorState = priorPrState(prior?.context);
+  // The prior run's HARVEST — what its agent actually concluded, read back off
+  // the same row. `context.prState` is written at dispatch, before any phase
+  // runs, so the post-hoc facts live on `scratch` (see `./fix-harvest.ts`).
+  const priorMarkers = prior ? readHarvestedMarkers(prior) : null;
 
   // Carry the escalation record forward. `escalatedAtSha` lives on the run
   // context already, so the stateful `requires-human` guard costs no new
   // storage, no extra API call and no label mutation (09 → S1).
   state.escalatedAtSha = priorState?.escalatedAtSha ?? null;
-  state.priorAttempts = Array.isArray(priorState?.priorAttempts) ? priorState.priorAttempts : [];
-  state.flakyDeferrals =
-    typeof priorState?.flakyDeferrals === "number" ? priorState.flakyDeferrals : 0;
 
   // `requires-human` is a NOTIFICATION, not a state. The state is "we escalated
   // at head SHA X" — which is what distinguishes a bot escalation (cleared by
@@ -405,7 +431,102 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   const hasLabel = state.labels.includes(REQUIRES_HUMAN_LABEL);
   state.escalatedBy = !hasLabel ? null : state.escalatedAtSha ? "us" : "human";
 
-  state.attempt = nextAttempt(state, priorState, prior ? didSpendAttempt(prior.id, deps) : false);
+  const history = deriveAttemptHistory(
+    state,
+    priorState,
+    priorMarkers,
+    prior ? didSpendAttempt(prior, deps) : false,
+  );
+  state.attempt = history.attempt;
+  state.priorAttempts = history.priorAttempts;
+  state.flakyDeferrals = history.flakyDeferrals;
+  state.priorDiagnosisClass = history.priorDiagnosisClass;
+}
+
+/** The four history fields {@link deriveAttemptHistory} produces together. */
+interface AttemptHistory {
+  attempt: number;
+  priorAttempts: string[];
+  flakyDeferrals: number;
+  priorDiagnosisClass: DiagnosisClass | null;
+}
+
+/**
+ * Fold one finished run into the PR's retry history.
+ *
+ * The three fields move TOGETHER and are derived in one place for that reason:
+ * `attempt`, the journal replayed as `{{priorAttempts}}`, and the consecutive-
+ * `flaky` counter all answer the same question — "what has happened to THIS
+ * PROBLEM so far" — and a partial update is how they drift apart. The clearest
+ * symptom of deriving them separately: a maintainer's push resets `attempt` to
+ * 1 while `{{priorAttempts}}` still narrates attempts 1–3, so the prompt tells
+ * the agent it is on attempt 1 and then recounts three of them.
+ *
+ * So a FRESH PROBLEM clears all three at once. Everything else appends the
+ * prior run's rendered line and advances (or does not advance) the counter.
+ */
+function deriveAttemptHistory(
+  state: PrState,
+  prior: PersistedPrState | null,
+  priorMarkers: HarvestedFixMarkers | null,
+  priorSpent: boolean,
+): AttemptHistory {
+  const fresh: AttemptHistory = {
+    attempt: 1,
+    priorAttempts: [],
+    flakyDeferrals: 0,
+    priorDiagnosisClass: null,
+  };
+  const priorAttempt = typeof prior?.attempt === "number" ? prior.attempt : 0;
+  // No prior run of the family at all.
+  if (priorAttempt === 0) return fresh;
+
+  // Someone else's push — a maintainer, a Dependabot rebase, a Renovate
+  // recreate. The world moved, so the counter, the journal, the deferral count
+  // and the last verdict are all about a problem that no longer exists.
+  if (!sameProblem(state, prior)) return fresh;
+
+  const carried = Array.isArray(prior?.priorAttempts)
+    ? prior.priorAttempts.filter((l): l is string => typeof l === "string")
+    : [];
+  // A run that produced no marker leaves no line, exactly as it consumes no
+  // attempt: there is nothing for the next attempt to learn from a crash.
+  const line = renderAttemptLine(priorAttempt, priorMarkers);
+  const priorAttempts = boundAttemptLines(line ? [...carried, line] : carried);
+
+  const priorFlaky = typeof prior?.flakyDeferrals === "number" ? prior.flakyDeferrals : 0;
+  // CONSECUTIVE, which is the whole point of the cap: three `flaky` verdicts in
+  // a row means the job is not flaky, it is intermittently really failing, and
+  // `fix.maxFlakyDeferrals` promotes it to `reproducible`. Any other class
+  // breaks the run and resets to 0. A run with no diagnosis at all (a crash)
+  // neither advances nor resets it — it says nothing about flakiness.
+  const flakyDeferrals = priorMarkers?.diagnosis
+    ? priorMarkers.diagnosis.class === "flaky"
+      ? priorFlaky + 1
+      : 0
+    : priorFlaky;
+
+  return {
+    attempt: nextAttempt(state, prior, priorSpent),
+    priorAttempts,
+    flakyDeferrals,
+    // Only ever the LAST run's verdict — see `PrState.priorDiagnosisClass` for
+    // why this one does not persist across a run that diagnosed nothing.
+    priorDiagnosisClass: priorMarkers?.diagnosis?.class ?? null,
+  };
+}
+
+/**
+ * Is the live head the same PROBLEM the prior run worked on?
+ *
+ * True when the head is unchanged (we made no progress — covers `no-change`
+ * and `gave-up`) or when WE authored the new head (our fix landed and CI is
+ * still red). False only when someone else pushed.
+ */
+function sameProblem(state: PrState, prior: PersistedPrState | null): boolean {
+  const priorHead = typeof prior?.headSha === "string" ? prior.headSha : "";
+  const headChanged = !!state.headSha && !!priorHead && state.headSha !== priorHead;
+  return !(headChanged && !state.headIsOurs);
 }
 
 /**
@@ -428,13 +549,10 @@ function nextAttempt(
   const priorAttempt = typeof prior?.attempt === "number" ? prior.attempt : 0;
   if (priorAttempt === 0) return 1;
 
-  const priorHead = typeof prior?.headSha === "string" ? prior.headSha : "";
-  const headChanged = !!state.headSha && !!priorHead && state.headSha !== priorHead;
-
-  // Someone else's push — a maintainer, a Dependabot rebase, a Renovate
-  // recreate. The world moved: fresh problem, fresh counter. This is what stops
-  // an exhausted human PR being permanently un-fixable for the life of the PR.
-  if (headChanged && !state.headIsOurs) return 1;
+  // Someone else's push. The world moved: fresh problem, fresh counter. This is
+  // what stops an exhausted human PR being permanently un-fixable for the life
+  // of the PR.
+  if (!sameProblem(state, prior)) return 1;
 
   // Same head (we made no progress — covers `no-change` and `gave-up`), or a
   // head WE authored on top of it (our fix landed, CI is still red). Same
@@ -446,26 +564,47 @@ function nextAttempt(
 /**
  * Did this prior run actually SPEND an attempt?
  *
- * §S1: `attempt` increments only when the run produced a `DIAGNOSIS_COMPLETE`
- * marker.
+ * §S1 answers it in two clauses, and BOTH are necessary:
  *
- * SEAM (Phase 4). The `onPhaseEnd` marker harvest — which will write the
- * class, the cause and the gate result to `scratch.fix` — is Phase 4's. Until
- * it lands we read the closest fact already persisted, and it is very nearly
- * the same fact: the `diagnose` phase carries
- * `on_output.requires_marker: DIAGNOSIS_COMPLETE`, so a SUCCEEDED `diagnose`
- * ledger row cannot exist without the marker having been emitted. A run that
- * crashed before or inside diagnose has no such row and costs nothing. When
- * Phase 4 lands, replace this call with a read of the harvested marker; the
- * signature does not change.
+ * 1. **The run produced a `DIAGNOSIS_COMPLETE` marker.** This is a read of the
+ *    harvest (`./fix-harvest.ts`), written by `onPhaseEnd` as each phase
+ *    completes. A run that crashed before `diagnose` finished — sandbox
+ *    provisioning failure, quota rejection, model API error — harvested no
+ *    diagnosis and costs nothing. That rule is the single most important
+ *    robustness property in the design: without it, one bad hour silently
+ *    escalates EVERY open dependency PR across EVERY managed repo to
+ *    `requires-human`, and a human then un-sticks each one by hand.
+ *    `fix.maxCostUsd` and `MAX_RESTART_RESUMES` bound the crash-loop case
+ *    instead, and neither poisons a label.
+ * 2. **Its class is one that costs an attempt** — §S1's class table, encoded as
+ *    {@link ATTEMPT_FREE_CLASSES}. `flaky` and `upstream-broken` are correct
+ *    stopping verdicts about something other than this PR's code; charging for
+ *    them would leave the PR with no attempts left at the moment it becomes
+ *    fixable, and would make `fix.maxFlakyDeferrals` unreachable.
+ *
+ * An UNRECOGNISED class counts. A hallucinated class token is not evidence that
+ * the run cost nothing, and the free-attempt direction is the unbounded one.
+ *
+ * Two fallbacks, in order:
+ *
+ * - **No harvest namespace at all** — the run predates the harvest (an upgrade
+ *   with fix runs already in flight) or died before its first `onPhaseEnd`.
+ *   Fall back to the ledger probe: `diagnose` carries
+ *   `on_output.requires_marker: DIAGNOSIS_COMPLETE`, so a SUCCEEDED `diagnose`
+ *   row cannot exist without the marker having been emitted. Same fact, read
+ *   less directly, and without the class.
+ * - **A read error** — fail CLOSED (count it). A read failure must not silently
+ *   grant a free attempt forever; the cost cap is the backstop, and the
+ *   alternative is an unbounded retry loop.
  */
-function didSpendAttempt(workflowRunId: string, deps: PrStateDeps): boolean {
+function didSpendAttempt(prior: WorkflowRun, deps: PrStateDeps): boolean {
   try {
-    return deps.db.executions.phaseSucceededInRun(workflowRunId, "diagnose");
+    const harvest = readHarvestedMarkers(prior);
+    if (!harvest) return deps.db.executions.phaseSucceededInRun(prior.id, "diagnose");
+    const diagnosis = harvest.diagnosis;
+    if (!diagnosis) return false;
+    return !(diagnosis.class && ATTEMPT_FREE_CLASSES.has(diagnosis.class));
   } catch {
-    // A ledger read failure must not silently grant a free attempt forever.
-    // Fail CLOSED here (count it) — the cost cap is the backstop, and the
-    // alternative is an unbounded retry loop.
     return true;
   }
 }

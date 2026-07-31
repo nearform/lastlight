@@ -33,6 +33,10 @@ import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { artifactStore } from "../sandbox/artifact-store.js";
 import { getWorkflow } from "./loader.js";
 import {
+  phaseSkipIfExpressions,
+  type AgentWorkflowDefinition,
+} from "lastlight-workflow-engine";
+import {
   runWorkflow,
   type ApprovalGateConfig,
   type RunnerCallbacks,
@@ -748,6 +752,130 @@ export function artifactIssueDir(
   return relocate ? `../.lastlight/${issueKey}` : `.lastlight/${issueKey}`;
 }
 
+// ---------------------------------------------------------------------------
+// Per-attempt fix policy (issue #251 — 04-retry.md §4.4, 09-state-machine.md §S1)
+// ---------------------------------------------------------------------------
+//
+// Both knobs below read `attempt` / `flakyDeferrals` — facts about the PR that
+// `renderContext` puts on `request.extra` at the dispatch choke point. Absent
+// (every non-PR route, and every route that predates the snapshot) they are
+// inert, so nothing outside the fix family can observe them.
+
+/**
+ * Read a numeric leaf off the untyped dispatch `extra`. Anything else — absent,
+ * a string, a stale shape — reads as "no snapshot", which is the inert case.
+ */
+function numberFromExtra(
+  extra: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const v = extra?.[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** The `models` key both fix workflows' `fix` phase renders. */
+const FIX_MODEL_KEY = "pr-fix";
+/** The optional escalation model. Unset ⇒ today's behaviour, exactly. */
+const FIX_RETRY_MODEL_KEY = "pr-fix-retry";
+
+/**
+ * Substitute `models["pr-fix-retry"]` for `models["pr-fix"]` once this PR has
+ * spent more than `fix.escalateModelAfterAttempt` attempts.
+ *
+ * `resolveModelVariant` renders `model:` templates against `run.ctx` **only**,
+ * so `{{attempt}}` inside a `model:` template cannot work without an engine
+ * change. Rewriting the map here is the cheapest correct route: no engine
+ * change, no YAML change, and it composes with the per-repo `models` override
+ * (issue #180) for free because the map handed in is already the merged
+ * `base ⊕ repo` one.
+ *
+ * Done BEFORE the map is persisted on `context.models`, deliberately: the admin
+ * panel renders that map, so an operator can see which model an attempt actually
+ * used — and `resume.ts` reads a resumed run's models back off that same stored
+ * value rather than re-deriving one, so a restart mid-attempt does not silently
+ * demote the model. (A repo layer that pins its own `pr-fix` re-applies that
+ * leaf on restore, which is the one case where the escalation does not survive.)
+ *
+ * Returns the map **by identity** when nothing applies, so a deployment with no
+ * `pr-fix-retry` key cannot tell this function exists.
+ */
+export function escalateFixModel(
+  workflowName: string,
+  models: ModelConfig | undefined,
+  attempt: number | undefined,
+  fix: FixConfig,
+): ModelConfig | undefined {
+  // Only the fix family reads `models["pr-fix"]`. Every PR-scoped dispatch
+  // carries an `attempt` (the snapshot is resolved for `pr-review` and
+  // `dependabot-pr-merge` too), so without this guard a review run would record
+  // a rewritten map it never used.
+  if (!PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) return models;
+  if (!models) return models;
+  const retry = models[FIX_RETRY_MODEL_KEY];
+  if (!retry) return models;
+  // `escalateModelAfterAttempt: 0` is legal and means "escalate from attempt 1".
+  // A dispatch with no snapshot has no attempt at all — treat it as the first.
+  if ((attempt ?? 1) <= fix.escalateModelAfterAttempt) return models;
+  if (models[FIX_MODEL_KEY] === retry) return models;
+  return { ...models, [FIX_MODEL_KEY]: retry };
+}
+
+/**
+ * The one `skip_if` row that `fix.maxFlakyDeferrals` makes conditional.
+ *
+ * Matched literally rather than by pattern: the promotion has to be greppable
+ * from the YAML, and a fuzzy match would also strip an overlay's own unrelated
+ * `class=flaky…` guard.
+ */
+export const FLAKY_SKIP_IF_EXPRESSION = "phaseOutputs.diagnosis.contains('class=flaky')";
+
+/**
+ * Promote a third consecutive `flaky` diagnosis to `reproducible` by dropping
+ * the `flaky` row from the `fix` phase's `skip_if` for this run.
+ *
+ * §S1: `flaky` short-circuits the `fix` phase — by its own definition there is
+ * nothing to fix — but it is **bounded**. Without the cap, a daily
+ * `fix-red-dependency-prs` against a PR with one flaky test produces an
+ * unbounded series of free full runs; and if a job reports flaky three times
+ * running it is not flaky, it is an intermittent real failure — exactly the PR a
+ * human would want attempted. So `fix.maxFlakyDeferrals: 2` deferrals, and the
+ * THIRD consecutive `flaky` spends a normal attempt.
+ *
+ * `flakyDeferrals` counts PRIOR runs, so the off-by-one lands here: `0` and `1`
+ * still defer, `2` (the third such diagnosis) runs. Same predicate
+ * `renderContext` exposes to the prompts as `{{flakyPromoted}}`.
+ *
+ * **Why a list edit and not an expression.** `skip_if`'s grammar
+ * (`core/loop-eval.ts`) is `contains()` / `==` / `!=` against a dotted path, and
+ * the list is OR-ed: there is no negation and no conjunction, so
+ * "`class=flaky` AND NOT promoted" is not expressible — and the alternatives
+ * (a new operator, or template-rendering the expressions) are engine changes
+ * bought for one caller. The conjunction instead lands where its second term
+ * already lives: the promotion is a fact about the PR's history, known before
+ * the run starts, so the run's guard list is composed from it. The other two
+ * rows are unconditional and are never touched.
+ *
+ * The loaded definition is a process-global cache entry, so a promoted run gets
+ * a shallow copy; an unpromoted one gets the definition back by identity.
+ */
+export function promoteFlakyDiagnosis(
+  definition: AgentWorkflowDefinition,
+  flakyDeferrals: number | undefined,
+  fix: FixConfig,
+): AgentWorkflowDefinition {
+  if ((flakyDeferrals ?? 0) < fix.maxFlakyDeferrals) return definition;
+  let promoted = false;
+  const phases = definition.phases.map((phase) => {
+    const exprs = phaseSkipIfExpressions(phase);
+    if (!exprs.includes(FLAKY_SKIP_IF_EXPRESSION)) return phase;
+    promoted = true;
+    const kept = exprs.filter((e) => e !== FLAKY_SKIP_IF_EXPRESSION);
+    // An empty `skip_if` is a schema violation (min 1), so drop the field.
+    return { ...phase, skip_if: kept.length > 0 ? kept : undefined };
+  });
+  return promoted ? { ...definition, phases } : definition;
+}
+
 /**
  * Run a named agent workflow against a target.
  *
@@ -779,7 +907,10 @@ export async function runSimpleWorkflow(
     return { success: true, phases: [] };
   }
 
-  const definition = getWorkflow(workflowName);
+  // `let`: the fix family's `flaky` cap composes the run's `skip_if` list from
+  // the PR's deferral history below (see `promoteFlakyDiagnosis`). Everything
+  // else gets the loader's cached definition back by identity.
+  let definition = getWorkflow(workflowName);
   const { owner, repo, issueNumber, prNumber } = request;
   const notify = callbacks.postComment || (async () => {});
 
@@ -792,7 +923,6 @@ export async function runSimpleWorkflow(
   // consistent view without re-deriving the merge. No layer ⇒ these are the
   // caller's own maps by identity, so behaviour is unchanged.
   const repoConfig = request.repoConfig;
-  const effectiveModels = repoConfig?.models ?? models;
   const effectiveVariants = repoConfig?.variants ?? variants;
   const effectiveApproval = repoConfig?.approval ?? approvalConfig;
   // The policy blocks have no caller-supplied counterpart (they aren't runner
@@ -803,6 +933,23 @@ export async function runSimpleWorkflow(
   // see the note on `ctx` below.
   const effectiveFix = repoConfig?.fix ?? operatorFix();
   const effectiveDependencies = repoConfig?.dependencies ?? operatorDependencies();
+
+  // ── Per-attempt fix policy (04-retry.md §4.4, 09-state-machine.md §S1) ─────
+  //
+  // Two facts about the PR, both projected onto `request.extra` by
+  // `renderContext` at dispatch: how many attempts this problem has already
+  // cost, and how many consecutive `flaky` verdicts it has deferred on. They
+  // resolve against the run's EFFECTIVE `fix:` block, so a repo that clamped
+  // itself down is escalated and promoted on its own numbers.
+  const attempt = numberFromExtra(request.extra, "attempt");
+  const flakyDeferrals = numberFromExtra(request.extra, "flakyDeferrals");
+  const effectiveModels = escalateFixModel(
+    workflowName,
+    repoConfig?.models ?? models,
+    attempt,
+    effectiveFix,
+  );
+  definition = promoteFlakyDiagnosis(definition, flakyDeferrals, effectiveFix);
 
   // Identify the trigger uniquely. Issue/PR-scoped workflows include the
   // number; repo-scoped workflows (e.g. health) just identify by repo+name;

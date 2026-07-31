@@ -56,10 +56,16 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
      the repo's package manager),
    - a breaking change in the new version needs call sites / types updated,
    - a peer-dependency or engines constraint needs a matching bump.
-3. Make the **smallest** change that makes CI pass, per the **fixing** skill.
+3. Write the gate script: `.lastlight-verify.sh` in the repo root, holding the
+   exact build + test + lint + typecheck commands CI runs, with the package
+   manager taken from the lockfile. Exit 0 means green. It is not there yet —
+   the harness clears it at the start of every attempt (see the **fixing**
+   skill). Write it before you start repairing, so the repair has something to
+   verify against.
+4. Make the **smallest** change that makes CI pass, per the **fixing** skill.
    Prefer a lockfile regeneration or a mechanical call-site/type update over a
    behavioural change. Do NOT widen the scope beyond making this update green.
-4. Follow the **building** skill: install dependencies with the repo's package
+5. Follow the **building** skill: install dependencies with the repo's package
    manager, then run the full gate (mirror CI — build + test + lint + typecheck). Do NOT commit until
    it all passes locally.
 
@@ -70,8 +76,15 @@ AFTER FIXING:
    Once the push re-runs CI and it goes green, the `dependabot-pr-merge`
    workflow takes over the merge — you do NOT merge or label a healthy PR.
 
-Push only on a green local gate. If the gate is still red, do NOT push a
-speculative fix — flag it for a human instead (below).
+PUSH DISCIPLINE — the gate decides, and it is checked after you finish:
+{{#if iteration}}- This is local iteration {{iteration}} of {{maxIterations}}. When `.lastlight-verify.sh`
+  exits non-zero you get another iteration to keep working; when it exits 0 the
+  phase ends.{{/if}}
+- Push **only** on a green local gate. A gate that did not run is `gate=skipped`,
+  and `skipped` counts as RED — it never authorises a push.
+- On the LAST iteration with the gate still red: emit `outcome=gave-up`,
+  `gate=red`, and do **not** push a speculative fix — flag it for a human
+  instead (below). An unverified push costs a full CI cycle to prove nothing.
 
 STOP and flag for a human when you CAN'T land it, so the nightly red-dependency
 sweep won't keep re-attempting it. That covers two cases:

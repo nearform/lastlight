@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError, reclassifySuccess } from "#src/engine/agent-executor.js";
+import { RunResultAccumulator, stageSkillBundle, excludeFromGit, resetVerifyScript, VERIFY_SCRIPT_NAME, detectAccountError, reclassifySuccess } from "#src/engine/agent-executor.js";
 
 /**
  * A pi assistant `message_end` event carrying per-message usage. Mirrors the
@@ -477,6 +477,77 @@ describe("excludeFromGit", () => {
     try {
       // No .git here — must not throw and must not create anything.
       expect(() => excludeFromGit(tmp, ".lastlight-skills")).not.toThrow();
+      expect(existsSync(join(tmp, ".git"))).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("writes the FILE form without a trailing slash", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "gitexclude-"));
+    try {
+      const repo = join(tmp, "repo");
+      mkdirSync(join(repo, ".git", "info"), { recursive: true });
+
+      excludeFromGit(repo, VERIFY_SCRIPT_NAME, "file");
+
+      const body = readFileSync(join(repo, ".git", "info", "exclude"), "utf8");
+      // `/x/` is a DIRECTORY pattern — with the trailing slash git would match
+      // nothing and the gate script could be committed into the PR.
+      expect(body).toContain(`/${VERIFY_SCRIPT_NAME}\n`);
+      expect(body).not.toContain(`/${VERIFY_SCRIPT_NAME}/`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * The push gate must be rewritten every attempt (09-state-machine.md §S1): the
+ * fix family shares ONE workspace per PR, so a script written by a superseded
+ * diagnosis — possibly by the other fix workflow — outlives the run that wrote
+ * it, and a stale gate passes green against the wrong commands.
+ */
+describe("resetVerifyScript", () => {
+  function checkout(): { tmp: string; repo: string } {
+    const tmp = mkdtempSync(join(tmpdir(), "verifygate-"));
+    const repo = join(tmp, "repo");
+    mkdirSync(join(repo, ".git", "info"), { recursive: true });
+    return { tmp, repo };
+  }
+
+  it("deletes a stale gate script and excludes it from git", () => {
+    const { tmp, repo } = checkout();
+    try {
+      writeFileSync(join(repo, VERIFY_SCRIPT_NAME), "#!/bin/sh\nexit 0\n");
+
+      resetVerifyScript(repo);
+
+      expect(existsSync(join(repo, VERIFY_SCRIPT_NAME))).toBe(false);
+      expect(readFileSync(join(repo, ".git", "info", "exclude"), "utf8"))
+        .toContain(`/${VERIFY_SCRIPT_NAME}`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("registers the exclusion on a fresh checkout with no script yet (idempotently)", () => {
+    const { tmp, repo } = checkout();
+    try {
+      resetVerifyScript(repo);
+      resetVerifyScript(repo);
+
+      const body = readFileSync(join(repo, ".git", "info", "exclude"), "utf8");
+      expect(body.match(new RegExp(`/${VERIFY_SCRIPT_NAME.replace(/\./g, "\\.")}`, "g"))).toHaveLength(1);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("does not throw when the dir is not a checkout", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "verifygate-"));
+    try {
+      expect(() => resetVerifyScript(tmp)).not.toThrow();
       expect(existsSync(join(tmp, ".git"))).toBe(false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });

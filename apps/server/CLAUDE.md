@@ -158,6 +158,14 @@ src/
                         persisted on `context.prState`. Never throws: every
                         read is best-effort and degrades to a value that
                         cannot cause a skip.
+    pr-escalation.ts    What a TERMINAL skip does to the PR: applies
+                        requires-human + one comment naming the case, the
+                        attempts spent and each attempt's class/cause — and
+                        RECORDS A RUN ROW first, because escalatedAtSha is
+                        read back off the prior run's context and a skip
+                        otherwise writes none (without it the bot reads its
+                        own label as a human's permanent hold). Called from
+                        BOTH dispatch gates.
     pr-decisions.ts     PURE functions over that snapshot — mayMerge,
                         resolveFixDisposition, resolveMergeDisposition,
                         resolveReviewTrigger, resolveDispatchDisposition,
@@ -351,7 +359,11 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   and a `{ decision, reason, inputs }` verdict per gate, rendered in the log, the
   escalation comment and the admin panel from one source. The loser of the lock
   is **dropped with a reason, not queued** — sound only because each dropped
-  case has a cron re-pickup. Contract: `spec/05-router.md` → "The PR-scoped
+  case has a cron re-pickup. A skip that is **terminal** for the problem
+  (attempts or cost exhausted, or a diagnosis outside `fix.retryableClasses`)
+  is not dropped silently: `pr-escalation.ts` records a run row, labels the PR
+  `requires-human` and posts one comment. The row is the load-bearing part —
+  see its module header. Contract: `spec/05-router.md` → "The PR-scoped
   dispatch gate".
 - **Configuration & deployment overlay** (`src/config/config.ts`, `config/default.yaml`,
   issue #61) — non-secret config (managed repos, routes, models, variants,

@@ -69,14 +69,41 @@ phases:
     # non-failing skip — the RUN still records `succeeded`, so `on_failure`
     # below ("leaving it for a human") does NOT post and the PR is never
     # poisoned with `requires-human` for a failure that isn't its fault.
+    #
+    # `class=flaky` is the one BOUNDED row: after `fix.maxFlakyDeferrals` (2)
+    # consecutive `flaky` verdicts on the same problem the harness drops this
+    # expression for that run, so the third one is attempted as `reproducible`
+    # (09-state-machine.md §S1 — three flaky reports running is an intermittent
+    # real failure, and an unbounded series of free full runs otherwise).
+    # `promoteFlakyDiagnosis` in src/workflows/simple.ts matches the expression
+    # below LITERALLY; the other two rows always apply.
     skip_if:
       - "phaseOutputs.diagnosis.contains('class=flaky')"
       - "phaseOutputs.diagnosis.contains('class=infra-dependent')"
       - "phaseOutputs.diagnosis.contains('class=upstream-broken')"
+    # Load-bearing, not cosmetic: `runUntilBash` defaults to
+    # `timeout_seconds ?? 30`, and thirty seconds kills any real test suite
+    # mid-run and reports a false red. Mirrors `fix.gateTimeoutSeconds` (900) in
+    # config/default.yaml — the schema parses this as a plain number, so it
+    # can't be templated; keep the two in step by hand.
+    timeout_seconds: 900
     # Closes the missing-postcondition gap: without a marker, a run that
     # inspects the PR and stops without pushing or labelling reports green.
     on_output:
       requires_marker: "CI_FIX_COMPLETE"
+    # The within-run local gate loop (04-retry.md §4.5). The gate command isn't
+    # statically knowable — package manager from the lockfile, commands from the
+    # repo's CI workflow — so the `fixing` skill has the agent write it to
+    # `.lastlight-verify.sh` at the repo root (excluded from git by the harness,
+    # and deleted at the start of every attempt so a superseded diagnosis can't
+    # gate this one). No script yet ⇒ an EXPLICIT non-zero exit: `gate=skipped`
+    # is treated as red and never authorises a push (09-state-machine.md §S1).
+    # `max_iterations` mirrors `fix.localIterations` (2); same templating
+    # caveat as `timeout_seconds` above.
+    generic_loop:
+      max_iterations: 2
+      until_bash: "if [ -f .lastlight-verify.sh ]; then sh .lastlight-verify.sh; else echo 'no .lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
+      fresh_context: false
     messages:
       on_start: "On it — investigating the failing checks on PR #{{prNumber}}..."
       on_success: "**Fix pushed** to `{{branch}}`."

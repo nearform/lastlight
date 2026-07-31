@@ -29,6 +29,34 @@ import type { DependenciesConfig, FixConfig, ReviewConfig } from "../config/conf
 import type { PrState } from "./pr-state.js";
 import { renderCiFailureReport } from "./github/github.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
+
+/**
+ * A skip that must be ESCALATED on the pull request — labelled `requires-human`
+ * and explained in one comment — rather than being dropped silently.
+ *
+ * Three of `resolveFixDisposition`'s skips are terminal *for this problem*: no
+ * further event will change the answer until a human (or a new commit) does
+ * something. 04-retry.md §4.3 requires those to be visible, because a PR that is
+ * skipped with no label, no comment and nothing on the PR explaining why is
+ * strictly WORSE than `requires-human` — it is dead and undiagnosable.
+ *
+ * The other skips must NOT escalate, and the distinction is structural rather
+ * than editorial:
+ *
+ * - `upstream-broken` is not this PR's fault and self-heals the moment the base
+ *   goes green (09 → D1 is explicit: skip without labelling).
+ * - `fork-pr` gets its own explanation — nothing is wrong with the change.
+ * - `human-hold` / `escalated` are ALREADY escalated; re-applying would comment
+ *   on every subsequent event.
+ * - `already-assessed` is a duplicate delivery, not a verdict.
+ *
+ * The case is produced by the branch that decided, and travels on the
+ * {@link Decision} beside the reason — so the applier switches on a typed field
+ * rather than string-matching the reason prose (the same rule the fork-PR notice
+ * already follows by keying on `state.isFork`).
+ */
+export type EscalationCase = "attempts-exhausted" | "budget-exhausted" | "not-retryable";
 
 /** The uniform decision envelope. */
 export interface Decision<T> {
@@ -37,6 +65,12 @@ export interface Decision<T> {
   reason: string;
   /** The snapshot fields this decision read. */
   inputs: Record<string, unknown>;
+  /**
+   * Set ONLY on a `skip` that must be escalated on the PR — see
+   * {@link EscalationCase}. Absent on every other decision, including every
+   * other skip.
+   */
+  escalation?: EscalationCase;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +192,11 @@ export interface FixDispositionOptions {
  * escalated at head SHA X", so the guard is stateful rather than the label: a
  * maintainer's push re-arms the loop, while a human who applied the label by
  * hand (no escalating run of ours to match) keeps a hard permanent override.
+ *
+ * Three of the skips are terminal for this problem and carry an
+ * {@link EscalationCase} so the caller labels and explains them on the PR
+ * (`./pr-escalation.ts`); the rest are deliberately silent. Which is which is a
+ * property of the branch, not of its prose — see {@link EscalationCase}.
  */
 export function resolveFixDisposition(
   state: PrState,
@@ -174,6 +213,8 @@ export function resolveFixDisposition(
     maxAttempts: cfg.maxAttempts,
     cumulativeCostUsd: state.cumulativeCostUsd,
     maxCostUsd: cfg.maxCostUsd,
+    priorDiagnosisClass: state.priorDiagnosisClass,
+    retryableClasses: cfg.retryableClasses,
     explicitRequest: !!opts.explicitRequest,
   };
 
@@ -224,6 +265,11 @@ export function resolveFixDisposition(
     }
   }
 
+  // The three ESCALATING skips. Ordering between them is cosmetic — all three
+  // apply the same label and the same comment, so it only picks which case the
+  // comment names — but they must all come AFTER the guards above, or a fork PR
+  // whose budget happens to be spent would be labelled `requires-human` for a
+  // problem that is not its author's to fix.
   if (cfg.maxCostUsd !== null && state.cumulativeCostUsd >= cfg.maxCostUsd) {
     return {
       decision: "skip",
@@ -231,6 +277,7 @@ export function resolveFixDisposition(
         `budget-exhausted: $${state.cumulativeCostUsd.toFixed(2)} spent on this PR, ` +
         `fix.maxCostUsd is $${cfg.maxCostUsd.toFixed(2)}`,
       inputs,
+      escalation: "budget-exhausted",
     };
   }
 
@@ -239,6 +286,39 @@ export function resolveFixDisposition(
       decision: "skip",
       reason: `attempts-exhausted: attempt ${state.attempt} exceeds fix.maxAttempts ${cfg.maxAttempts}`,
       inputs,
+      escalation: "attempts-exhausted",
+    };
+  }
+
+  // The ONE prior-run verdict that gates dispatch — and it is only allowed to
+  // because this skip WRITES A RUN ROW (09 → D1's general rule: "no prior-run
+  // verdict may gate dispatch unless the skipping path writes a run row").
+  // `upstream-broken` was the counter-example: gated on a remembered class
+  // through a path that recorded nothing, so `latestForTrigger` returned the
+  // same stale row forever and the PR was dead. It became a live precondition
+  // above; this one escalates instead, which is both visible and clearable.
+  //
+  // Expressed against `fix.retryableClasses` rather than hardcoding
+  // `infra-dependent`, because that leaf's whole contract is "classes another
+  // attempt may help with; every other class escalates immediately". The two
+  // exclusions are exactly {@link ATTEMPT_FREE_CLASSES}, which is not a
+  // coincidence: `flaky` is bounded by `fix.maxFlakyDeferrals` (a deferral, not
+  // a verdict) and `upstream-broken` is not this PR's fault — the same reason
+  // they cost no attempt is the reason they must not escalate.
+  const priorClass = state.priorDiagnosisClass;
+  if (
+    priorClass &&
+    !ATTEMPT_FREE_CLASSES.has(priorClass) &&
+    !cfg.retryableClasses.includes(priorClass) &&
+    !opts.explicitRequest
+  ) {
+    return {
+      decision: "skip",
+      reason:
+        `not-retryable: attempt ${state.attempt - 1} diagnosed \`${priorClass}\`, which is not in ` +
+        `fix.retryableClasses (${cfg.retryableClasses.join(", ") || "none"}) — another attempt cannot help`,
+      inputs,
+      escalation: "not-retryable",
     };
   }
 
@@ -539,8 +619,27 @@ export function resolveDispatchDisposition(
  *
  * Pure: the CI report was already fetched into the snapshot, so this renders it
  * rather than fetching it.
+ *
+ * `fix` and `dependencies` are optional because the variables they contribute
+ * are policy, not state — they come from the run's already-repo-clamped config
+ * blocks, not from the PR. Omitting one leaves its variables undefined, which
+ * the prompts' own `{{#if maxAttempts}}`-style guards already handle.
  */
-export function renderContext(state: PrState): Record<string, unknown> {
+export function renderContext(
+  state: PrState,
+  fix?: FixConfig,
+  dependencies?: DependenciesConfig,
+): Record<string, unknown> {
+  // The merge gate, decided ONCE here rather than re-derived in prose by the
+  // merge prompt. 09's thesis is one source and three renderings; a predicate
+  // restated as an instruction is a fourth reading free to disagree — and it
+  // did. `{{#if !checksSettledPassing}}` (what the prompt gated its
+  // "gate is CLOSED" banner on) diverges from `mayMerge` in both directions:
+  // it misses `settledCheckCount < minSettledChecks`, so an operator who raises
+  // `minSettledChecks` gets a banner claiming the gate is open while the gate
+  // is shut; and it ignores the `requireSettledChecks: false` exemption, so a
+  // deployment that turned the gate off still gets told not to merge.
+  const merge = dependencies ? mayMerge(state, dependencies) : undefined;
   const failedChecks = state.ciReport ? renderCiFailureReport(state.ciReport) : "";
   return {
     // Identity / targeting.
@@ -557,6 +656,10 @@ export function renderContext(state: PrState): Record<string, unknown> {
     checksState: state.checksState,
     checksSettledPassing: state.checksState === "passing",
     settledCheckCount: state.settledCheckCount,
+    // The gate itself, and the reason IT produced — so the prompt states the
+    // same case the log line and the admin panel state.
+    mayMerge: merge?.decision,
+    mayMergeReason: merge?.reason,
     baseChecksState: state.baseChecksState,
     failedChecks,
     // The "No failed checks found." sentinel must not reach the prompt as if it
@@ -567,9 +670,24 @@ export function renderContext(state: PrState): Record<string, unknown> {
         : "",
     ciLogsAvailable: state.ciReport?.logsAvailable ?? false,
 
-    // Retry state.
+    // Retry state. `maxAttempts` is rendered by all three fix prompts as
+    // `{{#if maxAttempts}} of {{maxAttempts}}{{/if}}` and was simply never
+    // provided — "this is attempt 2" instead of "this is attempt 2 of 3", which
+    // is the half that tells the agent whether to spend or to stop.
     attempt: state.attempt,
+    maxAttempts: fix?.maxAttempts,
     priorAttempts: state.priorAttempts,
+
+    // Flaky-deferral state. The PROMOTION itself (a third consecutive `flaky`
+    // is treated as `reproducible`, 09 → S1) is ACTED ON elsewhere —
+    // `promoteFlakyDiagnosis` in `workflows/simple.ts` drops the `class=flaky`
+    // row from the `fix` phase's `skip_if` for that run, because the engine's
+    // expression grammar has no negation to express the conjunction with. What
+    // is exposed here is the same fact for the PROMPT, so the agent can say why
+    // `flaky` is no longer being accepted for this PR.
     flakyDeferrals: state.flakyDeferrals,
+    maxFlakyDeferrals: fix?.maxFlakyDeferrals,
+    flakyPromoted:
+      fix !== undefined && state.flakyDeferrals >= fix.maxFlakyDeferrals,
   };
 }

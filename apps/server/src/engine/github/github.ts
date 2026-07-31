@@ -161,6 +161,38 @@ export class GitHubClient {
   }
 
   /**
+   * Add labels to an issue/PR, leaving existing labels alone.
+   *
+   * The only harness-side label WRITE. Every other label mutation in the system
+   * happens INSIDE the sandbox, through agentic-pi's `github_*` tools driven
+   * from a prompt — which is the right place for a label whose value is an
+   * agent's judgement (`dependency-trivial`, the triage vocabulary). This one
+   * is different in kind: the dispatch-time escalation
+   * (`../pr-escalation.ts`) fires precisely when we have decided NOT to
+   * provision a sandbox, so there is no agent to ask.
+   *
+   * GitHub's own endpoint creates a label that does not exist yet (with an
+   * arbitrary colour), so there is no `ensureLabels` companion to write.
+   * Idempotent by construction — re-adding a present label is a no-op — but
+   * that is NOT what makes the escalation post one comment; see
+   * `../pr-escalation.ts` for the record that does.
+   */
+  async addLabels(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    labels: string[],
+  ): Promise<void> {
+    if (labels.length === 0) return;
+    await this.octokit.rest.issues.addLabels({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      labels,
+    });
+  }
+
+  /**
    * List every repository the App installation can access, as `owner/repo`
    * full names. Used at boot to seed the managed-repo list from the App grant
    * (see src/managed-repos.ts). The installation id is bound by the App auth

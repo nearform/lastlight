@@ -49,6 +49,8 @@ import {
 } from "./workflows/simple.js";
 import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./engine/pr-state.js";
 import { renderContext, resolveDispatchDisposition } from "./engine/pr-decisions.js";
+import { escalatePr } from "./engine/pr-escalation.js";
+import { harvestFixMarkers } from "./engine/fix-harvest.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
 import { createAdmissionController, type AdmissionController } from "./workflows/admission.js";
@@ -371,11 +373,12 @@ async function main() {
       // a stored verdict read through a path that records nothing freezes, and
       // the PR is then dead with no label, no comment and no explanation
       // (09 → D1).
+      const effectiveFix = repoConfig?.fix ?? config.fix;
       const disposition = resolveDispatchDisposition(
         workflowName,
         prState,
         {
-          fix: repoConfig?.fix ?? config.fix,
+          fix: effectiveFix,
           dependencies: repoConfig?.dependencies ?? config.dependencies,
           review: repoConfig?.review ?? config.review,
         },
@@ -386,6 +389,14 @@ async function main() {
         `${disposition.decision} — ${disposition.reason}`,
       );
       if (disposition.decision === "skip") {
+        // A skip that is TERMINAL for this problem is labelled and explained on
+        // the PR rather than dropped silently — and, crucially, RECORDS A RUN
+        // ROW, without which `escalatedAtSha` would never persist and the next
+        // dispatch would read our own escalation as a human's permanent
+        // override (09 → D1; see `pr-escalation.ts`). Identical call to the
+        // dispatcher's, because the daily `fix-red-dependency-prs` sweep — this
+        // route — is what reaches most exhausted PRs.
+        await escalatePr(workflowName, prState, disposition, effectiveFix, { db, github });
         // Not an error: the harness correctly determined there is nothing to
         // do. Reporting it as a failure would paint a cron tick red and, on
         // the fan-out, count against `failures`.
@@ -453,7 +464,14 @@ async function main() {
     // moved on. One projection at one choke point is what makes the webhook and
     // cron dispatches of a `pr-fix`-shaped workflow carry identical context.
     if (prState) {
-      Object.assign(extra, renderContext(prState));
+      Object.assign(
+        extra,
+        renderContext(
+          prState,
+          repoConfig?.fix ?? config.fix,
+          repoConfig?.dependencies ?? config.dependencies,
+        ),
+      );
       extra.prState = prState;
     }
 
@@ -662,6 +680,10 @@ async function main() {
       /* unknown workflow — surfaced downstream by runSimpleWorkflow */
     }
 
+    // Set by `onRunStart` below, read by `onPhaseEnd`. Undefined only for the
+    // window before the run row exists, during which no phase can have ended.
+    let harvestRunId: string | undefined;
+
     let notifier: ProgressNotifier | undefined;
     const reporterProxy: ProgressReporter | undefined = statusChecklist
       ? {
@@ -740,17 +762,26 @@ async function main() {
           slackConnector.showTyping(channelId as string, threadId as string, threadId as string).catch(() => {});
         }
       },
-      onPhaseEnd: async (phase, result) =>
-        console.log(`[dispatch] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`),
-      onRunStart: notifierOnRunStart
-        ? async (runId: string) => {
-            // Synchronous notifier setup must finish before simple.ts calls
-            // reporter.start() (the next statement after it invokes this), so
-            // run it first, then chain any caller-provided onRunStart.
-            notifierOnRunStart(runId);
-            if (onRunStart) await onRunStart(runId);
-          }
-        : onRunStart,
+      onPhaseEnd: async (phase, result) => {
+        console.log(`[dispatch] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`);
+        // The marker harvest (09 → S1). This is the ONLY moment the two marker
+        // lines exist in memory — `{{phaseOutputs}}` is empty across a run
+        // boundary and the shared per-PR workspace is `reset --hard`-ed between
+        // runs, so a marker not persisted here is gone for good.
+        if (harvestRunId) harvestFixMarkers(db, harvestRunId, workflowName, phase, result.output);
+      },
+      onRunStart: async (runId: string) => {
+        // The run id is not knowable when this object is built — the row is
+        // created inside `runSimpleWorkflow` — and `onPhaseEnd` needs it to
+        // write the harvest. This callback fires synchronously before the first
+        // phase, so the assignment is always in place by the time it is read.
+        harvestRunId = runId;
+        // Synchronous notifier setup must finish before simple.ts calls
+        // reporter.start() (the next statement after it invokes this), so
+        // run it first, then chain any caller-provided onRunStart.
+        if (notifierOnRunStart) notifierOnRunStart(runId);
+        if (onRunStart) await onRunStart(runId);
+      },
     };
 
     let result: Awaited<ReturnType<typeof runSimpleWorkflow>> | undefined;

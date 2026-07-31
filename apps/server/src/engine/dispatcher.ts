@@ -15,6 +15,7 @@ import {
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
 import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./pr-state.js";
 import { resolveDispatchDisposition, type PrPolicyConfig } from "./pr-decisions.js";
+import { escalatePr } from "./pr-escalation.js";
 
 /**
  * Hand a workflow to the runner. Matches `dispatchWorkflow` in index.ts — the
@@ -205,7 +206,8 @@ export async function dispatch(
   // enum so the log line, the escalation comment and the admin detail panel are
   // three renderings of ONE source instead of three prose variants that drift.
   if (prState) {
-    const disposition = resolveDispatchDisposition(handler, prState, prPolicyConfig(), {
+    const policy = prPolicyConfig();
+    const disposition = resolveDispatchDisposition(handler, prState, policy, {
       explicitRequest,
       dedupOnHeadSha: true,
     });
@@ -218,6 +220,12 @@ export async function dispatch(
       // branch to push to. Keyed on the snapshot field, never on the reason
       // string.
       if (prState.isFork) await postForkNotice(prState, deps);
+      // A skip that is TERMINAL for this problem is labelled and explained
+      // instead of dropped silently — the same call, from the same decision, as
+      // the cron/API route in `dispatchWorkflow`. Keyed on the typed
+      // `escalation` case the deciding branch set, for the same reason the fork
+      // notice keys on `isFork`.
+      else await escalatePr(handler, prState, disposition, policy.fix, deps);
       return { kind: "skipped", reason: `${handler}: ${disposition.reason}` };
     }
   }

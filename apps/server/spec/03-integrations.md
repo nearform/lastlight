@@ -82,6 +82,12 @@ Grant Actions: read for full CI output.
 
 The notice is suppressed when none of the failed checks is a GitHub Actions job (a CircleCI-only repo has no Actions logs to be missing, so blaming the permission there would be wrong). The same permission backs agentic-pi's `github_list_workflow_runs` / `github_list_workflow_run_jobs` / `github_get_job_logs` tools, which return `{ ok: false, reason }` rather than throwing when it is absent.
 
+### Harness-side writes (`GitHubClient`)
+
+`src/engine/github/github.ts` is the harness's own Octokit client — App-authed, and deliberately *not* the surface agents use (they get agentic-pi's `github_*` tools inside the sandbox, gated per permission profile). Its write surface is small on purpose: comments (`postComment` / `updateComment` / `deleteComment`), reactions, review posting, the `last-light/review` check run — and one label write, `addLabels`.
+
+`addLabels` is the exception that proves the rule. Every other label mutation in the system happens *inside* a sandbox, driven from a prompt, because the label's value is an agent's judgement (`dependency-trivial`, the impact tiers, the triage vocabulary). The dispatch-time escalation is different in kind: it fires precisely when the gate has decided **not** to provision a sandbox, so there is no agent to ask — see [Router](/spec/05-router#escalation--the-skips-that-are-not-silent). GitHub's endpoint creates a label that does not exist yet, so there is no `ensureLabels` companion, and adding a label already present is a no-op — but idempotency at the API is *not* what makes the escalation comment once; the persisted escalation row is (see [State](/spec/10-state)). It needs no new App permission: writing labels is part of the `Issues: write` / `Pull requests: write` grants the App already holds.
+
 ## 2. Slack (HTTP Events API, default; Socket Mode dev fallback)
 
 | | |

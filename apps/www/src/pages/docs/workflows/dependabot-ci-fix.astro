@@ -96,6 +96,27 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		for the full list.
 	</p>
 
+	<p>
+		Two of those refusals are <em>terminal</em> — an exhausted attempt or cost
+		budget — and terminal refusals are never silent: the PR gets
+		<code>requires-human</code> and one comment saying which budget ran out and
+		what each attempt found, without a sandbox ever starting. The rest stay
+		quiet, because they are temporary or not this PR's fault. See
+		<a href="/docs/workflows/pr-fix">PR fix</a> for what the comment says and
+		how pushing a commit clears it.
+	</p>
+
+	<p>
+		Attempts are counted and remembered per <em>pull request</em>, not per
+		workflow — an <code>@last-light</code> comment routed to
+		<a href="/docs/workflows/pr-fix">PR fix</a> and a cron dispatch of this
+		workflow share one counter, one budget and one attempt history, because
+		"how many times have we tried to fix this PR" is a fact about the PR
+		rather than about how the event arrived. See
+		<a href="/docs/workflows/pr-fix">PR fix</a> for what each attempt carries
+		forward and which verdicts cost one.
+	</p>
+
 	<h2>Labels</h2>
 
 	<p>
@@ -109,7 +130,12 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		<code>infra-dependent</code> or <code>upstream-broken</code> the fix phase
 		is skipped outright, so nothing is labelled and the run still finishes
 		successfully. A flaky test or a base branch that is red on its own account
-		shouldn't leave the PR permanently marked as needing a human. The verdict labels
+		shouldn't leave the PR permanently marked as needing a human. The
+		<code>flaky</code> skip is bounded, though: after
+		<code>fix.maxFlakyDeferrals</code> (2) in a row on the same problem, the
+		third verdict is taken at face value and the PR gets a real attempt —
+		three flaky reports running is an intermittent real failure, and without
+		the bound the nightly sweep would re-run for free forever. The verdict labels
 		(<code>dependency-trivial</code> / <code>dependency-functional</code>) — and
 		clearing a stale <code>requires-human</code> once a later fix lands green — are
 		owned entirely by <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>,

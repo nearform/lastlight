@@ -5,7 +5,8 @@ it. Follow the **fixing** skill's procedure.
 labels, no comments. You read, you reproduce, you report. A later phase does the
 repair, and only if your verdict says one is worth attempting. Installing
 dependencies and running the failing command are expected — writing to the repo
-is not.
+is not. That includes `.lastlight-verify.sh`: the push gate belongs to the fix
+phase, which writes it fresh from your verdict.
 
 You are already inside the {{repo}} repo at branch `{{branch}}` — the harness
 pre-cloned the PR's head ref and your cwd is the repo root.

@@ -148,6 +148,41 @@ existed are tolerated: a bare `context.headSha` is honoured as a one-field
 snapshot, so the per-SHA dedup keeps working across the upgrade instead of
 re-assessing every open PR once.
 
+**The marker harvest on the row.** The snapshot is written at *dispatch*, before
+any phase runs, so what the run then *concluded* cannot live there. For the fix
+family, `RunnerCallbacks.onPhaseEnd` parses each phase's `DIAGNOSIS_COMPLETE` /
+`CI_FIX_COMPLETE` marker and merges it into `scratch.fixMarkers` — the run's
+mutable side — where the next dispatch reads it back off the same
+`latestForTrigger` row to derive `attempt`, `flakyDeferrals` and
+`priorAttempts` (see the
+[dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate)). It rides the
+existing row and the existing query: no new column, no second write path. The
+harvest is wired at **all three** `onPhaseEnd` call sites (fresh dispatch plus
+both resume paths), because a fix run that paused for an approval gate or was
+picked back up after a restart finishes its phases on the resume path — exactly
+the population whose attempt counter matters most. Presence of the
+`fixMarkers` key, not of a marker inside it, is what distinguishes "the harvest
+ran and the agent emitted nothing" from a row written before the harvest
+existed; the latter falls back to the `diagnose` ledger row, which cannot exist
+without the marker having been emitted.
+
+**The escalation row.** Almost every row here is created by
+`runSimpleWorkflow` and describes a run that executed. One is not: when the
+[dispatch gate](/spec/05-router#escalation--the-skips-that-are-not-silent)
+refuses a PR *terminally* — attempts exhausted, cost budget exhausted, or a
+last diagnosis outside `fix.retryableClasses` — it writes a row for the
+refusal itself, under the workflow it declined to run, with no phases and
+`context.escalation = { case, reason, at }` beside the snapshot. This is not
+bookkeeping: `escalatedAtSha` is read back off the *prior run's*
+`context.prState`, and a dispatch-time skip writes no row at all, so an
+escalation that recorded nothing would leave `requires-human` on the PR with
+no escalation SHA behind it — which the next dispatch reads as a *human's*
+permanent hold, latching the PR dead. The row is written **before** the
+label for the same reason, and is recorded **`succeeded`**: `failed` is
+reserved for malfunction, and a correct-but-stopped outcome recorded `failed`
+would post `messages.on_failure`, offer a Retry that cannot succeed, and
+pollute the cost/failure stats.
+
 `owner` + `repo` together identify the target: `repo` is stored **bare**
 (a single path-safe segment — taskIds and workspace/session dirs derive
 from it), so the org/user is kept in its own `owner` column rather than
@@ -416,7 +451,9 @@ session recreation after timeouts.
 
 - **No unbounded text in `workflow_runs.scratch`.** Loop iterations
   store an `executions.id` reference; the text lives in `output_text`
-  or in JSONL.
+  or in JSONL. The fix-marker harvest clamps every field it keeps and
+  bounds the rendered attempt journal on both axes, for the same
+  reason twice over: it is *also* replayed into every later prompt.
 - **`session_id` is the join key between the two stores.** Every
   `executions` row that ran an agent has one; matching the JSONL
   filename joins them.

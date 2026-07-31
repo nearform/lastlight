@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "path";
 import { DockerSandbox, type WorkspaceMount } from "./docker.js";
 import { SANDBOX_IMAGE, isSandboxAvailable } from "./images.js";
 import { githubBasicAuthB64, githubExtraheaderArgs } from "./git-http-auth.js";
+import { resetVerifyScript } from "../engine/executors/shared.js";
 
 export { DockerSandbox } from "./docker.js";
 export {
@@ -267,6 +268,12 @@ type PrePopulate = {
  *   - `recreateFromBase` (build): delete the stale checkout and re-clone from
  *     the default branch — a re-triggered incomplete build starts again off
  *     current `main` (issue #153).
+ *
+ * Every path that starts a NEW run also calls `resetVerifyScript` on the
+ * checkout: it deletes any `.lastlight-verify.sh` an earlier attempt left
+ * behind and registers it in `.git/info/exclude`. The same-run preserve path
+ * deliberately does not — the fix loop's later iterations keep the gate the
+ * first one wrote. See `engine/executors/shared.ts` → the push gate.
  */
 export { prePopulateWorkspace as __prePopulateWorkspaceForTest };
 
@@ -328,6 +335,12 @@ export function prePopulateWorkspace(
     } else {
       // Different run reusing this PR's workspace — refresh in place.
       refreshExistingClone(repoDir, markerPath, pre);
+      // A NEW run against a reused workspace is exactly the case the push gate
+      // must not inherit: the fix family shares one workspace per PR, so a
+      // `.lastlight-verify.sh` from a superseded diagnosis (possibly written by
+      // the other fix workflow) is still sitting there. Outside the refresh's
+      // try/catch on purpose — a failed fetch skips its `git clean` entirely.
+      resetVerifyScript(repoDir);
       return;
     }
   }
@@ -350,6 +363,9 @@ export function prePopulateWorkspace(
     normalizeOrigin(repoDir, pre, scrub);
     ensureBaseAvailable(repoDir, pre, authArgs, url, scrub);
     writeMarker(markerPath, pre.runId);
+    // Nothing to delete on a fresh clone; this registers the push gate in the
+    // checkout's `.git/info/exclude` so it can never be committed into the PR.
+    resetVerifyScript(repoDir);
     const ms = Date.now() - start;
     console.log(
       `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${repoDir} ` +
@@ -412,6 +428,7 @@ function cloneDefaultAndCreateBranch(
     );
     normalizeOrigin(repoDir, pre, scrub);
     writeMarker(markerPath, pre.runId);
+    resetVerifyScript(repoDir);
     const ms = Date.now() - start;
     console.log(
       `[sandbox] Pre-cloned ${pre.owner}/${pre.repo} (default branch) into ${repoDir} ` +

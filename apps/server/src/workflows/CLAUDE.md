@@ -295,6 +295,19 @@ caveat above), so a guard that must survive resume should read `scratch`; and
 every expression fails **open** — an unrecognised form or an absent variable
 runs the phase. The `all_success` caveat for downstream phases applies here too.
 
+**The guard list is composed per run, not just declared.** The grammar has no
+negation, so a conditional row is not expressible — and the `flaky` cap needs
+one ("skip on `class=flaky`, *unless* this PR already deferred twice"). Its
+second term is a fact about the PR known before the run starts, so
+`promoteFlakyDiagnosis` (`simple.ts`) drops that one expression from the `fix`
+phase when `flakyDeferrals >= fix.maxFlakyDeferrals`, on a shallow copy of the
+loader's cached definition (it is a process-global). Same seam, same run:
+`escalateFixModel` swaps `models["pr-fix"]` for `models["pr-fix-retry"]` above
+`fix.escalateModelAfterAttempt`, before `context.models` is persisted so the
+admin panel shows the model the attempt used. Both read `attempt` /
+`flakyDeferrals` off `request.extra`, where `renderContext` put them at
+dispatch, and both are inert when those are absent.
+
 ## Per-phase egress policy
 
 Any phase can declare `unrestricted_egress: true` to bypass the sandbox
