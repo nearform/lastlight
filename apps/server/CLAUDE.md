@@ -472,10 +472,16 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     `fix.gateTimeoutSeconds` (shared resource), and
     `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
     weld the escape hatch shut for a repo with no CI at all. `fix` +
-    `dependencies` are now **live**: the PR dispatch gate (below) enforces
-    `fix.maxAttempts` / `fix.maxCostUsd` and `dependencies.requireSettledChecks`
-    / `minSettledChecks`, and the green dependency cron reads the latter pair
-    too. **`review` is live as well**: `resolveReviewTrigger` is the one
+    `dependencies` are now **live**: the PR dispatch gate (below) reads the
+    run's repo-clamped blocks — on every route, webhook included — and enforces
+    `fix.maxAttempts` / `fix.maxCostUsd` and
+    `dependencies.requireSettledChecks` / `minSettledChecks`, and the green
+    dependency cron reads the latter pair too. What the gate does **not**
+    enforce is `dependencies.autoMergeMaxImpact`: that ceiling reaches the merge
+    run only as prompt text and the impact tier is the agent's self-report, so
+    it is policy the agent is asked to honour rather than a code-enforced
+    ceiling (`spec/02-configuration.md` → "Where `dependencies` is enforced").
+    **`review` is live as well**: `resolveReviewTrigger` is the one
     implementation of `review.trigger` on every route, and
     `src/cron/review-discovery.ts` is back to being a pure candidate finder.
     `review` is deliberately NOT seeded onto the template context — `build.yaml`

@@ -372,8 +372,8 @@ review:
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
-  localIterations: 2           # gate-loop iterations WITHIN one attempt
-  gateTimeoutSeconds: 900      # budget for the repo's own build/test gate
+  localIterations: 2           # gate-loop iterations WITHIN one attempt   [NOT WIRED]
+  gateTimeoutSeconds: 900      # budget for the repo's own build/test gate [NOT WIRED]
   escalateModelAfterAttempt: 1 # attempts above this use models["pr-fix-retry"]
   maxCostUsd: 5.0              # cumulative ceiling for ONE PR; null = no ceiling
   maxFlakyDeferrals: 2         # "flaky" verdicts before one is taken at face value
@@ -381,9 +381,22 @@ fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci
 
 dependencies:
   autoMergeMaxImpact: medium   # none | low | medium | high — ceiling for a MAJOR bump
-  requireSettledChecks: true   # every route waits for checks to settle green
+  requireSettledChecks: true   # no merge decision until the head SHA's checks settle
   minSettledChecks: 1          # …and there must be at least this many
   auditComment: true           # post the evidence comment when auto-merging a major</code></pre>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>Two keys are not wired yet.</strong>
+			<code>fix.localIterations</code> and <code>fix.gateTimeoutSeconds</code>
+			are parsed, clamped, and shown by <code>lastlight repo config show</code>
+			— and read by nothing. The workflow YAML hardcodes the matching
+			<code>2</code> and <code>900</code>, because the phase schema takes those
+			two fields as plain numbers and they can't be templated from config.
+			Setting either key has no effect; to change them, fork the fix workflow
+			YAML in your overlay and edit the phase.
+		</div>
+	</div>
 
 	<p>
 		<code>trigger: after-checks</code> means "once the head SHA's checks
@@ -409,16 +422,21 @@ dependencies:
 
 	<p>
 		<code>skipDraft</code> matches what the review sweep has always done. A
-		draft PR is skipped on the webhook path too, and marking it
-		<strong>Ready for review</strong> is the event that un-defers it.
+		draft PR is skipped on the webhook path too. Marking it
+		<strong>Ready for review</strong> lifts that skip, but under the packaged
+		<code>after-checks</code> it does <em>not</em> produce a review on its own:
+		it is a PR-attention event, and attention events are deferred in that mode.
+		What actually runs the review is the head SHA's checks settling — or, if no
+		settle event arrives, the 30-minute review sweep. Under
+		<code>trigger: eager</code>, Ready for review is the event that un-defers
+		it.
 	</p>
 
 	<p>
 		The <code>fix</code> budgets bound a loop that <em>diagnoses</em> a CI
 		failure before it retries it. <code>maxAttempts</code> counts across runs
 		for a given PR — so a bot that reopens the same failure ten times still
-		costs three attempts — while <code>localIterations</code> is the cheaper
-		inner loop inside a single attempt. A diagnosis class outside
+		costs three attempts. A diagnosis class outside
 		<code>retryableClasses</code> escalates straight away rather than spending
 		budget on a retry that can't help. And <code>maxCostUsd</code> ships
 		<strong>on</strong>: an unbounded agent loop against a genuinely broken PR
@@ -430,6 +448,22 @@ dependencies:
 		is what gates a major bump — a <code>@types/*</code> major is not a
 		framework rewrite. Set <code>autoMergeMaxImpact: none</code> to keep every
 		major in front of a human.
+	</p>
+
+	<p>
+		Know which half of that block is enforced where.
+		<code>requireSettledChecks</code> and <code>minSettledChecks</code> are
+		<strong>enforced in code</strong>: the merge verdict is computed from the
+		head SHA's resolved check state before the run starts and handed to the
+		agent as a decided answer it is told not to re-derive, and
+		<code>requireSettledChecks</code> additionally makes the dispatch gate
+		refuse a PR whose checks are still running.
+		<code>autoMergeMaxImpact</code> is an <strong>instruction to the
+		agent</strong>: the impact tier is the model's own judgement, reported in
+		the run's completion marker, and the ceiling reaches the run as prompt text
+		— nothing parses the tier or withholds the merge tools from a run that
+		reported one above the ceiling. Lowering the ceiling narrows what the agent
+		is told it may land; it is not a hard stop.
 	</p>
 
 	<p>

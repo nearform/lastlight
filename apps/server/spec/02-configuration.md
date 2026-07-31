@@ -111,8 +111,8 @@ interface ReviewConfig {                  // when a pr-review run is triggered
 
 interface FixConfig {                     // budgets for every PR_FIX_SHAPED workflow
   maxAttempts: number;                    // cross-run attempts per (repo, PR) before requires-human
-  localIterations: number;                // gate-loop iterations WITHIN one attempt
-  gateTimeoutSeconds: number;             // until_bash budget for the repo's build/test gate
+  localIterations: number;                // gate-loop iterations WITHIN one attempt   [NOT WIRED]
+  gateTimeoutSeconds: number;             // until_bash budget for the build/test gate [NOT WIRED]
   escalateModelAfterAttempt: number;      // attempts above this use models["pr-fix-retry"]
   maxCostUsd: number | null;              // cumulative ceiling for ONE PR; null = unbounded
   maxFlakyDeferrals: number;              // `flaky` verdicts before one counts as reproducible
@@ -120,9 +120,9 @@ interface FixConfig {                     // budgets for every PR_FIX_SHAPED wor
 }
 
 interface DependenciesConfig {            // how far a MAJOR dependency bump may auto-merge
-  autoMergeMaxImpact: "none" | "low" | "medium" | "high";
-  requireSettledChecks: boolean;          // enforce settled-"passing" on ALL routes
-  minSettledChecks: number;               // a decision needs >= N settled checks; 0 = legacy
+  autoMergeMaxImpact: "none" | "low" | "medium" | "high";  // PROMPT-LEVEL — see below
+  requireSettledChecks: boolean;          // `mayMerge` demands settled-"passing"
+  minSettledChecks: number;               // ...and >= N settled checks; 0 = legacy
   auditComment: boolean;                  // post the evidence comment when auto-merging a major
 }
 
@@ -275,7 +275,7 @@ warning; the run proceeds either way.
 | `fix.retryableClasses` | yes | a **subset** of the operator's list — naming a class the operator doesn't retry would *add* a retryable failure mode; the remaining (possibly empty) subset stands, since retrying less is always allowed |
 | `fix.escalateModelAfterAttempt` | **no** | operator-only — spend control |
 | `fix.gateTimeoutSeconds` | **no** | operator-only — a shared-resource budget, not a "how careful is this repo" dial |
-| `dependencies.autoMergeMaxImpact` | yes | the **lower** tier on `none < low < medium < high` |
+| `dependencies.autoMergeMaxImpact` | yes | the **lower** tier on `none < low < medium < high` (a clamp on a *prompt-level* ceiling — see below) |
 | `dependencies.requireSettledChecks` | yes | add-only `true` — a repo may demand settled checks, never waive the operator's requirement |
 | `dependencies.minSettledChecks` | **no** | operator-only — see below |
 | `dependencies.auditComment` | yes | free — cosmetic either way, and the paper trail it silences is its own |
@@ -296,6 +296,22 @@ interesting one — the obvious clamp, `max(repo, operator)`, would weld the esc
 hatch shut for a repo with **no CI at all**, which could then only ever raise the
 number of settled checks an auto-merge needs and never lower it to `0`. That case
 belongs to the merge decision (a `checksState` of `none`), not to a config clamp.
+
+**Where `dependencies` is enforced.** The block is enforced in two different
+ways and the difference matters when reading it as a safety property.
+`requireSettledChecks` and `minSettledChecks` are **code**: `mayMerge`
+(`src/engine/pr-decisions.ts`) evaluates them against the resolved check state
+before the run starts, and the merge prompt is handed the verdict as
+`{{mayMerge}}` / `{{mayMergeReason}}` with an instruction not to re-derive it —
+one predicate, one reading. `requireSettledChecks` additionally makes the
+dispatch gate refuse a `pending` PR outright. `autoMergeMaxImpact` is
+**prompt-level**: the impact tier is the agent's own judgement, self-reported in
+the `ASSESSMENT_COMPLETE` marker, and the ceiling reaches the run only as text
+in `workflows/prompts/dependabot-pr-merge.md`. No code parses `impact=`,
+compares it to the ceiling, or withholds the merge capability from a phase whose
+tier came back above it — the phase must run either way, because it also labels
+and comments. So the settled-checks pair bounds *when* a merge may be decided;
+the ceiling is policy the agent is asked to honour.
 
 `review.postsCheck` predates the block and is still **mirrored** flat as
 `config.reviewPostsCheck` (the `REVIEW_POSTS_CHECK` env var below) for the
@@ -718,8 +734,8 @@ These have no env var — they're set in `config/default.yaml` or the overlay's
 | `deploy.version` | `string \| null`, `null` | Core-version pin (git tag/ref). Deployment config, not runtime behaviour. Env: `LASTLIGHT_CORE_VERSION`. | no |
 | `bootstrap.label` / `explore.defaultRepo` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO`. | no |
 | `review.{postsCheck,trigger,requestLabel,skipDraft}` | `false` / `after-checks` / `null` / `true` | When a `pr-review` run is triggered, and whether it posts the `last-light/review` check. `after-checks` means "once the head SHA's checks **settle**, either colour" — so the review can read and cite the CI result, and a push-storm collapses to one review per settled SHA. There is no settled-*and-passing* sub-mode: a PR whose CI never goes green would then never be reviewed at all. Enforced by `resolveReviewTrigger` (`src/engine/pr-decisions.ts`) at the [dispatch gate](/spec/05-router#reviewtrigger--one-resolver-every-route) — **one** implementation, on every route, with `src/cron/review-discovery.ts` reduced to a candidate finder. `on-request` is served by `requestLabel`, an `@bot review` comment, and the Re-run button on the check; `review_requested` is opportunistic only, since GitHub App bot users are not selectable in the reviewer picker. Env: `REVIEW_POSTS_CHECK` (`postsCheck` only). | **yes** — `postsCheck`/`skipDraft` add-only, the rest free |
-| `fix.{maxAttempts,localIterations,gateTimeoutSeconds,escalateModelAfterAttempt,maxCostUsd,maxFlakyDeferrals,retryableClasses}` | `3` / `2` / `900` / `1` / `5.0` / `2` / `[reproducible, env-mismatch]` | Retry budgets shared by every PR_FIX_SHAPED workflow (`pr-fix`, `dependabot-ci-fix`). `maxAttempts` counts *across runs* for one PR, `localIterations` *within* one attempt; the cost ceiling is cumulative per PR and ships **on**. A diagnosis class outside `retryableClasses` escalates immediately rather than burning budget on a retry that can't help. | **yes**, clamped one-way (`escalateModelAfterAttempt` / `gateTimeoutSeconds` operator-only) |
-| `dependencies.{autoMergeMaxImpact,requireSettledChecks,minSettledChecks,auditComment}` | `medium` / `true` / `1` / `true` | How far up the impact scale a **major** dependency bump may auto-merge. Impact, not semver magnitude, is the gate: a `@types/*` major is not a framework rewrite. | **yes**, clamped one-way (`minSettledChecks` operator-only) |
+| `fix.{maxAttempts,localIterations,gateTimeoutSeconds,escalateModelAfterAttempt,maxCostUsd,maxFlakyDeferrals,retryableClasses}` | `3` / `2` / `900` / `1` / `5.0` / `2` / `[reproducible, env-mismatch]` | Retry budgets shared by every PR_FIX_SHAPED workflow (`pr-fix`, `dependabot-ci-fix`). `maxAttempts` counts *across runs* for one PR; the cost ceiling is cumulative per PR and ships **on**. A diagnosis class outside `retryableClasses` escalates immediately rather than burning budget on a retry that can't help. **`localIterations` and `gateTimeoutSeconds` are parsed, clamped and reported but read by nothing**: the phase schema takes `max_iterations` / `timeout_seconds` as plain numbers, so they can't be templated from config, and both fix workflow YAMLs hardcode the matching `2` and `900`. Setting either key changes nothing — edit the workflow YAML (or fork it in an overlay) instead. | **yes**, clamped one-way (`escalateModelAfterAttempt` / `gateTimeoutSeconds` operator-only) |
+| `dependencies.{autoMergeMaxImpact,requireSettledChecks,minSettledChecks,auditComment}` | `medium` / `true` / `1` / `true` | How far up the impact scale a **major** dependency bump may auto-merge. Impact, not semver magnitude, is the gate: a `@types/*` major is not a framework rewrite. Enforced in two different ways — `requireSettledChecks` / `minSettledChecks` are code (`mayMerge`, decided before the run and handed to the prompt as a verdict), `autoMergeMaxImpact` is prompt-level (the tier is the agent's self-report; nothing parses it or compares it to the ceiling). See "Where `dependencies` is enforced" above. | **yes**, clamped one-way (`minSettledChecks` operator-only) |
 | `otel.*` | see Telemetry | Env-overridable per key; `collectorHosts` is *unioned* with env, not replaced. | no |
 | `cron.webhooksEnabledCondition` | `true` | Present in `default.yaml` but **inert** — `normalizeFileConfig` never reads a `cron:` block. The real condition is declared per cron YAML (`condition.unless: webhooksEnabled`) and applied by `getJobs`, with `webhooksEnabled` derived in `src/index.ts` as `webhookSecret && githubApp`. | no |
 

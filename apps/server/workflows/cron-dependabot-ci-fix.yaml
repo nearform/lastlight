@@ -19,8 +19,11 @@ context:
   # settled failing check conclusion (GitHubClient.getChecksConclusion), NOT
   # mergeable_state, so we never fire while checks are still running.
   discover: red-dependency-prs
-# NOTE: like merge-green-dependency-prs, and unlike cron-review, this sweep
-# intentionally has NO `condition.unless: webhooksEnabled`. It's an additive
-# backstop that also runs with webhooks on. Per-PR runs dedup by (repo, PR), and
-# the discovery step skips any PR carrying the `requires-human` label, so it
-# won't re-attempt fixes Last Light already gave up on.
+# NOTE: like merge-green-dependency-prs (and like cron-review, which dropped its
+# own condition), this sweep intentionally has NO `condition.unless:
+# webhooksEnabled`. It's an additive backstop that also runs with webhooks on.
+# Per-PR runs dedup by (repo, PR). Discovery does NOT filter on `requires-human`:
+# it is a candidate finder, and whether we may act on an escalated PR is decided
+# once at the dispatch gate off the PR-state snapshot (see
+# src/cron/dependabot-discovery.ts's module header) — which is what lets a
+# maintainer's push re-arm a PR we gave up on, with no label to remove.

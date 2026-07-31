@@ -45,6 +45,16 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	</p>
 
 	<p>
+		That verdict is computed in code and handed to the run as a decided answer
+		— the prompt reads it rather than re-deriving it, so the log line, the
+		audit comment and the admin panel all state the same case. It is an
+		<em>instruction</em> to the agent, though, not a capability lock: the run
+		still holds the merge tools when the gate is shut, because the same phase
+		also labels and comments. Separately, the dispatch gate refuses to start a
+		merge run at all while checks are still <code>pending</code>.
+	</p>
+
+	<p>
 		The same gate covers <strong>both</strong> mechanisms. Auto-merge used to be
 		treated as the inherently safe one, on the reasoning that GitHub's
 		required-checks gate would catch anything wrong — but that reasoning is
@@ -101,6 +111,20 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		Set <code>autoMergeMaxImpact: none</code> to keep every major in front of a
 		human.
 	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>The ceiling is policy, not a lock.</strong> The tier is the
+			agent's own judgement — reported in the completion marker — and
+			<code>autoMergeMaxImpact</code> reaches the run as prompt text. No code
+			parses the reported tier, compares it to the ceiling, or takes the merge
+			tools away from a run that reported one above it. The rubric's
+			<em>unknown ⇒ high</em> rule and the settled-checks gate are what make
+			the default safe in practice; lowering the ceiling narrows what the
+			agent is told it may land, and the audit comment is how you check
+			afterwards that it did.
+		</div>
+	</div>
 
 	<h2>Pipeline</h2>
 
