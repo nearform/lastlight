@@ -154,10 +154,15 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
     // Head SHA + base ref come from the checkout / run context, never the agent.
     const baseRef = typeof ctx.baseBranch === "string" && ctx.baseBranch ? ctx.baseBranch : undefined;
-    let headSha = this.gitHeadSha(hostRepoDir);
-    // No local checkout (k8s: only the artifact store's `.lastlight/`) — fetch
-    // the head SHA from the GitHub API so the idempotency check below and inline
-    // comments (which require a commit id) both work.
+    // `git rev-parse HEAD` doubles as the "is there a local checkout?" probe: it
+    // returns a SHA on host-checkout backends (docker/none/gondolin) and
+    // undefined on k8s, where the workspace lives in a sandbox PVC and only the
+    // harvested `.lastlight/` reaches the harness.
+    const localHeadSha = this.gitHeadSha(hostRepoDir);
+    // No local checkout (k8s) — fetch the head SHA from the GitHub API so the
+    // idempotency check below and inline comments (which require a commit id)
+    // both work.
+    let headSha = localHeadSha;
     if (!headSha) headSha = await github.getPullRequestHeadSha(owner, repo, prNumber).catch(() => undefined);
 
     // Idempotency: skip if a bot review already exists on this head SHA (guards
@@ -172,8 +177,13 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     }
 
     // Commentable line set from the local checkout diff. Failure → null → all
-    // findings demoted to the body (the review still posts).
-    let commentable = baseRef ? this.gitCommentableDiff(hostRepoDir, baseRef) : null;
+    // findings demoted to the body (the review still posts). Gated on a local
+    // checkout actually existing: without that guard, k8s (no `.git` on the
+    // harness) runs a guaranteed-to-fail `git diff` that dumps a usage block and
+    // a FALSE "demoting all findings to the body" on every run — before the API
+    // fallback silently rescues the findings.
+    let commentable =
+      localHeadSha && baseRef ? this.gitCommentableDiff(hostRepoDir, baseRef) : null;
     // No local checkout (or no base ref) — fall back to GitHub's own PR diff
     // (the same merge-base diff) so findings still anchor inline on k8s instead
     // of demoting to the body.
@@ -231,7 +241,13 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
   private gitHeadSha(repoDir: string): string | undefined {
     try {
-      return execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      // Also the "is there a local checkout?" probe (undefined on k8s), so it
+      // runs on every run — silence stderr ("fatal: not a git repository") that
+      // execFileSync otherwise inherits to the console.
+      return execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
     } catch {
       return undefined;
     }
