@@ -2203,9 +2203,13 @@ export function createAdminRoutes(
     globallyEnabled: boolean,
   ): Record<string, unknown> => ({
     repos: getManagedRepos(),
+    // Spread ahead of the control keys, deliberately: a cron YAML MAY pin its
+    // own `context.repos`. It may NOT pin the control keys — those are injected
+    // after it, so operator YAML can't spoof the cron's identity or its
+    // globally-enabled state (same ordering as `jobs.ts`).
+    ...def.context,
     [CRON_NAME_KEY]: def.name,
     [CRON_GLOBALLY_ENABLED_KEY]: globallyEnabled,
-    ...def.context,
   });
 
   /**
@@ -2404,11 +2408,18 @@ export function createAdminRoutes(
     // deliberately NOT carried is `_cronGloballyEnabled`: absent means "on", so
     // "Run now" keeps working for a cron that is globally disabled, which is
     // exactly what the button is for.
+    //
+    // Which is why the YAML's own context is spread ahead of `_cronName` AND has
+    // `_cronGloballyEnabled` stripped out of it first: here absence is the
+    // signal, so simply re-injecting the key after the spread would defeat the
+    // button. A cron YAML pinning `context.repos` still overrides the managed
+    // list, as everywhere else.
+    const { [CRON_GLOBALLY_ENABLED_KEY]: _yamlEnabled, ...defContext } = def.context ?? {};
     const context = {
       repos: getManagedRepos(),
+      ...defContext,
       [CRON_NAME_KEY]: def.name,
       sender: actorFromContext(c),
-      ...def.context,
     };
     config.triggerCron(def.workflow, context).catch((err) => {
       console.error(`[admin] cron trigger ${name} failed:`, err);

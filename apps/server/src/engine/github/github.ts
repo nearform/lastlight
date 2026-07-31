@@ -453,8 +453,20 @@ export class GitHubClient {
       }
       const { data: blob } = await this.octokit.rest.git.getBlob({ owner, repo, file_sha: entry.sha });
       const content = Buffer.from(blob.content ?? "", (blob.encoding as BufferEncoding) ?? "base64");
+      // Re-check against the ACTUAL length. `entry.size` is absent on some tree
+      // entries and defaults to 0 above, so the pre-check degrades to
+      // `bytes + 0 > maxBytes` and would admit a blob of any size.
+      // `sanitizeRepoFiles` applies the cap again downstream, but this one is
+      // meant to hold on its own. `continue`, not `break`, for the same reason
+      // as above: a later small file is still admissible.
+      if (bytes + content.length > maxBytes) {
+        truncated = true;
+        continue;
+      }
       bytes += content.length;
-      files.push({ path: entry.path, mode: entry.mode ?? "100644", size, content });
+      // Record the true size, not the (possibly absent, possibly wrong) size
+      // the tree reported — downstream cap checks key off this.
+      files.push({ path: entry.path, mode: entry.mode ?? "100644", size: content.length, content });
     }
 
     return { status: "ok", defaultBranch, treeSha, etag, files, truncated };

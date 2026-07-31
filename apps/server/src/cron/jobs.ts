@@ -61,10 +61,16 @@ export function getJobs(opts?: {
       // whose scoped-token mint 422s.
       context: {
         repos: getAccessibleManagedRepos(),
+        // Spread ahead of the control keys, deliberately: a cron YAML MAY pin
+        // its own `context.repos` and override the managed-repo list.
+        ...def.context,
         // Control keys for the fan-out; stripped there, never reaching a run.
+        // Injected LAST so operator YAML can't spoof them — a `_cronName` from
+        // `context:` would make `resolveCronRepos` apply another cron's per-repo
+        // opt-in/opt-out rules to this tick, and a `_cronGloballyEnabled` would
+        // let a disabled cron fan out as enabled.
         [CRON_NAME_KEY]: def.name,
         [CRON_GLOBALLY_ENABLED_KEY]: globallyEnabled,
-        ...def.context,
       },
     });
   }
