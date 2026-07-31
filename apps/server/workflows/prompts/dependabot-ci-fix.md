@@ -111,10 +111,11 @@ name: "requires-human", color: "b60205", description: "Last Light can't proceed
 automatically; a maintainer must handle it." }] }`), then add it with
 `github_add_labels` (`{ owner: "{{owner}}", repo: "{{repo}}", issue_number:
 {{prNumber}}, labels: ["requires-human"] }`), and say so in your summary. If
-label writes are denied, just say so in your summary. (This isn't permanent:
-once a later fix lands and turns the checks green, the `dependabot-pr-merge`
-workflow re-assesses the PR and clears `requires-human` if the update is
-trivial.)
+label writes are denied, just say so in your summary. (This isn't permanent, and
+nobody has to remove it by hand: the harness reads the label as OURS, applied at
+this head, so any commit pushed by someone else re-arms the loop. It is also
+cleared by `dependabot-pr-merge` once a later fix turns the checks green on a
+trivial update.)
 
 OUTPUT: A brief summary of the root cause, exactly what you changed, the
 local test/lint/typecheck results, and any checks you couldn't reproduce in the

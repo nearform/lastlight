@@ -466,24 +466,18 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   // runs, so the post-hoc facts live on `scratch` (see `./fix-harvest.ts`).
   const priorMarkers = prior ? readHarvestedMarkers(prior) : null;
 
-  // Carry the escalation record forward. `escalatedAtSha` lives on the run
-  // context already, so the stateful `requires-human` guard costs no new
-  // storage, no extra API call and no label mutation (09 → S1).
-  state.escalatedAtSha = priorState?.escalatedAtSha ?? null;
-
-  // `requires-human` is a NOTIFICATION, not a state. The state is "we escalated
-  // at head SHA X" — which is what distinguishes a bot escalation (cleared by
-  // the next human push) from a maintainer applying the label by hand to mean
-  // "stay out" (a permanent override we must honour).
-  const hasLabel = state.labels.includes(REQUIRES_HUMAN_LABEL);
-  state.escalatedBy = !hasLabel ? null : state.escalatedAtSha ? "us" : "human";
-
-  // The journal is derived from the latest PR-SCOPED run, not the latest FIX
-  // run: it is keyed on the PR (10-pr-memory.md), so a `pr-review` that ran
-  // between two fix attempts carries the accumulation forward and may have
-  // added to it. Falls back to the fix-family row when there is no wider one.
+  // The widest prior run of ours on this PR — every PR-SCOPED workflow, not
+  // just the fix family, because it is keyed on the PR (10-pr-memory.md). Two
+  // things read it: the journal (a `pr-review` between two fix attempts carries
+  // the accumulation forward and may have added to it) and the escalation
+  // record, which has to answer "have we ever touched this PR at all" and would
+  // get the wrong answer from the fix family alone. Falls back to the
+  // fix-family row when there is no wider one.
   const priorAny = deps.db.runs.latestForTrigger([...PR_SCOPED_WORKFLOWS], triggerId) ?? prior;
-  state.notes = deriveNotes(state, priorAny, priorPrState(priorAny?.context));
+  const priorAnyState = priorPrState(priorAny?.context);
+
+  applyEscalationRecord(state, priorState, priorAny, priorAnyState);
+  state.notes = deriveNotes(state, priorAny, priorAnyState);
 
   const history = deriveAttemptHistory(
     state,
@@ -495,6 +489,79 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   state.priorAttempts = history.priorAttempts;
   state.flakyDeferrals = history.flakyDeferrals;
   state.priorDiagnosisClass = history.priorDiagnosisClass;
+}
+
+/**
+ * Whose `requires-human` is this, and at which head did we put it there?
+ *
+ * The two fields resolve together because they are one answer, and splitting
+ * them is how they come to contradict each other.
+ *
+ * `requires-human` is a NOTIFICATION (09 → S1). The STATE is "**we** escalated
+ * at head SHA X", because that is the only form a later push can invalidate —
+ * which is what distinguishes a bot escalation (cleared by the next human push,
+ * with no label to remove by hand) from a maintainer applying the label to mean
+ * "bot, stay out" (a permanent override we must honour).
+ *
+ * `escalatedAtSha` is written by `./pr-escalation.ts` and by nothing else — but
+ * `escalatePr` is not the only way OUR label reaches a pull request, and the two
+ * other routes leave it on with no SHA behind it:
+ *
+ * 1. **The agent applies it mid-run.** The packaged prompts instruct it to —
+ *    `prompts/dependabot-ci-fix.md` when it cannot land the PR, and
+ *    `prompts/dependabot-pr-merge.md` for a FUNCTIONAL bump, by design.
+ *    `context.prState` is written at DISPATCH, before any phase runs, and is
+ *    never rewritten, so however correct that label is, the run persists no
+ *    escalation record.
+ * 2. **The row predates this module.** Every PR already carrying the label at
+ *    upgrade has run rows with no `prState` at all.
+ *
+ * Under a bare `escalatedAtSha ? "us" : "human"` test both read as a
+ * MAINTAINER's permanent hold: the bot mistaking its own label for a "stay
+ * out", which is the exact one-way door 09 → S1 set out to remove — and case 2
+ * does it to every already-labelled PR at once, on upgrade.
+ *
+ * So the discriminator is not the SHA but **whether any run of ours has ever
+ * touched this PR**. A label on a PR no run of ours has ever seen can only be a
+ * maintainer's; that is the hard permanent override, and it is preserved
+ * exactly. A label on a PR we have worked is ours. Misreading in this direction
+ * costs at most further dispatches on a PR already bounded by
+ * `fix.maxAttempts` and `fix.maxCostUsd`; misreading it the other way is
+ * permanent and needs a human to un-stick each PR by hand.
+ *
+ * When we conclude `"us"` with no recorded SHA, the prior run's head stands in
+ * for it — that IS the head we were at when the label landed. Without it
+ * `resolveFixDisposition`'s "same problem" test would compare against null, so
+ * a bot that had just said "a human must look at this" would keep re-attempting
+ * until the budget ran out, and `dependabot-pr-merge` would re-label and
+ * re-comment a functional bump on every event.
+ */
+function applyEscalationRecord(
+  state: PrState,
+  prior: PersistedPrState | null,
+  priorAny: WorkflowRun | null | undefined,
+  priorAnyState: PersistedPrState | null,
+): void {
+  // Carried forward off the prior run's context, so the stateful guard costs no
+  // new storage, no extra API call and no label mutation (09 → S1). Read from
+  // the fix family first and the wider PR-scoped row second: `escalatePr` records
+  // under whichever workflow was dispatching, which may be `dependabot-pr-merge`
+  // or `pr-review`.
+  const recorded = prior?.escalatedAtSha ?? priorAnyState?.escalatedAtSha ?? null;
+  state.escalatedAtSha = recorded;
+
+  if (!state.labels.includes(REQUIRES_HUMAN_LABEL)) {
+    state.escalatedBy = null;
+    return;
+  }
+  if (!priorAny) {
+    // No run of ours has ever touched this PR, so nobody but a maintainer can
+    // have applied the label. The one case the whole distinction exists for.
+    state.escalatedBy = "human";
+    return;
+  }
+  state.escalatedBy = "us";
+  state.escalatedAtSha = recorded ?? priorAnyState?.headSha ?? null;
 }
 
 /**

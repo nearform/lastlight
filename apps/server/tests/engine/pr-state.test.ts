@@ -15,6 +15,9 @@ import type { StateDb } from "#src/state/db.js";
 import type { WorkflowRun } from "#src/state/workflow-run-store.js";
 import { applyDerivedState, type PrState, type PrStateDeps } from "#src/engine/pr-state.js";
 import { harvestFixMarkers, readHarvestedMarkers } from "#src/engine/fix-harvest.js";
+import { resolveFixDisposition } from "#src/engine/pr-decisions.js";
+import { REQUIRES_HUMAN_LABEL } from "#src/cron/dependabot-discovery.js";
+import { defaultFixConfig } from "#src/config/config.js";
 
 const BOT = "last-light[bot]";
 const TRIGGER = "cliftonc/lastlight#190";
@@ -107,7 +110,28 @@ function harness(opts: { ledgerSaysDiagnosed?: boolean } = {}) {
     harvestFixMarkers(db, id, "dependabot-ci-fix", phase, output);
   }
 
-  return { rows, db, deps, dispatch, finish };
+  /**
+   * A run row as a build BEFORE `context.prState` existed left it: no snapshot,
+   * no harvest, at most the bare `headSha` the old context carried. Every PR
+   * already labelled `requires-human` at upgrade has rows of exactly this shape.
+   */
+  function recordLegacyRun(context: Record<string, unknown> = {}): string {
+    const id = `legacy-${rows.length + 1}`;
+    rows.push({
+      id,
+      workflowName: "dependabot-ci-fix",
+      triggerId: TRIGGER,
+      currentPhase: "fix",
+      phaseHistory: [],
+      status: "succeeded",
+      context,
+      startedAt: new Date(rows.length * 1000).toISOString(),
+      updatedAt: new Date(rows.length * 1000).toISOString(),
+    } as WorkflowRun);
+    return id;
+  }
+
+  return { rows, db, deps, dispatch, finish, recordLegacyRun };
 }
 
 const diagnosis = (cls: string, cause = "the lockfile is stale") =>
@@ -367,6 +391,112 @@ describe("applyDerivedState — the priorAttempts journal", () => {
     expect(last.state.priorAttempts.length).toBeLessThanOrEqual(6);
     // Newest kept, oldest dropped.
     expect(last.state.priorAttempts[last.state.priorAttempts.length - 1]).toContain("blip 11");
+  });
+});
+
+/**
+ * Who owns a `requires-human` label — the one question that decides whether the
+ * bot may ever touch the PR again.
+ *
+ * `escalatedBy: "human"` is a PERMANENT hard override, so reading our own label
+ * as a maintainer's is the one-way door 09 → S1 exists to remove. Two routes put
+ * our label on a PR with no `escalatedAtSha` behind it: the agent applying it
+ * mid-run (the packaged fix and merge prompts both instruct it to, and
+ * `context.prState` is written at dispatch and never rewritten), and every run
+ * row written before this module existed.
+ */
+describe("applyDerivedState — whose `requires-human` is this", () => {
+  const LABELLED = { labels: [REQUIRES_HUMAN_LABEL] };
+
+  it("a maintainer's label on a PR we have NEVER touched is a permanent hold", () => {
+    // The distinction the whole rule exists to preserve. No run of ours has ever
+    // seen this PR, so nobody but a maintainer can have applied the label.
+    const h = harness();
+    const { state } = h.dispatch(LABELLED);
+    expect(state.escalatedBy).toBe("human");
+    expect(state.escalatedAtSha).toBeNull();
+    expect(resolveFixDisposition(state, defaultFixConfig()).reason).toMatch(/^human-hold:/);
+  });
+
+  it("a label the AGENT applied mid-run reads as ours, not as a human's", () => {
+    // The packaged `dependabot-ci-fix` prompt tells the agent to apply
+    // `requires-human` when it cannot land the PR. That run persists no
+    // `escalatedAtSha` — its snapshot was written at dispatch, before the label
+    // existed — so a bare `escalatedAtSha ? "us" : "human"` test latched the PR
+    // dead on the very next event.
+    const h = harness();
+    const first = h.dispatch();
+    h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    h.finish(first.id, "fix", fixOutcome("gave-up", "red"));
+    expect(first.state.escalatedAtSha).toBeNull();
+
+    const next = h.dispatch(LABELLED);
+    expect(next.state.escalatedBy).toBe("us");
+    // The head we were at when the label landed stands in for the SHA nobody
+    // recorded, so the guard binds on THIS problem rather than on nothing.
+    expect(next.state.escalatedAtSha).toBe(first.state.headSha);
+    expect(resolveFixDisposition(next.state, defaultFixConfig()).reason).toMatch(/^escalated:/);
+  });
+
+  it("and it stops holding the moment anyone else pushes", () => {
+    // The anti-latch property, for the agent-applied label too: a new head from
+    // anyone but us is a fresh problem, so the label stops binding with nobody
+    // having to remove it by hand.
+    const h = harness();
+    const first = h.dispatch();
+    h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    h.dispatch(LABELLED);
+
+    const pushed = h.dispatch({
+      ...LABELLED,
+      headSha: "cccc333",
+      headAuthor: "octocat",
+      headIsOurs: false,
+    });
+    expect(pushed.state.escalatedBy).toBe("us");
+    expect(pushed.state.attempt).toBe(1);
+    expect(resolveFixDisposition(pushed.state, defaultFixConfig()).decision).toBe("run");
+  });
+
+  it("a LEGACY row with no prState does not read as a human hold either", () => {
+    // On upgrade, every PR already carrying the label has rows of exactly this
+    // shape — so the old test would have latched all of them at once, each
+    // needing a human to un-stick it by hand.
+    const h = harness();
+    h.recordLegacyRun({ headSha: "aaaa111", owner: "cliftonc", repo: "lastlight" });
+
+    const { state } = h.dispatch(LABELLED);
+    expect(state.escalatedBy).toBe("us");
+    expect(state.escalatedAtSha).toBe("aaaa111");
+    expect(resolveFixDisposition(state, defaultFixConfig()).reason).toMatch(/^escalated:/);
+  });
+
+  it("a legacy row with no head SHA at all is still ours, just without one", () => {
+    const h = harness();
+    h.recordLegacyRun({ owner: "cliftonc", repo: "lastlight" });
+
+    const { state } = h.dispatch(LABELLED);
+    expect(state.escalatedBy).toBe("us");
+    expect(state.escalatedAtSha).toBeNull();
+    // Nothing to match the head against, so the guard falls through to the
+    // ordinary budget gates rather than to a permanent hold.
+    expect(resolveFixDisposition(state, defaultFixConfig()).decision).toBe("run");
+  });
+
+  it("a recorded escalation still wins over the stand-in", () => {
+    // `escalatePr`'s row is the real thing; the fallbacks only ever fill a gap.
+    const h = harness();
+    const first = h.dispatch();
+    h.rows[0].context = {
+      prState: { ...first.state, escalatedAtSha: "eeee555", escalatedBy: "us" },
+    };
+    expect(h.dispatch(LABELLED).state.escalatedAtSha).toBe("eeee555");
+  });
+
+  it("no label ⇒ nobody escalated, whatever the history says", () => {
+    const h = harness();
+    h.recordLegacyRun({ headSha: "aaaa111" });
+    expect(h.dispatch().state.escalatedBy).toBeNull();
   });
 });
 
