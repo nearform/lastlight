@@ -377,6 +377,32 @@ describe("resolveFixDisposition", () => {
     expect(escalating({})).toBeUndefined(); // a plain `run`
   });
 
+  it("drops on the PR-scoped run lock, before every other guard", () => {
+    // 09 → S4. `resolveReviewTrigger` read `runInFlight` and these two did not,
+    // so the daily `fix-red-dependency-prs` could dispatch `dependabot-ci-fix`
+    // onto a PR with a live `pr-fix` run — and the fix family now shares ONE
+    // workspace per PR, so that is two agents fetching, `reset --hard`-ing and
+    // `clean -fdx`-ing the same directory, each deleting the other's
+    // `.lastlight-verify.sh`.
+    const held = { runInFlight: { workflow: "pr-fix", runId: "4821" } };
+    const d = resolveFixDisposition(state(held), fix);
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^run-in-flight: pr-fix 4821 is already working this PR$/);
+    // A typed field, like `escalation` — the caller must not parse the prose.
+    expect(d.runInFlight).toEqual({ workflow: "pr-fix", runId: "4821" });
+    // NOT terminal: no label, no comment, no run row. It is a "come back later"
+    // that every dropped case has a cron re-pickup for.
+    expect(d.escalation).toBeUndefined();
+
+    // Before the escalating skips: a PR whose budget the in-flight run is still
+    // spending must not be labelled `requires-human` for it.
+    expect(resolveFixDisposition(state({ ...held, attempt: 9, cumulativeCostUsd: 99 }), fix).escalation)
+      .toBeUndefined();
+    // And before the explicit-request override — `@bot fix this` cannot walk
+    // into the running agent's workspace.
+    expect(resolveFixDisposition(state(held), fix, { explicitRequest: true }).decision).toBe("skip");
+  });
+
   it("does not let an explicit request override upstream-broken or the budget", () => {
     // Facts, not policy: re-running against a red base cannot help however
     // nicely you ask, and the cap exists to stop exactly this.
@@ -438,6 +464,20 @@ describe("resolveMergeDisposition", () => {
     const d = resolveMergeDisposition(state(over), deps, opts);
     expect(d.decision).toBe(expected);
     expect(d.reason).toMatch(reason);
+  });
+
+  it("drops on the run lock — no auto-merge against a PR whose fix run is in flight", () => {
+    // The sequence 09 → S4 names verbatim: `dependabot-ci-fix` pushes a fix, CI
+    // goes green while the run is still writing its comment and marker,
+    // `pr.checks_passed` fires, and the merge route acts on a tree still being
+    // rewritten. This route never read `runInFlight` at all.
+    const d = resolveMergeDisposition(
+      state({ checksState: "passing", runInFlight: { workflow: "dependabot-ci-fix", runId: "99" } }),
+      deps,
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^run-in-flight: dependabot-ci-fix 99/);
+    expect(d.runInFlight).toEqual({ workflow: "dependabot-ci-fix", runId: "99" });
   });
 });
 

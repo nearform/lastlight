@@ -73,6 +73,25 @@ export interface Decision<T> {
    */
   escalation?: EscalationCase;
   /**
+   * Set ONLY on a skip produced by the PR-scoped run lock (09 → S4), carrying
+   * the run that holds it.
+   *
+   * A lock drop is NOT terminal and must not be treated as one: nothing is
+   * wrong with the PR, we simply cannot work on it while another run owns its
+   * workspace. So it carries no {@link EscalationCase} — it labels nothing,
+   * comments nothing and writes no run row — and the caller keys on this typed
+   * field rather than string-matching the reason prose, exactly as the
+   * escalation applier keys on `escalation` and the fork notice on
+   * `state.isFork`. The one response it does earn is a REPLY when a human asked
+   * directly: a maintainer who is silently dropped will just ask again.
+   *
+   * Drop-and-reply (rather than queue) is only sound because every dropped case
+   * has a cron re-pickup — `merge-green-dependency-prs`, `fix-red-dependency-prs`
+   * and `check-prs-awaiting-review`. A future phase must convert
+   * drop-on-lock into queue-on-lock before removing any of them.
+   */
+  runInFlight?: { workflow: string; runId: string };
+  /**
    * Set ONLY when the decision came from {@link resolveReviewTrigger}, carrying
    * its UNDEGRADED three-valued verdict.
    *
@@ -84,6 +103,48 @@ export interface Decision<T> {
    * follows.
    */
   review?: ReviewTriggerDecision;
+}
+
+// ---------------------------------------------------------------------------
+// The PR-scoped run lock — 09 → S4
+// ---------------------------------------------------------------------------
+
+/**
+ * "Another run already owns this PR" — stated ONCE, for every disposition.
+ *
+ * The lock is PR-scoped across every PR-scoped workflow (`pr-fix`,
+ * `dependabot-ci-fix`, `dependabot-pr-merge`, `pr-review`), and
+ * `PR_SCOPED_WORKFLOWS` is exactly the union of the three dispositions below —
+ * so a guard that lives in one of them is a guard only one route obeys. It used
+ * to: `resolveReviewTrigger` checked `runInFlight` and the two others did not,
+ * while the dispatcher checked it inline for the webhook/comment route and
+ * `dispatchWorkflow` (the cron fan-out and `/api/run`) never did at all. The
+ * daily `fix-red-dependency-prs` could therefore dispatch `dependabot-ci-fix`
+ * onto a PR that already had a live `pr-fix` run, and
+ * `merge-green-dependency-prs` could enable auto-merge against a PR whose fix
+ * run was still writing its marker — the two sequences 09 → S4 names verbatim
+ * as the reason the lock exists.
+ *
+ * That is worse than harmless duplication now that the fix family shares ONE
+ * workspace per PR (`${repo}-${prNumber}-fix`): two runs `git fetch` +
+ * `reset --hard` + `git clean -fdx` the same directory while an agent works in
+ * it, and each rewrites the other's `.lastlight-verify.sh` gate.
+ *
+ * It is checked FIRST in each disposition, before every other skip, because it
+ * is the one skip that is purely transient. Ordering it after the escalating
+ * skips would label a PR `requires-human` for a budget that a run currently in
+ * flight is still spending; ordering it after `explicitRequest` would let an
+ * `@bot fix this` walk straight into the running agent's workspace.
+ */
+function runLockDrop<T>(decision: T, state: PrState, inputs: Record<string, unknown>): Decision<T> | null {
+  if (!state.runInFlight) return null;
+  const { workflow, runId } = state.runInFlight;
+  return {
+    decision,
+    reason: `run-in-flight: ${workflow} ${runId} is already working this PR`,
+    inputs,
+    runInFlight: state.runInFlight,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +289,13 @@ export function resolveFixDisposition(
     maxCostUsd: cfg.maxCostUsd,
     priorDiagnosisClass: state.priorDiagnosisClass,
     retryableClasses: cfg.retryableClasses,
+    runInFlight: state.runInFlight,
     explicitRequest: !!opts.explicitRequest,
   };
+
+  // The PR-scoped run lock, before anything else — see `runLockDrop`.
+  const locked = runLockDrop<FixDisposition>("skip", state, inputs);
+  if (locked) return locked;
 
   // A fork PR has no branch we can push to. Cheapest possible skip: before the
   // budget arithmetic, before any sandbox.
@@ -467,6 +533,14 @@ export function resolveReviewTrigger(
     explicitRequest: !!opts.explicitRequest,
   };
 
+  // The PR-scoped run lock, before anything else — see `runLockDrop`. Above the
+  // explicit-request branch on purpose: the lock is not policy but a physical
+  // constraint (one workspace, one branch, one agent), so it is the one thing an
+  // `@bot review` does NOT override. The dispatcher replies to the human whose
+  // request it dropped; the 30-minute sweep is the re-pickup.
+  const locked = runLockDrop<ReviewTriggerDecision>("skip", state, inputs);
+  if (locked) return locked;
+
   const labelRequested = !!cfg.requestLabel && state.labels.includes(cfg.requestLabel);
   if (opts.explicitRequest || labelRequested) {
     return {
@@ -490,14 +564,6 @@ export function resolveReviewTrigger(
 
   if (cfg.skipDraft && state.isDraft) {
     return { decision: "skip", reason: "draft: review.skipDraft is on", inputs };
-  }
-
-  if (state.runInFlight) {
-    return {
-      decision: "skip",
-      reason: `run-in-flight: ${state.runInFlight.workflow} ${state.runInFlight.runId} is already working this PR`,
-      inputs,
-    };
   }
 
   if (state.botReviewAtHead) {
@@ -567,8 +633,17 @@ export function resolveMergeDisposition(
     headSha: state.headSha,
     escalatedBy: state.escalatedBy,
     escalatedAtSha: state.escalatedAtSha,
+    runInFlight: state.runInFlight,
     explicitRequest: !!opts.explicitRequest,
   };
+
+  // The PR-scoped run lock, before anything else — see `runLockDrop`. This is
+  // the branch that stops `merge-green-dependency-prs` enabling auto-merge
+  // against a PR whose fix run is still in flight: the fix pushes, CI goes
+  // green while the run is still writing its comment and marker, and the merge
+  // route then acts on a tree that is still being rewritten.
+  const locked = runLockDrop<FixDisposition>("skip", state, inputs);
+  if (locked) return locked;
 
   if (state.escalatedBy === "human" && !opts.explicitRequest) {
     return {
@@ -643,6 +718,13 @@ export type DispatchDispositionOptions = FixDispositionOptions & ReviewTriggerOp
  * — but the caller keeps the undegraded decision on {@link Decision.review},
  * because the CHECK RUN each should leave behind differs: see
  * {@link reviewCheckPlacement}.
+ *
+ * The PR-scoped run lock is enforced inside each of the three, not here: the
+ * lock's span (`PR_SCOPED_WORKFLOWS`) is exactly the union of the three
+ * branches, so the `ungated` fallback below is unreachable for a workflow the
+ * lock covers — and a caller that reaches one of the dispositions directly
+ * (`pr-escalation.ts`'s tests, the evals harness) gets the same answer as one
+ * that comes through here. See {@link runLockDrop}.
  */
 export function resolveDispatchDisposition(
   workflowName: string,
@@ -663,6 +745,10 @@ export function resolveDispatchDisposition(
       reason: review.reason,
       inputs: review.inputs,
       review: review.decision,
+      // Carried through the collapse: a review dropped by the run lock is the
+      // same kind of "come back later" as a fix dropped by it, and the caller
+      // owes the same reply to whoever asked.
+      ...(review.runInFlight ? { runInFlight: review.runInFlight } : {}),
     };
   }
   return {

@@ -5,7 +5,12 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { loadConfig, resolveModel, resolveVariant, resolveGithubAuth } from "./config/config.js";
 import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService } from "./connectors/index.js";
-import { dispatch, type DispatchDeps } from "./engine/dispatcher.js";
+import {
+  dispatch,
+  applyPrDispatchGate,
+  prPolicyConfig,
+  type DispatchDeps,
+} from "./engine/dispatcher.js";
 import { MessageBatcher } from "./engine/chat/message-batcher.js";
 import { chatSystemSuffix, handleChatMessage, loadAgentContext } from "./engine/chat/chat.js";
 import { configureWorkflowAssets, validateAssets, getWorkflow } from "./workflows/loader.js";
@@ -48,22 +53,15 @@ import {
   type SimpleWorkflowRequest,
 } from "./workflows/simple.js";
 import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./engine/pr-state.js";
-import {
-  renderContext,
-  resolveDispatchDisposition,
-  reviewCheckPlacement,
-  type ReviewTriggerOptions,
-} from "./engine/pr-decisions.js";
+import { renderContext, type ReviewTriggerOptions } from "./engine/pr-decisions.js";
 import {
   REVIEW_WORKFLOW,
   installReviewCheckObserver,
   linkReviewCheck,
   openReviewCheck,
-  postReviewCheckForSkip,
   recordReviewCheck,
 } from "./engine/review-check.js";
 import { runDashboardUrl } from "./notify/model.js";
-import { escalatePr } from "./engine/pr-escalation.js";
 import { harvestFixMarkers } from "./engine/fix-harvest.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
@@ -411,23 +409,20 @@ async function main() {
       // Only the routes that have NOT already decided are gated here. The
       // dispatcher decides for itself so it can reply to a human whose request
       // it dropped; deciding twice would double every skip and every log line.
+      // It is the SAME function, reading the SAME repo-clamped config (it is
+      // handed `resolveRepoPolicy`, which is this file's `resolveRepoRunConfig`),
+      // so the two routes cannot answer differently.
+      //
       // A skip writes NO run row, which is exactly why every gate reachable
       // from here is a LIVE precondition rather than a prior run's verdict —
       // a stored verdict read through a path that records nothing freezes, and
       // the PR is then dead with no label, no comment and no explanation
-      // (09 → D1).
-      const effectiveFix = repoConfig?.fix ?? config.fix;
-      const effectiveReviewCfg = repoConfig?.review ?? config.review;
-      const disposition = resolveDispatchDisposition(
-        workflowName,
-        prState,
+      // (09 → D1). The one exception, an ESCALATING skip, records one itself.
+      const disposition = await applyPrDispatchGate(
         {
-          fix: effectiveFix,
-          dependencies: repoConfig?.dependencies ?? config.dependencies,
-          review: effectiveReviewCfg,
-        },
-        {
-          dedupOnHeadSha: true,
+          workflowName,
+          state: prState,
+          policy: prPolicyConfig(repoConfig),
           // The cron fan-out marks itself `sweep` — the RELEASE MECHANISM for
           // every PR whose fix chain ended without pushing, and the only route
           // that reaches an `after-checks` PR no further `check_suite` will ever
@@ -440,41 +435,15 @@ async function main() {
           // the human override for those already exists on the comment path.
           explicitRequest:
             workflowName === REVIEW_WORKFLOW && context._triggerType === "api",
+          logPrefix: "[dispatch]",
         },
-      );
-      console.log(
-        `[dispatch] ${workflowName} ${prState.repo}#${prState.prNumber}: ` +
-        `${disposition.decision} — ${disposition.reason}`,
+        { db, github, botLogin: config.botLogin, botMention: `@${config.botName}` },
       );
       if (disposition.decision === "skip") {
-        if (disposition.review) {
-          // A DEFERRED review leaves a placeholder check rather than a label +
-          // comment — same call, same decision, as the dispatcher's gate.
-          await postReviewCheckForSkip(
-            {
-              workflowName,
-              placement: reviewCheckPlacement(disposition.review, effectiveReviewCfg),
-              postsCheck: effectiveReviewCfg.postsCheck,
-              route: reviewRouteFromContext(context),
-              owner,
-              repo,
-              headSha: prState.headSha,
-            },
-            { github, botLogin: config.botLogin, botMention: `@${config.botName}` },
-          );
-          return { success: true };
-        }
-        // A skip that is TERMINAL for this problem is labelled and explained on
-        // the PR rather than dropped silently — and, crucially, RECORDS A RUN
-        // ROW, without which `escalatedAtSha` would never persist and the next
-        // dispatch would read our own escalation as a human's permanent
-        // override (09 → D1; see `pr-escalation.ts`). Identical call to the
-        // dispatcher's, because the daily `fix-red-dependency-prs` sweep — this
-        // route — is what reaches most exhausted PRs.
-        await escalatePr(workflowName, prState, disposition, effectiveFix, { db, github });
         // Not an error: the harness correctly determined there is nothing to
-        // do. Reporting it as a failure would paint a cron tick red and, on
-        // the fan-out, count against `failures`.
+        // do — including a run-lock drop, which the daily crons re-pick up.
+        // Reporting it as a failure would paint a cron tick red and, on the
+        // fan-out, count against `failures`.
         return { success: true };
       }
     }
@@ -1396,6 +1365,16 @@ async function main() {
         { model: resolveModel(config.models, "chat"), maxTurns: 10 },
       ),
     publicUrl: config.publicUrl,
+    // ONE config at the dispatch gate. The dispatcher decides for itself (it
+    // has to — it replies to the human whose request it dropped, and its
+    // dispatches are fire-and-forget), so the way to keep it from carrying a
+    // second, operator-only view of policy is to hand it the very same
+    // resolution `dispatchWorkflow` performs below. `fetchRepoLayer` memoises
+    // per repo for 60 s, so the pair costs one conditional request between them.
+    resolveRepoPolicy: async (workflowName, context) => {
+      const { repoConfig } = await resolveRepoRunConfig(workflowName, context, { client: github });
+      return repoConfig;
+    },
   };
 
   // Wire Slack approval buttons into the SAME approval-resolution path as the

@@ -18,11 +18,13 @@ import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./pr-state.js
 import {
   resolveDispatchDisposition,
   reviewCheckPlacement,
+  type Decision,
+  type FixDisposition,
   type PrPolicyConfig,
   type ReviewTriggerOptions,
 } from "./pr-decisions.js";
 import { postReviewCheckForSkip } from "./review-check.js";
-import { escalatePr } from "./pr-escalation.js";
+import { escalatePr, type EscalationDeps } from "./pr-escalation.js";
 
 /**
  * Hand a workflow to the runner. Matches `dispatchWorkflow` in index.ts — the
@@ -56,7 +58,43 @@ export interface DispatchDeps {
   runChat: RunChatFn;
   route?: (envelope: EventEnvelope, deps: RouterDeps) => Promise<Route>;
   publicUrl?: string;
+  /**
+   * Resolve the target repo's `.lastlight/` POLICY layer for this dispatch.
+   *
+   * INJECTED rather than imported so the dispatcher keeps no edge to the runner
+   * (`resolveRepoRunConfig` lives in `workflows/simple.ts`, which drags the
+   * loader, the sandbox and the artifact store in with it). `main()` wires the
+   * very same call `dispatchWorkflow` makes one level down, so both gates read
+   * ONE config.
+   *
+   * Without it the dispatcher read the OPERATOR's values while `dispatchWorkflow`
+   * read the repo-clamped ones, and the webhook route always hands `_prState`
+   * down — so on EVERY webhook-originated PR dispatch a managed repo's clamped
+   * `fix.maxAttempts` / `fix.maxCostUsd` / `fix.retryableClasses` /
+   * `dependencies.requireSettledChecks` / `review.trigger` / `skipDraft` /
+   * `postsCheck` were silently not applied, while `renderContext` rendered them
+   * to the prompt and `lastlight repo config show` reported them. Only the cron
+   * sweep and `/api/run` honoured them.
+   *
+   * Cheap: `fetchRepoLayer` memoises per repo for 60 s, so this call and
+   * `dispatchWorkflow`'s are one conditional request per repo per minute
+   * between them, and this one usually warms the cache for that one.
+   *
+   * Omitted (chat-only wiring, tests) means "no repo layer" — the operator's
+   * config, which is what the layer clamps toward anyway.
+   */
+  resolveRepoPolicy?: ResolveRepoPolicyFn;
 }
+
+/**
+ * The three policy blocks a repo's `.lastlight/` layer may clamp, or undefined
+ * when no layer applies. Structurally the `RunRepoConfig` `resolveRepoRunConfig`
+ * returns, narrowed to what the gate reads.
+ */
+export type ResolveRepoPolicyFn = (
+  workflowName: string,
+  context: Record<string, unknown>,
+) => Promise<Partial<PrPolicyConfig> | undefined>;
 
 /**
  * The typed result of dispatching one event. Handlers return an outcome rather
@@ -179,33 +217,12 @@ export async function dispatch(
   // all for them**: it is called with a bare workflow name and a bare issue
   // number, while every phase ledger row is written by `phase-executor.ts`
   // with `skill = "<workflow>:<phase>"` and `trigger_id = "owner/repo#N"`, so
-  // no row can ever match on both and it has always returned false. Nothing
-  // has ever stopped an `@bot fix this` routed to `pr-fix` running
-  // concurrently with a `fix-red-dependency-prs` dispatch of
-  // `dependabot-ci-fix` — two agents, two clones of the same branch, both
-  // running the gate, both pushing — which is why this matters more than the
-  // plan assumed. It also closes the case where `dependabot-pr-merge` enables
-  // auto-merge against a PR whose fix run is still in flight.
-  //
-  // The loser is DROPPED with a reason, not queued. That is only sound because
-  // every dropped case has a cron re-pickup (`merge-green-dependency-prs`,
-  // `fix-red-dependency-prs`, `check-prs-awaiting-review`) — a future phase
-  // must convert drop-on-lock into queue-on-lock before removing any of them.
+  // no row can ever match on both and it has always returned false. The lock
+  // now lives in the DECISION functions (`runLockDrop`), so the cron fan-out
+  // and `/api/run` obey it too — it used to be read here and in
+  // `resolveReviewTrigger` only, which left `fix-red-dependency-prs` free to
+  // dispatch `dependabot-ci-fix` onto a PR with a live `pr-fix` run.
   const triggerId = String(envelope.issueNumber || envelope.id);
-  if (prState?.runInFlight) {
-    const { workflow, runId } = prState.runInFlight;
-    const reason =
-      `${handler}: ${workflow} run ${runId} is already in flight for ` +
-      `${prState.repo}#${prState.prNumber}`;
-    console.log(`[event] Skipping: ${reason}`);
-    // A maintainer who is silently dropped will just ask again.
-    if (explicitRequest) {
-      await envelope.reply(
-        `I'm already working on this PR (\`${workflow}\`). I'll finish that run first — ask me again if it doesn't cover what you need.`,
-      );
-    }
-    return { kind: "skipped", reason };
-  }
   if (!prState && deps.db.executions.isRunning(handler, triggerId)) {
     console.log(`[event] Skipping: ${handler} already running for ${triggerId}`);
     if (envelope.type === "message") {
@@ -221,45 +238,34 @@ export async function dispatch(
   // enum so the log line, the escalation comment and the admin detail panel are
   // three renderings of ONE source instead of three prose variants that drift.
   if (prState) {
-    const policy = prPolicyConfig();
-    const disposition = resolveDispatchDisposition(handler, prState, policy, {
-      explicitRequest,
-      dedupOnHeadSha: true,
-      route: reviewRoute,
-    });
-    console.log(
-      `[event] ${handler} ${prState.repo}#${prState.prNumber}: ${disposition.decision} — ${disposition.reason}`,
+    // The repo's `.lastlight/` layer, folded in BEFORE the decision — the same
+    // resolution `dispatchWorkflow` makes one level down, hitting the same 60 s
+    // cache. Without it this gate read the operator's budgets while the prompt
+    // rendered the repo's.
+    const policy = prPolicyConfig(await deps.resolveRepoPolicy?.(handler, context));
+    const disposition = await applyPrDispatchGate(
+      { workflowName: handler, state: prState, policy, explicitRequest, route: reviewRoute, logPrefix: "[event]" },
+      deps,
     );
     if (disposition.decision === "skip") {
-      // A DEFERRED review ("not yet") leaves a placeholder check saying so, when
-      // `review.postsCheck` is on — the same call, from the same decision, as
-      // the cron/API route in `dispatchWorkflow`. A plain skip leaves nothing.
-      if (disposition.review) {
-        await postReviewCheckForSkip(
-          {
-            workflowName: handler,
-            placement: reviewCheckPlacement(disposition.review, policy.review),
-            postsCheck: policy.review.postsCheck,
-            route: reviewRoute,
-            owner: prState.repo.split("/")[0] ?? "",
-            repo: prState.repo.split("/")[1] ?? "",
-            headSha: prState.headSha,
-          },
-          { github: deps.github, botLogin: getRuntimeConfig()?.botLogin, botMention: `@${getBotName()}` },
+      // The two responses that belong to THIS route rather than to the decision
+      // — both keyed on a typed field, never on the reason prose.
+      //
+      // A maintainer whose explicit request lost the run lock is told so; one
+      // who is silently dropped will just ask again. (The lock is not policy but
+      // a physical constraint, so `@bot` does not override it — the cron
+      // re-pickup is what makes dropping sound.)
+      if (disposition.runInFlight && explicitRequest) {
+        await envelope.reply(
+          `I'm already working on this PR (\`${disposition.runInFlight.workflow}\`). I'll finish that run first — ask me again if it doesn't cover what you need.`,
         );
-        return { kind: "skipped", reason: `${handler}: ${disposition.reason}` };
       }
       // A fork PR is the one skip a human is owed an explanation for on the PR
       // itself: there is nothing wrong with their change, we simply have no
-      // branch to push to. Keyed on the snapshot field, never on the reason
-      // string.
-      if (prState.isFork) await postForkNotice(prState, deps);
-      // A skip that is TERMINAL for this problem is labelled and explained
-      // instead of dropped silently — the same call, from the same decision, as
-      // the cron/API route in `dispatchWorkflow`. Keyed on the typed
-      // `escalation` case the deciding branch set, for the same reason the fork
-      // notice keys on `isFork`.
-      else await escalatePr(handler, prState, disposition, policy.fix, deps);
+      // branch to push to.
+      if (prState.isFork && !disposition.runInFlight && !disposition.review) {
+        await postForkNotice(prState, deps);
+      }
       return { kind: "skipped", reason: `${handler}: ${disposition.reason}` };
     }
   }
@@ -333,22 +339,120 @@ async function resolvePrStateForDispatch(
 }
 
 /**
- * The three policy blocks the dispatch gate reads.
+ * The three policy blocks the dispatch gate reads — the operator's config with
+ * the target repo's `.lastlight/` layer folded in.
  *
- * SEAM: these are the OPERATOR's values. The target repo's `.lastlight/` layer
- * is resolved one level down, at `dispatchWorkflow` — and it may only ever
- * clamp these tighter (a repo can lower `fix.maxAttempts`, never raise it), so
- * reading the operator's values here can only ever let a run through that the
- * repo would also have skipped a moment later, never the reverse. Fold the
- * repo layer in here when the two resolutions are merged.
+ * ONE config, one decision, every route. This used to be operator-only in the
+ * dispatcher and repo-clamped in `dispatchWorkflow`, which failed silently and
+ * asymmetrically: the gate used one number while `renderContext` rendered
+ * another to the prompt and `lastlight repo config show` reported the same one
+ * the prompt got. The repo layer may only ever clamp TIGHTER (add-only, see
+ * `packages/shared/src/repo-config-schema.ts`), so the old seam always erred by
+ * letting a run through the repo would have refused — which is exactly the
+ * direction a budget cap must not err in.
+ *
+ * `layer` comes from {@link DispatchDeps.resolveRepoPolicy}, which is the same
+ * `resolveRepoRunConfig` call `dispatchWorkflow` makes; the `?? operator`
+ * fallbacks mirror its `repoConfig?.fix ?? config.fix` exactly.
  */
-function prPolicyConfig(): PrPolicyConfig {
+export function prPolicyConfig(layer?: Partial<PrPolicyConfig>): PrPolicyConfig {
   const rt = getRuntimeConfig();
   return {
-    fix: rt?.fix ?? defaultFixConfig(),
-    dependencies: rt?.dependencies ?? defaultDependenciesConfig(),
-    review: rt?.review ?? defaultReviewConfig(),
+    fix: layer?.fix ?? rt?.fix ?? defaultFixConfig(),
+    dependencies: layer?.dependencies ?? rt?.dependencies ?? defaultDependenciesConfig(),
+    review: layer?.review ?? rt?.review ?? defaultReviewConfig(),
   };
+}
+
+/** Everything {@link applyPrDispatchGate} needs to act on its own verdict. */
+export interface PrGateDeps extends EscalationDeps {
+  /** `<botName>[bot]`. Defaults to the boot config's. */
+  botLogin?: string;
+  /** `@<botName>`, for the `on-request` placeholder's instructions. */
+  botMention?: string;
+}
+
+/** What {@link applyPrDispatchGate} was asked to decide. */
+export interface PrGateArgs {
+  workflowName: string;
+  state: PrState;
+  /** Already repo-clamped — see {@link prPolicyConfig}. */
+  policy: PrPolicyConfig;
+  explicitRequest?: boolean;
+  route: NonNullable<ReviewTriggerOptions["route"]>;
+  /** `[event]` (webhook/comment) or `[dispatch]` (cron, `/api/run`). */
+  logPrefix: string;
+}
+
+/**
+ * THE dispatch gate — decide, log, and apply the decision's own consequences.
+ *
+ * Both routes call this one function: the dispatcher for webhook/comment
+ * events, and `dispatchWorkflow` for the cron fan-out, `/api/run` and resume.
+ * They used to carry two hand-kept-in-step copies of it, reading two different
+ * configs (see {@link prPolicyConfig}) and diverging on which side effects a
+ * skip earns.
+ *
+ * The two consequences that belong to the DECISION rather than to the route are
+ * applied here, so neither can be forgotten by one caller:
+ *
+ * - a **deferred review** leaves the placeholder check that says "not yet"
+ *   (itself route-limited inside `postReviewCheckForSkip` — a statement about a
+ *   head SHA belongs on PR attention, not on every sweep tick);
+ * - a skip that is **terminal for this problem** is labelled and explained, and
+ *   RECORDS A RUN ROW without which `escalatedAtSha` never persists and the next
+ *   dispatch reads our own label as a human's permanent hold (09 → D1).
+ *
+ * What is NOT applied here is the route's own courtesy: replying to the human
+ * whose request was dropped, and the fork-PR notice. Both are answers to a
+ * person who is watching, so they belong to the route that has one — a daily
+ * cron re-posting a fork notice for the life of the PR is spam, not
+ * transparency. The caller keys them on the TYPED fields the deciding branch
+ * set (`decision.runInFlight`, `state.isFork`), never on the reason prose.
+ */
+export async function applyPrDispatchGate(
+  args: PrGateArgs,
+  deps: PrGateDeps,
+): Promise<Decision<FixDisposition>> {
+  const { workflowName, state, policy, route } = args;
+  const disposition = resolveDispatchDisposition(workflowName, state, policy, {
+    explicitRequest: args.explicitRequest,
+    dedupOnHeadSha: true,
+    route,
+  });
+  console.log(
+    `${args.logPrefix} ${workflowName} ${state.repo}#${state.prNumber}: ` +
+    `${disposition.decision} — ${disposition.reason}`,
+  );
+  if (disposition.decision !== "skip") return disposition;
+
+  // A run-lock drop is a "come back later", not a verdict: no placeholder, no
+  // label, no comment, no run row. Returned to the caller so the route that has
+  // a human on the other end can reply.
+  if (disposition.runInFlight) return disposition;
+
+  if (disposition.review) {
+    await postReviewCheckForSkip(
+      {
+        workflowName,
+        placement: reviewCheckPlacement(disposition.review, policy.review),
+        postsCheck: policy.review.postsCheck,
+        route,
+        owner: state.repo.split("/")[0] ?? "",
+        repo: state.repo.split("/")[1] ?? "",
+        headSha: state.headSha,
+      },
+      {
+        github: deps.github,
+        botLogin: deps.botLogin ?? getRuntimeConfig()?.botLogin,
+        botMention: deps.botMention ?? `@${getBotName()}`,
+      },
+    );
+    return disposition;
+  }
+
+  await escalatePr(workflowName, state, disposition, policy.fix, deps);
+  return disposition;
 }
 
 /**
