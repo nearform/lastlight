@@ -215,6 +215,84 @@ export class WorkflowRunStore {
     return row ? this.deserialize(row) : null;
   }
 
+  /**
+   * The most recent run for this trigger belonging to ANY of `workflowNames`,
+   * in ANY status.
+   *
+   * Two things distinguish it from {@link latestSucceededForTrigger}:
+   *
+   * 1. **It keys on a FAMILY, not one workflow.** "How many times have we tried
+   *    to fix this PR, and what did we try" is a fact about the pull request;
+   *    which of `pr-fix` / `dependabot-ci-fix` happened to run is an
+   *    implementation detail of how the event arrived — and routing genuinely
+   *    varies (an `@bot fix this` comment on a red Dependabot PR is an LLM
+   *    decision that can land on either). Under (workflow, PR) keying that PR
+   *    would get a second, empty attempt counter: attempt resets to 1,
+   *    `{{priorAttempts}}` renders blank, and the budget silently doubles.
+   *    See 09-state-machine.md → S1 ("Identity").
+   * 2. **It does not filter on success.** A crashed run has to be VISIBLE, so
+   *    the caller can decide it consumed no attempt. Filtering it out here
+   *    would make a crash look like "no prior attempt" and re-arm the loop
+   *    from zero.
+   */
+  latestForTrigger(workflowNames: string[], triggerId: string): WorkflowRun | null {
+    if (workflowNames.length === 0) return null;
+    const placeholders = workflowNames.map(() => "?").join(", ");
+    const row = this.db.prepare(`
+      SELECT * FROM workflow_runs
+      WHERE trigger_id = ? AND workflow_name IN (${placeholders})
+      ORDER BY started_at DESC
+      LIMIT 1
+    `).get(triggerId, ...workflowNames) as Record<string, unknown> | undefined;
+    return row ? this.deserialize(row) : null;
+  }
+
+  /**
+   * The oldest still-live (queued / running / paused) run for this trigger
+   * among `workflowNames` — the PR-scoped run lock (09-state-machine.md → S4).
+   *
+   * Oldest-first deliberately: the answer to "who holds the lock" must be the
+   * incumbent, not whichever row sorted last.
+   *
+   * `paused` counts. A paused run still owns its sandbox workspace, and the fix
+   * family now SHARES one workspace per PR — letting a second workflow in
+   * would have two agents fetch/reset/push the same branch through the same
+   * directory.
+   */
+  activeForTrigger(workflowNames: string[], triggerId: string): WorkflowRun | null {
+    if (workflowNames.length === 0) return null;
+    const placeholders = workflowNames.map(() => "?").join(", ");
+    const row = this.db.prepare(`
+      SELECT * FROM workflow_runs
+      WHERE trigger_id = ? AND workflow_name IN (${placeholders})
+        AND status IN ('queued', 'running', 'paused')
+      ORDER BY started_at ASC
+      LIMIT 1
+    `).get(triggerId, ...workflowNames) as Record<string, unknown> | undefined;
+    return row ? this.deserialize(row) : null;
+  }
+
+  /**
+   * The most recent SUCCEEDED run of EACH of `workflowNames` for this trigger,
+   * keyed by workflow name. Absent keys mean "never succeeded here".
+   *
+   * Feeds the "already assessed at this head SHA" dedup, which is per-workflow
+   * on purpose even though the fix ATTEMPT counter is per-family: `pr-fix`
+   * having succeeded at a SHA says nothing about whether `dependabot-pr-merge`
+   * has assessed it. One small indexed lookup per name — the set is four.
+   */
+  latestSucceededForTriggers(
+    workflowNames: string[],
+    triggerId: string,
+  ): Record<string, WorkflowRun> {
+    const out: Record<string, WorkflowRun> = {};
+    for (const name of workflowNames) {
+      const run = this.latestSucceededForTrigger(name, triggerId);
+      if (run) out[name] = run;
+    }
+    return out;
+  }
+
   /** List all active (queued, running, or paused) workflow runs */
   listActive(): WorkflowRun[] {
     const rows = this.db.prepare(`

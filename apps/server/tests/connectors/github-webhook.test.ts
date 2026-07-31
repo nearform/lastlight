@@ -292,6 +292,43 @@ describe("GitHubWebhookConnector — failed checks", () => {
     expect(emitted).toBeNull();
   });
 
+  it("emits pr.checks_failed on a human PR whose head commit WE pushed", async () => {
+    // The CI feedback loop `pr-fix` has never had: it could push a fix and
+    // never learn whether the build went green, because this event only ever
+    // fired for dependency PRs. `git-auth.ts` stamps `user.name = botLogin` on
+    // our commits and the check_suite payload carries the same field.
+    const { emitted } = await postCheckSuiteCompleted(connector(), {
+      conclusion: "failure",
+      prNumber: 207,
+      commitAuthor: BOT_LOGIN,
+      commitMessage: "fix(ci): pin vitest to 3.2.4",
+      headBranch: "lastlight/205-user-identity",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+    // ...and the router must send it to `pr-fix`, not the dependency workflow.
+    expect(emitted.isDependencyPr).toBe(false);
+  });
+
+  it("carries isDependencyPr: true for a genuine bump", async () => {
+    const { emitted } = await postCheckSuiteCompleted(connector(), {
+      conclusion: "failure",
+      prNumber: 681,
+    });
+    expect(emitted.isDependencyPr).toBe(true);
+  });
+
+  it("still ignores a human PR the bot has never pushed to", async () => {
+    const { json, emitted } = await postCheckSuiteCompleted(connector(), {
+      conclusion: "failure",
+      prNumber: 207,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
   it("emits pr.checks_failed for a Renovate PR detected by head branch", async () => {
     // The commit author isn't the bot (squashed/proxied), but the branch is.
     const { emitted } = await postCheckSuiteCompleted(connector(), {
@@ -424,6 +461,23 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
     });
     expect(json.filtered).toBe(true);
     expect(emitted).toBeNull();
+  });
+
+  it("applies the settle gate to a bot-authored head too", async () => {
+    // The broadened emit (§3.4) does NOT get a free pass on settling: a repo
+    // with several check-reporting apps must still fire once per SHA, not once
+    // per suite, when the head commit is ours.
+    const { conn, calls } = connectorWithChecks("pending");
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "failure",
+      prNumber: 207,
+      commitAuthor: BOT_LOGIN,
+      headBranch: "lastlight/205-user-identity",
+      headSha: "cafe1234",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+    expect(calls).toEqual([["acme", "widgets", "cafe1234"]]);
   });
 
   it("skips the settle lookup entirely for a non-dependency red PR", async () => {

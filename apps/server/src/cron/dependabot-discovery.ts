@@ -36,12 +36,15 @@
  *     `unknown` and kicks off the recompute; both sweeps re-poll it with a
  *     widening backoff (`resolveMergeableState`, issue #204) before giving up.
  *
- * Both sweeps SKIP any PR carrying the `requires-human` label — the terminal
- * flag the dependabot prompts apply when Last Light can't proceed automatically
- * (a functional merge left for a human, or a CI fix it couldn't complete). That
- * stops the nightly crons re-attempting things we already know we can't land.
- * The webhooks are NOT label-gated, so a genuinely new bot push is still handled
- * live and the success path clears the label.
+ * **These are candidate finders, not policy** (09-state-machine.md → S1/S2).
+ * They answer "does this PR look like it needs this workflow?" — a fact about
+ * the pull request. Whether we may ACT on it (the `requires-human` escalation
+ * guard, the attempt counter, the cost cap, the per-SHA dedup, the fork guard)
+ * is decided once by `resolvePrState` + `resolveDispatchDisposition` at the
+ * `dispatchWorkflow` choke point, which the webhook route crosses too. The
+ * `requires-human` filter used to live here AND in the dispatcher, and the two
+ * disagreed by construction: the label was a one-way door on the cron side
+ * while the webhook cleared it on success. Now there is one answer.
  */
 
 /**
@@ -147,6 +150,19 @@ export interface DiscoverOptions {
   /** Injectable sleep for the re-poll backoff (default real `setTimeout`); tests
    *  pass a no-op so the poll loop runs without real delay. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * `dependencies.requireSettledChecks` — when on, the GREEN sweep additionally
+   * requires the head SHA's checks to be settled-`passing`, not just
+   * `mergeable_state: "clean"`.
+   *
+   * `clean` alone is not proof: on a repo with **no required status checks** a
+   * PR whose checks are FAILING still reports mergeable — the exact hazard the
+   * merge prompt documents ("a direct merge would land a RED PR — this has
+   * happened"), and the reason the cron's notion of green and the webhook's
+   * settle logic must not be allowed to diverge. Costs one extra API call per
+   * green candidate, which is why it is config-gated rather than unconditional.
+   */
+  requireSettledChecks?: boolean;
 }
 
 const DEFAULT_MAX_PER_REPO = 25;
@@ -183,11 +199,15 @@ interface Candidate {
 }
 
 /**
- * List + filter one repo's open dependency-PR candidates: is-dependency,
- * non-draft, NOT carrying the `requires-human` label, oldest-first, capped at
- * `maxPerRepo`. Per-repo listing failures are logged and yield `[]`, never
- * fatal, so one inaccessible repo doesn't sink the sweep. Shared by both the
- * green and red sweeps.
+ * List one repo's open dependency-PR candidates: is-dependency, non-draft,
+ * oldest-first, capped at `maxPerRepo`. Per-repo listing failures are logged
+ * and yield `[]`, never fatal, so one inaccessible repo doesn't sink the sweep.
+ * Shared by both the green and red sweeps.
+ *
+ * No `requires-human` filter: that is a POLICY question, and it is now answered
+ * once at dispatch off the snapshot's `escalatedBy` / `escalatedAtSha` — which
+ * is what lets a maintainer's push re-arm a PR we escalated, instead of the
+ * label being a permanent one-way door with no code path that removes it.
  */
 async function listDependencyCandidates(
   full: string,
@@ -211,8 +231,6 @@ async function listDependencyCandidates(
 
   return open
     .filter(isDependencyPr)
-    // Don't re-attempt what we already flagged as needing a human.
-    .filter((p) => !p.labels.includes(REQUIRES_HUMAN_LABEL))
     .sort((a, b) => a.number - b.number) // oldest first (the sweep's fairness order)
     .slice(0, maxPerRepo)
     .map((p) => ({
@@ -289,9 +307,31 @@ export async function discoverGreenDependencyPrs(
       // Only genuinely-green PRs. `unstable`/`blocked`/`behind`/`dirty` (and a PR
       // still `unknown` after the re-poll) are left for the real-time webhook or
       // the next tick once they go clean.
-      if (state === "clean") {
-        out.push({ repo: c.full, prNumber: c.number, title: c.title });
+      if (state !== "clean") continue;
+
+      // `clean` is GitHub's mergeability verdict, not a CI verdict — on a repo
+      // with no *required* checks a red PR is still "clean". Ask the checks
+      // directly so the cron's green means the same thing the webhook's does.
+      if (opts.requireSettledChecks) {
+        let conclusion: Awaited<ReturnType<PrDiscoveryClient["getChecksConclusion"]>>;
+        try {
+          conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef);
+        } catch (err) {
+          // Fail CLOSED here, uniquely: every other read in this module fails
+          // open because a dropped candidate costs one tick, whereas a
+          // wrongly-green candidate costs a merged red PR.
+          opts.log?.(`[dependabot-discovery] ${c.full}#${c.number}: checks read failed — ${String(err)}`);
+          continue;
+        }
+        if (conclusion !== "passing") {
+          opts.log?.(
+            `[dependabot-discovery] ${c.full}#${c.number}: mergeable_state=clean but checks are ${conclusion} — not green`,
+          );
+          continue;
+        }
       }
+
+      out.push({ repo: c.full, prNumber: c.number, title: c.title });
     }
   }
 

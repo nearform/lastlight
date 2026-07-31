@@ -391,7 +391,12 @@ dependencies:
 		the CI result instead of guessing at it, and a push storm collapses to one
 		review per settled SHA. There is deliberately no settled-<em>and-passing</em>
 		mode: a PR whose CI never goes green would then never be reviewed, which is
-		exactly the PR most worth a look.
+		exactly the PR most worth a look. One caveat while this lands:
+		<code>trigger</code>, <code>requestLabel</code> and <code>skipDraft</code>
+		are <strong>not enforced yet</strong> — reviews still fire when a PR opens
+		or is pushed to. Turning the packaged <code>after-checks</code> on before
+		the rest of the machinery is wired would silently stop every human PR being
+		reviewed on push. <code>postsCheck</code> is live today.
 	</p>
 
 	<p>

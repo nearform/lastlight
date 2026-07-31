@@ -469,13 +469,24 @@ a resumed run lands in the same sandbox dir the original started in.
 
 **Per-PR reuse exception (issue #107).** The workflows in
 `PER_TARGET_REUSE_WORKFLOWS` (`pr-review`, `pr-fix`) **drop** the run-id
-suffix — their taskId is `${repo}-${prNumber}-${workflowName}`, keyed by
-(repo, PR) rather than per-run. A re-review of the same PR (push →
-`synchronize`, cron PR-review fanout) therefore lands in the **same**
-sandbox dir, so `prePopulateWorkspace` does `git fetch` + `reset --hard` +
-`git clean -fdx -e node_modules` instead of a fresh 1.3G clone + full
-install, and N dirs/PR collapse to 1 (cutting the #106 churn at its
-source).
+suffix — their taskId is keyed by (repo, PR) rather than per-run. A
+re-review of the same PR (push → `synchronize`, cron PR-review fanout)
+therefore lands in the **same** sandbox dir, so `prePopulateWorkspace` does
+`git fetch` + `reset --hard` + `git clean -fdx -e node_modules` instead of
+a fresh 1.3G clone + full install, and N dirs/PR collapse to 1 (cutting the
+#106 churn at its source).
+
+**The fix family shares one workspace.** Every workflow in
+`PR_FIX_SHAPED_WORKFLOWS` (`pr-fix`, `dependabot-ci-fix`) uses the *same*
+key, `${repo}-${prNumber}-fix`, rather than `…-${workflowName}`. The
+PR-scoped run lock (below) means only one of them can be in flight for a PR
+at a time, so two directories were pure waste — and routing genuinely
+varies: an `@bot fix this` comment on a red Dependabot PR is an LLM
+decision that can land on either workflow, so attempt 2 would otherwise
+re-clone and re-install from cold just because the event arrived
+differently. Everything else keeps `${repo}-${number}-${workflowName}`;
+`dependabot-pr-merge` has no checkout to share and `pr-review` must not
+share a tree with an agent that is rewriting it.
 
 **Per-target recreate (issue #153).** `PER_TARGET_RECREATE_WORKFLOWS`
 (`build`) *also* drops the run-id suffix (taskId `${repo}-${issueNumber}-build`)
@@ -487,8 +498,18 @@ and its `lastlight/N-slug` branch is always cut from the latest default, never a
 stale pushed branch. This is driven by `recreateFromBase` on `GitSandboxAccess`
 / `PrePopulateSpec` (set in `gitSandboxAccessForWorkflow`).
 
-Concurrency is held off by the dispatcher's `isRunning(skill, triggerId)` guard
-plus `runs.getByTrigger` reuse; the cross-run vs same-run distinction is made by
+Concurrency on a PR is held off by the **PR-scoped run lock** — the
+`runInFlight` field of the snapshot the dispatch gate resolves
+(`src/engine/pr-state.ts`; one live run at a time across `pr-fix`,
+`dependabot-ci-fix`, `dependabot-pr-merge`, `pr-review`, `paused` included,
+because a paused run still owns its workspace). This is not a refinement of the
+old `isRunning(skill, triggerId)` guard: **that guard never worked at all.** It
+is called with a bare workflow name and a bare issue number, while every phase
+ledger row is written by `phase-executor.ts` with `skill = "<workflow>:<phase>"`
+and `trigger_id = "owner/repo#N"` — no row could ever match both predicates, so
+it always returned false. It survives only for the non-PR workflows, which have
+no snapshot. Everything else here is unchanged: `runs.getByTrigger` reuse, and
+the cross-run vs same-run distinction made by
 a `<workDir>/.lastlight-run` marker stamped with the owning run id (same id →
 preserve the checkout for the next phase — the architect's `plan.md` survives;
 different id → refresh for pr-review/pr-fix, recreate-from-base for build). The

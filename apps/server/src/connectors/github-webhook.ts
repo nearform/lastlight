@@ -296,6 +296,12 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     let labels: string[] = [];
     let issueAuthor: string | undefined;
     let headSha: string | undefined;
+    // The dependency discriminator, CARRIED rather than discarded. The
+    // connector has to compute it to decide whether to emit at all; the router
+    // used to pay an LLM classifier call to re-guess it from a prose sentence,
+    // and got it wrong — see the `pr.checks_failed` case in `engine/router.ts`
+    // (09-state-machine.md → D5).
+    let isDependencyPr: boolean | undefined;
 
     switch (githubEvent) {
       case "issues":
@@ -401,16 +407,22 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           const headCommit = payload.check_suite?.head_commit;
           const commitAuthor: string = headCommit?.author?.name || "";
           const headBranch: string = payload.check_suite?.head_branch || "";
-          // GATE: only a dependency-update PR (Dependabot / Renovate) may kick
-          // off the red-CI fix path — the exact deterministic check the green
-          // `pr.checks_passed` path below applies. Without it, EVERY red PR
-          // (including a human's) reached the router's LLM classifier as the
-          // sole authority, which misfired human PRs onto `dependabot-ci-fix`
-          // (a repo-write sandbox run). Commit author OR branch prefix, so a
-          // squashed/proxied bot commit still matches via its branch.
-          const isDependencyPr =
+          // GATE: which red PRs may kick off the fix path at all. Commit author
+          // OR branch prefix for the dependency case, so a squashed/proxied bot
+          // commit still matches via its branch.
+          const isDependency =
             /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
             /^(dependabot|renovate)\//.test(headBranch);
+          // ...plus a head commit WE pushed. `git-auth.ts` stamps
+          // `user.name = <botName>[bot]` on the agent's own commits and the
+          // check_suite payload carries the same field, so this is precisely
+          // "did my fix work?" — the CI feedback loop `pr-fix` has never had
+          // (it could push a fix and never learn whether the build went green,
+          // because this event only ever fired for dependency PRs). It stays
+          // bounded: it cannot fire for an ordinary human PR the bot has not
+          // touched. It is nonetheless the one change here that can increase
+          // run volume on non-dependency PRs — watch it after rollout.
+          const isOurOwnPush = !!this.config.botLogin && commitAuthor === this.config.botLogin;
           // Only fire once the PR's checks have FULLY SETTLED red — a repo with
           // several check-reporting apps completes one suite at a time, and a
           // failure in one while another is still running should not kick off a
@@ -418,8 +430,8 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           // nothing is pending and ≥1 check concluded red, so exactly one event
           // fires per SHA (the last suite to settle). Absent a wired client
           // (standalone tests) we keep the legacy per-suite behaviour. Gated
-          // behind isDependencyPr so a human's red PR never even makes the call.
-          if (pr?.number && isDependencyPr) {
+          // behind the emit check so an untouched human PR never makes the call.
+          if (pr?.number && (isDependency || isOurOwnPush)) {
             const settled = await this.settledConclusion(repoFullName, sha, "failing");
             if (settled === "failing") {
               prNumber = pr.number;
@@ -428,6 +440,12 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
               type = "pr.checks_failed";
               title = (headCommit?.message || "").split("\n")[0] || title;
               issueAuthor = commitAuthor || issueAuthor;
+              // The router routes on THIS, deterministically: dependency →
+              // `dependabot-ci-fix`, everything else → `pr-fix`. Without it a
+              // human's red PR would run a dependency-bump prompt, the
+              // `dependency-*` label vocabulary and a `requires-human`
+              // preflight it was never designed for.
+              isDependencyPr = isDependency;
             }
           }
         } else if (
@@ -445,7 +463,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           const headCommit = payload.check_suite?.head_commit;
           const commitAuthor: string = headCommit?.author?.name || "";
           const headBranch: string = payload.check_suite?.head_branch || "";
-          const isDependencyPr =
+          const isDependency =
             /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
             /^(dependabot|renovate)\//.test(headBranch);
           // Fire ONLY when the head SHA's checks have fully settled green. A
@@ -454,7 +472,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           // aggregate to "passing", so exactly one `pr.checks_passed` fires per
           // SHA instead of one per check-reporting app. (Legacy per-suite
           // behaviour is preserved when no client is wired — standalone tests.)
-          if (pr?.number && isDependencyPr) {
+          if (pr?.number && isDependency) {
             const settled = await this.settledConclusion(repoFullName, sha, "passing");
             if (settled === "passing") {
               prNumber = pr.number;
@@ -463,6 +481,10 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
               type = "pr.checks_passed";
               title = (headCommit?.message || "").split("\n")[0] || title;
               issueAuthor = commitAuthor || issueAuthor;
+              // Always true on this branch (the green route is dependency-only),
+              // set for symmetry so the envelope's discriminator is never
+              // undefined on a check-outcome event.
+              isDependencyPr = true;
             }
           }
         }
@@ -487,6 +509,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       issueNumber,
       prNumber,
       headSha,
+      isDependencyPr,
       sender,
       issueAuthor,
       senderIsBot: false, // already filtered bots above

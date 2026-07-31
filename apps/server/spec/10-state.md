@@ -129,6 +129,25 @@ land on the mutable side, at `scratch.repoConfig.assetWarnings`; a resume that
 could not restore the repo's unpacked asset tree records
 `scratch.repoConfig.restoreWarnings`.
 
+**The PR snapshot on the row.** For a PR-scoped workflow (`pr-fix`,
+`dependabot-ci-fix`, `dependabot-pr-merge`, `pr-review`), `context.prState`
+carries the whole `PrState` resolved at dispatch (see the
+[dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate)) — verbatim, not
+scattered leaves. Two reasons. **Forensics:** the run detail panel can show the
+decision that was actually taken *and* the inputs that produced it, long after
+the live state has moved on; a re-derivation at read time would answer a
+different question. **The state machine reads it back:** the next dispatch for
+that PR loads the previous run's snapshot to compute `attempt` (unchanged head,
+or a head *we* authored, means the same problem and the counter advances;
+anyone else's push resets it to 1), to carry `escalatedAtSha` forward — which is
+what makes `requires-human` a notification rather than a state, since a
+maintainer's push clears the guard with no label edit — and to answer "have we
+already assessed this exact head SHA?". So the escalation record costs no new
+table, no extra API call and no label mutation. Rows written before the snapshot
+existed are tolerated: a bare `context.headSha` is honoured as a one-field
+snapshot, so the per-SHA dedup keeps working across the upgrade instead of
+re-assessing every open PR once.
+
 `owner` + `repo` together identify the target: `repo` is stored **bare**
 (a single path-safe segment — taskIds and workspace/session dirs derive
 from it), so the org/user is kept in its own `owner` column rather than

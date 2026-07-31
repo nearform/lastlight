@@ -58,7 +58,7 @@ session management, allowlist enforcement, and message chunking.
 | **Normalize** | `GitHubWebhookConnector.normalize()` (`line 157–260`). Runs *after* signature + allowlist. Returns `null` for ignored actions (does not produce an envelope). |
 | **Event types** | `issue.opened`, `issue.reopened`, `issue.closed`, `pr.opened`, `pr.synchronize`, `pr.reopened`, `pr.closed`, `pr.merged`, `pr.checks_failed`, `pr.checks_passed`, `comment.created`, `pr_review.submitted`, `pr_review_comment.created` |
 | **Re-run checks** | `check_run.rerequested` / `check_suite.rerequested` (the GitHub "Re-run" / "Re-run all checks" buttons) normalize to `pr.synchronize` for the PR in the event's `pull_requests[]`, re-triggering pr-review against the current head. Requires the App to subscribe to the **Check run** / **Check suite** events (App permission: Checks: read). |
-| **Failed checks** | `check_suite.completed` with a `failure` / `timed_out` conclusion normalizes to `pr.checks_failed`, but **only for dependency-update PRs** — the connector pre-filters on the head commit author (`dependabot[bot]` / `renovate[bot]`) or the suite's head branch (`dependabot/` / `renovate/`), the same deterministic gate as the green `pr.checks_passed` path, so a human's red PR fires nothing (the head commit also supplies the title + author signal). **Settle-aware:** the connector emits only once the head SHA's checks have *fully settled red* (`getChecksConclusion === "failing"` — nothing pending), so a repo with several check-reporting apps fires one event per SHA, not one per suite. The router then runs the (already dependency-gated) event through the intent classifier so a workflow that claims a check-failure intent via its `classification` block (e.g. `dependabot-ci-fix`) is picked up; unclaimed → ignored. Requires the **Check suite** subscription (Checks: read); reading the *reason* it failed additionally wants **Actions: read** — see below. |
+| **Failed checks** | `check_suite.completed` with a `failure` / `timed_out` conclusion normalizes to `pr.checks_failed` for two populations: a **dependency-update PR** (head commit author `dependabot[bot]` / `renovate[bot]`, or a `dependabot/` / `renovate/` head branch — commit author *or* branch, so a squashed or proxied bot commit still matches), **and** a PR whose head commit **we** pushed (`head_commit.author.name === botLogin`, which is exactly what `git-auth.ts` stamps on the agent's own commits). The second is the CI feedback loop `pr-fix` never had: it could push a fix and never learn whether the build went green, because this event only ever fired for dependency PRs. It stays bounded — it cannot fire on a human PR the bot has not touched — but it is the one gate here that can raise run volume on non-dependency PRs. **Settle-aware:** the connector emits only once the head SHA's checks have *fully settled red* (`getChecksConclusion === "failing"` — nothing pending), so a repo with several check-reporting apps fires one event per SHA, not one per suite. The dependency discriminator is **carried on the envelope** as `isDependencyPr` rather than discarded, so the router routes on it deterministically (dependency → `dependabot-ci-fix`, otherwise → `pr-fix`) instead of paying a classifier call to re-guess it — see [Router](/spec/05-router). Requires the **Check suite** subscription (Checks: read); reading the *reason* it failed additionally wants **Actions: read** — see below. |
 | **Passed checks** | `check_suite.completed` with a `success` conclusion normalizes to `pr.checks_passed`, but **only for dependency-update PRs** — the connector pre-filters on the head commit author (`dependabot[bot]` / `renovate[bot]`) or the suite's head branch (`dependabot/` / `renovate/`) so an ordinary green PR fires nothing. **Settle-aware:** it emits only when the head SHA has *fully settled green* (`getChecksConclusion === "passing"`); an earlier suite going green while siblings are still running sees `"pending"` and is dropped, so exactly one event fires per SHA — the last suite to settle. The router routes it deterministically (no classifier call) to the workflow claiming the `dependabot-pr-merge` intent; unclaimed → ignored. Same **Check suite** subscription (Checks: read). |
 | **Filtered out** | `IGNORED_ACTIONS` (line 27): `edited`, `labeled`, `unlabeled`, `assigned`, `closed` (except for the explicit close types above), `pinned`, `transferred`, and friends. Bot self-events are dropped unless the bot opened/synchronised a PR **or** it's a `check_suite.completed` (the failing-CI signal is always bot-sent); a PR **authored** by the bot is dropped from pr-review entirely (self-review guard). |
 | **Reply** | Posts a comment via `replyFn(owner, repo, issueNumber, msg)` (line 237). Returns `Promise<void>`; no useful return value. No-op if `replyFn` or issue context is missing. |
@@ -152,7 +152,13 @@ Two of the scheduled crons are **dependency-PR discovery backstops** for the
 
 - `merge-green-dependency-prs` (`discover: green-dependency-prs`, daily 14:00) —
   finds green (`mergeable_state === "clean"`) dependency PRs and fans out
-  `dependabot-pr-merge`.
+  `dependabot-pr-merge`. With `dependencies.requireSettledChecks` on (the
+  default) it additionally asks the head SHA's checks: `clean` is GitHub's
+  *mergeability* verdict, not a CI verdict, and on a repo with **no required
+  status checks** a PR whose checks are failing still reports `clean` — so
+  without that second read the cron's notion of "green" and the webhook's
+  would differ, and the difference is a merged red PR. Uniquely in this
+  module that read fails **closed**: a dropped candidate costs one tick.
 - `fix-red-dependency-prs` (`discover: red-dependency-prs`, daily 15:00) — finds
   dependency PRs that can't merge on their own and that `dependabot-ci-fix` can
   push toward: a settled-red check conclusion (failing/timed-out via
@@ -165,16 +171,28 @@ Two of the scheduled crons are **dependency-PR discovery backstops** for the
   `unstable` is covered by the checks conclusion; `unknown` is left for a later
   tick.
 
-Both sweeps **skip any PR carrying the `requires-human` label** — the terminal
-flag the dependabot prompts apply when Last Light can't proceed (a functional
-merge, or a CI fix it couldn't complete) — so the nightly crons don't re-attempt
-what we already know we can't land. The **webhook path** now honors it too: the
-dispatcher applies a pre-sandbox idempotency guard on the two dependency check
-events (one PR read) that skips a PR carrying `requires-human`, **or** one whose
-current head SHA equals the SHA of the last successful assessment (a re-fired
-suite / cron overlap). A genuinely new push (new head SHA, no `requires-human`)
-still runs once, and an explicit human `@bot` comment is an intentional override
-that the guard does **not** gate.
+**Both discoverers are candidate finders, not policy.** They answer one
+question — does this PR *look* like it needs this workflow? — and nothing else.
+Whether we may act on it (the escalation guard, the attempt counter, the cost
+cap, the per-SHA dedup, the fork guard, the run lock) is decided once, off the
+resolved PR snapshot, at the `dispatchWorkflow` choke point the webhook route
+crosses too: see the [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
+
+That split is a correction, not a tidy-up. The `requires-human` filter used to
+live in the discoverers **and** in the dispatcher, and the two disagreed by
+construction: on the cron side the label was a one-way door with no code path
+that removed it, while the webhook path cleared it on success. Now there is one
+answer, and it is stateful rather than label-based — the state is "we escalated
+at head SHA X", so a maintainer's push re-arms the PR automatically, and the
+same label with no escalating run of ours behind it is read as a human saying
+"stay out" and honoured permanently.
+
+The same choke point is why the fan-out no longer bypasses enrichment. A cron
+dispatch calls `dispatchWorkflow` directly and never crosses the dispatcher, so
+every nightly `fix-red-dependency-prs` run used to carry `branch` + `reason` but
+an **empty** `{{ciSection}}`, the repo's default branch instead of the PR's real
+base, and no fork guard at all. One projection at one place makes the webhook
+and cron dispatches of a `pr-fix`-shaped workflow identical by construction.
 
 ## 5. Admin dashboard
 

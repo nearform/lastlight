@@ -603,6 +603,17 @@ export function workflowScopedTaskId(
   workflowName: string,
   workflowId: string,
 ): string {
+  // The fix FAMILY shares one workspace per PR (09-state-machine.md → S4).
+  // The PR-scoped run lock means only one of `pr-fix` / `dependabot-ci-fix`
+  // can be in flight for a PR at a time, so two directories were pure waste —
+  // and routing genuinely varies (an `@bot fix this` comment on a red
+  // Dependabot PR is an LLM decision that can land on either workflow), so
+  // attempt 2 would otherwise re-clone and re-install from cold just because
+  // the event arrived differently. `dependabot-pr-merge` keeps its own key
+  // below: it has no checkout to share.
+  if (number !== undefined && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
+    return `${repo}-${number}-fix`;
+  }
   // Reusable / recreatable per-target workspaces are keyed by (repo, issue)
   // only — no run suffix — so a re-run lands on the same dir (reused for
   // pr-review/pr-fix, recreated-from-base for build; see the two sets above).

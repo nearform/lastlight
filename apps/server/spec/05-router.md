@@ -59,7 +59,7 @@ instead. Only the configured handle matches — there is no legacy fallback (see
 |---|---|---|
 | `issue.opened` / `issue.reopened` | `skill: issue-triage` | `reopened=true` for the latter |
 | `pr.opened` / `pr.synchronize` / `pr.reopened` | `skill: pr-review` | |
-| `pr.checks_failed` | classifier → the workflow claiming the intent (else `ignore`) | A failing `check_suite` — the connector only emits this for a **dependency-update PR** (deterministic commit-author / branch-prefix gate, mirroring `pr.checks_passed`), so a human's red PR never reaches here. The classifier then routes the recognised bump to `dependabot-ci-fix`. Unlike other structured events, routing goes through the intent classifier so workflows self-register via `classification` |
+| `pr.checks_failed` | `dependabot-ci-fix` (dependency PR) / `pr-fix` (anything else) | A failing `check_suite`. Routed **deterministically** off `envelope.isDependencyPr` — the discriminator the connector already computed to decide whether to emit at all (see [Integrations](/spec/03-integrations)) — with no classifier call, exactly like the green path below. It used to go through the classifier, which could only ever land on `dependabot-ci-fix`: `fallbackWorkflowForIntent` resolves a workflow by its `classification.intent` and `pr-fix.yaml` has no `classification:` block, so `pr-fix` was structurally unselectable. That was harmless only while the connector's gate was dependency-only; now that a PR whose head **we** pushed also emits the event, a human's red PR would have run a dependency-bump prompt, the `dependency-*` label vocabulary and a `requires-human` preflight it was never designed for |
 | `pr.checks_passed` | the workflow claiming the `dependabot-pr-merge` intent (else `ignore`) | A green `check_suite` on a dependency-update PR (the connector already pre-filtered to Dependabot / Renovate). Routed **deterministically** via `getWorkflowByIntent("dependabot-pr-merge")` — no classifier call, since the dependency-PR gate is the connector's job |
 | `comment.created` with pending reply gate | `skill: explore-reply` | Reply-gate short-circuit — see below |
 | `comment.created` on a pre-build issue, plain (no `@last-light`) | `skill: issue-triage` (`mode: retriage`) | Reporter-driven re-triage — see below |
@@ -303,7 +303,7 @@ is handled in the harness:
 | `status-report` | `664–675` — list running executions |
 | `approval-response` | `839–893` — resume or fail paused run |
 | `explore-reply` | `750–836` — feed comment into paused explore loop |
-| `pr-fix`, `dependabot-ci-fix` | `handlePrFix` — lightweight diagnose-then-fix-and-push (both are `PR_FIX_SHAPED_WORKFLOWS`, and both run the same two phases — see [Phases & Prompts](/spec/07-phases-and-prompts); the handler resolves the PR head branch + failed-check summary, skips fork PRs, dispatches the named workflow) |
+| `pr-fix`, `dependabot-ci-fix` | `handlePrFix` — lightweight diagnose-then-fix-and-push (both are `PR_FIX_SHAPED_WORKFLOWS`, and both run the same two phases — see [Phases & Prompts](/spec/07-phases-and-prompts)). It no longer reads the PR itself: the head branch, the fork verdict and the CI evidence all come off the snapshot resolved by the [dispatch gate](#the-pr-scoped-dispatch-gate) below, so it is left with one degenerate case (we could not read the PR at all, so there is no branch to fix) |
 | `build` | `896–976` — full build cycle on an issue |
 | `answer` | `982–1014` — generic `dispatchWorkflow()` for `answer.yaml`; answers a question issue directly (routed via `routes.github.issue_answer` / `routes.slack.answer`) |
 | `pr-review`, `pr-comment`, `issue-triage`, `issue-comment`, `explore`, `security-review`, `security-feedback`, `verify`, `qa-test`, `demo` | `982–1014` — generic `dispatchWorkflow()` + ack |
@@ -312,6 +312,83 @@ The generic-dispatch lane runs the YAML workflow whose name matches
 the skill string. Anything bespoke (e.g. `build` first
 records an `execution` row and reacts 🚀 on the comment before
 dispatching) gets its own branch.
+
+## The PR-scoped dispatch gate
+
+The router answers *what should happen*. A second question — *may it happen
+to this pull request right now* — is answered once, immediately after, by
+`src/engine/dispatcher.ts`. It is a separate layer because the router is
+side-effect-free and stateless by contract, while this gate reads live
+GitHub state and our own run history.
+
+Everything it needs is one **resolved snapshot**, `PrState`
+(`src/engine/pr-state.ts`), computed once per dispatch for any workflow in
+`PR_SCOPED_WORKFLOWS` (`pr-fix`, `dependabot-ci-fix`, `dependabot-pr-merge`,
+`pr-review`). It has two halves — live GitHub facts (head SHA and its git
+author, head/base refs, draft, fork, labels, checks state + settled count,
+base-branch checks, our own review at the head, the CI failure report) and
+facts derived from our run history keyed on the PR (attempt number, flaky
+deferrals, escalation SHA and who escalated, prior-attempt markers,
+cumulative cost, the last assessed head SHA per workflow, and any
+PR-scoped run currently in flight). Resolution never throws: every read is
+independently best-effort and degrades to a value that *cannot* cause a
+skip, with the failures listed on `readErrors`. It rides down to
+`dispatchWorkflow` on the context, so nothing is fetched twice.
+
+Every policy question is then a **pure function over that snapshot**
+(`src/engine/pr-decisions.ts`) returning `{ decision, reason, inputs }`
+rather than a bare enum — `mayMerge`, `resolveFixDisposition`,
+`resolveMergeDisposition`, `resolveReviewTrigger`,
+`resolveDispatchDisposition`, and `renderContext` (the projection into the
+template variables the prompts render). The reason is produced by the
+decision and rendered in the log line, the escalation comment and the run
+detail panel: one source, several renderings, instead of three prose
+variants that drift. Purity is the point — the whole gate is table-testable
+against literal fixtures with no GitHub mock and no sandbox.
+
+Two properties are load-bearing:
+
+- **A PR-scoped run lock.** Only one of the four workflows may be in flight
+  for a PR at a time (`runInFlight`, an oldest-first query over `queued` /
+  `running` / `paused` rows). `db.executions.isRunning(handler, triggerId)`
+  was supposed to be this guard and **never worked at all**: it is called
+  with a bare workflow name and a bare issue number, while every phase
+  ledger row is written with `skill = "<workflow>:<phase>"` and
+  `trigger_id = "owner/repo#N"`, so no row could ever match both predicates
+  and it always returned false. Nothing had ever stopped an `@bot fix this`
+  routed to `pr-fix` running concurrently with a `fix-red-dependency-prs`
+  dispatch of `dependabot-ci-fix` — two agents, two clones of the same
+  branch, both pushing. It also closes the case where
+  `dependabot-pr-merge` enables auto-merge on a PR whose fix run is still
+  running. The loser of the lock is **dropped with a reason, not queued**,
+  which is only sound because every dropped case has a cron re-pickup
+  (`merge-green-dependency-prs`, `fix-red-dependency-prs`,
+  `check-prs-awaiting-review`); converting drop-on-lock into queue-on-lock
+  is a prerequisite for retiring any of them.
+- **No prior run's verdict may gate dispatch.** A skip writes *no* run row,
+  so a gate on "what did the last run conclude" reads the same stale row
+  forever and the PR is dead with no label, no comment and nothing on the
+  PR explaining why. Every gate here is therefore a **live precondition**
+  (`baseChecksState === "failing"` is `upstream-broken`, not a remembered
+  diagnosis) or a fact about the PR that a human action can change.
+  `requires-human` follows the same rule: the *state* is "we escalated at
+  head SHA X" (`escalatedAtSha` on the run context), so a maintainer's push
+  re-arms the loop automatically, while the same label with no escalating
+  run of ours behind it means a human applied it by hand and is honoured as
+  a permanent override.
+
+An explicit human request (`comment.created` / `pr_review_comment.created`
+/ Slack `message`) overrides the escalation guard and the per-SHA dedup —
+a maintainer asking directly is an intentional override — but not the
+facts: a fork PR, a red base branch and an exhausted budget do not care how
+nicely you ask. Fork PRs are the one skip the author is owed an explanation
+for, so the gate posts a comment saying we have no branch to push to.
+
+`dispatchWorkflow` runs the same gate for the routes that never cross the
+dispatcher — the cron fan-outs and `/api/run` — and persists the snapshot
+on the run row (see [State](/spec/10-state)). That is what makes a nightly
+`fix-red-dependency-prs` run and a live webhook carry byte-identical
+context.
 
 ## Introspection — the route playground
 
@@ -343,6 +420,17 @@ unchanged.
 - **No LLM in deterministic routes.** The opening / synchronize / open
   events route by event type. The LLM never decides whether to triage
   an issue.
+- **Both check-outcome routes are deterministic.** `pr.checks_passed` and
+  `pr.checks_failed` are structured events the connector has already
+  qualified; re-deriving "is this a dependency PR?" from a prose sentence
+  with a classifier is strictly worse than carrying the boolean the
+  connector computed. A classifier route also silently constrains the
+  reachable handlers to workflows that declare a `classification:` block,
+  which is not a property any structured route should depend on.
+- **The router decides *what*; the dispatch gate decides *whether*.** No PR
+  policy — attempt budgets, escalation, dedup, the run lock — belongs in
+  `routeEvent`. Keeping it out is what lets the route playground run the
+  real router with no DB and no GitHub client.
 - **Reply gate beats mention parsing.** If the DB says a workflow is
   waiting on this thread, the comment goes there — regardless of
   whether it mentions the bot, contains a slash command, or anything
@@ -370,6 +458,9 @@ unchanged.
 | Composable base prompt + adds-info prompt | `workflows/prompts/classifier.md`, `workflows/prompts/classify-adds-info.md` |
 | Per-workflow category source | `classification:` block in each `workflows/<name>.yaml` |
 | Intent → workflow fallback | `getWorkflowByIntent()` in `src/workflows/loader.ts` |
+| PR snapshot + `PR_SCOPED_WORKFLOWS` (the run lock's span) | `src/engine/pr-state.ts` |
+| Pure decisions over the snapshot | `src/engine/pr-decisions.ts` |
+| Dispatch gate (router result → workflow) | `src/engine/dispatcher.ts` |
 | Injection screener | `src/engine/screen/screen.ts` |
 | Direct provider calls + model auto-detect | `src/engine/llm.ts` |
 | Harness consumer (skill → handler) | `src/index.ts:560–1124` |
@@ -399,6 +490,13 @@ unchanged.
   comment and every Slack message, so cost it. SQLite handles it
   trivially; a re-implementation on a remote DB should cache the active
   set of `triggerId`s in memory.
+- **Resolve PR state once, then decide.** The version of this system that
+  read the PR at each site that needed it had six such sites, each
+  fetching an overlapping subset and each free to disagree; the bugs that
+  produced were invisible until the state was written down as one type. A
+  re-implementation should make the snapshot a value, make every policy
+  question a pure function of it, and give itself exactly one place that
+  talks to the forge.
 - **Treat the classifier prompt as code.** A change to the base template's
   output format or fallback rules ripples through every chat surface; the intent
   set itself is now data (one `classification:` block per workflow). Version both

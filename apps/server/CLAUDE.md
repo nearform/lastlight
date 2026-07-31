@@ -146,7 +146,26 @@ src/
       shared.ts         Backend-agnostic building blocks (RunResultAccumulator,
                         skill-bundle staging, server-artifact stage/harvest,
                         finalizeFromRunResult, githubAuthEnvFrom).
-    dispatcher.ts       Routes classified events to workflow or chat handler.
+    dispatcher.ts       Routes classified events to workflow or chat handler,
+                        and gates every PR-scoped dispatch on the snapshot
+                        below (run lock + decision, before any sandbox).
+    pr-state.ts         The PR state machine: `resolvePrState()` — ONE
+                        snapshot per dispatch of everything we know about a
+                        PR (live GitHub facts + facts derived from our own
+                        run history, keyed on the PR), plus
+                        PR_SCOPED_WORKFLOWS, the span of the run lock.
+                        Resolved at the dispatchWorkflow choke point and
+                        persisted on `context.prState`. Never throws: every
+                        read is best-effort and degrades to a value that
+                        cannot cause a skip.
+    pr-decisions.ts     PURE functions over that snapshot — mayMerge,
+                        resolveFixDisposition, resolveMergeDisposition,
+                        resolveReviewTrigger, resolveDispatchDisposition,
+                        renderContext. Each returns
+                        `{ decision, reason, inputs }`, so the log line, the
+                        escalation comment and the admin panel are three
+                        renderings of one source. Table-testable with no
+                        GitHub mock and no sandbox.
     event-shim.ts       Translates agentic-pi events → Claude-SDK envelope jsonl.
     llm.ts              One-shot LLM helper for screen/ + classifier —
                         direct fetch to Anthropic Messages or OpenAI Chat
@@ -317,6 +336,23 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
 - **Workflow** — a YAML file listing phases. The runner knows nothing about
   "build" vs "triage" — it just executes phases in order (or as a DAG). See
   `src/workflows/CLAUDE.md`.
+- **PR state machine** (`src/engine/pr-state.ts` + `pr-decisions.ts`,
+  `docs/plans/dependency-pr-resilience/09-state-machine.md`) — what the harness
+  knows about a pull request is **resolved once per dispatch** into a `PrState`
+  snapshot at the `dispatchWorkflow` choke point, and every policy question is
+  then a pure function over it. It replaced reads spread across six sites, each
+  fetching an overlapping subset and each free to disagree. Three things it
+  buys: a real **PR-scoped run lock** across `pr-fix` / `dependabot-ci-fix` /
+  `dependabot-pr-merge` / `pr-review` (the old
+  `db.executions.isRunning(handler, triggerId)` guard never matched a row —
+  wrong key on both predicates — so two agents could clone and push the same
+  branch); identical context on the webhook and cron routes, because the cron
+  fan-out calls `dispatchWorkflow` directly and used to bypass every enrichment;
+  and a `{ decision, reason, inputs }` verdict per gate, rendered in the log, the
+  escalation comment and the admin panel from one source. The loser of the lock
+  is **dropped with a reason, not queued** — sound only because each dropped
+  case has a cron re-pickup. Contract: `spec/05-router.md` → "The PR-scoped
+  dispatch gate".
 - **Configuration & deployment overlay** (`src/config/config.ts`, `config/default.yaml`,
   issue #61) — non-secret config (managed repos, routes, models, variants,
   approvals, disables, cron participation) is loaded at startup from the packaged
@@ -398,9 +434,14 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     `key-not-allowed` instead: `fix.escalateModelAfterAttempt` (spend),
     `fix.gateTimeoutSeconds` (shared resource), and
     `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
-    weld the escape hatch shut for a repo with no CI at all. Currently **inert**:
-    the blocks resolve through all four layers and reach `RunRepoConfig` + the
-    template context (`{{fix.maxAttempts}}`), but no workflow consumes them yet.
+    weld the escape hatch shut for a repo with no CI at all. `fix` +
+    `dependencies` are now **live**: the PR dispatch gate (below) enforces
+    `fix.maxAttempts` / `fix.maxCostUsd` and `dependencies.requireSettledChecks`
+    / `minSettledChecks`, and the green dependency cron reads the latter pair
+    too. `review` is still inert — `resolveReviewTrigger` exists and is tested
+    but nothing calls it, because switching the packaged
+    `review.trigger: after-checks` on today would silently stop every human PR
+    being reviewed on push.
     `review` is deliberately NOT seeded onto the template context — `build.yaml`
     already emits `output_var: review` and a top-level object would shadow it.
   - **Cron participation** — a `crons: { enable, disable }` block, valid at
@@ -762,8 +803,12 @@ Sandbox workspace provisioning (issue #107):
   by (repo, PR) and reused across runs. A `<workDir>/.lastlight-run` marker
   records the owning run: same run → preserve the checkout for the next
   phase; a different run reusing the dir → `git fetch` + `reset --hard` +
-  `git clean -fdx -e node_modules` (deps stay warm). See the workflows
-  guide's "taskId scoping" section.
+  `git clean -fdx -e node_modules` (deps stay warm). The whole fix family
+  (`PR_FIX_SHAPED_WORKFLOWS`) shares ONE workspace per PR —
+  `${repo}-${prNumber}-fix`, not `…-${workflowName}` — because the PR-scoped
+  run lock admits only one of them at a time and routing between `pr-fix` and
+  `dependabot-ci-fix` genuinely varies by how the event arrived. See the
+  workflows guide's "taskId scoping" section.
 - **Per-issue build recreate (issue #153)** — `build` workspaces are keyed by
   (repo, issue) too, but a different-run marker → **delete the leftover
   checkout and re-clone from the default branch** (`recreateFromBase`), so a

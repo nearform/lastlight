@@ -6,9 +6,15 @@ import type { GitHubClient } from "./github/github.js";
 import type { ChatResult } from "./chat/chat.js";
 import { routeEvent, type Route, type RouterDeps } from "./router.js";
 import { runDashboardUrl } from "../notify/model.js";
-import { getRuntimeConfig } from "../config/config.js";
-import { PR_FIX_SHAPED_WORKFLOWS, DEPENDENCY_WEBHOOK_WORKFLOWS } from "../workflows/target-policy.js";
-import { REQUIRES_HUMAN_LABEL } from "../cron/dependabot-discovery.js";
+import {
+  getRuntimeConfig,
+  defaultFixConfig,
+  defaultDependenciesConfig,
+  defaultReviewConfig,
+} from "../config/config.js";
+import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./pr-state.js";
+import { resolveDispatchDisposition, type PrPolicyConfig } from "./pr-decisions.js";
 
 /**
  * Hand a workflow to the runner. Matches `dispatchWorkflow` in index.ts — the
@@ -126,11 +132,65 @@ export async function dispatch(
     return { kind: "handled", handler };
   }
 
+  // ── The PR state machine (09-state-machine.md) ────────────────────────────
+  //
+  // Everything past this point is a workflow dispatch, so this is where the
+  // pull request's state is resolved — ONCE — for every PR-scoped workflow.
+  // The snapshot then answers three questions that used to be asked by three
+  // separate pieces of code, each fetching an overlapping subset and each free
+  // to disagree: is a run already in flight, may this run at all, and what do
+  // the prompts render. It rides down to `dispatchWorkflow` on `_prState`, so
+  // the enrichment there costs no second round of API calls.
+  //
+  // An explicit `@bot` request is an intentional override of the label guard
+  // and the per-SHA dedup — the same carve-out `target-policy.ts` already
+  // documents for the dependency guard, and the same discriminator the old
+  // `dependencyDedupSkip` used (it keyed off the webhook event type, not the
+  // handler, precisely so a human asking directly was never gated).
+  const explicitRequest =
+    envelope.type === "message" ||
+    envelope.type === "comment.created" ||
+    envelope.type === "pr_review_comment.created";
+  const prState = await resolvePrStateForDispatch(handler, context, deps);
+  if (prState) context._prState = prState;
+
   // Guard against double-dispatching the same work. Everything past this
   // point is a workflow dispatch (or a resume of one), so a run already in
   // flight for this trigger is a no-op.
+  //
+  // For a PR-scoped workflow the authority is the snapshot's `runInFlight`
+  // (09 → S4), NOT `db.executions.isRunning`. **That guard has never worked at
+  // all for them**: it is called with a bare workflow name and a bare issue
+  // number, while every phase ledger row is written by `phase-executor.ts`
+  // with `skill = "<workflow>:<phase>"` and `trigger_id = "owner/repo#N"`, so
+  // no row can ever match on both and it has always returned false. Nothing
+  // has ever stopped an `@bot fix this` routed to `pr-fix` running
+  // concurrently with a `fix-red-dependency-prs` dispatch of
+  // `dependabot-ci-fix` — two agents, two clones of the same branch, both
+  // running the gate, both pushing — which is why this matters more than the
+  // plan assumed. It also closes the case where `dependabot-pr-merge` enables
+  // auto-merge against a PR whose fix run is still in flight.
+  //
+  // The loser is DROPPED with a reason, not queued. That is only sound because
+  // every dropped case has a cron re-pickup (`merge-green-dependency-prs`,
+  // `fix-red-dependency-prs`, `check-prs-awaiting-review`) — a future phase
+  // must convert drop-on-lock into queue-on-lock before removing any of them.
   const triggerId = String(envelope.issueNumber || envelope.id);
-  if (deps.db.executions.isRunning(handler, triggerId)) {
+  if (prState?.runInFlight) {
+    const { workflow, runId } = prState.runInFlight;
+    const reason =
+      `${handler}: ${workflow} run ${runId} is already in flight for ` +
+      `${prState.repo}#${prState.prNumber}`;
+    console.log(`[event] Skipping: ${reason}`);
+    // A maintainer who is silently dropped will just ask again.
+    if (explicitRequest) {
+      await envelope.reply(
+        `I'm already working on this PR (\`${workflow}\`). I'll finish that run first — ask me again if it doesn't cover what you need.`,
+      );
+    }
+    return { kind: "skipped", reason };
+  }
+  if (!prState && deps.db.executions.isRunning(handler, triggerId)) {
     console.log(`[event] Skipping: ${handler} already running for ${triggerId}`);
     if (envelope.type === "message") {
       await envelope.reply(`That task is already running. Use /status to check progress.`);
@@ -138,34 +198,40 @@ export async function dispatch(
     return { kind: "skipped", reason: `${handler} already running for ${triggerId}` };
   }
 
-  // Dependency-PR idempotency: on the AUTOMATED check_suite webhook path, skip
-  // (before any sandbox) a PR the bot has already handled — one carrying
-  // `requires-human`, or one whose current head SHA we already assessed. A
-  // multi-app repo re-fires a green/red suite and the daily cron overlaps, so
-  // without this the same PR gets re-assessed repeatedly, burning tokens and
-  // flooding the queue. A genuinely new push (new head SHA, no requires-human)
-  // still runs once; a human `@bot` request (comment.created) is NOT gated.
-  if (
-    (envelope.type === "pr.checks_passed" || envelope.type === "pr.checks_failed") &&
-    DEPENDENCY_WEBHOOK_WORKFLOWS.has(handler)
-  ) {
-    const skip = await dependencyDedupSkip(handler, context, deps);
-    if (skip) {
-      console.log(`[event] Skipping: ${skip.reason}`);
-      return skip;
+  // Should we spend a run on this PR at all? One pure decision over the
+  // snapshot, replacing `dependencyDedupSkip` (the `requires-human` +
+  // already-assessed pair) and the fork/branch preflight `handlePrFix` used to
+  // do with its own second PR read. `{decision, reason}` rather than a bare
+  // enum so the log line, the escalation comment and the admin detail panel are
+  // three renderings of ONE source instead of three prose variants that drift.
+  if (prState) {
+    const disposition = resolveDispatchDisposition(handler, prState, prPolicyConfig(), {
+      explicitRequest,
+      dedupOnHeadSha: true,
+    });
+    console.log(
+      `[event] ${handler} ${prState.repo}#${prState.prNumber}: ${disposition.decision} — ${disposition.reason}`,
+    );
+    if (disposition.decision === "skip") {
+      // A fork PR is the one skip a human is owed an explanation for on the PR
+      // itself: there is nothing wrong with their change, we simply have no
+      // branch to push to. Keyed on the snapshot field, never on the reason
+      // string.
+      if (prState.isFork) await postForkNotice(prState, deps);
+      return { kind: "skipped", reason: `${handler}: ${disposition.reason}` };
     }
   }
 
   // PR fix: lightweight fix-and-push driven by CI failures / a comment. Also
   // covers pr-fix-shaped workflows (e.g. dependabot-ci-fix) reached via the
-  // classifier — they all need the PR head branch + failed-check summary that
-  // handlePrFix resolves, and it dispatches the passed `handler` unchanged.
+  // classifier — they all need the PR head branch the snapshot resolved, and
+  // it dispatches the passed `handler` unchanged.
   if (
     (routeKey === "github.pr_fix" || PR_FIX_SHAPED_WORKFLOWS.has(handler)) &&
     context.prNumber &&
     context.repo
   ) {
-    return handlePrFix(context, handler, deps);
+    return handlePrFix(context, handler, deps, prState);
   }
 
   if (handler === "explore-reply") {
@@ -198,56 +264,75 @@ export async function dispatch(
 }
 
 /**
- * Pre-sandbox idempotency check for a dependency-PR webhook. One cheap PR read
- * yields two skip signals:
- *   • the PR carries `requires-human` → a maintainer owns it; do nothing.
- *   • the PR's live head SHA equals the SHA of the last SUCCEEDED run of this
- *     workflow for the PR → there's nothing new to assess (a re-fired suite,
- *     cron/webhook overlap).
- * Returns a `skipped` outcome to short-circuit, or null to let the run proceed.
- * A read failure returns null (fail-open) — the workflow's own `ASSESSMENT_COMPLETE`
- * marker + the LLM "skip if already commented" instruction remain as backstops,
- * and we'd rather occasionally re-run than drop a genuine event.
+ * Resolve the PR snapshot for this dispatch, or null when the event is not a
+ * PR-scoped one.
+ *
+ * Null is a real answer, not a failure: it means "no PR policy governs this
+ * handler", and the caller falls back to the generic already-running guard.
+ * `resolvePrState` itself never throws — every live read is best-effort and
+ * degrades to a value that cannot cause a skip (see `PrState.readErrors`), so
+ * a GitHub outage can slow us down but can never drop a genuine event.
  */
-async function dependencyDedupSkip(
+async function resolvePrStateForDispatch(
   handler: string,
   context: Record<string, unknown>,
   deps: DispatchDeps,
-): Promise<{ kind: "skipped"; reason: string } | null> {
-  const github = deps.github;
-  const repoStr = typeof context.repo === "string" ? context.repo : undefined;
+): Promise<PrState | null> {
+  if (!PR_SCOPED_WORKFLOWS.has(handler)) return null;
+  const repoStr = typeof context.repo === "string" ? context.repo : "";
   const prNumber = typeof context.prNumber === "number" ? context.prNumber : undefined;
-  if (!github || !repoStr || !prNumber) return null;
   const [owner, name] = repoStr.split("/");
-  if (!owner || !name) return null;
+  if (!owner || !name || !prNumber) return null;
+  return resolvePrState(owner, name, prNumber, {
+    github: deps.github,
+    db: deps.db,
+    botLogin: getRuntimeConfig()?.botLogin ?? "",
+  });
+}
 
-  let pr: Awaited<ReturnType<GitHubClient["getPullRequest"]>>;
-  try {
-    pr = await github.getPullRequest(owner, name, prNumber);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[dispatch] dependency dedup read failed for ${repoStr}#${prNumber}: ${msg}`);
-    return null;
-  }
+/**
+ * The three policy blocks the dispatch gate reads.
+ *
+ * SEAM: these are the OPERATOR's values. The target repo's `.lastlight/` layer
+ * is resolved one level down, at `dispatchWorkflow` — and it may only ever
+ * clamp these tighter (a repo can lower `fix.maxAttempts`, never raise it), so
+ * reading the operator's values here can only ever let a run through that the
+ * repo would also have skipped a moment later, never the reverse. Fold the
+ * repo layer in here when the two resolutions are merged.
+ */
+function prPolicyConfig(): PrPolicyConfig {
+  const rt = getRuntimeConfig();
+  return {
+    fix: rt?.fix ?? defaultFixConfig(),
+    dependencies: rt?.dependencies ?? defaultDependenciesConfig(),
+    review: rt?.review ?? defaultReviewConfig(),
+  };
+}
 
-  const labels = (pr.labels ?? [])
-    .map((l) => (typeof l === "string" ? l : l?.name ?? ""))
-    .filter(Boolean);
-  if (labels.includes(REQUIRES_HUMAN_LABEL)) {
-    return { kind: "skipped", reason: `${handler}: ${repoStr}#${prNumber} is ${REQUIRES_HUMAN_LABEL}` };
-  }
-
-  const headSha = pr.head?.sha;
-  const triggerId = `${repoStr}#${prNumber}`;
-  const lastRun = deps.db.runs.latestSucceededForTrigger(handler, triggerId);
-  const lastSha = (lastRun?.context as Record<string, unknown> | undefined)?.headSha;
-  if (headSha && typeof lastSha === "string" && headSha === lastSha) {
-    return {
-      kind: "skipped",
-      reason: `${handler}: already assessed ${repoStr}#${prNumber} at ${headSha.slice(0, 7)}`,
-    };
-  }
-  return null;
+/**
+ * Tell the author of a fork PR why we can't help. Their change is fine; its
+ * head branch just lives on a repo we have no write access to (and its head ref
+ * isn't on origin), so there is nothing for a fix run to clone or push to.
+ * Best-effort — a failed comment never changes the dispatch outcome.
+ */
+async function postForkNotice(state: PrState, deps: DispatchDeps): Promise<void> {
+  const [owner, name] = state.repo.split("/");
+  if (!deps.github || !owner || !name) return;
+  const source = state.headRepoFullName
+    ? `from \`${state.headRepoFullName}\``
+    : "from a now-deleted fork";
+  await deps.github
+    .postComment(
+      owner,
+      name,
+      state.prNumber,
+      `I can't apply fixes to this PR — it comes ${source}, and I have no write access to the ` +
+      `source branch (nor is its head ref on \`${state.repo}\`). Re-create the change on a ` +
+      `branch in \`${state.repo}\` and I'll fix it there.`,
+    )
+    .catch((e: unknown) =>
+      console.warn(`[event] fork-PR notice comment failed: ${e instanceof Error ? e.message : String(e)}`),
+    );
 }
 
 /**
@@ -571,14 +656,27 @@ async function handleBuild(
 }
 
 /**
- * Lightweight PR fix — fix-and-push, no full build cycle. Resolves the PR's
- * head branch and CI failures (needed by the architect/executor), then
- * dispatches the `pr-fix` workflow. Bails if the branch can't be determined.
+ * Lightweight PR fix — fix-and-push, no full build cycle.
+ *
+ * This used to be the second of six places that read a PR's state: it fetched
+ * the PR again for the head branch, ran its own fork guard, and downloaded the
+ * failed-check text — none of which the cron fan-out got, because that calls
+ * `dispatchWorkflow` DIRECTLY and never crosses this function. All of it is now
+ * one field lookup on the snapshot, and the enrichment the prompts render
+ * (`ciSection`, `baseBranch`, `attempt`, `priorAttempts`, …) is projected once
+ * at `dispatchWorkflow` by `renderContext`, so both routes carry identical
+ * context by construction.
+ *
+ * The fork guard and every other skip already ran in `dispatch` via
+ * `resolveDispatchDisposition`; what is left here is the one degenerate case
+ * that is not a policy decision — we could not read the PR at all, so there is
+ * no branch to fix.
  */
 async function handlePrFix(
   context: Record<string, unknown>,
   handler: string,
   deps: DispatchDeps,
+  state: PrState | null,
 ): Promise<DispatchOutcome> {
   const repoStr = context.repo as string;
   const [owner, repo] = repoStr.includes("/") ? repoStr.split("/") : ["", repoStr];
@@ -589,76 +687,27 @@ async function handlePrFix(
     return { kind: "ignored", reason: `invalid repo format: ${repoStr}` };
   }
 
-  let prTitle = (context.title as string) || "";
-  let prBody = (context.body as string) || "";
-  let branch = "";
-  let failedChecks = "";
-  let isForkPr = false;
-  let headRepoFullName: string | null = null;
-  if (deps.github) {
-    try {
-      const pr = await deps.github.getPullRequest(owner, repo, prNumber);
-      prTitle = prTitle || pr.title;
-      prBody = prBody || pr.body || "";
-      branch = pr.head.ref;
-      // Cross-repo (fork) PR detection. A fork PR's head branch lives on
-      // another repo we have no write access to, and its head ref isn't on
-      // this repo's origin — so there's nothing for pr-fix to clone or push
-      // to. Bail here, before any sandbox is provisioned. `head.repo` is null
-      // when the source fork was deleted; treat that as a fork too (the branch
-      // is gone either way).
-      headRepoFullName = pr.head.repo?.full_name ?? null;
-      const baseRepoFullName = pr.base.repo?.full_name ?? `${owner}/${repo}`;
-      isForkPr = headRepoFullName === null || headRepoFullName !== baseRepoFullName;
-      failedChecks = await deps.github.getFailedChecks(owner, repo, pr.head.sha);
-    } catch (err: any) {
-      console.warn(`[event] Could not fetch PR: ${err.message}`);
-    }
-  }
-
-  if (isForkPr) {
-    console.log(
-      `[event] pr-fix skipped: PR #${prNumber} is a fork PR ` +
-      `(head ${headRepoFullName ?? "deleted fork"} ≠ base ${owner}/${repo})`,
-    );
-    if (deps.github) {
-      const source = headRepoFullName ? `from \`${headRepoFullName}\`` : "from a now-deleted fork";
-      await deps.github
-        .postComment(
-          owner,
-          repo,
-          prNumber,
-          `I can't apply fixes to this PR — it comes ${source}, and I have no write access to the ` +
-          `source branch (nor is its head ref on \`${owner}/${repo}\`). Re-create the change on a ` +
-          `branch in \`${owner}/${repo}\` and I'll fix it there.`,
-        )
-        .catch((e: unknown) =>
-          console.warn(`[event] fork-PR notice comment failed: ${e instanceof Error ? e.message : String(e)}`),
-        );
-    }
-    return { kind: "ignored", reason: `pr-fix not supported for fork PR #${prNumber}` };
-  }
-
-  if (!branch) {
+  if (!state?.headRef) {
     console.error(`[event] Could not determine branch for PR #${prNumber}`);
     return { kind: "ignored", reason: `could not determine branch for PR #${prNumber}` };
   }
 
-  console.log(`[event] PR fix for ${repoStr}#${prNumber} on branch ${branch}`);
-  const ciSection = failedChecks && !failedChecks.includes("No failed checks")
-    ? `CI FAILURES (from GitHub Actions — fix these first):\n${failedChecks}`
-    : "";
+  console.log(`[event] PR fix for ${repoStr}#${prNumber} on branch ${state.headRef}`);
 
   deps.dispatchWorkflow(handler, {
     repo: repoStr,
     prNumber,
-    title: prTitle,
-    body: prBody,
+    // The event's own title/body win when it carried them (a comment trigger
+    // quotes the PR it was posted on); the snapshot is the fallback and the
+    // only source on the check_suite + cron routes.
+    title: (context.title as string) || state.title,
+    body: (context.body as string) || state.body,
     commentBody: (context.commentBody as string) || "",
     sender: (context.sender as string) || "unknown",
-    branch,
-    failedChecks,
-    ciSection,
+    // Cron-only: WHY the red sweep summoned this PR (checks-failing | behind |
+    // dirty | blocked). Nothing in the snapshot can reconstruct it.
+    ...(typeof context.reason === "string" ? { reason: context.reason } : {}),
+    _prState: state,
     _triggerType: "webhook",
   }).catch((err) => {
     console.error(`[event] PR fix failed:`, err);

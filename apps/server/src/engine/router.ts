@@ -216,33 +216,35 @@ export async function routeEvent(
       };
 
     case "pr.checks_failed": {
-      // CI went red on a dependency-update PR. The webhook connector only emits
-      // this event for a Dependabot/Renovate PR (deterministic commit-author /
-      // branch-prefix gate, mirroring the green `pr.checks_passed` path) — so we
-      // arrive here already knowing the PR is a dependency bump; a human's red PR
-      // never reaches this case. Route through the classifier (not a fixed route
-      // key) so any workflow that claims a check-failure intent via its
-      // `classification:` block can pick it up — e.g. a Dependabot
-      // dependency-bump fixer. Only a NOVEL claimed intent (resolved via
-      // getWorkflowByIntent) is eligible; a well-known comment intent
-      // (build/review/…) is ignored here, so the general classifier can't
-      // misfire this structured event onto an unrelated workflow.
-      const text =
-        `Pull request #${envelope.prNumber} "${envelope.title || ""}" ` +
-        `by ${envelope.issueAuthor || "unknown"} — its CI checks have failed.`;
-      const { intent } = await classifyComment(text, {
-        issueTitle: envelope.title,
-        isPullRequest: true,
-      });
-      const handler = fallbackWorkflowForIntent(intent);
+      // CI went red on a PR the connector decided we should act on: a
+      // Dependabot/Renovate bump, OR a PR whose head commit WE pushed (the
+      // "did my fix work?" loop). So a human's red PR DOES reach this case now,
+      // whenever the bot has pushed to it — which is exactly why the routing
+      // below is deterministic.
+      //
+      // It used to go through the LLM classifier, and that could only ever land
+      // on `dependabot-ci-fix`: `fallbackWorkflowForIntent` resolves a workflow
+      // by its `classification.intent`, and `pr-fix.yaml` has no
+      // `classification:` block at all, so it was structurally unselectable.
+      // A human's red PR therefore ran a dependency-bump prompt, the
+      // `dependency-trivial`/`dependency-functional` label vocabulary and a
+      // `requires-human` preflight it was never designed for. The connector
+      // already computed the discriminator to decide whether to emit; carrying
+      // it here is cheaper, non-flaky, and makes the two check-outcome routes
+      // symmetric (`pr.checks_passed` below is deterministic for the same
+      // reason). See 09-state-machine.md → D5.
+      const handler = envelope.isDependencyPr
+        ? getWorkflowByIntent("dependabot-ci-fix")?.name
+        : gh.pr_fix || "pr-fix";
       if (!handler) {
         return {
           action: "ignore",
-          reason: `no workflow claims failed-checks intent '${intent}'`,
+          reason: "no workflow claims the dependabot-ci-fix intent",
         };
       }
       console.log(
-        `[router] Failed checks on ${envelope.repo}#${envelope.prNumber} → ${handler} (intent: ${intent})`,
+        `[router] Failed checks on ${envelope.repo}#${envelope.prNumber} → ${handler}` +
+        `${envelope.isDependencyPr ? " (dependency PR)" : " (our own push)"}`,
       );
       return {
         action: "handler",

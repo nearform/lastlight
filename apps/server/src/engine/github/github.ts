@@ -682,6 +682,35 @@ export class GitHubClient {
     repo: string,
     ref: string,
   ): Promise<"passing" | "failing" | "pending" | "none"> {
+    return (await this.getChecksSummary(owner, repo, ref)).state;
+  }
+
+  /**
+   * {@link getChecksConclusion} plus the COUNT of checks behind the verdict, in
+   * the same two API calls.
+   *
+   * `settledCount` exists because "passing" alone is not evidence of anything:
+   * on a repo with no CI at all, `getChecksConclusion` returns `"none"` and a
+   * repo with one trivial check returns `"passing"` — and the auto-merge
+   * decision needs to tell "CI approved this" from "nothing looked at it"
+   * (`dependencies.minSettledChecks`; see `mayMerge` in ../pr-decisions.ts and
+   * 09-state-machine.md → D10). Deriving it in the client rather than at the
+   * call site keeps it to ONE round trip: recomputing the count from a second
+   * `listForRef` would double the cost of every PR-state resolution.
+   *
+   * A check run counts as settled when it has left queued/in_progress —
+   * whatever it concluded. Status contexts are settled unless the combined
+   * state is `pending`.
+   */
+  async getChecksSummary(
+    owner: string,
+    repo: string,
+    ref: string,
+  ): Promise<{
+    state: "passing" | "failing" | "pending" | "none";
+    settledCount: number;
+    pendingCount: number;
+  }> {
     const [{ data: checks }, { data: status }] = await Promise.all([
       this.octokit.rest.checks.listForRef({ owner, repo, ref, filter: "latest" }),
       this.octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
@@ -689,19 +718,46 @@ export class GitHubClient {
     const runs = checks.check_runs;
     const statuses = status.statuses ?? [];
 
-    if (runs.length === 0 && statuses.length === 0) return "none";
-
-    const runPending = runs.some((r) => r.status === "queued" || r.status === "in_progress");
+    const runPendingCount = runs.filter(
+      (r) => r.status === "queued" || r.status === "in_progress",
+    ).length;
     const statusPending = statuses.length > 0 && status.state === "pending";
-    if (runPending || statusPending) return "pending";
+    const pendingCount = runPendingCount + (statusPending ? statuses.length : 0);
+    const settledCount = runs.length - runPendingCount + (statusPending ? 0 : statuses.length);
+
+    if (runs.length === 0 && statuses.length === 0) {
+      return { state: "none", settledCount: 0, pendingCount: 0 };
+    }
+
+    if (runPendingCount > 0 || statusPending) {
+      return { state: "pending", settledCount, pendingCount };
+    }
 
     const runFailing = runs.some(
       (r) => r.conclusion === "failure" || r.conclusion === "timed_out",
     );
     const statusFailing = status.state === "failure" || status.state === "error";
-    if (runFailing || statusFailing) return "failing";
+    if (runFailing || statusFailing) return { state: "failing", settledCount, pendingCount };
 
-    return "passing";
+    return { state: "passing", settledCount, pendingCount };
+  }
+
+  /**
+   * The git AUTHOR NAME on a commit — not a GitHub login.
+   *
+   * This is the discriminator the fix state machine uses to answer "did WE push
+   * this head, or did the world move?" (09-state-machine.md → S1, the attempt
+   * table). It has to be the git author name because that is what
+   * `git-auth.ts` stamps on the agent's own commits (`user.name = botLogin`),
+   * and it is the same field `check_suite.head_commit.author.name` carries on
+   * the webhook path — so the webhook and the cron agree by construction.
+   *
+   * Returns `""` when GitHub reports no author name, so callers get a value
+   * that simply never equals `botLogin` rather than a null to branch on.
+   */
+  async getCommitAuthorName(owner: string, repo: string, ref: string): Promise<string> {
+    const { data } = await this.octokit.rest.repos.getCommit({ owner, repo, ref });
+    return data.commit?.author?.name ?? "";
   }
 
   /**

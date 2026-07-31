@@ -47,6 +47,8 @@ import {
   PR_FIX_SHAPED_WORKFLOWS,
   type SimpleWorkflowRequest,
 } from "./workflows/simple.js";
+import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./engine/pr-state.js";
+import { renderContext, resolveDispatchDisposition } from "./engine/pr-decisions.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
 import { createAdmissionController, type AdmissionController } from "./workflows/admission.js";
@@ -330,10 +332,72 @@ async function main() {
       return { success: false, error: msg };
     }
 
+    // ── The PR state machine (09-state-machine.md → S3) ────────────────────
+    //
+    // One resolved snapshot per dispatch, at the SAME choke point and for the
+    // same reason as the two guards above: webhook, cron, `/api/*` and resume
+    // all funnel through here.
+    //
+    // The webhook route already resolved it — the dispatcher needs
+    // `runInFlight` before it can decide to dispatch at all — and hands it
+    // down on `_prState`, so this costs nothing there. The cron fan-out and
+    // the direct API triggers arrive COLD and resolve here, which is what
+    // finally closes the gap where every nightly `fix-red-dependency-prs` run
+    // carried `branch` + `reason` but an EMPTY `{{ciSection}}`, the repo's
+    // default branch instead of the PR's real base, and no fork guard at all:
+    // the fan-out calls this function directly and never crosses `handlePrFix`.
+    const inheritedPrState =
+      context._prState && typeof context._prState === "object"
+        ? (context._prState as PrState)
+        : null;
+    let prState: PrState | null = inheritedPrState;
+    if (
+      !prState &&
+      PR_SCOPED_WORKFLOWS.has(workflowName) &&
+      owner &&
+      repo &&
+      typeof context.prNumber === "number"
+    ) {
+      prState = await resolvePrState(owner, repo, context.prNumber, {
+        github,
+        db,
+        botLogin: config.botLogin,
+      });
+      // Only the routes that have NOT already decided are gated here. The
+      // dispatcher decides for itself so it can reply to a human whose request
+      // it dropped; deciding twice would double every skip and every log line.
+      // A skip writes NO run row, which is exactly why every gate reachable
+      // from here is a LIVE precondition rather than a prior run's verdict —
+      // a stored verdict read through a path that records nothing freezes, and
+      // the PR is then dead with no label, no comment and no explanation
+      // (09 → D1).
+      const disposition = resolveDispatchDisposition(
+        workflowName,
+        prState,
+        {
+          fix: repoConfig?.fix ?? config.fix,
+          dependencies: repoConfig?.dependencies ?? config.dependencies,
+          review: repoConfig?.review ?? config.review,
+        },
+        { dedupOnHeadSha: true },
+      );
+      console.log(
+        `[dispatch] ${workflowName} ${prState.repo}#${prState.prNumber}: ` +
+        `${disposition.decision} — ${disposition.reason}`,
+      );
+      if (disposition.decision === "skip") {
+        // Not an error: the harness correctly determined there is nothing to
+        // do. Reporting it as a failure would paint a cron tick red and, on
+        // the fan-out, count against `failures`.
+        return { success: true };
+      }
+    }
+
     // Pluck the standard fields, leave the rest in `extra` for the workflow
     // template to consume.
     const {
       _triggerType,
+      _prState: _inheritedPrState,
       repo: _r,
       issueNumber,
       prNumber,
@@ -382,17 +446,42 @@ async function main() {
     if (typeof channelId === "string") extra.channelId = channelId;
     if (typeof threadId === "string") extra.threadId = threadId;
 
+    // Project the snapshot into the template variables the prompts render, and
+    // persist the WHOLE thing on the run context rather than scattered leaves
+    // (§S3) — so the run detail panel can show the decisions that were actually
+    // taken, with the inputs that produced them, long after the live state has
+    // moved on. One projection at one choke point is what makes the webhook and
+    // cron dispatches of a `pr-fix`-shaped workflow carry identical context.
+    if (prState) {
+      Object.assign(extra, renderContext(prState));
+      extra.prState = prState;
+    }
+
     // For PR-scoped read workflows, resolve the PR head ref and ask the
     // sandbox to pre-clone the repo at that branch. The agent then enters
     // a workspace that's already a checkout of the PR's actual code —
     // saves a redundant clone_repo MCP call inside the session.
     //
-    // pr-fix (and other pr-fix-shaped workflows like dependabot-ci-fix) already
-    // plumb `branch` through context (set by handlePrFix) because the fix phase
-    // needs the branch name to push to; we honor that here as the pre-populate
-    // branch too so the workspace is pre-checked-out at the PR head.
+    // The snapshot's head ref is the authority for every PR-scoped workflow —
+    // one read, already taken. It replaces the second `getPullRequest` the
+    // block below used to issue for the read-only workflows, and it is the
+    // only source the cron fan-out ever had for `dependabot-ci-fix` (via the
+    // discoverer's `branch`, which stays as the fallback for a snapshot whose
+    // PR read failed).
     let prePopulateBranch: string | undefined =
       typeof ctxPrePopulateBranch === "string" ? ctxPrePopulateBranch : undefined;
+    if (
+      !prePopulateBranch &&
+      prState?.headRef &&
+      (PR_FIX_SHAPED_WORKFLOWS.has(workflowName) ||
+        PR_HEADREF_PREPOPULATE_WORKFLOWS.has(workflowName))
+    ) {
+      prePopulateBranch = prState.headRef;
+      console.log(
+        `[dispatch] ${workflowName}: pre-populating workspace at ${owner}/${repo}@${prePopulateBranch} ` +
+        `(base ${prState.baseRef || "?"})`,
+      );
+    }
     if (!prePopulateBranch && typeof ctxBranch === "string" && ctxBranch && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
       prePopulateBranch = ctxBranch;
     }
@@ -797,7 +886,14 @@ async function main() {
       opts: { log?: (msg: string) => void },
     ) => Promise<DependencyPr[]>
   > = {
-    "green-dependency-prs": discoverGreenDependencyPrs,
+    // The green sweep's notion of "green" must match the webhook's: on a repo
+    // with no *required* checks, `mergeable_state: "clean"` is true for a PR
+    // whose CI is red. `requireSettledChecks` makes it ask the checks too.
+    "green-dependency-prs": (repos, gh, opts) =>
+      discoverGreenDependencyPrs(repos, gh, {
+        ...opts,
+        requireSettledChecks: config.dependencies.requireSettledChecks,
+      }),
     "red-dependency-prs": discoverRedDependencyPrs,
     // The pr-review cron: find open PRs awaiting review and fan out one single-PR
     // pr-review run each. Replaces the old `mode: scan` review run, which ran the

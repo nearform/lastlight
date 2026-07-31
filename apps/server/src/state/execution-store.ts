@@ -359,6 +359,52 @@ export class ExecutionStore {
     return !!row;
   }
 
+  /**
+   * Total USD spent by every execution belonging to a run of one of
+   * `workflowNames` for this trigger — the cumulative per-PR cost the
+   * `fix.maxCostUsd` brake is enforced against (09-state-machine.md → S1).
+   *
+   * Cost is recorded per PHASE (one `executions` row each) and only ever rolled
+   * up per RUN, so there was no way to ask "what has this pull request cost us
+   * across every attempt". This is that question, and it is deliberately asked
+   * of the same (family, PR) key as `latestForTrigger`: a budget that resets
+   * because routing moved from `pr-fix` to `dependabot-ci-fix` is not a budget.
+   *
+   * Rows with a NULL `cost_usd` (a phase that reported none, or an
+   * OAuth/subscription run) contribute 0 — the brake must never be tripped by
+   * missing data.
+   */
+  costForTriggerWorkflows(triggerId: string, workflowNames: string[]): number {
+    if (workflowNames.length === 0) return 0;
+    const placeholders = workflowNames.map(() => "?").join(", ");
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(e.cost_usd), 0) AS total
+      FROM executions e
+      JOIN workflow_runs r ON r.id = e.workflow_run_id
+      WHERE r.trigger_id = ? AND r.workflow_name IN (${placeholders})
+    `).get(triggerId, ...workflowNames) as { total: number } | undefined;
+    return row?.total ?? 0;
+  }
+
+  /**
+   * Did `workflowRunId` complete phase `phaseName` successfully?
+   *
+   * Phase ledger rows are keyed `"<workflow>:<phase>"` (the engine's dedup
+   * key), so this is a run-scoped `shouldRunPhase` that does not need to know
+   * which workflow of a family ran. Used to decide whether a prior fix run
+   * actually SPENT an attempt: `diagnose` carries
+   * `on_output.requires_marker: DIAGNOSIS_COMPLETE`, so a succeeded row for it
+   * is equivalent to the marker having been emitted.
+   */
+  phaseSucceededInRun(workflowRunId: string, phaseName: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 FROM executions
+      WHERE workflow_run_id = ? AND skill LIKE ? AND success = 1
+      LIMIT 1
+    `).get(workflowRunId, `%:${phaseName}`);
+    return !!row;
+  }
+
   /** Check if a skill has already completed successfully for a given trigger */
   isCompleted(skill: string, triggerId: string): boolean {
     const row = this.db.prepare(`

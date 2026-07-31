@@ -35,6 +35,13 @@ export interface EventEnvelope {
    *  carry the settled check_suite's head_sha). Lets the dependency-workflow
    *  dedup guard skip a PR already assessed at this exact SHA. */
   headSha?: string;
+  /** Is this a dependency-update (Dependabot / Renovate) PR? Set on the
+   *  check-outcome events, where the connector already computes it — from the
+   *  head commit's author and the suite's head branch — to decide whether to
+   *  emit at all. Carried rather than discarded so the router can route
+   *  `pr.checks_failed` deterministically instead of paying a classifier call
+   *  to re-derive it from a prose sentence. */
+  isDependencyPr?: boolean;
   /** Login / username of the originator. */
   sender: string;
   /** Login of the issue/PR original author — distinct from `sender` (the
@@ -67,7 +74,8 @@ export type EventType =
   | "pr.reopened"
   | "pr.closed"
   | "pr.merged"
-  | "pr.checks_failed"    // a dependency PR's checks settled RED (aggregate)
+  | "pr.checks_failed"    // checks settled RED (aggregate) on a dependency PR,
+                          // or on any PR whose head commit the bot pushed
   | "pr.checks_passed"    // a dependency PR's checks settled GREEN (aggregate)
   | "comment.created"
   | "pr_review.submitted"
@@ -112,6 +120,7 @@ the workflow context where dispatched code may pull fields from it.
 | `issueNumber` | issues + PRs + comments + reviews | never |
 | `prNumber` | PR events + PR comments only | never |
 | `headSha` | `pr.checks_passed` / `pr.checks_failed` (the settled suite's head SHA) | never |
+| `isDependencyPr` | `pr.checks_passed` (always `true`) / `pr.checks_failed` (`true` for a bump, `false` for a PR the bot pushed to) | never |
 | `title` | issues + PRs (+ comments via parent) | never |
 | `issueAuthor` | issues + PRs + comments (parent author) | never |
 | `labels` | issues + PRs (snapshot at event time) | never |

@@ -130,6 +130,30 @@ differ.
   `.lastlight/lastlight.yml`, reported in the same `{ success: false }` shape as
   the unmanaged-repo guard. Only a context naming exactly one repo resolves a
   layer. See [Configuration](/spec/02-configuration).
+- **The PR state machine resolves at the same choke point.** For any workflow in
+  `PR_SCOPED_WORKFLOWS` (`pr-fix`, `dependabot-ci-fix`, `dependabot-pr-merge`,
+  `pr-review`), `dispatchWorkflow()` resolves one `PrState` snapshot per dispatch
+  (`resolvePrState`, `src/engine/pr-state.ts`) and decides whether to run from it
+  by pure function (`src/engine/pr-decisions.ts`). The webhook route resolves it
+  one level earlier — the dispatcher needs the run lock before it can decide to
+  dispatch at all — and hands it down on the context, so it is never fetched
+  twice; the cron fan-out and the direct API triggers arrive cold and resolve
+  here. That is the point: the fan-out calls this function *directly*, so before
+  this every nightly dependency-fix run was dispatched with none of the
+  enrichment the webhook route did by hand. **Cron discoverers are therefore
+  pure candidate finders** — they answer "does this PR look like it needs this
+  workflow?" and know nothing about escalation, budgets, dedup or forks. A skip
+  here is `{ success: true }`, not an error: correctly determining there is
+  nothing to do would otherwise paint a cron tick red. The snapshot then travels
+  on the run row as `context.prState` (see [State](/spec/10-state)) and its
+  projection supplies the prompts' `{{ciSection}}` / `{{attempt}}` /
+  `baseBranch`. Contract + rationale: the
+  [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
+  One seam worth knowing: the dispatcher's copy of the gate reads the
+  **operator's** `fix` / `dependencies` / `review` blocks, because the repo layer
+  resolves a level down — and since a repo may only ever clamp them tighter, that
+  can only let through a run the repo would also have skipped a moment later,
+  never the reverse.
 - **HTTP server is provided by the GitHub webhook connector.** No
   standalone listener. The admin dashboard, `/api/run`, and `/api/build`
   all silently disappear if there is no GitHub App configured.
@@ -177,6 +201,8 @@ Supporting files referenced by name during boot:
 | `CronScheduler` + `getJobs()` | `src/cron/*` |
 | Admin dashboard mount | `src/admin/index.ts` |
 | Router | `src/engine/router.ts` |
+| Dispatch gate (route → workflow) | `src/engine/dispatcher.ts` |
+| PR snapshot + pure decisions over it | `src/engine/pr-state.ts`, `src/engine/pr-decisions.ts` |
 | `dispatchWorkflow` → `runSimpleWorkflow` | `src/workflows/simple.ts` |
 | `resumeOrphanedWorkflows` | `src/workflows/resume.ts` |
 

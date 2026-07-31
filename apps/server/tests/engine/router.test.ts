@@ -61,6 +61,9 @@ beforeEach(() => {
   // the fallback was NOT consulted.
   mockGetWorkflowByIntent.mockReset();
   mockGetWorkflowByIntent.mockReturnValue(undefined);
+  // The check-outcome routes assert the classifier is NOT consulted (09 → D5),
+  // so their call history must start clean.
+  mockClassifyComment.mockClear();
   setRuntimeConfig({
     managedRepos: ['cliftonc/drizzle-cube', 'cliftonc/drizby', 'cliftonc/lastlight'],
   } as unknown as LastLightConfig);
@@ -152,8 +155,7 @@ describe('routeEvent — PR events', () => {
 });
 
 describe('routeEvent — pr.checks_failed', () => {
-  it('routes to the workflow that claims the classified intent', async () => {
-    mockClassifyComment.mockResolvedValueOnce({ intent: 'dependabot-ci-fix' } as any);
+  it('routes a dependency PR to dependabot-ci-fix without a classifier call', async () => {
     mockGetWorkflowByIntent.mockReturnValue({ name: 'dependabot-ci-fix' } as any);
     const result = await routeEvent(
       makeEnvelope({
@@ -161,6 +163,7 @@ describe('routeEvent — pr.checks_failed', () => {
         prNumber: 681,
         title: 'Bump lodash from 4.17.20 to 4.17.21',
         issueAuthor: 'dependabot[bot]',
+        isDependencyPr: true,
       }),
     );
     expect(result.action).toBe('handler');
@@ -169,14 +172,37 @@ describe('routeEvent — pr.checks_failed', () => {
       expect(result.context.prNumber).toBe(681);
       expect(result.context.author).toBe('dependabot[bot]');
     }
+    // 09 → D5: the connector already knows; re-guessing it costs an LLM call
+    // and lands every red PR on the dependency workflow.
+    expect(mockClassifyComment).not.toHaveBeenCalled();
   });
 
-  it('ignores the event when no workflow claims the intent', async () => {
-    mockClassifyComment.mockResolvedValueOnce({ intent: 'review' } as any);
-    // getWorkflowByIntent stays undefined (well-known intents are excluded by
-    // fallbackWorkflowForIntent anyway).
+  it('routes a non-dependency red PR to pr-fix, never to the dependency workflow', async () => {
+    // The broadened emit (§3.4) delivers a human's PR here whenever WE pushed
+    // its head commit. `pr-fix.yaml` has no `classification:` block, so the old
+    // classifier route could never select it — every such PR ran a
+    // dependency-bump prompt instead.
+    mockGetWorkflowByIntent.mockReturnValue({ name: 'dependabot-ci-fix' } as any);
     const result = await routeEvent(
-      makeEnvelope({ type: 'pr.checks_failed', prNumber: 5, title: 'Some PR' }),
+      makeEnvelope({
+        type: 'pr.checks_failed',
+        prNumber: 5,
+        title: 'Add feature',
+        issueAuthor: 'octocat',
+        isDependencyPr: false,
+      }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-fix');
+    }
+    expect(mockClassifyComment).not.toHaveBeenCalled();
+  });
+
+  it('ignores a dependency PR when no workflow claims the dependabot-ci-fix intent', async () => {
+    mockGetWorkflowByIntent.mockReturnValue(undefined);
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.checks_failed', prNumber: 5, title: 'Some PR', isDependencyPr: true }),
     );
     expect(result.action).toBe('ignore');
   });

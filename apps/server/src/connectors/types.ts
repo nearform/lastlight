@@ -24,6 +24,20 @@ export interface EventEnvelope {
    * dedup guard to skip a PR already assessed at this exact SHA.
    */
   headSha?: string;
+  /**
+   * Is this a dependency-update (Dependabot / Renovate) PR? Set on the
+   * check-outcome events, where the connector already computes it — from the
+   * head commit's author and the suite's head branch — to decide whether to
+   * emit at all.
+   *
+   * It is carried rather than discarded so the router can route
+   * `pr.checks_failed` DETERMINISTICALLY (dependency → `dependabot-ci-fix`,
+   * everything else → `pr-fix`) instead of paying a classifier call to
+   * re-derive it from a prose sentence. That call could never select `pr-fix`
+   * — `pr-fix.yaml` has no `classification:` block — so every red PR resolved
+   * to the dependency workflow (09-state-machine.md → D5).
+   */
+  isDependencyPr?: boolean;
   /** Login/username of the sender */
   sender: string;
   /** Login of the issue/PR original author (distinct from `sender`, the commenter) */

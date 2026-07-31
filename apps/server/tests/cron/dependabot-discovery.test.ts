@@ -90,7 +90,11 @@ describe("discoverGreenDependencyPrs", () => {
     ]);
   });
 
-  it("excludes a green dependency PR carrying the requires-human label", async () => {
+  it("still surfaces a requires-human PR — the label is policy, decided at dispatch", async () => {
+    // 09 → S1: the state is "we escalated at head SHA X", not the label, and a
+    // discoverer that filtered on it made the label a one-way door no code path
+    // could ever reopen. The escalation guard now runs once, at
+    // `dispatchWorkflow`, for the cron and the webhook alike.
     const gh = fakeGh(
       {
         "cliftonc/a": [
@@ -100,7 +104,7 @@ describe("discoverGreenDependencyPrs", () => {
             title: "Bump b",
             draft: false,
             authorLogin: "dependabot[bot]",
-            labels: [REQUIRES_HUMAN_LABEL], // already flagged → skipped, no fetch
+            labels: [REQUIRES_HUMAN_LABEL],
           },
         ],
       },
@@ -108,9 +112,50 @@ describe("discoverGreenDependencyPrs", () => {
     );
 
     const prs = await discoverGreenDependencyPrs(["cliftonc/a"], gh);
-    expect(prs).toEqual([{ repo: "cliftonc/a", prNumber: 2, title: "Bump a" }]);
-    // #3 was filtered before the per-PR mergeable fetch.
-    expect(gh.getPullRequest).not.toHaveBeenCalledWith("cliftonc", "a", 3);
+    expect(prs).toEqual([
+      { repo: "cliftonc/a", prNumber: 2, title: "Bump a" },
+      { repo: "cliftonc/a", prNumber: 3, title: "Bump b" },
+    ]);
+  });
+
+  it("does not call green a `clean` PR whose checks are red, when requireSettledChecks is on", async () => {
+    // `mergeable_state: clean` is GitHub's MERGEABILITY verdict. On a repo with
+    // no *required* status checks it is true for a PR whose CI is failing —
+    // the exact hazard the merge prompt documents ("this has happened").
+    const gh = fakeGh(
+      { "cliftonc/a": [{ number: 2, title: "Bump a", draft: false, authorLogin: "dependabot[bot]" }] },
+      { "cliftonc/a#2": "clean" },
+    );
+    gh.getChecksConclusion = vi.fn(async () => "failing" as const);
+
+    expect(await discoverGreenDependencyPrs(["cliftonc/a"], gh, { requireSettledChecks: true })).toEqual([]);
+    // ...and asks the checks about the exact commit it listed.
+    expect(gh.getChecksConclusion).toHaveBeenCalledWith("cliftonc", "a", "sha-2");
+  });
+
+  it("keeps today's behaviour when requireSettledChecks is off — no extra call", async () => {
+    const gh = fakeGh(
+      { "cliftonc/a": [{ number: 2, title: "Bump a", draft: false, authorLogin: "dependabot[bot]" }] },
+      { "cliftonc/a#2": "clean" },
+    );
+    gh.getChecksConclusion = vi.fn(async () => "failing" as const);
+
+    expect(await discoverGreenDependencyPrs(["cliftonc/a"], gh)).toEqual([
+      { repo: "cliftonc/a", prNumber: 2, title: "Bump a" },
+    ]);
+    expect(gh.getChecksConclusion).not.toHaveBeenCalled();
+  });
+
+  it("fails CLOSED on a checks read error — a wrongly-green PR costs a merged red PR", async () => {
+    const gh = fakeGh(
+      { "cliftonc/a": [{ number: 2, title: "Bump a", draft: false, authorLogin: "dependabot[bot]" }] },
+      { "cliftonc/a#2": "clean" },
+    );
+    gh.getChecksConclusion = vi.fn(async () => {
+      throw new Error("502");
+    });
+
+    expect(await discoverGreenDependencyPrs(["cliftonc/a"], gh, { requireSettledChecks: true })).toEqual([]);
   });
 
   it("isolates a repo whose PR listing throws (skips it, keeps going)", async () => {
@@ -296,7 +341,7 @@ describe("discoverRedDependencyPrs", () => {
     ]);
   });
 
-  it("excludes a red dependency PR carrying the requires-human label (no checks fetch)", async () => {
+  it("still surfaces a requires-human red PR — the escalation guard runs at dispatch", async () => {
     const gh = fakeGh(
       {
         "cliftonc/a": [
@@ -316,8 +361,8 @@ describe("discoverRedDependencyPrs", () => {
     const prs = await discoverRedDependencyPrs(["cliftonc/a"], gh);
     expect(prs).toEqual([
       { repo: "cliftonc/a", prNumber: 3, title: "Bump a", branch: "dependabot/npm/pkg-3", reason: "checks-failing" },
+      { repo: "cliftonc/a", prNumber: 4, title: "Bump b", branch: "dependabot/npm/pkg-4", reason: "checks-failing" },
     ]);
-    expect(gh.getChecksConclusion).not.toHaveBeenCalledWith("cliftonc", "a", "sha-4");
   });
 
   it("re-polls a cold `unknown` and routes it once it settles to dirty", async () => {
