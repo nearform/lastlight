@@ -463,6 +463,24 @@ Two properties are load-bearing:
   (`merge-green-dependency-prs`, `fix-red-dependency-prs`,
   `check-prs-awaiting-review`); converting drop-on-lock into queue-on-lock
   is a prerequisite for retiring any of them.
+
+  The lock is enforced **inside the decision functions** (`runLockDrop`,
+  called first by `resolveFixDisposition`, `resolveMergeDisposition` and
+  `resolveReviewTrigger`), not by the route. It began as an inline check in
+  the dispatcher, which meant the webhook route obeyed it and the cron
+  fan-out and `/api/run` did not — so the daily `fix-red-dependency-prs`
+  could dispatch onto a PR with a live `pr-fix` run, which is the very
+  sequence the lock exists to prevent, made worse by the fix family now
+  sharing one workspace per PR. `PR_SCOPED_WORKFLOWS` is exactly the union
+  of the three dispositions, so placing it there covers every route by
+  construction, including a caller that reaches a disposition directly.
+  It is checked **before every other skip**: ordering it after the
+  escalating skips would label a PR `requires-human` for a budget a live run
+  is still spending, and ordering it after `explicitRequest` would let an
+  `@bot fix this` walk into the running agent's workspace. A lock drop
+  carries no escalation case — it labels nothing, comments nothing and
+  writes no run row — and the route that has a human on the other end
+  replies to them.
 - **No prior run's verdict may gate dispatch — unless the skipping path
   writes a run row.** A skip returns `{ kind: "skipped" }` and writes *no*
   row, so a gate on "what did the last run conclude" reads the same stale
@@ -510,7 +528,7 @@ the check say" are different questions:
 | Decision | When | `last-light/review` (only when `review.postsCheck`) |
 |---|---|---|
 | `dispatch` | an explicit request, the `review.requestLabel`, `eager` on PR attention, or a settled suite under `after-checks` | `in_progress`, completed from the run's terminal transition |
-| `defer` | `on-request` with nobody asking; `after-checks` waiting for CI, or reached on PR attention rather than a settle | `queued` under `after-checks`, `neutral` under `on-request` — and only on a PR-attention event, since a placeholder is a statement about a head SHA and the 30-minute sweep would otherwise re-post one per tick |
+| `defer` | `on-request` with nobody asking; `after-checks` waiting for CI (on every route but the sweep — see below), or reached on PR attention rather than a settle | `queued` under `after-checks`, `neutral` under `on-request` — and only on a PR-attention event, since a placeholder is a statement about a head SHA and the 30-minute sweep would otherwise re-post one per tick |
 | `skip` | draft (`review.skipDraft`), already reviewed at this head, or another PR-scoped run in flight | **nothing.** A run that never dispatches must not create a check and immediately conclude it |
 
 Two consequences worth stating outright:
@@ -518,7 +536,26 @@ Two consequences worth stating outright:
 - **An explicit `@bot review` always dispatches**, overriding mode, draft
   *and* dedup. Today that carve-out is accidental — the comment path simply
   never crossed these code paths — and as one branch of the resolver it
-  becomes a decision.
+  becomes a decision. The **one** thing it does not override is the run
+  lock, which is checked above it: the lock is not policy but a physical
+  constraint (one workspace, one branch, one agent). The requester is told
+  so, and the sweep is the re-pickup.
+- **The sweep is exempt from the `pending` deferral.** `defer` on
+  `checks-pending` applies on every route *except* `route === "sweep"`. A
+  check run that never CONCLUDES — a fork PR's `workflow_run` awaiting
+  maintainer approval, a dead self-hosted runner, a third-party app that
+  opened a check and crashed — leaves the aggregate `pending` with no
+  further `check_suite` ever coming, so deferring on every route deferred
+  forever, and with `review.postsCheck` on the `queued` placeholder sat
+  there permanently. Nothing in the snapshot dates the pending state, so the
+  sweep cannot tell "CI is still running" from "this will never settle" and
+  must pick which error to make: a review posted 30 minutes into a running
+  suite costs timing (it cannot cite a failure that has not happened, and
+  the next push re-arms `botReviewAtHead`), while a PR that is never
+  reviewed and possibly never mergeable costs correctness. `after-checks`
+  is "on settle, either colour" — the colour was never the gate, and on the
+  one route that exists to pick up what no webhook will fire for, neither is
+  settling.
 - **Fix outranks review** on a settled-failing suite, and it needs no new
   state. `normalize()` returns one envelope per delivery and `route()`
   returns one handler, so a `check_suite.completed` fan-out into both

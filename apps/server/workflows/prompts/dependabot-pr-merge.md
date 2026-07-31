@@ -157,6 +157,12 @@ and creates only the missing ones, so it never errors on labels that exist:
 - `dependency-major-high` — color `b60205` — "Major version bump, high impact — needs human review."
 If `github_ensure_labels` is denied (the token lacks the permission), fall back to
 using only labels that already exist and skip the rest.
+
+When YOU apply `requires-human`, it is not a permanent stop and nobody has to
+remove it by hand: the harness reads a label on a PR it has worked as OURS,
+applied at this head, so any commit pushed by someone else re-arms the loop.
+Never tell a maintainer in a comment that they must delete the label — ask them
+for the decision or the merge, not for label housekeeping.
 Then apply exactly the labels for your verdict via `github_add_labels`, and clear
 the superseded ones with `github_remove_label`. **Only ever touch the six labels
 above** — never add or remove a label outside this vocabulary (Renovate's

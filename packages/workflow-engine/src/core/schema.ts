@@ -297,8 +297,13 @@ const PhaseDefinitionSchema = z
      * Expressions use the `until:` grammar (see `core/loop-eval.ts`) evaluated
      * against `{ ...ctx, phaseOutputs, scratch }` — the same values a prompt
      * template can render. `output` is empty here (the phase has not run), so
-     * only bare `output.contains(...)` is meaningless; read an upstream phase
-     * instead, e.g. `phaseOutputs.diagnosis.contains('class=flaky')`.
+     * only bare `output.contains(...)` is meaningless; read what an upstream
+     * phase left behind instead. Prefer a value a phase already PARSED into
+     * `scratch` (e.g. `scratch.fixMarkers.diagnosis.class == 'flaky'`) over a
+     * `.contains()` against `phaseOutputs.<phase>`: the latter is a substring
+     * match on the agent's whole free-form output, so prose that merely
+     * mentions the needle matches it, and it is empty across a resume boundary
+     * (below) where it then fails open.
      *
      * Two scoping notes:
      *   - `phaseOutputs` is empty across a **resume** boundary (a phase skipped

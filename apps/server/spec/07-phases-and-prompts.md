@@ -172,11 +172,17 @@ fixed here*; `building` owns *install and run the gate*. See
 [Skills](/spec/08-skills).
 
 Each phase carries a `requires_marker` postcondition —
-`DIAGNOSIS_COMPLETE` on `diagnose`, `CI_FIX_COMPLETE` on `fix` — and
-the marker line is the interface between them. `diagnose` writes
-`class=<one of five>` into its marker; `fix` declares a `skip_if` that
-reads it (`phaseOutputs.diagnosis.contains('class=flaky')` and the two
-other stopping classes) and is skipped, non-failing, when it matches.
+`DIAGNOSIS_COMPLETE:` on `diagnose`, `CI_FIX_COMPLETE:` on `fix` — and
+the marker line is the interface between them. **The colon is part of the
+postcondition**, because the engine enforces `requires_marker` as a bare
+substring of the output while the parser only recognises `<TAG>:`; declaring
+the bare tag let an output that merely *mentioned* it pass a gate that then
+parsed to nothing. Both forms are pinned to `DIAGNOSIS_MARKER_POSTCONDITION`
+/ `CI_FIX_MARKER_POSTCONDITION` (`src/engine/fix-markers.ts`) by test.
+`diagnose` writes `class=<one of five>` into its marker; `fix` declares a
+`skip_if` that reads the **parsed** class the harvest persisted
+(`scratch.fixMarkers.diagnosis.class == 'flaky'` and the two other stopping
+classes) and is skipped, non-failing, when it matches.
 `dependabot-ci-fix` previously had *no* postcondition at all, so a run
 that inspected the PR and stopped without pushing or labelling reported
 green.

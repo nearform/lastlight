@@ -279,9 +279,15 @@ A phase can declare `skip_if:` — one expression, or a list (OR-ed) — evaluat
 when the node becomes *ready*, against `{ ...ctx, phaseOutputs, scratch }`. A
 match takes the **same non-failing skip path** as `requires_sandbox` above, so
 the run still records `succeeded`. The grammar is the `until:` one
-(`core/loop-eval.ts`); the useful form is a dotted `.contains()` against an
-upstream phase's output, e.g.
-`phaseOutputs.diagnosis.contains('class=flaky')` on `pr-fix`/`dependabot-ci-fix`.
+(`core/loop-eval.ts`); the useful form is a dotted read of a value an upstream
+phase already **parsed** into `scratch`, e.g.
+`scratch.fixMarkers.diagnosis.class == 'flaky'` on `pr-fix`/`dependabot-ci-fix`.
+A `.contains()` against `phaseOutputs.<phase>` is available and is what those
+rows used to do — don't: that is a substring match on the agent's whole
+free-form output, so prose ("this is not `class=flaky`…") and a replayed
+`{{priorAttempts}}` line both match it, `class=flaky-timeout` matches while
+`class=probably-flaky` doesn't, and it is empty across a resume boundary (next
+paragraph) so it fails open on exactly the verdicts it guards.
 
 `requires_sandbox` gates on the phase being *unavailable*; `skip_if` gates on it
 being *unnecessary*. The distinction from `on_output.contains_BLOCKED:

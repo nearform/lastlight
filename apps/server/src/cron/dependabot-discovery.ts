@@ -319,8 +319,10 @@ async function resolveMergeableState(
 
 /**
  * Find every green (`mergeable_state: "clean"`) dependency PR across `repos`
- * (`owner/repo` full names), EXCLUDING any carrying the `requires-human` label.
- * A cold `unknown` read is re-polled (`resolveMergeableState`) before giving up,
+ * (`owner/repo` full names). No `requires-human` filter — that is a POLICY
+ * question, answered once at the dispatch gate off the PR-state snapshot (see
+ * the module header), which is what lets a maintainer's push re-arm a PR we
+ * gave up on. A cold `unknown` read is re-polled (`resolveMergeableState`) before giving up,
  * so a genuinely-mergeable-but-uncomputed PR isn't stranded for want of a second
  * read (issue #204). Per-repo failures are logged and skipped, never fatal.
  */
@@ -379,8 +381,10 @@ export async function discoverGreenDependencyPrs(
 
 /**
  * Find every RED dependency PR across `repos` (`owner/repo` full names) that
- * `dependabot-ci-fix` can act on, EXCLUDING any carrying the `requires-human`
- * label. A PR qualifies when its checks are settled-FAILING, OR its
+ * `dependabot-ci-fix` can act on. No `requires-human` filter — see
+ * `discoverGreenDependencyPrs` and the module header: whether we may act on an
+ * escalated PR is decided at the dispatch gate, not here.
+ * A PR qualifies when its checks are settled-FAILING, OR its
  * `mergeable_state` is `behind` / `dirty` / `blocked` (a merge it can't make on
  * its own but ci-fix can push toward — see `MERGE_BLOCKED_STATES`). Failing CI
  * takes precedence in the reported `reason` (there's a concrete build to fix).

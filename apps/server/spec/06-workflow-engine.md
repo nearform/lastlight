@@ -247,9 +247,9 @@ cases that must not be re-attempted.
 ```yaml
 - name: fix
   skip_if:                                          # one string, or a list (OR-ed)
-    - "phaseOutputs.diagnosis.contains('class=flaky')"
-    - "phaseOutputs.diagnosis.contains('class=infra-dependent')"
-    - "phaseOutputs.diagnosis.contains('class=upstream-broken')"
+    - "scratch.fixMarkers.diagnosis.class == 'flaky'"
+    - "scratch.fixMarkers.diagnosis.class == 'infra-dependent'"
+    - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
 ```
 
 Expressions use the `until:` grammar (see *Loop expression evaluator*
@@ -259,6 +259,19 @@ not run), so a bare `output.contains(...)` is meaningless; read an upstream
 phase instead. AND is expressible by collapsing to a single expression; the
 production consumer is a class list, which is why one expression per class
 reads better than one compound one.
+
+**Read a PARSED value out of `scratch`, not prose out of `phaseOutputs`.**
+The production rows above used to be
+`phaseOutputs.diagnosis.contains('class=flaky')`, and every way that can go
+wrong, it did: `phaseOutputs.diagnosis` is the agent's *entire* output and
+the match is a plain substring, so an agent writing "this is not
+`class=flaky`, it is reproducible" skipped the phase; a `{{priorAttempts}}`
+line replayed from an earlier attempt matched too; `class=flaky-timeout`
+matched while `class=probably-flaky` did not; and `phaseOutputs` is **empty
+across a resume boundary**, so the guard failed open and ran a full sandbox
+on exactly the verdicts it exists to stop. `scratch` is reloaded from the run
+row each iteration, and the marker harvest has already parsed and validated
+the class — so the guard reads the same value the decision layer does.
 
 There is no negation, and a *conditional* row — "skip on `class=flaky`,
 unless this PR has already deferred twice" — is therefore not expressible
@@ -616,8 +629,15 @@ One grammar, two consumers. `evalUntilExpression` drives a
 `generic_loop`'s `until:`; `evalSkipIf` OR-s a phase's `skip_if` list and
 returns the **first matching expression**, so the scheduler can name it in
 the skip reason. The longer dotted path exists for `skip_if`, which needs
-to read a *sibling* value (`phaseOutputs.diagnosis.contains(…)`) that the
-loop never did.
+to read a *sibling* value (`scratch.fixMarkers.diagnosis.class == '…'`)
+that the loop never did.
+
+`runScope.scratch` is refreshed from the run row on each iteration, inside
+the `getRun` the cancel check already makes — so a guard reading `scratch`
+sees what a phase harvest wrote through `onPhaseEnd`, not the value the
+scope was constructed with. Without that refresh a `scratch` guard is a
+silent no-op on the fresh path: it reads state that predates the phase it is
+guarding on.
 
 `until_bash` is the alternative: a shell command whose exit code (0 →
 stop) drives the loop. It runs **inside the sandbox** (via `executeCommand`

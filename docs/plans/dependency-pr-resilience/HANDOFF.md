@@ -80,12 +80,14 @@ without one (`docs/RELEASING.md`).
   records `toolCount: 18`, now 21.** Captured evidence from a real run —
   re-capture with the smoke command in `packages/agentic-pi/CLAUDE.md`, do not
   hand-edit. Nothing asserts it today.
-- **`resolveDispatchDisposition` reads the operator's review config in the
-  dispatcher and the repo-clamped one in `dispatchWorkflow`** — a pre-existing
-  seam noted in `prPolicyConfig()`. Since `review.trigger` / `requestLabel` are
-  unclamped, a repo's `trigger` can differ from the operator's on the webhook
-  path while the sweep and cold routes see the repo value. Fold the two
-  resolutions together when someone next touches that seam.
+- ~~`resolveDispatchDisposition` reads the operator's review config in the
+  dispatcher and the repo-clamped one in `dispatchWorkflow`.~~ **Closed.** The
+  gate body is now one function (`applyPrDispatchGate`) called by both routes,
+  and `prPolicyConfig(layer)` folds in the repo layer resolved through the
+  injected `DispatchDeps.resolveRepoPolicy`. It was worse than the seam note
+  said: the webhook route always passes `_prState`, so `dispatchWorkflow`'s
+  clamped gate never ran for it and **every** webhook-originated PR dispatch
+  used operator values while the prompt rendered the repo's.
 
 ### Overlay forks that silently keep old behaviour
 
@@ -94,8 +96,11 @@ shape. All are recorded in BREAKING-CHANGES.
 
 - A fork of `skills/fixing/SKILL.md` still names `../.lastlight-verify.sh`; the
   gate never runs.
-- A fork of either fix workflow that reworded
-  `phaseOutputs.diagnosis.contains('class=flaky')` never gets the flaky
+- A fork of either fix workflow that **kept** the old
+  `phaseOutputs.diagnosis.contains('class=<cls>')` rows now never matches at
+  all, so it runs a full sandbox on every `flaky` / `infra-dependent` /
+  `upstream-broken` verdict; one that **reworded**
+  `scratch.fixMarkers.diagnosis.class == 'flaky'` never gets the flaky
   promotion — `promoteFlakyDiagnosis` matches that expression **literally**.
 - A fork of `dependabot-pr-merge.yaml` keeps `skill: code-review` and runs the
   new prompt without the impact rubric.
