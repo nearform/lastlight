@@ -117,8 +117,9 @@ Call it **TRIVIAL** only if ALL of these hold:
 - there is NO change to runtime logic, control flow, or behaviour, AND
 - nothing security-sensitive (auth, crypto, deserialization, network, file I/O)
   changed in a meaningful way, AND
-- if it IS a **major** version bump, STEP 2a puts its impact at or below the
-  configured ceiling.
+- if it IS a **major** version bump, the tier STEP 2a computes for it is at or
+  below the configured ceiling. (STEP 2a runs for every major regardless — this
+  test only *consults* its answer.)
 If you are unsure, or the change touches application logic, treat it as
 **FUNCTIONAL**. When in doubt, do NOT auto-merge.
 
@@ -129,6 +130,16 @@ magnitude alone cannot tell the two apart.
 STEP 2a — Impact, for a MAJOR bump only.
 Non-major bumps have no impact tier: their `impact` is `none` and STEP 2's test
 governs them unchanged. Skip straight to STEP 2b.
+
+**Every major gets a tier, whatever the verdict.** The tier is a property of the
+BUMP, not of the path it takes: you compute it before you know whether the PR is
+TRIVIAL or FUNCTIONAL, and a FUNCTIONAL major carries its tier exactly as a
+TRIVIAL one does — `high` is the commonest tier there and the reason the PR is
+FUNCTIONAL at all. `none` on a major is always wrong. It is not "not
+applicable", not "no auto-merge" and not "unknown" — unknown is `high`. The tier
+is the durable record of why a major did or did not land (STEP 2b makes it a
+label, and the marker carries it), so a major recorded `none` leaves that
+question permanently unanswerable.
 
 For a major, read the **dependency-impact** skill and apply its rubric to reach
 exactly one tier — `low`, `medium`, or `high` — from evidence you can gather
@@ -320,7 +331,10 @@ marker — ALWAYS. Pick the `action` that describes what you actually did:
   major-bump case.
 - `comment` — you left a review/nudge comment and took no branch action.
 
-`impact` is the STEP 2a tier for a major, and `none` for every non-major.
+`impact` is the STEP 2a tier for a major — `low`, `medium` or `high`, on a
+FUNCTIONAL verdict just as on a TRIVIAL one — and `none` **only** for a
+non-major. Emitting `impact=none` on a major contradicts STEP 2a and destroys
+the audit record; if you reached a verdict you reached a tier, so state it.
 
   ASSESSMENT_COMPLETE: pr={{prNumber}} verdict=<TRIVIAL|FUNCTIONAL> impact=<none|low|medium|high> action=<automerge|merge|rebase|rebase-and-human|comment|already-handled>
 

@@ -313,6 +313,13 @@ tier came back above it — the phase must run either way, because it also label
 and comments. So the settled-checks pair bounds *when* a merge may be decided;
 the ceiling is policy the agent is asked to honour.
 
+That makes the tier's accuracy a **measured** property rather than an enforced
+one, which is why it has an eval: `apps/evals/datasets/dependency-merge/` runs a
+major bump per tier and grades the `impact=` the agent reports. Its first run
+earned its keep — an agent that classified a major FUNCTIONAL was recording
+`impact=none`, which is safe (nothing auto-merges) but erases the impact label
+the audit trail depends on. The wording that permitted the reading is fixed.
+
 `review.postsCheck` predates the block and is still **mirrored** flat as
 `config.reviewPostsCheck` (the `REVIEW_POSTS_CHECK` env var below) for the
 public-config surface — one value projected two ways rather than a second source

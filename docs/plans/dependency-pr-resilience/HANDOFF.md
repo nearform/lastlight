@@ -75,20 +75,24 @@ half done; item 6 has not been started.
   `fix__flaky-promoted` covers the attempt dimension by seeding attempt 3 with
   two prior flaky verdicts.
 
-  Baseline: Claude Haiku 4.5, **8/9**, $1.51. The first run found two *fixture*
-  defects rather than model ones — identical base/head trees (fixed with
-  `repos-head/<id>/`) and two expectations that contradicted the shipped rubrics
-  — which is the tiers earning their keep before they ever graded a model.
+  Baseline: Claude Haiku 4.5, **9/9**, ~$1.6. Everything the runs turned up was
+  a defect in something other than the model: two *fixture* defects (identical
+  base/head trees, fixed with `repos-head/<id>/`; and two expectations that
+  contradicted the shipped rubrics) and one **prompt** defect.
 
-  The one standing failure is worth carrying forward: on the express 4 → 5 case
-  the agent behaves safely every time (FUNCTIONAL, `requires-human`, no
-  auto-merge) but intermittently records `impact=none` on a *major*, reasoning
-  that the tier is only assigned on the TRIVIAL path. That reading is one the
-  prompt's STEP 2a wording permits, and an `impact=none` on a major erases the
-  audit record the impact label is supposed to be. Tightening
-  `prompts/dependabot-pr-merge.md` is a follow-up with evidence behind it now.
-  It is also the case for grading markers rather than mutations: `behavioral`
-  passed on every run.
+  The prompt defect is the tier's first real catch. On the express 4 → 5 case
+  the agent behaved safely every time (FUNCTIONAL, `requires-human`, no
+  auto-merge) but intermittently recorded `impact=none` on a *major*, reasoning
+  that the tier is only assigned on the TRIVIAL path — a reading three places in
+  `prompts/dependabot-pr-merge.md` permitted, and one that erases the audit
+  record the impact label exists to be. All three now state that the tier
+  belongs to the BUMP, not to the verdict; the wording is pinned by
+  `tests/workflows/dependabot-pr-merge.test.ts`, and `--runs 3` on that case
+  went 3/3 against 1 of 3 observed before.
+
+  Note what did NOT catch it: `behavioral` passed on every run, before and
+  after. Grading the marker rather than the mutations is what made the missing
+  record visible.
 
 §6.5 items 1–4 are done, including the repo-config clamp check: a fixture
 `.lastlight/lastlight.yml` that tries to loosen `fix.maxAttempts`,

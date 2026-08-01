@@ -45,24 +45,25 @@ file list and the patch, so the two cannot disagree.
 
 ## Baseline, and the finding it produced
 
-Claude Haiku 4.5, three cases, ~$0.15: `low` and `medium` pass; `high` is
-**unstable across runs**. Twice it recorded `impact=none` on the express 4 → 5
-major, reasoning in its own words that "impact tier is only for major bumps that
-reach TRIVIAL classification".
+Claude Haiku 4.5, three cases, ~$0.15. All three pass — but the `high` case only
+after the finding it produced was fixed.
 
-The behaviour was safe every time — verdict `FUNCTIONAL`, `requires-human`
-applied, auto-merge never enabled. What was wrong was the **record**: the merge
-prompt states that `impact` is the STEP 2a tier for a major and `none` only for
-a non-major, and the impact label is described there as "the record" of why a
-major was or was not landed. An `impact=none` on a major erases that.
+Twice it recorded `impact=none` on the express 4 → 5 major, reasoning in its own
+words that "impact tier is only for major bumps that reach TRIVIAL
+classification". The behaviour was safe every time — verdict `FUNCTIONAL`,
+`requires-human` applied, auto-merge never enabled. What was wrong was the
+**record**: the impact label is what STEP 2b calls the durable answer to why a
+major did or did not land, and `none` on a major erases it.
 
-Two things follow, and the case is deliberately left failing to hold both open:
+That turned out to be a **prompt** defect, not a model one. Three places could
+be read as making the tier a property of the verdict rather than of the bump —
+STEP 2's TRIVIAL test ("STEP 2a puts its impact at or below the ceiling", which
+reads as if 2a exists to serve that test), STEP 2a's own framing, and the marker
+spec. All three now say otherwise, and
+`tests/workflows/dependabot-pr-merge.test.ts` pins the wording. Re-run with
+`--runs 3` (worst-case verdict): **3/3**, against 1 of 3 observed before.
 
-1. It is arguably a **prompt** defect, not only a model one — STEP 2a is reached
-   on the TRIVIAL path, so "the tier is only assigned there" is a reading the
-   text permits. Tightening that wording is a change to `dependabot-pr-merge.md`
-   worth making on its own evidence, which is what this case now provides.
-2. It shows why the tier grades the marker and not just the GitHub mutations:
-   `behavioral` passes on all three runs. An eval that watched only what the
-   agent *did* would have called this green and never seen the audit trail go
-   missing.
+Worth keeping in view: `behavioral` passed on every one of those runs, before
+and after. An eval that watched only what the agent *did* would have called this
+green throughout and never seen the audit trail go missing. That is the case for
+grading the marker.

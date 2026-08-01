@@ -107,6 +107,22 @@ describe("dependabot-pr-merge — major-bump impact (#252)", () => {
     expect(prompt).not.toMatch(/Only if `mergeable_state` is `clean`/);
   });
 
+  it("says the tier belongs to the BUMP, not to the verdict", () => {
+    // The eval's `depmerge__high-framework-major` case caught the reading this
+    // closes: an agent that classified a major FUNCTIONAL emitted
+    // `impact=none`, reasoning that the tier is only assigned on the path to
+    // TRIVIAL. Its behaviour was safe — no auto-merge, `requires-human`
+    // applied — but the impact label is what STEP 2b calls the record of why a
+    // major did or did not land, and `none` on a major erases it. Three places
+    // in the prompt could be read that way; all three now say otherwise.
+    expect(prompt).toContain("Every major gets a tier, whatever the verdict");
+    expect(prompt).toContain("`none` on a major is always wrong");
+    // STEP 2's TRIVIAL test must read as CONSULTING 2a, not as gating it.
+    expect(prompt).toContain("STEP 2a runs for every major regardless");
+    // …and the marker spec, which is where the value is actually written.
+    expect(prompt).toMatch(/`none` \*\*only\*\* for a\s*\n?non-major/);
+  });
+
   it("extends the marker with the impact tier, keeping the ASSESSMENT_COMPLETE prefix", () => {
     // `requires_marker` matches the literal prefix, so appending a field is
     // backward-compatible with the postcondition contract above.
