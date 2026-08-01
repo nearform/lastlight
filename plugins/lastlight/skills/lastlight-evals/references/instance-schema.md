@@ -60,12 +60,44 @@ Datasets are discovered from (overlay > user > built-in): `<overlay>/evals/datas
     "issue_closed": false,
     "comment_matches": "(?i)thanks",
     "pr_opened": { "base": "main", "head_is_branch": true, "title_matches": "(?i)fix" },
+    "pr_merged": false,                    // dependency-merge: merged outright?
+    "auto_merge_enabled": true,            // …or the CI-gated route (a different decision)
     "review_submitted": {}                 // pr-review: proxy check that a review was posted
+  },
+
+  // ── PR-scoped workflows (fix / dependency-merge) ──
+  "pr_state": {                            // the snapshot a dispatch would have resolved
+    "head_sha": "a41f0c8",
+    "checks_state": "failing",             // passing | failing | pending | none
+    "settled_check_count": 1,
+    "base_checks_state": "passing",        // the fact that separates "this PR broke it"
+    "attempt": 3,                          // drives "{{attempt}} of {{maxAttempts}}"
+    "flaky_deferrals": 2,                  // 2 ⇒ {{flakyPromoted}} is true
+    "prior_attempts": ["DIAGNOSIS_COMPLETE: … class=flaky …"],
+    "notes": [{ "kind": "ruled-out", "text": "not the lockfile" }],
+    "ci_jobs": [                            // feeds BOTH {{ciSection}} and the Actions tools
+      { "name": "CI / test", "log_excerpt": "…", "failing_step": "npm test" }
+    ],
+    "fix": { "maxAttempts": 2 },            // overrides on the policy blocks; rest = shipped defaults
+    "dependencies": { "autoMergeMaxImpact": "low" }
+  },
+  "expect_markers": {                      // the marker line the run signed off with
+    "diagnosis_class": "reproducible",     // or diagnosis_class_any_of: [...]
+    "fix_outcome": "pushed", "fix_gate": "green",
+    "assessment_impact": "high", "assessment_action_any_of": ["comment"]
   }
 }
 ```
 
 Every `expect_github` field is optional — only the present ones are checked.
+
+**`pr_state` is not optional in practice for a PR-scoped workflow.** In production
+those workflows are *dispatched*, and everything their prompts reason with —
+`{{ciSection}}`, `{{attempt}}`, `{{mayMerge}}`, `{{priorNotes}}` — is
+`renderContext`'s projection of that snapshot. The harness hands your seed to
+core's own projection; a case without one runs the workflow with every `{{#if}}`
+guard on the empty branch, which is not a smaller version of production but a
+different one.
 
 ## Add a triage case
 
@@ -114,6 +146,21 @@ Don't hand-build these — use `lastlight-evals add-case --pr <url> --review` (s
 `review_gold` from the PR's human review for you to curate. Or bulk-import the
 Martian Code Review Bench with `npx tsx scripts/import-martian.ts`.
 
+## Add a fix / dependency-merge case
+
+Give the case a `pr` seed, a `pr_state` block and an `expect_markers` verdict. For a
+`fix` case that also needs a checkout, `repos/<id>/` is the tree at the **base**
+commit and `repos-head/<id>/` is the PR's own commit applied on the branch — both
+are needed, or base and head are identical and a diagnosing agent correctly
+answers that `main` is broken too, turning every red-dependency case into
+`upstream-broken`.
+
+Calibrate the expectation against the **shipped skill**, not intuition:
+`skills/fixing/SKILL.md` defines the five diagnosis classes (a network blip is
+`flaky`, not `infra-dependent`), and `skills/dependency-impact/SKILL.md` gives
+`low` to any dev-only dependency. When a case and the skill disagree, the skill
+wins — otherwise the eval measures the fixture author.
+
 ## Add a custom tier
 
 Create `datasets/<tier-name>/` with `tier.json` (`name`, `defaultWorkflow`,
@@ -125,6 +172,11 @@ and `tests/<id>/`. Discovery auto-finds it — no code change. Run it with
 
 - **Behavioral:** did the workflow take the expected GitHub actions
   (`expect_github`)?
+- **Markers (fix / dependency-merge):** did the run sign off with the verdict the
+  case expects (`expect_markers`)? For those tiers this is the primary signal —
+  a diagnosis that reaches the wrong class misroutes the whole retry loop while
+  touching no GitHub state, so behavioral grading alone would score it green.
+  Parsed with core's own marker parsers, so a bare mention of a tag never counts.
 - **Triage:** did the decision match `triage_gold`?
 - **Review (pr-review):** an LLM judge matches the posted review's findings against
   `review_gold` → **precision / recall / F-beta** (β via `EVAL_F_BETA` or

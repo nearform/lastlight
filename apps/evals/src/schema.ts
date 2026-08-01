@@ -1,3 +1,5 @@
+import type { PrStateSeed } from "./pr-context.js";
+
 /**
  * Eval data model — SWE-bench-compatible.
  *
@@ -62,6 +64,14 @@ export interface PullSeed {
   head_commit: string;
   state?: "open" | "closed";
   user?: string;
+  /**
+   * The PR's changed files. For a tier with a seeded workspace these are
+   * computed from the checkout (`prFilesFromGit`); for a tier without one — the
+   * dependency-merge tier, which never checks anything out — this is how a case
+   * states the diff, and it feeds BOTH `GET /pulls/:n/files` and the patch
+   * `github_get_pull_request_diff` returns.
+   */
+  files?: PullFile[];
   /** Prior PR discussion the skill reads (advance, don't restart). */
   reviews?: ReviewSeed[];
   review_comments?: ReviewCommentSeed[];
@@ -116,6 +126,11 @@ export interface ExpectGithub {
     /** PR title must match this (case-insensitive) regex. */
     title_matches?: string;
   };
+  /** The PR must (or must not) have been merged outright. */
+  pr_merged?: boolean;
+  /** Auto-merge must (or must not) have been enabled — the CI-gated route the
+   * merge workflow prefers, and a different decision from merging now. */
+  auto_merge_enabled?: boolean;
   /** A formal PR review must have been submitted (pr-review tier). A cheap
    * deterministic proxy alongside the LLM-judge precision/recall grade. */
   review_submitted?: {
@@ -181,6 +196,43 @@ export interface SweBenchInstance {
   /** For pr-review: the human-verified gold set the posted review is scored
    * against (LLM judge → precision/recall/F-beta). */
   review_gold?: GoldComment[];
+  /**
+   * The `PrState` snapshot a dispatch would have resolved for this case
+   * (issues #251, #252). Present ⇒ the harness projects it through core's own
+   * `renderContext` into the run context, exactly as `dispatchWorkflow` does —
+   * which is where the fix and merge prompts get `{{ciSection}}`,
+   * `{{attempt}}`, `{{mayMerge}}`, `{{priorNotes}}` and the rest.
+   *
+   * Required in practice for the fix and merge tiers: without it those
+   * workflows run with every `{{#if}}` guard on the empty branch, which is not
+   * a smaller version of production but a different one. See `./pr-context.ts`.
+   */
+  pr_state?: PrStateSeed;
+  /**
+   * Assertions on the MARKER LINES the run's phases emitted — the only durable
+   * statement a fix or merge run makes about what it concluded. Graded with
+   * core's own parsers, so a bare mention of a tag never counts (see
+   * `gradeMarkers`).
+   */
+  expect_markers?: ExpectMarkers;
+}
+
+/** Assertions on the marker lines a run emitted. Every field optional. */
+export interface ExpectMarkers {
+  /** `DIAGNOSIS_COMPLETE: … class=<x>` — one of the five diagnosis classes. */
+  diagnosis_class?: string;
+  /** Accept any of these classes (a case where two verdicts are both defensible). */
+  diagnosis_class_any_of?: string[];
+  /** `CI_FIX_COMPLETE: … outcome=<x>` — pushed | no-change | gave-up | …. */
+  fix_outcome?: string;
+  /** `CI_FIX_COMPLETE: … gate=<x>` — green | red | skipped. */
+  fix_gate?: string;
+  /** `ASSESSMENT_COMPLETE: … impact=<x>` — none | low | medium | high. */
+  assessment_impact?: string;
+  /** `ASSESSMENT_COMPLETE: … action=<x>` — automerge | merge | rebase | comment | …. */
+  assessment_action?: string;
+  /** Accept any of these actions. */
+  assessment_action_any_of?: string[];
 }
 
 // ── Results ───────────────────────────────────────────────────────────────
@@ -234,6 +286,13 @@ export interface InstanceResult {
   passToPass?: { id: string; pass: boolean }[];
   /** Behavioral grade: did the workflow take the expected GitHub actions? */
   behavioral?: { ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] };
+  /**
+   * Marker grade (fix / dependency-merge tiers): did the run sign off with the
+   * verdict the case expects? For those tiers this is the primary signal — a
+   * diagnosis that reaches the wrong class misroutes the whole retry loop while
+   * touching no GitHub state, so `behavioral` alone would score it green.
+   */
+  markers?: { ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] };
   /** PR-review grade (pr-review tier): the posted review scored against the gold
    * set via LLM judge. `posted` = distinct findings the agent raised, `gold` =
    * golden comments, `matched` = findings that matched a gold comment. `fbeta` is

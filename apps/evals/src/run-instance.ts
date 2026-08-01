@@ -39,7 +39,8 @@ import { appliedRepoConfigKeys, loadRepoConfigFixture, resolveEvalRepoConfig, ty
 import { seedWorkspace, seedWorkspaceFromGit, seedWorkspacePrReview, prFilesFromGit, isRealSha, injectRepoContext, type SeedResult } from "./seed.js";
 import { collectMetrics, drainSessions, readSessionLog, listSessionFiles, concatJsonl } from "./metrics.js";
 import { modelCost } from "./env.js";
-import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview } from "./grade.js";
+import { gradeBehavioral, gradeExecution, gradeTriage, gradeReview, gradeMarkers } from "./grade.js";
+import { prContextPatch } from "./pr-context.js";
 
 export interface RunInstanceOptions {
   /**
@@ -141,7 +142,11 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
   // grade). Keeping these explicit avoids the old `!== "issue-triage"` binary
   // misclassifying pr-review as code-fix.
   const isPrReview = workflowName === "pr-review";
-  const isCodeFix = !isPrReview && workflowName !== "issue-triage";
+  // `dependabot-pr-merge` decides a merge through the GitHub tools and never
+  // touches a checkout — production gives it no pre-clone either. Seeding it a
+  // workspace would be inventing a code path it does not have.
+  const NO_WORKSPACE = new Set(["issue-triage", "dependabot-pr-merge"]);
+  const isCodeFix = !isPrReview && !NO_WORKSPACE.has(workflowName);
 
   const stateDir = opts.stateDir ?? mkdtempSync(join(tmpdir(), "ll-eval-"));
   const sessionsDir = join(stateDir, "agent-sessions");
@@ -168,6 +173,26 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     repo: name,
     issues: inst.issue ? [inst.issue] : [],
     pulls: inst.pr ? [inst.pr] : [],
+    // The CI-read tools (`github_list_workflow_runs` / `..._run_jobs` /
+    // `github_get_job_logs`) served from the SAME seed that produces the
+    // prompt's `{{ciSection}}`, so digging into the logs corroborates what the
+    // agent was told rather than contradicting it. Absent seed ⇒ the routes stay
+    // 404, which is this file's loud default.
+    ...(inst.pr_state?.ci_jobs?.length
+      ? {
+          actions: {
+            headSha: inst.pr_state.head_sha ?? "e7a1d09",
+            headBranch: inst.pr_state.head_ref,
+            jobs: inst.pr_state.ci_jobs.map((j) => ({
+              name: j.name,
+              conclusion: j.conclusion,
+              log: j.log_excerpt,
+              workflowPath: j.workflow_path,
+              failingStep: j.failing_step,
+            })),
+          },
+        }
+      : {}),
     existingLabels: inst.issue?.labels ?? [],
     repoConfig: loadRepoConfigFixture(opts.datasetDir, inst.instance_id),
   });
@@ -207,7 +232,23 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     if (isCodeFix) {
       const fixtureDir = opts.datasetDir ? join(opts.datasetDir, "repos", inst.instance_id) : undefined;
       if (fixtureDir && existsSync(fixtureDir)) {
-        seed = seedWorkspace({ stateDir, taskId, fixtureDir, branch, repoSubdir });
+        // `repos-head/<id>/` — the PR's own commit, applied on the branch over
+        // the base tree. Presence IS the declaration, like every other
+        // per-instance dir here. Without it base and head are identical, and a
+        // diagnosing agent that asks "is main broken too?" correctly answers
+        // yes — turning every red-dependency case into `upstream-broken`.
+        const headDir = opts.datasetDir
+          ? join(opts.datasetDir, "repos-head", inst.instance_id)
+          : undefined;
+        seed = seedWorkspace({
+          stateDir,
+          taskId,
+          fixtureDir,
+          branch,
+          repoSubdir,
+          headDir,
+          headMessage: inst.pr?.title,
+        });
       } else if (isRealSha(inst.base_commit) && /^[^/]+\/[^/]+$/.test(inst.repo)) {
         seed = seedWorkspaceFromGit({ stateDir, taskId, repo: inst.repo, baseCommit: inst.base_commit, branch, repoSubdir });
       }
@@ -235,6 +276,11 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
     // files via the API gets the real changed set instead of a 404.
     if (isPrReview && inst.pr && seed) {
       fake.setPullFiles(inst.pr.number, prFilesFromGit(repoDir, inst.pr.base_commit, inst.pr.head_commit));
+    } else if (inst.pr?.files?.length) {
+      // A tier with no checkout (dependency-merge) states its diff in the case
+      // instead. Same registration, so `GET /pulls/:n/files` and the patch
+      // `github_get_pull_request_diff` returns come from one source.
+      fake.setPullFiles(inst.pr.number, inst.pr.files);
     }
 
     // 2b. Inject synthetic repo-context into the pr-review checkout so the
@@ -291,6 +337,41 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       // No prePopulateBranch → the runner never clones from GitHub; the agent
       // works in the dir we seeded above (or an empty dir for triage).
     };
+
+    // 3a. The PR state machine's projection (issues #251, #252).
+    //
+    // A PR-scoped workflow is dispatched in production, never called: the
+    // dispatcher resolves one `PrState` snapshot and `renderContext` projects it
+    // into the context. That projection IS what the fix and merge prompts reason
+    // with — `{{ciSection}}`, `{{attempt}}`, `{{mayMerge}}`, `{{priorNotes}}`,
+    // `{{verifyScript}}` — so running them off a hand-built context measures a
+    // workflow production does not have. `./pr-context.ts` builds the snapshot a
+    // case seeds and hands it to CORE's projection, unmodified.
+    //
+    // Gated on the workflow's own `pr_scoped: true` metadata rather than a name
+    // list here — the same fact core derives `prScopedWorkflows()` from, so an
+    // overlay's forked fix workflow is covered without a change to this file.
+    //
+    // `pr-review` is deliberately EXCLUDED. It is a shipped, judge-scored tier
+    // whose numbers are compared across runs and against Martian's leaderboard;
+    // enriching its context is a real improvement to make, but making it as a
+    // side effect here would silently move every historical score. Tracked as a
+    // follow-up, not smuggled in.
+    const wantsPrContext =
+      !isPrReview && ((def as { pr_scoped?: boolean }).pr_scoped === true || !!inst.pr_state);
+    if (wantsPrContext) {
+      Object.assign(
+        ctx,
+        prContextPatch({
+          repo: `${owner}/${name}`,
+          prNumber: inst.pr?.number ?? issueNumber,
+          title: inst.pr?.title ?? inst.issue?.title ?? inst.instance_id,
+          body: inst.pr?.body ?? inst.issue?.body ?? inst.problem_statement,
+          branch,
+          seed: inst.pr_state,
+        }),
+      );
+    }
 
     // The arm supplies model selection in one shot: it patches `ctx.models`/
     // `ctx.variants` (config arms — EXACTLY as production's `simple.js`, so phase
@@ -472,6 +553,12 @@ export async function runInstance(inst: SweBenchInstance, opts: RunInstanceOptio
       ok: behavioralExpect.ok && triage.ok,
       checks: [...behavioralExpect.checks, ...triage.checks],
     };
+
+    // 5a'. Marker grade (fix / dependency-merge). The verdict a run signs off
+    // with is the deliverable for those tiers, and it touches no GitHub state —
+    // so without this a diagnosis that reached the wrong class scores green.
+    const markers = gradeMarkers(inst.expect_markers, wf.phases);
+    if (inst.expect_markers) result.markers = markers;
 
     // 5b-pr. PR-review grade (pr-review only): the submitted review scored
     // against the gold set by an LLM judge → precision / recall / F-beta. A judge

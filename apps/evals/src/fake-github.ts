@@ -22,7 +22,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { type AddressInfo } from "node:net";
 
 import type { IssueSeed, PullSeed, PullFile } from "./schema.js";
@@ -146,6 +146,10 @@ interface PullRequest {
   reviewComments: InlineComment[];
   /** Reviews the workflow SUBMITTED during the run (for pr-review grading). */
   submitted: Review[];
+  /** Set by `PUT /pulls/:n/merge` — the merge the run actually performed. */
+  mergedBy?: { method: string };
+  /** Set by the `enablePullRequestAutoMerge` GraphQL mutation. */
+  autoMerge?: { method: string; enabledAt: string };
 }
 
 /** How the create-review `event` maps to a review `state`. */
@@ -160,6 +164,24 @@ function eventToState(event: string | undefined): Review["state"] {
     default:
       return "PENDING";
   }
+}
+
+/** One failing job as the Actions endpoints should report it. */
+export interface ActionsJobSeed {
+  name: string;
+  conclusion?: string;
+  /** Full log text served by `GET /actions/jobs/:id/logs`. */
+  log: string;
+  workflowPath?: string;
+  failingStep?: string;
+}
+
+/** The Actions fixture: one workflow run over the head SHA, with its jobs. */
+export interface ActionsSeed {
+  headSha: string;
+  headBranch?: string;
+  workflowName?: string;
+  jobs: ActionsJobSeed[];
 }
 
 export interface FakeGitHub {
@@ -203,6 +225,10 @@ export interface FakeGitHub {
   /** How many times {@link FakeGitHub.fetchRepoConfigTree} was called — a
    * mechanism signal (>0 proves the harness actually consulted the seam). */
   repoConfigFetches: () => number;
+  /** The merge a run performed on a PR, if it merged one outright. */
+  mergeOf: (prNumber: number) => { method: string } | undefined;
+  /** The auto-merge a run enabled on a PR, if it took the gated route. */
+  autoMergeOf: (prNumber: number) => { method: string; enabledAt: string } | undefined;
 }
 
 export interface FakeGitHubOptions {
@@ -210,6 +236,17 @@ export interface FakeGitHubOptions {
   repo: string;
   defaultBranch?: string;
   issues?: IssueSeed[];
+  /**
+   * GitHub Actions fixtures for the CI-read tools (`github_list_workflow_runs`
+   * / `github_list_workflow_run_jobs` / `github_get_job_logs`).
+   *
+   * The fix workflows hand the agent a CI summary in the prompt and then invite
+   * it to dig further with those tools — so a fix case whose tools 404 measures
+   * an agent working around the harness. Built from the SAME `pr_state.ci_jobs`
+   * seed that produced the prompt's `{{ciSection}}` (see `run-instance.ts`), so
+   * what the agent reads and what it was told cannot disagree.
+   */
+  actions?: ActionsSeed;
   /** PRs served by the fake (pr-review tier). Each also gets a shadow issue so
    * the issue-comment / labels endpoints work on the PR number. */
   pulls?: PullSeed[];
@@ -381,6 +418,66 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
     return { status: "ok", defaultBranch, treeSha: repoConfigTreeSha, etag: repoConfigEtag, files, truncated };
   }
 
+  // ── Actions fixture ───────────────────────────────────────────────────
+  // Ids are synthetic but stable within a run, which is all the tools need:
+  // `github_list_workflow_runs` hands the agent a run id and it asks for that
+  // run's jobs, then that job's logs.
+  const ACTIONS_RUN_ID = 900001;
+  const actionsJobs = (opts.actions?.jobs ?? []).map((j, i) => ({
+    id: 800001 + i,
+    name: j.name,
+    conclusion: j.conclusion ?? "failure",
+    log: j.log,
+    workflowPath: j.workflowPath,
+    failingStep: j.failingStep,
+  }));
+
+  function serializeRun() {
+    const a = opts.actions!;
+    return {
+      id: ACTIONS_RUN_ID,
+      name: a.workflowName ?? "CI",
+      head_sha: a.headSha,
+      head_branch: a.headBranch ?? defaultBranch,
+      path: a.jobs[0]?.workflowPath ?? ".github/workflows/ci.yml",
+      event: "pull_request",
+      status: "completed",
+      conclusion: "failure",
+      created_at: NOW,
+      updated_at: NOW,
+      html_url: `https://github.com/${owner}/${repo}/actions/runs/${ACTIONS_RUN_ID}`,
+    };
+  }
+
+  function serializeJob(j: (typeof actionsJobs)[number]) {
+    return {
+      id: j.id,
+      run_id: ACTIONS_RUN_ID,
+      name: j.name,
+      status: "completed",
+      conclusion: j.conclusion,
+      started_at: NOW,
+      completed_at: NOW,
+      html_url: `https://github.com/${owner}/${repo}/actions/runs/${ACTIONS_RUN_ID}/job/${j.id}`,
+      steps: j.failingStep
+        ? [{ name: j.failingStep, status: "completed", conclusion: "failure", number: 1 }]
+        : [],
+    };
+  }
+
+  /**
+   * The PR's patch, assembled from the per-file `patch` hunks already seeded
+   * for `GET /pulls/:n/files`. One fixture, two representations — a case that
+   * declares its changed files gets both the file list and the diff, and they
+   * cannot disagree.
+   */
+  function diffOf(prNumber: number): string {
+    const files = pullFiles.get(prNumber) ?? [];
+    return files
+      .map((f) => `diff --git a/${f.filename} b/${f.filename}\n${f.patch ?? ""}`)
+      .join("\n");
+  }
+
   const repoBase = `/repos/${owner}/${repo}`;
 
   const server = createServer((req, res) => {
@@ -408,7 +505,8 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
       };
 
       try {
-        const handled = route(method, path, body, json);
+        const accept = String(req.headers.accept ?? "");
+        const handled = route(method, path, body, json, accept, res);
         if (!handled) json(404, { message: `fake-github: no route for ${method} ${path}` });
       } catch (err) {
         json(500, { message: `fake-github error: ${(err as Error).message}` });
@@ -421,7 +519,75 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
     path: string,
     body: unknown,
     json: (status: number, payload: unknown) => void,
+    /** Request `Accept` — the diff media type is how `pulls.get` asks for a patch. */
+    accept: string,
+    res: ServerResponse,
   ): boolean {
+    // ── GraphQL: the auto-merge mutation ────────────────────────────────
+    //
+    // `github_enable_auto_merge` has NO REST equivalent — GitHub exposes
+    // `enablePullRequestAutoMerge` only through GraphQL, so a REST-only fake
+    // 404s the one call the merge workflow's preferred path depends on, and the
+    // agent silently falls back to a direct merge. That would make every
+    // dependency-merge case measure the fallback.
+    if (method === "POST" && path === "/graphql") {
+      const q = String((body as { query?: string } | undefined)?.query ?? "");
+      const vars = ((body as { variables?: Record<string, unknown> } | undefined)?.variables ??
+        {}) as { id?: string; mergeMethod?: string };
+      if (q.includes("enablePullRequestAutoMerge")) {
+        // The node id the client resolved via REST is `PR_<number>` here (see
+        // `serializePull`), so the mutation can find the PR the same way.
+        const num = Number(String(vars.id ?? "").replace(/^PR_/, ""));
+        const pr = pulls.find((p) => p.number === num);
+        if (!pr) {
+          json(200, { data: null, errors: [{ message: `Could not resolve to a node: ${vars.id}` }] });
+          return true;
+        }
+        const method_ = String(vars.mergeMethod ?? "SQUASH").toLowerCase();
+        pr.autoMerge = { method: method_, enabledAt: NOW };
+        json(200, {
+          data: {
+            enablePullRequestAutoMerge: {
+              pullRequest: { number: pr.number, autoMergeRequest: { enabledAt: NOW } },
+            },
+          },
+        });
+        return true;
+      }
+      json(200, { data: null, errors: [{ message: `fake-github: unsupported GraphQL operation` }] });
+      return true;
+    }
+
+    // ── Actions (CI reads) ──────────────────────────────────────────────
+    //
+    // Served from the `actions` fixture, which is built from the same seed as
+    // the prompt's CI summary — so `github_get_job_logs` corroborates
+    // `{{ciSection}}` instead of contradicting it. With NO fixture these stay
+    // 404, which is the loud default the rest of this file keeps.
+    if (opts.actions && method === "GET" && path.startsWith(`${repoBase}/actions/`)) {
+      const rest = path.slice(`${repoBase}/actions/`.length);
+      if (rest === "runs" || /^workflows\/[^/]+\/runs$/.test(rest)) {
+        json(200, { total_count: 1, workflow_runs: [serializeRun()] });
+        return true;
+      }
+      const jobsOf = /^runs\/(\d+)\/jobs$/.exec(rest);
+      if (jobsOf) {
+        json(200, { total_count: actionsJobs.length, jobs: actionsJobs.map(serializeJob) });
+        return true;
+      }
+      const logsOf = /^jobs\/(\d+)\/logs$/.exec(rest);
+      if (logsOf) {
+        const job = actionsJobs.find((j) => j.id === Number(logsOf[1]));
+        if (!job) return false;
+        // Real GitHub 302s to a signed blob URL and octokit follows it; a direct
+        // 200 with the text is the same thing to the caller.
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+        res.end(job.log);
+        return true;
+      }
+      return false;
+    }
+
     // GET /repos/:owner/:repo
     if (method === "GET" && path === repoBase) {
       json(200, {
@@ -563,8 +729,8 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
       }
     }
 
-    // Per-PR routes: /repos/:owner/:repo/pulls/:n[/reviews|/comments|/files]
-    const pullMatch = path.match(new RegExp(`^${escapeRe(repoBase)}/pulls/(\\d+)(/reviews|/comments|/files)?$`));
+    // Per-PR routes: /repos/:owner/:repo/pulls/:n[/reviews|/comments|/files|/merge]
+    const pullMatch = path.match(new RegExp(`^${escapeRe(repoBase)}/pulls/(\\d+)(/reviews|/comments|/files|/merge)?$`));
     if (pullMatch) {
       const num = Number(pullMatch[1]);
       const sub = pullMatch[2];
@@ -574,9 +740,35 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
         return true;
       }
 
-      // /pulls/:n
+      // /pulls/:n — JSON, or the raw patch when the caller asked for the diff
+      // media type. `github_get_pull_request_diff` is `pulls.get` with
+      // `mediaType: { format: "diff" }`, so serving JSON to it would hand the
+      // agent an object where it expects a patch — the impact assessment then
+      // reasons about the wrong artifact entirely.
       if (!sub && method === "GET") {
+        if (/vnd\.github(\.[^+\s]*)?\.diff/.test(accept) || /vnd\.github\.v3\.diff/.test(accept)) {
+          // `charset=utf-8` is load-bearing: octokit decodes a response body as
+          // TEXT only for `application/json`, `text/*` or a `charset=utf-8`
+          // content-type, and hands anything else back as an ArrayBuffer.
+          res.writeHead(200, { "content-type": "application/vnd.github.v3.diff; charset=utf-8" });
+          res.end(diffOf(pr.number));
+          return true;
+        }
         json(200, serializePull(pr));
+        return true;
+      }
+
+      // /pulls/:n/merge — the direct merge (`github_merge_pull_request`).
+      if (sub === "/merge" && method === "PUT") {
+        const b = (body ?? {}) as { merge_method?: string };
+        if (pr.merged) {
+          json(405, { message: "Pull Request is not mergeable" });
+          return true;
+        }
+        pr.merged = true;
+        pr.state = "closed";
+        pr.mergedBy = { method: b.merge_method ?? "merge" };
+        json(200, { sha: pr.head.sha, merged: true, message: "Pull Request successfully merged" });
         return true;
       }
 
@@ -640,10 +832,15 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
   function serializePull(pr: PullRequest) {
     return {
       number: pr.number,
+      // The GraphQL node id `enablePullRequestAutoMerge` is given. The real one
+      // is opaque; the client only ever round-trips it from here to the
+      // mutation, so a derivable form keeps the fake stateless about it.
+      node_id: `PR_${pr.number}`,
       title: pr.title,
       body: pr.body,
       state: pr.state,
       merged: pr.merged,
+      auto_merge: pr.autoMerge ? { enabled_by: { login: "last-light[bot]" }, merge_method: pr.autoMerge.method } : null,
       head: pr.head,
       base: pr.base,
       user: pr.user,
@@ -699,6 +896,8 @@ export async function startFakeGitHub(opts: FakeGitHubOptions): Promise<FakeGitH
     setPullFiles: (n, files) => pullFiles.set(n, files),
     fetchRepoConfigTree,
     repoConfigFetches: () => repoConfigFetches,
+    mergeOf: (n) => pulls.find((p) => p.number === n)?.mergedBy,
+    autoMergeOf: (n) => pulls.find((p) => p.number === n)?.autoMerge,
   };
 }
 

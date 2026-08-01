@@ -1,5 +1,5 @@
 /**
- * Deterministic grading — two signals, no LLM judge.
+ * Deterministic grading — three signals, no LLM judge.
  *
  *  - Execution (code-fix): copy the held-out tests into the workspace the agent
  *    left behind, run them, and require every FAIL_TO_PASS test to pass and
@@ -8,6 +8,10 @@
  *  - Behavioral: compare the GitHub mutations the workflow performed (recorded
  *    by the fake GitHub) against the instance's expectations. For triage this
  *    is the primary signal (its output IS GitHub state).
+ *  - Markers (fix / dependency-merge): the marker LINES a run signed off with.
+ *    For those tiers the verdict is the deliverable — a diagnosis that reaches
+ *    the wrong class sends the whole retry loop the wrong way while touching
+ *    no GitHub state at all, so behavioral grading alone would score it green.
  */
 
 import { execFileSync } from "node:child_process";
@@ -15,7 +19,14 @@ import { cpSync, existsSync, writeFileSync } from "node:fs";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import type { ExpectGithub, GoldComment } from "./schema.js";
+import {
+  parseDiagnosisMarker,
+  parseFixOutcomeMarker,
+  type DiagnosisMarker,
+  type FixOutcomeMarker,
+} from "lastlight-core/evals";
+
+import type { ExpectGithub, ExpectMarkers, GoldComment } from "./schema.js";
 import type { FakeGitHub, SubmittedReview } from "./fake-github.js";
 import { judge, parseJudgeJson, defaultJudgeModel } from "./judge.js";
 
@@ -55,6 +66,22 @@ export function gradeBehavioral(
       detail: `${comments.length} comment(s)`,
     });
   }
+  if (expect.pr_merged !== undefined) {
+    const merged = fake.mergeOf(ctx.issueNumber);
+    checks.push({
+      name: expect.pr_merged ? "pr-merged" : "pr-not-merged",
+      ok: !!merged === expect.pr_merged,
+      detail: merged ? `merged via ${merged.method}` : "not merged",
+    });
+  }
+  if (expect.auto_merge_enabled !== undefined) {
+    const auto = fake.autoMergeOf(ctx.issueNumber);
+    checks.push({
+      name: expect.auto_merge_enabled ? "auto-merge-enabled" : "auto-merge-not-enabled",
+      ok: !!auto === expect.auto_merge_enabled,
+      detail: auto ? `auto-merge via ${auto.method}` : "auto-merge off",
+    });
+  }
   if (expect.pr_opened) {
     const prs = fake.pulls();
     const pr = prs[0];
@@ -81,6 +108,83 @@ export function gradeBehavioral(
     }
     checks.push({ name: "review-submitted", ok, detail });
   }
+
+  return { ok: checks.every((c) => c.ok), checks };
+}
+
+// ── Marker grade (fix / dependency-merge) ───────────────────────────────────
+
+/**
+ * The `ASSESSMENT_COMPLETE` marker the merge workflow signs off with.
+ *
+ * Parsed here rather than in core because core never reads it back: the merge
+ * run's postcondition only requires the tag to be PRESENT, and the impact tier
+ * it carries is a self-report the code deliberately does not enforce
+ * (`spec/02-configuration.md` → "Where `dependencies` is enforced"). That is
+ * exactly why it needs an eval — a self-report nothing checks is measurable
+ * only by measuring it.
+ */
+export function parseAssessmentMarker(
+  output: string,
+): { verdict?: string; impact?: string; action?: string } | null {
+  // Last marker wins, and the tag must carry its colon — a sentence that merely
+  // mentions `ASSESSMENT_COMPLETE` is not a verdict. Same rule as core's
+  // `lastMarkerLine`, which is why the two fix markers below go through core.
+  const lines = output.split(/\r?\n/).filter((l) => l.includes("ASSESSMENT_COMPLETE:"));
+  const line = lines.at(-1);
+  if (!line) return null;
+  const field = (k: string) => new RegExp(`\\b${k}=([^\\s]+)`).exec(line)?.[1];
+  return { verdict: field("verdict"), impact: field("impact"), action: field("action") };
+}
+
+/** Every phase's output, newest last — a loop's iterations included. */
+function allOutput(phases: { output?: string }[]): string {
+  return phases.map((p) => p.output ?? "").join("\n");
+}
+
+/**
+ * Grade the marker lines a run emitted.
+ *
+ * The parsers are CORE's (`parseDiagnosisMarker` / `parseFixOutcomeMarker`), so
+ * a bare tag with no colon scores as "no marker" here exactly as it does in the
+ * harvest that feeds the next attempt — the disagreement that let a silent
+ * no-op run pass as a diagnosis (issue #251).
+ */
+export function gradeMarkers(
+  expect: ExpectMarkers | undefined,
+  phases: { output?: string }[],
+): { ok: boolean; checks: Check[] } {
+  const checks: Check[] = [];
+  if (!expect) return { ok: true, checks };
+
+  const output = allOutput(phases);
+  const diagnosis: DiagnosisMarker | null = parseDiagnosisMarker(output);
+  const fix: FixOutcomeMarker | null = parseFixOutcomeMarker(output);
+  const assessment = parseAssessmentMarker(output);
+
+  const eq = (name: string, want: string | undefined, got: string | undefined) => {
+    if (want === undefined) return;
+    checks.push({ name: `${name}=${want}`, ok: got === want, detail: `got ${got ?? "(no marker)"}` });
+  };
+  const oneOf = (name: string, want: string[] | undefined, got: string | undefined) => {
+    if (!want || want.length === 0) return;
+    checks.push({
+      name: `${name}∈{${want.join("|")}}`,
+      ok: got !== undefined && want.includes(got),
+      detail: `got ${got ?? "(no marker)"}`,
+    });
+  };
+
+  // `?? undefined`: core's parsers return `null` for a field the marker line
+  // omitted, and a missing field must read as "(no marker)" rather than as the
+  // string "null".
+  eq("diagnosis.class", expect.diagnosis_class, diagnosis?.class ?? undefined);
+  oneOf("diagnosis.class", expect.diagnosis_class_any_of, diagnosis?.class ?? undefined);
+  eq("fix.outcome", expect.fix_outcome, fix?.outcome ?? undefined);
+  eq("fix.gate", expect.fix_gate, fix?.gate ?? undefined);
+  eq("assessment.impact", expect.assessment_impact, assessment?.impact);
+  eq("assessment.action", expect.assessment_action, assessment?.action);
+  oneOf("assessment.action", expect.assessment_action_any_of, assessment?.action);
 
   return { ok: checks.every((c) => c.ok), checks };
 }

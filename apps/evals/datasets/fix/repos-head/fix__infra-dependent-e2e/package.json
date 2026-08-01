@@ -1,0 +1,12 @@
+{
+  "name": "retryer",
+  "version": "3.2.1",
+  "type": "module",
+  "description": "Retry helper.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "tiny-backoff": "^4.0.0"
+  }
+}

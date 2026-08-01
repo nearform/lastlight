@@ -572,6 +572,13 @@ async function runEval(): Promise<number> {
     const seenPr = new Set<string>();
     const prToFetch = work.filter((w) => {
       if (!w.inst.pr || !/^[^/]+\/[^/]+$/.test(w.inst.repo)) return false;
+      // Only a case that will actually be CHECKED OUT from git needs its PR
+      // commits mirrored. A synthetic PR — the dependency-merge tier states its
+      // diff in the fixture and never clones anything — carries placeholder
+      // SHAs, and trying to fetch them aborts the whole run on a repo that does
+      // not exist. `isRealSha` rejects the all-zero placeholder, which is the
+      // same discriminator `run-instance.ts` seeds by.
+      if (!isRealSha(w.inst.pr.base_commit) || !isRealSha(w.inst.pr.head_commit)) return false;
       const k = `${w.inst.repo}#${w.inst.pr.number}`;
       if (seenPr.has(k)) return false;
       seenPr.add(k);

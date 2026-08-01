@@ -1,0 +1,229 @@
+[
+  {
+    "instance_id": "fix__reproducible-api-removal",
+    "repo": "acme/slugger",
+    "problem_statement": "CI is red on the tiny-case 2.4.0 \u2192 3.0.0 bump. The suite fails deterministically: `src/slug.js` imports `kebab`, which 3.0.0 renamed to `kebabCase`.",
+    "pr": {
+      "number": 412,
+      "title": "Bump tiny-case from 2.4.0 to 3.0.0",
+      "body": "Bumps the dependency to the version listed in the title.\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "lastlight/fix__reproducible-api-removal",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]"
+    },
+    "pr_state": {
+      "head_sha": "a41f0c8",
+      "head_ref": "lastlight/fix__reproducible-api-removal",
+      "checks_state": "failing",
+      "settled_check_count": 1,
+      "base_checks_state": "passing",
+      "ci_jobs": [
+        {
+          "name": "CI / test",
+          "log_excerpt": "> slugger@1.4.0 test\n> node --test\n\n\u2716 test/slug.test.js (31.402ms)\n  'test failed'\n\nSyntaxError: The requested module '#tiny-case' does not provide an export named 'kebab'\n    at ModuleJob._instantiate (node:internal/modules/esm/module_job:171:21)\n    at async ModuleJob.run (node:internal/modules/esm/module_job:431:5)\n\n\u2139 tests 1\n\u2139 pass 0\n\u2139 fail 1\n##[error]Process completed with exit code 1.\n",
+          "workflow_path": ".github/workflows/ci.yml",
+          "failing_step": "npm test"
+        }
+      ]
+    },
+    "expect_markers": {
+      "diagnosis_class": "reproducible",
+      "fix_gate": "green",
+      "fix_outcome": "pushed"
+    },
+    "expect_github": {
+      "labels_absent": [
+        "requires-human"
+      ]
+    }
+  },
+  {
+    "instance_id": "fix__flaky-timeout",
+    "repo": "acme/poller",
+    "problem_statement": "CI is red on the tap-reporter 4.2.0 \u2192 5.0.0 bump. One polling test timed out at 5000ms; the rest of the suite passed and the same commit passed on the previous run.",
+    "pr": {
+      "number": 418,
+      "title": "Bump tap-reporter from 4.2.0 to 5.0.0",
+      "body": "Bumps the dependency to the version listed in the title.\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "lastlight/fix__flaky-timeout",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]"
+    },
+    "pr_state": {
+      "head_sha": "b7d2e10",
+      "head_ref": "lastlight/fix__flaky-timeout",
+      "checks_state": "failing",
+      "settled_check_count": 1,
+      "base_checks_state": "passing",
+      "ci_jobs": [
+        {
+          "name": "CI / test",
+          "log_excerpt": "> poller@2.1.0 test\n> node --test\n\n\u2714 test/format.test.js (12.004ms)\n\u2716 test/poll.test.js (5001.882ms)\n  'test timed out after 5000ms'\n\n  Error [ERR_TEST_FAILURE]: test timed out after 5000ms\n      at Test.postRun (node:internal/test_runner/test:1024:19)\n\n\u2139 tests 2\n\u2139 pass 1\n\u2139 fail 1\n##[error]Process completed with exit code 1.\n",
+          "workflow_path": ".github/workflows/ci.yml",
+          "failing_step": "npm test"
+        }
+      ]
+    },
+    "expect_markers": {
+      "diagnosis_class": "flaky"
+    }
+  },
+  {
+    "instance_id": "fix__flaky-promoted",
+    "repo": "acme/poller",
+    "problem_statement": "CI is red on the tap-reporter 4.2.0 \u2192 5.0.0 bump, for the third consecutive attempt. The two previous attempts both diagnosed `flaky` and changed nothing.",
+    "pr": {
+      "number": 419,
+      "title": "Bump tap-reporter from 4.2.0 to 5.0.0",
+      "body": "Bumps the dependency to the version listed in the title.\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "lastlight/fix__flaky-promoted",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]"
+    },
+    "pr_state": {
+      "head_sha": "b7d2e10",
+      "head_ref": "lastlight/fix__flaky-promoted",
+      "checks_state": "failing",
+      "settled_check_count": 1,
+      "base_checks_state": "passing",
+      "attempt": 3,
+      "flaky_deferrals": 2,
+      "prior_attempts": [
+        "DIAGNOSIS_COMPLETE: pr=419 attempt=1 class=flaky cause=poll test timed out at 5000ms ci_vs_local=passes-locally",
+        "DIAGNOSIS_COMPLETE: pr=419 attempt=2 class=flaky cause=poll test timed out again, unrelated to the bump ci_vs_local=passes-locally"
+      ],
+      "notes": [
+        {
+          "kind": "ruled-out",
+          "text": "the bump itself: tap-reporter is dev-only and the failing test does not import it"
+        }
+      ],
+      "ci_jobs": [
+        {
+          "name": "CI / test",
+          "log_excerpt": "> poller@2.1.0 test\n> node --test\n\n\u2714 test/format.test.js (12.004ms)\n\u2716 test/poll.test.js (5001.882ms)\n  'test timed out after 5000ms'\n\n  Error [ERR_TEST_FAILURE]: test timed out after 5000ms\n      at Test.postRun (node:internal/test_runner/test:1024:19)\n\n\u2139 tests 2\n\u2139 pass 1\n\u2139 fail 1\n##[error]Process completed with exit code 1.\n",
+          "workflow_path": ".github/workflows/ci.yml",
+          "failing_step": "npm test"
+        }
+      ]
+    },
+    "expect_markers": {
+      "diagnosis_class_any_of": [
+        "reproducible",
+        "env-mismatch",
+        "infra-dependent"
+      ]
+    }
+  },
+  {
+    "instance_id": "fix__env-mismatch-node-version",
+    "repo": "acme/grouper",
+    "problem_statement": "CI is red on the tiny-group 1.9.0 \u2192 2.0.0 bump. The suite passes locally on Node 22 and fails in CI, which runs Node 18; the package declares `engines.node: >=22`.",
+    "pr": {
+      "number": 77,
+      "title": "Bump tiny-group from 1.9.0 to 2.0.0",
+      "body": "Bumps the dependency to the version listed in the title.\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "lastlight/fix__env-mismatch-node-version",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]"
+    },
+    "pr_state": {
+      "head_sha": "c0091ab",
+      "head_ref": "lastlight/fix__env-mismatch-node-version",
+      "checks_state": "failing",
+      "settled_check_count": 1,
+      "base_checks_state": "passing",
+      "ci_jobs": [
+        {
+          "name": "CI / test",
+          "log_excerpt": "Run actions/setup-node@v4\n  node-version: 18\nNow using node v18.20.4 (npm v10.7.0)\n\nnpm warn EBADENGINE Unsupported engine {\nnpm warn EBADENGINE   package: 'grouper@1.0.0',\nnpm warn EBADENGINE   required: { node: '>=22' },\nnpm warn EBADENGINE   current: { node: 'v18.20.4', npm: '10.7.0' }\nnpm warn EBADENGINE }\n\n> grouper@1.0.0 test\n> node --test\n\n\u2716 test/group.test.js (18.220ms)\n  TypeError: Object.groupBy is not a function\n      at groupBy (file:///home/runner/work/grouper/src/group.js:3:17)\n\n\u2139 pass 0\n\u2139 fail 1\n##[error]Process completed with exit code 1.\n",
+          "workflow_path": ".github/workflows/ci.yml",
+          "failing_step": "npm test"
+        }
+      ]
+    },
+    "expect_markers": {
+      "diagnosis_class": "env-mismatch"
+    }
+  },
+  {
+    "instance_id": "fix__infra-dependent-e2e",
+    "repo": "acme/retryer",
+    "problem_statement": "CI is red on the tiny-backoff 3.8.0 \u2192 4.0.0 bump. The unit job passed; the `e2e` job failed because it has no staging backend to talk to \u2014 `STAGING_BASE_URL` is unset for this run.",
+    "pr": {
+      "number": 133,
+      "title": "Bump tiny-backoff from 3.8.0 to 4.0.0",
+      "body": "Bumps the dependency to the version listed in the title.\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "lastlight/fix__infra-dependent-e2e",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]"
+    },
+    "pr_state": {
+      "head_sha": "d51ba7e",
+      "head_ref": "lastlight/fix__infra-dependent-e2e",
+      "checks_state": "failing",
+      "settled_check_count": 1,
+      "base_checks_state": "passing",
+      "ci_jobs": [
+        {
+          "name": "CI / e2e",
+          "log_excerpt": "> node --test e2e/\n\n\u2716 e2e/smoke.test.js (2.114ms)\n  'test failed'\n\n  AssertionError [ERR_ASSERTION]: STAGING_BASE_URL is not set\n\n      at TestContext.<anonymous> (file:///home/runner/work/retryer/e2e/smoke.test.js:7:10)\n\n\u2139 tests 1\n\u2139 pass 0\n\u2139 fail 1\n##[error]Process completed with exit code 1.\n",
+          "workflow_path": ".github/workflows/ci.yml",
+          "failing_step": "node --test e2e/"
+        }
+      ]
+    },
+    "expect_markers": {
+      "diagnosis_class": "infra-dependent"
+    }
+  },
+  {
+    "instance_id": "fix__upstream-broken-base-red",
+    "repo": "acme/money",
+    "problem_statement": "CI is red on the tiny-intl 6.4.0 \u2192 7.0.0 bump. The failing test also fails on `main`: a regression landed there in #874 and dropped the rounding in `convert()`.",
+    "pr": {
+      "number": 902,
+      "title": "Bump tiny-intl from 6.4.0 to 7.0.0",
+      "body": "Bumps the dependency to the version listed in the title.\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "lastlight/fix__upstream-broken-base-red",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]"
+    },
+    "pr_state": {
+      "head_sha": "e11c4d0",
+      "head_ref": "lastlight/fix__upstream-broken-base-red",
+      "checks_state": "failing",
+      "settled_check_count": 1,
+      "base_checks_state": "failing",
+      "ci_jobs": [
+        {
+          "name": "CI / test",
+          "log_excerpt": "> money@5.0.0 test\n> node --test\n\n\u2714 test/format.test.js (11.902ms)\n\u2716 test/rates.test.js (18.441ms)\n  'test failed'\n\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n  1234.5 !== 1235\n\n      at TestContext.<anonymous> (file:///home/runner/work/money/test/rates.test.js:6:10)\n\n\u2139 tests 2\n\u2139 pass 1\n\u2139 fail 1\n##[error]Process completed with exit code 1.\n",
+          "workflow_path": ".github/workflows/ci.yml",
+          "failing_step": "npm test"
+        }
+      ],
+      "notes": [
+        {
+          "kind": "constraint",
+          "text": "the rates rounding regression came from #874 on main, not from this bump"
+        }
+      ]
+    },
+    "expect_markers": {
+      "diagnosis_class": "upstream-broken"
+    }
+  }
+]

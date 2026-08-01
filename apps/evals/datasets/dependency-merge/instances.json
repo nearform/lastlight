@@ -1,0 +1,168 @@
+[
+  {
+    "instance_id": "depmerge__low-types-major",
+    "repo": "acme/app",
+    "problem_statement": "Green major bump of @types/node \u2014 a types-only devDependency with no runtime surface.",
+    "pr": {
+      "number": 501,
+      "title": "Bump @types/node from 22.10.2 to 26.1.1",
+      "body": "Bumps [types-node](https://github.com/example/types-node) from 22.10.2 to 26.1.1.\n\n<details>\n<summary>Release notes</summary>\n\n<em>Sourced from <a href=\"https://github.com/example/types-node/releases\">types-node's releases</a>.</em>\n\n## 26.0.0\n\n* Types now target Node 26's `lib.dom` split. No runtime code ships in this package.\n* **Breaking:** removed the deprecated `NodeJS.Dict` alias.\n\n</details>\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=types-node)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates)\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "dependabot/npm_and_yarn/pr-501",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]",
+      "files": [
+        {
+          "sha": "0000000000000000000000000000000000000000",
+          "filename": "package.json",
+          "status": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "changes": 2,
+          "patch": "@@ -12,7 +12,7 @@\n   },\n   \"devDependencies\": {\n-    \"@types/node\": \"^22.10.2\",\n+    \"@types/node\": \"^26.1.1\",\n     \"typescript\": \"^5.7.0\"\n   }\n"
+        },
+        {
+          "sha": "0000000000000000000000000000000000000000",
+          "filename": "package-lock.json",
+          "status": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "changes": 2,
+          "patch": "@@ -1,7 +1,7 @@\n {\n   \"name\": \"acme-app\",\n   \"lockfileVersion\": 3,\n-    \"@types/node\": \"22.10.2\",\n+    \"@types/node\": \"26.1.1\",\n   \"packages\": {}\n }\n"
+        }
+      ]
+    },
+    "pr_state": {
+      "head_sha": "f1a0b22",
+      "head_ref": "dependabot/npm_and_yarn/pr-501",
+      "checks_state": "passing",
+      "settled_check_count": 3,
+      "base_checks_state": "passing"
+    },
+    "expect_markers": {
+      "assessment_impact": "low",
+      "assessment_action": "automerge"
+    },
+    "expect_github": {
+      "auto_merge_enabled": true,
+      "labels_absent": [
+        "requires-human"
+      ]
+    }
+  },
+  {
+    "instance_id": "depmerge__medium-runtime-major",
+    "repo": "acme/app",
+    "problem_statement": "Green major bump of date-fns 3 \u2192 4, a runtime dependency. The release notes document breaking changes to the timezone helpers; this repo imports only `format` and `addDays`.",
+    "pr": {
+      "number": 502,
+      "title": "Bump date-fns from 3.6.0 to 4.1.0",
+      "body": "Bumps [date-fns](https://github.com/example/date-fns) from 3.6.0 to 4.1.0.\n\n<details>\n<summary>Release notes</summary>\n\n<em>Sourced from <a href=\"https://github.com/example/date-fns/releases\">date-fns's releases</a>.</em>\n\n## 4.0.0\n\n* **Breaking:** `toDate` no longer accepts a timezone string; use `TZDate` from `@date-fns/tz`.\n* **Breaking:** removed the deprecated `parseFromTimezone` helper.\n* `format` and `addDays` are unchanged.\n\n</details>\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=date-fns)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates)\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "dependabot/npm_and_yarn/pr-502",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]",
+      "files": [
+        {
+          "sha": "0000000000000000000000000000000000000000",
+          "filename": "package.json",
+          "status": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "changes": 2,
+          "patch": "@@ -5,7 +5,7 @@\n   \"dependencies\": {\n-    \"date-fns\": \"^3.6.0\",\n+    \"date-fns\": \"^4.1.0\",\n     \"express\": \"^4.21.2\"\n   },\n"
+        },
+        {
+          "sha": "0000000000000000000000000000000000000000",
+          "filename": "package-lock.json",
+          "status": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "changes": 2,
+          "patch": "@@ -1,7 +1,7 @@\n-    \"date-fns\": \"3.6.0\",\n+    \"date-fns\": \"4.1.0\",\n"
+        }
+      ]
+    },
+    "pr_state": {
+      "head_sha": "c33d017",
+      "head_ref": "dependabot/npm_and_yarn/pr-502",
+      "checks_state": "passing",
+      "settled_check_count": 3,
+      "base_checks_state": "passing"
+    },
+    "expect_markers": {
+      "assessment_impact": "medium",
+      "assessment_action": "automerge"
+    },
+    "expect_github": {
+      "auto_merge_enabled": true,
+      "labels_absent": [
+        "requires-human"
+      ]
+    }
+  },
+  {
+    "instance_id": "depmerge__high-framework-major",
+    "repo": "acme/app",
+    "problem_statement": "Green major bump of express 4 \u2192 5. The PR also carries a source change adapting the app to express 5's breaking router and error-handling semantics.",
+    "pr": {
+      "number": 503,
+      "title": "Bump express from 4.21.2 to 5.1.0",
+      "body": "Bumps [express](https://github.com/example/express) from 4.21.2 to 5.1.0.\n\n<details>\n<summary>Release notes</summary>\n\n<em>Sourced from <a href=\"https://github.com/example/express/releases\">express's releases</a>.</em>\n\n## 5.0.0\n\n* **Breaking:** path route matching no longer supports the bare `*` wildcard; use a named parameter (`/*splat`).\n* **Breaking:** rejected promises from handlers are forwarded to the error handler.\n* **Breaking:** `res.status()` validates its argument and throws on a non-integer.\n\n</details>\n\n[![Dependabot compatibility score](https://dependabot-badges.githubapp.com/badges/compatibility_score?dependency-name=express)](https://docs.github.com/en/github/managing-security-vulnerabilities/about-dependabot-security-updates)\n\nDependabot will resolve any conflicts with this PR as long as you don't alter it yourself.",
+      "base_ref": "main",
+      "head_ref": "dependabot/npm_and_yarn/pr-503",
+      "base_commit": "0000000000000000000000000000000000000000",
+      "head_commit": "0000000000000000000000000000000000000000",
+      "user": "dependabot[bot]",
+      "files": [
+        {
+          "sha": "0000000000000000000000000000000000000000",
+          "filename": "package.json",
+          "status": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "changes": 2,
+          "patch": "@@ -6,7 +6,7 @@\n   \"dependencies\": {\n-    \"express\": \"^4.21.2\"\n+    \"express\": \"^5.1.0\"\n   },\n"
+        },
+        {
+          "sha": "0000000000000000000000000000000000000000",
+          "filename": "package-lock.json",
+          "status": "modified",
+          "additions": 1,
+          "deletions": 1,
+          "changes": 2,
+          "patch": "@@ -1,7 +1,7 @@\n {\n   \"name\": \"acme-app\",\n   \"lockfileVersion\": 3,\n-    \"express\": \"4.21.2\",\n+    \"express\": \"5.1.0\",\n   \"packages\": {}\n }\n"
+        },
+        {
+          "sha": "0000000000000000000000000000000000000000",
+          "filename": "src/server.js",
+          "status": "modified",
+          "additions": 6,
+          "deletions": 4,
+          "changes": 10,
+          "patch": "@@ -18,12 +18,14 @@ app.get(\"/orders/:id\", async (req, res) => {\n });\n\n-app.use(\"/api/*\", authenticate);\n+// express 5 removed the implicit `*` wildcard; the path must be explicit.\n+app.use(\"/api/*splat\", authenticate);\n\n-app.use((err, req, res, next) => {\n-  res.status(500).send(err.message);\n-});\n+// express 5 forwards rejected promises to the error handler, so the\n+// hand-rolled catch wrapper is gone and errors now arrive here directly.\n+app.use((err, req, res, next) => {\n+  res.status(err.status ?? 500).json({ error: err.message });\n+});\n"
+        }
+      ]
+    },
+    "pr_state": {
+      "head_sha": "9b7ee41",
+      "head_ref": "dependabot/npm_and_yarn/pr-503",
+      "checks_state": "passing",
+      "settled_check_count": 3,
+      "base_checks_state": "passing"
+    },
+    "expect_markers": {
+      "assessment_impact": "high",
+      "assessment_action_any_of": [
+        "comment",
+        "rebase-and-human"
+      ]
+    },
+    "expect_github": {
+      "auto_merge_enabled": false,
+      "pr_merged": false
+    }
+  }
+]

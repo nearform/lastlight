@@ -175,9 +175,10 @@ Per the `docs-sync` skill's mapping. A pre-commit hook fires on
    half needs a **private** repo with a red PR — a downscoped token omitting
    `actions` still reads a public repo's Actions logs, so it cannot stand in.
 6. **End-to-end without touching production** — the evals harness
-   (`apps/evals`, mocked GitHub, no real token, model key only). *Not started,
-   and it needs authoring, not just running:* no shipped tier drives the fix
-   family (`code-fix` drives `build`). Two new tiers, driving:
+   (`apps/evals`, mocked GitHub, no real token, model key only). *Done:* the
+   `fix` and `dependency-merge` tiers ship in `apps/evals/datasets/`. Note the
+   escalation policy is graded by core's unit tests, not here — see HANDOFF for
+   why. The tiers drive:
    - each of the five diagnosis classes through attempts 1 → 3, asserting the
      escalation policy per class;
    - a major-bump case per impact tier, asserting the label + action.

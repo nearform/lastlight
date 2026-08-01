@@ -1,0 +1,12 @@
+{
+  "name": "money",
+  "version": "5.0.0",
+  "type": "module",
+  "description": "Currency formatting.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "tiny-intl": "^7.0.0"
+  }
+}

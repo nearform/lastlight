@@ -226,6 +226,20 @@ export function seedWorkspace(opts: {
   /** Seed into a `<workspace>/<repoSubdir>/` child dir (production's nested
    * layout) instead of the workspace root. See {@link workDirFor}. */
   repoSubdir?: string;
+  /**
+   * Files that make up the PR's own COMMIT, applied over the base tree on the
+   * working branch (`repos-head/<instance_id>/` in a dataset).
+   *
+   * Without this a vendored fixture has base and head at identical content, and
+   * an agent that checks — which a diagnosing agent does, because "is this
+   * broken on main too?" is the first question worth asking — correctly
+   * concludes the failure is not this PR's doing. Every red-dependency case
+   * would then read as `upstream-broken`. The overlay is what makes the fixture
+   * an actual pull request: `main` at the pre-bump state, one commit on top.
+   */
+  headDir?: string;
+  /** Subject line for that commit — conventionally the PR title. */
+  headMessage?: string;
 }): SeedResult {
   const def = opts.defaultBranch ?? "main";
   const workDir = workDirFor(opts.stateDir, opts.taskId, opts.repoSubdir);
@@ -242,6 +256,14 @@ export function seedWorkspace(opts: {
 
   const branch = opts.branch ?? def;
   if (branch !== def) git(workDir, ["checkout", "-q", "-b", branch]);
+
+  // The PR's commit, on the branch and nowhere else — so `git diff main...HEAD`
+  // shows the bump and `git log main` does not.
+  if (opts.headDir && existsSync(opts.headDir)) {
+    cpSync(opts.headDir, workDir, { recursive: true });
+    git(workDir, ["add", "-A"]);
+    git(workDir, ["commit", "-q", "-m", opts.headMessage ?? "Bump dependency"]);
+  }
 
   return { workDir, originDir, baseCommit, branch };
 }

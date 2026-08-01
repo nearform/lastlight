@@ -148,10 +148,13 @@ or `--delete` removes the run dir.
 
 ## 5. Author eval cases (optional)
 
-Three tiers ship: **triage** (cheap, issue-triage), **code-fix** (heavy, build
-workflow with held-out tests), and **pr-review** (PR-review precision, graded by
+Six tiers ship: **triage** (cheap, issue-triage), **code-fix** (heavy, build
+workflow with held-out tests), **pr-review** (PR-review precision, graded by
 an LLM judge against a gold set → precision / recall / **F1** by default, the
-F-beta configurable via `EVAL_F_BETA`). To add cases or
+F-beta configurable via `EVAL_F_BETA`), **repo-config** (a repo's committed
+`.lastlight/` layer), **fix** (the diagnosis half of the fix loop — one case per
+diagnosis class), and **dependency-merge** (a major bump per impact tier, which
+measures the one policy the code deliberately does not enforce). To add cases or
 a custom tier, read **`references/instance-schema.md`** — it has the
 `SweBenchInstance` schema, the exact files to create for each tier, and worked
 examples.
@@ -179,6 +182,11 @@ Quick shape (paths are relative to the workspace's `evals/` dir):
     a real `AGENTS.md`/`CLAUDE.md` if the repo ships one (never shadowing it). This
     is how you prove *"adding this to your repo improves review quality"* — and the
     lever the **`lastlight-evals-loop`** skill drives.
+- **Fix / dependency-merge case:** a `pr` seed, a `pr_state` block (the snapshot a
+  dispatch would have resolved — it is what supplies `{{ciSection}}`,
+  `{{attempt}}`, `{{mayMerge}}`) and an `expect_markers` verdict. A `fix` case
+  that needs a checkout also needs `repos-head/<id>/`, the PR's own commit on top
+  of the base tree.
 - **Custom tier:** a new `evals/datasets/<tier>/` with `tier.json` +
   `instances.json` (+ `repos/` & `tests/` for code-fix-style tiers). Discovery is
   automatic — no code change.

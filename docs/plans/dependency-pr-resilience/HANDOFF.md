@@ -53,17 +53,42 @@ half done; item 6 has not been started.
   because the repository is public and GitHub gates public Actions logs on
   public read rather than on the permission. It therefore needs a **private**
   repo with a red PR, or a second dev App to revoke on.
-- **§6.5.6 — the evals end-to-end pass.** Not started, and larger than "run the
-  evals": there is no dataset to run. The shipped tiers are `code-fix`,
-  `pr-review`, `repo-config` and `triage`, and `code-fix` drives `build`, not
-  the fix family — so nothing today exercises a diagnosis class or an impact
-  tier. The work is to **author** two tiers against the mocked GitHub: five
-  diagnosis classes driven through attempts 1 → 3 asserting the escalation
-  policy per class, and a major-bump case per impact tier asserting the label +
-  action. Scaffold with `plugins/lastlight/skills/lastlight-evals`; build
-  fixtures from real PRs with `add-case --pr <url>`. A workspace pointed at a
-  local build with `LASTLIGHT_CORE_DIR=/path/to/lastlight` is how it runs
-  against this branch rather than the npm-installed core.
+- **§6.5.6 — the evals end-to-end pass.** **Done, with one narrowing.** Two new
+  tiers ship in `apps/evals/datasets/`: `fix` (six cases — one per diagnosis
+  class, plus the promoted-flaky attempt) and `dependency-merge` (three cases,
+  one per impact tier). Both needed a harness seam first: the workflows are
+  *dispatched* in production, and every variable their prompts reason with comes
+  from `renderContext`'s projection of the `PrState` snapshot — so the harness
+  now seeds a snapshot and hands it to core's own projection
+  (`apps/evals/src/pr-context.ts`, exported through the evals barrel), rather
+  than running them off a hand-built context in which every `{{#if}}` guard takes
+  the empty branch.
+
+  **The narrowing:** the escalation *policy* is not measured here and should not
+  be. `resolveFixDisposition` and friends are pure functions over the snapshot,
+  already table-tested in core without a model; and the harness cannot drive a
+  multi-run sequence anyway, because the marker harvest that carries a verdict
+  into the next attempt writes through `workflow_runs.scratch` — a database the
+  harness deliberately does not pass. What the tiers measure is the half only a
+  model can answer: given real CI evidence, does the agent reach the right
+  class, and does it honour an impact ceiling nothing in the code enforces.
+  `fix__flaky-promoted` covers the attempt dimension by seeding attempt 3 with
+  two prior flaky verdicts.
+
+  Baseline: Claude Haiku 4.5, **8/9**, $1.51. The first run found two *fixture*
+  defects rather than model ones — identical base/head trees (fixed with
+  `repos-head/<id>/`) and two expectations that contradicted the shipped rubrics
+  — which is the tiers earning their keep before they ever graded a model.
+
+  The one standing failure is worth carrying forward: on the express 4 → 5 case
+  the agent behaves safely every time (FUNCTIONAL, `requires-human`, no
+  auto-merge) but intermittently records `impact=none` on a *major*, reasoning
+  that the tier is only assigned on the TRIVIAL path. That reading is one the
+  prompt's STEP 2a wording permits, and an `impact=none` on a major erases the
+  audit record the impact label is supposed to be. Tightening
+  `prompts/dependabot-pr-merge.md` is a follow-up with evidence behind it now.
+  It is also the case for grading markers rather than mutations: `behavioral`
+  passed on every run.
 
 §6.5 items 1–4 are done, including the repo-config clamp check: a fixture
 `.lastlight/lastlight.yml` that tries to loosen `fix.maxAttempts`,
