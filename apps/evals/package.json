@@ -1,7 +1,7 @@
 {
   "name": "lastlight-evals",
-  "version": "0.9.3",
-  "description": "Eval harness for Last Light workflows \u2014 drives the real production workflows against a mocked GitHub and grades deterministically (SWE-bench compatible).",
+  "version": "0.9.4",
+  "description": "Eval harness for Last Light workflows — drives the real production workflows against a mocked GitHub and grades deterministically (SWE-bench compatible).",
   "type": "module",
   "bin": {
     "lastlight-evals": "dist/run.js"
