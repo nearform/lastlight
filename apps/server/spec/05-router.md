@@ -510,6 +510,25 @@ Two properties are load-bearing:
   run of ours behind it means a human applied it by hand and is honoured as
   a permanent override.
 
+**The escalation guard is not identical on the fix and merge routes**, and
+the difference is the whole point. `resolveFixDisposition` treats a head we
+authored as *still the same problem*
+(`headSha === escalatedAtSha || headIsOurs`): our own retry push must not
+re-arm the attempt counter, or the loop never terminates.
+`resolveMergeDisposition` compares `headSha === escalatedAtSha` **only**.
+On that route our commit at the head is not another attempt — it is the
+RESOLUTION, and the entire `dependabot-ci-fix` → `pr.checks_passed` →
+`dependabot-pr-merge` handoff ends with it. Carrying the disjunct across
+made the handoff structurally unreachable for any PR we had ever
+escalated: ci-fix repaired the branch, CI went green, and the merge route
+skipped *because we were the one who fixed it* — 27 of 37 green dependency
+PRs sat behind it. Dropping it does not unbound the route: a merge run that
+declines re-stamps `escalatedAtSha` at the head it just assessed (so the
+comparison catches the next dispatch), and one that succeeds populates
+`assessedHeadShaByWorkflow`, so the per-head `already-assessed` dedup below
+bounds it to **one assessment per head SHA** — the bound every
+never-escalated PR already lives under.
+
 An explicit human request (`comment.created` / `pr_review_comment.created`
 / `pr.review_requested` / Slack `message` / `/api/run`) overrides the
 escalation guard, the not-retryable verdict and the per-SHA dedup — a

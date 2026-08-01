@@ -758,9 +758,25 @@ export function resolveMergeDisposition(
     };
   }
 
+  // Still binding only while the head is the one we escalated at. NOTE the
+  // missing `|| state.headIsOurs` that `resolveFixDisposition` carries: on the
+  // fix route our own commit on top of an escalation is another attempt at the
+  // same problem, but on THIS route it is the RESOLUTION. The whole
+  // `dependabot-ci-fix` → `pr.checks_passed` → `dependabot-pr-merge` handoff
+  // ends with our fix commit at the head, so including it made the handoff
+  // structurally unreachable for every PR we had ever escalated: we fixed it,
+  // CI went green, and the merge route skipped *because* we were the one who
+  // fixed it. 27 of 37 green dependency PRs were stuck behind this.
+  //
+  // Dropping it does not unbound the route. A merge run that assesses this head
+  // and declines still records a run row, which re-stamps `escalatedAtSha` at
+  // the current head — so the comparison below catches the very next dispatch —
+  // and a run that succeeds populates `assessedHeadShaByWorkflow`, so the
+  // `already-assessed` guard underneath bounds it to ONE assessment per head
+  // SHA either way. That is the same bound every never-escalated PR already
+  // lives under.
   if (state.escalatedBy === "us" && !opts.explicitRequest) {
-    const sameProblem = state.headSha === state.escalatedAtSha || state.headIsOurs;
-    if (sameProblem) {
+    if (state.headSha === state.escalatedAtSha) {
       return {
         decision: "skip",
         reason: `escalated: we escalated this PR at ${(state.escalatedAtSha ?? "").slice(0, 7)} and nothing has changed since`,

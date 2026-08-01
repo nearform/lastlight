@@ -492,6 +492,102 @@ describe("resolveMergeDisposition", () => {
     expect(d.reason).toMatch(reason);
   });
 
+  it("our own escalation is still binding while the head has not moved", () => {
+    const d = resolveMergeDisposition(
+      state({
+        checksState: "passing",
+        labels: ["requires-human"],
+        escalatedBy: "us",
+        escalatedAtSha: "abcdef1234567890",
+        headSha: "abcdef1234567890",
+      }),
+      deps,
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^escalated: we escalated this PR at abcdef1/);
+  });
+
+  it("OUR OWN fix commit clears the escalation — it is the resolution, not a repeat", () => {
+    // The `#239` shape, and the reason the merge route must NOT inherit
+    // `resolveFixDisposition`'s `|| state.headIsOurs`: we escalated at an old
+    // head, `dependabot-ci-fix` then pushed a fix, and CI went green. The whole
+    // ci-fix → `pr.checks_passed` → merge handoff ends with our commit at the
+    // head, so treating that as "nothing has changed" made the handoff
+    // unreachable for every PR we had ever escalated.
+    const d = resolveMergeDisposition(
+      state({
+        checksState: "passing",
+        labels: ["requires-human"],
+        escalatedBy: "us",
+        escalatedAtSha: "fe5bc73aaaaaaaaa",
+        headSha: "099bca81bbbbbbbb",
+        headAuthor: "last-light[bot]",
+        headIsOurs: true,
+      }),
+      deps,
+    );
+    expect(d.decision).toBe("run");
+    expect(d.reason).toMatch(/^checks passing$/);
+  });
+
+  it("but that same PR is bounded to ONE assessment per head SHA", () => {
+    // What replaces the guard we just dropped: the merge run assesses the fix
+    // commit once, records it, and every later dispatch at that head dedups.
+    const d = resolveMergeDisposition(
+      state({
+        checksState: "passing",
+        labels: ["requires-human"],
+        escalatedBy: "us",
+        escalatedAtSha: "fe5bc73aaaaaaaaa",
+        headSha: "099bca81bbbbbbbb",
+        headIsOurs: true,
+        assessedHeadShaByWorkflow: { "dependabot-pr-merge": "099bca81bbbbbbbb" },
+      }),
+      deps,
+      { dedupOnHeadSha: true },
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^already-assessed: dependabot-pr-merge/);
+  });
+
+  it("and re-escalating at the new head stops it again", () => {
+    // The other half of the bound: a merge run that declines re-stamps
+    // `escalatedAtSha` at the head it just assessed, so the guard above catches
+    // the very next dispatch even with nothing in `assessedHeadShaByWorkflow`.
+    const d = resolveMergeDisposition(
+      state({
+        checksState: "passing",
+        labels: ["requires-human"],
+        escalatedBy: "us",
+        escalatedAtSha: "099bca81bbbbbbbb",
+        headSha: "099bca81bbbbbbbb",
+        headIsOurs: true,
+      }),
+      deps,
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^escalated:/);
+  });
+
+  it("the FIX route keeps `headIsOurs` — our retry is the same problem there", () => {
+    // The clause is dropped on the merge route ONLY. On the fix route it is
+    // load-bearing: without it our own retry push would re-arm the attempt
+    // counter forever.
+    const d = resolveFixDisposition(
+      state({
+        checksState: "failing",
+        labels: ["requires-human"],
+        escalatedBy: "us",
+        escalatedAtSha: "fe5bc73aaaaaaaaa",
+        headSha: "099bca81bbbbbbbb",
+        headIsOurs: true,
+      }),
+      deps,
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^escalated:/);
+  });
+
   it("drops on the run lock — no auto-merge against a PR whose fix run is in flight", () => {
     // The sequence 09 → S4 names verbatim: `dependabot-ci-fix` pushes a fix, CI
     // goes green while the run is still writing its comment and marker,
