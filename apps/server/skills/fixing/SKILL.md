@@ -179,10 +179,16 @@ your cwd, which is the checkout. The right command is whatever CI runs, with the
 package manager detected from the lockfile, so it is knowable only at runtime,
 by you. Exit 0 means green.
 
-Three rules about that file:
+Four rules about that file:
 
 - **Write it first, before you start repairing.** The harness runs it after each
   fix iteration; with no script there is no gate, and no gate means no push.
+- **Make it a bash script.** The harness runs it with `bash`, so `set -euo
+  pipefail` and the rest of bash is available to you — but a script written for
+  another interpreter will not be run the way you intended, however correct its
+  shebang. Whatever you write here, run it yourself the same way before you
+  trust it: a gate the harness scores differently than you did is worse than no
+  gate, because you will report green on a red one.
 - **It is yours alone.** The harness deletes it at the start of every attempt, so
   a stale script from a superseded diagnosis can never gate this one. Write it
   fresh; never assume one is already there. (The same is true of

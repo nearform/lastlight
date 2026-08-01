@@ -5,6 +5,7 @@ import {
   DIAGNOSIS_MARKER_POSTCONDITION,
 } from "#src/engine/fix-markers.js";
 import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
+import { PR_FIX_SHAPED_WORKFLOWS } from "#src/workflows/target-policy.js";
 import { defaultFixConfig } from "lastlight-shared";
 
 /**
@@ -129,6 +130,26 @@ describe.each(["pr-fix", "dependabot-ci-fix"])("%s — the local push gate", (na
     // And under `.git/`, which is what makes `git add -A` unable to commit it
     // on every backend rather than only the ones that remembered to exclude it.
     expect(VERIFY_SCRIPT_NAME.startsWith(".git/")).toBe(true);
+  });
+
+  // The INTERPRETER, not just the path — the other half of "the gate the
+  // harness runs is the gate the agent verified". `sh <script>` discards the
+  // script's shebang, and `/bin/sh` in the sandbox image is dash, which
+  // rejects the `set -euo pipefail` the `fixing` skill asks the agent to open
+  // with and exits 2 on line 2. That made this gate a CONSTANT RED in
+  // milliseconds on every run ever recorded: the loop still iterated, so it
+  // looked alive, but no iteration could go green, and the harness's half of
+  // "no green gate ⇒ no push" never fired — leaving the agent's own
+  // self-reported `gate=green` (it runs the script directly, shebang honoured)
+  // as the only thing gating a push. Asserted across the whole fix-shaped
+  // family: the two workflows carry the same loop and must not diverge.
+  it.each([...PR_FIX_SHAPED_WORKFLOWS])("runs %s's gate under bash, never sh", (name) => {
+    const phase = getWorkflow(name).phases.find((p) => p.name === "fix")!;
+    const cmd = phase.generic_loop!.until_bash!;
+    expect(cmd).toContain(`bash ${VERIFY_SCRIPT_NAME}`);
+    // `bash <path>` does not contain `<space>sh <path>`, so this catches a
+    // regression to the dash-invoking form without flagging the fix itself.
+    expect(cmd).not.toContain(` sh ${VERIFY_SCRIPT_NAME}`);
   });
 
   it("treats a missing gate script as an explicit red, not an accident of exit codes", () => {

@@ -855,12 +855,25 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
    the same two deletes run inside the clone init container
    (`sandbox/k8s/init-clone.ts`), on exactly the same set of paths.
 
+   The workflows invoke it as **`bash .git/lastlight-verify.sh`**, never
+   `sh <script>`. The harness's own wrapper is `sh -c` (step 3 below) and
+   `/bin/sh` in the sandbox image is dash, which rejects the `set -euo pipefail`
+   the `fixing` skill has the agent open the script with — so `sh <script>` exited
+   2 on line 2 and made the gate a constant RED in milliseconds, on every backend
+   that runs this image. The loop still iterated, so it looked alive; what it
+   could never do was go green. Naming the interpreter is what keeps the gate the
+   harness scores identical to the one the agent ran and reported on — the agent
+   executes the script directly, so its shebang is honoured there.
+
    The gate is also **recorded**: the marker harvest reads it (never drains it —
    it is the live gate the next iteration runs) onto
    `scratch.fixMarkers.verifyScript`, where the admin run detail panel renders
    it. The script is authored by the agent being gated and `until_bash` only
    reads its exit code, so recording it is the hardening 09-state-machine.md §S1
-   asks for in place of validating its contents. See [State](/spec/10-state).
+   asks for in place of validating its contents. That read resolves the checkout
+   from the run ROW's `repo` column — not `context.repo`, which the dispatcher
+   consumes and never persists, and which silently resolved every fix run's gate
+   and journal to nothing. See [State](/spec/10-state).
 2. **Spawn** — `docker run -d` or VM start. Container/VM mapped to the
    `taskId` in `activeContainers`.
 3. **Run** — `docker exec -i -w <cwd> {container} sh -c "agentic-pi run ..."`

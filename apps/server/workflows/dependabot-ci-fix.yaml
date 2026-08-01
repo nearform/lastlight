@@ -148,9 +148,23 @@ phases:
     # is treated as red and never authorises a push (09-state-machine.md §S1).
     # `max_iterations` reads `fix.localIterations`, same as `timeout_seconds`
     # above; `2` is the packaged fallback, not the operative value.
+    #
+    # Run the gate with `bash`, NOT `sh`. `/bin/sh` in the sandbox image is
+    # dash, and the script the agent writes is the one the `fixing` skill asks
+    # for — a shell script that opens `set -euo pipefail`. dash rejects
+    # `-o pipefail` on line 2 and exits 2 before the first real command, so
+    # `sh <script>` made the gate a CONSTANT RED in milliseconds: every loop
+    # burned all its iterations, no iteration could ever satisfy the condition,
+    # and the harness's half of "no green gate ⇒ no push" never fired — leaving
+    # the agent's own self-reported `gate=green` (it runs the script directly,
+    # so its shebang IS honoured) as the only thing gating a push. `sh` also
+    # discards the script's `#!` line, which is precisely what let the harness
+    # and the agent disagree about the same file; `bash` is a superset of the
+    # shell any gate script here targets, so it agrees with a `#!/bin/sh`,
+    # `#!/usr/bin/env bash`, or shebang-less script alike.
     generic_loop:
       max_iterations: { from: fix.localIterations, default: 2 }
-      until_bash: "if [ -f .git/lastlight-verify.sh ]; then sh .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
+      until_bash: "if [ -f .git/lastlight-verify.sh ]; then bash .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
       fresh_context: false
     messages:
       on_start: "On it — investigating the failing checks on PR #{{prNumber}}..."

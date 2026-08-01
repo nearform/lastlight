@@ -204,17 +204,40 @@ function isWithin(parent: string, child: string): boolean {
  *
  * Resolved from the run row exactly as `createTaskSandbox` / `reapSandboxWorkspace`
  * resolve it — `<sandboxes root>/<taskId>/<repo>` — so the three never disagree.
- * `taskId` and `repo` are both persisted on `workflow_runs.context` at creation.
  * A taskId that escapes the sandboxes root is refused rather than followed, the
  * same guard the reaper applies.
+ *
+ * ## Where the two halves come from
+ *
+ * `taskId` is on `context` (written at creation). **`repo` is on the run ROW,
+ * not on `context`** — and that asymmetry is load-bearing enough to have broken
+ * this function for its whole life. `dispatchWorkflow` reads `context.repo` as
+ * a QUALIFIED `owner/repo`, splits it into the row's `owner` + bare `repo`
+ * columns, and the persisted context keeps only `owner`. So reading the repo
+ * off `context` resolved to `""` on every real run, this returned `null`, and
+ * BOTH callers — the push-gate read and the journal drain — were silently
+ * skipped: `scratch.fixMarkers.verifyScript` was `null` and `notes` was `[]` on
+ * every fix run ever recorded, while the files sat on disk in the workspace.
+ * The unit tests missed it by hand-building `context: { taskId, repo }`, a
+ * shape production never produces.
+ *
+ * The row's column is also the RIGHT source independent of that bug: it is
+ * documented as the bare, path-safe name, which is exactly what
+ * `prePopulateWorkspace` uses for the checkout dir. The `context` fallback is
+ * kept for callers that synthesize a run without a row (tests, the evals
+ * harness) and is de-qualified so either shape resolves.
  */
 export function prNotesRepoDir(
-  run: Pick<WorkflowRun, "context"> | null | undefined,
+  run: Pick<WorkflowRun, "context" | "repo"> | null | undefined,
   overrides: { stateDir?: string; sandboxDir?: string } = {},
 ): string | null {
   const ctx = run?.context as Record<string, unknown> | undefined;
   const taskId = typeof ctx?.taskId === "string" ? ctx.taskId : "";
-  const repo = typeof ctx?.repo === "string" ? ctx.repo : "";
+  const rowRepo = typeof run?.repo === "string" ? run.repo : "";
+  const ctxRepo = typeof ctx?.repo === "string" ? ctx.repo : "";
+  // `.split("/").pop()` de-qualifies an `owner/repo` fallback and is a no-op on
+  // an already-bare name; the path-escape guard below still has the last word.
+  const repo = (rowRepo || ctxRepo).split("/").pop() ?? "";
   if (!taskId || !repo) return null;
   const rt = getRuntimeConfig();
   const stateDir = overrides.stateDir || rt?.stateDir || process.env.STATE_DIR || "data";

@@ -89,9 +89,14 @@ phases:
     # is treated as red and never authorises a push (09-state-machine.md §S1).
     # `max_iterations` reads `fix.localIterations`, same as `timeout_seconds`
     # above; `2` is the packaged fallback, not the operative value.
+    #
+    # Run the gate with `bash`, NOT `sh` — see the same loop in
+    # `dependabot-ci-fix.yaml` for the full story. Short version: `/bin/sh` is
+    # dash, the agent writes `set -euo pipefail`, dash rejects `-o pipefail` and
+    # exits 2 on line 2, and the gate was a constant red in milliseconds.
     generic_loop:
       max_iterations: { from: fix.localIterations, default: 2 }
-      until_bash: "if [ -f .git/lastlight-verify.sh ]; then sh .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
+      until_bash: "if [ -f .git/lastlight-verify.sh ]; then bash .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
       fresh_context: false
     messages:
       on_start: "On it — fixing PR #{{prNumber}}..."

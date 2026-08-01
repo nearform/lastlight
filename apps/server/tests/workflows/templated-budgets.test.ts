@@ -55,7 +55,7 @@ function budgetedWorkflow(name = "budgeted-loop"): AgentWorkflowDefinition {
         timeout_seconds: { from: "fix.gateTimeoutSeconds", default: 900 },
         generic_loop: {
           max_iterations: { from: "fix.localIterations", default: 2 },
-          until_bash: "sh .git/lastlight-verify.sh",
+          until_bash: "bash .git/lastlight-verify.sh",
           interactive: false,
           fresh_context: false,
         },

@@ -27,6 +27,7 @@ import {
 import { MAX_PR_NOTES, PR_NOTES_FILE_NAME } from "#src/engine/pr-notes.js";
 import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
 import { renderContext } from "#src/engine/pr-decisions.js";
+import { resetRuntimeConfigForTests } from "#src/config/config.js";
 
 const BOT = "last-light[bot]";
 const TRIGGER = "cliftonc/lastlight#190";
@@ -204,6 +205,44 @@ describe("prNotesRepoDir", () => {
     expect(dir).toBe("/state/sandboxes/owner-repo-190-fix/repo");
   });
 
+  // The shape production actually persists. `dispatchWorkflow` reads a
+  // QUALIFIED `context.repo`, splits it into the run row's `owner` + bare
+  // `repo` columns, and the persisted context keeps only `owner` — so every
+  // real run row reaches this function with no `repo` on `context` at all.
+  // Resolving the repo from `context` (which is what this did for its whole
+  // life) yielded `""` → `null` → the push gate and the journal were never
+  // read on ANY real run. The rest of this file missed it by hand-building a
+  // context with a `repo` key, so this row-shaped case is the regression.
+  it("reads the repo off the run ROW — a production context carries no `repo`", () => {
+    expect(
+      prNotesRepoDir(
+        { repo: "drizzle-cube-nextjs", context: { taskId: "drizzle-cube-nextjs-132-fix" } },
+        { stateDir: "/state" },
+      ),
+    ).toBe("/state/sandboxes/drizzle-cube-nextjs-132-fix/drizzle-cube-nextjs");
+  });
+
+  it("prefers the row's bare column when a context also carries one", () => {
+    expect(
+      prNotesRepoDir(
+        { repo: "lastlight", context: { taskId: "t", repo: "stale/name" } },
+        { stateDir: "/state" },
+      ),
+    ).toBe("/state/sandboxes/t/lastlight");
+  });
+
+  // The fallback exists for callers that synthesize a run with no row (tests,
+  // the evals harness). Those hand-written contexts are the one place a
+  // QUALIFIED value shows up, and the workspace dir is keyed on the bare name.
+  it("de-qualifies an `owner/repo` context fallback", () => {
+    expect(
+      prNotesRepoDir(
+        { context: { taskId: "owner-repo-190-fix", repo: "cliftonc/lastlight" } },
+        { stateDir: "/state" },
+      ),
+    ).toBe("/state/sandboxes/owner-repo-190-fix/lastlight");
+  });
+
   it("honours an explicit sandboxDir, exactly as the reaper does", () => {
     expect(
       prNotesRepoDir(
@@ -226,6 +265,91 @@ describe("prNotesRepoDir", () => {
     expect(prNotesRepoDir(null)).toBeNull();
     expect(prNotesRepoDir({ context: {} })).toBeNull();
     expect(prNotesRepoDir({ context: { taskId: "t" } })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The harvest resolving its OWN checkout
+// ---------------------------------------------------------------------------
+
+/**
+ * Every other test in this file hands `harvestFixMarkers` an explicit
+ * `repoDir`, which is the right seam for asserting what it does with a
+ * checkout — but it bypasses the step that decides WHICH checkout, and that
+ * step was broken in production for the whole life of both features. So this
+ * one drives the real resolution: a production-shaped run row (repo on the
+ * ROW, absent from `context`) against a real workspace laid out exactly as
+ * `createTaskSandbox` lays it out, with no override at all.
+ */
+describe("harvestFixMarkers — resolving the checkout off a production run row", () => {
+  const TASK_ID = "cliftonc-lastlight-190-fix";
+  let stateDir: string;
+  let checkout: string;
+  let originalStateDir: string | undefined;
+
+  beforeEach(() => {
+    stateDir = join(workspace, "state");
+    checkout = join(stateDir, "sandboxes", TASK_ID, "lastlight");
+    mkdirSync(join(checkout, ".git"), { recursive: true });
+    originalStateDir = process.env.STATE_DIR;
+    process.env.STATE_DIR = stateDir;
+    // `prNotesRepoDir` prefers a loaded runtime config over the env var; clear
+    // it so this test pins the path rather than inheriting another suite's.
+    resetRuntimeConfigForTests();
+  });
+
+  afterEach(() => {
+    if (originalStateDir === undefined) delete process.env.STATE_DIR;
+    else process.env.STATE_DIR = originalStateDir;
+    resetRuntimeConfigForTests();
+  });
+
+  it("reads the push gate and drains the journal with no repoDir override", () => {
+    const rows: WorkflowRun[] = [
+      {
+        id: "run-1",
+        workflowName: "dependabot-ci-fix",
+        triggerId: TRIGGER,
+        // The row's own column — the bare, path-safe name. This is the half
+        // that was never being read.
+        repo: "lastlight",
+        currentPhase: "fix_iter_1",
+        phaseHistory: [],
+        status: "running",
+        context: { prState: liveState(), taskId: TASK_ID },
+        startedAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      } as WorkflowRun,
+    ];
+    const db = {
+      runs: {
+        getRun: (id: string) => rows.find((r) => r.id === id) ?? null,
+        mergeScratch: (id: string, patch: Record<string, unknown>) => {
+          const row = rows.find((r) => r.id === id);
+          if (row) row.scratch = { ...(row.scratch ?? {}), ...patch };
+        },
+      },
+    } as unknown as StateDb;
+
+    // What the agent leaves behind in its cwd.
+    writeFileSync(join(checkout, VERIFY_SCRIPT_NAME), "#!/usr/bin/env bash\nset -euo pipefail\nnpm ci\n");
+    writeFileSync(join(checkout, PR_NOTES_FILE_NAME), "ruled-out: not the lockfile\n");
+
+    harvestFixMarkers(
+      db,
+      "run-1",
+      "dependabot-ci-fix",
+      "fix_iter_1",
+      "CI_FIX_COMPLETE: pr=190 attempt=1 outcome=pushed tried=bumped the peer dep gate=green",
+    );
+
+    const harvested = readHarvestedMarkers(rows[0]);
+    expect(harvested?.verifyScript).toContain("npm ci");
+    expect(harvested?.notes.map((n) => n.text)).toEqual(["not the lockfile"]);
+    // The gate is a READ (it is the live gate the next iteration runs); the
+    // journal is a DRAIN.
+    expect(existsSync(join(checkout, VERIFY_SCRIPT_NAME))).toBe(true);
+    expect(existsSync(join(checkout, PR_NOTES_FILE_NAME))).toBe(false);
   });
 });
 
