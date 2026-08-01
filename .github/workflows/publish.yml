@@ -39,7 +39,7 @@ name: Publish release
 # the agent image, so it's covered too.
 #
 # CACHING: driven by `docker buildx bake` against docker-bake.hcl. Each image
-# has a per-image **registry** build cache (ghcr.io/nearform/lastlight-<img>:
+# has a per-image **registry** build cache (<registry>/lastlight-<img>:
 # buildcache) that any run can read, so unchanged layers survive across releases.
 #
 #   Why registry and not `type=gha`: this workflow only runs on a RELEASE (a tag
@@ -62,12 +62,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Git tag/ref to check out AND image tag to publish (e.g. v0.11.0)"
-        required: true
+        description: "Ref to build + image tag (e.g. v0.11.0 or a full 40-char SHA). Omit to build the dispatched branch, tagged <branch>-<short-sha>."
+        required: false
         type: string
 
 concurrency:
-  group: publish-release-${{ github.event.release.tag_name || inputs.tag }}
+  group: publish-release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -81,14 +81,17 @@ jobs:
   checks:
     uses: ./.github/workflows/ci.yml
     with:
-      ref: ${{ github.event.release.tag_name || inputs.tag }}
+      # release tag, else the dispatch `tag` input, else the dispatched branch.
+      ref: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
 
   images:
     needs: checks
     runs-on: ubuntu-latest
     env:
-      REGISTRY: ghcr.io/nearform
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # Publish to the GHCR namespace of whoever owns the repo running this:
+      # ghcr.io/nearform on upstream, ghcr.io/<fork-owner> on a fork. Lets a fork
+      # build+push its own images (workflow_dispatch on a branch) with no edit.
+      REGISTRY: ghcr.io/${{ github.repository_owner }}
       # Only move `:latest` on a real, non-prerelease Release — never when a
       # workflow_dispatch rebuilds an arbitrary (possibly older) tag.
       PUSH_LATEST: ${{ github.event_name == 'release' && github.event.release.prerelease == false }}
@@ -102,7 +105,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+
+      # Resolve the image tag: release tag, else the dispatch `tag` input, else
+      # (dispatch on a branch with no input) a sanitized <branch>-<short-sha> —
+      # so "Run workflow" on a branch produces an appropriately-named build.
+      - name: Resolve image tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE_TAG" ]; then
+            t="$RELEASE_TAG"
+          elif [ -n "$INPUT_TAG" ]; then
+            t="$INPUT_TAG"
+          else
+            safe="$(printf '%s' "$REF_NAME" | tr '/' '-' | tr -cd 'A-Za-z0-9._-')"
+            t="${safe}-$(git rev-parse --short HEAD)"
+          fi
+          echo "tag=$t" >> "$GITHUB_OUTPUT"
+          echo "Image tag: \`$t\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -128,7 +153,7 @@ jobs:
         run: docker buildx bake -f docker-bake.hcl --push core
         env:
           REGISTRY: ${{ env.REGISTRY }}
-          TAG: ${{ env.TAG }}
+          TAG: ${{ steps.tag.outputs.tag }}
           PUSH_LATEST: ${{ env.PUSH_LATEST }}
           GIT_SHA: ${{ github.sha }}
           BUILD_DATE: ${{ steps.meta.outputs.date }}
@@ -143,7 +168,7 @@ jobs:
         run: docker buildx bake -f docker-bake.hcl --push sandbox-qa
         env:
           REGISTRY: ${{ env.REGISTRY }}
-          TAG: ${{ env.TAG }}
+          TAG: ${{ steps.tag.outputs.tag }}
           PUSH_LATEST: ${{ env.PUSH_LATEST }}
 
   # Publish the six public npm packages — ONLY after `images` succeeds, and ONLY
