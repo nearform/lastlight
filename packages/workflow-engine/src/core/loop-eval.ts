@@ -1,8 +1,11 @@
 /**
- * Minimal expression evaluator for generic loop `until` conditions.
+ * Minimal expression evaluator for generic loop `until` conditions and
+ * phase-level `skip_if` guards.
  *
  * Supported forms:
  *   output.contains('text')   — true if the output string contains 'text'
+ *   a.b.c.contains('text')    — same, against any dotted path in the context
+ *                               (`output` is just the degenerate one-segment case)
  *   variable == 'value'       — equality check against the context map
  *   variable != 'value'       — inequality check against the context map
  *
@@ -52,10 +55,18 @@ function coerceBool(v: unknown): boolean {
 export function evalUntilExpression(expr: string, ctx: LoopEvalContext): boolean {
   const trimmed = expr.trim();
 
-  // output.contains('text') or output.contains("text")
-  const containsMatch = trimmed.match(/^output\.contains\(['"](.+)['"]\)$/);
+  // <dotted.path>.contains('text') — `output.contains(...)` is the one-segment
+  // case (the only form the generic loop uses). A longer path lets a `skip_if`
+  // read a *sibling* value the loop never needed, e.g.
+  // `phaseOutputs.diagnosis.contains('class=flaky')`.
+  const containsMatch = trimmed.match(/^([\w.]+)\.contains\(['"](.+)['"]\)$/);
   if (containsMatch) {
-    return String(ctx.output ?? "").includes(containsMatch[1]);
+    const [, key, needle] = containsMatch;
+    const v = readPath(ctx, key);
+    // Strings/numbers only — stringifying an object yields "[object Object]",
+    // which is a substring match waiting to surprise someone.
+    if (typeof v !== "string" && typeof v !== "number") return false;
+    return String(v).includes(needle);
   }
 
   // dotted.path == true / == false / != true / != false (bare boolean literal)
@@ -86,4 +97,24 @@ export function evalUntilExpression(expr: string, ctx: LoopEvalContext): boolean
 
   // Unrecognised — safe default
   return false;
+}
+
+/**
+ * Evaluate a phase's `skip_if` guard against the run's render context.
+ *
+ * Returns the **first matching expression** (so the caller can name it in the
+ * skip reason) or `undefined` when none match. The list is OR-ed: the
+ * production consumer is "skip the fix phase when the diagnosis landed in any
+ * of the non-fixable classes", where one expression per class reads as the
+ * class list it is. AND is expressible by collapsing to a single expression.
+ *
+ * Safe defaults throughout — an unrecognised expression and an absent variable
+ * both evaluate false, so a malformed or not-yet-populated guard **runs** the
+ * phase rather than silently swallowing it.
+ */
+export function evalSkipIf(
+  expressions: readonly string[],
+  ctx: LoopEvalContext,
+): string | undefined {
+  return expressions.find((expr) => evalUntilExpression(expr, ctx));
 }

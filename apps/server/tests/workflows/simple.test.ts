@@ -8,14 +8,35 @@ import type { ExecutorConfig } from "#src/engine/github/profiles.js";
 const RUN = "abcdef12-3456-7890-abcd-ef1234567890";
 
 describe("workflowScopedTaskId", () => {
-  it("keys pr-review / pr-fix by (repo, PR) with no run suffix so they reuse one workspace", () => {
+  it("keys per-target workflows by (repo, PR) with no run suffix so they reuse one workspace", () => {
     for (const wf of PER_TARGET_REUSE_WORKFLOWS) {
       const a = workflowScopedTaskId("drizzle-cube", 918, wf, RUN);
       const b = workflowScopedTaskId("drizzle-cube", 918, wf, "different-run-id");
-      expect(a).toBe(`drizzle-cube-918-${wf}`);
       // Two separate runs on the same PR resolve to the same dir → reuse.
       expect(a).toBe(b);
+      expect(a).not.toContain(RUN.slice(0, 8));
     }
+  });
+
+  it("gives the whole fix FAMILY one shared workspace per PR", () => {
+    // 09-state-machine.md → S4. The PR-scoped run lock means only one of these
+    // can be in flight for a PR at a time, so two directories were pure waste —
+    // and routing genuinely varies (an `@bot fix this` comment on a red
+    // Dependabot PR is an LLM decision that can land on either workflow), so
+    // attempt 2 would otherwise re-clone and re-install from cold just because
+    // the event arrived differently.
+    const prFix = workflowScopedTaskId("drizzle-cube", 918, "pr-fix", RUN);
+    const ciFix = workflowScopedTaskId("drizzle-cube", 918, "dependabot-ci-fix", "different-run-id");
+    expect(prFix).toBe("drizzle-cube-918-fix");
+    expect(ciFix).toBe(prFix);
+  });
+
+  it("keeps dependabot-pr-merge on its own key — it has no checkout to share", () => {
+    expect(workflowScopedTaskId("drizzle-cube", 918, "dependabot-pr-merge", RUN))
+      .toBe("drizzle-cube-918-dependabot-pr-merge");
+    // pr-review reads the tree a fix run may be rewriting, so it keeps its own too.
+    expect(workflowScopedTaskId("drizzle-cube", 918, "pr-review", RUN))
+      .toBe("drizzle-cube-918-pr-review");
   });
 
   it("keys build (recreate-from-base) by (repo, issue) with no run suffix so a re-run lands on the same dir", () => {

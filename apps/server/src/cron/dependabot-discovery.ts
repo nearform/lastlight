@@ -36,12 +36,15 @@
  *     `unknown` and kicks off the recompute; both sweeps re-poll it with a
  *     widening backoff (`resolveMergeableState`, issue #204) before giving up.
  *
- * Both sweeps SKIP any PR carrying the `requires-human` label — the terminal
- * flag the dependabot prompts apply when Last Light can't proceed automatically
- * (a functional merge left for a human, or a CI fix it couldn't complete). That
- * stops the nightly crons re-attempting things we already know we can't land.
- * The webhooks are NOT label-gated, so a genuinely new bot push is still handled
- * live and the success path clears the label.
+ * **These are candidate finders, not policy** (09-state-machine.md → S1/S2).
+ * They answer "does this PR look like it needs this workflow?" — a fact about
+ * the pull request. Whether we may ACT on it (the `requires-human` escalation
+ * guard, the attempt counter, the cost cap, the per-SHA dedup, the fork guard)
+ * is decided once by `resolvePrState` + `resolveDispatchDisposition` at the
+ * `dispatchWorkflow` choke point, which the webhook route crosses too. The
+ * `requires-human` filter used to live here AND in the dispatcher, and the two
+ * disagreed by construction: the label was a one-way door on the cron side
+ * while the webhook cleared it on success. Now there is one answer.
  */
 
 /**
@@ -55,6 +58,32 @@
 export const DEP_TRIVIAL_LABEL = "dependency-trivial";
 export const DEP_FUNCTIONAL_LABEL = "dependency-functional";
 export const REQUIRES_HUMAN_LABEL = "requires-human";
+
+/**
+ * MAJOR-bump impact tiers (issue #252, 05-impact.md §5.4). Additive: the two
+ * labels above keep their meaning, because both are load-bearing for discovery
+ * — `dependency-functional` + `requires-human` still means "high impact, a
+ * human decides", so nothing about the escalated case changed.
+ *
+ * These say what the trivial/functional pair cannot: WHY a major was safe to
+ * land, or why it was not. Exactly one is ever applied at a time; the merge
+ * prompt clears the other two in the same idempotent pass.
+ *
+ * The hex colours are part of the contract — `github_ensure_labels` creates a
+ * missing label with them, so a rename here without the same edit in
+ * `workflows/prompts/dependabot-pr-merge.md` produces two label vocabularies on
+ * the same repo. `tests/cron/label-vocab.test.ts` pins names and colours
+ * against that prompt.
+ */
+/** Green, matching `dependency-trivial` — a major that reads as trivial. */
+export const DEP_MAJOR_LOW_LABEL = "dependency-major-low";
+export const DEP_MAJOR_LOW_COLOR = "0e8a16";
+/** Amber, matching `dependency-functional` — landed, but worth a glance. */
+export const DEP_MAJOR_MEDIUM_LABEL = "dependency-major-medium";
+export const DEP_MAJOR_MEDIUM_COLOR = "fbca04";
+/** Red, matching `requires-human` — never auto-merged. */
+export const DEP_MAJOR_HIGH_LABEL = "dependency-major-high";
+export const DEP_MAJOR_HIGH_COLOR = "b60205";
 
 /** The subset of the harness GitHub client this module needs — keeps it fake-able. */
 export interface PrDiscoveryClient {
@@ -81,6 +110,7 @@ export interface PrDiscoveryClient {
     owner: string,
     repo: string,
     ref: string,
+    opts?: { excludeApp?: string },
   ): Promise<"passing" | "failing" | "pending" | "none">;
 }
 
@@ -147,6 +177,29 @@ export interface DiscoverOptions {
   /** Injectable sleep for the re-poll backoff (default real `setTimeout`); tests
    *  pass a no-op so the poll loop runs without real delay. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * `dependencies.requireSettledChecks` — when on, the GREEN sweep additionally
+   * requires the head SHA's checks to be settled-`passing`, not just
+   * `mergeable_state: "clean"`.
+   *
+   * `clean` alone is not proof: on a repo with **no required status checks** a
+   * PR whose checks are FAILING still reports mergeable — the exact hazard the
+   * merge prompt documents ("a direct merge would land a RED PR — this has
+   * happened"), and the reason the cron's notion of green and the webhook's
+   * settle logic must not be allowed to diverge. Costs one extra API call per
+   * green candidate, which is why it is config-gated rather than unconditional.
+   */
+  requireSettledChecks?: boolean;
+  /**
+   * Our own App slug (`botName`), excluded from every check aggregate here.
+   *
+   * Both sweeps are TRIGGER-side settle computations, so the uniform rule of
+   * 07 §7.2 applies: a `last-light/review` check that is queued or in progress
+   * on the head SHA would otherwise report the suite `pending` and strand the
+   * PR on both sweeps — the green one because `pending` is not `passing`, the
+   * red one because it is not `failing` either.
+   */
+  botName?: string;
 }
 
 const DEFAULT_MAX_PER_REPO = 25;
@@ -183,11 +236,15 @@ interface Candidate {
 }
 
 /**
- * List + filter one repo's open dependency-PR candidates: is-dependency,
- * non-draft, NOT carrying the `requires-human` label, oldest-first, capped at
- * `maxPerRepo`. Per-repo listing failures are logged and yield `[]`, never
- * fatal, so one inaccessible repo doesn't sink the sweep. Shared by both the
- * green and red sweeps.
+ * List one repo's open dependency-PR candidates: is-dependency, non-draft,
+ * oldest-first, capped at `maxPerRepo`. Per-repo listing failures are logged
+ * and yield `[]`, never fatal, so one inaccessible repo doesn't sink the sweep.
+ * Shared by both the green and red sweeps.
+ *
+ * No `requires-human` filter: that is a POLICY question, and it is now answered
+ * once at dispatch off the snapshot's `escalatedBy` / `escalatedAtSha` — which
+ * is what lets a maintainer's push re-arm a PR we escalated, instead of the
+ * label being a permanent one-way door with no code path that removes it.
  */
 async function listDependencyCandidates(
   full: string,
@@ -211,8 +268,6 @@ async function listDependencyCandidates(
 
   return open
     .filter(isDependencyPr)
-    // Don't re-attempt what we already flagged as needing a human.
-    .filter((p) => !p.labels.includes(REQUIRES_HUMAN_LABEL))
     .sort((a, b) => a.number - b.number) // oldest first (the sweep's fairness order)
     .slice(0, maxPerRepo)
     .map((p) => ({
@@ -264,8 +319,10 @@ async function resolveMergeableState(
 
 /**
  * Find every green (`mergeable_state: "clean"`) dependency PR across `repos`
- * (`owner/repo` full names), EXCLUDING any carrying the `requires-human` label.
- * A cold `unknown` read is re-polled (`resolveMergeableState`) before giving up,
+ * (`owner/repo` full names). No `requires-human` filter — that is a POLICY
+ * question, answered once at the dispatch gate off the PR-state snapshot (see
+ * the module header), which is what lets a maintainer's push re-arm a PR we
+ * gave up on. A cold `unknown` read is re-polled (`resolveMergeableState`) before giving up,
  * so a genuinely-mergeable-but-uncomputed PR isn't stranded for want of a second
  * read (issue #204). Per-repo failures are logged and skipped, never fatal.
  */
@@ -289,9 +346,33 @@ export async function discoverGreenDependencyPrs(
       // Only genuinely-green PRs. `unstable`/`blocked`/`behind`/`dirty` (and a PR
       // still `unknown` after the re-poll) are left for the real-time webhook or
       // the next tick once they go clean.
-      if (state === "clean") {
-        out.push({ repo: c.full, prNumber: c.number, title: c.title });
+      if (state !== "clean") continue;
+
+      // `clean` is GitHub's mergeability verdict, not a CI verdict — on a repo
+      // with no *required* checks a red PR is still "clean". Ask the checks
+      // directly so the cron's green means the same thing the webhook's does.
+      if (opts.requireSettledChecks) {
+        let conclusion: Awaited<ReturnType<PrDiscoveryClient["getChecksConclusion"]>>;
+        try {
+          conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef, {
+          excludeApp: opts.botName,
+        });
+        } catch (err) {
+          // Fail CLOSED here, uniquely: every other read in this module fails
+          // open because a dropped candidate costs one tick, whereas a
+          // wrongly-green candidate costs a merged red PR.
+          opts.log?.(`[dependabot-discovery] ${c.full}#${c.number}: checks read failed — ${String(err)}`);
+          continue;
+        }
+        if (conclusion !== "passing") {
+          opts.log?.(
+            `[dependabot-discovery] ${c.full}#${c.number}: mergeable_state=clean but checks are ${conclusion} — not green`,
+          );
+          continue;
+        }
       }
+
+      out.push({ repo: c.full, prNumber: c.number, title: c.title });
     }
   }
 
@@ -300,8 +381,10 @@ export async function discoverGreenDependencyPrs(
 
 /**
  * Find every RED dependency PR across `repos` (`owner/repo` full names) that
- * `dependabot-ci-fix` can act on, EXCLUDING any carrying the `requires-human`
- * label. A PR qualifies when its checks are settled-FAILING, OR its
+ * `dependabot-ci-fix` can act on. No `requires-human` filter — see
+ * `discoverGreenDependencyPrs` and the module header: whether we may act on an
+ * escalated PR is decided at the dispatch gate, not here.
+ * A PR qualifies when its checks are settled-FAILING, OR its
  * `mergeable_state` is `behind` / `dirty` / `blocked` (a merge it can't make on
  * its own but ci-fix can push toward — see `MERGE_BLOCKED_STATES`). Failing CI
  * takes precedence in the reported `reason` (there's a concrete build to fix).
@@ -324,7 +407,9 @@ export async function discoverRedDependencyPrs(
       try {
         // Query the exact commit we listed (headSha) so a mid-sweep push can't
         // make us read a newer commit's checks; fall back to the ref if absent.
-        conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef);
+        conclusion = await gh.getChecksConclusion(c.owner, c.repo, c.headSha || c.headRef, {
+          excludeApp: opts.botName,
+        });
         // A settled-failing build is reason enough (and makes the mergeable
         // signal moot), so skip the potentially-slow `unknown` re-poll for it;
         // otherwise warm the read so a cold `unknown` that's really behind/dirty/

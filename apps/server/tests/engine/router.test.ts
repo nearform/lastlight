@@ -61,6 +61,9 @@ beforeEach(() => {
   // the fallback was NOT consulted.
   mockGetWorkflowByIntent.mockReset();
   mockGetWorkflowByIntent.mockReturnValue(undefined);
+  // The check-outcome routes assert the classifier is NOT consulted (09 → D5),
+  // so their call history must start clean.
+  mockClassifyComment.mockClear();
   setRuntimeConfig({
     managedRepos: ['cliftonc/drizzle-cube', 'cliftonc/drizby', 'cliftonc/lastlight'],
   } as unknown as LastLightConfig);
@@ -151,9 +154,144 @@ describe('routeEvent — PR events', () => {
   });
 });
 
+describe('routeEvent — the Phase 7 review signals', () => {
+  it('routes pr.checks_settled to pr-review — the after-checks trigger', async () => {
+    // Deliberately NOT config-aware: the router's job is
+    // `event → { workflow, context }`, and a deferred review is still routed to
+    // pr-review, it just runs later. The mode is enforced once, at the gate.
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.checks_settled', prNumber: 5, headSha: 'sha-1' }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-review');
+      expect(result.context._routeKey).toBe('github.pr_checks_settled');
+      expect(result.context.headSha).toBe('sha-1');
+    }
+    expect(mockClassifyComment).not.toHaveBeenCalled();
+  });
+
+  it('routes the configured request label to pr-review', async () => {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      review: { postsCheck: false, trigger: 'on-request', requestLabel: 'lastlight:review', skipDraft: true },
+    } as unknown as LastLightConfig);
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'lastlight:review' }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.handler).toBe('pr-review');
+  });
+
+  it('IGNORES every other label — routine labelling must not cost a PrState resolve', async () => {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      review: { postsCheck: false, trigger: 'on-request', requestLabel: 'lastlight:review', skipDraft: true },
+    } as unknown as LastLightConfig);
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'bug' }),
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it('ignores a label event when no requestLabel is configured at all', async () => {
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'lastlight:review' }),
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it("routes a REPO's own request label, even when the operator sets none", async () => {
+    // The shipped operator default is `null`, so reading only the operator's
+    // value dropped every `pr.labeled` event right here — before any repo layer
+    // was resolved — and made a key documented as repo-settable on both doc
+    // surfaces do nothing (#256).
+    const resolveRepoPolicy = vi.fn().mockResolvedValue({
+      review: { requestLabel: 'please-review' },
+    });
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'please-review' }),
+      { resolveRepoPolicy },
+    );
+
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.handler).toBe('pr-review');
+    expect(resolveRepoPolicy).toHaveBeenCalledWith(
+      'pr-review',
+      expect.objectContaining({ repo: 'cliftonc/drizzle-cube', prNumber: 5 }),
+    );
+  });
+
+  it("honours the operator's label AND the repo's — a repo may add, never remove", async () => {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      review: { postsCheck: false, trigger: 'on-request', requestLabel: 'lastlight:review', skipDraft: true },
+    } as unknown as LastLightConfig);
+    const resolveRepoPolicy = vi.fn().mockResolvedValue({
+      review: { requestLabel: 'please-review' },
+    });
+
+    for (const label of ['lastlight:review', 'please-review']) {
+      const result = await routeEvent(
+        makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: label }),
+        { resolveRepoPolicy },
+      );
+      expect(result.action).toBe('handler');
+    }
+  });
+
+  it('still ignores every OTHER label once the repo layer is in play', async () => {
+    const resolveRepoPolicy = vi.fn().mockResolvedValue({
+      review: { requestLabel: 'please-review' },
+    });
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'bug' }),
+      { resolveRepoPolicy },
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it("falls back to the operator's label when the repo layer cannot be read", async () => {
+    // Best-effort everywhere else it is read; a router that throws because
+    // GitHub had a bad minute drops the event entirely.
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      review: { postsCheck: false, trigger: 'on-request', requestLabel: 'lastlight:review', skipDraft: true },
+    } as unknown as LastLightConfig);
+    const resolveRepoPolicy = vi.fn().mockRejectedValue(new Error('502 Bad Gateway'));
+
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'lastlight:review' }),
+      { resolveRepoPolicy },
+    );
+
+    expect(result.action).toBe('handler');
+  });
+
+  it('routes a review requested from US to pr-review', async () => {
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.review_requested', prNumber: 5, requestedReviewer: 'last-light[bot]' }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-review');
+      expect(result.context._routeKey).toBe('github.pr_review_requested');
+    }
+  });
+
+  it('ignores a review requested from somebody else', async () => {
+    // 07 §7.1's caveat: App bot users are not selectable in the reviewer
+    // picker, so `on-request` must not DEPEND on this route — but answering
+    // another human's review request would be worse than not handling it.
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.review_requested', prNumber: 5, requestedReviewer: 'alice' }),
+    );
+    expect(result.action).toBe('ignore');
+  });
+});
+
 describe('routeEvent — pr.checks_failed', () => {
-  it('routes to the workflow that claims the classified intent', async () => {
-    mockClassifyComment.mockResolvedValueOnce({ intent: 'dependabot-ci-fix' } as any);
+  it('routes a dependency PR to dependabot-ci-fix without a classifier call', async () => {
     mockGetWorkflowByIntent.mockReturnValue({ name: 'dependabot-ci-fix' } as any);
     const result = await routeEvent(
       makeEnvelope({
@@ -161,6 +299,7 @@ describe('routeEvent — pr.checks_failed', () => {
         prNumber: 681,
         title: 'Bump lodash from 4.17.20 to 4.17.21',
         issueAuthor: 'dependabot[bot]',
+        isDependencyPr: true,
       }),
     );
     expect(result.action).toBe('handler');
@@ -169,14 +308,37 @@ describe('routeEvent — pr.checks_failed', () => {
       expect(result.context.prNumber).toBe(681);
       expect(result.context.author).toBe('dependabot[bot]');
     }
+    // 09 → D5: the connector already knows; re-guessing it costs an LLM call
+    // and lands every red PR on the dependency workflow.
+    expect(mockClassifyComment).not.toHaveBeenCalled();
   });
 
-  it('ignores the event when no workflow claims the intent', async () => {
-    mockClassifyComment.mockResolvedValueOnce({ intent: 'review' } as any);
-    // getWorkflowByIntent stays undefined (well-known intents are excluded by
-    // fallbackWorkflowForIntent anyway).
+  it('routes a non-dependency red PR to pr-fix, never to the dependency workflow', async () => {
+    // The broadened emit (§3.4) delivers a human's PR here whenever WE pushed
+    // its head commit. `pr-fix.yaml` has no `classification:` block, so the old
+    // classifier route could never select it — every such PR ran a
+    // dependency-bump prompt instead.
+    mockGetWorkflowByIntent.mockReturnValue({ name: 'dependabot-ci-fix' } as any);
     const result = await routeEvent(
-      makeEnvelope({ type: 'pr.checks_failed', prNumber: 5, title: 'Some PR' }),
+      makeEnvelope({
+        type: 'pr.checks_failed',
+        prNumber: 5,
+        title: 'Add feature',
+        issueAuthor: 'octocat',
+        isDependencyPr: false,
+      }),
+    );
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-fix');
+    }
+    expect(mockClassifyComment).not.toHaveBeenCalled();
+  });
+
+  it('ignores a dependency PR when no workflow claims the dependabot-ci-fix intent', async () => {
+    mockGetWorkflowByIntent.mockReturnValue(undefined);
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.checks_failed', prNumber: 5, title: 'Some PR', isDependencyPr: true }),
     );
     expect(result.action).toBe('ignore');
   });
@@ -367,7 +529,11 @@ describe('routeEvent — comment.created', () => {
         '@last-light can you look at this?',
         expect.objectContaining({ prAuthor: 'dependabot[bot]', checksState: 'failing' }),
       );
-      expect(getChecksConclusion).toHaveBeenCalledWith('cliftonc', 'drizzle-cube', 'headsha');
+      expect(getChecksConclusion).toHaveBeenCalledWith('cliftonc', 'drizzle-cube', 'headsha', {
+        // Our own in-progress `last-light/review` check must not make the PR
+        // read `pending` and route the comment to neither branch (07 §7.2).
+        excludeApp: 'last-light',
+      });
       expect(result.action).toBe('handler');
       if (result.action === 'handler') {
         expect(result.handler).toBe('dependabot-ci-fix');

@@ -1,7 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { EventEnvelope } from '#src/connectors/types.js';
+import { setRuntimeConfig, resetRuntimeConfigForTests } from '#src/config/config.js';
+import {
+  defaultFixConfig,
+  defaultDependenciesConfig,
+  defaultReviewConfig,
+} from 'lastlight-shared/config-types';
 import type { Route } from '#src/engine/router.js';
-import { dispatch, type DispatchDeps } from '#src/engine/dispatcher.js';
+import type { PrState } from '#src/engine/pr-state.js';
+import {
+  dispatch,
+  applyPrDispatchGate,
+  prPolicyConfig,
+  type DispatchDeps,
+} from '#src/engine/dispatcher.js';
 
 /** Minimal EventEnvelope for dispatcher tests. */
 function makeEnvelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {
@@ -34,12 +46,22 @@ function mockDb(over: Record<string, any> = {}) {
     recordStart: vi.fn(),
     recordFinish: vi.fn(),
     getExecutionOutput: vi.fn(),
+    // execution-store — the PR state machine's derived half
+    costForTriggerWorkflows: vi.fn().mockReturnValue(0),
+    phaseSucceededInRun: vi.fn().mockReturnValue(true),
     // workflow-run-store
     getRun: vi.fn(),
     latestSucceededForTrigger: vi.fn().mockReturnValue(null),
     resolveGateAndResume: vi.fn(),
     resolveGateAndFail: vi.fn(),
     resolveReplyGateAndResume: vi.fn(),
+    // workflow-run-store — the PR state machine's derived half
+    latestForTrigger: vi.fn().mockReturnValue(null),
+    activeForTrigger: vi.fn().mockReturnValue(null),
+    latestSucceededForTriggers: vi.fn().mockReturnValue({}),
+    // workflow-run-store — the escalation record a terminal skip writes
+    createRun: vi.fn(),
+    finishRun: vi.fn(),
     // approval-store
     respond: vi.fn(),
     getPendingByTrigger: vi.fn(),
@@ -53,6 +75,8 @@ function mockDb(over: Record<string, any> = {}) {
       recordStart: m.recordStart,
       recordFinish: m.recordFinish,
       getExecutionOutput: m.getExecutionOutput,
+      costForTriggerWorkflows: m.costForTriggerWorkflows,
+      phaseSucceededInRun: m.phaseSucceededInRun,
     },
     runs: {
       getRun: m.getRun,
@@ -60,6 +84,11 @@ function mockDb(over: Record<string, any> = {}) {
       resolveGateAndResume: m.resolveGateAndResume,
       resolveGateAndFail: m.resolveGateAndFail,
       resolveReplyGateAndResume: m.resolveReplyGateAndResume,
+      latestForTrigger: m.latestForTrigger,
+      activeForTrigger: m.activeForTrigger,
+      latestSucceededForTriggers: m.latestSucceededForTriggers,
+      createRun: m.createRun,
+      finishRun: m.finishRun,
     },
     approvals: {
       respond: m.respond,
@@ -67,6 +96,54 @@ function mockDb(over: Record<string, any> = {}) {
       getPendingForWorkflow: m.getPendingForWorkflow,
     },
   };
+}
+
+/**
+ * A GitHub stub shaped for `resolvePrState` — one PR read plus the four
+ * head-SHA reads it fans out. Defaults describe an ordinary same-repo PR with
+ * a red build, which is the case every fix-path test starts from.
+ */
+function prGithubStub(
+  pr: {
+    headRef?: string;
+    headSha?: string;
+    baseRef?: string;
+    labels?: string[];
+    headRepo?: string | null;
+    draft?: boolean;
+    checksState?: 'passing' | 'failing' | 'pending' | 'none';
+    baseChecksState?: 'passing' | 'failing' | 'pending' | 'none';
+    headAuthor?: string;
+    botReview?: { state: string } | null;
+  } = {},
+  over: Record<string, any> = {},
+) {
+  return {
+    getPullRequest: vi.fn().mockResolvedValue({
+      title: 'PR',
+      body: 'b',
+      draft: pr.draft ?? false,
+      labels: (pr.labels ?? []).map((name) => ({ name })),
+      head: {
+        ref: pr.headRef ?? 'fix-branch',
+        sha: pr.headSha ?? 'sha-current',
+        repo: pr.headRepo === undefined ? { full_name: 'cliftonc/lastlight' } : pr.headRepo && { full_name: pr.headRepo },
+      },
+      base: { ref: pr.baseRef ?? 'main', repo: { full_name: 'cliftonc/lastlight' } },
+    }),
+    getChecksSummary: vi.fn().mockResolvedValue({
+      state: pr.checksState ?? 'failing',
+      settledCount: 2,
+      pendingCount: 0,
+    }),
+    getBaseChecksState: vi.fn().mockResolvedValue(pr.baseChecksState ?? 'passing'),
+    getLatestBotReview: vi.fn().mockResolvedValue(pr.botReview ?? null),
+    getCommitAuthorName: vi.fn().mockResolvedValue(pr.headAuthor ?? 'octocat'),
+    getCiFailureReport: vi.fn().mockResolvedValue({ jobs: [], logsAvailable: false }),
+    postComment: vi.fn().mockResolvedValue(1),
+    addLabels: vi.fn().mockResolvedValue(undefined),
+    ...over,
+  } as any;
 }
 
 /**
@@ -82,7 +159,6 @@ function makeDeps(route: Route, overrides: Partial<DispatchDeps> = {}): Dispatch
     sessionManager: {} as any,
     runChat: vi.fn(),
     route: vi.fn().mockResolvedValue(route),
-    reviewPostsCheck: false,
     ...overrides,
   };
 }
@@ -541,56 +617,44 @@ describe('dispatch — pr-fix dispatch', () => {
     context: { _routeKey: 'github.pr_fix', repo: 'cliftonc/lastlight', prNumber: 5, sender: 'octocat', commentBody: 'fix it', ...ctx },
   });
 
-  it('resolves the PR branch + CI failures and dispatches pr-fix', async () => {
+  it('hands the resolved snapshot down instead of re-reading the PR', async () => {
     const envelope = makeEnvelope({ type: 'comment.created', prNumber: 5 });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
-    const github = {
-      getPullRequest: vi.fn().mockResolvedValue({
-        title: 'PR',
-        body: 'b',
-        head: { ref: 'fix-branch', sha: 'abc', repo: { full_name: 'cliftonc/lastlight' } },
-        base: { repo: { full_name: 'cliftonc/lastlight' } },
-      }),
-      getFailedChecks: vi.fn().mockResolvedValue('test-suite failed'),
-    };
-    const deps = makeDeps(prFixRoute(), {
-      db: mockDb() as any,
-      github: github as any,
-      dispatchWorkflow,
-    });
+    const github = prGithubStub({ headRef: 'fix-branch', headSha: 'abc', baseRef: 'release/2.x' });
+    const deps = makeDeps(prFixRoute(), { db: mockDb() as any, github, dispatchWorkflow });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(outcome).toEqual({ kind: 'dispatched', workflow: 'pr-fix' });
-    expect(dispatchWorkflow).toHaveBeenCalledWith(
-      'pr-fix',
-      expect.objectContaining({ prNumber: 5, branch: 'fix-branch', failedChecks: 'test-suite failed', _triggerType: 'webhook' }),
-    );
+    // ONE PR read for the whole dispatch — `handlePrFix` used to issue a
+    // second one of its own.
+    expect(github.getPullRequest).toHaveBeenCalledTimes(1);
+    const ctx = dispatchWorkflow.mock.calls[0][1];
+    expect(ctx.prNumber).toBe(5);
+    expect(ctx._triggerType).toBe('webhook');
+    // The enrichment itself is `renderContext`'s job at `dispatchWorkflow`;
+    // what this seam owes it is the snapshot.
+    expect(ctx._prState).toMatchObject({
+      repo: 'cliftonc/lastlight',
+      prNumber: 5,
+      headRef: 'fix-branch',
+      headSha: 'abc',
+      baseRef: 'release/2.x',
+      checksState: 'failing',
+    });
   });
 
-  it('does not dispatch a fork PR — bails fast and posts a notice', async () => {
+  it('does not dispatch a fork PR — bails before any sandbox and posts a notice', async () => {
     const envelope = makeEnvelope({ type: 'comment.created', prNumber: 5 });
     const dispatchWorkflow = vi.fn();
-    const github = {
-      getPullRequest: vi.fn().mockResolvedValue({
-        title: 'PR',
-        body: 'b',
-        head: { ref: 'their-branch', sha: 'abc', repo: { full_name: 'octocat/lastlight' } },
-        base: { repo: { full_name: 'cliftonc/lastlight' } },
-      }),
-      getFailedChecks: vi.fn().mockResolvedValue(''),
-      postComment: vi.fn().mockResolvedValue(1),
-    };
-    const deps = makeDeps(prFixRoute(), {
-      db: mockDb() as any,
-      github: github as any,
-      dispatchWorkflow,
-    });
+    const github = prGithubStub({ headRef: 'their-branch', headRepo: 'octocat/lastlight' });
+    const deps = makeDeps(prFixRoute(), { db: mockDb() as any, github, dispatchWorkflow });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(dispatchWorkflow).not.toHaveBeenCalled();
-    expect(outcome.kind).toBe('ignored');
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toContain('fork-pr');
     expect(github.postComment).toHaveBeenCalledWith(
       'cliftonc',
       'lastlight',
@@ -602,42 +666,549 @@ describe('dispatch — pr-fix dispatch', () => {
   it('treats a deleted-fork PR (null head.repo) as a fork and bails', async () => {
     const envelope = makeEnvelope({ type: 'comment.created', prNumber: 5 });
     const dispatchWorkflow = vi.fn();
-    const github = {
-      getPullRequest: vi.fn().mockResolvedValue({
-        title: 'PR',
-        body: 'b',
-        head: { ref: 'gone', sha: 'abc', repo: null },
-        base: { repo: { full_name: 'cliftonc/lastlight' } },
-      }),
-      getFailedChecks: vi.fn().mockResolvedValue(''),
-      postComment: vi.fn().mockResolvedValue(1),
-    };
-    const deps = makeDeps(prFixRoute(), {
-      db: mockDb() as any,
-      github: github as any,
-      dispatchWorkflow,
-    });
+    const github = prGithubStub({ headRef: 'gone', headRepo: null });
+    const deps = makeDeps(prFixRoute(), { db: mockDb() as any, github, dispatchWorkflow });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(dispatchWorkflow).not.toHaveBeenCalled();
-    expect(outcome.kind).toBe('ignored');
+    expect(outcome.kind).toBe('skipped');
     expect(github.postComment).toHaveBeenCalled();
   });
 
   it('does not dispatch when the branch cannot be resolved', async () => {
     const envelope = makeEnvelope({ type: 'comment.created', prNumber: 5 });
     const dispatchWorkflow = vi.fn();
-    const deps = makeDeps(prFixRoute(), {
-      db: mockDb() as any,
-      github: null,
-      dispatchWorkflow,
-    });
+    const deps = makeDeps(prFixRoute(), { db: mockDb() as any, github: null, dispatchWorkflow });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(dispatchWorkflow).not.toHaveBeenCalled();
     expect(outcome.kind).toBe('ignored');
+  });
+
+  it('refuses to act on a PR it could not read, and says which read failed', async () => {
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 5 });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    // `getPullRequest` is the one read whose degraded values are all the
+    // PERMISSIVE ones — `labels: []`, `isFork: false`, `headSha: ''` — so a 502
+    // yields a snapshot that LOOKS healthy and every guard below it evaluates
+    // defaults rather than facts (#256). Every other read still fails open; see
+    // the next case.
+    const github = prGithubStub({}, {
+      getPullRequest: vi.fn().mockRejectedValue(new Error('502 from GitHub')),
+    });
+    const deps = makeDeps(prFixRoute(), { db: mockDb() as any, github, dispatchWorkflow });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toContain('read-degraded');
+    expect((outcome as any).reason).toContain('502 from GitHub');
+  });
+
+  it('makes that refusal transient — no label, no comment, no run row', async () => {
+    // A "come back later", exactly like a run-lock drop: the cron re-pickup is
+    // what makes dropping sound, and every side effect here would be a durable
+    // statement written against a pull request we could not read.
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 5 });
+    const db = mockDb();
+    const github = prGithubStub({}, {
+      getPullRequest: vi.fn().mockRejectedValue(new Error('403 from GitHub')),
+    });
+    const deps = makeDeps(prFixRoute(), { db: db as any, github });
+
+    await dispatch(envelope, deps);
+
+    expect(github.addLabels).not.toHaveBeenCalled();
+    expect(github.postComment).not.toHaveBeenCalled();
+    expect(db.runs.createRun).not.toHaveBeenCalled();
+  });
+
+  it('still fails open on a checks read error — no skip on incomplete data', async () => {
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 5 });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub({}, {
+      getChecksSummary: vi.fn().mockRejectedValue(new Error('boom')),
+      // A base we could not read must never read as `upstream-broken`.
+      getBaseChecksState: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+    const deps = makeDeps(prFixRoute(), { db: mockDb() as any, github, dispatchWorkflow });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome).toEqual({ kind: 'dispatched', workflow: 'pr-fix' });
+    const state = dispatchWorkflow.mock.calls[0][1]._prState;
+    expect(state.readErrors).toHaveLength(2);
+    expect(state.baseChecksState).toBe('none');
+  });
+});
+
+describe('dispatch — the PR-scoped run lock', () => {
+  const fixRoute = (): Route => ({
+    action: 'handler',
+    handler: 'dependabot-ci-fix',
+    context: { repo: 'cliftonc/lastlight', prNumber: 190 },
+  });
+
+  it('drops a second PR-scoped run while another workflow holds the PR', async () => {
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 190 });
+    const db = mockDb({
+      activeForTrigger: vi.fn().mockReturnValue({ id: 'run-4821', workflowName: 'pr-fix' }),
+    });
+    const deps = makeDeps(fixRoute(), { db: db as any, github: prGithubStub() });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    // The reason is now produced by the DECISION (`runLockDrop`) rather than
+    // written out a second time here, so the dispatcher's log line, the admin
+    // panel and this outcome are three renderings of one string.
+    expect((outcome as any).reason).toContain('run-in-flight: pr-fix run-4821');
+    expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
+    // The lock spans EVERY PR-scoped workflow, keyed on `owner/repo#N`.
+    expect(db.runs.activeForTrigger).toHaveBeenCalledWith(
+      expect.arrayContaining(['pr-fix', 'dependabot-ci-fix', 'dependabot-pr-merge', 'pr-review']),
+      'cliftonc/lastlight#190',
+    );
+  });
+
+  it('does NOT escalate the PR it dropped — a lock loss is a "come back later"', async () => {
+    // Ordering regression: the lock must be checked BEFORE the escalating
+    // skips, or a PR whose budget the in-flight run is still spending gets
+    // labelled `requires-human` for it.
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 190 });
+    const db = mockDb({
+      activeForTrigger: vi.fn().mockReturnValue({ id: 'run-4821', workflowName: 'pr-fix' }),
+      costForTriggerWorkflows: vi.fn().mockReturnValue(99),
+    });
+    const github = prGithubStub();
+    const deps = makeDeps(fixRoute(), { db: db as any, github });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toContain('run-in-flight');
+    // No label, no comment, no escalation run row.
+    expect(github.addLabels).not.toHaveBeenCalled();
+    expect(github.postComment).not.toHaveBeenCalled();
+    expect(db.runs.createRun).not.toHaveBeenCalled();
+  });
+
+  it('drops the MERGE route too — auto-merge against a PR whose fix run is in flight', async () => {
+    // 09 → S4 names this sequence verbatim: the fix pushes, CI goes green while
+    // the run is still writing its comment and marker, `pr.checks_passed` fires,
+    // and `dependabot-pr-merge` enables auto-merge on a tree still being
+    // rewritten. `resolveMergeDisposition` never read the lock.
+    const envelope = makeEnvelope({ type: 'pr.checks_passed', prNumber: 190 });
+    const db = mockDb({
+      activeForTrigger: vi.fn().mockReturnValue({ id: 'run-99', workflowName: 'dependabot-ci-fix' }),
+    });
+    const deps = makeDeps(
+      {
+        action: 'handler',
+        handler: 'dependabot-pr-merge',
+        context: { repo: 'cliftonc/lastlight', prNumber: 190 },
+      },
+      { db: db as any, github: prGithubStub({ checksState: 'passing' }) },
+    );
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toContain('run-in-flight: dependabot-ci-fix run-99');
+    expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('does not override the lock for an explicit @bot request — it replies instead', async () => {
+    // The lock is not policy but a physical constraint (one workspace, one
+    // branch, one agent), so `explicitRequest` — which DOES override the label
+    // guard, the mode, the draft filter and the per-SHA dedup — cannot buy past
+    // it. `resolveReviewTrigger` used to answer `dispatch` here; only the
+    // dispatcher's own inline guard stopped it, and that guard is gone.
+    const envelope = makeEnvelope({ type: 'comment.created', prNumber: 190, body: '@last-light review' });
+    const db = mockDb({
+      activeForTrigger: vi.fn().mockReturnValue({ id: 'run-7', workflowName: 'pr-fix' }),
+    });
+    const deps = makeDeps(
+      {
+        action: 'handler',
+        handler: 'pr-review',
+        context: { repo: 'cliftonc/lastlight', prNumber: 190 },
+      },
+      { db: db as any, github: prGithubStub() },
+    );
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/already working on this PR/i));
+  });
+
+  it('replies to a dropped human request — a maintainer silently dropped just asks again', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created', prNumber: 190 });
+    const db = mockDb({
+      activeForTrigger: vi.fn().mockReturnValue({ id: 'run-4821', workflowName: 'dependabot-ci-fix' }),
+    });
+    const deps = makeDeps(fixRoute(), { db: db as any, github: prGithubStub() });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringMatching(/already working on this PR/i));
+  });
+
+  it('leaves the legacy already-running guard in place for non-PR-scoped workflows', async () => {
+    const envelope = makeEnvelope({ type: 'comment.created', issueNumber: 7 });
+    const isRunning = vi.fn().mockReturnValue(true);
+    const db = mockDb({ isRunning });
+    const deps = makeDeps(
+      { action: 'handler', handler: 'issue-triage', context: { repo: 'cliftonc/lastlight', issueNumber: 7 } },
+      { db: db as any, github: prGithubStub() },
+    );
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect(isRunning).toHaveBeenCalledWith('issue-triage', '7');
+    expect(db.runs.activeForTrigger).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The CRON / `/api/run` half of the gate.
+ *
+ * `dispatchWorkflow` (src/index.ts) is a closure inside `main()` and cannot be
+ * reached from a test — which is exactly why the cron route's dispatch gate had
+ * no coverage at all, and exactly where two of the defects fixed here hid: the
+ * run lock was read by the dispatcher and by `resolveReviewTrigger`, neither of
+ * which the cron fan-out crosses. The gate is now ONE exported function that
+ * both routes call, so this is the cron route's dispatch gate under test, not a
+ * re-implementation of it.
+ */
+describe('dispatch — the webhook route reads the repo-clamped policy', () => {
+  // The gate existed twice and read different config: the dispatcher called
+  // `getRuntimeConfig()` (operator-only, because it runs BEFORE
+  // `resolveRepoRunConfig`), while `dispatchWorkflow` used `repoConfig?.fix ??
+  // config.fix`. And `dispatchWorkflow` only gates `if (!prState)` — the webhook
+  // route always hands `_prState` down — so on EVERY webhook-originated PR
+  // dispatch a managed repo's clamps were silently not applied, while
+  // `renderContext` rendered them into the prompt and `lastlight repo config
+  // show` reported them.
+  afterEach(() => resetRuntimeConfigForTests());
+
+  const fixRoute = (): Route => ({
+    action: 'handler',
+    handler: 'dependabot-ci-fix',
+    context: { repo: 'cliftonc/lastlight', prNumber: 190 },
+  });
+
+  /** A PR on its second attempt: runs under the operator's 3, exhausted under a repo's 1. */
+  function secondAttemptDb() {
+    return mockDb({
+      latestForTrigger: vi.fn().mockReturnValue({
+        id: 'run-1',
+        workflowName: 'dependabot-ci-fix',
+        status: 'succeeded',
+        context: { prState: { headSha: 'sha-current', attempt: 1 } },
+        scratch: {},
+      }),
+    });
+  }
+
+  it('applies a repo-clamped fix.maxAttempts that the operator config would have allowed', async () => {
+    setRuntimeConfig({
+      botName: 'last-light',
+      botLogin: 'last-light[bot]',
+      fix: defaultFixConfig(), // maxAttempts: 3
+      dependencies: defaultDependenciesConfig(),
+      review: defaultReviewConfig(),
+    } as any);
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 190 });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub();
+    const resolveRepoPolicy = vi.fn().mockResolvedValue({
+      fix: { ...defaultFixConfig(), maxAttempts: 1 },
+    });
+    const deps = makeDeps(fixRoute(), {
+      db: secondAttemptDb() as any,
+      github,
+      dispatchWorkflow,
+      resolveRepoPolicy,
+    });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(resolveRepoPolicy).toHaveBeenCalledWith(
+      'dependabot-ci-fix',
+      expect.objectContaining({ repo: 'cliftonc/lastlight', prNumber: 190 }),
+    );
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toMatch(/attempts-exhausted: attempt 2 exceeds fix\.maxAttempts 1/);
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('runs the same PR when no repo layer applies — the clamp is the only difference', async () => {
+    setRuntimeConfig({
+      botName: 'last-light',
+      botLogin: 'last-light[bot]',
+      fix: defaultFixConfig(),
+      dependencies: defaultDependenciesConfig(),
+      review: defaultReviewConfig(),
+    } as any);
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 190 });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const deps = makeDeps(fixRoute(), {
+      db: secondAttemptDb() as any,
+      github: prGithubStub(),
+      dispatchWorkflow,
+      resolveRepoPolicy: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect((await dispatch(envelope, deps)).kind).toBe('dispatched');
+    expect(dispatchWorkflow).toHaveBeenCalled();
+  });
+
+  it('applies a repo-clamped review.trigger on the webhook route', async () => {
+    // `review.trigger` is unclamped (free), so a repo may legitimately differ
+    // from the operator in EITHER direction — which is what made this seam
+    // observable: the sweep honoured the repo's value and the webhook did not.
+    setRuntimeConfig({
+      botName: 'last-light',
+      botLogin: 'last-light[bot]',
+      fix: defaultFixConfig(),
+      dependencies: defaultDependenciesConfig(),
+      review: { ...defaultReviewConfig(), trigger: 'eager' },
+    } as any);
+    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub({ checksState: 'passing' }, { createCheckRun: vi.fn().mockResolvedValue(1) });
+    const deps = makeDeps(
+      {
+        action: 'handler',
+        handler: 'pr-review',
+        context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 },
+      },
+      {
+        db: mockDb() as any,
+        github,
+        dispatchWorkflow,
+        resolveRepoPolicy: vi.fn().mockResolvedValue({
+          review: { ...defaultReviewConfig(), trigger: 'on-request', postsCheck: true },
+        }),
+      },
+    );
+
+    const outcome = await dispatch(envelope, deps);
+
+    // Under the operator's `eager` this would have dispatched.
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toMatch(/^pr-review: on-request:/);
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    // And the placeholder is the repo's mode's, not the operator's.
+    expect(github.createCheckRun).toHaveBeenCalledWith(
+      'cliftonc',
+      'lastlight',
+      'sha-current',
+      'last-light/review',
+      expect.objectContaining({ conclusion: 'neutral' }),
+    );
+  });
+});
+
+describe('applyPrDispatchGate — the cron / api route crosses the same gate', () => {
+  afterEach(() => resetRuntimeConfigForTests());
+
+  function prState(over: Partial<PrState> = {}): PrState {
+    return {
+      repo: 'cliftonc/lastlight',
+      prNumber: 190,
+      headSha: 'abcdef1234567890',
+      headAuthor: 'dependabot[bot]',
+      headIsOurs: false,
+      headRef: 'dependabot/npm/lodash-4.17.21',
+      baseRef: 'main',
+      isDraft: false,
+      isFork: false,
+      headRepoFullName: 'cliftonc/lastlight',
+      labels: [],
+      title: 'Bump lodash',
+      body: '',
+      checksState: 'failing',
+      settledCheckCount: 3,
+      baseChecksState: 'passing',
+      botReviewAtHead: null,
+      ciReport: null,
+      attempt: 1,
+      flakyDeferrals: 0,
+      escalatedAtSha: null,
+      escalatedBy: null,
+    forkNoticedAtSha: null,
+      priorAttempts: [],
+      notes: [],
+      priorDiagnosisClass: null,
+      cumulativeCostUsd: 0,
+    costBaselineUsd: 0,
+      assessedHeadShaByWorkflow: {},
+      runInFlight: null,
+      readErrors: [],
+      ...over,
+    } as PrState;
+  }
+
+  const policy = () => ({
+    fix: defaultFixConfig(),
+    dependencies: defaultDependenciesConfig(),
+    review: defaultReviewConfig(),
+  });
+
+  it('blocks the daily red sweep from dispatching onto a PR with a live fix run', async () => {
+    // `fix-red-dependency-prs` fans out straight to `dispatchWorkflow`, which
+    // never read `runInFlight` — so this dispatched `dependabot-ci-fix` into the
+    // same shared `${repo}-${prNumber}-fix` workspace a `pr-fix` agent was
+    // working in.
+    const db = mockDb();
+    const github = prGithubStub();
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'dependabot-ci-fix',
+        state: prState({ runInFlight: { workflow: 'pr-fix', runId: 'run-4821' } }),
+        policy: policy(),
+        route: 'attention',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(d.decision).toBe('skip');
+    expect(d.runInFlight).toEqual({ workflow: 'pr-fix', runId: 'run-4821' });
+    // Dropped, not escalated: no label, no comment, no escalation run row.
+    expect(github.addLabels).not.toHaveBeenCalled();
+    expect(github.postComment).not.toHaveBeenCalled();
+    expect(db.runs.createRun).not.toHaveBeenCalled();
+  });
+
+  it('blocks the daily green sweep from merging a PR with a live fix run', async () => {
+    const db = mockDb();
+    const github = prGithubStub({ checksState: 'passing' });
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'dependabot-pr-merge',
+        state: prState({
+          checksState: 'passing',
+          runInFlight: { workflow: 'dependabot-ci-fix', runId: 'run-99' },
+        }),
+        policy: policy(),
+        route: 'attention',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(d.decision).toBe('skip');
+    expect(d.reason).toMatch(/^run-in-flight: dependabot-ci-fix run-99/);
+  });
+
+  it('still escalates a genuinely terminal skip on this route — the crons reach most exhausted PRs', async () => {
+    const db = mockDb();
+    const github = prGithubStub();
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'dependabot-ci-fix',
+        state: prState({ attempt: 9 }),
+        policy: policy(),
+        route: 'attention',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(d.escalation).toBe('attempts-exhausted');
+    // The run row is the load-bearing part: without it `escalatedAtSha` never
+    // persists and the next dispatch reads our own label as a human's hold.
+    expect(db.runs.createRun).toHaveBeenCalled();
+    expect(github.addLabels).toHaveBeenCalled();
+  });
+
+  it('honours a repo-clamped fix.maxAttempts — the same policy object the prompt renders', async () => {
+    const db = mockDb();
+    const github = prGithubStub();
+    // A repo that clamped itself to one attempt. `attempt: 2` runs under the
+    // operator's default of 3 and is exhausted under the repo's 1.
+    const clamped = { ...policy(), fix: { ...defaultFixConfig(), maxAttempts: 1 } };
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'dependabot-ci-fix',
+        state: prState({ attempt: 2 }),
+        policy: clamped,
+        route: 'attention',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(d.decision).toBe('skip');
+    expect(d.reason).toMatch(/attempts-exhausted: attempt 2 exceeds fix\.maxAttempts 1/);
+    expect(
+      (
+        await applyPrDispatchGate(
+          {
+            workflowName: 'dependabot-ci-fix',
+            state: prState({ attempt: 2 }),
+            policy: policy(),
+            route: 'attention',
+            logPrefix: '[dispatch]',
+          },
+          { db: mockDb() as any, github: prGithubStub() },
+        )
+      ).decision,
+    ).toBe('run');
+  });
+
+  it('reviews a never-settling PR on the sweep route — the release mechanism it claims to be', async () => {
+    const db = mockDb();
+    const github = prGithubStub({ checksState: 'pending' });
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'pr-review',
+        state: prState({ checksState: 'pending' }),
+        policy: { ...policy(), review: { ...defaultReviewConfig(), trigger: 'after-checks' } },
+        route: 'sweep',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(d.decision).toBe('run');
+    expect(d.review).toBe('dispatch');
+  });
+});
+
+describe('prPolicyConfig — one config for both gates', () => {
+  afterEach(() => resetRuntimeConfigForTests());
+
+  it('prefers the repo layer over the operator config, leaf by leaf', () => {
+    setRuntimeConfig({
+      botName: 'last-light',
+      botLogin: 'last-light[bot]',
+      fix: { ...defaultFixConfig(), maxAttempts: 3 },
+      dependencies: defaultDependenciesConfig(),
+      review: { ...defaultReviewConfig(), trigger: 'eager' },
+    } as any);
+
+    expect(prPolicyConfig().fix.maxAttempts).toBe(3);
+    expect(prPolicyConfig().review.trigger).toBe('eager');
+
+    const layer = {
+      fix: { ...defaultFixConfig(), maxAttempts: 1 },
+      review: { ...defaultReviewConfig(), trigger: 'on-request' as const },
+    };
+    expect(prPolicyConfig(layer).fix.maxAttempts).toBe(1);
+    expect(prPolicyConfig(layer).review.trigger).toBe('on-request');
+    // A leaf the layer does not carry still comes from the operator.
+    expect(prPolicyConfig(layer).dependencies).toEqual(defaultDependenciesConfig());
   });
 });
 
@@ -663,94 +1234,190 @@ describe('dispatch — generic messaging dispatch', () => {
   });
 });
 
-describe('dispatch — webhook dispatch', () => {
-  it('dispatches the workflow with a webhook trigger and no review check by default', async () => {
-    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
+describe('dispatch — the pr-review trigger gate (Phase 7)', () => {
+  // `review.trigger` used to be enforceable in four places, only one of which
+  // was config-aware. It is now ONE pure function over the PR snapshot, called
+  // from the single dispatch choke point — so these cases are the webhook
+  // route's half of a contract the cron and comment routes share by
+  // construction (09 → S2).
+  afterEach(() => resetRuntimeConfigForTests());
+
+  function withReview(over: Partial<ReturnType<typeof defaultReviewConfig>> = {}) {
+    setRuntimeConfig({
+      botName: 'last-light',
+      botLogin: 'last-light[bot]',
+      fix: defaultFixConfig(),
+      dependencies: defaultDependenciesConfig(),
+      review: { ...defaultReviewConfig(), ...over },
+    } as any);
+  }
+
+  function reviewDeps(github: any, dispatchWorkflow: any, envType = 'pr.opened') {
+    return {
+      envelope: makeEnvelope({ type: envType as any, repo: 'cliftonc/lastlight', prNumber: 8 }),
+      deps: makeDeps(
+        {
+          action: 'handler',
+          handler: 'pr-review',
+          context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 },
+        },
+        { db: mockDb() as any, github, dispatchWorkflow },
+      ),
+    };
+  }
+
+  it('eager reviews on PR attention, in parallel with CI', async () => {
+    withReview({ trigger: 'eager' });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
-    const github = { createCheckRun: vi.fn() };
-    const deps = makeDeps(
-      { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: false },
+    const github = prGithubStub({ checksState: 'pending' });
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
+
+    expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
+    expect(dispatchWorkflow).toHaveBeenCalledWith(
+      'pr-review',
+      expect.objectContaining({ _triggerType: 'webhook' }),
     );
+    // The dispatcher no longer owns the check at all — creation moved to the
+    // one choke point every route crosses (09 → S2).
+    expect(github.createCheckRun).toBeUndefined();
+  });
+
+  it('after-checks defers on PR attention and posts a `queued` check', async () => {
+    withReview({ trigger: 'after-checks', postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub(
+      { checksState: 'pending' },
+      { createCheckRun: vi.fn().mockResolvedValue(4242) },
+    );
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
 
     const outcome = await dispatch(envelope, deps);
+    expect(outcome.kind).toBe('skipped');
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.createCheckRun).toHaveBeenCalledWith(
+      'cliftonc',
+      'lastlight',
+      'sha-current',
+      'last-light/review',
+      expect.objectContaining({ status: 'queued' }),
+    );
+  });
 
-    expect(outcome).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
-    expect(dispatchWorkflow).toHaveBeenCalledWith('pr-review', expect.objectContaining({ _triggerType: 'webhook' }), expect.any(Function));
+  it('on-request skips and posts a `neutral` check whose Re-run is the affordance', async () => {
+    withReview({ trigger: 'on-request', postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub({}, { createCheckRun: vi.fn().mockResolvedValue(4242) });
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
+
+    expect((await dispatch(envelope, deps)).kind).toBe('skipped');
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.createCheckRun).toHaveBeenCalledWith(
+      'cliftonc',
+      'lastlight',
+      'sha-current',
+      'last-light/review',
+      expect.objectContaining({ status: 'completed', conclusion: 'neutral' }),
+    );
+  });
+
+  it('a settled check suite is what after-checks actually fires on', async () => {
+    withReview({ trigger: 'after-checks' });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub({ checksState: 'failing' });
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow, 'pr.checks_settled');
+
+    expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
+  });
+
+  it('skips a DRAFT PR on the webhook path — which had no draft check at all before', async () => {
+    withReview({ trigger: 'eager', skipDraft: true, postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub(
+      { draft: true, checksState: 'passing' },
+      { createCheckRun: vi.fn() },
+    );
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
+
+    const outcome = await dispatch(envelope, deps);
+    expect(outcome).toEqual({
+      kind: 'skipped',
+      reason: 'pr-review: draft: review.skipDraft is on',
+    });
+    // A run that never dispatches creates NO check, rather than creating one and
+    // immediately concluding it (09 → S2).
     expect(github.createCheckRun).not.toHaveBeenCalled();
   });
 
-  it('posts an in-progress review check when reviewPostsCheck is enabled', async () => {
-    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
-    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
-    const github = {
-      getPullRequestHeadSha: vi.fn().mockResolvedValue('headsha'),
-      createCheckRun: vi.fn().mockResolvedValue(4242),
-      updateCheckRun: vi.fn().mockResolvedValue(undefined),
-      getLatestBotReview: vi.fn().mockResolvedValue({ state: 'APPROVED', body: 'lgtm' }),
-    };
-    const deps = makeDeps(
-      { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: true },
+  it('skips a head we already reviewed — one API call, not a sandbox run', async () => {
+    withReview({ trigger: 'eager', postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub(
+      { botReview: { state: 'APPROVED' } },
+      { createCheckRun: vi.fn() },
     );
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow);
 
     const outcome = await dispatch(envelope, deps);
-
-    expect(outcome).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
-    expect(github.createCheckRun).toHaveBeenCalledWith(
-      'cliftonc', 'lastlight', 'headsha', 'last-light/review', expect.anything(),
-    );
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as { reason: string }).reason).toMatch(/already-reviewed/);
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.createCheckRun).not.toHaveBeenCalled();
   });
 
-  it('links the review check to the run dashboard URL once the run starts', async () => {
-    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
-    // dispatchWorkflow fires onRunStart with the new run id, like the real runner.
-    const dispatchWorkflow = vi.fn().mockImplementation(async (_wf, _ctx, onRunStart?: (id: string) => Promise<void>) => {
-      if (onRunStart) await onRunStart('run-abc123');
-      return { success: true };
+  it('an explicit @bot review always dispatches — overriding mode, draft AND dedup', async () => {
+    withReview({ trigger: 'on-request', skipDraft: true });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub({ draft: true, botReview: { state: 'APPROVED' } });
+    const envelope = makeEnvelope({
+      type: 'comment.created',
+      repo: 'cliftonc/lastlight',
+      prNumber: 8,
+      body: '@last-light review',
     });
-    const github = {
-      getPullRequestHeadSha: vi.fn().mockResolvedValue('headsha'),
-      createCheckRun: vi.fn().mockResolvedValue(4242),
-      updateCheckRun: vi.fn().mockResolvedValue(undefined),
-      getLatestBotReview: vi.fn().mockResolvedValue({ state: 'APPROVED', body: 'lgtm' }),
-    };
     const deps = makeDeps(
-      { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: true, publicUrl: 'https://dash.example' },
+      {
+        action: 'handler',
+        handler: 'pr-review',
+        context: { _routeKey: 'github.pr_review', repo: 'cliftonc/lastlight', prNumber: 8 },
+      },
+      { db: mockDb() as any, github, dispatchWorkflow },
     );
 
-    await dispatch(envelope, deps);
-
-    expect(github.updateCheckRun).toHaveBeenCalledWith(
-      'cliftonc', 'lastlight', 4242,
-      expect.objectContaining({ detailsUrl: 'https://dash.example/admin/?run=run-abc123&tab=runs&wf=pr-review' }),
-    );
+    expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
   });
 
-  it('skips the details link when no public URL is configured', async () => {
-    const envelope = makeEnvelope({ type: 'pr.opened', repo: 'cliftonc/lastlight', prNumber: 8 });
-    const dispatchWorkflow = vi.fn().mockImplementation(async (_wf, _ctx, onRunStart?: (id: string) => Promise<void>) => {
-      if (onRunStart) await onRunStart('run-abc123');
-      return { success: true };
+  it('a review requested from us by name is an explicit request too', async () => {
+    withReview({ trigger: 'on-request' });
+    const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
+    const github = prGithubStub();
+    const envelope = makeEnvelope({
+      type: 'pr.review_requested',
+      repo: 'cliftonc/lastlight',
+      prNumber: 8,
+      requestedReviewer: 'last-light[bot]',
     });
-    const github = {
-      getPullRequestHeadSha: vi.fn().mockResolvedValue('headsha'),
-      createCheckRun: vi.fn().mockResolvedValue(4242),
-      updateCheckRun: vi.fn().mockResolvedValue(undefined),
-      getLatestBotReview: vi.fn().mockResolvedValue({ state: 'APPROVED', body: 'lgtm' }),
-    };
     const deps = makeDeps(
-      { action: 'handler', handler: 'pr-review', context: { _routeKey: 'github.pr_opened', repo: 'cliftonc/lastlight', prNumber: 8 } },
-      { db: mockDb() as any, github: github as any, dispatchWorkflow, reviewPostsCheck: true }, // no publicUrl
+      {
+        action: 'handler',
+        handler: 'pr-review',
+        context: { _routeKey: 'github.pr_review_requested', repo: 'cliftonc/lastlight', prNumber: 8 },
+      },
+      { db: mockDb() as any, github, dispatchWorkflow },
     );
 
-    await dispatch(envelope, deps);
+    expect(await dispatch(envelope, deps)).toEqual({ kind: 'dispatched', workflow: 'pr-review' });
+  });
 
-    // No updateCheckRun call carries a detailsUrl (completion call omits it too).
-    for (const call of github.updateCheckRun.mock.calls) {
-      expect(call[3]).not.toHaveProperty('detailsUrl');
-    }
+  it('does not post a placeholder on the 30-minute sweep route — that would be one check per tick', async () => {
+    withReview({ trigger: 'on-request', postsCheck: true });
+    const dispatchWorkflow = vi.fn();
+    const github = prGithubStub({}, { createCheckRun: vi.fn() });
+    // A sweep dispatch never crosses `dispatch()`; the closest webhook analogue
+    // is a settle event, which is also not PR attention.
+    const { envelope, deps } = reviewDeps(github, dispatchWorkflow, 'pr.checks_settled');
+
+    expect((await dispatch(envelope, deps)).kind).toBe('skipped');
+    expect(github.createCheckRun).not.toHaveBeenCalled();
   });
 });
 
@@ -776,56 +1443,135 @@ describe('dispatch — passthrough decisions', () => {
   });
 });
 
-describe('dispatch — dependency-PR dedup guard', () => {
+describe('dispatch — escalating a terminal skip', () => {
+  const fixRoute = (): Route => ({
+    action: 'handler',
+    handler: 'dependabot-ci-fix',
+    context: { repo: 'cliftonc/lastlight', prNumber: 190 },
+  });
+
+  /** A prior fix run that took the PR to its last allowed attempt. */
+  const exhausted = () =>
+    mockDb({
+      latestForTrigger: vi.fn().mockReturnValue({
+        id: 'r1',
+        context: { prState: { attempt: 3, headSha: 'sha-current' } },
+      }),
+    });
+
+  it('labels, comments and RECORDS the skip — silence is what this replaces', async () => {
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 190 });
+    const github = prGithubStub({ headSha: 'sha-current' });
+    const db = exhausted();
+    const deps = makeDeps(fixRoute(), { github, db: db as any });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toContain('attempts-exhausted');
+    expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.addLabels).toHaveBeenCalledWith('cliftonc', 'lastlight', 190, ['requires-human']);
+    expect(github.postComment).toHaveBeenCalledTimes(1);
+    // The row is the load-bearing part: without it `escalatedAtSha` never
+    // persists, and the next dispatch reads our own label as a human's
+    // permanent hold (09 → D1).
+    expect(db.runs.createRun).toHaveBeenCalledTimes(1);
+    const row = (db.runs.createRun as any).mock.calls[0][0];
+    expect(row.workflowName).toBe('dependabot-ci-fix');
+    expect(row.triggerId).toBe('cliftonc/lastlight#190');
+    expect(row.context.prState.escalatedAtSha).toBe('sha-current');
+    // `succeeded`, not `failed` — 09 → S1 reserves `failed` for malfunction.
+    expect(db.runs.finishRun).toHaveBeenCalledWith(row.id, 'succeeded', expect.anything());
+  });
+
+  it('applies nothing on a non-escalating skip', async () => {
+    // A red base is not this PR's fault and self-heals — labelling it would
+    // poison `requires-human` with a condition that resolves itself.
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 190 });
+    const github = prGithubStub({ headSha: 'sha-current', baseChecksState: 'failing' });
+    const db = exhausted();
+    const deps = makeDeps(fixRoute(), { github, db: db as any });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect((outcome as any).reason).toContain('upstream-broken');
+    expect(github.addLabels).not.toHaveBeenCalled();
+    expect(github.postComment).not.toHaveBeenCalled();
+    expect(db.runs.createRun).not.toHaveBeenCalled();
+  });
+});
+
+describe('dispatch — the dependency-merge disposition', () => {
   const checksRoute = (ctx: Record<string, unknown> = {}): Route => ({
     action: 'handler',
     handler: 'dependabot-pr-merge',
     context: { repo: 'cliftonc/lastlight', prNumber: 190, ...ctx },
   });
 
-  /** A GitHub stub whose getPullRequest returns the given labels + head SHA. */
-  function githubStub(pr: { labels?: string[]; headSha?: string }) {
-    return {
-      getPullRequest: vi.fn().mockResolvedValue({
-        labels: (pr.labels ?? []).map((name) => ({ name })),
-        head: { sha: pr.headSha ?? 'sha-current' },
-      }),
-    } as any;
-  }
-
-  it('skips (no sandbox) when the PR carries requires-human', async () => {
+  it('skips (no sandbox) when a human applied requires-human', async () => {
     const envelope = makeEnvelope({ type: 'pr.checks_passed', prNumber: 190 });
-    const github = githubStub({ labels: ['requires-human'], headSha: 'sha-current' });
+    // No escalating run of OURS to match → a maintainer applied the label to
+    // mean "bot, stay out". A hard, permanent override.
+    const github = prGithubStub({ labels: ['requires-human'], checksState: 'passing' });
     const deps = makeDeps(checksRoute(), { github });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(outcome.kind).toBe('skipped');
-    expect((outcome as any).reason).toContain('requires-human');
+    expect((outcome as any).reason).toContain('human-hold');
     expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
   });
 
-  it('skips when the current head SHA was already assessed', async () => {
+  it('skips when this workflow already assessed the current head SHA', async () => {
     const envelope = makeEnvelope({ type: 'pr.checks_passed', prNumber: 190 });
-    const github = githubStub({ headSha: 'sha-current' });
+    const github = prGithubStub({ headSha: 'sha-current', checksState: 'passing' });
     const db = mockDb({
-      latestSucceededForTrigger: vi.fn().mockReturnValue({ context: { headSha: 'sha-current' } }),
+      latestSucceededForTriggers: vi.fn().mockReturnValue({
+        'dependabot-pr-merge': { id: 'r1', context: { prState: { headSha: 'sha-current' } } },
+      }),
     });
     const deps = makeDeps(checksRoute(), { github, db: db as any });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(outcome.kind).toBe('skipped');
-    expect((outcome as any).reason).toContain('already assessed');
+    expect((outcome as any).reason).toContain('already-assessed');
+  });
+
+  it('honours a pre-snapshot run row that persisted only a bare headSha', async () => {
+    // The upgrade path: rows written before `context.prState` existed carried
+    // `context.headSha` alone. Ignoring them would re-assess every open PR once.
+    const envelope = makeEnvelope({ type: 'pr.checks_passed', prNumber: 190 });
+    const github = prGithubStub({ headSha: 'sha-current', checksState: 'passing' });
+    const db = mockDb({
+      latestSucceededForTriggers: vi.fn().mockReturnValue({
+        'dependabot-pr-merge': { id: 'r1', context: { headSha: 'sha-current' } },
+      }),
+    });
+    const deps = makeDeps(checksRoute(), { github, db: db as any });
+
+    expect((await dispatch(envelope, deps)).kind).toBe('skipped');
+  });
+
+  it('skips while CI is still running — the cheapest possible wait', async () => {
+    const envelope = makeEnvelope({ type: 'pr.checks_passed', prNumber: 190 });
+    const github = prGithubStub({ checksState: 'pending' });
+    const deps = makeDeps(checksRoute(), { github });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toContain('checks-pending');
     expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
   });
 
-  it('runs once for a genuinely new head SHA (no requires-human)', async () => {
+  it('runs once for a genuinely new head SHA', async () => {
     const envelope = makeEnvelope({ type: 'pr.checks_passed', prNumber: 190 });
-    const github = githubStub({ headSha: 'sha-new' });
+    const github = prGithubStub({ headSha: 'sha-new', checksState: 'passing' });
     const db = mockDb({
-      // last assessed a DIFFERENT (older) SHA → a new push should run
-      latestSucceededForTrigger: vi.fn().mockReturnValue({ context: { headSha: 'sha-old' } }),
+      latestSucceededForTriggers: vi.fn().mockReturnValue({
+        'dependabot-pr-merge': { id: 'r1', context: { prState: { headSha: 'sha-old' } } },
+      }),
     });
     const deps = makeDeps(checksRoute(), { github, db: db as any });
 
@@ -835,16 +1581,14 @@ describe('dispatch — dependency-PR dedup guard', () => {
     expect(deps.dispatchWorkflow).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT gate a human @bot comment request (only the automated webhook path)', async () => {
-    // Same handler, but a comment.created trigger is an explicit human override.
+  it('does NOT gate a human @bot comment request — an explicit ask is an override', async () => {
     const envelope = makeEnvelope({ type: 'comment.created', prNumber: 190 });
-    const github = githubStub({ labels: ['requires-human'], headSha: 'sha-current' });
+    const github = prGithubStub({ labels: ['requires-human'], checksState: 'passing' });
     const deps = makeDeps(checksRoute(), { github });
 
     const outcome = await dispatch(envelope, deps);
 
     expect(outcome.kind).toBe('dispatched');
-    expect(github.getPullRequest).not.toHaveBeenCalled();
     expect(deps.dispatchWorkflow).toHaveBeenCalledTimes(1);
   });
 });

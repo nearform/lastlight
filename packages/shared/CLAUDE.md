@@ -17,7 +17,17 @@ providers.ts          The provider + OAuth registry — the canonical list of
                       unlocks which provider". Imported by core's runtime + the CLI.
 oauth.ts              Shared OAuth token helpers (store shape, refresh/persist)
                       for the subscription-login providers.
-config-types.ts       Shared config TypeScript types (the overlay/runtime config shape).
+config-types.ts       Shared config TypeScript types (the overlay/runtime config
+                      shape), plus the `fix:` / `dependencies:` / `review:`
+                      policy blocks (issues #251/#252) and their shipped
+                      defaults (defaultFixConfig / defaultDependenciesConfig /
+                      defaultReviewConfig). Those three are here for a sharper
+                      reason than the rest: they are REPO-SETTABLE, so
+                      repo-config-schema.ts below — compiled into the CLI as
+                      well as core — has to know their shape and their defaults
+                      to clamp against. Core's normaliser and the repo-layer
+                      clamps therefore agree by construction, not by two
+                      hand-maintained copies.
 repo-config-schema.ts The PURE half of the per-repository `.lastlight/` config
                       layer (issue #180): the operator bounds (RepoConfigPolicy,
                       DEFAULT_REPO_CONFIG_ALLOW_KEYS, the 200-file / 2 MiB caps),
@@ -26,6 +36,22 @@ repo-config-schema.ts The PURE half of the per-repository `.lastlight/` config
                       (parseRepoConfigYaml, sanitizeRepoConfigLayer), the merge
                       (mergeLayer, resolveRepoConfig) and the RepoConfigWarning
                       vocabulary. No fs, no network, no runtime config.
+                      One rule governs every validator in here: a repo may only
+                      ever be MORE conservative than the operator. `approval` is
+                      the original add-only case; `fix` / `dependencies` /
+                      `review` generalise it — a loosening leaf is DROPPED with
+                      a `policy-downgrade` warning, and dropping is the clamp
+                      (the base carries the operator's value, so the dropped
+                      leaf resolves to exactly it). Leaves that even a one-way
+                      clamp would get wrong are operator-only and answer
+                      `key-not-allowed`: fix.escalateModelAfterAttempt (spend),
+                      fix.gateTimeoutSeconds (shared resource),
+                      dependencies.minSettledChecks (a max() clamp would weld
+                      the escape hatch shut for a repo with no CI).
+                      `shapeMerged` is TOTAL over the three blocks — a base
+                      built before they existed, or the CLI's empty offline
+                      base, still yields a complete policy leaf-by-leaf, so no
+                      consumer carries its own "if undefined then".
                       It lives HERE because both consumers need identical
                       answers and only shared is reachable by both: core at
                       runtime (`apps/server/src/config/repo-config.ts` owns the

@@ -147,12 +147,27 @@ export interface RepoConfigPolicy {
   allowAssets: boolean;
 }
 
-/** The effective, repo-specific values for the keys a repo is allowed to touch. */
+/**
+ * The effective, repo-specific values for the keys a repo is allowed to touch.
+ *
+ * Hand-mirrored from `RepoMergedConfig` in `packages/shared/src/
+ * repo-config-schema.ts` — the dashboard has no import edge to core. The three
+ * policy blocks below were missing from this copy while the endpoint was
+ * already returning them with provenance, so the per-repo Config tab silently
+ * hid the budgets a repo had actually set (#256). Keep the two in step: a leaf
+ * absent HERE is a leaf that does not exist as far as an operator can see.
+ */
 export interface RepoMergedConfig {
   models: Record<string, string>;
   variants: Record<string, string>;
   disabled: Record<string, string[]>;
   approval: Record<string, boolean>;
+  /** Retry/escalation budgets for the fix family (issue #251). */
+  fix: Record<string, unknown>;
+  /** Major-bump auto-merge policy (issue #252). */
+  dependencies: Record<string, unknown>;
+  /** Review trigger policy. */
+  review: Record<string, unknown>;
 }
 
 /** Provenance mirror of {@link RepoMergedConfig} — each leaf tagged with its winning layer. */
@@ -161,6 +176,9 @@ export interface RepoConfigSources {
   variants: Record<string, ConfigSource>;
   disabled: Record<string, ConfigSource>;
   approval: Record<string, ConfigSource>;
+  fix: Record<string, ConfigSource>;
+  dependencies: Record<string, ConfigSource>;
+  review: Record<string, ConfigSource>;
 }
 
 /** Response of `GET /repos/:owner/:repo/config`. */
@@ -195,6 +213,13 @@ export interface WorkflowRun {
   phaseHistory: PhaseHistoryEntry[];
   status: "queued" | "running" | "paused" | "succeeded" | "failed" | "cancelled";
   context?: Record<string, unknown>;
+  /**
+   * The run's mutable phase-to-phase state. Present on the single-run detail
+   * fetch only (the list query omits the heavy JSON blobs). Carries the fix
+   * harvest under `fixMarkers` — the attempt markers, the PR journal, and the
+   * push gate the agent wrote for itself — which `PrStatePanel` renders.
+   */
+  scratch?: Record<string, unknown>;
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;

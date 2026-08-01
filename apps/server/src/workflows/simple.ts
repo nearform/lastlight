@@ -4,10 +4,16 @@ import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
 import type { DisabledConfig } from "lastlight-shared/config-types";
 import {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
   getBotName,
   getRuntimeConfig,
+  type DependenciesConfig,
+  type FixConfig,
   type ModelConfig,
   type RepoConfigPolicy,
+  type ReviewConfig,
   type VariantConfig,
 } from "../config/config.js";
 import type { ConfigSource } from "../config/config-resolve.js";
@@ -26,6 +32,10 @@ import {
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
 import { artifactStore } from "../sandbox/artifact-store.js";
 import { getWorkflow } from "./loader.js";
+import {
+  phaseSkipIfExpressions,
+  type AgentWorkflowDefinition,
+} from "lastlight-workflow-engine";
 import {
   runWorkflow,
   type ApprovalGateConfig,
@@ -90,6 +100,14 @@ export interface RunRepoConfig {
   approval: Record<string, boolean>;
   /** Effective disables. `workflows` is enforced at dispatch (see below). */
   disabled: DisabledConfig;
+  /**
+   * Effective fix/dependency/review policy (issues #251, #252). Clamped at
+   * resolve time so these are never looser than the operator's own values —
+   * a consumer can read them directly without re-checking the bounds.
+   */
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
+  review: ReviewConfig;
   /** Per-leaf provenance — which layer won each key (`default`/`overlay`/`env`/`repo`). */
   sources: RepoConfigSources;
   /** Everything the layer dropped, fetching + validating. Never thrown. */
@@ -223,6 +241,9 @@ export async function resolveRepoRunConfig(
       variants: resolved.merged.variants,
       approval: resolved.merged.approval,
       disabled: resolved.merged.disabled,
+      fix: resolved.merged.fix,
+      dependencies: resolved.merged.dependencies,
+      review: resolved.merged.review,
       sources: resolved.sources,
       warnings: resolved.warnings,
     },
@@ -248,6 +269,14 @@ export interface RepoConfigRunRecord {
     variants?: Record<string, string>;
     approval?: Record<string, boolean>;
     disabled?: Partial<Record<keyof DisabledConfig, string[]>>;
+    /**
+     * The clamped leaves the repo won in `fix:` / `dependencies:` / `review:`.
+     * Loosely typed on purpose: this is a persisted JSON projection, and the
+     * restore path re-applies it over whatever the operator's block says today.
+     */
+    fix?: Record<string, unknown>;
+    dependencies?: Record<string, unknown>;
+    review?: Record<string, unknown>;
   };
   assets: string[];
   warnings: RepoConfigWarning[];
@@ -281,6 +310,9 @@ export function repoConfigRunRecord(cfg: RunRepoConfig): RepoConfigRunRecord {
       variants: wonBy(cfg.variants, cfg.sources.variants),
       approval: wonBy(cfg.approval, cfg.sources.approval),
       disabled: Object.keys(disabled).length > 0 ? disabled : undefined,
+      fix: wonBy(cfg.fix as unknown as Record<string, unknown>, cfg.sources.fix),
+      dependencies: wonBy(cfg.dependencies as unknown as Record<string, unknown>, cfg.sources.dependencies),
+      review: wonBy(cfg.review as unknown as Record<string, unknown>, cfg.sources.review),
     },
     assets: cfg.assets,
     warnings: cfg.warnings,
@@ -309,6 +341,15 @@ export interface RestoreRepoRunConfigOptions {
   variants?: VariantConfig;
   approval?: Record<string, boolean>;
   disabled?: DisabledConfig;
+  /**
+   * Operator policy blocks to re-apply the repo's clamped leaves onto. Default:
+   * the boot config's own blocks (the shipped defaults when config isn't
+   * loaded), which is what every production caller wants — unlike models and
+   * variants, these are not persisted on the run row in effective form.
+   */
+  fix?: FixConfig;
+  dependencies?: DependenciesConfig;
+  review?: ReviewConfig;
   /** Layer lookup seam (tests). Defaults to the cache, then one conditional refetch. */
   resolveLayer?: (repo: string) => Promise<RepoLayer | undefined>;
 }
@@ -320,6 +361,21 @@ const EMPTY_DISABLED: DisabledConfig = {
   skills: [],
   agentContext: [],
 };
+
+/**
+ * The operator's `fix:` / `dependencies:` / `review:` blocks from boot config,
+ * or the shipped defaults when config isn't loaded (unit tests, pre-boot paths).
+ * Mirrors `repoConfigPolicy()`'s "never throw, always answer" contract.
+ */
+function operatorFix(): FixConfig {
+  return getRuntimeConfig()?.fix ?? defaultFixConfig();
+}
+function operatorDependencies(): DependenciesConfig {
+  return getRuntimeConfig()?.dependencies ?? defaultDependenciesConfig();
+}
+function operatorReview(): ReviewConfig {
+  return getRuntimeConfig()?.review ?? defaultReviewConfig();
+}
 
 /**
  * The unpacked `.lastlight/` tree for `repo` **at the exact tree sha a run
@@ -395,6 +451,16 @@ export async function restoreRepoRunConfig(
     ...(options.disabled ?? {}),
     ...(applied.disabled ?? {}),
   };
+  // Same reasoning as `approval` above: the repo's leaves are already CLAMPED
+  // (only ever more conservative), so re-applying them over the operator's
+  // current block reproduces the original effective policy — and a budget the
+  // operator has since tightened still binds the resumed run.
+  const fix: FixConfig = { ...(options.fix ?? operatorFix()), ...(applied.fix ?? {}) };
+  const dependencies: DependenciesConfig = {
+    ...(options.dependencies ?? operatorDependencies()),
+    ...(applied.dependencies ?? {}),
+  };
+  const review: ReviewConfig = { ...(options.review ?? operatorReview()), ...(applied.review ?? {}) };
 
   const sourcesOf = (values: Record<string, unknown>, won?: Record<string, unknown>): Record<string, ConfigSource> => {
     const out: Record<string, ConfigSource> = {};
@@ -442,11 +508,17 @@ export async function restoreRepoRunConfig(
       variants,
       approval,
       disabled,
+      fix,
+      dependencies,
+      review,
       sources: {
         models: sourcesOf(models, applied.models),
         variants: sourcesOf(variants, applied.variants),
         disabled: disabledSources,
         approval: sourcesOf(approval, applied.approval),
+        fix: sourcesOf(fix as unknown as Record<string, unknown>, applied.fix),
+        dependencies: sourcesOf(dependencies as unknown as Record<string, unknown>, applied.dependencies),
+        review: sourcesOf(review as unknown as Record<string, unknown>, applied.review),
       },
       // The original fetch/merge warnings, plus this restore's own if it dropped
       // the asset layer — so a resumed run explains itself as fully as the first.
@@ -535,6 +607,17 @@ export function workflowScopedTaskId(
   workflowName: string,
   workflowId: string,
 ): string {
+  // The fix FAMILY shares one workspace per PR (09-state-machine.md → S4).
+  // The PR-scoped run lock means only one of `pr-fix` / `dependabot-ci-fix`
+  // can be in flight for a PR at a time, so two directories were pure waste —
+  // and routing genuinely varies (an `@bot fix this` comment on a red
+  // Dependabot PR is an LLM decision that can land on either workflow), so
+  // attempt 2 would otherwise re-clone and re-install from cold just because
+  // the event arrived differently. `dependabot-pr-merge` keeps its own key
+  // below: it has no checkout to share.
+  if (number !== undefined && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
+    return `${repo}-${number}-fix`;
+  }
   // Reusable / recreatable per-target workspaces are keyed by (repo, issue)
   // only — no run suffix — so a re-run lands on the same dir (reused for
   // pr-review/pr-fix, recreated-from-base for build; see the two sets above).
@@ -669,6 +752,137 @@ export function artifactIssueDir(
   return relocate ? `../.lastlight/${issueKey}` : `.lastlight/${issueKey}`;
 }
 
+// ---------------------------------------------------------------------------
+// Per-attempt fix policy (issue #251 — 04-retry.md §4.4, 09-state-machine.md §S1)
+// ---------------------------------------------------------------------------
+//
+// Both knobs below read `attempt` / `flakyDeferrals` — facts about the PR that
+// `renderContext` puts on `request.extra` at the dispatch choke point. Absent
+// (every non-PR route, and every route that predates the snapshot) they are
+// inert, so nothing outside the fix family can observe them.
+
+/**
+ * Read a numeric leaf off the untyped dispatch `extra`. Anything else — absent,
+ * a string, a stale shape — reads as "no snapshot", which is the inert case.
+ */
+function numberFromExtra(
+  extra: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const v = extra?.[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** The `models` key both fix workflows' `fix` phase renders. */
+const FIX_MODEL_KEY = "pr-fix";
+/** The optional escalation model. Unset ⇒ today's behaviour, exactly. */
+const FIX_RETRY_MODEL_KEY = "pr-fix-retry";
+
+/**
+ * Substitute `models["pr-fix-retry"]` for `models["pr-fix"]` once this PR has
+ * spent more than `fix.escalateModelAfterAttempt` attempts.
+ *
+ * `resolveModelVariant` renders `model:` templates against `run.ctx` **only**,
+ * so `{{attempt}}` inside a `model:` template cannot work without an engine
+ * change. Rewriting the map here is the cheapest correct route: no engine
+ * change, no YAML change, and it composes with the per-repo `models` override
+ * (issue #180) for free because the map handed in is already the merged
+ * `base ⊕ repo` one.
+ *
+ * Done BEFORE the map is persisted on `context.models`, deliberately: the admin
+ * panel renders that map, so an operator can see which model an attempt actually
+ * used — and `resume.ts` reads a resumed run's models back off that same stored
+ * value rather than re-deriving one, so a restart mid-attempt does not silently
+ * demote the model. (A repo layer that pins its own `pr-fix` re-applies that
+ * leaf on restore, which is the one case where the escalation does not survive.)
+ *
+ * Returns the map **by identity** when nothing applies, so a deployment with no
+ * `pr-fix-retry` key cannot tell this function exists.
+ */
+export function escalateFixModel(
+  workflowName: string,
+  models: ModelConfig | undefined,
+  attempt: number | undefined,
+  fix: FixConfig,
+): ModelConfig | undefined {
+  // Only the fix family reads `models["pr-fix"]`. Every PR-scoped dispatch
+  // carries an `attempt` (the snapshot is resolved for `pr-review` and
+  // `dependabot-pr-merge` too), so without this guard a review run would record
+  // a rewritten map it never used.
+  if (!PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) return models;
+  if (!models) return models;
+  const retry = models[FIX_RETRY_MODEL_KEY];
+  if (!retry) return models;
+  // `escalateModelAfterAttempt: 0` is legal and means "escalate from attempt 1".
+  // A dispatch with no snapshot has no attempt at all — treat it as the first.
+  if ((attempt ?? 1) <= fix.escalateModelAfterAttempt) return models;
+  if (models[FIX_MODEL_KEY] === retry) return models;
+  return { ...models, [FIX_MODEL_KEY]: retry };
+}
+
+/**
+ * The one `skip_if` row that `fix.maxFlakyDeferrals` makes conditional.
+ *
+ * Matched literally rather than by pattern: the promotion has to be greppable
+ * from the YAML, and a fuzzy match would also strip an overlay's own unrelated
+ * `flaky` guard.
+ *
+ * It reads the PARSED class off the marker harvest rather than substring-matching
+ * the diagnose phase's output, because the output form matched an agent's prose
+ * ("this is not `class=flaky`…"), matched a `{{priorAttempts}}` line replayed
+ * from an EARLIER attempt, and evaluated empty across a resume boundary — so the
+ * guard silently ran the full sandbox on exactly the verdicts it exists to stop.
+ * Keep this string byte-identical to the row in both fix workflow YAMLs.
+ */
+export const FLAKY_SKIP_IF_EXPRESSION = "scratch.fixMarkers.diagnosis.class == 'flaky'";
+
+/**
+ * Promote a third consecutive `flaky` diagnosis to `reproducible` by dropping
+ * the `flaky` row from the `fix` phase's `skip_if` for this run.
+ *
+ * §S1: `flaky` short-circuits the `fix` phase — by its own definition there is
+ * nothing to fix — but it is **bounded**. Without the cap, a daily
+ * `fix-red-dependency-prs` against a PR with one flaky test produces an
+ * unbounded series of free full runs; and if a job reports flaky three times
+ * running it is not flaky, it is an intermittent real failure — exactly the PR a
+ * human would want attempted. So `fix.maxFlakyDeferrals: 2` deferrals, and the
+ * THIRD consecutive `flaky` spends a normal attempt.
+ *
+ * `flakyDeferrals` counts PRIOR runs, so the off-by-one lands here: `0` and `1`
+ * still defer, `2` (the third such diagnosis) runs. Same predicate
+ * `renderContext` exposes to the prompts as `{{flakyPromoted}}`.
+ *
+ * **Why a list edit and not an expression.** `skip_if`'s grammar
+ * (`core/loop-eval.ts`) is `contains()` / `==` / `!=` against a dotted path, and
+ * the list is OR-ed: there is no negation and no conjunction, so
+ * "`class=flaky` AND NOT promoted" is not expressible — and the alternatives
+ * (a new operator, or template-rendering the expressions) are engine changes
+ * bought for one caller. The conjunction instead lands where its second term
+ * already lives: the promotion is a fact about the PR's history, known before
+ * the run starts, so the run's guard list is composed from it. The other two
+ * rows are unconditional and are never touched.
+ *
+ * The loaded definition is a process-global cache entry, so a promoted run gets
+ * a shallow copy; an unpromoted one gets the definition back by identity.
+ */
+export function promoteFlakyDiagnosis(
+  definition: AgentWorkflowDefinition,
+  flakyDeferrals: number | undefined,
+  fix: FixConfig,
+): AgentWorkflowDefinition {
+  if ((flakyDeferrals ?? 0) < fix.maxFlakyDeferrals) return definition;
+  let promoted = false;
+  const phases = definition.phases.map((phase) => {
+    const exprs = phaseSkipIfExpressions(phase);
+    if (!exprs.includes(FLAKY_SKIP_IF_EXPRESSION)) return phase;
+    promoted = true;
+    const kept = exprs.filter((e) => e !== FLAKY_SKIP_IF_EXPRESSION);
+    // An empty `skip_if` is a schema violation (min 1), so drop the field.
+    return { ...phase, skip_if: kept.length > 0 ? kept : undefined };
+  });
+  return promoted ? { ...definition, phases } : definition;
+}
+
 /**
  * Run a named agent workflow against a target.
  *
@@ -700,7 +914,10 @@ export async function runSimpleWorkflow(
     return { success: true, phases: [] };
   }
 
-  const definition = getWorkflow(workflowName);
+  // `let`: the fix family's `flaky` cap composes the run's `skip_if` list from
+  // the PR's deferral history below (see `promoteFlakyDiagnosis`). Everything
+  // else gets the loader's cached definition back by identity.
+  let definition = getWorkflow(workflowName);
   const { owner, repo, issueNumber, prNumber } = request;
   const notify = callbacks.postComment || (async () => {});
 
@@ -713,9 +930,33 @@ export async function runSimpleWorkflow(
   // consistent view without re-deriving the merge. No layer ⇒ these are the
   // caller's own maps by identity, so behaviour is unchanged.
   const repoConfig = request.repoConfig;
-  const effectiveModels = repoConfig?.models ?? models;
   const effectiveVariants = repoConfig?.variants ?? variants;
   const effectiveApproval = repoConfig?.approval ?? approvalConfig;
+  // The policy blocks have no caller-supplied counterpart (they aren't runner
+  // parameters — `runWorkflow.length` is frozen at 9), so the un-overridden case
+  // reads the operator's boot config directly. `review` gets no substitution
+  // here: nothing in a run consumes it (Phase 7 resolves the trigger mode at
+  // dispatch, before a run exists), and it must not reach the template context —
+  // see the note on `ctx` below.
+  const effectiveFix = repoConfig?.fix ?? operatorFix();
+  const effectiveDependencies = repoConfig?.dependencies ?? operatorDependencies();
+
+  // ── Per-attempt fix policy (04-retry.md §4.4, 09-state-machine.md §S1) ─────
+  //
+  // Two facts about the PR, both projected onto `request.extra` by
+  // `renderContext` at dispatch: how many attempts this problem has already
+  // cost, and how many consecutive `flaky` verdicts it has deferred on. They
+  // resolve against the run's EFFECTIVE `fix:` block, so a repo that clamped
+  // itself down is escalated and promoted on its own numbers.
+  const attempt = numberFromExtra(request.extra, "attempt");
+  const flakyDeferrals = numberFromExtra(request.extra, "flakyDeferrals");
+  const effectiveModels = escalateFixModel(
+    workflowName,
+    repoConfig?.models ?? models,
+    attempt,
+    effectiveFix,
+  );
+  definition = promoteFlakyDiagnosis(definition, flakyDeferrals, effectiveFix);
 
   // Identify the trigger uniquely. Issue/PR-scoped workflows include the
   // number; repo-scoped workflows (e.g. health) just identify by repo+name;
@@ -996,6 +1237,20 @@ export async function runSimpleWorkflow(
     // Reasoning-effort overrides per phase. Empty/undefined entries skip
     // the --variant flag (model uses its default effort). Effective, as above.
     variants: effectiveVariants as unknown as Record<string, unknown> | undefined,
+    // EFFECTIVE policy blocks (issues #251, #252), so a prompt can render
+    // `{{fix.maxAttempts}}` / `{{dependencies.autoMergeMaxImpact}}` and state the
+    // budget it is actually running under rather than a number frozen in prose.
+    //
+    // `review` is deliberately NOT seeded here. `renderTemplate` resolves a
+    // dotted key against `ctx` FIRST and only falls back to `ctx.phaseOutputs`
+    // when the first segment is absent — and `build.yaml`'s reviewer loop emits
+    // `output_var: review`, which `prompts/pr.md` reads as `{{review.approved}}`
+    // / `{{review.cycles}}`. A top-level `review` object would shadow it and
+    // make every build PR claim unresolved reviewer issues. The review policy
+    // has no prompt consumer anyway: Phase 7 reads it in code, off
+    // `RunRepoConfig.review` / the runtime config.
+    fix: effectiveFix as unknown as Record<string, unknown>,
+    dependencies: effectiveDependencies as unknown as Record<string, unknown>,
     // Slack-initiated runs need the runner to pause/resume on the thread id,
     // not on owner/repo#N. Passing the override through here keeps the
     // runner's triggerId derivation in one place.

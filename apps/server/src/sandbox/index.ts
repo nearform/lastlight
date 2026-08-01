@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "path";
 import { DockerSandbox, type WorkspaceMount } from "./docker.js";
 import { SANDBOX_IMAGE, isSandboxAvailable } from "./images.js";
 import { githubBasicAuthB64, githubExtraheaderArgs } from "./git-http-auth.js";
+import { resetPrNotesJournal, resetVerifyScript } from "../engine/executors/shared.js";
 
 export { DockerSandbox } from "./docker.js";
 export {
@@ -267,6 +268,19 @@ type PrePopulate = {
  *   - `recreateFromBase` (build): delete the stale checkout and re-clone from
  *     the default branch — a re-triggered incomplete build starts again off
  *     current `main` (issue #153).
+ *
+ * Every path that starts a NEW run also calls `resetVerifyScript` and
+ * `resetPrNotesJournal` on the checkout, deleting the file an earlier attempt
+ * left behind (`.git/lastlight-verify.sh`, `.git/lastlight-notes`). Both live
+ * under `.git/`, so neither can be committed into the PR whatever we do here —
+ * this is purely about STALENESS, and it is the only thing that clears them,
+ * since `git clean -fdx` never enters `.git/`. The same-run preserve path
+ * deliberately does not reset — the fix loop's later iterations keep the gate
+ * the first one wrote, and the journal is drained per phase by the harvest
+ * rather than per run. The kubernetes backend does the same two deletes inside
+ * its clone init container (`sandbox/k8s/init-clone.ts`), which is the only
+ * place with access to that checkout. See `engine/executors/shared.ts` → the
+ * push gate and the PR journal.
  */
 export { prePopulateWorkspace as __prePopulateWorkspaceForTest };
 
@@ -328,6 +342,15 @@ export function prePopulateWorkspace(
     } else {
       // Different run reusing this PR's workspace — refresh in place.
       refreshExistingClone(repoDir, markerPath, pre);
+      // A NEW run against a reused workspace is exactly the case the push gate
+      // must not inherit: the fix family shares one workspace per PR, so a
+      // `.git/lastlight-verify.sh` from a superseded diagnosis (possibly
+      // written by the other fix workflow) is still sitting there. The
+      // refresh's `git clean -fdx` cannot reach it — nothing cleans `.git/` —
+      // so this delete is the only thing that does, and it sits outside the
+      // refresh's try/catch on purpose: a failed fetch skips the clean entirely.
+      resetVerifyScript(repoDir);
+      resetPrNotesJournal(repoDir);
       return;
     }
   }
@@ -350,6 +373,11 @@ export function prePopulateWorkspace(
     normalizeOrigin(repoDir, pre, scrub);
     ensureBaseAvailable(repoDir, pre, authArgs, url, scrub);
     writeMarker(markerPath, pre.runId);
+    // A no-op on a fresh clone — kept so "every path that starts a new run
+    // resets the scratch files" holds without a reader having to work out
+    // which paths can and cannot have inherited one.
+    resetVerifyScript(repoDir);
+    resetPrNotesJournal(repoDir);
     const ms = Date.now() - start;
     console.log(
       `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${repoDir} ` +
@@ -412,6 +440,8 @@ function cloneDefaultAndCreateBranch(
     );
     normalizeOrigin(repoDir, pre, scrub);
     writeMarker(markerPath, pre.runId);
+    resetVerifyScript(repoDir);
+    resetPrNotesJournal(repoDir);
     const ms = Date.now() - start;
     console.log(
       `[sandbox] Pre-cloned ${pre.owner}/${pre.repo} (default branch) into ${repoDir} ` +

@@ -22,6 +22,7 @@ import { ActorChip } from "./ActorChip";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import { ApprovalBanner } from "./ApprovalBanner";
 import { PhaseDetailPanel } from "./PhaseDetailPanel";
+import { PrStatePanel } from "./PrStatePanel";
 import { MessageFeed, type MessageOrder } from "./MessageFeed";
 import {
   useUrlState,
@@ -446,6 +447,11 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
 
       <ApprovalBanner approvals={pendingApprovals} onResponded={handleApprovalResponded} />
 
+      {/* The snapshot the dispatch decision was taken on (09 §S3). Renders
+          itself away on any run that carries none — i.e. every non-PR-scoped
+          workflow — so there is no workflow-name list here to keep in step. */}
+      <PrStatePanel run={run} />
+
       <ResizablePipeline
         run={run}
         definition={definition}
@@ -670,13 +676,17 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
 
   const detailForSelected = detailRun?.id === selectedId ? detailRun : null;
   const listRow = visibleRuns.find((r) => r.id === selectedId) ?? null;
-  // Prefer the live-updating list row, but splice in `context` (absent from the
-  // list payload) from the detail fetch. Fall back to the full detail when the
-  // run isn't in the list at all (deep-linked / paginated out).
+  // Prefer the live-updating list row, but splice in `context` + `scratch`
+  // (both absent from the list payload — it omits the heavy JSON blobs) from
+  // the detail fetch. `PrStatePanel` reads the snapshot from one and the fix
+  // harvest from the other, so they must arrive together. Fall back to the full
+  // detail when the run isn't in the list at all (deep-linked / paginated out).
   const selectedRun: WorkflowRun | null = listRow
-    ? listRow.context
-      ? listRow
-      : { ...listRow, context: detailForSelected?.context }
+    ? {
+        ...listRow,
+        context: listRow.context ?? detailForSelected?.context,
+        scratch: listRow.scratch ?? detailForSelected?.scratch,
+      }
     : detailForSelected;
   const hasMore = runs.length < total;
 

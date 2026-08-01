@@ -146,7 +146,73 @@ src/
       shared.ts         Backend-agnostic building blocks (RunResultAccumulator,
                         skill-bundle staging, server-artifact stage/harvest,
                         finalizeFromRunResult, githubAuthEnvFrom).
-    dispatcher.ts       Routes classified events to workflow or chat handler.
+    dispatcher.ts       Routes classified events to workflow or chat handler,
+                        and gates every PR-scoped dispatch on the snapshot
+                        below (run lock + decision, before any sandbox).
+    pr-state.ts         The PR state machine: `resolvePrState()` — ONE
+                        snapshot per dispatch of everything we know about a
+                        PR (live GitHub facts + facts derived from our own
+                        run history, keyed on the PR). The span of the run
+                        lock is `prScopedWorkflows()` in
+                        workflows/pr-scope.ts, derived from each workflow's
+                        own `pr_scoped: true` YAML key.
+                        Resolved at the dispatchWorkflow choke point and
+                        persisted on `context.prState`. Never throws: every
+                        read is best-effort and degrades to a value that
+                        cannot cause a skip.
+    pr-notes.ts         The PR journal — the agent-written half of that
+                        snapshot (`PrState.notes`). Pure: kinds, the parse of
+                        the `<kind>: <line>` grammar, the bounds (20 notes /
+                        240 chars / 4 KiB, newest kept), staleness marking,
+                        and the fenced render. Notes are HINTS: no decision
+                        function reads them, `renderContext` projects them to
+                        one string (`{{priorNotes}}`), and a note containing
+                        `class=` or a marker tag is rejected on ingest.
+                        Impure half lives in `fix-harvest.ts` (the drain).
+    fix-scratch.ts      The two files the harness owns inside a PR checkout
+                        — the fix loop's push gate
+                        (.git/lastlight-verify.sh) and the PR journal
+                        (.git/lastlight-notes) — and the one argument that
+                        places both. They live under `.git/`, which git never
+                        walks, so `git add -A` cannot commit them on ANY
+                        backend and nothing has to be registered anywhere
+                        (issue #256: the k8s backend never wrote the
+                        `.git/info/exclude` line the old placement relied on,
+                        and committed them into the PR).
+    fix-harvest.ts      The impure half of the two above: after every phase it
+                        parses the marker lines out of the output, DRAINS the
+                        journal, and READS the push gate onto
+                        `scratch.fixMarkers` — the gate is a read, not a drain,
+                        because it is the live gate the next loop iteration
+                        runs. The recorded script is the fix loop's main
+                        debugging artifact (09 §S1) and the admin run detail
+                        panel renders it beside the snapshot.
+    pr-escalation.ts    What a TERMINAL skip does to the PR: applies
+                        requires-human + one comment naming the case, the
+                        attempts spent and each attempt's class/cause — and
+                        RECORDS A RUN ROW first, because escalatedAtSha is
+                        read back off the prior run's context and a skip
+                        otherwise writes none (without it the bot reads its
+                        own label as a human's permanent hold). Called from
+                        BOTH dispatch gates.
+    pr-decisions.ts     PURE functions over that snapshot — mayMerge,
+                        resolveFixDisposition, resolveMergeDisposition,
+                        resolveReviewTrigger, resolveDispatchDisposition,
+                        renderContext. Each returns
+                        `{ decision, reason, inputs }`, so the log line, the
+                        escalation comment and the admin panel are three
+                        renderings of one source. Table-testable with no
+                        GitHub mock and no sandbox.
+    review-check.ts     The `last-light/review` Check Run as a PROJECTION of
+                        run state: created at the dispatchWorkflow choke
+                        point (so a cron/comment/Slack/CLI review gets one
+                        too), persisted on `scratch.reviewCheck`, and
+                        COMPLETED FROM THE RUN'S TERMINAL TRANSITION via the
+                        run store's TerminalRunObserver — so simple.ts,
+                        resume.ts, the queued-run TTL expiry and the admin
+                        cancel all resolve it for free. It used to be
+                        completed inside a `.then()` on an in-memory promise
+                        and stranded `in_progress` on every deploy.
     event-shim.ts       Translates agentic-pi events → Claude-SDK envelope jsonl.
     llm.ts              One-shot LLM helper for screen/ + classifier —
                         direct fetch to Anthropic Messages or OpenAI Chat
@@ -317,6 +383,33 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
 - **Workflow** — a YAML file listing phases. The runner knows nothing about
   "build" vs "triage" — it just executes phases in order (or as a DAG). See
   `src/workflows/CLAUDE.md`.
+- **PR state machine** (`src/engine/pr-state.ts` + `pr-decisions.ts`,
+  `docs/plans/dependency-pr-resilience/09-state-machine.md`) — what the harness
+  knows about a pull request is **resolved once per dispatch** into a `PrState`
+  snapshot at the `dispatchWorkflow` choke point, and every policy question is
+  then a pure function over it. It replaced reads spread across six sites, each
+  fetching an overlapping subset and each free to disagree. Three things it
+  buys: a real **PR-scoped run lock** across `pr-fix` / `dependabot-ci-fix` /
+  `dependabot-pr-merge` / `pr-review` (the old
+  `db.executions.isRunning(handler, triggerId)` guard never matched a row —
+  wrong key on both predicates — so two agents could clone and push the same
+  branch); identical context on the webhook and cron routes, because the cron
+  fan-out calls `dispatchWorkflow` directly and used to bypass every enrichment;
+  and a `{ decision, reason, inputs }` verdict per gate, rendered in the log, the
+  escalation comment and the admin panel from one source. The loser of the lock
+  is **dropped with a reason, not queued** — sound only because each dropped
+  case has a cron re-pickup. A skip that is **terminal** for the problem
+  (attempts or cost exhausted, or a diagnosis outside `fix.retryableClasses`)
+  is not dropped silently: `pr-escalation.ts` records a run row, labels the PR
+  `requires-human` and posts one comment. The row is the load-bearing part —
+  see its module header. `pr-review` crosses the same gate, through
+  `resolveReviewTrigger` — **the only implementation of `review.trigger`
+  anywhere**, so `review-discovery.ts` is a candidate finder that knows nothing
+  about modes, drafts or settled checks, an explicit `@bot review` is a decision
+  rather than an accident of which code paths the comment route crossed, and the
+  `last-light/review` check is a projection of run state (`review-check.ts`)
+  instead of a `.then()` on an in-memory promise. Contract:
+  `spec/05-router.md` → "The PR-scoped dispatch gate".
 - **Configuration & deployment overlay** (`src/config/config.ts`, `config/default.yaml`,
   issue #61) — non-secret config (managed repos, routes, models, variants,
   approvals, disables, cron participation) is loaded at startup from the packaged
@@ -381,8 +474,38 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   - **Operator bounds** — the `repoConfig:` block in config
     (`enabled`, `allowKeys`, `allowedModels`, `allowAssets`). Default allow-list:
     `models`, `variants`, `crons`, `disabled.workflows`, `disabled.crons`,
-    `approval` (add-only — a repo may raise a gate, never clear one). Inert out
+    `approval` (add-only — a repo may raise a gate, never clear one), `fix`,
+    `dependencies`, `review` (one-way clamped — next bullet). Inert out
     of the box: nothing changes until a repo actually commits `.lastlight/`.
+  - **Policy blocks** (`fix` / `dependencies` / `review`, issues #251/#252) —
+    budgets and blast-radius dials, so they generalise `approval`'s add-only
+    rule: **a repo may only ever be MORE conservative than the operator.** A
+    loosening leaf is *dropped* with a `policy-downgrade` warning, and dropping
+    IS the clamp (the base carries the operator's value, so the leaf resolves
+    back to it). Per-key directions live with the sanitizers in
+    `packages/shared/src/repo-config-schema.ts` — `min()` for the fix budgets,
+    subset-only for `retryableClasses`, the lower tier for
+    `autoMergeMaxImpact`, add-only `true` for `requireSettledChecks` /
+    `postsCheck` / `skipDraft`, free for `auditComment` / `trigger` /
+    `requestLabel`. Three leaves are **operator-only** and answer
+    `key-not-allowed` instead: `fix.escalateModelAfterAttempt` (spend),
+    `fix.gateTimeoutSeconds` (shared resource), and
+    `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
+    weld the escape hatch shut for a repo with no CI at all. `fix` +
+    `dependencies` are now **live**: the PR dispatch gate (below) reads the
+    run's repo-clamped blocks — on every route, webhook included — and enforces
+    `fix.maxAttempts` / `fix.maxCostUsd` and
+    `dependencies.requireSettledChecks` / `minSettledChecks`, and the green
+    dependency cron reads the latter pair too. What the gate does **not**
+    enforce is `dependencies.autoMergeMaxImpact`: that ceiling reaches the merge
+    run only as prompt text and the impact tier is the agent's self-report, so
+    it is policy the agent is asked to honour rather than a code-enforced
+    ceiling (`spec/02-configuration.md` → "Where `dependencies` is enforced").
+    **`review` is live as well**: `resolveReviewTrigger` is the one
+    implementation of `review.trigger` on every route, and
+    `src/cron/review-discovery.ts` is back to being a pure candidate finder.
+    `review` is deliberately NOT seeded onto the template context — `build.yaml`
+    already emits `output_var: review` and a top-level object would shadow it.
   - **Cron participation** — a `crons: { enable, disable }` block, valid at
     EVERY layer. Operator `crons.disable` = off *by default* (the tick stays
     registered); a repo's `crons.enable` opts in even when globally off,
@@ -411,6 +534,11 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     powers the dashboard's per-repo **Config** tab; the CLI side is
     `lastlight repo fork` / `repo config validate` / `repo config show`
     (see `packages/cli/CLAUDE.md`). Full contract: `spec/02-configuration.md`.
+    The dashboard hand-mirrors `RepoMergedConfig` / `RepoConfigSources` in
+    `dashboard/src/api.ts` (no import edge to core); the copies drifted once and
+    hid the three policy blocks for a release, so
+    `tests/admin/dashboard-config-mirror.test.ts` now pins the mirror and the
+    tab's section list against the real type.
 - **Two execution modes**:
   - **Sandbox** — workflow phases run inside a Docker sandbox
     (`src/sandbox`) with a minted per-run GitHub token. Each phase invokes
@@ -738,8 +866,12 @@ Sandbox workspace provisioning (issue #107):
   by (repo, PR) and reused across runs. A `<workDir>/.lastlight-run` marker
   records the owning run: same run → preserve the checkout for the next
   phase; a different run reusing the dir → `git fetch` + `reset --hard` +
-  `git clean -fdx -e node_modules` (deps stay warm). See the workflows
-  guide's "taskId scoping" section.
+  `git clean -fdx -e node_modules` (deps stay warm). The whole fix family
+  (`PR_FIX_SHAPED_WORKFLOWS`) shares ONE workspace per PR —
+  `${repo}-${prNumber}-fix`, not `…-${workflowName}` — because the PR-scoped
+  run lock admits only one of them at a time and routing between `pr-fix` and
+  `dependabot-ci-fix` genuinely varies by how the event arrived. See the
+  workflows guide's "taskId scoping" section.
 - **Per-issue build recreate (issue #153)** — `build` workspaces are keyed by
   (repo, issue) too, but a different-run marker → **delete the leftover
   checkout and re-clone from the default branch** (`recreateFromBase`), so a

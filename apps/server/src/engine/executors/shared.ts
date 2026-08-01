@@ -9,6 +9,7 @@ import {
 } from "../github/profiles.js";
 import { AgenticShim, truncateForLog, safeStringify } from "../event-shim.js";
 import { BuildAssetStore, type BuildAssetRef } from "../../state/build-assets.js";
+import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "../fix-scratch.js";
 
 /**
  * Shared building blocks for the per-backend executors
@@ -33,6 +34,67 @@ export const SKILL_BUNDLE_ROOT = ".lastlight-skills";
 export const THINKING_LEVELS: ReadonlySet<string> = new Set([
   "off", "minimal", "low", "medium", "high", "xhigh",
 ]);
+
+// ── The harness's two scratch files in a PR checkout ────────────────
+//
+// The fix loop's push gate and the PR journal. Both live inside the checkout's
+// own `.git/` directory, which git never walks — the placement argument, and
+// the #256 bug that produced it, is stated once in `../fix-scratch.ts`. What
+// lives here is the half that needs `fs`: the start-of-run deletes.
+export { VERIFY_SCRIPT_NAME, PR_NOTES_FILE_NAME };
+
+/**
+ * Start-of-run reset for the push gate (09-state-machine.md §S1, requirement
+ * 3): delete any script an earlier attempt left behind.
+ *
+ * There is no `excludeFromGit` half — the gate lives under `.git/`, so nothing
+ * has to be registered for it to stay out of the PR. This is purely about
+ * STALENESS, and staleness is the whole reason it survives: the fix FAMILY
+ * shares ONE workspace per PR (§S4), so a gate written by a superseded
+ * diagnosis — possibly by the *other* fix workflow — outlives the run that
+ * wrote it; the reused-workspace refresh's `git clean -fdx` cannot reach inside
+ * `.git/`; and that clean sits inside a try/catch anyway, so a failed fetch
+ * skips it entirely. A stale gate is worse than no gate: it passes green
+ * against the wrong commands and authorises a push.
+ *
+ * Best-effort and non-fatal — a workspace we can't reset still runs, and the
+ * agent is instructed to rewrite the script unconditionally anyway. No-op when
+ * `repoDir` isn't a checkout (there is no `.git/` to write into).
+ */
+export function resetVerifyScript(repoDir: string): void {
+  try {
+    rmSync(join(repoDir, VERIFY_SCRIPT_NAME), { force: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[sandbox] Could not remove a stale ${VERIFY_SCRIPT_NAME}: ${msg}`);
+  }
+}
+
+/** Legacy alias for {@link PR_NOTES_FILE_NAME}, kept for existing importers. */
+export const PR_NOTES_FILE = PR_NOTES_FILE_NAME;
+
+/**
+ * Start-of-run reset for the journal: delete anything a crashed earlier attempt
+ * left behind.
+ *
+ * As with {@link resetVerifyScript}, there is no `excludeFromGit` half any
+ * more — placement under `.git/` is the guarantee. What remains is provenance:
+ * the delete is a belt for the harvest's own drain (`drainPrNotes` removes the
+ * file after each phase), and it matters for exactly one case — a run that died
+ * between the agent writing a note and `onPhaseEnd` reading it — where the file
+ * would otherwise be re-attributed to the NEXT run, with that run's id stamped
+ * on a claim it never made. Provenance that lies is worse than a lost note.
+ *
+ * Best-effort and non-fatal; no-op when `repoDir` isn't a checkout.
+ */
+export function resetPrNotesJournal(repoDir: string): void {
+  try {
+    rmSync(join(repoDir, PR_NOTES_FILE_NAME), { force: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[sandbox] Could not remove a stale ${PR_NOTES_FILE_NAME}: ${msg}`);
+  }
+}
 
 /**
  * Stage this phase's declared skills into a per-phase bundle directory at
@@ -99,6 +161,11 @@ export function skillBundleKey(config: ExecutorConfig): string {
  * sandbox checkout. Used for the gondolin backend, where the skill bundle must
  * be staged under cwd (the only mounted dir) rather than as an out-of-repo
  * sibling. No-op when `repoDir` isn't a git checkout (e.g. the workspace root).
+ *
+ * Directories only — it writes `/<entry>/`. It used to take a `kind` flag for
+ * the push gate and the PR journal, which are files; both now live under
+ * `.git/` (see the two sections above), where git cannot see them at all and
+ * nothing needs excluding. Every remaining caller registers a directory.
  */
 export function excludeFromGit(repoDir: string, entry: string): void {
   const gitDir = join(repoDir, ".git");

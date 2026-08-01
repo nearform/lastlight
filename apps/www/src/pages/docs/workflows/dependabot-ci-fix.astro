@@ -7,14 +7,26 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 >
 	<p>
 		Dependabot CI fix reacts when a dependency-update PR (Dependabot or Renovate)
-		goes red in CI. When a check suite completes with a failure, Last Light brings
-		the branch up to date with its base, diagnoses the breakage, and pushes the
-		smallest fix that makes CI pass. It is <strong>fix-only</strong>: it never
-		classifies, labels, or merges the PR. Once the push turns the checks green,
-		the <code>pr.checks_passed</code> webhook hands off to
+		goes red in CI. When a check suite completes with a failure, Last Light works
+		out <em>why</em> it broke, brings the branch up to date with its base, and
+		pushes the smallest fix that makes CI pass. It is <strong>fix-only</strong>:
+		it never classifies, labels, or merges the PR. Once the push turns the checks
+		green, the <code>pr.checks_passed</code> webhook hands off to
 		<a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>, the
 		single owner of the trivial-vs-functional classification and the auto-merge
 		decision — so the two workflows never duplicate each other's work.
+	</p>
+
+	<p>
+		The diagnosis is its own phase, and it runs first. Not every red dependency
+		PR is broken in a way a bot can repair — the tests may need a database this
+		sandbox doesn't have, or the base branch may already be red — and a blind
+		repair attempt on one of those spends a full install and test cycle to learn
+		nothing. So <strong>diagnose</strong> classifies the failure cheaply against
+		the already-cloned workspace, and <strong>fix</strong> runs only when the
+		verdict says a repair is worth attempting. It shares the
+		<a href="/docs/workflows/pr-fix">same two phases and the same five failure
+		classes</a> as PR fix.
 	</p>
 
 	<div class="docs-callout tip">
@@ -30,15 +42,20 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>Pipeline</h2>
 
 	<div class="workflow-diagram">
-		<svg viewBox="0 0 320 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+		<svg viewBox="0 0 486 80" fill="none" xmlns="http://www.w3.org/2000/svg">
 			<rect x="12" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
-			<text x="77" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
-			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">merge base + fix + push</text>
+			<text x="77" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Diagnose</text>
+			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">classify the failure</text>
 			<path d="M146 40 H172" stroke="var(--diag-line)" stroke-width="1.5"/>
 			<path d="M168 36 L174 40 L168 44 Z" fill="var(--diag-line)"/>
-			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
-			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">pr-merge</text>
-			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">once green: classify + merge</text>
+			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
+			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">merge base + fix + push</text>
+			<path d="M312 40 H338" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<path d="M334 36 L340 40 L334 44 Z" fill="var(--diag-line)"/>
+			<rect x="344" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+			<text x="409" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">pr-merge</text>
+			<text x="409" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">once green: classify + merge</text>
 		</svg>
 	</div>
 
@@ -46,9 +63,9 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li>Clones the repo at the PR's head branch (the dependency bump is already committed there)</li>
+		<li><strong>Diagnoses</strong> the cause before touching anything — reads the CI failures and the repo's own <code>.github/workflows/*.yml</code>, names what differs between CI and the sandbox, reproduces the exact failing command, and classifies the result: a stale lockfile, a breaking change in the new version, a call site or type that needs updating — or a failure nothing here can repair, in which case it stops and the fix phase never runs</li>
 		<li>Merges the base branch into the PR branch first (plain <code>git merge</code>, no rebase or force-push) so the fix is built on current base and a <code>behind</code> PR is brought up to date — resolving any lockfile conflict by regenerating it</li>
-		<li>Reads the CI failures and diagnoses the cause — a stale lockfile, a breaking change in the new version, a call site or type that needs updating</li>
-		<li>Makes the smallest fix that turns CI green, runs the test / lint / typecheck gate, and plain-pushes to the PR branch</li>
+		<li>Makes the smallest fix that turns CI green, runs the test / lint / typecheck gate, and plain-pushes to the PR branch — only once that gate is green, never speculatively</li>
 		<li>Stops there — it does not classify, comment, label (except the give-up case below), or merge. The push re-runs CI, and when it goes green the <code>pr.checks_passed</code> webhook fires <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a> to make the one classify / auto-merge decision</li>
 	</ul>
 
@@ -64,16 +81,40 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>Triggers</h2>
 
 	<ul>
-		<li><strong>GitHub webhook:</strong> a <code>check_suite.completed</code> event with a <code>failure</code> / <code>timed_out</code> conclusion (surfaced internally as <code>pr.checks_failed</code>). The router runs it through the intent classifier, which routes a recognised dependency-update PR here. Requires the GitHub App to subscribe to <strong>Check suite</strong> events (Checks: read).</li>
+		<li><strong>GitHub webhook:</strong> a <code>check_suite.completed</code> event with a <code>failure</code> / <code>timed_out</code> conclusion (surfaced internally as <code>pr.checks_failed</code>). The connector already knows whether the PR is a dependency bump — it checks the head commit author and the branch prefix to decide whether to emit at all — so the router routes on that flag <strong>deterministically</strong>, with no classifier call: a bump comes here, any other red PR goes to <a href="/docs/workflows/pr-fix">PR fix</a>. Requires the GitHub App to subscribe to <strong>Check suite</strong> events (Checks: read).</li>
 		<li><strong>Cron backstop:</strong> a daily job (<code>fix-red-dependency-prs</code>, 15:00 — one hour after the green sweep) whose runner finds, <em>in code</em>, the Dependabot / Renovate PRs across managed repos that can't merge on their own and that ci-fix can push toward: a <em>settled-red</em> check conclusion (failing/timed-out, so it never fires while checks are still running), <strong>or</strong> a <code>mergeable_state</code> of <code>behind</code> / <code>dirty</code> / <code>blocked</code>. It fans out <strong>one bounded run per PR</strong> — the same single-PR shape as the webhook, carrying the PR head branch (pre-clone) and the <code>reason</code> (<code>checks-failing</code> | <code>behind</code> | <code>dirty</code> | <code>blocked</code>; failing CI wins). It runs <em>alongside</em> webhooks — a safety net for PRs that went red, or fell out of a mergeable state, before boot or during a missed delivery. (<code>clean</code> is the green sweep's; <code>unknown</code> is left for a later tick.) Per-PR runs dedup by (repo, PR).</li>
 		<li><strong>Maintainer mention:</strong> an <code>@last-light</code> comment on a red Dependabot / Renovate PR (e.g. "can you look at this?"). The router hands the PR author + check state to the classifier, which routes a red dependency PR here — the on-demand version of the webhook. (A green one routes to <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a> instead; an explicit "review this" still gets a normal review.)</li>
 	</ul>
 
 	<p>
-		Because routing goes through the classifier rather than a fixed rule, other
-		workflows can react to the same failing-checks event by declaring their own
-		<code>classification</code> block — this workflow simply claims the
-		dependency-update case.
+		Whichever way a run is summoned, the same pre-flight decides whether it is
+		worth spending: a fork PR, a base branch that is red on its own account, an
+		exhausted attempt or cost budget for that PR, a head commit already
+		assessed, or another run already working the PR all refuse it before a
+		sandbox is provisioned. Only one of the four PR-scoped workflows may be in
+		flight for a PR at a time — see <a href="/docs/workflows/pr-fix">PR fix</a>
+		for the full list.
+	</p>
+
+	<p>
+		Two of those refusals are <em>terminal</em> — an exhausted attempt or cost
+		budget — and terminal refusals are never silent: the PR gets
+		<code>requires-human</code> and one comment saying which budget ran out and
+		what each attempt found, without a sandbox ever starting. The rest stay
+		quiet, because they are temporary or not this PR's fault. See
+		<a href="/docs/workflows/pr-fix">PR fix</a> for what the comment says and
+		how pushing a commit clears it.
+	</p>
+
+	<p>
+		Attempts are counted and remembered per <em>pull request</em>, not per
+		workflow — an <code>@last-light</code> comment routed to
+		<a href="/docs/workflows/pr-fix">PR fix</a> and a cron dispatch of this
+		workflow share one counter, one budget and one attempt history, because
+		"how many times have we tried to fix this PR" is a fact about the PR
+		rather than about how the event arrived. See
+		<a href="/docs/workflows/pr-fix">PR fix</a> for what each attempt carries
+		forward and which verdicts cost one.
 	</p>
 
 	<h2>Labels</h2>
@@ -84,16 +125,29 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		when it <strong>can't</strong> land the PR — it can't repair CI with a small,
 		safe change, or there's nothing to push and it can't unblock the PR (e.g. a
 		<code>blocked</code> PR awaiting a required human review) — it applies
-		<code>requires-human</code> and stops. The verdict labels
+		<code>requires-human</code> and stops. A <em>stopping diagnosis</em> is the
+		opposite case: when the verdict is <code>flaky</code>,
+		<code>infra-dependent</code> or <code>upstream-broken</code> the fix phase
+		is skipped outright, so nothing is labelled and the run still finishes
+		successfully. A flaky test or a base branch that is red on its own account
+		shouldn't leave the PR permanently marked as needing a human. The
+		<code>flaky</code> skip is bounded, though: after
+		<code>fix.maxFlakyDeferrals</code> (2) in a row on the same problem, the
+		third verdict is taken at face value and the PR gets a real attempt —
+		three flaky reports running is an intermittent real failure, and without
+		the bound the nightly sweep would re-run for free forever. The verdict labels
 		(<code>dependency-trivial</code> / <code>dependency-functional</code>) — and
 		clearing a stale <code>requires-human</code> once a later fix lands green — are
 		owned entirely by <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>,
-		which keeps the classification in one place. Both the red and green cron sweeps
-		<strong>skip PRs labelled <code>requires-human</code></strong>, so they never
-		re-attempt what Last Light already gave up on — while the webhooks stay
-		label-blind, so a genuinely new bot push is handled live and the success path
-		clears the label. Labels are created on demand
-		(<code>github_ensure_labels</code>).
+		which keeps the classification in one place. <code>requires-human</code> is a
+		<strong>notification, not a state</strong>: what actually holds a PR back is
+		the record that one of our own runs escalated it at a particular head commit,
+		so a maintainer pushing to the PR re-arms it automatically, with no label to
+		remove — while the same label with no run of ours behind it is read as a
+		human saying "stay out" and honoured indefinitely. That one rule is applied
+		at dispatch, so the crons and the webhooks agree; previously the crons
+		treated the label as a one-way door while the webhooks cleared it on success.
+		Labels are created on demand (<code>github_ensure_labels</code>).
 	</p>
 
 	<div class="docs-next">
@@ -120,7 +174,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	.workflow-diagram svg {
 		width: 100%;
-		max-width: 320px;
+		max-width: 486px;
 		height: auto;
 		display: block;
 		margin: 0 auto;

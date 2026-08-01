@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TemplatedNumberSchema } from "./templated-number.js";
 
 // ── Output rules ──────────────────────────────────────────────────────
 
@@ -64,7 +65,11 @@ const PhaseLoopSchema = z.object({
 
 const GenericLoopSchema = z
   .object({
-    max_iterations: z.number().int().positive(),
+    /**
+     * Iteration bound. Accepts `{ from: <ctx path>, default: N }` — see
+     * {@link TemplatedNumberSchema}; the fix loop reads `fix.localIterations`.
+     */
+    max_iterations: TemplatedNumberSchema,
     /** Expression to evaluate for completion: "output.contains('PASS')" or "verdict == 'APPROVED'" */
     until: z.string().optional(),
     /** Shell command: exit 0 = loop complete, non-zero = continue */
@@ -174,10 +179,17 @@ const PhaseDefinitionSchema = z
      */
     runtime: z.enum(["js", "ts", "python"]).optional(),
     /**
-     * Per-step timeout in seconds for `bash`/`script` phases. Defaults to the
-     * sandbox's configured timeout (fallback 300s for deterministic steps).
+     * Per-step timeout in seconds for `bash`/`script` phases, and for an agent
+     * phase's `generic_loop.until_bash` gate. Defaults to the sandbox's
+     * configured timeout (fallback 300s for deterministic steps, 30s for a
+     * loop condition).
+     *
+     * Accepts `{ from: <ctx path>, default: N }` — see
+     * {@link TemplatedNumberSchema}. `pr-fix` / `dependabot-ci-fix` read
+     * `fix.gateTimeoutSeconds` that way, so the repo-clamped config value is
+     * what actually bounds the gate.
      */
-    timeout_seconds: z.number().int().positive().optional(),
+    timeout_seconds: TemplatedNumberSchema.optional(),
     /**
      * Path to a prompt template file (relative to workflowDir).
      * Mutually exclusive with `skill`.
@@ -278,6 +290,47 @@ const PhaseDefinitionSchema = z
      */
     requires_sandbox: z.enum(["docker", "gondolin", "none"]).optional(),
     /**
+     * Conditional gate: skip this phase when any of these expressions matches
+     * the run's render context. One string, or a list (OR-ed).
+     *
+     * Same non-failing skip as `requires_sandbox` above — the node goes
+     * `skipped`, a `recordSkippedPhase` row lands, `messages.on_skipped_done`
+     * is surfaced, and the **run still records `succeeded`**. That last part is
+     * the whole point, and is why this exists rather than being expressed with
+     * the pre-existing `on_output.contains_BLOCKED: { action: fail }`: a phase
+     * whose *correct* outcome is "there is nothing for the next phase to do"
+     * must not paint the run red. A red run posts `messages.on_failure` to the
+     * PR, offers the dashboard's Retry button for something that cannot
+     * succeed, pollutes the cost/failure stats, and — because
+     * `latestSucceededForTrigger` ignores failed runs — defeats the
+     * already-handled-this-SHA dedup, so the same dead end is re-diagnosed on
+     * every webhook re-fire.
+     *
+     * Expressions use the `until:` grammar (see `core/loop-eval.ts`) evaluated
+     * against `{ ...ctx, phaseOutputs, scratch }` — the same values a prompt
+     * template can render. `output` is empty here (the phase has not run), so
+     * only bare `output.contains(...)` is meaningless; read what an upstream
+     * phase left behind instead. Prefer a value a phase already PARSED into
+     * `scratch` (e.g. `scratch.fixMarkers.diagnosis.class == 'flaky'`) over a
+     * `.contains()` against `phaseOutputs.<phase>`: the latter is a substring
+     * match on the agent's whole free-form output, so prose that merely
+     * mentions the needle matches it, and it is empty across a resume boundary
+     * (below) where it then fails open.
+     *
+     * Two scoping notes:
+     *   - `phaseOutputs` is empty across a **resume** boundary (a phase skipped
+     *     as already-`done` contributes nothing to the in-memory map), so a
+     *     guard that must survive resume should read `scratch`, which the run
+     *     store rehydrates.
+     *   - The guard is evaluated when the node becomes *ready*, i.e. after its
+     *     dependencies are terminal — which is what makes reading an upstream
+     *     phase's output well-defined.
+     *
+     * A skipped node is not `succeeded`, so the same `trigger_rule` caveat as
+     * `requires_sandbox` applies to anything downstream of a guarded phase.
+     */
+    skip_if: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
+    /**
      * Which docker sandbox image this phase runs in. `default` (or omitted) uses
      * the lean `lastlight-sandbox:latest`; `qa` uses the heavier
      * `lastlight-sandbox-qa:latest` (Playwright + Chromium baked in) for the
@@ -372,6 +425,15 @@ export function phaseSkillNames(phase: PhaseDefinition): string[] {
   if (phase.skill) return [phase.skill];
   return [];
 }
+
+/**
+ * Normalize a phase's `skip_if` declaration to a list of expressions.
+ * Returns `[]` for phases with no guard. Mirrors {@link phaseSkillNames}.
+ */
+export function phaseSkipIfExpressions(phase: PhaseDefinition): string[] {
+  if (phase.skip_if === undefined) return [];
+  return typeof phase.skip_if === "string" ? [phase.skip_if] : phase.skip_if;
+}
 export type PhaseLoop = z.infer<typeof PhaseLoopSchema>;
 export type GenericLoop = z.infer<typeof GenericLoopSchema>;
 export type OutputRule = z.infer<typeof OutputRuleSchema>;
@@ -418,6 +480,32 @@ export const AgentWorkflowSchema = z.object({
   description: z.string().optional(),
   /** What can trigger this workflow (informational; routing is in code). */
   trigger: z.string().optional(),
+  /**
+   * This workflow is dispatched against a PULL REQUEST, and must therefore
+   * cross the PR-scoped dispatch gate.
+   *
+   * Unlike `kind` (a dashboard label the runner ignores) this one is
+   * load-bearing. Declaring it puts the workflow inside:
+   *
+   *   - the **PR-scoped run lock** — one PR-scoped run per PR at a time, across
+   *     every member, so two agents never clone and push the same branch;
+   *   - the **already-assessed-at-this-head-SHA dedup**, per workflow;
+   *   - **escalation** — a terminal skip labels the PR and comments once,
+   *     rather than being dropped silently;
+   *   - the resolved **`PrState` snapshot** on `context.prState`, which is what
+   *     the fix prompts, the PR journal and the admin panel all render from.
+   *
+   * It is metadata on the workflow because that is where the fact lives. The
+   * harness used to carry a hardcoded set of four names while the handlers are
+   * operator-configurable through `routes.github.*`, so remapping a route to a
+   * forked workflow silently dropped the whole gate for it — no lock, no dedup,
+   * no escalation, and no warning (issue #256). `validateAssets` now warns when
+   * a configured `routes.github.pr_*` target does not declare this.
+   *
+   * The consuming set is `prScopedWorkflows()` in
+   * `apps/server/src/workflows/pr-scope.ts`.
+   */
+  pr_scoped: z.boolean().optional(),
   /**
    * Render progress as a single in-place "task list" comment/message that is
    * edited as phases run, instead of posting a new comment per phase. When

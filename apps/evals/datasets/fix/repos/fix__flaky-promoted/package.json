@@ -1,0 +1,12 @@
+{
+  "name": "poller",
+  "version": "2.1.0",
+  "type": "module",
+  "description": "Polling helper.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "tap-reporter": "^4.2.0"
+  }
+}

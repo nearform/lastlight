@@ -1,17 +1,100 @@
 kind: pr-fix
 name: pr-fix
+# PR-scoped (09-state-machine.md §S1/§S4): this workflow runs against a pull
+# request, so it crosses the PR-scoped dispatch gate — the run lock shared with
+# every other PR-scoped workflow, the per-head-SHA dedup, escalation, and the
+# resolved `PrState` snapshot on `context.prState`. A fork of this workflow that
+# drops the key silently loses all four; `validateAssets` warns when a
+# `routes.github.pr_*` target is missing it.
+pr_scoped: true
 description: "Lightweight PR fix — no architect/reviewer, just fix and push"
 trigger: pr-fix
 # Single in-place task-list comment/message instead of a comment per phase.
 status_checklist: true
 
 phases:
+  # Diagnose before repairing: classify the failure against the pre-cloned
+  # workspace (cheap) BEFORE the install + test cycle (expensive), so a failure
+  # no amount of fixing can address costs one short call. See the `fixing` skill.
+  - name: diagnose
+    label: Diagnose the failure
+    prompt: prompts/diagnose-ci.md
+    skill: fixing
+    # Cheap by intent — it reads logs and reproduces a command, it doesn't write
+    # code. Unset in config/default.yaml, so this falls through to models.default
+    # until an operator pins a cheaper model for it.
+    model: "{{models.diagnose}}"
+    output_var: diagnosis
+    # The tag WITH its colon, which is what the parser looks for
+    # (`lastMarkerLine`). The engine enforces the postcondition as a plain
+    # substring, so the bare tag let an output that merely MENTIONS
+    # `DIAGNOSIS_COMPLETE` pass a gate it then parsed to nothing — a green phase,
+    # a null diagnosis, and an attempt counter that never advanced. Pinned to
+    # `DIAGNOSIS_MARKER_POSTCONDITION` in src/engine/fix-markers.ts by test.
+    on_output:
+      requires_marker: "DIAGNOSIS_COMPLETE:"
+    messages:
+      on_start: "Diagnosing the failure on PR #{{prNumber}}..."
+      on_failure: "**Couldn't diagnose** the failure on PR #{{prNumber}}."
+
   - name: fix
     label: Fix
     prompt: prompts/pr-fix.md
-    skill: building
+    # `fixing` is primary (minimal repair + push discipline + the markers);
+    # `building` stays available for the install / gate mechanics.
+    skills: [fixing, building]
     model: "{{models.pr-fix}}"
+    # The three stopping classes: there is nothing here for a fix phase to do,
+    # so it must not provision a sandbox and run a 900-second gate for one. A
+    # non-failing skip — the RUN still records `succeeded`, because correctly
+    # determining the PR can't be fixed here IS the job. One expression per
+    # class, so the list reads as the class list it is.
+    #
+    # Read off the PARSED class the marker harvest persisted
+    # (`scratch.fixMarkers.diagnosis.class`), not off the diagnose phase's whole
+    # output. Substring-matching the output was wrong three ways: prose like
+    # "this is not class=flaky, it's reproducible" skipped the fix; a replayed
+    # `{{priorAttempts}}` line from an earlier attempt matched too; and
+    # `phaseOutputs` is EMPTY across a resume boundary, so the guard failed open
+    # and ran the full sandbox + gate on a verdict that said not to. `scratch`
+    # is reloaded from the run row, so it survives resume.
+    #
+    # `class=flaky` is the one BOUNDED row: after `fix.maxFlakyDeferrals` (2)
+    # consecutive `flaky` verdicts on the same problem the harness drops this
+    # expression for that run, so the third one is attempted as `reproducible`
+    # (09-state-machine.md §S1 — three flaky reports running is an intermittent
+    # real failure, and an unbounded series of free full runs otherwise).
+    # `promoteFlakyDiagnosis` in src/workflows/simple.ts matches the expression
+    # below LITERALLY; the other two rows always apply.
+    skip_if:
+      - "scratch.fixMarkers.diagnosis.class == 'flaky'"
+      - "scratch.fixMarkers.diagnosis.class == 'infra-dependent'"
+      - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
+    # Load-bearing, not cosmetic: `runUntilBash` defaults to
+    # `timeout_seconds ?? 30`, and thirty seconds kills any real test suite
+    # mid-run and reports a false red. READ from `fix.gateTimeoutSeconds` — the
+    # run's effective, repo-clamped config block — with the packaged value as
+    # the fallback for a context that carries no `fix:` at all (#256). The two
+    # no longer have to be kept in step by hand.
+    timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
+    # The tag WITH its colon — see the `diagnose` phase above.
+    on_output:
+      requires_marker: "CI_FIX_COMPLETE:"
+    # The within-run local gate loop (04-retry.md §4.5). The gate command isn't
+    # statically knowable — package manager from the lockfile, commands from the
+    # repo's CI workflow — so the `fixing` skill has the agent write it to
+    # `.git/lastlight-verify.sh` inside the checkout (under `.git/`, so no
+    # `git add -A` can ever commit it, and deleted at the start of every attempt
+    # so a superseded diagnosis can't gate this one). No script yet ⇒ an EXPLICIT non-zero exit: `gate=skipped`
+    # is treated as red and never authorises a push (09-state-machine.md §S1).
+    # `max_iterations` reads `fix.localIterations`, same as `timeout_seconds`
+    # above; `2` is the packaged fallback, not the operative value.
+    generic_loop:
+      max_iterations: { from: fix.localIterations, default: 2 }
+      until_bash: "if [ -f .git/lastlight-verify.sh ]; then sh .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
+      fresh_context: false
     messages:
       on_start: "On it — fixing PR #{{prNumber}}..."
       on_success: "**Fix pushed** to `{{branch}}`. CI should re-run automatically."
       on_failure: "**Fix failed** — I wasn't able to resolve this automatically."
+      on_skipped_done: "**No fix attempted** — the diagnosis says this isn't fixable from here. See the verdict above."

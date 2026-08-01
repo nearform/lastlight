@@ -6,11 +6,20 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	description="The PR fix workflow — lightweight fix-and-push for PR issues without the full architect/reviewer cycle."
 >
 	<p>
-		PR fix is a lightweight single-phase workflow for quick fixes on existing
+		PR fix is a lightweight two-phase workflow for quick fixes on existing
 		pull requests. When a maintainer comments on a PR asking Last Light to fix
 		something, and the classifier detects a BUILD intent, this workflow runs
-		instead of the full build cycle — it fixes the issue and pushes directly
-		to the PR branch.
+		instead of the full build cycle — it works out <em>why</em> the PR is red,
+		then fixes it and pushes directly to the PR branch.
+	</p>
+
+	<p>
+		The two phases exist because retrying is only useful if you know why
+		something failed. A blind second attempt on a PR whose tests need a
+		database, or whose base branch is already red, spends a full install and
+		test cycle to learn nothing. So <strong>diagnose</strong> classifies first,
+		cheaply, against the already-cloned workspace — and <strong>fix</strong>
+		runs only if the verdict says a repair is worth attempting.
 	</p>
 
 	<div class="docs-callout tip">
@@ -23,10 +32,15 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	<h2>Pipeline</h2>
 
 	<div class="workflow-diagram">
-		<svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg">
-			<rect x="30" y="12" width="140" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
-			<text x="100" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
-			<text x="100" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">fix + push to branch</text>
+		<svg viewBox="0 0 320 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+			<rect x="12" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="77" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Diagnose</text>
+			<text x="77" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">classify the failure</text>
+			<path d="M146 40 H172" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<path d="M168 36 L174 40 L168 44 Z" fill="var(--diag-line)"/>
+			<rect x="178" y="12" width="130" height="56" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+			<text x="243" y="37" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix</text>
+			<text x="243" y="52" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">if fixable: fix + push</text>
 		</svg>
 	</div>
 
@@ -44,7 +58,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<tr>
 				<td>Phases</td>
 				<td>6 (guardrails → architect → executor → reviewer → PR)</td>
-				<td>1 (fix and push)</td>
+				<td>2 (diagnose → fix)</td>
 			</tr>
 			<tr>
 				<td>Approval gates</td>
@@ -73,17 +87,218 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	<ul>
 		<li>Clones the repo at the PR's head branch</li>
-		<li>Reads the PR description, comment thread, and any CI failures</li>
-		<li>Implements the fix</li>
+		<li><strong>Diagnose</strong> — reads the PR description, comment thread and CI failures, reads the repo's own <code>.github/workflows/*.yml</code>, names the differences between CI and the sandbox (toolchain version, OS, absent services or secrets), reproduces the exact failing command, and classifies the failure. It changes nothing: no edits, no commits, no pushes, no labels</li>
+		<li><strong>Fix</strong> — implements the smallest change that lands the PR, guided by the diagnosis</li>
 		<li>Runs tests, lint, and typecheck</li>
-		<li>Pushes the fix commit to the PR branch</li>
+		<li>Pushes the fix commit to the PR branch — <em>only</em> on a green local gate. If the gate is still red when it runs out of iterations it says so rather than pushing a speculative fix, which would cost a full CI cycle to prove nothing</li>
 	</ul>
+
+	<h2>The five failure classes</h2>
+
+	<p>
+		The diagnosis lands in exactly one class, and the class decides what
+		happens next. Both PR fix and
+		<a href="/docs/workflows/dependabot-ci-fix">Dependabot CI fix</a> share the
+		same vocabulary — it lives in the <code>fixing</code> skill.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr>
+				<th>Class</th>
+				<th>Meaning</th>
+				<th>What happens next</th>
+			</tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>reproducible</code></td>
+				<td>The same command fails in the sandbox too</td>
+				<td>Fix it</td>
+			</tr>
+			<tr>
+				<td><code>env-mismatch</code></td>
+				<td>Passes locally, fails in CI on a version / OS / flag difference</td>
+				<td>Align to CI and re-verify — often a config change, not a code one</td>
+			</tr>
+			<tr>
+				<td><code>flaky</code></td>
+				<td>A timeout or network blip, or the same job passed on an earlier commit</td>
+				<td>Change nothing — but only twice in a row; the third is taken at face value and fixed</td>
+			</tr>
+			<tr>
+				<td><code>infra-dependent</code></td>
+				<td>The check needs secrets, a live service, a deployed backend or a browser</td>
+				<td>Can't be fixed here — escalate, naming the checks</td>
+			</tr>
+			<tr>
+				<td><code>upstream-broken</code></td>
+				<td>The base branch is red too</td>
+				<td>Not this PR's fault — it self-heals when the base goes green</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<div class="docs-callout note">
+		<div class="docs-callout-body">
+			The last three are <strong>stopping</strong> verdicts: the fix phase is
+			skipped and the run finishes <strong>successfully</strong>. Correctly
+			working out that a PR can't be fixed from here <em>is</em> the job, so
+			it isn't recorded as a failure — a red run would comment "couldn't
+			auto-fix, leaving it for a human" on a flaky test, offer a Retry that
+			cannot succeed, and skew the cost and failure stats.
+		</div>
+	</div>
+
+	<h2>What each attempt remembers</h2>
+
+	<p>
+		Attempts are separate runs, days apart — the next one starts when CI goes
+		red again. Nothing carries over on its own: the phase outputs are gone and
+		the workspace is reset between runs. So each phase signs off with a single
+		machine-readable line, and the harness keeps <strong>one bounded line per
+		attempt</strong>:
+	</p>
+
+	<pre><code set:text={'attempt 1: class=reproducible cause=lockfile stale vs package.json | outcome=pushed gate=green\nattempt 2: class=env-mismatch cause=CI runs node 22, sandbox node 20 | outcome=gave-up gate=red'}/></pre>
+
+	<p>
+		Attempt 3 therefore knows what was tried and what was ruled out, without
+		replaying two agent sessions. The prompt is told which attempt it is on
+		<em>and of how many</em>, so it can choose between spending and stopping.
+	</p>
+
+	<p>
+		Later attempts can also run on a <strong>stronger model</strong>. Set a
+		<code>pr-fix-retry</code> entry in <code>models</code> and every attempt
+		above <code>fix.escalateModelAfterAttempt</code> uses it instead of
+		<code>pr-fix</code> — the cheap model gets the first shot, the expensive
+		one gets the problem it couldn't solve. The model each attempt actually
+		used is recorded on the run, so it is visible in the dashboard afterwards.
+		Leave the entry unset and nothing changes.
+	</p>
+
+	<p>
+		The same lines drive the budget. An attempt is only counted when the
+		diagnosis actually landed — a run that crashed on a sandbox failure, a
+		quota rejection or a model API error costs <strong>nothing</strong>,
+		because otherwise one bad hour would escalate every open PR across every
+		repo to <code>requires-human</code> and a human would have to un-stick each
+		one by hand. <code>flaky</code> and <code>upstream-broken</code> cost
+		nothing either — they are verdicts about something other than this PR's
+		code. Repeated <code>flaky</code> verdicts are bounded separately by
+		<code>fix.maxFlakyDeferrals</code>: three in a row means the job is not
+		flaky, it is intermittently really failing, and it gets a real attempt.
+		And if <em>anyone else</em> pushes to the PR, the counter and the history
+		reset — the world moved, so it is a fresh problem.
+	</p>
+
+	<h3>Notes the agent leaves for itself</h3>
+
+	<p>
+		The marker line has fixed fields. Anything the agent works out that
+		doesn't fit them would be lost — so it can also write a short
+		<strong>note</strong> to the pull request's journal, one line at a time:
+	</p>
+
+	<pre><code set:text={'ruled-out: regenerating the lockfile changes nothing — the failure is in the source\nconstraint: the e2e job needs a postgres service; it can never run in this sandbox'}/></pre>
+
+	<p>
+		Four kinds — <code>finding</code>, <code>constraint</code>,
+		<code>ruled-out</code>, <code>todo</code>. <code>ruled-out</code> is the
+		one that earns its keep: it records a negative result the agent actually
+		checked, which is exactly what stops the next attempt spending itself
+		repeating it. The journal is keyed on the <em>pull request</em>, not on
+		the workflow, so a review of the PR reads what the fix runs learned.
+	</p>
+
+	<p>
+		The <strong>cap is the feature</strong>: twenty notes per PR (oldest
+		dropped), 240 characters each, 4 KiB rendered. Anything replayed into
+		every later prompt has to be small, or attempt 3 pays for attempt 1's
+		verbosity. Notes carry their provenance — which run, which phase, which
+		day — and once someone else pushes they are marked <strong>stale</strong>
+		rather than deleted: a claim about the old commit isn't evidence about
+		the new one, but it's still worth seeing.
+	</p>
+
+	<div class="docs-callout note">
+		<div class="docs-callout-body">
+			<strong>Notes are hints, never instructions.</strong> A fix agent reads
+			PR content written by whoever opened it, so anything it remembers could
+			carry that content into a later run's prompt. The journal is therefore
+			fenced and stripped: each note is one line and cannot forge the fence
+			it renders inside, a note containing a token the harness parses is
+			discarded outright, and nothing in the fix loop can be reached because
+			a note said so — no note substitutes for the local gate, and no note
+			can cause a push.
+		</div>
+	</div>
+
+	<h2>When it gives up, it says so</h2>
+
+	<p>
+		When the budget really is spent — every attempt used, the
+		<code>fix.maxCostUsd</code> ceiling reached, or a diagnosis of something
+		no further attempt can fix (needs secrets, a live service, a browser) —
+		Last Light stops <em>and tells you</em>. It applies
+		<code>requires-human</code> and posts <strong>one</strong> comment naming
+		which of those it was, how many attempts were spent, and what each of them
+		found. A PR quietly abandoned with nothing on it is worse than a labelled
+		one: nobody can tell the difference between "still working on it" and
+		"gave up three days ago".
+	</p>
+
+	<p>
+		The label is a <strong>notification, not a one-way door</strong>. Push a
+		commit and Last Light picks the PR up again with a fresh attempt counter —
+		nobody has to remove the label by hand, and asking in a comment works too.
+		A commit Last Light itself pushed doesn't count; it is someone
+		<em>else's</em> change that says the situation moved. The one case that
+		stays permanent is the reverse: a <code>requires-human</code> label a
+		maintainer applied by hand, with no give-up of ours behind it, means "stay
+		out" and is honoured until it is removed.
+	</p>
+
+	<p>
+		Two stopping cases deliberately stay quiet. A failing <em>base</em> branch
+		is not this PR's problem and heals itself the moment the base goes green,
+		and a fork PR gets its own explanation (there is no branch we can push
+		to) — labelling either would poison <code>requires-human</code> with
+		conditions nobody needs to act on.
+	</p>
 
 	<h2>Triggers</h2>
 
 	<ul>
 		<li><strong>GitHub comment:</strong> <code>@last-light fix this</code> on a PR (classifier detects BUILD intent on a PR comment)</li>
+		<li><strong>GitHub webhook:</strong> a <code>check_suite.completed</code> event that settles <em>red</em> on a PR whose head commit Last Light pushed (surfaced internally as <code>pr.checks_failed</code>). This is the feedback loop the fix phase never had — it could push a fix and never learn whether the build went green, because that event only ever fired for dependency PRs. Routing is deterministic: a dependency-update PR goes to <a href="/docs/workflows/dependabot-ci-fix">Dependabot CI fix</a>, anything else comes here. It cannot fire on a PR Last Light has not touched. Requires the GitHub App to subscribe to <strong>Check suite</strong> events (Checks: read).</li>
 	</ul>
+
+	<h2>When it won't run</h2>
+
+	<p>
+		Before any sandbox is provisioned, a single resolved view of the pull
+		request answers whether a fix run is worth spending at all. It is refused
+		when the PR comes from a <strong>fork</strong> (there is no branch we can
+		push to — the author gets a comment saying so), when the <strong>base
+		branch is itself red</strong> (a fix here cannot make CI green, and the PR
+		becomes eligible again the moment the base recovers — nothing to un-stick
+		by hand), when the attempt or cost budget for that PR is exhausted, when
+		the exact head commit has already been assessed, and when another run is
+		already working the PR. That last one is a real lock: only one of PR fix,
+		Dependabot CI fix, Dependabot PR merge and PR review may be in flight for
+		a given PR at a time, so two agents can never clone and push the same
+		branch at once.
+	</p>
+
+	<p>
+		An explicit <code>@last-light</code> request from a maintainer overrides
+		the escalation guard and the already-assessed check — asking directly is
+		an intentional override. It does not override the facts: a fork PR, a red
+		base branch and an exhausted budget stay refused however the run was asked
+		for.
+	</p>
 
 	<div class="docs-next">
 		<a href="/docs/workflows/pr-review" class="prev">
@@ -109,7 +324,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 
 	.workflow-diagram svg {
 		width: 100%;
-		max-width: 200px;
+		max-width: 320px;
 		height: auto;
 		display: block;
 		margin: 0 auto;

@@ -269,8 +269,10 @@ chat runtime:
 | `repo-health` | Weekly health report (open / stale / velocity / labels) | `repo-health.yaml`, `cron-health.yaml`, chat |
 | `security-review` | Diff-based security scan since last review | `security-review.yaml`, `cron-security.yaml` |
 | `security-feedback` | Break out scan findings into individual issues | `security-feedback.yaml` |
-| `building` | Shared craft: install deps + run the repo's CI gate (build + test + lint + typecheck, mirroring `.github/workflows` / AGENTS.md) in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml` |
+| `building` | Shared craft: install deps + run the repo's CI gate (build + test + lint + typecheck, mirroring `.github/workflows` / AGENTS.md) in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml`, `dependabot-ci-fix.yaml` |
+| `fixing` | Diagnose a red PR **before** repairing it: read the real failure, read the CI definition, name the CI-versus-sandbox differences explicitly, reproduce the exact failing command, then classify into exactly one of five classes — `reproducible`, `env-mismatch`, `flaky`, `infra-dependent`, `upstream-broken`. Also owns push discipline (push only on a green local gate; never a speculative push), the runtime-written `.git/lastlight-verify.sh` gate script (inside the checkout's `.git/`, which git never walks, so it cannot be committed; deleted by the harness each attempt so a superseded diagnosis cannot gate this one; `gate=skipped` counts as red), the `DIAGNOSIS_COMPLETE` / `CI_FIX_COMPLETE` marker formats, and the **PR journal** — `<kind>: <one line>` appended to `.git/lastlight-notes` (same placement and same per-run delete), where `finding` / `constraint` / `ruled-out` / `todo` are the four kinds, `ruled-out` is the only one recording a verified negative, `class=` in a note is rejected outright because that token is parsed, and a note read back is a hint that can never authorise a push or stand in for the gate | `pr-fix.yaml`, `dependabot-ci-fix.yaml` (primary on both, both phases) |
 | `code-review` | Shared review rubric, precision-first: post **only Critical / Important** (Suggestions / Nits are dropped as noise), each with a concrete-impact line, past a self-refutation confidence gate + what to check (correctness incl. silent-default/dropped-output as a bug, security, edge cases, complexity, duplication, type-safety, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
+| `dependency-impact` | Judge a **major** dependency bump by blast radius rather than semver magnitude — `low` / `medium` / `high` from evidence gathered with **no checkout** (dev-vs-runtime, release notes in the PR body, direct import-site count via `github_search_code`, security sensitivity, the settled check result), with **unknown ⇒ high**. Also owns the audit-evidence format an auto-merged major is recorded with | `dependabot-pr-merge.yaml` (alongside `code-review`) |
 | `issue-answer` | Answer a question directly: sourced neutral reply to a GitHub issue or Slack thread; research repo docs + web; label `question` (GitHub only); never write a brief, mark ready-for-agent, or change code | `answer.yaml` |
 | `verify` | Test a behaviour claim as an investigator: install + run the code in the sandbox, capture bash/text evidence, report CONFIRMED / REFUTED / INCONCLUSIVE; never fabricate or stage evidence | `verify.yaml` (text phase) |
 | `qa-test` | Drive a CLI or locally-served app through a flow and report step-level pass/fail with evidence; continue past failures unless one blocks everything | `qa-test.yaml` (text phase) |
@@ -280,10 +282,80 @@ chat runtime:
 
 `building` and `code-review` are not optional libraries — they're live
 shared building blocks staged into multiple workflows (`code-review` in the
-build cycle and `pr-review`; `building` in the build cycle and `pr-fix`), the
-same way `issue-triage` is reused across webhook and cron. The "Used by"
-column lists every workflow that stages each. Note `pr-review` stages
-`code-review` but **not** `building` — it's a pure code review.
+build cycle and `pr-review`; `building` in the build cycle and both fix
+workflows), the same way `issue-triage` is reused across webhook and cron.
+The "Used by" column lists every workflow that stages each. Note `pr-review`
+stages `code-review` but **not** `building` — it's a pure code review.
+
+### `fixing` vs `building`
+
+They divide by tense. `building` is about *implementing* — it assumes you
+know what you are trying to build. `fixing` is about **a failure that
+already happened**: find out why, decide whether it can be fixed here at
+all, and only then repair it, minimally. So on both fix workflows the
+`diagnose` phase stages `skill: fixing` alone and the `fix` phase stages
+`skills: [fixing, building]` — `fixing` first, so it is the primary, and
+`building` alongside it for the install + gate mechanics `fixing` defers
+to. Both phases set `prompt:` as well, and both prompts name the skill
+explicitly rather than relying on the auto-generated nudge.
+
+The five classes are the skill's load-bearing output, because the workflow
+branches on them:
+
+| Class | Meaning | Disposition |
+|---|---|---|
+| `reproducible` | The same command fails here too | Fix it |
+| `env-mismatch` | Passes here, fails in CI on a version / OS / flag difference | Align to CI and re-verify — the repair is often config, not code |
+| `flaky` | A timeout or network blip, or the same job passed on a prior SHA | Change nothing |
+| `infra-dependent` | Needs secrets, a live service, a deployed backend, a browser | Cannot be fixed here — escalate, naming the checks |
+| `upstream-broken` | The base branch is red too | Not this PR's fault; self-heals when the base goes green |
+
+The last three are **stopping** verdicts. Reaching one is a *correct*
+outcome, not a failure — stopping cheaply is the entire point of diagnosing
+first — which is why the `fix` phase's `skip_if` skips rather than fails on
+them and the run still records `succeeded`
+([Workflow Engine](/spec/06-workflow-engine)). The skill says so explicitly,
+because an agent's natural bias is to round a stopping verdict up to
+`reproducible` in order to look useful.
+
+Markdown cannot import, so the class vocabulary is pinned from the code side
+instead: `tests/skills/fixing.test.ts` asserts all five names appear verbatim
+in `SKILL.md`, the same pattern (and for the same reason) as
+`tests/cron/label-vocab.test.ts`.
+
+### `dependency-impact` — impact, not magnitude
+
+The only rule about bump magnitude in the codebase used to be one prose
+conjunct in the merge prompt's TRIVIAL test — *"it is not a **major**
+version bump of a runtime dependency"* — so every major escalated, whether
+it was a `@types/*` dev bump or a runtime framework rewrite. This skill
+replaces that conjunct with a rubric over evidence (issue #252).
+
+It is a skill rather than more prompt prose for two reasons. **Progressive
+disclosure:** the assess prompt is already long and the rubric is needed
+only when the PR *is* a major, which pi's on-demand catalogue handles for
+free. **Per-repo tunability:** a managed repo can override
+`skills/dependency-impact/SKILL.md` in its own `.lastlight/` — exactly the
+per-repo tuning this work exists to enable — without the operator widening
+`repoConfig.allowKeys`.
+
+| Tier | When | Effect |
+|---|---|---|
+| `low` | Dev-only dependency, **or** a GitHub Actions tag bump, **or** zero direct import sites; no documented breaking changes; CI settled `passing` | Auto-merges at `autoMergeMaxImpact >= low` |
+| `medium` | Runtime dependency, CI settled `passing`, breaking changes documented but none matching this repo's usage, not security-sensitive | Auto-merges at `autoMergeMaxImpact >= medium` (the packaged default) |
+| `high` | Security-sensitive domain, **or** many import sites, **or** breaking changes plausibly touching used APIs, **or** CI not settled `passing`, **or** release notes missing/unparseable | `dependency-functional` + `requires-human`, as every major used to get |
+
+**Unknown ⇒ high** is the load-bearing clause: inability to gather the
+evidence is itself a high-impact signal, not licence to guess low. It is
+why a repo with no CI at all cannot produce `low` or `medium` for a major —
+there is no behavioural evidence to weigh — while its non-major bumps
+continue down the unchanged trivial path.
+
+The tiers, the three impact labels and their hex colours are a contract
+between the skill, the merge prompt and `src/cron/dependabot-discovery.ts`,
+which markdown cannot import; `tests/cron/label-vocab.test.ts` and
+`tests/workflows/dependabot-pr-merge.test.ts` pin them, the same pattern as
+the `fixing` classes above.
 
 Nested skill directories (`skills/software-development/architect`,
 `skills/github/github-pr-workflow`, etc.) exist as a category library —

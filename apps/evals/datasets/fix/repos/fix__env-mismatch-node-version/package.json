@@ -1,0 +1,15 @@
+{
+  "name": "grouper",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Grouping helper.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "tiny-group": "^1.9.0"
+  }
+}

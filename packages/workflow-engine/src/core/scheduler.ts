@@ -1,6 +1,8 @@
 import type { AgentWorkflowDefinition } from "./schema.js";
+import { phaseSkipIfExpressions } from "./schema.js";
 import type { TemplateContext } from "./templates.js";
 import { renderTemplate } from "./templates.js";
+import { evalSkipIf } from "./loop-eval.js";
 import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
 import { PhaseExecutor, type PhaseRunContext } from "./phase-executor.js";
 import { OPENINFERENCE_CHAIN, OPENINFERENCE_SPAN_KIND } from "./types.js";
@@ -96,13 +98,28 @@ export async function runWorkflowCore(
   const activeBackend = config.sandbox ?? "gondolin";
 
   while (!isComplete(dag)) {
-    // Honour a cancel that landed during the previous phase's execution.
+    // Honour a cancel that landed during the previous phase's execution, and
+    // re-read the run row's scratch while we are here.
     if (db && workflowId) {
       const latest = db.runs.getRun(workflowId);
       if (latest?.status === "cancelled") {
         console.log(`[runner] ${definition.name} cancelled — stopping`);
         return { success: false, phases };
       }
+      // `runScope.scratch` is loaded ONCE, before the first phase. The HOST also
+      // writes to the row mid-run through `mergeScratch` from its `onPhaseEnd`
+      // hook — lastlight-core's fix-marker harvest does exactly that — and this
+      // process cannot see those writes. So the `skip_if` gate below would
+      // evaluate `scratch.*` against the pre-run snapshot on a fresh run and only
+      // see the real value across a resume (where the row is re-read at startup):
+      // a guard that silently does nothing on the path it was written for, which
+      // is the failure shape `skip_if` exists to avoid.
+      //
+      // Mutated in place, never replaced: `ctx.scratch` aliases this object so
+      // `{{scratch.*}}` templates and the loop nodes' own slots keep resolving.
+      // The row is authoritative because every in-engine scratch write is paired
+      // with a `mergeScratch` of the same value.
+      if (latest?.scratch) Object.assign(runScope.scratch, latest.scratch);
     }
 
     // Skip nodes whose trigger rule fails (deps terminal, rule unsatisfied).
@@ -124,15 +141,21 @@ export async function runWorkflowCore(
 
     const ready = getReadyNodes(dag);
 
-    // Capability gate: skip any ready node whose declared capability isn't
-    // available on this host. Safe-by-default graceful degradation — a gated
-    // phase (e.g. the browser-QA step that needs the docker image) silently
-    // no-ops instead of failing the workflow. Two reasons trigger a skip:
+    // Capability / conditional gate: skip any ready node that shouldn't run.
+    // Safe-by-default graceful degradation — a gated phase (e.g. the browser-QA
+    // step that needs the docker image) silently no-ops instead of failing the
+    // workflow. Three reasons trigger a skip:
     //   1. `requires_sandbox` names a backend other than the one running.
     //   2. `sandbox_image: qa` but the browser-QA image isn't built here (only
     //      checked on docker — on other backends the field is inert).
+    //   3. `skip_if` matches the run's render context — the phase is not
+    //      *unavailable*, it is *unnecessary* (the fix phase after a diagnosis
+    //      that says there is nothing to fix here). Evaluated only once the
+    //      node is ready, so an upstream phase's output is already in `outputs`.
     // Uses the same non-failing skip mechanics as the trigger-rule skip above,
-    // plus the phase's `on_skipped_done` message so the user sees why.
+    // plus the phase's `on_skipped_done` message so the user sees why. All
+    // three keep the RUN `succeeded`: a correct "nothing to do" is not a
+    // failure (see `skip_if` in core/schema.ts for why that matters).
     const gatedSkip: { node: (typeof ready)[number]; reason: string }[] = [];
     for (const node of ready) {
       const phaseDef = phaseByName.get(node.name);
@@ -145,6 +168,12 @@ export async function runWorkflowCore(
         !capabilities.qaImageAvailable()
       ) {
         gatedSkip.push({ node, reason: `requires the ${capabilities.qaImageName} image, not built on this host` });
+      } else if (phaseDef) {
+        const exprs = phaseSkipIfExpressions(phaseDef);
+        const matched = exprs.length
+          ? evalSkipIf(exprs, { ...ctx, phaseOutputs: outputs, scratch: runScope.scratch, output: "" })
+          : undefined;
+        if (matched) gatedSkip.push({ node, reason: `skip_if matched: ${matched}` });
       }
     }
     if (gatedSkip.length > 0) {

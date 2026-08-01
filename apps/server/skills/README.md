@@ -22,8 +22,10 @@ or editing a skill.
 | [`repo-health`](repo-health/) | `repo-health.yaml`, chat | Generate a repository health report — open issues, PR backlog, CI status, action items. |
 | [`security-review`](security-review/) | `security-review.yaml` | Diff-scoped SDLC security review; file one dated summary issue with a task-list of findings. |
 | [`security-feedback`](security-feedback/) | `security-feedback.yaml` | Process a maintainer's comment on a security scan summary — break findings into issues or record suppressions. |
-| [`building`](building/) | build (executor, reviewer), `pr-fix.yaml` | Shared craft: install-first + package-manager detection, the test/lint/typecheck gate, and TDD discipline in the sandbox. |
+| [`building`](building/) | build (executor, reviewer), `pr-fix.yaml`, `dependabot-ci-fix.yaml` | Shared craft: install-first + package-manager detection, the test/lint/typecheck gate, and TDD discipline in the sandbox. |
+| [`fixing`](fixing/) | `pr-fix.yaml`, `dependabot-ci-fix.yaml` | Diagnose a red PR before repairing it — compare the CI definition against the sandbox, classify into five failure classes, then make the minimal repair. Emits the `DIAGNOSIS_COMPLETE` / `CI_FIX_COMPLETE` markers. |
 | [`code-review`](code-review/) | build (reviewer), `pr-review.yaml` | Shared rubric: finding tiers (Critical/Important/Suggestions/Nits) and what-to-check. Referenced by both the branch-diff reviewer and the PR reviewer. |
+| [`dependency-impact`](dependency-impact/) | `dependabot-pr-merge.yaml` | Judge a MAJOR dependency bump by blast radius, not semver magnitude — low / medium / high from evidence gathered with no checkout. Unknown counts as high. |
 | [`verify`](verify/) | `verify.yaml` | Test a behaviour claim as an investigator — CONFIRMED / REFUTED / INCONCLUSIVE with bash-captured evidence. |
 | [`qa-test`](qa-test/) | `qa-test.yaml` | Run an automated QA flow against a CLI or locally-served app and report step-level pass/fail with evidence. |
 | [`browser-qa`](browser-qa/) | `verify.yaml`, `qa-test.yaml`, `demo.yaml` | Drive a real headless browser against a locally-served web UI and capture screenshot (and, for `demo`, video) evidence. Gated to the docker QA image. |
@@ -31,10 +33,14 @@ or editing a skill.
 
 `building` and `code-review` are **shared building blocks** so the install
 gate and the review rubric each live in one place. `building` is staged by the
-build cycle (executor + reviewer) and `pr-fix`; `code-review` by the build
-reviewer and `pr-review` (which stages `code-review` but **not** `building` — a
-pure code review). They're staged alongside the phase's primary skill/prompt and
-read on demand.
+build cycle (executor + reviewer) and both fix workflows; `code-review` by the
+build reviewer and `pr-review` (which stages `code-review` but **not**
+`building` — a pure code review). They're staged alongside the phase's primary
+skill/prompt and read on demand.
+
+`fixing` is the primary skill on both fix workflows, with `building` alongside
+it: `fixing` owns *why did this fail and can it be fixed here*, `building` owns
+*install and run the gate*.
 
 The live set is enforced at startup: `validateAssets()` (`src/workflows/loader.ts`)
 resolves every workflow `skill:` reference and `CHAT_SKILL_NAMES`

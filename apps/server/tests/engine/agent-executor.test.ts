@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { RunResultAccumulator, stageSkillBundle, excludeFromGit, detectAccountError, reclassifySuccess } from "#src/engine/agent-executor.js";
+import { RunResultAccumulator, stageSkillBundle, excludeFromGit, resetVerifyScript, VERIFY_SCRIPT_NAME, detectAccountError, reclassifySuccess } from "#src/engine/agent-executor.js";
 
 /**
  * A pi assistant `message_end` event carrying per-message usage. Mirrors the
@@ -477,6 +477,82 @@ describe("excludeFromGit", () => {
     try {
       // No .git here — must not throw and must not create anything.
       expect(() => excludeFromGit(tmp, ".lastlight-skills")).not.toThrow();
+      expect(existsSync(join(tmp, ".git"))).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("writes the DIRECTORY form — every remaining caller registers a dir", () => {
+    // The `kind: "file"` form existed for the push gate and the PR journal.
+    // Both now live under `.git/`, which git never walks, so neither needs
+    // excluding and no caller passes a file (see `src/engine/fix-scratch.ts`).
+    const tmp = mkdtempSync(join(tmpdir(), "gitexclude-"));
+    try {
+      const repo = join(tmp, "repo");
+      mkdirSync(join(repo, ".git", "info"), { recursive: true });
+
+      excludeFromGit(repo, ".lastlight-skills");
+
+      const body = readFileSync(join(repo, ".git", "info", "exclude"), "utf8");
+      expect(body).toContain("/.lastlight-skills/\n");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * The push gate must be rewritten every attempt (09-state-machine.md §S1): the
+ * fix family shares ONE workspace per PR, so a script written by a superseded
+ * diagnosis — possibly by the other fix workflow — outlives the run that wrote
+ * it, and a stale gate passes green against the wrong commands.
+ *
+ * Staleness is now the reset's ONLY job. The gate lives under `.git/`, so
+ * nothing has to be registered anywhere for it to stay out of the PR — and
+ * nothing else can clear it either, since `git clean -fdx` does not enter
+ * `.git/` (see `src/engine/fix-scratch.ts`, and
+ * `tests/sandbox/scratch-not-committable.test.ts` for the git round-trip).
+ */
+describe("resetVerifyScript", () => {
+  function checkout(): { tmp: string; repo: string } {
+    const tmp = mkdtempSync(join(tmpdir(), "verifygate-"));
+    const repo = join(tmp, "repo");
+    mkdirSync(join(repo, ".git", "info"), { recursive: true });
+    return { tmp, repo };
+  }
+
+  it("deletes a stale gate script", () => {
+    const { tmp, repo } = checkout();
+    try {
+      writeFileSync(join(repo, VERIFY_SCRIPT_NAME), "#!/bin/sh\nexit 0\n");
+
+      resetVerifyScript(repo);
+
+      expect(existsSync(join(repo, VERIFY_SCRIPT_NAME))).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("is idempotent, and touches nothing but the gate", () => {
+    const { tmp, repo } = checkout();
+    try {
+      resetVerifyScript(repo);
+      resetVerifyScript(repo);
+
+      expect(existsSync(join(repo, VERIFY_SCRIPT_NAME))).toBe(false);
+      // No exclude line is written any more — placement is the guarantee.
+      expect(existsSync(join(repo, ".git", "info", "exclude"))).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("does not throw when the dir is not a checkout", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "verifygate-"));
+    try {
+      expect(() => resetVerifyScript(tmp)).not.toThrow();
       expect(existsSync(join(tmp, ".git"))).toBe(false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });

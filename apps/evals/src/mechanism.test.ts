@@ -25,7 +25,9 @@ import {
 import { seedWorkspace, seedWorkspaceFromGit, prFilesFromGit, injectRepoContext } from "./seed.js";
 import { gitDiffAgainstBase } from "./run-instance.js";
 import { execFileSync } from "node:child_process";
-import { gradeExecution, gradeBehavioral, gradeTriage, gradeReview, fBeta } from "./grade.js";
+import { gradeExecution, gradeBehavioral, gradeTriage, gradeReview, gradeMarkers, fBeta } from "./grade.js";
+import { prContextPatch } from "./pr-context.js";
+import { defaultFixConfig } from "lastlight-core/evals";
 import { computeMartianRanking, type MartianSidecar } from "./report.js";
 import type { InstanceResult } from "./schema.js";
 import { loadMergedConfig, resolvePhaseModel } from "./config.js";
@@ -1051,6 +1053,262 @@ describe("collectMetrics — subscription-model cost fallback", () => {
       expect(m.costUsd).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── The PR state machine seam (issues #251, #252) ───────────────────────────
+
+describe("PR context — core's own projection, not a copy", () => {
+  const args = {
+    repo: "acme/widget",
+    prNumber: 412,
+    title: "Bump tiny-case from 2.4.0 to 3.0.0",
+    body: "Bumps tiny-case.",
+    branch: "dependabot/npm_and_yarn/tiny-case-3",
+  };
+
+  it("projects the CI evidence the fix prompts render", () => {
+    const ctx = prContextPatch({
+      ...args,
+      seed: {
+        checks_state: "failing",
+        base_checks_state: "passing",
+        attempt: 2,
+        ci_jobs: [
+          { name: "CI / test", log_excerpt: "SyntaxError: no export named 'kebab'", failing_step: "npm test" },
+        ],
+      },
+    });
+
+    // `{{ciSection}}` is the block the whole diagnosis rests on; `{{#if ciSection}}`
+    // is how the prompt gates it, so an empty string here means the agent is
+    // asked to diagnose a failure it was told nothing about.
+    expect(String(ctx.ciSection)).toContain("CI FAILURES");
+    expect(String(ctx.ciSection)).toContain("kebab");
+    expect(ctx.attempt).toBe(2);
+    expect(ctx.maxAttempts).toBe(defaultFixConfig().maxAttempts);
+    expect(ctx.checksState).toBe("failing");
+    expect(ctx.baseChecksState).toBe("passing");
+    expect(ctx.ciLogsAvailable).toBe(true);
+    // Both harness-owned paths reach the prompt as variables, so a fork that
+    // hardcoded the old ones is not silently in play.
+    expect(String(ctx.verifyScript)).toContain(".git/");
+    expect(String(ctx.notesFile)).toContain(".git/");
+  });
+
+  it("carries the flaky promotion the third attempt turns on", () => {
+    const ctx = prContextPatch({
+      ...args,
+      seed: { attempt: 3, flaky_deferrals: 2, checks_state: "failing" },
+    });
+    // The signal that stops attempt 3 from re-reporting `flaky` and then
+    // running the fix phase against a verdict that says "change nothing".
+    expect(ctx.flakyPromoted).toBe(true);
+    expect(ctx.flakyDeferrals).toBe(2);
+    expect(ctx.maxFlakyDeferrals).toBe(defaultFixConfig().maxFlakyDeferrals);
+  });
+
+  it("projects the merge gate's verdict AND its reason, from one decision", () => {
+    const green = prContextPatch({
+      ...args,
+      seed: { checks_state: "passing", settled_check_count: 3 },
+    });
+    expect(green.mayMerge).toBe(true);
+    expect(typeof green.mayMergeReason).toBe("string");
+
+    const pending = prContextPatch({ ...args, seed: { checks_state: "pending" } });
+    expect(pending.mayMerge).toBe(false);
+    // The reason is produced BY the decision — the panel, the log line and the
+    // prompt are three renderings of it, never three prose variants.
+    expect(String(pending.mayMergeReason).length).toBeGreaterThan(0);
+  });
+
+  it("seeds the policy blocks a prompt renders, under the case's overrides", () => {
+    const ctx = prContextPatch({ ...args, seed: { dependencies: { autoMergeMaxImpact: "low" } } });
+    expect((ctx.dependencies as { autoMergeMaxImpact: string }).autoMergeMaxImpact).toBe("low");
+    // Everything the case did NOT override is the shipped default, so a case
+    // states only what it is actually testing.
+    expect((ctx.fix as { maxAttempts: number }).maxAttempts).toBe(defaultFixConfig().maxAttempts);
+  });
+
+  it("a case with no seed still gets a coherent snapshot", () => {
+    const ctx = prContextPatch(args);
+    expect(ctx.attempt).toBe(1);
+    expect(ctx.ciSection).toBe("");
+    expect(ctx.prNumber).toBe(412);
+  });
+});
+
+// ── Marker grading (fix / dependency-merge) ─────────────────────────────────
+
+describe("gradeMarkers", () => {
+  const diagnose = (cls: string) =>
+    `DIAGNOSIS_COMPLETE: pr=412 attempt=1 class=${cls} cause=renamed export ci_vs_local=none`;
+
+  it("grades the diagnosis class off the real marker line", () => {
+    const phases = [{ output: `Looked at the log.\n${diagnose("reproducible")}` }];
+    expect(gradeMarkers({ diagnosis_class: "reproducible" }, phases).ok).toBe(true);
+    expect(gradeMarkers({ diagnosis_class: "flaky" }, phases).ok).toBe(false);
+  });
+
+  it("does not accept a bare mention of the tag", () => {
+    // The disagreement that let a silent no-op run pass as a diagnosis (#251):
+    // the phase gate tested `output.includes(tag)` while the parser required
+    // `<TAG>:`. Grading goes through CORE's parser, so the two agree here.
+    const phases = [{ output: "I'll finish with DIAGNOSIS_COMPLETE once I understand this." }];
+    const g = gradeMarkers({ diagnosis_class: "reproducible" }, phases);
+    expect(g.ok).toBe(false);
+    expect(g.checks[0].detail).toContain("no marker");
+  });
+
+  it("takes the LAST marker across phases — a loop's later iteration supersedes", () => {
+    const phases = [
+      { output: diagnose("flaky") },
+      { output: diagnose("reproducible") },
+    ];
+    expect(gradeMarkers({ diagnosis_class: "reproducible" }, phases).ok).toBe(true);
+  });
+
+  it("accepts any of a set where two verdicts are both defensible", () => {
+    const phases = [{ output: diagnose("env-mismatch") }];
+    expect(
+      gradeMarkers({ diagnosis_class_any_of: ["reproducible", "env-mismatch"] }, phases).ok,
+    ).toBe(true);
+    expect(gradeMarkers({ diagnosis_class_any_of: ["flaky"] }, phases).ok).toBe(false);
+  });
+
+  it("grades the fix outcome and its gate", () => {
+    const phases = [{ output: "CI_FIX_COMPLETE: pr=412 attempt=1 outcome=pushed tried=rename gate=green" }];
+    expect(gradeMarkers({ fix_outcome: "pushed", fix_gate: "green" }, phases).ok).toBe(true);
+    expect(gradeMarkers({ fix_gate: "red" }, phases).ok).toBe(false);
+  });
+
+  it("grades the merge assessment's impact and action", () => {
+    const phases = [
+      { output: "ASSESSMENT_COMPLETE: pr=501 verdict=TRIVIAL impact=low action=automerge" },
+    ];
+    expect(gradeMarkers({ assessment_impact: "low", assessment_action: "automerge" }, phases).ok).toBe(true);
+    expect(gradeMarkers({ assessment_impact: "high" }, phases).ok).toBe(false);
+  });
+
+  it("is a no-op for a case that declares no expectations", () => {
+    expect(gradeMarkers(undefined, [{ output: "anything" }]).ok).toBe(true);
+  });
+});
+
+// ── The merge + Actions endpoints the two new tiers need ────────────────────
+
+describe("fake GitHub — merge, auto-merge, diff and Actions", () => {
+  const pr = {
+    number: 501,
+    title: "Bump @types/node from 22 to 26",
+    body: "bump",
+    base_ref: "main",
+    head_ref: "dependabot/types-node-26",
+    base_commit: "0".repeat(40),
+    head_commit: "0".repeat(40),
+    user: "dependabot[bot]",
+    files: [
+      {
+        sha: "0".repeat(40),
+        filename: "package.json",
+        status: "modified" as const,
+        additions: 1,
+        deletions: 1,
+        changes: 2,
+        patch: '@@ -12,7 +12,7 @@\n-    "@types/node": "^22.10.2",\n+    "@types/node": "^26.1.1",',
+      },
+    ],
+  };
+
+  it("enables auto-merge through the GraphQL mutation the real tool uses", async () => {
+    // There is NO REST endpoint for this. A REST-only fake 404s the merge
+    // workflow's preferred path and the agent silently falls back to a direct
+    // merge — every case would then measure the fallback.
+    const fake = await startFakeGitHub({ owner: "acme", repo: "app", pulls: [pr] });
+    try {
+      const gh = new GitHubClient(staticAuth, { baseUrl: fake.url });
+      const res = (await gh.enablePullRequestAutoMerge("acme", "app", 501, "squash")) as {
+        ok: boolean;
+      };
+      expect(res.ok).toBe(true);
+      expect(fake.autoMergeOf(501)?.method).toBe("squash");
+      // Auto-merge is NOT a merge: the PR is still open, waiting on its checks.
+      expect(fake.mergeOf(501)).toBeUndefined();
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("records a direct merge separately from auto-merge", async () => {
+    const fake = await startFakeGitHub({ owner: "acme", repo: "app", pulls: [pr] });
+    try {
+      const gh = new GitHubClient(staticAuth, { baseUrl: fake.url });
+      await gh.mergePullRequest("acme", "app", 501, { merge_method: "squash" });
+      expect(fake.mergeOf(501)?.method).toBe("squash");
+      expect(fake.autoMergeOf(501)).toBeUndefined();
+      // …and the two are gradeable as the different decisions they are.
+      expect(gradeBehavioral({ pr_merged: true, auto_merge_enabled: false }, fake, { issueNumber: 501, branch: "main" }).ok).toBe(true);
+      expect(gradeBehavioral({ pr_merged: false }, fake, { issueNumber: 501, branch: "main" }).ok).toBe(false);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("serves the PR patch to the diff media type, not JSON", async () => {
+    const fake = await startFakeGitHub({ owner: "acme", repo: "app", pulls: [pr] });
+    try {
+      fake.setPullFiles(501, pr.files);
+      const gh = new GitHubClient(staticAuth, { baseUrl: fake.url });
+      const diff = (await gh.getPullRequestDiff("acme", "app", 501)) as unknown as string;
+      // A JSON body here would hand the impact assessment an object where it
+      // expects a patch — it would then reason about the wrong artifact.
+      expect(String(diff)).toContain("diff --git a/package.json");
+      expect(String(diff)).toContain("@types/node");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("serves the CI reads from the same fixture the prompt was built from", async () => {
+    const fake = await startFakeGitHub({
+      owner: "acme",
+      repo: "app",
+      pulls: [pr],
+      actions: {
+        headSha: "f1a0b22",
+        jobs: [{ name: "CI / test", log: "SyntaxError: no export named 'kebab'", failingStep: "npm test" }],
+      },
+    });
+    try {
+      const gh = new GitHubClient(staticAuth, { baseUrl: fake.url });
+      const runs = (await gh.listWorkflowRuns("acme", "app", {})) as { workflow_runs: { id: number }[] };
+      expect(runs.workflow_runs.length).toBe(1);
+      const jobs = (await gh.listWorkflowRunJobs("acme", "app", runs.workflow_runs[0].id)) as {
+        jobs: { id: number; name: string }[];
+      };
+      expect(jobs.jobs[0].name).toBe("CI / test");
+      const logs = (await gh.getJobLogs("acme", "app", jobs.jobs[0].id)) as unknown as
+        | string
+        | { log?: string; content?: string };
+      // An agent that digs into the logs must read the SAME failure the prompt
+      // told it about — one seed, two surfaces.
+      expect(JSON.stringify(logs)).toContain("kebab");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("keeps an un-fixtured Actions route a loud 404", async () => {
+    // The rest of this file's contract: an unimplemented route 404s rather than
+    // returning a plausible empty answer.
+    const fake = await startFakeGitHub({ owner: "acme", repo: "app", pulls: [pr] });
+    try {
+      const res = await fetch(`${fake.url}/repos/acme/app/actions/runs`);
+      expect(res.status).toBe(404);
+    } finally {
+      await fake.close();
     }
   });
 });

@@ -62,6 +62,7 @@ through — webhook dispatch, CLI, cron, admin resume.
   name: string;          // unique workflow name; lookup key
   description?: string;
   trigger?: string;      // informational
+  pr_scoped?: boolean;   // this workflow runs against a PULL REQUEST — see below
   variables?: Record<string, string>;
   classification?: {     // how the intent classifier routes to this workflow (issue #164)
     intent: string;      //   the intent token this workflow owns (unique; not a control intent)
@@ -71,6 +72,24 @@ through — webhook dispatch, CLI, cron, admin resume.
   phases: PhaseDefinition[];
 }
 ```
+
+`pr_scoped: true` is the one key here the runner acts on. It puts a workflow
+inside the PR-scoped dispatch gate: the run lock shared with every other
+PR-scoped workflow, the per-head-SHA dedup, escalation, and the resolved
+`PrState` snapshot on `context.prState`. `prScopedWorkflows()`
+(`src/workflows/pr-scope.ts`) derives the set from this metadata, memoised on the
+loader's asset version, so a forked or renamed workflow keeps its gate by
+carrying its own key. It is metadata on the workflow because that is where the
+fact lives: the harness previously held a hardcoded set of four names while the
+handlers are operator-configurable through `routes.github.*`, so remapping a
+route to a fork silently dropped the whole gate for it — and every consequence of
+the gate is a *refusal*, so nothing looked wrong until two agents pushed the same
+branch (issue #256). `validateAssets` now warns at boot when a configured
+`routes.github.pr_*` target does not declare it. The four packaged members are
+`pr-fix`, `dependabot-ci-fix`, `dependabot-pr-merge` and `pr-review`; those four
+names are also honoured without the key, for overlays that forked them before it
+existed, with a warning naming the file. See
+[05-router.md → the PR-scoped dispatch gate](05-router.md#the-pr-scoped-dispatch-gate).
 
 The optional `classification` block makes a workflow **self-describing to the
 router**: its `description`/`examples` are composed into the classifier prompt
@@ -90,7 +109,7 @@ overlay) can add a new intent with no core change. See
   command?: string;                     // type: bash — deterministic shell command (templated)
   script?: string;                      // type: script — inline source (templated)
   runtime?: "js" | "ts" | "python";     // type: script — js/ts → node, python → uv run (default "js")
-  timeout_seconds?: number;             // type: bash/script — per-step timeout (default 300)
+  timeout_seconds?: number | { from: string; default: number };  // bash/script step timeout + until_bash budget (default 300 / 30)
   skill?: string;                       // single skill name; sugar for `skills: [<name>]`
   skills?: string[];                    // per-phase bundle: <workspaceRoot>/.lastlight-skills/<phase>/<name>/
                                         // may coexist with `prompt`; mutually exclusive with `skill`
@@ -109,6 +128,7 @@ overlay) can add a new intent with no core change. See
   web_search?: boolean;                 // enable agentic-pi web tools
   requires_sandbox?: "docker" | "gondolin" | "none";  // skip phase (non-failing) if active backend differs
   sandbox_image?: "default" | "qa";     // docker only: "qa" runs on lastlight-sandbox-qa (Playwright+Chromium+ffmpeg); skips if unbuilt
+  skip_if?: string | string[];          // skip phase (non-failing) when any expression matches the render context
   loop?: PhaseLoop;                     // reviewer-fix loop
   generic_loop?: GenericLoop;           // until-condition loop
   on_output?: OutputRule[];             // contains_BLOCKED → fail; requires_marker → fail if final output lacks this marker (postcondition against silent no-op "successes")
@@ -213,6 +233,90 @@ array in order (`runner.ts:457–1033`).
 Loop iterations always run sequentially even inside DAG-mode workflows
 (fix cycles read the prior reviewer verdict).
 
+## Gated skips
+
+Before running the ready nodes, the scheduler filters them
+(`core/scheduler.ts`). Three declarations can take a node out:
+
+| Field | Gates on | Example |
+|---|---|---|
+| `requires_sandbox` | The named backend isn't the one running | the browser-QA step that only works on docker |
+| `sandbox_image: qa` | The heavier QA image isn't built on this host (docker only; inert elsewhere) | same |
+| `skip_if` | An expression matches the run's render context | the `fix` phase after a diagnosis that says there is nothing to fix |
+
+The first two gate on the phase being **unavailable**; `skip_if` gates on
+it being **unnecessary**. All three take the *same* path: the node records
+`skipped`, a `recordSkippedPhase` row lands, `messages.on_skipped_done` is
+surfaced so a human sees why, and **the run still records `succeeded`**.
+
+That last part is the whole reason `skip_if` exists rather than being
+expressed with the pre-existing `on_output.contains_BLOCKED: { action:
+fail }`. A phase whose *correct* outcome is "there is nothing for the next
+phase to do" must not paint the run red, because `failed` has four
+mechanical consequences: `messages.on_failure` posts to the PR (actively
+wrong — "leaving it for a human" on a flaky test), the dashboard's **Retry**
+button targets `failed`/`cancelled` and so offers a retry that cannot
+succeed, the cost and failure stats are polluted, and
+`latestSucceededForTrigger` ignores failed runs, which defeats the
+already-handled-this-SHA dedup so the same dead end is re-diagnosed on
+every webhook re-fire. Recording the skip `succeeded` fixes all four, and
+turns the fourth into a positive: the dedup starts working for exactly the
+cases that must not be re-attempted.
+
+```yaml
+- name: fix
+  skip_if:                                          # one string, or a list (OR-ed)
+    - "scratch.fixMarkers.diagnosis.class == 'flaky'"
+    - "scratch.fixMarkers.diagnosis.class == 'infra-dependent'"
+    - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
+```
+
+Expressions use the `until:` grammar (see *Loop expression evaluator*
+below), evaluated against `{ ...ctx, phaseOutputs, scratch }` — the same
+values a prompt template can render. `output` is empty here (the phase has
+not run), so a bare `output.contains(...)` is meaningless; read an upstream
+phase instead. AND is expressible by collapsing to a single expression; the
+production consumer is a class list, which is why one expression per class
+reads better than one compound one.
+
+**Read a PARSED value out of `scratch`, not prose out of `phaseOutputs`.**
+The production rows above used to be
+`phaseOutputs.diagnosis.contains('class=flaky')`, and every way that can go
+wrong, it did: `phaseOutputs.diagnosis` is the agent's *entire* output and
+the match is a plain substring, so an agent writing "this is not
+`class=flaky`, it is reproducible" skipped the phase; a `{{priorAttempts}}`
+line replayed from an earlier attempt matched too; `class=flaky-timeout`
+matched while `class=probably-flaky` did not; and `phaseOutputs` is **empty
+across a resume boundary**, so the guard failed open and ran a full sandbox
+on exactly the verdicts it exists to stop. `scratch` is reloaded from the run
+row each iteration, and the marker harvest has already parsed and validated
+the class — so the guard reads the same value the decision layer does.
+
+There is no negation, and a *conditional* row — "skip on `class=flaky`,
+unless this PR has already deferred twice" — is therefore not expressible
+at all. The `flaky` cap needs exactly that, and resolves it without an
+operator: its second term is a fact about the PR's history known *before*
+the run starts, so the harness composes the run's guard list from it —
+`promoteFlakyDiagnosis` (`src/workflows/simple.ts`) drops the `flaky`
+expression once `flakyDeferrals >= fix.maxFlakyDeferrals`, on a shallow
+copy of the loader's cached definition. The other two rows are
+unconditional. This is the general shape for any guard whose second term
+is run-level rather than phase-level: compose the list, don't grow the
+grammar.
+
+Two scoping rules:
+
+- **Evaluated when the node becomes *ready***, i.e. after its dependencies
+  are terminal — which is what makes reading an upstream phase's output
+  well-defined.
+- **`phaseOutputs` is empty across a resume boundary** (a phase skipped as
+  already-`done` contributes nothing to the in-memory map), so a guard that
+  must survive resume should read `scratch`, which the run store rehydrates.
+
+Every expression fails **open**: an unrecognised form and an absent variable
+both evaluate false, so a malformed or not-yet-populated guard *runs* the
+phase rather than silently swallowing it.
+
 ## Loops
 
 Two flavours.
@@ -257,7 +361,7 @@ enters the next fix cycle.
 - name: socratic
   prompt: prompts/explore-ask.md
   generic_loop:
-    max_iterations: 8
+    max_iterations: 8            # or { from: <ctx path>, default: N } — see below
     until: "output.contains('READY')"
     gate_kind: "reply"           # pause after each iteration; user reply feeds next
     scratch_key: "socratic"      # accumulate Q&A under workflow_runs.scratch.socratic
@@ -523,23 +627,92 @@ for the k8s-side half of this mechanism (the `QuotaExceededError` →
 ```ts
 // src/workflows/loop-eval.ts
 export function evalUntilExpression(expr: string, ctx: LoopEvalContext): boolean;
+export function evalSkipIf(exprs: readonly string[], ctx: LoopEvalContext): string | undefined;
 ```
 
 A custom mini-DSL (not `eval()`). Accepts:
 
 - `output.contains('text')` — substring match on the iteration's output
+- `a.b.c.contains('text')` — the same against any dotted path in the
+  context (`output` is the degenerate one-segment case). Strings and
+  numbers only: stringifying an object yields `"[object Object]"`, which
+  is a substring match waiting to surprise someone
 - `variable == 'value'` / `variable != 'value'` — equality / inequality
 - `variable == true` / `== false` — boolean coercion of bare literals
 - Dotted keys for nested access: `scratch.socratic.ready == true`
 
 Unrecognised expressions return `false` (safe default — the loop runs
-until `max_iterations`).
+until `max_iterations`; a `skip_if` guard runs its phase).
+
+One grammar, two consumers. `evalUntilExpression` drives a
+`generic_loop`'s `until:`; `evalSkipIf` OR-s a phase's `skip_if` list and
+returns the **first matching expression**, so the scheduler can name it in
+the skip reason. The longer dotted path exists for `skip_if`, which needs
+to read a *sibling* value (`scratch.fixMarkers.diagnosis.class == '…'`)
+that the loop never did.
+
+`runScope.scratch` is refreshed from the run row on each iteration, inside
+the `getRun` the cancel check already makes — so a guard reading `scratch`
+sees what a phase harvest wrote through `onPhaseEnd`, not the value the
+scope was constructed with. Without that refresh a `scratch` guard is a
+silent no-op on the fresh path: it reads state that predates the phase it is
+guarding on.
 
 `until_bash` is the alternative: a shell command whose exit code (0 →
 stop) drives the loop. It runs **inside the sandbox** (via `executeCommand`
 with `writeSession: false`) against the persisted workspace — not on the
 harness host. `{{}}` markers in the command are rejected before execution to
-prevent template-after-render injection (`validateShellCommand`).
+prevent template-after-render injection (`validateShellCommand`), so the
+command is necessarily a **literal** string — it cannot be varied per backend.
+
+Its budget is `phase.timeout_seconds ?? 30`. **Thirty seconds is a trap**: it
+kills any real build/test suite mid-run and reports a false red, so a phase
+whose gate is the repo's own CI commands must carry an explicit value. Both fix
+workflows read theirs from `fix.gateTimeoutSeconds` — see "Templated phase
+budgets" below.
+
+### Templated phase budgets
+
+`timeout_seconds` and `generic_loop.max_iterations` accept either a plain
+positive integer or a reference into the run's template context:
+
+```yaml
+timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
+generic_loop:
+  max_iterations: { from: fix.localIterations, default: 2 }
+```
+
+`from` is the same dotted lookup `{{a.b}}` performs (`lookupContextKey`), so
+`fix.localIterations` resolves against the EFFECTIVE, already repo-clamped
+`fix` block the runner seeds on every run's context — a repository that lowered
+its own budget in `.lastlight/lastlight.yml` is honoured with no code path of
+its own. Resolution happens once, before the first iteration, in
+`resolveTemplatedNumber` (`core/templated-number.ts`).
+
+`default` is the value the workflow ships with, and it is used verbatim
+whenever `from` resolves to nothing usable — key absent, non-numeric, zero or
+negative — with a warning naming the phase and the path. That is why the shape
+is an object rather than a bare `"{{fix.gateTimeoutSeconds}}"`: an unresolved
+template renders to the empty string, which would leave the engine inventing a
+kill timeout for a phase it knows nothing about. A resolved non-integer is
+rounded UP (`gateTimeoutSeconds` is documented as any positive number, and
+truncating a suite's budget downward is the direction that turns a passing gate
+red).
+
+Before this, both keys were parsed, per-repo clamped, CLI-displayed and read by
+nothing: the operative numbers were literals in the YAML, whose comments asked a
+human to keep the two in step (issue #256).
+
+**A loop node honours the phase's `on_output.requires_marker` and its
+`messages.on_start` / `on_success`.** The postcondition is checked once, against
+the **last** iteration's output (the turn that reports the outcome; an earlier
+one is by definition mid-loop), and its absence fails the phase exactly as it
+does for a non-loop phase. Reaching `max_iterations` without the condition is
+**not** a failure — a fix loop that runs out of iterations reports
+`outcome=gave-up`, which is a correct outcome — only the absent sign-off is. Two
+paths are exempt because they produce no fresh turn to sign off: a deduplicated
+(already-completed) phase on resume, and the `on_soft_failure: complete`
+advance.
 
 ## Invariants
 
@@ -568,6 +741,15 @@ prevent template-after-render injection (`validateShellCommand`).
 - **Restart-count is the circuit breaker.** Three failed resumes and
   the run is failed permanently. Resist the urge to raise the limit
   without thinking about what's actually crashing.
+- **A gated skip keeps the run green.** `requires_sandbox`,
+  `sandbox_image` and `skip_if` all record the node `skipped` and leave
+  the run `succeeded`. `failed` is reserved for **malfunction** — a
+  correct "there is nothing to do here" is not one, and recording it as
+  one mis-fires four downstream mechanisms (see *Gated skips*).
+- **A skipped node is not `succeeded`.** So an `all_success`
+  `trigger_rule` downstream of a gated phase will not fire. That caveat
+  is identical for all three gates; a graph that must proceed past one
+  needs `all_done` or `none_failed_min_one_success`.
 - **A run's config is frozen at dispatch.** `runWorkflow` takes the target
   repo's `.lastlight/` layer as a trailing, *defaulted* parameter (defaulted so
   `runWorkflow.length` stays 9 — the frozen `lastlight/evals` surface pinned by

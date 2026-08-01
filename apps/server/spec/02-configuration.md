@@ -58,7 +58,10 @@ interface LastLightConfig {
   bootstrapLabel: string;
   exploreDefaultRepo?: string;
   publicUrl?: string;
-  reviewPostsCheck: boolean;
+  reviewPostsCheck: boolean;              // `review.postsCheck`, flattened — predates the block below
+  review: ReviewConfig;                   // when pr-review runs, + the draft/label rules
+  fix: FixConfig;                         // retry budgets for the PR_FIX_SHAPED workflows
+  dependencies: DependenciesConfig;       // major-bump auto-merge policy
   concurrency: {                          // global sandbox-run concurrency cap
     maxWorkflows: number;                 //   max runs executing at once (default 4)
     maxQueueWaitMs: number;               //   TTL before a queued run is dropped (default 1 hr)
@@ -99,6 +102,30 @@ interface CronsConfig {                   // valid at EVERY layer (default / ove
   disable: string[];                      // the legacy `disabled.crons` list is unioned in here
 }
 
+interface ReviewConfig {                  // when a pr-review run is triggered
+  postsCheck: boolean;                    // post the `last-light/review` Check Run
+  trigger: "eager" | "after-checks" | "on-request";
+  requestLabel: string | null;            // the label that asks for one in `on-request`
+  skipDraft: boolean;                     // skip draft PRs
+}
+
+interface FixConfig {                     // budgets for every PR_FIX_SHAPED workflow
+  maxAttempts: number;                    // cross-run attempts per (repo, PR) before requires-human
+  localIterations: number;                // gate-loop iterations WITHIN one attempt
+  gateTimeoutSeconds: number;             // until_bash budget for the build/test gate
+  escalateModelAfterAttempt: number;      // attempts above this use models["pr-fix-retry"]
+  maxCostUsd: number | null;              // cumulative ceiling for ONE PR; null = unbounded
+  maxFlakyDeferrals: number;              // `flaky` verdicts before one counts as reproducible
+  retryableClasses: string[];             // diagnosis classes another attempt may help with
+}
+
+interface DependenciesConfig {            // how far a MAJOR dependency bump may auto-merge
+  autoMergeMaxImpact: "none" | "low" | "medium" | "high";  // PROMPT-LEVEL — see below
+  requireSettledChecks: boolean;          // `mayMerge` demands settled-"passing"
+  minSettledChecks: number;               // ...and >= N settled checks; 0 = legacy
+  auditComment: boolean;                  // post the evidence comment when auto-merging a major
+}
+
 interface RepoConfigPolicy {              // lastlight-shared/repo-config-schema
   enabled: boolean;                       // false ignores every repo's .lastlight/ (no fetch)
   allowKeys: string[];                    // dotted config paths a repo may set
@@ -115,8 +142,14 @@ interface KubernetesConfig {              // resolved by resolveKubernetesConfig
 
 Defined in `src/config/config.ts` (`LastLightConfig` + the interfaces above;
 `RepoConfigPolicy` is imported and re-exported from
-`lastlight-shared/repo-config-schema`, and `DisabledConfig` / `RouteConfig` from
-`lastlight-shared/config-types`). Loaded once at boot, never mutated. A
+`lastlight-shared/repo-config-schema`, and `DisabledConfig` / `RouteConfig` /
+`ReviewConfig` / `FixConfig` / `DependenciesConfig` from
+`lastlight-shared/config-types`). The three policy blocks live in the leaf
+package for a sharper reason than the other two: they are **repo-settable**, so
+the sanitizer that bounds a repo's `.lastlight/` — compiled into the CLI as well
+as core — has to know their shape *and* their shipped defaults. Core's
+normaliser and the repo-layer clamps therefore agree by construction rather than
+via two hand-maintained copies. Loaded once at boot, never mutated. A
 re-implementation should treat this object as effectively `Readonly` —
 any per-task overrides are layered *over* the base config at dispatch
 time, not back into it. The one exception is the **per-repository layer**
@@ -180,7 +213,7 @@ the whole file; an unknown or out-of-bounds key drops just that key; a fetch
 error falls back to the last good cached copy, or to no layer at all. Every
 rejection becomes a structured `RepoConfigWarning` (codes: `invalid-yaml`,
 `not-a-mapping`, `key-not-allowed`, `invalid-value`, `model-not-allowed`,
-`unknown-provider`, `approval-downgrade`, `path-escape`, `symlink`, `size-cap`,
+`unknown-provider`, `approval-downgrade`, `policy-downgrade`, `path-escape`, `symlink`, `size-cap`,
 `file-count-cap`, `workflow-not-allowed`, `assets-not-allowed`,
 `unrecognised-asset`, `fetch-failed`) surfaced on the run row, the admin API and
 the CLI. A repo's config file can never fail a run.
@@ -190,7 +223,7 @@ the CLI. A repo's config file can never fail a run.
 | Key | Default | Meaning |
 |---|---|---|
 | `repoConfig.enabled` | `true` | Master switch. `false` ignores every repo's `.lastlight/` — no fetch at all. |
-| `repoConfig.allowKeys` | `[models, variants, crons, disabled.workflows, disabled.crons, approval]` | Dotted config paths a repo may set. An entry admits itself and everything beneath it (`models` admits `models.architect`; `disabled.workflows` does **not** admit `disabled.prompts`). |
+| `repoConfig.allowKeys` | `[models, variants, crons, disabled.workflows, disabled.crons, approval, fix, dependencies, review]` | Dotted config paths a repo may set. An entry admits itself and everything beneath it (`models` admits `models.architect`; `disabled.workflows` does **not** admit `disabled.prompts`). |
 | `repoConfig.allowedModels` | `null` | `null` = any model whose `provider/` prefix is a provider Last Light can wire. A list restricts to exactly those specs (exact match, never a prefix rule). |
 | `repoConfig.allowAssets` | `true` | Unpack and use the repo's `workflows/prompts/`, `skills/`, `agent-context/` overrides. `false` keeps `lastlight.yml` only. |
 
@@ -209,6 +242,9 @@ the fallback when config isn't in reach, and must stay identical to
 | `disabled.workflows` | A repo opting *itself* out of a workflow. Enforced at the `dispatchWorkflow` choke point — the dispatch is refused before any `workflow_runs` row exists. |
 | `disabled.crons` | Legacy spelling of `crons.disable`, unioned into it. |
 | `approval` | **Add-only.** A repo may raise a gate for runs against itself (`true`); every `false` is dropped with a warning (`approval-downgrade` when the operator had set that gate). A repo can never remove oversight the operator asked for. |
+| `fix` | Retry budgets for the PR_FIX_SHAPED workflows. **One-way clamped** — see below. |
+| `dependencies` | Major-bump auto-merge policy. **One-way clamped** — see below. |
+| `review` | When `pr-review` runs, plus the draft/label rules. **One-way clamped** — see below. |
 
 Arrays replace, per the merge semantics above — so a repo's `disabled.workflows`
 list replaces the operator's rather than adding to it. Operators who don't want
@@ -218,6 +254,78 @@ Anything outside `allowKeys` — and anything inside it that this schema has no
 validator for — is dropped with a `key-not-allowed` warning. Refusing unknown
 keys is deliberate: an unbounded pass-through would let an operator widen the
 layer past what has been reviewed.
+
+### The policy blocks: a repo may only be *more* conservative
+
+`fix`, `dependencies` and `review` are budgets and blast-radius dials, not
+preferences, so admitting them wholesale would let a repo vote itself a bigger
+share of the operator's money and machines. The generalisation of `approval`'s
+add-only rule covers all three: **a repo may only ever be more conservative than
+the operator.** A leaf that would loosen is *dropped* — and dropping is the
+clamp, because the base already carries the operator's value, so the dropped
+leaf resolves to exactly it. The repo is told why with a `policy-downgrade`
+warning; the run proceeds either way.
+
+| Key | Repo-settable | Clamp |
+|---|---|---|
+| `fix.maxAttempts` | yes | `min(repo, operator)` |
+| `fix.localIterations` | yes | `min(repo, operator)` |
+| `fix.maxFlakyDeferrals` | yes | `min(repo, operator)` |
+| `fix.maxCostUsd` | yes | `min(repo, operator)`; a repo may not propose `null`, which means "no ceiling" and is therefore the loosest value there is |
+| `fix.retryableClasses` | yes | validated against the five diagnosis classes, then a **subset** of the operator's list — naming a class the operator doesn't retry would *add* a retryable failure mode; the remaining (possibly empty) subset stands, since retrying less is always allowed. A member that is not a diagnosis class at all is reported as `invalid-value`, not `policy-downgrade`: a typo and a policy decision are different problems with different fixes |
+| `fix.escalateModelAfterAttempt` | **no** | operator-only — spend control |
+| `fix.gateTimeoutSeconds` | **no** | operator-only — a shared-resource budget, not a "how careful is this repo" dial |
+| `dependencies.autoMergeMaxImpact` | yes | the **lower** tier on `none < low < medium < high` (a clamp on a *prompt-level* ceiling — see below) |
+| `dependencies.requireSettledChecks` | yes | add-only `true` — a repo may demand settled checks, never waive the operator's requirement |
+| `dependencies.minSettledChecks` | **no** | operator-only — see below |
+| `dependencies.auditComment` | yes | add-only `true` — a repo may *ask* for the auto-merge audit record, never silence one the operator requires. It is not cosmetic: it is the record of a major version this deployment auto-merged into that repo, and the party it would silence is the party being audited |
+| `review.trigger` | yes | the **lower** tier on `on-request < after-checks < eager`. The three modes are equally *safe* and not equally *expensive*: `eager` buys a full agent review per push, on the operator's budget. Opting down is still entirely the repo's call |
+| `review.requestLabel` | yes | free, but validated as a label **name** (no `/`, no `..`) — same guard `disabled` applies to workflow names. Naming one only ever ADDS an explicit, human-initiated route; the operator's own label keeps working. Both are honoured at the `pr.labeled` router branch |
+| `review.postsCheck` | yes | add-only `true` — a repo may ask for the check, never suppress one a branch-protection rule may be requiring |
+| `review.skipDraft` | yes | add-only `true` — a repo may skip drafts, never force reviews onto them |
+
+An add-only key given `false` is dropped as `policy-downgrade` when the operator
+actually had the stricter value, and as `invalid-value` when it didn't — the key
+is add-only either way, but only the first case is a repo *losing* an argument
+with its operator.
+
+The three operator-only leaves are reported as `key-not-allowed`, the same code
+an operator narrowing `allowKeys` produces, because from the repo's side it is
+the same answer: this key is not yours to set. `minSettledChecks` is the
+interesting one — the obvious clamp, `max(repo, operator)`, would weld the escape
+hatch shut for a repo with **no CI at all**, which could then only ever raise the
+number of settled checks an auto-merge needs and never lower it to `0`. That case
+belongs to the merge decision (a `checksState` of `none`), not to a config clamp.
+
+**Where `dependencies` is enforced.** The block is enforced in two different
+ways and the difference matters when reading it as a safety property.
+`requireSettledChecks` and `minSettledChecks` are **code**: `mayMerge`
+(`src/engine/pr-decisions.ts`) evaluates them against the resolved check state
+before the run starts, and the merge prompt is handed the verdict as
+`{{mayMerge}}` / `{{mayMergeReason}}` with an instruction not to re-derive it —
+one predicate, one reading. `requireSettledChecks` additionally makes the
+dispatch gate refuse a `pending` PR outright. `autoMergeMaxImpact` is
+**prompt-level**: the impact tier is the agent's own judgement, self-reported in
+the `ASSESSMENT_COMPLETE` marker, and the ceiling reaches the run only as text
+in `workflows/prompts/dependabot-pr-merge.md`. No code parses `impact=`,
+compares it to the ceiling, or withholds the merge capability from a phase whose
+tier came back above it — the phase must run either way, because it also labels
+and comments. So the settled-checks pair bounds *when* a merge may be decided;
+the ceiling is policy the agent is asked to honour.
+
+That makes the tier's accuracy a **measured** property rather than an enforced
+one, which is why it has an eval: `apps/evals/datasets/dependency-merge/` runs a
+major bump per tier and grades the `impact=` the agent reports. Its first run
+earned its keep — an agent that classified a major FUNCTIONAL was recording
+`impact=none`, which is safe (nothing auto-merges) but erases the impact label
+the audit trail depends on. The wording that permitted the reading is fixed.
+
+`review.postsCheck` predates the block and is still **mirrored** flat as
+`config.reviewPostsCheck` (the `REVIEW_POSTS_CHECK` env var below) for the
+public-config surface — one value projected two ways rather than a second source
+of truth. Nothing reads the flat copy any more: the check lifecycle resolves
+`review.postsCheck` off the run's repo-clamped config, so a repo that asked for
+the check gets it.
 
 ### Cron participation (`crons:`)
 
@@ -285,6 +393,12 @@ policy; `?refresh=1` bypasses the TTL) powers the dashboard's per-repo **Config*
 tab and `lastlight repo config show <owner/repo>`. `lastlight repo fork` and
 `lastlight repo config validate` are the authoring side, offline, running the
 same pure validators from `lastlight-shared/repo-config-schema`.
+
+**Known gap.** The dashboard mirrors `RepoMergedConfig` / `RepoConfigSources` by
+hand in `apps/server/dashboard/src/api.ts` (the SPA has no import edge to core),
+and those copies do not yet carry `fix` / `dependencies` / `review` — so the API
+returns the blocks with full provenance but the per-repo **Config** tab doesn't
+render them. The CLI's `repo config show` does.
 
 ## Env vars, by group
 
@@ -365,6 +479,16 @@ LASTLIGHT_THINKINGS={
 
 Keys are phase names from YAML workflows (e.g. `architect`, `reviewer`)
 or skill types (e.g. `chat`, `triage`). `default` is the catch-all.
+`config/default.yaml`'s commented examples also name `diagnose` (the CI-failure
+classifier that opens both fix workflows) and `pr-fix-retry` — which, when set,
+`escalateFixModel` (`src/workflows/simple.ts`) substitutes for `models["pr-fix"]`
+on any attempt above `fix.escalateModelAfterAttempt`, before the map is persisted
+on the run context, so the admin panel shows the model that attempt actually used.
+Unset, nothing changes at any attempt number. `diagnose` is left **unset** on purpose:
+those examples are Anthropic models, and pinning one packaged would send that
+phase at a provider a deployment overriding only `models.default` has no key for.
+Unset it falls through to `default` — a cheap model there is the whole point of
+splitting the phase out, so it is worth pinning per deployment.
 Resolution at dispatch (`resolveModel` / `resolveVariant`, `src/config/config.ts`):
 per-type if present, else `default`, else the base `LASTLIGHT_MODEL`.
 A repo's `.lastlight/lastlight.yml` can add per-task entries on top for runs
@@ -615,16 +739,39 @@ These have no env var — they're set in `config/default.yaml` or the overlay's
 | `cleanup.sandbox.{enabled,reapOnCompletion,sweepSchedule,retentionHours,maxDirs}` | `true` / `true` / `"0 * * * *"` / `12` / `40` | Sandbox-workspace reaping: reap an ephemeral run's workspace on terminal success, plus an hourly TTL + LRU backstop sweep that bounds the reusable per-PR cache. See `09-sandbox.md`. | no |
 | `repoConfig.{enabled,allowKeys,allowedModels,allowAssets}` | see the per-repository layer above | The operator's bounds on the repo layer. | **never** — a repo can't widen its own bounds |
 | `deploy.version` | `string \| null`, `null` | Core-version pin (git tag/ref). Deployment config, not runtime behaviour. Env: `LASTLIGHT_CORE_VERSION`. | no |
-| `bootstrap.label` / `explore.defaultRepo` / `review.postsCheck` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO` / `REVIEW_POSTS_CHECK`. | no |
+| `bootstrap.label` / `explore.defaultRepo` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO`. | no |
+| `review.{postsCheck,trigger,requestLabel,skipDraft}` | `false` / `after-checks` / `null` / `true` | When a `pr-review` run is triggered, and whether it posts the `last-light/review` check. `after-checks` means "once the head SHA's checks **settle**, either colour" — so the review can read and cite the CI result, and a push-storm collapses to one review per settled SHA. There is no settled-*and-passing* sub-mode: a PR whose CI never goes green would then never be reviewed at all. Enforced by `resolveReviewTrigger` (`src/engine/pr-decisions.ts`) at the [dispatch gate](/spec/05-router#reviewtrigger--one-resolver-every-route) — **one** implementation, on every route, with `src/cron/review-discovery.ts` reduced to a candidate finder. `on-request` is served by `requestLabel`, an `@bot review` comment, and the Re-run button on the check; `review_requested` is opportunistic only, since GitHub App bot users are not selectable in the reviewer picker. Env: `REVIEW_POSTS_CHECK` (`postsCheck` only). | **yes** — `postsCheck`/`skipDraft` add-only, `trigger` clamped to the lower automation tier, `requestLabel` free |
+| `fix.{maxAttempts,localIterations,gateTimeoutSeconds,escalateModelAfterAttempt,maxCostUsd,maxFlakyDeferrals,retryableClasses}` | `3` / `2` / `900` / `1` / `5.0` / `2` / `[reproducible, env-mismatch]` | Retry budgets shared by every PR_FIX_SHAPED workflow (`pr-fix`, `dependabot-ci-fix`). `maxAttempts` counts *across runs* for one PR; the cost ceiling is cumulative per PR and ships **on**. A diagnosis class outside `retryableClasses` escalates immediately rather than burning budget on a retry that can't help. `localIterations` and `gateTimeoutSeconds` reach the fix phase through a **templated phase budget**: `generic_loop.max_iterations: { from: fix.localIterations, default: 2 }` and `timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }` in both fix workflow YAMLs. The `from:` path resolves against the run's EFFECTIVE (already repo-clamped) `fix` block; the literal is the fallback for a context carrying no `fix:` at all. See `06-workflow-engine.md` → "Templated phase budgets". | **yes**, clamped one-way (`escalateModelAfterAttempt` / `gateTimeoutSeconds` operator-only) |
+| `dependencies.{autoMergeMaxImpact,requireSettledChecks,minSettledChecks,auditComment}` | `medium` / `true` / `1` / `true` | How far up the impact scale a **major** dependency bump may auto-merge. Impact, not semver magnitude, is the gate: a `@types/*` major is not a framework rewrite. Enforced in two different ways — `requireSettledChecks` / `minSettledChecks` are code (`mayMerge`, decided before the run and handed to the prompt as a verdict), `autoMergeMaxImpact` is prompt-level (the tier is the agent's self-report; nothing parses it or compares it to the ceiling). See "Where `dependencies` is enforced" above. | **yes**, clamped one-way (`minSettledChecks` operator-only) |
 | `otel.*` | see Telemetry | Env-overridable per key; `collectorHosts` is *unioned* with env, not replaced. | no |
 | `cron.webhooksEnabledCondition` | `true` | Present in `default.yaml` but **inert** — `normalizeFileConfig` never reads a `cron:` block. The real condition is declared per cron YAML (`condition.unless: webhooksEnabled`) and applied by `getJobs`, with `webhooksEnabled` derived in `src/index.ts` as `webhookSecret && githubApp`. | no |
 
 The lenient-vs-strict split matters: blocks whose job is to **bound untrusted
-input** (`crons`, `repoConfig.allowKeys`, `repoConfig.allowedModels`) degrade a
-malformed value to the documented default rather than throwing, because the same
-shapes are also read out of an untrusted repo layer and the two paths must not
-disagree. `managedRepos` and `routes`, by contrast, throw on a malformed value —
-they're operator-only.
+input** (`crons`, `repoConfig.allowKeys`, `repoConfig.allowedModels`, and the
+`fix` / `dependencies` / `review` policy blocks) degrade a malformed value to the
+documented default rather than throwing, because the same shapes are also read
+out of an untrusted repo layer and the two paths must not disagree.
+`managedRepos` and `routes`, by contrast, throw on a malformed value — they're
+operator-only.
+
+Two spots inside the policy blocks where "lenient" has a specific reading:
+`fix.maxCostUsd: null` is the documented "no ceiling" value and is honoured,
+while an absent or mistyped key falls back to the shipped ceiling — so a typo
+can never silently uncap spend. And `fix.retryableClasses` is validated against
+the five diagnosis classes (`DIAGNOSIS_CLASSES` in
+`packages/shared/src/config-types.ts`, re-exported by
+`src/engine/fix-markers.ts`) but still degrades rather than throwing: an unknown
+member is dropped with a warning naming the five, and a list that ends up empty
+warns that no PR will be retried. Dropping is the only correct direction — a
+class we do not recognise cannot be retried — but doing it silently was the
+defect: `reproducable` left a list that looked configured and made every
+diagnosis escalate `not-retryable` on the second dispatch.
+
+The three whole-number budgets (`maxAttempts`, `localIterations`,
+`maxFlakyDeferrals`) require integers on the operator path too, matching the
+repo-layer clamp; `fix: { maxAttempts: 2.5 }` is refused with a warning rather
+than leaving the two layers disagreeing about one leaf. `gateTimeoutSeconds` is
+a duration, not a count, and still takes any positive number.
 
 `publicConfig` isn't a knob: it's the redacted default / overlay / merged /
 provenance bundle `loadConfig` builds for `GET /admin/api/config`.
@@ -734,6 +881,14 @@ is ever executed — only read as prompts / skills / agent-context / YAML.
   value verbatim.
 - **Repo `approval` is add-only.** A repo may raise a gate for runs against
   itself, never clear one.
+- **A repo may only ever be more conservative than the operator.** The same rule
+  generalised to the `fix` / `dependencies` / `review` policy blocks: a leaf that
+  would loosen a budget, widen a retry set or raise an auto-merge ceiling is
+  dropped (`policy-downgrade`) and resolves back to the operator's value. Where
+  even a one-way clamp would be wrong — spend, a shared resource, or an escape
+  hatch a `max()` would weld shut — the leaf is operator-only instead. A
+  re-implementation that admits these blocks symmetrically has let every managed
+  repo set its own budget.
 - **Per-run config is per-run state, never a global.** The repo layer is carried
   on the run (and on a per-run `AssetResolver`), because concurrent runs and cron
   fan-outs share the process — a module-level install would hand one repo's

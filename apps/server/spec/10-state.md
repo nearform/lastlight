@@ -114,8 +114,12 @@ the run's **effective** maps — the target repo's `.lastlight/lastlight.yml`
 already folded in (see [Configuration](/spec/02-configuration)). When a repo
 layer applied, `context.repoConfig` additionally carries a `RepoConfigRunRecord`:
 `repo`, `defaultBranch`, `treeSha`, `fetchedAt`, `applied` (only the leaves whose
-provenance is `repo` — models / variants / approval / disabled), `assets`, and
-`warnings`. It is *persisted* rather than re-derived on read because the layer is
+provenance is `repo` — models / variants / approval / disabled, plus the clamped
+leaves it won in the `fix` / `dependencies` / `review` policy blocks), `assets`,
+and `warnings`. The policy leaves are recorded already clamped, so a resume
+re-applies them over whatever the operator's block says *today*: a budget the
+operator has since tightened still binds the resumed run, and one they have
+loosened doesn't retroactively widen it. It is *persisted* rather than re-derived on read because the layer is
 TTL-cached and mutable: by the time anyone asks why a run picked a model, the
 repo's default branch may have moved on. **Resume reads this record instead of
 re-resolving**, so an edit made while a run was paused/queued/dead can't
@@ -124,6 +128,92 @@ retarget it mid-flight. Asset-level drops discovered while running (a repo
 land on the mutable side, at `scratch.repoConfig.assetWarnings`; a resume that
 could not restore the repo's unpacked asset tree records
 `scratch.repoConfig.restoreWarnings`.
+
+**The PR snapshot on the row.** For a PR-scoped workflow (`pr-fix`,
+`dependabot-ci-fix`, `dependabot-pr-merge`, `pr-review`), `context.prState`
+carries the whole `PrState` resolved at dispatch (see the
+[dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate)) — verbatim, not
+scattered leaves. Two reasons. **Forensics:** the run detail panel can show the
+decision that was actually taken *and* the inputs that produced it, long after
+the live state has moved on; a re-derivation at read time would answer a
+different question. **The state machine reads it back:** the next dispatch for
+that PR loads the previous run's snapshot to compute `attempt` (unchanged head,
+or a head *we* authored, means the same problem and the counter advances;
+anyone else's push resets it to 1), to carry `escalatedAtSha` forward — which is
+what makes `requires-human` a notification rather than a state, since a
+maintainer's push clears the guard with no label edit — and to answer "have we
+already assessed this exact head SHA?". So the escalation record costs no new
+table, no extra API call and no label mutation. Rows written before the snapshot
+existed are tolerated: a bare `context.headSha` is honoured as a one-field
+snapshot, so the per-SHA dedup keeps working across the upgrade instead of
+re-assessing every open PR once.
+
+**The marker harvest on the row.** The snapshot is written at *dispatch*, before
+any phase runs, so what the run then *concluded* cannot live there. For the fix
+family, `RunnerCallbacks.onPhaseEnd` parses each phase's `DIAGNOSIS_COMPLETE` /
+`CI_FIX_COMPLETE` marker and merges it into `scratch.fixMarkers` — the run's
+mutable side — where the next dispatch reads it back off the same
+`latestForTrigger` row to derive `attempt`, `flakyDeferrals` and
+`priorAttempts` (see the
+[dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate)). It rides the
+existing row and the existing query: no new column, no second write path. The
+harvest is wired at **all three** `onPhaseEnd` call sites (fresh dispatch plus
+both resume paths), because a fix run that paused for an approval gate or was
+picked back up after a restart finishes its phases on the resume path — exactly
+the population whose attempt counter matters most. Presence of the
+`fixMarkers` key, not of a marker inside it, is what distinguishes "the harvest
+ran and the agent emitted nothing" from a row written before the harvest
+existed; the latter falls back to the `diagnose` ledger row, which cannot exist
+without the marker having been emitted.
+
+**The journal rides the same hook.** The markers are the only thing an agent
+can leave behind *in its output*; the **PR journal** is the only thing it can
+leave behind by choosing to. It travels the workspace instead: the agent
+appends one line per note to `.git/lastlight-notes` in the checkout, and the same
+`onPhaseEnd` harvest drains the file — reading it and deleting it, so it is a
+per-phase outbox rather than an accumulator — into `scratch.fixMarkers.notes`,
+where the next dispatch folds it onto `PrState.notes`. One hook and one scratch
+namespace on purpose: a second hook is a second thing to wire at three call
+sites and a second thing to forget at the fourth. Unlike the markers the
+journal is open to *every* PR-scoped workflow, gated on the run carrying a
+`context.prState` (which is precisely what makes a run PR-scoped), so
+`pr-review` reads what `dependabot-ci-fix` learned. The file lives inside the
+**checkout's own `.git/`** on every backend, which git never walks, so it cannot
+be committed into the target repo whatever the agent's `git add -A` does — see
+[Sandbox](/spec/09-sandbox). Bounds, kinds, staleness and the trust rules are
+in the [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
+
+**The push gate rides it too.** The fix loop's gate — `.git/lastlight-verify.sh`,
+written by the agent for itself — is *read* by the same harvest onto
+`scratch.fixMarkers.verifyScript` (bounded at 8 KiB, head kept), for the fix
+family only. A read, not a drain: unlike the journal this file is the live gate
+the next loop iteration runs, and removing it would disarm the loop the harvest
+is reporting on. The last non-null reading stands, since the gate is reset once
+per *attempt* rather than per phase. 09-state-machine.md §S1 calls this "the most
+useful debugging artifact in the fix loop": the gate is the one input to a fix
+run that nothing else records, the workspace is reset before the next attempt,
+and the script's contents are deliberately never validated — recording it is
+what lets a human see the problem instead of guessing at it. The admin run
+detail panel renders it beside the snapshot. Inert on the kubernetes backend,
+where the harness has no filesystem access to the PVC — the same narrowing the
+journal carries there.
+
+**The escalation row.** Almost every row here is created by
+`runSimpleWorkflow` and describes a run that executed. One is not: when the
+[dispatch gate](/spec/05-router#escalation--the-skips-that-are-not-silent)
+refuses a PR *terminally* — attempts exhausted, cost budget exhausted, or a
+last diagnosis outside `fix.retryableClasses` — it writes a row for the
+refusal itself, under the workflow it declined to run, with no phases and
+`context.escalation = { case, reason, at }` beside the snapshot. This is not
+bookkeeping: `escalatedAtSha` is read back off the *prior run's*
+`context.prState`, and a dispatch-time skip writes no row at all, so an
+escalation that recorded nothing would leave `requires-human` on the PR with
+no escalation SHA behind it — which the next dispatch reads as a *human's*
+permanent hold, latching the PR dead. The row is written **before** the
+label for the same reason, and is recorded **`succeeded`**: `failed` is
+reserved for malfunction, and a correct-but-stopped outcome recorded `failed`
+would post `messages.on_failure`, offer a Retry that cannot succeed, and
+pollute the cost/failure stats.
 
 `owner` + `repo` together identify the target: `repo` is stored **bare**
 (a single path-safe segment — taskIds and workspace/session dirs derive
@@ -393,7 +483,9 @@ session recreation after timeouts.
 
 - **No unbounded text in `workflow_runs.scratch`.** Loop iterations
   store an `executions.id` reference; the text lives in `output_text`
-  or in JSONL.
+  or in JSONL. The fix-marker harvest clamps every field it keeps and
+  bounds the rendered attempt journal on both axes, for the same
+  reason twice over: it is *also* replayed into every later prompt.
 - **`session_id` is the join key between the two stores.** Every
   `executions` row that ran an agent has one; matching the JSONL
   filename joins them.

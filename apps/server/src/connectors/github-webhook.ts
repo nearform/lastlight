@@ -41,7 +41,21 @@ export interface GitHubWebhookConfig {
     repo: string,
     ref: string,
   ) => Promise<"passing" | "failing" | "pending" | "none">;
+  /**
+   * The OPERATOR's `review.trigger`, read live.
+   *
+   * `check_suite.completed` is broadened past dependency PRs — to
+   * `pr.checks_settled` — only under `after-checks`, because that is the only
+   * mode with a consumer. Emitting is what costs event volume, and a repo that
+   * opts itself into `after-checks` under an `eager` operator is covered by the
+   * 30-minute `check-prs-awaiting-review` sweep. Unset (standalone unit tests)
+   * reads as "not after-checks".
+   */
+  reviewTrigger?: () => "eager" | "after-checks" | "on-request";
 }
+
+/** The check-run name whose "Re-run" button is a review request. */
+const REVIEW_CHECK_NAME = "last-light/review";
 
 /**
  * GitHub webhook actions we skip — these are noisy and never need agent work.
@@ -52,11 +66,18 @@ export interface GitHubWebhookConfig {
  * would block merges after a REQUEST_CHANGES + fix-commit cycle (the new
  * SHA would never get a check posted against it). The handler maps it to
  * `pr.synchronize` and routes to pr-review.
+ *
+ * `labeled` left this set in Phase 7: `review.requestLabel` is the real
+ * `on-request` mechanism (GitHub App bot users are not selectable in the
+ * reviewer picker, so `review_requested` cannot be). Everything that is not a
+ * `pull_request` label still falls out of `normalize()` with a null type and is
+ * answered `{ filtered: true, reason: "unmapped event" }`, and the router drops
+ * every PR label that is not the configured one — so the widening costs a
+ * normalize call, not a dispatch.
  */
 const IGNORED_ACTIONS = new Set([
   "deleted",
   "edited",
-  "labeled",
   "unlabeled",
   "assigned",
   "unassigned",
@@ -152,7 +173,18 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         senderLogin.endsWith("[bot]");
       const isPrAttention =
         eventType === "pull_request" &&
-        (action === "opened" || action === "synchronize" || action === "reopened");
+        (action === "opened" ||
+          action === "synchronize" ||
+          action === "reopened" ||
+          // A draft becoming ready is exactly when a deferred review should
+          // fire, so it carries the same exemption as `opened` — which it maps
+          // to (07 §7.3). Pairs with `review.skipDraft`.
+          action === "ready_for_review");
+      // The two new review-request signals. They do NOT get the bot-sender
+      // exemption above (a human applies a label or asks for a review), but they
+      // DO get the bot-authored-PR filter below — we can never review our own PR.
+      const isPrReviewSignal =
+        eventType === "pull_request" && (action === "labeled" || action === "review_requested");
       // A `check_suite.completed` (CI went red) is always sent by a bot — the
       // CI app / github-actions[bot] — so it would be dropped by the bot-sender
       // filter below without this exception. It carries nothing the agent
@@ -173,7 +205,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // through while the bot's own PRs are dropped before any sandbox spawns.
       const prAuthor = payload.pull_request?.user?.login || "";
       const isBotAuthoredPr =
-        isPrAttention &&
+        (isPrAttention || isPrReviewSignal) &&
         (prAuthor === this.config.botLogin || prAuthor.endsWith("[bot]"));
       if (isBotAuthoredPr) {
         return c.json(
@@ -267,6 +299,19 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     }
   }
 
+  /**
+   * Is the operator running `review.trigger: after-checks`? Only then does a
+   * settled check suite on a PR neither check-outcome route claimed become a
+   * `pr.checks_settled` event; every other mode has no consumer for it.
+   */
+  private afterChecks(): boolean {
+    try {
+      return this.config.reviewTrigger?.() === "after-checks";
+    } catch {
+      return false;
+    }
+  }
+
   private verifySignature(body: string, signature: string): boolean {
     const expected = "sha256=" + createHmac("sha256", this.config.webhookSecret)
       .update(body)
@@ -296,6 +341,16 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     let labels: string[] = [];
     let issueAuthor: string | undefined;
     let headSha: string | undefined;
+    // The dependency discriminator, CARRIED rather than discarded. The
+    // connector has to compute it to decide whether to emit at all; the router
+    // used to pay an LLM classifier call to re-guess it from a prose sentence,
+    // and got it wrong — see the `pr.checks_failed` case in `engine/router.ts`
+    // (09-state-machine.md → D5).
+    let isDependencyPr: boolean | undefined;
+    /** `pr.labeled` only — the label just added, for `review.requestLabel`. */
+    let addedLabel: string | undefined;
+    /** `pr.review_requested` only — who the review was asked of. */
+    let requestedReviewer: string | undefined;
 
     switch (githubEvent) {
       case "issues":
@@ -323,6 +378,34 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         else if (action === "synchronize") type = "pr.synchronize";
         // reopened: closed-then-reopened PRs deserve a fresh look too.
         else if (action === "reopened") type = "pr.reopened";
+        // A draft marked ready maps to `pr.opened` SEMANTICS — it is the moment
+        // the PR first asks to be looked at. This is what un-defers a review
+        // `review.skipDraft` held back; without it a PR opened as a draft and
+        // later marked ready would get no webhook-driven review at all.
+        else if (action === "ready_for_review") type = "pr.opened";
+        // A label was added. The router drops every label that is not the
+        // configured `review.requestLabel`, so this only ever reaches a
+        // dispatch when somebody asked for a review by label.
+        else if (action === "labeled") {
+          const name = payload.label?.name;
+          if (typeof name === "string" && name) {
+            type = "pr.labeled";
+            addedLabel = name;
+          }
+        }
+        // Opportunistic (07 §7.1's caveat): GitHub App bot users are not
+        // selectable in the reviewer picker, so `on-request` must NOT depend on
+        // this — it costs almost nothing and future-proofs. The router discards
+        // a request naming anybody else.
+        else if (action === "review_requested") {
+          const reviewer =
+            payload.requested_reviewer?.login ??
+            (payload.requested_team?.slug ? `team/${payload.requested_team.slug}` : undefined);
+          if (reviewer) {
+            type = "pr.review_requested";
+            requestedReviewer = reviewer;
+          }
+        }
         break;
 
       case "issue_comment":
@@ -371,7 +454,20 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         if (action === "rerequested" || action === "requested_action") {
           prNumber = payload.check_run?.pull_requests?.[0]?.number;
           issueNumber = prNumber;
-          if (prNumber) type = "pr.synchronize";
+          if (prNumber) {
+            // Re-running OUR OWN review check is an explicit review request,
+            // not "the code changed". That distinction is what makes the
+            // `on-request` placeholder check work as advertised: `neutral`
+            // never blocks a merge and its Re-run button IS the affordance —
+            // but only if pressing it overrides the mode, which `pr.synchronize`
+            // (an attention event) would not.
+            if (payload.check_run?.name === REVIEW_CHECK_NAME) {
+              type = "pr.review_requested";
+              requestedReviewer = this.config.botLogin;
+            } else {
+              type = "pr.synchronize";
+            }
+          }
         }
         break;
 
@@ -401,16 +497,22 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           const headCommit = payload.check_suite?.head_commit;
           const commitAuthor: string = headCommit?.author?.name || "";
           const headBranch: string = payload.check_suite?.head_branch || "";
-          // GATE: only a dependency-update PR (Dependabot / Renovate) may kick
-          // off the red-CI fix path — the exact deterministic check the green
-          // `pr.checks_passed` path below applies. Without it, EVERY red PR
-          // (including a human's) reached the router's LLM classifier as the
-          // sole authority, which misfired human PRs onto `dependabot-ci-fix`
-          // (a repo-write sandbox run). Commit author OR branch prefix, so a
-          // squashed/proxied bot commit still matches via its branch.
-          const isDependencyPr =
+          // GATE: which red PRs may kick off the fix path at all. Commit author
+          // OR branch prefix for the dependency case, so a squashed/proxied bot
+          // commit still matches via its branch.
+          const isDependency =
             /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
             /^(dependabot|renovate)\//.test(headBranch);
+          // ...plus a head commit WE pushed. `git-auth.ts` stamps
+          // `user.name = <botName>[bot]` on the agent's own commits and the
+          // check_suite payload carries the same field, so this is precisely
+          // "did my fix work?" — the CI feedback loop `pr-fix` has never had
+          // (it could push a fix and never learn whether the build went green,
+          // because this event only ever fired for dependency PRs). It stays
+          // bounded: it cannot fire for an ordinary human PR the bot has not
+          // touched. It is nonetheless the one change here that can increase
+          // run volume on non-dependency PRs — watch it after rollout.
+          const isOurOwnPush = !!this.config.botLogin && commitAuthor === this.config.botLogin;
           // Only fire once the PR's checks have FULLY SETTLED red — a repo with
           // several check-reporting apps completes one suite at a time, and a
           // failure in one while another is still running should not kick off a
@@ -418,8 +520,8 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           // nothing is pending and ≥1 check concluded red, so exactly one event
           // fires per SHA (the last suite to settle). Absent a wired client
           // (standalone tests) we keep the legacy per-suite behaviour. Gated
-          // behind isDependencyPr so a human's red PR never even makes the call.
-          if (pr?.number && isDependencyPr) {
+          // behind the emit check so an untouched human PR never makes the call.
+          if (pr?.number && (isDependency || isOurOwnPush)) {
             const settled = await this.settledConclusion(repoFullName, sha, "failing");
             if (settled === "failing") {
               prNumber = pr.number;
@@ -428,6 +530,27 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
               type = "pr.checks_failed";
               title = (headCommit?.message || "").split("\n")[0] || title;
               issueAuthor = commitAuthor || issueAuthor;
+              // The router routes on THIS, deterministically: dependency →
+              // `dependabot-ci-fix`, everything else → `pr-fix`. Without it a
+              // human's red PR would run a dependency-bump prompt, the
+              // `dependency-*` label vocabulary and a `requires-human`
+              // preflight it was never designed for.
+              isDependencyPr = isDependency;
+            }
+          } else if (pr?.number && this.afterChecks()) {
+            // FIX OUTRANKS REVIEW (09 → S2). A settled-red PR the fix family can
+            // act on has already been claimed above; only what is LEFT becomes a
+            // review settle. One envelope per delivery is all `normalize()` can
+            // return, so this precedence is not a policy choice bolted on later
+            // — it is the shape of the pipeline.
+            const settled = await this.settledConclusion(repoFullName, sha, "failing");
+            if (settled === "failing" || settled === "passing") {
+              prNumber = pr.number;
+              issueNumber = prNumber;
+              headSha = sha;
+              type = "pr.checks_settled";
+              title = (headCommit?.message || "").split("\n")[0] || title;
+              isDependencyPr = isDependency;
             }
           }
         } else if (
@@ -445,7 +568,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           const headCommit = payload.check_suite?.head_commit;
           const commitAuthor: string = headCommit?.author?.name || "";
           const headBranch: string = payload.check_suite?.head_branch || "";
-          const isDependencyPr =
+          const isDependency =
             /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
             /^(dependabot|renovate)\//.test(headBranch);
           // Fire ONLY when the head SHA's checks have fully settled green. A
@@ -454,7 +577,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           // aggregate to "passing", so exactly one `pr.checks_passed` fires per
           // SHA instead of one per check-reporting app. (Legacy per-suite
           // behaviour is preserved when no client is wired — standalone tests.)
-          if (pr?.number && isDependencyPr) {
+          if (pr?.number && isDependency) {
             const settled = await this.settledConclusion(repoFullName, sha, "passing");
             if (settled === "passing") {
               prNumber = pr.number;
@@ -463,6 +586,24 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
               type = "pr.checks_passed";
               title = (headCommit?.message || "").split("\n")[0] || title;
               issueAuthor = commitAuthor || issueAuthor;
+              // Always true on this branch (the green route is dependency-only),
+              // set for symmetry so the envelope's discriminator is never
+              // undefined on a check-outcome event.
+              isDependencyPr = true;
+            }
+          } else if (pr?.number && this.afterChecks()) {
+            // The green half of the same broadening. A non-dependency PR whose
+            // CI has fully settled green is the canonical `after-checks` review:
+            // nothing is going to change about this head, and the review can now
+            // say so.
+            const settled = await this.settledConclusion(repoFullName, sha, "passing");
+            if (settled === "passing") {
+              prNumber = pr.number;
+              issueNumber = prNumber;
+              headSha = sha;
+              type = "pr.checks_settled";
+              title = (headCommit?.message || "").split("\n")[0] || title;
+              isDependencyPr = isDependency;
             }
           }
         }
@@ -487,6 +628,9 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       issueNumber,
       prNumber,
       headSha,
+      isDependencyPr,
+      addedLabel,
+      requestedReviewer,
       sender,
       issueAuthor,
       senderIsBot: false, // already filtered bots above

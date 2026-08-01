@@ -89,13 +89,59 @@ export interface PhaseMarker {
  * better-sqlite3 transactions are synchronous. The atomic boundary is the DB
  * mutations only; the caller dispatches after the transaction commits.
  */
+/**
+ * Notified once a run reaches a TERMINAL status, whichever path took it there.
+ *
+ * The one consumer today is the `last-light/review` check run
+ * (`src/engine/review-check.ts`). 09-state-machine.md → S2 found that check
+ * being completed inside a `.then()` chained onto an in-memory promise in
+ * `dispatcher.ts` — so it stranded `in_progress` on every server restart
+ * mid-review (i.e. **every deploy**), every queued-then-resumed run, every
+ * `expireStaleRuns` cancellation and every crash. The fix is not routing but
+ * DURABILITY: make the check a projection of persisted run state, resolved
+ * wherever that state becomes terminal. Hanging the hook here rather than at
+ * the eight `finishRun` call sites is what makes `simple.ts`, `resume.ts`,
+ * `expireQueued` and the admin cancel all resolve it for free — and what stops
+ * a ninth call site being added without one.
+ *
+ * Contract: **synchronous, never throws, never re-enters the store.** It is
+ * called after the row is written (outside any transaction), and an
+ * implementation that needs I/O fires it and returns.
+ */
+export type TerminalRunObserver = (
+  run: WorkflowRun,
+  status: "succeeded" | "failed" | "cancelled",
+) => void;
+
 export class WorkflowRunStore {
   private db: Database.Database;
   private approvals: ApprovalStore;
+  private terminalObserver?: TerminalRunObserver;
 
   constructor(db: Database.Database, deps: { approvals: ApprovalStore }) {
     this.db = db;
     this.approvals = deps.approvals;
+  }
+
+  /** Install the {@link TerminalRunObserver}. Wired once, at boot. */
+  setTerminalObserver(fn: TerminalRunObserver): void {
+    this.terminalObserver = fn;
+  }
+
+  /**
+   * Fire the terminal observer for a row that has just been written. Swallows
+   * everything: a terminal transition is already persisted by the time we get
+   * here, and no projection of it may undo that.
+   */
+  private notifyTerminal(id: string, status: "succeeded" | "failed" | "cancelled"): void {
+    if (!this.terminalObserver) return;
+    try {
+      const run = this.getRun(id);
+      if (run) this.terminalObserver(run, status);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[runs] terminal observer failed for ${id}: ${msg}`);
+    }
   }
 
   // ── Plain single-mutation operations ───────────────────────────
@@ -213,6 +259,84 @@ export class WorkflowRunStore {
       LIMIT 1
     `).get(triggerId, workflowName) as Record<string, unknown> | undefined;
     return row ? this.deserialize(row) : null;
+  }
+
+  /**
+   * The most recent run for this trigger belonging to ANY of `workflowNames`,
+   * in ANY status.
+   *
+   * Two things distinguish it from {@link latestSucceededForTrigger}:
+   *
+   * 1. **It keys on a FAMILY, not one workflow.** "How many times have we tried
+   *    to fix this PR, and what did we try" is a fact about the pull request;
+   *    which of `pr-fix` / `dependabot-ci-fix` happened to run is an
+   *    implementation detail of how the event arrived — and routing genuinely
+   *    varies (an `@bot fix this` comment on a red Dependabot PR is an LLM
+   *    decision that can land on either). Under (workflow, PR) keying that PR
+   *    would get a second, empty attempt counter: attempt resets to 1,
+   *    `{{priorAttempts}}` renders blank, and the budget silently doubles.
+   *    See 09-state-machine.md → S1 ("Identity").
+   * 2. **It does not filter on success.** A crashed run has to be VISIBLE, so
+   *    the caller can decide it consumed no attempt. Filtering it out here
+   *    would make a crash look like "no prior attempt" and re-arm the loop
+   *    from zero.
+   */
+  latestForTrigger(workflowNames: string[], triggerId: string): WorkflowRun | null {
+    if (workflowNames.length === 0) return null;
+    const placeholders = workflowNames.map(() => "?").join(", ");
+    const row = this.db.prepare(`
+      SELECT * FROM workflow_runs
+      WHERE trigger_id = ? AND workflow_name IN (${placeholders})
+      ORDER BY started_at DESC
+      LIMIT 1
+    `).get(triggerId, ...workflowNames) as Record<string, unknown> | undefined;
+    return row ? this.deserialize(row) : null;
+  }
+
+  /**
+   * The oldest still-live (queued / running / paused) run for this trigger
+   * among `workflowNames` — the PR-scoped run lock (09-state-machine.md → S4).
+   *
+   * Oldest-first deliberately: the answer to "who holds the lock" must be the
+   * incumbent, not whichever row sorted last.
+   *
+   * `paused` counts. A paused run still owns its sandbox workspace, and the fix
+   * family now SHARES one workspace per PR — letting a second workflow in
+   * would have two agents fetch/reset/push the same branch through the same
+   * directory.
+   */
+  activeForTrigger(workflowNames: string[], triggerId: string): WorkflowRun | null {
+    if (workflowNames.length === 0) return null;
+    const placeholders = workflowNames.map(() => "?").join(", ");
+    const row = this.db.prepare(`
+      SELECT * FROM workflow_runs
+      WHERE trigger_id = ? AND workflow_name IN (${placeholders})
+        AND status IN ('queued', 'running', 'paused')
+      ORDER BY started_at ASC
+      LIMIT 1
+    `).get(triggerId, ...workflowNames) as Record<string, unknown> | undefined;
+    return row ? this.deserialize(row) : null;
+  }
+
+  /**
+   * The most recent SUCCEEDED run of EACH of `workflowNames` for this trigger,
+   * keyed by workflow name. Absent keys mean "never succeeded here".
+   *
+   * Feeds the "already assessed at this head SHA" dedup, which is per-workflow
+   * on purpose even though the fix ATTEMPT counter is per-family: `pr-fix`
+   * having succeeded at a SHA says nothing about whether `dependabot-pr-merge`
+   * has assessed it. One small indexed lookup per name — the set is four.
+   */
+  latestSucceededForTriggers(
+    workflowNames: string[],
+    triggerId: string,
+  ): Record<string, WorkflowRun> {
+    const out: Record<string, WorkflowRun> = {};
+    for (const name of workflowNames) {
+      const run = this.latestSucceededForTrigger(name, triggerId);
+      if (run) out[name] = run;
+    }
+    return out;
   }
 
   /** List all active (queued, running, or paused) workflow runs */
@@ -394,6 +518,10 @@ export class WorkflowRunStore {
          WHERE id = ? AND status = 'queued'`,
       )
       .run(now, now, reason, id);
+    // A queued run that expires never ran a phase, but it may already own a
+    // `last-light/review` check — the whole point of hanging the projection off
+    // the terminal transition is that this path resolves it for free.
+    if (info.changes === 1) this.notifyTerminal(id, "cancelled");
     return info.changes;
   }
 
@@ -461,6 +589,8 @@ export class WorkflowRunStore {
     } else {
       apply();
     }
+    // AFTER the transaction commits — the observer reads the row back.
+    this.notifyTerminal(id, status);
   }
 
   private flipFinished(id: string, status: "succeeded" | "failed" | "cancelled", error?: string): void {
@@ -479,6 +609,7 @@ export class WorkflowRunStore {
     this.db.prepare(`
       UPDATE workflow_runs SET status = 'cancelled', updated_at = ?, finished_at = ? WHERE id = ?
     `).run(now, now, id);
+    this.notifyTerminal(id, "cancelled");
   }
 
   /** Pause a workflow run (waiting for approval) */

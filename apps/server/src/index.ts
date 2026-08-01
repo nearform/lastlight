@@ -5,7 +5,12 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { loadConfig, resolveModel, resolveVariant, resolveGithubAuth } from "./config/config.js";
 import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService } from "./connectors/index.js";
-import { dispatch, type DispatchDeps } from "./engine/dispatcher.js";
+import {
+  dispatch,
+  applyPrDispatchGate,
+  prPolicyConfig,
+  type DispatchDeps,
+} from "./engine/dispatcher.js";
 import { MessageBatcher } from "./engine/chat/message-batcher.js";
 import { chatSystemSuffix, handleChatMessage, loadAgentContext } from "./engine/chat/chat.js";
 import { configureWorkflowAssets, validateAssets, getWorkflow } from "./workflows/loader.js";
@@ -47,6 +52,16 @@ import {
   PR_FIX_SHAPED_WORKFLOWS,
   type SimpleWorkflowRequest,
 } from "./workflows/simple.js";
+import { resolvePrState, prScopedWorkflows, type PrState } from "./engine/pr-state.js";
+import { renderContext, type ReviewTriggerOptions } from "./engine/pr-decisions.js";
+import {
+  REVIEW_WORKFLOW,
+  bindQueuedReviewCheck,
+  installReviewCheckObserver,
+  openAndBindReviewCheck,
+} from "./engine/review-check.js";
+import { runDashboardUrl } from "./notify/model.js";
+import { harvestFixMarkers } from "./engine/fix-harvest.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
 import { createAdmissionController, type AdmissionController } from "./workflows/admission.js";
@@ -59,6 +74,23 @@ import {
   type ProgressReporter,
 } from "./notify/index.js";
 import type { EventEnvelope } from "./connectors/types.js";
+
+/**
+/**
+ * The `review.trigger` ROUTE this dispatch arrived on, off the context key the
+ * cron fan-out sets (`_reviewRoute`).
+ *
+ * The webhook path sets it in the dispatcher, where the event type is still in
+ * hand; everything reaching `dispatchWorkflow` cold is either the sweep (which
+ * says so) or a hand-triggered run, and `attention` is the conservative default
+ * — the one value `after-checks` refuses.
+ */
+function reviewRouteFromContext(
+  context: Record<string, unknown>,
+): NonNullable<ReviewTriggerOptions["route"]> {
+  const raw = context._reviewRoute;
+  return raw === "sweep" || raw === "checks-settled" || raw === "attention" ? raw : "attention";
+}
 
 /**
  * Pre-flight validation — checks that config is sane before starting any
@@ -240,6 +272,17 @@ async function main() {
       ? GitHubClient.withToken(config.githubToken)
       : null;
 
+  // The `last-light/review` check is a PROJECTION OF RUN STATE (09 → S2): this
+  // is the one wiring that makes every terminal transition — `simple.ts`,
+  // `resume.ts`, the queued-run TTL expiry, the admin cancel — conclude an open
+  // check, instead of a `.then()` on an in-memory promise that a deploy,
+  // a crash or an admission-queued run silently outlives.
+  installReviewCheckObserver(db, {
+    github,
+    botLogin: config.botLogin,
+    botMention: `@${config.botName}`,
+  });
+
   // Discover the repos the App installation can access and seed the managed-repo
   // list. When the overlay's `managedRepos` is empty this becomes the effective
   // allowlist (getManagedRepos falls back to it); a configured list still wins.
@@ -330,10 +373,164 @@ async function main() {
       return { success: false, error: msg };
     }
 
+    // ── The PR state machine (09-state-machine.md → S3) ────────────────────
+    //
+    // One resolved snapshot per dispatch, at the SAME choke point and for the
+    // same reason as the two guards above: webhook, cron, `/api/*` and resume
+    // all funnel through here.
+    //
+    // The webhook route already resolved it — the dispatcher needs
+    // `runInFlight` before it can decide to dispatch at all — and hands it
+    // down on `_prState`, so this costs nothing there. The cron fan-out and
+    // the direct API triggers arrive COLD and resolve here, which is what
+    // finally closes the gap where every nightly `fix-red-dependency-prs` run
+    // carried `branch` + `reason` but an EMPTY `{{ciSection}}`, the repo's
+    // default branch instead of the PR's real base, and no fork guard at all:
+    // the fan-out calls this function directly and never crosses `handlePrFix`.
+    const inheritedPrState =
+      context._prState && typeof context._prState === "object"
+        ? (context._prState as PrState)
+        : null;
+    let prState: PrState | null = inheritedPrState;
+    if (
+      !prState &&
+      prScopedWorkflows().has(workflowName) &&
+      owner &&
+      repo &&
+      typeof context.prNumber === "number"
+    ) {
+      prState = await resolvePrState(owner, repo, context.prNumber, {
+        github,
+        db,
+        botLogin: config.botLogin,
+        botName: config.botName,
+      });
+      // Only the routes that have NOT already decided are gated here. The
+      // dispatcher decides for itself so it can reply to a human whose request
+      // it dropped; deciding twice would double every skip and every log line.
+      // It is the SAME function, reading the SAME repo-clamped config (it is
+      // handed `resolveRepoPolicy`, which is this file's `resolveRepoRunConfig`),
+      // so the two routes cannot answer differently.
+      //
+      // A skip writes NO run row, which is exactly why every gate reachable
+      // from here is a LIVE precondition rather than a prior run's verdict —
+      // a stored verdict read through a path that records nothing freezes, and
+      // the PR is then dead with no label, no comment and no explanation
+      // (09 → D1). The one exception, an ESCALATING skip, records one itself.
+      const disposition = await applyPrDispatchGate(
+        {
+          workflowName,
+          state: prState,
+          policy: prPolicyConfig(repoConfig),
+          // The cron fan-out marks itself `sweep` — the RELEASE MECHANISM for
+          // every PR whose fix chain ended without pushing, and the only route
+          // that reaches an `after-checks` PR no further `check_suite` will ever
+          // fire for.
+          route: reviewRouteFromContext(context),
+          // A direct `/api/run` (the CLI, the dashboard) is an operator asking
+          // for a REVIEW by hand, and overrides mode, draft and dedup exactly as
+          // `@bot review` does. Deliberately narrowed to `pr-review`: the fix
+          // family's skips are budgets and live facts rather than policy, and
+          // the human override for those already exists on the comment path.
+          explicitRequest:
+            workflowName === REVIEW_WORKFLOW && context._triggerType === "api",
+          logPrefix: "[dispatch]",
+        },
+        { db, github, botLogin: config.botLogin, botMention: `@${config.botName}` },
+      );
+      if (disposition.decision === "skip") {
+        // Not an error: the harness correctly determined there is nothing to
+        // do — including a run-lock drop, which the daily crons re-pick up.
+        // Reporting it as a failure would paint a cron tick red and, on the
+        // fan-out, count against `failures`.
+        return { success: true };
+      }
+    }
+
+    // ── The `last-light/review` check (09 → S2) ─────────────────────────────
+    //
+    // Created at the one choke point every route crosses, rather than in the
+    // webhook branch of the dispatcher — a cron-, comment-, Slack- or
+    // CLI-triggered review used to get no check at all — and completed from the
+    // run's TERMINAL TRANSITION, so it can no longer strand `in_progress` across
+    // a deploy. Reaching this line means some gate already said "run".
+    //
+    // CREATION AND PERSISTENCE ARE ONE STEP, and that is the whole of this
+    // helper. The check used to be created here, unconditionally, and recorded
+    // on `scratch.reviewCheck` only inside `onRunStart` — but `runSimpleWorkflow`
+    // returns `{ queued: true }` BEFORE it invokes `onRunStart` when the run is
+    // over the concurrency cap (and again on a duplicate trigger for an
+    // already-queued run). The check was then created, never persisted, never
+    // observed by the terminal observer, and never concluded. The old accidental
+    // repair is gone too: while the run is `queued` it counts as active for the
+    // trigger, so the 30-minute sweep resolves `run-in-flight` → placement
+    // `none` and posts no superseding check. That is precisely the bug 09 → S2
+    // exists to fix, reintroduced through the one path that skips `onRunStart`.
+    //
+    // So: nothing is created until a run ROW exists to hang it on, and it is
+    // recorded in the same breath. `onRunStart` covers the ordinary path; the
+    // queued path binds after the fact, below, against the row `runSimpleWorkflow`
+    // did create before returning.
+    const wantsReviewCheck =
+      workflowName === REVIEW_WORKFLOW &&
+      (repoConfig?.review ?? config.review).postsCheck &&
+      !!prState?.headSha;
+    let reviewCheckBound = false;
+    const reviewCheckDeps = { github, botLogin: config.botLogin };
+    const reviewCheckDetailsUrl = (runId: string) =>
+      runDashboardUrl(config.publicUrl, runId, workflowName);
+    const bindReviewCheck = async (runId: string): Promise<void> => {
+      if (!wantsReviewCheck || reviewCheckBound) return;
+      reviewCheckBound = true;
+      await openAndBindReviewCheck(
+        db,
+        runId,
+        {
+          owner,
+          repo,
+          headSha: prState!.headSha,
+          detailsUrl: reviewCheckDetailsUrl(runId),
+        },
+        reviewCheckDeps,
+      );
+    };
+    /**
+     * The queued half. `runSimpleWorkflow` writes the `queued` row and returns
+     * before `onRunStart`, so the run id never reaches us — but the ROW exists,
+     * keyed by exactly the trigger id `simple.ts` derived from this same
+     * context.
+     */
+    const bindReviewCheckForQueuedRun = async (): Promise<void> => {
+      if (!wantsReviewCheck || reviewCheckBound) return;
+      const number =
+        typeof context.issueNumber === "number"
+          ? context.issueNumber
+          : typeof context.prNumber === "number"
+          ? context.prNumber
+          : undefined;
+      const triggerId = slackTriggerId ?? (number !== undefined ? `${owner}/${repo}#${number}` : undefined);
+      if (!triggerId) return;
+      reviewCheckBound = true;
+      await bindQueuedReviewCheck(
+        db,
+        {
+          triggerId,
+          workflowName,
+          owner,
+          repo,
+          headSha: prState!.headSha,
+          detailsUrl: reviewCheckDetailsUrl,
+        },
+        reviewCheckDeps,
+      );
+    };
+
     // Pluck the standard fields, leave the rest in `extra` for the workflow
     // template to consume.
     const {
       _triggerType,
+      _prState: _inheritedPrState,
+      _reviewRoute: _ignoredReviewRoute,
       repo: _r,
       issueNumber,
       prNumber,
@@ -382,17 +579,49 @@ async function main() {
     if (typeof channelId === "string") extra.channelId = channelId;
     if (typeof threadId === "string") extra.threadId = threadId;
 
+    // Project the snapshot into the template variables the prompts render, and
+    // persist the WHOLE thing on the run context rather than scattered leaves
+    // (§S3) — so the run detail panel can show the decisions that were actually
+    // taken, with the inputs that produced them, long after the live state has
+    // moved on. One projection at one choke point is what makes the webhook and
+    // cron dispatches of a `pr-fix`-shaped workflow carry identical context.
+    if (prState) {
+      Object.assign(
+        extra,
+        renderContext(
+          prState,
+          repoConfig?.fix ?? config.fix,
+          repoConfig?.dependencies ?? config.dependencies,
+        ),
+      );
+      extra.prState = prState;
+    }
+
     // For PR-scoped read workflows, resolve the PR head ref and ask the
     // sandbox to pre-clone the repo at that branch. The agent then enters
     // a workspace that's already a checkout of the PR's actual code —
     // saves a redundant clone_repo MCP call inside the session.
     //
-    // pr-fix (and other pr-fix-shaped workflows like dependabot-ci-fix) already
-    // plumb `branch` through context (set by handlePrFix) because the fix phase
-    // needs the branch name to push to; we honor that here as the pre-populate
-    // branch too so the workspace is pre-checked-out at the PR head.
+    // The snapshot's head ref is the authority for every PR-scoped workflow —
+    // one read, already taken. It replaces the second `getPullRequest` the
+    // block below used to issue for the read-only workflows, and it is the
+    // only source the cron fan-out ever had for `dependabot-ci-fix` (via the
+    // discoverer's `branch`, which stays as the fallback for a snapshot whose
+    // PR read failed).
     let prePopulateBranch: string | undefined =
       typeof ctxPrePopulateBranch === "string" ? ctxPrePopulateBranch : undefined;
+    if (
+      !prePopulateBranch &&
+      prState?.headRef &&
+      (PR_FIX_SHAPED_WORKFLOWS.has(workflowName) ||
+        PR_HEADREF_PREPOPULATE_WORKFLOWS.has(workflowName))
+    ) {
+      prePopulateBranch = prState.headRef;
+      console.log(
+        `[dispatch] ${workflowName}: pre-populating workspace at ${owner}/${repo}@${prePopulateBranch} ` +
+        `(base ${prState.baseRef || "?"})`,
+      );
+    }
     if (!prePopulateBranch && typeof ctxBranch === "string" && ctxBranch && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
       prePopulateBranch = ctxBranch;
     }
@@ -573,6 +802,10 @@ async function main() {
       /* unknown workflow — surfaced downstream by runSimpleWorkflow */
     }
 
+    // Set by `onRunStart` below, read by `onPhaseEnd`. Undefined only for the
+    // window before the run row exists, during which no phase can have ended.
+    let harvestRunId: string | undefined;
+
     let notifier: ProgressNotifier | undefined;
     const reporterProxy: ProgressReporter | undefined = statusChecklist
       ? {
@@ -651,17 +884,31 @@ async function main() {
           slackConnector.showTyping(channelId as string, threadId as string, threadId as string).catch(() => {});
         }
       },
-      onPhaseEnd: async (phase, result) =>
-        console.log(`[dispatch] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`),
-      onRunStart: notifierOnRunStart
-        ? async (runId: string) => {
-            // Synchronous notifier setup must finish before simple.ts calls
-            // reporter.start() (the next statement after it invokes this), so
-            // run it first, then chain any caller-provided onRunStart.
-            notifierOnRunStart(runId);
-            if (onRunStart) await onRunStart(runId);
-          }
-        : onRunStart,
+      onPhaseEnd: async (phase, result) => {
+        console.log(`[dispatch] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`);
+        // The marker harvest (09 → S1). This is the ONLY moment the two marker
+        // lines exist in memory — `{{phaseOutputs}}` is empty across a run
+        // boundary and the shared per-PR workspace is `reset --hard`-ed between
+        // runs, so a marker not persisted here is gone for good.
+        if (harvestRunId) harvestFixMarkers(db, harvestRunId, workflowName, phase, result.output);
+      },
+      onRunStart: async (runId: string) => {
+        // The run id is not knowable when this object is built — the row is
+        // created inside `runSimpleWorkflow` — and `onPhaseEnd` needs it to
+        // write the harvest. This callback fires synchronously before the first
+        // phase, so the assignment is always in place by the time it is read.
+        harvestRunId = runId;
+        // Synchronous notifier setup must finish before simple.ts calls
+        // reporter.start() (the next statement after it invokes this), so it
+        // runs FIRST — before the first `await` in this callback, which is now
+        // the check creation below.
+        if (notifierOnRunStart) notifierOnRunStart(runId);
+        // Create AND bind the review check the moment the row exists — this is
+        // what makes it a projection of run state rather than of an in-memory
+        // promise, and it is why every terminal path resolves it for free.
+        await bindReviewCheck(runId);
+        if (onRunStart) await onRunStart(runId);
+      },
     };
 
     let result: Awaited<ReturnType<typeof runSimpleWorkflow>> | undefined;
@@ -691,6 +938,14 @@ async function main() {
       const summary = result.phases.map((p) => `${p.phase}=${p.success ? "ok" : "fail"}`).join(", ");
       if (result.queued) {
         console.log(`[dispatch] ${workflowName} queued (concurrency cap reached)`);
+        // A queued run never reaches `onRunStart` — `runSimpleWorkflow` returns
+        // the moment it writes the `queued` row — so bind the check here instead
+        // of leaving the run's only PR-visible artifact unowned. The row is
+        // found the same way `simple.ts` found (or created) it: by trigger id.
+        // Admission promotes it through `resumeSimpleRun`, which takes no
+        // callbacks at all, so this is the ONLY point at which a queued review's
+        // check can be bound to its run.
+        await bindReviewCheckForQueuedRun();
       } else if (result.paused) {
         console.log(`[dispatch] ${workflowName} paused (${summary})`);
       } else if (result.success) {
@@ -748,9 +1003,20 @@ async function main() {
       // Settle-aware gate: emit a dependency-PR checks event only once the head
       // SHA's checks have fully settled (green/red), so a multi-app repo fires
       // one event per SHA — the last suite to complete — not one per suite.
+      // `excludeApp` is the self-gating deadlock fix (07 §7.2): our own
+      // `last-light/review` check is on the same head SHA, so without it a
+      // queued/in-progress review pins this aggregate at `pending` and the
+      // settle event that would dispatch the review never fires.
       getChecksConclusion: github
-        ? (owner, repo, ref) => github.getChecksConclusion(owner, repo, ref)
+        ? (owner, repo, ref) =>
+            github.getChecksConclusion(owner, repo, ref, { excludeApp: config.botName })
         : undefined,
+      // Only broaden `check_suite.completed` beyond dependency PRs when the
+      // operator's mode actually consumes a settle event. Deliberately the
+      // OPERATOR's value, not a repo's: emitting is what costs event volume,
+      // and a repo that opts itself into `after-checks` under an `eager`
+      // operator is covered by the 30-minute `check-prs-awaiting-review` sweep.
+      reviewTrigger: () => config.review.trigger,
     });
     registry.register(githubConnector);
   }
@@ -797,12 +1063,26 @@ async function main() {
       opts: { log?: (msg: string) => void },
     ) => Promise<DependencyPr[]>
   > = {
-    "green-dependency-prs": discoverGreenDependencyPrs,
-    "red-dependency-prs": discoverRedDependencyPrs,
+    // The green sweep's notion of "green" must match the webhook's: on a repo
+    // with no *required* checks, `mergeable_state: "clean"` is true for a PR
+    // whose CI is red. `requireSettledChecks` makes it ask the checks too.
+    "green-dependency-prs": (repos, gh, opts) =>
+      discoverGreenDependencyPrs(repos, gh, {
+        ...opts,
+        requireSettledChecks: config.dependencies.requireSettledChecks,
+        botName: config.botName,
+      }),
+    "red-dependency-prs": (repos, gh, opts) =>
+      discoverRedDependencyPrs(repos, gh, { ...opts, botName: config.botName }),
     // The pr-review cron: find open PRs awaiting review and fan out one single-PR
     // pr-review run each. Replaces the old `mode: scan` review run, which ran the
     // whole listing/reviewing inside the sandbox with a static token it couldn't
     // re-mint and no way to hand its chosen PR to post-review.
+    //
+    // A pure CANDIDATE FINDER (09 → S2): it filters nothing but "open, not ours".
+    // Draft, already-reviewed-at-this-SHA, run-in-flight and the trigger mode are
+    // all decided once by `resolveReviewTrigger` at the dispatch choke point,
+    // which the webhook route crosses too.
     "prs-awaiting-review": (repos, gh, opts) =>
       discoverPrsAwaitingReview(repos, gh, { ...opts, botLogin: config.botLogin }),
   };
@@ -873,6 +1153,12 @@ async function main() {
         // Also red-sweep only — why it was summoned (checks-failing | behind |
         // dirty | blocked), threaded into the ci-fix prompt as `{{reason}}`.
         ...(pr.reason ? { reason: pr.reason } : {}),
+        // The review sweep announces itself, because `resolveReviewTrigger`
+        // treats it differently from a PR-attention event: `after-checks` will
+        // not fire on attention, and the sweep is the RELEASE MECHANISM for
+        // every PR whose fix chain ended without pushing — no new commit
+        // exists, so no further `check_suite` will ever fire for it (09 → S2).
+        ...(discoverKey === "prs-awaiting-review" ? { _reviewRoute: "sweep" } : {}),
       }));
       ({ dispatched, failures } = await fanOutContexts(workflowName, contexts, dispatchWorkflow));
     } else {
@@ -1139,8 +1425,17 @@ async function main() {
         { chatRunner, sessionsHomeDir: config.sessionsDir },
         { model: resolveModel(config.models, "chat"), maxTurns: 10 },
       ),
-    reviewPostsCheck: config.reviewPostsCheck,
     publicUrl: config.publicUrl,
+    // ONE config at the dispatch gate. The dispatcher decides for itself (it
+    // has to — it replies to the human whose request it dropped, and its
+    // dispatches are fire-and-forget), so the way to keep it from carrying a
+    // second, operator-only view of policy is to hand it the very same
+    // resolution `dispatchWorkflow` performs below. `fetchRepoLayer` memoises
+    // per repo for 60 s, so the pair costs one conditional request between them.
+    resolveRepoPolicy: async (workflowName, context) => {
+      const { repoConfig } = await resolveRepoRunConfig(workflowName, context, { client: github });
+      return repoConfig;
+    },
   };
 
   // Wire Slack approval buttons into the SAME approval-resolution path as the

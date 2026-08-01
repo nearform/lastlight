@@ -77,6 +77,37 @@ export type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-
 import type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types";
 export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types";
 
+// The `fix:` / `dependencies:` / `review:` policy blocks (issues #251/#252).
+// They live in `lastlight-shared` for the same reason as the two above PLUS one
+// more: they are repo-settable, so the repo-layer sanitizer — which the CLI also
+// compiles — has to name their shape and their shipped defaults. Imported for
+// in-file use and re-exported so `../config/config.js` stays the one import
+// surface for the runtime config shape.
+import {
+  DIAGNOSIS_CLASSES,
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+  isDependencyImpact,
+  isDiagnosisClass,
+  isReviewTrigger,
+  type DependenciesConfig,
+  type FixConfig,
+  type ReviewConfig,
+} from "lastlight-shared/config-types";
+export type {
+  DependenciesConfig,
+  DependencyImpact,
+  FixConfig,
+  ReviewConfig,
+  ReviewTrigger,
+} from "lastlight-shared/config-types";
+export {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+} from "lastlight-shared/config-types";
+
 export interface PublicConfigBundle {
   default: Record<string, unknown>;
   overlay: Record<string, unknown> | null;
@@ -166,7 +197,26 @@ export interface LastLightConfig {
   bootstrapLabel: string;
   exploreDefaultRepo?: string;
   publicUrl?: string;
+  /**
+   * `review.postsCheck`, flattened. Predates the `review:` block below and is
+   * still what `src/index.ts` hands the dispatcher; kept as the same value read
+   * two ways rather than a second source of truth.
+   */
   reviewPostsCheck: boolean;
+  /**
+   * When `pr-review` runs, plus the draft/label rules (Phase 7 of the
+   * dependency-PR-resilience plan). Repo-settable and add-only where it matters
+   * — see `packages/shared/src/repo-config-schema.ts`.
+   */
+  review: ReviewConfig;
+  /**
+   * Retry/escalation budgets for the PR_FIX_SHAPED workflows (issue #251) and
+   * the major-bump auto-merge policy (issue #252). Both blocks resolve through
+   * all four layers (default → overlay → env → repo) and are clamped so a repo
+   * can only ever be more conservative than the operator.
+   */
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   /**
    * Sandbox-workspace reaping (issue #106). The harness owns cleanup of the
@@ -299,6 +349,22 @@ export function getRoutes(): RouteConfig {
  */
 export function getBotName(): string {
   return currentConfig?.botName || "last-light";
+}
+
+/**
+ * The OPERATOR's `review:` block, with the packaged defaults when config isn't
+ * loaded yet (unit tests).
+ *
+ * The router uses it for exactly one thing — dropping a `pr.labeled` whose
+ * label is not `review.requestLabel` — because that is a hard ROUTER-level
+ * ignore, not a mode decision: a label nobody configured is not an event about
+ * us at all, and resolving a whole `PrState` to discover that would make
+ * routine labelling cost a handful of GitHub calls per label per PR. Every
+ * actual trigger-mode decision stays in `resolveReviewTrigger`, at the dispatch
+ * gate, where the repo layer has been folded in.
+ */
+export function getReviewConfig(): ReviewConfig {
+  return currentConfig?.review || defaultReviewConfig();
 }
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
@@ -539,7 +605,10 @@ export function loadConfig(): LastLightConfig {
     bootstrapLabel: fileCfg.bootstrapLabel,
     exploreDefaultRepo: fileCfg.exploreDefaultRepo,
     publicUrl: resolvePublicUrl(),
-    reviewPostsCheck: fileCfg.reviewPostsCheck,
+    reviewPostsCheck: fileCfg.review.postsCheck,
+    review: fileCfg.review,
+    fix: fileCfg.fix,
+    dependencies: fileCfg.dependencies,
     concurrency: fileCfg.concurrency,
     cleanup: fileCfg.cleanup,
     repoConfig: fileCfg.repoConfig,
@@ -568,7 +637,9 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   approval: Record<string, boolean>;
   bootstrapLabel: string;
   exploreDefaultRepo?: string;
-  reviewPostsCheck: boolean;
+  review: ReviewConfig;
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
   otel: OtelConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   cleanup: { sandbox: SandboxCleanupConfig };
@@ -587,6 +658,8 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {};
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
+  const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
+  const dependenciesRaw = isPlainObject(raw.dependencies) ? raw.dependencies : {};
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
   const otelRaw = isPlainObject(raw.otel) ? raw.otel : {};
   const cronsRaw = isPlainObject(raw.crons) ? raw.crons : {};
@@ -609,7 +682,69 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const deployVersion = typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
   const bootstrapLabel = typeof bootstrapRaw.label === "string" ? bootstrapRaw.label : "lastlight:bootstrap";
   const exploreDefaultRepo = typeof exploreRaw.defaultRepo === "string" ? exploreRaw.defaultRepo : undefined;
-  const reviewPostsCheck = reviewRaw.postsCheck === true;
+  // ── The fix / dependencies / review policy blocks (issues #251, #252) ──────
+  //
+  // Lenient, like `crons` and `repoConfig.allowKeys` above and for the same
+  // reason: the SAME blocks are also read out of an untrusted repo layer, so a
+  // malformed leaf must degrade to the documented default rather than take the
+  // harness down at boot — and the two paths must not disagree about shape. The
+  // shipped defaults come from `lastlight-shared` so `config/default.yaml`,
+  // this normaliser and the repo-layer clamps can't drift apart.
+  const fixDefaults = defaultFixConfig();
+  const fix: FixConfig = {
+    // Whole numbers, matching the repo-layer clamp in `repo-config-schema.ts`
+    // (`positiveInt`). They used to accept any positive number here while the
+    // clamp required an integer, so an operator writing `maxAttempts: 2.5` got
+    // the REPO layer silently falling back to the shipped default while the
+    // operator layer kept 2.5 — two layers disagreeing about the same leaf
+    // (#256). `gateTimeoutSeconds` is a duration, not a count, so it stays a
+    // plain positive number.
+    maxAttempts: positiveInt(fixRaw.maxAttempts, "fix.maxAttempts") ?? fixDefaults.maxAttempts,
+    localIterations:
+      positiveInt(fixRaw.localIterations, "fix.localIterations") ?? fixDefaults.localIterations,
+    gateTimeoutSeconds: positiveNumber(fixRaw.gateTimeoutSeconds) ?? fixDefaults.gateTimeoutSeconds,
+    // 0 is meaningful here ("escalate the model from the first retry"), so this
+    // one accepts zero where the budgets above require a positive number.
+    escalateModelAfterAttempt:
+      nonNegativeNumber(fixRaw.escalateModelAfterAttempt) ?? fixDefaults.escalateModelAfterAttempt,
+    // An explicit `null` is the documented "no ceiling" value, distinct from an
+    // absent/typo'd key which falls back to the shipped ceiling.
+    maxCostUsd:
+      fixRaw.maxCostUsd === null ? null : nonNegativeNumber(fixRaw.maxCostUsd) ?? fixDefaults.maxCostUsd,
+    maxFlakyDeferrals:
+      positiveInt(fixRaw.maxFlakyDeferrals, "fix.maxFlakyDeferrals") ?? fixDefaults.maxFlakyDeferrals,
+    retryableClasses: diagnosisClassList(fixRaw.retryableClasses) ?? fixDefaults.retryableClasses,
+  };
+
+  const dependenciesDefaults = defaultDependenciesConfig();
+  const dependencies: DependenciesConfig = {
+    autoMergeMaxImpact: isDependencyImpact(dependenciesRaw.autoMergeMaxImpact)
+      ? dependenciesRaw.autoMergeMaxImpact
+      : dependenciesDefaults.autoMergeMaxImpact,
+    requireSettledChecks:
+      typeof dependenciesRaw.requireSettledChecks === "boolean"
+        ? dependenciesRaw.requireSettledChecks
+        : dependenciesDefaults.requireSettledChecks,
+    minSettledChecks: nonNegativeNumber(dependenciesRaw.minSettledChecks) ?? dependenciesDefaults.minSettledChecks,
+    auditComment:
+      typeof dependenciesRaw.auditComment === "boolean"
+        ? dependenciesRaw.auditComment
+        : dependenciesDefaults.auditComment,
+  };
+
+  const reviewDefaults = defaultReviewConfig();
+  const review: ReviewConfig = {
+    // Historically `review.postsCheck` defaulted OFF for anything that wasn't
+    // literally `true`; keep that exact reading.
+    postsCheck: reviewRaw.postsCheck === true,
+    trigger: isReviewTrigger(reviewRaw.trigger) ? reviewRaw.trigger : reviewDefaults.trigger,
+    requestLabel:
+      typeof reviewRaw.requestLabel === "string" && reviewRaw.requestLabel.trim()
+        ? reviewRaw.requestLabel.trim()
+        : null,
+    skipDraft: typeof reviewRaw.skipDraft === "boolean" ? reviewRaw.skipDraft : reviewDefaults.skipDraft,
+  };
+
   const maxWorkflows =
     typeof concurrencyRaw.maxWorkflows === "number" && concurrencyRaw.maxWorkflows > 0
       ? concurrencyRaw.maxWorkflows
@@ -687,7 +822,9 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     approval,
     bootstrapLabel,
     exploreDefaultRepo,
-    reviewPostsCheck,
+    review,
+    fix,
+    dependencies,
     otel: normalizeOtelFileConfig(otelRaw),
     concurrency: { maxWorkflows, maxQueueWaitMs },
     cleanup: { sandbox: sandboxCleanup },
@@ -710,6 +847,74 @@ function nonEmptyStringList(raw: unknown): string[] | undefined {
   return raw
     .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
     .map((v) => v.trim());
+}
+
+/**
+ * `fix.retryableClasses`, validated against the closed {@link DIAGNOSIS_CLASSES}
+ * enum: unknown members are DROPPED with a warning rather than kept or fatal.
+ *
+ * Dropping is the only correct direction — a class we do not recognise cannot
+ * be retried — but doing it silently is what made this worth fixing. A typo
+ * (`reproducable`) leaves a list that looks configured and behaves as if every
+ * diagnosis were terminal: the second dispatch escalates `not-retryable`, the
+ * PR gets `requires-human`, and nothing anywhere names the cause (#256).
+ *
+ * An explicitly EMPTY result is legal and stays empty (retries off for every
+ * class), but says so once — it is a big behaviour change to reach by accident.
+ * An absent/scalar key returns `undefined` so the caller applies the default.
+ */
+function diagnosisClassList(raw: unknown): string[] | undefined {
+  const names = nonEmptyStringList(raw);
+  if (names === undefined) return undefined;
+  const unknown = names.filter((n) => !isDiagnosisClass(n));
+  if (unknown.length) {
+    console.warn(
+      `[config] Ignoring ${unknown.map((n) => `"${n}"`).join(", ")} in fix.retryableClasses — ` +
+      `not a diagnosis class. The five are: ${DIAGNOSIS_CLASSES.join(", ")}.`,
+    );
+  }
+  const kept = names.filter(isDiagnosisClass);
+  if (!kept.length) {
+    console.warn(
+      "[config] fix.retryableClasses is empty — every diagnosis will escalate " +
+      "`not-retryable` on the second dispatch, and no PR will be retried.",
+    );
+  }
+  return kept;
+}
+
+/**
+ * A finite number > 0, or `undefined` so the caller can apply its own default.
+ * Lenient sibling of {@link nonEmptyStringList} for the numeric policy leaves.
+ */
+function positiveNumber(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : undefined;
+}
+
+/** As {@link positiveNumber}, but 0 is a legal value rather than a fallback trigger. */
+function nonNegativeNumber(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+}
+
+/**
+ * A whole number >= 0, or `undefined` so the caller can apply its own default —
+ * the same predicate the repo-layer clamp applies (`positiveInt` in
+ * `packages/shared/src/repo-config-schema.ts`).
+ *
+ * Unlike its lenient siblings above this one WARNS on rejection, because the
+ * two paths are not symmetric: a repo's bad leaf is reported back through a
+ * structured `RepoConfigWarning` the dashboard and CLI render, while an
+ * operator's is only ever seen if we say something. `fix.maxAttempts: 2.5`
+ * silently becoming the shipped default is the failure this closes (#256).
+ */
+function positiveInt(raw: unknown, path: string): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "number" && Number.isInteger(raw) && raw >= 0) return raw;
+  console.warn(
+    `[config] Ignoring "${path}: ${JSON.stringify(raw)}" — it must be a whole number >= 0. ` +
+    `Falling back to the shipped default.`,
+  );
+  return undefined;
 }
 
 /** De-duplicate a name list, preserving first-seen order (used for unioned lists). */
@@ -762,6 +967,12 @@ function defaultRouteConfig(): RouteConfig {
       pr_opened: "pr-review",
       pr_synchronize: "pr-review",
       pr_reopened: "pr-review",
+      // Phase 7's three new PR-review routes. Each falls back to `pr_review`
+      // when unset, so an overlay that pins only `pr_review` still redirects
+      // all of them.
+      pr_checks_settled: "pr-review",
+      pr_labeled: "pr-review",
+      pr_review_requested: "pr-review",
       approval_response: "approval-response",
       security_review: "security-review",
       pr_fix: "pr-fix",

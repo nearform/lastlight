@@ -25,43 +25,47 @@ function normalize(p: PrEntry) {
   };
 }
 
-/** `reviewed` holds `owner/repo#num@headSha` keys the bot has already reviewed. */
-function fakeGh(listing: Record<string, PrEntry[]>, reviewed: Set<string>): ReviewDiscoveryClient {
+function fakeGh(listing: Record<string, PrEntry[]>): ReviewDiscoveryClient {
   return {
     listOpenPullRequests: vi.fn(async (owner: string, repo: string) =>
       (listing[`${owner}/${repo}`] ?? []).map(normalize),
-    ),
-    getLatestBotReview: vi.fn(async (owner: string, repo: string, n: number, headSha: string) =>
-      reviewed.has(`${owner}/${repo}#${n}@${headSha}`) ? { state: "COMMENTED" } : null,
     ),
   };
 }
 
 describe("discoverPrsAwaitingReview", () => {
-  it("returns open, non-draft, non-bot, unreviewed PRs — shaped for dispatch with prNumber + branch", async () => {
-    const gh = fakeGh(
-      {
-        "yo61/repo": [
-          { number: 3, title: "Add X", draft: false, authorLogin: "alice", headRef: "feat/x" },
-          { number: 4, title: "Draft Y", draft: true, authorLogin: "bob" }, // draft → skip
-          { number: 5, title: "Bot chore", draft: false, authorLogin: "last-light[bot]" }, // our own → skip
-          { number: 6, title: "Already reviewed", draft: false, authorLogin: "carol" }, // reviewed@head → skip
-        ],
-      },
-      new Set(["yo61/repo#6@sha-6"]),
-    );
+  it("returns every open PR that isn't ours — shaped for dispatch with prNumber + branch", async () => {
+    const gh = fakeGh({
+      "yo61/repo": [
+        { number: 3, title: "Add X", draft: false, authorLogin: "alice", headRef: "feat/x" },
+        { number: 5, title: "Bot chore", draft: false, authorLogin: "last-light[bot]" },
+      ],
+    });
 
     const out = await discoverPrsAwaitingReview(["yo61/repo"], gh);
     expect(out).toEqual([{ repo: "yo61/repo", prNumber: 3, title: "Add X", branch: "feat/x" }]);
   });
 
-  it("re-reviews a PR whose latest bot review is on an OLD head SHA (new commits landed)", async () => {
-    const gh = fakeGh(
-      { "yo61/repo": [{ number: 7, title: "Reworked", draft: false, authorLogin: "dave", headSha: "sha-new" }] },
-      new Set(["yo61/repo#7@sha-old"]), // reviewed at an old sha, not the current one
-    );
+  it("is a CANDIDATE FINDER, not policy — drafts and reviewed PRs are still candidates (09 → S2)", async () => {
+    // The draft filter and the per-candidate `getLatestBotReview` call used to
+    // live here, which made this a third implementation of `review.trigger`
+    // alongside the webhook gate and the comment path's silent bypass. Both are
+    // now fields of the ONE `PrState` snapshot `resolveReviewTrigger` decides
+    // over at the dispatch choke point — so the sweep offers them and the gate
+    // skips them, from exactly the code the webhook route uses.
+    const gh = fakeGh({
+      "yo61/repo": [
+        { number: 3, title: "Add X", draft: false, authorLogin: "alice" },
+        { number: 4, title: "Draft Y", draft: true, authorLogin: "bob" },
+        { number: 6, title: "Already reviewed at head", draft: false, authorLogin: "carol" },
+      ],
+    });
     const out = await discoverPrsAwaitingReview(["yo61/repo"], gh);
-    expect(out.map((p) => p.prNumber)).toEqual([7]);
+    expect(out.map((p) => p.prNumber)).toEqual([3, 4, 6]);
+    // And it asks GitHub nothing beyond the listing — one call per repo, no
+    // per-candidate review lookup. The client surface is the proof.
+    expect(gh.listOpenPullRequests).toHaveBeenCalledTimes(1);
+    expect(Object.keys(gh)).toEqual(["listOpenPullRequests"]);
   });
 
   it("isolates a per-repo listing failure — one bad repo doesn't sink the sweep", async () => {
@@ -71,44 +75,33 @@ describe("discoverPrsAwaitingReview", () => {
           ? Promise.reject(new Error("boom"))
           : [normalize({ number: 1, title: "ok", draft: false, authorLogin: "alice" })],
       ),
-      getLatestBotReview: vi.fn(async () => null),
     };
     const out = await discoverPrsAwaitingReview(["yo61/bad", "yo61/good"], gh, { log: () => {} });
     expect(out.map((p) => p.repo)).toEqual(["yo61/good"]);
   });
 
-  it("honours a custom botLogin for both self-PR skip and prior-review dedup", async () => {
-    const gh = fakeGh(
-      {
-        "yo61/repo": [
-          { number: 8, title: "custom bot self PR", draft: false, authorLogin: "nearform-lastlight[bot]" },
-          { number: 9, title: "human PR", draft: false, authorLogin: "erin" },
-        ],
-      },
-      new Set(),
-    );
-    const out = await discoverPrsAwaitingReview(["yo61/repo"], gh, { botLogin: "nearform-lastlight[bot]" });
-    expect(out.map((p) => p.prNumber)).toEqual([9]); // the bot's own PR (8) is skipped
+  it("honours a custom botLogin for the self-PR skip", async () => {
+    const gh = fakeGh({
+      "yo61/repo": [
+        { number: 8, title: "custom bot self PR", draft: false, authorLogin: "nearform-lastlight[bot]" },
+        { number: 9, title: "human PR", draft: false, authorLogin: "erin" },
+      ],
+    });
+    const out = await discoverPrsAwaitingReview(["yo61/repo"], gh, {
+      botLogin: "nearform-lastlight[bot]",
+    });
+    expect(out.map((p) => p.prNumber)).toEqual([9]);
   });
 
-  it("caps RUNS dispatched, not candidates examined — reviewed PRs don't starve unreviewed ones behind them", async () => {
-    // Steady state: the two oldest open PRs are already reviewed. With
-    // maxPerRepo=2 the cap must still surface 2 UNreviewed PRs from behind them,
-    // not stop after examining the first 2 (which would yield zero and defer the
-    // rest indefinitely).
-    const gh = fakeGh(
-      {
-        "yo61/repo": [
-          { number: 1, title: "old reviewed", draft: false, authorLogin: "a" },
-          { number: 2, title: "old reviewed", draft: false, authorLogin: "b" },
-          { number: 3, title: "unreviewed", draft: false, authorLogin: "c" },
-          { number: 4, title: "unreviewed", draft: false, authorLogin: "d" },
-          { number: 5, title: "unreviewed", draft: false, authorLogin: "e" },
-        ],
-      },
-      new Set(["yo61/repo#1@sha-1", "yo61/repo#2@sha-2"]),
-    );
+  it("caps candidates per repo, oldest first, so one busy repo can't spin hundreds of dispatches", async () => {
+    const gh = fakeGh({
+      "yo61/repo": [
+        { number: 5, title: "e", draft: false, authorLogin: "e" },
+        { number: 1, title: "a", draft: false, authorLogin: "a" },
+        { number: 3, title: "c", draft: false, authorLogin: "c" },
+      ],
+    });
     const out = await discoverPrsAwaitingReview(["yo61/repo"], gh, { maxPerRepo: 2 });
-    expect(out.map((p) => p.prNumber)).toEqual([3, 4]); // 2 dispatched, not starved by 1 & 2
+    expect(out.map((p) => p.prNumber)).toEqual([1, 3]);
   });
 });

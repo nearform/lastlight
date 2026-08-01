@@ -11,6 +11,7 @@ import {
   type RunRepoConfig,
 } from "./simple.js";
 import { slugify, type TemplateContext } from "./templates.js";
+import { harvestFixMarkers } from "../engine/fix-harvest.js";
 import {
   ProgressNotifier,
   GitHubTransport,
@@ -112,6 +113,8 @@ function makeCallbacks(
   repo: string,
   issueNumber: number | undefined,
   workflowName: string,
+  db: StateDb,
+  runId: string,
 ): RunnerCallbacks {
   return {
     postComment: github && issueNumber
@@ -125,8 +128,15 @@ function makeCallbacks(
         }
       : undefined,
     onPhaseStart: async (phase) => console.log(`[resume] ▶ ${workflowName}/${phase}`),
-    onPhaseEnd: async (phase, result) =>
-      console.log(`[resume] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`),
+    onPhaseEnd: async (phase, result) => {
+      console.log(`[resume] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`);
+      // The marker harvest has to be wired on the RESUME paths too, not only on
+      // the fresh dispatch in `index.ts`. A fix run that paused for an approval
+      // gate or was picked back up after a harness restart completes its
+      // `diagnose`/`fix` phases HERE — harvesting only in `index.ts` would lose
+      // every marker on exactly the runs whose attempt counter matters most.
+      harvestFixMarkers(db, runId, workflowName, phase, result.output);
+    },
   };
 }
 
@@ -336,14 +346,17 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
           }
         },
         onPhaseStart: async (phase) => console.log(`[resume] ▶ ${run.workflowName}/${phase}`),
-        onPhaseEnd: async (phase, result) =>
-          console.log(`[resume] ◀ ${run.workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`),
+        onPhaseEnd: async (phase, result) => {
+          console.log(`[resume] ◀ ${run.workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`);
+          harvestFixMarkers(opts.db, run.id, run.workflowName, phase, result.output);
+        },
       };
     }
   }
 
   let callbacks: RunnerCallbacks =
-    slackCallbacks || makeCallbacks(opts.github, owner, repo, issueNumber, run.workflowName);
+    slackCallbacks ||
+    makeCallbacks(opts.github, owner, repo, issueNumber, run.workflowName, opts.db, run.id);
 
   // Re-attach the in-place checklist on GitHub boot-recovery so a run that was
   // mid-flight when the harness died keeps editing its original status comment

@@ -72,6 +72,34 @@ describe("buildCloneInitContainer reuse refresh (Task 18b)", () => {
     expect(scriptText).not.toContain("main"); // base value never in the script text
   });
 
+  it("clears the harness's scratch files on the refresh path, before the fetch", () => {
+    // This backend's half of `resetVerifyScript` / `resetPrNotesJournal`
+    // (`engine/executors/shared.ts`), which every other backend does from
+    // `prePopulateWorkspace`. The harness has no filesystem access to the PVC,
+    // so the init container is the only place that can do it — and it never
+    // did, which is issue #256's k8s finding.
+    expect(scriptText).toContain("reset_scratch");
+    expect(scriptText).toContain('rm -f "$repo_dir/.git/lastlight-verify.sh" "$repo_dir/.git/lastlight-notes"');
+
+    // Ordering: the reset must precede the fetch on the different-run branch,
+    // because a FAILED refresh preserves the checkout — and that is exactly the
+    // case that must not inherit a superseded diagnosis's gate. `git clean`
+    // cannot clear them either; nothing cleans inside `.git/`.
+    const lines = scriptText.split("\n");
+    const resetAt = lines.findIndex((l) => l.trim() === "reset_scratch");
+    const fetchAt = lines.findIndex((l) => l.includes('fetch --depth 50 -- "$url" "$branch"'));
+    expect(resetAt).toBeGreaterThan(-1);
+    expect(fetchAt).toBeGreaterThan(resetAt);
+  });
+
+  it("clears them on the fresh-clone path too, so the invariant holds everywhere", () => {
+    // A no-op after a real `git clone`, kept so "every path that starts a new
+    // run clears the scratch files" is readable off the script rather than
+    // reconstructed from which paths could have inherited one.
+    const tail = scriptText.slice(scriptText.lastIndexOf('git clone'));
+    expect(tail).toContain("reset_scratch");
+  });
+
   it("recreate-from-base re-clones the default branch and cuts the head locally", () => {
     const rc = buildCloneInitContainer("img", {
       owner: "acme", repo: "web", branch: "lastlight/5-x",

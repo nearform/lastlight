@@ -550,6 +550,58 @@ const INTERNAL_ROUTE_TARGETS: Record<string, ReadonlySet<string>> = {
   "slack.explore_reply": new Set(["explore-reply"]),
 };
 
+/**
+ * Route keys whose target MUST be a PR-scoped workflow (`pr_scoped: true`).
+ *
+ * A list of ROUTE KEYS, not of workflow names — that distinction is the whole
+ * point. The router's branches are code and cannot be reconfigured; the
+ * workflow each one dispatches can be. Remapping one of these to a workflow
+ * that does not declare `pr_scoped` drops the PR run lock, the per-head-SHA
+ * dedup and escalation for it, and every one of those is a REFUSAL, so nothing
+ * looks wrong until two agents push the same branch (issue #256).
+ *
+ * `pr_comment` is deliberately absent: it routes to a conversational workflow
+ * that is not, and should not be, PR-scoped.
+ */
+const PR_SCOPED_ROUTE_KEYS: ReadonlySet<string> = new Set([
+  "github.pr_opened",
+  "github.pr_synchronize",
+  "github.pr_reopened",
+  "github.pr_checks_settled",
+  "github.pr_labeled",
+  "github.pr_review_requested",
+  "github.pr_fix",
+  "github.pr_review",
+  "slack.review",
+]);
+
+/**
+ * Warn — never throw — when a configured route that dispatches against a pull
+ * request targets a workflow that does not declare `pr_scoped: true`.
+ *
+ * A warning because the operator may have a reason: a route pointed at a
+ * genuinely non-PR workflow is a choice, and failing boot over it would be
+ * worse than the silence it replaces. What matters is that the choice is
+ * VISIBLE, which it was not.
+ */
+function warnUnscopedPrRoutes(routes?: RouteConfig): void {
+  if (!routes) return;
+  for (const [surface, values] of Object.entries(routes) as Array<[keyof RouteConfig, Record<string, string>]>) {
+    for (const [routeName, target] of Object.entries(values)) {
+      const routeKey = `${surface}.${routeName}`;
+      if (!PR_SCOPED_ROUTE_KEYS.has(routeKey)) continue;
+      const def = agentCache.get(target);
+      if (!def || def.pr_scoped === true) continue;
+      console.warn(
+        `[workflows] Route ${routeKey} targets "${target}", which does not declare ` +
+        `\`pr_scoped: true\`. The PR run lock, the per-head-SHA dedup and escalation ` +
+        `will not apply to it — add \`pr_scoped: true\` to its workflow YAML if that ` +
+        `is not what you intended.`,
+      );
+    }
+  }
+}
+
 function validateRouteTargets(routes?: RouteConfig): void {
   if (!routes) return;
   for (const [surface, values] of Object.entries(routes) as Array<[keyof RouteConfig, Record<string, string>]>) {
@@ -656,4 +708,5 @@ export function validateAssets(routes?: RouteConfig): void {
   }
 
   validateRouteTargets(routes);
+  warnUnscopedPrRoutes(routes);
 }

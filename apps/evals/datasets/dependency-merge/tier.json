@@ -1,0 +1,5 @@
+{
+  "name": "dependency-merge",
+  "defaultWorkflow": "dependabot-pr-merge",
+  "description": "A GREEN major dependency bump per impact tier. Measures the one policy the code deliberately does NOT enforce: `dependencies.autoMergeMaxImpact`."
+}

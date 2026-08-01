@@ -1,12 +1,25 @@
 /**
- * Deterministic discovery for the pr-review cron (`check-prs-awaiting-review`).
+ * CANDIDATE FINDER for the pr-review cron (`check-prs-awaiting-review`).
  *
- * Finds the open PRs that need a review — open, non-draft, NOT authored by the
- * bot, and WITHOUT a bot review at the PR's current head SHA — across `repos`,
- * in code (no LLM). The caller fans out one bounded single-PR `pr-review` run
- * per result, with `prNumber` + head ref set (see `src/index.ts`) — the exact
- * shape the `pr.opened` webhook produces: a fresh per-repo scoped token, a
- * pre-clone of the PR head, and a real PR number for `post-review` to post to.
+ * Finds the open PRs across `repos` that could plausibly want a review, in code
+ * (no LLM). The caller fans out one bounded single-PR `pr-review` run per
+ * result, with `prNumber` + head ref set (see `src/index.ts`) — the exact shape
+ * the `pr.opened` webhook produces: a fresh per-repo scoped token, a pre-clone
+ * of the PR head, and a real PR number for `post-review` to post to.
+ *
+ * **It holds no policy** (09-state-machine.md → S2). It used to filter drafts
+ * and call `getLatestBotReview` per candidate, which made it a third
+ * implementation of `review.trigger` alongside the webhook gate and the comment
+ * path's silent bypass — in a plan whose whole thesis is "make the policy
+ * configurable rather than hardcoded". The split is DISCOVERY vs POLICY, not
+ * cron vs webhook: draft, already-reviewed-at-this-head, run-in-flight and the
+ * trigger mode are all fields of the `PrState` snapshot that
+ * `resolveReviewTrigger` decides over, once, at the dispatch choke point every
+ * route crosses.
+ *
+ * The one filter that stays is not policy but arithmetic: GitHub 422s an
+ * attempt to review your own pull request, so a bot-authored PR is not a
+ * candidate in the first place.
  *
  * This replaces the old `mode: scan` run, whose single agent listed and reviewed
  * PRs itself inside the sandbox — which couldn't reliably auth (a static token
@@ -34,32 +47,28 @@ export interface ReviewDiscoveryClient {
       headSha: string;
     }>
   >;
-  /** The bot's most recent review on this PR's CURRENT head SHA, or null when
-   * the bot hasn't reviewed this SHA yet (re-pushes invalidate a stale review). */
-  getLatestBotReview(
-    owner: string,
-    repo: string,
-    pullNumber: number,
-    headSha: string,
-    botLogin?: string,
-  ): Promise<{ state: string } | null>;
 }
 
 export interface ReviewDiscoverOptions {
   log?: (msg: string) => void;
   /**
    * Bot login incl. the `[bot]` suffix (e.g. `last-light[bot]`). The bot's own
-   * PRs are skipped (never self-review), and its review at the current head SHA
-   * marks a PR done. Defaults to `last-light[bot]`; the caller passes the
-   * configured `botLogin` so a renamed App slug matches.
+   * PRs are not candidates — GitHub refuses a self-review outright. Defaults to
+   * `last-light[bot]`; the caller passes the configured `botLogin` so a renamed
+   * App slug matches.
    */
   botLogin?: string;
   /**
-   * Cap the number of runs DISPATCHED per repo per tick (not candidates
-   * examined) so one busy repo can't spin hundreds of runs at once. The check
-   * walks all open PRs and stops after this many *unreviewed* ones, so
-   * already-reviewed PRs in the oldest positions never starve unreviewed PRs
-   * behind them. Runs also queue against the global admission cap. Default 25.
+   * Cap the candidates offered per repo per tick, so one busy repo can't spin
+   * hundreds of dispatches at once. Oldest-first, so the cap is stable across
+   * ticks rather than starving the same tail every time.
+   *
+   * This used to cap runs DISPATCHED, walking every open PR and stopping after
+   * N *unreviewed* ones. That distinction died with the per-candidate
+   * `getLatestBotReview` call: the dispatch gate now answers "already reviewed
+   * at this head" from the one `PrState` snapshot it resolves anyway, so a
+   * candidate that turns out to be reviewed is a cheap gate skip, not a run.
+   * Runs also queue against the global admission cap. Default 25.
    */
   maxPerRepo?: number;
 }
@@ -94,29 +103,12 @@ export async function discoverPrsAwaitingReview(
     }
 
     const candidates = open
-      .filter((pr) => !pr.draft && pr.authorLogin !== botLogin)
-      .sort((a, b) => a.number - b.number); // oldest first — deterministic, fair
+      .filter((pr) => pr.authorLogin !== botLogin)
+      .sort((a, b) => a.number - b.number) // oldest first — deterministic, fair
+      .slice(0, maxPerRepo);
 
-    // Cap RUNS dispatched, not candidates examined: walk every open PR and stop
-    // once we've queued `maxPerRepo` UNreviewed ones. Slicing before the review
-    // check would starve unreviewed PRs behind a block of already-reviewed ones
-    // (the steady state), deferring them indefinitely.
-    let dispatched = 0;
     for (const pr of candidates) {
-      if (dispatched >= maxPerRepo) break;
-      let reviewed: boolean;
-      try {
-        reviewed = !!(await gh.getLatestBotReview(owner, repo, pr.number, pr.headSha, botLogin));
-      } catch (err) {
-        // Can't tell → skip this tick rather than risk a duplicate review. The
-        // next tick retries, and `post-review` is itself idempotent on the head
-        // SHA, so a missed check here can't cause a double-post downstream.
-        opts.log?.(`[review-discovery] ${full}#${pr.number}: review lookup failed — ${String(err)}`);
-        continue;
-      }
-      if (reviewed) continue; // already reviewed at the current head SHA
       out.push({ repo: full, prNumber: pr.number, title: pr.title, branch: pr.headRef });
-      dispatched++;
     }
   }
 

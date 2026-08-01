@@ -1,0 +1,15 @@
+{
+  "name": "slugger",
+  "version": "1.4.0",
+  "type": "module",
+  "description": "Slug helper.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "imports": {
+    "#tiny-case": "./vendor/tiny-case/index.js"
+  },
+  "dependencies": {
+    "tiny-case": "^2.4.0"
+  }
+}

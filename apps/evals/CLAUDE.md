@@ -154,6 +154,7 @@ The release commit is conventionally just the two version-file lines
 | `src/add-case.ts` | `add-case` — author an instance from a real GitHub PR/issue (`gh`+`git`: base/head SHAs, `test_patch`, red→green verdicts). |
 | `src/fake-github.ts` | In-process fake GitHub REST API (seeds fixtures, records mutations) **plus** the non-REST `fetchRepoConfigTree` seam for a repo's `.lastlight/`. |
 | `src/repo-config.ts` | Per-repo config layer (#180): reads a case's fixture tree and drives core's OWN resolver over it. The one file with deep `lastlight-core/dist/...` imports — see below. |
+| `src/pr-context.ts` | PR state machine (#251/#252): builds the `PrState` snapshot a case seeds and hands it to core's OWN `renderContext`. Same shape as `repo-config.ts` — the harness supplies what core normally reads from live GitHub, core does the projection. No second copy of it here. |
 | `src/seed.ts` / `src/grade.ts` / `src/metrics.ts` | Workspace seeding (vendored fixture, git-source `base_commit` checkout, OR pr-review PR-head checkout — all from the `./.eval-cache/` mirror) / grading (execution TAP, behavioral, + `gradeReview` judge) / token-cost roll-up. |
 | `src/judge.ts` | One-shot LLM client for `gradeReview` (pr-review only) — direct provider `fetch`, temp 0. `EVAL_JUDGE_MODEL` overrides `defaultJudgeModel()`. |
 | `scripts/import-martian.ts` | Import Martian's Code Review Bench offline set (50 PRs) into the `pr-review` tier (`gh`+`git`: resolves base/head, pins SHAs). |
@@ -209,6 +210,20 @@ The release commit is conventionally just the two version-file lines
 - **Add a tier:** drop a dir with `instances.json` + `tier.json`
   (`{ name, defaultWorkflow, description }`). No code change — `discovery.ts`
   finds it. The workflow must be resolvable by core's `getWorkflow`.
+- **Add a PR-scoped case (fix / dependency-merge):** give it a `pr_state` block.
+  The harness projects it through **core's own** `renderContext`
+  (`src/pr-context.ts`), which is where `{{ciSection}}`, `{{attempt}}`,
+  `{{mayMerge}}` and `{{priorNotes}}` come from in production — a case without
+  one runs those workflows with every `{{#if}}` guard on the empty branch.
+  Grade the verdict with `expect_markers` (`diagnosis_class`,
+  `assessment_impact`, …): for those tiers the marker line IS the deliverable,
+  and a wrong diagnosis touches no GitHub state, so `expect_github` alone scores
+  it green.
+- **Give a vendored case a real PR commit:** `repos/<id>/` is the base tree,
+  `repos-head/<id>/` is the PR's commit applied on the branch. Without the
+  second, base and head are identical and an agent that checks whether `main` is
+  broken too correctly answers yes — every red-dependency case then reads as
+  `upstream-broken`.
 - **Add a model:** add an entry to `models.json` `compare` (`id`, `label`,
   `envKey`); it runs only when its `envKey` is set.
 - **Eval an overlay's own workflows + datasets:**
@@ -259,6 +274,12 @@ the whole point is to test what ships.
 
 ## How the mock actually works (don't break these)
 
+- **Auto-merge is GraphQL, not REST.** `github_enable_auto_merge` has no REST
+  equivalent — GitHub exposes `enablePullRequestAutoMerge` only through
+  GraphQL — so `fake-github.ts` serves `POST /graphql` for that one mutation. A
+  REST-only fake 404s the merge workflow's *preferred* path and the agent
+  silently falls back to a direct merge, which would make every
+  dependency-merge case measure the fallback.
 - **The base-URL seam.** The `github_*` tools are agentic-pi's *built-in*
   extension (not a swappable MCP server). agentic-pi ≥ 0.2.11 exposes
   `githubApiBaseUrl`; Last Light threads it `ExecutorConfig.githubApiBaseUrl →

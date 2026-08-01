@@ -81,10 +81,120 @@ const REPO_CONFIG_DIR = ".lastlight";
 const REPO_CONFIG_DEFAULT_MAX_FILES = 200;
 const REPO_CONFIG_DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 
+/**
+ * One failed check run, resolved as far as the App's permissions allow.
+ *
+ * The optional fields are exactly the ones that need `Actions: read`. They are
+ * the difference between "CI is red" and "CI is red *here*, in *this* step of
+ * *this* workflow file" — `workflowPath` is what lets a fix agent open the CI
+ * definition in its checkout and compare CI's toolchain against the sandbox's.
+ */
+export interface CiJobFailure {
+  /** Check-run name, e.g. `CI / build (22)`. */
+  name: string;
+  /** `failure` | `timed_out` — the conclusions {@link GitHubClient.getChecksConclusion} calls red. */
+  conclusion: string;
+  /** e.g. `.github/workflows/ci.yml`. Undefined for non-Actions checks or when Actions is unreadable. */
+  workflowPath?: string;
+  /** Name of the step that failed, from the job's `steps[]`. Same availability as `workflowPath`. */
+  failingStep?: string;
+  /** {@link extractErrorExcerpt} over the real job log, or the annotation fallback. */
+  logExcerpt: string;
+  /** The check run's `details_url` — where an agent can dig further via `github_get_job_logs`. */
+  jobUrl?: string;
+  /** True only when `logExcerpt` came from the REAL Actions job log. */
+  logsAvailable: boolean;
+  /**
+   * WHY the real log is missing, when it is. Set only for an Actions job we
+   * actually tried to read — see {@link CiLogUnavailableCause}.
+   */
+  logUnavailableCause?: CiLogUnavailableCause;
+}
+
+/**
+ * Why an Actions job log could not be used as evidence.
+ *
+ * Every one of these used to collapse into a single `.catch(() => null)`, and
+ * the banner then asserted the one cause we had never checked ("the App lacks
+ * `Actions: read`"). Telling an operator to grant a permission they already
+ * granted is a smaller version of exactly the damage issue #251's Finding 1 was
+ * about: a degradation that reads as normal operation. So the cause is
+ * CLASSIFIED at the point of failure and rendered verbatim.
+ *
+ *  - `forbidden`   — HTTP 403. The genuine missing-permission case, and the
+ *                    only one where "grant Actions: read" is the fix. App-wide,
+ *                    so one job saying it settles it for the whole report.
+ *  - `expired`     — HTTP 410 Gone. Actions retains logs for a bounded window;
+ *                    on an older PR this is the COMMON case, and there is
+ *                    nothing to grant.
+ *  - `unavailable` — anything else: 429/secondary rate limit, 5xx, the report
+ *                    deadline firing, or a body we could not decode. Transient.
+ *  - `empty`       — the download succeeded and carried nothing usable. Not a
+ *                    fetch problem at all.
+ */
+export type CiLogUnavailableCause = "forbidden" | "expired" | "unavailable" | "empty";
+
+/** Structured result of {@link GitHubClient.getCiFailureReport}. */
+export interface CiFailureReport {
+  jobs: CiJobFailure[];
+  /** False when NO job could supply a real log — everything below is annotations. */
+  logsAvailable: boolean;
+  /**
+   * The cause the banner speaks with when `logsAvailable` is false — the most
+   * actionable one across the jobs (see {@link dominantLogUnavailableCause}).
+   * Undefined when logs were available or when no Actions job was even tried.
+   */
+  logUnavailableCause?: CiLogUnavailableCause;
+}
+
+/** Options shared by the three settle-aware check queries. */
+export interface ChecksQueryOptions {
+  /**
+   * Drop check runs produced by this GitHub App slug — in practice always our
+   * own `botName`.
+   *
+   * **This is the self-gating deadlock fix** (07-review-triggers.md §7.2). The
+   * aggregate is computed over *every* check run on the head SHA, ours
+   * included, so a `last-light/review` check sitting `queued` (waiting for CI,
+   * under `review.trigger: after-checks`) or `in_progress` (a review actually
+   * running) makes the aggregate permanently `pending`. The settle event then
+   * never fires, the review never runs, the check never concludes — and if the
+   * repo made it a *required* check, the PR is unmergeable forever. The same
+   * loop reaches `pr.checks_passed` on a Dependabot PR whose review check is
+   * still open, so the rule is uniform: **exclude our own checks from every
+   * TRIGGER-side settle computation**, and let GitHub's required-check gate do
+   * the real merge gating.
+   *
+   * It is deliberately opt-in rather than always-on: a caller reporting check
+   * state to a *human* (or to the merge prompt) should show what GitHub shows.
+   */
+  excludeApp?: string;
+}
+
 /** octokit surfaces HTTP failures as errors carrying the numeric `status`. */
 function httpStatus(err: unknown): number | undefined {
   const status = (err as { status?: unknown })?.status;
   return typeof status === "number" ? status : undefined;
+}
+
+/**
+ * Apply {@link ChecksQueryOptions.excludeApp} to a check-run list.
+ *
+ * One helper rather than the same `filter` inline at each query, because
+ * "which reads drop our own checks" is a correctness property (07 §7.2) that
+ * should be greppable — `getCiFailureReport` was the one settle-path read that
+ * silently didn't, and our own `CHANGES_REQUESTED` review check concludes
+ * `failure` (../review-check.ts), so the fix agent was handed its own
+ * reviewer's verdict as CI evidence to fix.
+ *
+ * Only check runs carry an `app`; commit statuses do not, and we never post
+ * one, so there is nothing to exclude on that side.
+ */
+function excludingApp<T extends { app?: { slug?: string | null } | null }>(
+  runs: T[],
+  opts: ChecksQueryOptions,
+): T[] {
+  return opts.excludeApp ? runs.filter((r) => r.app?.slug !== opts.excludeApp) : runs;
 }
 
 /**
@@ -126,6 +236,38 @@ export class GitHubClient {
       body,
     });
     return data.id;
+  }
+
+  /**
+   * Add labels to an issue/PR, leaving existing labels alone.
+   *
+   * The only harness-side label WRITE. Every other label mutation in the system
+   * happens INSIDE the sandbox, through agentic-pi's `github_*` tools driven
+   * from a prompt — which is the right place for a label whose value is an
+   * agent's judgement (`dependency-trivial`, the triage vocabulary). This one
+   * is different in kind: the dispatch-time escalation
+   * (`../pr-escalation.ts`) fires precisely when we have decided NOT to
+   * provision a sandbox, so there is no agent to ask.
+   *
+   * GitHub's own endpoint creates a label that does not exist yet (with an
+   * arbitrary colour), so there is no `ensureLabels` companion to write.
+   * Idempotent by construction — re-adding a present label is a no-op — but
+   * that is NOT what makes the escalation post one comment; see
+   * `../pr-escalation.ts` for the record that does.
+   */
+  async addLabels(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    labels: string[],
+  ): Promise<void> {
+    if (labels.length === 0) return;
+    await this.octokit.rest.issues.addLabels({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      labels,
+    });
   }
 
   /**
@@ -489,21 +631,37 @@ export class GitHubClient {
    * `name` in their list will gate merges on the eventual conclusion.
    *
    * Requires the GitHub App to have `Checks: Read and write` permission.
+   *
+   * `status` defaults to `in_progress` (the historical behaviour). The other
+   * two exist for the review PLACEHOLDERS: `queued` says "waiting for CI"
+   * under `review.trigger: after-checks`, and `completed` + `conclusion:
+   * neutral` says "available on request" under `on-request` — see
+   * `reviewCheckPlacement` in ../pr-decisions.ts.
    */
   async createCheckRun(
     owner: string,
     repo: string,
     headSha: string,
     name: string,
-    options: { detailsUrl?: string; output?: { title: string; summary: string } } = {},
+    options: {
+      status?: "queued" | "in_progress" | "completed";
+      conclusion?: "success" | "failure" | "neutral" | "cancelled" | "timed_out" | "action_required" | "skipped";
+      detailsUrl?: string;
+      output?: { title: string; summary: string };
+    } = {},
   ): Promise<number> {
+    const status = options.status ?? "in_progress";
     const { data } = await this.octokit.rest.checks.create({
       owner,
       repo,
       name,
       head_sha: headSha,
-      status: "in_progress",
-      started_at: new Date().toISOString(),
+      status,
+      // `queued` has not started, so it must not claim a start time.
+      ...(status === "queued" ? {} : { started_at: new Date().toISOString() }),
+      ...(status === "completed"
+        ? { conclusion: options.conclusion ?? "neutral", completed_at: new Date().toISOString() }
+        : {}),
       ...(options.detailsUrl ? { details_url: options.detailsUrl } : {}),
       ...(options.output ? { output: options.output } : {}),
     });
@@ -649,76 +807,266 @@ export class GitHubClient {
     owner: string,
     repo: string,
     ref: string,
+    opts: ChecksQueryOptions = {},
   ): Promise<"passing" | "failing" | "pending" | "none"> {
+    return (await this.getChecksSummary(owner, repo, ref, opts)).state;
+  }
+
+  /**
+   * {@link getChecksConclusion} plus the COUNT of checks behind the verdict, in
+   * the same two API calls.
+   *
+   * `settledCount` exists because "passing" alone is not evidence of anything:
+   * on a repo with no CI at all, `getChecksConclusion` returns `"none"` and a
+   * repo with one trivial check returns `"passing"` — and the auto-merge
+   * decision needs to tell "CI approved this" from "nothing looked at it"
+   * (`dependencies.minSettledChecks`; see `mayMerge` in ../pr-decisions.ts and
+   * 09-state-machine.md → D10). Deriving it in the client rather than at the
+   * call site keeps it to ONE round trip: recomputing the count from a second
+   * `listForRef` would double the cost of every PR-state resolution.
+   *
+   * A check run counts as settled when it has left queued/in_progress —
+   * whatever it concluded. Status contexts are settled unless the combined
+   * state is `pending`.
+   */
+  async getChecksSummary(
+    owner: string,
+    repo: string,
+    ref: string,
+    opts: ChecksQueryOptions = {},
+  ): Promise<{
+    state: "passing" | "failing" | "pending" | "none";
+    settledCount: number;
+    pendingCount: number;
+  }> {
     const [{ data: checks }, { data: status }] = await Promise.all([
       this.octokit.rest.checks.listForRef({ owner, repo, ref, filter: "latest" }),
       this.octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
     ]);
-    const runs = checks.check_runs;
+    // Drop OUR OWN check runs when the caller is deciding whether to TRIGGER
+    // work — see {@link ChecksQueryOptions.excludeApp}.
+    const runs = excludingApp(checks.check_runs, opts);
     const statuses = status.statuses ?? [];
 
-    if (runs.length === 0 && statuses.length === 0) return "none";
-
-    const runPending = runs.some((r) => r.status === "queued" || r.status === "in_progress");
+    const runPendingCount = runs.filter(
+      (r) => r.status === "queued" || r.status === "in_progress",
+    ).length;
     const statusPending = statuses.length > 0 && status.state === "pending";
-    if (runPending || statusPending) return "pending";
+    const pendingCount = runPendingCount + (statusPending ? statuses.length : 0);
+    const settledCount = runs.length - runPendingCount + (statusPending ? 0 : statuses.length);
+
+    if (runs.length === 0 && statuses.length === 0) {
+      return { state: "none", settledCount: 0, pendingCount: 0 };
+    }
+
+    if (runPendingCount > 0 || statusPending) {
+      return { state: "pending", settledCount, pendingCount };
+    }
 
     const runFailing = runs.some(
       (r) => r.conclusion === "failure" || r.conclusion === "timed_out",
     );
     const statusFailing = status.state === "failure" || status.state === "error";
-    if (runFailing || statusFailing) return "failing";
+    if (runFailing || statusFailing) return { state: "failing", settledCount, pendingCount };
 
-    return "passing";
+    return { state: "passing", settledCount, pendingCount };
   }
 
   /**
-   * Get failed check runs for a PR's head SHA.
-   * Fetches the actual job logs (not just annotations) to show real errors.
+   * The git AUTHOR NAME on a commit — not a GitHub login.
+   *
+   * This is the discriminator the fix state machine uses to answer "did WE push
+   * this head, or did the world move?" (09-state-machine.md → S1, the attempt
+   * table). It has to be the git author name because that is what
+   * `git-auth.ts` stamps on the agent's own commits (`user.name = botLogin`),
+   * and it is the same field `check_suite.head_commit.author.name` carries on
+   * the webhook path — so the webhook and the cron agree by construction.
+   *
+   * Returns `""` when GitHub reports no author name, so callers get a value
+   * that simply never equals `botLogin` rather than a null to branch on.
    */
-  async getFailedChecks(owner: string, repo: string, ref: string): Promise<string> {
-    try {
-      const { data } = await this.octokit.rest.checks.listForRef({
-        owner,
-        repo,
-        ref,
-        filter: "latest",
-      });
+  async getCommitAuthorName(owner: string, repo: string, ref: string): Promise<string> {
+    const { data } = await this.octokit.rest.repos.getCommit({ owner, repo, ref });
+    return data.commit?.author?.name ?? "";
+  }
 
-      const failed = data.check_runs.filter(
-        (r) => r.conclusion === "failure" || r.conclusion === "timed_out"
-      );
+  /**
+   * Check state of a PR's BASE branch head — a branch name is a valid `ref` for
+   * the checks API, so this is {@link getChecksConclusion} pointed at the base
+   * tip.
+   *
+   * It has its own name because the *question* is different: "is the PR at
+   * fault, or was `main` already red?". A red base makes retrying the PR
+   * pointless, and call sites asking that shouldn't have to know it's the same
+   * query as "is this PR red".
+   */
+  async getBaseChecksState(
+    owner: string,
+    repo: string,
+    baseRef: string,
+    opts: ChecksQueryOptions = {},
+  ): Promise<"passing" | "failing" | "pending" | "none"> {
+    return this.getChecksConclusion(owner, repo, baseRef, opts);
+  }
 
-      if (failed.length === 0) return "No failed checks found.";
+  /**
+   * Structured CI failure evidence for a ref — the HEAVY counterpart to
+   * {@link getChecksConclusion}: one Actions job-log download per failed check
+   * run, plus the job and workflow-run metadata that says *where* it failed.
+   *
+   * Every Actions read here needs the App's optional `Actions: read`
+   * permission. None of them is required: each degrades independently to
+   * `undefined` / the annotation fallback, and the per-job + report-level
+   * `logsAvailable` flags are what let the renderer say so out loud instead of
+   * passing annotations off as job logs (issue #251).
+   *
+   * Throws if the check-run listing itself fails — a report cannot represent
+   * "I couldn't look". {@link getFailedChecks} catches that for prompt callers.
+   *
+   * **Bounded on purpose.** `resolvePrState` awaits this synchronously on the
+   * dispatch path a webhook handler takes, BEFORE any disposition is taken — so
+   * it is paid in full even on dispatches that go on to skip as
+   * `already-reviewed` / `human-hold` / `run-in-flight`. `checks.listForRef`
+   * returns up to 30 runs, and the first cut of this method downloaded every
+   * failed one's FULL log concurrently, uncapped and with no deadline: thirty
+   * multi-megabyte strings resident at once, on a host with a 2 GB agent cap and
+   * no swap. Hence {@link CI_LOG_FETCH_CONCURRENCY},
+   * {@link CI_REPORT_DEADLINE_MS} and the byte cap inside
+   * {@link extractErrorExcerpt}.
+   */
+  async getCiFailureReport(
+    owner: string,
+    repo: string,
+    ref: string,
+    opts: ChecksQueryOptions = {},
+  ): Promise<CiFailureReport> {
+    const { data } = await this.octokit.rest.checks.listForRef({
+      owner,
+      repo,
+      ref,
+      filter: "latest",
+    });
 
-      const summaries = await Promise.all(failed.map(async (run) => {
-        let logExcerpt = "";
+    const failed = excludingApp(data.check_runs, opts).filter(
+      (r) => r.conclusion === "failure" || r.conclusion === "timed_out"
+    );
+    if (failed.length === 0) return { jobs: [], logsAvailable: false };
 
-        // Try to fetch the actual Actions job log using the job id from details_url.
+    // ONE deadline for the whole report rather than one per request: what the
+    // dispatch path can afford is a total wall-clock budget, and per-request
+    // timeouts multiply by the number of concurrency waves. An aborted read is
+    // classified `unavailable` like any other fetch failure, so a slow GitHub
+    // costs us evidence, never the dispatch.
+    const signal = AbortSignal.timeout(CI_REPORT_DEADLINE_MS);
+    const request = { signal };
+
+    // A failing matrix shares one workflow run, so `path` is one lookup for all
+    // of its shards, not one per shard. Memoized per report, not per client —
+    // a workflow file can be edited between runs.
+    const workflowPaths = new Map<number, Promise<string | undefined>>();
+    const workflowPathFor = (runId: number): Promise<string | undefined> => {
+      let pending = workflowPaths.get(runId);
+      if (!pending) {
+        pending = this.octokit.rest.actions
+          .getWorkflowRun({ owner, repo, run_id: runId, request })
+          .then((res) => res.data.path as string | undefined)
+          .catch(() => undefined);
+        workflowPaths.set(runId, pending);
+      }
+      return pending;
+    };
+
+    const jobs = await mapWithConcurrency(
+      failed,
+      CI_LOG_FETCH_CONCURRENCY,
+      async (run): Promise<CiJobFailure> => {
         const jobId = actionsJobIdFromDetailsUrl(run.details_url);
+        const runId = actionsRunIdFromDetailsUrl(run.details_url);
+
+        let logExcerpt = "";
+        let logsAvailable = false;
+        let cause: CiLogUnavailableCause | undefined;
+        let failingStep: string | undefined;
+        let workflowPath: string | undefined;
+
         if (jobId !== null) {
-          try {
-            const { data: logData } = await this.octokit.rest.actions.downloadJobLogsForWorkflowRun({
-              owner,
-              repo,
-              job_id: jobId,
-            });
-            const fullLog = typeof logData === "string" ? logData : String(logData);
-            logExcerpt = extractErrorExcerpt(fullLog);
-          } catch {
-            // Job logs may not be available — fall back to annotations
+          // The three Actions reads are independent — a permission denial or an
+          // expired log on one must not cost us the other two. Only the LOG
+          // read's failure is classified: it is the one the banner speaks about.
+          const [log, job, path] = await Promise.all([
+            this.octokit.rest.actions
+              .downloadJobLogsForWorkflowRun({ owner, repo, job_id: jobId, request })
+              .then((res) => ({ ok: true as const, data: res.data as unknown }))
+              .catch((err: unknown) => ({ ok: false as const, cause: logFetchCause(err) })),
+            this.octokit.rest.actions
+              .getJobForWorkflowRun({ owner, repo, job_id: jobId, request })
+              .then((res) => res.data)
+              .catch(() => null),
+            runId !== null ? workflowPathFor(runId) : Promise.resolve(undefined),
+          ]);
+
+          if (!log.ok) {
+            cause = log.cause;
+          } else {
+            const text = decodeJobLog(log.data);
+            // A body in a shape we don't recognise is not evidence — and it is
+            // specifically the shape that used to stringify to
+            // "[object ArrayBuffer]" and pass for a real log. See decodeJobLog.
+            if (text === null) cause = "unavailable";
+            else {
+              logExcerpt = extractErrorExcerpt(text);
+              // An excerpt we can't show is not evidence either: treat a blank
+              // one as "no logs" so it falls through to annotations AND says so,
+              // rather than claiming real logs and rendering nothing.
+              if (logExcerpt.trim().length === 0) {
+                logExcerpt = "";
+                cause = "empty";
+              }
+            }
           }
+          logsAvailable = logExcerpt.length > 0;
+
+          failingStep = job?.steps?.find(
+            (s) => s.conclusion === "failure" || s.conclusion === "timed_out"
+          )?.name;
+          workflowPath = path;
         }
 
-        // Fall back to annotations if no job logs
         if (!logExcerpt) {
           logExcerpt = await fetchAnnotationExcerpt(this.octokit, owner, repo, run.id);
         }
 
-        return `### ${run.name}: ${run.conclusion}\n${logExcerpt || "No log details available."}`;
-      }));
+        return {
+          name: run.name,
+          conclusion: run.conclusion as string,
+          ...(workflowPath ? { workflowPath } : {}),
+          ...(failingStep ? { failingStep } : {}),
+          logExcerpt,
+          ...(run.details_url ? { jobUrl: run.details_url } : {}),
+          logsAvailable,
+          ...(cause ? { logUnavailableCause: cause } : {}),
+        };
+      },
+    );
 
-      return summaries.join("\n\n");
+    const logsAvailable = jobs.some((j) => j.logsAvailable);
+    const cause = logsAvailable ? undefined : dominantLogUnavailableCause(jobs);
+    return { jobs, logsAvailable, ...(cause ? { logUnavailableCause: cause } : {}) };
+  }
+
+  /**
+   * Get failed check runs for a PR's head SHA as the markdown blob
+   * `{{ciSection}}` has always carried — a thin renderer over
+   * {@link getCiFailureReport}, kept so prompt-only callers are unchanged.
+   */
+  async getFailedChecks(
+    owner: string,
+    repo: string,
+    ref: string,
+    opts: ChecksQueryOptions = {},
+  ): Promise<string> {
+    try {
+      return renderCiFailureReport(await this.getCiFailureReport(owner, repo, ref, opts));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return `Could not fetch check runs: ${message}`;
@@ -737,6 +1085,117 @@ const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s/;
 const NOISE_RE = /Process completed with exit code|##\[error\]Process completed|^##\[error\]$/i;
 
 /**
+ * Hard BYTE cap on one job's excerpt.
+ *
+ * `buildContextExcerpt` bounds LINES (50), and the no-anchor path bounds them
+ * at 30 — neither bounds bytes, and a minified bundle, a base64 blob or a
+ * single-line JSON dump is ONE line of arbitrary length. Roughly 4k tokens:
+ * enough for a stack trace plus its build context, small enough that several of
+ * these don't crowd out the prompt.
+ *
+ * Same cap, for the same reason, as agentic-pi's `excerptJobLog`
+ * (`packages/agentic-pi/src/extensions/github/log-excerpt.ts`, whose header
+ * explains the strategy). Duplicated rather than imported: that module is not
+ * on agentic-pi's public entry (`src/index.ts`) and widening a published
+ * package's API to share one constant is the wrong trade. Keep the two in step.
+ */
+const MAX_CI_LOG_EXCERPT_BYTES = 16_000;
+
+/**
+ * Cap on how much of a raw log we even SCAN. Beyond this we keep the TAIL —
+ * the failure that stopped the job is the last one, and a long log's early
+ * errors are usually retried-and-recovered noise. Without it a 100 MB log costs
+ * a 100 MB `split("\n")` plus a regex per line before the excerpt cap above
+ * ever gets a chance to apply.
+ */
+const MAX_CI_LOG_SCAN_BYTES = 512 * 1024;
+
+/**
+ * How many failed checks we resolve at once. `checks.listForRef` defaults to 30
+ * runs and each resolution holds a whole job log in memory, so unbounded
+ * `Promise.all` means up to 30 concurrent multi-megabyte strings — see
+ * {@link GitHubClient.getCiFailureReport} for why that lands on the dispatch
+ * path whether or not the dispatch goes anywhere.
+ */
+const CI_LOG_FETCH_CONCURRENCY = 4;
+
+/**
+ * Total wall-clock budget for every Actions read in one report. A webhook
+ * handler is waiting on this, and the report is best-effort evidence: losing it
+ * to a deadline costs the fix agent context, while hanging on it costs the
+ * dispatch.
+ */
+const CI_REPORT_DEADLINE_MS = 20_000;
+
+/**
+ * `Promise.all` with a ceiling on how many run at once. Results stay in input
+ * order, so the report reads in check-run order however the waves interleaved.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = next++; i < items.length; i = next++) {
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/**
+ * Decode an Actions job-log response body into text, or `null` when it isn't
+ * one we recognise.
+ *
+ * Octokit only hands back a `string` when the response carried a `text/*`
+ * content type or a utf-8 charset; **anything else lands as an `ArrayBuffer`**
+ * (`@octokit/request`'s `getResponseData`). This endpoint 302s to blob storage
+ * whose content type we do not control, so that branch is reachable — and the
+ * `typeof data === "string" ? data : String(data)` this replaces would have
+ * turned it into the literal `"[object ArrayBuffer]"`: non-empty, so
+ * `logsAvailable` went TRUE, the annotation fallback was skipped and the
+ * degradation banner suppressed. That is precisely the silent degradation this
+ * phase exists to kill, so an unrecognised shape is reported, not stringified.
+ */
+function decodeJobLog(data: unknown): string | null {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+  // Buffer / Uint8Array — a view over someone else's ArrayBuffer, so the
+  // offset+length matter.
+  if (ArrayBuffer.isView(data)) {
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8");
+  }
+  return null;
+}
+
+/** Classify a failed job-log download — see {@link CiLogUnavailableCause}. */
+function logFetchCause(err: unknown): CiLogUnavailableCause {
+  const status = httpStatus(err);
+  if (status === 403) return "forbidden";
+  if (status === 410) return "expired";
+  // 429 / 5xx / an aborted request / a network error all land here: we could
+  // not fetch, and we do not know more than that.
+  return "unavailable";
+}
+
+/**
+ * The cause the report-level banner speaks with, in decreasing order of "what
+ * should the operator do about it".
+ *
+ * `forbidden` leads because a 403 is App-wide — one job reporting it settles
+ * the question for every job — and it is the only cause with an action attached.
+ * `empty` trails because it is not a fetch failure at all.
+ */
+function dominantLogUnavailableCause(jobs: CiJobFailure[]): CiLogUnavailableCause | undefined {
+  const order: CiLogUnavailableCause[] = ["forbidden", "expired", "unavailable", "empty"];
+  return order.find((c) => jobs.some((j) => j.logUnavailableCause === c));
+}
+
+/**
  * Parse the Actions job id from a check-run's `details_url`.
  * Actions URLs look like: `.../actions/runs/<runId>/job/<jobId>`
  * Returns `null` for non-Actions checks or unparseable URLs.
@@ -745,6 +1204,95 @@ export function actionsJobIdFromDetailsUrl(url: string | null | undefined): numb
   if (!url) return null;
   const m = url.match(/\/job\/(\d+)/);
   return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * Parse the Actions *run* id out of the same `details_url`. The run — not the
+ * job — is what knows the workflow file's `path`, and the URL already carries
+ * it, so resolving `workflowPath` costs no extra lookup to discover the id.
+ * Returns `null` for non-Actions checks or unparseable URLs.
+ */
+export function actionsRunIdFromDetailsUrl(url: string | null | undefined): number | null {
+  if (!url) return null;
+  const m = url.match(/\/actions\/runs\/(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/**
+ * The three-line banner that fires when the report degraded to annotations —
+ * one per {@link CiLogUnavailableCause}.
+ *
+ * This is the actual fix for issue #251's "Finding 1". The missing permission
+ * was never the real damage — the damage was that its absence looked exactly
+ * like normal operation, so every install that followed our own setup docs has
+ * been diagnosing CI failures from truncated annotations without anyone
+ * noticing. Saying so in the prompt makes the degradation legible to both the
+ * agent and whoever reads the transcript.
+ *
+ * Which is exactly why there are four of these and not one. A banner that
+ * names the wrong cause reintroduces the same failure in miniature: an operator
+ * told to grant a permission they already granted stops reading, and the run
+ * that produced a 410 or a rate limit goes on looking normal. Only `forbidden`
+ * may mention the permission, because only a 403 is evidence of it.
+ */
+const LOGS_UNAVAILABLE_NOTES: Record<CiLogUnavailableCause, string> = {
+  forbidden: [
+    "NOTE: GitHub Actions job logs are unavailable (the App lacks `Actions: read`).",
+    "The excerpts below are check-run annotations only, which are usually truncated.",
+    "Grant Actions: read for full CI output.",
+  ].join("\n"),
+  expired: [
+    "NOTE: GitHub Actions job logs are unavailable — GitHub has expired them (410 Gone; Actions keeps logs for a limited retention window).",
+    "The excerpts below are check-run annotations only, which are usually truncated.",
+    "This is NOT a permission problem and nothing needs granting: only a fresh CI run can produce readable logs.",
+  ].join("\n"),
+  unavailable: [
+    "NOTE: GitHub Actions job logs could not be fetched (the request failed or timed out — e.g. a rate limit or a GitHub 5xx).",
+    "The excerpts below are check-run annotations only, which are usually truncated.",
+    "This is NOT a permission problem and is usually transient: a later attempt may well get them.",
+  ].join("\n"),
+  empty: [
+    "NOTE: GitHub Actions returned an EMPTY job log for every failed check.",
+    "The excerpts below are check-run annotations only, which are usually truncated.",
+    "This is NOT a permission problem — the job produced no output GitHub kept.",
+  ].join("\n"),
+};
+
+/**
+ * Render a {@link CiFailureReport} as the markdown `{{ciSection}}` carries.
+ *
+ * The "No failed checks found." sentinel is load-bearing: `dispatchWorkflow`
+ * tests the rendered string for `"No failed checks"` to decide whether to
+ * populate `ciSection` at all.
+ */
+export function renderCiFailureReport(report: CiFailureReport): string {
+  if (report.jobs.length === 0) return "No failed checks found.";
+
+  const sections = report.jobs.map((job) => {
+    const locators = [
+      job.workflowPath ? `workflow: ${job.workflowPath}` : null,
+      job.failingStep ? `failing step: ${job.failingStep}` : null,
+    ].filter(Boolean);
+    return [
+      `### ${job.name}: ${job.conclusion}`,
+      locators.length ? `(${locators.join(" — ")})` : null,
+      job.logExcerpt || "No log details available.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  });
+
+  // Only blame the permission when there was an Actions job whose logs we could
+  // have read. A CircleCI-only repo has no Actions logs to be missing, and
+  // telling its operator to grant `Actions: read` would be a lie.
+  const hadActionsJob = report.jobs.some((j) => actionsJobIdFromDetailsUrl(j.jobUrl) !== null);
+  if (report.logsAvailable || !hadActionsJob) return sections.join("\n\n");
+
+  // No recorded cause means nobody classified the failure, so the honest banner
+  // is the one that claims least — never the permission one, which is a claim
+  // about a status code we would not have seen.
+  const note = LOGS_UNAVAILABLE_NOTES[report.logUnavailableCause ?? "unavailable"];
+  return [note, ...sections].join("\n\n");
 }
 
 /**
@@ -758,9 +1306,20 @@ function stripTimestamp(line: string): string {
  * Given the full text of an Actions job log, return a compact excerpt
  * highlighting the real error lines with surrounding context.
  * Timestamps are stripped; pure noise lines are deprioritised.
+ *
+ * Bounded in BYTES as well as lines ({@link MAX_CI_LOG_EXCERPT_BYTES}), because
+ * the line bounds below are no bound at all on a log whose failure is one
+ * 8 MB minified line — and this excerpt is held on `PrState.ciReport` and
+ * rendered into a prompt. The cap is applied here rather than at the call site
+ * so every caller is bounded by construction.
  */
-export function extractErrorExcerpt(fullLog: string): string {
-  const rawLines = fullLog.split("\n");
+export function extractErrorExcerpt(
+  fullLog: string,
+  maxBytes: number = MAX_CI_LOG_EXCERPT_BYTES,
+): string {
+  // Scan-window first: everything below is O(log size), and the byte cap can
+  // only help once we have already paid for the split.
+  const rawLines = tailBytes(fullLog, MAX_CI_LOG_SCAN_BYTES).split("\n");
   const lines = rawLines.map(stripTimestamp);
 
   // Collect indices of real (non-noise) error lines
@@ -780,12 +1339,19 @@ export function extractErrorExcerpt(fullLog: string): string {
   // Prefer real error lines; fall back to noise-only if that's all we have
   const anchorIndices = realErrorIndices.length > 0 ? realErrorIndices : noiseOnlyIndices;
 
-  if (anchorIndices.length > 0) {
-    return buildContextExcerpt(lines, anchorIndices);
-  }
+  const excerpt =
+    anchorIndices.length > 0
+      ? buildContextExcerpt(lines, anchorIndices)
+      : // No error lines at all — return the last 30 lines as a tail
+        lines.slice(-30).join("\n");
 
-  // No error lines at all — return the last 30 lines as a tail
-  return lines.slice(-30).join("\n");
+  const capped = tailBytes(excerpt, maxBytes);
+  if (capped === excerpt) return excerpt;
+  // Say so in-band: a silently truncated excerpt reads like a complete one, and
+  // the agent would reason about a stack trace it can't see the top of.
+  const shown = Buffer.byteLength(capped, "utf8");
+  const total = Buffer.byteLength(excerpt, "utf8");
+  return `[truncated — showing the last ${shown} of ${total} bytes of this excerpt]\n${capped}`;
 }
 
 /**
@@ -800,6 +1366,27 @@ function buildContextExcerpt(lines: string[], anchorIndices: number[]): string {
   }
   const sorted = Array.from(included).sort((a, b) => a - b);
   return sorted.slice(0, 50).map((i) => lines[i]).join("\n");
+}
+
+/**
+ * Keep the last `maxBytes` bytes, then drop the leading partial line. That
+ * second step also repairs the mojibake a byte-exact cut through a multi-byte
+ * character would otherwise leave at the front. Cutting from the END because
+ * the failure that stopped a job is the last thing in it.
+ *
+ * Mirrors agentic-pi's `tailBytes` (see {@link MAX_CI_LOG_EXCERPT_BYTES}).
+ */
+function tailBytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.byteLength <= maxBytes) return text;
+  const tail = buf.subarray(buf.byteLength - maxBytes).toString("utf8");
+  const nl = tail.indexOf("\n");
+  if (nl === -1) return tail;
+  const whole = tail.slice(nl + 1);
+  // One enormous line followed by a newline leaves nothing after the cut. A
+  // ragged first line beats reporting the log as empty, which is a different
+  // (and wrong) claim about why there is no evidence.
+  return whole.trim().length > 0 ? whole : tail;
 }
 
 /**

@@ -352,6 +352,137 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</tbody>
 	</table>
 
+	<h2 id="workflow-policy">Workflow policy — <code>fix</code>, <code>dependencies</code>, <code>review</code></h2>
+
+	<p>
+		Three blocks have no environment variable at all: they're budgets and
+		blast-radius dials, and those belong in a file you can review and diff
+		rather than in a shell. They live in <code>config/default.yaml</code> with
+		the values below, and you override them in your
+		<code>instance/config.yaml</code>.
+	</p>
+
+	<pre><code># instance/config.yaml
+
+review:
+  postsCheck: false            # post the `last-light/review` Check Run
+  trigger: after-checks        # eager | after-checks | on-request
+  requestLabel: null           # the label that asks for a review in `on-request`
+  skipDraft: true              # skip draft PRs
+
+fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
+  maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
+  localIterations: 2           # gate-loop iterations WITHIN one attempt
+  gateTimeoutSeconds: 900      # budget for the repo's own build/test gate
+  escalateModelAfterAttempt: 1 # attempts above this use models["pr-fix-retry"]
+  maxCostUsd: 5.0              # cumulative ceiling for ONE PR; null = no ceiling
+  maxFlakyDeferrals: 2         # "flaky" verdicts before one is taken at face value
+  retryableClasses: [reproducible, env-mismatch]
+
+dependencies:
+  autoMergeMaxImpact: medium   # none | low | medium | high — ceiling for a MAJOR bump
+  requireSettledChecks: true   # no merge decision until the head SHA's checks settle
+  minSettledChecks: 1          # …and there must be at least this many
+  auditComment: true           # post the evidence comment when auto-merging a major</code></pre>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>How the two loop budgets reach the run.</strong>
+			<code>fix.localIterations</code> and <code>fix.gateTimeoutSeconds</code>
+			are read by the fix phase itself, which declares
+			<code>max_iterations: &#123; from: fix.localIterations, default: 2 &#125;</code>
+			and <code>timeout_seconds: &#123; from: fix.gateTimeoutSeconds, default: 900 &#125;</code>.
+			The <code>from:</code> path resolves against the run's effective — already
+			repo-clamped — <code>fix</code> block, so a repository that lowers its own
+			budget in <code>.lastlight/</code> is honoured; the number in the YAML is
+			only the fallback for a run whose context carries no <code>fix:</code> at
+			all.
+		</div>
+	</div>
+
+	<p>
+		<code>trigger: after-checks</code> means "once the head SHA's checks
+		<strong>settle</strong> — either colour". The review can then read and cite
+		the CI result instead of guessing at it, and a push storm collapses to one
+		review per settled SHA. There is deliberately no settled-<em>and-passing</em>
+		mode: a PR whose CI never goes green would then never be reviewed, which is
+		exactly the PR most worth a look.
+	</p>
+
+	<p>
+		<code>on-request</code> means the review runs only when somebody asks. Three
+		ways to ask: apply the <code>requestLabel</code> — yours, or one the target
+		repo named in its own <code>.lastlight/</code>, both of which are honoured
+		on the <code>pull_request.labeled</code> webhook — comment
+		<code>@last-light review</code>, or — with <code>postsCheck</code> on —
+		press <strong>Re-run</strong> on the <code>last-light/review</code> check,
+		which is posted as a <code>neutral</code> conclusion so it never blocks a
+		merge. (GitHub's reviewer picker doesn't offer App bot users, so
+		"request a review from the bot" is handled opportunistically but is not
+		the mechanism to rely on.) Under <code>after-checks</code> with
+		<code>postsCheck</code> on, the check is posted <code>queued</code> while CI
+		runs, so branch protection can require it without racing.
+	</p>
+
+	<p>
+		<code>skipDraft</code> matches what the review sweep has always done. A
+		draft PR is skipped on the webhook path too. Marking it
+		<strong>Ready for review</strong> lifts that skip, but under the packaged
+		<code>after-checks</code> it does <em>not</em> produce a review on its own:
+		it is a PR-attention event, and attention events are deferred in that mode.
+		What actually runs the review is the head SHA's checks settling — or, if no
+		settle event arrives, the 30-minute review sweep. Under
+		<code>trigger: eager</code>, Ready for review is the event that un-defers
+		it.
+	</p>
+
+	<p>
+		The <code>fix</code> budgets bound a loop that <em>diagnoses</em> a CI
+		failure before it retries it. <code>maxAttempts</code> and
+		<code>maxCostUsd</code> both bound the current <em>problem</em>, not the
+		PR's lifetime: a push from anyone but the bot is a fresh problem, so it
+		re-arms the attempt counter and the cost window together and clears the
+		<code>requires-human</code> hold with no label to remove by hand. A
+		diagnosis class outside <code>retryableClasses</code> escalates straight
+		away rather than spending budget on a retry that can't help — its members
+		are checked against the five diagnosis classes, so a typo narrows the set
+		with a warning instead of silently making everything terminal. And
+		<code>maxCostUsd</code> ships <strong>on</strong>: an unbounded agent loop
+		against a genuinely broken PR is the one failure mode that costs real
+		money.
+	</p>
+
+	<p>
+		For <code>dependencies</code>, <em>impact</em> rather than semver magnitude
+		is what gates a major bump — a <code>@types/*</code> major is not a
+		framework rewrite. Set <code>autoMergeMaxImpact: none</code> to keep every
+		major in front of a human.
+	</p>
+
+	<p>
+		Know which half of that block is enforced where.
+		<code>requireSettledChecks</code> and <code>minSettledChecks</code> are
+		<strong>enforced in code</strong>: the merge verdict is computed from the
+		head SHA's resolved check state before the run starts and handed to the
+		agent as a decided answer it is told not to re-derive, and
+		<code>requireSettledChecks</code> additionally makes the dispatch gate
+		refuse a PR whose checks are still running.
+		<code>autoMergeMaxImpact</code> is an <strong>instruction to the
+		agent</strong>: the impact tier is the model's own judgement, reported in
+		the run's completion marker, and the ceiling reaches the run as prompt text
+		— nothing parses the tier or withholds the merge tools from a run that
+		reported one above the ceiling. Lowering the ceiling narrows what the agent
+		is told it may land; it is not a hard stop.
+	</p>
+
+	<p>
+		All three are <strong>repo-settable</strong>, one-way: a repo's
+		<code>.lastlight/</code> can only ever make itself <em>more</em>
+		conservative than you are. See
+		<a href="/docs/repo-config#policy">Per-repo config</a> for the per-key
+		clamps and the three keys a repo can't touch at all.
+	</p>
+
 	<h2>Build assets</h2>
 
 	<p>
