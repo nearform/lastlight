@@ -57,6 +57,30 @@ phases:
     # until an operator pins a cheaper model for it.
     model: "{{models.diagnose}}"
     output_var: diagnosis
+    # Nothing to diagnose when the PR isn't red — it's merge-BLOCKED, and the
+    # repair (merge the base in, regenerate the conflicted lockfile) is
+    # mechanical. Diagnosing it anyway was actively harmful, not merely wasteful:
+    # this phase's taxonomy is CI-failure-shaped, so an agent looking at green
+    # checks and no failing job honestly answered `infra-dependent` ("nothing
+    # here to repair") — one of the three stopping classes in the `fix` phase's
+    # `skip_if` below. The fix phase was skipped and the conflict left in place,
+    # on a `succeeded` run.
+    #
+    # Safe as a bare OR-ed list (the grammar has no negation) because
+    # `reason` carries CI's verdict FIRST: `dependabot-discovery.ts` resolves it
+    # as `conclusion === "failing" ? "checks-failing" : mergeableState`, so these
+    # three values imply CI is not settled-failing. A PR that is both red and
+    # behind arrives as `checks-failing` and still gets diagnosed.
+    #
+    # The fix phase's own `skip_if` rows read `scratch.fixMarkers.diagnosis.class`,
+    # which is absent when this phase is skipped — and an absent variable fails
+    # OPEN, so the fix phase runs. Its step 1 does the base merge + conflict
+    # resolution before it consults the diagnosis, and the prompt already guards
+    # the diagnosis behind `{{#if phaseOutputs.diagnosis}}`.
+    skip_if:
+      - "reason == 'dirty'"
+      - "reason == 'behind'"
+      - "reason == 'blocked'"
     # The tag WITH its colon, which is what the parser looks for
     # (`lastMarkerLine`). The engine enforces the postcondition as a plain
     # substring, so the bare tag let an output that merely MENTIONS

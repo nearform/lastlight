@@ -29,6 +29,16 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		classes</a> as PR fix.
 	</p>
 
+	<p>
+		Diagnose is <strong>skipped</strong> when the PR isn't red at all. A
+		dependency PR can be unmergeable without a single failing check — it's
+		<code>behind</code> its base, it has a merge <code>dirty</code> conflict
+		(almost always the lockfile), or it's <code>blocked</code> on a required
+		gate. There is nothing to classify in that case, and the repair is the
+		mechanical base-merge the fix phase does first anyway, so the run goes
+		straight there. Only a genuinely red build pays for a diagnosis.
+	</p>
+
 	<div class="docs-callout tip">
 		<div class="docs-callout-body">
 			<strong>Permission profile:</strong> <code>repo-write</code> — it merges the

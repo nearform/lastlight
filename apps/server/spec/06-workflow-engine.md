@@ -271,6 +271,32 @@ cases that must not be re-attempted.
     - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
 ```
 
+`dependabot-ci-fix` carries a second, simpler list on the phase *above*,
+reading a plain context value rather than a parsed marker:
+
+```yaml
+- name: diagnose
+  skip_if:
+    - "reason == 'dirty'"
+    - "reason == 'behind'"
+    - "reason == 'blocked'"
+```
+
+There is nothing to diagnose when no check is failing — the PR is
+merge-BLOCKED, and the repair (merge the base in, regenerate the conflicted
+lockfile) is mechanical. Diagnosing anyway was worse than wasteful: the
+phase's taxonomy is CI-failure-shaped, so an agent shown green checks and no
+failing job honestly answered `infra-dependent`, which is one of the three
+stopping rows above — the fix phase was skipped and the conflict left in
+place, on a `succeeded` run. A bare OR-ed list is sufficient despite the
+grammar having no negation, because `reason` carries CI's verdict **first**
+(`conclusion === "failing" ? "checks-failing" : mergeableState` in
+`src/cron/dependabot-discovery.ts`), so these three values imply CI is not
+settled-failing; a PR that is both red *and* behind arrives as
+`checks-failing` and is still diagnosed. The `fix` rows then read a
+`scratch` path that is absent, and an absent variable **fails open**, so the
+fix phase runs.
+
 Expressions use the `until:` grammar (see *Loop expression evaluator*
 below), evaluated against `{ ...ctx, phaseOutputs, scratch }` — the same
 values a prompt template can render. `output` is empty here (the phase has

@@ -69,10 +69,25 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    lockfile. If the branch is already up to date this is a no-op. (The workspace
    is a shallow clone; if the merge base isn't reachable, run `git fetch --deepen
    100 origin {{baseBranch}}` — or `--unshallow` — and retry the merge.)
-2. Work from the diagnosis above. It already names the cause and which checks
-   can't be reproduced here — don't re-derive either. If reproducing
-   contradicts it, trust what you observe and say so in your summary. The
-   common causes for a dependency bump are:
+{{#if !phaseOutputs.diagnosis}}
+   **This step IS the job here.** No diagnosis ran, which means you were
+   summoned to unblock a MERGE rather than to repair a red build — the reason
+   above is `dirty` (conflict), `behind` or `blocked`. CI is not red; the PR
+   simply cannot merge. So completing the merge and pushing it is the whole
+   repair, and there was no failure to diagnose. Do not hunt for a broken test
+   to justify the run. Land the merge, let the gate confirm the tree still
+   builds, push, and report `outcome=pushed`. A `dirty` PR whose conflict you
+   resolved is a SUCCESS even if the only file you changed was the lockfile. If
+   the gate then comes back red, you have a real failure and step 2 onwards
+   applies.
+{{/if}}
+2. {{#if phaseOutputs.diagnosis}}Work from the diagnosis above. It already names
+   the cause and which checks can't be reproduced here — don't re-derive either.
+   If reproducing contradicts it, trust what you observe and say so in your
+   summary.{{/if}}{{#if !phaseOutputs.diagnosis}}No diagnosis phase ran for this
+   PR, so there is nothing to work from — start from what step 1 left you and
+   only dig deeper if the gate is red.{{/if}} The common causes for a dependency
+   bump are:
    - the lockfile is stale or inconsistent with the manifest (regenerate it with
      the repo's package manager),
    - a breaking change in the new version needs call sites / types updated,

@@ -80,6 +80,15 @@ instead of a full gate run.
    - was it a timeout or network error, or did this same job pass on an earlier
      SHA of this branch? → `flaky`
 
+   **No job is failing at all?** Then you were summoned for a MERGE problem, not
+   a CI one — the reason above will be `dirty` (conflict), `behind` or
+   `blocked`. That is `reproducible`: the repair is to merge the base in and
+   regenerate the conflicted lockfile, and the fix phase does exactly that.
+   It is emphatically NOT `infra-dependent` — every stopping class above means
+   "no repair is worth attempting", and choosing one here skips the fix phase
+   and leaves the PR conflicted. `infra-dependent` is a property of a CHECK you
+   could not run; it says nothing about a branch that will not merge.
+
 OUTPUT: a short verdict — the cause, the CI-versus-sandbox comparison, which
 checks you could not reproduce here, and what a repair would have to change.
 No patch, no diff.
