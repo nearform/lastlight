@@ -25,6 +25,9 @@ import {
   type CommandSpec,
   type SandboxRunContext,
 } from "./executors/orchestrator.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("executor");
 // Re-exported for back-compat with existing importers (tests, dashboards,
 // workflow phase executor).
 export { RunResultAccumulator, stageSkillBundle, excludeFromGit, resetVerifyScript, VERIFY_SCRIPT_NAME, detectAccountError, mapStopReason, reclassifySuccess } from "./executors/shared.js";
@@ -129,10 +132,12 @@ async function prepareRun(
       // `task=` matters when runs overlap: several in-process runs interleave
       // their mints in one log, and without the task id you can't tell which
       // credential belongs to the run that later 403s (issue #215).
-      console.log(
-        `[executor] Minting git token: task=${taskId}, profile=${access.profile}, ` +
-        `repo=${access.repo || "(unscoped)"}, permissions=${permissions ? Object.keys(permissions).join(",") : "all"}`,
-      );
+      log.info("Minting git token", {
+        taskId,
+        profile: access.profile,
+        repo: access.repo || "(unscoped)",
+        permissions: permissions ? Object.keys(permissions).join(",") : "all",
+      });
       const { token } = await refreshGitAuth({
         appId: app.appId,
         privateKeyPath: app.privateKeyPath,
@@ -149,10 +154,7 @@ async function prepareRun(
       // repo (deleted / transferred to another org / access revoked). Record it
       // so the caller fails the phase loudly instead of running a toolless agent.
       mintError = msg;
-      console.warn(
-        `[executor] Could not mint git token (repo=${access.repo || "none"}, ` +
-        `profile=${access.profile}): ${msg}`,
-      );
+      log.warn("Could not mint git token", { repo: access.repo || "none", profile: access.profile, err });
     }
   } else if (access) {
     // PAT fallback: no GitHub App, but a static Personal Access Token is set.
@@ -164,12 +166,11 @@ async function prepareRun(
     const pat = getRuntimeConfig()?.githubToken || process.env.GITHUB_TOKEN;
     if (pat) {
       if (GITHUB_PERMISSION_PROFILES[access.profile]?.contents === "write") {
-        console.warn(
-          `[executor] Using a static, operator-supplied GITHUB_TOKEN for a ` +
-          `repo-write workflow (task=${taskId}, profile=${access.profile}, ` +
-          `repo=${access.repo || "none"}) — no App is configured, so this token ` +
-          `was NOT minted for this run and the PAT's own scopes apply (no ` +
-          `per-run downscoping).`,
+        log.warn(
+          "Using a static, operator-supplied GITHUB_TOKEN for a repo-write workflow — no App " +
+            "configured, so this token was NOT minted for this run and the PAT's own scopes apply " +
+            "(no per-run downscoping)",
+          { taskId, profile: access.profile, repo: access.repo || "none" },
         );
       }
       mintedToken = pat;
@@ -205,10 +206,10 @@ async function prepareRun(
   if (oauthId && !inProcessBackend) {
     const oauthEnvVar = oauthEnvVarForProvider(oauthId);
     if (!oauthEnvVar) {
-      console.warn(
-        `[executor] Model '${modelSpec}' uses OAuth provider '${oauthId}', which has no ` +
-          `in-guest env route — the '${backend}' sandbox can't authenticate it. Use the ` +
-          `gondolin/none backend (host-side auth via the credential store) or an API-key provider.`,
+      log.warn(
+        "Model uses OAuth provider with no in-guest env route — sandbox backend can't authenticate " +
+          "it; use gondolin/none (host-side auth via the credential store) or an API-key provider",
+        { modelSpec, oauthId, backend },
       );
     } else if (!ghEnv[oauthEnvVar] && !process.env[oauthEnvVar]) {
       // Only mint from stored creds when an explicit token isn't already set.
@@ -226,15 +227,15 @@ async function prepareRun(
           const apiKeyEnv = providerByPrefix(oauthId)?.envKey;
           const hasApiKey = !!apiKeyEnv && (!!ghEnv[apiKeyEnv] || !!process.env[apiKeyEnv]);
           if (OAUTH_ONLY_PROVIDERS.has(oauthId) || !hasApiKey) {
-            console.warn(
-              `[executor] Model '${modelSpec}' needs an OAuth login for '${oauthId}' but none is ` +
-                `stored. Run: lastlight oauth login ${oauthId}`,
-            );
+            log.warn("Model needs an OAuth login but none is stored", {
+              modelSpec,
+              oauthId,
+              hint: `lastlight oauth login ${oauthId}`,
+            });
           }
         }
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[executor] OAuth token refresh failed for '${oauthId}': ${msg}`);
+        log.warn("OAuth token refresh failed", { oauthId, err });
       }
     }
   }

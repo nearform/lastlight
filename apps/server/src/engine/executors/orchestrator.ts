@@ -30,6 +30,7 @@ import type { Span } from "@opentelemetry/api";
 import { recordError, recordExecutionMetrics, setSpanAttributes } from "../../telemetry/index.js";
 import { AgentSpanTree, recordPiEvent } from "../../telemetry/pi-events.js";
 import { OI, llmTokenAttributes } from "../../telemetry/openinference.js";
+import { logger } from "../../logging/logger.js";
 import {
   DEFAULT_MODEL,
   RunResultAccumulator,
@@ -42,6 +43,8 @@ import {
   skillBundleKey,
   stageArtifactsIn,
 } from "./shared.js";
+
+const log = logger("executor");
 
 /**
  * The **Sandbox orchestrator** — the deep module that owns one agent/command
@@ -156,8 +159,7 @@ function deliverAgentContext(sandbox: Sandbox, ctx: SandboxRunContext, prov: Pro
     }
     if (md) writeFileSync(join(prov.hostWorkspaceDir, "AGENTS.md"), md);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[executor] Could not deliver AGENTS.md: ${msg}`);
+    log.warn("Could not deliver AGENTS.md", { err });
   }
 }
 
@@ -201,7 +203,7 @@ export async function runSandboxedAgent(
   const sessionsDir = resolveSessionsDir(config);
 
   return withSandbox(ctx, async (sandbox, prov) => {
-    console.log(`  [executor] Running agent (task: ${ctx.taskId}, sandbox: ${ctx.backend})`);
+    log.info("Running agent", { taskId: ctx.taskId, sandbox: ctx.backend });
     // AGENTS.md — composed once, delivered the way this backend needs it
     // (workspace write, or the k8s adapter's own init-fetch channel).
     deliverAgentContext(sandbox, ctx, prov);
@@ -211,8 +213,7 @@ export async function runSandboxedAgent(
     try {
       skillDirs = sandbox.stageSkills(skillBundleKey(config), config.skillPaths);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[executor] Could not stage skills: ${msg}`);
+      log.warn("Could not stage skills", { err });
     }
 
     // Server-mode build assets: stage in before, harvest after (even on error).

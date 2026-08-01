@@ -5,6 +5,23 @@ import { tmpdir } from "os";
 import { loadConfig, defaultFixConfig, resetRuntimeConfigForTests } from "#src/config/config.js";
 import { DIAGNOSIS_CLASSES } from "#src/engine/fix-markers.js";
 
+// config.ts logs these boot-time warnings via the pino LoggerPort instead of
+// console. Mock the logger so the suite's stderr stays free of real pino
+// JSON, and expose warn as a hoisted spy so `said()` below can inspect the
+// structured fields (previously a `console.warn` string).
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 /**
  * The OPERATOR's half of the `fix:` policy block — `loadConfig`'s normaliser.
  *
@@ -28,22 +45,22 @@ function overlayWith(block: string): string {
 }
 
 describe("loadConfig — the fix policy block", () => {
-  let warn: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
     for (const k of ["GITHUB_APP_ID", "SLACK_BOT_TOKEN", "LASTLIGHT_MODEL", "LASTLIGHT_MODELS"]) {
       vi.stubEnv(k, "");
     }
-    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnSpy.mockClear();
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
-    vi.restoreAllMocks();
     resetRuntimeConfigForTests();
   });
 
-  const said = () => warn.mock.calls.flat().join(" ");
+  const said = () =>
+    warnSpy.mock.calls
+      .map(([msg, fields]: [string, unknown]) => `${msg} ${fields ? JSON.stringify(fields) : ""}`)
+      .join(" ");
 
   describe("whole-number budgets", () => {
     it("rejects a fractional maxAttempts, loudly", () => {

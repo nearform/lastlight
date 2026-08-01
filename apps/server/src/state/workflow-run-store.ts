@@ -1,6 +1,9 @@
 import type Database from "better-sqlite3";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("runs");
 
 /**
  * Sort key that floats in-flight runs above everything else, ahead of the
@@ -163,8 +166,7 @@ export class WorkflowRunStore {
       const run = this.getRun(id);
       if (run) this.terminalObserver(run, status);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[runs] terminal observer failed for ${id}: ${msg}`);
+      log.warn("Terminal observer failed", { runId: id, err });
     }
   }
 

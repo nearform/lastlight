@@ -2,6 +2,24 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+
+// src/cron/repo-crons.ts + src/cron/fanout.ts now log per-repo participation
+// diagnostics via the pino LoggerPort instead of console — mock the logger
+// module so the suite's stderr stays free of real pino JSON (this suite
+// deliberately fails a repo-layer fetch to prove one repo's bad day doesn't
+// sink the tick; no assertions here depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import type { CronDispatcher } from "#src/cron/fanout.js";
 
 /**

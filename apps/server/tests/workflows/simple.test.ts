@@ -1,7 +1,24 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+// reapOnSuccess's underlying reapSandboxWorkspace (src/sandbox/reap.js) now
+// logs via the pino LoggerPort instead of console — mock the logger module
+// so the suite's stderr stays free of real pino JSON (no assertions here
+// depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { workflowScopedTaskId, resolveRunBranch, artifactIssueDir, reapOnSuccess, PER_TARGET_REUSE_WORKFLOWS, PER_TARGET_RECREATE_WORKFLOWS, PREPOPULATE_SYNTH_WORKFLOWS, PR_HEADREF_PREPOPULATE_WORKFLOWS } from "#src/workflows/simple.js";
 import type { ExecutorConfig } from "#src/engine/github/profiles.js";
 

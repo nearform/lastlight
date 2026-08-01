@@ -7,6 +7,7 @@ import type { StateDb } from "../state/db.js";
 import type { PhaseHistoryEntry } from "../state/db.js";
 import type { ModelConfig, VariantConfig } from "../config/config.js";
 import { resolveModel, resolveVariant, getBotName } from "../config/config.js";
+import { logger } from "../logging/logger.js";
 import type { AgentWorkflowDefinition } from "./schema.js";
 import {
   createAssetResolver,
@@ -48,6 +49,8 @@ import { collapseDetail } from "../notify/render.js";
 // `isTerminated` used to live here; re-exported for API stability.
 export { isTerminated };
 export type { PhaseResult, WorkflowResult };
+
+const repoConfigLog = logger("repo-config");
 
 /**
  * Map of approval gate name → enabled. Gate names are arbitrary strings
@@ -191,8 +194,7 @@ function runAssetResolver(repoConfig?: RunRepoConfig): AssetResolver | undefined
   } catch (err: unknown) {
     // Warn, drop the layer, run anyway — the repo-config failure rule. A repo
     // whose cache dir vanished mid-run must not take the run down with it.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[repo-config] ${repoConfig.repo}: could not build the per-run asset resolver (${msg})`);
+    repoConfigLog.warn("Could not build the per-run asset resolver", { repo: repoConfig.repo, err });
     return undefined;
   }
 }
@@ -224,8 +226,7 @@ function runAgentContext(assets: AssetResolver, repoConfig?: RunRepoConfig): str
   try {
     return assets.loadAgentContext();
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[repo-config] ${repoConfig?.repo ?? "?"}: could not compose the run's agent context (${msg})`);
+    repoConfigLog.warn("Could not compose the run's agent context", { repo: repoConfig?.repo ?? "?", err });
     return undefined;
   }
 }
@@ -532,6 +533,7 @@ export async function runWorkflow(
 
   const ports: EnginePorts = {
     agent: agentPort,
+    logger: logger("runner"),
     // The repo's prompt/skill overrides reach the agent through this port:
     // `resolveSkillPaths` returns HOST paths (the repo-config cache dir is just
     // another one), which the orchestrator stages into the sandbox exactly like
@@ -600,10 +602,11 @@ function recordAssetWarnings(
   const warnings = assets?.warnings ?? [];
   if (!warnings.length || !db || !workflowId) return;
   try {
-    for (const w of warnings) console.warn(`[repo-config] ${repoConfig?.repo ?? "?"}: ${w.message}`);
+    for (const w of warnings) {
+      repoConfigLog.warn(w.message, { repo: repoConfig?.repo ?? "?" });
+    }
     db.runs.mergeScratch(workflowId, { repoConfig: { assetWarnings: [...warnings] } });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[repo-config] Could not record asset warnings for run ${workflowId}: ${msg}`);
+    repoConfigLog.warn("Could not record asset warnings", { runId: workflowId, err });
   }
 }

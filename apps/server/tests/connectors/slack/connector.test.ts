@@ -1,6 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "crypto";
 import { Hono } from "hono";
+
+// src/connectors/slack/connector.ts now logs connect/disconnect/delivery
+// diagnostics via the pino LoggerPort instead of console — mock the logger
+// module so the suite's stderr stays free of real pino JSON (no assertions
+// here depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
 import Database from "better-sqlite3";
 import { SlackConnector, verifySlackSignature } from "#src/connectors/slack/connector.js";
 import { SessionManager } from "#src/connectors/messaging/session-manager.js";

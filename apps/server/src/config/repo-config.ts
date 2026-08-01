@@ -61,6 +61,9 @@ import {
 } from "lastlight-shared/repo-config-schema";
 import { GitHubClient, type RepoConfigFile } from "../engine/github/github.js";
 import { getRuntimeConfig, type LastLightConfig } from "./config.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("repo-config");
 
 /**
  * The pure half, re-exported so every existing `src/config/repo-config.js`
@@ -225,7 +228,7 @@ export async function fetchRepoLayer(
 
   const slug = parseRepoSlug(repo);
   if (!slug) {
-    console.warn(`[repo-config] Ignoring malformed repo name: ${repo}`);
+    log.warn("Ignoring malformed repo name", { repo });
     return undefined;
   }
 
@@ -258,7 +261,7 @@ export async function fetchRepoLayer(
   } catch (err: unknown) {
     // Warn, keep the last good layer, run anyway.
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[repo-config] ${repo}: .lastlight/ fetch failed (${message}) — using the cached layer if any`);
+    log.warn(".lastlight/ fetch failed — using the cached layer if any", { repo, err });
     const fallback = hydrate(repo, dir, prior);
     if (fallback) {
       fallback.warnings = [
@@ -415,7 +418,7 @@ function writeSidecar(dir: string, layer: RepoLayer): void {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "meta.json"), JSON.stringify(sidecar, null, 2));
   } catch (err: unknown) {
-    console.warn(`[repo-config] Could not persist ${layer.repo} cache sidecar: ${(err as Error).message}`);
+    log.warn("Could not persist cache sidecar", { repo: layer.repo, err });
   }
 }
 
@@ -477,7 +480,7 @@ function unpack(dir: string, files: readonly RepoConfigFile[]): string {
     rmSync(root, { recursive: true, force: true });
     renameSync(tmp, root);
   } catch (err: unknown) {
-    console.warn(`[repo-config] Could not unpack ${dir}: ${(err as Error).message}`);
+    log.warn("Could not unpack repo config cache dir", { dir, err });
   }
   return root;
 }

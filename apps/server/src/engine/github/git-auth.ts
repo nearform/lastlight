@@ -3,6 +3,9 @@ import { createSign } from "crypto";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import { GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue } from "../../sandbox/git-http-auth.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("git-auth");
 
 export type GitHubPermissionLevel = "read" | "write";
 
@@ -71,9 +74,12 @@ export async function configureGitAuth(config: {
   const token = await getInstallationToken(config);
 
   if (!shouldWriteGlobalGitConfig()) {
-    console.log(`[git-auth] Minted GitHub App token (expires: ${token.expiresAt}). ` +
-      `Global git config left untouched; sandboxes receive the token via GIT_TOKEN + ` +
-      `a GIT_CONFIG_* http.extraheader. Set LASTLIGHT_WRITE_GLOBAL_GIT=1 to also write ~/.gitconfig.`);
+    log.info(
+      "Minted GitHub App token — global git config left untouched; sandboxes receive the token " +
+        "via GIT_TOKEN + a GIT_CONFIG_* http.extraheader (set LASTLIGHT_WRITE_GLOBAL_GIT=1 to also " +
+        "write ~/.gitconfig)",
+      { expiresAt: token.expiresAt },
+    );
     return token;
   }
 
@@ -87,7 +93,7 @@ export async function configureGitAuth(config: {
   execGit(["config", "--global", "user.name", botLogin]);
   execGit(["config", "--global", "user.email", `${botLogin}@users.noreply.github.com`]);
 
-  console.log(`[git-auth] Configured GLOBAL git with GitHub App token via http.extraheader (expires: ${token.expiresAt})`);
+  log.info("Configured GLOBAL git with GitHub App token via http.extraheader", { expiresAt: token.expiresAt });
 
   return token;
 }
@@ -120,7 +126,7 @@ export async function refreshGitAuth(config: {
   // (idempotent — safe to call standalone).
   execGit(["config", "--global", GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue(token.token)]);
 
-  console.log(`[git-auth] Refreshed token in GLOBAL git config via http.extraheader (expires: ${token.expiresAt})`);
+  log.info("Refreshed token in GLOBAL git config via http.extraheader", { expiresAt: token.expiresAt });
   return token;
 }
 
@@ -184,10 +190,11 @@ async function getInstallationToken(config: {
   const grantedRepos = Array.isArray(data.repositories)
     ? data.repositories.map((r: { full_name?: string; name?: string }) => r.full_name ?? r.name).join(",")
     : "(all)";
-  console.log(
-    `[git-auth] Mint granted: repository_selection=${data.repository_selection ?? "?"}, ` +
-      `permissions=${data.permissions ? JSON.stringify(data.permissions) : "?"}, repositories=${grantedRepos}`,
-  );
+  log.info("Mint granted", {
+    repositorySelection: data.repository_selection ?? "?",
+    permissions: data.permissions ?? "?",
+    repositories: grantedRepos,
+  });
 
   return { token: data.token, expiresAt: data.expires_at };
 }

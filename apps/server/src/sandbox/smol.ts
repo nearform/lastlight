@@ -4,8 +4,10 @@ import { lookup } from "node:dns/promises";
 import { existsSync, readdirSync } from "fs";
 import { join, resolve } from "path";
 import { randomUUID } from "crypto";
+import { logger } from "../logging/logger.js";
 
 const execFileAsync = promisify(execFileCb);
+const log = logger("smol");
 
 /**
  * smolvm sandbox manager — runs agent tasks inside local micro-VMs.
@@ -82,10 +84,10 @@ export function smolAvailable(): boolean {
     try {
       execFileSync(smolBin(), ["--version"], { stdio: "ignore", timeout: 5000 });
       _smolAvailable = true;
-      console.log(`[smol] smolvm available (image: ${smolImage()})`);
+      log.info("smolvm available", { image: smolImage() });
     } catch {
       _smolAvailable = false;
-      console.log("[smol] smolvm CLI not available — smol backend unavailable");
+      log.info("smolvm CLI not available — smol backend unavailable");
     }
   }
   return _smolAvailable;
@@ -164,7 +166,7 @@ export class SmolSandbox {
       throw new Error(`Failed to create smol sandbox: ${err.message}`);
     }
 
-    console.log(`[smol] Created: ${machineName}`);
+    log.info("Created", { machineName });
     await this.waitForReady(machineName);
     const hostWorkspace = await this.resolveHostWorkspace(machineName, worktreePath);
     const info: SmolMachineInfo = { machineName, worktreePath, hostWorkspace };
@@ -195,11 +197,13 @@ export class SmolSandbox {
       ).catch(() => { /* best effort */ });
       if (hit) {
         const dir = hit.slice(0, hit.length - sentinel.length - 1);
-        if (dir !== worktreePath) console.log(`[smol] Workspace share lands at ${dir} (not the source root)`);
+        if (dir !== worktreePath) {
+          log.info("Workspace share lands at a different dir than the source root", { dir, worktreePath });
+        }
         return dir;
       }
-    } catch (err: any) {
-      console.warn(`[smol] Could not probe workspace mount (${err.message}) — assuming source root`);
+    } catch (err) {
+      log.warn("Could not probe workspace mount — assuming source root", { err });
     }
     return worktreePath;
   }
@@ -215,7 +219,7 @@ export class SmolSandbox {
         await new Promise((r) => setTimeout(r, 500));
       }
     }
-    console.warn(`[smol] Timed out waiting for ${machineName} to be ready — proceeding anyway`);
+    log.warn("Timed out waiting for machine to be ready — proceeding anyway", { machineName });
   }
 
   /**
@@ -455,7 +459,7 @@ export class SmolSandbox {
     execSafe(smolBin(), ["machine", "stop", "--name", info.machineName]);
     execSafe(smolBin(), ["machine", "delete", "-f", "--name", info.machineName]);
     this.machines.delete(taskId);
-    console.log(`[smol] Destroyed: ${info.machineName}`);
+    log.info("Destroyed", { machineName: info.machineName });
   }
 
   /**
@@ -481,7 +485,7 @@ export class SmolSandbox {
       try { await lookup(h); ok.add(h); } catch { dropped.push(h); }
     }));
     if (dropped.length) {
-      console.warn(`[smol] Dropping unresolvable allow-host entries (smolvm resolves each at VM start): ${dropped.join(", ")}`);
+      log.warn("Dropping unresolvable allow-host entries (smolvm resolves each at VM start)", { dropped });
     }
     return this.config.allowHosts.filter((h) => ok.has(h));
   }

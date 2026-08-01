@@ -18,6 +18,22 @@ vi.mock("@octokit/auth-app", () => ({
   createAppAuth,
 }));
 
+// The diagnostic now logs via the pino LoggerPort instead of console — mock
+// the logger module so the assertions below can inspect the captured warn
+// call's fields instead of console output.
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -70,7 +86,6 @@ describe("githubAppClient — 403/404 scope diagnostic", () => {
       repositorySelection: "all",
       permissions: { issues: "write", pull_requests: "write" },
     });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const handler = await buildAndCaptureHandler();
 
     const err = {
@@ -79,23 +94,23 @@ describe("githubAppClient — 403/404 scope diagnostic", () => {
     };
     await expect(handler(err, { method: "GET", url: "/repos/o/private/pulls" })).rejects.toBe(err);
 
-    const line = warn.mock.calls.map((c) => String(c[0])).find((s) => s.includes("[github-diag]"))!;
-    expect(line).toContain("GET /repos/o/private/pulls -> 404");
-    expect(line).toContain("x-accepted-github-permissions=pull_requests=read");
-    expect(line).toContain("repository_selection=all");
+    const call = warnSpy.mock.calls.find(([msg]) => msg === "Request denied by GitHub")!;
+    const fields = call[1] as Record<string, unknown>;
+    expect(fields.method).toBe("GET");
+    expect(fields.url).toBe("/repos/o/private/pulls");
+    expect(fields.status).toBe(404);
+    expect(fields.acceptedPermissions).toBe("pull_requests=read");
+    expect(fields.tokenRepositorySelection).toBe("all");
     // Permission LEVELS are logged, not just names — so a read grant where write
     // is required is visible against x-accepted-github-permissions (#213/#215).
-    expect(line).toContain("issues=write,pull_requests=write");
-    warn.mockRestore();
+    expect(fields.tokenPermissions).toBe("issues=write,pull_requests=write");
   });
 
   it("does not log for non-403/404 errors but still re-throws", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const handler = await buildAndCaptureHandler();
 
     const err = { status: 500 };
     await expect(handler(err, { method: "GET", url: "/x" })).rejects.toBe(err);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("[github-diag]"))).toBe(false);
-    warn.mockRestore();
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });

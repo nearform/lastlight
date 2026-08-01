@@ -37,6 +37,11 @@ import {
   recordIntervention,
   type EscalationDeps,
 } from "./pr-escalation.js";
+import { logger } from "../logging/logger.js";
+
+const eventLog = logger("event");
+const dispatchLog = logger("dispatch");
+const approvalLog = logger("approval");
 
 /**
  * Hand a workflow to the runner. Matches `dispatchWorkflow` in index.ts — the
@@ -251,7 +256,7 @@ export async function dispatch(
   // dispatch `dependabot-ci-fix` onto a PR with a live `pr-fix` run.
   const triggerId = String(envelope.issueNumber || envelope.id);
   if (!prState && deps.db.executions.isRunning(handler, triggerId)) {
-    console.log(`[event] Skipping: ${handler} already running for ${triggerId}`);
+    eventLog.info("Skipping — already running", { handler, triggerId });
     if (envelope.type === "message") {
       await envelope.reply(`That task is already running. Use /status to check progress.`);
     }
@@ -501,10 +506,14 @@ export async function applyPrDispatchGate(
     dedupOnHeadSha: true,
     route,
   });
-  console.log(
-    `${args.logPrefix} ${workflowName} ${state.repo}#${state.prNumber}: ` +
-    `${disposition.decision} — ${disposition.reason}`,
-  );
+  const gateLog = args.logPrefix === "[dispatch]" ? dispatchLog : eventLog;
+  gateLog.info("Dispatch gate decision", {
+    workflow: workflowName,
+    repo: state.repo,
+    prNumber: state.prNumber,
+    decision: disposition.decision,
+    reason: disposition.reason,
+  });
   if (disposition.decision !== "skip") return disposition;
 
   // The HOLD is an instruction, not a verdict: no placeholder, no label, no
@@ -594,8 +603,7 @@ function ackGithubEvent(envelope: EventEnvelope, github: GitHubClient | null): v
   const commentId = raw?.comment?.id;
 
   const fail = (err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[event] Could not react 👀 to ${envelope.type}: ${msg}`);
+    eventLog.warn("Could not react to event", { type: envelope.type, err });
   };
 
   switch (envelope.type) {
@@ -642,8 +650,7 @@ async function handleMessageDispatch(
     try {
       await envelope.reply(body);
     } catch (err: unknown) {
-      const m = err instanceof Error ? err.message : String(err);
-      console.warn(`[event] failed to post run-start ack: ${m}`);
+      eventLog.warn("Failed to post run-start ack", { err });
     }
   };
 
@@ -661,7 +668,7 @@ async function handleMessageDispatch(
     })
     .catch(async (err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[event] workflow ${handler} threw: ${msg}`);
+      eventLog.error("Workflow threw", { handler, err });
       await envelope.reply(`*${handler}* failed: ${msg}`);
     });
 
@@ -689,8 +696,7 @@ async function handleWebhookDispatch(
   deps
     .dispatchWorkflow(handler, { ...workflowContext, _triggerType: "webhook" })
     .catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[event] Unhandled error in workflow ${handler}: ${msg}`);
+      eventLog.error("Unhandled error in workflow", { handler, err });
     });
 
   return { kind: "dispatched", workflow: handler };
@@ -713,7 +719,7 @@ async function handleBuild(
   const issueNumber = context.issueNumber as number;
 
   if (!owner || !repo) {
-    console.error(`[event] Invalid repo format: ${repoStr}`);
+    eventLog.error("Invalid repo format", { repoStr });
     return { kind: "ignored", reason: `invalid repo format: ${repoStr}` };
   }
 
@@ -732,7 +738,7 @@ async function handleBuild(
           .filter(Boolean);
       }
     } catch (err: any) {
-      console.warn(`[event] Could not fetch issue: ${err.message}`);
+      eventLog.warn("Could not fetch issue", { err });
     }
   }
 
@@ -758,8 +764,7 @@ async function handleBuild(
     const commentId = (envelope.raw as { comment?: { id?: number } } | undefined)?.comment?.id;
     if (commentId) {
       deps.github.reactToComment(owner, repo, commentId, "rocket").catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[event] Could not react to trigger comment: ${msg}`);
+        eventLog.warn("Could not react to trigger comment", { err });
       });
     }
   }
@@ -783,7 +788,7 @@ async function handleBuild(
       envelope.reply(result.success ? `Build cycle complete.` : `Build cycle failed.`);
     }
   }).catch((err) => {
-    console.error(`[event] Build cycle failed:`, err);
+    eventLog.error("Build cycle failed", { err });
     deps.db.executions.recordFinish(executionId, { success: false, error: err.message, durationMs: 0 });
   });
 
@@ -818,16 +823,16 @@ async function handlePrFix(
   const prNumber = context.prNumber as number;
 
   if (!owner || !repo) {
-    console.error(`[event] Invalid repo format: ${repoStr}`);
+    eventLog.error("Invalid repo format", { repoStr });
     return { kind: "ignored", reason: `invalid repo format: ${repoStr}` };
   }
 
   if (!state?.headRef) {
-    console.error(`[event] Could not determine branch for PR #${prNumber}`);
+    eventLog.error("Could not determine branch for PR", { prNumber });
     return { kind: "ignored", reason: `could not determine branch for PR #${prNumber}` };
   }
 
-  console.log(`[event] PR fix for ${repoStr}#${prNumber} on branch ${state.headRef}`);
+  eventLog.info("PR fix dispatch", { repo: repoStr, prNumber, headRef: state.headRef });
 
   deps.dispatchWorkflow(handler, {
     repo: repoStr,
@@ -845,7 +850,7 @@ async function handlePrFix(
     _prState: state,
     _triggerType: "webhook",
   }).catch((err) => {
-    console.error(`[event] PR fix failed:`, err);
+    eventLog.error("PR fix failed", { err });
   });
 
   return { kind: "dispatched", workflow: handler };
@@ -869,12 +874,12 @@ async function handleExploreReply(
 
   const run = deps.db.runs.getRun(workflowRunId);
   if (!run) {
-    console.warn(`[event] explore-reply: run ${workflowRunId} not found`);
+    eventLog.warn("explore-reply: run not found", { workflowRunId });
     return handled;
   }
   const pending = deps.db.approvals.getPendingForWorkflow(workflowRunId);
   if (!pending || pending.kind !== "reply") {
-    console.warn(`[event] explore-reply: no pending reply gate on ${workflowRunId}`);
+    eventLog.warn("explore-reply: no pending reply gate", { workflowRunId });
     return handled;
   }
   // Append the QA entry to scratch.socratic.qa. The runner reads this via
@@ -906,10 +911,10 @@ async function handleExploreReply(
       socratic: { ...prevSocratic, qa: qaList },
     });
   } catch (err) {
-    console.warn(
-      `[event] explore-reply: reply gate ${pending.id} already resolved — skipping duplicate resume:`,
+    eventLog.warn("explore-reply: reply gate already resolved — skipping duplicate resume", {
+      pendingId: pending.id,
       err,
-    );
+    });
     return handled;
   }
 
@@ -923,7 +928,7 @@ async function handleExploreReply(
   const storedCtx = (run.context || {}) as Record<string, unknown>;
   const storedOwner = storedCtx.owner as string | undefined;
   const resumeRepo = storedOwner && run.repo ? `${storedOwner}/${run.repo}` : run.repo || undefined;
-  console.log(`[event] explore-reply: resuming ${workflowRunId} after reply from ${sender}`);
+  eventLog.info("explore-reply: resuming after reply", { workflowRunId, sender });
   deps.dispatchWorkflow("explore", {
     repo: resumeRepo || (isSlack ? undefined : run.triggerId.split("#")[0]),
     issueNumber: run.issueNumber,
@@ -932,7 +937,7 @@ async function handleExploreReply(
     triggerId: isSlack ? run.triggerId : undefined,
     channelId: replyChannelId,
     threadId: replyThreadId,
-  }).catch((err) => console.error(`[event] explore-reply resume failed:`, err));
+  }).catch((err) => eventLog.error("explore-reply resume failed", { err }));
   return handled;
 }
 
@@ -993,7 +998,7 @@ async function handleApprovalResponse(
           body: "",
           sender,
           _triggerType: "approval",
-        }).catch((err) => console.error(`[approval] Resume failed:`, err));
+        }).catch((err) => approvalLog.error("Resume failed", { err }));
       } else {
         // Can't reconstruct the dispatch target — record without resuming.
         deps.db.approvals.respond(approval.id, "approved", sender, reason);
@@ -1099,7 +1104,7 @@ export async function runChatTurn(
     await reply(result.text);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[dispatch] Chat error:`, msg);
+    dispatchLog.error("Chat error", { err });
     deps.db.executions.recordFinish(executionId, { success: false, error: msg, durationMs: 0 });
     await reply("Sorry, I encountered an error. Please try again.");
   }

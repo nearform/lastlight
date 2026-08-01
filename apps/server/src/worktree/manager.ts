@@ -1,6 +1,9 @@
 import { execFileSync, type ExecSyncOptions } from "child_process";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join, resolve } from "path";
+import { logger } from "../logging/logger.js";
+
+const log = logger("worktree");
 
 const WORKTREE_DIR = ".worktrees";
 
@@ -59,7 +62,7 @@ export class WorktreeManager {
     const bareDir = join(this.baseDir, `.bare-${repoName}`);
 
     if (!existsSync(bareDir)) {
-      console.log(`[worktree] Bare clone: ${repoUrl}`);
+      log.info("Bare clone", { repoUrl });
       this.execGit(["clone", "--bare", repoUrl, bareDir]);
     } else {
       // Fetch latest
@@ -81,12 +84,12 @@ export class WorktreeManager {
 
     if (branchExists) {
       // Resume existing branch
-      console.log(`[worktree] Resuming branch: ${branch}`);
+      log.info("Resuming branch", { branch });
       this.execGit(["-C", bareDir, "worktree", "add", worktreePath, `origin/${branch}`]);
       this.execGit(["-C", worktreePath, "checkout", "-B", branch, `origin/${branch}`]);
     } else {
       // Create new branch from base
-      console.log(`[worktree] New branch: ${branch} from ${baseRef}`);
+      log.info("New branch", { branch, baseRef });
       this.execGit(["-C", bareDir, "worktree", "add", "-b", branch, worktreePath, baseRef]);
     }
 
@@ -142,7 +145,7 @@ export class WorktreeManager {
     }
 
     this.active.delete(taskId);
-    console.log(`[worktree] Cleaned up: ${taskId}`);
+    log.info("Cleaned up", { taskId });
   }
 
   /**

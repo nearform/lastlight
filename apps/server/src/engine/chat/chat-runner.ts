@@ -33,6 +33,9 @@ import {
   oauthProviderIdForModel,
   resolveOAuthApiKey,
 } from "../oauth.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("chat");
 
 const MAX_TOOL_ROUNDS = 8;
 
@@ -251,7 +254,7 @@ export class ChatRunner {
       return this.model;
     } catch (err) {
       this.modelError = err instanceof Error ? err.message : String(err);
-      console.error(`[chat] ${this.modelError}`);
+      log.error("Could not resolve model", { err });
       return undefined;
     }
   }
@@ -369,10 +372,12 @@ export class ChatRunner {
       try {
         assistant = await completeWithRetry(completeSimple, effectiveModel, context, opts, {
           onRetry: ({ attempt, delayMs, reason }) =>
-            console.warn(
-              `[chat] transient model error (retry ${attempt}/${CHAT_RETRY_BACKOFF_MS.length} ` +
-              `in ${delayMs / 1000}s): ${reason}`,
-            ),
+            log.warn("Transient model error, retrying", {
+              attempt,
+              maxAttempts: CHAT_RETRY_BACKOFF_MS.length,
+              delayMs,
+              reason,
+            }),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

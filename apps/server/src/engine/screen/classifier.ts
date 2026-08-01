@@ -18,6 +18,9 @@
 import { HELPER_MAX_TOKENS, chat as realChat, defaultFastModel as realDefaultFastModel, type ChatFunction } from "../llm.js";
 import { getAssetVersion, listAgentWorkflows, loadPromptTemplate } from "../../workflows/loader.js";
 import { intentToken, RESERVED_CONTROL_INTENTS } from "../../workflows/schema.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("classifier");
 
 /**
  * A classifier intent. The well-known intents the router has bespoke handling
@@ -258,7 +261,7 @@ export async function classifyCommentAddsInfo(
     );
     return /\bADDS_INFO\b/i.test(output);
   } catch (err: any) {
-    console.error(`[classifier] Error classifying comment info: ${err.message}`);
+    log.error("Error classifying comment info", { err });
     return false;
   }
 }
@@ -352,11 +355,11 @@ export async function classifyComment(
     // introspection-only, but the WARNING is not — a fallback this consequential
     // has to leave a trace on the route it actually ran.
     if (!intentMatch) {
-      console.warn(
-        `[classifier] no parseable INTENT from ${resolvedModel} — defaulting to chat ` +
-          `(raw: ${JSON.stringify(output.slice(0, 160))}). If this repeats, the model is ` +
-          `returning nothing: raise HELPER_MAX_TOKENS or pin models.classifier to a model ` +
-          `that answers within it.`,
+      log.warn(
+        "No parseable INTENT — defaulting to chat. If this repeats, the model is " +
+          "returning nothing: raise HELPER_MAX_TOKENS or pin models.classifier to a model " +
+          "that answers within it",
+        { model: resolvedModel, raw: output.slice(0, 160) },
       );
     }
     if (explain && !intentMatch) {
@@ -369,7 +372,7 @@ export async function classifyComment(
       ? { intent, repo, issueNumber, reason, model: resolvedModel }
       : { intent, repo, issueNumber, reason };
   } catch (err: any) {
-    console.error(`[classifier] Error classifying comment: ${err.message}`);
+    log.error("Error classifying comment", { err });
     // Fail-safe: an error must never launch a workflow, so default to chat.
     // In introspection/`explain` mode, though, surface the error (and which
     // model it tried) in `reason` — otherwise a failed LLM call (e.g. a missing

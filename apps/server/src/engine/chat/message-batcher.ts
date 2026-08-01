@@ -1,4 +1,7 @@
 import type { EventEnvelope } from "../../connectors/types.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("message-batcher");
 
 /**
  * Per-session message batcher that sits *before* routing/classification.
@@ -105,7 +108,7 @@ export class MessageBatcher {
         try {
           await this.deps.dispatch(combine(batch));
         } catch (err) {
-          console.error(`[message-batcher] dispatch failed for ${key}:`, err);
+          log.error("Dispatch failed", { key, err });
         }
       }
     } finally {

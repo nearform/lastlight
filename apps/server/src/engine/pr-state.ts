@@ -42,6 +42,9 @@ import {
   type PrNote,
 } from "./pr-notes.js";
 import { REQUIRES_HUMAN_LABEL } from "../cron/dependabot-discovery.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("pr-state");
 
 /** Aggregate check state for a ref, as {@link GitHubClient.getChecksConclusion} reports it. */
 export type ChecksState = "passing" | "failing" | "pending" | "none";
@@ -481,7 +484,7 @@ export async function resolvePrState(
   const note = (what: string, err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
     readErrors.push(`${what}: ${msg}`);
-    console.warn(`[pr-state] ${full}#${prNumber} ${what} failed: ${msg}`);
+    log.warn("Read failed", { repo: full, prNumber, what, err });
   };
 
   const state: PrState = {

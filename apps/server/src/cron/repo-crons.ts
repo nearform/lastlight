@@ -34,6 +34,9 @@
 
 import { getRuntimeConfig, type CronsConfig, type RepoConfigPolicy } from "../config/config.js";
 import { fetchRepoLayer, getCachedRepoLayer, repoConfigPolicy, type RepoLayer } from "../config/repo-config.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("cron");
 
 /**
  * Context keys the cron tick carries from {@link import("./jobs.js").getJobs}
@@ -99,8 +102,11 @@ export async function resolveCronRepos(options: ResolveCronReposOptions): Promis
       } catch (err: unknown) {
         // `fetchRepoLayer` doesn't reject, but a caller-supplied lookup might —
         // and one repo's bad day must never cost the other repos their tick.
-        const message = err instanceof Error ? err.message : String(err);
-        console.warn(`[cron] ${cron}: could not read ${repo}'s .lastlight/ config (${message}) — using the global setting`);
+        log.warn("Could not read repo's .lastlight/ config — using the global setting", {
+          cron,
+          repo,
+          err,
+        });
         return [repo, undefined] as const;
       }
     }),

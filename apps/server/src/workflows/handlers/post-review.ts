@@ -9,6 +9,9 @@ import {
   type ReviewFindingsDoc,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("post-review");
 import type { ExecutorConfig } from "lastlight-workflow-engine";
 import type { TemplateContext } from "lastlight-workflow-engine";
 import type { PhaseDefinition } from "lastlight-workflow-engine";
@@ -119,7 +122,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         });
       }
       this.reporter.failWorkflow(error);
-      console.error(`[post-review] ${error}`);
+      log.error(error);
       return { results: [result], status: "failed" };
     };
 
@@ -202,7 +205,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[post-review] inline review POST failed: ${msg}; retrying body-only`);
+      log.warn("Inline review POST failed; retrying body-only", { err });
       // Off-diff anchors (e.g. a stale diff) 422 — retry with everything in the
       // body so the review still lands.
       const bodyOnly = buildBodyOnlyReview(doc);
@@ -320,7 +323,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
   }
 
   private diffFailed(msg: string): null {
-    console.warn(`[post-review] could not compute commentable diff (${msg}); demoting all findings to the body`);
+    log.warn("Could not compute commentable diff; demoting all findings to the body", { reason: msg });
     return null;
   }
 

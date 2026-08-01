@@ -30,6 +30,23 @@ vi.mock("#src/managed-repos.js", async (importOriginal) => {
   return { ...actual, getAccessibleManagedRepos: () => ["acme/a"] };
 });
 
+// jobs.ts logs the unrecognised-condition warning via the pino LoggerPort
+// instead of console. Mock the logger so the suite's stderr stays free of
+// real pino JSON, and expose warn as a hoisted spy so the test below can
+// assert on the structured fields (previously a `console.warn` string match).
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 const { getJobs } = await import("#src/cron/jobs.js");
 
 const def = (name: string, unless?: string): CronDef => ({
@@ -43,6 +60,7 @@ const names = (opts: Parameters<typeof getJobs>[0]) => getJobs(opts).map((j) => 
 
 beforeEach(() => {
   cronDefs.mockReset();
+  warnSpy.mockReset();
 });
 
 describe("getJobs — condition.unless predicate map", () => {
@@ -63,11 +81,12 @@ describe("getJobs — condition.unless predicate map", () => {
     // Registration is the safe direction. A silently dropped cron produces no
     // ticks, no rows and no error — which is the failure the literal comparison
     // already had; a spurious tick is a cheap no-op.
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     cronDefs.mockReturnValue([def("typo", "webhooksEnbaled")]);
     expect(names({ webhooksEnabled: true, crons: { enable: [], disable: [] } })).toEqual(["typo"]);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("webhooksEnbaled"));
-    warn.mockRestore();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ unless: "webhooksEnbaled" }),
+    );
   });
 
   it("a cron with NO condition is registered whatever the context says", () => {

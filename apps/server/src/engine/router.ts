@@ -14,6 +14,9 @@ import type { StateDb } from "../state/db.js";
 import type { GitHubClient } from "./github/github.js";
 import { isDependencyPr } from "../cron/dependabot-discovery.js";
 import { holdReply } from "./pr-decisions.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("router");
 
 /**
  * Resolve a classifier intent the router has no bespoke branch for to the
@@ -110,10 +113,10 @@ async function reviewRequestLabels(
     const repoLabel = layer?.review?.requestLabel;
     if (typeof repoLabel === "string" && repoLabel) labels.add(repoLabel);
   } catch (err: unknown) {
-    console.warn(
-      `[router] Could not resolve ${envelope.repo}'s review.requestLabel ` +
-      `(${err instanceof Error ? err.message : String(err)}); using the operator's only.`,
-    );
+    log.warn("Could not resolve review.requestLabel; using the operator's only", {
+      repo: envelope.repo,
+      err,
+    });
   }
   return labels;
 }
@@ -256,9 +259,7 @@ async function dependencyPrSignals(
           });
     return { prAuthor: pr.user?.login ?? envelope.issueAuthor, checksState };
   } catch (err) {
-    console.warn(
-      `[router] dependency-PR signal fetch failed for ${envelope.repo}#${envelope.prNumber}: ${String(err)}`,
-    );
+    log.warn("Dependency-PR signal fetch failed", { repo: envelope.repo, prNumber: envelope.prNumber, err });
     return {};
   }
 }
@@ -292,9 +293,11 @@ export async function routeEvent(
         envelope.title || "",
         envelope.body || "",
       );
-      console.log(
-        `[router] New issue ${envelope.repo}#${envelope.issueNumber} classified as: ${isQuestion ? "question" : "work"}`,
-      );
+      log.info("New issue classified", {
+        repo: envelope.repo,
+        issueNumber: envelope.issueNumber,
+        classification: isQuestion ? "question" : "work",
+      });
       return {
         action: "handler",
         handler: isQuestion
@@ -466,10 +469,12 @@ export async function routeEvent(
           reason: "no workflow claims the dependabot-ci-fix intent",
         };
       }
-      console.log(
-        `[router] Failed checks on ${envelope.repo}#${envelope.prNumber} → ${handler}` +
-        `${envelope.isDependencyPr ? " (dependency PR)" : " (our own push)"}`,
-      );
+      log.info("Failed checks routed", {
+        repo: envelope.repo,
+        prNumber: envelope.prNumber,
+        handler,
+        isDependencyPr: envelope.isDependencyPr,
+      });
       return {
         action: "handler",
         handler,
@@ -500,9 +505,7 @@ export async function routeEvent(
           reason: "no workflow claims the dependabot-pr-merge intent",
         };
       }
-      console.log(
-        `[router] Green checks on ${envelope.repo}#${envelope.prNumber} → ${handler}`,
-      );
+      log.info("Green checks routed", { repo: envelope.repo, prNumber: envelope.prNumber, handler });
       return {
         action: "handler",
         handler,
@@ -577,9 +580,7 @@ export async function routeEvent(
           }
 
           if (retriage) {
-            console.log(
-              `[router] Re-triaging ${triggerId} from reporter/maintainer comment`,
-            );
+            log.info("Re-triaging from reporter/maintainer comment", { triggerId });
             return {
               action: "handler",
               handler: gh.issue_opened || "issue-triage",
@@ -667,9 +668,12 @@ export async function routeEvent(
           ? getWorkflowByIntent("dependabot-ci-fix")?.name ?? gh.pr_fix ?? "pr-fix"
           : gh.pr_fix || "pr-fix";
         const note = retryMatch[1].trim();
-        console.log(
-          `[router] Retry requested on ${envelope.repo}#${envelope.prNumber} by ${envelope.sender} → ${handler}`,
-        );
+        log.info("Retry requested", {
+          repo: envelope.repo,
+          prNumber: envelope.prNumber,
+          by: envelope.sender,
+          handler,
+        });
         return {
           action: "handler",
           handler,
@@ -777,10 +781,11 @@ export async function routeEvent(
         }),
         screenForInjection(envelope.body),
       ]);
-      console.log(
-        `[router] Comment classified as: ${intent}` +
-        (screen.flagged ? ` [screener flagged: ${screen.reason || "no reason"}]` : ""),
-      );
+      log.info("Comment classified", {
+        intent,
+        screenerFlagged: screen.flagged,
+        screenerReason: screen.flagged ? screen.reason || "no reason" : undefined,
+      });
 
       // When the screener flags, prefix the commentBody with a one-line
       // warning. Downstream agents anchored by agent-context/security.md
@@ -932,12 +937,13 @@ export async function routeEvent(
         issueNumber: classifiedIssue,
         reason: classifiedReason,
       } = classification;
-      console.log(
-        `[router] Slack message classified as: ${intent}` +
-        `${classifiedRepo ? ` (repo: ${classifiedRepo})` : ""}` +
-        `${classifiedIssue ? ` (#${classifiedIssue})` : ""}` +
-        (screen.flagged ? ` [screener flagged: ${screen.reason || "no reason"}]` : ""),
-      );
+      log.info("Slack message classified", {
+        intent,
+        repo: classifiedRepo,
+        issueNumber: classifiedIssue,
+        screenerFlagged: screen.flagged,
+        screenerReason: screen.flagged ? screen.reason || "no reason" : undefined,
+      });
 
       const slackText = screen.flagged ? `${flagPrefix(screen.reason)}${text}` : text;
 

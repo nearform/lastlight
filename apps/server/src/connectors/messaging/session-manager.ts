@@ -1,6 +1,9 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import type { ConversationKey, ConversationSession, ConversationMessage } from "./types.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("messaging");
 
 /** Inactivity timeout before a session is considered stale (30 minutes) */
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
@@ -87,7 +90,7 @@ export class SessionManager {
    * loudly rather than commit a half-broken schema.
    */
   private rebuildWithoutTableUnique() {
-    console.log("[messaging] migrating messaging_sessions: dropping unconditional UNIQUE constraint");
+    log.info("Migrating messaging_sessions: dropping unconditional UNIQUE constraint");
     const fkOriginal = this.db.pragma("foreign_keys", { simple: true });
     this.db.pragma("foreign_keys = OFF");
     try {

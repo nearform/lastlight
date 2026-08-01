@@ -3,6 +3,9 @@ import type { V1PersistentVolumeClaim, V1Pod } from "@kubernetes/client-node";
 import type { K8sApis } from "./client.js";
 import { RUN_ID_LABEL } from "./pod.js";
 import type { RunId } from "./run-id.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("reclaim");
 
 /** Selects the label every sandbox Pod/PVC carries (`pod.ts` / `pvc.ts`) — the
  *  list-scope for `reclaimSandbox` so it never touches non-Last-Light objects. */
@@ -108,7 +111,14 @@ export async function reclaimSandbox(
   selector: ReclaimSelector,
   opts?: ReclaimOpts,
 ): Promise<ReclaimResult> {
-  const warn = opts?.onWarn ?? console.warn;
+  // Custom `onWarn` (a test seam / caller-supplied string logger) keeps its
+  // message-only contract; the default (production) path logs structured —
+  // with `{ err }` where available — so the stack survives instead of being
+  // flattened into a string by the caller-agnostic callback shape.
+  const warn = (message: string, fields?: Record<string, unknown>): void => {
+    if (opts?.onWarn) opts.onWarn(message);
+    else log.warn(message, fields);
+  };
   const now = opts?.now ?? Date.now();
 
   let pods: V1Pod[];
@@ -126,8 +136,8 @@ export async function reclaimSandbox(
   } catch (err) {
     if (err instanceof ApiException && err.code === 403) {
       warn(
-        `[k8s] reclaimSandbox: RBAC for listing Pods/PVCs is not granted in ${namespace} ` +
-          `(Plan 7). Skipping reclaim.`,
+        "reclaimSandbox: RBAC for listing Pods/PVCs is not granted (Plan 7). Skipping reclaim.",
+        { namespace },
       );
       return { podsDeleted: 0, pvcsDeleted: 0 };
     }
@@ -185,15 +195,14 @@ async function deleteBestEffort(
   op: () => Promise<unknown>,
   name: string,
   kind: string,
-  warn: (message: string) => void,
+  warn: (message: string, fields?: Record<string, unknown>) => void,
 ): Promise<boolean> {
   try {
     await op();
     return true;
   } catch (err) {
     if (err instanceof ApiException && err.code === 404) return true;
-    const message = err instanceof Error ? err.message : String(err);
-    warn(`[k8s] reclaimSandbox: failed to delete ${kind} ${name}: ${message}`);
+    warn(`reclaimSandbox: failed to delete ${kind} ${name}`, { kind, name, err });
     return false;
   }
 }

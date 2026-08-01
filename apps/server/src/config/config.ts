@@ -10,6 +10,9 @@ import {
   type RepoConfigPolicy,
 } from "lastlight-shared/repo-config-schema";
 import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-workflow-engine";
+import { logger } from "../logging/logger.js";
+
+const log = logger("config");
 
 /**
  * Load .env file into process.env (simple, no dependency).
@@ -906,16 +909,16 @@ function diagnosisClassList(raw: unknown): string[] | undefined {
   if (names === undefined) return undefined;
   const unknown = names.filter((n) => !isDiagnosisClass(n));
   if (unknown.length) {
-    console.warn(
-      `[config] Ignoring ${unknown.map((n) => `"${n}"`).join(", ")} in fix.retryableClasses — ` +
-      `not a diagnosis class. The five are: ${DIAGNOSIS_CLASSES.join(", ")}.`,
-    );
+    log.warn("Ignoring unrecognised diagnosis classes in fix.retryableClasses", {
+      unknown,
+      allowed: DIAGNOSIS_CLASSES,
+    });
   }
   const kept = names.filter(isDiagnosisClass);
   if (!kept.length) {
-    console.warn(
-      "[config] fix.retryableClasses is empty — every diagnosis will escalate " +
-      "`not-retryable` on the second dispatch, and no PR will be retried.",
+    log.warn(
+      "fix.retryableClasses is empty — every diagnosis will escalate " +
+        "not-retryable on the second dispatch, and no PR will be retried",
     );
   }
   return kept;
@@ -948,10 +951,10 @@ function nonNegativeNumber(raw: unknown): number | undefined {
 function positiveInt(raw: unknown, path: string): number | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw === "number" && Number.isInteger(raw) && raw >= 0) return raw;
-  console.warn(
-    `[config] Ignoring "${path}: ${JSON.stringify(raw)}" — it must be a whole number >= 0. ` +
-    `Falling back to the shipped default.`,
-  );
+  log.warn("Ignoring invalid config value — must be a whole number >= 0; falling back to default", {
+    path,
+    value: raw,
+  });
   return undefined;
 }
 
@@ -1117,7 +1120,7 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   ) {
     sandbox.backend = backend;
   } else if (backend) {
-    console.warn(`[config] Unknown LASTLIGHT_SANDBOX value "${backend}" — using the file/default backend`);
+    log.warn("Unknown LASTLIGHT_SANDBOX value — using the file/default backend", { value: backend });
   }
   if (env.MAX_TURNS) sandbox.maxTurns = parseInt(env.MAX_TURNS, 10);
   if (Object.keys(sandbox).length) layer.sandbox = sandbox;
@@ -1126,7 +1129,7 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   if (buildAssetsLoc === "repo" || buildAssetsLoc === "server") {
     layer.buildAssets = { location: buildAssetsLoc };
   } else if (buildAssetsLoc) {
-    console.warn(`[config] Unknown LASTLIGHT_BUILD_ASSETS value "${buildAssetsLoc}" — using the file/default location`);
+    log.warn("Unknown LASTLIGHT_BUILD_ASSETS value — using the file/default location", { value: buildAssetsLoc });
   }
 
   // Core-version pin override (CI can set this instead of editing config.yaml).
@@ -1180,7 +1183,7 @@ function applyJsonStringMap(
       }
     }
   } catch (err: any) {
-    console.warn(`[config] Invalid ${label} JSON: ${err.message}`);
+    log.warn("Invalid JSON env var", { label, err });
   }
 }
 

@@ -8,6 +8,9 @@ import type { MessagingConfig } from "../messaging/types.js";
 import type { EventEnvelope } from "../types.js";
 import type { UserStore } from "../../state/user-store.js";
 import { hasMarkdownImage, markdownToSlackBlocks, markdownToSlackMrkdwn } from "./mrkdwn.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("slack");
 
 /**
  * A resolved approval-button click, handed to the app for routing. `envelope`
@@ -134,16 +137,16 @@ export class SlackConnector extends MessagingConnector {
   async start(): Promise<void> {
     if (this.bolt) {
       await this.bolt.start();
-      console.log(`[slack] Connected via Socket Mode`);
+      log.info("Connected via Socket Mode");
     } else {
-      console.log(`[slack] Listening via HTTP Events API at /webhooks/slack`);
+      log.info("Listening via HTTP Events API at /webhooks/slack");
     }
   }
 
   async stop(): Promise<void> {
     if (this.bolt) {
       await this.bolt.stop();
-      console.log(`[slack] Disconnected`);
+      log.info("Disconnected");
     }
     // Webhook mode shares the GitHub connector's HTTP server; nothing to stop.
   }
@@ -183,7 +186,7 @@ export class SlackConnector extends MessagingConnector {
       // Only auto-generated image blocks are worth retrying without — an
       // explicit-blocks caller owns its payload and should see the error.
       if (!autoBlocks) throw err;
-      console.warn(`[slack] image blocks rejected, falling back to text: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn("Image blocks rejected, falling back to text", { err });
       const result = await this.web.chat.postMessage({
         channel: channelId,
         text: fallbackText,
@@ -266,7 +269,7 @@ export class SlackConnector extends MessagingConnector {
   /** Send a message to the configured delivery channel (for cron reports) */
   async sendToDeliveryChannel(text: string): Promise<void> {
     if (!this.slackConfig.deliveryChannel) {
-      console.warn("[slack] No delivery channel configured");
+      log.warn("No delivery channel configured");
       return;
     }
     const chunks = this.chunkMessage(text);
@@ -315,7 +318,7 @@ export class SlackConnector extends MessagingConnector {
         // Slack will retry (and we'd handle it twice if it slipped past dedup).
         setImmediate(() => {
           this.dispatchSlackEvent(event).catch((err) =>
-            console.error("[slack] event handler error:", err),
+            log.error("Event handler error", { err }),
           );
         });
       }
@@ -344,7 +347,7 @@ export class SlackConnector extends MessagingConnector {
       // Ack within Slack's 3s window; resolve the gate asynchronously.
       setImmediate(() => {
         this.handleInteraction(payload).catch((err) =>
-          console.error("[slack] interaction handler error:", err),
+          log.error("Interaction handler error", { err }),
         );
       });
       return c.body(null, 200);
@@ -357,7 +360,7 @@ export class SlackConnector extends MessagingConnector {
     const handle = async ({ ack, body }: { ack: () => Promise<void>; body: unknown }) => {
       await ack();
       await this.handleInteraction(body).catch((err) =>
-        console.error("[slack] interaction handler error:", err),
+        log.error("Interaction handler error", { err }),
       );
     };
     this.bolt.action("approval_approve", handle);
@@ -479,13 +482,19 @@ export class SlackConnector extends MessagingConnector {
     // Log EVERY inbound message before any filtering. When a DM looks like it
     // "dropped" messages, this line tells us whether Slack delivered the event
     // at all and, if so, why we ignored it (a subtype like message_changed, a
-    // bot_id, or empty text) — versus Slack never sending it.
-    console.log(
-      `[slack] inbound msg ch=${msg.channel ?? "-"} ts=${msg.ts ?? "-"} ` +
-      `thread_ts=${msg.thread_ts ?? "-"} subtype=${msg.subtype ?? "-"} ` +
-      `bot_id=${msg.bot_id ?? "-"} channel_type=${msg.channel_type ?? "-"} ` +
-      `user=${msg.user ?? "-"} hasText=${msg.text ? "y" : "n"}`,
-    );
+    // bot_id, or empty text) — versus Slack never sending it. Debug: this is a
+    // raw per-message protocol trace (fires for every inbound Socket Mode
+    // event, filtered or not), not a business-meaningful lifecycle line.
+    log.debug("Inbound message", {
+      channel: msg.channel ?? null,
+      ts: msg.ts ?? null,
+      threadTs: msg.thread_ts ?? null,
+      subtype: msg.subtype ?? null,
+      botId: msg.bot_id ?? null,
+      channelType: msg.channel_type ?? null,
+      user: msg.user ?? null,
+      hasText: Boolean(msg.text),
+    });
     // Filter out non-standard message subtypes (edits, deletes, joins, etc.)
     if (msg.subtype) return;
     if (!msg.user || !msg.text) return;
@@ -581,8 +590,7 @@ export class SlackConnector extends MessagingConnector {
         return byEmail.login ?? null;
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[slack] user identity match failed for ${userId}: ${msg}`);
+      log.warn("User identity match failed", { userId, err });
     }
     return null;
   }

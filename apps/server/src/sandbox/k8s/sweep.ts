@@ -2,6 +2,9 @@ import { resolveKubernetesConfig } from "../../config/config.js";
 import { sweepSandboxes } from "../../cron/sandbox-sweep.js";
 import { makeK8sApis, type K8sApis } from "./client.js";
 import { reclaimSandbox } from "./reclaim.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("k8s");
 
 /**
  * The `kubernetes` backend's backstop sweep (Plan 5) — it runs in place of the
@@ -68,7 +71,6 @@ export async function sweepK8sSandboxes(opts: SweepK8sOpts): Promise<void> {
       maxIdlePVCs: opts.maxIdlePVCs,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[k8s] sweepK8sSandboxes: skipping PVC reclaim — ${message}`);
+    log.warn("sweepK8sSandboxes: skipping PVC reclaim", { err });
   }
 }

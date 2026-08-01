@@ -770,6 +770,17 @@ accepted as aliases for the `LASTLIGHT_*` forms below):
 Runtime:
 
 - `PORT` — webhook listener port (default 8644)
+- `LOG_LEVEL` — pino level for operational logs: `debug|info|warn|error|fatal`
+  (default `info`). Set `LOG_LEVEL=debug` to open up debug tracing.
+- `LOG_FORMAT` — `json|pretty` (default: auto — `pretty` when stderr is a TTY,
+  `json` otherwise, so k8s/prod gets JSON automatically without setting this).
+  **Log contract** (`src/logging/logger.ts`): operational logs are JSON lines
+  on **stderr** carrying a string `level`, plus `component`, `msg`, `err`,
+  `time`, and — inside an active OTel span — `trace_id`/`span_id`. The
+  cluster's Vector DaemonSet tails pod stderr and its `pod_level` transform
+  reads that JSON `level` straight into Loki's severity, instead of guessing
+  from plaintext. **stdout** is reserved for the sandbox's NDJSON event
+  protocol (agentic-pi's emitter) — never write operational logs there.
 - `LASTLIGHT_OVERLAY_DIR` — trusted deployment overlay root (docker-compose
   mounts `instance/` here as `/app/instance`). Layered over
   `config/default.yaml` for config + assets; secrets read from its `secrets/`

@@ -5,6 +5,27 @@ vi.mock("child_process", async (importOriginal) => {
   return { ...actual, execFileSync: vi.fn() };
 });
 
+// index.ts now logs via the pino LoggerPort instead of console — mock the
+// logger module so tests can inspect captured info/warn calls (and so the
+// suite's stderr stays free of real pino JSON) instead of spying on console.
+const { infoSpy, warnSpy } = vi.hoisted(() => ({ infoSpy: vi.fn(), warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: infoSpy,
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
+beforeEach(() => {
+  infoSpy.mockClear();
+  warnSpy.mockClear();
+});
+
 import { execFileSync } from "child_process";
 import {
   existsSync,
@@ -65,7 +86,6 @@ describe("prePopulateWorkspace token-leak protection", () => {
   });
 
   it("clones from a plain URL (no token embedded) and authenticates via -c extraheader", () => {
-    vi.spyOn(console, "log").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
     prePopulateWorkspace("/tmp/work", {
       owner: "cliftonc",
@@ -84,7 +104,6 @@ describe("prePopulateWorkspace token-leak protection", () => {
   });
 
   it("normalizes origin to a credential-free URL after cloning", () => {
-    vi.spyOn(console, "log").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
     prePopulateWorkspace("/tmp/work", {
       owner: "cliftonc", repo: "lastlight", branch: "opencode-fork", token: TOKEN,
@@ -97,7 +116,6 @@ describe("prePopulateWorkspace token-leak protection", () => {
   });
 
   it("does not leak the token into the success log line", () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
     prePopulateWorkspace("/tmp/work", {
       owner: "cliftonc",
@@ -105,12 +123,11 @@ describe("prePopulateWorkspace token-leak protection", () => {
       branch: "opencode-fork",
       token: TOKEN,
     });
-    const joined = logSpy.mock.calls.flat().join("\n");
+    const joined = infoSpy.mock.calls.flat().map((v) => JSON.stringify(v)).join("\n");
     expect(joined).not.toContain(TOKEN);
   });
 
   it("redacts the token AND its base64 from the warning when git clone fails", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // execFileSync surfaces command failures with an Error whose .message
     // echoes the full command — now the `-c http.extraheader=…: basic <b64>`
     // arg rather than an auth URL. Reproduce that shape.
@@ -131,7 +148,8 @@ describe("prePopulateWorkspace token-leak protection", () => {
     });
 
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    const logged = warnSpy.mock.calls[0].join(" ");
+    const [msg, fields] = warnSpy.mock.calls[0];
+    const logged = `${msg} ${JSON.stringify(fields)}`;
     expect(logged).not.toContain(TOKEN);
     expect(logged).not.toContain(b64);
     expect(logged).toContain("[REDACTED-AUTH]");
@@ -143,7 +161,6 @@ describe("prePopulateWorkspace token-leak protection", () => {
   it("tolerates a token with URL-unsafe characters (./ /+/=)", () => {
     // The old guard threw on these; GitHub can return them. The token now
     // rides base64 inside a `-c` arg, so any charset is fine.
-    vi.spyOn(console, "log").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
     const weird = "ghs_weird.tok/en+v=";
     prePopulateWorkspace("/tmp/work", {
@@ -165,8 +182,6 @@ describe("prePopulateWorkspace clone depth + per-PR reuse (issue #107)", () => {
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "ll-prepop-"));
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
   });
   afterEach(() => {
@@ -264,8 +279,6 @@ describe("prePopulateWorkspace base merge-base availability (pr-review diff)", (
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "ll-basemb-"));
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
   });
   afterEach(() => {
@@ -422,8 +435,6 @@ describe("prePopulateWorkspace recreate-from-base (build, issue #153)", () => {
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "ll-recreate-"));
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
   });
   afterEach(() => {

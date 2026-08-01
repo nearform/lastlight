@@ -2,6 +2,9 @@
  * Message delivery service for sending output to messaging platforms.
  * Used by cron jobs (health reports, alerts) and other async notifications.
  */
+import { logger } from "../../logging/logger.js";
+
+const log = logger("delivery");
 
 export type DeliveryTarget = (message: string) => Promise<void>;
 
@@ -11,7 +14,7 @@ export class MessageDeliveryService {
   /** Register a delivery target for a platform */
   register(platform: string, target: DeliveryTarget): void {
     this.targets.set(platform, target);
-    console.log(`[delivery] Registered target: ${platform}`);
+    log.info("Registered target", { platform });
   }
 
   /** Deliver a message to a specific platform, or all if none specified */
@@ -19,7 +22,7 @@ export class MessageDeliveryService {
     if (platform) {
       const target = this.targets.get(platform);
       if (!target) {
-        console.warn(`[delivery] No target registered for platform: ${platform}`);
+        log.warn("No target registered for platform", { platform });
         return;
       }
       await target(message);
@@ -31,7 +34,7 @@ export class MessageDeliveryService {
       try {
         await target(message);
       } catch (err) {
-        console.error(`[delivery] Failed to deliver to ${name}:`, err);
+        log.error("Failed to deliver", { target: name, err });
       }
     }
   }

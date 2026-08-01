@@ -26,6 +26,22 @@ vi.mock("crypto", async (importOriginal) => {
   };
 });
 
+// git-auth now logs via the pino LoggerPort instead of console — mock the
+// logger module so the "Mint granted" assertion below can inspect the
+// captured info-call fields instead of console output.
+const { infoSpy } = vi.hoisted(() => ({ infoSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: infoSpy,
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { execSync, execFileSync } from "child_process";
 import * as fs from "fs";
 import { configureGitAuth, refreshGitAuth } from "#src/engine/github/git-auth.js";
@@ -87,14 +103,13 @@ describe("git-auth — global ~/.gitconfig writes are opt-in", () => {
         }),
       }),
     );
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
     await refreshGitAuth({ ...baseConfig, repositories: ["private-repo-a"] });
 
-    const line = log.mock.calls.map((c) => String(c[0])).find((s) => s.includes("Mint granted"))!;
-    expect(line).toContain("repository_selection=selected");
-    expect(line).toContain('"issues":"write"');
-    expect(line).toContain("owner/private-repo-a");
-    log.mockRestore();
+    const call = infoSpy.mock.calls.find(([msg]) => msg === "Mint granted")!;
+    const fields = call[1] as Record<string, unknown>;
+    expect(fields.repositorySelection).toBe("selected");
+    expect(fields.permissions).toMatchObject({ issues: "write", pull_requests: "write", contents: "write" });
+    expect(fields.repositories).toBe("owner/private-repo-a");
   });
 });
 

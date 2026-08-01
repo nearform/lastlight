@@ -31,6 +31,21 @@ import {
 import { HOLD_LABEL, REQUIRES_HUMAN_LABEL } from "#src/cron/dependabot-discovery.js";
 import { defaultFixConfig } from "lastlight-shared/config-types";
 
+// pr-escalation.ts logs via the pino LoggerPort. Mock the logger so the
+// suite's stderr stays free of real pino JSON from the failure-path tests
+// below (createRun/addLabels/postComment rejections, etc).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 const BOT = "last-light[bot]";
 const REPO = "cliftonc/lastlight";
 const PR = 190;

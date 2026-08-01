@@ -56,6 +56,12 @@ import {
   PR_HEADREF_PREPOPULATE_WORKFLOWS,
   PR_FIX_SHAPED_WORKFLOWS,
 } from "./target-policy.js";
+import { logger } from "../logging/logger.js";
+
+const repoConfigLog = logger("repo-config");
+const simpleLog = logger("simple");
+const reapLog = logger("reap");
+const workflowLog = logger("workflow");
 
 // ---------------------------------------------------------------------------
 // Per-repository config layer (issue #180)
@@ -203,15 +209,14 @@ export async function resolveRepoRunConfig(
   } catch (err: unknown) {
     // `fetchRepoLayer` is documented never to reject; this is the belt to its
     // braces. A repo config problem must never be the thing that fails a run.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[repo-config] ${repo}: layer resolution failed (${msg}) — running with the operator config`);
+    repoConfigLog.warn("Layer resolution failed — running with the operator config", { repo, err });
     return {};
   }
   if (!layer) return {};
 
   const resolved = resolveRepoConfig(base, policy, layer);
   for (const warning of resolved.warnings) {
-    console.warn(`[repo-config] ${repo}: ${warning.message}`);
+    repoConfigLog.warn(warning.message, { repo });
   }
 
   // The repo opting ITSELF out of a workflow. Enforced here, next to the
@@ -401,8 +406,7 @@ async function repoLayerForTree(
   } catch (err: unknown) {
     // `fetchRepoLayer` is documented never to reject; belt to its braces. A
     // resume must never die because a repo's config couldn't be re-read.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[repo-config] ${repo}: could not restore the cached layer (${msg})`);
+    repoConfigLog.warn("Could not restore the cached layer", { repo, err });
     return undefined;
   }
 }
@@ -489,7 +493,7 @@ export async function restoreRepoRunConfig(
           `available — the default branch has moved on, or the cache was evicted. The rest of the run used ` +
           `the operator's prompts, skills and agent context.`,
       };
-      console.warn(`[repo-config] ${record.repo}: ${warning.message}`);
+      repoConfigLog.warn(warning.message, { repo: record.repo });
     }
   }
 
@@ -667,7 +671,7 @@ export function reapOnSuccess(workflowName: string, taskId: string, config: Exec
     });
     if (removed) {
       artifactStore.gc(taskId).catch((err: unknown) => {
-        console.warn(`[reap] artifact gc failed for ${taskId}:`, err);
+        reapLog.warn("Artifact gc failed", { taskId, err });
       });
     }
   } catch {
@@ -934,9 +938,7 @@ export async function runSimpleWorkflow(
   // creating a workflow_runs row. Returning success=true keeps callers
   // (router, cron tick, etc.) from treating this as an error.
   if (!db.isWorkflowEnabled(workflowName)) {
-    console.log(
-      `[workflow] skipped "${workflowName}" — disabled in admin dashboard`,
-    );
+    workflowLog.info("Skipped — disabled in admin dashboard", { workflowName });
     return { success: true, phases: [] };
   }
 
@@ -1108,7 +1110,7 @@ export async function runSimpleWorkflow(
       },
       startedAt: new Date().toISOString(),
     });
-    console.log(`[simple] Created workflow run ${workflowId} (${workflowName}) status=${runStatus}`);
+    simpleLog.info("Created workflow run", { workflowId, workflowName, status: runStatus });
     if (overCap) {
       // On k8s the cap is the runaway-loop sanity fuse (the ResourceQuota is the
       // real authority), not a tuned concurrency limit — word it accurately.
@@ -1147,8 +1149,7 @@ export async function runSimpleWorkflow(
   // stall the workflow.
   if (callbacks.onRunStart) {
     callbacks.onRunStart(workflowId).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[simple] onRunStart callback threw: ${msg}`);
+      simpleLog.warn("onRunStart callback threw", { err });
     });
   }
 
@@ -1174,8 +1175,7 @@ export async function runSimpleWorkflow(
       runUrl: runDashboardUrl(callbacks.publicUrl, workflowId, workflowName),
     });
     await callbacks.reporter.start(model).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[simple] reporter.start threw: ${msg}`);
+      simpleLog.warn("reporter.start threw", { err });
     });
   }
 
@@ -1362,9 +1362,10 @@ async function handleExistingRun(
   // Dedup: a duplicate trigger on an already-queued run must be a no-op.
   // Do NOT fall through to runWorkflow — that would execute it outside the cap.
   if (run.status === "queued") {
-    console.log(
-      `[simple] Duplicate trigger for queued run ${run.id} (${run.workflowName}) — returning queued dedup`,
-    );
+    simpleLog.info("Duplicate trigger for queued run — returning queued dedup", {
+      runId: run.id,
+      workflowName: run.workflowName,
+    });
     return { success: true, queued: true, phases: [] };
   }
 
@@ -1394,9 +1395,11 @@ async function handleExistingRun(
       // No currentPhase manipulation is needed — for an approve gate the
       // gated phase is already `done` so the runner proceeds past it; for a
       // reply gate the loop node resumes from `scratch.iteration`.
-      console.log(
-        `[simple] ${pendingApproval.kind === "reply" ? "Reply" : "Approval"} received for gate ${pendingApproval.gate} — resuming ${run.workflowName}`,
-      );
+      simpleLog.info("Gate response received — resuming", {
+        kind: pendingApproval.kind === "reply" ? "reply" : "approval",
+        gate: pendingApproval.gate,
+        workflowName: run.workflowName,
+      });
       db.runs.setRunning(run.id);
       if (pendingApproval.kind !== "reply") {
         await notify(`**Approval received** — resuming \`${run.workflowName}\`.`);
@@ -1417,8 +1420,10 @@ async function handleExistingRun(
   }
 
   // Normal resume — the runner's definition-driven resume takes over.
-  console.log(
-    `[simple] Resuming ${run.workflowName} for ${run.triggerId} (last phase: ${run.currentPhase})`,
-  );
+  simpleLog.info("Resuming", {
+    workflowName: run.workflowName,
+    triggerId: run.triggerId,
+    lastPhase: run.currentPhase,
+  });
   return null;
 }

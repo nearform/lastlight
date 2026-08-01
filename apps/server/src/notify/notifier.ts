@@ -22,6 +22,9 @@ import type {
   ProgressStep,
   StepStatus,
 } from "./types.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("notifier");
 
 export class ProgressNotifier implements ProgressReporter {
   private model: ProgressModel | null = null;
@@ -46,8 +49,7 @@ export class ProgressNotifier implements ProgressReporter {
     await Promise.all(
       this.transports.map((t) =>
         t.publish(body, model).catch((err: unknown) => {
-          const m = err instanceof Error ? err.message : String(err);
-          console.warn(`[notifier] publish failed: ${m}`);
+          log.warn("Publish failed", { err });
         }),
       ),
     );
@@ -97,8 +99,7 @@ export class ProgressNotifier implements ProgressReporter {
           // Rich surfaces render interactive controls; the rest post plain text.
           (t.noteApproval ? t.noteApproval(markdown, meta) : t.note(markdown)).catch(
             (err: unknown) => {
-              const m = err instanceof Error ? err.message : String(err);
-              console.warn(`[notifier] noteApproval failed: ${m}`);
+              log.warn("noteApproval failed", { err });
             },
           ),
         ),
@@ -116,8 +117,7 @@ export class ProgressNotifier implements ProgressReporter {
       await Promise.all(
         transports.map((t) =>
           t.note(markdown).catch((err: unknown) => {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[notifier] note failed: ${m}`);
+            log.warn("note failed", { err });
           }),
         ),
       );

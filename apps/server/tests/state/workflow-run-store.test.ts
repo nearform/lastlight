@@ -1,10 +1,25 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { StateDb } from "#src/state/db.js";
 import { migrate } from "#src/state/migrate.js";
 import { ApprovalStore } from "#src/state/approval-store.js";
 import { WorkflowRunStore } from "#src/state/workflow-run-store.js";
+
+// workflow-run-store.ts logs a throwing terminal observer via the pino
+// LoggerPort. Mock the logger so the suite's stderr stays free of real pino
+// JSON from the "a throwing observer never fails the transition" test below.
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
 
 let db: StateDb;
 

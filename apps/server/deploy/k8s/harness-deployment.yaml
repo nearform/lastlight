@@ -64,6 +64,7 @@ spec:
           env:
             - { name: LASTLIGHT_OVERLAY_DIR, value: /app/instance }
             - { name: STATE_DIR, value: /app/data }
+            - { name: LOG_LEVEL, value: info }
           resources:
             requests:
               cpu: "500m"

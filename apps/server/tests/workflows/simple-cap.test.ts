@@ -26,6 +26,22 @@ vi.mock("#src/engine/agent-executor.js", () => ({
   executeCommand: vi.fn(),
 }));
 
+// reapOnSuccess's underlying reapSandboxWorkspace (src/sandbox/reap.js) now
+// logs via the pino LoggerPort instead of console — mock the logger module
+// so the suite's stderr stays free of real pino JSON (no assertions here
+// depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { runSimpleWorkflow } from "#src/workflows/simple.js";
 import { StateDb } from "#src/state/db.js";
 import { runWorkflow } from "#src/workflows/runner.js";

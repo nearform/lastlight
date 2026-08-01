@@ -33,6 +33,25 @@ vi.mock("#src/sandbox/k8s/reclaim.js", () => ({
   reclaimSandbox: vi.fn(async () => ({ podsDeleted: 0, pvcsDeleted: 0 })),
 }));
 
+// The cancel route's workspace reap (src/sandbox/reap.js) — and now several
+// admin-route diagnostics (OAuth config/callback failures, cancel/retry/resume
+// failures) — log via the pino LoggerPort instead of console. Mock the logger
+// module so the suite's stderr stays free of real pino JSON, and expose
+// error/warn as named hoisted spies so the OAuth tests below can assert a
+// failure was logged (previously done via `vi.spyOn(console, ...)`).
+const { errorSpy, warnSpy } = vi.hoisted(() => ({ errorSpy: vi.fn(), warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: errorSpy,
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 // Pin the cron definitions the /crons routes resolve against, so the trigger
 // tests don't depend on the bundled workflows/cron-*.yaml fixture set. Other
 // loader exports (getWorkflow, listAgentWorkflows, …) pass through unchanged.
@@ -310,7 +329,7 @@ describe("GET /auth-required (GitHub OAuth)", () => {
   });
 
   it("returns githubOAuth: false when id+secret set but allowed org is missing", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    errorSpy.mockClear();
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
       githubOAuthClientId: "GH_CLIENT",
       githubOAuthClientSecret: "GH_SECRET",
@@ -318,8 +337,7 @@ describe("GET /auth-required (GitHub OAuth)", () => {
     const res = await request(app, "/auth-required");
     const body = await res.json() as { githubOAuth: boolean };
     expect(body.githubOAuth).toBe(false);
-    expect(errSpy).toHaveBeenCalled();
-    errSpy.mockRestore();
+    expect(errorSpy).toHaveBeenCalled();
   });
 });
 
@@ -331,14 +349,12 @@ describe("GET /oauth/github/authorize", () => {
   });
 
   it("returns 404 when id+secret set but allowed org is missing", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
       githubOAuthClientId: "GH_CLIENT",
       githubOAuthClientSecret: "GH_SECRET",
     }));
     const res = await request(app, "/oauth/github/authorize");
     expect(res.status).toBe(404);
-    errSpy.mockRestore();
   });
 
   it("redirects to GitHub when configured with an allowed org", async () => {
@@ -496,7 +512,7 @@ describe("GET /oauth/github/callback", () => {
 
   it("redirects to /admin/?error=github_org when membership returns 404 (not a member)", async () => {
     const originalFetch = global.fetch;
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnSpy.mockClear();
     global.fetch = mockGithubFetch({ userLogin: "alice", orgStatus: 404 });
 
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
@@ -513,14 +529,14 @@ describe("GET /oauth/github/callback", () => {
     const res = await app.fetch(req);
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/admin/?error=github_org");
+    expect(warnSpy).toHaveBeenCalled();
 
     global.fetch = originalFetch;
-    warnSpy.mockRestore();
   });
 
   it("redirects to /admin/?error=github_org when membership returns 302 (insufficient visibility)", async () => {
     const originalFetch = global.fetch;
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnSpy.mockClear();
     global.fetch = mockGithubFetch({ userLogin: "alice", orgStatus: 302 });
 
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
@@ -537,9 +553,9 @@ describe("GET /oauth/github/callback", () => {
     const res = await app.fetch(req);
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/admin/?error=github_org");
+    expect(warnSpy).toHaveBeenCalled();
 
     global.fetch = originalFetch;
-    warnSpy.mockRestore();
   });
 });
 

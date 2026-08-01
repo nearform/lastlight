@@ -1,5 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
 import { HELPER_MAX_TOKENS } from "#src/engine/llm.js";
+
+// classifier.ts now logs via the pino LoggerPort instead of console — mock the
+// logger module so the "falls back on error" assertions below can inspect the
+// captured error calls instead of console output.
+const { errorSpy } = vi.hoisted(() => ({ errorSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: errorSpy,
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
 import {
   buildClassifierPrompt,
   classifyComment,
@@ -148,16 +164,14 @@ describe("classifyComment — injected chat", () => {
 
   it("falls back to chat intent when chat rejects", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("network"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    errorSpy.mockClear();
     const r = await classifyComment("@last-light can you build this?", {}, { chat, defaultFastModel: () => "openai/test" });
     expect(r).toEqual({ intent: "chat" });
     expect(errorSpy).toHaveBeenCalled();
-    errorSpy.mockRestore();
   });
 
   it("with explain, surfaces the error in reason instead of a silent chat fallback", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("401 no api key"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const r = await classifyComment(
       "@last-light can you review this?",
       {},
@@ -166,7 +180,6 @@ describe("classifyComment — injected chat", () => {
     expect(r.intent).toBe("chat");
     expect(r.reason).toContain("classifier error");
     expect(r.reason).toContain("401 no api key");
-    errorSpy.mockRestore();
   });
 });
 
@@ -224,10 +237,9 @@ describe("classifyIssueIntent — injected chat", () => {
 
   it("defaults to false (work → triage) when chat rejects", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("network"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    errorSpy.mockClear();
     const r = await classifyIssueIntent("Anything", "body", { chat, defaultFastModel: () => "openai/test" });
     expect(r).toBe(false);
     expect(errorSpy).toHaveBeenCalled();
-    errorSpy.mockRestore();
   });
 });

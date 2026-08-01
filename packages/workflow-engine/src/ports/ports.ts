@@ -228,6 +228,32 @@ export interface ObservabilityPort {
   recordError(surface: string, error: unknown, attrs: Record<string, unknown>): void;
 }
 
+// ── LoggerPort — structured JSON logging ──────────────────────────────────────
+//
+// The engine's structured logging seam. The app owns the pino logger, so the
+// engine takes an injected logger port instead of importing a concrete logger.
+// The default adapter wraps the real logger; the test/no-op impl is silent.
+
+export interface LoggerPort {
+  debug(msg: string, fields?: Record<string, unknown>): void;
+  info(msg: string, fields?: Record<string, unknown>): void;
+  warn(msg: string, fields?: Record<string, unknown>): void;
+  error(msg: string, fields?: Record<string, unknown>): void;
+  fatal(msg: string, fields?: Record<string, unknown>): void;
+  child(component: string): LoggerPort;
+}
+
+export const noopLogger: LoggerPort = {
+  debug() {},
+  info() {},
+  warn() {},
+  error() {},
+  fatal() {},
+  child() {
+    return noopLogger;
+  },
+};
+
 // ── PhaseReporter — progress / notification surface ──────────────────────────
 
 export interface ReportStepOpts {
@@ -313,6 +339,7 @@ export interface EnginePorts {
   assets: AssetLoader;
   liveness: LivenessPort;
   observability: ObservabilityPort;
+  logger?: LoggerPort;
   /** Reviewer verdict-artifact fallback reader (see {@link VerdictArtifactReader}). */
   verdictReader?: VerdictArtifactReader;
   /** App-registered handlers for non-generic phase types (e.g. post-review). */

@@ -2,6 +2,9 @@ import { Readable } from "node:stream";
 import type { ReadableStream as NodeWebReadableStream } from "node:stream/web";
 import type { Hono } from "hono";
 import { ArtifactTooLarge, type ArtifactStore } from "../artifact-store.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("artifact-upload");
 
 /**
  * Mount the internal artifact-upload endpoint on the shared Hono app. A
@@ -32,9 +35,7 @@ export function mountArtifactUpload(app: Hono, store: ArtifactStore): void {
       if (err instanceof ArtifactTooLarge) return c.body(null, 413);
       // Never swallow the cause: surface it so a malformed bundle vs a broken
       // extraction is diagnosable in the harness log, not an opaque 400.
-      console.error(
-        `[artifact-upload] unpack failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
-      );
+      log.error("Unpack failed", { err });
       // traversal / malformed tar → 400
       return c.body(null, 400);
     }

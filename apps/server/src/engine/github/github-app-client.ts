@@ -2,6 +2,9 @@ import { createAppAuth } from "@octokit/auth-app";
 import { readFileSync } from "fs";
 import { Octokit } from "octokit";
 import { resolve } from "path";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("github-diag");
 
 export interface GitHubAppClientConfig {
   appId: string;
@@ -40,27 +43,32 @@ function installScopeDiagnostics(octokit: Octokit, appAuth: boolean): void {
       const headers =
         (error as { response?: { headers?: Record<string, string> } }).response?.headers ?? {};
       const accepted = headers["x-accepted-github-permissions"] ?? "(none)";
-      let scope = "";
+      let tokenRepositorySelection: string | undefined;
+      let tokenPermissions: string | undefined;
       if (appAuth) {
         try {
           const auth = (await octokit.auth({ type: "installation" })) as {
             repositorySelection?: string;
             permissions?: Record<string, string>;
           };
-          const perms = auth.permissions
+          tokenRepositorySelection = auth.repositorySelection ?? "?";
+          tokenPermissions = auth.permissions
             ? Object.entries(auth.permissions)
                 .map(([name, level]) => `${name}=${level}`)
                 .join(",")
             : "?";
-          scope = `; token repository_selection=${auth.repositorySelection ?? "?"}, permissions=${perms}`;
         } catch {
           // Introspection is best-effort — never mask the real request error.
         }
       }
-      console.warn(
-        `[github-diag] ${options.method} ${options.url} -> ${status}; ` +
-          `x-accepted-github-permissions=${accepted}${scope}`,
-      );
+      log.warn("Request denied by GitHub", {
+        method: options.method,
+        url: options.url,
+        status,
+        acceptedPermissions: accepted,
+        tokenRepositorySelection,
+        tokenPermissions,
+      });
     }
     throw error;
   });
