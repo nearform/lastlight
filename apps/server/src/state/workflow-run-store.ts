@@ -2,6 +2,30 @@ import type Database from "better-sqlite3";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
 
+/**
+ * Sort key that floats in-flight runs above everything else, ahead of the
+ * `started_at DESC` tiebreak.
+ *
+ * This is a PAGINATION correctness fix, not a cosmetic one. The dashboard's
+ * Live filter asks for `queued|running|paused`, and a cron fan-out enqueues a
+ * whole batch at once — 30-40 rows whose `started_at` is newer than any run
+ * currently executing. Ordered by date alone they filled the entire first page,
+ * so the running work sat on page 2; and because the list hides queued rows by
+ * default, the user saw an EMPTY Live tab while agents were mid-run. Sorting
+ * client-side cannot fix that: the rows it would reorder were never fetched.
+ *
+ * `running` leads `paused` because a paused run already has its own surface
+ * (the approval banner), so the top of the list is the place to see what is
+ * actually moving. Everything terminal shares the last bucket and stays purely
+ * chronological among itself, which is what the day/week ranges want.
+ */
+const ACTIVE_FIRST = `CASE status
+             WHEN 'running' THEN 0
+             WHEN 'paused'  THEN 1
+             WHEN 'queued'  THEN 2
+             ELSE 3
+           END`;
+
 export interface PhaseHistoryEntry {
   phase: string;
   timestamp: string;
@@ -444,7 +468,7 @@ export class WorkflowRunStore {
             GROUP BY workflow_run_id
          ) agg ON agg.workflow_run_id = workflow_runs.id
          ${whereClause}
-         ORDER BY started_at DESC
+         ORDER BY ${ACTIVE_FIRST}, started_at DESC
          LIMIT ? OFFSET ?`,
       )
       .all(...params, limit, offset) as Record<string, unknown>[];

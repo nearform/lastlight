@@ -824,3 +824,75 @@ describe("terminal run observer", () => {
     expect(db.runs.getRun(id)?.phaseHistory.at(-1)?.phase).toBe("complete");
   });
 });
+
+describe("list() ordering — in-flight runs float above the queue", () => {
+  /** Seed a run with an explicit start time so ordering is deterministic. */
+  const at = (status: string, minutesAgo: number) =>
+    makeRun({
+      status: status as Parameters<WorkflowRunStore["createRun"]>[0]["status"],
+      startedAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+    });
+
+  it("keeps a running run on page 1 when a cron fan-out floods the queue", () => {
+    // The reported bug: a batch of freshly-queued runs is NEWER than the work
+    // actually executing, so a date-only sort pushed the running run to page 2.
+    // The dashboard hides queued rows by default, so the Live tab rendered
+    // empty while an agent was mid-run.
+    const running = at("running", 30);
+    for (let i = 0; i < 40; i++) at("queued", 1);
+
+    const { runs, total } = db.runs.list({
+      limit: 20,
+      statuses: ["queued", "running", "paused"],
+    });
+
+    expect(total).toBe(41);
+    expect(runs[0]!.id).toBe(running);
+    expect(runs.filter((r) => r.status !== "queued")).toHaveLength(1);
+  });
+
+  it("orders running before paused before queued", () => {
+    // Dates deliberately run OPPOSITE to the wanted order — queued is newest,
+    // running oldest — so a date-only sort produces the exact reverse and this
+    // test can only pass on the status key.
+    const running = at("running", 3);
+    const paused = at("paused", 2);
+    const queued = at("queued", 1);
+
+    const { runs } = db.runs.list({ statuses: ["queued", "running", "paused"] });
+
+    expect(runs.map((r) => r.id)).toEqual([running, paused, queued]);
+  });
+
+  it("leaves terminal runs purely chronological — the day/week ranges are unchanged", () => {
+    const older = at("succeeded", 20);
+    const newer = at("failed", 10);
+    const newest = at("cancelled", 5);
+
+    const { runs } = db.runs.list();
+
+    expect(runs.map((r) => r.id)).toEqual([newest, newer, older]);
+  });
+
+  it("floats an in-flight run above terminal ones even in an unfiltered range", () => {
+    at("succeeded", 1);
+    const running = at("running", 90);
+
+    const { runs } = db.runs.list();
+
+    expect(runs[0]!.id).toBe(running);
+  });
+
+  it("paginates consistently — page 2 never repeats or drops a row", () => {
+    const running = at("running", 60);
+    for (let i = 0; i < 30; i++) at("queued", 30 - i);
+
+    const p1 = db.runs.list({ limit: 20, statuses: ["queued", "running", "paused"] });
+    const p2 = db.runs.list({ limit: 20, offset: 20, statuses: ["queued", "running", "paused"] });
+
+    expect(p1.runs[0]!.id).toBe(running);
+    const ids = [...p1.runs, ...p2.runs].map((r) => r.id);
+    expect(ids).toHaveLength(31);
+    expect(new Set(ids).size).toBe(31);
+  });
+});
