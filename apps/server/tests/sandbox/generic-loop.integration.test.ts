@@ -5,6 +5,7 @@ import { join } from "path";
 import type { AgentWorkflowDefinition } from "#src/workflows/schema.js";
 import type { TemplateContext } from "#src/workflows/templates.js";
 import type { ExecutorConfig } from "#src/engine/github/profiles.js";
+import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
 
 /**
  * The one genuinely new production runtime path in Phase 4: `generic_loop` +
@@ -13,7 +14,7 @@ import type { ExecutorConfig } from "#src/engine/github/profiles.js";
  * a sandbox against the persisted workspace.
  *
  * This test keeps the sandbox real and stubs only the AI: `executeAgent` is
- * mocked (it stands in for the fix agent and writes `.lastlight-verify.sh` the
+ * mocked (it stands in for the fix agent and writes `.git/lastlight-verify.sh` the
  * way the `fixing` skill instructs), while `executeCommand` — which backs
  * `runUntilBash` — is the real thing and executes inside a docker container.
  *
@@ -77,14 +78,20 @@ function dockerConfig(): ExecutorConfig {
   return { sandbox: "docker", stateDir, sessionsDir: join(stateDir, "agent-sessions") };
 }
 
-/** Host path of the workspace `until_bash` runs in (cwd, no pre-clone). */
+/**
+ * Host path of the workspace `until_bash` runs in (cwd, no pre-clone).
+ *
+ * The `.git/` dir is created because the gate lives inside it — the real
+ * article is a git checkout, where it always exists (see
+ * `src/engine/fix-scratch.ts`).
+ */
 function workspaceOf(taskId: string): string {
   const dir = join(stateDir, "sandboxes", taskId);
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(dir, ".git"), { recursive: true });
   return dir;
 }
 
-const GATE = "if [ -f .lastlight-verify.sh ]; then sh .lastlight-verify.sh; else echo 'no gate — RED'; exit 1; fi";
+const GATE = `if [ -f ${VERIFY_SCRIPT_NAME} ]; then sh ${VERIFY_SCRIPT_NAME}; else echo 'no gate — RED'; exit 1; fi`;
 
 const agentOk = (output: string) => ({ success: true, output, error: undefined, turns: 1, durationMs: 5 });
 
@@ -124,11 +131,11 @@ describe.skipIf(!RUN)("generic_loop + until_bash (integration)", () => {
     // it green. Exactly the shape the `fixing` skill describes, minus the AI.
     mockExecuteAgent
       .mockImplementationOnce(async () => {
-        writeFileSync(join(ws, ".lastlight-verify.sh"), "#!/bin/sh\necho gate-red\nexit 1\n");
+        writeFileSync(join(ws, VERIFY_SCRIPT_NAME), "#!/bin/sh\necho gate-red\nexit 1\n");
         return agentOk("attempt 1");
       })
       .mockImplementationOnce(async () => {
-        writeFileSync(join(ws, ".lastlight-verify.sh"), "#!/bin/sh\necho gate-green\nexit 0\n");
+        writeFileSync(join(ws, VERIFY_SCRIPT_NAME), "#!/bin/sh\necho gate-green\nexit 0\n");
         return agentOk("attempt 2");
       });
 
@@ -189,7 +196,7 @@ describe.skipIf(!RUN)("generic_loop + until_bash (integration)", () => {
     // A gate that would outlast BOTH the phase timeout and the 30s default, so
     // the elapsed time says which one was applied.
     mockExecuteAgent.mockImplementation(async () => {
-      writeFileSync(join(ws, ".lastlight-verify.sh"), "#!/bin/sh\nsleep 90\nexit 0\n");
+      writeFileSync(join(ws, VERIFY_SCRIPT_NAME), "#!/bin/sh\nsleep 90\nexit 0\n");
       return agentOk("wrote a slow gate");
     });
 

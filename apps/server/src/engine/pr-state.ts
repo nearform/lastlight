@@ -25,6 +25,7 @@ import type { WorkflowRun } from "../state/workflow-run-store.js";
 import type { GitHubClient } from "./github/github.js";
 import type { CiFailureReport } from "./github/github.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { prScopedWorkflows } from "../workflows/pr-scope.js";
 import { REQUIRES_HUMAN_LABEL } from "../cron/dependabot-discovery.js";
 import { readHarvestedMarkers, type HarvestedFixMarkers } from "./fix-harvest.js";
 import {
@@ -166,6 +167,22 @@ export interface PrState {
    * - `null` — not escalated.
    */
   escalatedBy: "us" | "human" | null;
+  /**
+   * Head SHA at which we told this PR's author we cannot fix a fork, or null.
+   *
+   * The dedup for the fork-PR notice, carried forward exactly as
+   * {@link escalatedAtSha} is — the same "the persisted record IS the
+   * de-duplication" property `pr-escalation.ts` documents, rather than an API
+   * scan asking "did we already comment".
+   *
+   * Unlike the escalation guard it is never invalidated by a later push, and
+   * that asymmetry is the point. An escalation says "this problem needs a
+   * human", which a new commit can make untrue; a fork notice says "your branch
+   * is not on this repo", which pushing to that same fork does not change. So
+   * the notice is once per PR, not once per head — a fork PR that gets ten
+   * pushes is one apology, not ten.
+   */
+  forkNoticedAtSha: string | null;
   /** One marker line per prior attempt, oldest first — rendered as `{{priorAttempts}}`. */
   priorAttempts: string[];
   /**
@@ -205,8 +222,32 @@ export interface PrState {
    * on the next event and put the label straight back.
    */
   priorDiagnosisClass: DiagnosisClass | null;
-  /** Cumulative USD across every fix-family run for this PR (`fix.maxCostUsd`). */
+  /**
+   * USD spent on THIS PROBLEM by the fix family (`fix.maxCostUsd`).
+   *
+   * Scoped to a problem, not to a PR — the same window {@link attempt} uses,
+   * and for the same reason. It was the PR's whole lifetime spend, which put it
+   * out of step with every other budget in the snapshot: a maintainer's push
+   * re-armed `attempt` and cleared the `escalated:` guard, then the very next
+   * check fell straight back through `budget-exhausted` and posted another
+   * `requires-human` comment — a comment whose own closing paragraph tells the
+   * maintainer that pushing is the remedy (#256).
+   *
+   * Computed as lifetime spend minus {@link costBaselineUsd}.
+   */
   cumulativeCostUsd: number;
+  /**
+   * Lifetime fix-family spend at the moment the current problem began — the
+   * offset {@link cumulativeCostUsd} is measured from.
+   *
+   * Carried forward while the problem is the same and re-stamped to the
+   * lifetime total when someone else's push makes it a fresh one, so the two
+   * fields together say "we have spent $X since the last human intervention"
+   * without a second store or a per-run cost column. Zero on a PR we have never
+   * worked, which makes `cumulative = lifetime` — the old behaviour, for the
+   * only case where the old behaviour was right.
+   */
+  costBaselineUsd: number;
   /**
    * Head SHA the most recent SUCCEEDED run of each PR-scoped workflow saw —
    * the "already assessed at this SHA" dedup, per workflow.
@@ -240,20 +281,13 @@ export interface PrState {
 /**
  * Every PR-scoped workflow — the span of the run lock (09 → S4).
  *
- * `db.executions.isRunning(handler, triggerId)` was supposed to be this guard
- * and is not: it keys on the WORKFLOW name while phase ledger rows are keyed
- * `"<workflow>:<phase>"`, and on the bare issue number while the ledger uses
- * `owner/repo#N`. So nothing has ever stopped an `@bot fix this` comment routed
- * to `pr-fix` running concurrently with a `fix-red-dependency-prs` dispatch of
- * `dependabot-ci-fix` — two agents, two clones of the same branch, both
- * pushing. It also closes the case where `dependabot-pr-merge` enables
- * auto-merge against a PR whose fix run is still in flight.
+ * Re-exported from `../workflows/pr-scope.ts`, which derives it from each
+ * workflow's own `pr_scoped: true` metadata rather than from a hardcoded list
+ * of four names the operator is free to route around. The argument for both the
+ * span and the derivation lives there; every reader inside the PR state machine
+ * reaches for it through this module.
  */
-export const PR_SCOPED_WORKFLOWS = new Set([
-  ...PR_FIX_SHAPED_WORKFLOWS,
-  "dependabot-pr-merge",
-  "pr-review",
-]);
+export { prScopedWorkflows } from "../workflows/pr-scope.js";
 
 /** The trigger id every PR-scoped run and ledger row is keyed by. */
 export function prTriggerId(repo: string, prNumber: number): string {
@@ -339,10 +373,12 @@ export async function resolvePrState(
     flakyDeferrals: 0,
     escalatedAtSha: null,
     escalatedBy: null,
+    forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
     priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
+    costBaselineUsd: 0,
     assessedHeadShaByWorkflow: {},
     runInFlight: null,
     readErrors,
@@ -451,14 +487,15 @@ export async function resolvePrState(
  */
 export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   const family = [...PR_FIX_SHAPED_WORKFLOWS];
+  const prScoped = [...prScopedWorkflows()];
   const triggerId = prTriggerId(state.repo, state.prNumber);
 
-  const inFlight = deps.db.runs.activeForTrigger([...PR_SCOPED_WORKFLOWS], triggerId);
+  const inFlight = deps.db.runs.activeForTrigger(prScoped, triggerId);
   state.runInFlight = inFlight ? { workflow: inFlight.workflowName, runId: inFlight.id } : null;
 
-  state.cumulativeCostUsd = deps.db.executions.costForTriggerWorkflows(triggerId, family);
+  const lifetimeCostUsd = deps.db.executions.costForTriggerWorkflows(triggerId, family);
 
-  const succeeded = deps.db.runs.latestSucceededForTriggers([...PR_SCOPED_WORKFLOWS], triggerId);
+  const succeeded = deps.db.runs.latestSucceededForTriggers(prScoped, triggerId);
   state.assessedHeadShaByWorkflow = {};
   for (const [name, run] of Object.entries(succeeded)) {
     const sha = priorPrState(run.context)?.headSha;
@@ -479,11 +516,34 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   // record, which has to answer "have we ever touched this PR at all" and would
   // get the wrong answer from the fix family alone. Falls back to the
   // fix-family row when there is no wider one.
-  const priorAny = deps.db.runs.latestForTrigger([...PR_SCOPED_WORKFLOWS], triggerId) ?? prior;
+  const priorAny = deps.db.runs.latestForTrigger(prScoped, triggerId) ?? prior;
   const priorAnyState = priorPrState(priorAny?.context);
 
   applyEscalationRecord(state, priorState, priorAny, priorAnyState);
   state.notes = deriveNotes(state, priorAny, priorAnyState);
+
+  // The fork-PR notice's dedup, carried forward off the WIDEST prior row for
+  // the same reason the escalation record is: `noticeForkPr` records under
+  // whichever workflow was dispatching. Never invalidated by a push — see the
+  // field's own doc.
+  state.forkNoticedAtSha =
+    (typeof priorState?.forkNoticedAtSha === "string" ? priorState.forkNoticedAtSha : null) ??
+    (typeof priorAnyState?.forkNoticedAtSha === "string" ? priorAnyState.forkNoticedAtSha : null);
+
+  // The cost WINDOW, on the same boundary the attempt counter uses. `sameProblem`
+  // is the whole definition: while it holds we carry the prior run's baseline,
+  // and when someone else pushes we re-stamp it to the lifetime total so the
+  // fresh problem starts at zero — which is exactly what makes a maintainer's
+  // push re-arm the budget the way it already re-armed the attempt counter.
+  const freshProblem = !sameProblem(state, priorState);
+  const priorBaseline =
+    typeof priorState?.costBaselineUsd === "number" ? priorState.costBaselineUsd : 0;
+  state.costBaselineUsd = freshProblem ? lifetimeCostUsd : priorBaseline;
+  // `max(0, …)` for the one case that can go negative: a run row written before
+  // this field existed carries no baseline, so a PR mid-flight at upgrade reads
+  // 0 and gets its full lifetime spend — correct — while a later re-stamp can
+  // only ever move the baseline forward.
+  state.cumulativeCostUsd = Math.max(0, lifetimeCostUsd - state.costBaselineUsd);
 
   const history = deriveAttemptHistory(
     state,
@@ -678,6 +738,12 @@ function deriveAttemptHistory(
  * True when the head is unchanged (we made no progress — covers `no-change`
  * and `gave-up`) or when WE authored the new head (our fix landed and CI is
  * still red). False only when someone else pushed.
+ *
+ * THE boundary of a problem, and read in two places on purpose: the attempt
+ * counter and {@link PrState.costBaselineUsd}. Those two are the pair of
+ * budgets `fix.maxAttempts` and `fix.maxCostUsd` bound, so a maintainer's push
+ * has to re-arm both or neither — re-arming only the counter is what let
+ * `budget-exhausted` re-comment on every push (#256).
  */
 function sameProblem(state: PrState, prior: PersistedPrState | null): boolean {
   const priorHead = typeof prior?.headSha === "string" ? prior.headSha : "";

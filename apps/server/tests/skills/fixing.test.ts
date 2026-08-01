@@ -12,6 +12,7 @@ import {
   renderPrNotes,
   type PrNote,
 } from "#src/engine/pr-notes.js";
+import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
 
 /** One prior note, for the prompt-render cases below. */
 const NOTE: PrNote = {
@@ -222,4 +223,103 @@ describe("fixing skill — the non-fixable classes gate the fix phase", () => {
       expect(joined).not.toContain(`'${cls}'`);
     }
   });
+});
+
+/**
+ * The four context keys `renderContext` projects for the fix loop, and the
+ * prompts that read them.
+ *
+ * All four were seeded onto every PR-scoped run's context and referenced by no
+ * prompt at all (#256), which cost two concrete things. On the promoted third
+ * run the agent got no signal that its `flaky` verdict would be ignored, so it
+ * diagnosed `flaky` again and the fix phase then ran against a diagnosis saying
+ * "change nothing". And `skills/fixing/SKILL.md` told the agent to say when the
+ * CI logs were unavailable — using a fact it was never handed.
+ *
+ * A projection nothing reads is indistinguishable from a projection that is
+ * broken, so these assert the render, not the presence of the key.
+ */
+describe("the fix loop's projected state reaches the agent", () => {
+  const FIX_PROMPTS = ["prompts/pr-fix.md", "prompts/dependabot-ci-fix.md"];
+  const base = {
+    owner: "acme", repo: "widgets", prNumber: 7, branch: "dependabot/npm/lodash",
+    baseBranch: "main", attempt: 3, maxAttempts: 3,
+    notesFile: PR_NOTES_FILE_NAME, verifyScript: VERIFY_SCRIPT_NAME,
+  };
+  const promoted = {
+    ...base, flakyPromoted: true, flakyDeferrals: 2, maxFlakyDeferrals: 2,
+  } as unknown as TemplateContext;
+  const notPromoted = {
+    ...base, flakyPromoted: false, flakyDeferrals: 1, maxFlakyDeferrals: 2,
+  } as unknown as TemplateContext;
+
+  it.each(["prompts/diagnose-ci.md", ...FIX_PROMPTS])(
+    "%s tells the agent when its `flaky` verdict will not be accepted",
+    (path) => {
+      const template = loadPromptTemplate(path);
+      const rendered = renderTemplate(template, promoted);
+      expect(rendered).toContain("2");
+      expect(rendered).toMatch(/flaky/);
+      // The counts are rendered from the projection, not hardcoded.
+      expect(template).toContain("{{flakyDeferrals}}");
+      expect(template).toContain("{{maxFlakyDeferrals}}");
+      // ...and the block is gone on every run that is NOT the promoted one,
+      // which is the common case.
+      expect(renderTemplate(template, notPromoted)).not.toContain("{{");
+    },
+  );
+
+  it("the diagnose prompt names the three honest alternatives on the promoted run", () => {
+    // The failure mode this closes is the agent repeating `flaky` because it has
+    // nothing else to say. Naming the alternatives is what makes the warning
+    // actionable rather than merely discouraging.
+    const rendered = renderTemplate(loadPromptTemplate("prompts/diagnose-ci.md"), promoted);
+    expect(rendered).toContain("infra-dependent");
+    expect(rendered).toContain("upstream-broken");
+  });
+
+  it("the diagnose prompt says so when the harness could not download the logs", () => {
+    const template = loadPromptTemplate("prompts/diagnose-ci.md");
+    const missing = renderTemplate(template, {
+      ...base, ciLogsAvailable: false, ciLogsUnavailable: true,
+    } as unknown as TemplateContext);
+
+    expect(missing).toContain("could not download the job logs");
+    // The instruction `skills/fixing/SKILL.md` gives, now backed by a fact.
+    expect(missing).toContain("`cause=`");
+    expect(missing).not.toContain("only when an excerpt is genuinely inconclusive");
+  });
+
+  it("keeps the ordinary log instruction when the logs ARE available", () => {
+    const present = renderTemplate(loadPromptTemplate("prompts/diagnose-ci.md"), {
+      ...base, ciLogsAvailable: true, ciLogsUnavailable: false,
+    } as unknown as TemplateContext);
+
+    expect(present).toContain("only when an excerpt is genuinely inconclusive");
+    expect(present).not.toContain("could not download the job logs");
+  });
+
+  it("says neither when there are no failing checks at all", () => {
+    // `ciLogsAvailable` is false on a green PR too — there is nothing to fetch.
+    // Branching on its negation would warn about a download that was never
+    // attempted, which is why `ciLogsUnavailable` is a separate projection.
+    const green = renderTemplate(loadPromptTemplate("prompts/diagnose-ci.md"), {
+      ...base, ciLogsAvailable: false, ciLogsUnavailable: false,
+    } as unknown as TemplateContext);
+
+    expect(green).not.toContain("could not download the job logs");
+    expect(green).not.toContain("only when an excerpt is genuinely inconclusive");
+  });
+
+  it.each(["prompts/diagnose-ci.md", ...FIX_PROMPTS])(
+    "%s reads the keys `renderContext` actually projects",
+    (path) => {
+      // The other half of the link: `pr-decisions.test.ts` asserts the
+      // projection produces these, and this asserts a prompt consumes them. A
+      // key projected and read by nothing is the defect being closed, and only
+      // both halves together rule it out.
+      const template = loadPromptTemplate(path);
+      expect(template).toContain("{{#if flakyPromoted}}");
+    },
+  );
 });

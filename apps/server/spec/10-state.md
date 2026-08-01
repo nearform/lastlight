@@ -169,7 +169,7 @@ without the marker having been emitted.
 **The journal rides the same hook.** The markers are the only thing an agent
 can leave behind *in its output*; the **PR journal** is the only thing it can
 leave behind by choosing to. It travels the workspace instead: the agent
-appends one line per note to `.lastlight-notes` in the checkout, and the same
+appends one line per note to `.git/lastlight-notes` in the checkout, and the same
 `onPhaseEnd` harvest drains the file — reading it and deleting it, so it is a
 per-phase outbox rather than an accumulator — into `scratch.fixMarkers.notes`,
 where the next dispatch folds it onto `PrState.notes`. One hook and one scratch
@@ -177,11 +177,26 @@ namespace on purpose: a second hook is a second thing to wire at three call
 sites and a second thing to forget at the fourth. Unlike the markers the
 journal is open to *every* PR-scoped workflow, gated on the run carrying a
 `context.prState` (which is precisely what makes a run PR-scoped), so
-`pr-review` reads what `dependabot-ci-fix` learned. The file lives at the root
-of the **checkout** on every backend and is registered in that checkout's
-`.git/info/exclude`, so it is never committed into the target repo — see
+`pr-review` reads what `dependabot-ci-fix` learned. The file lives inside the
+**checkout's own `.git/`** on every backend, which git never walks, so it cannot
+be committed into the target repo whatever the agent's `git add -A` does — see
 [Sandbox](/spec/09-sandbox). Bounds, kinds, staleness and the trust rules are
 in the [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
+
+**The push gate rides it too.** The fix loop's gate — `.git/lastlight-verify.sh`,
+written by the agent for itself — is *read* by the same harvest onto
+`scratch.fixMarkers.verifyScript` (bounded at 8 KiB, head kept), for the fix
+family only. A read, not a drain: unlike the journal this file is the live gate
+the next loop iteration runs, and removing it would disarm the loop the harvest
+is reporting on. The last non-null reading stands, since the gate is reset once
+per *attempt* rather than per phase. 09-state-machine.md §S1 calls this "the most
+useful debugging artifact in the fix loop": the gate is the one input to a fix
+run that nothing else records, the workspace is reset before the next attempt,
+and the script's contents are deliberately never validated — recording it is
+what lets a human see the problem instead of guessing at it. The admin run
+detail panel renders it beside the snapshot. Inert on the kubernetes backend,
+where the harness has no filesystem access to the PVC — the same narrowing the
+journal carries there.
 
 **The escalation row.** Almost every row here is created by
 `runSimpleWorkflow` and describes a run that executed. One is not: when the

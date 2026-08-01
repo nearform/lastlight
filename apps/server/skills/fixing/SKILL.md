@@ -19,8 +19,9 @@ test cycle to learn nothing. So you classify first and repair second.
 
 **1. Read the real failure.** Start from the structured CI report in your
 prompt. When an excerpt is inconclusive, pull the full job log with
-`github_get_job_logs`. If the report says logs were **unavailable**, say so in
-your verdict — do not invent a cause from an annotation that was truncated.
+`github_get_job_logs`. When the harness could not download the logs at all your
+prompt says so explicitly, and names the reason — say so in your verdict too,
+and do not invent a cause from an annotation that was truncated.
 
 **2. Read the CI definition.** `.github/workflows/*.yml` is already in the
 checkout (the harness pre-cloned the PR head). Extract, per failing job: runner
@@ -48,7 +49,7 @@ emitted the `DIAGNOSIS_COMPLETE` marker.
 |---|---|---|
 | `reproducible` | The same command fails here too | Fix it. Consumes an attempt. |
 | `env-mismatch` | Passes here, fails in CI on a version / OS / flag difference | Align to CI and re-verify. The repair is often config (engines, matrix, lockfile) rather than code. Consumes an attempt. |
-| `flaky` | A timeout or network blip, or the same job passed on a prior SHA | **Change nothing.** No fix phase runs; no attempt is consumed. |
+| `flaky` | A timeout or network blip, or the same job passed on a prior SHA | **Change nothing.** No fix phase runs; no attempt is consumed — *until the deferral cap, below*. |
 | `infra-dependent` | Needs secrets, a live service, a deployed backend, a browser | Cannot be fixed here. Escalate, naming the checks. |
 | `upstream-broken` | The base branch is red too | Not this PR's fault. Skipped without `requires-human` — it self-heals when the base goes green. |
 
@@ -61,6 +62,15 @@ Distinguishing `flaky` from `reproducible` is what `github_list_workflow_runs`
 is for: *did this same job pass on an earlier SHA of this branch?* Without that
 evidence, reserve `flaky` for an explicit timeout or network error in the log —
 a test that simply fails is `reproducible`.
+
+**`flaky` is bounded.** After `fix.maxFlakyDeferrals` consecutive `flaky`
+verdicts on one PR the harness stops accepting it and treats the next one as
+`reproducible`, running the fix phase anyway — a job that fails this
+consistently is not flaky, it is intermittently *really* failing. Your prompt
+says so plainly when you are on that run, so you never have to count. Repeating
+`flaky` there produces a repair attempt against a diagnosis that says "change
+nothing", which helps nobody: name the real difference, or take one of the two
+honest stops (`infra-dependent`, `upstream-broken`) with the evidence.
 
 `infra-dependent` is a property of the **check**, not of the PR. A PR whose unit
 tests are red *and* whose e2e suite needs a deployed backend is `reproducible`:
@@ -104,10 +114,12 @@ Four rules, all load-bearing — these lines are parsed:
 The markers carry a fixed schema. Anything you learn that has no field there is
 lost at the end of the phase — unless you write it to the journal.
 
-**Append one line per note to `.lastlight-notes` in the repo root** (your cwd,
-beside `package.json`). The harness reads and clears it after every phase and
-keeps the notes on the pull request, so a later attempt — and the reviewer, and
-the *other* fix workflow — sees what you left.
+**Append one line per note to `.git/lastlight-notes`** — a path relative to your
+cwd, which is the checkout. It sits inside the repository's own `.git/`
+directory, so git never sees it and it can never end up in your commit. The
+harness reads and clears it after every phase and keeps the notes on the pull
+request, so a later attempt — and the reviewer, and the *other* fix workflow —
+sees what you left.
 
 ```
 <kind>: <one line>
@@ -158,8 +170,8 @@ lint + typecheck, run per the **building** skill. If it is still red when you
 run out of iterations, emit `outcome=gave-up` and **do not push a speculative
 fix** — an unverified push costs a full CI cycle to prove nothing.
 
-**Write the gate command to `.lastlight-verify.sh` in the repo root** — your
-cwd, alongside `package.json`. The right command is whatever CI runs, with the
+**Write the gate command to `.git/lastlight-verify.sh`** — a path relative to
+your cwd, which is the checkout. The right command is whatever CI runs, with the
 package manager detected from the lockfile, so it is knowable only at runtime,
 by you. Exit 0 means green.
 
@@ -167,12 +179,12 @@ Three rules about that file:
 
 - **Write it first, before you start repairing.** The harness runs it after each
   fix iteration; with no script there is no gate, and no gate means no push.
-- **It is yours alone.** The harness deletes it and re-registers it in
-  `.git/info/exclude` at the start of every attempt, so it can never be
-  committed into the PR and a stale script from a superseded diagnosis can never
-  gate this one. Write it fresh; never assume one is already there. (The same is
-  true of `.lastlight-notes` — both are harness files, excluded from git on every
-  backend, and neither is ever part of your commit.)
+- **It is yours alone.** The harness deletes it at the start of every attempt, so
+  a stale script from a superseded diagnosis can never gate this one. Write it
+  fresh; never assume one is already there. (The same is true of
+  `.git/lastlight-notes`. Both live inside the repository's `.git/` directory,
+  which git does not track, so neither can ever be part of your commit — you do
+  not need to exclude or clean them up.)
 - **No gate is a RED gate.** If you did not write the script, or you could not
   run it, report `gate=skipped` — and treat that exactly as `gate=red`: it does
   **not** authorise a push. Only a script that actually exited 0 does.

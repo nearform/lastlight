@@ -122,6 +122,32 @@ export function slugify(text: string): string {
 }
 
 /**
+ * Walk a dotted key like `scratch.socratic.ready` through `ctx`, falling back
+ * to `ctx.phaseOutputs` for the first segment. Returns undefined on any
+ * missing intermediate.
+ *
+ * Exported because `{{a.b}}` is no longer the only reader of the context:
+ * `resolveTemplatedNumber` (./templated-number.ts) resolves a phase budget's
+ * `from:` path, and it must agree with what a prompt would render for the same
+ * key — one walk, not two.
+ */
+export function lookupContextKey(ctx: TemplateContext, key: string): unknown {
+  const parts = key.split(".");
+  if (parts.length === 1) {
+    const val = ctx[key];
+    if (val !== undefined && val !== null) return val;
+    return ctx.phaseOutputs?.[key];
+  }
+  let cur: unknown = ctx[parts[0]];
+  if (cur === undefined || cur === null) cur = ctx.phaseOutputs?.[parts[0]];
+  for (let i = 1; i < parts.length; i++) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[parts[i]];
+  }
+  return cur;
+}
+
+/**
  * Render a template string with the given context.
  * Processes: {{#if}}, {{slugify}}, {{branchUrl}}, {{varName}}.
  */
@@ -138,24 +164,7 @@ export function renderTemplate(template: string, ctx: TemplateContext): string {
     });
   }
 
-  // Walk a dotted key like `scratch.socratic.ready` through ctx, falling
-  // back to ctx.phaseOutputs for the first segment. Returns undefined on
-  // any missing intermediate.
-  const walkKey = (key: string): unknown => {
-    const parts = key.split(".");
-    if (parts.length === 1) {
-      const val = ctx[key];
-      if (val !== undefined && val !== null) return val;
-      return ctx.phaseOutputs?.[key];
-    }
-    let cur: unknown = ctx[parts[0]];
-    if (cur === undefined || cur === null) cur = ctx.phaseOutputs?.[parts[0]];
-    for (let i = 1; i < parts.length; i++) {
-      if (cur === null || typeof cur !== "object") return undefined;
-      cur = (cur as Record<string, unknown>)[parts[i]];
-    }
-    return cur;
-  };
+  const walkKey = (key: string): unknown => lookupContextKey(ctx, key);
 
   // 1. Conditional blocks: {{#if varName}}...{{/if}} (supports dot notation).
   //    Key segments allow hyphens so phase/model keys like `pr-fix` resolve

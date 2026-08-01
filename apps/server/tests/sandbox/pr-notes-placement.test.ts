@@ -1,26 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, existsSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import { sandboxFor, type SandboxFactoryOpts } from "#src/sandbox/sandbox.js";
 import { resetPrNotesJournal } from "#src/engine/executors/shared.js";
 import { PR_NOTES_FILE_NAME } from "#src/engine/pr-notes.js";
-import { VERIFY_SCRIPT_NAME } from "#src/engine/agent-executor.js";
 
 /**
- * Where the PR journal (`.lastlight-notes`) resolves, and why it can never be
- * committed into the target repo.
+ * Where the PR journal (`.git/lastlight-notes`) resolves.
  *
- * The placement question is the same one `.lastlight-verify.sh` answered
- * (`verify-gate.test.ts`), and it resolves the same way — the ROOT OF THE
- * CHECKOUT on every backend — for one hard reason and one soft one:
+ * The placement question is the same one `.git/lastlight-verify.sh` answered
+ * (`verify-gate.test.ts`), and it resolves the same way — inside the CHECKOUT's
+ * own `.git/` on every backend — for one hard reason and one soft one:
  *
  *   - **hard**: gondolin is the packaged default (`sandbox.backend: gondolin`)
  *     and mounts only cwd, so a workspace-root sibling reached via `../` is
  *     unreachable in the guest. A `../` journal would silently never be written
  *     on the default backend, which for a MEMORY feature is indistinguishable
- *     from "the agent had nothing to say".
+ *     from "the agent had nothing to say". `.git/` is inside cwd.
  *   - **soft**: one uniform path is what lets the prompt state a literal
  *     filename while the harvest resolves the same path off the run row without
  *     knowing the backend.
@@ -29,7 +27,8 @@ import { VERIFY_SCRIPT_NAME } from "#src/engine/agent-executor.js";
  * conditional on `buildAssets === "server"` AND a non-gondolin backend, whereas
  * the journal must be placed correctly on EVERY backend in EVERY `buildAssets`
  * mode — because unlike a build handoff doc, it must never end up in a
- * dependency PR.
+ * dependency PR. That it CANNOT is proved directly against git in
+ * `scratch-not-committable.test.ts`.
  */
 describe("the PR journal resolves under the checkout, not the workspace root", () => {
   function opts(): SandboxFactoryOpts {
@@ -70,43 +69,33 @@ describe("the PR journal resolves under the checkout, not the workspace root", (
   });
 });
 
-describe("the journal is never committable", () => {
+describe("the start-of-run reset", () => {
   function checkout(): string {
     const dir = mkdtempSync(join(tmpdir(), "notes-repo-"));
     mkdirSync(join(dir, ".git", "info"), { recursive: true });
     return dir;
   }
 
-  it("registers itself in the checkout's `.git/info/exclude`", () => {
-    // `.git/info/exclude` is the guarantee — not living outside the tree. It is
-    // inside `.git/`, so it is never tracked, committed or pushed, and it leaves
-    // the repo's own `.gitignore` alone.
-    const repo = checkout();
-    resetPrNotesJournal(repo);
-    const body = readFileSync(join(repo, ".git", "info", "exclude"), "utf8");
-    // The FILE form (`/x`), not the directory form (`/x/`) — a trailing slash
-    // would silently match nothing.
-    expect(body).toContain(`/${PR_NOTES_FILE_NAME}\n`);
-    expect(body).not.toContain(`/${PR_NOTES_FILE_NAME}/`);
-  });
-
   it("is idempotent, so every provisioning path may call it", () => {
     const repo = checkout();
+    writeFileSync(join(repo, PR_NOTES_FILE_NAME), "finding: from a run that died\n");
     resetPrNotesJournal(repo);
     resetPrNotesJournal(repo);
     resetPrNotesJournal(repo);
-    const body = readFileSync(join(repo, ".git", "info", "exclude"), "utf8");
-    expect(body.split("\n").filter((l) => l === `/${PR_NOTES_FILE_NAME}`)).toHaveLength(1);
+    expect(existsSync(join(repo, PR_NOTES_FILE_NAME))).toBe(false);
   });
 
-  it("coexists with the push gate's own exclusion", () => {
+  it("writes no `.git/info/exclude` line — placement is the guarantee now", () => {
+    // The journal lives under `.git/`, which git never walks, so there is
+    // nothing to exclude. Asserted rather than assumed because the exclude
+    // registration was the OLD guarantee, and the kubernetes backend never
+    // implemented it (#256) — a suppression every backend must remember is not
+    // a guarantee. `scratch-not-committable.test.ts` proves the property
+    // directly against git.
     const repo = checkout();
     resetPrNotesJournal(repo);
-    const body = readFileSync(join(repo, ".git", "info", "exclude"), "utf8");
-    expect(body).toContain(`/${PR_NOTES_FILE_NAME}\n`);
-    // The gate registers separately (`resetVerifyScript`); neither clobbers the
-    // other's line, which is what the append-if-absent shape buys.
-    expect(body).not.toContain(VERIFY_SCRIPT_NAME);
+    // Not even created — the reset touches nothing but the journal itself.
+    expect(existsSync(join(repo, ".git", "info", "exclude"))).toBe(false);
   });
 
   it("clears a journal a crashed earlier run left behind", () => {

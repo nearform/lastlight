@@ -30,7 +30,8 @@ import type { PrState } from "./pr-state.js";
 import { renderCiFailureReport } from "./github/github.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
 import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
-import { PR_NOTES_FILE_NAME, renderPrNotes } from "./pr-notes.js";
+import { renderPrNotes } from "./pr-notes.js";
+import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "./fix-scratch.js";
 
 /**
  * A skip that must be ESCALATED on the pull request — labelled `requires-human`
@@ -54,8 +55,9 @@ import { PR_NOTES_FILE_NAME, renderPrNotes } from "./pr-notes.js";
  *
  * The case is produced by the branch that decided, and travels on the
  * {@link Decision} beside the reason — so the applier switches on a typed field
- * rather than string-matching the reason prose (the same rule the fork-PR notice
- * already follows by keying on `state.isFork`).
+ * rather than string-matching the reason prose. Every other consequence follows
+ * the same rule: {@link Decision.runInFlight}, {@link Decision.readDegraded} and
+ * {@link Decision.forkPr} are each set by exactly the branch that decided them.
  */
 export type EscalationCase = "attempts-exhausted" | "budget-exhausted" | "not-retryable";
 
@@ -82,7 +84,7 @@ export interface Decision<T> {
    * comments nothing and writes no run row — and the caller keys on this typed
    * field rather than string-matching the reason prose, exactly as the
    * escalation applier keys on `escalation` and the fork notice on
-   * `state.isFork`. The one response it does earn is a REPLY when a human asked
+   * {@link Decision.forkPr}. The one response it does earn is a REPLY when a human asked
    * directly: a maintainer who is silently dropped will just ask again.
    *
    * Drop-and-reply (rather than queue) is only sound because every dropped case
@@ -103,6 +105,29 @@ export interface Decision<T> {
    * follows.
    */
   review?: ReviewTriggerDecision;
+  /**
+   * Set ONLY on a skip produced by {@link readDegradedDrop} — the PR read
+   * itself failed, so nothing below it was decided on facts.
+   *
+   * Like {@link runInFlight} and for the same reason: it is transient, not
+   * terminal, so it carries no {@link EscalationCase}, labels nothing, comments
+   * nothing and writes no run row. The caller keys on this typed field rather
+   * than on the reason prose.
+   */
+  readDegraded?: true;
+  /**
+   * Set ONLY on the `fork-pr` skip — the head branch lives on a repo we cannot
+   * push to, so there is nothing to clone or push.
+   *
+   * A typed field rather than the caller re-deriving it from `state.isFork`,
+   * which is what it used to do. Those are not the same predicate: `isFork` is
+   * true on EVERY skip a fork PR takes, so a fork PR dropped by the run lock, by
+   * a deferred review or by the head-SHA dedup each earned a fork-PR notice
+   * saying "I can't apply fixes to this PR" — an explanation of a decision that
+   * was not taken (#256). Only the branch that actually decided `fork-pr` sets
+   * this.
+   */
+  forkPr?: true;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +139,7 @@ export interface Decision<T> {
  *
  * The lock is PR-scoped across every PR-scoped workflow (`pr-fix`,
  * `dependabot-ci-fix`, `dependabot-pr-merge`, `pr-review`), and
- * `PR_SCOPED_WORKFLOWS` is exactly the union of the three dispositions below —
+ * `prScopedWorkflows()` is exactly the union of the three dispositions below —
  * so a guard that lives in one of them is a guard only one route obeys. It used
  * to: `resolveReviewTrigger` checked `runInFlight` and the two others did not,
  * while the dispatcher checked it inline for the webhook/comment route and
@@ -128,7 +153,7 @@ export interface Decision<T> {
  * That is worse than harmless duplication now that the fix family shares ONE
  * workspace per PR (`${repo}-${prNumber}-fix`): two runs `git fetch` +
  * `reset --hard` + `git clean -fdx` the same directory while an agent works in
- * it, and each rewrites the other's `.lastlight-verify.sh` gate.
+ * it, and each rewrites the other's `.git/lastlight-verify.sh` gate.
  *
  * It is checked FIRST in each disposition, before every other skip, because it
  * is the one skip that is purely transient. Ordering it after the escalating
@@ -136,6 +161,40 @@ export interface Decision<T> {
  * flight is still spending; ordering it after `explicitRequest` would let an
  * `@bot fix this` walk straight into the running agent's workspace.
  */
+/**
+ * "We could not read the pull request" — the one place {@link PrState.readErrors}
+ * is allowed to change an outcome.
+ *
+ * Every live read in `resolvePrState` is best-effort and degrades to a value
+ * that cannot cause a skip. That fail-open is load-bearing and stays: we would
+ * far rather re-run than silently drop a genuine event because GitHub had a bad
+ * minute. But `getPullRequest` is not like the others. It is the read that
+ * supplies `labels`, `isFork`, `isDraft`, `headSha` and `headRef` — the inputs
+ * to almost every guard below — and its degraded values are all the PERMISSIVE
+ * ones: `labels: []` so the `requires-human` hold does not apply, `isFork:
+ * false` so the fork guard does not apply, `headSha: ""` so the dedup does not
+ * apply. A 403 or 404 therefore produces a snapshot that looks perfectly
+ * healthy, and the cron route then dispatches a repo-write sandbox run against
+ * a pull request we know nothing about (#256).
+ *
+ * So this one read failing is a "come back later", not a verdict — the same
+ * shape as {@link runLockDrop}: no label, no comment, no run row, and the cron
+ * re-pickup is what makes dropping sound. Every OTHER read failing still
+ * fails open exactly as documented.
+ */
+function readDegradedDrop<T>(decision: T, state: PrState, inputs: Record<string, unknown>): Decision<T> | null {
+  const failed = state.readErrors.filter((e) => e.startsWith("getPullRequest"));
+  if (!failed.length) return null;
+  return {
+    decision,
+    reason:
+      `read-degraded: could not read the pull request (${failed.join("; ")}), so every guard below ` +
+      `would be evaluating defaults rather than facts`,
+    inputs: { ...inputs, readErrors: failed },
+    readDegraded: true,
+  };
+}
+
 function runLockDrop<T>(decision: T, state: PrState, inputs: Record<string, unknown>): Decision<T> | null {
   if (!state.runInFlight) return null;
   const { workflow, runId } = state.runInFlight;
@@ -293,6 +352,13 @@ export function resolveFixDisposition(
     explicitRequest: !!opts.explicitRequest,
   };
 
+  // We could not read the PR at all — see `readDegradedDrop`. Above even the
+  // run lock, because `runInFlight` is the one input below that does NOT come
+  // from the failed read: reporting "another run owns this PR" would be true
+  // but beside the point, and the honest answer is that we know nothing.
+  const blind = readDegradedDrop<FixDisposition>("skip", state, inputs);
+  if (blind) return blind;
+
   // The PR-scoped run lock, before anything else — see `runLockDrop`.
   const locked = runLockDrop<FixDisposition>("skip", state, inputs);
   if (locked) return locked;
@@ -306,6 +372,7 @@ export function resolveFixDisposition(
         `fork-pr: head ${state.headRepoFullName ?? "(deleted fork)"} is not on ${state.repo}, ` +
         `so there is nothing to clone or push to`,
       inputs,
+      forkPr: true,
     };
   }
 
@@ -533,6 +600,12 @@ export function resolveReviewTrigger(
     explicitRequest: !!opts.explicitRequest,
   };
 
+  // We could not read the PR at all — see `readDegradedDrop`. `skip`, not
+  // `defer`: a deferral posts a placeholder check saying "not yet" against a
+  // head SHA, and we do not reliably know the head SHA.
+  const blind = readDegradedDrop<ReviewTriggerDecision>("skip", state, inputs);
+  if (blind) return blind;
+
   // The PR-scoped run lock, before anything else — see `runLockDrop`. Above the
   // explicit-request branch on purpose: the lock is not policy but a physical
   // constraint (one workspace, one branch, one agent), so it is the one thing an
@@ -661,6 +734,13 @@ export function resolveMergeDisposition(
     explicitRequest: !!opts.explicitRequest,
   };
 
+  // We could not read the PR at all — see `readDegradedDrop`. It matters most
+  // on this route: `mergeable_state`, the labels and the fork flag all come
+  // from that read, and enabling auto-merge on a pull request we cannot see is
+  // the one irreversible thing this codebase does.
+  const blind = readDegradedDrop<FixDisposition>("skip", state, inputs);
+  if (blind) return blind;
+
   // The PR-scoped run lock, before anything else — see `runLockDrop`. This is
   // the branch that stops `merge-green-dependency-prs` enabling auto-merge
   // against a PR whose fix run is still in flight: the fix pushes, CI goes
@@ -744,7 +824,7 @@ export type DispatchDispositionOptions = FixDispositionOptions & ReviewTriggerOp
  * {@link reviewCheckPlacement}.
  *
  * The PR-scoped run lock is enforced inside each of the three, not here: the
- * lock's span (`PR_SCOPED_WORKFLOWS`) is exactly the union of the three
+ * lock's span (`prScopedWorkflows()`) is exactly the union of the three
  * branches, so the `ungated` fallback below is unreachable for a workflow the
  * lock covers — and a caller that reaches one of the dispositions directly
  * (`pr-escalation.ts`'s tests, the evals harness) gets the same answer as one
@@ -771,8 +851,11 @@ export function resolveDispatchDisposition(
       review: review.decision,
       // Carried through the collapse: a review dropped by the run lock is the
       // same kind of "come back later" as a fix dropped by it, and the caller
-      // owes the same reply to whoever asked.
+      // owes the same reply to whoever asked. `readDegraded` rides along for
+      // the same reason and one more — it is what stops the caller posting a
+      // placeholder check against a head SHA we could not read.
       ...(review.runInFlight ? { runInFlight: review.runInFlight } : {}),
+      ...(review.readDegraded ? { readDegraded: true as const } : {}),
     };
   }
   return {
@@ -848,6 +931,17 @@ export function renderContext(
         ? `CI FAILURES (from GitHub Actions — fix these first):\n${failedChecks}`
         : "",
     ciLogsAvailable: state.ciReport?.logsAvailable ?? false,
+    // The BRANCHABLE half of the same fact, and not simply the negation of the
+    // line above: `ciLogsAvailable` is false both when the log download failed
+    // AND when there is no CI report at all (nothing failing, nothing to
+    // fetch). A prompt branching on the negation would warn "the harness could
+    // not download the job logs" on a perfectly green PR. This is true only
+    // when we HAVE a report and its logs are missing — which is the case
+    // `skills/fixing/SKILL.md` tells the agent to name in its verdict, using a
+    // fact it was never handed until now (#256). The cause is already spoken by
+    // `renderCiFailureReport`'s banner inside `{{ciSection}}`, so it is not
+    // duplicated here.
+    ciLogsUnavailable: !!state.ciReport && !state.ciReport.logsAvailable,
 
     // Retry state. `maxAttempts` is rendered by all three fix prompts as
     // `{{#if maxAttempts}} of {{maxAttempts}}{{/if}}` and was simply never
@@ -868,11 +962,16 @@ export function renderContext(
     // are emitted by `renderPrNotes` itself rather than written into the
     // (forkable) prompt templates, so no fork can drop them.
     priorNotes: renderPrNotes(state.notes),
-    // Where the agent appends a new note. A template variable rather than a
-    // literal in each prompt so the placement stays resolvable in ONE place —
-    // it is a bare relative path because the agent's cwd is the checkout on
-    // every backend, which is the same reason `.lastlight-verify.sh` is one.
+    // Where the agent appends a new note, and where it writes the push gate.
+    // Template variables rather than literals in each prompt so both placements
+    // stay resolvable in ONE place; both are bare relative paths because the
+    // agent's cwd is the checkout on every backend, and both sit under `.git/`
+    // so no `git add -A` can commit them (see `engine/executors/shared.ts`).
+    // `until_bash` still carries the gate path as a literal — the engine's
+    // `validateShellCommand` rejects any command containing `{{` — and
+    // `tests/workflows/pr-fix.test.ts` pins that literal to this constant.
     notesFile: PR_NOTES_FILE_NAME,
+    verifyScript: VERIFY_SCRIPT_NAME,
 
     // Flaky-deferral state. The PROMOTION itself (a third consecutive `flaky`
     // is treated as `reproducible`, 09 → S1) is ACTED ON elsewhere —

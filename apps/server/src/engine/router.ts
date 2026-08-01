@@ -3,7 +3,7 @@ import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent, WELL_KNO
 import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getWorkflowByIntent } from "../workflows/loader.js";
-import { getRoutes, getBotName, getReviewConfig } from "../config/config.js";
+import { getRoutes, getBotName, getReviewConfig, type ReviewConfig } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
 import type { GitHubClient } from "./github/github.js";
 import { isDependencyPr } from "../cron/dependabot-discovery.js";
@@ -42,6 +42,73 @@ export interface RouterDeps {
    * comment classifies as normal.
    */
   github?: GitHubClient | null;
+  /**
+   * Resolve the target repo's `.lastlight/` POLICY layer — the SAME injected
+   * seam the dispatcher carries (`DispatchDeps.resolveRepoPolicy`), threaded
+   * one level up.
+   *
+   * Used by exactly one branch: `pr.labeled`, to learn a repo's own
+   * `review.requestLabel`. The router is otherwise deliberately operator-only,
+   * and that is the right default — routing is the operator's, and a router
+   * that resolves repo config on every event is a fetch per event.
+   *
+   * This one branch is different because the label route is the ONLY way a
+   * repo's `on-request` mode can actually be triggered (a GitHub App bot user
+   * cannot be picked in the reviewer dropdown), and the shipped operator
+   * default is `null` — so every `pr.labeled` event was dropped here before any
+   * repo layer was resolved, and a key documented as repo-settable on both doc
+   * surfaces did nothing (#256). The cost is one CACHED config resolution per
+   * `pr.labeled` event: `fetchRepoLayer` memoises per repo for 60 s, so it is a
+   * conditional request per repo per minute, far below the `resolvePrState`
+   * this branch's hard ignore exists to avoid.
+   *
+   * Omitted (chat-only wiring, tests) means "no repo layer" — the operator's
+   * value alone, which is exactly the old behaviour.
+   */
+  resolveRepoPolicy?: (
+    workflowName: string,
+    context: Record<string, unknown>,
+  ) => Promise<{ review?: Partial<ReviewConfig> } | undefined>;
+}
+
+/**
+ * Every label that requests a review for this PR — the operator's
+ * `review.requestLabel` plus the target repo's, when it sets one.
+ *
+ * A SET rather than one value, because both are legitimate: an operator's label
+ * is the deployment-wide affordance and a repo's is that repo's own, and
+ * honouring only one of them makes the other silently inert. The repo layer is
+ * add-only everywhere else in this codebase, and this is the same shape — a
+ * repo can name an ADDITIONAL label, never take the operator's away.
+ *
+ * Never throws and never blocks the route: the repo layer is best-effort
+ * everywhere it is read (`resolveRepoRunConfig` degrades to the operator config
+ * on a failed fetch), and a router that 500s because GitHub had a bad minute
+ * would drop the event entirely.
+ */
+async function reviewRequestLabels(
+  handler: string,
+  envelope: EventEnvelope,
+  deps: RouterDeps,
+): Promise<ReadonlySet<string>> {
+  const labels = new Set<string>();
+  const operator = getReviewConfig().requestLabel;
+  if (operator) labels.add(operator);
+  if (!deps.resolveRepoPolicy || !envelope.repo) return labels;
+  try {
+    const layer = await deps.resolveRepoPolicy(handler, {
+      repo: envelope.repo,
+      prNumber: envelope.prNumber,
+    });
+    const repoLabel = layer?.review?.requestLabel;
+    if (typeof repoLabel === "string" && repoLabel) labels.add(repoLabel);
+  } catch (err: unknown) {
+    console.warn(
+      `[router] Could not resolve ${envelope.repo}'s review.requestLabel ` +
+      `(${err instanceof Error ? err.message : String(err)}); using the operator's only.`,
+    );
+  }
+  return labels;
 }
 
 /** Friendly reply when a Slack/CLI command targets an unmanaged repo. */
@@ -251,8 +318,17 @@ export async function routeEvent(
       // label is dropped here rather than at the dispatch gate: this is the
       // router-level hard ignore `pr_review.submitted` below already models, and
       // it is what stops routine labelling costing a `resolvePrState` each time.
-      const requestLabel = getReviewConfig().requestLabel;
-      if (!requestLabel || envelope.addedLabel !== requestLabel) {
+      //
+      // The OPERATOR's label or the target REPO's, because either is a real
+      // request. Reading only the operator's made the key inert for repos: the
+      // shipped default is `null`, so every `pr.labeled` event was dropped right
+      // here, before any repo layer was resolved — while
+      // `resolveReviewTrigger` a level down happily honoured the repo's value
+      // for every OTHER route (#256). One cached resolution per label event
+      // buys the documented behaviour back; see `RouterDeps.resolveRepoPolicy`.
+      const handler = gh.pr_labeled || gh.pr_review || "pr-review";
+      const requestLabels = await reviewRequestLabels(handler, envelope, deps);
+      if (!envelope.addedLabel || !requestLabels.has(envelope.addedLabel)) {
         return {
           action: "ignore",
           reason: `label ${envelope.addedLabel ?? "(none)"} does not request a review`,
@@ -260,7 +336,7 @@ export async function routeEvent(
       }
       return {
         action: "handler",
-        handler: gh.pr_labeled || gh.pr_review || "pr-review",
+        handler,
         context: {
           _routeKey: "github.pr_labeled",
           repo: envelope.repo,

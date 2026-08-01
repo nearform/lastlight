@@ -130,9 +130,11 @@ differ.
   `.lastlight/lastlight.yml`, reported in the same `{ success: false }` shape as
   the unmanaged-repo guard. Only a context naming exactly one repo resolves a
   layer. See [Configuration](/spec/02-configuration).
-- **The PR state machine resolves at the same choke point.** For any workflow in
-  `PR_SCOPED_WORKFLOWS` (`pr-fix`, `dependabot-ci-fix`, `dependabot-pr-merge`,
-  `pr-review`), `dispatchWorkflow()` resolves one `PrState` snapshot per dispatch
+- **The PR state machine resolves at the same choke point.** For any workflow
+  declaring `pr_scoped: true` in its YAML (the packaged four are `pr-fix`,
+  `dependabot-ci-fix`, `dependabot-pr-merge` and `pr-review`;
+  `prScopedWorkflows()` in `src/workflows/pr-scope.ts` derives the set from that
+  metadata), `dispatchWorkflow()` resolves one `PrState` snapshot per dispatch
   (`resolvePrState`, `src/engine/pr-state.ts`) and decides whether to run from it
   by pure function (`src/engine/pr-decisions.ts`). The webhook route resolves it
   one level earlier — the dispatcher needs the run lock before it can decide to
@@ -149,11 +151,11 @@ differ.
   projection supplies the prompts' `{{ciSection}}` / `{{attempt}}` /
   `baseBranch`. Contract + rationale: the
   [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
-  One seam worth knowing: the dispatcher's copy of the gate reads the
-  **operator's** `fix` / `dependencies` / `review` blocks, because the repo layer
-  resolves a level down — and since a repo may only ever clamp them tighter, that
-  can only let through a run the repo would also have skipped a moment later,
-  never the reverse.
+  The dispatcher's copy of the gate resolves the **repo's** `fix` /
+  `dependencies` / `review` blocks first, through the same injected
+  `resolveRepoPolicy` seam (hitting the same 60 s cache `dispatchWorkflow` uses
+  one level down), so the gate and the prompt are never judging by different
+  budgets.
 - **HTTP server is provided by the GitHub webhook connector.** No
   standalone listener. The admin dashboard, `/api/run`, and `/api/build`
   all silently disappear if there is no GitHub App configured.

@@ -32,7 +32,14 @@ import { pretty } from "./ConfigPage";
  * and per-repo config views look like one feature.
  */
 
-const SECTIONS = ["models", "variants", "disabled", "approval"] as const;
+/**
+ * Sections rendered, in order. `fix` / `dependencies` / `review` are the
+ * policy blocks (issues #251, #252): the endpoint returned them with
+ * provenance from the day they shipped, but this list stopped at `approval`,
+ * so a repo's budgets were invisible on the one surface an operator uses to
+ * check them (#256).
+ */
+const SECTIONS = ["models", "variants", "disabled", "approval", "fix", "dependencies", "review"] as const;
 type Section = (typeof SECTIONS)[number];
 
 /** One row of the effective-config table. */
@@ -85,7 +92,11 @@ function toLeaves(data: RepoConfigBundle): Leaf[] {
 function renderValue(value: unknown): string {
   if (Array.isArray(value)) return value.length === 0 ? "—" : value.join(", ");
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (value === null || value === undefined) return "—";
+  // An explicit `null` is a VALUE in the policy blocks — `fix.maxCostUsd: null`
+  // is "no ceiling", `review.requestLabel: null` is "no label trigger" — so it
+  // must not render as the same em-dash an absent leaf gets.
+  if (value === null) return "null";
+  if (value === undefined) return "—";
   return String(value);
 }
 

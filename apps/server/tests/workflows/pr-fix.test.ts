@@ -4,6 +4,8 @@ import {
   CI_FIX_MARKER_POSTCONDITION,
   DIAGNOSIS_MARKER_POSTCONDITION,
 } from "#src/engine/fix-markers.js";
+import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
+import { defaultFixConfig } from "lastlight-shared";
 
 /**
  * Contract test for the built-in pr-fix workflow. It carries the same
@@ -80,18 +82,30 @@ describe.each(["pr-fix", "dependabot-ci-fix"])("%s — the local push gate", (na
   const fix = getWorkflow(name).phases.find((p) => p.name === "fix")!;
 
   it("declares the gate loop with a persistent context", () => {
-    expect(fix.generic_loop?.max_iterations).toBe(2); // = fix.localIterations
     expect(fix.generic_loop?.fresh_context).toBe(false); // iteration 2 sees iteration 1
     expect(fix.generic_loop?.until).toBeUndefined(); // the SCRIPT is the gate, not prose
   });
 
-  it("carries an explicit, generous timeout_seconds", () => {
-    // `runUntilBash` falls back to `phase.timeout_seconds ?? 30`, and 30s kills
-    // a real test suite mid-run and reports a false red. The value tracks
-    // `fix.gateTimeoutSeconds` in config/default.yaml, which cannot be
-    // templated in (the schema parses a plain number).
-    expect(fix.timeout_seconds).toBe(900);
-    expect(fix.timeout_seconds).toBeGreaterThan(30);
+  it("reads both loop budgets from the run's effective fix config", () => {
+    // The keys were parsed, clamped per repo, CLI-displayed and read by
+    // NOTHING (#256): the operative numbers were these two literals, and the
+    // YAML comments asked a human to keep them in step. Now the literal is the
+    // FALLBACK and the config block is the value, so a repo that lowered its
+    // own budget is honoured and the admin panel stops reporting a bound the
+    // loop is not held to.
+    const defaults = defaultFixConfig();
+    expect(fix.generic_loop?.max_iterations).toEqual({
+      from: "fix.localIterations",
+      default: defaults.localIterations,
+    });
+    expect(fix.timeout_seconds).toEqual({
+      from: "fix.gateTimeoutSeconds",
+      default: defaults.gateTimeoutSeconds,
+    });
+    // `runUntilBash` falls back to `?? 30`, and 30s kills a real test suite
+    // mid-run and reports a false red — so the fallback must stay generous
+    // even if the reference never resolves.
+    expect(defaults.gateTimeoutSeconds).toBeGreaterThan(30);
   });
 
   it("keeps the CI_FIX_COMPLETE postcondition on the looped phase", () => {
@@ -109,14 +123,19 @@ describe.each(["pr-fix", "dependabot-ci-fix"])("%s — the local push gate", (na
     // workspace-root gate is unreachable in the guest. cwd is the checkout on
     // every backend, so a bare relative path is the one form that works.
     expect(cmd).not.toContain("../");
-    expect(cmd).toContain(".lastlight-verify.sh");
+    // Pinned to the constant, since that is the only reason the YAML literal
+    // and the harness's delete agree on a path.
+    expect(cmd).toContain(VERIFY_SCRIPT_NAME);
+    // And under `.git/`, which is what makes `git add -A` unable to commit it
+    // on every backend rather than only the ones that remembered to exclude it.
+    expect(VERIFY_SCRIPT_NAME.startsWith(".git/")).toBe(true);
   });
 
   it("treats a missing gate script as an explicit red, not an accident of exit codes", () => {
     const cmd = fix.generic_loop!.until_bash!;
     // The `else` branch is the point: no script ⇒ `gate=skipped` ⇒ RED ⇒ the
     // loop continues and nothing authorises a push.
-    expect(cmd).toMatch(/if \[ -f \.lastlight-verify\.sh \]/);
+    expect(cmd).toContain(`if [ -f ${VERIFY_SCRIPT_NAME} ]`);
     expect(cmd).toMatch(/else\b[\s\S]*exit 1/);
   });
 });

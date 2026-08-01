@@ -68,7 +68,7 @@ function gatedLoopWorkflow(maxIterations = 2): AgentWorkflowDefinition {
         },
         generic_loop: {
           max_iterations: maxIterations,
-          until_bash: "if [ -f .lastlight-verify.sh ]; then sh .lastlight-verify.sh; else exit 1; fi",
+          until_bash: "if [ -f .git/lastlight-verify.sh ]; then sh .git/lastlight-verify.sh; else exit 1; fi",
           interactive: false,
           fresh_context: false,
         },

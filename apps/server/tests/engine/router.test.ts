@@ -201,6 +201,73 @@ describe('routeEvent — the Phase 7 review signals', () => {
     expect(result.action).toBe('ignore');
   });
 
+  it("routes a REPO's own request label, even when the operator sets none", async () => {
+    // The shipped operator default is `null`, so reading only the operator's
+    // value dropped every `pr.labeled` event right here — before any repo layer
+    // was resolved — and made a key documented as repo-settable on both doc
+    // surfaces do nothing (#256).
+    const resolveRepoPolicy = vi.fn().mockResolvedValue({
+      review: { requestLabel: 'please-review' },
+    });
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'please-review' }),
+      { resolveRepoPolicy },
+    );
+
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') expect(result.handler).toBe('pr-review');
+    expect(resolveRepoPolicy).toHaveBeenCalledWith(
+      'pr-review',
+      expect.objectContaining({ repo: 'cliftonc/drizzle-cube', prNumber: 5 }),
+    );
+  });
+
+  it("honours the operator's label AND the repo's — a repo may add, never remove", async () => {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      review: { postsCheck: false, trigger: 'on-request', requestLabel: 'lastlight:review', skipDraft: true },
+    } as unknown as LastLightConfig);
+    const resolveRepoPolicy = vi.fn().mockResolvedValue({
+      review: { requestLabel: 'please-review' },
+    });
+
+    for (const label of ['lastlight:review', 'please-review']) {
+      const result = await routeEvent(
+        makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: label }),
+        { resolveRepoPolicy },
+      );
+      expect(result.action).toBe('handler');
+    }
+  });
+
+  it('still ignores every OTHER label once the repo layer is in play', async () => {
+    const resolveRepoPolicy = vi.fn().mockResolvedValue({
+      review: { requestLabel: 'please-review' },
+    });
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'bug' }),
+      { resolveRepoPolicy },
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it("falls back to the operator's label when the repo layer cannot be read", async () => {
+    // Best-effort everywhere else it is read; a router that throws because
+    // GitHub had a bad minute drops the event entirely.
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      review: { postsCheck: false, trigger: 'on-request', requestLabel: 'lastlight:review', skipDraft: true },
+    } as unknown as LastLightConfig);
+    const resolveRepoPolicy = vi.fn().mockRejectedValue(new Error('502 Bad Gateway'));
+
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.labeled', prNumber: 5, addedLabel: 'lastlight:review' }),
+      { resolveRepoPolicy },
+    );
+
+    expect(result.action).toBe('handler');
+  });
+
   it('routes a review requested from US to pr-review', async () => {
     const result = await routeEvent(
       makeEnvelope({ type: 'pr.review_requested', prNumber: 5, requestedReviewer: 'last-light[bot]' }),

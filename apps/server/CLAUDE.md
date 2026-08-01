@@ -152,8 +152,10 @@ src/
     pr-state.ts         The PR state machine: `resolvePrState()` — ONE
                         snapshot per dispatch of everything we know about a
                         PR (live GitHub facts + facts derived from our own
-                        run history, keyed on the PR), plus
-                        PR_SCOPED_WORKFLOWS, the span of the run lock.
+                        run history, keyed on the PR). The span of the run
+                        lock is `prScopedWorkflows()` in
+                        workflows/pr-scope.ts, derived from each workflow's
+                        own `pr_scoped: true` YAML key.
                         Resolved at the dispatchWorkflow choke point and
                         persisted on `context.prState`. Never throws: every
                         read is best-effort and degrades to a value that
@@ -167,6 +169,24 @@ src/
                         one string (`{{priorNotes}}`), and a note containing
                         `class=` or a marker tag is rejected on ingest.
                         Impure half lives in `fix-harvest.ts` (the drain).
+    fix-scratch.ts      The two files the harness owns inside a PR checkout
+                        — the fix loop's push gate
+                        (.git/lastlight-verify.sh) and the PR journal
+                        (.git/lastlight-notes) — and the one argument that
+                        places both. They live under `.git/`, which git never
+                        walks, so `git add -A` cannot commit them on ANY
+                        backend and nothing has to be registered anywhere
+                        (issue #256: the k8s backend never wrote the
+                        `.git/info/exclude` line the old placement relied on,
+                        and committed them into the PR).
+    fix-harvest.ts      The impure half of the two above: after every phase it
+                        parses the marker lines out of the output, DRAINS the
+                        journal, and READS the push gate onto
+                        `scratch.fixMarkers` — the gate is a read, not a drain,
+                        because it is the live gate the next loop iteration
+                        runs. The recorded script is the fix loop's main
+                        debugging artifact (09 §S1) and the admin run detail
+                        panel renders it beside the snapshot.
     pr-escalation.ts    What a TERMINAL skip does to the PR: applies
                         requires-human + one comment naming the case, the
                         attempts spent and each attempt's class/cause — and
@@ -514,10 +534,11 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     powers the dashboard's per-repo **Config** tab; the CLI side is
     `lastlight repo fork` / `repo config validate` / `repo config show`
     (see `packages/cli/CLAUDE.md`). Full contract: `spec/02-configuration.md`.
-    **Known gap:** the dashboard hand-mirrors `RepoMergedConfig` /
-    `RepoConfigSources` in `dashboard/src/api.ts` (no import edge to core) and
-    those copies don't carry `fix` / `dependencies` / `review` yet, so the tab
-    doesn't render them even though the endpoint returns them with provenance.
+    The dashboard hand-mirrors `RepoMergedConfig` / `RepoConfigSources` in
+    `dashboard/src/api.ts` (no import edge to core); the copies drifted once and
+    hid the three policy blocks for a release, so
+    `tests/admin/dashboard-config-mirror.test.ts` now pins the mirror and the
+    tab's section list against the real type.
 - **Two execution modes**:
   - **Sandbox** — workflow phases run inside a Docker sandbox
     (`src/sandbox`) with a minted per-run GitHub token. Each phase invokes

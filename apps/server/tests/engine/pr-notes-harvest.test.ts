@@ -25,6 +25,7 @@ import {
   readHarvestedMarkers,
 } from "#src/engine/fix-harvest.js";
 import { MAX_PR_NOTES, PR_NOTES_FILE_NAME } from "#src/engine/pr-notes.js";
+import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
 import { renderContext } from "#src/engine/pr-decisions.js";
 
 const BOT = "last-light[bot]";
@@ -36,7 +37,10 @@ let repoDir: string;
 beforeEach(() => {
   workspace = mkdtempSync(join(tmpdir(), "pr-notes-"));
   repoDir = join(workspace, "lastlight");
-  mkdirSync(repoDir, { recursive: true });
+  // The journal lives at `<repo>/.git/lastlight-notes` — inside the repository
+  // dir git never walks (`src/engine/fix-scratch.ts`), so the fixture needs a
+  // `.git/` exactly as a real checkout has one.
+  mkdirSync(join(repoDir, ".git"), { recursive: true });
 });
 
 afterEach(() => {
@@ -72,10 +76,12 @@ function liveState(over: Partial<PrState> = {}): PrState {
     flakyDeferrals: 0,
     escalatedAtSha: null,
     escalatedBy: null,
+    forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
     priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
+    costBaselineUsd: 0,
     assessedHeadShaByWorkflow: {},
     runInFlight: null,
     readErrors: [],
@@ -432,5 +438,102 @@ describe("notes inform, never authorise", () => {
 
   it("exposes the journal path to the prompts as a populated variable", () => {
     expect(renderContext(liveState()).notesFile).toBe(PR_NOTES_FILE_NAME);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The recorded push gate (09-state-machine.md §S1, item 1)
+// ---------------------------------------------------------------------------
+
+/** What the agent does: write the gate script into its cwd. */
+function agentWritesGate(body: string): void {
+  writeFileSync(join(repoDir, VERIFY_SCRIPT_NAME), body);
+}
+
+/**
+ * The gate is a file the agent writes FOR ITSELF and `until_bash` only reads
+ * its exit code. 09 §S1 accepts that (real CI is always the merge authority,
+ * so a weak gate costs an attempt, never a bad merge) on ONE condition: that
+ * the script is inspectable afterwards. It wasn't — the workspace is reset at
+ * the start of the next attempt and the evidence went with it.
+ */
+describe("the recorded push gate", () => {
+  it("records the script the agent actually wrote", () => {
+    const h = harness();
+    const run = h.dispatch();
+    agentWritesGate("#!/bin/sh\nnpm ci && npm test\n");
+    h.finish(run.id, "fix_iter_1");
+
+    expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toBe("#!/bin/sh\nnpm ci && npm test\n");
+  });
+
+  it("READS it — the drain would disarm the loop it is reporting on", () => {
+    // Unlike the journal, this file is the live gate the NEXT iteration runs.
+    // Removing it at the end of every phase would turn iteration 2 into
+    // `gate=skipped`, which is treated as red.
+    const h = harness();
+    const run = h.dispatch();
+    agentWritesGate("#!/bin/sh\nnpm test\n");
+    h.finish(run.id, "fix_iter_1");
+
+    expect(existsSync(join(repoDir, VERIFY_SCRIPT_NAME))).toBe(true);
+  });
+
+  it("keeps the last gate it saw when a later phase can't reach the workspace", () => {
+    // The reset happens once per ATTEMPT, not per phase, so a phase that
+    // records nothing must not blank the gate an earlier phase recorded — on
+    // kubernetes that is every phase (no host access to the PVC).
+    const h = harness();
+    const run = h.dispatch();
+    agentWritesGate("#!/bin/sh\npnpm build\n");
+    h.finish(run.id, "fix_iter_1");
+    rmSync(join(repoDir, VERIFY_SCRIPT_NAME));
+    h.finish(run.id, "fix_iter_2");
+
+    expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toContain("pnpm build");
+  });
+
+  it("supersedes it when a later phase rewrote the gate", () => {
+    const h = harness();
+    const run = h.dispatch();
+    agentWritesGate("#!/bin/sh\nexit 0\n");
+    h.finish(run.id, "fix_iter_1");
+    agentWritesGate("#!/bin/sh\nnpm test -- --run\n");
+    h.finish(run.id, "fix_iter_2");
+
+    expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toBe("#!/bin/sh\nnpm test -- --run\n");
+  });
+
+  it("bounds a runaway script instead of pulling it into the harness", () => {
+    const h = harness();
+    const run = h.dispatch();
+    agentWritesGate(`#!/bin/sh\n${"echo x\n".repeat(20_000)}`);
+    h.finish(run.id, "fix_iter_1");
+
+    const recorded = readHarvestedMarkers(h.rows[0])?.verifyScript ?? "";
+    expect(recorded.length).toBeLessThan(10 * 1024);
+    expect(recorded).toContain("truncated");
+    // The HEAD is kept: a shell script is read top-down.
+    expect(recorded.startsWith("#!/bin/sh")).toBe(true);
+  });
+
+  it("is null on a run that wrote no gate", () => {
+    const h = harness();
+    const run = h.dispatch();
+    h.finish(run.id, "diagnose", diagnosis("reproducible"));
+
+    expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toBeNull();
+  });
+
+  it("is not recorded for a PR-scoped run outside the fix family", () => {
+    // `pr-review` shares the PR and the journal, but it writes no gate — a
+    // script in its workspace would be a leftover, not evidence about it.
+    const h = harness();
+    const run = h.dispatch({}, "pr-review");
+    agentWritesGate("#!/bin/sh\nnpm test\n");
+    agentWrites("finding: the diff looks fine");
+    h.finish(run.id, "review");
+
+    expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toBeNull();
   });
 });

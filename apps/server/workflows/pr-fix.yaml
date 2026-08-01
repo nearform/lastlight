@@ -1,5 +1,12 @@
 kind: pr-fix
 name: pr-fix
+# PR-scoped (09-state-machine.md §S1/§S4): this workflow runs against a pull
+# request, so it crosses the PR-scoped dispatch gate — the run lock shared with
+# every other PR-scoped workflow, the per-head-SHA dedup, escalation, and the
+# resolved `PrState` snapshot on `context.prState`. A fork of this workflow that
+# drops the key silently loses all four; `validateAssets` warns when a
+# `routes.github.pr_*` target is missing it.
+pr_scoped: true
 description: "Lightweight PR fix — no architect/reviewer, just fix and push"
 trigger: pr-fix
 # Single in-place task-list comment/message instead of a comment per phase.
@@ -65,25 +72,26 @@ phases:
       - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
     # Load-bearing, not cosmetic: `runUntilBash` defaults to
     # `timeout_seconds ?? 30`, and thirty seconds kills any real test suite
-    # mid-run and reports a false red. Mirrors `fix.gateTimeoutSeconds` (900) in
-    # config/default.yaml — the schema parses this as a plain number, so it
-    # can't be templated; keep the two in step by hand.
-    timeout_seconds: 900
+    # mid-run and reports a false red. READ from `fix.gateTimeoutSeconds` — the
+    # run's effective, repo-clamped config block — with the packaged value as
+    # the fallback for a context that carries no `fix:` at all (#256). The two
+    # no longer have to be kept in step by hand.
+    timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
     # The tag WITH its colon — see the `diagnose` phase above.
     on_output:
       requires_marker: "CI_FIX_COMPLETE:"
     # The within-run local gate loop (04-retry.md §4.5). The gate command isn't
     # statically knowable — package manager from the lockfile, commands from the
     # repo's CI workflow — so the `fixing` skill has the agent write it to
-    # `.lastlight-verify.sh` at the repo root (excluded from git by the harness,
-    # and deleted at the start of every attempt so a superseded diagnosis can't
-    # gate this one). No script yet ⇒ an EXPLICIT non-zero exit: `gate=skipped`
+    # `.git/lastlight-verify.sh` inside the checkout (under `.git/`, so no
+    # `git add -A` can ever commit it, and deleted at the start of every attempt
+    # so a superseded diagnosis can't gate this one). No script yet ⇒ an EXPLICIT non-zero exit: `gate=skipped`
     # is treated as red and never authorises a push (09-state-machine.md §S1).
-    # `max_iterations` mirrors `fix.localIterations` (2); same templating
-    # caveat as `timeout_seconds` above.
+    # `max_iterations` reads `fix.localIterations`, same as `timeout_seconds`
+    # above; `2` is the packaged fallback, not the operative value.
     generic_loop:
-      max_iterations: 2
-      until_bash: "if [ -f .lastlight-verify.sh ]; then sh .lastlight-verify.sh; else echo 'no .lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
+      max_iterations: { from: fix.localIterations, default: 2 }
+      until_bash: "if [ -f .git/lastlight-verify.sh ]; then sh .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
       fresh_context: false
     messages:
       on_start: "On it — fixing PR #{{prNumber}}..."

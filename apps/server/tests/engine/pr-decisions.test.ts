@@ -53,10 +53,12 @@ function state(over: Partial<PrState> = {}): PrState {
     flakyDeferrals: 0,
     escalatedAtSha: null,
     escalatedBy: null,
+    forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
     priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
+    costBaselineUsd: 0,
     assessedHeadShaByWorkflow: {},
     runInFlight: null,
     readErrors: [],
@@ -167,6 +169,30 @@ describe("resolveFixDisposition", () => {
       {},
       "run",
       /^attempt/,
+    ],
+    [
+      // The ONE read whose failure is not fail-open. `getPullRequest` supplies
+      // `labels`, `isFork`, `isDraft` and `headSha`, and every degraded value is
+      // the PERMISSIVE one — `labels: []` so the hold does not apply, `isFork:
+      // false` so the fork guard does not, `headSha: ""` so the dedup does not.
+      // A 403 therefore yields a snapshot that LOOKS healthy, and the cron route
+      // then dispatches a repo-write sandbox run against a PR we cannot see.
+      "an unreadable PULL REQUEST skips — every guard below would be reading defaults",
+      { readErrors: ["getPullRequest: 403 Forbidden"], labels: [], headSha: "" },
+      {},
+      {},
+      "skip",
+      /^read-degraded: could not read the pull request/,
+    ],
+    [
+      // Transient, so it must outrank even a fork PR's own explanation: we do
+      // not know that it IS a fork.
+      "the degraded read outranks the fork guard, because `isFork: false` is a default too",
+      { readErrors: ["getPullRequest: 502"], isFork: true },
+      {},
+      {},
+      "skip",
+      /^read-degraded:/,
     ],
     [
       // No escalating run of ours to match → a maintainer applied the label by
@@ -383,7 +409,7 @@ describe("resolveFixDisposition", () => {
     // onto a PR with a live `pr-fix` run — and the fix family now shares ONE
     // workspace per PR, so that is two agents fetching, `reset --hard`-ing and
     // `clean -fdx`-ing the same directory, each deleting the other's
-    // `.lastlight-verify.sh`.
+    // `.git/lastlight-verify.sh`.
     const held = { runInFlight: { workflow: "pr-fix", runId: "4821" } };
     const d = resolveFixDisposition(state(held), fix);
     expect(d.decision).toBe("skip");
@@ -727,6 +753,20 @@ describe("renderContext", () => {
     expect(ctx.ciSection).toContain("CI FAILURES");
     expect(ctx.ciSection).toContain("test (node 22)");
     expect(ctx.ciLogsAvailable).toBe(true);
+    expect(ctx.ciLogsUnavailable).toBe(false);
+  });
+
+  it("distinguishes 'the log download failed' from 'there was nothing to fetch'", () => {
+    // Not the negation of `ciLogsAvailable`, which is also false on a green PR.
+    // `prompts/diagnose-ci.md` branches on this one, so getting it wrong warns
+    // "the harness could not download the job logs" on a PR with no failures.
+    const failed = renderContext(state({ ciReport: { jobs: [], logsAvailable: false } }));
+    expect(failed.ciLogsAvailable).toBe(false);
+    expect(failed.ciLogsUnavailable).toBe(true);
+
+    const nothingToFetch = renderContext(state({ checksState: "passing", ciReport: null }));
+    expect(nothingToFetch.ciLogsAvailable).toBe(false);
+    expect(nothingToFetch.ciLogsUnavailable).toBe(false);
   });
 
   it("does not pass the empty-report sentinel off as CI evidence", () => {
@@ -803,5 +843,77 @@ describe("renderContext", () => {
     const ctx = renderContext(state({ checksState: "passing" }));
     expect(ctx.mayMerge).toBeUndefined();
     expect(ctx.mayMergeReason).toBeUndefined();
+  });
+});
+
+/**
+ * The read-degraded drop is transient, and the merge route is where that
+ * matters most: enabling auto-merge is the one irreversible thing this codebase
+ * does, and `mergeable_state`, the labels and the fork flag all come from the
+ * read that failed.
+ */
+describe("resolveMergeDisposition — an unreadable pull request", () => {
+  it("refuses to assess a PR whose read failed", () => {
+    const decision = resolveMergeDisposition(
+      state({ readErrors: ["getPullRequest: 404 Not Found"], checksState: "passing" }),
+      defaultDependenciesConfig(),
+    );
+
+    expect(decision.decision).toBe("skip");
+    expect(decision.readDegraded).toBe(true);
+    expect(decision.reason).toMatch(/^read-degraded:/);
+    // Transient, not terminal: nothing to label, nothing to comment.
+    expect(decision.escalation).toBeUndefined();
+  });
+
+  it("names the failed read, so the log line says which call to look at", () => {
+    const decision = resolveMergeDisposition(
+      state({ readErrors: ["getPullRequest: 404 Not Found", "getChecksSummary: 502"] }),
+      defaultDependenciesConfig(),
+    );
+
+    expect(decision.reason).toContain("404 Not Found");
+    // Only the PR read is quoted — the others still fail open, so naming them
+    // here would suggest they had something to do with the refusal.
+    expect(decision.reason).not.toContain("getChecksSummary");
+  });
+
+  it("still fails open on every other read", () => {
+    const decision = resolveMergeDisposition(
+      state({
+        readErrors: ["getChecksSummary: 502", "getBaseChecksState: 502"],
+        checksState: "passing",
+        settledCheckCount: 3,
+      }),
+      defaultDependenciesConfig(),
+    );
+
+    expect(decision.readDegraded).toBeUndefined();
+    expect(decision.decision).toBe("run");
+  });
+});
+
+describe("resolveReviewTrigger — an unreadable pull request", () => {
+  it("skips rather than defers, because a deferral is a claim about a head SHA", () => {
+    // `defer` posts the placeholder check that says "not yet" against the head
+    // — and we do not reliably know the head.
+    const decision = resolveReviewTrigger(
+      state({ readErrors: ["getPullRequest: 403"], headSha: "" }),
+      defaultReviewConfig(),
+    );
+
+    expect(decision.decision).toBe("skip");
+    expect(decision.readDegraded).toBe(true);
+  });
+
+  it("outranks an explicit request — asking does not make the PR readable", () => {
+    const decision = resolveReviewTrigger(
+      state({ readErrors: ["getPullRequest: 403"] }),
+      defaultReviewConfig(),
+      { explicitRequest: true },
+    );
+
+    expect(decision.decision).toBe("skip");
+    expect(decision.readDegraded).toBe(true);
   });
 });

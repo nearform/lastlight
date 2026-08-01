@@ -84,10 +84,12 @@ export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types"
 // in-file use and re-exported so `../config/config.js` stays the one import
 // surface for the runtime config shape.
 import {
+  DIAGNOSIS_CLASSES,
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultReviewConfig,
   isDependencyImpact,
+  isDiagnosisClass,
   isReviewTrigger,
   type DependenciesConfig,
   type FixConfig,
@@ -690,8 +692,16 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   // this normaliser and the repo-layer clamps can't drift apart.
   const fixDefaults = defaultFixConfig();
   const fix: FixConfig = {
-    maxAttempts: positiveNumber(fixRaw.maxAttempts) ?? fixDefaults.maxAttempts,
-    localIterations: positiveNumber(fixRaw.localIterations) ?? fixDefaults.localIterations,
+    // Whole numbers, matching the repo-layer clamp in `repo-config-schema.ts`
+    // (`positiveInt`). They used to accept any positive number here while the
+    // clamp required an integer, so an operator writing `maxAttempts: 2.5` got
+    // the REPO layer silently falling back to the shipped default while the
+    // operator layer kept 2.5 — two layers disagreeing about the same leaf
+    // (#256). `gateTimeoutSeconds` is a duration, not a count, so it stays a
+    // plain positive number.
+    maxAttempts: positiveInt(fixRaw.maxAttempts, "fix.maxAttempts") ?? fixDefaults.maxAttempts,
+    localIterations:
+      positiveInt(fixRaw.localIterations, "fix.localIterations") ?? fixDefaults.localIterations,
     gateTimeoutSeconds: positiveNumber(fixRaw.gateTimeoutSeconds) ?? fixDefaults.gateTimeoutSeconds,
     // 0 is meaningful here ("escalate the model from the first retry"), so this
     // one accepts zero where the budgets above require a positive number.
@@ -701,8 +711,9 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     // absent/typo'd key which falls back to the shipped ceiling.
     maxCostUsd:
       fixRaw.maxCostUsd === null ? null : nonNegativeNumber(fixRaw.maxCostUsd) ?? fixDefaults.maxCostUsd,
-    maxFlakyDeferrals: nonNegativeNumber(fixRaw.maxFlakyDeferrals) ?? fixDefaults.maxFlakyDeferrals,
-    retryableClasses: nonEmptyStringList(fixRaw.retryableClasses) ?? fixDefaults.retryableClasses,
+    maxFlakyDeferrals:
+      positiveInt(fixRaw.maxFlakyDeferrals, "fix.maxFlakyDeferrals") ?? fixDefaults.maxFlakyDeferrals,
+    retryableClasses: diagnosisClassList(fixRaw.retryableClasses) ?? fixDefaults.retryableClasses,
   };
 
   const dependenciesDefaults = defaultDependenciesConfig();
@@ -839,6 +850,40 @@ function nonEmptyStringList(raw: unknown): string[] | undefined {
 }
 
 /**
+ * `fix.retryableClasses`, validated against the closed {@link DIAGNOSIS_CLASSES}
+ * enum: unknown members are DROPPED with a warning rather than kept or fatal.
+ *
+ * Dropping is the only correct direction — a class we do not recognise cannot
+ * be retried — but doing it silently is what made this worth fixing. A typo
+ * (`reproducable`) leaves a list that looks configured and behaves as if every
+ * diagnosis were terminal: the second dispatch escalates `not-retryable`, the
+ * PR gets `requires-human`, and nothing anywhere names the cause (#256).
+ *
+ * An explicitly EMPTY result is legal and stays empty (retries off for every
+ * class), but says so once — it is a big behaviour change to reach by accident.
+ * An absent/scalar key returns `undefined` so the caller applies the default.
+ */
+function diagnosisClassList(raw: unknown): string[] | undefined {
+  const names = nonEmptyStringList(raw);
+  if (names === undefined) return undefined;
+  const unknown = names.filter((n) => !isDiagnosisClass(n));
+  if (unknown.length) {
+    console.warn(
+      `[config] Ignoring ${unknown.map((n) => `"${n}"`).join(", ")} in fix.retryableClasses — ` +
+      `not a diagnosis class. The five are: ${DIAGNOSIS_CLASSES.join(", ")}.`,
+    );
+  }
+  const kept = names.filter(isDiagnosisClass);
+  if (!kept.length) {
+    console.warn(
+      "[config] fix.retryableClasses is empty — every diagnosis will escalate " +
+      "`not-retryable` on the second dispatch, and no PR will be retried.",
+    );
+  }
+  return kept;
+}
+
+/**
  * A finite number > 0, or `undefined` so the caller can apply its own default.
  * Lenient sibling of {@link nonEmptyStringList} for the numeric policy leaves.
  */
@@ -849,6 +894,27 @@ function positiveNumber(raw: unknown): number | undefined {
 /** As {@link positiveNumber}, but 0 is a legal value rather than a fallback trigger. */
 function nonNegativeNumber(raw: unknown): number | undefined {
   return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+}
+
+/**
+ * A whole number >= 0, or `undefined` so the caller can apply its own default —
+ * the same predicate the repo-layer clamp applies (`positiveInt` in
+ * `packages/shared/src/repo-config-schema.ts`).
+ *
+ * Unlike its lenient siblings above this one WARNS on rejection, because the
+ * two paths are not symmetric: a repo's bad leaf is reported back through a
+ * structured `RepoConfigWarning` the dashboard and CLI render, while an
+ * operator's is only ever seen if we say something. `fix.maxAttempts: 2.5`
+ * silently becoming the shipped default is the failure this closes (#256).
+ */
+function positiveInt(raw: unknown, path: string): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "number" && Number.isInteger(raw) && raw >= 0) return raw;
+  console.warn(
+    `[config] Ignoring "${path}: ${JSON.stringify(raw)}" — it must be a whole number >= 0. ` +
+    `Falling back to the shipped default.`,
+  );
+  return undefined;
 }
 
 /** De-duplicate a name list, preserving first-seen order (used for unioned lists). */

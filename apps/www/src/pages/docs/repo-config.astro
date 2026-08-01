@@ -252,7 +252,7 @@ review:
 			</tr>
 			<tr>
 				<td><code>fix.retryableClasses</code></td>
-				<td>keep a <strong>subset</strong> of your list. Naming a class you don't retry would add a retryable failure mode, so it's dropped; retrying <em>less</em> is always fine.</td>
+				<td>keep a <strong>subset</strong> of your list. Naming a class you don't retry would add a retryable failure mode, so it's dropped; retrying <em>less</em> is always fine. A name that isn't one of the five diagnosis classes at all is reported as a typo rather than as a policy decision — different problems, different fixes.</td>
 			</tr>
 			<tr>
 				<td><code>fix.escalateModelAfterAttempt</code>, <code>fix.gateTimeoutSeconds</code></td>
@@ -272,11 +272,15 @@ review:
 			</tr>
 			<tr>
 				<td><code>dependencies.auditComment</code></td>
-				<td>set it freely — the evidence comment is cosmetic, and the paper trail it silences is its own.</td>
+				<td>turn it <strong>on</strong>. It isn't cosmetic: it's the record of a major version we auto-merged into that repo, so the party it would silence is the party being audited. Asking for one you don't require is always fine.</td>
 			</tr>
 			<tr>
-				<td><code>review.trigger</code>, <code>review.requestLabel</code></td>
-				<td>set them freely. All three modes are equally safe, and a repo choosing <code>on-request</code> is opting <em>itself</em> out of automation — its call.</td>
+				<td><code>review.trigger</code></td>
+				<td>move it <em>down</em> the <code>on-request &lt; after-checks &lt; eager</code> scale. The three modes are equally safe but not equally expensive — <code>eager</code> buys a full agent review per push, on your budget — and a repo opting <em>itself</em> out of automation is entirely its call.</td>
+			</tr>
+			<tr>
+				<td><code>review.requestLabel</code></td>
+				<td>set it freely. Naming a label only ever adds an explicit, human-initiated route; yours keeps working alongside it, and both are honoured on the <code>pull_request.labeled</code> webhook.</td>
 			</tr>
 			<tr>
 				<td><code>review.postsCheck</code>, <code>review.skipDraft</code></td>
@@ -420,9 +424,7 @@ Values marked (repo) came from this repo's .lastlight/.</code></pre>
 		(<code>default</code> / <code>overlay</code> / <code>env</code> /
 		<code>repo</code>), the raw file the repo committed, its warnings and its
 		assets — is a <strong>Config</strong> tab on each repo's page in the admin
-		dashboard. (One gap for now: that tab doesn't yet render the
-		<code>fix</code> / <code>dependencies</code> / <code>review</code> blocks,
-		though the API returns them — use <code>repo config show</code> for those.)
+		dashboard, policy blocks included.
 	</p>
 
 	<h2 id="caching">Caching</h2>

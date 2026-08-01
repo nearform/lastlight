@@ -1,5 +1,12 @@
 kind: review
 name: pr-review
+# PR-scoped (09-state-machine.md §S1/§S4): this workflow runs against a pull
+# request, so it crosses the PR-scoped dispatch gate — the run lock shared with
+# every other PR-scoped workflow, the per-head-SHA dedup, escalation, and the
+# resolved `PrState` snapshot on `context.prState`. A fork of this workflow that
+# drops the key silently loses all four; `validateAssets` warns when a
+# `routes.github.pr_*` target is missing it.
+pr_scoped: true
 classification:
   intent: review
   description: |

@@ -81,8 +81,14 @@ export interface PrNote {
   stale?: boolean;
 }
 
-/** Where the agent appends. See `./fix-harvest.ts` for why this path, not `../`. */
-export const PR_NOTES_FILE_NAME = ".lastlight-notes";
+/**
+ * Where the agent appends. Re-exported from `./fix-scratch.ts`, which holds
+ * both harness-owned checkout paths and the single argument that places them
+ * (short version: inside `.git/`, which git never walks, so `git add -A` cannot
+ * commit it on any backend). Kept exported here because every importer of the
+ * journal reaches for it through this module.
+ */
+export { PR_NOTES_FILE_NAME } from "./fix-scratch.js";
 
 // ---------------------------------------------------------------------------
 // Bounds — the cap is the feature (10-pr-memory.md)

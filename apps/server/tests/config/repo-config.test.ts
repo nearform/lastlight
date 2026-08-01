@@ -437,6 +437,35 @@ describe("resolveRepoConfig — fix policy is clamped one way", () => {
     expect(result.warnings.find((w) => w.path === "fix.retryableClasses")?.code).toBe("policy-downgrade");
   });
 
+  it("reports a misspelt class as a typo, not as a policy decision", () => {
+    // Two different problems with two different fixes: "you spelled it wrong"
+    // (`invalid-value`) and "the operator doesn't retry that"
+    // (`policy-downgrade`). Reporting the first as the second sends the repo
+    // owner to ask the operator about a key they typed wrong (#256).
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ fix: { retryableClasses: ["reproducable"] } }),
+    );
+
+    expect(result.merged.fix.retryableClasses).toEqual([]);
+    const warning = result.warnings.find((w) => w.path === "fix.retryableClasses");
+    expect(warning?.code).toBe("invalid-value");
+    expect(warning?.message).toContain("reproducable");
+    expect(warning?.message).toContain("reproducible"); // the five, named
+  });
+
+  it("separates a typo from a genuine downgrade in the same list", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ fix: { retryableClasses: ["reproducible", "reproducable", "infra-dependent"] } }),
+    );
+
+    expect(result.merged.fix.retryableClasses).toEqual(["reproducible"]);
+    expect(codes(result.warnings).sort()).toEqual(["invalid-value", "policy-downgrade"]);
+  });
+
   it("refuses the operator-only keys outright", () => {
     const result = resolveRepoConfig(
       policyBase(),
@@ -468,13 +497,40 @@ describe("resolveRepoConfig — dependencies policy is clamped one way", () => {
     const result = resolveRepoConfig(
       policyBase(),
       policyBlocks(),
-      layerWith({ dependencies: { autoMergeMaxImpact: "none", auditComment: false } }),
+      layerWith({ dependencies: { autoMergeMaxImpact: "none", auditComment: true } }),
     );
 
     expect(result.merged.dependencies.autoMergeMaxImpact).toBe("none");
     expect(result.sources.dependencies.autoMergeMaxImpact).toBe("repo");
-    // auditComment is free — cosmetic either way.
-    expect(result.merged.dependencies.auditComment).toBe(false);
+    // auditComment is add-only `true` — asking for the record is always allowed.
+    expect(result.merged.dependencies.auditComment).toBe(true);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("refuses to let a repo silence the audit comment the operator requires", () => {
+    // The audit comment records a MAJOR bump this deployment auto-merged into
+    // that repo, so the party it would silence is the party being audited
+    // (#256). Turning it on when the operator has it off stays allowed.
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ dependencies: { auditComment: false } }),
+    );
+
+    expect(result.merged.dependencies.auditComment).toBe(true);
+    expect(result.sources.dependencies.auditComment).not.toBe("repo");
+    expect(codes(result.warnings)).toEqual(["policy-downgrade"]);
+  });
+
+  it("lets a repo turn the audit comment ON when the operator has it off", () => {
+    const result = resolveRepoConfig(
+      policyBase({ dependencies: { ...defaultDependenciesConfig(), auditComment: false } }),
+      policyBlocks(),
+      layerWith({ dependencies: { auditComment: true } }),
+    );
+
+    expect(result.merged.dependencies.auditComment).toBe(true);
+    expect(result.sources.dependencies.auditComment).toBe("repo");
     expect(result.warnings).toEqual([]);
   });
 
@@ -540,7 +596,7 @@ describe("resolveRepoConfig — dependencies policy is clamped one way", () => {
 });
 
 describe("resolveRepoConfig — review policy", () => {
-  it("lets a repo pick any trigger mode and its own request label", () => {
+  it("lets a repo opt DOWN the automation scale, and name its own request label", () => {
     const result = resolveRepoConfig(
       policyBase(),
       policyBlocks(),
@@ -550,6 +606,42 @@ describe("resolveRepoConfig — review policy", () => {
     expect(result.merged.review.trigger).toBe("on-request");
     expect(result.merged.review.requestLabel).toBe("please-review");
     expect(result.sources.review.trigger).toBe("repo");
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("refuses a repo buying itself MORE review automation than the operator runs", () => {
+    // `eager` is a full agent review per push, on the operator's budget (#256).
+    // Same direction as the fix budgets: only ever less.
+    const result = resolveRepoConfig(
+      policyBase({ review: { ...defaultReviewConfig(), trigger: "on-request" } }),
+      policyBlocks(),
+      layerWith({ review: { trigger: "eager" } }),
+    );
+
+    expect(result.merged.review.trigger).toBe("on-request");
+    expect(result.sources.review.trigger).not.toBe("repo");
+    expect(codes(result.warnings)).toEqual(["policy-downgrade"]);
+  });
+
+  it("clamps the middle tier too, not just the extremes", () => {
+    const result = resolveRepoConfig(
+      policyBase({ review: { ...defaultReviewConfig(), trigger: "after-checks" } }),
+      policyBlocks(),
+      layerWith({ review: { trigger: "eager" } }),
+    );
+
+    expect(result.merged.review.trigger).toBe("after-checks");
+    expect(codes(result.warnings)).toEqual(["policy-downgrade"]);
+  });
+
+  it("allows the equal tier without a warning", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ review: { trigger: defaultReviewConfig().trigger } }),
+    );
+
+    expect(result.merged.review.trigger).toBe(defaultReviewConfig().trigger);
     expect(result.warnings).toEqual([]);
   });
 

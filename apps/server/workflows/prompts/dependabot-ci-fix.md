@@ -40,6 +40,16 @@ DIAGNOSIS (from the previous phase — this is your starting point, not a
 hypothesis to re-derive):
 {{phaseOutputs.diagnosis}}
 {{/if}}
+{{#if flakyPromoted}}
+NOTE: The `diagnose` phase's `flaky` verdict is NOT being honoured for this PR.
+{{flakyDeferrals}} consecutive `flaky` diagnoses have already deferred it, which
+is the cap (`fix.maxFlakyDeferrals` = {{maxFlakyDeferrals}}), so the harness has
+promoted this run to a real repair attempt. Treat the failure as reproducible
+and look for the actual difference — a version, an ordering, a shared fixture, a
+race — rather than re-running the job and hoping. If you genuinely cannot make
+it green, `outcome=gave-up` with what you ruled out is the honest answer; do not
+push a speculative fix.
+{{/if}}
 
 INSTRUCTIONS:
 Work efficiently and stay focused — you are on a time budget, so spend it on the
@@ -67,12 +77,12 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
      the repo's package manager),
    - a breaking change in the new version needs call sites / types updated,
    - a peer-dependency or engines constraint needs a matching bump.
-3. Write the gate script: `.lastlight-verify.sh` in the repo root, holding the
-   exact build + test + lint + typecheck commands CI runs, with the package
-   manager taken from the lockfile. Exit 0 means green. It is not there yet —
-   the harness clears it at the start of every attempt (see the **fixing**
-   skill). Write it before you start repairing, so the repair has something to
-   verify against.
+3. Write the gate script: `{{verifyScript}}` — a path relative to your cwd,
+   which is the checkout — holding the exact build + test + lint + typecheck
+   commands CI runs, with the package manager taken from the lockfile. Exit 0
+   means green. It is not there yet — the harness clears it at the start of
+   every attempt (see the **fixing** skill). Write it before you start
+   repairing, so the repair has something to verify against.
 4. Make the **smallest** change that makes CI pass, per the **fixing** skill.
    Prefer a lockfile regeneration or a mechanical call-site/type update over a
    behavioural change. Do NOT widen the scope beyond making this update green.
@@ -88,7 +98,7 @@ AFTER FIXING:
    workflow takes over the merge — you do NOT merge or label a healthy PR.
 
 PUSH DISCIPLINE — the gate decides, and it is checked after you finish:
-{{#if iteration}}- This is local iteration {{iteration}} of {{maxIterations}}. When `.lastlight-verify.sh`
+{{#if iteration}}- This is local iteration {{iteration}} of {{maxIterations}}. When `{{verifyScript}}`
   exits non-zero you get another iteration to keep working; when it exits 0 the
   phase ends.{{/if}}
 - Push **only** on a green local gate. A gate that did not run is `gate=skipped`,

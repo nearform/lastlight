@@ -9,6 +9,7 @@ import { OPENINFERENCE_CHAIN, OPENINFERENCE_SPAN_KIND } from "./types.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "./schema.js";
 import { phaseSkillNames } from "./schema.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
+import { resolveTemplatedNumber } from "./templated-number.js";
 import { evalUntilExpression } from "./loop-eval.js";
 import { parseReviewerVerdict } from "./verdict.js";
 import { PhaseRef } from "./phase-ref.js";
@@ -739,8 +740,21 @@ export class PhaseExecutor {
       this.ledgerDeps,
       workflowId,
       githubAccess,
-      phase.timeout_seconds,
+      this.phaseTimeoutSeconds(phase),
       sandboxEnv,
+    );
+  }
+
+  /**
+   * The phase's kill timeout, with a `{ from: … }` reference resolved against
+   * this run's context (so `fix.gateTimeoutSeconds` is the value that bounds
+   * the gate, not the literal the YAML shipped with).
+   */
+  private phaseTimeoutSeconds(phase: PhaseDefinition): number | undefined {
+    return resolveTemplatedNumber(
+      phase.timeout_seconds,
+      this.run.ctx,
+      `${phase.name}.timeout_seconds`,
     );
   }
 
@@ -757,7 +771,12 @@ export class PhaseExecutor {
       const res = await this.ports.agent.runCommand(
         { kind: "bash", command },
         { ...phaseConfigFor(config, phase, this.ports.assets), telemetry: { workflowName: definition.name, phaseName: `${phase.name}_until`, triggerId, workflowRunId: workflowId } },
-        { taskId, githubAccess, timeoutSeconds: phase.timeout_seconds ?? 30, writeSession: false },
+        {
+          taskId,
+          githubAccess,
+          timeoutSeconds: this.phaseTimeoutSeconds(phase) ?? 30,
+          writeSession: false,
+        },
       );
       return res.success;
     } catch {
@@ -1074,7 +1093,14 @@ export class PhaseExecutor {
   ): Promise<PhaseOutcome> {
     const loop = phase.generic_loop!;
     const phaseName = phase.name;
-    const MAX_ITER = loop.max_iterations;
+    // Resolved ONCE, before the first iteration: the bound a loop advertised at
+    // `on_start` must be the bound it is actually held to, and re-resolving per
+    // iteration would let a `scratch` write move the goalposts mid-loop.
+    const MAX_ITER = resolveTemplatedNumber(
+      loop.max_iterations,
+      this.run.ctx,
+      `${phaseName}.generic_loop.max_iterations`,
+    )!;
     const { store: db, workflowId, scratch, config } = this.run;
     const results: PhaseResult[] = [];
 

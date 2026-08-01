@@ -14,7 +14,7 @@ import {
   defaultReviewConfig,
 } from "../config/config.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
-import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./pr-state.js";
+import { resolvePrState, prScopedWorkflows, type PrState } from "./pr-state.js";
 import {
   resolveDispatchDisposition,
   reviewCheckPlacement,
@@ -24,7 +24,7 @@ import {
   type ReviewTriggerOptions,
 } from "./pr-decisions.js";
 import { postReviewCheckForSkip } from "./review-check.js";
-import { escalatePr, type EscalationDeps } from "./pr-escalation.js";
+import { escalatePr, noticeForkPr, type EscalationDeps } from "./pr-escalation.js";
 
 /**
  * Hand a workflow to the runner. Matches `dispatchWorkflow` in index.ts — the
@@ -125,7 +125,14 @@ export async function dispatch(
   envelope: EventEnvelope,
   deps: DispatchDeps,
 ): Promise<DispatchOutcome> {
-  const route = await (deps.route ?? routeEvent)(envelope, { db: deps.db, github: deps.github });
+  const route = await (deps.route ?? routeEvent)(envelope, {
+    db: deps.db,
+    github: deps.github,
+    // Threaded one level up so the `pr.labeled` branch can see a repo's own
+    // `review.requestLabel`. Same resolver, same 60 s cache, so the resolution
+    // this triggers usually warms the one the dispatch gate makes below.
+    resolveRepoPolicy: deps.resolveRepoPolicy,
+  });
 
   if (route.action === "ignore") {
     return { kind: "ignored", reason: route.reason };
@@ -263,8 +270,14 @@ export async function dispatch(
       // A fork PR is the one skip a human is owed an explanation for on the PR
       // itself: there is nothing wrong with their change, we simply have no
       // branch to push to.
-      if (prState.isFork && !disposition.runInFlight && !disposition.review) {
-        await postForkNotice(prState, deps);
+      //
+      // Keyed on the DECISION, not on `prState.isFork`. `isFork` is true on
+      // every skip a fork PR takes, so it used to explain a decision that was
+      // not taken — a run-lock drop, a deferred review or a head-SHA dedup on a
+      // fork PR each earned "I can't apply fixes to this PR", once per skip.
+      // `noticeForkPr` supplies the other half, the de-duplication (#256).
+      if (disposition.forkPr) {
+        await noticeForkPr(handler, prState, deps);
       }
       return { kind: "skipped", reason: `${handler}: ${disposition.reason}` };
     }
@@ -326,7 +339,7 @@ async function resolvePrStateForDispatch(
   context: Record<string, unknown>,
   deps: DispatchDeps,
 ): Promise<PrState | null> {
-  if (!PR_SCOPED_WORKFLOWS.has(handler)) return null;
+  if (!prScopedWorkflows().has(handler)) return null;
   const repoStr = typeof context.repo === "string" ? context.repo : "";
   const prNumber = typeof context.prNumber === "number" ? context.prNumber : undefined;
   const [owner, name] = repoStr.split("/");
@@ -431,6 +444,13 @@ export async function applyPrDispatchGate(
   // a human on the other end can reply.
   if (disposition.runInFlight) return disposition;
 
+  // Neither is a failed PR read (`readDegradedDrop`), and here the reason is
+  // sharper: every side effect below writes to a pull request we could not
+  // read. Labelling `requires-human` off a `labels: []` default, or posting a
+  // review placeholder against a head SHA we do not have, would each be a
+  // durable statement made on no information.
+  if (disposition.readDegraded) return disposition;
+
   if (disposition.review) {
     await postReviewCheckForSkip(
       {
@@ -453,32 +473,6 @@ export async function applyPrDispatchGate(
 
   await escalatePr(workflowName, state, disposition, policy.fix, deps);
   return disposition;
-}
-
-/**
- * Tell the author of a fork PR why we can't help. Their change is fine; its
- * head branch just lives on a repo we have no write access to (and its head ref
- * isn't on origin), so there is nothing for a fix run to clone or push to.
- * Best-effort — a failed comment never changes the dispatch outcome.
- */
-async function postForkNotice(state: PrState, deps: DispatchDeps): Promise<void> {
-  const [owner, name] = state.repo.split("/");
-  if (!deps.github || !owner || !name) return;
-  const source = state.headRepoFullName
-    ? `from \`${state.headRepoFullName}\``
-    : "from a now-deleted fork";
-  await deps.github
-    .postComment(
-      owner,
-      name,
-      state.prNumber,
-      `I can't apply fixes to this PR — it comes ${source}, and I have no write access to the ` +
-      `source branch (nor is its head ref on \`${state.repo}\`). Re-create the change on a ` +
-      `branch in \`${state.repo}\` and I'll fix it there.`,
-    )
-    .catch((e: unknown) =>
-      console.warn(`[event] fork-PR notice comment failed: ${e instanceof Error ? e.message : String(e)}`),
-    );
 }
 
 /**

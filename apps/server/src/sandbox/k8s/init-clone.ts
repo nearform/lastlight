@@ -42,12 +42,25 @@ export interface CloneSpec {
 // rather than leaving a half-reset tree (mirrors the host `refreshExistingClone`).
 // `ensure_base` fetches + deepens `origin/<base>` for the three-dot PR diff on
 // both the fresh-clone and refresh paths (mirrors the host `ensureBaseAvailable`).
+//
+// `reset_scratch` is this backend's half of `resetVerifyScript` /
+// `resetPrNotesJournal` (`engine/executors/shared.ts`), which the host backends
+// call from `prePopulateWorkspace`. The harness has no filesystem access to the
+// PVC, so the init container is the only place that can do it. Same rule: every
+// path that starts a NEW run clears both, and the same-run preserve path does
+// not. Purely about a stale gate surviving between attempts — both files live
+// under `.git/`, which git never walks, so neither can be committed into the PR
+// on this backend or any other. `git clean -fdx` cannot reach them either,
+// which is why this runs after the refresh rather than relying on it.
 const CLONE_SCRIPT = [
   "set -eu",
   'owner="$1"; repo="$2"; branch="$3"; ws="$4"; base="$5"; run_id="$6"; recreate="$7"',
   'repo_dir="$ws/$repo"',
   'marker="$ws/.lastlight-run"',
   'url="https://github.com/$owner/$repo.git"',
+  "reset_scratch() {",
+  '  rm -f "$repo_dir/.git/lastlight-verify.sh" "$repo_dir/.git/lastlight-notes" || true',
+  "}",
   "ensure_base() {",
   '  [ -n "$base" ] && [ "$base" != "$branch" ] && [ -z "$recreate" ] || return 0',
   '  dest="+refs/heads/$base:refs/remotes/origin/$base"',
@@ -67,6 +80,11 @@ const CLONE_SCRIPT = [
   '    echo "[clone] existing checkout (same run) — preserving"; exit 0',
   "  fi",
   '  if [ -z "$recreate" ]; then',
+  // Before the fetch, not after it: a failed refresh takes the `else` branch
+  // below and preserves the checkout, and that is exactly the case that must
+  // not inherit a superseded diagnosis's gate (mirrors the host, which calls
+  // the two resets outside `refreshExistingClone`'s try/catch).
+  "    reset_scratch",
   '    if git -C "$repo_dir" fetch --depth 50 -- "$url" "$branch" \\',
   '      && git -C "$repo_dir" checkout -B "$branch" FETCH_HEAD \\',
   '      && git -C "$repo_dir" reset --hard FETCH_HEAD \\',
@@ -94,6 +112,10 @@ const CLONE_SCRIPT = [
   '  git -C "$repo_dir" checkout -B "$branch"',
   '  git -C "$repo_dir" remote set-url origin "$url"',
   "fi",
+  // A no-op after a fresh clone — kept so "every path that starts a new run
+  // clears the scratch files" holds on this backend too, without a reader
+  // having to work out which paths can have inherited one.
+  "reset_scratch",
   "ensure_base",
   "stamp",
 ].join("\n");
@@ -110,6 +132,11 @@ const CLONE_SCRIPT = [
  * recreate-from-base run, re-clones the default branch. For PR-diff workflows the
  * base branch is fetched + deepened to a shared merge-base on both the fresh and
  * refresh paths so `git diff origin/<base>...HEAD` resolves.
+ *
+ * Every new-run path also clears the harness's two scratch files
+ * (`.git/lastlight-verify.sh`, `.git/lastlight-notes`) — this backend's half of
+ * `resetVerifyScript` / `resetPrNotesJournal`, which the harness cannot do
+ * itself because it has no filesystem access to the PVC.
  *
  * Auth is the github.com-scoped `http.extraheader` delivered as `GIT_CONFIG_*`
  * env from the creds Secret (agentGitIdentityEnv) — no token in any URL.

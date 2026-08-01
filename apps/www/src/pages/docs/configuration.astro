@@ -372,8 +372,8 @@ review:
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
-  localIterations: 2           # gate-loop iterations WITHIN one attempt   [NOT WIRED]
-  gateTimeoutSeconds: 900      # budget for the repo's own build/test gate [NOT WIRED]
+  localIterations: 2           # gate-loop iterations WITHIN one attempt
+  gateTimeoutSeconds: 900      # budget for the repo's own build/test gate
   escalateModelAfterAttempt: 1 # attempts above this use models["pr-fix-retry"]
   maxCostUsd: 5.0              # cumulative ceiling for ONE PR; null = no ceiling
   maxFlakyDeferrals: 2         # "flaky" verdicts before one is taken at face value
@@ -385,16 +385,18 @@ dependencies:
   minSettledChecks: 1          # …and there must be at least this many
   auditComment: true           # post the evidence comment when auto-merging a major</code></pre>
 
-	<div class="docs-callout warn">
+	<div class="docs-callout">
 		<div class="docs-callout-body">
-			<strong>Two keys are not wired yet.</strong>
+			<strong>How the two loop budgets reach the run.</strong>
 			<code>fix.localIterations</code> and <code>fix.gateTimeoutSeconds</code>
-			are parsed, clamped, and shown by <code>lastlight repo config show</code>
-			— and read by nothing. The workflow YAML hardcodes the matching
-			<code>2</code> and <code>900</code>, because the phase schema takes those
-			two fields as plain numbers and they can't be templated from config.
-			Setting either key has no effect; to change them, fork the fix workflow
-			YAML in your overlay and edit the phase.
+			are read by the fix phase itself, which declares
+			<code>max_iterations: &#123; from: fix.localIterations, default: 2 &#125;</code>
+			and <code>timeout_seconds: &#123; from: fix.gateTimeoutSeconds, default: 900 &#125;</code>.
+			The <code>from:</code> path resolves against the run's effective — already
+			repo-clamped — <code>fix</code> block, so a repository that lowers its own
+			budget in <code>.lastlight/</code> is honoured; the number in the YAML is
+			only the fallback for a run whose context carries no <code>fix:</code> at
+			all.
 		</div>
 	</div>
 
@@ -409,7 +411,9 @@ dependencies:
 
 	<p>
 		<code>on-request</code> means the review runs only when somebody asks. Three
-		ways to ask: apply the <code>requestLabel</code>, comment
+		ways to ask: apply the <code>requestLabel</code> — yours, or one the target
+		repo named in its own <code>.lastlight/</code>, both of which are honoured
+		on the <code>pull_request.labeled</code> webhook — comment
 		<code>@last-light review</code>, or — with <code>postsCheck</code> on —
 		press <strong>Re-run</strong> on the <code>last-light/review</code> check,
 		which is posted as a <code>neutral</code> conclusion so it never blocks a
@@ -434,13 +438,18 @@ dependencies:
 
 	<p>
 		The <code>fix</code> budgets bound a loop that <em>diagnoses</em> a CI
-		failure before it retries it. <code>maxAttempts</code> counts across runs
-		for a given PR — so a bot that reopens the same failure ten times still
-		costs three attempts. A diagnosis class outside
-		<code>retryableClasses</code> escalates straight away rather than spending
-		budget on a retry that can't help. And <code>maxCostUsd</code> ships
-		<strong>on</strong>: an unbounded agent loop against a genuinely broken PR
-		is the one failure mode that costs real money.
+		failure before it retries it. <code>maxAttempts</code> and
+		<code>maxCostUsd</code> both bound the current <em>problem</em>, not the
+		PR's lifetime: a push from anyone but the bot is a fresh problem, so it
+		re-arms the attempt counter and the cost window together and clears the
+		<code>requires-human</code> hold with no label to remove by hand. A
+		diagnosis class outside <code>retryableClasses</code> escalates straight
+		away rather than spending budget on a retry that can't help — its members
+		are checked against the five diagnosis classes, so a typo narrows the set
+		with a warning instead of silently making everything terminal. And
+		<code>maxCostUsd</code> ships <strong>on</strong>: an unbounded agent loop
+		against a genuinely broken PR is the one failure mode that costs real
+		money.
 	</p>
 
 	<p>

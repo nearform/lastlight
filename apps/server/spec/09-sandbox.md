@@ -824,21 +824,43 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
    before logging (`sandbox/index.ts`).
 
    Every path that starts a **new** run also resets the two harness-owned
-   files that live *inside* the checkout — the fix loop's push gate
-   (`.lastlight-verify.sh`, `resetVerifyScript`) and the PR journal
-   (`.lastlight-notes`, `resetPrNotesJournal`). Each is deleted, so a
-   superseded run's file can never be inherited, and each is registered in
-   the checkout's local `.git/info/exclude`, so the agent's own `git add -A`
-   can never commit it into the PR. Both live at the **root of the
-   checkout on every backend** rather than as a workspace-root sibling:
-   gondolin is the packaged default and mounts only cwd, so a `../` path is
-   unreachable in the guest — a sibling gate would silently never run, and a
-   sibling journal would silently never be written. `.git/info/exclude` (not
-   living outside the tree) is what keeps them out of the PR, the same
-   backstop the gondolin skill bundle relies on. The *same-run* preserve
-   path deliberately skips both: a later phase of one run keeps the gate the
-   first phase wrote, and the journal is drained per phase by the marker
-   harvest rather than per run (see [State](/spec/10-state)).
+   files that live inside the checkout's own `.git/` — the fix loop's push
+   gate (`.git/lastlight-verify.sh`, `resetVerifyScript`) and the PR journal
+   (`.git/lastlight-notes`, `resetPrNotesJournal`). Both paths are stated
+   once in `src/engine/fix-scratch.ts`.
+
+   **Placement, not suppression, is what keeps them out of the pull request.**
+   `.git/` is the repository, not the work tree: no pathspec walk enters it, so
+   `git add -A` cannot see either file on any backend, with nothing to register
+   anywhere. They used to sit at the root of the checkout and stay out of the PR
+   because each backend added them to that checkout's local
+   `.git/info/exclude` — and the kubernetes backend never got that code, so on
+   k8s the harness's own scratch files were committed into the dependency PR
+   (issue #256). A guarantee every new backend must re-implement is not a
+   guarantee; the failure mode of forgetting is now a stale gate, which is
+   recoverable and locally visible, rather than a committed file, which is
+   neither.
+
+   `.git/` rather than a workspace-root sibling because gondolin is the packaged
+   default and mounts only cwd, so a `../` path is unreachable in the guest — a
+   sibling gate would silently never run, and a sibling journal would silently
+   never be written. `.git/` is *inside* cwd.
+
+   The delete is therefore purely about **staleness**, and it is the only thing
+   that clears either file: `git clean -fdx` does not enter `.git/`. The
+   *same-run* preserve path deliberately skips both — a later phase of one run
+   keeps the gate the first phase wrote, and the journal is drained per phase by
+   the marker harvest rather than per run (see [State](/spec/10-state)). On the
+   **kubernetes** backend the harness has no filesystem access to the PVC, so
+   the same two deletes run inside the clone init container
+   (`sandbox/k8s/init-clone.ts`), on exactly the same set of paths.
+
+   The gate is also **recorded**: the marker harvest reads it (never drains it —
+   it is the live gate the next iteration runs) onto
+   `scratch.fixMarkers.verifyScript`, where the admin run detail panel renders
+   it. The script is authored by the agent being gated and `until_bash` only
+   reads its exit code, so recording it is the hardening 09-state-machine.md §S1
+   asks for in place of validating its contents. See [State](/spec/10-state).
 2. **Spawn** — `docker run -d` or VM start. Container/VM mapped to the
    `taskId` in `activeContainers`.
 3. **Run** — `docker exec -i -w <cwd> {container} sh -c "agentic-pi run ..."`

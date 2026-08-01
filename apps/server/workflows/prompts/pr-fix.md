@@ -33,15 +33,25 @@ hypothesis to re-derive):
 {{#if ciSection}}
 NOTE: The CI failures above are the primary issue — fix those first.
 {{/if}}
+{{#if flakyPromoted}}
+NOTE: The `diagnose` phase's `flaky` verdict is NOT being honoured for this PR.
+{{flakyDeferrals}} consecutive `flaky` diagnoses have already deferred it, which
+is the cap (`fix.maxFlakyDeferrals` = {{maxFlakyDeferrals}}), so the harness has
+promoted this run to a real repair attempt. Treat the failure as reproducible
+and look for the actual difference — a version, an ordering, a shared fixture, a
+race — rather than re-running the job and hoping. If you genuinely cannot make
+it green, `outcome=gave-up` with what you ruled out is the honest answer; do not
+push a speculative fix.
+{{/if}}
 INSTRUCTIONS:
 1. Understand what the maintainer is asking for, and what the diagnosis says
    the cause is. If reproducing contradicts the diagnosis, trust what you
    observe — and say so in your summary.
-2. Write the gate script FIRST: `.lastlight-verify.sh` in the repo root, holding
-   the exact build + test + lint + typecheck commands CI runs, with the package
-   manager taken from the lockfile. Exit 0 means green. It is not there yet —
-   the harness clears it at the start of every attempt (see the **fixing**
-   skill).
+2. Write the gate script FIRST: `{{verifyScript}}` — a path relative to your
+   cwd, which is the checkout — holding the exact build + test + lint +
+   typecheck commands CI runs, with the package manager taken from the
+   lockfile. Exit 0 means green. It is not there yet — the harness clears it at
+   the start of every attempt (see the **fixing** skill).
 3. Read the relevant code and make the fix — per the **fixing** skill, the
    smallest change that addresses the diagnosed cause. Don't widen the scope.
 4. Follow the **building** skill: install dependencies, then run the full
@@ -54,7 +64,7 @@ AFTER FIXING:
 2. git push origin HEAD
 
 PUSH DISCIPLINE — the gate decides, and it is checked after you finish:
-{{#if iteration}}- This is local iteration {{iteration}} of {{maxIterations}}. When `.lastlight-verify.sh`
+{{#if iteration}}- This is local iteration {{iteration}} of {{maxIterations}}. When `{{verifyScript}}`
   exits non-zero you get another iteration to keep working; when it exits 0 the
   phase ends.{{/if}}
 - Push **only** on a green local gate. A gate that did not run is `gate=skipped`,

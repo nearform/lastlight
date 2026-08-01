@@ -51,7 +51,8 @@ export const PR_FIX_SHAPED_WORKFLOWS = new Set(["pr-fix", "dependabot-ci-fix"]);
 // pure decision over it (`engine/pr-decisions.ts` → `resolveFixDisposition`),
 // which applies to every PR-scoped workflow and every route rather than to two
 // workflows on the webhook path — so the set had no readers left. The span the
-// snapshot covers is `PR_SCOPED_WORKFLOWS` in `engine/pr-state.ts`.
+// snapshot covers is `prScopedWorkflows()` in `./pr-scope.ts`, derived from each
+// workflow's own `pr_scoped: true` metadata.
 
 /**
  * Workflows whose per-target workspace is **recreated from the default branch**

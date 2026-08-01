@@ -671,9 +671,14 @@ describe("resolveRepoRunConfig — the dispatch choke point", () => {
     expect(result.repoConfig?.dependencies.autoMergeMaxImpact).toBe("medium");
     // Operator-only: refused even though 60 < 900.
     expect(result.repoConfig?.fix.gateTimeoutSeconds).toBe(defaultFixConfig().gateTimeoutSeconds);
-    // Free key: applied as asked.
-    expect(result.repoConfig?.dependencies.auditComment).toBe(false);
-    expect(result.repoConfig?.warnings.map((w) => w.code).sort()).toEqual(["key-not-allowed", "policy-downgrade"]);
+    // Add-only key: a repo may ask for the auto-merge audit record, never
+    // silence one the operator requires — it is the audit OF that repo.
+    expect(result.repoConfig?.dependencies.auditComment).toBe(true);
+    expect(result.repoConfig?.warnings.map((w) => w.code).sort()).toEqual([
+      "key-not-allowed",
+      "policy-downgrade",
+      "policy-downgrade",
+    ]);
   });
 
   it("degrades to the operator config when the fetch fails, rather than failing the run", async () => {

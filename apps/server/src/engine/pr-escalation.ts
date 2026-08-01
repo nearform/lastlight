@@ -215,6 +215,116 @@ export async function escalatePr(
   return { case: kase, runId, labelled, commented };
 }
 
+/**
+ * The phase name the fork-notice row terminates on. Same non-phase convention
+ * as {@link ESCALATION_PHASE}, so the run detail panel reads correctly.
+ */
+export const FORK_NOTICE_PHASE = "fork-pr";
+
+/** What {@link noticeForkPr} did, for the caller's log line and for tests. */
+export interface ForkNoticeOutcome {
+  runId: string;
+  commented: boolean;
+}
+
+/**
+ * Tell a fork PR's author, ONCE, why we cannot help — and record that we did.
+ *
+ * Their change is fine; its head branch simply lives on a repo we have no write
+ * access to (and its head ref isn't on origin), so there is nothing for a fix
+ * run to clone or push to.
+ *
+ * ## Once per PR, and why the row
+ *
+ * The old notice had no de-duplication at all and keyed on `state.isFork`
+ * rather than on the `fork-pr` decision, so a fork PR earned this comment on
+ * every skip of any kind, once per skip (#256). Both halves are fixed: the
+ * caller keys on `Decision.forkPr`, and the once-only property comes from the
+ * persisted record exactly as it does for {@link escalatePr} — the next
+ * dispatch reads `forkNoticedAtSha` back off the prior run's `context.prState`
+ * and does not call this again. No API scan, no comment-body marker.
+ *
+ * The row therefore has to be written BEFORE the comment, for the same reason
+ * and with the same crash-window reasoning: row-then-crash leaves a record with
+ * no comment, so the author is told on the next event; comment-then-crash would
+ * repeat the comment forever, which is the failure being fixed.
+ *
+ * Unlike an escalation this records no label and is never invalidated by a
+ * push. A fork stays a fork.
+ *
+ * Never throws. The comment is best-effort; the record is not optional.
+ */
+export async function noticeForkPr(
+  workflowName: string,
+  state: PrState,
+  deps: EscalationDeps,
+): Promise<ForkNoticeOutcome | null> {
+  const [owner, name] = state.repo.split("/");
+  if (!owner || !name || !deps.github) return null;
+  // Already told them. The whole point.
+  if (state.forkNoticedAtSha) return null;
+  // No head SHA means the PR read failed — but the dispatch gate refuses a
+  // degraded read before it ever reaches here, so this is belt: recording
+  // `forkNoticedAtSha: ""` would read back as falsy and re-notice forever.
+  if (!state.headSha) return null;
+
+  const runId = randomUUID();
+  const recorded: PrState = { ...state, forkNoticedAtSha: state.headSha };
+  try {
+    deps.db.runs.createRun({
+      id: runId,
+      workflowName,
+      triggerId: prTriggerId(state.repo, state.prNumber),
+      owner,
+      repo: name,
+      issueNumber: state.prNumber,
+      currentPhase: FORK_NOTICE_PHASE,
+      status: "running",
+      triggeredBy: "last-light",
+      triggerActorType: "system",
+      context: { prState: recorded },
+      startedAt: new Date().toISOString(),
+    });
+    deps.db.runs.finishRun(runId, "succeeded", {
+      terminalMarker: { phase: FORK_NOTICE_PHASE, summary: "fork-pr: told the author once" },
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[fork-notice] ${state.repo}#${state.prNumber}: could not record the notice (${msg}) — ` +
+      `saying nothing, since a comment with no record would repeat on every event`,
+    );
+    return null;
+  }
+
+  let commented = false;
+  try {
+    await deps.github.postComment(owner, name, state.prNumber, renderForkNotice(state));
+    commented = true;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[fork-notice] ${state.repo}#${state.prNumber}: comment failed: ${msg}`);
+  }
+
+  console.log(
+    `[fork-notice] ${workflowName} ${state.repo}#${state.prNumber}: ` +
+    `at ${state.headSha.slice(0, 7)} (run ${runId}, comment=${commented})`,
+  );
+  return { runId, commented };
+}
+
+/** The fork-PR notice. Pure, so its wording is table-testable. */
+export function renderForkNotice(state: PrState): string {
+  const source = state.headRepoFullName
+    ? `from \`${state.headRepoFullName}\``
+    : "from a now-deleted fork";
+  return (
+    `I can't apply fixes to this PR — it comes ${source}, and I have no write access to the ` +
+    `source branch (nor is its head ref on \`${state.repo}\`). Re-create the change on a ` +
+    `branch in \`${state.repo}\` and I'll fix it there.`
+  );
+}
+
 /** One-line human summary per case, for the comment's opening sentence. */
 const CASE_HEADLINE: Record<EscalationCase, string> = {
   "attempts-exhausted": "I've used every attempt I'm allowed on this pull request",

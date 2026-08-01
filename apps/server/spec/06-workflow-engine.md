@@ -62,6 +62,7 @@ through — webhook dispatch, CLI, cron, admin resume.
   name: string;          // unique workflow name; lookup key
   description?: string;
   trigger?: string;      // informational
+  pr_scoped?: boolean;   // this workflow runs against a PULL REQUEST — see below
   variables?: Record<string, string>;
   classification?: {     // how the intent classifier routes to this workflow (issue #164)
     intent: string;      //   the intent token this workflow owns (unique; not a control intent)
@@ -71,6 +72,24 @@ through — webhook dispatch, CLI, cron, admin resume.
   phases: PhaseDefinition[];
 }
 ```
+
+`pr_scoped: true` is the one key here the runner acts on. It puts a workflow
+inside the PR-scoped dispatch gate: the run lock shared with every other
+PR-scoped workflow, the per-head-SHA dedup, escalation, and the resolved
+`PrState` snapshot on `context.prState`. `prScopedWorkflows()`
+(`src/workflows/pr-scope.ts`) derives the set from this metadata, memoised on the
+loader's asset version, so a forked or renamed workflow keeps its gate by
+carrying its own key. It is metadata on the workflow because that is where the
+fact lives: the harness previously held a hardcoded set of four names while the
+handlers are operator-configurable through `routes.github.*`, so remapping a
+route to a fork silently dropped the whole gate for it — and every consequence of
+the gate is a *refusal*, so nothing looked wrong until two agents pushed the same
+branch (issue #256). `validateAssets` now warns at boot when a configured
+`routes.github.pr_*` target does not declare it. The four packaged members are
+`pr-fix`, `dependabot-ci-fix`, `dependabot-pr-merge` and `pr-review`; those four
+names are also honoured without the key, for overlays that forked them before it
+existed, with a warning naming the file. See
+[05-router.md → the PR-scoped dispatch gate](05-router.md#the-pr-scoped-dispatch-gate).
 
 The optional `classification` block makes a workflow **self-describing to the
 router**: its `description`/`examples` are composed into the classifier prompt
@@ -90,7 +109,7 @@ overlay) can add a new intent with no core change. See
   command?: string;                     // type: bash — deterministic shell command (templated)
   script?: string;                      // type: script — inline source (templated)
   runtime?: "js" | "ts" | "python";     // type: script — js/ts → node, python → uv run (default "js")
-  timeout_seconds?: number;             // type: bash/script — per-step timeout (default 300)
+  timeout_seconds?: number | { from: string; default: number };  // bash/script step timeout + until_bash budget (default 300 / 30)
   skill?: string;                       // single skill name; sugar for `skills: [<name>]`
   skills?: string[];                    // per-phase bundle: <workspaceRoot>/.lastlight-skills/<phase>/<name>/
                                         // may coexist with `prompt`; mutually exclusive with `skill`
@@ -342,7 +361,7 @@ enters the next fix cycle.
 - name: socratic
   prompt: prompts/explore-ask.md
   generic_loop:
-    max_iterations: 8
+    max_iterations: 8            # or { from: <ctx path>, default: N } — see below
     until: "output.contains('READY')"
     gate_kind: "reply"           # pause after each iteration; user reply feeds next
     scratch_key: "socratic"      # accumulate Q&A under workflow_runs.scratch.socratic
@@ -649,9 +668,40 @@ command is necessarily a **literal** string — it cannot be varied per backend.
 Its budget is `phase.timeout_seconds ?? 30`. **Thirty seconds is a trap**: it
 kills any real build/test suite mid-run and reports a false red, so a phase
 whose gate is the repo's own CI commands must carry an explicit value. Both fix
-workflows set `timeout_seconds: 900`, mirroring `fix.gateTimeoutSeconds` — the
-config key cannot be templated in, because the schema parses `timeout_seconds`
-and `max_iterations` as plain numbers.
+workflows read theirs from `fix.gateTimeoutSeconds` — see "Templated phase
+budgets" below.
+
+### Templated phase budgets
+
+`timeout_seconds` and `generic_loop.max_iterations` accept either a plain
+positive integer or a reference into the run's template context:
+
+```yaml
+timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
+generic_loop:
+  max_iterations: { from: fix.localIterations, default: 2 }
+```
+
+`from` is the same dotted lookup `{{a.b}}` performs (`lookupContextKey`), so
+`fix.localIterations` resolves against the EFFECTIVE, already repo-clamped
+`fix` block the runner seeds on every run's context — a repository that lowered
+its own budget in `.lastlight/lastlight.yml` is honoured with no code path of
+its own. Resolution happens once, before the first iteration, in
+`resolveTemplatedNumber` (`core/templated-number.ts`).
+
+`default` is the value the workflow ships with, and it is used verbatim
+whenever `from` resolves to nothing usable — key absent, non-numeric, zero or
+negative — with a warning naming the phase and the path. That is why the shape
+is an object rather than a bare `"{{fix.gateTimeoutSeconds}}"`: an unresolved
+template renders to the empty string, which would leave the engine inventing a
+kill timeout for a phase it knows nothing about. A resolved non-integer is
+rounded UP (`gateTimeoutSeconds` is documented as any positive number, and
+truncating a suite's budget downward is the direction that turns a passing gate
+red).
+
+Before this, both keys were parsed, per-repo clamped, CLI-displayed and read by
+nothing: the operative numbers were literals in the YAML, whose comments asked a
+human to keep the two in step (issue #256).
 
 **A loop node honours the phase's `on_output.requires_marker` and its
 `messages.on_start` / `on_success`.** The postcondition is checked once, against

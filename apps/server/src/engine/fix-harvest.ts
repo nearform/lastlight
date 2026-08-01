@@ -55,8 +55,8 @@ import {
   type DiagnosisMarker,
   type FixOutcomeMarker,
 } from "./fix-markers.js";
+import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "./fix-scratch.js";
 import {
-  PR_NOTES_FILE_NAME,
   boundNotes,
   coerceNotes,
   parseNoteFile,
@@ -93,6 +93,28 @@ export interface HarvestedFixMarkers extends AttemptMarkers {
    * none, which is most of them.
    */
   notes: PrNote[];
+  /**
+   * The push gate this run actually ran — the contents of
+   * `.git/lastlight-verify.sh` as the agent wrote it (09-state-machine.md §S1,
+   * item 1: *"record the script's contents on the run record, surfaced in the
+   * §S3 panel — this is the most useful debugging artifact in the fix loop"*).
+   *
+   * The gate is a file the agent writes FOR ITSELF, and `until_bash` only reads
+   * its exit code. That is a bounded hazard by design (real CI is always the
+   * merge authority, so a weak gate costs a wasted attempt, never a bad merge)
+   * — but only if the script is *inspectable* afterwards. Without this, "the
+   * gate went green and the fix was still wrong" is unanswerable: the workspace
+   * is reset on the next attempt and the script goes with it.
+   *
+   * Deliberately NOT static-validated. 09 §S1 is explicit that checking the
+   * script's contents is an arms race against your own agent; recording it lets
+   * a human see the problem instead of guessing at it.
+   *
+   * `null` on every run that wrote no gate — which includes every run on the
+   * kubernetes backend, where the harness has no filesystem access to the PVC
+   * (the same narrowing the PR journal carries there).
+   */
+  verifyScript: string | null;
 }
 
 /**
@@ -129,6 +151,7 @@ export function readHarvestedMarkers(
     phases: Array.isArray(raw.phases) ? raw.phases.filter((p) => typeof p === "string") : [],
     at: typeof raw.at === "string" ? raw.at : "",
     notes: coerceNotes(raw.notes),
+    verifyScript: typeof raw.verifyScript === "string" ? raw.verifyScript : null,
   };
 }
 
@@ -137,38 +160,39 @@ export function readHarvestedMarkers(
 // ---------------------------------------------------------------------------
 
 /**
- * The journal is a file at the ROOT OF THE CHECKOUT
- * (`<workspace>/<repo>/.lastlight-notes`) on EVERY backend, kept out of the PR
- * by the checkout's local `.git/info/exclude`.
+ * The journal is a file inside the checkout's own `.git/` directory
+ * (`<workspace>/<repo>/.git/lastlight-notes`) on EVERY backend.
  *
- * That is deliberately the same resolution `.lastlight-verify.sh` reached
+ * That is deliberately the same resolution `.git/lastlight-verify.sh` reached
  * (`./executors/shared.ts` → the push gate), and for the same reasons — with one
  * extra:
  *
- * 1. **gondolin is the packaged default** (`sandbox.backend: gondolin`) and
+ * 1. **Git structurally cannot see it.** `.git/` is the repository, not the
+ *    work tree; no pathspec walk enters it, so `git add -A` cannot commit the
+ *    journal on any backend, in any `buildAssets` mode, with nothing to
+ *    register anywhere. That last clause is the whole point: the journal used
+ *    to sit at the checkout root and depend on each backend adding it to the
+ *    local `.git/info/exclude`, and the kubernetes backend never got that code
+ *    (#256). A guarantee that every new backend must re-implement is not a
+ *    guarantee.
+ * 2. **gondolin is the packaged default** (`sandbox.backend: gondolin`) and
  *    mounts only cwd, so a workspace-root sibling reached via `../` is simply
  *    unreachable inside the guest. A `../` journal would silently never be
  *    written on the default backend — the worst possible failure mode for a
  *    memory feature, because it looks like "the agent had nothing to say".
- * 2. **One uniform path is what makes the prompt and the harvest agree.** The
+ *    `.git/` is inside cwd, so it is reachable there.
+ * 3. **One uniform path is what makes the prompt and the harvest agree.** The
  *    agent is told a bare relative path with its cwd already the checkout; the
  *    harvest resolves the same path from the run row. Neither has to know the
  *    backend, which is exactly what `artifactIssueDir` DOES have to know — its
  *    relocation is conditional on `buildAssets === "server"` AND a non-gondolin
- *    backend, so it is not reusable here. The journal must be placed correctly
- *    on every backend in every `buildAssets` mode, because unlike a build
- *    handoff doc it must NEVER end up committed into a dependency PR.
- * 3. **Living outside the git tree was never the real guarantee anyway.**
- *    `.git/info/exclude` is: it is inside `.git/`, never tracked, never pushed,
- *    leaves the repo's own `.gitignore` untouched, and applies only to this
- *    ephemeral sandbox checkout. It is the same backstop the gondolin skill
- *    bundle and the push gate already rely on. See `resetPrNotesJournal`.
+ *    backend, so it is not reusable here.
  *
- * The one thing living inside the tree costs is that a cross-run workspace
- * refresh (`git clean -fdx -e node_modules`) removes the file — which is not a
- * cost at all here: the journal is DRAINED into the run's scratch at the end of
- * every phase, so its durable home is the snapshot, and a leftover file from a
- * crashed run is something we want gone rather than mis-attributed.
+ * `git clean -fdx -e node_modules` on a cross-run workspace refresh does NOT
+ * reach inside `.git/`, so the explicit `resetPrNotesJournal` delete is the only
+ * thing that clears a file a crashed run left behind — which is the point of it
+ * existing. The journal is DRAINED into the run's scratch at the end of every
+ * phase, so its durable home is the snapshot either way.
  */
 function isWithin(parent: string, child: string): boolean {
   return child === parent || child.startsWith(`${parent}${sep}`);
@@ -247,6 +271,38 @@ function readTail(path: string): string | null {
 }
 
 /**
+ * Cap on how much of the gate script is recorded.
+ *
+ * Smaller than the journal's cap and taken from the HEAD rather than the tail:
+ * a shell script is read top-down, and the interesting part of a runaway one is
+ * where it starts, not where it ends.
+ */
+const MAX_VERIFY_SCRIPT_BYTES = 8 * 1024;
+
+/**
+ * Read the push gate the agent wrote for itself, or null when it wrote none.
+ *
+ * A READ, not a drain (`drainPrNotes` below is the drain): the same file is the
+ * live gate `generic_loop.until_bash` runs on the next iteration, so removing
+ * it would disarm the loop this harvest is reporting on. The reset that DOES
+ * clear it happens once per attempt, at the start, in `./executors/shared.ts`.
+ *
+ * Never throws: a failed read must not fail the phase that produced it.
+ */
+export function readVerifyScript(repoDir: string): string | null {
+  const path = join(repoDir, VERIFY_SCRIPT_NAME);
+  try {
+    const body = readFileSync(path, "utf8");
+    if (!body.trim()) return null;
+    return body.length > MAX_VERIFY_SCRIPT_BYTES
+      ? `${body.slice(0, MAX_VERIFY_SCRIPT_BYTES)}\n… truncated at ${MAX_VERIFY_SCRIPT_BYTES} bytes`
+      : body;
+  } catch {
+    return null; // no gate written yet — the state every run starts in
+  }
+}
+
+/**
  * Read the journal and DELETE it — a drain, not a read.
  *
  * The delete is what makes the file a per-phase outbox rather than an
@@ -303,8 +359,9 @@ export function harvestFixMarkers(
     // would put this module and `./pr-state.ts` in an import cycle), the gate
     // reads the fact at its source: a run carries `context.prState` iff the
     // dispatcher resolved a snapshot for it, which is exactly the definition of
-    // PR-scoped. It therefore tracks `PR_SCOPED_WORKFLOWS` automatically as
-    // that set grows.
+    // PR-scoped. It therefore tracks `prScopedWorkflows()` automatically as
+    // that set changes — including a workflow an operator adds by declaring
+    // `pr_scoped: true` in an overlay.
     const wantsNotes =
       !!(run?.context as Record<string, unknown> | undefined)?.prState;
     if (!wantsMarkers && !wantsNotes) return;
@@ -316,11 +373,19 @@ export function harvestFixMarkers(
     const at = new Date().toISOString();
 
     let notes = current?.notes ?? [];
-    if (wantsNotes) {
+    // The gate script is recorded for the FIX FAMILY only — it is the only
+    // family that writes one. Its last non-null reading stands: the file is
+    // reset once per attempt, not per phase, so a later phase that cannot see
+    // the workspace must not blank the gate an earlier one recorded.
+    let verifyScript = current?.verifyScript ?? null;
+    if (wantsNotes || wantsMarkers) {
       const repoDir = overrides.repoDir !== undefined ? overrides.repoDir : prNotesRepoDir(run);
       if (repoDir) {
-        const fresh = drainPrNotes(repoDir, { at, runId, workflow: workflowName, phase });
-        if (fresh.length > 0) notes = boundNotes([...notes, ...fresh]);
+        if (wantsNotes) {
+          const fresh = drainPrNotes(repoDir, { at, runId, workflow: workflowName, phase });
+          if (fresh.length > 0) notes = boundNotes([...notes, ...fresh]);
+        }
+        if (wantsMarkers) verifyScript = readVerifyScript(repoDir) ?? verifyScript;
       }
     }
 
@@ -338,6 +403,7 @@ export function harvestFixMarkers(
       phases: phases.includes(base) ? phases : [...phases, base],
       at,
       notes,
+      verifyScript,
     };
     db.runs.mergeScratch(runId, { [FIX_HARVEST_SCRATCH_KEY]: next });
   } catch (err: unknown) {

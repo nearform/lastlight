@@ -687,13 +687,14 @@ describe('dispatch — pr-fix dispatch', () => {
     expect(outcome.kind).toBe('ignored');
   });
 
-  it('fails open: a PR read error still dispatches rather than dropping the event', async () => {
+  it('refuses to act on a PR it could not read, and says which read failed', async () => {
     const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 5 });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
-    // Everything after `getPullRequest` is skipped (there is no head SHA to
-    // point it at), so the snapshot is all defaults — none of which can cause
-    // a skip. The branch is unknowable, so this specific route can only bail;
-    // what matters is that it bails LOUDLY rather than silently skipping.
+    // `getPullRequest` is the one read whose degraded values are all the
+    // PERMISSIVE ones — `labels: []`, `isFork: false`, `headSha: ''` — so a 502
+    // yields a snapshot that LOOKS healthy and every guard below it evaluates
+    // defaults rather than facts (#256). Every other read still fails open; see
+    // the next case.
     const github = prGithubStub({}, {
       getPullRequest: vi.fn().mockRejectedValue(new Error('502 from GitHub')),
     });
@@ -701,11 +702,31 @@ describe('dispatch — pr-fix dispatch', () => {
 
     const outcome = await dispatch(envelope, deps);
 
-    expect(outcome.kind).toBe('ignored');
-    expect((outcome as any).reason).toContain('could not determine branch');
+    expect(dispatchWorkflow).not.toHaveBeenCalled();
+    expect(outcome.kind).toBe('skipped');
+    expect((outcome as any).reason).toContain('read-degraded');
+    expect((outcome as any).reason).toContain('502 from GitHub');
   });
 
-  it('fails open on a checks read error — no skip on incomplete data', async () => {
+  it('makes that refusal transient — no label, no comment, no run row', async () => {
+    // A "come back later", exactly like a run-lock drop: the cron re-pickup is
+    // what makes dropping sound, and every side effect here would be a durable
+    // statement written against a pull request we could not read.
+    const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 5 });
+    const db = mockDb();
+    const github = prGithubStub({}, {
+      getPullRequest: vi.fn().mockRejectedValue(new Error('403 from GitHub')),
+    });
+    const deps = makeDeps(prFixRoute(), { db: db as any, github });
+
+    await dispatch(envelope, deps);
+
+    expect(github.addLabels).not.toHaveBeenCalled();
+    expect(github.postComment).not.toHaveBeenCalled();
+    expect(db.runs.createRun).not.toHaveBeenCalled();
+  });
+
+  it('still fails open on a checks read error — no skip on incomplete data', async () => {
     const envelope = makeEnvelope({ type: 'pr.checks_failed', prNumber: 5 });
     const dispatchWorkflow = vi.fn().mockResolvedValue({ success: true });
     const github = prGithubStub({}, {
@@ -1024,10 +1045,12 @@ describe('applyPrDispatchGate — the cron / api route crosses the same gate', (
       flakyDeferrals: 0,
       escalatedAtSha: null,
       escalatedBy: null,
+    forkNoticedAtSha: null,
       priorAttempts: [],
       notes: [],
       priorDiagnosisClass: null,
       cumulativeCostUsd: 0,
+    costBaselineUsd: 0,
       assessedHeadShaByWorkflow: {},
       runInFlight: null,
       readErrors: [],

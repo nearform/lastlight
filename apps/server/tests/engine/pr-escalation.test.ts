@@ -17,7 +17,7 @@ import { StateDb } from "#src/state/db.js";
 import type { GitHubClient } from "#src/engine/github/github.js";
 import { applyDerivedState, prTriggerId, type PrState } from "#src/engine/pr-state.js";
 import { resolveFixDisposition } from "#src/engine/pr-decisions.js";
-import { escalatePr, renderEscalationComment } from "#src/engine/pr-escalation.js";
+import { escalatePr, noticeForkPr, renderEscalationComment } from "#src/engine/pr-escalation.js";
 import { REQUIRES_HUMAN_LABEL } from "#src/cron/dependabot-discovery.js";
 import { defaultFixConfig } from "lastlight-shared/config-types";
 
@@ -53,10 +53,12 @@ function liveState(over: Partial<PrState> = {}): PrState {
     flakyDeferrals: 0,
     escalatedAtSha: null,
     escalatedBy: null,
+    forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
     priorDiagnosisClass: null,
     cumulativeCostUsd: 0,
+    costBaselineUsd: 0,
     assessedHeadShaByWorkflow: {},
     runInFlight: null,
     readErrors: [],
@@ -422,5 +424,230 @@ describe("renderEscalationComment", () => {
     const body = renderEscalationComment("budget-exhausted", "budget-exhausted: …", liveState(), fix);
     expect(body).toContain("no per-attempt notes");
     expect(body).not.toContain("- `attempt");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fork-PR notice — once per PR, keyed on the decision
+// ---------------------------------------------------------------------------
+
+/**
+ * The notice is the one skip a human is owed an explanation for on the PR
+ * itself: nothing is wrong with their change, we simply have no branch to push
+ * to. Two things were wrong with it (#256), and each is a test below: it fired
+ * on `state.isFork` rather than on the `fork-pr` DECISION, so any skip on a
+ * fork PR earned it; and it had no de-duplication at all, so it fired once per
+ * skip for the life of the PR.
+ *
+ * Run through the real store for the same reason the escalation tests are:
+ * the de-duplication IS the persisted record, so faking the store would fake
+ * the link that carries the property.
+ */
+describe("noticeForkPr", () => {
+  const FORK = liveState({
+    isFork: true,
+    headRepoFullName: "octocat/lastlight",
+    headRef: "patch-1",
+  });
+
+  /** One dispatch of the fork PR, applying whatever the decision entails. */
+  async function forkDispatch(github: ReturnType<typeof fakeGithub>, over: Partial<PrState> = {}) {
+    const state = liveState({ ...FORK, ...over });
+    applyDerivedState(state, { github: null, db, botLogin: BOT });
+    const decision = resolveFixDisposition(state, fix, { dedupOnHeadSha: true });
+    const outcome = decision.forkPr ? await noticeForkPr(WORKFLOW, state, { db, github }) : null;
+    return { state, decision, outcome };
+  }
+
+  it("explains itself once, and records that it did", async () => {
+    const github = fakeGithub();
+    const { decision, outcome } = await forkDispatch(github);
+
+    expect(decision.reason).toMatch(/^fork-pr:/);
+    expect(decision.forkPr).toBe(true);
+    expect(outcome?.commented).toBe(true);
+    expect(github.postComment).toHaveBeenCalledTimes(1);
+    expect(github.postComment.mock.calls[0][3]).toContain("octocat/lastlight");
+    // Never a label: a fork PR is not `requires-human`, it is not this author's
+    // problem to solve on this repo.
+    expect(github.addLabels).not.toHaveBeenCalled();
+  });
+
+  it("says nothing on the next event, because the record carries forward", async () => {
+    const github = fakeGithub();
+    await forkDispatch(github);
+    const second = await forkDispatch(github);
+
+    expect(second.state.forkNoticedAtSha).toBe(FORK.headSha);
+    expect(second.decision.forkPr).toBe(true); // still the right decision…
+    expect(second.outcome).toBeNull(); // …and still says nothing
+    expect(github.postComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays silent across a push, unlike an escalation", async () => {
+    // The asymmetry is deliberate. An escalation says "this problem needs a
+    // human", which a new commit can make untrue; a fork notice says "your
+    // branch is not on this repo", which pushing to that same fork does not
+    // change. Ten pushes is one apology.
+    const github = fakeGithub();
+    await forkDispatch(github);
+    const afterPush = await forkDispatch(github, { headSha: "ffff666", headAuthor: "octocat" });
+
+    expect(afterPush.outcome).toBeNull();
+    expect(github.postComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not fired by a skip that is not `fork-pr`", async () => {
+    // `state.isFork` is true on EVERY skip a fork PR takes. The run lock is one
+    // of them: "another run owns this PR" has nothing to say about forks, and
+    // answering it with "I can't apply fixes to this PR" explains a decision
+    // that was not taken.
+    const github = fakeGithub();
+    db.runs.createRun({
+      id: "run-live",
+      workflowName: "pr-fix",
+      triggerId: TRIGGER,
+      owner: "cliftonc",
+      repo: "lastlight",
+      issueNumber: PR,
+      currentPhase: "fix",
+      status: "running",
+      startedAt: new Date().toISOString(),
+    });
+
+    const { decision, outcome } = await forkDispatch(github);
+
+    expect(decision.reason).toMatch(/^run-in-flight:/);
+    expect(decision.forkPr).toBeUndefined();
+    expect(outcome).toBeNull();
+    expect(github.postComment).not.toHaveBeenCalled();
+  });
+
+  it("says nothing rather than repeating itself when the record cannot be written", async () => {
+    // Row-then-comment, for the same reason escalation is: comment-then-crash
+    // would repeat the comment forever, which is the failure being fixed.
+    const github = fakeGithub();
+    const brokenDb = {
+      runs: {
+        ...db.runs,
+        createRun: () => { throw new Error("disk full"); },
+        activeForTrigger: () => null,
+        latestForTrigger: () => null,
+        latestSucceededForTriggers: () => ({}),
+      },
+      executions: { costForTriggerWorkflows: () => 0, phaseSucceededInRun: () => false },
+    } as unknown as StateDb;
+
+    const outcome = await noticeForkPr(WORKFLOW, liveState(FORK), { db: brokenDb, github });
+
+    expect(outcome).toBeNull();
+    expect(github.postComment).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cost window
+// ---------------------------------------------------------------------------
+
+/**
+ * `fix.maxCostUsd` bounds a PROBLEM, not a pull request — the same window
+ * `fix.maxAttempts` bounds, on the same `sameProblem` boundary.
+ *
+ * It used to be the PR's whole lifetime spend, which put the two budgets out of
+ * step: a maintainer's push re-armed the attempt counter and cleared the
+ * `escalated:` guard, then the very next event fell straight back through
+ * `budget-exhausted` and posted another `requires-human` comment — a comment
+ * whose closing paragraph tells the maintainer that pushing is the remedy
+ * (#256).
+ */
+describe("the cost window resets with the problem", () => {
+  /** A finished fix run costing `usd`, dispatched at `headSha`. */
+  function spend(n: number, headSha: string, usd: number, state: PrState): void {
+    const id = `cost-run-${n}`;
+    db.runs.createRun({
+      id,
+      workflowName: WORKFLOW,
+      triggerId: TRIGGER,
+      owner: "cliftonc",
+      repo: "lastlight",
+      issueNumber: PR,
+      currentPhase: "fix",
+      status: "succeeded",
+      context: { prState: state },
+      startedAt: `2020-01-0${n}T00:00:00.000Z`,
+    });
+    // The cost is summed off `executions` JOINed to the run row, so the
+    // execution has to carry `workflowRunId` — that join is what scopes spend
+    // to the fix family on this PR.
+    db.executions.recordStart({
+      id: `exec-${n}`,
+      skill: WORKFLOW,
+      triggerType: "webhook",
+      triggerId: TRIGGER,
+      repo: REPO,
+      issueNumber: PR,
+      startedAt: `2020-01-0${n}T00:00:00.000Z`,
+      workflowRunId: id,
+    });
+    db.executions.recordFinish(`exec-${n}`, { success: true, costUsd: usd });
+    void headSha;
+  }
+
+  it("counts spend on the current problem, not the PR's lifetime", async () => {
+    const github = fakeGithub();
+    const budget = { ...fix, maxCostUsd: 1.0 };
+
+    // Two attempts blow the budget on the original head.
+    const first = snapshot(github);
+    spend(1, first.headSha, 0.8, first);
+    const second = snapshot(github);
+    spend(2, second.headSha, 0.5, second);
+
+    const exhausted = snapshot(github);
+    expect(exhausted.cumulativeCostUsd).toBeCloseTo(1.3);
+    const stop = resolveFixDisposition(exhausted, budget);
+    expect(stop.escalation).toBe("budget-exhausted");
+    await escalatePr(WORKFLOW, exhausted, stop, budget, { db, github });
+    expect(github.postComment).toHaveBeenCalledTimes(1);
+
+    // A maintainer pushes. That is a fresh problem — so the budget re-arms
+    // exactly as the attempt counter does, and nothing is posted again.
+    const afterPush = snapshot(github, { headSha: "ffff666", headAuthor: "octocat" });
+    expect(afterPush.attempt).toBe(1);
+    expect(afterPush.cumulativeCostUsd).toBe(0);
+    expect(afterPush.costBaselineUsd).toBeCloseTo(1.3);
+
+    const retry = resolveFixDisposition(afterPush, budget);
+    expect(retry.decision).toBe("run");
+    expect(retry.escalation).toBeUndefined();
+    expect(github.postComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps counting while the problem is the same, including across our own pushes", async () => {
+    const github = fakeGithub();
+    const first = snapshot(github);
+    spend(1, first.headSha, 0.4, first);
+
+    // OUR push: the fix landed and CI is still red — same problem, so the spend
+    // carries. (`headIsOurs` is what `sameProblem` reads.)
+    const ours = snapshot(github, { headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
+    expect(ours.cumulativeCostUsd).toBeCloseTo(0.4);
+    spend(2, ours.headSha, 0.4, ours);
+
+    const third = snapshot(github, { headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
+    expect(third.cumulativeCostUsd).toBeCloseTo(0.8);
+    expect(third.costBaselineUsd).toBe(0);
+  });
+
+  it("gives a PR mid-flight at upgrade its full lifetime spend", async () => {
+    // A run row written before `costBaselineUsd` existed carries no baseline,
+    // so it reads 0 — which is the old behaviour, for the only case where the
+    // old behaviour was right.
+    const github = fakeGithub();
+    const legacy = liveState();
+    delete (legacy as Partial<PrState>).costBaselineUsd;
+    spend(1, legacy.headSha, 0.9, legacy);
+
+    expect(snapshot(github).cumulativeCostUsd).toBeCloseTo(0.9);
   });
 });

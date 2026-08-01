@@ -9,13 +9,14 @@ should require **only a YAML file** in `workflows/`, no runner changes.
 
 | File | Role |
 |---|---|
-| `schema.ts` | Zod schema for `AgentWorkflowDefinition`, `PhaseDefinition`, `PhaseLoop`, `GenericLoop`, `CronWorkflowDefinition`. Source of truth for what a YAML file is allowed to contain. Also home to the optional top-level `classification:` block (`intent`/`description`/`examples`) — how a workflow contributes its category to the composed intent classifier and claims a routable intent (issue #164) — plus `RESERVED_CONTROL_INTENTS` + `intentToken()`. |
+| `schema.ts` | Zod schema for `AgentWorkflowDefinition`, `PhaseDefinition`, `PhaseLoop`, `GenericLoop`, `CronWorkflowDefinition`. Source of truth for what a YAML file is allowed to contain. Also home to the optional top-level `classification:` block (`intent`/`description`/`examples`) — how a workflow contributes its category to the composed intent classifier and claims a routable intent (issue #164) — plus `RESERVED_CONTROL_INTENTS` + `intentToken()`, and the top-level `pr_scoped:` flag (see `pr-scope.ts`). |
 | `loader.ts` | Reads `workflows/*.yaml`, validates against the schema, caches parsed definitions. `getWorkflow(name)` is the only lookup the rest of the code uses. |
 | `templates.ts` | Mustache-ish template engine. Handles `{{branch}}`, `{{issueDir}}`, `{{contextSnapshot}}`, `{{models.architect}}`, `{{phaseOutputs.guardrails.output}}`, list iteration, and `unless_*` clauses. |
 | `simple.ts` | Top-of-stack entry: `runSimpleWorkflow(workflowName, request, …)`. Picks the trigger id, builds the template context, creates or reuses a `workflow_runs` row, then calls `runWorkflow`. |
 | `runner.ts` | The **scheduler**. One sequential walk over a chain-synthesized DAG — no separate linear/DAG paths. Owns the `phases[]`/`outputs{}` accumulation, node status, cancel/skip handling, and the terminal `set_phase`/PR wrap-up. Delegates each node's body to `PhaseExecutor`. Also: `gitAccessProfileForWorkflow`, `gitSandboxAccessForWorkflow`. Re-exports `isTerminated`. |
 | `phase-executor.ts` | `PhaseExecutor` — owns every per-phase body (context / standard agent / reviewer-loop / generic-loop, plus approval & reply gates) behind `execute(node, outputs) → PhaseOutcome`. Constructed once per run from three collaborators: run-scoped data, a `PhaseReporter`, a `PhaseResolver`. Also home to `runPhase`, `buildPhasePrompt`, `phaseConfigFor`, `isTerminated`. Unit-tested with fakes (`phase-executor.test.ts`). |
 | `dag.ts` | Pure graph logic: `buildDag(phases, { chainIfNoDeps })`, `evaluateTriggerRule`, `getReadyNodes`, `getNodesToSkip`, `isComplete`, `topoSort`. No IO. `chainIfNoDeps` synthesizes a previous-phase chain when no phase declares `depends_on`. |
+| `pr-scope.ts` | Which workflows are PR-SCOPED, derived from each definition's `pr_scoped: true` and memoised on the loader's asset version. The span of the PR run lock, the per-head-SHA dedup, escalation and the `PrState` snapshot. Metadata rather than a hardcoded name set because the handlers are operator-configurable through `routes.github.*` — remapping a route to a fork used to drop the whole gate silently (issue #256). The four original built-ins are honoured without the key, with a warning. |
 | `phase-ref.ts` | `PhaseRef` value object — the single authority for building loop-iteration labels (`format()`) and parsing them back (`parse()` → base + kind). No IO. |
 | `verdict.ts` | `parseReviewerVerdict(output) → { verdict, viaFallback }` — the one pure parser for a reviewer phase's `VERDICT:` marker (with the fallback heuristic). Both runner verdict sites call it. |
 | `loop-eval.ts` | Expression evaluator for `generic_loop.until` conditions (`output.contains('PASS')`, `verdict == 'APPROVED'`). |
@@ -209,6 +210,16 @@ runs **inside the sandbox** (via `executeCommand`, `writeSession: false`)
 against the persisted workspace — exit 0 ends the loop. (It used to run on the
 harness host via `execSync`; it now executes in the same container the phase
 does.)
+
+**Templated phase budgets.** `timeout_seconds` and
+`generic_loop.max_iterations` take either a plain positive integer or
+`{ from: <dotted context path>, default: N }`. `from` is the same lookup
+`{{a.b}}` performs, resolved once before the first iteration
+(`resolveTemplatedNumber`, in the engine's `core/templated-number.ts`);
+`default` is used verbatim, with a warning, when it resolves to nothing usable.
+Both fix workflows read `fix.localIterations` / `fix.gateTimeoutSeconds` this
+way, against the run's effective (already repo-clamped) `fix` block — the two
+keys were otherwise parsed, clamped and read by nothing (issue #256).
 
 **Soft-failure policy (`generic_loop.on_soft_failure`).** By default any
 non-success iteration hard-fails the whole workflow. That's wrong for a

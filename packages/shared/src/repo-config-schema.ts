@@ -41,12 +41,15 @@ import { join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { providerByPrefix, oauthProviderByModelPrefix } from "./providers.js";
 import {
+  DIAGNOSIS_CLASSES,
   defaultDependenciesConfig,
   defaultFixConfig,
   defaultReviewConfig,
   dependencyImpactRank,
   isDependencyImpact,
+  isDiagnosisClass,
   isReviewTrigger,
+  reviewTriggerRank,
   type DependenciesConfig,
   type DisabledConfig,
   type FixConfig,
@@ -883,7 +886,21 @@ function sanitizeFix(
         const operator = Array.isArray(operatorRaw.retryableClasses)
           ? (operatorRaw.retryableClasses as unknown[]).filter((v): v is string => typeof v === "string")
           : defaults.retryableClasses;
-        const names = (value as string[]).map((v) => v.trim());
+        const raw = (value as string[]).map((v) => v.trim());
+        // Against the closed enum FIRST, and reported separately from the
+        // subset clamp: "you spelled it wrong" and "the operator doesn't retry
+        // that" are different problems with different fixes, and a typo would
+        // otherwise be reported as a policy decision (#256).
+        const misspelt = raw.filter((n) => !isDiagnosisClass(n));
+        if (misspelt.length > 0) {
+          warn(
+            "invalid-value",
+            path,
+            `Dropped ${misspelt.map((n) => `"${n}"`).join(", ")} from "${path}": not a diagnosis class. ` +
+              `The five are: ${DIAGNOSIS_CLASSES.join(", ")}.`,
+          );
+        }
+        const names = raw.filter(isDiagnosisClass) as string[];
         const added = names.filter((n) => !operator.includes(n));
         if (added.length > 0) {
           warn(
@@ -981,10 +998,29 @@ function sanitizeDependencies(
         break;
       }
       case "auditComment": {
-        // Free: the audit comment is cosmetic either way, and a repo that finds
-        // it noisy silencing it costs nothing but a paper trail it owns.
+        // Add-only `true`, like `requireSettledChecks` above.
+        //
+        // This was `free` on the reasoning that the comment is cosmetic. It is
+        // not: it is the AUDIT RECORD of a major version this deployment
+        // auto-merged into that repo, and the party it silences is the party
+        // being audited (#256). Turning it ON when the operator has it off is
+        // the conservative direction and stays allowed; turning it off is the
+        // one thing a repo may not do.
         if (typeof value !== "boolean") {
           warn("invalid-value", path, `Ignored "${path}": it must be true or false.`);
+          continue;
+        }
+        const operator =
+          typeof operatorRaw.auditComment === "boolean"
+            ? operatorRaw.auditComment
+            : defaults.auditComment;
+        if (!value && operator) {
+          warn(
+            "policy-downgrade",
+            path,
+            `Ignored "${path}: false": this key is add-only — a repo may ask for the auto-merge ` +
+              `audit comment, never silence one this deployment requires.`,
+          );
           continue;
         }
         out.auditComment = value;
@@ -1018,6 +1054,7 @@ function sanitizeReview(
     warn("invalid-value", "review", `Ignored "review" in .lastlight/${REPO_CONFIG_FILE}: it must be a mapping.`);
     return undefined;
   }
+  const defaults = defaultReviewConfig();
   const operatorRaw = operatorBlockNode(base, "review");
   const out: Record<string, unknown> = {};
 
@@ -1028,15 +1065,32 @@ function sanitizeReview(
       continue;
     }
     switch (key) {
-      case "trigger":
-        // Free — all three modes are equally "safe". A repo choosing
-        // `on-request` is opting itself out of automation, which is its call.
+      case "trigger": {
+        // The LOWER automation tier wins (`on-request < after-checks < eager`),
+        // the same direction `dependencies.autoMergeMaxImpact` is clamped in.
+        //
+        // This was `free` on the reasoning that all three modes are equally
+        // "safe". They are not equally EXPENSIVE (#256): a repo committing
+        // `eager` against an `on-request` deployment buys itself a full agent
+        // run per push, on the operator's budget. Opting DOWN is still entirely
+        // its call.
         if (!isReviewTrigger(value)) {
           warn("invalid-value", path, `Ignored "${path}": it must be one of eager, after-checks, on-request.`);
           continue;
         }
+        const operator = isReviewTrigger(operatorRaw.trigger) ? operatorRaw.trigger : defaults.trigger;
+        if (reviewTriggerRank(value) > reviewTriggerRank(operator)) {
+          warn(
+            "policy-downgrade",
+            path,
+            `Ignored "${path}: ${value}": a repo may only ask for LESS review automation — ` +
+              `this deployment runs "${operator}".`,
+          );
+          continue;
+        }
         out.trigger = value;
         break;
+      }
       case "requestLabel": {
         // Free, but it is a LABEL name, never a path — same guard
         // `sanitizeDisabled` applies to workflow/cron names.

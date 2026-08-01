@@ -33,16 +33,23 @@
  * Pure: no I/O, no clock, no DB. `./fix-harvest.ts` is the impure half.
  */
 
-/** The five diagnosis classes (09 → S1, `skills/fixing/SKILL.md`). */
-export const DIAGNOSIS_CLASSES = [
-  "reproducible",
-  "env-mismatch",
-  "flaky",
-  "infra-dependent",
-  "upstream-broken",
-] as const;
-
-export type DiagnosisClass = (typeof DIAGNOSIS_CLASSES)[number];
+/**
+ * The five diagnosis classes (09 → S1, `skills/fixing/SKILL.md`).
+ *
+ * Defined in `lastlight-shared` and re-exported here, where every reader of the
+ * marker grammar looks for them. They moved because `fix.retryableClasses` is a
+ * config leaf naming members of this enum, and both places that validate it —
+ * the boot normaliser in core and the repo-layer clamp compiled into the CLI —
+ * need it. `shared` is the only package both may reach, and a second hand-kept
+ * copy of a closed enum is exactly how `retryableClasses` came to accept
+ * `reproducable` in the first place (#256).
+ */
+import {
+  DIAGNOSIS_CLASSES,
+  isDiagnosisClass,
+  type DiagnosisClass,
+} from "lastlight-shared/config-types";
+export { DIAGNOSIS_CLASSES, isDiagnosisClass, type DiagnosisClass };
 
 /**
  * The two classes that cost NO attempt, per 09-state-machine.md §S1's class

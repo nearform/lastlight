@@ -111,8 +111,8 @@ interface ReviewConfig {                  // when a pr-review run is triggered
 
 interface FixConfig {                     // budgets for every PR_FIX_SHAPED workflow
   maxAttempts: number;                    // cross-run attempts per (repo, PR) before requires-human
-  localIterations: number;                // gate-loop iterations WITHIN one attempt   [NOT WIRED]
-  gateTimeoutSeconds: number;             // until_bash budget for the build/test gate [NOT WIRED]
+  localIterations: number;                // gate-loop iterations WITHIN one attempt
+  gateTimeoutSeconds: number;             // until_bash budget for the build/test gate
   escalateModelAfterAttempt: number;      // attempts above this use models["pr-fix-retry"]
   maxCostUsd: number | null;              // cumulative ceiling for ONE PR; null = unbounded
   maxFlakyDeferrals: number;              // `flaky` verdicts before one counts as reproducible
@@ -272,15 +272,15 @@ warning; the run proceeds either way.
 | `fix.localIterations` | yes | `min(repo, operator)` |
 | `fix.maxFlakyDeferrals` | yes | `min(repo, operator)` |
 | `fix.maxCostUsd` | yes | `min(repo, operator)`; a repo may not propose `null`, which means "no ceiling" and is therefore the loosest value there is |
-| `fix.retryableClasses` | yes | a **subset** of the operator's list — naming a class the operator doesn't retry would *add* a retryable failure mode; the remaining (possibly empty) subset stands, since retrying less is always allowed |
+| `fix.retryableClasses` | yes | validated against the five diagnosis classes, then a **subset** of the operator's list — naming a class the operator doesn't retry would *add* a retryable failure mode; the remaining (possibly empty) subset stands, since retrying less is always allowed. A member that is not a diagnosis class at all is reported as `invalid-value`, not `policy-downgrade`: a typo and a policy decision are different problems with different fixes |
 | `fix.escalateModelAfterAttempt` | **no** | operator-only — spend control |
 | `fix.gateTimeoutSeconds` | **no** | operator-only — a shared-resource budget, not a "how careful is this repo" dial |
 | `dependencies.autoMergeMaxImpact` | yes | the **lower** tier on `none < low < medium < high` (a clamp on a *prompt-level* ceiling — see below) |
 | `dependencies.requireSettledChecks` | yes | add-only `true` — a repo may demand settled checks, never waive the operator's requirement |
 | `dependencies.minSettledChecks` | **no** | operator-only — see below |
-| `dependencies.auditComment` | yes | free — cosmetic either way, and the paper trail it silences is its own |
-| `review.trigger` | yes | free — all three modes are equally safe; a repo choosing `on-request` is opting *itself* out of automation |
-| `review.requestLabel` | yes | free, but validated as a label **name** (no `/`, no `..`) — same guard `disabled` applies to workflow names |
+| `dependencies.auditComment` | yes | add-only `true` — a repo may *ask* for the auto-merge audit record, never silence one the operator requires. It is not cosmetic: it is the record of a major version this deployment auto-merged into that repo, and the party it would silence is the party being audited |
+| `review.trigger` | yes | the **lower** tier on `on-request < after-checks < eager`. The three modes are equally *safe* and not equally *expensive*: `eager` buys a full agent review per push, on the operator's budget. Opting down is still entirely the repo's call |
+| `review.requestLabel` | yes | free, but validated as a label **name** (no `/`, no `..`) — same guard `disabled` applies to workflow names. Naming one only ever ADDS an explicit, human-initiated route; the operator's own label keeps working. Both are honoured at the `pr.labeled` router branch |
 | `review.postsCheck` | yes | add-only `true` — a repo may ask for the check, never suppress one a branch-protection rule may be requiring |
 | `review.skipDraft` | yes | add-only `true` — a repo may skip drafts, never force reviews onto them |
 
@@ -733,8 +733,8 @@ These have no env var — they're set in `config/default.yaml` or the overlay's
 | `repoConfig.{enabled,allowKeys,allowedModels,allowAssets}` | see the per-repository layer above | The operator's bounds on the repo layer. | **never** — a repo can't widen its own bounds |
 | `deploy.version` | `string \| null`, `null` | Core-version pin (git tag/ref). Deployment config, not runtime behaviour. Env: `LASTLIGHT_CORE_VERSION`. | no |
 | `bootstrap.label` / `explore.defaultRepo` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO`. | no |
-| `review.{postsCheck,trigger,requestLabel,skipDraft}` | `false` / `after-checks` / `null` / `true` | When a `pr-review` run is triggered, and whether it posts the `last-light/review` check. `after-checks` means "once the head SHA's checks **settle**, either colour" — so the review can read and cite the CI result, and a push-storm collapses to one review per settled SHA. There is no settled-*and-passing* sub-mode: a PR whose CI never goes green would then never be reviewed at all. Enforced by `resolveReviewTrigger` (`src/engine/pr-decisions.ts`) at the [dispatch gate](/spec/05-router#reviewtrigger--one-resolver-every-route) — **one** implementation, on every route, with `src/cron/review-discovery.ts` reduced to a candidate finder. `on-request` is served by `requestLabel`, an `@bot review` comment, and the Re-run button on the check; `review_requested` is opportunistic only, since GitHub App bot users are not selectable in the reviewer picker. Env: `REVIEW_POSTS_CHECK` (`postsCheck` only). | **yes** — `postsCheck`/`skipDraft` add-only, the rest free |
-| `fix.{maxAttempts,localIterations,gateTimeoutSeconds,escalateModelAfterAttempt,maxCostUsd,maxFlakyDeferrals,retryableClasses}` | `3` / `2` / `900` / `1` / `5.0` / `2` / `[reproducible, env-mismatch]` | Retry budgets shared by every PR_FIX_SHAPED workflow (`pr-fix`, `dependabot-ci-fix`). `maxAttempts` counts *across runs* for one PR; the cost ceiling is cumulative per PR and ships **on**. A diagnosis class outside `retryableClasses` escalates immediately rather than burning budget on a retry that can't help. **`localIterations` and `gateTimeoutSeconds` are parsed, clamped and reported but read by nothing**: the phase schema takes `max_iterations` / `timeout_seconds` as plain numbers, so they can't be templated from config, and both fix workflow YAMLs hardcode the matching `2` and `900`. Setting either key changes nothing — edit the workflow YAML (or fork it in an overlay) instead. | **yes**, clamped one-way (`escalateModelAfterAttempt` / `gateTimeoutSeconds` operator-only) |
+| `review.{postsCheck,trigger,requestLabel,skipDraft}` | `false` / `after-checks` / `null` / `true` | When a `pr-review` run is triggered, and whether it posts the `last-light/review` check. `after-checks` means "once the head SHA's checks **settle**, either colour" — so the review can read and cite the CI result, and a push-storm collapses to one review per settled SHA. There is no settled-*and-passing* sub-mode: a PR whose CI never goes green would then never be reviewed at all. Enforced by `resolveReviewTrigger` (`src/engine/pr-decisions.ts`) at the [dispatch gate](/spec/05-router#reviewtrigger--one-resolver-every-route) — **one** implementation, on every route, with `src/cron/review-discovery.ts` reduced to a candidate finder. `on-request` is served by `requestLabel`, an `@bot review` comment, and the Re-run button on the check; `review_requested` is opportunistic only, since GitHub App bot users are not selectable in the reviewer picker. Env: `REVIEW_POSTS_CHECK` (`postsCheck` only). | **yes** — `postsCheck`/`skipDraft` add-only, `trigger` clamped to the lower automation tier, `requestLabel` free |
+| `fix.{maxAttempts,localIterations,gateTimeoutSeconds,escalateModelAfterAttempt,maxCostUsd,maxFlakyDeferrals,retryableClasses}` | `3` / `2` / `900` / `1` / `5.0` / `2` / `[reproducible, env-mismatch]` | Retry budgets shared by every PR_FIX_SHAPED workflow (`pr-fix`, `dependabot-ci-fix`). `maxAttempts` counts *across runs* for one PR; the cost ceiling is cumulative per PR and ships **on**. A diagnosis class outside `retryableClasses` escalates immediately rather than burning budget on a retry that can't help. `localIterations` and `gateTimeoutSeconds` reach the fix phase through a **templated phase budget**: `generic_loop.max_iterations: { from: fix.localIterations, default: 2 }` and `timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }` in both fix workflow YAMLs. The `from:` path resolves against the run's EFFECTIVE (already repo-clamped) `fix` block; the literal is the fallback for a context carrying no `fix:` at all. See `06-workflow-engine.md` → "Templated phase budgets". | **yes**, clamped one-way (`escalateModelAfterAttempt` / `gateTimeoutSeconds` operator-only) |
 | `dependencies.{autoMergeMaxImpact,requireSettledChecks,minSettledChecks,auditComment}` | `medium` / `true` / `1` / `true` | How far up the impact scale a **major** dependency bump may auto-merge. Impact, not semver magnitude, is the gate: a `@types/*` major is not a framework rewrite. Enforced in two different ways — `requireSettledChecks` / `minSettledChecks` are code (`mayMerge`, decided before the run and handed to the prompt as a verdict), `autoMergeMaxImpact` is prompt-level (the tier is the agent's self-report; nothing parses it or compares it to the ceiling). See "Where `dependencies` is enforced" above. | **yes**, clamped one-way (`minSettledChecks` operator-only) |
 | `otel.*` | see Telemetry | Env-overridable per key; `collectorHosts` is *unioned* with env, not replaced. | no |
 | `cron.webhooksEnabledCondition` | `true` | Present in `default.yaml` but **inert** — `normalizeFileConfig` never reads a `cron:` block. The real condition is declared per cron YAML (`condition.unless: webhooksEnabled`) and applied by `getJobs`, with `webhooksEnabled` derived in `src/index.ts` as `webhookSecret && githubApp`. | no |
@@ -750,10 +750,21 @@ operator-only.
 Two spots inside the policy blocks where "lenient" has a specific reading:
 `fix.maxCostUsd: null` is the documented "no ceiling" value and is honoured,
 while an absent or mistyped key falls back to the shipped ceiling — so a typo
-can never silently uncap spend. And `fix.retryableClasses` is a free string list
-rather than an enum: the class vocabulary belongs to the `diagnose` phase, and an
-operator naming a class this build doesn't know should narrow the retry set, not
-fail the boot.
+can never silently uncap spend. And `fix.retryableClasses` is validated against
+the five diagnosis classes (`DIAGNOSIS_CLASSES` in
+`packages/shared/src/config-types.ts`, re-exported by
+`src/engine/fix-markers.ts`) but still degrades rather than throwing: an unknown
+member is dropped with a warning naming the five, and a list that ends up empty
+warns that no PR will be retried. Dropping is the only correct direction — a
+class we do not recognise cannot be retried — but doing it silently was the
+defect: `reproducable` left a list that looked configured and made every
+diagnosis escalate `not-retryable` on the second dispatch.
+
+The three whole-number budgets (`maxAttempts`, `localIterations`,
+`maxFlakyDeferrals`) require integers on the operator path too, matching the
+repo-layer clamp; `fix: { maxAttempts: 2.5 }` is refused with a warning rather
+than leaving the two layers disagreeing about one leaf. `gateTimeoutSeconds` is
+a duration, not a count, and still takes any positive number.
 
 `publicConfig` isn't a knob: it's the redacted default / overlay / merged /
 provenance bundle `loadConfig` builds for `GET /admin/api/config`.

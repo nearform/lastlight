@@ -9,7 +9,7 @@ import {
 } from "../github/profiles.js";
 import { AgenticShim, truncateForLog, safeStringify } from "../event-shim.js";
 import { BuildAssetStore, type BuildAssetRef } from "../../state/build-assets.js";
-import { PR_NOTES_FILE_NAME } from "../pr-notes.js";
+import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "../fix-scratch.js";
 
 /**
  * Shared building blocks for the per-backend executors
@@ -35,47 +35,31 @@ export const THINKING_LEVELS: ReadonlySet<string> = new Set([
   "off", "minimal", "low", "medium", "high", "xhigh",
 ]);
 
-// ── The within-run push gate ────────────────────────────────────────
+// ── The harness's two scratch files in a PR checkout ────────────────
 //
-// The local gate the two fix workflows run through `generic_loop.until_bash`
-// (04-retry.md §4.5, 09-state-machine.md §S1). The right gate command is not
-// statically knowable — the package manager comes from the lockfile and the
-// commands from the repo's own CI workflow — so the `fixing` skill has the
-// agent write it here, and exit 0 ends the loop.
-//
-// It lives at the ROOT OF THE CHECKOUT (`<repo>/.lastlight-verify.sh`) on
-// EVERY backend, not at the workspace root beside the skill bundle. Three
-// reasons, in order of weight:
-//   1. gondolin is the packaged default (`sandbox.backend: gondolin`) and
-//      mounts only cwd, so a `../`-relative script is unreachable in the guest.
-//      A workspace-root gate would silently never run on the default backend.
-//   2. One uniform path keeps `until_bash` a LITERAL string, which the engine's
-//      `validateShellCommand` requires — it rejects any command containing
-//      `{{`, so the path can't be templated per backend.
-//   3. `git clean -fdx` surviving no longer matters, because the harness
-//      rewrites the gate every attempt (see `resetVerifyScript`).
-// What keeps it out of the dependency PR is `.git/info/exclude` — the same
-// backstop the gondolin skill bundle already relies on — not living outside
-// the tree.
-export const VERIFY_SCRIPT_NAME = ".lastlight-verify.sh";
+// The fix loop's push gate and the PR journal. Both live inside the checkout's
+// own `.git/` directory, which git never walks — the placement argument, and
+// the #256 bug that produced it, is stated once in `../fix-scratch.ts`. What
+// lives here is the half that needs `fs`: the start-of-run deletes.
+export { VERIFY_SCRIPT_NAME, PR_NOTES_FILE_NAME };
 
 /**
  * Start-of-run reset for the push gate (09-state-machine.md §S1, requirement
- * 3): delete any script an earlier attempt left behind, then register it in the
- * checkout's local `.git/info/exclude` so the agent's own `git add -A` can
- * never commit it into the PR.
+ * 3): delete any script an earlier attempt left behind.
  *
- * The delete is not redundant with the reused-workspace refresh's
- * `git clean -fdx`. The fix FAMILY shares ONE workspace per PR (§S4), so a gate
- * written by a superseded diagnosis — possibly by the *other* fix workflow —
- * outlives the run that wrote it; and the refresh's clean sits inside a
- * try/catch, so a failed fetch skips it entirely and leaves the stale gate
- * armed. A stale gate is worse than no gate: it passes green against the wrong
- * commands and authorises a push.
+ * There is no `excludeFromGit` half — the gate lives under `.git/`, so nothing
+ * has to be registered for it to stay out of the PR. This is purely about
+ * STALENESS, and staleness is the whole reason it survives: the fix FAMILY
+ * shares ONE workspace per PR (§S4), so a gate written by a superseded
+ * diagnosis — possibly by the *other* fix workflow — outlives the run that
+ * wrote it; the reused-workspace refresh's `git clean -fdx` cannot reach inside
+ * `.git/`; and that clean sits inside a try/catch anyway, so a failed fetch
+ * skips it entirely. A stale gate is worse than no gate: it passes green
+ * against the wrong commands and authorises a push.
  *
  * Best-effort and non-fatal — a workspace we can't reset still runs, and the
  * agent is instructed to rewrite the script unconditionally anyway. No-op when
- * `repoDir` isn't a checkout.
+ * `repoDir` isn't a checkout (there is no `.git/` to write into).
  */
 export function resetVerifyScript(repoDir: string): void {
   try {
@@ -84,41 +68,24 @@ export function resetVerifyScript(repoDir: string): void {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[sandbox] Could not remove a stale ${VERIFY_SCRIPT_NAME}: ${msg}`);
   }
-  excludeFromGit(repoDir, VERIFY_SCRIPT_NAME, "file");
 }
 
-// ── The PR journal ──────────────────────────────────────────────────
-//
-// The agent's outbox for `PrState.notes` (10-pr-memory.md). Same placement as
-// the push gate above and for the same reasons: it lives at the ROOT OF THE
-// CHECKOUT on EVERY backend, because gondolin is the packaged default and
-// mounts only cwd (so a `../` sibling is unreachable in the guest), and because
-// one uniform path is what lets the prompt state a literal filename while the
-// harvest resolves the same path from the run row without knowing the backend.
-//
-// What keeps it out of a dependency PR is `.git/info/exclude`, not living
-// outside the tree — and here that matters more than it does for the gate: the
-// journal must never be committed on ANY backend in ANY `buildAssets` mode,
-// which is precisely why `artifactIssueDir`'s relocation (conditional on
-// `buildAssets === "server"` AND a non-gondolin backend) could not be reused.
-// The full argument is in `../fix-harvest.ts`.
-
+/** Legacy alias for {@link PR_NOTES_FILE_NAME}, kept for existing importers. */
 export const PR_NOTES_FILE = PR_NOTES_FILE_NAME;
 
 /**
  * Start-of-run reset for the journal: delete anything a crashed earlier attempt
- * left behind, then register it in the checkout's local `.git/info/exclude` so
- * the agent's own `git add -A` can never commit it into the PR.
+ * left behind.
  *
- * The delete is a belt for the harvest's own drain (`drainPrNotes` removes the
- * file after each phase). It matters for exactly one case — a run that died
+ * As with {@link resetVerifyScript}, there is no `excludeFromGit` half any
+ * more — placement under `.git/` is the guarantee. What remains is provenance:
+ * the delete is a belt for the harvest's own drain (`drainPrNotes` removes the
+ * file after each phase), and it matters for exactly one case — a run that died
  * between the agent writing a note and `onPhaseEnd` reading it — where the file
  * would otherwise be re-attributed to the NEXT run, with that run's id stamped
  * on a claim it never made. Provenance that lies is worse than a lost note.
  *
- * The `excludeFromGit` half is the load-bearing one and is idempotent, so this
- * is safe to call on every provisioning path. Best-effort and non-fatal, like
- * {@link resetVerifyScript}; no-op when `repoDir` isn't a checkout.
+ * Best-effort and non-fatal; no-op when `repoDir` isn't a checkout.
  */
 export function resetPrNotesJournal(repoDir: string): void {
   try {
@@ -127,7 +94,6 @@ export function resetPrNotesJournal(repoDir: string): void {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[sandbox] Could not remove a stale ${PR_NOTES_FILE_NAME}: ${msg}`);
   }
-  excludeFromGit(repoDir, PR_NOTES_FILE_NAME, "file");
 }
 
 /**
@@ -196,16 +162,17 @@ export function skillBundleKey(config: ExecutorConfig): string {
  * be staged under cwd (the only mounted dir) rather than as an out-of-repo
  * sibling. No-op when `repoDir` isn't a git checkout (e.g. the workspace root).
  *
- * `kind` picks the gitignore form: `dir` (default) writes `/<entry>/`, which
- * matches a directory only; `file` writes `/<entry>`, needed for the push gate
- * (`.lastlight-verify.sh`) — the trailing slash would silently match nothing.
+ * Directories only — it writes `/<entry>/`. It used to take a `kind` flag for
+ * the push gate and the PR journal, which are files; both now live under
+ * `.git/` (see the two sections above), where git cannot see them at all and
+ * nothing needs excluding. Every remaining caller registers a directory.
  */
-export function excludeFromGit(repoDir: string, entry: string, kind: "dir" | "file" = "dir"): void {
+export function excludeFromGit(repoDir: string, entry: string): void {
   const gitDir = join(repoDir, ".git");
   if (!existsSync(gitDir)) return; // not a checkout — nothing to exclude
   const infoDir = join(gitDir, "info");
   const excludeFile = join(infoDir, "exclude");
-  const line = kind === "file" ? `/${entry}` : `/${entry}/`;
+  const line = `/${entry}/`;
   let current = "";
   try { current = readFileSync(excludeFile, "utf8"); } catch { /* may not exist yet */ }
   if (current.split(/\r?\n/).includes(line)) return;

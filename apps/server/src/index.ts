@@ -52,7 +52,7 @@ import {
   PR_FIX_SHAPED_WORKFLOWS,
   type SimpleWorkflowRequest,
 } from "./workflows/simple.js";
-import { resolvePrState, PR_SCOPED_WORKFLOWS, type PrState } from "./engine/pr-state.js";
+import { resolvePrState, prScopedWorkflows, type PrState } from "./engine/pr-state.js";
 import { renderContext, type ReviewTriggerOptions } from "./engine/pr-decisions.js";
 import {
   REVIEW_WORKFLOW,
@@ -394,7 +394,7 @@ async function main() {
     let prState: PrState | null = inheritedPrState;
     if (
       !prState &&
-      PR_SCOPED_WORKFLOWS.has(workflowName) &&
+      prScopedWorkflows().has(workflowName) &&
       owner &&
       repo &&
       typeof context.prNumber === "number"

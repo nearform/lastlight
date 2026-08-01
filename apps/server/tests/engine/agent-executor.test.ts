@@ -483,19 +483,19 @@ describe("excludeFromGit", () => {
     }
   });
 
-  it("writes the FILE form without a trailing slash", () => {
+  it("writes the DIRECTORY form — every remaining caller registers a dir", () => {
+    // The `kind: "file"` form existed for the push gate and the PR journal.
+    // Both now live under `.git/`, which git never walks, so neither needs
+    // excluding and no caller passes a file (see `src/engine/fix-scratch.ts`).
     const tmp = mkdtempSync(join(tmpdir(), "gitexclude-"));
     try {
       const repo = join(tmp, "repo");
       mkdirSync(join(repo, ".git", "info"), { recursive: true });
 
-      excludeFromGit(repo, VERIFY_SCRIPT_NAME, "file");
+      excludeFromGit(repo, ".lastlight-skills");
 
       const body = readFileSync(join(repo, ".git", "info", "exclude"), "utf8");
-      // `/x/` is a DIRECTORY pattern — with the trailing slash git would match
-      // nothing and the gate script could be committed into the PR.
-      expect(body).toContain(`/${VERIFY_SCRIPT_NAME}\n`);
-      expect(body).not.toContain(`/${VERIFY_SCRIPT_NAME}/`);
+      expect(body).toContain("/.lastlight-skills/\n");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -507,6 +507,12 @@ describe("excludeFromGit", () => {
  * fix family shares ONE workspace per PR, so a script written by a superseded
  * diagnosis — possibly by the other fix workflow — outlives the run that wrote
  * it, and a stale gate passes green against the wrong commands.
+ *
+ * Staleness is now the reset's ONLY job. The gate lives under `.git/`, so
+ * nothing has to be registered anywhere for it to stay out of the PR — and
+ * nothing else can clear it either, since `git clean -fdx` does not enter
+ * `.git/` (see `src/engine/fix-scratch.ts`, and
+ * `tests/sandbox/scratch-not-committable.test.ts` for the git round-trip).
  */
 describe("resetVerifyScript", () => {
   function checkout(): { tmp: string; repo: string } {
@@ -516,7 +522,7 @@ describe("resetVerifyScript", () => {
     return { tmp, repo };
   }
 
-  it("deletes a stale gate script and excludes it from git", () => {
+  it("deletes a stale gate script", () => {
     const { tmp, repo } = checkout();
     try {
       writeFileSync(join(repo, VERIFY_SCRIPT_NAME), "#!/bin/sh\nexit 0\n");
@@ -524,21 +530,20 @@ describe("resetVerifyScript", () => {
       resetVerifyScript(repo);
 
       expect(existsSync(join(repo, VERIFY_SCRIPT_NAME))).toBe(false);
-      expect(readFileSync(join(repo, ".git", "info", "exclude"), "utf8"))
-        .toContain(`/${VERIFY_SCRIPT_NAME}`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  it("registers the exclusion on a fresh checkout with no script yet (idempotently)", () => {
+  it("is idempotent, and touches nothing but the gate", () => {
     const { tmp, repo } = checkout();
     try {
       resetVerifyScript(repo);
       resetVerifyScript(repo);
 
-      const body = readFileSync(join(repo, ".git", "info", "exclude"), "utf8");
-      expect(body.match(new RegExp(`/${VERIFY_SCRIPT_NAME.replace(/\./g, "\\.")}`, "g"))).toHaveLength(1);
+      expect(existsSync(join(repo, VERIFY_SCRIPT_NAME))).toBe(false);
+      // No exclude line is written any more — placement is the guarantee.
+      expect(existsSync(join(repo, ".git", "info", "exclude"))).toBe(false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TemplatedNumberSchema } from "./templated-number.js";
 
 // ── Output rules ──────────────────────────────────────────────────────
 
@@ -64,7 +65,11 @@ const PhaseLoopSchema = z.object({
 
 const GenericLoopSchema = z
   .object({
-    max_iterations: z.number().int().positive(),
+    /**
+     * Iteration bound. Accepts `{ from: <ctx path>, default: N }` — see
+     * {@link TemplatedNumberSchema}; the fix loop reads `fix.localIterations`.
+     */
+    max_iterations: TemplatedNumberSchema,
     /** Expression to evaluate for completion: "output.contains('PASS')" or "verdict == 'APPROVED'" */
     until: z.string().optional(),
     /** Shell command: exit 0 = loop complete, non-zero = continue */
@@ -174,10 +179,17 @@ const PhaseDefinitionSchema = z
      */
     runtime: z.enum(["js", "ts", "python"]).optional(),
     /**
-     * Per-step timeout in seconds for `bash`/`script` phases. Defaults to the
-     * sandbox's configured timeout (fallback 300s for deterministic steps).
+     * Per-step timeout in seconds for `bash`/`script` phases, and for an agent
+     * phase's `generic_loop.until_bash` gate. Defaults to the sandbox's
+     * configured timeout (fallback 300s for deterministic steps, 30s for a
+     * loop condition).
+     *
+     * Accepts `{ from: <ctx path>, default: N }` — see
+     * {@link TemplatedNumberSchema}. `pr-fix` / `dependabot-ci-fix` read
+     * `fix.gateTimeoutSeconds` that way, so the repo-clamped config value is
+     * what actually bounds the gate.
      */
-    timeout_seconds: z.number().int().positive().optional(),
+    timeout_seconds: TemplatedNumberSchema.optional(),
     /**
      * Path to a prompt template file (relative to workflowDir).
      * Mutually exclusive with `skill`.
@@ -468,6 +480,32 @@ export const AgentWorkflowSchema = z.object({
   description: z.string().optional(),
   /** What can trigger this workflow (informational; routing is in code). */
   trigger: z.string().optional(),
+  /**
+   * This workflow is dispatched against a PULL REQUEST, and must therefore
+   * cross the PR-scoped dispatch gate.
+   *
+   * Unlike `kind` (a dashboard label the runner ignores) this one is
+   * load-bearing. Declaring it puts the workflow inside:
+   *
+   *   - the **PR-scoped run lock** — one PR-scoped run per PR at a time, across
+   *     every member, so two agents never clone and push the same branch;
+   *   - the **already-assessed-at-this-head-SHA dedup**, per workflow;
+   *   - **escalation** — a terminal skip labels the PR and comments once,
+   *     rather than being dropped silently;
+   *   - the resolved **`PrState` snapshot** on `context.prState`, which is what
+   *     the fix prompts, the PR journal and the admin panel all render from.
+   *
+   * It is metadata on the workflow because that is where the fact lives. The
+   * harness used to carry a hardcoded set of four names while the handlers are
+   * operator-configurable through `routes.github.*`, so remapping a route to a
+   * forked workflow silently dropped the whole gate for it — no lock, no dedup,
+   * no escalation, and no warning (issue #256). `validateAssets` now warns when
+   * a configured `routes.github.pr_*` target does not declare this.
+   *
+   * The consuming set is `prScopedWorkflows()` in
+   * `apps/server/src/workflows/pr-scope.ts`.
+   */
+  pr_scoped: z.boolean().optional(),
   /**
    * Render progress as a single in-place "task list" comment/message that is
    * edited as phases run, instead of posting a new comment per phase. When

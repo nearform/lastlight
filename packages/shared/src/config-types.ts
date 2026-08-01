@@ -30,6 +30,32 @@ export interface RouteConfig {
 // ---------------------------------------------------------------------------
 
 /**
+ * The five classes a `diagnose` phase may return (09 → S1,
+ * `apps/server/skills/fixing/SKILL.md`), which is also the vocabulary
+ * {@link FixConfig.retryableClasses} names members of.
+ *
+ * It lives here rather than beside the marker parser in core because BOTH
+ * validators of that leaf need it: core's boot normaliser, and the repo-layer
+ * clamp in `./repo-config-schema.ts` — which is compiled into the CLI and may
+ * never reach core. `apps/server/src/engine/fix-markers.ts` re-exports it, so
+ * every reader of the marker grammar still finds it where it expects to.
+ */
+export const DIAGNOSIS_CLASSES = [
+  "reproducible",
+  "env-mismatch",
+  "flaky",
+  "infra-dependent",
+  "upstream-broken",
+] as const;
+
+export type DiagnosisClass = (typeof DIAGNOSIS_CLASSES)[number];
+
+/** True when `value` is one of {@link DIAGNOSIS_CLASSES}. */
+export function isDiagnosisClass(value: unknown): value is DiagnosisClass {
+  return typeof value === "string" && (DIAGNOSIS_CLASSES as readonly string[]).includes(value);
+}
+
+/**
  * Retry/escalation policy for every PR_FIX_SHAPED workflow (`pr-fix`,
  * `dependabot-ci-fix`).
  *
@@ -42,9 +68,19 @@ export interface RouteConfig {
 export interface FixConfig {
   /** Cross-run attempts per (repo, PR) before the PR is escalated to a human. */
   maxAttempts: number;
-  /** Within-run gate-loop iterations inside ONE attempt. */
+  /**
+   * Within-run gate-loop iterations inside ONE attempt.
+   *
+   * Read by the fix phase's `generic_loop.max_iterations:
+   * { from: fix.localIterations, default: 2 }` in `pr-fix.yaml` /
+   * `dependabot-ci-fix.yaml` — the effective block is seeded on the run's
+   * template context, so the repo-clamped value is the operative bound.
+   */
   localIterations: number;
-  /** `until_bash` budget, in seconds, for the repo's build/test gate. */
+  /**
+   * `until_bash` budget, in seconds, for the repo's build/test gate. Read by
+   * the same phase's `timeout_seconds: { from: fix.gateTimeoutSeconds, … }`.
+   */
   gateTimeoutSeconds: number;
   /** Attempts ABOVE this number use `models["pr-fix-retry"]` when one is set. */
   escalateModelAfterAttempt: number;
@@ -54,9 +90,14 @@ export interface FixConfig {
   maxFlakyDeferrals: number;
   /**
    * Diagnosis classes another attempt may help with; every other class escalates
-   * immediately. Deliberately a free string list rather than an enum: the
-   * vocabulary belongs to the `diagnose` phase, and an operator naming a class
-   * this build doesn't know should narrow the retry set, not fail the boot.
+   * immediately. Members must be {@link DIAGNOSIS_CLASSES}.
+   *
+   * Typed `string[]` rather than `DiagnosisClass[]` because it is parsed from
+   * untrusted YAML and a bad member must NARROW the retry set with a warning
+   * rather than fail the boot — but it is validated against the enum on both
+   * paths now. It was not: a typo (`reproducable`) silently made every
+   * diagnosis escalate `not-retryable` on the second dispatch, with nothing
+   * said anywhere (#256).
    */
   retryableClasses: string[];
 }
@@ -97,8 +138,8 @@ export function dependencyImpactRank(impact: DependencyImpact): number {
  * Policy for merging dependency PRs — specifically, how far up the impact scale
  * a MAJOR bump may be auto-merged instead of escalated to a human.
  *
- * Repo-settable subset: `autoMergeMaxImpact` (clamped to the lower tier),
- * `requireSettledChecks` (add-only `true`) and `auditComment` (free — cosmetic).
+ * Repo-settable subset: `autoMergeMaxImpact` (clamped to the lower tier), and
+ * `requireSettledChecks` + `auditComment` (both add-only `true`).
  * `minSettledChecks` is **operator-only**: the §6.2 `max(repo, operator)` clamp
  * would weld the escape hatch shut for a repo with no CI at all (09 locked
  * decision 18).
@@ -149,11 +190,38 @@ export function isReviewTrigger(value: unknown): value is ReviewTrigger {
 }
 
 /**
- * The `review:` block. Every key is repo-settable; `postsCheck` and `skipDraft`
- * are add-only `true` (a repo may ask for the check and may skip drafts; it may
- * not suppress an operator's check or force reviews onto drafts), `trigger` and
- * `requestLabel` are free — a repo choosing `on-request` is opting itself out of
- * automation, which is its call.
+ * How much automation a trigger mode buys, ascending — the scale the repo-layer
+ * clamp takes the minimum on.
+ *
+ * Not derived from {@link REVIEW_TRIGGERS}' index, which runs the other way: the
+ * list is ordered most-automatic first for readability, and silently inverting
+ * it is exactly the kind of coupling that breaks when someone reorders the
+ * literal. Stated explicitly instead.
+ *
+ * `eager` runs a full agent review on every push; `after-checks` runs one per
+ * settled head; `on-request` runs none unless asked. So a repo that commits
+ * `eager` against an `on-request` deployment is buying itself an agent run per
+ * push at the operator's expense (#256) — the same direction `fix.maxAttempts`
+ * is clamped in, and the same clamp applies.
+ */
+const REVIEW_TRIGGER_AUTOMATION: Record<ReviewTrigger, number> = {
+  "on-request": 0,
+  "after-checks": 1,
+  eager: 2,
+};
+
+/** Position of a trigger mode on the automation scale. */
+export function reviewTriggerRank(trigger: ReviewTrigger): number {
+  return REVIEW_TRIGGER_AUTOMATION[trigger];
+}
+
+/**
+ * The `review:` block. Every key is repo-settable, and every one is CLAMPED
+ * towards less automation: `postsCheck` and `skipDraft` are add-only `true` (a
+ * repo may ask for the check and may skip drafts; it may not suppress an
+ * operator's check or force reviews onto drafts), `trigger` takes the lower
+ * {@link reviewTriggerRank} of repo and operator, and `requestLabel` is free —
+ * naming a label only ever adds an explicit, human-initiated route.
  */
 export interface ReviewConfig {
   /** Post the `last-light/review` Check Run. */

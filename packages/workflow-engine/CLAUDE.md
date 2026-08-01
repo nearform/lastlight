@@ -21,6 +21,15 @@ core/
   phase-ref.ts       Phase identity/reference resolution (incl. loop-iteration names).
   loop-eval.ts       Loop condition evaluation (max_cycles, on_request_changes, …).
   templates.ts       The `{{…}}` template engine used for prompts/models/variants.
+                     `lookupContextKey` is the one dotted-path walk over a run
+                     context; both `{{a.b}}` and the budget resolver below use it.
+  templated-number.ts  A phase budget that may be READ FROM THE RUN CONTEXT:
+                     `timeout_seconds` / `generic_loop.max_iterations` accept
+                     `{ from: <ctx path>, default: N }` as well as a plain
+                     integer. `default` is the workflow's packaged value and is
+                     used (with a warning) whenever `from` resolves to nothing
+                     usable — see the module header for why that beats a bare
+                     `"{{…}}"` string.
   schema.ts          Zod schema for a workflow YAML definition — the parse contract.
   verdict.ts         Reviewer verdict parsing (APPROVE / REQUEST_CHANGES).
   types.ts           Shared engine types.
