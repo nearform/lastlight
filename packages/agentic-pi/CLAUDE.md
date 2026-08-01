@@ -229,13 +229,21 @@ echo "list files in src/" | node dist/cli.js run \
 
 # GitHub tools (read profile)
 echo "list open PRs on owner/repo" | node dist/cli.js run \
-  --model openai/gpt-5.4-nano --thinking off --no-session --profile read
+  --model openai/gpt-5.4-nano --thinking off --no-session --no-skills --profile read
 
 # Gondolin sandbox (requires QEMU on host; native only)
 echo "create a file note.txt with 'hello' in it" | node dist/cli.js run \
   --model openai/gpt-5.4-nano --thinking off --no-session \
   --sandbox gondolin --cwd /tmp/scratch
 ```
+
+**Capture fixtures in a CLEAN env, from a neutral cwd.** `--no-skills` plus
+`env -i` carrying only `PATH` / `HOME` / the provider key / `GITHUB_TOKEN`, and
+`--cwd /tmp`. Otherwise the capturer's own `~/.agents/skills` catalogue, their
+`TAVILY_API_KEY` and their working directory are all baked into the committed
+evidence, and the next person's re-capture differs for reasons that have
+nothing to do with the code. `GITHUB_TOKEN` is enough for the `read` profile —
+the App PEM is not needed to capture one.
 
 Env vars typically needed when developing (mirror lastlight's `.env`):
 

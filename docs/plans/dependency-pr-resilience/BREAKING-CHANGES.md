@@ -48,7 +48,7 @@ Three of the README's open questions were settled by the operator before any cod
 
 - **The GitHub App requests a new optional permission, `Actions: read`.** Every existing installation must re-consent to grant it. Nothing hard-fails without it — the CI failure report degrades to check-run annotations exactly as before — but the degradation is now *stated* in `{{ciSection}}` instead of being invisible, and diagnosis quality is capped at annotations until it is granted.
 - **`agentic-pi`'s `read` profile grew from 18 tools to 21** (`github_list_workflow_runs`, `github_list_workflow_run_jobs`, `github_get_job_logs`), and every other profile by the same three. Any consumer pinning a profile's tool count sees the change.
-- **Follow-up, not done here:** `packages/agentic-pi/test/fixtures/phase2-smoke-github-read-profile.jsonl` records `toolCount: 18` and is now one number stale. It is captured contract evidence from a real run, so it must be re-captured with the smoke command in `packages/agentic-pi/CLAUDE.md` (needs a model API key + App credentials) rather than hand-edited. No test asserts against it today.
+- `packages/agentic-pi/test/fixtures/phase2-smoke-github-read-profile.jsonl` has been **re-captured** from a real run and records `toolCount: 21`. Captured evidence, never hand-edited: the smoke command in `packages/agentic-pi/CLAUDE.md` produces it, and now specifies a clean env + `--no-skills` so the capture carries no trace of whoever ran it. A `GITHUB_TOKEN` suffices for the `read` profile; the App PEM is not needed.
 
 ## Phase 2 — the `fixing` skill and the `diagnose` phase
 

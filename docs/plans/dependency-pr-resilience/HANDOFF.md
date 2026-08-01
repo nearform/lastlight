@@ -33,23 +33,37 @@ enforces it).
 
 ## What is left
 
-Only [06-config.md](06-config.md) §6.5 items **5** and **6** — both need
-credentials this work did not have.
+Only [06-config.md](06-config.md) §6.5 items **5** and **6**. Item 5 is now
+half done; item 6 has not been started.
 
-- **§6.5.5 — `Actions: read`, verified for real.** Grant it on the dev App,
-  confirm `getCiFailureReport` returns `logsAvailable: true` with genuine log
-  excerpts against a known-red PR, then revoke and confirm it degrades to
-  annotations *with the explicit notice*. This is the highest-value remaining
-  check: every diagnosis in the fix loop is capped at annotation quality until
-  the permission is actually granted, and the whole plan's premise is that real
-  logs are what make diagnosis worth doing.
-- **§6.5.6 — the evals end-to-end pass.** Needs a model provider key (no
-  `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` was available
-  here) and costs real model spend. Drive each of the five diagnosis classes
-  through attempts 1 → 3 asserting the escalation policy per class, and a
-  major-bump case per impact tier asserting the label + action. Scaffold with
-  `plugins/lastlight/skills/lastlight-evals`; build fixtures from real PRs with
-  `add-case --pr <url>`.
+- **§6.5.5 — `Actions: read`.** The **positive** half is verified against real
+  GitHub. The dev App installation (`cliftonc`, all repos) reports
+  `"actions": "read"` in its granted permissions, and `getCiFailureReport` run
+  against a real red head SHA (`nearform/lastlight@cb9f9cc4`) returns
+  `logsAvailable: true` with a genuine 2.5 KB excerpt, the failing step named
+  (`Install dependencies`) and no annotation fallback — so the excerpt
+  extraction and the renderer both work on real Actions logs, which is the
+  premise the fix loop rests on.
+
+  The **negative** half — revoke, and confirm the degrade to annotations *with
+  the explicit notice* — is still owed, and needs a target this work did not
+  have. Revoking on the live App would disturb production, and the obvious
+  substitute does not reproduce the denial: a deliberately downscoped
+  installation token that omits `actions` entirely **still returned the logs**,
+  because the repository is public and GitHub gates public Actions logs on
+  public read rather than on the permission. It therefore needs a **private**
+  repo with a red PR, or a second dev App to revoke on.
+- **§6.5.6 — the evals end-to-end pass.** Not started, and larger than "run the
+  evals": there is no dataset to run. The shipped tiers are `code-fix`,
+  `pr-review`, `repo-config` and `triage`, and `code-fix` drives `build`, not
+  the fix family — so nothing today exercises a diagnosis class or an impact
+  tier. The work is to **author** two tiers against the mocked GitHub: five
+  diagnosis classes driven through attempts 1 → 3 asserting the escalation
+  policy per class, and a major-bump case per impact tier asserting the label +
+  action. Scaffold with `plugins/lastlight/skills/lastlight-evals`; build
+  fixtures from real PRs with `add-case --pr <url>`. A workspace pointed at a
+  local build with `LASTLIGHT_CORE_DIR=/path/to/lastlight` is how it runs
+  against this branch rather than the npm-installed core.
 
 §6.5 items 1–4 are done, including the repo-config clamp check: a fixture
 `.lastlight/lastlight.yml` that tries to loosen `fix.maxAttempts`,
@@ -64,22 +78,26 @@ without one (`docs/RELEASING.md`).
 
 ## Known gaps, deliberately left
 
-- **`fix.localIterations` and `fix.gateTimeoutSeconds` are not wired.** The
-  phase schema parses `max_iterations` and `timeout_seconds` as plain numbers,
-  so they cannot be templated from config; `pr-fix.yaml` and
-  `dependabot-ci-fix.yaml` hardcode values matching the packaged defaults (`2`
-  and `900`). Changing either config key does nothing. Wiring them needs a
-  config→definition seam in the loader or `simple.ts`.
-- **The dashboard renders none of this.** Nothing in `apps/server/dashboard/src`
-  reads `context.prState`, so §S3's "recorded snapshot in the run detail panel"
-  has no panel yet, and the mirrored `RepoMergedConfig` / `RepoConfigSources`
-  types still do not carry `fix` / `dependencies` / `review`.
-- **The PR-notes journal is inert on the kubernetes backend** — no host-shared
-  workspace, so the drain finds no file.
-- **`packages/agentic-pi/test/fixtures/phase2-smoke-github-read-profile.jsonl`
-  records `toolCount: 18`, now 21.** Captured evidence from a real run —
-  re-capture with the smoke command in `packages/agentic-pi/CLAUDE.md`, do not
-  hand-edit. Nothing asserts it today.
+- ~~`fix.localIterations` and `fix.gateTimeoutSeconds` are not wired.~~
+  **Closed.** The phase schema's `timeout_seconds` and
+  `generic_loop.max_iterations` also accept `{ from: <ctx path>, default: N }`
+  (`core/templated-number.ts`), resolved against the run's effective — already
+  repo-clamped — `fix` block. The seam turned out to belong in the engine, not
+  in the loader or `simple.ts`: the context is the only channel a
+  runtime-agnostic engine has.
+- ~~The dashboard renders none of this.~~ **Closed.** `PrStatePanel` renders
+  `context.prState`, the recorded `{decision, reason}` pairs and the harvested
+  push gate on the run detail view; the Config tab renders `fix` /
+  `dependencies` / `review`, pinned against the real type by
+  `tests/admin/dashboard-config-mirror.test.ts`.
+- **The PR-notes journal and the recorded push gate are inert on the kubernetes
+  backend** — no host-shared workspace, so the drain finds no file and the gate
+  read finds no script.
+- ~~`phase2-smoke-github-read-profile.jsonl` records `toolCount: 18`.~~
+  **Closed.** Re-captured from a real run (21 tools, the Actions trio
+  included), in a clean env from `/tmp` with `--no-skills` so the capturer's
+  own skills catalogue and search keys stay out of the evidence — the smoke
+  command in `packages/agentic-pi/CLAUDE.md` now says so.
 - ~~`resolveDispatchDisposition` reads the operator's review config in the
   dispatcher and the repo-clamped one in `dispatchWorkflow`.~~ **Closed.** The
   gate body is now one function (`applyPrDispatchGate`) called by both routes,

@@ -170,9 +170,14 @@ Per the `docs-sync` skill's mapping. A pre-commit hook fires on
 5. **`Actions: read` is best verified for real** — grant it on the dev App,
    confirm `getCiFailureReport` returns `logsAvailable: true` with genuine log
    excerpts against a known-red PR, then revoke and confirm it degrades to
-   annotations **with the explicit notice**.
+   annotations **with the explicit notice**. *Half done:* the grant and the
+   log-excerpt half are verified against real GitHub (see HANDOFF). The revoke
+   half needs a **private** repo with a red PR — a downscoped token omitting
+   `actions` still reads a public repo's Actions logs, so it cannot stand in.
 6. **End-to-end without touching production** — the evals harness
-   (`apps/evals`, mocked GitHub, no real token, model key only) driving:
+   (`apps/evals`, mocked GitHub, no real token, model key only). *Not started,
+   and it needs authoring, not just running:* no shipped tier drives the fix
+   family (`code-fix` drives `build`). Two new tiers, driving:
    - each of the five diagnosis classes through attempts 1 → 3, asserting the
      escalation policy per class;
    - a major-bump case per impact tier, asserting the label + action.
