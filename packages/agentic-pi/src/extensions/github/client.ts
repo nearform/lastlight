@@ -8,6 +8,24 @@
 
 import { Octokit } from "@octokit/rest";
 import type { GitHubAuth } from "./auth.js";
+import {
+  capText,
+  page,
+  searchPage,
+  summarizeBranch,
+  summarizeCodeHit,
+  summarizeComment,
+  summarizeCommit,
+  summarizeFile,
+  summarizeIssue,
+  summarizeIssueHit,
+  summarizeLabel,
+  summarizePullRequest,
+  summarizeRepoHit,
+  summarizeRepository,
+  summarizeReview,
+  summarizeReviewComment,
+} from "./projections.js";
 
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
@@ -184,7 +202,7 @@ export class GitHubClient {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.repos.get({ owner, repo });
-      return data;
+      return summarizeRepository(data);
     });
   }
 
@@ -302,11 +320,11 @@ export class GitHubClient {
     });
   }
 
-  async listBranches(owner: string, repo: string, page = 1, perPage = 30) {
+  async listBranches(owner: string, repo: string, pageNum = 1, perPage = 30) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.repos.listBranches({ owner, repo, page, per_page: perPage });
-      return data;
+      const { data } = await ok.repos.listBranches({ owner, repo, page: pageNum, per_page: perPage });
+      return page(data.map(summarizeBranch), pageNum, perPage);
     });
   }
 
@@ -329,22 +347,36 @@ export class GitHubClient {
   async listIssues(owner: string, repo: string, opts: Record<string, unknown> = {}) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
+      const cleaned = omitFalsy(opts);
+      const perPage = Number(cleaned.per_page ?? 30);
+      const pageNum = Number(cleaned.page ?? 1);
       const { data } = await ok.issues.listForRepo({
         owner,
         repo,
         state: "open",
-        per_page: 30,
-        ...omitFalsy(opts),
+        ...cleaned,
+        per_page: perPage,
+        page: pageNum,
       } as Parameters<typeof ok.issues.listForRepo>[0]);
-      return data;
+      return page(data.map(summarizeIssue), pageNum, perPage);
     });
   }
 
-  async getIssue(owner: string, repo: string, issue_number: number) {
+  async getIssue(
+    owner: string,
+    repo: string,
+    issue_number: number,
+    opts: { fullBody?: boolean } = {},
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.issues.get({ owner, repo, issue_number });
-      return data;
+      return {
+        ...summarizeIssue(data),
+        body: capText(data.body, { full: opts.fullBody, hatch: "full_body: true" }),
+        closed_at: data.closed_at ?? null,
+        milestone: data.milestone?.title ?? null,
+      };
     });
   }
 
@@ -402,14 +434,23 @@ export class GitHubClient {
   ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
+      const { fullBodies, ...rest } = opts as { fullBodies?: boolean } & Record<string, unknown>;
+      const cleaned = omitFalsy(rest);
+      const perPage = Number(cleaned.per_page ?? 30);
+      const pageNum = Number(cleaned.page ?? 1);
       const { data } = await ok.issues.listComments({
         owner,
         repo,
         issue_number,
-        per_page: 30,
-        ...omitFalsy(opts),
+        ...cleaned,
+        per_page: perPage,
+        page: pageNum,
       } as Parameters<typeof ok.issues.listComments>[0]);
-      return data;
+      return page(
+        data.map((c) => summarizeComment(c, fullBodies)),
+        pageNum,
+        perPage,
+      );
     });
   }
 
@@ -433,7 +474,7 @@ export class GitHubClient {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.issues.listLabelsForRepo({ owner, repo, per_page: 100 });
-      return data;
+      return data.map(summarizeLabel);
     });
   }
 
@@ -504,22 +545,44 @@ export class GitHubClient {
         if (v === "" || v === undefined || v === null) continue;
         cleaned[k] = v;
       }
+      const perPage = Number(cleaned.per_page ?? 30);
+      const pageNum = Number(cleaned.page ?? 1);
       const { data } = await ok.pulls.list({
         owner,
         repo,
         state: "open",
-        per_page: 30,
         ...cleaned,
+        per_page: perPage,
+        page: pageNum,
       } as Parameters<typeof ok.pulls.list>[0]);
-      return data;
+      return page(data.map(summarizePullRequest), pageNum, perPage);
     });
   }
 
-  async getPullRequest(owner: string, repo: string, pull_number: number) {
+  async getPullRequest(
+    owner: string,
+    repo: string,
+    pull_number: number,
+    opts: { fullBody?: boolean } = {},
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
       const { data } = await ok.pulls.get({ owner, repo, pull_number });
-      return data;
+      return {
+        ...summarizePullRequest(data),
+        body: capText(data.body, { full: opts.fullBody, hatch: "full_body: true" }),
+        mergeable: data.mergeable,
+        mergeable_state: data.mergeable_state,
+        merged: data.merged,
+        maintainer_can_modify: data.maintainer_can_modify,
+        additions: data.additions,
+        deletions: data.deletions,
+        changed_files: data.changed_files,
+        commits: data.commits,
+        head_sha: data.head?.sha,
+        head_repo: data.head?.repo?.full_name ?? null,
+        base_sha: data.base?.sha,
+      };
     });
   }
 
@@ -538,32 +601,78 @@ export class GitHubClient {
     });
   }
 
-  async listPullRequestFiles(owner: string, repo: string, pull_number: number) {
+  async listPullRequestFiles(
+    owner: string,
+    repo: string,
+    pull_number: number,
+    opts: { includePatch?: boolean; fullPatch?: boolean; page?: number; perPage?: number } = {},
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.pulls.listFiles({ owner, repo, pull_number, per_page: 100 });
-      return data;
+      const perPage = opts.perPage ?? 100;
+      const pageNum = opts.page ?? 1;
+      const { data } = await ok.pulls.listFiles({
+        owner,
+        repo,
+        pull_number,
+        per_page: perPage,
+        page: pageNum,
+      });
+      return page(
+        data.map((f) => summarizeFile(f, opts)),
+        pageNum,
+        perPage,
+      );
     });
   }
 
-  async listPullRequestReviews(owner: string, repo: string, pull_number: number) {
+  async listPullRequestReviews(
+    owner: string,
+    repo: string,
+    pull_number: number,
+    opts: { fullBodies?: boolean; page?: number; perPage?: number } = {},
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.pulls.listReviews({ owner, repo, pull_number, per_page: 100 });
-      return data;
+      const perPage = opts.perPage ?? 30;
+      const pageNum = opts.page ?? 1;
+      const { data } = await ok.pulls.listReviews({
+        owner,
+        repo,
+        pull_number,
+        per_page: perPage,
+        page: pageNum,
+      });
+      return page(
+        data.map((r) => summarizeReview(r, opts.fullBodies)),
+        pageNum,
+        perPage,
+      );
     });
   }
 
-  async listPullRequestReviewComments(owner: string, repo: string, pull_number: number) {
+  async listPullRequestReviewComments(
+    owner: string,
+    repo: string,
+    pull_number: number,
+    opts: { fullBodies?: boolean; page?: number; perPage?: number } = {},
+  ) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
+      const perPage = opts.perPage ?? 30;
+      const pageNum = opts.page ?? 1;
       const { data } = await ok.pulls.listReviewComments({
         owner,
         repo,
         pull_number,
-        per_page: 100,
+        per_page: perPage,
+        page: pageNum,
       });
-      return data;
+      return page(
+        data.map((c) => summarizeReviewComment(c, opts.fullBodies)),
+        pageNum,
+        perPage,
+      );
     });
   }
 
@@ -686,13 +795,21 @@ export class GitHubClient {
   async listCommits(owner: string, repo: string, opts: Record<string, unknown> = {}) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
+      const { fullMessages, ...rest } = opts as { fullMessages?: boolean } & Record<string, unknown>;
+      const perPage = Number(rest.per_page ?? 30);
+      const pageNum = Number(rest.page ?? 1);
       const { data } = await ok.repos.listCommits({
         owner,
         repo,
-        per_page: 30,
-        ...opts,
+        ...rest,
+        per_page: perPage,
+        page: pageNum,
       } as Parameters<typeof ok.repos.listCommits>[0]);
-      return data;
+      return page(
+        data.map((c) => summarizeCommit(c, fullMessages)),
+        pageNum,
+        perPage,
+      );
     });
   }
 
@@ -803,27 +920,31 @@ export class GitHubClient {
 
   // ── Search ────────────────────────────────────────────────────────
 
-  async searchRepositories(query: string, page = 1, perPage = 30) {
+  async searchRepositories(query: string, pageNum = 1, perPage = 30) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.search.repos({ q: query, page, per_page: perPage });
-      return data;
+      const { data } = await ok.search.repos({ q: query, page: pageNum, per_page: perPage });
+      return searchPage(data, data.items.map(summarizeRepoHit), pageNum, perPage);
     });
   }
 
-  async searchIssues(query: string, page = 1, perPage = 30) {
+  async searchIssues(query: string, pageNum = 1, perPage = 30) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.search.issuesAndPullRequests({ q: query, page, per_page: perPage });
-      return data;
+      const { data } = await ok.search.issuesAndPullRequests({
+        q: query,
+        page: pageNum,
+        per_page: perPage,
+      });
+      return searchPage(data, data.items.map(summarizeIssueHit), pageNum, perPage);
     });
   }
 
-  async searchCode(query: string, page = 1, perPage = 30) {
+  async searchCode(query: string, pageNum = 1, perPage = 30) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.search.code({ q: query, page, per_page: perPage });
-      return data;
+      const { data } = await ok.search.code({ q: query, page: pageNum, per_page: perPage });
+      return searchPage(data, data.items.map(summarizeCodeHit), pageNum, perPage);
     });
   }
 }

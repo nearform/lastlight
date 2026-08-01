@@ -85,7 +85,12 @@ in tiers instead:
 
 a. Call `github_list_pull_request_files` ({ owner: "{{owner}}", repo: "{{repo}}",
    pull_number }) to get the changed files with per-file `additions`/`deletions`.
-   This file list — plus the PR title — is your primary signal.
+   This file list — plus the PR title — is your primary signal. It comes back as
+   `{ items, has_more, next_page }` and carries NO patches by default, which is
+   exactly what you want here; leave `include_patch` alone.
+   PR #{{prNumber}} **is** your target — start here. Do NOT call
+   `github_list_pull_requests` to "find" or "confirm" it; you were handed it, and
+   listing a dependency-heavy repo dumps every open PR for nothing.
 b. A lockfile / `go.sum` change is expected noise for a version bump. NEVER read
    its diff; judge the bump from the PR title and the manifest change alone.
 c. If the only NON-lockfile files touched are the manifest (`package.json`,

@@ -176,7 +176,7 @@ export function buildGitHubTools(
 
     tool(
       "github_get_repository",
-      "Get repository metadata",
+      "Get repository metadata: name, full_name, description, private/fork/archived, default_branch, language, topics, star + open-issue counts, html_url, pushed_at.",
       Type.Object({ owner: Type.String(), repo: Type.String() }),
       ({ owner, repo }) => gh.getRepository(owner, repo),
     ),
@@ -227,7 +227,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_branches",
-      "List branches in a repository",
+      "List branches in a repository — each { name, sha, protected }. Paged: returns { items, page, per_page, has_more, next_page }.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -253,7 +253,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_issues",
-      "List open issues in a repository",
+      "SEARCH a repository's issues when you do NOT already know the number. Returns { items, page, per_page, has_more, next_page }; each item is a summary (number, title, state, author, labels, assignees, comment count, timestamps, is_pull_request) — NOT the body. Call github_get_issue for one issue's body. If you were handed an issue_number, skip this.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -273,9 +273,20 @@ export function buildGitHubTools(
 
     tool(
       "github_get_issue",
-      "Get a specific issue by number",
-      Type.Object({ owner: Type.String(), repo: Type.String(), issue_number: Type.Number() }),
-      ({ owner, repo, issue_number }) => gh.getIssue(owner, repo, issue_number),
+      "Get one issue by number: the list summary plus body (truncated past 4000 chars — pass full_body to lift that), closed_at and milestone.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        issue_number: Type.Number(),
+        full_body: Type.Optional(
+          Type.Boolean({
+            description:
+              "Return the complete body instead of the first 4000 chars. Only set this when the truncated head was not enough.",
+          }),
+        ),
+      }),
+      ({ owner, repo, issue_number, full_body }) =>
+        gh.getIssue(owner, repo, issue_number, { fullBody: full_body }),
     ),
 
     tool(
@@ -322,16 +333,22 @@ export function buildGitHubTools(
 
     tool(
       "github_list_issue_comments",
-      "List comments on an issue",
+      "List comments on an issue or PR, oldest first. Returns { items, page, per_page, has_more, next_page } — 30 per page by default, each body truncated past 4000 chars. A long thread is PAGED, never silently cut: when has_more is true, re-call with the next_page value. Prefer paging over raising per_page.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
         issue_number: Type.Number(),
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
+        full_bodies: Type.Optional(
+          Type.Boolean({
+            description:
+              "Return every comment body in full instead of truncating each at 4000 chars. Expensive on a long thread — prefer reading the truncated page first.",
+          }),
+        ),
       }),
-      ({ owner, repo, issue_number, ...opts }) =>
-        gh.listIssueComments(owner, repo, issue_number, opts),
+      ({ owner, repo, issue_number, full_bodies, ...opts }) =>
+        gh.listIssueComments(owner, repo, issue_number, { ...opts, fullBodies: full_bodies }),
     ),
 
     tool(
@@ -360,7 +377,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_labels",
-      "List all labels in a repository",
+      "List all labels in a repository — each { name, color, description }.",
       Type.Object({ owner: Type.String(), repo: Type.String() }),
       ({ owner, repo }) => gh.listLabels(owner, repo),
     ),
@@ -402,7 +419,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_pull_requests",
-      "List pull requests in a repository",
+      "SEARCH a repository's pull requests when you do NOT already know the number. Returns { items, page, per_page, has_more, next_page }; each item is a summary (number, title, state, draft, author, head, base, labels, timestamps) — NOT the body or the diff. If you were handed a specific pull_number, skip this and call github_get_pull_request directly; listing to 'confirm' a PR you already have is wasted context.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -428,9 +445,20 @@ export function buildGitHubTools(
 
     tool(
       "github_get_pull_request",
-      "Get a specific pull request by number",
-      Type.Object({ owner: Type.String(), repo: Type.String(), pull_number: Type.Number() }),
-      ({ owner, repo, pull_number }) => gh.getPullRequest(owner, repo, pull_number),
+      "Get one pull request by number: the list summary plus body (truncated past 4000 chars — pass full_body to lift that), mergeable/mergeable_state, merged, additions/deletions/changed_files/commits, and head/base SHAs. Use it for mergeability and metadata — for the changed files call github_list_pull_request_files, and for the diff github_get_pull_request_diff.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        full_body: Type.Optional(
+          Type.Boolean({
+            description:
+              "Return the complete body instead of the first 4000 chars. Dependabot/Renovate changelogs run to tens of kB, so only set this when the truncated head was not enough — e.g. you need a breaking-changes section that fell past the cut.",
+          }),
+        ),
+      }),
+      ({ owner, repo, pull_number, full_body }) =>
+        gh.getPullRequest(owner, repo, pull_number, { fullBody: full_body }),
     ),
 
     tool(
@@ -450,9 +478,33 @@ export function buildGitHubTools(
 
     tool(
       "github_list_pull_request_files",
-      "List files changed in a pull request",
-      Type.Object({ owner: Type.String(), repo: Type.String(), pull_number: Type.Number() }),
-      ({ owner, repo, pull_number }) => gh.listPullRequestFiles(owner, repo, pull_number),
+      "List files changed in a pull request. Returns { items, page, per_page, has_more, next_page }; each item is { filename, status, additions, deletions, changes }. The per-file PATCH IS OMITTED by default — a lockfile patch alone runs to tens of thousands of lines. The file list plus line counts is usually the whole signal you need; when it isn't, prefer reading the one file you care about (github_get_file_contents) or the local checkout over pulling patches for everything.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+        include_patch: Type.Optional(
+          Type.Boolean({
+            description:
+              "Include each file's patch, capped at 2000 chars per file. Set this only after the file list alone proved insufficient, and narrow with per_page first.",
+          }),
+        ),
+        full_patch: Type.Optional(
+          Type.Boolean({
+            description:
+              "With include_patch, return each patch uncapped. Very expensive on a PR that touches a lockfile — avoid unless you have narrowed to a specific small file.",
+          }),
+        ),
+      }),
+      ({ owner, repo, pull_number, include_patch, full_patch, page, per_page }) =>
+        gh.listPullRequestFiles(owner, repo, pull_number, {
+          includePatch: include_patch,
+          fullPatch: full_patch,
+          page,
+          perPage: per_page,
+        }),
     ),
 
     tool(
@@ -464,16 +516,44 @@ export function buildGitHubTools(
 
     tool(
       "github_list_pull_request_reviews",
-      "List submitted reviews on a pull request (each with state APPROVED/CHANGES_REQUESTED/COMMENTED, reviewer login, body, and commit SHA). Use to check whether the bot has already reviewed this PR.",
-      Type.Object({ owner: Type.String(), repo: Type.String(), pull_number: Type.Number() }),
-      ({ owner, repo, pull_number }) => gh.listPullRequestReviews(owner, repo, pull_number),
+      "List submitted reviews on a pull request — each { id, author, state (APPROVED/CHANGES_REQUESTED/COMMENTED), submitted_at, body }, body truncated past 4000 chars. Paged: returns { items, page, per_page, has_more, next_page }. Use to check whether the bot has already reviewed this PR.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+        full_bodies: Type.Optional(
+          Type.Boolean({ description: "Return every review body in full instead of truncating." }),
+        ),
+      }),
+      ({ owner, repo, pull_number, full_bodies, page, per_page }) =>
+        gh.listPullRequestReviews(owner, repo, pull_number, {
+          fullBodies: full_bodies,
+          page,
+          perPage: per_page,
+        }),
     ),
 
     tool(
       "github_list_pull_request_review_comments",
-      "List line-level review comments on a pull request (each with path, line, body, commit_id, reviewer login). Distinct from issue comments — these are anchored to specific diff lines.",
-      Type.Object({ owner: Type.String(), repo: Type.String(), pull_number: Type.Number() }),
-      ({ owner, repo, pull_number }) => gh.listPullRequestReviewComments(owner, repo, pull_number),
+      "List line-level review comments on a pull request — each { id, author, path, line, created_at, body, in_reply_to_id }, body truncated past 4000 chars. Distinct from issue comments: these are anchored to specific diff lines. Paged: returns { items, page, per_page, has_more, next_page }.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+        full_bodies: Type.Optional(
+          Type.Boolean({ description: "Return every comment body in full instead of truncating." }),
+        ),
+      }),
+      ({ owner, repo, pull_number, full_bodies, page, per_page }) =>
+        gh.listPullRequestReviewComments(owner, repo, pull_number, {
+          fullBodies: full_bodies,
+          page,
+          perPage: per_page,
+        }),
     ),
 
     tool(
@@ -540,7 +620,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_commits",
-      "List commits on a repository or branch",
+      "List commits on a repository or branch — each { sha, message, author, date, html_url }, message truncated past 4000 chars. Paged: returns { items, page, per_page, has_more, next_page }.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -548,8 +628,12 @@ export function buildGitHubTools(
         path: Type.Optional(Type.String({ description: "Only commits touching this path" })),
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
+        full_messages: Type.Optional(
+          Type.Boolean({ description: "Return every commit message in full instead of truncating." }),
+        ),
       }),
-      ({ owner, repo, ...opts }) => gh.listCommits(owner, repo, opts),
+      ({ owner, repo, full_messages, ...opts }) =>
+        gh.listCommits(owner, repo, { ...opts, fullMessages: full_messages }),
     ),
 
     // ── Actions (CI) ──────────────────────────────────────────────────
@@ -633,7 +717,7 @@ export function buildGitHubTools(
 
     tool(
       "github_search_repositories",
-      "Search for GitHub repositories",
+      "Search for GitHub repositories. Returns { total_count, incomplete_results, items, page, per_page, has_more, next_page }; each item is { full_name, description, language, stargazers_count, default_branch, html_url }.",
       Type.Object({
         query: Type.String(),
         page: Type.Optional(Type.Number()),
@@ -644,7 +728,7 @@ export function buildGitHubTools(
 
     tool(
       "github_search_issues",
-      "Search issues and pull requests across repositories",
+      "Search issues and pull requests across repositories. Returns { total_count, incomplete_results, items, page, per_page, has_more, next_page }; each item is a summary (number, title, state, repository, author, labels, timestamps, is_pull_request) — NOT the body. Fetch one with github_get_issue.",
       Type.Object({
         query: Type.String({
           description: "GitHub search query (e.g. 'repo:owner/name is:open label:bug')",
@@ -657,7 +741,7 @@ export function buildGitHubTools(
 
     tool(
       "github_search_code",
-      "Search code across repositories",
+      "Search code across repositories. Returns { total_count, incomplete_results, items, page, per_page, has_more, next_page }; each item is { path, repository, html_url } — the MATCHING LINES ARE NOT RETURNED, so read the file (github_get_file_contents) or the local checkout when you need context. Counting hits (e.g. import sites) needs only total_count.",
       Type.Object({
         query: Type.String({ description: "GitHub code search query" }),
         page: Type.Optional(Type.Number()),

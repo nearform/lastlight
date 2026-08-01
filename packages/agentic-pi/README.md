@@ -45,6 +45,35 @@ exposing **31 GitHub tools** ported from lastlight's `mcp-github-app`:
 clone/push, issues, PRs, reviews, labels, search. Tool names are prefixed
 with `github_`.
 
+**Reads are projected, not raw** (`extensions/github/projections.ts`). Octokit
+returns the REST payload verbatim, which is written for API clients rather than
+for a context window: a dozen `*_url` fields per object, a ~1 kB `user` object
+per actor, a complete repository object under a PR's `head` *and* `base`, and
+then the genuinely large text — a Renovate changelog body, a lockfile `patch`, a
+long review thread. Measured raw against real repos: `listPullRequests` 468 kB,
+`listIssues` 254 kB, `listCommits` 142 kB, one Renovate `getPullRequest` 76 kB.
+An agent re-sends every one of those on each subsequent step of its loop, so the
+cost is the payload times the turns that follow it.
+
+Three rules bound it, applied uniformly so an agent learns one shape:
+
+1. **Project** to the fields prompts branch on — URLs, nested actor/repo objects
+   and reaction counts are dropped. List entries carry no body; fetch one with
+   `github_get_issue` / `github_get_pull_request`.
+2. **Cap prose, and name the lift.** Bodies, review text and commit messages are
+   truncated at 4000 chars and a file's `patch` at 2000, with a notice that names
+   the flag returning it whole (`full_body`, `full_bodies`, `full_messages`,
+   `full_patch`) — so the escape hatch is found at the moment it matters instead
+   of costing system-prompt tokens on every run that doesn't need it.
+3. **Page, don't cut, the item count.** Every list returns
+   `{ items, page, per_page, has_more, next_page }`, so a long comment thread is
+   paged rather than silently truncated. Search adds the API's real
+   `total_count`.
+
+One default is worth calling out: `github_list_pull_request_files` **omits each
+file's `patch`** unless you pass `include_patch`. A lockfile patch alone runs to
+tens of thousands of lines, and it was 86% of a measured 7-file payload.
+
 Auth is opinionated: **GitHub App credentials preferred**, static
 `GITHUB_TOKEN` only as a low-trust fallback. JWT-minted installation tokens
 cached for ~50 minutes, 5-minute refresh buffer. Git operations authenticate

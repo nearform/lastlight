@@ -20,7 +20,10 @@ For general issue questions use `issue-comment`; for a full review use
 
 ### 1. Read the PR and the question
 
-- `github_get_pull_request` → title, body, base, head.
+- `github_get_pull_request` → title, body, base, head. `prNumber` in the Context
+  block **is** your target — go straight there. Do **not** call
+  `github_list_pull_requests` to "find" or "confirm" it; you were handed it, and
+  listing dumps every open PR for nothing.
 - The triggering question is in `context.commentBody`. Answer *that* question —
   don't generalise to a review or answer a different one.
 

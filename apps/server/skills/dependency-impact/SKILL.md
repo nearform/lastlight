@@ -27,8 +27,8 @@ more than the one above it.
 | # | Evidence | How |
 |---|---|---|
 | 1 | Dev vs runtime dependency | The manifest change: `dependencies` vs `devDependencies`. `@types/*`, linters, formatters and test runners are dev-only; so is a GitHub Actions tag/SHA bump |
-| 2 | Release notes / changelog / breaking-change headings | `github_get_pull_request` → the **body**. Dependabot embeds Release notes, Changelog and Commits sections, plus a compatibility-score badge |
-| 3 | Blast radius | `github_search_code` for `from "<pkg>"` / `require("<pkg>")` — count the direct import sites |
+| 2 | Release notes / changelog / breaking-change headings | `github_get_pull_request` → the **body**. Dependabot embeds Release notes, Changelog and Commits sections, plus a compatibility-score badge. The body comes back capped at 4000 chars; if it was cut and you still can't see whether the release documents a breaking change, re-call with `full_body: true` — a buried breaking-changes heading is precisely what this row is for. Don't reach for it when the head of the notes already decided the tier |
+| 3 | Blast radius | `github_search_code` for `from "<pkg>"` / `require("<pkg>")` — count the direct import sites. The result's `total_count` **is** that count, so read it rather than tallying `items`, and don't fan out a query per import spelling when one is enough to size the blast radius |
 | 4 | Security sensitivity | Does the package sit in auth, crypto, serialization, network, file I/O, or database-driver territory? |
 | 5 | Behavioural evidence | The settled check state supplied in your prompt — deterministic, computed in code, **not** inferred from `mergeable_state` |
 

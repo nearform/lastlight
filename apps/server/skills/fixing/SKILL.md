@@ -23,6 +23,10 @@ prompt. When an excerpt is inconclusive, pull the full job log with
 prompt says so explicitly, and names the reason — say so in your verdict too,
 and do not invent a cause from an annotation that was truncated.
 
+The `prNumber` in your prompt **is** your target, and its head is already
+checked out. Do **not** call `github_list_pull_requests` to "find" or "confirm"
+it; you were handed it, and listing dumps every open PR for nothing.
+
 **2. Read the CI definition.** `.github/workflows/*.yml` is already in the
 checkout (the harness pre-cloned the PR head). Extract, per failing job: runner
 OS, toolchain versions (`setup-node`, `setup-python`, matrix entries), the
