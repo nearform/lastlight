@@ -15,7 +15,7 @@
  * `getWorkflowByIntent` fallback all read one source of truth.
  */
 
-import { chat as realChat, defaultFastModel as realDefaultFastModel, type ChatFunction } from "../llm.js";
+import { HELPER_MAX_TOKENS, chat as realChat, defaultFastModel as realDefaultFastModel, type ChatFunction } from "../llm.js";
 import { getAssetVersion, listAgentWorkflows, loadPromptTemplate } from "../../workflows/loader.js";
 import { intentToken, RESERVED_CONTROL_INTENTS } from "../../workflows/schema.js";
 
@@ -254,7 +254,7 @@ export async function classifyCommentAddsInfo(
         { role: "system", content: loadPromptTemplate(ADDS_INFO_PROMPT_PATH) },
         { role: "user", content: userPrompt },
       ],
-      { maxTokens: 16 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
     return /\bADDS_INFO\b/i.test(output);
   } catch (err: any) {
@@ -305,7 +305,7 @@ export async function classifyComment(
         { role: "system", content: prompt },
         { role: "user", content: userPrompt },
       ],
-      { maxTokens: 128 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
 
     const upper = output.trim().toUpperCase();
@@ -340,10 +340,25 @@ export async function classifyComment(
       ? reasonMatch[1].trim()
       : undefined;
 
-    // Introspection: when no INTENT line parsed, the model returned empty or
-    // malformed output (e.g. a reasoning model whose small token budget was
-    // consumed by hidden reasoning before it emitted anything) — the parser then
-    // silently defaults to `chat`. Surface that instead of hiding it.
+    // When no INTENT line parsed, the model returned empty or malformed output
+    // (e.g. a reasoning model whose token budget was consumed by hidden
+    // reasoning before it emitted anything) and the parser silently defaults to
+    // `chat`.
+    //
+    // That default is indistinguishable from a correctly-classified question:
+    // on a PR `chat` falls through to `pr-comment`, on an issue it routes to
+    // `ignore`. So a wholly dead classifier looks exactly like a quiet day, and
+    // one ran that way in production unnoticed. The `explain` copy below is
+    // introspection-only, but the WARNING is not — a fallback this consequential
+    // has to leave a trace on the route it actually ran.
+    if (!intentMatch) {
+      console.warn(
+        `[classifier] no parseable INTENT from ${resolvedModel} — defaulting to chat ` +
+          `(raw: ${JSON.stringify(output.slice(0, 160))}). If this repeats, the model is ` +
+          `returning nothing: raise HELPER_MAX_TOKENS or pin models.classifier to a model ` +
+          `that answers within it.`,
+      );
+    }
     if (explain && !intentMatch) {
       reason = `classifier returned no parseable INTENT — the model output was empty or malformed (raw: ${JSON.stringify(
         output.slice(0, 160),

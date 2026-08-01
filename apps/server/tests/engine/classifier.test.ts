@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { HELPER_MAX_TOKENS } from "#src/engine/llm.js";
 import {
   buildClassifierPrompt,
   classifyComment,
@@ -97,7 +98,7 @@ describe("classifyComment — injected chat", () => {
         expect.objectContaining({ role: "system" }),
         expect.objectContaining({ role: "user", content: expect.stringContaining("@last-light can you build this?") }),
       ]),
-      { maxTokens: 128 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
   });
 
@@ -132,7 +133,7 @@ describe("classifyComment — injected chat", () => {
           content: expect.stringContaining("one-sentence justification"),
         }),
       ]),
-      { maxTokens: 128 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
   });
 
@@ -208,7 +209,7 @@ describe("classifyIssueIntent — injected chat", () => {
         expect.objectContaining({ role: "system" }),
         expect.objectContaining({ role: "user", content: expect.stringContaining("How is lastlight different") }),
       ]),
-      { maxTokens: 128 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
   });
 

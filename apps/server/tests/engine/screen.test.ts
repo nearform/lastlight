@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { HELPER_MAX_TOKENS } from "#src/engine/llm.js";
 import {
   wrapUntrusted,
   flagPrefix,
@@ -82,7 +83,7 @@ describe("screenForInjection — injected chat", () => {
         expect.objectContaining({ role: "system" }),
         expect.objectContaining({ role: "user", content: expect.stringContaining(longText) }),
       ]),
-      { maxTokens: 64 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
   });
 
