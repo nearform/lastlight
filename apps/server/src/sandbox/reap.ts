@@ -1,6 +1,9 @@
 import { execFileSync } from "child_process";
 import { rmSync } from "fs";
 import { join, resolve, sep } from "path";
+import { logger } from "../logging/logger.js";
+
+const log = logger("reap");
 
 /**
  * Reap on-disk sandbox workspaces — the piece the container teardown never did.
@@ -75,7 +78,7 @@ export function reapSandboxWorkspace(opts: {
   const base = sandboxRoot(opts.stateDir, opts.sandboxDir);
   const workDir = resolve(base, opts.taskId);
   if (!isWithinDir(base, workDir)) {
-    console.warn(`[reap] refusing taskId that escapes sandboxes root: ${opts.taskId}`);
+    log.warn("Refusing taskId that escapes sandboxes root", { taskId: opts.taskId });
     return { removed: false, reason: "escape" };
   }
   const isLive = opts.isLive ?? hasLiveContainer;
@@ -84,11 +87,10 @@ export function reapSandboxWorkspace(opts: {
   }
   try {
     rmSync(workDir, { recursive: true, force: true });
-    console.log(`[reap] removed workspace ${opts.taskId}`);
+    log.info("Removed workspace", { taskId: opts.taskId });
     return { removed: true };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[reap] failed to remove ${opts.taskId}: ${msg}`);
+    log.warn("Failed to remove workspace", { taskId: opts.taskId, err });
     return { removed: false, reason: "error" };
   }
 }

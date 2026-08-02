@@ -46,6 +46,9 @@ import type { StateDb } from "../state/db.js";
 import type { WorkflowRun } from "../state/workflow-run-store.js";
 import type { GitHubClient } from "./github/github.js";
 import type { ReviewCheckPlacement } from "./pr-decisions.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("check");
 
 /** The check-run name branch protection can require. */
 export const REVIEW_CHECK_NAME = "last-light/review";
@@ -122,13 +125,14 @@ export async function openReviewCheck(
         },
       },
     );
-    console.log(
-      `[check] Posted in-progress check ${checkRunId} for ${args.owner}/${args.repo} on ${args.headSha.slice(0, 7)}`,
-    );
+    log.info("Posted in-progress check", {
+      checkRunId,
+      repo: `${args.owner}/${args.repo}`,
+      headSha: args.headSha.slice(0, 7),
+    });
     return { checkRunId, owner: args.owner, repo: args.repo, headSha: args.headSha };
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[check] failed to create in-progress check: ${msg}`);
+    log.warn("Failed to create in-progress check", { err });
     return null;
   }
 }
@@ -258,12 +262,14 @@ export async function postPlaceholderReviewCheck(
       REVIEW_CHECK_NAME,
       options,
     );
-    console.log(
-      `[check] Posted ${placement} check ${id} for ${args.owner}/${args.repo} on ${args.headSha.slice(0, 7)}`,
-    );
+    log.info("Posted placeholder check", {
+      placement,
+      checkRunId: id,
+      repo: `${args.owner}/${args.repo}`,
+      headSha: args.headSha.slice(0, 7),
+    });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[check] failed to create ${placement} check: ${msg}`);
+    log.warn("Failed to create placeholder check", { placement, err });
   }
 }
 
@@ -308,10 +314,9 @@ export async function linkReviewCheck(
   if (!deps.github || !detailsUrl) return;
   try {
     await deps.github.updateCheckRun(ref.owner, ref.repo, ref.checkRunId, { detailsUrl });
-    console.log(`[check] linked check ${ref.checkRunId} → ${detailsUrl}`);
+    log.info("Linked check", { checkRunId: ref.checkRunId, detailsUrl });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[check] failed to set details_url on check ${ref.checkRunId}: ${msg}`);
+    log.warn("Failed to set details_url on check", { checkRunId: ref.checkRunId, err });
   }
 }
 
@@ -360,8 +365,7 @@ export async function concludeReviewCheck(
         deps.botLogin,
       );
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[check] could not read the posted review for check ${ref.checkRunId}: ${msg}`);
+      log.warn("Could not read the posted review for check", { checkRunId: ref.checkRunId, err });
     }
     if (status === "failed" && !review) {
       title = "Review didn't complete";
@@ -385,10 +389,9 @@ export async function concludeReviewCheck(
       conclusion,
       output: { title, summary },
     });
-    console.log(`[check] Completed check ${ref.checkRunId} → ${conclusion} (run ${status})`);
+    log.info("Completed check", { checkRunId: ref.checkRunId, conclusion, runStatus: status });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[check] failed to complete check ${ref.checkRunId}: ${msg}`);
+    log.warn("Failed to complete check", { checkRunId: ref.checkRunId, err });
   }
 }
 
@@ -400,8 +403,7 @@ export function installReviewCheckObserver(db: StateDb, deps: ReviewCheckDeps): 
   db.runs.setTerminalObserver((run, status) => {
     if (!readReviewCheck(run)) return;
     concludeReviewCheck(db, run, status, deps).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[check] terminal conclusion failed for run ${run.id}: ${msg}`);
+      log.warn("Terminal conclusion failed for run", { runId: run.id, err });
     });
   });
 }

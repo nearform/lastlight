@@ -9,6 +9,9 @@ import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
 import type { OtelConfig } from "../config/config.js";
 import { OTEL_COLLECTOR_SANDBOX_ENDPOINT } from "../sandbox/egress-firewall-config.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("otel");
 
 export type TelemetryPrimitive = string | number | boolean;
 export type TelemetryAttributes = Record<string, unknown>;
@@ -74,7 +77,7 @@ export function resolveOtlpProtocol(signalEnv: string | undefined): "http/protob
   const raw = (signalEnv || process.env.OTEL_EXPORTER_OTLP_PROTOCOL || "").trim().toLowerCase();
   if (raw === "http/json") return "http/json";
   if (raw === "" || raw === "http/protobuf") return "http/protobuf";
-  console.warn(`[otel] unsupported OTEL_EXPORTER_OTLP_PROTOCOL "${raw}"; using http/protobuf`);
+  log.warn("Unsupported OTEL_EXPORTER_OTLP_PROTOCOL; using http/protobuf", { raw });
   return "http/protobuf";
 }
 
@@ -176,15 +179,14 @@ export async function initTelemetry(config: OtelConfig, opts: { packageVersion?:
         ? { metricReader: new PeriodicExportingMetricReader({ exporter: makeMetricExporter() }) }
         : {}),
     });
-    if (!metricsEnabled) console.log("[otel] metrics disabled (traces only)");
+    if (!metricsEnabled) log.info("Metrics disabled (traces only)");
     await sdk.start();
     enabled = true;
   } catch (err) {
     sdk = undefined;
     enabled = false;
-    const msg = err instanceof Error ? err.message : String(err);
     if (config.strict) throw err;
-    console.warn(`[otel] initialization failed; continuing without telemetry: ${msg}`);
+    log.warn("Initialization failed; continuing without telemetry", { err });
   }
 }
 
@@ -194,8 +196,7 @@ export async function shutdownTelemetry(): Promise<void> {
   sdk = undefined;
   enabled = false;
   await active.shutdown().catch((err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[otel] shutdown failed: ${msg}`);
+    log.warn("Shutdown failed", { err });
   });
 }
 
@@ -306,7 +307,7 @@ export function getOtelEnvForSandbox(env: NodeJS.ProcessEnv = process.env): Reco
     // down with it. OTLP header values legitimately almost never contain a
     // single quote; when they do, the operator gets a clear log line.
     if (/[\r\n']/.test(value)) {
-      console.warn(`[otel] not forwarding ${key}: value contains a newline or single quote`);
+      log.warn("Not forwarding OTEL env var: value contains a newline or single quote", { key });
       continue;
     }
     out[key] = value;

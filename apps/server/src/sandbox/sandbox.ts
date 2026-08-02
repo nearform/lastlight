@@ -13,6 +13,7 @@ import { ALLOW_ALL_SENTINEL } from "./egress-allowlist.js";
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox } from "../telemetry/index.js";
 import { KubernetesSandbox } from "./k8s/kubernetes-sandbox.js";
 import type { GitAccessProfile } from "../engine/github/profiles.js";
+import { logger } from "../logging/logger.js";
 import {
   DOCKER_WORKSPACE_DIR,
   SKILL_BUNDLE_ROOT,
@@ -570,7 +571,7 @@ class InProcessSandbox implements Sandbox {
       webSearch: opts.webSearch === true,
       webSearchProvider: opts.webSearchProvider,
       onEvent,
-      onWarn: (msg) => console.warn(`[agentic] ${msg}`),
+      onWarn: (msg) => logger("agentic").warn(msg),
     });
   }
 

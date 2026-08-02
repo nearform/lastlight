@@ -3,6 +3,9 @@ import { randomUUID } from "crypto";
 import type { Connector, EventEnvelope } from "../types.js";
 import type { SessionManager } from "./session-manager.js";
 import type { MessagingConfig, IncomingMessageParams } from "./types.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("messaging");
 
 /**
  * Abstract base class for messaging platform connectors.
@@ -49,7 +52,11 @@ export abstract class MessagingConnector extends EventEmitter implements Connect
 
     // Allowlist check
     if (this.config.allowedUsers.length > 0 && !this.config.allowedUsers.includes(platformUserId)) {
-      console.log(`[${this.name}] Ignoring message from unauthorized user: ${platformUsername} (${platformUserId})`);
+      log.info("Ignoring message from unauthorized user", {
+        platform: this.name,
+        platformUsername,
+        platformUserId,
+      });
       return;
     }
 

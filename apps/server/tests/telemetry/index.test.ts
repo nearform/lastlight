@@ -1,4 +1,21 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
+
+// src/telemetry/index.ts now logs unsupported-protocol / unsafe-env-var warnings
+// via the pino LoggerPort instead of console — mock the logger module so the
+// suite's stderr stays free of real pino JSON (no assertions here depend on
+// the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, isTelemetryEnabled, resolveOtlpProtocol, safeMetricAttributes, shutdownTelemetry, withSpan } from "#src/telemetry/index.js";
 import { OTEL_COLLECTOR_SANDBOX_ENDPOINT } from "#src/sandbox/egress-firewall-config.js";
 

@@ -1,5 +1,8 @@
 import { Cron } from "croner";
 import type { StateDb } from "../state/db.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("cron");
 
 export interface CronJob {
   name: string;
@@ -43,23 +46,23 @@ export class CronScheduler {
     const cronJob = new Cron(job.schedule, async () => {
       // Overlap protection — skip if still running
       if (this.running.has(job.name)) {
-        console.log(`[cron] Skipping ${job.name} — still running from previous tick`);
+        log.info("Skipping — still running from previous tick", { job: job.name });
         return;
       }
 
       this.running.add(job.name);
-      console.log(`[cron] Running: ${job.name}`);
+      log.info("Running", { job: job.name });
 
       try {
         await this.runner(job.workflow, job.context);
-      } catch (err: any) {
-        console.error(`[cron] ${job.name} failed:`, err.message);
+      } catch (err: unknown) {
+        log.error("Job failed", { job: job.name, err });
 
         // Check consecutive failures (tracked under the workflow name)
         const failures = this.db.executions.consecutiveFailures(job.workflow);
         const max = job.maxFailures || 3;
         if (failures >= max) {
-          console.error(`[cron] ALERT: ${job.name} has failed ${failures} times consecutively`);
+          log.error("ALERT: job has failed consecutively", { job: job.name, failures });
           // TODO: send alert (Slack webhook, email, etc.)
         }
       } finally {
@@ -68,7 +71,7 @@ export class CronScheduler {
     });
 
     this.jobs.set(job.name, cronJob);
-    console.log(`[cron] Registered: ${job.name} (${job.schedule})`);
+    log.info("Registered", { job: job.name, schedule: job.schedule });
   }
 
   /** Register a lightweight direct handler (no skill/sandbox overhead) */
@@ -85,15 +88,15 @@ export class CronScheduler {
       this.running.add(job.name);
       try {
         await job.handler();
-      } catch (err: any) {
-        console.error(`[cron] ${job.name} failed:`, err.message);
+      } catch (err: unknown) {
+        log.error("Job failed", { job: job.name, err });
       } finally {
         this.running.delete(job.name);
       }
     });
 
     this.jobs.set(job.name, cronJob);
-    console.log(`[cron] Registered: ${job.name} (${job.schedule})`);
+    log.info("Registered", { job: job.name, schedule: job.schedule });
   }
 
   /** Whether a cron with this name is currently registered. */
@@ -107,7 +110,7 @@ export class CronScheduler {
     if (!job) return;
     job.stop();
     this.jobs.delete(name);
-    console.log(`[cron] Stopped: ${name}`);
+    log.info("Stopped", { job: name });
   }
 
   /** Replace an existing cron with a new schedule/context. Equivalent to unregister + register. */
@@ -129,7 +132,7 @@ export class CronScheduler {
   stopAll(): void {
     for (const [name, job] of this.jobs) {
       job.stop();
-      console.log(`[cron] Stopped: ${name}`);
+      log.info("Stopped", { job: name });
     }
     this.jobs.clear();
   }

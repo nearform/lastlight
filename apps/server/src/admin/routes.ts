@@ -85,6 +85,10 @@ import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
 import type { WorkflowApproval } from "../state/approval-store.js";
 import type { PublicConfigBundle, BuildAssetsLocation } from "../config/config.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("admin");
+const oauthLog = logger("oauth");
 
 /**
  * Map a build-asset filename extension to a binary MIME type, or null when the
@@ -661,8 +665,8 @@ export function createAdminRoutes(
   const githubCredsSet = Boolean(config.githubOAuthClientId && config.githubOAuthClientSecret);
   const githubOAuthEnabled = githubCredsSet && Boolean(config.githubAllowedOrg);
   if (githubCredsSet && !config.githubAllowedOrg) {
-    console.error(
-      "[oauth] GitHub OAuth client id/secret are set but GITHUB_ALLOWED_ORG is empty. " +
+    oauthLog.error(
+      "GitHub OAuth client id/secret are set but GITHUB_ALLOWED_ORG is empty. " +
       "Set it to a GitHub org slug to restrict login to that org, or to \"*\" to " +
       "explicitly allow any GitHub user. GitHub OAuth is disabled until this is set.",
     );
@@ -979,7 +983,7 @@ export function createAdminRoutes(
         "https://slack.com/user_id"?: string;
       };
       if (userInfo.ok === false) {
-        console.error("Slack openid.connect.userInfo failed:", userInfo.error);
+        oauthLog.error("Slack openid.connect.userInfo failed", { error: userInfo.error });
         return c.json({ error: "Slack userInfo failed" }, 502);
       }
 
@@ -992,9 +996,10 @@ export function createAdminRoutes(
         const matchesId = teamId === allowed;
         const matchesDomain = teamDomain === allowed;
         if (!matchesId && !matchesDomain) {
-          console.warn(
-            `[oauth] Slack login rejected: workspace ${teamDomain ?? teamId ?? "unknown"} not in allowlist (${allowed})`,
-          );
+          oauthLog.warn("Slack login rejected: workspace not in allowlist", {
+            workspace: teamDomain ?? teamId ?? "unknown",
+            allowed,
+          });
           return c.json({ error: "workspace not allowed" }, 403);
         }
       }
@@ -1015,8 +1020,7 @@ export function createAdminRoutes(
           });
           matchedLogin = user.login;
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[oauth] failed to persist Slack user ${slackUserId}: ${msg}`);
+          oauthLog.warn("Failed to persist Slack user", { slackUserId, err });
         }
       }
 
@@ -1026,7 +1030,7 @@ export function createAdminRoutes(
       // bare "/admin" 404s in dev. Production static serving accepts both.
       return c.redirect(`/admin/?token=${encodeURIComponent(token)}`);
     } catch (err: unknown) {
-      console.error("OAuth exchange failed:", err);
+      oauthLog.error("Slack OAuth exchange failed", { err });
       return c.json({ error: "OAuth exchange failed" }, 502);
     }
   });
@@ -1116,7 +1120,7 @@ export function createAdminRoutes(
         memberStatus = memberRes.status;
       }
       if (!userInfo.login) {
-        console.error("GitHub /user failed: missing login field");
+        oauthLog.error("GitHub /user failed: missing login field");
         return fail("github_userinfo");
       }
       const login = userInfo.login;
@@ -1124,9 +1128,11 @@ export function createAdminRoutes(
       // Only 204 No Content means confirmed member. 302 means caller lacks
       // read:org visibility; 404 means not a member. Both cases are rejected.
       if (!githubAllowAnyUser && memberStatus !== 204) {
-        console.warn(
-          `[oauth] GitHub login rejected: ${login} not a confirmed member of ${config.githubAllowedOrg!} (status ${memberStatus})`,
-        );
+        oauthLog.warn("GitHub login rejected: not a confirmed org member", {
+          login,
+          org: config.githubAllowedOrg!,
+          memberStatus,
+        });
         return fail("github_org");
       }
 
@@ -1155,8 +1161,7 @@ export function createAdminRoutes(
             email = emails.find((e) => e.primary && e.verified)?.email ?? null;
           }
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[oauth] GitHub /user/emails lookup failed for ${login}: ${msg}`);
+          oauthLog.warn("GitHub /user/emails lookup failed", { login, err });
         }
       }
       if (typeof userInfo.id === "number") {
@@ -1170,8 +1175,7 @@ export function createAdminRoutes(
           });
         } catch (err: unknown) {
           // Identity capture is best-effort — never block a valid login on it.
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[oauth] failed to persist user ${login}: ${msg}`);
+          oauthLog.warn("Failed to persist user", { login, err });
         }
       }
 
@@ -1180,7 +1184,7 @@ export function createAdminRoutes(
       const token = createToken(config.adminSecret, "github", login);
       return c.redirect(`/admin/?token=${encodeURIComponent(token)}`);
     } catch (err: unknown) {
-      console.error("GitHub OAuth exchange failed:", err);
+      oauthLog.error("GitHub OAuth exchange failed", { err });
       return fail("oauth_exchange");
     }
   });
@@ -1524,7 +1528,7 @@ export function createAdminRoutes(
               await killContainer(ctr.name);
               killed.push(ctr.name);
             } catch (err) {
-              console.warn(`[cancel] failed to kill ${ctr.name}:`, err);
+              log.warn("Cancel: failed to kill container", { container: ctr.name, err });
             }
           }),
         );
@@ -1539,7 +1543,7 @@ export function createAdminRoutes(
           }
         }
       } catch (err) {
-        console.warn(`[cancel] container enumeration failed:`, err);
+        log.warn("Cancel: container enumeration failed", { err });
       }
     }
     // Reap the workspace too (issue #106) — the kills above stop the in-flight
@@ -1567,7 +1571,7 @@ export function createAdminRoutes(
             runId: RunId.from(run.id),
           });
         } catch (err) {
-          console.warn(`[cancel] k8s reclaim failed for run ${run.id}:`, err);
+          log.warn("Cancel: k8s reclaim failed", { runId: run.id, err });
         }
         // The pod's uploaded `.lastlight/` artifacts live host-side under
         // `<sandboxDir>/<taskId>` even on k8s (the artifact store is host-local
@@ -1580,7 +1584,7 @@ export function createAdminRoutes(
         try {
           await artifactStore.gc(storedTaskId);
         } catch (err) {
-          console.warn(`[cancel] artifact gc failed for ${storedTaskId}:`, err);
+          log.warn("Cancel: artifact gc failed", { taskId: storedTaskId, err });
         }
       } else {
         reaped = reapSandboxWorkspace({
@@ -1598,7 +1602,7 @@ export function createAdminRoutes(
           try {
             await artifactStore.gc(storedTaskId);
           } catch (err) {
-            console.warn(`[cancel] artifact gc failed for ${storedTaskId}:`, err);
+            log.warn("Cancel: artifact gc failed", { taskId: storedTaskId, err });
           }
         }
       }
@@ -1625,7 +1629,7 @@ export function createAdminRoutes(
     // Fire-and-forget: restartRun (inside the callback) flips status→running
     // atomically, so a second immediate retry click 400s on the status guard.
     config.retryWorkflow(run, actorFromContext(c) ?? "admin").catch((err) =>
-      console.error(`[admin] retry ${id} failed:`, err));
+      log.error("Retry failed", { id, err }));
     return c.json({ retrying: id });
   });
 
@@ -2211,7 +2215,7 @@ export function createAdminRoutes(
       const workflowRun = db.runs.getRun(approval.workflowRunId);
       if (workflowRun && config.resumeWorkflow) {
         config.resumeWorkflow(workflowRun, actor).catch((err) => {
-          console.error(`[admin] Failed to resume workflow ${workflowRun.id}:`, err);
+          log.error("Failed to resume workflow", { workflowRunId: workflowRun.id, err });
         });
       }
     }
@@ -2457,7 +2461,7 @@ export function createAdminRoutes(
       sender: actorFromContext(c),
     };
     config.triggerCron(def.workflow, context).catch((err) => {
-      console.error(`[admin] cron trigger ${name} failed:`, err);
+      log.error("Cron trigger failed", { name, err });
     });
     return c.json({ name, workflow: def.workflow, triggered: true });
   });
@@ -2586,7 +2590,7 @@ export function createAdminRoutes(
     // takes minutes. `_prState` carries the armed snapshot down so the run
     // persists the intervention on its own `context.prState` — which is where
     // the record normally lives, and why no standalone row is written here.
-    console.log(`[admin] retry ${workflowName} ${repo}#${prNumber} by ${by} — ${disposition.reason}`);
+    log.info("retry", { workflow: workflowName, repo, prNumber, by, reason: disposition.reason });
     config.dispatchWorkflow(workflowName, {
       ...context,
       body: state.body,
@@ -2594,7 +2598,7 @@ export function createAdminRoutes(
       sender: by,
       triggeredBy: by,
     }).catch((err: unknown) => {
-      console.error(`[admin] retry ${workflowName} ${repo}#${prNumber} failed:`, err);
+      log.error("retry failed", { workflow: workflowName, repo, prNumber, err });
     });
 
     return c.json({

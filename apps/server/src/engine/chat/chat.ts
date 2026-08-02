@@ -9,6 +9,9 @@ import type { EmitterRecord } from "agentic-pi";
 import { getRuntimeConfig } from "../../config/config.js";
 import { recordError, recordExecutionMetrics, telemetryIncludesContent, withSpan } from "../../telemetry/index.js";
 import { recordPiEvent } from "../../telemetry/pi-events.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("chat");
 
 /**
  * Chat-specific system prompt appended to the agent context. Composed
@@ -204,19 +207,22 @@ export async function handleChatMessage(
         includeContent: getRuntimeConfig()?.otel.includeContent ?? telemetryIncludesContent(),
       });
     } catch (err: unknown) {
-      const m = err instanceof Error ? err.message : String(err);
-      console.warn(`[chat] failed to write dashboard shim: ${m}`);
+      log.warn("Failed to write dashboard shim", { err });
     }
 
-    const costStr = result.costUsd !== undefined ? `, $${result.costUsd.toFixed(4)}` : "";
-    console.log(
-      `[chat] ${sender} → ${result.stopReason ?? "?"} (${result.turns ?? "?"} turns, ${Math.round(result.durationMs / 1000)}s${costStr}) [session ${turn.agentSessionId.slice(0, 8)}…]`,
-    );
+    log.info("Chat turn completed", {
+      sender,
+      stopReason: result.stopReason ?? "?",
+      turns: result.turns ?? "?",
+      durationSec: Math.round(result.durationMs / 1000),
+      costUsd: result.costUsd,
+      sessionId: turn.agentSessionId.slice(0, 8),
+    });
     recordExecutionMetrics("chat", { model: turn.modelId, success: result.success, stop_reason: result.stopReason, durationMs: result.durationMs, costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens });
     return result;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.error(`[chat] Error handling message from ${sender}:`, errMsg);
+    log.error("Error handling message", { sender, err });
     const dashboardSessionId = await writeChatFailureShim({
       sessionsHomeDir: deps.sessionsHomeDir,
       prompt: message,

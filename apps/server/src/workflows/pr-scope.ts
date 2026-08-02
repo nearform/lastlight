@@ -44,6 +44,9 @@
  */
 
 import { getAssetVersion, listAgentWorkflows } from "./loader.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("pr-scope");
 
 /**
  * The four built-ins that were PR-scoped before `pr_scoped` existed.
@@ -87,19 +90,18 @@ export function prScopedWorkflows(): ReadonlySet<string> {
       names.add(legacy);
       if (!warned.has(legacy)) {
         warned.add(legacy);
-        console.warn(
-          `[pr-scope] Workflow "${legacy}" does not declare \`pr_scoped: true\`. ` +
-          `Treating it as PR-scoped anyway (it always was), but add the key to its ` +
-          `YAML — the compatibility fallback only covers the four original built-ins.`,
+        log.warn(
+          "Workflow does not declare `pr_scoped: true` — treating it as PR-scoped " +
+            "anyway (it always was), but add the key to its YAML; the compatibility " +
+            "fallback only covers the four original built-ins",
+          { workflow: legacy },
         );
       }
     }
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[pr-scope] Could not read the workflow definitions (${msg}) — ` +
-      `falling back to the built-in PR-scoped set.`,
-    );
+    log.warn("Could not read the workflow definitions — falling back to the built-in PR-scoped set", {
+      err,
+    });
     names = new Set(LEGACY_PR_SCOPED_NAMES);
   }
 

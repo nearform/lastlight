@@ -1,5 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "crypto";
+
+// src/connectors/github-webhook.ts now logs webhook/installation events via
+// the pino LoggerPort instead of console — mock the logger module so the
+// suite's stderr stays free of real pino JSON (no assertions here depend on
+// the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { GitHubWebhookConnector } from "#src/connectors/github-webhook.js";
 import {
   setRuntimeConfig,

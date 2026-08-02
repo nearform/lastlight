@@ -19,6 +19,7 @@ import type {
   AssetLoader,
   EnginePorts,
   LivenessPort,
+  LoggerPort,
   ObservabilityPort,
   PhaseOutcome,
   PhaseReporter,
@@ -26,6 +27,7 @@ import type {
   PhaseResult,
   WorkflowStateStore,
 } from "../ports/ports.js";
+import { noopLogger } from "../ports/ports.js";
 
 // Re-export the collaborator/result port types so existing importers of the
 // old `./phase-executor.js` path (runner, tests) keep resolving them here.
@@ -229,6 +231,7 @@ interface LedgerDeps {
   agent: AgentPort;
   liveness: LivenessPort;
   observability: ObservabilityPort;
+  logger?: LoggerPort;
 }
 
 /** Check if a sandbox container is actually running for a given taskId prefix. */
@@ -272,6 +275,7 @@ async function runPhaseLedger(
 ): Promise<RunPhaseResult> {
   const { dedupKey, phaseName, taskId, triggerId, repo, workflowRunId } = meta;
   const { store: db, liveness, observability } = deps;
+  const log = deps.logger ?? noopLogger;
   return observability.withSpan("lastlight.workflow.phase", attrs, async (span) => {
     if (db) {
       const status = db.executions.shouldRunPhase(dedupKey, triggerId, workflowRunId);
@@ -279,14 +283,14 @@ async function runPhaseLedger(
       if (status === "running") {
         const alive = await isContainerAlive(liveness, taskId);
         if (alive) {
-          console.log(`[runner] Phase ${phaseName} is already running (container alive) — skipping`);
+          log.debug("phase already running", { phase: phaseName });
           span?.addEvent("lastlight.workflow.phase.skipped", { reason: "running" });
           return { skipped: true, reason: "running" };
         }
-        console.log(`[runner] Phase ${phaseName} was running but container is dead — cleaning up`);
+        log.warn("phase container is dead", { phase: phaseName });
         db.executions.markStaleAsFailed(dedupKey, triggerId, workflowRunId);
       } else if (status === "done") {
-        console.log(`[runner] Phase ${phaseName} already completed successfully — skipping`);
+        log.debug("phase already completed", { phase: phaseName });
         span?.addEvent("lastlight.workflow.phase.skipped", { reason: "done" });
         return { skipped: true, reason: "done" };
       }
@@ -308,7 +312,7 @@ async function runPhaseLedger(
           try {
             db.executions.recordSessionId(executionId, sessionId);
           } catch (err) {
-            console.warn(`[runner] Failed to persist session id mid-run for ${phaseName}:`, err);
+            log.warn("failed to persist session id mid-run", { phase: phaseName, err });
           }
         });
 
@@ -453,6 +457,7 @@ export class PhaseExecutor {
       agent: this.ports.agent,
       liveness: this.ports.liveness,
       observability: this.ports.observability,
+      logger: this.ports.logger,
     };
   }
 
@@ -465,6 +470,7 @@ export class PhaseExecutor {
     node: DagNode,
     outputs: Readonly<Record<string, unknown>>,
   ): Promise<PhaseOutcome> {
+    const log = this.ports.logger ?? noopLogger;
     const phase = this.run.definition.phases.find((p) => p.name === node.name);
     if (!phase) {
       // Unknown node — shouldn't happen; treat as a no-op success.
@@ -481,7 +487,7 @@ export class PhaseExecutor {
     if (handler) return handler.execute(phase, node, outputs);
 
     if (!phase.prompt && phaseSkillNames(phase).length === 0) {
-      console.warn(`[runner] Phase "${phase.name}" has type=agent but neither prompt: nor skills: — skipping`);
+      log.warn("agent phase has neither prompt nor skills — skipping", { phase: phase.name });
       return { results: [], status: "succeeded" };
     }
 
@@ -756,6 +762,7 @@ export class PhaseExecutor {
       phase.timeout_seconds,
       this.run.ctx,
       `${phase.name}.timeout_seconds`,
+      this.ports.logger,
     );
   }
 
@@ -792,6 +799,7 @@ export class PhaseExecutor {
     iteration: number,
   ): Promise<boolean> {
     const { config, githubAccess, taskId, triggerId, definition, workflowId, store: db } = this.run;
+    const log = this.ports.logger ?? noopLogger;
     const label = PhaseRef.iterCheck(phase.name, iteration).format();
     const startedAt = Date.now();
 
@@ -809,7 +817,7 @@ export class PhaseExecutor {
           workflowRunId: workflowId,
         });
       } catch (err) {
-        console.warn(`[runner] Failed to record until_bash check row for ${label}:`, err);
+        log.warn("Failed to record until_bash check row", { label, err });
       }
     }
 
@@ -854,7 +862,7 @@ export class PhaseExecutor {
           `$ ${command}\n\n${output.length > MAX_UNTIL_OUTPUT_BYTES ? output.slice(-MAX_UNTIL_OUTPUT_BYTES) : output}`,
         );
       } catch (err) {
-        console.warn(`[runner] Failed to finish until_bash check row for ${label}:`, err);
+        log.warn("Failed to finish until_bash check row", { label, err });
       }
     }
 
@@ -960,6 +968,7 @@ export class PhaseExecutor {
     phase: PhaseDefinition,
     outputs: Readonly<Record<string, unknown>>,
   ): Promise<PhaseOutcome> {
+    const log = this.ports.logger ?? noopLogger;
     const loop = phase.loop!;
     const phaseName = phase.name;
     const MAX_CYCLES = loop.max_cycles;
@@ -1039,16 +1048,18 @@ export class PhaseExecutor {
           if (fromFile) {
             parsed = fromFile;
             resultOverride = { ...resultOverride, success: true, error: undefined };
-            console.warn(
-              `[runner] Reviewer stdout missing VERDICT: marker — recovered ${fromFile.verdict} from reviewer-verdict.md`,
-            );
+            log.warn("reviewer stdout missing VERDICT marker — recovered from reviewer-verdict.md", {
+              phase: phaseName,
+              verdict: fromFile.verdict,
+            });
           }
         }
         verdict = parsed.verdict;
         if (parsed.viaFallback) {
-          console.warn(
-            `[runner] Reviewer output missing VERDICT: marker — using fallback detection (isApproved=${verdict === "APPROVED"})`,
-          );
+          log.warn("reviewer output missing VERDICT marker — using fallback detection", {
+            phase: phaseName,
+            isApproved: verdict === "APPROVED",
+          });
         }
         results.push({ phase: reviewLabel, ...resultOverride });
         await this.reporter.onEnd(reviewLabel, results[results.length - 1]);
@@ -1177,6 +1188,7 @@ export class PhaseExecutor {
       loop.max_iterations,
       this.run.ctx,
       `${phaseName}.generic_loop.max_iterations`,
+      this.ports.logger,
     )!;
     const { store: db, workflowId, scratch, config } = this.run;
     const results: PhaseResult[] = [];

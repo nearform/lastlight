@@ -76,6 +76,10 @@ import {
   type PrState,
 } from "./pr-state.js";
 import { HOLD_LABEL, REQUIRES_HUMAN_LABEL } from "../cron/dependabot-discovery.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("escalation");
+const retryLog = logger("retry");
 
 /**
  * The packaged bot handle. Only a FALLBACK: every real call site passes the
@@ -147,9 +151,11 @@ export async function escalatePr(
   // again. Refuse rather than latch; the next event re-resolves the snapshot
   // and escalates properly.
   if (!state.headSha) {
-    console.warn(
-      `[escalate] ${state.repo}#${state.prNumber}: ${kase} but the head SHA is unknown — skipping silently`,
-    );
+    log.warn("Escalation case but head SHA is unknown — skipping silently", {
+      repo: state.repo,
+      prNumber: state.prNumber,
+      case: kase,
+    });
     return null;
   }
 
@@ -201,10 +207,10 @@ export async function escalatePr(
       terminalMarker: { phase: ESCALATION_PHASE, summary: decision.reason },
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[escalate] ${state.repo}#${state.prNumber}: could not record the escalation (${msg}) — ` +
-      `applying no label, since a label with no record reads as a human's permanent hold`,
+    log.warn(
+      "Could not record the escalation — applying no label, since a label with no " +
+        "record reads as a human's permanent hold",
+      { repo: state.repo, prNumber: state.prNumber, err },
     );
     return null;
   }
@@ -215,8 +221,7 @@ export async function escalatePr(
     await github.addLabels(owner, name, state.prNumber, [REQUIRES_HUMAN_LABEL]);
     labelled = true;
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[escalate] ${state.repo}#${state.prNumber}: could not apply the label: ${msg}`);
+    log.warn("Could not apply the label", { repo: state.repo, prNumber: state.prNumber, err });
   }
 
   // ── 3. The comment. Only behind a label that actually landed. ────────────
@@ -241,15 +246,20 @@ export async function escalatePr(
       );
       commented = true;
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[escalate] ${state.repo}#${state.prNumber}: could not post the comment: ${msg}`);
+      log.warn("Could not post the comment", { repo: state.repo, prNumber: state.prNumber, err });
     }
   }
 
-  console.log(
-    `[escalate] ${workflowName} ${state.repo}#${state.prNumber}: ${kase} at ` +
-    `${state.headSha.slice(0, 7)} (run ${runId}, label=${labelled}, comment=${commented})`,
-  );
+  log.info("Escalated", {
+    workflowName,
+    repo: state.repo,
+    prNumber: state.prNumber,
+    case: kase,
+    headSha: state.headSha.slice(0, 7),
+    runId,
+    labelled,
+    commented,
+  });
   return { case: kase, runId, labelled, commented };
 }
 
@@ -327,10 +337,10 @@ export async function noticeForkPr(
       terminalMarker: { phase: FORK_NOTICE_PHASE, summary: "fork-pr: told the author once" },
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[fork-notice] ${state.repo}#${state.prNumber}: could not record the notice (${msg}) — ` +
-      `saying nothing, since a comment with no record would repeat on every event`,
+    log.warn(
+      "Could not record the fork notice — saying nothing, since a comment with no " +
+        "record would repeat on every event",
+      { repo: state.repo, prNumber: state.prNumber, err },
     );
     return null;
   }
@@ -340,14 +350,17 @@ export async function noticeForkPr(
     await deps.github.postComment(owner, name, state.prNumber, renderForkNotice(state));
     commented = true;
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[fork-notice] ${state.repo}#${state.prNumber}: comment failed: ${msg}`);
+    log.warn("Fork notice comment failed", { repo: state.repo, prNumber: state.prNumber, err });
   }
 
-  console.log(
-    `[fork-notice] ${workflowName} ${state.repo}#${state.prNumber}: ` +
-    `at ${state.headSha.slice(0, 7)} (run ${runId}, comment=${commented})`,
-  );
+  log.info("Fork notice sent", {
+    workflowName,
+    repo: state.repo,
+    prNumber: state.prNumber,
+    headSha: state.headSha.slice(0, 7),
+    runId,
+    commented,
+  });
   return { runId, commented };
 }
 
@@ -580,18 +593,21 @@ export async function recordIntervention(
       },
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[retry] ${state.repo}#${state.prNumber}: could not record the retry (${msg}) — ` +
-      `it will be lost, and the maintainer will have to ask again`,
+    retryLog.warn(
+      "Could not record the retry — it will be lost, and the maintainer will have to ask again",
+      { repo: state.repo, prNumber: state.prNumber, err },
     );
     return null;
   }
 
-  console.log(
-    `[retry] ${workflowName} ${state.repo}#${state.prNumber}: recorded a ${intervention.via} retry ` +
-    `at ${state.headSha.slice(0, 7)} (run ${runId})`,
-  );
+  retryLog.info("Recorded a retry", {
+    workflow: workflowName,
+    repo: state.repo,
+    prNumber: state.prNumber,
+    via: intervention.via,
+    atSha: state.headSha.slice(0, 7),
+    runId,
+  });
   return { runId, via: intervention.via, at: intervention.at };
 }
 

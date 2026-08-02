@@ -1,5 +1,8 @@
 import type { EmitterRecord } from "agentic-pi";
 import { SessionLog } from "../session-log.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("shim");
 
 /**
  * Translates agentic-pi's JSONL event stream into Claude-SDK-style envelope
@@ -474,8 +477,7 @@ export class AgenticShim {
         );
       })
       .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[shim] failed to append jsonl: ${msg}`);
+        log.warn("Failed to append jsonl", { err });
       });
   }
 }

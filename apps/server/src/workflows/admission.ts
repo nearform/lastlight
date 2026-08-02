@@ -32,6 +32,9 @@
 import type { StateDb } from "../state/db.js";
 import type { WorkflowRun } from "../state/workflow-run-store.js";
 import { resumeSimpleRun, type ResumeOptions } from "./resume.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("admission");
 
 /**
  * Absurdly-high runaway-loop backstop for the k8s backend. NOT a tuned
@@ -94,8 +97,7 @@ export function createAdmissionController(deps: AdmissionDeps): AdmissionControl
         // now been honoured, so retract it before the run posts anything of its
         // own (issue #244). Fire-and-forget: a failed retract is cosmetic.
         retractQueuedAck(admitted, resumeOpts).catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[admission] Failed to retract queued ack for ${admitted.id}: ${msg}`);
+          log.warn("Failed to retract queued ack", { runId: admitted.id, err });
         });
         dispatchAdmitted(admitted, resumeOpts);
       }
@@ -114,8 +116,7 @@ export function createAdmissionController(deps: AdmissionDeps): AdmissionControl
     if (timer !== undefined) return;
     timer = setInterval(() => {
       sweep().catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[admission] Sweep failed: ${msg}`);
+        log.error("Sweep failed", { err });
       });
     }, sweepIntervalMs);
   }
@@ -133,8 +134,7 @@ export function createAdmissionController(deps: AdmissionDeps): AdmissionControl
 /** Fire-and-forget: resume a newly admitted run. */
 function dispatchAdmitted(run: WorkflowRun, resumeOpts: ResumeOptions): void {
   resumeSimpleRun(run, resumeOpts).catch((err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[admission] resumeSimpleRun failed for ${run.id}: ${msg}`);
+    log.error("resumeSimpleRun failed", { runId: run.id, err });
   });
 }
 
@@ -153,8 +153,7 @@ async function expireStaleRuns(
       const changed = db.runs.expireQueued(run.id, reason);
       if (changed === 1) {
         postExpiryAck(run, reason, resumeOpts).catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[admission] Failed to post expiry ack for ${run.id}: ${msg}`);
+          log.warn("Failed to post expiry ack", { runId: run.id, err });
         });
       }
     }

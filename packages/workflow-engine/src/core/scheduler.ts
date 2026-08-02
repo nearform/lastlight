@@ -14,6 +14,7 @@ import type {
   WorkflowResult,
   WorkflowStateStore,
 } from "../ports/ports.js";
+import { noopLogger } from "../ports/ports.js";
 
 /**
  * Host capabilities the scheduler consults for the `requires_sandbox` /
@@ -67,6 +68,7 @@ export async function runWorkflowCore(
 ): Promise<WorkflowResult> {
   const { definition, ctx, config, triggerId, githubAccess, workflowId } = runScope;
   const { reporter, resolver, ports, store: db, reporterActive, capabilities } = deps;
+  const log = deps.ports.logger ?? noopLogger;
 
   // The run-level span — the CHAIN root the phase (CHAIN) and agent (AGENT) spans
   // nest under, so a Phoenix trace renders workflow → phase → agent → turn → tool.
@@ -103,7 +105,7 @@ export async function runWorkflowCore(
     if (db && workflowId) {
       const latest = db.runs.getRun(workflowId);
       if (latest?.status === "cancelled") {
-        console.log(`[runner] ${definition.name} cancelled — stopping`);
+        log.info("workflow cancelled — stopping", { workflow: definition.name });
         return { success: false, phases };
       }
       // `runScope.scratch` is loaded ONCE, before the first phase. The HOST also
@@ -214,7 +216,7 @@ export async function runWorkflowCore(
       // An agent call threw (OOM / unexpected / provisioning failure). Mark the
       // node failed so the failure cascades to downstream skips, mirroring a
       // normal failure.
-      console.error(`[runner] Phase "${node.name}" threw unexpectedly:`, err);
+      log.error("phase threw unexpectedly", { phase: node.name, err });
       phases.push({ phase: node.name, success: false, error: String(err), output: "" });
       node.status = "failed";
       // Attribute the failure to THIS phase. `current_phase`/`phase_history`

@@ -1,6 +1,9 @@
 import { ApiException } from "@kubernetes/client-node";
 import type { CoreV1Api, V1ContainerStatus } from "@kubernetes/client-node";
 import { containerStartState, initContainerFailure, terminalResult } from "./pod-status.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("k8s");
 
 /** Bound on the post-stream status poll: ~15 × 500ms ≈ 8s before the coarse
  *  phase-based fallback, so a lagging kubelet status never hangs a command. */
@@ -173,8 +176,9 @@ export async function waitForPodGone(core: CoreV1Api, ns: string, name: string):
     await sleep(POD_DELETE_POLL_INTERVAL_MS);
   }
   const budgetSeconds = (POD_DELETE_POLL_ATTEMPTS * POD_DELETE_POLL_INTERVAL_MS) / 1000;
-  console.warn(
-    `[k8s] pod ${name} still present ${budgetSeconds}s after delete — proceeding anyway ` +
-      `(a sequential pod on the same PVC may race the volume release).`,
+  log.warn(
+    "Pod still present after delete — proceeding anyway " +
+      "(a sequential pod on the same PVC may race the volume release)",
+    { pod: name, budgetSeconds },
   );
 }

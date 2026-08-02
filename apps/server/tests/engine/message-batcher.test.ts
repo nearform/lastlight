@@ -1,4 +1,20 @@
 import { describe, it, expect, vi } from "vitest";
+
+// message-batcher.ts now logs via the pino LoggerPort instead of console — mock
+// the logger module so the "keeps draining if a dispatch throws" test below
+// doesn't print a JSON error blob + stack trace to stderr on every run.
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import type { EventEnvelope } from "#src/connectors/types.js";
 import { MessageBatcher } from "#src/engine/chat/message-batcher.js";
 
@@ -108,7 +124,6 @@ describe("MessageBatcher", () => {
       calls.push(e.body);
       if (failFirst) { failFirst = false; throw new Error("boom"); }
     };
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const b = new MessageBatcher({ dispatch, debounceMs: 0 });
 
     b.submit(env("s1", "A", "100"));
@@ -118,6 +133,5 @@ describe("MessageBatcher", () => {
 
     expect(calls).toEqual(["A", "B"]); // the throw didn't wedge the next turn
     expect(b.activeSessions).toBe(0);
-    errSpy.mockRestore();
   });
 });

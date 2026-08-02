@@ -10,6 +10,9 @@ import {
 import { AgenticShim, truncateForLog, safeStringify } from "../event-shim.js";
 import { BuildAssetStore, type BuildAssetRef } from "../../state/build-assets.js";
 import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "../fix-scratch.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("executor");
 
 /**
  * Shared building blocks for the per-backend executors
@@ -65,8 +68,7 @@ export function resetVerifyScript(repoDir: string): void {
   try {
     rmSync(join(repoDir, VERIFY_SCRIPT_NAME), { force: true });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[sandbox] Could not remove a stale ${VERIFY_SCRIPT_NAME}: ${msg}`);
+    log.warn(`Could not remove a stale ${VERIFY_SCRIPT_NAME}`, { err });
   }
 }
 
@@ -91,8 +93,7 @@ export function resetPrNotesJournal(repoDir: string): void {
   try {
     rmSync(join(repoDir, PR_NOTES_FILE_NAME), { force: true });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[sandbox] Could not remove a stale ${PR_NOTES_FILE_NAME}: ${msg}`);
+    log.warn(`Could not remove a stale ${PR_NOTES_FILE_NAME}`, { err });
   }
 }
 
@@ -241,8 +242,7 @@ export function stageArtifactsIn(art: ServerArtifacts | undefined): void {
     // and are never in the repo's git tree anyway.
     excludeFromGit(art.repoDir, ARTIFACT_DIR_ROOT);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[executor] Could not stage build assets: ${msg}`);
+    log.warn("Could not stage build assets", { err });
   }
 }
 
@@ -252,8 +252,7 @@ export function harvestArtifactsOut(art: ServerArtifacts | undefined): void {
   try {
     art.store.harvestFrom(art.ref, art.dir);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[executor] Could not harvest build assets: ${msg}`);
+    log.warn("Could not harvest build assets", { err });
   }
 }
 
@@ -603,11 +602,13 @@ export function finalizeFromRunResult(
   const costUsd = stats?.cost ?? 0;
   const turns = stats?.assistantMessages ?? 0;
 
-  const costStr = costUsd > 0 ? `, $${costUsd.toFixed(4)}` : "";
-  console.log(
-    `  [executor] Result: ${stopReason} (${turns} turns, ${Math.round(durationMs / 1000)}s${costStr})` +
-    `${result.sessionId ? ` [session ${result.sessionId}]` : ""}`,
-  );
+  log.info("Result", {
+    stopReason,
+    turns,
+    durationSec: Math.round(durationMs / 1000),
+    costUsd: costUsd > 0 ? costUsd : undefined,
+    sessionId: result.sessionId,
+  });
 
   shim.finalize({
     finalText: result.finalText,
@@ -644,8 +645,8 @@ export function finalizeFromRunResult(
       ? "agent produced no final answer (empty completion — no usable output)"
       : stopReason);
   if (!success || accountError) {
-    if (accountError) console.error(`  [executor] Account error: ${errorText}`);
-    else console.error(`  [executor] Run failed (${stopReason}): ${errorText}`);
+    if (accountError) log.error("Account error", { errorText });
+    else log.error("Run failed", { stopReason, errorText });
   }
 
   return {
@@ -736,9 +737,7 @@ export function coerceThinking(raw: string | undefined): ThinkingLevel | undefin
   if (!raw) return undefined;
   const v = raw.trim().toLowerCase();
   if (!THINKING_LEVELS.has(v)) {
-    console.warn(
-      `[executor] Ignoring unknown thinking level "${raw}" — must be one of: ${[...THINKING_LEVELS].join(", ")}`,
-    );
+    log.warn("Ignoring unknown thinking level", { value: raw, allowed: [...THINKING_LEVELS] });
     return undefined;
   }
   return v as ThinkingLevel;

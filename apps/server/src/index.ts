@@ -74,6 +74,7 @@ import {
   type ProgressReporter,
 } from "./notify/index.js";
 import type { EventEnvelope } from "./connectors/types.js";
+import { logger } from "./logging/logger.js";
 
 /**
 /**
@@ -98,9 +99,10 @@ function reviewRouteFromContext(
  * Docker's restart policy doesn't loop forever on a misconfigured container.
  */
 function validateConfig(config: ReturnType<typeof loadConfig>): void {
-  const fatal = (msg: string) => {
-    console.error(`\n[startup] FATAL: ${msg}`);
-    console.error("[startup] Fix your .env and restart.\n");
+  const log = logger("startup");
+  const fatal = (msg: string, fields?: Record<string, unknown>) => {
+    log.fatal(msg, fields);
+    log.fatal("Fix your .env and restart.");
     process.exit(78); // EX_CONFIG — sysexits.h convention
   };
 
@@ -118,18 +120,19 @@ function validateConfig(config: ReturnType<typeof loadConfig>): void {
         fatal(`GITHUB_APP_PRIVATE_KEY_PATH ("${privateKeyPath}") does not look like a PEM file.`);
       }
     } catch (err: any) {
-      fatal(`Cannot read GITHUB_APP_PRIVATE_KEY_PATH ("${privateKeyPath}"): ${err.message}`);
+      fatal(`Cannot read GITHUB_APP_PRIVATE_KEY_PATH ("${privateKeyPath}")`, { err });
     }
   }
 
   if (!config.webhookSecret && config.githubApp) {
-    console.warn("[startup] WEBHOOK_SECRET is not set — webhook signature verification is disabled.");
+    log.warn("WEBHOOK_SECRET is not set — webhook signature verification is disabled.");
   }
 }
 
 async function main() {
-  console.log(`Last Light v${readPackageVersion() ?? "unknown"} — Agent SDK Harness`);
-  console.log("====================================");
+  const startupLog = logger("startup");
+  startupLog.info(`Last Light v${readPackageVersion() ?? "unknown"} — Agent SDK Harness`);
+  startupLog.info("====================================");
 
   // Load and validate config + overlay assets before starting anything. These
   // throw on a broken/empty overlay, a cron targeting a missing workflow, or a
@@ -143,24 +146,34 @@ async function main() {
       overlayRoot: config.overlayDir,
       disabled: config.disabled,
     });
-    validateAssets(config.routes);
+    validateAssets(config.routes, logger("workflows"));
   } catch (err: unknown) {
-    console.error(`\n[startup] FATAL: ${(err as Error).message}`);
-    console.error("[startup] Fix your config/overlay and restart.\n");
+    startupLog.fatal((err as Error).message, { err });
+    startupLog.fatal("Fix your config/overlay and restart.");
     process.exit(78); // EX_CONFIG — sysexits.h convention
   }
   validateConfig(config);
   const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { version?: string };
   await initTelemetry(config.otel, { packageVersion: packageJson.version });
   let telemetryShutdownStarted = false;
-  console.log(config.otel.enabled
-    ? `[otel] enabled service=${config.otel.serviceName} forwardToSandbox=${config.otel.forwardToSandbox} includeContent=${config.otel.includeContent}`
-    : "[otel] disabled");
+  const configLog = logger("config");
+  configLog.info(
+    config.otel.enabled ? "otel enabled" : "otel disabled",
+    config.otel.enabled
+      ? {
+          service: config.otel.serviceName,
+          forwardToSandbox: config.otel.forwardToSandbox,
+          includeContent: config.otel.includeContent,
+        }
+      : undefined,
+  );
 
-  console.log(`[config] Port: ${config.port}, Model: ${config.model}`);
+  configLog.info("Port and model", { port: config.port, model: config.model });
   const modelOverrides = Object.entries(config.models).filter(([k]) => k !== "default");
   if (modelOverrides.length > 0) {
-    console.log(`[config] Model overrides: ${modelOverrides.map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    configLog.info("Model overrides", {
+      overrides: Object.fromEntries(modelOverrides),
+    });
   }
 
   // Clean up any sandbox containers left over from a previous run
@@ -170,9 +183,8 @@ async function main() {
   for (const sub of ["sessions", "logs", "sandboxes"]) {
     mkdirSync(resolve(config.stateDir, sub), { recursive: true });
   }
-  console.log(`[state] State dir: ${config.stateDir}`);
-  console.log(`[state] Sessions dir: ${config.sessionsDir}`);
-  console.log(`[config] Sandbox backend: ${config.sandbox}`);
+  configLog.info("State dirs", { stateDir: config.stateDir, sessionsDir: config.sessionsDir });
+  configLog.info("Sandbox backend", { backend: config.sandbox });
 
   // Regenerate egress firewall configs (nginx ssl_preread + coredns) from
   // the allowlist source of truth. Only meaningful for the docker backend;
@@ -182,7 +194,7 @@ async function main() {
   // SNI allowlist no longer needs collector hosts — that hop happens on
   // the collector's trusted outbound leg, not through the firewall.
   const proxyDir = writeEgressFirewallConfigs(config.stateDir);
-  console.log(`[state] Egress firewall configs: ${proxyDir}`);
+  configLog.info("Egress firewall configs", { dir: proxyDir });
 
   // Generate the in-network OTEL collector config (docker backend). Derived
   // from the harness's OTEL_* backend env so the collector re-exports to the
@@ -193,12 +205,15 @@ async function main() {
   const collectorConfigPath = writeOtelCollectorConfig(config.stateDir, {
     active: config.otel.enabled && config.otel.forwardToSandbox,
   });
-  console.log(`[state] OTEL collector config: ${collectorConfigPath} (forwarding ${config.otel.enabled && config.otel.forwardToSandbox ? "active" : "disabled"})`);
+  configLog.info("OTEL collector config", {
+    path: collectorConfigPath,
+    forwarding: config.otel.enabled && config.otel.forwardToSandbox ? "active" : "disabled",
+  });
 
   // Initialize state database first — ChatRunner needs SessionManager
   // (DB-backed) at construction time.
   const db = new StateDb(config.dbPath);
-  console.log(`[state] Database: ${config.dbPath}`);
+  configLog.info("Database", { path: config.dbPath });
 
   // Session manager for messaging connectors (shared across Slack, Discord, etc.)
   const sessionManager = new SessionManager(db.database);
@@ -239,12 +254,11 @@ async function main() {
     },
     sessionManager,
   );
+  const chatLog = logger("chat");
   if (chatSkills.skills.length > 0) {
-    console.log(
-      `[chat] Loaded ${chatSkills.skills.length} skill(s): ${chatSkills.skills.map((s) => s.name).join(", ")}`,
-    );
+    chatLog.info("Loaded skills", { names: chatSkills.skills.map((s) => s.name) });
   } else {
-    console.warn("[chat] No skills loaded — frontmatter missing or no matching SKILL.md found");
+    chatLog.warn("No skills loaded — frontmatter missing or no matching SKILL.md found");
   }
 
   // Configure git with GitHub App credentials — agents can git clone/push natively.
@@ -259,7 +273,7 @@ async function main() {
         botLogin: config.botLogin,
       });
     } catch (err: any) {
-      console.warn(`[git-auth] Initial token mint failed (will retry per-execution): ${err.message}`);
+      logger("git-auth").warn("Initial token mint failed (will retry per-execution)", { err });
     }
   }
 
@@ -290,14 +304,13 @@ async function main() {
   // on failure we fall back to whatever `managedRepos` config provides. Runs
   // before the HTTP listener opens, so the list is warm before the first event.
   if (github && config.githubApp) {
+    const githubLog = logger("github");
     try {
       const repos = await github.listInstallationRepos();
       setInstallationRepos(repos);
-      console.log(`[github] Discovered ${repos.length} installation repos`);
+      githubLog.info("Discovered installation repos", { count: repos.length });
     } catch (err) {
-      console.warn(
-        `[github] Installation repo discovery failed: ${(err as Error).message}`,
-      );
+      githubLog.warn("Installation repo discovery failed", { err });
     }
   }
 
@@ -320,6 +333,7 @@ async function main() {
     context: Record<string, unknown>,
     onRunStart?: (runId: string) => Promise<void>,
   ): Promise<{ success: boolean; error?: string; paused?: boolean; queued?: boolean }> => {
+    const log = logger("dispatch");
     // Slack-initiated workflows (explore, /explore) carry a
     // `slack:{team}:{channel}:{thread}` triggerId and don't require a
     // managed `repo` — their postComment goes back to the Slack thread.
@@ -330,7 +344,7 @@ async function main() {
     const repoStr = context.repo as string | undefined;
     if (!repoStr && !slackTriggerId) {
       const msg = `dispatchWorkflow(${workflowName}): missing 'repo' in context`;
-      console.error(`[dispatch] ${msg}`);
+      log.error(msg, { workflowName });
       return { success: false, error: msg };
     }
     const [owner, repo] = repoStr && repoStr.includes("/")
@@ -340,7 +354,7 @@ async function main() {
       : ["", ""];
     if (repoStr && (!owner || !repo)) {
       const msg = `dispatchWorkflow(${workflowName}): invalid repo format '${repoStr}'`;
-      console.error(`[dispatch] ${msg}`);
+      log.error(msg, { workflowName, repoStr });
       return { success: false, error: msg };
     }
 
@@ -353,7 +367,7 @@ async function main() {
     const unmanaged = unmanagedReposInContext(context);
     if (unmanaged.length > 0) {
       const msg = `dispatchWorkflow(${workflowName}): refusing unmanaged repo(s): ${unmanaged.join(", ")}`;
-      console.warn(`[dispatch] ${msg}`);
+      log.warn(msg, { workflowName, unmanaged });
       return { success: false, error: msg };
     }
 
@@ -369,7 +383,7 @@ async function main() {
       // The repo opting itself out via `disabled.workflows`. Same refusal shape
       // as the unmanaged-repo guard, so every caller already handles it.
       const msg = `dispatchWorkflow(${workflowName}): refusing repo-disabled workflow: ${refusal}`;
-      console.warn(`[dispatch] ${msg}`);
+      log.warn(msg, { workflowName, refusal });
       return { success: false, error: msg };
     }
 
@@ -617,10 +631,12 @@ async function main() {
         PR_HEADREF_PREPOPULATE_WORKFLOWS.has(workflowName))
     ) {
       prePopulateBranch = prState.headRef;
-      console.log(
-        `[dispatch] ${workflowName}: pre-populating workspace at ${owner}/${repo}@${prePopulateBranch} ` +
-        `(base ${prState.baseRef || "?"})`,
-      );
+      log.info("Pre-populating workspace", {
+        workflowName,
+        repo: `${owner}/${repo}`,
+        branch: prePopulateBranch,
+        base: prState.baseRef || "?",
+      });
     }
     if (!prePopulateBranch && typeof ctxBranch === "string" && ctxBranch && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
       prePopulateBranch = ctxBranch;
@@ -648,16 +664,17 @@ async function main() {
         // baseline (the read-only pre-clone is shallow + single-branch at the
         // head ref, so `origin/<base>` isn't present until the agent fetches it).
         if (pr.base?.ref) extra.baseBranch = pr.base.ref;
-        console.log(
-          `[dispatch] ${workflowName}: pre-populating workspace at ${owner}/${repo}@${prePopulateBranch} ` +
-          `(base ${pr.base?.ref ?? "?"})`,
-        );
+        log.info("Pre-populating workspace", {
+          workflowName,
+          repo: `${owner}/${repo}`,
+          headRef: prePopulateBranch,
+          baseRef: pr.base?.ref ?? "?",
+        });
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[dispatch] ${workflowName}: could not resolve PR head ref (${msg}); ` +
-          `agent will need to clone via MCP`,
-        );
+        log.warn("Could not resolve PR head ref; agent will need to clone via MCP", {
+          workflowName,
+          err,
+        });
       }
     }
 
@@ -672,11 +689,11 @@ async function main() {
       try {
         extra.baseBranch = await github.getDefaultBranch(owner, repo);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[dispatch] ${workflowName}: could not resolve default branch for ${owner}/${repo} ` +
-          `(${msg}); assuming main`,
-        );
+        log.warn("Could not resolve default branch; assuming main", {
+          workflowName,
+          repo: `${owner}/${repo}`,
+          err,
+        });
         extra.baseBranch = "main";
       }
     }
@@ -750,14 +767,15 @@ async function main() {
           // exclusively (avoids double-rendering the body).
           request.issueBody = "";
           if (screen.flagged) {
-            console.warn(
-              `[dispatch] Screener flagged combined issue context for ${owner}/${repo}#${request.issueNumber}: ${screen.reason || "no reason"}`,
-            );
+            log.warn("Screener flagged combined issue context", {
+              repo: `${owner}/${repo}`,
+              issueNumber: request.issueNumber,
+              reason: screen.reason || "no reason",
+            });
           }
         }
       } catch (err: unknown) {
-        const m = err instanceof Error ? err.message : String(err);
-        console.warn(`[dispatch] Failed to fetch/screen issue context: ${m}`);
+        log.warn("Failed to fetch/screen issue context", { err });
         // Non-fatal — workflow proceeds with whatever context the envelope had.
       }
     }
@@ -767,8 +785,7 @@ async function main() {
           try {
             await slackConnector!.sendMessage(channelId, threadId, msg);
           } catch (err: unknown) {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[dispatch] Failed to post to Slack thread: ${m}`);
+            log.warn("Failed to post to Slack thread", { err });
           }
         }
       : undefined;
@@ -853,8 +870,7 @@ async function main() {
             }
             if (transports.length > 0) notifier = new ProgressNotifier(transports);
           } catch (err: unknown) {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[dispatch] notifier setup failed: ${m}`);
+            log.warn("Notifier setup failed", { err });
           }
         }
       : undefined;
@@ -870,13 +886,12 @@ async function main() {
                 // ack) needs a handle to retract itself with later (#244).
                 return await github.postComment(owner, repo, issueNumber as number, msg);
               } catch (err: unknown) {
-                const m = err instanceof Error ? err.message : String(err);
-                console.warn(`[dispatch] Failed to post comment: ${m}`);
+                log.warn("Failed to post comment", { err });
               }
             }
           : undefined),
       onPhaseStart: async (phase) => {
-        console.log(`[dispatch] ▶ ${workflowName}/${phase}`);
+        log.info("Phase start", { workflowName, phase });
         // Refresh the Slack thinking indicator so long-running phases
         // don't leave the thread looking dead. threadId doubles as both
         // the message anchor and the thread root for DM threads.
@@ -885,7 +900,7 @@ async function main() {
         }
       },
       onPhaseEnd: async (phase, result) => {
-        console.log(`[dispatch] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`);
+        log.info("Phase end", { workflowName, phase, success: result.success });
         // The marker harvest (09 → S1). This is the ONLY moment the two marker
         // lines exist in memory — `{{phaseOutputs}}` is empty across a run
         // boundary and the shared per-PR workspace is `reset --hard`-ed between
@@ -937,7 +952,7 @@ async function main() {
       );
       const summary = result.phases.map((p) => `${p.phase}=${p.success ? "ok" : "fail"}`).join(", ");
       if (result.queued) {
-        console.log(`[dispatch] ${workflowName} queued (concurrency cap reached)`);
+        log.info("Queued (concurrency cap reached)", { workflowName });
         // A queued run never reaches `onRunStart` — `runSimpleWorkflow` returns
         // the moment it writes the `queued` row — so bind the check here instead
         // of leaving the run's only PR-visible artifact unowned. The row is
@@ -947,16 +962,16 @@ async function main() {
         // check can be bound to its run.
         await bindReviewCheckForQueuedRun();
       } else if (result.paused) {
-        console.log(`[dispatch] ${workflowName} paused (${summary})`);
+        log.info("Paused", { workflowName, summary });
       } else if (result.success) {
-        console.log(`[dispatch] ${workflowName} completed (${summary})`);
+        log.info("Completed", { workflowName, summary });
       } else {
-        console.warn(`[dispatch] ${workflowName} failed (${summary})`);
+        log.warn("Failed", { workflowName, summary });
       }
       return { success: result.success, paused: result.paused, queued: result.queued };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[dispatch] ${workflowName} threw: ${msg}`);
+      log.error("Threw", { workflowName, err });
       return { success: false, error: msg };
     } finally {
       // Event-driven admission: after each dispatch settles, pull the next
@@ -966,8 +981,7 @@ async function main() {
       // retry.
       if (!result?.backpressure) {
         admissionController?.admitNext().catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[admission] admitNext error: ${msg}`);
+          logger("admission").warn("admitNext error", { err });
         });
       }
     }
@@ -1093,6 +1107,7 @@ async function main() {
   // `dispatchWorkflow`, which is defined earlier in this file. Named (not inline)
   // so the admin `triggerCron` callback can reuse it to fire a cron on demand.
   const cronRunner: WorkflowRunner = async (workflowName, context) => {
+    const log = logger("cron");
     let dispatched: number;
     let failures: number;
     // A cron whose context sets `discover: <key>` fans out one bounded single-PR
@@ -1130,18 +1145,27 @@ async function main() {
           ).repos
         : candidates;
       if (repos.length !== candidates.length) {
-        console.log(
-          `[cron] ${cronName}: ${repos.length}/${candidates.length} repo(s) participate in this cron`,
-        );
+        log.info("Repo(s) participate in this cron", {
+          cronName,
+          participating: repos.length,
+          candidates: candidates.length,
+        });
       }
       // Every repo opted out (or a globally-off cron nobody opted into) — no
       // discovery calls, no dispatches, no failure. A cheap no-op tick.
+      // The discoverer's `log` callback only carries per-repo/per-candidate
+      // diagnostics (a skipped malformed repo, a failed listing/fetch) — one
+      // of these can fire per managed repo on every tick, so it's `.debug`,
+      // not `.info`. The once-per-tick summary below stays `.info`.
       const prs = github && repos.length
-        ? await discoverer(repos, github, { log: (m) => console.log(m) })
+        ? await discoverer(repos, github, { log: (m) => log.debug(m) })
         : [];
-      console.log(
-        `[cron] ${workflowName}: ${prs.length} ${discoverKey} across ${repos.length} repo(s)`,
-      );
+      log.info("Discovered PRs", {
+        workflowName,
+        discoverKey,
+        count: prs.length,
+        repoCount: repos.length,
+      });
       const contexts = prs.map((pr) => ({
         _triggerType: "cron",
         repo: pr.repo,
@@ -1165,9 +1189,7 @@ async function main() {
       ({ dispatched, failures } = await dispatchCronWorkflow(workflowName, context, dispatchWorkflow));
     }
     if (failures > 0) {
-      console.warn(
-        `[cron] ${workflowName}: ${failures}/${dispatched} dispatches failed`,
-      );
+      log.warn("Dispatches failed", { workflowName, failures, dispatched });
     }
   };
   const cron = new CronScheduler(db, cronRunner);
@@ -1213,6 +1235,7 @@ async function main() {
 
   // Mount admin dashboard on the shared HTTP server (always available).
   {
+    const adminLog = logger("admin");
     mountAdmin(app, db, {
       cronScheduler: cron,
       triggerCron: cronRunner,
@@ -1247,7 +1270,7 @@ async function main() {
       githubAllowedOrg: process.env.GITHUB_ALLOWED_ORG,
       resumeWorkflow: async (workflowRun, sender) => {
         if (!github) {
-          console.warn(`[admin] Cannot resume workflow ${workflowRun.id}: GitHub App not configured`);
+          adminLog.warn("Cannot resume workflow: GitHub App not configured", { runId: workflowRun.id });
           return;
         }
         // Derive owner/repo for the resume dispatch. Prefer the triggerId
@@ -1265,11 +1288,16 @@ async function main() {
         }
         const issueNumber = workflowRun.issueNumber;
         if (!owner || !repo || !issueNumber) {
-          console.warn(`[admin] Cannot resume workflow ${workflowRun.id}: missing owner/repo/issueNumber`);
+          adminLog.warn("Cannot resume workflow: missing owner/repo/issueNumber", { runId: workflowRun.id });
           return;
         }
         db.runs.setRunning(workflowRun.id);
-        console.log(`[admin] Resuming ${workflowRun.workflowName} for ${owner}/${repo}#${issueNumber} after dashboard approval by ${sender}`);
+        adminLog.info("Resuming after dashboard approval", {
+          workflowName: workflowRun.workflowName,
+          repo: `${owner}/${repo}`,
+          issueNumber,
+          sender,
+        });
         dispatchWorkflow(workflowRun.workflowName, {
           repo: `${owner}/${repo}`,
           issueNumber,
@@ -1277,7 +1305,7 @@ async function main() {
           body: "",
           sender,
           _triggerType: "admin",
-        }).catch((err) => console.error(`[admin] Resume failed:`, err));
+        }).catch((err) => adminLog.error("Resume failed", { err }));
       },
       // Retry a FAILED or CANCELLED run, resuming from where it stopped with the
       // same context. Unlike `resumeWorkflow` (approval-gate resume, which
@@ -1290,7 +1318,10 @@ async function main() {
       // phases and starts clean.
       retryWorkflow: async (workflowRun, sender) => {
         if (workflowRun.status !== "failed" && workflowRun.status !== "cancelled") {
-          console.warn(`[admin] Cannot retry ${workflowRun.id}: status is '${workflowRun.status}', not 'failed' or 'cancelled'`);
+          adminLog.warn("Cannot retry: not in a retryable status", {
+            runId: workflowRun.id,
+            status: workflowRun.status,
+          });
           return;
         }
         // Compare-and-set: flip failed/cancelled→running and clear the terminal
@@ -1298,17 +1329,24 @@ async function main() {
         // dispatch.
         const changed = db.runs.restartRun(workflowRun.id);
         if (changed !== 1) {
-          console.warn(`[admin] Retry ${workflowRun.id}: run is no longer retryable (raced) — skipping dispatch`);
+          adminLog.warn("Retry: run is no longer retryable (raced) — skipping dispatch", {
+            runId: workflowRun.id,
+          });
           return;
         }
         const fresh = db.runs.getRun(workflowRun.id);
         if (!fresh) return;
-        console.log(`[admin] Retrying ${fresh.workflowName} run ${fresh.id} (was on phase=${workflowRun.currentPhase}) by ${sender}`);
+        adminLog.info("Retrying", {
+          workflowName: fresh.workflowName,
+          runId: fresh.id,
+          previousPhase: workflowRun.currentPhase,
+          sender,
+        });
         resumeSimpleRun(fresh, resumeOpts).catch((err) =>
-          console.error(`[admin] Retry ${fresh.id} failed:`, err));
+          adminLog.error("Retry failed", { runId: fresh.id, err }));
       },
     });
-    console.log(`[admin] Dashboard mounted at /admin`);
+    adminLog.info("Dashboard mounted at /admin");
   }
 
   // Protect API endpoints with auth when any login method is configured
@@ -1323,9 +1361,10 @@ async function main() {
     githubOAuthClientSecret: process.env.GITHUB_OAUTH_CLIENT_SECRET,
     githubAllowedOrg: process.env.GITHUB_ALLOWED_ORG,
   });
+  const apiLog = logger("api");
   if (apiAuthEnabled) {
     app.use("/api/*", authMiddleware(apiAuthEnabled, adminSecret));
-    console.log(`[api] API endpoints protected with auth`);
+    apiLog.info("API endpoints protected with auth");
   }
 
   // API endpoint for CLI triggers
@@ -1349,7 +1388,7 @@ async function main() {
       return c.json({ error: `Repo not managed: ${unmanaged.join(", ")}` }, 403);
     }
 
-    console.log(`[api] CLI triggered: workflow=${workflowName}`);
+    apiLog.info("CLI triggered", { workflowName });
 
     // Run asynchronously — return immediately with a stable id the caller
     // can correlate with workflow_runs in the dashboard.
@@ -1363,8 +1402,7 @@ async function main() {
       ...(apiActor ? { triggeredBy: apiActor } : {}),
       _triggerType: "api",
     }).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[api] workflow ${workflowName} failed: ${msg}`);
+      apiLog.error("Workflow failed", { workflowName, err });
     });
 
     return c.json({ accepted: true, executionId, workflow: workflowName }, 202);
@@ -1382,7 +1420,7 @@ async function main() {
       return c.json({ error: `Repo not managed: ${owner}/${repo}` }, 403);
     }
 
-    console.log(`[api] CLI build triggered: ${owner}/${repo}#${issueNumber}`);
+    apiLog.info("CLI build triggered", { repo: `${owner}/${repo}`, issueNumber });
 
     // If labels weren't supplied, fetch them so the orchestrator can detect
     // bootstrap tasks (lastlight:bootstrap label) and skip the BLOCKED gate.
@@ -1409,7 +1447,7 @@ async function main() {
       ...(actorFromContext(c) ? { triggeredBy: actorFromContext(c) } : {}),
       _triggerType: "api",
     }).catch((err) => {
-      console.error(`[api] Build failed:`, err);
+      apiLog.error("Build failed", { err });
     });
 
     return c.json({ accepted: true, owner, repo, issueNumber }, 202);
@@ -1508,18 +1546,23 @@ async function main() {
     return c.json({ text: reply, thread: threadId ?? session.id, sessionId: session.id, outcome: outcome.kind });
   });
 
+  const eventLog = logger("event");
   const handleEnvelope = async (envelope: EventEnvelope) => {
-    console.log(`[event] ${envelope.source}:${envelope.type} from ${envelope.sender}${envelope.repo ? ` on ${envelope.repo}` : ""}`);
+    eventLog.info("Received", {
+      source: envelope.source,
+      type: envelope.type,
+      sender: envelope.sender,
+      repo: envelope.repo,
+    });
     try {
       const outcome = await dispatch(envelope, dispatchDeps);
       if (outcome.kind === "ignored") {
-        console.log(`[event] Ignored: ${outcome.reason}`);
+        eventLog.info("Ignored", { reason: outcome.reason });
       } else if (outcome.kind === "skipped") {
-        console.log(`[event] Skipped: ${outcome.reason}`);
+        eventLog.info("Skipped", { reason: outcome.reason });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[event] dispatch threw: ${msg}`);
+      eventLog.error("Dispatch threw", { err });
     }
   };
 
@@ -1556,10 +1599,10 @@ async function main() {
       cron.register(job);
     }
     if (webhooksEnabled) {
-      console.log("[cron] Webhooks enabled — skipping issue/PR polling crons");
+      logger("cron").info("Webhooks enabled — skipping issue/PR polling crons");
     }
   } else {
-    console.log("[cron] No GitHub client — skipping all cron jobs (chat-only mode)");
+    logger("cron").info("No GitHub client — skipping all cron jobs (chat-only mode)");
   }
 
   // Sandbox-workspace reaping backstop (issue #106) — a DIRECT (non-sandboxed)
@@ -1599,16 +1642,17 @@ async function main() {
   }
 
   // Start everything
+  const mainLog = logger("main");
   await registry.startAll();
-  console.log("[main] All connectors started");
-  console.log("[main] Cron jobs registered");
+  mainLog.info("All connectors started");
+  mainLog.info("Cron jobs registered");
 
   // Open the shared HTTP listener. All routes (admin, /api/*, /health,
   // /webhooks/github, /webhooks/slack) are registered synchronously above, so
   // the port is ready the moment it opens. Always boots — chat-only, PAT, and
   // full GitHub App modes alike.
   const server = serve({ fetch: app.fetch, port: config.port, hostname: "0.0.0.0" });
-  console.log(`[http] Listening on port ${config.port}`);
+  logger("http").info("Listening", { port: config.port });
 
   // Chat runs in-process via pi-ai — no long-lived server to boot.
 
@@ -1618,18 +1662,18 @@ async function main() {
   // failed and re-dispatch each run so the runner can pick up after the last
   // completed phase. Skips 'paused' runs — those intentionally wait for a
   // human approval and are resumed via the dashboard / GitHub comment flow.
-  resumeOrphanedWorkflows(resumeOpts).catch((err) => console.error("[main] Resume sweep failed:", err));
+  resumeOrphanedWorkflows(resumeOpts).catch((err) => mainLog.error("Resume sweep failed", { err }));
 
   // Start the periodic admission sweeper. Also admits any queued runs that
   // were persisted before the harness restarted (e.g. a queued run survived
   // a crash; the sweeper picks it up on the first tick).
   admissionController.start();
 
-  console.log("[main] Ready to receive events");
+  mainLog.info("Ready to receive events");
 
   // Graceful shutdown
   const shutdown = async () => {
-    console.log("\n[main] Shutting down...");
+    mainLog.info("Shutting down");
     cron.stopAll();
     admissionController.stop();
     await registry.stopAll();
@@ -1649,7 +1693,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("[main] Fatal error:", err);
+  logger("main").fatal("Fatal error", { err });
   // Exit 78 (EX_CONFIG) to signal Docker restart policy that looping won't help.
   // Common causes: bad PEM, wrong App ID, missing env vars.
   const msg = err?.message || "";

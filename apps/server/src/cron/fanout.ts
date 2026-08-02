@@ -23,6 +23,9 @@
  */
 
 import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, resolveCronRepos } from "./repo-crons.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("cron-fanout");
 
 export type CronDispatcher = (
   workflow: string,
@@ -78,11 +81,13 @@ export async function dispatchCronWorkflow(
     });
     targets = resolved.repos;
     if (resolved.optedOut.length || resolved.optedIn.length) {
-      console.log(
-        `[cron-fanout] ${cron}: ${targets.length}/${repos.length} repo(s)` +
-          (resolved.optedOut.length ? ` — opted out: ${resolved.optedOut.join(", ")}` : "") +
-          (resolved.optedIn.length ? ` — opted in: ${resolved.optedIn.join(", ")}` : ""),
-      );
+      log.info("Repo participation resolved", {
+        cron,
+        targetCount: targets.length,
+        repoCount: repos.length,
+        optedOut: resolved.optedOut,
+        optedIn: resolved.optedIn,
+      });
     }
   }
 
@@ -135,10 +140,11 @@ async function runOne(
     const result = await dispatch(workflowName, context);
     return !!(result.success || result.paused);
   } catch (err) {
-    console.error(
-      `[cron-fanout] ${workflowName} dispatch threw for ${String(context.repo ?? "<no repo>")}:`,
+    log.error("Dispatch threw", {
+      workflowName,
+      repo: String(context.repo ?? "<no repo>"),
       err,
-    );
+    });
     return false;
   }
 }

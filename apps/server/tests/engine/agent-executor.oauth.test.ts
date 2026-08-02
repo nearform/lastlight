@@ -21,6 +21,22 @@ vi.mock("#src/engine/oauth.js", async (importActual) => {
   return { ...actual, resolveOAuthApiKey: (...a: unknown[]) => resolveOAuthApiKeySpy(...a) };
 });
 
+// The executor now logs via the pino LoggerPort instead of console — mock the
+// logger module so the "needs an OAuth login" assertions below can inspect
+// the captured warn calls instead of console output.
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 const { executeAgent } = await import("#src/engine/agent-executor.js");
 const { FakeSandbox } = await import("#src/sandbox/sandbox.js");
 
@@ -52,6 +68,7 @@ async function runWithModel(
 const savedEnv = { ...process.env };
 beforeEach(() => {
   resolveOAuthApiKeySpy.mockReset();
+  warnSpy.mockClear();
   delete process.env.ANTHROPIC_OAUTH_TOKEN;
   delete process.env.COPILOT_GITHUB_TOKEN;
   // Clear the API-key fallback so the missing-login path is deterministic —
@@ -94,9 +111,8 @@ describe("executor OAuth env injection (container backends)", () => {
 
   it("warns about a missing OAuth login only when no API-key fallback exists", async () => {
     resolveOAuthApiKeySpy.mockResolvedValue(null);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await runWithModel("anthropic/claude-sonnet-4-6", { backend: "docker" });
-    expect(warn.mock.calls.some(([m]) => String(m).includes("needs an OAuth login"))).toBe(true);
+    expect(warnSpy.mock.calls.some(([m]) => String(m).includes("needs an OAuth login"))).toBe(true);
   });
 
   it("stays silent about a missing OAuth login when ANTHROPIC_API_KEY is set (API-key auth works)", async () => {
@@ -104,9 +120,8 @@ describe("executor OAuth env injection (container backends)", () => {
     // fine, so the OAuth-login warning was pure per-run noise.
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
     resolveOAuthApiKeySpy.mockResolvedValue(null);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { fake } = await runWithModel("anthropic/claude-sonnet-4-6", { backend: "docker" });
-    expect(warn.mock.calls.some(([m]) => String(m).includes("needs an OAuth login"))).toBe(false);
+    expect(warnSpy.mock.calls.some(([m]) => String(m).includes("needs an OAuth login"))).toBe(false);
     // The API key still rides into the sandbox env for pi-ai to use.
     expect(fake.env?.ANTHROPIC_API_KEY).toBe("sk-ant-test");
     expect(fake.env?.ANTHROPIC_OAUTH_TOKEN).toBeUndefined();

@@ -1,6 +1,9 @@
 import { ApiException, type CustomObjectsApi } from "@kubernetes/client-node";
 import { applyEgressPolicies } from "./egress-apply.js";
 import type { HarnessSelector } from "./egress-policy.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("k8s");
 
 /**
  * Applies the strict/open CiliumNetworkPolicy egress pair to a namespace,
@@ -41,10 +44,10 @@ export class EgressEnsurer {
     if (pending) return pending;
     const applied = applyEgressPolicies(custom, { namespace, hosts, harness }).catch((err) => {
       if (err instanceof ApiException && err.code === 403) {
-        console.warn(
-          `[k8s] egress policies not applied in ${namespace}: RBAC for ` +
-            `CiliumNetworkPolicy is not granted (Plan 6). Running WITHOUT egress ` +
-            `enforcement (Cilium default-allow).`,
+        log.warn(
+          "Egress policies not applied: RBAC for CiliumNetworkPolicy is not granted (Plan 6) — " +
+            "running WITHOUT egress enforcement (Cilium default-allow)",
+          { namespace },
         );
         return; // resolve — don't retry/re-log every run
       }

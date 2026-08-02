@@ -9,6 +9,8 @@ import {
   RESERVED_CONTROL_INTENTS,
   type AgentWorkflowDefinition,
   type CronWorkflowDefinition,
+  type LoggerPort,
+  noopLogger,
 } from "lastlight-workflow-engine";
 import type { DisabledConfig, RouteConfig } from "./config-types.js";
 
@@ -584,7 +586,7 @@ const PR_SCOPED_ROUTE_KEYS: ReadonlySet<string> = new Set([
  * worse than the silence it replaces. What matters is that the choice is
  * VISIBLE, which it was not.
  */
-function warnUnscopedPrRoutes(routes?: RouteConfig): void {
+function warnUnscopedPrRoutes(routes: RouteConfig | undefined, log: LoggerPort): void {
   if (!routes) return;
   for (const [surface, values] of Object.entries(routes) as Array<[keyof RouteConfig, Record<string, string>]>) {
     for (const [routeName, target] of Object.entries(values)) {
@@ -592,11 +594,11 @@ function warnUnscopedPrRoutes(routes?: RouteConfig): void {
       if (!PR_SCOPED_ROUTE_KEYS.has(routeKey)) continue;
       const def = agentCache.get(target);
       if (!def || def.pr_scoped === true) continue;
-      console.warn(
-        `[workflows] Route ${routeKey} targets "${target}", which does not declare ` +
-        `\`pr_scoped: true\`. The PR run lock, the per-head-SHA dedup and escalation ` +
-        `will not apply to it — add \`pr_scoped: true\` to its workflow YAML if that ` +
-        `is not what you intended.`,
+      log.warn(
+        "PR-scoped route targets a workflow that does not declare pr_scoped: true — " +
+        "the PR run lock, per-head-SHA dedup and escalation will not apply; " +
+        "add `pr_scoped: true` to its workflow YAML if that is not intended",
+        { routeKey, target },
       );
     }
   }
@@ -618,7 +620,7 @@ function validateRouteTargets(routes?: RouteConfig): void {
   }
 }
 
-export function validateAssets(routes?: RouteConfig): void {
+export function validateAssets(routes?: RouteConfig, log: LoggerPort = noopLogger): void {
   populateCache();
   for (const route of ["workflows", "crons"] as const) {
     for (const name of disabled[route]) {
@@ -708,5 +710,5 @@ export function validateAssets(routes?: RouteConfig): void {
   }
 
   validateRouteTargets(routes);
-  warnUnscopedPrRoutes(routes);
+  warnUnscopedPrRoutes(routes, log);
 }

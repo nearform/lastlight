@@ -4,8 +4,10 @@ import { existsSync, readFileSync } from "fs";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { randomUUID } from "crypto";
 import { AGENTIC_PROFILES, type GitAccessProfile } from "../engine/github/profiles.js";
+import { logger } from "../logging/logger.js";
 
 const execFileAsync = promisify(execFileCb);
+const log = logger("sandbox");
 
 /**
  * Docker sandbox manager — runs agent tasks in isolated sibling containers.
@@ -238,7 +240,7 @@ export class DockerSandbox {
 
       const info: SandboxInfo = { containerId, containerName, worktreePath };
       this.activeContainers.set(opts.taskId, info);
-      console.log(`[sandbox] Created: ${containerName}`);
+      log.info("Created", { containerName });
 
       // Wait for entrypoint to finish setting up auth, skills, MCP config.
       // The entrypoint drops to `gosu agent sleep infinity` when done —
@@ -271,7 +273,7 @@ export class DockerSandbox {
       }
     }
 
-    console.warn(`[sandbox] Timed out waiting for ${containerName} to be ready — proceeding anyway`);
+    log.warn("Timed out waiting for container to be ready — proceeding anyway", { containerName });
   }
 
   /**
@@ -613,7 +615,7 @@ export class DockerSandbox {
 
     execSafe("docker", ["rm", "-f", info.containerName]);
     this.activeContainers.delete(taskId);
-    console.log(`[sandbox] Destroyed: ${info.containerName}`);
+    log.info("Destroyed", { containerName: info.containerName });
   }
 
   async destroyAll(): Promise<void> {
@@ -635,13 +637,11 @@ export class DockerSandbox {
         const parentGitDir = resolve(gitdirPath, "..", "..");
         const sandboxRoot = resolve(worktreePath, "..");
         if (!isSubpath(sandboxRoot, parentGitDir)) {
-          console.warn(
-            `[sandbox] Blocking unsafe gitdir mount outside sandbox root: ${parentGitDir}`,
-          );
+          log.warn("Blocking unsafe gitdir mount outside sandbox root", { parentGitDir });
           return [];
         }
         if (!existsSync(parentGitDir)) {
-          console.warn(`[sandbox] Skipping missing gitdir parent mount: ${parentGitDir}`);
+          log.warn("Skipping missing gitdir parent mount", { parentGitDir });
           return [];
         }
         return [

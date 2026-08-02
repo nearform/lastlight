@@ -4,6 +4,23 @@ import { ApiException } from "@kubernetes/client-node";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// pod-lifecycle.ts and egress-ensurer.ts now log via the pino LoggerPort
+// instead of console — mock the logger module so the "warns once" assertions
+// below can inspect the captured warn calls instead of console output.
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { KubernetesSandbox } from "#src/sandbox/k8s/kubernetes-sandbox.js";
 import { configureWorkflowAssets } from "#src/workflows/loader.js";
 import {
@@ -511,17 +528,15 @@ describe("KubernetesSandbox", () => {
       () => {},
     );
 
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnSpy.mockClear();
     vi.useFakeTimers();
     try {
       const disposePromise = sbx.dispose();
       await vi.runAllTimersAsync();
       await expect(disposePromise).resolves.toBeUndefined();
-      // Assert before mockRestore() — restore clears recorded mock.calls.
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("still present"));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("still present"), expect.anything());
     } finally {
       vi.useRealTimers();
-      warnSpy.mockRestore();
     }
   });
 });
@@ -567,22 +582,18 @@ describe("KubernetesSandbox egress policy", () => {
         throw new ApiException(403, "Forbidden", {}, {});
       });
       const { apis, created } = fakeApis({ createNamespacedCustomObject: create });
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        const sbx = new KubernetesSandbox(
-          factoryOpts,
-          cfg(apis, { egressEnsurer: new EgressEnsurer() }),
-        );
-        await sbx.provision();
-        await expect(
-          sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any),
-        ).resolves.toMatchObject({ exitCode: 0 });
-        expect(created).toHaveLength(1);
-        expect(created[0].metadata.labels[EGRESS_POLICY_LABEL]).toBe("strict");
-        expect(warnSpy).toHaveBeenCalledTimes(1);
-      } finally {
-        warnSpy.mockRestore();
-      }
+      warnSpy.mockClear();
+      const sbx = new KubernetesSandbox(
+        factoryOpts,
+        cfg(apis, { egressEnsurer: new EgressEnsurer() }),
+      );
+      await sbx.provision();
+      await expect(
+        sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      expect(created).toHaveLength(1);
+      expect(created[0].metadata.labels[EGRESS_POLICY_LABEL]).toBe("strict");
+      expect(warnSpy).toHaveBeenCalledTimes(1);
     },
   );
 
@@ -593,19 +604,15 @@ describe("KubernetesSandbox egress policy", () => {
         throw new ApiException(403, "Forbidden", {}, {});
       });
       const { apis } = fakeApis({ createNamespacedCustomObject: create });
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      try {
-        const sbx = new KubernetesSandbox(
-          factoryOpts,
-          cfg(apis, { egressEnsurer: new EgressEnsurer() }),
-        );
-        await sbx.provision();
-        await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
-        await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
-        expect(warnSpy).toHaveBeenCalledTimes(1);
-      } finally {
-        warnSpy.mockRestore();
-      }
+      warnSpy.mockClear();
+      const sbx = new KubernetesSandbox(
+        factoryOpts,
+        cfg(apis, { egressEnsurer: new EgressEnsurer() }),
+      );
+      await sbx.provision();
+      await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      await sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
     },
   );
 

@@ -63,6 +63,9 @@ import {
   type NoteProvenance,
   type PrNote,
 } from "./pr-notes.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("fix-harvest");
 
 /**
  * The `scratch` key the harvest owns.
@@ -430,7 +433,6 @@ export function harvestFixMarkers(
     };
     db.runs.mergeScratch(runId, { [FIX_HARVEST_SCRATCH_KEY]: next });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[fix-harvest] ${workflowName}/${phase} run ${runId}: ${msg}`);
+    log.warn("Harvest failed", { workflowName, phase, runId, err });
   }
 }

@@ -1,5 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// src/worktree/manager.ts now logs via the pino LoggerPort instead of console
+// — mock the logger module so the suite's stderr stays free of real pino
+// JSON (no assertions here depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 vi.mock("child_process", () => ({
   execSync: vi.fn(),
   execFileSync: vi.fn().mockReturnValue(""),

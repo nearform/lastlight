@@ -1,5 +1,22 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
+
+// SessionManager's one-shot UNIQUE-constraint migration now logs via the pino
+// LoggerPort instead of console — mock the logger module so the suite's
+// stderr stays free of real pino JSON (no assertions here depend on the
+// logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { SessionManager } from "#src/connectors/messaging/session-manager.js";
 
 const KEY = {

@@ -1,5 +1,22 @@
 import { describe, it, expect, vi } from "vitest";
 import { ApiException } from "@kubernetes/client-node";
+
+// egress-ensurer.ts now logs via the pino LoggerPort instead of console —
+// mock the logger module so the "warns once" assertions below can inspect
+// the captured warn calls instead of console output.
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { EgressEnsurer } from "#src/sandbox/k8s/egress-ensurer.js";
 import type { HarnessSelector } from "#src/sandbox/k8s/egress-policy.js";
 
@@ -41,18 +58,14 @@ describe("EgressEnsurer", () => {
         throw new ApiException(403, "Forbidden", {}, {});
       }),
     } as any;
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const ensurer = new EgressEnsurer();
-      await expect(ensurer.ensure(custom, "ns-403", [], harness)).resolves.toBeUndefined();
-      expect(warnSpy).toHaveBeenCalledTimes(1);
+    warnSpy.mockClear();
+    const ensurer = new EgressEnsurer();
+    await expect(ensurer.ensure(custom, "ns-403", [], harness)).resolves.toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
 
-      // Cached: a second call on the SAME instance doesn't re-warn.
-      await ensurer.ensure(custom, "ns-403", [], harness);
-      expect(warnSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      warnSpy.mockRestore();
-    }
+    // Cached: a second call on the SAME instance doesn't re-warn.
+    await ensurer.ensure(custom, "ns-403", [], harness);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
   it("a non-403 error rejects and clears the cache so a later call retries", async () => {

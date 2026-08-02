@@ -1,9 +1,25 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
+
+// artifact-upload-route.ts now logs via the pino LoggerPort instead of
+// console — mock the logger module so the suite's stderr stays free of real
+// pino JSON (no assertions here depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { mountArtifactUpload } from "#src/sandbox/k8s/artifact-upload-route.js";
 import { LocalArtifactBackend } from "#src/sandbox/artifact-backend.js";
 import { createArtifactStore, type ArtifactStore } from "#src/sandbox/artifact-store.js";

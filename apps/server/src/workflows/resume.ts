@@ -19,6 +19,9 @@ import {
   runDashboardUrl,
   type NotifierState,
 } from "../notify/index.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("resume");
 
 export interface ResumeOptions {
   db: StateDb;
@@ -96,8 +99,7 @@ async function refetchIssue(
       ).filter(Boolean),
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[resume] Could not refetch ${owner}/${repo}#${issueNumber}: ${msg}`);
+    log.warn("Could not refetch issue", { repo: `${owner}/${repo}`, issueNumber, err });
     return fallback;
   }
 }
@@ -122,14 +124,13 @@ function makeCallbacks(
           try {
             await github.postComment(owner, repo, issueNumber, msg);
           } catch (err: unknown) {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[resume] Failed to post comment: ${m}`);
+            log.warn("Failed to post comment", { err });
           }
         }
       : undefined,
-    onPhaseStart: async (phase) => console.log(`[resume] ▶ ${workflowName}/${phase}`),
+    onPhaseStart: async (phase) => log.info("Phase start", { workflowName, phase }),
     onPhaseEnd: async (phase, result) => {
-      console.log(`[resume] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`);
+      log.info("Phase end", { workflowName, phase, success: result.success });
       // The marker harvest has to be wired on the RESUME paths too, not only on
       // the fresh dispatch in `index.ts`. A fix run that paused for an approval
       // gate or was picked back up after a harness restart completes its
@@ -209,8 +210,7 @@ async function resumedRunConfig(run: WorkflowRun, opts: ResumeOptions): Promise<
       try {
         opts.db.runs.mergeScratch(run.id, { repoConfig: { restoreWarnings: [warning] } });
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[resume] Could not record the repo-config restore warning for ${run.id}: ${msg}`);
+        log.warn("Could not record the repo-config restore warning", { runId: run.id, err });
       }
     }
     return {
@@ -221,8 +221,7 @@ async function resumedRunConfig(run: WorkflowRun, opts: ResumeOptions): Promise<
     };
   } catch (err: unknown) {
     // The repo-config failure rule: warn, drop the layer, run anyway.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[resume] ${record.repo}: could not restore the repo config for ${run.id} (${msg})`);
+    log.warn("Could not restore the repo config", { repo: record.repo, runId: run.id, err });
     return base;
   }
 }
@@ -258,7 +257,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
   const isSlack = run.triggerId.startsWith("slack:");
 
   if (!owner && !repo && !isSlack) {
-    console.warn(`[resume] Skipping ${run.id}: cannot derive owner/repo from triggerId ${run.triggerId}`);
+    log.warn("Skipping — cannot derive owner/repo from triggerId", { runId: run.id, triggerId: run.triggerId });
     return;
   }
 
@@ -266,8 +265,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
   try {
     definition = getWorkflow(run.workflowName);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[resume] Skipping ${run.id}: workflow definition "${run.workflowName}" not found: ${msg}`);
+    log.warn("Skipping — workflow definition not found", { runId: run.id, workflowName: run.workflowName, err });
     opts.db.runs.finishRun(run.id, "failed", { error: `harness restarted; workflow definition not found` });
     return;
   }
@@ -324,9 +322,11 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     triggerIdOverride: isSlack ? run.triggerId : undefined,
   };
 
-  console.log(
-    `[resume] Re-dispatching ${run.workflowName} for ${run.triggerId} (was on phase=${run.currentPhase})`,
-  );
+  log.info("Re-dispatching", {
+    workflowName: run.workflowName,
+    triggerId: run.triggerId,
+    currentPhase: run.currentPhase,
+  });
 
   // For Slack-originated runs, post progress to the Slack thread instead
   // of GitHub. The channelId/threadId were stored in context by the
@@ -341,13 +341,12 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
         postComment: async (msg: string) => {
           try { await poster(ch, th, msg); }
           catch (err: unknown) {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[resume] Failed to post to Slack thread: ${m}`);
+            log.warn("Failed to post to Slack thread", { err });
           }
         },
-        onPhaseStart: async (phase) => console.log(`[resume] ▶ ${run.workflowName}/${phase}`),
+        onPhaseStart: async (phase) => log.info("Phase start", { workflowName: run.workflowName, phase }),
         onPhaseEnd: async (phase, result) => {
-          console.log(`[resume] ◀ ${run.workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`);
+          log.info("Phase end", { workflowName: run.workflowName, phase, success: result.success });
           harvestFixMarkers(opts.db, run.id, run.workflowName, phase, result.output);
         },
       };
@@ -396,8 +395,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
       );
       callbacks = { ...callbacks, reporter: notifier };
     } catch (err: unknown) {
-      const m = err instanceof Error ? err.message : String(err);
-      console.warn(`[resume] notifier setup failed: ${m}`);
+      log.warn("Notifier setup failed", { err });
     }
   }
 
@@ -438,7 +436,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
       // Same backpressure requeue as the fresh-dispatch path: a promoted run
       // that re-hits the quota goes back to `queued` for the next admission tick.
       opts.db.runs.requeueRunning(run.id);
-      console.log(`[resume] ${run.workflowName} run ${run.id} requeued — cluster at capacity`);
+      log.info("Requeued — cluster at capacity", { workflowName: run.workflowName, runId: run.id });
     } else if (!result.paused) {
       opts.db.runs.finishRun(run.id, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed during resume",
@@ -446,7 +444,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[resume] ${run.workflowName} resume for ${run.id} threw: ${msg}`);
+    log.error("Resume threw", { workflowName: run.workflowName, runId: run.id, err });
     opts.db.runs.finishRun(run.id, "failed", { error: `resume threw: ${msg}` });
   }
 }
@@ -487,17 +485,17 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     for (const run of queued) {
       requeued += opts.db.runs.requeue(run.id);
     }
-    console.log(`[resume] Refreshed queue clock for ${requeued} queued orphan(s) — admission will promote them`);
+    log.info("Refreshed queue clock for queued orphan(s) — admission will promote them", { requeued });
   }
 
   const orphans = active.filter((r) => r.status === "running");
 
   if (orphans.length === 0) {
-    console.log("[resume] No orphaned running workflow runs to recover");
+    log.info("No orphaned running workflow runs to recover");
     return;
   }
 
-  console.log(`[resume] Found ${orphans.length} orphaned running workflow run(s) — recovering`);
+  log.info("Found orphaned running workflow run(s) — recovering", { count: orphans.length });
 
   for (const run of orphans) {
     // Clear any "still running" execution rows so dedup works on resume.
@@ -506,7 +504,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
       "stale: harness restarted",
     );
     if (cleared > 0) {
-      console.log(`[resume] Cleared ${cleared} stale execution(s) for ${run.triggerId}`);
+      log.info("Cleared stale execution(s)", { triggerId: run.triggerId, cleared });
     }
 
     // Circuit breaker: bump the per-run restart counter, and if we've now
@@ -516,7 +514,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     const attempts = opts.db.runs.incrementRestartCount(run.id);
     if (attempts > MAX_RESTART_RESUMES) {
       const msg = `harness restarted ${attempts - 1}x while this run was active — giving up after ${MAX_RESTART_RESUMES} resume attempts`;
-      console.warn(`[resume] ${run.workflowName} run ${run.id}: ${msg}`);
+      log.warn(msg, { workflowName: run.workflowName, runId: run.id });
       opts.db.runs.finishRun(run.id, "failed", { error: msg });
       continue;
     }
@@ -524,7 +522,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     // Dispatch in the background — we don't want one slow resume to block
     // the others (or the rest of the boot sequence).
     resumeSimpleRun(run, opts).catch((err) =>
-      console.error(`[resume] ${run.workflowName} run ${run.id} crashed:`, err),
+      log.error("Crashed during resume", { workflowName: run.workflowName, runId: run.id, err }),
     );
   }
 }

@@ -637,7 +637,7 @@ What the runner has to know:
   (the orchestrator's workspace write, the k8s `AgentContextSink`) uses the value
   verbatim.
 - **Failure rule.** Every step above is best-effort: a missing cache dir or an
-  unreadable file drops the layer with a `console.warn` and the run continues on
+  unreadable file drops the layer with a logged warning and the run continues on
   the operator's assets. A repo's config can never fail a run.
 - **Reporting.** Resolver warnings (a dropped repo agent-context file) are
   written to `workflow_runs.scratch.repoConfig.assetWarnings` in `runWorkflow`'s

@@ -8,6 +8,9 @@ import {
   addInstallationRepos,
   removeInstallationRepos,
 } from "../managed-repos.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("github");
 
 export interface GitHubWebhookConfig {
   /**
@@ -219,7 +222,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // manage. See src/managed-repos.ts.
       const repoFullName = payload.repository?.full_name;
       if (!isManagedRepo(repoFullName)) {
-        console.log(`[github] Filtered webhook for unmanaged repo: ${repoFullName}`);
+        log.info("Filtered webhook for unmanaged repo", { repoFullName });
         return c.json({ filtered: true, reason: `repo not managed: ${repoFullName}` }, 200);
       }
 
@@ -254,11 +257,11 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       if (action === "added") {
         const added = names(payload.repositories_added);
         addInstallationRepos(added);
-        console.log(`[github] Installation repos added: ${added.join(", ") || "(none)"}`);
+        log.info("Installation repos added", { repos: added });
       } else if (action === "removed") {
         const removed = names(payload.repositories_removed);
         removeInstallationRepos(removed);
-        console.log(`[github] Installation repos removed: ${removed.join(", ") || "(none)"}`);
+        log.info("Installation repos removed", { repos: removed });
       }
       return;
     }
@@ -268,10 +271,10 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // The initial-install payload lists the granted repos; reset to exactly them.
       const repos = names(payload.repositories);
       setInstallationRepos(repos);
-      console.log(`[github] App installed with ${repos.length} repos`);
+      log.info("App installed", { repoCount: repos.length });
     } else if (action === "deleted") {
       setInstallationRepos([]);
-      console.log(`[github] App uninstalled — cleared installation repos`);
+      log.info("App uninstalled — cleared installation repos");
     }
   }
 
@@ -293,8 +296,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     try {
       return await this.config.getChecksConclusion(owner, repo, sha);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[github] getChecksConclusion(${repoFullName}@${sha.slice(0, 7)}) failed: ${msg}`);
+      log.warn("getChecksConclusion failed", { repoFullName, sha: sha.slice(0, 7), err });
       return fallback;
     }
   }
@@ -649,7 +651,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     // already registered on the shared app at construction time. This connector
     // stays registered purely so its `emit("event", …)` flows through the
     // ConnectorRegistry.
-    console.log("[github] Webhook routes registered on shared HTTP server");
+    log.info("Webhook routes registered on shared HTTP server");
   }
 
   async stop(): Promise<void> {

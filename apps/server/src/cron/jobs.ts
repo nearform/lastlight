@@ -4,6 +4,9 @@ import { getCronWorkflows } from "../workflows/loader.js";
 import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, operatorCrons } from "./repo-crons.js";
 import type { CronsConfig } from "../config/config.js";
 import type { StateDb } from "../state/db.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("cron");
 
 /** What a `condition.unless` predicate is evaluated against. */
 export interface CronConditionContext {
@@ -39,10 +42,10 @@ function conditionAllows(unless: string | undefined, ctx: CronConditionContext):
   if (!predicate) {
     if (!warnedConditions.has(unless)) {
       warnedConditions.add(unless);
-      console.warn(
-        `[cron] unknown condition.unless "${unless}" — registering the cron anyway ` +
-        `(known: ${Object.keys(CRON_CONDITION_PREDICATES).join(", ")})`,
-      );
+      log.warn("Unknown condition.unless — registering the cron anyway", {
+        unless,
+        known: Object.keys(CRON_CONDITION_PREDICATES),
+      });
     }
     return true;
   }

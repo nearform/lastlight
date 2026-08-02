@@ -49,6 +49,7 @@
 
 import { z } from "zod";
 import { lookupContextKey, type TemplateContext } from "./templates.js";
+import { noopLogger, type LoggerPort } from "../ports/ports.js";
 
 /**
  * A phase budget: a literal, or a reference into the run context with the
@@ -89,6 +90,8 @@ export function resolveTemplatedNumber(
   ctx: TemplateContext,
   /** Names the phase/field in the warning, e.g. `fix.timeout_seconds`. */
   where: string,
+  /** Structured logger for the misresolve warning; silent by default. */
+  log: LoggerPort = noopLogger,
 ): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value === "number") return value;
@@ -99,9 +102,11 @@ export function resolveTemplatedNumber(
     // Not an error: a workflow may legitimately run in a context that carries
     // no `fix` block (a manual trigger, a resumed pre-upgrade run). The warning
     // is what stops a MISSPELLED `from:` from looking identical to that.
-    console.warn(
-      `[runner] ${where}: {{${value.from}}} did not resolve to a positive number — using ${value.default}`,
-    );
+    log.warn("templated number did not resolve to a positive number — using default", {
+      where,
+      from: value.from,
+      default: value.default,
+    });
     return value.default;
   }
   return Math.ceil(n);
