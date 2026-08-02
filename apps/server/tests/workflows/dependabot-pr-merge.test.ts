@@ -215,6 +215,71 @@ describe("dependabot-pr-merge — major-bump impact (#252)", () => {
   });
 });
 
+/**
+ * Issue #264 — the merge workflow as the backstop against a fix that made CI
+ * green by turning a check off.
+ *
+ * The hard prohibition lives in `agent-context/rules.md`, which every agent
+ * session carries. This is the other half: a rule binds the agent that might
+ * suppress, and nothing detects a violation, so the LAST gate before the harm
+ * lands has to look. `dependabot-pr-merge` is that gate — it is the single owner
+ * of the merge decision, and a suppressed PR never comes back through
+ * `pr.checks_failed` at all (CI goes green, which routes it *here*).
+ *
+ * It is also the cheapest possible place to look: STEP 1a already fetches the
+ * file list, so "did this PR touch how the repo verifies itself" is answered
+ * from filenames the agent is holding, with no extra diff pulled and no extra
+ * context spent.
+ */
+describe("dependabot-pr-merge — verification integrity (#264)", () => {
+  const prompt = loadPromptTemplate("prompts/dependabot-pr-merge.md");
+
+  it("makes weakened verification a TRIVIAL-disqualifying conjunct", () => {
+    // The classification test is the load-bearing placement: STEP 2's list is
+    // the ONE thing standing between a PR and `github_enable_auto_merge`, and a
+    // rule stated anywhere else in this prompt is advice the agent may weigh
+    // against the bump looking trivial. As a conjunct it cannot be weighed.
+    expect(prompt).toContain("A change that weakens verification is never TRIVIAL.");
+    expect(prompt).toContain("nothing weakens how the repo verifies itself");
+  });
+
+  it("scans the file list it already has, rather than pulling a diff", () => {
+    // The whole design constraint of this prompt is "don't pull giant diffs".
+    // A check that cost a full diff would be the first thing dropped under
+    // context pressure, so it reads FILENAMES from STEP 1a's existing response
+    // and opens at most the one file that matched.
+    expect(prompt).toContain("verifies itself");
+    expect(prompt).toMatch(/you already have the list, and you are reading filenames/);
+    expect(prompt).toMatch(/read that file's patch — \*\*only\*\* that/);
+  });
+
+  it("names verification surfaces beyond the JS ecosystem", () => {
+    // A node-only list would silently pass every Python / Go / Java repo, which
+    // is the failure mode that made a regex-table detector the wrong shape for
+    // this problem in the first place.
+    for (const surface of [".gitlab-ci.yml", "Jenkinsfile", ".golangci.yml", "pyproject.toml"]) {
+      expect(prompt).toContain(surface);
+    }
+  });
+
+  it("does not let a green suite vouch for a change to the suite", () => {
+    // The circularity at the heart of #264: the checks are evidence about the
+    // bump only while the PR did not edit the checks.
+    expect(prompt).toMatch(/the green may be a product of the change/i);
+    expect(prompt).toContain("*however green it is*");
+  });
+
+  it("binds to our own fix commits, and stays a routing decision not an accusation", () => {
+    // The concrete case is Last Light's OWN fix commit on a dependency branch —
+    // green checks, clean branch, trivial bump. And the neighbouring case is
+    // legitimate (an `env-mismatch` repair aligns CI to reality), so the verdict
+    // is FUNCTIONAL — a human's call — rather than a refusal.
+    expect(prompt).toContain("including Last Light's own");
+    expect(prompt).toContain("Changing a check is not automatically wrong.");
+    expect(prompt).toMatch(/FUNCTIONAL is that route, not an\s*\n?accusation/);
+  });
+});
+
 describe("dependency-impact skill", () => {
   const skill = readFileSync(
     fileURLToPath(new URL("../../skills/dependency-impact/SKILL.md", import.meta.url)),

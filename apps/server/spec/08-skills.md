@@ -367,7 +367,8 @@ them directly.
 
 Three files in `agent-context/`, read in alphabetical order:
 
-- **`rules.md`** — operational guardrails. Workspace conventions,
+- **`rules.md`** — operational guardrails. Workspace conventions, the
+  prohibition on satisfying a check by disabling it (issue #264),
   GitHub-first coordination, git auth, managed repos, review and
   triage guidelines, label standards.
 - **`security.md`** — security boundaries. Untrusted user content

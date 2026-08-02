@@ -102,7 +102,24 @@ d. Only when a non-lockfile *source* file changed AND the change is small (a
    lockfiles is clearly small. If the non-lockfile change is large, or you can't
    cheaply bound it, treat the PR as **FUNCTIONAL** and leave it for a human — do
    NOT force the diff into context.
-e. Call `github_get_pull_request` and read `mergeable_state` — for branch hygiene
+e. Scan that same file list for changes to how the repo **verifies itself**. This
+   costs you nothing — you already have the list, and you are reading filenames,
+   not diffs. A dependency bump should touch dependency metadata and nothing
+   else, so any of these appearing in it is an anomaly:
+   - CI / pipeline definitions — `.github/workflows/**`, `.gitlab-ci.yml`,
+     `Jenkinsfile`, `.circleci/**`, `azure-pipelines.yml`, a `Makefile` target
+     CI invokes;
+   - test files and test configuration, in any language;
+   - type-checker, linter or build configuration — `tsconfig*.json`,
+     `next.config.*`, `.eslintrc*` / `eslint.config.*`, `.golangci.yml`,
+     `setup.cfg`, the tool sections of `pyproject.toml`, and their equivalents;
+   - commit hooks, and the `scripts` section of a package manifest.
+   When one of them IS in the list, read that file's patch — **only** that
+   file's. This is the single exception to the no-diffs rule above and it is a
+   narrow one: these files are small, and you are opening them for a specific
+   question. If the change is too large to bound cheaply, that is FUNCTIONAL by
+   STEP 1d already, and you are done.
+f. Call `github_get_pull_request` and read `mergeable_state` — for branch hygiene
    and the merge mechanism, NOT for greenness (the gate above owns that).
    `clean` = mergeable with nothing outstanding; `unstable` = a check is failing
    or still running; `blocked` = a required check/review is outstanding; `dirty`
@@ -114,12 +131,46 @@ e. Call `github_get_pull_request` and read `mergeable_state` — for branch hygi
 
 Apply the **code-review** skill's rubric to whatever you inspected.
 
+**A change that weakens verification is never TRIVIAL.**
+A dependency bump earns its auto-merge from exactly one thing: the checks ran
+against it and passed. That reasoning collapses if the PR also changed *what the
+checks do* — the green may be a product of the change rather than evidence about
+the bump. So when STEP 1e turned up one of those files, judge it before you
+classify:
+
+- **Ask whether the checked surface still catches what it caught before.** A CI
+  job made non-blocking, conditional-false or deleted; a test removed, skipped,
+  emptied or narrowed to a single case; a suite that now passes having run
+  nothing; a type checker or linter told to ignore its own errors, pointed away
+  from the offending path, or turned down from strict; a blanket file-scope
+  suppression comment; a hook bypassed; a non-zero exit swallowed. Each of those
+  means the suite that just went green is not the suite that would have caught a
+  bad bump.
+- **If it does weaken verification, the PR is FUNCTIONAL** — whatever else it
+  contains, and *however green it is*. Do not merge and do not enable auto-merge.
+  Take the FUNCTIONAL path in STEP 3, and in your comment name the file, quote
+  the line, and say plainly what stopped being checked. That is the comment's
+  whole value: a maintainer should not have to go and find it.
+- **This holds regardless of who wrote the commit** — including Last Light's own
+  fix commits on this branch. A fix that turned CI green by turning a check off
+  is precisely what this step exists to catch, and it is the case least likely to
+  look wrong from the outside: the checks are green, the branch is clean, and the
+  bump itself really is trivial.
+- **Changing a check is not automatically wrong.** A CI job pinned to a toolchain
+  the project has moved off, or a lint rule contradicting a convention the repo
+  just adopted, is genuinely repaired by editing it. You are not being asked to
+  judge intent — only to notice that the question the checks answered has
+  changed, and to route that to a human. FUNCTIONAL is that route, not an
+  accusation.
+
 STEP 2 — Classify the change, conservatively.
 Call it **TRIVIAL** only if ALL of these hold:
 - it is limited to dependency metadata (lockfile / manifest version bumps),
   a GitHub Actions tag/SHA bump, type-only edits, comments, or mechanical
   rename/signature updates, AND
 - there is NO change to runtime logic, control flow, or behaviour, AND
+- nothing weakens how the repo verifies itself, per the block immediately
+  above, AND
 - nothing security-sensitive (auth, crypto, deserialization, network, file I/O)
   changed in a meaningful way, AND
 - if it IS a **major** version bump, the tier STEP 2a computes for it is at or
@@ -213,7 +264,7 @@ STEP 3 — Act on the classification.
 
   Then handle the branch **separately**, because branch hygiene is not a merge
   decision (see the three-decisions note at the top). If the `mergeable_state` you
-  read in STEP 1e is `behind` or `dirty` AND the PR author is `dependabot[bot]`
+  read in STEP 1f is `behind` or `dirty` AND the PR author is `dependabot[bot]`
   or `renovate[bot]`, still ask that bot to regenerate its own branch, exactly as
   the TRIVIAL path does below — `@dependabot rebase` (`behind`) /
   `@dependabot recreate` (`dirty`), or Renovate's `rebase` label. Do NOT enable
@@ -234,7 +285,7 @@ STEP 3 — Act on the classification.
   in your review comment that the branch is behind/conflicted and needs a manual
   rebase.
 - If **TRIVIAL**: land it, or move it toward landing. The MERGE GATE decides
-  *whether*; the `mergeable_state` you read in STEP 1e decides *how*.
+  *whether*; the `mergeable_state` you read in STEP 1f decides *how*.
 
   GATE CLOSED (checks not settled `passing`, or fewer than `minSettledChecks`
   settled) — do NOT merge and do NOT enable auto-merge. Take any branch action
@@ -271,7 +322,7 @@ STEP 3 — Act on the classification.
   (`dirty`, almost always the lockfile). Do NOT push, rebase, or merge from base
   yourself — ask the bot that opened the PR to update its OWN branch, which
   regenerates lockfiles correctly. Branch on the PR **author** (`user.login`,
-  from STEP 1e):
+  from STEP 1f):
   - `dependabot[bot]` → post a comment via `github_add_issue_comment` whose body
     is exactly `@dependabot rebase` when `behind`, or `@dependabot recreate` when
     `dirty` (recreate regenerates the PR from scratch and resolves lockfile

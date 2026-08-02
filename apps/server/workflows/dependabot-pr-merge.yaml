@@ -62,7 +62,17 @@ phases:
   # nothing about merge-safety — but only a trivial PR also gets auto-merge
   # enabled to land it once GitHub re-runs the checks green. Because
   # each run assesses a single PR, its context is bounded — the overflow that
-  # killed the old whole-repo scan can't happen. See prompts/dependabot-pr-merge.md.
+  # killed the old whole-repo scan can't happen.
+  #
+  # It is also the BACKSTOP for issue #264 — a fix that made CI green by
+  # disabling the check. The prohibition lives in `agent-context/rules.md` and
+  # nothing enforces it in code, so the last gate before the merge has to look:
+  # STEP 1e reads the file list it already fetched for CI config, test files,
+  # type/lint/build config and manifest `scripts`, and STEP 2 makes "nothing
+  # weakens verification" a TRIVIAL-disqualifying conjunct. This workflow is
+  # where such a PR necessarily lands — suppression turns the checks GREEN, so
+  # `pr.checks_failed` never fires and the fix family never sees it again.
+  # See prompts/dependabot-pr-merge.md.
   - name: assess
     label: Assess & maybe auto-merge
     prompt: prompts/dependabot-pr-merge.md
