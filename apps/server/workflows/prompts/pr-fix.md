@@ -48,14 +48,23 @@ INSTRUCTIONS:
    the cause is. If reproducing contradicts the diagnosis, trust what you
    observe — and say so in your summary.
 2. Write the gate script FIRST: `{{verifyScript}}` — a path relative to your
-   cwd, which is the checkout — holding the exact build + test + lint +
-   typecheck commands CI runs, with the package manager taken from the
-   lockfile. Exit 0 means green. It is not there yet — the harness clears it at
-   the start of every attempt (see the **fixing** skill).
+   cwd, which is the checkout — holding the **narrowest** command that would
+   have failed before your fix and passes after it: one test file, one lint
+   rule, one build target, one install. Exit 0 means green. NOT the repo's CI
+   pipeline: CI runs on the commit you push and is the authority, so a gate that
+   mirrors it delays the push and tells you nothing new — aim for under two
+   minutes, skip anything you already watched pass this session, and never try
+   to start docker or a database (there is none here). If the diagnosed problem
+   has no reproducible check at all, gate on the repair being coherent rather
+   than leaving the script unwritten: a missing script is `gate=skipped`, which
+   counts as RED and never authorises a push. It is not there yet — the harness
+   clears it at the start of every attempt. See the **fixing** skill's "The
+   gate" for the full shape.
 3. Read the relevant code and make the fix — per the **fixing** skill, the
    smallest change that addresses the diagnosed cause. Don't widen the scope.
-4. Follow the **building** skill: install dependencies, then run the full
-   gate (mirror CI — build + test + lint + typecheck) — do NOT commit until it all passes
+4. Follow the **building** skill for the install, then run your gate script and
+   require it to pass — do NOT commit until it does. Breadth is CI's job; don't
+   also run the full suite here
 
 AFTER FIXING:
 1. git add -A && git commit -m "fix: address feedback on PR #{{prNumber}}

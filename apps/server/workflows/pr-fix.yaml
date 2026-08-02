@@ -94,8 +94,21 @@ phases:
     # `dependabot-ci-fix.yaml` for the full story. Short version: `/bin/sh` is
     # dash, the agent writes `set -euo pipefail`, dash rejects `-o pipefail` and
     # exits 2 on line 2, and the gate was a constant red in milliseconds.
+    #
+    # `until:` short-circuits `until_bash` — again see `dependabot-ci-fix.yaml`
+    # for the full argument, since the two loops are one family and must not
+    # diverge. Short version: `outcome=pushed` means the commit is on the branch
+    # and GitHub's checks are now the better authority, so re-running a slower
+    # copy of them in a fresh container buys nothing and costs minutes. It fires
+    # on `pushed` only — `no-change` / `gave-up` pushed nothing, so no external
+    # check exists, the local gate is the only evidence there is, and its red
+    # verdict is what earns the agent the next iteration (short-circuiting those
+    # too would make `fix.localIterations` dead config). `tried=` is in the
+    # needle so a replayed `{{priorAttempts}}` line — which `renderAttemptLine`
+    # writes WITHOUT `tried=` — cannot match.
     generic_loop:
       max_iterations: { from: fix.localIterations, default: 2 }
+      until: "output.contains('outcome=pushed tried=')"
       until_bash: "if [ -f .git/lastlight-verify.sh ]; then bash .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
       fresh_context: false
     messages:

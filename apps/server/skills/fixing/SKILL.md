@@ -169,20 +169,92 @@ mechanical call-site/type update over a behavioural change. Don't refactor,
 don't chase failures unrelated to the diagnosed cause, and don't sink your
 budget into one slow or unreproducible check.
 
-**Push only on a green local gate.** The gate is the repo's own build + test +
-lint + typecheck, run per the **building** skill. If it is still red when you
-run out of iterations, emit `outcome=gave-up` and **do not push a speculative
-fix** — an unverified push costs a full CI cycle to prove nothing.
+**Push only on a green local gate.** The gate is the targeted reproduction
+below, written by you at runtime. If it is still red when you run out of
+iterations, emit `outcome=gave-up` and **do not push a speculative fix** — an
+unverified push costs a full CI cycle to prove nothing.
 
-**Write the gate command to `.git/lastlight-verify.sh`** — a path relative to
-your cwd, which is the checkout. The right command is whatever CI runs, with the
-package manager detected from the lockfile, so it is knowable only at runtime,
-by you. Exit 0 means green.
+## The gate
 
-Four rules about that file:
+**Write it to `.git/lastlight-verify.sh`** — a path relative to your cwd, which
+is the checkout. The harness runs it after every fix iteration; exit 0 means
+green and ends the loop.
+
+It answers exactly one question: **is the thing I diagnosed actually fixed?**
+That makes it a *targeted reproduction*, never a stand-in for CI. CI runs on the
+commit you push — real OS, real services, the whole matrix — and it is the
+authority on whether this PR is green. Duplicating it here buys no information
+and costs the one thing you are short of: a ten-minute gate delays the push by
+ten minutes, and CI has usually gone green before it finishes.
+
+So write **the narrowest command that would have failed before your fix and
+passes after it** — one test file, one lint rule, one build target, one install.
+Dependencies are already installed by the time the gate runs (you installed
+them, per the **building** skill), so it need not install again unless the
+install *is* the check. **Aim for under two minutes.**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# diagnosed: test/foo-service.test.ts fails on the zod major bump
+npx vitest run test/foo-service.test.ts
+```
+
+Four things it must never contain:
+
+- **The whole suite.** Full lint + full typecheck + every build target + every
+  test project is what CI is for, and CI will run it. A gate written that way
+  took **eleven minutes** to verify a regenerated lockfile — and CI went green
+  before it finished.
+- **A check you already ran this session and watched pass.** You have the
+  result. The gate is not where you prove it twice.
+- **Anything that starts a service** — `docker`, `docker compose`, a database, a
+  daemon. There is none in this sandbox, so those branches can never execute:
+  a `command -v docker` guard around them is dead code that emits "Skipping…"
+  noise and nothing else. A check that genuinely needs a service is
+  `infra-dependent` — name it in `unreproducible=` and let CI run it.
+- **`cd` out of the checkout, or anything that mutates git state.** The harness
+  re-runs the script after you finish, so it has to be idempotent.
+
+### When there is nothing to reproduce
+
+A merge conflict is the case that matters: you resolved it by regenerating the
+lockfile, no check was ever failing, and there is nothing to re-run. **Write a
+gate anyway** — just not a CI clone. In order of preference:
+
+1. **The coherence check the repair implies.** For a merge/lockfile resolution
+   that is: no conflict marker survived, and the lockfile installs — which is
+   precisely what a botched regeneration fails.
+
+   ```bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+
+   # merge conflict resolved by regenerating package-lock.json; nothing was
+   # failing, so the gate checks the repair is coherent — not that CI is green.
+   ! git grep -lI '^<<<<<<< ' -- .
+   npm ci
+   ```
+
+2. **An honest empty gate** — a script that states in one line why there was
+   nothing to verify, and exits 0.
+
+**What you must not do is leave it unwritten.** With no script the loop's gate
+can never go green, so it spends its remaining iterations re-running the whole
+fix phase against a repair that was already finished, ends on the phase's
+failure message, and leaves you reporting `gate=skipped` — which counts as RED
+and never authorises the push the repair needed. A correct conflict resolution would be
+thrown away for want of two lines of bash. The script's contents are recorded on
+the run and read by humans afterwards, so an empty gate is an inspectable claim
+you are making in writing; a missing one is indistinguishable from a broken one.
+That is also why an empty gate is never a way out of a check you could have run.
+
+Four rules about the file:
 
 - **Write it first, before you start repairing.** The harness runs it after each
-  fix iteration; with no script there is no gate, and no gate means no push.
+  fix iteration, and a repair with nothing to verify against is a guess. Writing
+  it first is also what forces you to say what "fixed" means before you start.
 - **Make it a bash script.** The harness runs it with `bash`, so `set -euo
   pipefail` and the rest of bash is available to you — but a script written for
   another interpreter will not be run the way you intended, however correct its

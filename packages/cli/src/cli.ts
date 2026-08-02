@@ -36,7 +36,7 @@ import {
   tokenIsExpired,
   DEFAULT_URL,
 } from "./cli-config.js";
-import { table, age, colorStatus, checkmark, followSSE } from "./cli-format.js";
+import { table, age, colorStatus, checkmark, execMark, followSSE } from "./cli-format.js";
 import { renderTimeline, renderMessage, renderRaw } from "./cli-timeline.js";
 
 // ── arg parsing ────────────────────────────────────────────────────────────
@@ -629,7 +629,7 @@ async function cmdWorkflow(): Promise<void> {
     console.log(`status ${colorStatus(run.status)}   phase ${run.currentPhase}   repo ${run.repo ?? "-"}   started ${age(run.startedAt)}`);
     console.log("");
     const rows = execs.map((e) => ({
-      ok: checkmark(e.success),
+      ok: execMark(e.success, e.stopReason),
       phase: (e.skill ?? "").replace(`${run.workflowName}:`, ""),
       dur: e.durationMs ? `${Math.round(e.durationMs / 1000)}s` : "",
       session: e.sessionId ?? "",

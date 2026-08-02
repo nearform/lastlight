@@ -399,8 +399,32 @@ enters the next fix cycle.
 ```
 
 Iteration naming: `${phaseName}_iter_${n}`; a soft-failure retry is
-`${phaseName}_iter_${n}_retry` (its own ledger row). The until-condition is
-evaluated by `loop-eval.ts` — see below.
+`${phaseName}_iter_${n}_retry` (its own ledger row) and the `until_bash` exit
+check is `${phaseName}_iter_${n}_check` (its own ledger row too — see "Recording
+a loop iteration" below). The until-condition is evaluated by `loop-eval.ts` —
+see below.
+
+**Recording a loop iteration.** The iteration is persisted the moment its *work*
+finishes — `phase_history` entry (`iteration N — work complete`) plus the
+iteration's `output_text` — **before** the exit condition is evaluated.
+Everything after the agent turn belongs to the loop, not the iteration.
+`until_bash` then opens its own `executions` row (`recordStart` → command →
+`recordFinish` + `recordOutputText`), because it is a real sandbox command that
+can run for minutes and an *open* row with a start time is how every renderer
+draws "in flight, since N". The row deliberately bypasses
+`runPhaseLedger`/`shouldRunPhase` — a condition must be re-evaluated on every
+ask, never replayed from a dedup hit — and its `success` records whether the
+check **ran**, with the verdict in `stop_reason` as `condition_met` /
+`condition_not_met`. A red gate is the loop working as designed (it is what
+earns the agent another iteration), so it must not read as a failure: the
+dashboard gives `condition_not_met` a muted `unmet` tone and the CLI a `↻`.
+When the condition is met a second entry (`iteration N — condition met`) is
+appended for the same label; readers fold a repeated label last-wins.
+
+Without this, prod run `49c101aa` spent 6m48s of a 20m31s run inside
+`until_bash` with nothing recording it, while the run advertised
+`currentPhase: "diagnose"` — a phase that had ended 12 minutes earlier — and
+omitted the completed `fix_iter_1` from `phase_history` entirely.
 
 **`on_soft_failure`** — by default any non-success iteration hard-fails the
 whole run, which is wrong for a long interactive loop (one degenerate turn
@@ -696,6 +720,62 @@ kills any real build/test suite mid-run and reports a false red, so a phase
 whose gate is the repo's own CI commands must carry an explicit value. Both fix
 workflows read theirs from `fix.gateTimeoutSeconds` — see "Templated phase
 budgets" below.
+
+The two are not exclusive, and the order between them is load-bearing: `until`
+is evaluated **first**, and a match short-circuits `until_bash` entirely
+(`phase-executor.ts`: `if (!conditionMet && loop.until_bash)`). A loop can
+therefore declare both — a cheap expression that names the cases where there is
+nothing left to check, and the expensive command for everything else.
+
+**The fix family's push short-circuit.** Both `pr-fix` and `dependabot-ci-fix`
+use exactly that pairing:
+
+```yaml
+generic_loop:
+  max_iterations: { from: fix.localIterations, default: 2 }
+  until: "output.contains('outcome=pushed tried=')"
+  until_bash: "if [ -f .git/lastlight-verify.sh ]; then bash …; else … exit 1; fi"
+```
+
+`outcome=pushed` in a `CI_FIX_COMPLETE` marker means the commit is already on
+the branch. GitHub's checks started against it the moment it landed and are the
+strictly better authority — the real CI environment rather than a sandbox
+approximation of it, warm rather than a cold container, and covering the matrix
+legs the sandbox cannot reproduce. Re-running the local gate at that point
+cannot change anything: its exit code decides only whether to spend **another**
+agent iteration, and a pushed fix has nothing left to iterate on. Without the
+short-circuit a real run (`49c101aa`) pushed at 11:03:31, saw GitHub go fully
+green at 11:06:25, and still sat in a fresh container from 11:04:00 to 11:10:48
+running the same suite a third time.
+
+It fires on `pushed` **only**. `no-change` / `gave-up` pushed nothing, so there
+is no new commit, no new check run and no external authority — the local gate is
+the only evidence that exists, and its red verdict is precisely what earns the
+agent the next iteration. Short-circuiting all three outcomes would end every
+loop at iteration 1 and make `fix.localIterations` dead config.
+
+The needle carries `tried=` because `outcome=pushed` alone also appears in a
+rendered `{{priorAttempts}}` journal line from an earlier attempt
+(`renderAttemptLine` emits `… | outcome=pushed gate=green`), which the prompt
+replays into the run — the same replayed-line false match that forced the fix
+phase's `skip_if` rows off `phaseOutputs`. `scratch` is not an option inside a
+loop (it is refreshed per *phase node*, not per iteration, so it is stale
+there), but `renderAttemptLine` deliberately never renders `tried=`, so
+`outcome=pushed tried=` matches a live marker and nothing else. A marker that
+reorders its fields simply fails to match and the gate runs as before — the
+fallback is the previous behaviour, which is the right direction for a
+cost optimisation to fail in.
+
+What this gives up is stated plainly rather than left implicit: after a push the
+harness no longer has an independent check on the agent's self-reported
+`gate=green`. That is *not* a reintroduction of the `sh`-versus-`bash` defect
+(see [Sandbox](/spec/09-sandbox) → the push gate), because the gate in this flow
+runs **after** the push and therefore never gated it — the agent's self-report
+was already the only thing between a bad fix and the branch. What catches a bad
+fix is unchanged: GitHub's checks go red, `pr.checks_failed` re-dispatches the
+fix family, and `fix.maxAttempts` / `fix.maxCostUsd` bound the retries. Naming
+`bash` still matters for the unpushed path, which is where the loop's iterations
+live.
 
 ### Templated phase budgets
 

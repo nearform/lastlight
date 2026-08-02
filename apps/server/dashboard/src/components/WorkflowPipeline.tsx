@@ -252,7 +252,12 @@ export function WorkflowPipeline({
         if (typeof exec.durationMs === "number") {
           duration = exec.durationMs / 1000;
         }
-        if (exec.success === true) status = "done";
+        if (exec.success === true)
+          // A generic-loop `until_bash` check (`<phase>_iter_N_check`) records
+          // success = "did the check run", with the verdict in stopReason. A
+          // RED gate ran fine but did NOT finish the loop — neither green nor
+          // red, so give it the muted `unmet` tone.
+          status = exec.stopReason === "condition_not_met" ? "unmet" : "done";
         else if (exec.success === false)
           // A cascade-skipped phase is stored as success=0 (so it re-evaluates
           // on resume) but carries stopReason="skipped" — it never ran, so don't
@@ -281,7 +286,11 @@ export function WorkflowPipeline({
           const lastExec = execByPhase.get(kids[kids.length - 1]!);
           if (kidExecs.some((kx) => kx.success === undefined))
             status = isTerminalRun ? "failed" : "active";
-          else if (lastExec?.success === true) status = "done";
+          else if (lastExec?.success === true)
+            // Same rule as the leaf above: a loop whose LAST child is a red
+            // exit check ran out of iterations without its gate ever going
+            // green. That is not a failure, but it is not a pass either.
+            status = lastExec.stopReason === "condition_not_met" ? "unmet" : "done";
           else if (lastExec?.success === false)
             status = lastExec.stopReason === "skipped" ? "skipped" : "failed";
           // Span the loop: earliest iteration start + summed iteration durations.

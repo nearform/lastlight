@@ -89,7 +89,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		<li>Clones the repo at the PR's head branch</li>
 		<li><strong>Diagnose</strong> — reads the PR description, comment thread and CI failures, reads the repo's own <code>.github/workflows/*.yml</code>, names the differences between CI and the sandbox (toolchain version, OS, absent services or secrets), reproduces the exact failing command, and classifies the failure. It changes nothing: no edits, no commits, no pushes, no labels</li>
 		<li><strong>Fix</strong> — implements the smallest change that lands the PR, guided by the diagnosis</li>
-		<li>Runs tests, lint, and typecheck</li>
+		<li>Runs a local gate it wrote for itself — a <em>targeted</em> reproduction of the failure it diagnosed (one test file, one lint rule, one build target), not a copy of the repo's CI pipeline. CI runs on the pushed commit and is the authority on green; the gate only answers "is the thing I diagnosed fixed?"</li>
 		<li>Pushes the fix commit to the PR branch — <em>only</em> on a green local gate. If the gate is still red when it runs out of iterations it says so rather than pushing a speculative fix, which would cost a full CI cycle to prove nothing</li>
 	</ul>
 

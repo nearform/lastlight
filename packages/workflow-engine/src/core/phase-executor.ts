@@ -436,6 +436,7 @@ export async function runCommandPhase(
 // ── PhaseExecutor ────────────────────────────────────────────────────────────
 
 const MAX_PREV_OUTPUT_BYTES = 10 * 1024; // cap accumulated generic-loop output at 10KB
+const MAX_UNTIL_OUTPUT_BYTES = 8 * 1024; // cap the until_bash gate's recorded stdout at 8KB
 
 export class PhaseExecutor {
   constructor(
@@ -763,14 +764,63 @@ export class PhaseExecutor {
    * the persisted workspace), replacing the old harness-host `execSync`. Exit 0
    * ⇒ loop complete. The check inherits the phase's egress; no session log is
    * written (it's an internal loop condition, not a user-facing phase).
+   *
+   * **It gets its own `executions` row.** This is a real command in the real
+   * sandbox — a full CI gate on a big repo, minutes of it (prod run `49c101aa`
+   * spent 6m48s here, a third of the whole run). It used to be recorded
+   * NOWHERE: no phase, no ledger row, no pipeline node, no timer, and the
+   * iteration's own phase-history entry was still withheld pending its verdict,
+   * so every reader — dashboard, CLI, admin API — showed a run that looked
+   * finished-but-stuck. Recording `started_at` BEFORE the command and the
+   * verdict after makes the gap self-describing: an unfinished row is exactly
+   * how every other long operation in the engine says "in flight, since N",
+   * and the same renderers already know how to draw it.
+   *
+   * Two deliberate choices in the row:
+   *  - It bypasses `runPhaseLedger` (and so `shouldRunPhase`). A condition must
+   *    be re-evaluated every time it is asked; a dedup hit that replayed a
+   *    stale verdict against a workspace that has since changed is precisely
+   *    the bug this row exists to expose.
+   *  - `success` records whether the check RAN, not what it said. A `false`
+   *    verdict is the loop working as designed (iterate again) and must not
+   *    paint the phase red or count as a failure; the verdict lands in
+   *    `stop_reason` as `condition_met` / `condition_not_met`.
    */
-  private async runUntilBash(command: string, phase: PhaseDefinition): Promise<boolean> {
-    const { config, githubAccess, taskId, triggerId, definition, workflowId } = this.run;
+  private async runUntilBash(
+    command: string,
+    phase: PhaseDefinition,
+    iteration: number,
+  ): Promise<boolean> {
+    const { config, githubAccess, taskId, triggerId, definition, workflowId, store: db } = this.run;
+    const label = PhaseRef.iterCheck(phase.name, iteration).format();
+    const startedAt = Date.now();
+
+    const executionId = db ? randomUUID() : undefined;
+    if (db && executionId) {
+      try {
+        db.executions.recordStart({
+          id: executionId,
+          triggerType: "webhook",
+          triggerId,
+          skill: `${definition.name}:${label}`,
+          repo: githubAccess?.repo,
+          issueNumber: issueNumberFromTrigger(triggerId),
+          startedAt: new Date(startedAt).toISOString(),
+          workflowRunId: workflowId,
+        });
+      } catch (err) {
+        console.warn(`[runner] Failed to record until_bash check row for ${label}:`, err);
+      }
+    }
+
+    let met = false;
+    let output = "";
+    let error: string | undefined;
     try {
       validateShellCommand(command);
       const res = await this.ports.agent.runCommand(
         { kind: "bash", command },
-        { ...phaseConfigFor(config, phase, this.ports.assets), telemetry: { workflowName: definition.name, phaseName: `${phase.name}_until`, triggerId, workflowRunId: workflowId } },
+        { ...phaseConfigFor(config, phase, this.ports.assets), telemetry: { workflowName: definition.name, phaseName: label, triggerId, workflowRunId: workflowId } },
         {
           taskId,
           githubAccess,
@@ -778,10 +828,37 @@ export class PhaseExecutor {
           writeSession: false,
         },
       );
-      return res.success;
-    } catch {
-      return false;
+      met = res.success;
+      output = res.output ?? "";
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
     }
+
+    if (db && executionId) {
+      try {
+        db.executions.recordFinish(executionId, {
+          success: error === undefined,
+          error,
+          turns: 0,
+          durationMs: Date.now() - startedAt,
+          stopReason: error !== undefined ? "error_fatal" : met ? "condition_met" : "condition_not_met",
+        });
+        // The gate's own output is the artifact you want when asking "why did
+        // this loop keep going", and `writeSession: false` means no session
+        // jsonl carries it — so `output_text` is the only copy that exists.
+        // Nothing renders `output_text` today (it backs the scratch
+        // `lastOutputExecutionId` indirection); it is queryable on the row, and
+        // it is the column any future surface would read.
+        db.executions.recordOutputText(
+          executionId,
+          `$ ${command}\n\n${output.length > MAX_UNTIL_OUTPUT_BYTES ? output.slice(-MAX_UNTIL_OUTPUT_BYTES) : output}`,
+        );
+      } catch (err) {
+        console.warn(`[runner] Failed to finish until_bash check row for ${label}:`, err);
+      }
+    }
+
+    return met;
   }
 
   /**
@@ -1227,6 +1304,31 @@ export class PhaseExecutor {
         previousOutput = combined.length > MAX_PREV_OUTPUT_BYTES ? combined.slice(-MAX_PREV_OUTPUT_BYTES) : combined;
       }
 
+      // ── The iteration's work is DONE here ──────────────────────────────────
+      //
+      // Everything below (the `until` expression, and especially the
+      // `until_bash` sandbox command) is the LOOP asking "are we finished?",
+      // not the iteration still working. Persisting the iteration's output and
+      // its phase-history entry only after that answer arrived meant the run's
+      // own state lied for as long as the check took: prod run `49c101aa` sat
+      // for 6m48s advertising `currentPhase: "diagnose"` — a phase that had
+      // ended 12 minutes earlier — with `fix_iter_1` absent from
+      // `phaseHistory` although it had completed. So record both NOW.
+      //
+      // The condition-met branch below appends a SECOND entry for the same
+      // label. That is deliberate: they are two distinct events (the work
+      // finished at T1, the loop was declared complete at T2), and keeping
+      // them apart is what makes the gap legible instead of invisible. The
+      // reader contract that makes a repeated label safe is: **last entry
+      // wins**, everywhere. The dashboard pipeline already folded history into
+      // a `Map` keyed by phase, and both resume paths (`resume.ts`,
+      // `simple.ts`) fold it into a `Set` of names; `PhaseDetailPanel` was the
+      // one reader that took the FIRST match and now takes the last, so the
+      // summary it shows and the summary the pipeline shows agree.
+      const iterExecutionId = "executionId" in ir ? ir.executionId : undefined;
+      if (iterExecutionId && db) db.executions.recordOutputText(iterExecutionId, iterOutput);
+      this.reporter.persistPhase(iterLabel, `iteration ${iteration} — work complete`);
+
       let conditionMet = false;
       if (loop.until) {
         conditionMet = evalUntilExpression(loop.until, {
@@ -1240,11 +1342,8 @@ export class PhaseExecutor {
         });
       }
       if (!conditionMet && loop.until_bash) {
-        conditionMet = await this.runUntilBash(loop.until_bash, phase);
+        conditionMet = await this.runUntilBash(loop.until_bash, phase, iteration);
       }
-
-      const iterExecutionId = "executionId" in ir ? ir.executionId : undefined;
-      if (iterExecutionId && db) db.executions.recordOutputText(iterExecutionId, iterOutput);
 
       if (conditionMet) {
         complete = true;
@@ -1318,7 +1417,11 @@ export class PhaseExecutor {
         return { results, status: "succeeded", paused: true };
       }
 
-      this.reporter.persistPhase(iterLabel);
+      // (No persistPhase here any more — a non-final iteration is recorded the
+      // moment its work finished, above, not after the condition said "again".
+      // The interactive gate above `return`s, so it never reached this line;
+      // a paused round is now recorded too, which is what the notifier's
+      // re-seeded `completed` set wanted all along.)
     }
 
     if (!complete) {

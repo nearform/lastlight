@@ -211,6 +211,23 @@ against the persisted workspace — exit 0 ends the loop. (It used to run on the
 harness host via `execSync`; it now executes in the same container the phase
 does.)
 
+**`until` short-circuits `until_bash`.** A loop may declare both; `until` is
+evaluated first and a match skips the command entirely. That pairing is how the
+fix family stops paying for a gate that has nothing left to gate: both fix
+workflows carry `until: "output.contains('outcome=pushed tried=')"` alongside
+the `.git/lastlight-verify.sh` gate, so once the agent's `CI_FIX_COMPLETE`
+marker says it pushed, the harness does **not** spin up a fresh container to
+re-run a slower copy of the CI suite GitHub is already running on that commit.
+It fires on `pushed` only — `no-change` / `gave-up` pushed nothing, so no
+external check exists, the local gate is the only evidence there is, and its red
+verdict is what earns the agent the next iteration (short-circuiting those too
+would make `fix.localIterations` dead config). `tried=` is in the needle because
+`renderAttemptLine` writes a replayed `{{priorAttempts}}` line *without* it, so
+a quoted journal line from an earlier attempt can't trip the short-circuit —
+`scratch` isn't available as an alternative inside a loop, since the scheduler
+refreshes it per phase node rather than per iteration. Full contract +
+the safety trade-off in [`spec/06-workflow-engine.md`](../../spec/06-workflow-engine.md).
+
 **Templated phase budgets.** `timeout_seconds` and
 `generic_loop.max_iterations` take either a plain positive integer or
 `{ from: <dotted context path>, default: N }`. `from` is the same lookup
@@ -418,6 +435,10 @@ cycle:
   iteration whose first attempt came back soft (see `on_soft_failure` above); it
   gets its own ledger row so resume/dedup treats it as a distinct step, and the
   dashboard's longest-prefix grouping still nests it under the parent
+- `${parentPhaseName}_iter_${n}_check` — the `generic_loop.until_bash` exit
+  check that follows iteration n (see "Recording the loop" below). Ledger row
+  only: it is never a phase, never enters `phase_history`, and never becomes
+  `current_phase`.
 
 The legacy bare-numeric re-review form (`reviewer_2`) is **dropped** — it was
 untagged, ambiguous with literal phase names, and inconsistent with the
@@ -425,8 +446,43 @@ untagged, ambiguous with literal phase names, and inconsistent with the
 
 The dashboard's `WorkflowPipeline.tsx` uses a longest-prefix match to
 group these under the declared parent (`reviewer_fix_1` → belongs to
-`reviewer`) and stacks them vertically below that column in the pipeline
-diagram.
+`reviewer`; `fix_iter_1_check` → belongs to `fix`) and stacks them vertically
+below that column in the pipeline diagram.
+
+### Recording the loop
+
+**An iteration is persisted when its WORK finishes, not when the loop's exit
+condition resolves.** Everything after the agent turn — the `until` expression
+and especially the `until_bash` command — is the loop asking "are we done?", not
+the iteration still working. So `persistPhase(<phase>_iter_N, "iteration N —
+work complete")` and the iteration's `recordOutputText` both fire *before* the
+condition is evaluated. Prod run `49c101aa` is why: it sat 6m48s in `until_bash`
+advertising `currentPhase: "diagnose"` (a phase that had ended 12 minutes
+earlier) with `fix_iter_1` missing from `phase_history` although it had
+completed.
+
+**`until_bash` gets its own `executions` row** (`<phase>_iter_N_check`) —
+`recordStart` before the command, `recordFinish` + `recordOutputText` after. It
+is a real sandbox command that can run for minutes, and an open row with a start
+time is how every renderer already draws "in flight, since N". Two deliberate
+properties:
+
+- It **bypasses** `runPhaseLedger` / `shouldRunPhase`. A condition must be
+  re-evaluated every time it is asked; a dedup hit replaying a stale verdict
+  against a since-changed workspace is the bug the row exists to expose. Its
+  dedup key is distinct from the iteration's, so it can never mark a phase done
+  or be resumed into.
+- `success` records whether the check **ran**, not what it said. A red gate is
+  the loop working as designed, so the verdict lands in `stop_reason` as
+  `condition_met` / `condition_not_met`. The dashboard renders the latter as its
+  own muted `unmet` tone (neither green nor red) and the CLI as `↻`.
+
+When the condition IS met, a *second* history entry is appended for the same
+label (`iteration N — condition met`). Two distinct events, and keeping them
+apart is what makes the gap legible; every reader folds a repeated label
+last-wins (the pipeline's history `Map`, both resume paths' `Set` of names,
+`PhaseDetailPanel`'s `.at(-1)`). Covered by
+`tests/workflows/generic-loop-check-row.test.ts`.
 
 ## Approval gates
 

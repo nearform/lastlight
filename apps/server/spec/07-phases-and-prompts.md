@@ -168,8 +168,35 @@ fix phase. The split exists to gate spend: `diagnose` runs against the
 already-pre-cloned workspace *before* the install + test cycle, so a
 failure no amount of fixing can address costs one short call rather
 than a full gate run. `fixing` owns *why did this fail and can it be
-fixed here*; `building` owns *install and run the gate*. See
+fixed here* — including the gate script's content contract below;
+`building` owns *install and run the commands*. See
 [Skills](/spec/08-skills).
+
+**The gate is a targeted reproduction, not a CI clone.** All three
+surfaces that instruct it — `skills/fixing/SKILL.md` ("The gate"), and
+step 2 / step 3 of `prompts/pr-fix.md` / `prompts/dependabot-ci-fix.md` —
+ask for the *narrowest* command that would have failed before the fix and
+passes after it: one test file, one lint rule, one build target, one
+install, under two minutes. Four exclusions are explicit: the whole suite
+(CI runs it on the pushed commit and is the authority), a check already
+watched passing in the same session, anything that starts a service
+(there is no docker in the sandbox, so a `command -v docker` guard is dead
+code — a check that needs one is `infra-dependent`), and anything that
+mutates git state (the harness re-runs the script). The failure this
+closes: a `dirty` PR whose whole repair was a regenerated lockfile got a
+verbatim copy of the repo's CI pipeline — five builds, two test suites,
+eleven minutes, three unreachable service branches — and real CI went
+green before the local gate finished. A weak gate costs a wasted attempt
+and never a bad merge (`fix-harvest.ts`), which is exactly why breadth
+belongs to CI and not here. **A repair with nothing to reproduce still
+writes a gate** — the coherence check the repair implies (no conflict
+marker left, the lockfile installs), or an honest one-line `exit 0`
+stating why there was nothing to verify. Leaving it unwritten is the
+worse option, not the modest one: with no script the loop's gate
+condition can never be met, so it burns its remaining iterations
+re-running a repair that was already finished, ends on the phase's
+`on_failure` message, and the run reports `gate=skipped` — RED, which
+never authorises the push the repair needed.
 
 `dependabot-ci-fix` runs **one** phase when it was summoned for a merge
 problem rather than a red build: its `diagnose` declares

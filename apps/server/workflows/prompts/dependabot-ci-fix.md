@@ -84,11 +84,13 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    above is `dirty` (conflict), `behind` or `blocked`. CI is not red; the PR
    simply cannot merge. So completing the merge and pushing it is the whole
    repair, and there was no failure to diagnose. Do not hunt for a broken test
-   to justify the run. Land the merge, let the gate confirm the tree still
-   builds, push, and report `outcome=pushed`. A `dirty` PR whose conflict you
-   resolved is a SUCCESS even if the only file you changed was the lockfile. If
-   the gate then comes back red, you have a real failure and step 2 onwards
-   applies.
+   to justify the run, and do not stand up a CI-sized gate for a lockfile.
+   Land the merge, let a small gate confirm the repair is coherent (no conflict
+   markers left, the lockfile installs), push, and report `outcome=pushed`. CI
+   is what tells you the branch is green, and it runs on the commit you push
+   without being asked. A `dirty` PR whose conflict you resolved is a SUCCESS
+   even if the only file you changed was the lockfile. If the gate then comes
+   back red, you have a real failure and step 2 onwards applies.
 {{/if}}
 2. {{#if phaseOutputs.diagnosis}}Work from the diagnosis above. It already names
    the cause and which checks can't be reproduced here — don't re-derive either.
@@ -102,17 +104,26 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    - a breaking change in the new version needs call sites / types updated,
    - a peer-dependency or engines constraint needs a matching bump.
 3. Write the gate script: `{{verifyScript}}` — a path relative to your cwd,
-   which is the checkout — holding the exact build + test + lint + typecheck
-   commands CI runs, with the package manager taken from the lockfile. Exit 0
-   means green. It is not there yet — the harness clears it at the start of
-   every attempt (see the **fixing** skill). Write it before you start
-   repairing, so the repair has something to verify against.
+   which is the checkout — holding the **narrowest** command that would have
+   failed before your fix and passes after it: one test file, one lint rule, one
+   build target, or, for a lockfile you regenerated, the install itself. Exit 0
+   means green. NOT the repo's CI pipeline: CI runs on the commit you push and
+   is the authority, so a gate that mirrors it delays the push and tells you
+   nothing new — aim for under two minutes, skip anything you already watched
+   pass this session, and never try to start docker or a database (there is
+   none here). If step 1's merge was the whole repair and nothing was ever
+   failing, gate on the repair being coherent — no conflict markers left, and
+   the lockfile installs — rather than leaving the script unwritten: a missing
+   script is `gate=skipped`, which counts as RED and would throw a correct
+   resolution away. The script is not there yet — the harness clears it at the
+   start of every attempt. Write it before you start repairing. See the
+   **fixing** skill's "The gate" for the full shape.
 4. Make the **smallest** change that makes CI pass, per the **fixing** skill.
    Prefer a lockfile regeneration or a mechanical call-site/type update over a
    behavioural change. Do NOT widen the scope beyond making this update green.
-5. Follow the **building** skill: install dependencies with the repo's package
-   manager, then run the full gate (mirror CI — build + test + lint + typecheck). Do NOT commit until
-   it all passes locally.
+5. Follow the **building** skill for the install: the repo's package manager,
+   taken from the lockfile. Then run your gate script and require it to pass
+   before you commit. Breadth is CI's job — don't also run the full suite here.
 
 AFTER FIXING:
 1. git add -A && git commit -m "fix(deps): make #{{prNumber}} mergeable"

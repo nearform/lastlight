@@ -65,10 +65,27 @@ export function colorStatus(status: string | null | undefined): string {
   }
 }
 
-/** ✓ / ✗ for a boolean-ish success value. */
+/** ✓ / ✗ for a boolean-ish success value (`…` while still in flight). */
 export function checkmark(success: boolean | undefined): string {
   if (success === undefined) return chalk.yellow("…");
   return success ? chalk.green("✓") : chalk.red("✗");
+}
+
+/**
+ * The mark for an `executions` row, where two `stop_reason`s mean NEITHER pass
+ * nor fail and must not be rendered as one:
+ *
+ *  - `skipped` — cascade-skipped by an upstream failure/gate. Stored
+ *    `success = 0` so it re-evaluates on resume, but it never ran.
+ *  - `condition_not_met` — a generic-loop `until_bash` exit check that ran
+ *    fine and came back RED. Stored `success = 1` because the CHECK
+ *    succeeded; the loop simply isn't finished. A green ✓ would read as
+ *    "the gate passed", which is the opposite of what happened.
+ */
+export function execMark(success: boolean | undefined, stopReason?: string): string {
+  if (stopReason === "skipped") return chalk.dim("⊘");
+  if (stopReason === "condition_not_met") return chalk.dim("↻");
+  return checkmark(success);
 }
 
 /**

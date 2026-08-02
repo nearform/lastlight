@@ -3,6 +3,8 @@ import { getWorkflow } from "#src/workflows/loader.js";
 import {
   CI_FIX_MARKER_POSTCONDITION,
   DIAGNOSIS_MARKER_POSTCONDITION,
+  parseFixOutcomeMarker,
+  renderAttemptLine,
 } from "#src/engine/fix-markers.js";
 import { VERIFY_SCRIPT_NAME } from "#src/engine/fix-scratch.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "#src/workflows/target-policy.js";
@@ -84,7 +86,56 @@ describe.each(["pr-fix", "dependabot-ci-fix"])("%s — the local push gate", (na
 
   it("declares the gate loop with a persistent context", () => {
     expect(fix.generic_loop?.fresh_context).toBe(false); // iteration 2 sees iteration 1
-    expect(fix.generic_loop?.until).toBeUndefined(); // the SCRIPT is the gate, not prose
+    expect(fix.generic_loop?.until_bash).toBeTruthy(); // the SCRIPT is still the gate
+  });
+
+  /**
+   * The push short-circuit. `until` is evaluated BEFORE `until_bash` and skips
+   * it entirely when it matches, so this is the one place the loop can say
+   * "there is nothing left to gate".
+   *
+   * Once the agent has pushed, the commit is on the branch and GitHub's checks
+   * are running against it — a strictly better authority than a fresh container
+   * re-running a slower copy of the same suite. Run `49c101aa` paid 6m48s for
+   * that copy, on a commit GitHub had already passed 4m30s earlier.
+   */
+  it("short-circuits the gate once the agent has pushed", () => {
+    expect(fix.generic_loop?.until).toBe("output.contains('outcome=pushed tried=')");
+  });
+
+  it("matches a live CI_FIX_COMPLETE line and NOT a replayed journal line", () => {
+    const needle = fix.generic_loop!.until!.match(/^output\.contains\('(.+)'\)$/)![1];
+
+    // The live marker, exactly as `skills/fixing/SKILL.md` specifies it.
+    const live = `${CI_FIX_MARKER_POSTCONDITION} pr=7 attempt=1 outcome=pushed tried=regen lockfile gate=green`;
+    expect(live).toContain(needle);
+    expect(parseFixOutcomeMarker(live)?.outcome).toBe("pushed");
+
+    // The `{{priorAttempts}}` line an EARLIER attempt left behind, replayed into
+    // this prompt and liable to be quoted back in the agent's own prose. It
+    // carries `outcome=pushed` — which is exactly why the needle can't be that
+    // alone — but `renderAttemptLine` deliberately never renders `tried=`.
+    const replayed = renderAttemptLine(1, {
+      diagnosis: {
+        pr: 7, attempt: 1, class: "env-mismatch", rawClass: "env-mismatch",
+        cause: "node 22 vs 20", ciVsLocal: "node version", unreproducible: [],
+      },
+      fix: { pr: 7, attempt: 1, outcome: "pushed", rawOutcome: "pushed", tried: "bump", gate: "green", rawGate: "green" },
+    })!;
+    expect(replayed).toContain("outcome=pushed");
+    expect(replayed).not.toContain(needle);
+  });
+
+  it("still gates the outcomes that pushed nothing", () => {
+    const needle = fix.generic_loop!.until!.match(/^output\.contains\('(.+)'\)$/)![1];
+    // No push ⇒ no new commit ⇒ no GitHub check ⇒ the local gate is the only
+    // evidence there is, and its RED verdict is what earns the next iteration.
+    // Short-circuiting these too would exit every loop at iteration 1 and turn
+    // `fix.localIterations` into dead config.
+    for (const outcome of ["no-change", "gave-up"]) {
+      const line = `${CI_FIX_MARKER_POSTCONDITION} pr=7 attempt=1 outcome=${outcome} tried=bumped the pin gate=red`;
+      expect(line).not.toContain(needle);
+    }
   });
 
   it("reads both loop budgets from the run's effective fix config", () => {

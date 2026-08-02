@@ -894,6 +894,19 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
    harness scores identical to the one the agent ran and reported on — the agent
    executes the script directly, so its shebang is honoured there.
 
+   That is the **unpushed** path, and it is the only path the harness-side gate
+   still runs on. Both fix loops carry
+   `until: "output.contains('outcome=pushed tried=')"` ahead of the
+   `until_bash`, and `until` short-circuits it: once the agent reports
+   `outcome=pushed`, the commit is on the branch, GitHub's checks are running
+   against it, and a fresh container re-running a slower copy of that suite can
+   change nothing — the gate's exit code only decides whether to spend another
+   iteration. This deliberately leaves the agent's self-reported `gate=green` as
+   the only local check *after* a push, which costs nothing that was not already
+   given up: the gate runs after the push in this flow and so never gated it.
+   See [Workflow engine](/spec/06-workflow-engine) → "The fix family's push
+   short-circuit" for the full trade-off.
+
    The gate is also **recorded**: the marker harvest reads it (never drains it —
    it is the live gate the next iteration runs) onto
    `scratch.fixMarkers.verifyScript`, where the admin run detail panel renders

@@ -162,8 +162,55 @@ phases:
     # and the agent disagree about the same file; `bash` is a superset of the
     # shell any gate script here targets, so it agrees with a `#!/bin/sh`,
     # `#!/usr/bin/env bash`, or shebang-less script alike.
+    #
+    # `until:` is checked FIRST and short-circuits `until_bash` entirely
+    # (phase-executor.ts: `if (!conditionMet && loop.until_bash)`), so it is
+    # where "there is nothing left for the gate to gate" belongs. The one case
+    # that qualifies is `outcome=pushed`: the commit is already ON the branch,
+    # GitHub's checks started against it the moment it landed, and they are the
+    # strictly better authority — the real CI environment rather than a sandbox
+    # approximation of it, warm rather than a cold container, and running
+    # against every matrix leg we cannot reproduce here. Run `49c101aa` is the
+    # bill for not saying so: the agent pushed at 11:03:31 having already run
+    # the whole suite itself, GitHub went fully green at 11:06:25, and the
+    # harness spent 11:04:00–11:10:48 in a fresh container re-running the same
+    # suite a third time before agreeing. The gate's exit code could not have
+    # changed anything by then — all it decides is whether to spend ANOTHER
+    # agent iteration, and a pushed fix has nothing left to iterate on.
+    #
+    # It short-circuits on `pushed` ONLY. `no-change` / `gave-up` still pay for
+    # the gate, deliberately: nothing was pushed, so there is no new commit, no
+    # new check run and no external authority — the local gate is the only
+    # evidence that exists, and its RED verdict is precisely what earns the
+    # agent the next iteration. Short-circuiting all three outcomes would exit
+    # every loop at iteration 1 and quietly turn `fix.localIterations` into
+    # dead config.
+    #
+    # The needle carries `tried=` on purpose. `outcome=pushed` on its own also
+    # appears in a rendered `{{priorAttempts}}` journal line from an EARLIER
+    # attempt (`renderAttemptLine`: `… | outcome=pushed gate=green`), which this
+    # prompt replays — the same replayed-line false match that forced the
+    # `skip_if` rows above off `phaseOutputs` and onto the parsed `scratch`
+    # value. Inside a loop iteration `scratch` is not an option (the scheduler
+    # refreshes it per PHASE node, not per iteration, so it is stale here), but
+    # `renderAttemptLine` deliberately omits `tried=`, so `outcome=pushed tried=`
+    # matches a LIVE `CI_FIX_COMPLETE:` line and nothing else. A marker that
+    # reorders its fields simply fails to match and the gate runs exactly as
+    # before — the fallback is the old behaviour, which is the right way round.
+    #
+    # What this gives up, stated plainly: after a push the harness no longer has
+    # an independent check on the agent's self-reported `gate=green`. That reads
+    # like the `sh`-vs-`bash` bug above and is not the same thing, because the
+    # gate in this flow runs AFTER the push and therefore never gated it — the
+    # agent's self-report was already the only thing between a bad fix and the
+    # branch, on every run this workflow has ever done. What actually catches a
+    # bad fix is untouched: GitHub's checks go red, `pr.checks_failed`
+    # re-dispatches this family, and `fix.maxAttempts` / `fix.maxCostUsd` bound
+    # the retries. The `bash`-not-`sh` fix still matters for the UNPUSHED path,
+    # which is where the loop's iterations actually live.
     generic_loop:
       max_iterations: { from: fix.localIterations, default: 2 }
+      until: "output.contains('outcome=pushed tried=')"
       until_bash: "if [ -f .git/lastlight-verify.sh ]; then bash .git/lastlight-verify.sh; else echo 'no .git/lastlight-verify.sh — gate=skipped, treated as RED'; exit 1; fi"
       fresh_context: false
     messages:
