@@ -824,7 +824,7 @@ function applyIntervention(
 export function interventionKey(intervention: PrIntervention | null | undefined): string | null {
   if (!intervention) return null;
   const { at, via, by, note } = intervention;
-  return `${at} ${via} ${by ?? ""} ${note ?? ""}`;
+  return JSON.stringify([at, via, by ?? "", note ?? ""]);
 }
 
 /**
