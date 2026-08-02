@@ -26,18 +26,83 @@ import type { GitHubClient } from "./github/github.js";
 import type { CiFailureReport } from "./github/github.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
 import { prScopedWorkflows } from "../workflows/pr-scope.js";
-import { REQUIRES_HUMAN_LABEL } from "../cron/dependabot-discovery.js";
 import { readHarvestedMarkers, type HarvestedFixMarkers } from "./fix-harvest.js";
 import {
   ATTEMPT_FREE_CLASSES,
   boundAttemptLines,
   renderAttemptLine,
+  renderInterventionLine,
   type DiagnosisClass,
 } from "./fix-markers.js";
-import { boundNotes, coerceNotes, markNotesStale, type PrNote } from "./pr-notes.js";
+import {
+  boundNotes,
+  coerceNotes,
+  markNotesStale,
+  sanitizeNoteText,
+  type PrNote,
+} from "./pr-notes.js";
+import { REQUIRES_HUMAN_LABEL } from "../cron/dependabot-discovery.js";
 
 /** Aggregate check state for a ref, as {@link GitHubClient.getChecksConclusion} reports it. */
 export type ChecksState = "passing" | "failing" | "pending" | "none";
+
+/**
+ * How a retry arrived. Three surfaces, ONE record (03-retry-intervention.md).
+ *
+ * - `comment` — `@<bot> retry [reason]`, already maintainer-gated by the
+ *   `author_association` check that governs the whole `@`-mention path.
+ * - `label` — a human took `requires-human` off. Maintainer-gated for free:
+ *   GitHub requires triage permission to change a label.
+ * - `api` — the admin endpoint behind `lastlight pr retry`, gated by the
+ *   authenticated admin session.
+ */
+export type InterventionVia = "comment" | "label" | "api";
+
+/**
+ * The last time a human told us to try again — the one thing that makes an
+ * escalated problem dispatchable without a new commit.
+ *
+ * `by` and `note` are recorded for DISPLAY and for the journal. **No decision
+ * function reads either** — the same rule {@link PrNote} lives under. Capability
+ * is checked at the surface (`author_association`, GitHub's own label
+ * permissions, or the admin session); identity is never a decision input
+ * (locked decision 5). There is no precedence between two maintainers either:
+ * last one wins (locked decision 6), which is what one nullable field with a
+ * timestamp gives for free.
+ */
+export interface PrIntervention {
+  at: string;
+  /** The head SHA the retry was asked for — the retry's own idempotency key. */
+  atSha: string;
+  /** How it arrived: a comment, a label removal, or the admin API. */
+  via: InterventionVia;
+  by?: string;
+  note?: string;
+}
+
+/**
+ * What a SURFACE hands in. `at` and `atSha` are stamped by
+ * {@link applyDerivedState}, so no caller can date a retry itself or key one to
+ * a head SHA it did not read.
+ */
+export interface InterventionRequest {
+  via: InterventionVia;
+  by?: string;
+  /** Free text from the comment / CLI. Sanitized on the way in; never trusted. */
+  note?: string;
+}
+
+/**
+ * The phase a STANDALONE retry record terminates on — `recordIntervention`'s row
+ * (`./pr-escalation.ts`, which re-exports this as its public name).
+ *
+ * Defined HERE, at the reading end, because the value is load-bearing on this
+ * side: {@link applyDerivedState} has to recognise the row to keep it out of
+ * {@link PrState.assessedHeadShaByWorkflow}. Importing it from
+ * `./pr-escalation.ts` would close a module cycle (that module already imports
+ * this one), so the definition lives on the side with no outbound edge.
+ */
+export const INTERVENTION_PHASE = "retry-requested";
 
 /**
  * Everything the harness knows about one pull request at one moment.
@@ -80,8 +145,8 @@ export interface PrState {
    * Derived here rather than left to each call site so the decision functions
    * stay pure over the snapshot and never need the bot identity. It is the
    * discriminator behind both the attempt table (our push = same problem;
-   * anyone else's = the world moved) and the stateful `requires-human` guard
-   * (our own commit on top of an escalation does not count as intervention).
+   * anyone else's = the world moved) and the {@link escalatedAtSha} guard (our
+   * own commit on top of an escalation does not count as intervention).
    */
   headIsOurs: boolean;
   /** The PR's head branch — what a fix run clones and pushes to. */
@@ -155,18 +220,58 @@ export interface PrState {
   attempt: number;
   /** Consecutive `flaky` diagnoses so far, bounded by `fix.maxFlakyDeferrals`. */
   flakyDeferrals: number;
-  /** Head SHA at which one of OUR runs escalated this PR, or null. */
+  /**
+   * Head SHA at which one of OUR runs escalated this PR, or null.
+   *
+   * The WHOLE of the escalation state. There is no companion "who applied the
+   * label" field, and its absence is the point: `requires-human` is a
+   * notification, read by nothing, so `escalatedAtSha !== null` is the only
+   * question a decision asks — "did a run of ours stop here, and is this still
+   * the head it stopped at?". A maintainer who wants the bot off a PR applies
+   * the HOLD label instead, which is an instruction rather than something
+   * inferred from a label we also write ourselves (02-hold-label.md).
+   *
+   * Written by `./pr-escalation.ts` and by nothing else, which is why that
+   * module records a run row BEFORE it labels: a skip writes no row, so an
+   * escalation that stayed a row-less skip would never persist this and would
+   * re-comment on every subsequent event.
+   *
+   * **Consumed by an {@link intervention}.** A recorded retry clears this back
+   * to null — that is how a re-arm becomes visible to the pure decision
+   * functions, which see only the snapshot. The mechanism stays bounded because
+   * the next escalation writes a fresh value at the same head while the
+   * intervention is by then the one the prior run already saw.
+   */
   escalatedAtSha: string | null;
   /**
-   * Who put `requires-human` on this PR:
-   * - `"us"` — a run of ours escalated it (we know the SHA, so a later push
-   *   clears the guard automatically).
-   * - `"human"` — the label is present but no run of ours escalated: a
-   *   maintainer applied it to mean "bot, stay out". A hard, permanent
-   *   override.
-   * - `null` — not escalated.
+   * The last time a human told us to try again, or null — the RETRY direction
+   * of human intent, and the counterpart to {@link escalatedAtSha}
+   * (03-retry-intervention.md).
+   *
+   * Before this field the state machine modelled *the PR's problem* precisely
+   * and *human intent* not at all: the only way to say "a human intervened" was
+   * that the head SHA changed and we did not author it, which is an INFERENCE
+   * FROM A COMMIT rather than a record of a decision. Two of the three things a
+   * maintainer would naturally try — commenting, removing the label — cleared
+   * the escalation guard without moving the budget window, so both fell straight
+   * back through `budget-exhausted` and posted a duplicate escalation comment.
+   *
+   * Recording it fixes both halves at once: `sameProblem` reads it, so a retry
+   * re-arms the attempt counter AND the cost baseline exactly as a push does
+   * (locked decision 7), and the record is what makes the re-arm ONCE-ONLY —
+   * the next dispatch reads the same intervention back off the prior run's
+   * snapshot and does not re-arm again.
+   *
+   * `by` and `note` are for display and for the journal. **No decision function
+   * reads either** — see {@link PrIntervention}.
+   *
+   * Written wherever the retry is recorded: on the dispatched run's own
+   * snapshot when the retry results in a run, and on a standalone row
+   * (`recordIntervention`, `./pr-escalation.ts`) when it does not — the same
+   * "a skip writes no row, so the record must" reasoning `escalatePr` is built
+   * on.
    */
-  escalatedBy: "us" | "human" | null;
+  intervention: PrIntervention | null;
   /**
    * Head SHA at which we told this PR's author we cannot fix a fork, or null.
    *
@@ -216,10 +321,22 @@ export interface PrState {
    * is fresh.
    *
    * Deliberately NOT carried across a run that diagnosed nothing — unlike
-   * {@link flakyDeferrals}, which persists. That asymmetry is what keeps the
-   * manual exit working: a maintainer who removes `requires-human` by hand is
-   * asking for another try, and a remembered `infra-dependent` would re-escalate
-   * on the next event and put the label straight back.
+   * {@link flakyDeferrals}, which persists — and cleared outright by a fresh
+   * problem, whether the freshness came from a push or from an
+   * {@link intervention}. Both halves exist so that a remembered
+   * `infra-dependent` cannot re-escalate on the next event and put the label
+   * straight back.
+   *
+   * That was written as *"what keeps the manual exit working"*, and until
+   * 03-retry-intervention.md it only described one of the three cases. Removing
+   * `requires-human` by hand did clear a remembered `not-retryable` — but
+   * `budget-exhausted` and `attempts-exhausted` do not read this field at all,
+   * so the label removal cleared the guard, the budget gate fired anyway, and
+   * the label went straight back with a duplicate comment. **The manual exit
+   * now works for all three**, because it is no longer this field that carries
+   * it: a retry is a RECORD ({@link intervention}), it re-arms the counter and
+   * the cost baseline together, and this field being null is one consequence of
+   * that rather than the whole mechanism.
    */
   priorDiagnosisClass: DiagnosisClass | null;
   /**
@@ -259,6 +376,12 @@ export interface PrState {
    * works because correct-but-stopped outcomes (`flaky`, `infra-dependent`,
    * `upstream-broken`) now record `succeeded`: before that, the dedup did not
    * fire for exactly the cases that must not be re-attempted.
+   *
+   * A `retry-requested` row is the one `succeeded` row that never counts — it
+   * records a dispatch that did NOT happen, which is the opposite of the claim
+   * this field makes — and the fix family's entries are dropped entirely while a
+   * retry asked at this head is still waiting for a run to serve it. See
+   * `unassessForPendingRetry`.
    */
   assessedHeadShaByWorkflow: Record<string, string>;
   /**
@@ -313,6 +436,17 @@ export interface PrStateDeps {
    * existing test) still gets the exclusion.
    */
   botName?: string;
+  /**
+   * A retry that arrived WITH this event — `@<bot> retry` on the comment route,
+   * or `lastlight pr retry` on the admin route.
+   *
+   * Handed to the resolver rather than written by the caller afterwards, because
+   * the whole point of the record is that `sameProblem` reads it: an
+   * intervention applied after the snapshot was derived would re-arm nothing.
+   * The `label` surface needs no equivalent — its evidence is the live label
+   * read, which is already here.
+   */
+  intervention?: InterventionRequest;
 }
 
 /** The App slug behind a `<slug>[bot]` login. */
@@ -372,7 +506,7 @@ export async function resolvePrState(
     attempt: 1,
     flakyDeferrals: 0,
     escalatedAtSha: null,
-    escalatedBy: null,
+    intervention: null,
     forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
@@ -498,6 +632,20 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   const succeeded = deps.db.runs.latestSucceededForTriggers(prScoped, triggerId);
   state.assessedHeadShaByWorkflow = {};
   for (const [name, run] of Object.entries(succeeded)) {
+    // A `retry-requested` row is not evidence of assessment — it is the record
+    // of a dispatch that DID NOT HAPPEN (`recordIntervention`, written when a
+    // retry is re-armed and then skipped for an unrelated reason such as
+    // `upstream-broken`). It is stamped `succeeded` at the current head like
+    // every other ledger row, so counting it here made the one row that exists
+    // to preserve a maintainer's ask the thing that swallowed it: the next cold
+    // resolve read "we already handled this SHA" and refused the retry with the
+    // budgets sitting freshly armed.
+    //
+    // Skipping it drops the workflow's entry rather than falling back to an
+    // older row, which is the conservative direction for this field: worst case
+    // we re-assess a head, and the un-assess below has to be able to override a
+    // real run at this head anyway.
+    if (run.currentPhase === INTERVENTION_PHASE) continue;
     const sha = priorPrState(run.context)?.headSha;
     if (typeof sha === "string" && sha) state.assessedHeadShaByWorkflow[name] = sha;
   }
@@ -513,14 +661,26 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   // just the fix family, because it is keyed on the PR (10-pr-memory.md). Two
   // things read it: the journal (a `pr-review` between two fix attempts carries
   // the accumulation forward and may have added to it) and the escalation
-  // record, which has to answer "have we ever touched this PR at all" and would
-  // get the wrong answer from the fix family alone. Falls back to the
-  // fix-family row when there is no wider one.
+  // record, because `escalatePr` records under whichever workflow was
+  // dispatching — which may be `dependabot-pr-merge` or `pr-review`, neither of
+  // which the fix family would find. Falls back to the fix-family row when there
+  // is no wider one.
   const priorAny = deps.db.runs.latestForTrigger(prScoped, triggerId) ?? prior;
   const priorAnyState = priorPrState(priorAny?.context);
 
-  applyEscalationRecord(state, priorState, priorAny, priorAnyState);
-  state.notes = deriveNotes(state, priorAny, priorAnyState);
+  applyEscalationRecord(state, priorState, priorAnyState);
+
+  // The RETRY direction of human intent (03-retry-intervention.md). Resolved
+  // BEFORE everything below, because `retried` is one of the two things that
+  // make a problem fresh — and it may clear {@link PrState.escalatedAtSha},
+  // which `applyEscalationRecord` has just carried forward.
+  const retried = applyIntervention(state, priorState, priorAnyState, deps);
+
+  state.notes = deriveNotes(state, priorAny, priorAnyState, retried);
+
+  // …and an ask still waiting for a run takes the head back off the
+  // `already-assessed` dedup, for as many ticks as that takes.
+  unassessForPendingRetry(state, succeeded);
 
   // The fork-PR notice's dedup, carried forward off the WIDEST prior row for
   // the same reason the escalation record is: `noticeForkPr` records under
@@ -532,10 +692,11 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
 
   // The cost WINDOW, on the same boundary the attempt counter uses. `sameProblem`
   // is the whole definition: while it holds we carry the prior run's baseline,
-  // and when someone else pushes we re-stamp it to the lifetime total so the
-  // fresh problem starts at zero — which is exactly what makes a maintainer's
-  // push re-arm the budget the way it already re-armed the attempt counter.
-  const freshProblem = !sameProblem(state, priorState);
+  // and when it breaks we re-stamp it to the lifetime total so the fresh problem
+  // starts at zero — which is exactly what makes a maintainer's push, or a
+  // recorded RETRY, re-arm the budget the way it re-arms the attempt counter.
+  // One predicate, both budgets: re-arming only the counter is #256.
+  const freshProblem = !sameProblem(state, priorState, retried);
   const priorBaseline =
     typeof priorState?.costBaselineUsd === "number" ? priorState.costBaselineUsd : 0;
   state.costBaselineUsd = freshProblem ? lifetimeCostUsd : priorBaseline;
@@ -550,6 +711,7 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
     priorState,
     priorMarkers,
     prior ? didSpendAttempt(prior, deps) : false,
+    retried,
   );
   state.attempt = history.attempt;
   state.priorAttempts = history.priorAttempts;
@@ -558,76 +720,219 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
 }
 
 /**
- * Whose `requires-human` is this, and at which head did we put it there?
+ * Drop the fix family's "already assessed at this head" entries while a retry
+ * asked AT THIS HEAD is still waiting to be served.
  *
- * The two fields resolve together because they are one answer, and splitting
- * them is how they come to contradict each other.
+ * Without this the `already-assessed` skip eats every retry that did not arrive
+ * as an explicit `@bot` request (the label and API surfaces): our own escalation
+ * row — and the attempt that exhausted the budget before it — both record
+ * `succeeded` at this head, so the dedup reads "we already handled this SHA" and
+ * the retry becomes a no-op with the budgets sitting freshly armed. A push
+ * clears the same guard by changing the SHA; a retry has to say it.
  *
- * `requires-human` is a NOTIFICATION (09 → S1). The STATE is "**we** escalated
- * at head SHA X", because that is the only form a later push can invalidate —
- * which is what distinguishes a bot escalation (cleared by the next human push,
- * with no label to remove by hand) from a maintainer applying the label to mean
- * "bot, stay out" (a permanent override we must honour).
+ * **The ask survives the tick it arrived on**, which is the part that is easy to
+ * get wrong and was wrong: this used to fire only when the intervention was NEW
+ * to this dispatch, so a retry recorded on one tick and dispatched on a later
+ * one — exactly what `recordIntervention`'s standalone row exists for, and what
+ * the comment and label surfaces produce whenever the gate then skips for an
+ * unrelated reason — was un-assessed on the tick that could not use it and
+ * re-assessed on the tick that could. Hence the predicate is "has a run SERVED
+ * this ask", not "did this ask arrive just now".
  *
- * `escalatedAtSha` is written by `./pr-escalation.ts` and by nothing else — but
- * `escalatePr` is not the only way OUR label reaches a pull request, and the two
- * other routes leave it on with no SHA behind it:
+ * A run has served it when the row claiming the head carries the same
+ * {@link interventionKey} on its own snapshot: `dispatchWorkflow` persists the
+ * resolved snapshot on `context.prState`, so a run dispatched by the retry
+ * carries it and a run that finished before the ask does not. That is what
+ * bounds the whole clause — one extra window per ask, not a dedup switched off
+ * for the life of the pull request — and it is why the `retry-requested` row
+ * itself must be kept out of `assessedHeadShaByWorkflow` above: it carries the
+ * record forward, so it would read as having served an ask it was written to
+ * defer.
+ */
+function unassessForPendingRetry(state: PrState, succeeded: Record<string, WorkflowRun>): void {
+  const ask = state.intervention;
+  if (!ask || !state.headSha || ask.atSha !== state.headSha) return;
+  const asked = interventionKey(ask);
+  for (const name of PR_FIX_SHAPED_WORKFLOWS) {
+    if (state.assessedHeadShaByWorkflow[name] !== state.headSha) continue;
+    const seen = interventionKey(
+      coerceIntervention(priorPrState(succeeded[name]?.context)?.intervention),
+    );
+    if (seen !== asked) delete state.assessedHeadShaByWorkflow[name];
+  }
+}
+
+/**
+ * Resolve {@link PrState.intervention}, and answer the one question the rest of
+ * the derivation needs: **has a human asked for another try since the prior run
+ * saw one?**
  *
- * 1. **The agent applies it mid-run.** The packaged prompts instruct it to —
- *    `prompts/dependabot-ci-fix.md` when it cannot land the PR, and
- *    `prompts/dependabot-pr-merge.md` for a FUNCTIONAL bump, by design.
- *    `context.prState` is written at DISPATCH, before any phase runs, and is
- *    never rewritten, so however correct that label is, the run persists no
- *    escalation record.
- * 2. **The row predates this module.** Every PR already carrying the label at
- *    upgrade has run rows with no `prState` at all.
+ * Three inputs, in order of authority:
  *
- * Under a bare `escalatedAtSha ? "us" : "human"` test both read as a
- * MAINTAINER's permanent hold: the bot mistaking its own label for a "stay
- * out", which is the exact one-way door 09 → S1 set out to remove — and case 2
- * does it to every already-labelled PR at once, on upgrade.
+ * 1. An intervention handed in with this event ({@link PrStateDeps.intervention})
+ *    — the comment and API surfaces.
+ * 2. The LABEL surface, detected rather than delivered. No webhook is needed:
+ *    "we escalated at this head, the head has not moved, and our
+ *    `requires-human` is gone" can only be a human having taken it off. It is
+ *    trivially detectable only because 02-hold-label.md demoted the label to a
+ *    pure notification — its absence is now pure evidence with no competing
+ *    meaning.
+ * 3. Whatever the prior run already carried, folded forward exactly as
+ *    {@link PrState.escalatedAtSha} and {@link PrState.forkNoticedAtSha} are.
  *
- * So the discriminator is not the SHA but **whether any run of ours has ever
- * touched this PR**. A label on a PR no run of ours has ever seen can only be a
- * maintainer's; that is the hard permanent override, and it is preserved
- * exactly. A label on a PR we have worked is ours. Misreading in this direction
- * costs at most further dispatches on a PR already bounded by
- * `fix.maxAttempts` and `fix.maxCostUsd`; misreading it the other way is
- * permanent and needs a human to un-stick each PR by hand.
+ * The answer is computed against the FIX-FAMILY prior specifically, not against
+ * whatever the record was folded off: an intervention first recorded on a
+ * `pr-review` run's snapshot has not yet re-armed the fix family's counter, and
+ * comparing against the wider row would silently swallow it.
  *
- * When we conclude `"us"` with no recorded SHA, the prior run's head stands in
- * for it — that IS the head we were at when the label landed. Without it
- * `resolveFixDisposition`'s "same problem" test would compare against null, so
- * a bot that had just said "a human must look at this" would keep re-attempting
- * until the budget ran out, and `dependabot-pr-merge` would re-label and
- * re-comment a functional bump on every event.
+ * **A retry consumes the escalation.** Clearing `escalatedAtSha` is how the
+ * re-arm becomes visible to the pure decision functions, which see only the
+ * snapshot — and it is what bounds the whole mechanism: the next escalation
+ * writes a fresh `escalatedAtSha` at the same head, the intervention is by then
+ * the one the prior run already saw, and the `escalated:` skip binds again. No
+ * ping-pong, and no second budget to keep in step (locked decision 9's
+ * unbounded-retries property is bounded by the escalation, not by a counter).
+ */
+function applyIntervention(
+  state: PrState,
+  prior: PersistedPrState | null,
+  priorAny: PersistedPrState | null,
+  deps: PrStateDeps,
+): boolean {
+  const carried = coerceIntervention(prior?.intervention) ?? coerceIntervention(priorAny?.intervention);
+  state.intervention = newIntervention(state, carried, deps) ?? carried;
+
+  const seen = interventionKey(coerceIntervention(prior?.intervention));
+  const retried = !!state.intervention && interventionKey(state.intervention) !== seen;
+  if (retried) state.escalatedAtSha = null;
+  return retried;
+}
+
+/**
+ * The identity of one ask — "is this the same retry the prior run already
+ * consumed, or a new one?".
+ *
+ * The timestamp alone is not enough, and the reason is a real one rather than a
+ * theoretical one: `at` has millisecond resolution, so two asks that land in the
+ * same millisecond read as one and the second silently re-arms nothing. The
+ * whole tuple is what a human actually varied — when, how, who, and why — and
+ * two asks identical on all four are the same ask for every purpose this has.
+ *
+ * Shared with `recordIntervention` (`./pr-escalation.ts`), so the row-writing
+ * side and the folding side cannot disagree about what "already recorded" means.
+ */
+export function interventionKey(intervention: PrIntervention | null | undefined): string | null {
+  if (!intervention) return null;
+  const { at, via, by, note } = intervention;
+  return `${at} ${via} ${by ?? ""} ${note ?? ""}`;
+}
+
+/**
+ * A retry recorded by THIS dispatch, or null when there is nothing new.
+ *
+ * Refuses without a head SHA, for the same reason `escalatePr` does: the SHA is
+ * the record's idempotency key, and one keyed to `""` would match nothing and
+ * re-arm forever.
+ */
+function newIntervention(
+  state: PrState,
+  carried: PrIntervention | null,
+  deps: PrStateDeps,
+): PrIntervention | null {
+  if (!state.headSha) return null;
+
+  const req = deps.intervention;
+  if (req && (req.via === "comment" || req.via === "label" || req.via === "api")) {
+    // The note is FREE TEXT a maintainer typed, so it goes through the journal's
+    // own sanitizer before it is stored — flattened to one line, control
+    // characters stripped, and rejected outright if it carries `class=` or a
+    // marker tag. That is what lets it be replayed into a later prompt (as the
+    // journal's seam line, and as a `PrNote`) without being able to forge a
+    // token the parser reads.
+    const note = sanitizeNoteText(typeof req.note === "string" ? req.note : "");
+    return {
+      at: new Date().toISOString(),
+      atSha: state.headSha,
+      via: req.via,
+      ...(typeof req.by === "string" && req.by ? { by: req.by.slice(0, 100) } : {}),
+      ...(note ? { note } : {}),
+    };
+  }
+
+  // Surface 2 — `requires-human` came off by hand.
+  //
+  // Two guards beyond the obvious one. The labels have to be REAL: a failed
+  // `getPullRequest` degrades them to `[]`, which would read as "the label is
+  // gone" on every event we could not read. And a retry already recorded at
+  // this head is not re-detected — that is what makes the record once-only
+  // here, since a skip writes no run row for a second detection to read back.
+  //
+  // The known imprecision: a `requires-human` write that 403'd is
+  // indistinguishable from one a human removed, so an escalation whose label
+  // never landed earns ONE extra window at that head. Bounded (the guard below
+  // stops it repeating at the same head) and deliberately erring toward the
+  // human, since the alternative is a PR we stopped on with nothing on it
+  // saying so.
+  if (
+    state.escalatedAtSha &&
+    state.escalatedAtSha === state.headSha &&
+    !state.labels.includes(REQUIRES_HUMAN_LABEL) &&
+    !state.readErrors.some((e) => e.startsWith("getPullRequest")) &&
+    !(carried && carried.atSha === state.headSha)
+  ) {
+    return { at: new Date().toISOString(), atSha: state.headSha, via: "label" };
+  }
+
+  return null;
+}
+
+/** Read a persisted intervention back, tolerating every shape a JSON column can hold. */
+function coerceIntervention(raw: unknown): PrIntervention | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const via = typeof r.via === "string" ? r.via : "";
+  if (via !== "comment" && via !== "label" && via !== "api") return null;
+  if (typeof r.at !== "string" || !r.at) return null;
+  // Re-sanitized on the way IN as well as out, exactly as `coerceNotes` is: a
+  // row written by an older build must not carry a note past today's rules.
+  const note = sanitizeNoteText(typeof r.note === "string" ? r.note : "");
+  return {
+    at: r.at,
+    atSha: typeof r.atSha === "string" ? r.atSha : "",
+    via,
+    ...(typeof r.by === "string" && r.by ? { by: r.by } : {}),
+    ...(note ? { note } : {}),
+  };
+}
+
+/**
+ * At which head did one of OUR runs escalate this PR?
+ *
+ * One field, one read, no inference. It used to be two fields — this one and an
+ * `escalatedBy: "us" | "human" | null` derived from whether `requires-human` was
+ * present AND whether any run of ours had ever touched the PR — which made the
+ * LABEL a state in practice, exactly what 09 → S1 said it must not be. The
+ * inference was also only ever right on a PR the bot had never worked: on any
+ * other, a maintainer's hand-applied `requires-human` read as the bot's own
+ * escalation and was cleared by the next person's push.
+ *
+ * Deleting it is the fix (02-hold-label.md). The hold a maintainer actually
+ * wants is now its own label, checked at the dispatch gate as a live
+ * precondition; `requires-human` keeps being APPLIED — by `escalatePr` and by
+ * the agent per the dependabot prompts — and is read by nothing.
+ *
+ * What is left is carried forward off the prior run's context, so the stateful
+ * guard costs no new storage, no extra API call and no label mutation (09 → S1).
+ * Read from the fix family first and the wider PR-scoped row second:
+ * `escalatePr` records under whichever workflow was dispatching, which may be
+ * `dependabot-pr-merge` or `pr-review`.
  */
 function applyEscalationRecord(
   state: PrState,
   prior: PersistedPrState | null,
-  priorAny: WorkflowRun | null | undefined,
   priorAnyState: PersistedPrState | null,
 ): void {
-  // Carried forward off the prior run's context, so the stateful guard costs no
-  // new storage, no extra API call and no label mutation (09 → S1). Read from
-  // the fix family first and the wider PR-scoped row second: `escalatePr` records
-  // under whichever workflow was dispatching, which may be `dependabot-pr-merge`
-  // or `pr-review`.
-  const recorded = prior?.escalatedAtSha ?? priorAnyState?.escalatedAtSha ?? null;
-  state.escalatedAtSha = recorded;
-
-  if (!state.labels.includes(REQUIRES_HUMAN_LABEL)) {
-    state.escalatedBy = null;
-    return;
-  }
-  if (!priorAny) {
-    // No run of ours has ever touched this PR, so nobody but a maintainer can
-    // have applied the label. The one case the whole distinction exists for.
-    state.escalatedBy = "human";
-    return;
-  }
-  state.escalatedBy = "us";
-  state.escalatedAtSha = recorded ?? priorAnyState?.headSha ?? null;
+  state.escalatedAtSha = prior?.escalatedAtSha ?? priorAnyState?.escalatedAtSha ?? null;
 }
 
 /**
@@ -647,16 +952,45 @@ function applyEscalationRecord(
  *
  * Both sources are re-sanitized on the way through (`coerceNotes`), so a row
  * written by an older build cannot carry a note past today's rejection rules.
+ *
+ * THE STALENESS BOUNDARY IS {@link headMoved}, NOT {@link sameProblem}. Those
+ * used to be the same predicate and are not any more: a RETRY makes the problem
+ * fresh for the two budgets without anything about the pull request having
+ * changed, so marking the journal stale on one would be a claim about the head
+ * that is simply untrue — the head is the same commit it was a minute ago. The
+ * doc comment above is the test: *"a claim about the old head is not evidence
+ * about the new one"* only bites when there IS a new head.
+ *
+ * A maintainer's own reason for the retry is appended here as a note, so it
+ * reaches the next attempt's prompt through the one channel that is already
+ * bounded and fenced. Like every other note it informs and cannot authorise.
  */
 function deriveNotes(
   state: PrState,
   priorRun: WorkflowRun | null | undefined,
   prior: PersistedPrState | null,
+  retried: boolean,
 ): PrNote[] {
   const carried = coerceNotes(prior?.notes);
   const harvested = coerceNotes(priorRun ? readHarvestedMarkers(priorRun)?.notes : null);
   const merged = boundNotes([...carried, ...harvested]);
-  return sameProblem(state, prior) ? merged : markNotesStale(merged);
+  const folded = headMoved(state, prior) ? markNotesStale(merged) : merged;
+  const note = retried ? state.intervention?.note : undefined;
+  if (!note) return folded;
+  return boundNotes([
+    ...folded,
+    {
+      at: state.intervention!.at,
+      // No run wrote it, so there is no run id to attribute it to; the
+      // provenance that matters is that a HUMAN asked, which the two fields
+      // below say. `renderNoteLine` drops empty parts.
+      runId: "",
+      workflow: "retry",
+      phase: state.intervention!.via,
+      kind: "finding",
+      text: note,
+    },
+  ]);
 }
 
 /** The four history fields {@link deriveAttemptHistory} produces together. */
@@ -680,12 +1014,37 @@ interface AttemptHistory {
  *
  * So a FRESH PROBLEM clears all three at once. Everything else appends the
  * prior run's rendered line and advances (or does not advance) the counter.
+ *
+ * ## The one asymmetry: the journal survives a retry
+ *
+ * Locked decision 8 (03-retry-intervention.md). Two ways to reach a fresh
+ * problem, and they are NOT the same fresh problem:
+ *
+ * |                       | `attempt` | cost baseline | `priorAttempts`        | `flakyDeferrals` | `priorDiagnosisClass` |
+ * |-----------------------|-----------|---------------|------------------------|------------------|-----------------------|
+ * | push (non-bot head)   | 1         | re-stamped    | **wiped**              | 0                | null                  |
+ * | retry                 | 1         | re-stamped    | **carried + seam line**| 0                | null                  |
+ *
+ * A push changed the code, so prior findings may be stale. A retry changed
+ * nothing but patience — and discarding `priorAttempts` there sends attempt 1
+ * of the new window straight down attempt 1 of the old window's road. On the
+ * PR that produced this plan the journal held the one useful fact: that the
+ * diagnosis had already concluded CI was green at the current head.
+ *
+ * `flakyDeferrals` resets on BOTH. A human intervening is a statement that the
+ * flaky-versus-real inference should start over, and they have better evidence
+ * than the counter does.
+ *
+ * The seam line is not decoration. Without it the journal renders `attempt 1`,
+ * `attempt 2`, and then a run that also calls itself attempt 1, with nothing
+ * saying where the boundary is.
  */
 function deriveAttemptHistory(
   state: PrState,
   prior: PersistedPrState | null,
   priorMarkers: HarvestedFixMarkers | null,
   priorSpent: boolean,
+  retried: boolean,
 ): AttemptHistory {
   const fresh: AttemptHistory = {
     attempt: 1,
@@ -697,17 +1056,35 @@ function deriveAttemptHistory(
   // No prior run of the family at all.
   if (priorAttempt === 0) return fresh;
 
-  // Someone else's push — a maintainer, a Dependabot rebase, a Renovate
-  // recreate. The world moved, so the counter, the journal, the deferral count
-  // and the last verdict are all about a problem that no longer exists.
-  if (!sameProblem(state, prior)) return fresh;
-
   const carried = Array.isArray(prior?.priorAttempts)
     ? prior.priorAttempts.filter((l): l is string => typeof l === "string")
     : [];
   // A run that produced no marker leaves no line, exactly as it consumes no
   // attempt: there is nothing for the next attempt to learn from a crash.
   const line = renderAttemptLine(priorAttempt, priorMarkers);
+
+  // Someone else's push — a maintainer, a Dependabot rebase, a Renovate
+  // recreate. The world moved, so the counter, the journal, the deferral count
+  // and the last verdict are all about a problem that no longer exists.
+  //
+  // Checked BEFORE the retry branch, so a maintainer who pushes AND asks in the
+  // same breath gets the push's semantics: the code changed, which is the
+  // stronger statement about whether the journal still describes anything.
+  if (headMoved(state, prior)) return fresh;
+
+  // A retry. Same head, same code — so the journal is carried and a seam line
+  // marks where the old window ended.
+  if (retried) {
+    return {
+      ...fresh,
+      priorAttempts: boundAttemptLines([
+        ...carried,
+        ...(line ? [line] : []),
+        renderInterventionLine(state.intervention?.note),
+      ]),
+    };
+  }
+
   const priorAttempts = boundAttemptLines(line ? [...carried, line] : carried);
 
   const priorFlaky = typeof prior?.flakyDeferrals === "number" ? prior.flakyDeferrals : 0;
@@ -733,22 +1110,44 @@ function deriveAttemptHistory(
 }
 
 /**
+ * Did SOMEONE ELSE push? The world-moved half of {@link sameProblem}.
+ *
+ * False when the head is unchanged (we made no progress — covers `no-change`
+ * and `gave-up`) and when WE authored the new head (our fix landed and CI is
+ * still red). Split out because the journal's staleness marking needs exactly
+ * this and not the whole predicate: a retry makes the problem fresh without the
+ * head having moved, and a note about a commit that is still the head is not
+ * stale. See {@link deriveNotes}.
+ */
+function headMoved(state: PrState, prior: PersistedPrState | null): boolean {
+  const priorHead = typeof prior?.headSha === "string" ? prior.headSha : "";
+  const headChanged = !!state.headSha && !!priorHead && state.headSha !== priorHead;
+  return headChanged && !state.headIsOurs;
+}
+
+/**
  * Is the live head the same PROBLEM the prior run worked on?
  *
- * True when the head is unchanged (we made no progress — covers `no-change`
- * and `gave-up`) or when WE authored the new head (our fix landed and CI is
- * still red). False only when someone else pushed.
+ * False in exactly two cases, and they are the two ways a human intervenes:
+ * somebody else pushed ({@link headMoved}), or somebody asked us to try again
+ * ({@link PrState.intervention}). **A retry does exactly what a push does** —
+ * locked decision 7 — so it is one predicate rather than a second budget shape,
+ * which is how the old six-sites-disagreeing situation started.
  *
  * THE boundary of a problem, and read in two places on purpose: the attempt
  * counter and {@link PrState.costBaselineUsd}. Those two are the pair of
- * budgets `fix.maxAttempts` and `fix.maxCostUsd` bound, so a maintainer's push
- * has to re-arm both or neither — re-arming only the counter is what let
- * `budget-exhausted` re-comment on every push (#256).
+ * budgets `fix.maxAttempts` and `fix.maxCostUsd` bound, so an intervention has
+ * to re-arm both or neither — re-arming only the counter is what let
+ * `budget-exhausted` re-comment on every push (#256), and it is exactly what
+ * clearing the escalation guard from an `@bot` comment used to do.
  */
-function sameProblem(state: PrState, prior: PersistedPrState | null): boolean {
-  const priorHead = typeof prior?.headSha === "string" ? prior.headSha : "";
-  const headChanged = !!state.headSha && !!priorHead && state.headSha !== priorHead;
-  return !(headChanged && !state.headIsOurs);
+function sameProblem(
+  state: PrState,
+  prior: PersistedPrState | null,
+  retried: boolean,
+): boolean {
+  if (retried) return false;
+  return !headMoved(state, prior);
 }
 
 /**
@@ -773,8 +1172,10 @@ function nextAttempt(
 
   // Someone else's push. The world moved: fresh problem, fresh counter. This is
   // what stops an exhausted human PR being permanently un-fixable for the life
-  // of the PR.
-  if (!sameProblem(state, prior)) return 1;
+  // of the PR. (The RETRY half of "fresh problem" never reaches here —
+  // `deriveAttemptHistory` returns its own table row above — so this reads the
+  // head alone.)
+  if (headMoved(state, prior)) return 1;
 
   // Same head (we made no progress — covers `no-change` and `gave-up`), or a
   // head WE authored on top of it (our fix landed, CI is still red). Same

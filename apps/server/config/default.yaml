@@ -127,6 +127,22 @@ repoConfig:
 bootstrap:
   label: "lastlight:bootstrap"
 
+# The HOLD label. Apply it to ANY issue or pull request and Last Light stops
+# acting on that subject entirely — no triage, no review, no fix, no merge, no
+# comment. Remove it and the bot resumes; there is no record to clear either way.
+#
+# It outranks everything except "we could not read the pull request at all",
+# including an explicit `@<bot> ...` request — which gets exactly one reply
+# naming the label, so a direct instruction is refused rather than ignored.
+# `requires-human` is a NOTIFICATION ("I stopped, a human should look") and is
+# read by nothing; this is the live precondition.
+#
+# Renaming it here changes what the CODE gates on. The packaged prompts create
+# the DEFAULT name in their `github_ensure_labels` pass, so a rename also wants
+# a forked prompt (or the label created by hand). Env: LASTLIGHT_HOLD_LABEL.
+hold:
+  label: lastlight-ignore
+
 explore:
   defaultRepo: null
 

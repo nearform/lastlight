@@ -150,13 +150,20 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		clearing a stale <code>requires-human</code> once a later fix lands green — are
 		owned entirely by <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>,
 		which keeps the classification in one place. <code>requires-human</code> is a
-		<strong>notification, not a state</strong>: what actually holds a PR back is
-		the record that one of our own runs escalated it at a particular head commit,
-		so a maintainer pushing to the PR re-arms it automatically, with no label to
-		remove — while the same label with no run of ours behind it is read as a
-		human saying "stay out" and honoured indefinitely. That one rule is applied
-		at dispatch, so the crons and the webhooks agree; previously the crons
-		treated the label as a one-way door while the webhooks cleared it on success.
+		<strong>notification, not a state</strong>, and nothing in the harness reads
+		it: what actually holds a PR back is the record that one of our own runs
+		escalated it at a particular head commit, so a maintainer pushing to the PR
+		re-arms it automatically, with no label to remove. Two other things re-arm
+		it identically — commenting <code>@last-light retry [reason]</code>, and
+		removing <code>requires-human</code> by hand — and all three reset the
+		attempt counter and the cost budget together (see
+		<a href="/docs/workflows/pr-fix">PR fix</a>). To tell Last Light to
+		stay off a PR entirely, apply the <strong>hold</strong> label
+		(<code>lastlight-ignore</code>, configurable as <code>hold.label</code>) —
+		it blocks every workflow, beats an explicit request, and lifts when you
+		remove it. That one rule is applied at dispatch, so the crons and the
+		webhooks agree; previously the crons treated <code>requires-human</code> as
+		a one-way door while the webhooks cleared it on success.
 		Labels are created on demand (<code>github_ensure_labels</code>).
 	</p>
 

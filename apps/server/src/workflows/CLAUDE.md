@@ -321,9 +321,12 @@ phase when `flakyDeferrals >= fix.maxFlakyDeferrals`, on a shallow copy of the
 loader's cached definition (it is a process-global). Same seam, same run:
 `escalateFixModel` swaps `models["pr-fix"]` for `models["pr-fix-retry"]` above
 `fix.escalateModelAfterAttempt`, before `context.models` is persisted so the
-admin panel shows the model the attempt used. Both read `attempt` /
-`flakyDeferrals` off `request.extra`, where `renderContext` put them at
-dispatch, and both are inert when those are absent.
+admin panel shows the model the attempt used. Both read off `request.extra`,
+where `renderContext` put them at dispatch, and both are inert when those are
+absent — `promoteFlakyDiagnosis` reads `flakyDeferrals`, and `escalateFixModel`
+reads `priorAttempts.length` rather than `attempt`: `attempt` re-arms on a push
+or a recorded retry, the journal survives a retry, so the journal is the count
+that knows how many times the PR has actually been tried.
 
 ## Per-phase egress policy
 

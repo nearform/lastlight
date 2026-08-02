@@ -46,7 +46,7 @@ function liveState(over: Partial<PrState> = {}): PrState {
     attempt: 1,
     flakyDeferrals: 0,
     escalatedAtSha: null,
-    escalatedBy: null,
+    intervention: null,
     forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
@@ -397,35 +397,39 @@ describe("applyDerivedState — the priorAttempts journal", () => {
 });
 
 /**
- * Who owns a `requires-human` label — the one question that decides whether the
- * bot may ever touch the PR again.
+ * `requires-human` is a notification — and now literally so (02-hold-label.md).
  *
- * `escalatedBy: "human"` is a PERMANENT hard override, so reading our own label
- * as a maintainer's is the one-way door 09 → S1 exists to remove. Two routes put
- * our label on a PR with no `escalatedAtSha` behind it: the agent applying it
- * mid-run (the packaged fix and merge prompts both instruct it to, and
- * `context.prState` is written at dispatch and never rewritten), and every run
- * row written before this module existed.
+ * The label used to be read as a decision input, with a companion `escalatedBy`
+ * field inferring WHOSE it was from "have we ever run on this PR". That made the
+ * label a state in practice, and the inference was only ever right on a PR the
+ * bot had never touched: on any other, a maintainer's hand-applied
+ * `requires-human` read as the bot's own escalation and was cleared by the next
+ * person's push. Both are gone. The whole of the escalation state is
+ * `escalatedAtSha`, written by `escalatePr` and by nothing else.
+ *
+ * So every case below asserts the same property from a different angle: the
+ * LABEL changes nothing, and the RECORD changes everything.
  */
-describe("applyDerivedState — whose `requires-human` is this", () => {
+describe("applyDerivedState — `requires-human` is read by nothing", () => {
   const LABELLED = { labels: [REQUIRES_HUMAN_LABEL] };
 
-  it("a maintainer's label on a PR we have NEVER touched is a permanent hold", () => {
-    // The distinction the whole rule exists to preserve. No run of ours has ever
-    // seen this PR, so nobody but a maintainer can have applied the label.
+  it("a maintainer's label on a PR we have never touched no longer holds anything", () => {
+    // THE behaviour change. It used to resolve `escalatedBy: "human"` — a
+    // permanent hard override — and that was the only case the whole inference
+    // existed for. A maintainer who wants this now applies the HOLD label, which
+    // works on every PR rather than only on virgin ones.
     const h = harness();
     const { state } = h.dispatch(LABELLED);
-    expect(state.escalatedBy).toBe("human");
     expect(state.escalatedAtSha).toBeNull();
-    expect(resolveFixDisposition(state, defaultFixConfig()).reason).toMatch(/^human-hold:/);
+    expect(resolveFixDisposition(state, defaultFixConfig()).decision).toBe("run");
   });
 
-  it("a label the AGENT applied mid-run reads as ours, not as a human's", () => {
+  it("a label the AGENT applied mid-run means nothing to the code either", () => {
     // The packaged `dependabot-ci-fix` prompt tells the agent to apply
     // `requires-human` when it cannot land the PR. That run persists no
-    // `escalatedAtSha` — its snapshot was written at dispatch, before the label
-    // existed — so a bare `escalatedAtSha ? "us" : "human"` test latched the PR
-    // dead on the very next event.
+    // `escalatedAtSha` — its snapshot is written at dispatch, before the label
+    // exists — so there is no record, and with no record there is no guard. The
+    // budgets are what bound this PR now, which is what they were always for.
     const h = harness();
     const first = h.dispatch();
     h.finish(first.id, "diagnose", diagnosis("reproducible"));
@@ -433,21 +437,66 @@ describe("applyDerivedState — whose `requires-human` is this", () => {
     expect(first.state.escalatedAtSha).toBeNull();
 
     const next = h.dispatch(LABELLED);
-    expect(next.state.escalatedBy).toBe("us");
-    // The head we were at when the label landed stands in for the SHA nobody
-    // recorded, so the guard binds on THIS problem rather than on nothing.
-    expect(next.state.escalatedAtSha).toBe(first.state.headSha);
-    expect(resolveFixDisposition(next.state, defaultFixConfig()).reason).toMatch(/^escalated:/);
+    expect(next.state.escalatedAtSha).toBeNull();
+    expect(resolveFixDisposition(next.state, defaultFixConfig()).decision).toBe("run");
   });
 
-  it("and it stops holding the moment anyone else pushes", () => {
-    // The anti-latch property, for the agent-applied label too: a new head from
-    // anyone but us is a fresh problem, so the label stops binding with nobody
-    // having to remove it by hand.
+  it("a recorded escalation binds while our notification is still on the PR", () => {
+    // `escalatePr`'s row is the only thing that ever bound, and it still does.
+    // Asserted twice, because the record must be what carries the guard: the
+    // same history re-resolved must produce the same verdict every time, and no
+    // amount of re-reading the PR may turn it into something else.
     const h = harness();
     const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
-    h.dispatch(LABELLED);
+    h.rows[0].context = { prState: { ...first.state, escalatedAtSha: "aaaa111" } };
+
+    for (let i = 0; i < 2; i++) {
+      const { state } = h.dispatch(LABELLED);
+      expect(state.escalatedAtSha).toBe("aaaa111");
+      expect(state.intervention).toBeNull();
+      expect(resolveFixDisposition(state, defaultFixConfig()).reason).toMatch(/^escalated:/);
+    }
+  });
+
+  it("but the label coming OFF is a retry — the one thing `requires-human` still says", () => {
+    // 03-retry-intervention.md, surface 2. No webhook: "we escalated at this
+    // head, the head has not moved, and our label is gone" can only be a human
+    // having removed it — and it is trivially detectable ONLY because Phase 2
+    // demoted the label to a pure notification, so its absence is evidence with
+    // no competing meaning.
+    //
+    // It used to CLEAR the guard without moving the budget window, so the
+    // dispatch fell straight into `budget-exhausted`, re-labelled the PR and
+    // posted a duplicate escalation comment. Now it re-arms.
+    const h = harness();
+    const first = h.dispatch();
+    h.rows[0].context = { prState: { ...first.state, attempt: 4, escalatedAtSha: "aaaa111" } };
+
+    const { state } = h.dispatch(LABELLED);
+    expect(resolveFixDisposition(state, defaultFixConfig()).reason).toMatch(/^escalated:/);
+
+    const removed = h.dispatch();
+    expect(removed.state.intervention).toMatchObject({ via: "label", atSha: "aaaa111" });
+    expect(removed.state.escalatedAtSha).toBeNull();
+    expect(removed.state.attempt).toBe(1);
+    expect(resolveFixDisposition(removed.state, defaultFixConfig()).decision).toBe("run");
+
+    // ONCE. The record is on the dispatched run's own snapshot, so the next
+    // event reads the same intervention back and does not re-arm again — which
+    // is what stops a permanently-unlabelled PR getting a fresh window per tick.
+    const next = h.dispatch();
+    expect(next.state.intervention?.at).toBe(removed.state.intervention?.at);
+    expect(next.state.priorAttempts).toEqual(removed.state.priorAttempts);
+    expect(next.state.priorAttempts.filter((l) => l.includes("retried by request"))).toHaveLength(1);
+  });
+
+  it("and it stops binding the moment anyone else pushes", () => {
+    // The anti-latch property, unchanged: a new head from anyone but us is a
+    // fresh problem, so the record stops binding with nobody having to remove
+    // any label by hand.
+    const h = harness();
+    const first = h.dispatch();
+    h.rows[0].context = { prState: { ...first.state, escalatedAtSha: "aaaa111" } };
 
     const pushed = h.dispatch({
       ...LABELLED,
@@ -455,50 +504,32 @@ describe("applyDerivedState — whose `requires-human` is this", () => {
       headAuthor: "octocat",
       headIsOurs: false,
     });
-    expect(pushed.state.escalatedBy).toBe("us");
     expect(pushed.state.attempt).toBe(1);
     expect(resolveFixDisposition(pushed.state, defaultFixConfig()).decision).toBe("run");
   });
 
-  it("a LEGACY row with no prState does not read as a human hold either", () => {
+  it("a LEGACY row with no prState carries no escalation", () => {
     // On upgrade, every PR already carrying the label has rows of exactly this
-    // shape — so the old test would have latched all of them at once, each
-    // needing a human to un-stick it by hand.
+    // shape. They used to be inferred into `escalatedBy: "us"` with the row's
+    // bare `headSha` standing in for a SHA nobody recorded; now they simply
+    // carry no record, and the PR is dispatchable.
     const h = harness();
     h.recordLegacyRun({ headSha: "aaaa111", owner: "cliftonc", repo: "lastlight" });
 
     const { state } = h.dispatch(LABELLED);
-    expect(state.escalatedBy).toBe("us");
-    expect(state.escalatedAtSha).toBe("aaaa111");
-    expect(resolveFixDisposition(state, defaultFixConfig()).reason).toMatch(/^escalated:/);
-  });
-
-  it("a legacy row with no head SHA at all is still ours, just without one", () => {
-    const h = harness();
-    h.recordLegacyRun({ owner: "cliftonc", repo: "lastlight" });
-
-    const { state } = h.dispatch(LABELLED);
-    expect(state.escalatedBy).toBe("us");
     expect(state.escalatedAtSha).toBeNull();
-    // Nothing to match the head against, so the guard falls through to the
-    // ordinary budget gates rather than to a permanent hold.
     expect(resolveFixDisposition(state, defaultFixConfig()).decision).toBe("run");
   });
 
-  it("a recorded escalation still wins over the stand-in", () => {
-    // `escalatePr`'s row is the real thing; the fallbacks only ever fill a gap.
+  it("reads the record off the WIDEST prior row, not just the fix family's", () => {
+    // `escalatePr` records under whichever workflow was dispatching, which may
+    // be `dependabot-pr-merge` or `pr-review` — neither of which the fix-family
+    // lookup would find.
     const h = harness();
     const first = h.dispatch();
-    h.rows[0].context = {
-      prState: { ...first.state, escalatedAtSha: "eeee555", escalatedBy: "us" },
-    };
-    expect(h.dispatch(LABELLED).state.escalatedAtSha).toBe("eeee555");
-  });
-
-  it("no label ⇒ nobody escalated, whatever the history says", () => {
-    const h = harness();
-    h.recordLegacyRun({ headSha: "aaaa111" });
-    expect(h.dispatch().state.escalatedBy).toBeNull();
+    h.rows[0].workflowName = "dependabot-pr-merge";
+    h.rows[0].context = { prState: { ...first.state, escalatedAtSha: "eeee555" } };
+    expect(h.dispatch().state.escalatedAtSha).toBe("eeee555");
   });
 });
 

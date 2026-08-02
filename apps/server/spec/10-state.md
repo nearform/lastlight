@@ -139,14 +139,27 @@ the live state has moved on; a re-derivation at read time would answer a
 different question. **The state machine reads it back:** the next dispatch for
 that PR loads the previous run's snapshot to compute `attempt` (unchanged head,
 or a head *we* authored, means the same problem and the counter advances;
-anyone else's push resets it to 1), to carry `escalatedAtSha` forward — which is
-what makes `requires-human` a notification rather than a state, since a
-maintainer's push clears the guard with no label edit — and to answer "have we
-already assessed this exact head SHA?". So the escalation record costs no new
-table, no extra API call and no label mutation. Rows written before the snapshot
-existed are tolerated: a bare `context.headSha` is honoured as a one-field
-snapshot, so the per-SHA dedup keeps working across the upgrade instead of
-re-assessing every open PR once.
+anyone else's push resets it to 1), to carry `escalatedAtSha` and
+`intervention` forward — which is what makes `requires-human` a notification
+rather than a state, since a maintainer's push or a recorded retry clears the
+guard with no label edit — and to answer "have we already assessed this exact
+head SHA?". So the escalation record costs no new table, no extra API call and no
+label mutation. Rows written before the snapshot existed are tolerated: a bare
+`context.headSha` is honoured as a one-field snapshot, so the per-SHA dedup keeps
+working across the upgrade instead of re-assessing every open PR once.
+
+`intervention` is the newest of those folded fields and the only one recording
+**human intent** rather than a fact about the pull request:
+`{ at, atSha, via: "comment" | "label" | "api", by?, note? }` — the last time
+somebody told us to try again (see
+[Router](/spec/05-router#un-sticking-an-escalated-pr--the-three-retry-surfaces)).
+It is re-sanitized on read as well as on write, exactly as `notes` is, so a row
+written by an older build cannot carry a `note` past today's rejection rules; and
+`by` / `note` are for display and for the journal only — no decision function
+reads either. A retry that is folded forward and found to be *new* re-arms the
+attempt counter and the cost baseline and clears `escalatedAtSha`; the record is
+what makes that re-arm once-only, since the next dispatch reads the same
+intervention back and does not re-arm again.
 
 **The marker harvest on the row.** The snapshot is written at *dispatch*, before
 any phase runs, so what the run then *concluded* cannot live there. For the fix
@@ -207,13 +220,33 @@ refusal itself, under the workflow it declined to run, with no phases and
 `context.escalation = { case, reason, at }` beside the snapshot. This is not
 bookkeeping: `escalatedAtSha` is read back off the *prior run's*
 `context.prState`, and a dispatch-time skip writes no row at all, so an
-escalation that recorded nothing would leave `requires-human` on the PR with
-no escalation SHA behind it — which the next dispatch reads as a *human's*
-permanent hold, latching the PR dead. The row is written **before** the
-label for the same reason, and is recorded **`succeeded`**: `failed` is
-reserved for malfunction, and a correct-but-stopped outcome recorded `failed`
-would post `messages.on_failure`, offer a Retry that cannot succeed, and
+escalation that recorded nothing would never persist it — the `escalated:`
+guard would never bind, and every subsequent event on the same dead PR would
+escalate again, re-applying the label and posting the comment once per event.
+The row is written **before** the label for the same reason (row-then-crash
+leaves a record with no label, which is quiet; label-then-crash leaves a
+`requires-human` nothing in the code can see), and is recorded **`succeeded`**:
+`failed` is reserved for malfunction, and a correct-but-stopped outcome recorded
+`failed` would post `messages.on_failure`, offer a Retry that cannot succeed, and
 pollute the cost/failure stats.
+
+**The retry row** (`current_phase = "retry-requested"`) is the second row of
+that kind, and the mirror image of the first: it records a human's ask that
+produced **no** run, so the ask is not lost when the gate then skips for an
+unrelated reason (`upstream-broken` — the base is red at the moment somebody
+asks). Same shape and same ordering as the escalation row, `succeeded`, with
+`context.intervention` beside the snapshot, `trigger_actor_type = "system"`
+(the harness recording a fact, not a person's run) and `triggered_by` set to
+whoever asked. It is idempotent: `recordIntervention` refuses when the prior
+PR-scoped row already carries the same intervention, which is what makes it safe
+on a route that fires per cron tick. A retry that *does* dispatch needs no row —
+the dispatched run's own `context.prState` carries the intervention.
+
+This row is the one `succeeded` row that must **not** count toward the per-head
+`already-assessed` dedup (`assessedHeadShaByWorkflow` skips it): it records a
+dispatch that did not happen, and it carries the intervention forward, so
+counting it would make the row written to *defer* an ask read as having served
+it.
 
 `owner` + `repo` together identify the target: `repo` is stored **bare**
 (a single path-safe segment — taskIds and workspace/session dirs derive

@@ -80,6 +80,31 @@ lastlight qa-test owner/repo#42 -- "login, create a project"  # drive a flow →
 lastlight health owner/repo           # weekly health report
 lastlight security owner/repo         # security review</code></pre>
 
+	<h3>Un-sticking a pull request</h3>
+
+	<p>
+		When Last Light gives up on a PR it labels it <code>requires-human</code>,
+		comments once explaining what it tried, and stops. <code>pr retry</code> is
+		how you tell it to have another go: it re-arms both budgets — the attempt
+		counter <em>and</em> the cost window — and re-runs the workflow that got
+		stuck. The reason you type is recorded against the retry and reaches the
+		next attempt as a note, so the agent knows what you knew.
+	</p>
+
+	<pre><code>lastlight pr retry owner/repo#42
+lastlight pr retry owner/repo#42 the arm64 runner was flaky</code></pre>
+
+	<p>
+		It is the same act as commenting <code>@last-light retry</code> on the PR or
+		removing the <code>requires-human</code> label — all three write one record,
+		so none of them produces a second escalation comment. What a retry does
+		<strong>not</strong> override: the <code>lastlight-ignore</code> hold label
+		(which beats it outright), a run already working that PR, a fork PR, a red
+		base branch, or a PR the harness could not read. Those exit non-zero with
+		the reason. If the gate skips for a transient reason the ask is still
+		recorded, and the next event honours it.
+	</p>
+
 	<h2>Debugging a running instance</h2>
 
 	<p>

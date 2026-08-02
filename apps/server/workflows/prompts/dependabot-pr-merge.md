@@ -171,19 +171,26 @@ and creates only the missing ones, so it never errors on labels that exist:
 - `dependency-major-low` — color `0e8a16` — "Major version bump, low impact."
 - `dependency-major-medium` — color `fbca04` — "Major version bump, medium impact."
 - `dependency-major-high` — color `b60205` — "Major version bump, high impact — needs human review."
+- `lastlight-ignore` — color `24292f` — "Last Light will not act on this issue or pull request."
 If `github_ensure_labels` is denied (the token lacks the permission), fall back to
 using only labels that already exist and skip the rest.
 
-When YOU apply `requires-human`, it is not a permanent stop and nobody has to
-remove it by hand: the harness reads a label on a PR it has worked as OURS,
-applied at this head, so any commit pushed by someone else re-arms the loop.
-Never tell a maintainer in a comment that they must delete the label — ask them
-for the decision or the merge, not for label housekeeping.
+`lastlight-ignore` is created here and **never applied or removed by you**. It is
+a maintainer's instruction to the harness — "stay off this" — and a PR carrying
+it never reaches you at all, because the dispatch gate refuses before any run
+starts. Creating it is the whole job: a maintainer can only reach for a label
+that exists in the repo's picker.
+
+When YOU apply `requires-human`, it is a NOTIFICATION, not a stop: nothing in the
+harness reads it, so it neither holds this PR nor needs removing by hand. It
+means "I stopped and a human should look". Never tell a maintainer in a comment
+that they must delete the label — ask them for the decision or the merge, not for
+label housekeeping.
 Then apply exactly the labels for your verdict via `github_add_labels`, and clear
-the superseded ones with `github_remove_label`. **Only ever touch the six labels
-above** — never add or remove a label outside this vocabulary (Renovate's
-`rebase` label, a maintainer's `blocked`, a release label: all must survive
-untouched).
+the superseded ones with `github_remove_label`. **Only ever touch the six
+verdict labels above** — never `lastlight-ignore`, and never a label outside this
+vocabulary (Renovate's `rebase` label, a maintainer's `blocked`, a release label:
+all must survive untouched).
 - **TRIVIAL** → add `dependency-trivial`; remove `dependency-functional` if
   present. Also remove `requires-human` for now — the default trivial path lands
   automatically. (STEP 3 re-adds `requires-human` in the ONE case where a trivial

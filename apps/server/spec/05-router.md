@@ -57,6 +57,7 @@ instead. Only the configured handle matches — there is no legacy fallback (see
 
 | Trigger | Result | Notes |
 |---|---|---|
+| **any GitHub envelope whose subject carries the hold label** | `ignore`, or one `reply` naming the label | **First, above every rule below**, including the reply-gate and re-triage short-circuits — "stay off this" has no carve-outs or it is not a hold. One array lookup on labels the envelope already carries, so a held subject never costs a `PrState` resolve. The reply fires only for a `comment.created` that `@`-mentions us (a direct instruction refused rather than ignored); every other event type is silent. See [The hold](#the-hold--the-first-gate) |
 | `issue.opened` / `issue.reopened` | `skill: issue-triage` | `reopened=true` for the latter |
 | `pr.opened` / `pr.synchronize` / `pr.reopened` | `skill: pr-review` | `ready_for_review` on a draft normalizes to `pr.opened` — it is the moment the PR first asks to be looked at, and the event that un-defers a review `review.skipDraft` held back |
 | `pr.checks_settled` | `skill: pr-review` | The head SHA's checks have settled — either colour — on a PR that neither check-outcome route below claimed. This is `review.trigger: after-checks`'s trigger. **Not config-aware:** the router's job is `event → { workflow, context }`, and a deferred review is still *routed* to `pr-review`; the mode is enforced once, at the [dispatch gate](#the-pr-scoped-dispatch-gate) |
@@ -69,6 +70,7 @@ instead. Only the configured handle matches — there is no legacy fallback (see
 | `comment.created` without `@last-light` | `ignore` | reason: "no bot mention" |
 | `comment.created` from non-maintainer | `reply: "only maintainers can trigger builds"` | `authorAssociation` not in `MAINTAINER_ROLES` |
 | `comment.created` matching `@last-light approve\|reject [reason]` | `skill: approval-response` | Regex parse, no classifier |
+| `comment.created` matching `@last-light retry [reason]` on a **PR** | `dependabot-ci-fix` (dependency PR) / `pr-fix` (anything else) | The recorded "go again" — regex parse, above classification, because a retry has to be an exact instruction rather than an LLM guess. Free text after the command becomes the intervention's `note`. Carries `_retry` down to the dispatch gate, which hands it to `resolvePrState`; see [Un-sticking an escalated PR](#un-sticking-an-escalated-pr--the-three-retry-surfaces). On an issue it means nothing and falls through to the classifier |
 | `comment.created` matching `@last-light security-review` | `skill: security-review` | |
 | `comment.created` matching `@last-light verify <claim>` | `skill: verify` | Text after the keyword becomes `commentBody`; works on issues + PRs |
 | `comment.created` matching `@last-light qa-test <target>` | `skill: qa-test` | Text after the keyword becomes `commentBody`; works on issues + PRs |
@@ -332,7 +334,7 @@ two halves — live GitHub facts (head SHA and its git
 author, head/base refs, draft, fork, labels, checks state + settled count,
 base-branch checks, our own review at the head, the CI failure report) and
 facts derived from our run history keyed on the PR (attempt number, flaky
-deferrals, escalation SHA and who escalated, the SHA at which a fork PR was
+deferrals, the SHA one of our runs escalated at, the SHA at which a fork PR was
 told we cannot help, prior-attempt markers, cost spent on the current problem,
 the last assessed head SHA per workflow, and any PR-scoped run currently in
 flight). Resolution never throws: every read is independently best-effort and
@@ -343,14 +345,68 @@ fetched twice.
 `readErrors` is **read** by exactly one guard, and only for one entry.
 `getPullRequest` is the read that supplies `labels`, `isFork`, `isDraft` and
 `headSha`, and each of its degraded values is the permissive one — `labels: []`
-so the `requires-human` hold does not apply, `isFork: false` so the fork guard
-does not, `headSha: ""` so the dedup does not. A 403 therefore yields a snapshot
+so the hold below does not apply, `isFork: false` so the fork guard does not,
+`headSha: ""` so the dedup does not. A 403 therefore yields a snapshot
 that *looks* healthy, and the cron route would dispatch a repo-write sandbox run
 against a pull request we know nothing about. So a failed PR read produces a
 `read-degraded` skip in all three dispositions, ahead of every other guard
-including the run lock. It is transient like a lock drop — no label, no comment,
-no run row — and the cron re-pickup is what makes dropping sound. Every other
-read still fails open exactly as described.
+including the hold and the run lock. It is transient like a lock drop — no
+label, no comment, no run row — and the cron re-pickup is what makes dropping
+sound. Every other read still fails open exactly as described.
+
+### The hold — the first gate
+
+One label, applied by a **human only**, stops Last Light acting on a subject
+entirely. It is checked in `resolveDispatchDisposition` above every other
+guard except the degraded read: above the run lock, above the fork check,
+above the budgets, and above an explicit `@bot` request. The packaged name is
+`lastlight-ignore`; it is operator-configurable as `hold.label`
+(env `LASTLIGHT_HOLD_LABEL`, see [Configuration](/spec/02-configuration)), lives
+in `src/cron/dependabot-discovery.ts` beside the rest of the label vocabulary,
+and is created with its own colour by the same `github_ensure_labels` pass the
+dependency prompts run.
+
+Why a **label** rather than a stored record, a comment convention or a config
+list: it is a *live precondition*, which is the same property that makes
+`baseChecksState` safe to gate on. It re-evaluates on every event, it is
+idempotent (present or absent, so there is no ordering to resolve between two
+maintainers), it is maintainer-gated for free because GitHub already requires
+triage permission to change a label, and **removing it resumes the bot with no
+record to clean up**. Nothing is persisted and nothing has to be migrated.
+
+The skip is **silent** — no `requires-human`, no comment, no run row, and for
+`pr-review` no placeholder check either. It is not a verdict about the change;
+it is an instruction we are obeying, and the label on the PR already says
+everything a comment could. Labelling and commenting on a pull request somebody
+has explicitly asked us to leave alone would be the exact opposite of what they
+asked for, which is why the hold sits *above* the three escalating skips rather
+than beside them.
+
+The hold **beats an explicit request** — otherwise it is not a block. The one
+thing a direct `@bot …` earns is **one reply naming the label and how to lift
+it**, because silently ignoring a direct instruction is worse than refusing it.
+That reply belongs to the route that has a human on the other end (the router's
+comment path, or the dispatcher's PR gate), never to the decision — the same
+rule the fork notice and the run-lock reply follow, and the reason a cron tick
+on a held PR says nothing at all. No de-duplication is needed: it fires only on
+an explicit ask, so it is one reply per ask.
+
+The gate above governs the four PR-scoped workflows. The hold blocks **every**
+workflow on **any** subject, PRs and issues alike (one word, one meaning), so
+the router applies the same check to the envelope's labels as a hard ignore
+before any branch — which is what makes `issue-triage`, `issue-comment`,
+`build`, `explore`, `verify` and everything else honour it, and what keeps a
+held subject from costing a `PrState` resolution per event.
+
+`requires-human` is the **other** label, and it does the other job: it is
+written by us (by `escalatePr`, and by the agent per the dependabot prompts) and
+**read by nothing**. It means "I stopped and a human should look" — a
+notification. It used to be read as a decision input, with the code inferring
+*whose* label it was from "have we ever run on this PR"; that inference was
+honoured only on a PR the bot had never touched, so on any PR it had ever
+reviewed or assessed a maintainer's hand-applied `requires-human` read as the
+bot's own escalation and was cleared by the next person's push. The hold label
+replaces that inference with an instruction.
 
 The derived half is a **fold over the PR's own run history**, read off
 the most recent run of the fix family (`latestForTrigger`, keyed on the
@@ -382,18 +438,62 @@ is that run's harvested markers (`scratch.fixMarkers` — see
 - **`priorAttempts`** accumulates one rendered line per attempt, oldest
   first, and is replayed into every later prompt — so it is bounded on
   both axes (line length and line count) rather than growing with the
-  PR's age.
+  PR's age. It is also what **model escalation** keys on
+  (`fix.escalateModelAfterAttempt`): `attempt` is a budget position that
+  re-arms, this is the count that survives, and keying the model on the
+  counter downgraded a PR that had already failed three times to the base
+  model the moment somebody asked for another go.
 - **`priorDiagnosisClass`** is the *immediately preceding* run's class,
   and the only prior-run verdict any dispatch decision reads (see the
   escalation section below for why that is allowed). Unlike
   `flakyDeferrals` it is **not** carried across a run that diagnosed
-  nothing — including our own escalation row — which is what keeps the
-  manual exit working: a maintainer who removes `requires-human` by hand
-  gets a genuine retry rather than an instant re-escalation that puts the
-  label straight back.
+  nothing — including our own escalation row — so a remembered
+  `infra-dependent` cannot re-escalate on the next event and put the label
+  straight back.
+- **`intervention`** is the RETRY direction of human intent, and the
+  counterpart to `escalatedAtSha`: *the last time a human told us to try
+  again*, with the head SHA they asked at, how the ask arrived, who made
+  it and why. It is the one thing that makes an escalated problem
+  dispatchable **without a new commit**. Before it, "a human intervened"
+  could only be inferred from a commit — the head SHA changed and we did
+  not author it — so of the three things a maintainer would naturally
+  try, exactly one worked. `by` and `note` are recorded for **display and
+  for the journal only**: no decision function reads either, which is the
+  same rule `notes` lives under. Capability is checked at each surface
+  (`author_association`, GitHub's own label permissions, the admin
+  session); identity is never a decision input, and there is no precedence
+  between two maintainers — last one wins.
 
 A fresh problem clears all four together: a prompt that says "attempt
 1" while recounting three earlier attempts is incoherent.
+
+**There are two ways to become a fresh problem, and they are not the same
+fresh problem.** Someone else's push wipes `priorAttempts`; a recorded
+retry **carries** it and appends one bounded seam line
+(`— retried by request: "…" —`). A push changed the code, so prior findings
+may be stale; a retry changed nothing but patience, and discarding the
+journal there sends attempt 1 of the new window straight down attempt 1 of
+the old window's road. Both reset `attempt`, the cost baseline,
+`flakyDeferrals` and `priorDiagnosisClass` — a human intervening is a
+statement that the flaky-versus-real inference should start over, and they
+have better evidence than the counter does. The journal's *staleness*
+marking follows the head, not the boundary: a note about a commit that is
+still the head is not stale.
+
+A retry also **un-assesses the head** for the fix family, because the
+escalation row — and the attempt that exhausted the budget before it — both
+record `succeeded` at that SHA, so the `already-assessed` dedup below would
+otherwise swallow every retry that did not arrive as an explicit `@bot`
+request. It stays un-assessed **until a run has served the ask**, not just
+for the tick the ask arrived on: the row claiming the head has to carry the
+same intervention on its own snapshot before the dedup binds again. A retry
+that is recorded on one tick and dispatched on a later one — which is what
+the standalone `retry-requested` row exists for — would otherwise be
+un-assessed on the tick that could not use it and re-assessed on the tick
+that could. That row is itself kept out of `assessedHeadShaByWorkflow`: it
+records a dispatch that did **not** happen, so it is not evidence that
+anything was assessed, and it carries the intervention forward, so counting
+it would make it read as having served the ask it was written to defer.
 
 - **`notes`** is the PR's **journal** — a bounded, agent-written memory
   (`src/engine/pr-notes.ts`). The four other fields above are things the
@@ -504,11 +604,11 @@ Two properties are load-bearing:
   a remembered diagnosis) or a fact about the PR that a human action can
   change. The single exception is `priorDiagnosisClass`, and it is allowed
   exactly because its skip *escalates* — which records a row (below).
-  `requires-human` follows the same rule: the *state* is "we escalated at
-  head SHA X" (`escalatedAtSha` on the run context), so a maintainer's push
-  re-arms the loop automatically, while the same label with no escalating
-  run of ours behind it means a human applied it by hand and is honoured as
-  a permanent override.
+  The escalation guard follows the same rule: the *state* is "we escalated
+  at head SHA X" (`escalatedAtSha` on the run context) and nothing else, so
+  a maintainer's push re-arms the loop automatically with no label to
+  remove by hand. The `requires-human` label itself is read nowhere; a human
+  who wants the bot off a PR applies the hold instead.
 
 **The escalation guard is not identical on the fix and merge routes**, and
 the difference is the whole point. `resolveFixDisposition` treats a head we
@@ -529,13 +629,89 @@ comparison catches the next dispatch), and one that succeeds populates
 bounds it to **one assessment per head SHA** — the bound every
 never-escalated PR already lives under.
 
-An explicit human request (`comment.created` / `pr_review_comment.created`
-/ `pr.review_requested` / Slack `message` / `/api/run`) overrides the
+An explicit human request (`comment.created` / `pr.review_requested` /
+Slack `message` / `/api/run`) overrides the
 escalation guard, the not-retryable verdict and the per-SHA dedup — a
 maintainer asking directly is an intentional override — but not the facts:
 a fork PR, a red base branch and an exhausted budget do not care how nicely
 you ask. Fork PRs are the one skip the author is owed an explanation for,
 so the gate posts a comment saying we have no branch to push to.
+
+### Un-sticking an escalated PR — the three retry surfaces
+
+Clearing the *guard* is not the same as moving the *window*, and confusing
+the two is how `budget-exhausted` came to re-comment on every push (#256).
+An explicit request has always cleared the guard, then fallen straight
+through into a budget gate with no override — so asking bought a duplicate
+escalation comment and nothing else. A recorded **`intervention`** moves the
+window instead, which is what makes all three of these do the same thing:
+
+| Surface | How it is authorised | Notes |
+|---|---|---|
+| `@<bot> retry [reason]` on the PR | the `author_association` check that gates the whole `@`-mention path | Structured, above classification. Free text after the command becomes the `note` — it reaches the next attempt as the journal's seam line and as a `PrNote`, both bounded and fenced by `pr-notes.ts`, and is rejected outright if it carries `class=` or a marker tag |
+| Removing `requires-human` | GitHub already requires triage permission to change a label | **No webhook.** "We escalated at this head, the head has not moved, and our label is gone" can only be a human having removed it — detectable only because the label is now a pure notification, so its absence carries no competing meaning |
+| `POST /admin/api/prs/:owner/:repo/:number/retry` — `lastlight pr retry <owner/repo#N> [reason]`, and the dashboard when it comes | the authenticated admin session (`authMiddleware`), plus the `isManagedRepo` allowlist every repo-touching admin path honours | `via: "api"`, `by` from the session, optional body `{ reason }` → `note`. The only surface with **no event of its own**, so it is the only one that dispatches — see below |
+
+A retry **consumes the escalation**: `escalatedAtSha` is cleared, which is
+how the re-arm becomes visible to decision functions that see only the
+snapshot. That is also what bounds the whole mechanism — the next
+escalation writes a fresh `escalatedAtSha` at the same head, the
+intervention is by then the one the prior run already saw, and the
+`escalated:` skip binds again. Retries are otherwise **unbounded, full
+window each time**: the backstop is a server-level spend cap, not a hidden
+second budget.
+
+**What a retry does not override:** the hold label (which beats it
+outright, and earns the asker one reply naming the label), the fork guard,
+the run lock, `upstream-broken`, or a degraded read. Those are facts about
+the pull request or instructions that outrank it; the budgets are policy,
+and policy is what a maintainer may move.
+
+**Where the record lives.** Normally on the dispatched run's own snapshot —
+`dispatchWorkflow` persists the whole `PrState` on `context.prState`, so a
+retry that results in a run needs no row of its own. When the gate then
+skips for an unrelated reason (`upstream-broken` is the case that matters:
+the base is red at the exact moment somebody asks), `recordIntervention`
+writes a standalone row in the same shape and the same order as
+`escalatePr` — the record first, before any GitHub write. Two mechanisms
+with the same shape and different orderings is how the next reader gets it
+wrong. Nothing is recorded when the hold beat the retry, when the PR read
+was degraded, or when another run owns the PR (a row written under a live
+run would displace that run's own snapshot as the history the next dispatch
+folds from; the route's "ask me again" reply is the right answer there).
+
+**Why the admin route dispatches.** The other two surfaces arrive *on* an
+event that is already dispatching; the API surface has no event behind it, and
+an escalated PR is by definition one no further `check_suite` will fire for.
+Recording and parking would leave the ask waiting on the daily sweep at best,
+and on nothing at all for a PR no cron covers — so `lastlight pr retry` would
+report success and change nothing anyone could see. The record itself does
+survive being parked (the un-assess above holds until a run serves the ask),
+which is what makes the standalone row worth writing; dispatching is about the
+*asker* getting an answer, not about the record surviving.
+
+Which is why the route crosses `applyPrDispatchGate` **itself** rather than
+leaving it to `dispatchWorkflow`. The armed snapshot has to travel down on
+`_prState` (it carries the intervention), and an inherited snapshot is exactly
+the signal `dispatchWorkflow` reads as *"this route already decided"* — the same
+contract the dispatcher works under. The rule is: **the route that resolves is
+the route that gates.** So the retry endpoint is a third caller of the one gate,
+not a third copy of it, and the guard list above ("what a retry does not
+override") applies to it unchanged. Its three answers map onto the gate's own
+verdicts:
+
+| gate | HTTP | body |
+|---|---|---|
+| `run` | 200 | `dispatched: true`, `recorded: false` — the record lives on the dispatched run's snapshot |
+| `skip`, not one of the three below | 200 | `dispatched: false`, `recorded: true` — the standalone row is written (inside the gate), so the next event honours it |
+| `skip` with `onHold` / `runInFlight` / `readDegraded` | 409 | `dispatched: false`, `recorded: false`. The hold's `reason` is `holdReply()` — the same sentence the comment route gives, because the person asked and was refused |
+
+`config.github` / `config.dispatchWorkflow` / `config.resolveRepoPolicy` are the
+three collaborators `src/index.ts` wires for it — the last one being the *same*
+`resolveRepoRunConfig` closure the dispatcher gets, so the admin route cannot
+read a repo's clamped budgets looser than the repo set them. Absent (chat-only,
+CLI-only) the endpoint reports 503 rather than acting on a snapshot made of
+defaults.
 
 ### `review.trigger` — one resolver, every route
 
@@ -667,32 +843,48 @@ the attempt count and each attempt's `class=` / `cause=` (the same rendered
 `priorAttempts` lines the next prompt would have replayed). Every other
 skip stays silent, and the difference is structural — `upstream-broken`
 self-heals and is not this PR's fault, `fork-pr` gets its own explanation,
-`human-hold` / `escalated` are already escalated, and `already-assessed` is
-a duplicate delivery.
+`on-hold` is a maintainer's instruction to stay off the PR, `escalated` is
+already escalated, and `already-assessed` is a duplicate delivery.
 
 The **run row is the load-bearing part**, not bookkeeping.
 `escalatedAtSha` is read back off the *prior run's* persisted
 `context.prState`; a dispatch-time skip writes no row, so an escalation
-that stayed row-less would never persist it — and the next dispatch,
-seeing `requires-human` with no `escalatedAtSha` behind it, would classify
-our own label as a human's **permanent** hold and latch the PR dead. That
-is the one-way door the stateful guard exists to remove, reintroduced by
-the feature meant to remove it. The row is recorded `succeeded` (`failed`
-is reserved for malfunction) with the resolved snapshot on it, so the run
-detail panel explains the stop.
+that stayed row-less would never persist it — the guard would never bind,
+and every subsequent event on the same dead PR would escalate again,
+re-applying the label and posting the comment once per event. The row is
+recorded `succeeded` (`failed` is reserved for malfunction) with the
+resolved snapshot on it, so the run detail panel explains the stop.
 
 Three consequences follow from that ordering:
 
-- **The row is written before the label.** Row-then-crash leaves an
-  escalation with no label, so the guard does not bind and the next event
-  simply escalates again; label-then-crash would leave a label with no
-  record, which is the permanent misclassification above.
+- **The row is written before the label.** The row is what binds, so a
+  label write that fails costs the PR its *notification*, not its guard:
+  the escalation record is already down and the next event takes the
+  `escalated:` skip. Label-then-crash would leave a `requires-human`
+  nothing in the code can see, so every later event would escalate and
+  comment again.
 - **The comment is posted only behind a label that landed**, so a failed
-  label write retries cleanly instead of commenting once per attempt.
+  label write leaves no orphaned explanation on the PR.
 - **Once-only is a property of the record, not of an API scan.** Neither
   `postComment` nor `addLabels` de-duplicates; the next dispatch at the
-  same head resolves `escalatedBy: "us"` and takes the `escalated:` skip,
-  which carries no escalation case and therefore applies nothing.
+  same head reads `escalatedAtSha` back and takes the `escalated:` skip,
+  which carries no escalation case and therefore applies nothing. That
+  makes it entirely dependent on the `escalated:` guard firing first — and
+  the guard is bypassable, by an explicit request, by a hand-removed label
+  or by a retry, every one of which lands back in `escalatePr`. So it also
+  **refuses outright when it has already escalated at this exact head**.
+  Re-recording would be harmless; re-commenting is #256.
+
+The comment's closing section is a **contract**: it is the only place most
+people will ever learn how to un-stick the bot, so every exit it names has
+to work and every exit that works has to be named. It used to fail both
+halves — it promised *"you can also ask me directly in a comment to
+override"*, which the budget gate refused, and it predated the hold label
+entirely. It now lists the three retry surfaces (push, `@<bot> retry
+[reason]`, remove `requires-human`) as one group, because they do the same
+thing, plus the hold as the opposite of a retry. It is pure and
+table-tested, and it renders the deployment's own configured `hold.label`
+and `@<botName>` rather than the packaged names.
 
 The **fork-PR notice** (`noticeForkPr`, same module) is the one non-escalating
 skip that still speaks on the PR: nothing is wrong with the author's change, we
@@ -716,7 +908,15 @@ counter meant the `escalated:` guard fell away and the very next event fell
 straight back through `budget-exhausted`, posting another `requires-human`
 comment — a comment whose own closing paragraph tells the maintainer that
 pushing is the remedy. `PrState.costBaselineUsd` carries the offset forward and
-is re-stamped to the lifetime total when someone else pushes.
+is re-stamped to the lifetime total when someone else pushes, **or when a retry
+is recorded**: one predicate (`sameProblem`) moves both budgets, because a
+second budget shape is how the six-sites-disagreeing situation started.
+
+`fix.maxCostUsd` is therefore a **futility guard, not a spend guard**. It is
+scoped to a problem and re-armed by any human intervention, which is futility
+logic; a real spend cap belongs at server level and does not exist yet. With
+unbounded full-window retries that cap becomes the only backstop, which is why
+it is a prerequisite rather than an enhancement.
 
 `dispatchWorkflow` runs the same gate for the routes that never cross the
 dispatcher — the cron fan-outs and `/api/run` — and persists the snapshot
@@ -800,6 +1000,7 @@ unchanged.
 | The PR-scoped set (the run lock's span), from `pr_scoped:` metadata | `src/workflows/pr-scope.ts` |
 | Pure decisions over the snapshot | `src/engine/pr-decisions.ts` |
 | Escalation (label + one comment + the run row) | `src/engine/pr-escalation.ts` |
+| Retry record (`PrState.intervention`, `recordIntervention`) | `src/engine/pr-state.ts`, `src/engine/pr-escalation.ts` |
 | Dispatch gate (router result → workflow) | `src/engine/dispatcher.ts` |
 | Injection screener | `src/engine/screen/screen.ts` |
 | Direct provider calls + model auto-detect | `src/engine/llm.ts` |

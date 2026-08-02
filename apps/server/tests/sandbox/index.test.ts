@@ -284,8 +284,10 @@ describe("prePopulateWorkspace base merge-base availability (pr-review diff)", (
       owner: "cliftonc", repo: REPO, branch: "pr-head", baseBranch: "main", token: TOKEN,
       runId: "run-1", shallow: true,
     });
-    // Head clone, origin normalized, then base+head fetched and merge-base checked.
-    expect(gitVerbs()).toEqual(["clone", "remote", "fetch", "fetch", "merge-base"]);
+    // Head clone, origin normalized, the base added to the fetch refspec (read
+    // first so `--add` can't duplicate it), then base+head fetched and
+    // merge-base checked.
+    expect(gitVerbs()).toEqual(["clone", "remote", "config", "remote", "fetch", "fetch", "merge-base"]);
     // The base is materialized as a real remote-tracking ref at depth 50.
     const baseFetch = fetches().find((a) => a.includes(BASE_DEST))!;
     expect(baseFetch).toBeDefined();
@@ -346,6 +348,70 @@ describe("prePopulateWorkspace base merge-base availability (pr-review diff)", (
     ).not.toThrow();
     // The clone still succeeded → marker stamped so the run proceeds.
     expect(readFileSync(join(workDir, ".lastlight-run"), "utf-8")).toBe("run-1");
+  });
+});
+
+describe("prePopulateWorkspace same-run base refresh (stuck-PR recovery)", () => {
+  let workDir: string;
+  const REPO = "lastlight";
+  const BASE_DEST = "+refs/heads/main:refs/remotes/origin/main";
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "ll-samerun-"));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockExec.mockReturnValue(Buffer.from(""));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    mockExec.mockReset();
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  function seedExistingClone(marker?: string): void {
+    mkdirSync(join(workDir, REPO, ".git"), { recursive: true });
+    if (marker !== undefined) writeFileSync(join(workDir, ".lastlight-run"), marker);
+  }
+
+  /** Every fetch invocation's argv. */
+  function fetches(): string[][] {
+    return calledArgs().filter((a) => gitVerb(a) === "fetch");
+  }
+
+  it("refreshes origin/<base> when a later phase of the SAME run revisits it", () => {
+    seedExistingClone("run-1");
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "pr-head", baseBranch: "main", token: TOKEN,
+      runId: "run-1", shallow: false,
+    });
+    // The base is re-fetched as a real remote-tracking ref — `origin/main` was
+    // otherwise frozen at whatever the run's FIRST phase saw, and the fix phase
+    // merges it tens of minutes later.
+    expect(fetches().some((a) => a.includes(BASE_DEST))).toBe(true);
+    // …and NOTHING that touches HEAD, the index or the working tree. That is
+    // the whole safety argument for doing this on the preserve path.
+    expect(gitVerbs()).toEqual(["config", "remote", "fetch", "fetch", "merge-base"]);
+    const setBranches = calledArgs().find((a) => a.includes("set-branches"))!;
+    expect(setBranches).toEqual(["-C", join(workDir, REPO), "remote", "set-branches", "--add", "origin", "main"]);
+  });
+
+  it("stays a pure no-op on a same-run revisit when base equals the head branch", () => {
+    seedExistingClone("run-1");
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "main", baseBranch: "main", token: TOKEN,
+      runId: "run-1",
+    });
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("stays a pure no-op on a same-run revisit with recreateFromBase", () => {
+    seedExistingClone("run-1");
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "lastlight/1-foo", baseBranch: "main", token: TOKEN,
+      runId: "run-1", recreateFromBase: true,
+    });
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(existsSync(join(workDir, REPO, ".git"))).toBe(true);
   });
 });
 

@@ -3,10 +3,17 @@ import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent, WELL_KNO
 import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getWorkflowByIntent } from "../workflows/loader.js";
-import { getRoutes, getBotName, getReviewConfig, type ReviewConfig } from "../config/config.js";
+import {
+  getRoutes,
+  getBotName,
+  getHoldLabel,
+  getReviewConfig,
+  type ReviewConfig,
+} from "../config/config.js";
 import type { StateDb } from "../state/db.js";
 import type { GitHubClient } from "./github/github.js";
 import { isDependencyPr } from "../cron/dependabot-discovery.js";
+import { holdReply } from "./pr-decisions.js";
 
 /**
  * Resolve a classifier intent the router has no bespoke branch for to the
@@ -163,6 +170,54 @@ function botMatchers(handle: string) {
 }
 
 /**
+ * The HOLD, at the subject level — *"Last Light, stay off this."*
+ *
+ * Locked decision 3 (02-hold-label.md): the hold blocks **every** workflow on
+ * **any** subject carrying it, PRs and issues alike. "A label nobody can
+ * remember the scope of is a label nobody reaches for."
+ *
+ * The PR-scoped half of that is enforced at the dispatch gate
+ * (`resolveDispatchDisposition`), which is where the cron fan-out and `/api/run`
+ * cross too. This is the OTHER half, and it is not redundant with it: the gate
+ * only governs the four PR-scoped workflows, so without this an
+ * `issue-triage` / `issue-comment` / `build` / `explore` / `verify` / `qa-test`
+ * on a held subject would run happily — including on a held pull request, since
+ * `pr-comment` and friends are not PR-scoped either.
+ *
+ * A ROUTER-level hard ignore, deliberately, in the same shape as `pr.labeled`'s
+ * and `pr_review.submitted`'s: it costs one array lookup on labels the envelope
+ * already carries, where deciding it further down would cost a `resolvePrState`
+ * per event on a subject we have been told not to touch.
+ *
+ * The one thing it is not silent about is a direct instruction. A maintainer who
+ * comments `@<bot> …` gets exactly one reply naming the label (locked decision
+ * 4) — the hold beats an explicit request, but silently ignoring somebody who
+ * asked is worse than refusing them. Every other event type says nothing.
+ *
+ * Fails OPEN by construction: `labels` is whatever the webhook payload carried
+ * (the parent issue's, for a comment), so a label added between the payload and
+ * the dispatch is caught by the gate below instead of here.
+ */
+function holdRoute(
+  envelope: EventEnvelope,
+  bot: ReturnType<typeof botMatchers>,
+): Route | null {
+  if (envelope.source !== "github") return null;
+  const label = getHoldLabel();
+  if (!label || !(envelope.labels ?? []).includes(label)) return null;
+  // An explicit ask, on the one event type that carries a person's words. A
+  // `pr.review_requested` is an explicit request too, but replying to it would
+  // post a comment nobody wrote a comment to get.
+  if (envelope.type === "comment.created" && bot.mention.test(envelope.body || "")) {
+    return { action: "reply", message: holdReply(label) };
+  }
+  return {
+    action: "ignore",
+    reason: `on-hold: \`${label}\` is applied to ${envelope.repo ?? "this repo"}#${envelope.issueNumber ?? "?"}`,
+  };
+}
+
+/**
  * For a comment on a dependency-update PR (Dependabot / Renovate), resolve the
  * PR author + check state to feed the classifier. Returns `{}` when the comment
  * isn't on a dependency-authored PR, when no GitHub client is available, or on
@@ -221,6 +276,11 @@ export async function routeEvent(
   const gh = routes.github;
   const slack = routes.slack;
   const bot = botMatchers(getBotName());
+  // The HOLD, before every branch below — see `holdRoute`. Above even the
+  // reply-gate and re-triage short-circuits inside `comment.created`: "stay off
+  // this" has no carve-outs, or it is not a hold.
+  const held = holdRoute(envelope, bot);
+  if (held) return held;
   switch (envelope.type) {
     case "issue.opened": {
       // Pure question issues ("how does X work?", "X vs Y?") want an ANSWER,
@@ -541,9 +601,11 @@ export async function routeEvent(
         return { action: "ignore", reason: "no bot mention in comment" };
       }
 
-      // Only maintainers (OWNER, MEMBER, COLLABORATOR) can trigger builds.
-      // For non-maintainers we reply directly via the connector — no agent
-      // invocation needed.
+      // The maintainer gate (OWNER, MEMBER, COLLABORATOR) for the ENTIRE
+      // @-mention path: approve/reject, retry, security-review, verify, qa-test,
+      // demo and every classified route below all sit behind it, so a non-maintainer
+      // mentioning the bot gets the canned reply and nothing dispatches. The
+      // reply goes out via the connector — no agent invocation needed.
       if (!MAINTAINER_ROLES.has(envelope.authorAssociation || "")) {
         return {
           action: "reply",
@@ -567,6 +629,66 @@ export async function routeEvent(
             sender: envelope.sender,
             decision: approveMatch ? "approved" : "rejected",
             reason: rejectMatch ? rejectMatch[1].trim() || undefined : undefined,
+          },
+        };
+      }
+
+      // `@<bot> retry [reason]` — the RECORDED "go again" (03-retry-intervention.md,
+      // locked decision 11's first surface).
+      //
+      // Structured rather than classified, because a retry has to be an exact
+      // instruction: the classifier would route "@bot try again" to `build` →
+      // `pr-fix`, which is a dispatch with no record behind it — the thing that
+      // used to clear the escalation guard, fall into the same budget gate, and
+      // post a duplicate escalation comment. What re-arms the PR is
+      // `_retry` below, which the dispatcher hands to `resolvePrState` so the
+      // snapshot is derived WITH the intervention rather than patched after.
+      //
+      // PR-only: the whole mechanism is scoped to the fix family's budgets, and
+      // on an issue `retry` means nothing — it falls through to classification.
+      //
+      // Already maintainer-gated: the `MAINTAINER_ROLES` check above governs the
+      // entire `@`-mention path. Nothing extra is needed here, and per locked
+      // decision 5 nothing checks WHO — `by` is recorded for display only.
+      const retryMatch = envelope.prNumber
+        ? envelope.body.match(bot.command("retry\\b([\\s\\S]*)"))
+        : null;
+      if (retryMatch) {
+        // Route to the same workflow the red-PR webhook would. `isDependencyPr`
+        // is the cheap author/title predicate rather than `envelope.isDependencyPr`,
+        // which the connector only computes on the check-suite routes: a comment
+        // envelope carries the PR's author and title and nothing else.
+        const dependencyPr = isDependencyPr({
+          authorLogin: envelope.issueAuthor ?? "",
+          title: envelope.title ?? "",
+          draft: false,
+        });
+        const handler = dependencyPr
+          ? getWorkflowByIntent("dependabot-ci-fix")?.name ?? gh.pr_fix ?? "pr-fix"
+          : gh.pr_fix || "pr-fix";
+        const note = retryMatch[1].trim();
+        console.log(
+          `[router] Retry requested on ${envelope.repo}#${envelope.prNumber} by ${envelope.sender} → ${handler}`,
+        );
+        return {
+          action: "handler",
+          handler,
+          context: {
+            _routeKey: "github.pr_fix",
+            repo: envelope.repo,
+            prNumber: envelope.prNumber,
+            issueNumber: envelope.issueNumber,
+            title: envelope.title,
+            body: envelope.body,
+            sender: envelope.sender,
+            commentBody: envelope.body,
+            // Consumed by the dispatcher and never forwarded to a workflow —
+            // `handlePrFix` builds its dispatch context field by field.
+            _retry: {
+              via: "comment" as const,
+              by: envelope.sender,
+              ...(note ? { note } : {}),
+            },
           },
         };
       }

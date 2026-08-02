@@ -14,6 +14,7 @@
 import { describe, it, expect } from "vitest";
 import type { PrState } from "#src/engine/pr-state.js";
 import {
+  holdReply,
   mayMerge,
   resolveFixDisposition,
   resolveMergeDisposition,
@@ -52,7 +53,7 @@ function state(over: Partial<PrState> = {}): PrState {
     attempt: 1,
     flakyDeferrals: 0,
     escalatedAtSha: null,
-    escalatedBy: null,
+    intervention: null,
     forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
@@ -195,26 +196,21 @@ describe("resolveFixDisposition", () => {
       /^read-degraded:/,
     ],
     [
-      // No escalating run of ours to match → a maintainer applied the label by
-      // hand to mean "bot, stay out".
-      "a human-applied requires-human is a permanent override",
-      { labels: ["requires-human"], escalatedBy: "human" },
+      // THE behaviour change of 02-hold-label.md. `requires-human` was the only
+      // label read as a decision input, and the read inferred WHOSE it was from
+      // "have we ever run on this PR" — so a maintainer's hand-applied label was
+      // honoured only on a PR the bot had never touched. Nothing reads it now.
+      // The hold a maintainer actually wants is its own label, below.
+      "a hand-applied requires-human holds nothing — it is a notification",
+      { labels: ["requires-human"] },
       {},
       {},
-      "skip",
-      /^human-hold:/,
-    ],
-    [
-      "...which an explicit @bot request still overrides",
-      { labels: ["requires-human"], escalatedBy: "human" },
-      {},
-      { explicitRequest: true },
       "run",
       /^attempt/,
     ],
     [
       "our own escalation binds while the head is the one we escalated at",
-      { escalatedBy: "us", escalatedAtSha: "abcdef1234567890" },
+      { escalatedAtSha: "abcdef1234567890" },
       {},
       {},
       "skip",
@@ -222,7 +218,7 @@ describe("resolveFixDisposition", () => {
     ],
     [
       "...and while the only commit since is one WE authored",
-      { escalatedBy: "us", escalatedAtSha: "0000000", headIsOurs: true },
+      { escalatedAtSha: "0000000", headIsOurs: true },
       {},
       {},
       "skip",
@@ -232,9 +228,17 @@ describe("resolveFixDisposition", () => {
       // The behaviour a human expects after being asked to intervene: a push
       // re-arms the loop with no label to remove.
       "a maintainer's push clears our escalation without touching the label",
-      { escalatedBy: "us", escalatedAtSha: "0000000", headIsOurs: false },
+      { escalatedAtSha: "0000000", headIsOurs: false },
       {},
       {},
+      "run",
+      /^attempt/,
+    ],
+    [
+      "...as does an explicit @bot request at the same head",
+      { escalatedAtSha: "abcdef1234567890" },
+      {},
+      { explicitRequest: true },
       "run",
       /^attempt/,
     ],
@@ -378,9 +382,9 @@ describe("resolveFixDisposition", () => {
     // the branch that decided — so the applier never string-matches the prose.
     // What must not creep in here is a skip that is temporary (`upstream-broken`
     // self-heals), not this PR's problem (`fork-pr`), already escalated
-    // (`human-hold` / `escalated`), or a duplicate delivery
-    // (`already-assessed`): each would put a label on a PR nobody needs to look
-    // at, or comment again on every subsequent event.
+    // (`escalated`), or a duplicate delivery (`already-assessed`): each would
+    // put a label on a PR nobody needs to look at, or comment again on every
+    // subsequent event.
     const escalating = (over: Partial<PrState>, opts = {}) =>
       resolveFixDisposition(state(over), fix, opts).escalation;
 
@@ -390,9 +394,8 @@ describe("resolveFixDisposition", () => {
 
     expect(escalating({ baseChecksState: "failing" })).toBeUndefined();
     expect(escalating({ isFork: true })).toBeUndefined();
-    expect(escalating({ labels: ["requires-human"], escalatedBy: "human" })).toBeUndefined();
     expect(
-      escalating({ escalatedBy: "us", escalatedAtSha: "abcdef1234567890", attempt: 9 }),
+      escalating({ escalatedAtSha: "abcdef1234567890", attempt: 9 }),
     ).toBeUndefined();
     expect(
       escalating(
@@ -452,11 +455,12 @@ describe("resolveMergeDisposition", () => {
       /^checks-pending:/,
     ],
     [
-      "a human-applied requires-human is a permanent override here too",
-      { checksState: "passing", labels: ["requires-human"], escalatedBy: "human" },
+      // The same behaviour change as on the fix route: nothing reads the label.
+      "a hand-applied requires-human does not block a merge either",
+      { checksState: "passing", labels: ["requires-human"] },
       {},
-      "skip",
-      /^human-hold:/,
+      "run",
+      /^checks passing$/,
     ],
     [
       "an already-assessed head is a duplicate",
@@ -497,7 +501,6 @@ describe("resolveMergeDisposition", () => {
       state({
         checksState: "passing",
         labels: ["requires-human"],
-        escalatedBy: "us",
         escalatedAtSha: "abcdef1234567890",
         headSha: "abcdef1234567890",
       }),
@@ -518,7 +521,6 @@ describe("resolveMergeDisposition", () => {
       state({
         checksState: "passing",
         labels: ["requires-human"],
-        escalatedBy: "us",
         escalatedAtSha: "fe5bc73aaaaaaaaa",
         headSha: "099bca81bbbbbbbb",
         headAuthor: "last-light[bot]",
@@ -537,7 +539,6 @@ describe("resolveMergeDisposition", () => {
       state({
         checksState: "passing",
         labels: ["requires-human"],
-        escalatedBy: "us",
         escalatedAtSha: "fe5bc73aaaaaaaaa",
         headSha: "099bca81bbbbbbbb",
         headIsOurs: true,
@@ -558,7 +559,6 @@ describe("resolveMergeDisposition", () => {
       state({
         checksState: "passing",
         labels: ["requires-human"],
-        escalatedBy: "us",
         escalatedAtSha: "099bca81bbbbbbbb",
         headSha: "099bca81bbbbbbbb",
         headIsOurs: true,
@@ -577,7 +577,6 @@ describe("resolveMergeDisposition", () => {
       state({
         checksState: "failing",
         labels: ["requires-human"],
-        escalatedBy: "us",
         escalatedAtSha: "fe5bc73aaaaaaaaa",
         headSha: "099bca81bbbbbbbb",
         headIsOurs: true,
@@ -816,6 +815,148 @@ describe("resolveDispatchDisposition", () => {
   });
 });
 
+/**
+ * The HOLD label (02-hold-label.md) — *"Last Light, stay off this."*
+ *
+ * A LIVE precondition rather than a stored verdict, which is the whole reason it
+ * is a label: present or absent right now, nothing persisted, nothing to
+ * migrate, and removing it resumes the bot with no record to clean up. It also
+ * replaces the one place `requires-human` was read as a decision input, which is
+ * what makes that label a pure notification.
+ *
+ * Every case here is really about ORDERING. The hold is only a block if it
+ * outranks the run lock, the fork check, the budgets and an explicit request —
+ * and it must NOT outrank "we could not read the pull request at all", because
+ * `labels: []` is exactly what that failure degrades to.
+ */
+describe("resolveDispatchDisposition — the hold label", () => {
+  const cfg = { fix, dependencies: deps, review };
+  const HOLD = "lastlight-ignore";
+  const held = (over: Partial<PrState> = {}) => state({ labels: [HOLD], ...over });
+
+  it("blocks every PR-scoped workflow, silently", () => {
+    // Locked decision 3: one word, one meaning. A hold that some workflows
+    // honoured and others did not would be a label nobody could remember the
+    // scope of, which is a label nobody reaches for.
+    for (const w of ["pr-fix", "dependabot-ci-fix", "dependabot-pr-merge", "pr-review"]) {
+      const d = resolveDispatchDisposition(w, held({ checksState: "passing" }), cfg);
+      expect(d.decision).toBe("skip");
+      expect(d.reason).toMatch(/^on-hold: `lastlight-ignore` is applied/);
+      // A typed field, like `escalation` and `runInFlight` — the caller must
+      // not parse the prose. It carries the LABEL, because naming it is the
+      // only useful thing to say to whoever asked.
+      expect(d.onHold).toEqual({ label: HOLD });
+      // NOTHING is applied. No label, no comment, no run row (no
+      // `EscalationCase`), and — for `pr-review` — no placeholder check either,
+      // since `postReviewCheckForSkip` is keyed on `review` being present.
+      expect(d.escalation).toBeUndefined();
+      expect(d.review).toBeUndefined();
+    }
+  });
+
+  it("blocks a workflow no disposition governs, too", () => {
+    // The `ungated` fallback. The hold is an instruction about the SUBJECT, not
+    // a verdict about a fix / merge / review, so it has to read the same
+    // whichever branch would otherwise have answered.
+    const d = resolveDispatchDisposition("build", held(), cfg);
+    expect(d.decision).toBe("skip");
+    expect(d.onHold).toEqual({ label: HOLD });
+  });
+
+  it("beats an explicit @bot request — otherwise it is not a block", () => {
+    // Locked decision 4. The one thing the request earns is a REPLY, and that
+    // belongs to the route with a human on the other end, not to this decision.
+    const d = resolveDispatchDisposition("pr-fix", held(), cfg, { explicitRequest: true });
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^on-hold:/);
+  });
+
+  it("beats the run lock, and is the reason reported", () => {
+    // Above the lock on purpose: the lock says "come back later" and the hold
+    // says "do not come back". Reporting the transient one would be true and
+    // useless.
+    const d = resolveDispatchDisposition(
+      "pr-fix",
+      held({ runInFlight: { workflow: "pr-review", runId: "4821" } }),
+      cfg,
+    );
+    expect(d.reason).toMatch(/^on-hold:/);
+    expect(d.runInFlight).toBeUndefined();
+  });
+
+  it("beats the fork guard and both budgets", () => {
+    // Labelling `requires-human` and commenting on a PR a maintainer has told
+    // us to leave alone is the exact opposite of what the label asked for, so
+    // the hold has to sit above the three escalating skips.
+    const d = resolveDispatchDisposition(
+      "pr-fix",
+      held({ isFork: true, attempt: 9, cumulativeCostUsd: 99, priorDiagnosisClass: "infra-dependent" }),
+      cfg,
+    );
+    expect(d.reason).toMatch(/^on-hold:/);
+    expect(d.escalation).toBeUndefined();
+    expect(d.forkPr).toBeUndefined();
+  });
+
+  it("LOSES to a degraded read — `labels: []` is what that failure looks like", () => {
+    // The one guard above it. When `getPullRequest` fails we do not know
+    // whether the hold is there; reporting "on hold" off a default would be a
+    // statement made on no information, and it would hide the real problem.
+    const d = resolveDispatchDisposition(
+      "pr-fix",
+      state({ labels: [], readErrors: ["getPullRequest: 403 Forbidden"] }),
+      cfg,
+    );
+    expect(d.reason).toMatch(/^read-degraded:/);
+    expect(d.onHold).toBeUndefined();
+    expect(d.readDegraded).toBe(true);
+  });
+
+  it("...and a degraded read on a pr-review still carries the check verdict", () => {
+    // The degraded probe above the hold must not flatten the per-workflow
+    // disposition: `postReviewCheckForSkip` keys on `review`, and the caller
+    // needs `readDegraded` to know not to post a placeholder against a head SHA
+    // it does not have.
+    const d = resolveDispatchDisposition(
+      "pr-review",
+      state({ labels: [], readErrors: ["getPullRequest: 502"] }),
+      cfg,
+    );
+    expect(d.review).toBe("skip");
+    expect(d.readDegraded).toBe(true);
+  });
+
+  it("removing it re-dispatches, with no record to clear", () => {
+    // The property that makes a label the right shape for this: it is
+    // idempotent and live, so "last one wins" never has to be applied and there
+    // is nothing to un-persist. The SAME snapshot minus the label runs.
+    const s = held({ checksState: "failing" });
+    expect(resolveDispatchDisposition("pr-fix", s, cfg).decision).toBe("skip");
+    expect(
+      resolveDispatchDisposition("pr-fix", { ...s, labels: [] }, cfg).decision,
+    ).toBe("run");
+  });
+
+  it("honours the operator's configured name, and only that name", () => {
+    const s = state({ labels: ["do-not-touch"] });
+    expect(resolveDispatchDisposition("pr-fix", s, cfg).decision).toBe("run");
+    expect(
+      resolveDispatchDisposition("pr-fix", s, { ...cfg, holdLabel: "do-not-touch" }).decision,
+    ).toBe("skip");
+    // …and the packaged default no longer applies once renamed.
+    expect(
+      resolveDispatchDisposition("pr-fix", held(), { ...cfg, holdLabel: "do-not-touch" }).decision,
+    ).toBe("run");
+  });
+
+  it("names the label in the one reply it ever produces", () => {
+    // The label IS the remedy, and it is operator-configurable, so the prose
+    // cannot carry it as a literal.
+    expect(holdReply("do-not-touch")).toContain("`do-not-touch`");
+    expect(holdReply(HOLD)).toMatch(/remove the label/i);
+  });
+});
+
 describe("renderContext", () => {
   it("projects the snapshot into the variables the prompts render", () => {
     const ctx = renderContext(
@@ -1011,5 +1152,95 @@ describe("resolveReviewTrigger — an unreadable pull request", () => {
 
     expect(decision.decision).toBe("skip");
     expect(decision.readDegraded).toBe(true);
+  });
+});
+
+/**
+ * What a retry does **not** override (03-retry-intervention.md).
+ *
+ * A recorded retry re-arms the two budgets, and that is all it does. Every
+ * other guard is either a FACT about the pull request (a fork has no branch to
+ * push to, a red base cannot be made green from here) or an instruction that
+ * outranks it (the hold), and none of them cares how nicely you ask. The
+ * distinction is the same one the explicit-request carve-out has always drawn:
+ * policy yields to a maintainer, facts do not.
+ *
+ * These are pure table tests: `applyDerivedState` has already done the re-arming
+ * by the time any of this runs, so a fixture with an `intervention` and
+ * `attempt: 1` is exactly what the resolver would be handed.
+ */
+describe("resolveFixDisposition — what a retry does not override", () => {
+  const RETRY = {
+    at: "2026-08-02T10:00:00.000Z",
+    atSha: "abcdef1234567890",
+    via: "comment" as const,
+    by: "alice",
+    note: "arm64 runner was flaky",
+  };
+  /** A PR whose budgets a retry has just re-armed. */
+  const retried = (over: Partial<PrState> = {}) =>
+    state({ intervention: RETRY, escalatedAtSha: null, attempt: 1, cumulativeCostUsd: 0, ...over });
+
+  it("re-arms the PR it is recorded on — the control case", () => {
+    const d = resolveFixDisposition(retried(), fix, { dedupOnHeadSha: true });
+    expect(d.decision).toBe("run");
+    expect(d.reason).toBe("attempt 1/3");
+    // Carried on `inputs` for the run detail panel — WHO asked and why the
+    // budgets look freshly armed — and read by no branch.
+    expect(d.inputs.intervention).toEqual(RETRY);
+  });
+
+  it("does not override the HOLD label", () => {
+    // Locked decision 4, and the single case where "a maintainer asked and was
+    // not obeyed" is intentional — which is why the route owes them a reply.
+    const d = resolveDispatchDisposition(
+      "pr-fix",
+      retried({ labels: ["lastlight-ignore"] }),
+      { fix, dependencies: deps, review },
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.onHold).toEqual({ label: "lastlight-ignore" });
+    expect(d.escalation).toBeUndefined();
+  });
+
+  it("does not override the fork guard", () => {
+    const d = resolveFixDisposition(
+      retried({ isFork: true, headRepoFullName: "octocat/lastlight" }),
+      fix,
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^fork-pr:/);
+    expect(d.forkPr).toBe(true);
+  });
+
+  it("does not override the run lock", () => {
+    // Not policy but a physical constraint: one workspace, one branch, one
+    // agent. The cron re-pickup is what makes dropping sound.
+    const d = resolveFixDisposition(
+      retried({ runInFlight: { workflow: "pr-fix", runId: "run-1" } }),
+      fix,
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^run-in-flight:/);
+  });
+
+  it("does not override `upstream-broken`", () => {
+    // A fact, not a verdict: re-running against a red base cannot make CI
+    // green. It self-heals, and the retry is recorded so it survives the wait.
+    const d = resolveFixDisposition(retried({ baseChecksState: "failing" }), fix);
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^upstream-broken:/);
+    expect(d.escalation).toBeUndefined();
+  });
+
+  it("does not override a degraded read", () => {
+    // "We could not read the pull request" outranks every reading of it —
+    // including the one that says a human asked.
+    const d = resolveFixDisposition(
+      retried({ readErrors: ["getPullRequest: 403"], headSha: "" }),
+      fix,
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.readDegraded).toBe(true);
   });
 });

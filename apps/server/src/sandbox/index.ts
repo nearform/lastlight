@@ -317,8 +317,19 @@ export function prePopulateWorkspace(
     // Same run (or a caller that doesn't track runs): preserve the workspace
     // exactly — earlier phases may have written uncommitted scratch here.
     if (!pre.runId || lastRun === pre.runId) {
+      // Preserve the checkout — but NOT the base ref. `origin/<base>` was
+      // fetched when this run's FIRST phase provisioned, and the fix phase
+      // merges it minutes later; on a repo taking several dependency bumps a
+      // day the merge lands a base that is already superseded, leaving the PR
+      // `dirty` and therefore un-buildable by GitHub (no merge ref → no
+      // `pull_request` workflows at all, so `checksState` then reads green off
+      // whatever commit-status app is left). This writes remote-tracking refs
+      // only — never HEAD, the index or the working tree — so it cannot
+      // disturb the uncommitted scratch this path exists to keep.
+      ensureBaseAvailable(repoDir, pre, authArgs, url, scrub);
       console.log(
-        `[sandbox] Pre-clone skipped: ${repoDir} already a git repo (same run).`,
+        `[sandbox] Pre-clone skipped: ${repoDir} already a git repo (same run); ` +
+        `refreshed origin/${pre.baseBranch ?? "(none)"}.`,
       );
       return;
     }
@@ -472,6 +483,10 @@ function cloneDefaultAndCreateBranch(
  * plain clone (post-review's two-dot fallback still anchors the PR's own lines)
  * and never fails provisioning. Runs only for PR-diff workflows (a `baseBranch`
  * distinct from the head, never a recreate-from-base build).
+ *
+ * Called on EVERY provisioning path, including a later phase of the same run —
+ * `origin/<base>` is otherwise frozen for the whole run and the fix phase
+ * merges a base that is tens of minutes stale.
  */
 function ensureBaseAvailable(
   repoDir: string,
@@ -495,10 +510,35 @@ function ensureBaseAvailable(
     }
   };
   // Deepen both the base ref and the head branch to the same absolute depth.
+  // Always with an EXPLICIT `--depth`: a bare fetch into a shallow repository
+  // has awkward depth semantics and can deepen much further than intended.
   const fetchBoth = (depthArgs: string[]): void => {
     try { run([...authArgs, "fetch", ...depthArgs, url, dest]); } catch { /* best-effort */ }
     try { run([...authArgs, "fetch", ...depthArgs, url, pre.branch]); } catch { /* best-effort */ }
   };
+  // Put the base into `remote.origin.fetch`, so the ref we materialize below is
+  // also REFRESHABLE by a plain `git fetch origin <base>` — the fix prompt's own
+  // step 1. `--depth` implies `--single-branch`, so the configured refspec
+  // covers the head branch only; git's opportunistic remote-tracking update
+  // then skips `<base>` and the agent's fetch writes FETCH_HEAD and nothing
+  // else, leaving the very next `git merge origin/<base>` on the stale ref.
+  // `set-branches --add` does not dedupe and this runs once per phase, so read
+  // the refspecs first. Best-effort on both halves — it is a second line of
+  // defence, not the mechanism.
+  const configuredRefspecs = (): string[] => {
+    try {
+      return String(execFileSync(
+        "git",
+        ["-C", repoDir, "config", "--get-all", "remote.origin.fetch"],
+        { stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 },
+      )).split("\n").map((l) => l.trim()).filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  if (!configuredRefspecs().includes(dest)) {
+    try { run(["remote", "set-branches", "--add", "origin", base], 15_000); } catch { /* best-effort */ }
+  }
   try {
     fetchBoth(["--depth", "50"]);
     if (hasMergeBase()) return;

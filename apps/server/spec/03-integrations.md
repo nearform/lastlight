@@ -119,7 +119,7 @@ concern — see [Chat](/spec/11-chat).
 
 | | |
 |---|---|
-| **Transport** | HTTP POST from `src/cli/cli.ts` to the running harness. `POST /api/run` (generic workflow dispatch) or `POST /api/build` (build cycle on an issue URL). |
+| **Transport** | HTTP POST from `packages/cli/src/cli.ts` to the running harness. `POST /api/run` (generic workflow dispatch) or `POST /api/build` (build cycle on an issue URL). `lastlight pr retry` is the one trigger that goes to an **admin** route instead — `POST /admin/api/prs/:owner/:repo/:number/retry`, see below. |
 | **Auth** | `Authorization: Bearer <token>` header. The token is issued by `POST /admin/api/login` after the CLI submits `LASTLIGHT_TOKEN` (which the operator sets to match `ADMIN_PASSWORD`). HMAC-signed, 7-day TTL. Verified by `authMiddleware()` (`src/admin/auth.ts:35–65`). |
 | **Normalize** | None — the CLI does not produce an EventEnvelope. The `/api/run` handler unpacks `{ workflow, context }` and calls `dispatchWorkflow()` directly (`src/index.ts:495–518`). Workflows triggered this way see `_triggerType: "api"` in their context. |
 | **Event types** | n/a |
@@ -190,19 +190,23 @@ Two of the scheduled crons are **dependency-PR discovery backstops** for the
 
 **Both discoverers are candidate finders, not policy.** They answer one
 question — does this PR *look* like it needs this workflow? — and nothing else.
-Whether we may act on it (the escalation guard, the attempt counter, the cost
-cap, the per-SHA dedup, the fork guard, the run lock) is decided once, off the
-resolved PR snapshot, at the `dispatchWorkflow` choke point the webhook route
-crosses too: see the [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
+Whether we may act on it (the hold label, the escalation guard, the attempt
+counter, the cost cap, the per-SHA dedup, the fork guard, the run lock) is
+decided once, off the resolved PR snapshot, at the `dispatchWorkflow` choke point
+the webhook route crosses too: see the
+[dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
 
 That split is a correction, not a tidy-up. The `requires-human` filter used to
 live in the discoverers **and** in the dispatcher, and the two disagreed by
 construction: on the cron side the label was a one-way door with no code path
 that removed it, while the webhook path cleared it on success. Now there is one
 answer, and it is stateful rather than label-based — the state is "we escalated
-at head SHA X", so a maintainer's push re-arms the PR automatically, and the
-same label with no escalating run of ours behind it is read as a human saying
-"stay out" and honoured permanently.
+at head SHA X" (`PrState.escalatedAtSha`), so a maintainer's push re-arms the PR
+automatically. `requires-human` itself is read by **nothing**: it is a
+notification the bot writes, and the label a human applies to mean "stay off
+this" is the separate **hold** label (`hold.label`, default `lastlight-ignore`),
+answered at the same choke point above every other guard. See
+[Router](/spec/05-router#the-hold--the-first-gate).
 
 The same choke point is why the fan-out no longer bypasses enrichment. A cron
 dispatch calls `dispatchWorkflow` directly and never crosses the dispatcher, so
@@ -221,6 +225,16 @@ and cron dispatches of a `pr-fix`-shaped workflow identical by construction.
 | **Event types** | n/a |
 | **Resume** | When an operator approves a paused workflow, `/admin/approvals/:id/respond` calls `config.resumeWorkflow(workflowRun, "admin")` — the same callback the GitHub `@last-light approve` comment and Slack `/approve` slash command use. (`src/admin/routes.ts:813–831`, callback wired at `src/index.ts:453–476`) |
 | **Cron management** | Schedule overrides and enable/disable land in `cron_overrides`; the scheduler applies them on next tick without a process restart. **Disable re-registers rather than unregisters** — the job keeps ticking with `_cronGloballyEnabled: false` so a repo that opted into that cron from its `.lastlight/` is still honoured; usually the fan-out resolves to nobody and the tick costs nothing. "Run now" carries `_cronName` (so a repo's opt-out is respected however the tick was started) but deliberately *not* `_cronGloballyEnabled`, so the button still works on a globally-disabled cron. |
+| **PR retry** | `POST /admin/api/prs/:owner/:repo/:number/retry`, body `{ "reason"?: string }` — the third of the three surfaces that re-arm a pull request the harness escalated (see [Router](/spec/05-router#un-sticking-an-escalated-pr--the-three-retry-surfaces)). It is the only surface with no event of its own, so it resolves a `PrState` with `intervention: { via: "api", by: <session actor>, note: reason }`, crosses `applyPrDispatchGate` **itself**, and dispatches on `run` — the route that resolves is the route that gates. The workflow retried is the one that last worked the PR (`latestForTrigger` over `PR_FIX_SHAPED_WORKFLOWS`), else the configured `github.pr_fix` route. |
+
+The retry endpoint's answers, in full: **200** on dispatch (`dispatched: true`)
+or on record-without-dispatch (`dispatched: false, recorded: true`); **409** when
+the hold label, the run lock or a degraded read refuses it (nothing recorded);
+**403** for a repo outside `managedRepos`; **400** for a non-positive PR number;
+**503** when `github` / `dispatchWorkflow` are not wired (chat-only, CLI-only);
+**401** unauthenticated, from the same `authMiddleware` as every other admin
+route. `lastlight pr retry <owner/repo#N> [reason]` is a thin client over it and
+renders exactly those three outcomes (see `packages/cli/CLAUDE.md`).
 
 ## Invariants
 

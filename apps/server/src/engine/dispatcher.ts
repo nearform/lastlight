@@ -9,13 +9,20 @@ import { runDashboardUrl } from "../notify/model.js";
 import {
   getRuntimeConfig,
   getBotName,
+  getHoldLabel,
   defaultFixConfig,
   defaultDependenciesConfig,
   defaultReviewConfig,
 } from "../config/config.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
-import { resolvePrState, prScopedWorkflows, type PrState } from "./pr-state.js";
 import {
+  resolvePrState,
+  prScopedWorkflows,
+  type InterventionRequest,
+  type PrState,
+} from "./pr-state.js";
+import {
+  holdReply,
   resolveDispatchDisposition,
   reviewCheckPlacement,
   type Decision,
@@ -24,7 +31,12 @@ import {
   type ReviewTriggerOptions,
 } from "./pr-decisions.js";
 import { postReviewCheckForSkip } from "./review-check.js";
-import { escalatePr, noticeForkPr, type EscalationDeps } from "./pr-escalation.js";
+import {
+  escalatePr,
+  noticeForkPr,
+  recordIntervention,
+  type EscalationDeps,
+} from "./pr-escalation.js";
 
 /**
  * Hand a workflow to the runner. Matches `dispatchWorkflow` in index.ts — the
@@ -202,7 +214,6 @@ export async function dispatch(
   const explicitRequest =
     envelope.type === "message" ||
     envelope.type === "comment.created" ||
-    envelope.type === "pr_review_comment.created" ||
     // A review requested BY NAME — the reviewer picker, or the Re-run button on
     // our own `last-light/review` check. Both are a human pointing at us, so
     // both override mode, draft and dedup exactly as `@bot review` does. The
@@ -212,7 +223,16 @@ export async function dispatch(
   // `checks-settled` satisfies `after-checks`; `attention` is what defers.
   const reviewRoute: ReviewTriggerOptions["route"] =
     envelope.type === "pr.checks_settled" ? "checks-settled" : "attention";
-  const prState = await resolvePrStateForDispatch(handler, context, deps);
+  // `@<bot> retry [reason]`, if that is what this was. Handed to the RESOLVER
+  // rather than applied afterwards: the whole point of the record is that
+  // `sameProblem` reads it, so an intervention stamped onto a snapshot that was
+  // already derived would re-arm nothing (03-retry-intervention.md).
+  const prState = await resolvePrStateForDispatch(
+    handler,
+    context,
+    deps,
+    retryRequest(context),
+  );
   if (prState) context._prState = prState;
 
   // Guard against double-dispatching the same work. Everything past this
@@ -266,6 +286,22 @@ export async function dispatch(
         await envelope.reply(
           `I'm already working on this PR (\`${disposition.runInFlight.workflow}\`). I'll finish that run first — ask me again if it doesn't cover what you need.`,
         );
+      }
+      // A maintainer whose explicit request lost to the HOLD label is told
+      // which label is holding me off and how to lift it (locked decision 4).
+      // Same rule as the reply above: it belongs to the ROUTE that has a human
+      // on the other end, never to the decision — a cron tick must say nothing,
+      // and a hold that commented once per tick would be worse than the silence
+      // it replaced. No dedup needed: this fires only on an explicit ask, so it
+      // is one reply per ask, which is correct.
+      //
+      // In practice the router usually answers first (it sees the same label on
+      // the envelope and short-circuits before any `resolvePrState`); this is
+      // the branch for a PR whose event carried no labels — a `check_suite`
+      // route, a `/api/run` with `_triggerType: api` — where the live read is
+      // the first sight of the hold.
+      if (disposition.onHold && explicitRequest) {
+        await envelope.reply(holdReply(disposition.onHold.label));
       }
       // A fork PR is the one skip a human is owed an explanation for on the PR
       // itself: there is nothing wrong with their change, we simply have no
@@ -338,6 +374,7 @@ async function resolvePrStateForDispatch(
   handler: string,
   context: Record<string, unknown>,
   deps: DispatchDeps,
+  intervention?: InterventionRequest,
 ): Promise<PrState | null> {
   if (!prScopedWorkflows().has(handler)) return null;
   const repoStr = typeof context.repo === "string" ? context.repo : "";
@@ -348,7 +385,29 @@ async function resolvePrStateForDispatch(
     github: deps.github,
     db: deps.db,
     botLogin: getRuntimeConfig()?.botLogin ?? "",
+    ...(intervention ? { intervention } : {}),
   });
+}
+
+/**
+ * Read the router's `_retry` marker off the route context.
+ *
+ * Defensive rather than a cast: `context` is untyped by construction (every
+ * route builds its own), so an unrecognised shape reads as "no retry" — which
+ * is the inert case — rather than being stamped onto the snapshot verbatim. The
+ * `note` is NOT sanitized here; `resolvePrState` does that once, where the
+ * record is built, so no surface can skip it.
+ */
+function retryRequest(context: Record<string, unknown>): InterventionRequest | undefined {
+  const raw = context._retry;
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  if (r.via !== "comment" && r.via !== "label" && r.via !== "api") return undefined;
+  return {
+    via: r.via,
+    ...(typeof r.by === "string" && r.by ? { by: r.by } : {}),
+    ...(typeof r.note === "string" && r.note ? { note: r.note } : {}),
+  };
 }
 
 /**
@@ -374,6 +433,11 @@ export function prPolicyConfig(layer?: Partial<PrPolicyConfig>): PrPolicyConfig 
     fix: layer?.fix ?? rt?.fix ?? defaultFixConfig(),
     dependencies: layer?.dependencies ?? rt?.dependencies ?? defaultDependenciesConfig(),
     review: layer?.review ?? rt?.review ?? defaultReviewConfig(),
+    // The HOLD label. Read off the OPERATOR's config only — never the `layer` —
+    // because it is not in `repoConfig.allowKeys` and there is no direction to
+    // clamp a label name in. A repo that could rename it could rename it to
+    // something nobody applies.
+    holdLabel: getHoldLabel(),
   };
 }
 
@@ -381,7 +445,11 @@ export function prPolicyConfig(layer?: Partial<PrPolicyConfig>): PrPolicyConfig 
 export interface PrGateDeps extends EscalationDeps {
   /** `<botName>[bot]`. Defaults to the boot config's. */
   botLogin?: string;
-  /** `@<botName>`, for the `on-request` placeholder's instructions. */
+  /**
+   * `@<botName>` — the `on-request` placeholder's instructions, and the handle
+   * the escalation comment tells a maintainer to address `retry` to. Defaults
+   * to the boot config's.
+   */
   botMention?: string;
 }
 
@@ -439,9 +507,25 @@ export async function applyPrDispatchGate(
   );
   if (disposition.decision !== "skip") return disposition;
 
+  // The HOLD is an instruction, not a verdict: no placeholder, no label, no
+  // comment, no run row — silent, exactly like `upstream-broken`. Stated here as
+  // its own early return rather than relied on falling through: `escalatePr`
+  // would no-op anyway (no `EscalationCase`), but a future skip consequence
+  // added below must not quietly start firing on a PR a maintainer told us to
+  // leave alone. Returned to the caller so the route with a human on the other
+  // end can reply.
+  if (disposition.onHold) return disposition;
+
   // A run-lock drop is a "come back later", not a verdict: no placeholder, no
   // label, no comment, no run row. Returned to the caller so the route that has
   // a human on the other end can reply.
+  //
+  // ALSO no intervention row, and that is a decision rather than an omission. A
+  // row written while another run owns the PR would become the `latestForTrigger`
+  // the next dispatch reads its history off, displacing the live run's own
+  // snapshot and losing its harvested attempt line. The route's reply already
+  // says "ask me again if it doesn't cover what you need", which is the right
+  // answer to a retry aimed at work that is currently happening.
   if (disposition.runInFlight) return disposition;
 
   // Neither is a failed PR read (`readDegradedDrop`), and here the reason is
@@ -450,6 +534,18 @@ export async function applyPrDispatchGate(
   // review placeholder against a head SHA we do not have, would each be a
   // durable statement made on no information.
   if (disposition.readDegraded) return disposition;
+
+  // A retry that produced no run. The snapshot re-armed the budgets, but a skip
+  // writes no row — so without this the ask evaporates and the PR escalates
+  // again the moment whatever blocked it clears (`upstream-broken` is the case
+  // that matters: the base is red at the exact moment the maintainer asks).
+  // Idempotent: `recordIntervention` refuses when the record is already on a
+  // row, which is why it is safe on a route that fires per cron tick.
+  //
+  // Below the three guards above on purpose. The HOLD beats a retry outright
+  // (locked decision 4), a degraded read knows nothing, and a lock drop is
+  // covered by the note above.
+  await recordIntervention(workflowName, state, deps);
 
   if (disposition.review) {
     await postReviewCheckForSkip(
@@ -471,7 +567,13 @@ export async function applyPrDispatchGate(
     return disposition;
   }
 
-  await escalatePr(workflowName, state, disposition, policy.fix, deps);
+  await escalatePr(workflowName, state, disposition, policy.fix, {
+    ...deps,
+    // The two operator-configurable names the escalation comment has to speak,
+    // so the exits it lists are the ones this deployment actually has.
+    holdLabel: deps.holdLabel ?? policy.holdLabel ?? getHoldLabel(),
+    botMention: deps.botMention ?? `@${getBotName()}`,
+  });
   return disposition;
 }
 

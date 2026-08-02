@@ -292,6 +292,12 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td>Label applied to issues that exist solely to set up missing guardrails in a target repo.</td>
 			</tr>
 			<tr>
+				<td><code>LASTLIGHT_HOLD_LABEL</code></td>
+				<td>No</td>
+				<td><code>lastlight-ignore</code></td>
+				<td>The <strong>hold</strong> label. Apply it to any issue or pull request and Last Light stops acting on that subject entirely — no triage, no review, no fix, no merge, no comment. It outranks everything except "we couldn't read the pull request at all", including an explicit <code>@last-light …</code> request, which gets exactly one reply naming the label. Remove it and the bot resumes, with no record to clear. Distinct from <code>requires-human</code>, which the bot <em>writes</em> as a notification and nothing reads. Overlay key: <code>hold.label</code>.</td>
+			</tr>
+			<tr>
 				<td><code>MAX_CONCURRENT_WORKFLOWS</code></td>
 				<td>No</td>
 				<td><code>4</code></td>
@@ -442,7 +448,7 @@ dependencies:
 		<code>maxCostUsd</code> both bound the current <em>problem</em>, not the
 		PR's lifetime: a push from anyone but the bot is a fresh problem, so it
 		re-arms the attempt counter and the cost window together and clears the
-		<code>requires-human</code> hold with no label to remove by hand. A
+		escalation with no label to remove by hand. A
 		diagnosis class outside <code>retryableClasses</code> escalates straight
 		away rather than spending budget on a retry that can't help — its members
 		are checked against the five diagnosis classes, so a typo narrows the set

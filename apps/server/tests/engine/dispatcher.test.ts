@@ -8,6 +8,7 @@ import {
 } from 'lastlight-shared/config-types';
 import type { Route } from '#src/engine/router.js';
 import type { PrState } from '#src/engine/pr-state.js';
+import { HOLD_LABEL } from '#src/cron/dependabot-discovery.js';
 import {
   dispatch,
   applyPrDispatchGate,
@@ -1044,7 +1045,7 @@ describe('applyPrDispatchGate — the cron / api route crosses the same gate', (
       attempt: 1,
       flakyDeferrals: 0,
       escalatedAtSha: null,
-      escalatedBy: null,
+      intervention: null,
     forkNoticedAtSha: null,
       priorAttempts: [],
       notes: [],
@@ -1165,6 +1166,90 @@ describe('applyPrDispatchGate — the cron / api route crosses the same gate', (
         )
       ).decision,
     ).toBe('run');
+  });
+
+  /**
+   * The retry's standalone row (03-retry-intervention.md → "Where the record
+   * lives"). A retry that RESULTS IN A RUN needs none — `dispatchWorkflow`
+   * persists the whole snapshot on `context.prState`, so the dispatched run
+   * carries it. This is the other case.
+   */
+  const RETRY = {
+    at: '2026-08-02T10:00:00.000Z',
+    atSha: 'abcdef1234567890',
+    via: 'comment' as const,
+    by: 'alice',
+  };
+
+  it('records a retry the gate then skipped, so the ask is not lost', async () => {
+    // `upstream-broken` is the case that matters: the base branch is red at the
+    // exact moment somebody asks. A skip writes no run row, so without this the
+    // retry evaporates — the base goes green an hour later, the PR is picked up,
+    // the budget is still spent, and it escalates again.
+    const db = mockDb();
+    const github = prGithubStub();
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'dependabot-ci-fix',
+        state: prState({ intervention: RETRY, baseChecksState: 'failing' }),
+        policy: policy(),
+        route: 'attention',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(d.reason).toMatch(/^upstream-broken:/);
+    expect(db.runs.createRun).toHaveBeenCalledTimes(1);
+    const row = db.runs.createRun.mock.calls[0][0];
+    expect(row.currentPhase).toBe('retry-requested');
+    expect(row.context.prState.intervention).toEqual(RETRY);
+    // Recorded, not escalated: nothing is said on the PR.
+    expect(github.addLabels).not.toHaveBeenCalled();
+    expect(github.postComment).not.toHaveBeenCalled();
+  });
+
+  it('records NOTHING when the hold beat the retry', async () => {
+    // Locked decision 4. The hold is not "come back later", it is "do not come
+    // back" — recording a retry underneath it would re-arm the PR the moment
+    // the label came off, on the strength of an ask we refused.
+    const db = mockDb();
+    const github = prGithubStub();
+    const d = await applyPrDispatchGate(
+      {
+        workflowName: 'dependabot-ci-fix',
+        state: prState({ intervention: RETRY, labels: ['lastlight-ignore'] }),
+        policy: { ...policy(), holdLabel: 'lastlight-ignore' },
+        route: 'attention',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(d.onHold).toEqual({ label: 'lastlight-ignore' });
+    expect(db.runs.createRun).not.toHaveBeenCalled();
+  });
+
+  it('records NOTHING when a run already owns the PR', async () => {
+    // A row written while another run owns the PR would become the
+    // `latestForTrigger` the next dispatch reads its history off, displacing
+    // the live run's own snapshot and losing its harvested attempt line. The
+    // route's reply already says "ask me again if it doesn't cover what you
+    // need", which is the right answer to a retry aimed at work in flight.
+    const db = mockDb();
+    const github = prGithubStub();
+    await applyPrDispatchGate(
+      {
+        workflowName: 'dependabot-ci-fix',
+        state: prState({ intervention: RETRY, runInFlight: { workflow: 'pr-fix', runId: 'run-1' } }),
+        policy: policy(),
+        route: 'attention',
+        logPrefix: '[dispatch]',
+      },
+      { db: db as any, github },
+    );
+
+    expect(db.runs.createRun).not.toHaveBeenCalled();
   });
 
   it('reviews a never-settling PR on the sweep route — the release mechanism it claims to be', async () => {
@@ -1508,18 +1593,52 @@ describe('dispatch — the dependency-merge disposition', () => {
     context: { repo: 'cliftonc/lastlight', prNumber: 190, ...ctx },
   });
 
-  it('skips (no sandbox) when a human applied requires-human', async () => {
+  it('DISPATCHES a PR carrying requires-human — the label is a notification, not a state', async () => {
+    // 02-hold-label.md. `requires-human` used to be inferred into a permanent
+    // "bot, stay out" whenever no escalating run of ours matched — which meant
+    // it worked only on a PR we had never touched, and read as our own label
+    // everywhere else. Nothing reads it now; the HOLD label below is the block.
     const envelope = makeEnvelope({ type: 'pr.checks_passed', prNumber: 190 });
-    // No escalating run of OURS to match → a maintainer applied the label to
-    // mean "bot, stay out". A hard, permanent override.
     const github = prGithubStub({ labels: ['requires-human'], checksState: 'passing' });
     const deps = makeDeps(checksRoute(), { github });
 
     const outcome = await dispatch(envelope, deps);
 
+    expect(outcome).toEqual({ kind: 'dispatched', workflow: 'dependabot-pr-merge' });
+  });
+
+  it('skips SILENTLY when the hold label is on the PR', async () => {
+    // No label, no comment, no run row, no reply — a cron/webhook tick that
+    // finds the hold says nothing at all (locked decision 3).
+    const envelope = makeEnvelope({ type: 'pr.checks_passed', prNumber: 190 });
+    const github = prGithubStub({ labels: [HOLD_LABEL], checksState: 'passing' });
+    const deps = makeDeps(checksRoute(), { github });
+
+    const outcome = await dispatch(envelope, deps);
+
     expect(outcome.kind).toBe('skipped');
-    expect((outcome as any).reason).toContain('human-hold');
+    expect((outcome as any).reason).toContain('on-hold');
     expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
+    expect(github.addLabels).not.toHaveBeenCalled();
+    expect(github.postComment).not.toHaveBeenCalled();
+    expect(envelope.reply).not.toHaveBeenCalled();
+  });
+
+  it('replies exactly once when an EXPLICIT request loses to the hold', async () => {
+    // Locked decision 4: the hold beats an explicit request, and the bot says
+    // so — otherwise it is silently ignoring a direct instruction, which is
+    // worse than refusing it. The reply belongs to the ROUTE that has a human on
+    // the other end, which is why the cron tick above stays quiet.
+    const envelope = makeEnvelope({ type: 'comment.created', prNumber: 190, body: '@last-light merge this' });
+    const github = prGithubStub({ labels: [HOLD_LABEL], checksState: 'passing' });
+    const deps = makeDeps(checksRoute(), { github });
+
+    const outcome = await dispatch(envelope, deps);
+
+    expect(outcome.kind).toBe('skipped');
+    expect(deps.dispatchWorkflow).not.toHaveBeenCalled();
+    expect(envelope.reply).toHaveBeenCalledTimes(1);
+    expect(envelope.reply).toHaveBeenCalledWith(expect.stringContaining(HOLD_LABEL));
   });
 
   it('skips when this workflow already assessed the current head SHA', async () => {

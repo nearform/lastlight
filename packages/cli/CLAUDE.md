@@ -25,6 +25,7 @@ cli-format.ts     Table / age / color helpers for CLI output.
 cli-timeline.ts   Session timeline renderer.
 setup.ts          First-run setup wizard (client | server).
 fork-cli.ts       `lastlight fork` — copy built-in assets into the overlay.
+pr-cli.ts         `lastlight pr retry` — the admin-API client for the PR retry surface.
 repo-cli.ts       `lastlight repo` — a managed repo's own `.lastlight/` config layer
                   (fork prompts/skills into it, validate it offline, show the server's
                   effective view). Reuses fork-cli's copy + core-root helpers.
@@ -49,6 +50,9 @@ lastlight owner/repo#N                 # shorthand
 lastlight build owner/repo#N           # explicit full build cycle
 lastlight triage|review owner/repo[#N] # repo-wide scan or single issue/PR
 lastlight health|security owner/repo   # repo-level report
+lastlight pr retry owner/repo#N [reason]  # un-stick a PR the bot escalated (re-arms BOTH
+                                        # budgets + re-runs the stuck workflow; the hold
+                                        # label / run lock / fork guard still win)
 # Debug (read the admin API instead of SSH; all accept --json):
 lastlight workflow list [--status s] [--workflow name] [--limit n]
 lastlight workflow log <id> [--follow]
@@ -68,6 +72,34 @@ lastlight setup                        # first-run wizard (asks: client | server
 Per-command help: `lastlight <cmd> help` (e.g. `lastlight cron help`) — the
 top-level `lastlight` / `--help` is a compact index; detail lives under each
 command's help.
+
+## Un-stick a PR (`pr-cli.ts`)
+
+`lastlight pr retry <owner/repo#N> [reason]` — the third of the three surfaces
+that re-arm a pull request Last Light escalated (the other two are a
+`@<bot> retry` comment and removing `requires-human`; see
+[`docs/plans/stuck-pr-recovery/03-retry-intervention.md`](../../docs/plans/stuck-pr-recovery/03-retry-intervention.md)
+and `apps/server/spec/05-router.md` → "Un-sticking an escalated PR"). One POST to
+`POST /admin/api/prs/:owner/:repo/:number/retry`; everything after the reference
+is the free-text reason, recorded on the retry and replayed to the next attempt
+as a note (sanitized server-side — it can never forge a marker token).
+
+The command is deliberately thin, because **every guard is the server's**: the
+managed-repo allowlist, the hold label, the run lock, the fork guard and the fix
+budgets are all decided at the same `applyPrDispatchGate` a webhook crosses. So
+there are exactly three answers:
+
+| server | meaning | CLI |
+|---|---|---|
+| 200 `dispatched: true` | re-armed and running now | ✓, naming the workflow, exit 0 |
+| 200 `dispatched: false` | recorded — the gate skipped for an unrelated reason (a red base branch), so the next event honours it | ✓, naming the reason, exit 0 |
+| 409 | refused, nothing recorded — the hold label, a run already working the PR, or a PR we could not read | the reason on stderr, **exit 1** |
+
+That third row is why `pr retry` uses `apiPostStatus` rather than `apiPost`: a
+refusal is an *answer*, not a transport failure, and `apiPost` dies on any
+non-2xx. `parsePrRef` is narrower than `cli.ts`'s general `parseGitHubRef` on
+purpose — a retry moves a PR's fix budgets, so an `/issues/N` URL is rejected
+locally rather than 404'd remotely.
 
 ## Server lifecycle (HOST-LOCAL)
 

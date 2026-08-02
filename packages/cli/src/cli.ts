@@ -227,6 +227,37 @@ async function apiPost(path: string, body: unknown): Promise<any> {
   return handle(res, path);
 }
 
+/**
+ * `apiPost` for endpoints whose REFUSALS are answers rather than errors — today
+ * `pr retry`, where "the hold label beat you" and "another run owns this PR" are
+ * 409s the caller has to render, not stack traces. Same request as `apiPost`;
+ * the only difference is that a non-2xx comes back instead of exiting. A 401
+ * still dies, because that is about the caller's session, not the request.
+ */
+async function apiPostStatus(path: string, body: unknown): Promise<{ status: number; data: any }> {
+  await ensureFreshToken();
+  const t = target();
+  let res: Response;
+  try {
+    res = await fetch(`${t.url}${path}`, {
+      method: "POST",
+      headers: authHeaders(t.token),
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    return die(`Cannot reach ${t.url} — is the server running? (${(e as Error).message})`);
+  }
+  if (res.status === 401) die("Not logged in or token expired — run: lastlight login");
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+  return { status: res.status, data };
+}
+
 function num(flag: string | boolean | undefined, fallback: number): number {
   const n = typeof flag === "string" ? parseInt(flag, 10) : NaN;
   return Number.isFinite(n) ? n : fallback;
@@ -270,6 +301,17 @@ ${chalk.bold("Cron")} (list + trigger scheduled jobs on the instance — handy f
   lastlight cron enable <name>       Enable a disabled cron
   lastlight cron disable <name>      Disable a cron
                                      ${chalk.dim("[--json on any]. Omit <name> for an interactive picker.")}`,
+
+  pr: `
+${chalk.bold("PR")} (act on a pull request the instance stopped on)
+  lastlight pr retry <owner/repo#N> [reason]
+                                     Tell the bot to have another go — re-arms the attempt
+                                     counter AND the cost window, and re-runs the workflow
+                                     that got stuck. The reason is recorded and reaches the
+                                     next attempt as a note. ${chalk.dim("[--json]")}
+  ${chalk.dim("Same effect as commenting `@<bot> retry` on the PR, or removing `requires-human`.")}
+  ${chalk.dim("Refused (exit 1) if the PR carries the hold label, another run owns it, or it")}
+  ${chalk.dim("could not be read — the hold beats a retry outright, by design.")}`,
 
   server: `
 ${chalk.bold("Server")} (host-local — run on the server; manages the docker stack)
@@ -352,6 +394,7 @@ ${chalk.bold("Trigger")} (run work on a repo)
   lastlight triage|review <owner/repo[#N]>      Triage/review a whole repo (scan) or one issue/PR
   lastlight verify|qa-test <owner/repo#N>       Test a claim / drive a flow → pass/fail
   lastlight health|security <owner/repo>        Weekly health report / security review
+  lastlight pr retry <owner/repo#N> [reason]    Have another go at a PR the bot stopped on
 
 ${chalk.bold("Debug")} (read the running instance)   ${chalk.dim("→ lastlight <cmd> help")}
   workflow · session · logs · approvals · stats · cron
@@ -1184,6 +1227,23 @@ async function cmdRepo(): Promise<void> {
   if (code !== 0) process.exit(code);
 }
 
+// ── pr (thin client) ─────────────────────────────────────────────────────────
+
+/**
+ * `lastlight pr retry <owner/repo#N> [reason]` — tell the instance to have
+ * another go at a pull request it stopped on. One POST; every guard (managed
+ * repo, the hold label, the run lock, the budgets) is the server's, decided at
+ * the same gate a webhook crosses. See src/pr-cli.ts.
+ */
+async function cmdPr(): Promise<void> {
+  const { prCommand } = await import("./pr-cli.js");
+  const code = await prCommand(positionals.slice(1), {
+    json: JSON_OUT,
+    apiPost: apiPostStatus,
+  }).catch((err: unknown) => die(err instanceof Error ? err.message : String(err)));
+  if (code !== 0) process.exit(code);
+}
+
 // ── skills (host-local) ──────────────────────────────────────────────────────
 
 /**
@@ -1269,6 +1329,7 @@ async function main() {
     case "cron":
     case "crons": return cmdCron();
     case "fork": return cmdFork();
+    case "pr": return cmdPr();
     case "repo": return cmdRepo();
     case "skills": return cmdSkills();
     case "oauth":

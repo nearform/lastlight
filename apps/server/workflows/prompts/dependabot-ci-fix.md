@@ -14,6 +14,12 @@ CONTEXT:
   branch out of date with base; `dirty` = merge conflict; `blocked` = a required
   gate is unmet). CI may already be green — bringing the branch up to date (step
   1) is often the whole fix.{{/if}}
+- Checks: **{{checksState}}** — {{settledCheckCount}} settled check(s). Read the
+  count, not just the state: a suspiciously low one usually means GitHub has
+  stopped building this PR at all (it cannot compute a merge ref for a `dirty`
+  PR, so no `pull_request` workflow is even created) and the one thing still
+  reporting is a commit-status app keying off the push. That is a green with no
+  CI behind it — treat it as unknown, not as passing.
 - This is an automated dependency update (Dependabot / Renovate). The dependency
   bump itself is already committed on this branch — do NOT revert it. Your job is
   to make the update pass CI and mergeable.
@@ -62,7 +68,10 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    current base and a `behind` PR is made mergeable (so the merge step later sees
    a `clean` PR, not `behind`). Merge — do NOT rebase or force-push:
    - `git fetch origin {{baseBranch}}`
-   - `git merge --no-edit origin/{{baseBranch}}`
+   - `git merge --no-edit FETCH_HEAD` — merge what you just fetched, NOT
+     `origin/{{baseBranch}}`. In a shallow single-branch clone that
+     remote-tracking ref may not have moved, and merging it silently lands a
+     base that is already superseded.
    If the merge conflicts (almost always the lockfile), resolve it by
    **regenerating** the lockfile with the repo's package manager, then
    `git add -A && git commit --no-edit` to complete the merge — never hand-edit a
@@ -136,11 +145,12 @@ name: "requires-human", color: "b60205", description: "Last Light can't proceed
 automatically; a maintainer must handle it." }] }`), then add it with
 `github_add_labels` (`{ owner: "{{owner}}", repo: "{{repo}}", issue_number:
 {{prNumber}}, labels: ["requires-human"] }`), and say so in your summary. If
-label writes are denied, just say so in your summary. (This isn't permanent, and
-nobody has to remove it by hand: the harness reads the label as OURS, applied at
-this head, so any commit pushed by someone else re-arms the loop. It is also
-cleared by `dependabot-pr-merge` once a later fix turns the checks green on a
-trivial update.)
+label writes are denied, just say so in your summary. (It is a NOTIFICATION, not
+a stop: nothing in the harness reads this label, so it neither holds the PR nor
+needs removing by hand. It is also cleared by `dependabot-pr-merge` once a later
+fix turns the checks green on a trivial update. The label that DOES hold a PR is
+`lastlight-ignore`, which only a maintainer applies — never apply or remove it
+yourself.)
 
 OUTPUT: A brief summary of the root cause, exactly what you changed, the
 local test/lint/typecheck results, and any checks you couldn't reproduce in the

@@ -1375,3 +1375,202 @@ describe('routeEvent — reporter-driven re-triage', () => {
     expect(result.action).toBe('ignore');
   });
 });
+
+/**
+ * The HOLD label at the SUBJECT level (02-hold-label.md, locked decision 3).
+ *
+ * The dispatch gate covers the four PR-scoped workflows; this covers everything
+ * else — `issue-triage`, `issue-comment`, `build`, `explore`, `verify`, and any
+ * workflow an overlay adds — because "stay off this" that only some workflows
+ * honour is a label nobody can remember the scope of.
+ *
+ * It is a router-level HARD IGNORE, the same shape as `pr.labeled`'s and
+ * `pr_review.submitted`'s: one array lookup on labels the envelope already
+ * carries, where deciding it further down would cost a `resolvePrState` per
+ * event on a subject we have been told not to touch.
+ */
+describe('routeEvent — the hold label', () => {
+  const HOLD = 'lastlight-ignore';
+
+  it('suppresses issue-triage on a held issue', async () => {
+    mockClassifyIssue.mockClear();
+    const result = await routeEvent(
+      makeEnvelope({ type: 'issue.opened', issueNumber: 1, title: 'Bug', labels: [HOLD] }),
+    );
+    expect(result.action).toBe('ignore');
+    if (result.action === 'ignore') expect(result.reason).toMatch(/^on-hold: `lastlight-ignore`/);
+    // Not even classified — the hold is above the LLM call, so a held issue
+    // costs nothing at all.
+    expect(mockClassifyIssue).not.toHaveBeenCalled();
+  });
+
+  it('suppresses issue-comment on a held issue', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'chat' });
+    const result = await routeEvent(
+      makeEnvelope({
+        type: 'comment.created',
+        issueNumber: 1,
+        body: 'plain comment, no mention',
+        authorAssociation: 'OWNER',
+        labels: [HOLD],
+      }),
+      makeDeps(false),
+    );
+    expect(result.action).toBe('ignore');
+    expect(mockClassifyComment).not.toHaveBeenCalled();
+  });
+
+  it('replies ONCE, naming the label, when a maintainer @-mentions on a held subject', async () => {
+    // Locked decision 4: the hold beats an explicit request, and refusing out
+    // loud beats ignoring somebody who asked. `reply` is a Route, so the
+    // dispatcher posts exactly one comment and dispatches nothing.
+    mockClassifyComment.mockResolvedValue({ intent: 'build' });
+    const result = await routeEvent(
+      makeEnvelope({
+        type: 'comment.created',
+        issueNumber: 1,
+        body: '@last-light build this',
+        authorAssociation: 'OWNER',
+        labels: [HOLD],
+      }),
+      makeDeps(false),
+    );
+    expect(result.action).toBe('reply');
+    if (result.action === 'reply') expect(result.message).toContain(`\`${HOLD}\``);
+    expect(mockClassifyComment).not.toHaveBeenCalled();
+  });
+
+  it('holds a PULL REQUEST subject too — the label has one meaning', async () => {
+    // `pr-comment` / `verify` / `qa-test` are not PR-scoped, so the dispatch
+    // gate never sees them. Without this branch a held PR would still answer
+    // questions and record demos.
+    const result = await routeEvent(
+      makeEnvelope({ type: 'pr.opened', prNumber: 7, issueNumber: 7, labels: [HOLD] }),
+    );
+    expect(result.action).toBe('ignore');
+  });
+
+  it('says nothing on a held subject when nobody asked', async () => {
+    // A non-mention comment, a synchronize, a settled suite: every one of them
+    // is silent. The reply is owed to a person, not to an event.
+    for (const envelope of [
+      makeEnvelope({ type: 'pr.synchronize', prNumber: 7, labels: [HOLD] }),
+      makeEnvelope({ type: 'pr.checks_settled', prNumber: 7, labels: [HOLD] }),
+      makeEnvelope({ type: 'pr.review_requested', prNumber: 7, labels: [HOLD], requestedReviewer: 'last-light[bot]' }),
+    ]) {
+      expect((await routeEvent(envelope)).action).toBe('ignore');
+    }
+  });
+
+  it('leaves an unheld subject completely alone', async () => {
+    mockClassifyIssue.mockResolvedValue(false);
+    const result = await routeEvent(
+      makeEnvelope({ type: 'issue.opened', issueNumber: 1, title: 'Bug', labels: ['bug'] }),
+    );
+    expect(result.action).toBe('handler');
+  });
+
+  it('honours the operator-configured name', async () => {
+    setRuntimeConfig({
+      managedRepos: ['cliftonc/drizzle-cube'],
+      holdLabel: 'do-not-touch',
+    } as unknown as LastLightConfig);
+    // The packaged default no longer applies once renamed…
+    expect(
+      (await routeEvent(makeEnvelope({ type: 'issue.opened', issueNumber: 1, labels: [HOLD] }))).action,
+    ).toBe('handler');
+    // …and the configured one does.
+    expect(
+      (await routeEvent(makeEnvelope({ type: 'issue.opened', issueNumber: 1, labels: ['do-not-touch'] })))
+        .action,
+    ).toBe('ignore');
+  });
+});
+
+/**
+ * `@<bot> retry [reason]` — the first of 03-retry-intervention.md's three
+ * surfaces, and a REPAIR rather than a feature.
+ *
+ * It is structured rather than classified on purpose. "@bot try again"
+ * classifies as `build` and routes to `pr-fix`, which is a dispatch with no
+ * record behind it — precisely the path that used to clear the escalation guard,
+ * fall into the same budget gate and post a duplicate escalation comment. What
+ * re-arms the PR is the `_retry` marker below, which the dispatcher hands to
+ * `resolvePrState` so the snapshot is DERIVED with the intervention rather than
+ * patched afterwards.
+ */
+describe('routeEvent — @bot retry', () => {
+  const retry = (over: Partial<EventEnvelope> = {}) =>
+    makeEnvelope({
+      type: 'comment.created',
+      body: '@last-light retry',
+      authorAssociation: 'COLLABORATOR',
+      prNumber: 5,
+      ...over,
+    });
+
+  it('routes to the fix family with the retry marker, without asking the classifier', async () => {
+    const result = await routeEvent(retry());
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('pr-fix');
+      expect(result.context._routeKey).toBe('github.pr_fix');
+      expect(result.context._retry).toEqual({ via: 'comment', by: 'octocat' });
+    }
+    // Structured match, above classification — no LLM call, no ambiguity.
+    expect(mockClassifyComment).not.toHaveBeenCalled();
+  });
+
+  it('carries the free text after the command as the reason', async () => {
+    const result = await routeEvent(retry({ body: '@last-light retry the arm64 runner was flaky' }));
+    if (result.action === 'handler') {
+      expect(result.context._retry).toEqual({
+        via: 'comment',
+        by: 'octocat',
+        note: 'the arm64 runner was flaky',
+      });
+    }
+  });
+
+  it('routes a DEPENDENCY PR to the ci-fix workflow, as the red-PR webhook would', async () => {
+    mockGetWorkflowByIntent.mockReturnValue({ name: 'dependabot-ci-fix' } as never);
+    const result = await routeEvent(
+      retry({ issueAuthor: 'dependabot[bot]', title: 'Bump lodash from 4.17.20 to 4.17.21' }),
+    );
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('dependabot-ci-fix');
+    }
+  });
+
+  it('is maintainer-gated, by the check that governs the whole @-mention path', async () => {
+    // No extra authorization work — `MAINTAINER_ROLES` sits above every
+    // structured command. Locked decision 5: capability is checked, identity
+    // never is, so there is nothing per-person to add here either.
+    const result = await routeEvent(retry({ authorAssociation: 'NONE' }));
+    expect(result.action).toBe('reply');
+    if (result.action === 'reply') expect(result.message).toMatch(/maintainer/i);
+  });
+
+  it('means nothing on an issue — it falls through to classification', async () => {
+    // The whole mechanism is scoped to the fix family's budgets.
+    mockClassifyComment.mockResolvedValue({ intent: 'chat' });
+    const result = await routeEvent(
+      makeEnvelope({
+        type: 'comment.created',
+        body: '@last-light retry',
+        authorAssociation: 'OWNER',
+        issueNumber: 10,
+      }),
+    );
+    if (result.action === 'handler') expect(result.handler).toBe('issue-comment');
+    expect(mockClassifyComment).toHaveBeenCalled();
+  });
+
+  it('loses to the HOLD label, and says so once', async () => {
+    // Locked decision 4: the hold beats an explicit request, and the one thing
+    // the request earns is a reply naming the label.
+    const result = await routeEvent(retry({ labels: ['lastlight-ignore'] }));
+    expect(result.action).toBe('reply');
+    if (result.action === 'reply') expect(result.message).toMatch(/lastlight-ignore/);
+  });
+});

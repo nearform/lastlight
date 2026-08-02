@@ -1216,6 +1216,18 @@ async function main() {
     mountAdmin(app, db, {
       cronScheduler: cron,
       triggerCron: cronRunner,
+      // The three collaborators `POST /prs/:owner/:repo/:number/retry` needs to
+      // do what `lastlight pr retry` asks: resolve the PR, cross the same gate
+      // every other route crosses, and dispatch. `resolveRepoPolicy` is the very
+      // same closure `dispatchDeps` gets below — one resolution of a repo's
+      // clamped budgets, so the admin route can't read them looser than the repo
+      // set them.
+      github,
+      dispatchWorkflow,
+      resolveRepoPolicy: async (workflowName, context) => {
+        const { repoConfig } = await resolveRepoRunConfig(workflowName, context, { client: github });
+        return repoConfig;
+      },
       stateDir: config.stateDir,
       sessionsDir: config.sessionsDir,
       buildAssetsDir: config.buildAssetsDir,

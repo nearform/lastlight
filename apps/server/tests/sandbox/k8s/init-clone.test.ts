@@ -100,6 +100,79 @@ describe("buildCloneInitContainer reuse refresh (Task 18b)", () => {
     expect(tail).toContain("reset_scratch");
   });
 
+  it("refreshes origin/<base> on the SAME-run preserve path too, before the early exit", () => {
+    // The `#1016` defect, mirrored from the host `prePopulateWorkspace`: the
+    // preserve path used to `exit 0` before any fetch, so `origin/<base>` was
+    // frozen from the run's FIRST phase and the fix phase merged a base tens of
+    // minutes stale — leaving the PR `dirty`, which GitHub cannot build a merge
+    // ref for, so no `pull_request` workflow runs at all.
+    const lines = scriptText.split("\n");
+    const defAt = lines.findIndex((l) => l.trim() === "ensure_base() {");
+    const guardAt = lines.findIndex((l) => l.includes('[ "$last_run" = "$run_id" ]'));
+    const callAt = lines.findIndex((l, i) => i > guardAt && l.trim() === "ensure_base");
+    const exitAt = lines.findIndex((l) => l.includes("(same run) — preserving"));
+
+    expect(defAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeGreaterThan(defAt); // the function is defined before it is called
+    expect(callAt).toBeGreaterThan(guardAt);
+    expect(exitAt).toBeGreaterThan(callAt); // the refresh happens BEFORE `exit 0`
+  });
+
+  it("does NOT clear the scratch files on the preserve path (this is not a new run)", () => {
+    // The other half of the property: `ensure_base` writes remote-tracking refs
+    // only — never HEAD, the index or the working tree — so the uncommitted
+    // scratch an earlier phase wrote survives. Adding a `reset_scratch` here
+    // would silently drop the live fix-loop push gate mid-run.
+    const lines = scriptText.split("\n");
+    const guardAt = lines.findIndex((l) => l.includes('[ "$last_run" = "$run_id" ]'));
+    const exitAt = lines.findIndex((l) => l.includes("(same run) — preserving"));
+    const preserveBlock = lines.slice(guardAt, exitAt + 1).join("\n");
+    expect(preserveBlock).toContain("ensure_base");
+    expect(preserveBlock).not.toContain("reset_scratch");
+  });
+
+  it("adds the base to remote.origin.fetch, so the agent's own `git fetch origin <base>` is load-bearing", () => {
+    // `--depth` implies `--single-branch`, so the configured refspec covers the
+    // head branch only. Git's opportunistic remote-tracking update then skips
+    // `<base>`, and the fix prompt's step-1 `git fetch origin {{baseBranch}}`
+    // writes FETCH_HEAD and nothing else — leaving the very next
+    // `git merge origin/<base>` on the ref it thought it had just moved.
+    expect(scriptText).toContain('remote set-branches --add origin "$base"');
+    // `set-branches --add` does NOT dedupe and `ensure_base` runs once per
+    // phase, so the configured refspecs are READ first and the add is guarded.
+    expect(scriptText).toMatch(
+      /config --get-all remote\.origin\.fetch[^\n]*grep -qxF "\$dest"[\s\S]{0,120}remote set-branches --add origin "\$base"/,
+    );
+    // Best-effort: a second line of defence, never a reason to fail provisioning.
+    expect(scriptText).toMatch(/remote set-branches --add origin "\$base" \|\| true/);
+  });
+
+  it("keeps the refspec add inside ensure_base's guard (no base / recreate ⇒ untouched)", () => {
+    const lines = scriptText.split("\n");
+    const defAt = lines.findIndex((l) => l.trim() === "ensure_base() {");
+    const guardLineAt = lines.findIndex((l, i) => i > defAt && l.includes('[ "$base" != "$branch" ]'));
+    const addAt = lines.findIndex((l) => l.includes("remote set-branches --add origin"));
+    const closeAt = lines.findIndex((l, i) => i > defAt && l === "}");
+    expect(guardLineAt).toBeGreaterThan(defAt);
+    expect(addAt).toBeGreaterThan(guardLineAt); // after `[ -n "$base" ] … || return 0`
+    expect(addAt).toBeLessThan(closeAt);
+  });
+
+  it("never bare-fetches inside ensure_base — every fetch carries an explicit depth", () => {
+    // A bare `git fetch` into a shallow repository has awkward depth semantics
+    // and can deepen much further than intended, so the deepening ladder stays
+    // explicit: --depth 50 → --depth 500 → --unshallow.
+    const lines = scriptText.split("\n");
+    const defAt = lines.findIndex((l) => l.trim() === "ensure_base() {");
+    const closeAt = lines.findIndex((l, i) => i > defAt && l === "}");
+    // `git -C "$repo_dir" fetch …` only — not the `remote.origin.fetch` config read.
+    const fetches = lines.slice(defAt, closeAt).filter((l) => /\$repo_dir" fetch /.test(l));
+    expect(fetches.length).toBeGreaterThan(0);
+    for (const line of fetches) {
+      expect(line).toMatch(/--depth "\$depth"|--unshallow/);
+    }
+  });
+
   it("recreate-from-base re-clones the default branch and cuts the head locally", () => {
     const rc = buildCloneInitContainer("img", {
       owner: "acme", repo: "web", branch: "lastlight/5-x",

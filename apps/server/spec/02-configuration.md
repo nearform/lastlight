@@ -56,6 +56,7 @@ interface LastLightConfig {
   slack?: SlackConfig;
   approval?: Record<string, boolean>;     // gate-name → enabled
   bootstrapLabel: string;
+  holdLabel: string;                      // the HOLD label — a human applies it to stop Last Light
   exploreDefaultRepo?: string;
   publicUrl?: string;
   reviewPostsCheck: boolean;              // `review.postsCheck`, flattened — predates the block below
@@ -482,9 +483,18 @@ or skill types (e.g. `chat`, `triage`). `default` is the catch-all.
 `config/default.yaml`'s commented examples also name `diagnose` (the CI-failure
 classifier that opens both fix workflows) and `pr-fix-retry` — which, when set,
 `escalateFixModel` (`src/workflows/simple.ts`) substitutes for `models["pr-fix"]`
-on any attempt above `fix.escalateModelAfterAttempt`, before the map is persisted
+above `fix.escalateModelAfterAttempt`, before the map is persisted
 on the run context, so the admin panel shows the model that attempt actually used.
-Unset, nothing changes at any attempt number. `diagnose` is left **unset** on purpose:
+The leaf is expressed in *attempts* and stays that way, but what it is compared
+against is `priorAttempts.length + 1` — the **journal**, not the `attempt`
+counter. `attempt` is a budget position that re-arms on a push or a recorded
+retry, so keying the model on it downgraded a PR that had already failed three
+times back to the base model the moment somebody asked for another go. The
+journal survives a retry (and is wiped by a push, where the code genuinely
+changed), so it is the count that knows how many times this has actually been
+tried. Each retry also leaves a seam line in the journal, so the count runs one
+ahead per intervention — the conservative direction. Unset, nothing changes at
+any attempt number. `diagnose` is left **unset** on purpose:
 those examples are Anthropic models, and pinning one packaged would send that
 phase at a provider a deployment overriding only `models.default` has no key for.
 Unset it falls through to `default` — a cheap model there is the whole point of
@@ -647,6 +657,7 @@ renders a proper agent tree. Constants: `src/telemetry/openinference.ts`; tree:
 | Var | Purpose | Default |
 |---|---|---|
 | `BOOTSTRAP_LABEL` | label for issues that set up missing guardrails | `lastlight:bootstrap` |
+| `LASTLIGHT_HOLD_LABEL` | the HOLD label a maintainer applies to stop Last Light acting on an issue or PR (overlay `hold.label`) | `lastlight-ignore` |
 | `EXPLORE_DEFAULT_REPO` | `owner/name` — destination for Slack-initiated explore publish | unset (must be set or run fails at publish phase) |
 | `REVIEW_POSTS_CHECK` | post a Check Run on PR head SHA after pr-review | `false` |
 | `MAX_CONCURRENT_WORKFLOWS` | global cap on sandboxed workflow runs executing at once; excess triggers are persisted as `queued` and admitted FIFO as slots free (overlay `concurrency.maxWorkflows`) | `4` |
@@ -740,6 +751,7 @@ These have no env var — they're set in `config/default.yaml` or the overlay's
 | `repoConfig.{enabled,allowKeys,allowedModels,allowAssets}` | see the per-repository layer above | The operator's bounds on the repo layer. | **never** — a repo can't widen its own bounds |
 | `deploy.version` | `string \| null`, `null` | Core-version pin (git tag/ref). Deployment config, not runtime behaviour. Env: `LASTLIGHT_CORE_VERSION`. | no |
 | `bootstrap.label` / `explore.defaultRepo` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO`. | no |
+| `hold.label` | `string`, `lastlight-ignore` | The **HOLD** label. A maintainer applies it to any issue or pull request and Last Light stops acting on that subject entirely — no triage, no review, no fix, no merge, and no comment. It is checked at the dispatch gate above every other guard except a failed PR read, and in the router as a subject-level hard ignore so non-PR-scoped workflows honour it too; it beats an explicit `@bot …` request, which earns exactly one reply naming the label. Removing it resumes the bot with no record to clear — that liveness is why it is a label rather than a stored verdict. Distinct from `requires-human`, which the bot *writes* as a notification and nothing reads. See [Router](/spec/05-router#the-hold--the-first-gate). Renaming it changes what the code gates on; the packaged prompts create the **default** name in their `github_ensure_labels` pass, so a rename also wants a forked prompt (or the label created by hand). Env: `LASTLIGHT_HOLD_LABEL`. | no — a repo that could rename it could rename it to something nobody applies |
 | `review.{postsCheck,trigger,requestLabel,skipDraft}` | `false` / `after-checks` / `null` / `true` | When a `pr-review` run is triggered, and whether it posts the `last-light/review` check. `after-checks` means "once the head SHA's checks **settle**, either colour" — so the review can read and cite the CI result, and a push-storm collapses to one review per settled SHA. There is no settled-*and-passing* sub-mode: a PR whose CI never goes green would then never be reviewed at all. Enforced by `resolveReviewTrigger` (`src/engine/pr-decisions.ts`) at the [dispatch gate](/spec/05-router#reviewtrigger--one-resolver-every-route) — **one** implementation, on every route, with `src/cron/review-discovery.ts` reduced to a candidate finder. `on-request` is served by `requestLabel`, an `@bot review` comment, and the Re-run button on the check; `review_requested` is opportunistic only, since GitHub App bot users are not selectable in the reviewer picker. Env: `REVIEW_POSTS_CHECK` (`postsCheck` only). | **yes** — `postsCheck`/`skipDraft` add-only, `trigger` clamped to the lower automation tier, `requestLabel` free |
 | `fix.{maxAttempts,localIterations,gateTimeoutSeconds,escalateModelAfterAttempt,maxCostUsd,maxFlakyDeferrals,retryableClasses}` | `3` / `2` / `900` / `1` / `5.0` / `2` / `[reproducible, env-mismatch]` | Retry budgets shared by every PR_FIX_SHAPED workflow (`pr-fix`, `dependabot-ci-fix`). `maxAttempts` counts *across runs* for one PR; the cost ceiling is cumulative per PR and ships **on**. A diagnosis class outside `retryableClasses` escalates immediately rather than burning budget on a retry that can't help. `localIterations` and `gateTimeoutSeconds` reach the fix phase through a **templated phase budget**: `generic_loop.max_iterations: { from: fix.localIterations, default: 2 }` and `timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }` in both fix workflow YAMLs. The `from:` path resolves against the run's EFFECTIVE (already repo-clamped) `fix` block; the literal is the fallback for a context carrying no `fix:` at all. See `06-workflow-engine.md` → "Templated phase budgets". | **yes**, clamped one-way (`escalateModelAfterAttempt` / `gateTimeoutSeconds` operator-only) |
 | `dependencies.{autoMergeMaxImpact,requireSettledChecks,minSettledChecks,auditComment}` | `medium` / `true` / `1` / `true` | How far up the impact scale a **major** dependency bump may auto-merge. Impact, not semver magnitude, is the gate: a `@types/*` major is not a framework rewrite. Enforced in two different ways — `requireSettledChecks` / `minSettledChecks` are code (`mayMerge`, decided before the run and handed to the prompt as a verdict), `autoMergeMaxImpact` is prompt-level (the tier is the agent's self-report; nothing parses it or compares it to the ceiling). See "Where `dependencies` is enforced" above. | **yes**, clamped one-way (`minSettledChecks` operator-only) |

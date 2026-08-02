@@ -369,6 +369,38 @@ export function renderAttemptLine(attempt: number, markers: AttemptMarkers | nul
 }
 
 /**
+ * The SEAM a human's retry leaves in the journal (03-retry-intervention.md,
+ * locked decision 8).
+ *
+ * ```
+ * — retried by request: "arm64 runner was flaky" —
+ * ```
+ *
+ * A retry keeps `priorAttempts` — nothing about the code changed, only how much
+ * patience is left — so without a boundary marker the journal reads `attempt 1`,
+ * `attempt 2`, and then a new run that also calls itself attempt 1, and the
+ * agent cannot tell where one window ends and the next begins.
+ *
+ * Rendered HERE rather than at the call site so it is bounded by the same
+ * {@link MAX_ATTEMPT_LINE_CHARS} every other line in the array is: the whole
+ * array is replayed into every later prompt, so a seam line is paid for on every
+ * subsequent attempt exactly as an attempt line is.
+ *
+ * `note` is free text a maintainer typed. It has already been through
+ * `pr-notes.ts`'s `sanitizeNoteText` by the time it reaches a
+ * `PrState.intervention` — flattened to one line, stripped of control
+ * characters, and REJECTED outright if it carries `class=` or a marker tag — so
+ * it can inform an agent and can never forge a token the parser reads. Passing
+ * an unsanitized string here would defeat that; the sanitize happens where the
+ * record is built, once.
+ */
+export function renderInterventionLine(note?: string | null): string {
+  const text = typeof note === "string" ? note.replace(/\s+/g, " ").trim() : "";
+  const line = text ? `— retried by request: "${text}" —` : "— retried by request —";
+  return clamp(line, MAX_ATTEMPT_LINE_CHARS);
+}
+
+/**
  * Keep the journal bounded: at most {@link MAX_PRIOR_ATTEMPT_LINES} lines,
  * newest kept, oldest dropped, order preserved.
  *

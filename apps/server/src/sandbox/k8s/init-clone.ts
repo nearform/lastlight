@@ -9,8 +9,9 @@ export interface CloneSpec {
   /**
    * PR base branch. When set (and distinct from `branch`), the script fetches it
    * and deepens both refs to a shared merge-base so `git diff origin/<base>...HEAD`
-   * works — for both the fresh clone and the reuse-refresh path. Skipped for a
-   * `recreateFromBase` run.
+   * works — on the fresh clone, the reuse-refresh path AND the same-run preserve
+   * path (where the ref would otherwise be frozen for the whole run). Skipped for
+   * a `recreateFromBase` run.
    */
   baseBranch?: string;
   /**
@@ -40,8 +41,11 @@ export interface CloneSpec {
 // tree warm) or, for a recreate-from-base run, discard and re-clone the default.
 // The head refresh is best-effort: a failed fetch preserves the existing checkout
 // rather than leaving a half-reset tree (mirrors the host `refreshExistingClone`).
-// `ensure_base` fetches + deepens `origin/<base>` for the three-dot PR diff on
-// both the fresh-clone and refresh paths (mirrors the host `ensureBaseAvailable`).
+// `ensure_base` fetches + deepens `origin/<base>` for the three-dot PR diff, and
+// runs on EVERY path — fresh clone, different-run refresh, AND the same-run
+// preserve above (mirrors the host `ensureBaseAvailable`). The preserve path
+// needs it because `origin/<base>` is otherwise frozen for the whole run and a
+// later fix phase merges a base tens of minutes stale.
 //
 // `reset_scratch` is this backend's half of `resetVerifyScript` /
 // `resetPrNotesJournal` (`engine/executors/shared.ts`), which the host backends
@@ -64,6 +68,20 @@ const CLONE_SCRIPT = [
   "ensure_base() {",
   '  [ -n "$base" ] && [ "$base" != "$branch" ] && [ -z "$recreate" ] || return 0',
   '  dest="+refs/heads/$base:refs/remotes/origin/$base"',
+  // Put the base into `remote.origin.fetch`, so the ref materialized below is
+  // also REFRESHABLE by a plain `git fetch origin <base>` — the fix prompt's own
+  // step 1. `--depth` implies `--single-branch`, so the configured refspec covers
+  // the head branch only; git's opportunistic remote-tracking update then skips
+  // `<base>` and the agent's fetch writes FETCH_HEAD and nothing else, leaving
+  // the very next `git merge origin/<base>` on the stale ref. `set-branches
+  // --add` does not dedupe and `ensure_base` runs once per phase, so read the
+  // configured refspecs first. Best-effort — a second line of defence, not the
+  // mechanism (the explicit `dest` refspec below is).
+  '  git -C "$repo_dir" config --get-all remote.origin.fetch 2>/dev/null | grep -qxF "$dest" \\',
+  '    || git -C "$repo_dir" remote set-branches --add origin "$base" || true',
+  // Always fetch with an EXPLICIT `--depth`: a bare fetch into a shallow
+  // repository has awkward depth semantics and can deepen much further than
+  // intended.
   "  for depth in 50 500; do",
   '    git -C "$repo_dir" fetch --depth "$depth" -- "$url" "$dest" || true',
   '    git -C "$repo_dir" fetch --depth "$depth" -- "$url" "$branch" || true',
@@ -77,7 +95,18 @@ const CLONE_SCRIPT = [
   'if [ -d "$repo_dir/.git" ]; then',
   '  last_run="$(cat "$marker" 2>/dev/null || true)"',
   '  if [ -z "$run_id" ] || [ "$last_run" = "$run_id" ]; then',
-  '    echo "[clone] existing checkout (same run) — preserving"; exit 0',
+  // Preserve the checkout — but NOT the base ref. `origin/<base>` was fetched
+  // when this run's FIRST phase provisioned, and the fix phase merges it minutes
+  // later; on a repo taking several dependency bumps a day the merge lands a base
+  // that is already superseded, leaving the PR `dirty` and therefore un-buildable
+  // by GitHub (no merge ref → no `pull_request` workflows at all, so
+  // `checksState` then reads green off whatever commit-status app is left).
+  // `ensure_base` writes remote-tracking refs only — never HEAD, the index or the
+  // working tree — so it cannot disturb the uncommitted scratch this path exists
+  // to keep, and it is deliberately NOT paired with `reset_scratch` for the same
+  // reason the host isn't: this is not a new run.
+  "    ensure_base",
+  '    echo "[clone] existing checkout (same run) — preserving; refreshed origin/$base"; exit 0',
   "  fi",
   '  if [ -z "$recreate" ]; then',
   // Before the fetch, not after it: a failed refresh takes the `else` branch
@@ -130,8 +159,10 @@ const CLONE_SCRIPT = [
  * phase reads what an earlier one wrote), a different run refreshes the head
  * (`git fetch` + `reset --hard` + `clean -fdx -e node_modules`) or, for a
  * recreate-from-base run, re-clones the default branch. For PR-diff workflows the
- * base branch is fetched + deepened to a shared merge-base on both the fresh and
- * refresh paths so `git diff origin/<base>...HEAD` resolves.
+ * base branch is fetched + deepened to a shared merge-base on EVERY path — fresh
+ * clone, different-run refresh and same-run preserve — so
+ * `git diff origin/<base>...HEAD` resolves against a base that is current as of
+ * THIS phase, not as of the run's first one.
  *
  * Every new-run path also clears the harness's two scratch files
  * (`.git/lastlight-verify.sh`, `.git/lastlight-notes`) — this backend's half of

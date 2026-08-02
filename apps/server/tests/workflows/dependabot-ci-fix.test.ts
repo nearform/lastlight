@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { getWorkflow, getCronWorkflows, getWorkflowByIntent } from "#src/workflows/loader.js";
+import {
+  getWorkflow,
+  getCronWorkflows,
+  getWorkflowByIntent,
+  loadPromptTemplate,
+} from "#src/workflows/loader.js";
 
 /**
  * Contract test for the built-in dependabot-ci-fix workflow + its red-PR cron
@@ -53,6 +58,28 @@ describe("dependabot-ci-fix — built-in workflow + cron", () => {
     expect(byName.get("diagnose")?.output_var).toBe("diagnosis");
     // `fixing` first — the runner directs the agent to the primary skill.
     expect(byName.get("fix")?.skills).toEqual(["fixing", "building"]);
+  });
+
+  it("merges FETCH_HEAD in step 1, never the remote-tracking ref", () => {
+    // `--depth` implies `--single-branch`, so `remote.origin.fetch` covers the
+    // PR head only and `git fetch origin <base>` updates FETCH_HEAD while
+    // leaving `origin/<base>` exactly where it was. The prompt merged that
+    // stale ref, so a fix run could resolve yesterday's conflict and leave
+    // today's — the PR stays `dirty` and GitHub stops building it entirely.
+    const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+    expect(prompt).toContain("git fetch origin {{baseBranch}}");
+    expect(prompt).toContain("git merge --no-edit FETCH_HEAD");
+    expect(prompt).not.toContain("git merge --no-edit origin/{{baseBranch}}");
+  });
+
+  it("hands the fix phase the settled-check COUNT, not just the state", () => {
+    // A `dirty` PR has no merge ref, so no `pull_request` workflow is created
+    // at all and the only thing left reporting is a commit-status app keying
+    // off the push — `checksState` then reads `passing` off one check where
+    // eleven used to settle. The count is the evidence that green is hollow.
+    const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+    expect(prompt).toContain("{{checksState}}");
+    expect(prompt).toContain("{{settledCheckCount}}");
   });
 
   it("is resolvable by intent (the router's pr.checks_failed fallback route)", () => {

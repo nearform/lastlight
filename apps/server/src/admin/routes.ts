@@ -38,6 +38,11 @@ import {
   loadSkillRaw,
 } from "../workflows/loader.js";
 import { routeEvent, type Route } from "../engine/router.js";
+import { applyPrDispatchGate, prPolicyConfig } from "../engine/dispatcher.js";
+import { resolvePrState, prTriggerId } from "../engine/pr-state.js";
+import { holdReply, type PrPolicyConfig } from "../engine/pr-decisions.js";
+import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import type { GitHubClient } from "../engine/github/github.js";
 import { classifyComment, type ClassificationResult } from "../engine/screen/classifier.js";
 import type { EventEnvelope, EventType } from "../connectors/types.js";
 import {
@@ -220,6 +225,36 @@ export interface AdminConfig {
    * without the runner (tests, CLI-only) → the trigger endpoint reports 503.
    */
   triggerCron?: (workflow: string, context: Record<string, unknown>) => Promise<void>;
+  /**
+   * The harness GitHub client — `null` in chat-only mode, absent in tests that
+   * don't need it. The three collaborators below exist for ONE endpoint,
+   * `POST /prs/:owner/:repo/:number/retry`, which has to resolve a live `PrState`
+   * snapshot, cross the same dispatch gate every other route crosses, and then
+   * dispatch. Without a client there is nothing to resolve, so the route reports
+   * 503 rather than acting on a snapshot made of defaults.
+   */
+  github?: GitHubClient | null;
+  /**
+   * Dispatch a workflow now. Wired in `src/index.ts` to the same
+   * `dispatchWorkflow` every route uses, so a retry's run is indistinguishable
+   * from a webhook's. Absent without the runner (tests, CLI-only) → 503.
+   */
+  dispatchWorkflow?: (
+    workflow: string,
+    context: Record<string, unknown>,
+  ) => Promise<{ success: boolean; error?: string }>;
+  /**
+   * The run's repo-clamped `fix`/`dependencies`/`review` blocks — the SAME
+   * resolution `dispatchWorkflow` performs (`resolveRepoRunConfig`), handed in
+   * for the same reason the dispatcher is handed it: a second, operator-only
+   * view of policy would read a repo's budgets LOOSER than the repo set them,
+   * which is the one direction a budget must not err in. Absent → the
+   * operator's own config (`prPolicyConfig(undefined)`).
+   */
+  resolveRepoPolicy?: (
+    workflowName: string,
+    context: Record<string, unknown>,
+  ) => Promise<Partial<PrPolicyConfig> | undefined>;
   /** Slack OAuth config (optional — enables "Login with Slack" on dashboard) */
   slackOAuthClientId?: string;
   slackOAuthClientSecret?: string;
@@ -2425,6 +2460,152 @@ export function createAdminRoutes(
       console.error(`[admin] cron trigger ${name} failed:`, err);
     });
     return c.json({ name, workflow: def.workflow, triggered: true });
+  });
+
+  // ── Un-stick a pull request — the third retry surface ─────────────────────
+  //
+  // `lastlight pr retry <owner/repo#N> [reason]` and (eventually) the dashboard.
+  // The other two surfaces are a `@<bot> retry` comment and taking
+  // `requires-human` off by hand; all three write the SAME record
+  // (`PrState.intervention`) and re-arm through the one `sameProblem` boundary —
+  // see `docs/plans/stuck-pr-recovery/03-retry-intervention.md` and
+  // `spec/05-router.md` → "Un-sticking an escalated PR".
+  //
+  // Modelled on `cron trigger` above: the route owns the guards and the shape,
+  // an injected callback owns the runner. Authorisation is the admin session
+  // (the `authMiddleware` at the top of this file); `by` is that session's
+  // identity, recorded for display only — per locked decision 5 no decision
+  // function reads WHO asked.
+  //
+  // ## Why it dispatches, and why it can't just record
+  //
+  // `resolvePrState` + `recordIntervention` alone would persist the ask and
+  // leave the next event to act on it. That is right for the comment/label
+  // surfaces, which arrive ON an event that is already dispatching. It is wrong
+  // here: an escalated PR is by definition one no further `check_suite` will
+  // fire for, so "the next event" is the daily sweep at best and nothing at all
+  // for a PR no cron covers — `lastlight pr retry` would report success and
+  // change nothing anyone could see. The RECORD does survive being parked
+  // (`applyDerivedState` keeps the head un-assessed until a run has served the
+  // ask), which is what makes the standalone row worth writing at all; what
+  // dispatching buys is the asker an answer.
+  //
+  // Which is why this crosses `applyPrDispatchGate` itself rather than letting
+  // `dispatchWorkflow` do it: the snapshot travels down on `_prState` (it must —
+  // it carries the intervention), and an inherited snapshot is exactly the signal
+  // `dispatchWorkflow` reads as "this route already decided". The route that
+  // resolves is the route that gates; the dispatcher does the same thing for the
+  // same reason. The gate is what makes a retry NOT override the hold label, the
+  // fork guard, the run lock, `upstream-broken` or a degraded read — and, on the
+  // skips that are none of those, what records the standalone `retry-requested`
+  // row so the ask survives to the next event.
+  app.post("/prs/:owner/:repo/:number/retry", async (c) => {
+    const { owner, repo: name } = c.req.param();
+    const repo = `${owner}/${name}`;
+    const prNumber = Number.parseInt(c.req.param("number"), 10);
+    if (!Number.isInteger(prNumber) || prNumber <= 0) {
+      return c.json({ error: `invalid pull request number: ${c.req.param("number")}` }, 400);
+    }
+    // The same allowlist that gates every other repo-touching path. A retry must
+    // not be a way to make the harness act on a repo the operator never
+    // enrolled — `dispatchWorkflow` refuses it too, but that refusal happens
+    // after this route has already resolved (and could have recorded) state
+    // against it.
+    if (!isManagedRepo(repo)) {
+      return c.json({ error: `${repo} is not a managed repository` }, 403);
+    }
+    const github = config.github ?? null;
+    if (!github || !config.dispatchWorkflow) {
+      return c.json({ error: "pull-request retry is not configured" }, 503);
+    }
+
+    // Free text from `lastlight pr retry <ref> "<reason>"`. Untrusted, and
+    // deliberately NOT sanitized here: `resolvePrState` runs it through
+    // `pr-notes.ts`'s sanitizer where the record is built, so no surface can
+    // skip that step.
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: unknown };
+    const reason = typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim() : undefined;
+    const by = actorFromContext(c) ?? "admin";
+
+    // Which workflow is "go again"? The one that last worked this PR — the same
+    // row `escalatePr` recorded against and the same row `resolvePrState` reads
+    // its history off, so the retry lands on the workflow that actually got
+    // stuck (`dependabot-ci-fix` for a dependency PR, `pr-fix` otherwise)
+    // without a second GitHub read to re-derive what the router already decided
+    // once. A PR we have never fixed falls back to the configured `pr_fix` route.
+    const prior = db.runs.latestForTrigger([...PR_FIX_SHAPED_WORKFLOWS], prTriggerId(repo, prNumber));
+    const workflowName = prior?.workflowName ?? getRoutes().github?.pr_fix ?? "pr-fix";
+
+    const state = await resolvePrState(owner, name, prNumber, {
+      github,
+      db,
+      botLogin: getRuntimeConfig()?.botLogin ?? "",
+      botName: getBotName(),
+      // Handed to the RESOLVER, never patched on afterwards: `sameProblem` reads
+      // the record, so an intervention stamped onto an already-derived snapshot
+      // would re-arm nothing. `at`/`atSha` are stamped in there too, so this
+      // route cannot date a retry itself or key one to a head it never read.
+      intervention: { via: "api", by, ...(reason ? { note: reason } : {}) },
+    });
+
+    const context = { repo, prNumber, title: state.title, _triggerType: "api" as const };
+    const policy = prPolicyConfig(await config.resolveRepoPolicy?.(workflowName, context));
+    const disposition = await applyPrDispatchGate(
+      { workflowName, state, policy, route: "attention", logPrefix: "[admin]" },
+      { db, github, botLogin: getRuntimeConfig()?.botLogin, botMention: `@${getBotName()}` },
+    );
+
+    const retry = state.intervention;
+    if (disposition.decision === "skip") {
+      // Three of the gate's skips deliberately record NOTHING — the hold (a
+      // maintainer said stay off), a degraded read (we know nothing), and a run
+      // already owning the PR (a row there would displace that run's own
+      // snapshot). Those are refusals: the ask did not land, and the caller is
+      // told so with a non-2xx. Every other skip already wrote the standalone
+      // `retry-requested` row inside the gate, so the ask is parked and will be
+      // honoured by the next event — a 200 with `dispatched: false`.
+      const refused = !!(disposition.onHold || disposition.runInFlight || disposition.readDegraded);
+      return c.json(
+        {
+          repo,
+          prNumber,
+          workflow: workflowName,
+          dispatched: false,
+          recorded: !refused,
+          ...(refused ? {} : { retry }),
+          // The hold is the one skip that owes a human a sentence rather than a
+          // reason string, and it is the SAME sentence the comment route gives.
+          reason: disposition.onHold ? holdReply(disposition.onHold.label) : disposition.reason,
+          ...(disposition.onHold ? { held: disposition.onHold.label } : {}),
+        },
+        refused ? 409 : 200,
+      );
+    }
+
+    // Fire-and-forget, exactly like `cron trigger` and `/api/run`: a fix run
+    // takes minutes. `_prState` carries the armed snapshot down so the run
+    // persists the intervention on its own `context.prState` — which is where
+    // the record normally lives, and why no standalone row is written here.
+    console.log(`[admin] retry ${workflowName} ${repo}#${prNumber} by ${by} — ${disposition.reason}`);
+    config.dispatchWorkflow(workflowName, {
+      ...context,
+      body: state.body,
+      _prState: state,
+      sender: by,
+      triggeredBy: by,
+    }).catch((err: unknown) => {
+      console.error(`[admin] retry ${workflowName} ${repo}#${prNumber} failed:`, err);
+    });
+
+    return c.json({
+      repo,
+      prNumber,
+      workflow: workflowName,
+      dispatched: true,
+      recorded: false,
+      retry,
+      reason: disposition.reason,
+    });
   });
 
   return app;

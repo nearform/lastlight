@@ -782,6 +782,27 @@ const FIX_RETRY_MODEL_KEY = "pr-fix-retry";
  * Substitute `models["pr-fix-retry"]` for `models["pr-fix"]` once this PR has
  * spent more than `fix.escalateModelAfterAttempt` attempts.
  *
+ * ## Why this keys on `priorAttempts`, not on `attempt`
+ *
+ * Locked decision 10 (03-retry-intervention.md). `attempt` is a BUDGET
+ * position: it re-arms to 1 whenever the problem becomes fresh, which is now
+ * true for a recorded retry as well as for a push. Keying the model on it meant
+ * a PR that had already failed three times on the escalated model was retried
+ * on the BASE model the moment a maintainer asked for another go — the exact
+ * opposite of what asking for another go means.
+ *
+ * `priorAttempts` is the journal, and locked decision 8 makes it the field that
+ * SURVIVES a retry. So its length is the thing that actually knows how many
+ * times this has been tried, and `attempt` goes back to being purely a budget.
+ * A push still wipes the journal, which is right: the code changed, so the
+ * earlier attempts are not evidence that this one needs a stronger model.
+ *
+ * The journal also carries a one-line SEAM per retry, so the count runs one
+ * ahead of the attempt count per intervention. That is the conservative
+ * direction — it escalates the model slightly sooner on a PR a human has
+ * already had to intervene on — and it keeps this a plain `length` read rather
+ * than a parse of the rendered lines.
+ *
  * `resolveModelVariant` renders `model:` templates against `run.ctx` **only**,
  * so `{{attempt}}` inside a `model:` template cannot work without an engine
  * change. Rewriting the map here is the cheapest correct route: no engine
@@ -802,20 +823,25 @@ const FIX_RETRY_MODEL_KEY = "pr-fix-retry";
 export function escalateFixModel(
   workflowName: string,
   models: ModelConfig | undefined,
-  attempt: number | undefined,
+  /** How many lines `PrState.priorAttempts` carries — see the note above. */
+  priorAttempts: number | undefined,
   fix: FixConfig,
 ): ModelConfig | undefined {
   // Only the fix family reads `models["pr-fix"]`. Every PR-scoped dispatch
-  // carries an `attempt` (the snapshot is resolved for `pr-review` and
+  // carries a journal (the snapshot is resolved for `pr-review` and
   // `dependabot-pr-merge` too), so without this guard a review run would record
   // a rewritten map it never used.
   if (!PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) return models;
   if (!models) return models;
   const retry = models[FIX_RETRY_MODEL_KEY];
   if (!retry) return models;
-  // `escalateModelAfterAttempt: 0` is legal and means "escalate from attempt 1".
-  // A dispatch with no snapshot has no attempt at all — treat it as the first.
-  if ((attempt ?? 1) <= fix.escalateModelAfterAttempt) return models;
+  // The config leaf is expressed in ATTEMPTS, and stays that way — an operator
+  // who wrote `escalateModelAfterAttempt: 1` meant "attempt 2 onwards". An
+  // empty journal is attempt 1, which is also what a dispatch with no snapshot
+  // at all reads as. `escalateModelAfterAttempt: 0` is legal and means
+  // "escalate from attempt 1".
+  const attempt = (priorAttempts ?? 0) + 1;
+  if (attempt <= fix.escalateModelAfterAttempt) return models;
   if (models[FIX_MODEL_KEY] === retry) return models;
   return { ...models, [FIX_MODEL_KEY]: retry };
 }
@@ -948,12 +974,17 @@ export async function runSimpleWorkflow(
   // cost, and how many consecutive `flaky` verdicts it has deferred on. They
   // resolve against the run's EFFECTIVE `fix:` block, so a repo that clamped
   // itself down is escalated and promoted on its own numbers.
-  const attempt = numberFromExtra(request.extra, "attempt");
   const flakyDeferrals = numberFromExtra(request.extra, "flakyDeferrals");
+  // The JOURNAL's length, not `attempt` — locked decision 10. `attempt` re-arms
+  // on a retry and `priorAttempts` survives one, so this is the field that
+  // knows how many times the PR has actually been tried.
+  const priorAttempts = Array.isArray(request.extra?.priorAttempts)
+    ? request.extra.priorAttempts.length
+    : undefined;
   const effectiveModels = escalateFixModel(
     workflowName,
     repoConfig?.models ?? models,
-    attempt,
+    priorAttempts,
     effectiveFix,
   );
   definition = promoteFlakyDiagnosis(definition, flakyDeferrals, effectiveFix);

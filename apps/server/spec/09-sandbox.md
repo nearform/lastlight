@@ -348,11 +348,15 @@ exists) the script compares a `<WORKSPACE_DIR>/.lastlight-run` marker (stamped
 with the owning run id, kept outside the repo so `git clean` can't touch it)
 against the run id passed as argv:
 
-- **Same run** (marker matches, or no run id) → **preserve** the checkout
-  untouched. Each workflow phase is its own Pod against the shared per-(repo,PR)
-  PVC, so a later phase must read what an earlier one wrote (the architect's
-  `plan.md`, the executor's edits) — an unconditional refresh would destroy that
-  handoff.
+- **Same run** (marker matches, or no run id) → **preserve** the checkout — HEAD,
+  the index and the work tree are left exactly as they are. Each workflow phase
+  is its own Pod against the shared per-(repo,PR) PVC, so a later phase must read
+  what an earlier one wrote (the architect's `plan.md`, the executor's edits) —
+  an unconditional refresh would destroy that handoff. The one thing this path
+  *does* refresh is `origin/<base>` (`ensure_base`, below): it writes
+  remote-tracking refs only, so it cannot disturb the uncommitted scratch the
+  path exists to keep. It is deliberately **not** paired with `reset_scratch` —
+  this is not a new run.
 - **Different run** (a fresh run reusing the PR's dir) → **refresh the head**:
   `git fetch` the head ref, `checkout -B` + `reset --hard` to it, then
   `git clean -fdx -e node_modules` (keeping the dependency tree warm). This is
@@ -366,9 +370,23 @@ against the run id passed as argv:
 
 For PR-diff workflows the base branch (`PrePopulateSpec.baseBranch`, threaded
 into the clone init) is fetched as a real `origin/<base>` ref and both refs are
-deepened until they share a merge-base (depth 50 → 500 → `--unshallow`), on both
-the fresh-clone and refresh paths, so `git diff origin/<base>...HEAD` — the
-three-dot PR diff the review agent and post-review anchor against — resolves.
+deepened until they share a merge-base (depth 50 → 500 → `--unshallow`), so
+`git diff origin/<base>...HEAD` — the three-dot PR diff the review agent and
+post-review anchor against — resolves. `ensure_base` runs on **every** path:
+the fresh clone, the different-run refresh, *and* the same-run preserve.
+
+That last one is not redundant. Without it `origin/<base>` is frozen at whatever
+the run's *first* phase fetched, so a fix phase merging it tens of minutes later
+lands a base that is already superseded — which leaves the PR `dirty`, and GitHub
+cannot compute a merge ref for a `dirty` PR, so no `pull_request` workflow is
+created at all and `checksState` then reads green off whatever commit-status app
+is left. `ensure_base` also adds the base to `remote.origin.fetch` (`git remote
+set-branches --add`) before fetching, because `--depth` implies
+`--single-branch`: without the extra refspec the agent's own `git fetch origin
+<base>` moves `FETCH_HEAD` and nothing else, leaving the next `git merge
+origin/<base>` on the stale ref. Every fetch passes an explicit `--depth`, since
+a bare fetch into a shallow repository can deepen much further than intended.
+
 Best-effort throughout (mirrors the host `ensureBaseAvailable`); skipped for a
 `recreateFromBase` run.
 
@@ -823,6 +841,15 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
    every path. Pre-clone errors are scrubbed (token **and** its base64)
    before logging (`sandbox/index.ts`).
 
+   For a PR-diff workflow every path also runs `ensureBaseAvailable` — the fresh
+   clone, the different-run refresh **and** the same-run preserve — so
+   `origin/<base>` is current as of *this* phase rather than as of the run's
+   first one. See the kubernetes backend's Workspace section above for why (a
+   stale merge leaves the PR `dirty`, and GitHub builds no `pull_request`
+   workflow for a `dirty` PR) and for the `remote.origin.fetch` refspec it adds
+   so the agent's own `git fetch origin <base>` can refresh the ref too. It
+   writes remote-tracking refs only — never HEAD, the index or the work tree.
+
    Every path that starts a **new** run also resets the two harness-owned
    files that live inside the checkout's own `.git/` — the fix loop's push
    gate (`.git/lastlight-verify.sh`, `resetVerifyScript`) and the PR journal
@@ -850,7 +877,9 @@ identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`) and the github.com-scoped
    that clears either file: `git clean -fdx` does not enter `.git/`. The
    *same-run* preserve path deliberately skips both — a later phase of one run
    keeps the gate the first phase wrote, and the journal is drained per phase by
-   the marker harvest rather than per run (see [State](/spec/10-state)). On the
+   the marker harvest rather than per run (see [State](/spec/10-state)). These
+   two are the only things that path skips; the base-ref refresh above is not one
+   of them, because it touches no file the checkout's phases can see. On the
    **kubernetes** backend the harness has no filesystem access to the PVC, so
    the same two deletes run inside the clone init container
    (`sandbox/k8s/init-clone.ts`), on exactly the same set of paths.

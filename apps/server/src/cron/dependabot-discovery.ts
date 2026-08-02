@@ -38,7 +38,7 @@
  *
  * **These are candidate finders, not policy** (09-state-machine.md → S1/S2).
  * They answer "does this PR look like it needs this workflow?" — a fact about
- * the pull request. Whether we may ACT on it (the `requires-human` escalation
+ * the pull request. Whether we may ACT on it (the hold label, the escalation
  * guard, the attempt counter, the cost cap, the per-SHA dedup, the fork guard)
  * is decided once by `resolvePrState` + `resolveDispatchDisposition` at the
  * `dispatchWorkflow` choke point, which the webhook route crosses too. The
@@ -49,15 +49,55 @@
 
 /**
  * Last Light dependency-PR lifecycle labels. THE single source of truth for
- * these strings. The discovery exclusion below imports `REQUIRES_HUMAN_LABEL`;
- * the dependabot PROMPTS hardcode the same strings (markdown can't import) —
- * `workflows/prompts/dependabot-pr-merge.md` and `dependabot-ci-fix.md`.
+ * these strings. The dependabot PROMPTS hardcode the same strings (markdown
+ * can't import) — `workflows/prompts/dependabot-pr-merge.md` and
+ * `dependabot-ci-fix.md`.
  * `tests/cron/label-vocab.test.ts` asserts those prompt files contain these
  * exact strings so the code and the prompts never drift.
  */
 export const DEP_TRIVIAL_LABEL = "dependency-trivial";
 export const DEP_FUNCTIONAL_LABEL = "dependency-functional";
 export const REQUIRES_HUMAN_LABEL = "requires-human";
+
+/**
+ * The HOLD label — *"Last Light, stay off this."*
+ *
+ * The one label in this file the harness READS as a decision input, and the one
+ * no agent may ever apply or remove. It sits here rather than in `config/`
+ * because this module is THE single source of truth for the label vocabulary,
+ * and the hold has to read correctly beside the three strings above.
+ *
+ * Two labels, two jobs, neither inferred (02-hold-label.md):
+ *
+ * | label                        | written by     | read by           | meaning                            |
+ * |------------------------------|----------------|-------------------|------------------------------------|
+ * | {@link REQUIRES_HUMAN_LABEL} | the bot        | **nothing**       | "I stopped; a human should look."  |
+ * | {@link HOLD_LABEL}           | **a human**    | the dispatch gate | "Stay off this."                   |
+ *
+ * A LIVE PRECONDITION, deliberately, rather than a stored record: it
+ * re-evaluates on every event, it is idempotent (present or absent, so "last
+ * one wins" never has to be applied), and GitHub already gates it on triage
+ * permission — so no `author_association` check is needed on this path.
+ * Removing it resumes the bot with no record to clean up.
+ *
+ * It is the PACKAGED DEFAULT, not a constant the code gates on directly:
+ * `hold.label` in `config/default.yaml` (env `LASTLIGHT_HOLD_LABEL`) is
+ * operator-configurable, and `getHoldLabel()` is what every decision reads. This
+ * string is what the packaged prompts create in their `github_ensure_labels`
+ * pass, so an operator who RENAMES it must fork that prompt too — the same
+ * code-vs-prompt contract `tests/cron/label-vocab.test.ts` pins for the six
+ * labels above.
+ */
+export const HOLD_LABEL = "lastlight-ignore";
+/**
+ * Dark grey — deliberately not in the red/amber/green family the lifecycle and
+ * impact labels use. Those describe a VERDICT about the change; this one
+ * describes an instruction to the bot, and reading as "off" rather than "bad" is
+ * the point. Part of the contract exactly as the three colours below are:
+ * `github_ensure_labels` creates a missing label with whatever hex the prompt
+ * names.
+ */
+export const HOLD_LABEL_COLOR = "24292f";
 
 /**
  * MAJOR-bump impact tiers (issue #252, 05-impact.md §5.4). Additive: the two
@@ -242,9 +282,10 @@ interface Candidate {
  * Shared by both the green and red sweeps.
  *
  * No `requires-human` filter: that is a POLICY question, and it is now answered
- * once at dispatch off the snapshot's `escalatedBy` / `escalatedAtSha` — which
- * is what lets a maintainer's push re-arm a PR we escalated, instead of the
- * label being a permanent one-way door with no code path that removes it.
+ * once at dispatch off the snapshot's `escalatedAtSha` — which is what lets a
+ * maintainer's push re-arm a PR we escalated, instead of the label being a
+ * permanent one-way door with no code path that removes it. Nor a hold filter:
+ * the hold is answered at the same choke point, on every route.
  */
 async function listDependencyCandidates(
   full: string,

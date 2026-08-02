@@ -179,7 +179,10 @@ export function buildPrState(args: {
     attempt: s.attempt ?? 1,
     flakyDeferrals: s.flaky_deferrals ?? 0,
     escalatedAtSha: null,
-    escalatedBy: null,
+    // No seed key: an intervention is a fact about a HUMAN having asked, and
+    // the harness has no human. It re-arms the budgets, so a case that seeded
+    // one would be asserting against a snapshot the eval itself had un-stuck.
+    intervention: null,
     forkNoticedAtSha: null,
     priorAttempts: s.prior_attempts ?? [],
     notes: (s.notes ?? []).map((n) => ({

@@ -101,6 +101,9 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
   const priorAttempts = list(state.priorAttempts).filter((a): a is string => typeof a === "string");
   const readErrors = list(state.readErrors).filter((e): e is string => typeof e === "string");
   const runInFlight = asDict(state.runInFlight);
+  // The retry direction of human intent. `by` and `note` are recorded for
+  // DISPLAY — this is the display — and no decision function reads either.
+  const intervention = asDict(state.intervention);
 
   const headSha = str(state.headSha);
   const attempt = num(state.attempt);
@@ -239,11 +242,27 @@ export function PrStatePanel({ run }: { run: WorkflowRun }) {
               {str(state.escalatedAtSha) && !escalation && (
                 <Verdict
                   name="escalatedAtSha"
-                  decision={str(state.escalatedBy) === "us" ? "ours" : "human"}
-                  reason={`requires-human standing at ${str(state.escalatedAtSha)!.slice(0, 7)}`}
+                  decision="ours"
+                  reason={`we escalated this PR at ${str(state.escalatedAtSha)!.slice(0, 7)}`}
                 />
               )}
-              {!str(ctx.mayMergeReason) && !escalation && !runInFlight && !str(state.escalatedAtSha) && (
+              {/* Why the budgets look freshly armed on a PR that has clearly
+                  been round this loop before: a human asked for another go. */}
+              {intervention && (
+                <Verdict
+                  name={`retry (${str(intervention.via) ?? "?"})`}
+                  decision="re-armed"
+                  reason={[
+                    str(intervention.by) ? `${str(intervention.by)} asked` : "asked",
+                    str(intervention.atSha) ? `at ${str(intervention.atSha)!.slice(0, 7)}` : null,
+                    str(intervention.at) ? `on ${str(intervention.at)!.slice(0, 10)}` : null,
+                    str(intervention.note) ? `— “${str(intervention.note)}”` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                />
+              )}
+              {!str(ctx.mayMergeReason) && !escalation && !runInFlight && !intervention && !str(state.escalatedAtSha) && (
                 <li className="py-1 text-[11px] text-base-content/50">
                   No gate verdict was recorded on this run — it was dispatched with nothing to
                   refuse.

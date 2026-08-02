@@ -171,6 +171,29 @@ const description = "Frequently asked questions about Last Light — the self-ho
 			</details>
 
 			<details class="faq-item">
+				<summary>How do I tell the bot to leave one issue or PR alone?</summary>
+				<div class="faq-answer">
+					<p>Apply the <strong>hold</strong> label — <code>lastlight-ignore</code> by default. Last Light then stops acting on that issue or pull request entirely: no triage, no review, no fix, no merge, and no comment. It outranks every other rule except "we couldn't read the pull request at all", including a direct <code>@last-light …</code> request — which gets exactly one reply naming the label, so a direct instruction is refused rather than silently ignored.</p>
+					<p>Remove the label and the bot resumes. Nothing is persisted either way, which is the point: it is a live precondition re-read on every event, not a stored verdict you have to clear. GitHub already requires triage permission to change a label, so it needs no separate permission model. Rename it with <code>LASTLIGHT_HOLD_LABEL</code> (overlay key <code>hold.label</code>) — but the packaged prompts create the default name, so a rename means creating the label by hand or forking that prompt.</p>
+					<p>Don't use <code>requires-human</code> for this. That one is a <em>notification</em> the bot writes when it gives up; nothing reads it, and taking it off now means the opposite — "have another go".</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Last Light gave up on my PR. How do I get it going again?</summary>
+				<div class="faq-answer">
+					<p>When the attempt or cost budget for a PR runs out, Last Light labels it <code>requires-human</code>, comments once explaining what it tried, and stops. Four things un-stick it, and they all do exactly the same thing — re-arm the attempt counter <em>and</em> the cost window for a fresh full budget:</p>
+					<ul>
+						<li>Push a commit to the branch (anyone's but the bot's).</li>
+						<li>Comment <code>@last-light retry</code>, optionally with a reason: <code>@last-light retry the arm64 runner was flaky</code>. The reason is recorded and handed to the next attempt.</li>
+						<li>Remove the <code>requires-human</code> label.</li>
+						<li>Run <code>lastlight pr retry owner/repo#42 [reason]</code> from a terminal — the only one that dispatches the stuck workflow immediately rather than waiting for the next event.</li>
+					</ul>
+					<p>A retry keeps what the earlier attempts learned; a push wipes it, because a push changed the code. Retries are unbounded — each buys a full window — so it is a real spending decision, and each one is recorded (who asked, when, why) on the run that follows. Nothing you ask for overrides the hold label, a run already working that PR, a fork PR, a red base branch, or a PR the harness could not read.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
 				<summary>Is there a risk of the bot going rogue?</summary>
 				<div class="faq-answer">
 					<p>The bot can only do what its GitHub App permissions allow. It can't delete repos, manage org settings, or access repos where it's not installed. Build requests only trigger when a maintainer explicitly @mentions the bot. All actions are logged as session trajectories in <code>logs/</code>.</p>

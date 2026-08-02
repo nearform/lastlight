@@ -76,7 +76,6 @@ function liveState(over: Partial<PrState> = {}): PrState {
     attempt: 1,
     flakyDeferrals: 0,
     escalatedAtSha: null,
-    escalatedBy: null,
     forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],

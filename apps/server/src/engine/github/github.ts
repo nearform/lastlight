@@ -926,7 +926,7 @@ export class GitHubClient {
    * **Bounded on purpose.** `resolvePrState` awaits this synchronously on the
    * dispatch path a webhook handler takes, BEFORE any disposition is taken — so
    * it is paid in full even on dispatches that go on to skip as
-   * `already-reviewed` / `human-hold` / `run-in-flight`. `checks.listForRef`
+   * `already-reviewed` / `on-hold` / `run-in-flight`. `checks.listForRef`
    * returns up to 30 runs, and the first cut of this method downloaded every
    * failed one's FULL log concurrently, uncapped and with no deadline: thirty
    * multi-megabyte strings resident at once, on a host with a 2 GB agent cap and

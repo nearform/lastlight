@@ -29,6 +29,7 @@ import type { DependenciesConfig, FixConfig, ReviewConfig } from "../config/conf
 import type { PrState } from "./pr-state.js";
 import { renderCiFailureReport } from "./github/github.js";
 import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import { HOLD_LABEL } from "../cron/dependabot-discovery.js";
 import { ATTEMPT_FREE_CLASSES } from "./fix-markers.js";
 import { renderPrNotes } from "./pr-notes.js";
 import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "./fix-scratch.js";
@@ -49,8 +50,10 @@ import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "./fix-scratch.js";
  * - `upstream-broken` is not this PR's fault and self-heals the moment the base
  *   goes green (09 → D1 is explicit: skip without labelling).
  * - `fork-pr` gets its own explanation — nothing is wrong with the change.
- * - `human-hold` / `escalated` are ALREADY escalated; re-applying would comment
- *   on every subsequent event.
+ * - `on-hold` is a maintainer's instruction; labelling and commenting on a PR
+ *   somebody has explicitly told us to leave alone is the opposite of obeying it.
+ * - `escalated` is ALREADY escalated; re-applying would comment on every
+ *   subsequent event.
  * - `already-assessed` is a duplicate delivery, not a verdict.
  *
  * The case is produced by the branch that decided, and travels on the
@@ -115,6 +118,23 @@ export interface Decision<T> {
    * than on the reason prose.
    */
   readDegraded?: true;
+  /**
+   * Set ONLY on the HOLD skip — a maintainer put the hold label on this subject
+   * and every workflow is off it until they take it back (02-hold-label.md).
+   *
+   * Carries the LABEL rather than a bare `true`, because the one thing the
+   * caller does with it is name the label to the person it just refused: a
+   * message that says "I'm not acting here" without saying which label to remove
+   * is a dead end. The name is operator-configurable, so it cannot be a literal
+   * at the call site.
+   *
+   * Like {@link runInFlight} and {@link readDegraded}: no {@link EscalationCase},
+   * no label, no comment, no run row, no review placeholder. Silent, exactly
+   * like `upstream-broken` — an instruction we are obeying is not a verdict
+   * about the change, and there is nothing to tell anybody that the label on the
+   * PR does not already say.
+   */
+  onHold?: { label: string };
   /**
    * Set ONLY on the `fork-pr` skip — the head branch lives on a repo we cannot
    * push to, so there is nothing to clone or push.
@@ -193,6 +213,76 @@ function readDegradedDrop<T>(decision: T, state: PrState, inputs: Record<string,
     inputs: { ...inputs, readErrors: failed },
     readDegraded: true,
   };
+}
+
+/**
+ * "A maintainer told us to stay off this pull request" — the HOLD
+ * (02-hold-label.md, locked decisions 2–4).
+ *
+ * The ONE label the harness reads as a decision input, and the reason
+ * `requires-human` no longer is one. It is a LIVE PRECONDITION in the same
+ * sense `baseChecksState` is: present or absent right now, re-evaluated on every
+ * event, nothing persisted, nothing to migrate, and removing it resumes the bot
+ * with no record to clean up. That is also why it needs no `author_association`
+ * check — GitHub already requires triage permission to add or remove a label.
+ *
+ * It sits above EVERY other guard except {@link readDegradedDrop}, and the
+ * ordering is the whole design:
+ *
+ * - **above the run lock**, because the lock reports "come back later" and the
+ *   hold reports "do not come back" — reporting the transient one would be true
+ *   and useless;
+ * - **above the fork check**, because a fork notice explains a decision we did
+ *   not take;
+ * - **above the budgets**, because they escalate — labelling `requires-human`
+ *   and commenting on a PR a maintainer has explicitly told us to leave alone is
+ *   the exact opposite of what the label asked for;
+ * - **below the degraded read**, because `labels: []` is what a failed
+ *   `getPullRequest` degrades to, so on that path we do not know whether the
+ *   hold is there. "We could not read the PR" outranks every reading of it.
+ *
+ * It also beats an EXPLICIT request (locked decision 4) — otherwise it is not a
+ * block. The reply that owes the human an explanation belongs to the route that
+ * has one, not here: see {@link Decision.onHold}.
+ */
+function holdDrop<T>(
+  decision: T,
+  state: PrState,
+  label: string,
+  inputs: Record<string, unknown>,
+): Decision<T> | null {
+  if (!label || !state.labels.includes(label)) return null;
+  return {
+    decision,
+    reason:
+      `on-hold: \`${label}\` is applied to this pull request — a maintainer asked me to stay ` +
+      `off it, so nothing runs until the label is removed`,
+    inputs: { ...inputs, holdLabel: label },
+    onHold: { label },
+  };
+}
+
+/**
+ * The one reply a hold ever produces — for a human who asked and lost.
+ *
+ * Locked decision 4: the hold beats an explicit request, and the bot says so
+ * once. A silently-ignored direct instruction is worse than a refused one, and
+ * the person is right there waiting; every OTHER hold skip says nothing at all.
+ *
+ * Pure, so the wording is table-testable, and SHARED by the two routes that have
+ * a human on the other end — the router's subject-level ignore (issue and PR
+ * comments) and the dispatcher's PR gate. One string, so a maintainer gets the
+ * same sentence wherever they asked.
+ *
+ * It names the label, because the label is the remedy: "I'm not acting" without
+ * "remove X" is a dead end, and the name is operator-configurable so it cannot
+ * be a literal in the prose.
+ */
+export function holdReply(label: string): string {
+  return (
+    `I'm staying off this one — it's labelled \`${label}\`, which tells me not to act on it. ` +
+    `Remove the label and ask me again and I'll pick it up.`
+  );
 }
 
 function runLockDrop<T>(decision: T, state: PrState, inputs: Record<string, unknown>): Decision<T> | null {
@@ -321,10 +411,14 @@ export interface FixDispositionOptions {
  * precondition. The diagnosis class remains an explanation, never a dispatch
  * input.
  *
- * **`requires-human` is a notification, not a state.** The state is "we
- * escalated at head SHA X", so the guard is stateful rather than the label: a
- * maintainer's push re-arms the loop, while a human who applied the label by
- * hand (no escalating run of ours to match) keeps a hard permanent override.
+ * **`requires-human` is a notification, not a state** — and now literally so.
+ * The state is "we escalated at head SHA X" (`escalatedAtSha`), so the guard is
+ * stateful rather than the label, and a maintainer's push re-arms the loop with
+ * nothing to remove by hand. The label itself is read NOWHERE: a human who wants
+ * the bot off a PR applies the HOLD label instead (see {@link holdDrop}), which
+ * is an instruction rather than a hold inferred from a label we also apply
+ * ourselves — an inference that only ever worked on a PR we had never touched
+ * (02-hold-label.md).
  *
  * Three of the skips are terminal for this problem and carry an
  * {@link EscalationCase} so the caller labels and explains them on the PR
@@ -340,8 +434,14 @@ export function resolveFixDisposition(
     baseChecksState: state.baseChecksState,
     checksState: state.checksState,
     headSha: state.headSha,
-    escalatedBy: state.escalatedBy,
     escalatedAtSha: state.escalatedAtSha,
+    // The retry direction of human intent. Read by NO branch below — a recorded
+    // retry has already done its work in `applyDerivedState` (the counter, the
+    // cost baseline and `escalatedAtSha` are all re-armed by the time this
+    // function runs) — but carried on `inputs` so the run detail panel can say
+    // WHO asked and why the budgets look freshly armed on a PR that has clearly
+    // been round this loop before.
+    intervention: state.intervention,
     attempt: state.attempt,
     maxAttempts: cfg.maxAttempts,
     cumulativeCostUsd: state.cumulativeCostUsd,
@@ -387,16 +487,21 @@ export function resolveFixDisposition(
     };
   }
 
-  if (state.escalatedBy === "human" && !opts.explicitRequest) {
-    return {
-      decision: "skip",
-      reason:
-        "human-hold: requires-human was applied by a human, not by one of our runs — a permanent override",
-      inputs,
-    };
-  }
-
-  if (state.escalatedBy === "us" && !opts.explicitRequest) {
+  // OUR OWN escalation record — `escalatedAtSha !== null`, never the label.
+  // `requires-human` is a NOTIFICATION and is read by nothing (02-hold-label.md):
+  // a maintainer who wants us off a PR applies the HOLD label above, which is an
+  // instruction rather than something we infer from a label we also write
+  // ourselves. This branch is only ever about a run of OURS that stopped.
+  //
+  // A recorded RETRY consumes the record, so this branch simply does not fire
+  // after one — there is no `intervention` clause here on purpose
+  // (03-retry-intervention.md). `explicitRequest` still bypasses it, and that is
+  // now a much smaller carve-out than it was: it used to clear the guard and
+  // fall straight through into `budget-exhausted` below, which re-escalated and
+  // posted a duplicate comment. A retry moves the WINDOW rather than lifting the
+  // guard, and `escalatePr`'s own same-head dedup catches whatever gets here
+  // anyway.
+  if (state.escalatedAtSha !== null && !opts.explicitRequest) {
     // We escalated. Still binding only while the head is the one we escalated
     // at, or a commit WE authored on top of it — anyone else's push IS the
     // human intervention we asked for, and re-arms both the counter and the
@@ -706,8 +811,10 @@ export function resolveReviewTrigger(
  * counter and cost cap are facts about the FIX FAMILY, and a PR whose fix
  * attempts are exhausted must still be mergeable the moment CI goes green.
  * What the two share is the pair of guards that are facts about the PULL
- * REQUEST — "a human told us to stay out" and "we already assessed this exact
- * head" — so those are restated here rather than inherited.
+ * REQUEST — "we already escalated at this head" and "we already assessed this
+ * exact head" — so those are restated here rather than inherited. "A human told
+ * us to stay out" is no longer one of them: that is the HOLD, resolved once for
+ * every workflow in {@link resolveDispatchDisposition} above all three of these.
  *
  * Note what is deliberately NOT here: {@link mayMerge}. That predicate gates
  * the ACTION (Phase 5's merge decision, inside the run, where the impact tier
@@ -728,7 +835,6 @@ export function resolveMergeDisposition(
     settledCheckCount: state.settledCheckCount,
     requireSettledChecks: cfg.requireSettledChecks,
     headSha: state.headSha,
-    escalatedBy: state.escalatedBy,
     escalatedAtSha: state.escalatedAtSha,
     runInFlight: state.runInFlight,
     explicitRequest: !!opts.explicitRequest,
@@ -749,15 +855,6 @@ export function resolveMergeDisposition(
   const locked = runLockDrop<FixDisposition>("skip", state, inputs);
   if (locked) return locked;
 
-  if (state.escalatedBy === "human" && !opts.explicitRequest) {
-    return {
-      decision: "skip",
-      reason:
-        "human-hold: requires-human was applied by a human, not by one of our runs — a permanent override",
-      inputs,
-    };
-  }
-
   // Still binding only while the head is the one we escalated at. NOTE the
   // missing `|| state.headIsOurs` that `resolveFixDisposition` carries: on the
   // fix route our own commit on top of an escalation is another attempt at the
@@ -775,7 +872,7 @@ export function resolveMergeDisposition(
   // `already-assessed` guard underneath bounds it to ONE assessment per head
   // SHA either way. That is the same bound every never-escalated PR already
   // lives under.
-  if (state.escalatedBy === "us" && !opts.explicitRequest) {
+  if (state.escalatedAtSha !== null && !opts.explicitRequest) {
     if (state.headSha === state.escalatedAtSha) {
       return {
         decision: "skip",
@@ -819,6 +916,18 @@ export interface PrPolicyConfig {
   fix: FixConfig;
   dependencies: DependenciesConfig;
   review: ReviewConfig;
+  /**
+   * The HOLD label (`hold.label`), operator-configurable — see
+   * {@link holdDrop}. NOT repo-clamped like the three blocks above and
+   * deliberately not in `repoConfig.allowKeys`: it is a label name, not a
+   * budget, and there is no "more conservative" direction to clamp it toward.
+   *
+   * Optional so every existing construction of this type still compiles and so
+   * a caller reaching the resolver directly (the evals harness, a table test)
+   * gets the packaged default rather than a silently disabled hold. Pass an
+   * empty string to turn the branch off entirely.
+   */
+  holdLabel?: string;
 }
 
 /** Everything {@link resolveDispatchDisposition} needs beyond the snapshot. */
@@ -845,6 +954,13 @@ export type DispatchDispositionOptions = FixDispositionOptions & ReviewTriggerOp
  * lock covers — and a caller that reaches one of the dispositions directly
  * (`pr-escalation.ts`'s tests, the evals harness) gets the same answer as one
  * that comes through here. See {@link runLockDrop}.
+ *
+ * The HOLD is the one guard that lives HERE rather than inside the three, and
+ * for the mirror-image reason: it is not a verdict about a fix, a merge or a
+ * review, it is an instruction about the SUBJECT, so it must read identically
+ * whichever branch would have answered — including the `ungated` fallback, which
+ * is how a workflow nobody has classified yet still honours it. See
+ * {@link holdDrop} for why it sits above everything except the degraded read.
  */
 export function resolveDispatchDisposition(
   workflowName: string,
@@ -852,6 +968,28 @@ export function resolveDispatchDisposition(
   cfg: PrPolicyConfig,
   opts: DispatchDispositionOptions = {},
 ): Decision<FixDisposition> {
+  // The HOLD, above every other guard except the degraded read.
+  //
+  // The `readDegradedDrop` probe below is a QUESTION, not the answer: when the
+  // PR read failed we fall through untouched, so the per-workflow disposition
+  // produces the degraded drop itself — with its own `inputs` and, for
+  // `pr-review`, the `review` verdict the check-run placement needs. Deciding it
+  // twice here would flatten that.
+  const holdInputs = {
+    workflowName,
+    labels: state.labels,
+    explicitRequest: !!opts.explicitRequest,
+  };
+  if (!readDegradedDrop<FixDisposition>("skip", state, holdInputs)) {
+    const held = holdDrop<FixDisposition>(
+      "skip",
+      state,
+      cfg.holdLabel ?? HOLD_LABEL,
+      holdInputs,
+    );
+    if (held) return held;
+  }
+
   if (PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
     return resolveFixDisposition(state, cfg.fix, opts);
   }

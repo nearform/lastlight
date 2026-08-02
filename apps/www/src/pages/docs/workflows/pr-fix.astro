@@ -173,7 +173,10 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		<code>pr-fix-retry</code> entry in <code>models</code> and every attempt
 		above <code>fix.escalateModelAfterAttempt</code> uses it instead of
 		<code>pr-fix</code> — the cheap model gets the first shot, the expensive
-		one gets the problem it couldn't solve. The model each attempt actually
+		one gets the problem it couldn't solve. That count is the number of
+		attempts <em>on record</em>, not the budget counter, so asking for a retry
+		on a PR that has already failed three times keeps the stronger model rather
+		than dropping back to the cheap one. The model each attempt actually
 		used is recorded on the run, so it is visible in the dashboard afterwards.
 		Leave the entry unset and nothing changes.
 	</p>
@@ -250,14 +253,59 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	</p>
 
 	<p>
-		The label is a <strong>notification, not a one-way door</strong>. Push a
-		commit and Last Light picks the PR up again with a fresh attempt counter —
-		nobody has to remove the label by hand, and asking in a comment works too.
-		A commit Last Light itself pushed doesn't count; it is someone
-		<em>else's</em> change that says the situation moved. The one case that
-		stays permanent is the reverse: a <code>requires-human</code> label a
-		maintainer applied by hand, with no give-up of ours behind it, means "stay
-		out" and is honoured until it is removed.
+		The label is a <strong>notification, and nothing reads it</strong>. What
+		holds the PR back is the record that one of our runs escalated it at a
+		particular head commit, never the label — and there are
+		<strong>three ways to lift it from GitHub</strong>, all of which do exactly
+		the same thing: re-arm the attempt counter <em>and</em> the cost budget for
+		a fresh full window.
+	</p>
+
+	<ul>
+		<li>
+			<strong>Push a commit to the branch.</strong> Nobody has to remove the
+			label by hand. A commit Last Light itself pushed doesn't count; it is
+			someone <em>else's</em> change that says the situation moved.
+		</li>
+		<li>
+			<strong>Comment <code>@last-light retry</code></strong>, optionally with
+			a reason — <code>@last-light retry the arm64 runner was flaky</code>.
+			The reason is recorded against the PR and handed to the next attempt as
+			a hint. Maintainers only (the same check that gates every
+			<code>@last-light …</code> command).
+		</li>
+		<li>
+			<strong>Remove the <code>requires-human</code> label.</strong> Last Light
+			reads that as "have another go" and starts a fresh window at the same
+			commit. No webhook and no configuration: it simply notices, next time it
+			looks at the PR, that the label it applied is gone.
+		</li>
+	</ul>
+
+	<p>
+		From a terminal there is a fourth:
+		<code>lastlight pr retry owner/repo#42 [reason]</code> writes the same
+		record over the admin API (see the <a href="/docs/cli">CLI reference</a>).
+		It is the only surface with no GitHub event behind it, so unlike the other
+		three it also <em>dispatches</em> the stuck workflow straight away rather
+		than waiting for the next thing to happen on the PR.
+	</p>
+
+	<p>
+		A retry <em>keeps</em> what the earlier attempts learned — the per-attempt
+		notes carry forward with a marked seam — where a push wipes them, because
+		a push changed the code and a retry did not. Retries are unbounded: each
+		one buys a full window, so this is a real spending decision and it is
+		recorded (who asked, when, and why) on the run that follows.
+	</p>
+
+	<p>
+		To stop Last Light touching a PR at all, apply the <strong>hold</strong>
+		label — <code>lastlight-ignore</code> by default, configurable as
+		<code>hold.label</code>. It blocks every workflow on the issue or PR
+		carrying it, outranks an explicit <code>@last-light …</code> request (which
+		gets one reply naming the label), and lifts the moment you remove it, with
+		no record to clear.
 	</p>
 
 	<p>

@@ -61,34 +61,52 @@ const fix = (over: Partial<FixConfig> = {}): FixConfig => ({ ...defaultFixConfig
 describe("escalateFixModel — the `pr-fix-retry` substitution", () => {
   const withRetry: ModelConfig = { default: OPERATOR, "pr-fix-retry": RETRY };
 
+  // The argument is the length of `PrState.priorAttempts` — the JOURNAL, not
+  // the attempt counter (03-retry-intervention.md, locked decision 10). An
+  // empty journal is attempt 1. `attempt` re-arms to 1 on a retry and the
+  // journal survives one, so keying on the counter downgraded the model on a PR
+  // that had already failed three times, which is backwards.
+  const journal = (attempts: number) => attempts - 1;
+
   it("does nothing at all when no `pr-fix-retry` key is configured", () => {
     // The load-bearing property: an operator who never heard of this feature
     // gets today's behaviour EXACTLY, at every attempt number.
     const models: ModelConfig = { default: OPERATOR, "pr-fix": "anthropic/pinned" };
     for (const attempt of [1, 2, 3, 99]) {
-      expect(escalateFixModel("pr-fix", models, attempt, fix())).toBe(models);
+      expect(escalateFixModel("pr-fix", models, journal(attempt), fix())).toBe(models);
     }
   });
 
   it("substitutes only ABOVE the threshold", () => {
     // Packaged `escalateModelAfterAttempt: 1` ⇒ attempt 1 is unescalated.
-    expect(escalateFixModel("pr-fix", withRetry, 1, fix())).toBe(withRetry);
-    expect(escalateFixModel("pr-fix", withRetry, 2, fix())?.["pr-fix"]).toBe(RETRY);
-    expect(escalateFixModel("pr-fix", withRetry, 3, fix())?.["pr-fix"]).toBe(RETRY);
+    expect(escalateFixModel("pr-fix", withRetry, journal(1), fix())).toBe(withRetry);
+    expect(escalateFixModel("pr-fix", withRetry, journal(2), fix())?.["pr-fix"]).toBe(RETRY);
+    expect(escalateFixModel("pr-fix", withRetry, journal(3), fix())?.["pr-fix"]).toBe(RETRY);
   });
 
   it("accepts a threshold of 0 — escalate from the first attempt", () => {
-    expect(escalateFixModel("pr-fix", withRetry, 1, fix({ escalateModelAfterAttempt: 0 }))?.["pr-fix"])
+    expect(
+      escalateFixModel("pr-fix", withRetry, journal(1), fix({ escalateModelAfterAttempt: 0 }))?.["pr-fix"],
+    ).toBe(RETRY);
+  });
+
+  it("stays escalated across a retry, which is the whole point", () => {
+    // Locked decision 10. A retry re-arms `attempt` to 1 but CARRIES the
+    // journal (plus a one-line seam), so a PR that has already failed three
+    // times keeps the escalated model instead of silently dropping back to the
+    // base one at the exact moment a human said "try harder".
+    const afterThreeAttemptsAndARetry = 3 + 1; // three attempt lines + the seam
+    expect(escalateFixModel("pr-fix", withRetry, afterThreeAttemptsAndARetry, fix())?.["pr-fix"])
       .toBe(RETRY);
   });
 
   it("applies to the whole fix family and nothing else", () => {
-    expect(escalateFixModel("dependabot-ci-fix", withRetry, 4, fix())?.["pr-fix"]).toBe(RETRY);
-    // A `pr-review` / `dependabot-pr-merge` dispatch carries an `attempt` too
-    // (the snapshot is resolved for every PR-scoped workflow), and must not
-    // record a rewritten map it never reads.
-    expect(escalateFixModel("pr-review", withRetry, 4, fix())).toBe(withRetry);
-    expect(escalateFixModel("dependabot-pr-merge", withRetry, 4, fix())).toBe(withRetry);
+    expect(escalateFixModel("dependabot-ci-fix", withRetry, 3, fix())?.["pr-fix"]).toBe(RETRY);
+    // A `pr-review` / `dependabot-pr-merge` dispatch carries a journal too (the
+    // snapshot is resolved for every PR-scoped workflow), and must not record a
+    // rewritten map it never reads.
+    expect(escalateFixModel("pr-review", withRetry, 3, fix())).toBe(withRetry);
+    expect(escalateFixModel("dependabot-pr-merge", withRetry, 3, fix())).toBe(withRetry);
   });
 
   it("treats a dispatch with no snapshot as the first attempt", () => {
@@ -98,7 +116,7 @@ describe("escalateFixModel — the `pr-fix-retry` substitution", () => {
 
   it("never mutates the map it was given", () => {
     const models: ModelConfig = { default: OPERATOR, "pr-fix": OPERATOR, "pr-fix-retry": RETRY };
-    const out = escalateFixModel("pr-fix", models, 2, fix());
+    const out = escalateFixModel("pr-fix", models, journal(2), fix());
     expect(out).not.toBe(models);
     expect(models["pr-fix"]).toBe(OPERATOR);
     expect(out?.["pr-fix-retry"]).toBe(RETRY);
@@ -109,10 +127,11 @@ describe("escalateFixModel — the `pr-fix-retry` substitution", () => {
     // no extra code: a repo that pinned its own `pr-fix` still escalates to the
     // operator's retry model…
     const repoPinnedFix: ModelConfig = { default: OPERATOR, "pr-fix": "openai/gpt-5-repo", "pr-fix-retry": RETRY };
-    expect(escalateFixModel("pr-fix", repoPinnedFix, 2, fix())?.["pr-fix"]).toBe(RETRY);
+    expect(escalateFixModel("pr-fix", repoPinnedFix, journal(2), fix())?.["pr-fix"]).toBe(RETRY);
     // …and a repo that pinned its own retry model escalates to THAT.
     const repoPinnedRetry: ModelConfig = { default: OPERATOR, "pr-fix-retry": "openai/gpt-5-repo-retry" };
-    expect(escalateFixModel("pr-fix", repoPinnedRetry, 2, fix())?.["pr-fix"]).toBe("openai/gpt-5-repo-retry");
+    expect(escalateFixModel("pr-fix", repoPinnedRetry, journal(2), fix())?.["pr-fix"])
+      .toBe("openai/gpt-5-repo-retry");
   });
 });
 
@@ -332,9 +351,11 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
   });
 
   it("escalates the fix phase's model above the threshold, and records it", async () => {
+    // The journal is what the substitution reads (locked decision 10), so the
+    // dispatch context has to carry it — `renderContext` projects both.
     const { run: row } = await run(
       "reproducible",
-      { attempt: 2, flakyDeferrals: 0 },
+      { attempt: 2, priorAttempts: ["attempt 1: class=reproducible cause=stale lockfile"], flakyDeferrals: 0 },
       { default: OPERATOR, "pr-fix-retry": RETRY },
     );
     expect(fixModel()).toBe(RETRY);
@@ -346,7 +367,7 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
   it("leaves attempt 1 on the operator's model", async () => {
     const { run: row } = await run(
       "reproducible",
-      { attempt: 1, flakyDeferrals: 0 },
+      { attempt: 1, priorAttempts: [], flakyDeferrals: 0 },
       { default: OPERATOR, "pr-fix-retry": RETRY },
     );
     expect(fixModel()).toBe(OPERATOR);
@@ -354,7 +375,11 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
   });
 
   it("uses the operator's model at every attempt when no retry model is set", async () => {
-    await run("reproducible", { attempt: 3, flakyDeferrals: 0 }, { default: OPERATOR });
+    await run(
+      "reproducible",
+      { attempt: 3, priorAttempts: ["attempt 1: x", "attempt 2: y"], flakyDeferrals: 0 },
+      { default: OPERATOR },
+    );
     expect(fixModel()).toBe(OPERATOR);
   });
 
@@ -363,7 +388,7 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
     // that pinned its own retry model escalates to that one.
     const { run: row } = await run(
       "reproducible",
-      { attempt: 2, flakyDeferrals: 0 },
+      { attempt: 2, priorAttempts: ["attempt 1: class=reproducible cause=stale lockfile"], flakyDeferrals: 0 },
       { default: OPERATOR, "pr-fix-retry": RETRY },
       runRepoConfig({ default: OPERATOR, "pr-fix": "openai/gpt-5-repo", "pr-fix-retry": "openai/gpt-5-repo-retry" }),
     );

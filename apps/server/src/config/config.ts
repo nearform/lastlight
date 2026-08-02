@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { parse as parseYaml } from "yaml";
 import { normalizeAllowlistHost } from "../sandbox/egress-allowlist.js";
+import { HOLD_LABEL } from "../cron/dependabot-discovery.js";
 import { resolveConfigLayers } from "./config-resolve.js";
 import {
   DEFAULT_REPO_CONFIG_ALLOW_KEYS,
@@ -195,6 +196,18 @@ export interface LastLightConfig {
   slack?: SlackConfig;
   approval?: Record<string, boolean>;
   bootstrapLabel: string;
+  /**
+   * The HOLD label (`hold.label`, env `LASTLIGHT_HOLD_LABEL`) — a maintainer
+   * applies it to an issue or PR to stop Last Light acting on that subject at
+   * all. Read at the dispatch gate (`resolveDispatchDisposition`) and in the
+   * router's issue path; see {@link HOLD_LABEL} for the packaged default and
+   * why it is a live precondition rather than a stored record.
+   *
+   * Operator-only on purpose: it is not in `repoConfig.allowKeys`, because the
+   * label is the affordance a repo's own maintainers already have — a repo that
+   * could RENAME it could also rename it to something nobody applies.
+   */
+  holdLabel: string;
   exploreDefaultRepo?: string;
   publicUrl?: string;
   /**
@@ -365,6 +378,20 @@ export function getBotName(): string {
  */
 export function getReviewConfig(): ReviewConfig {
   return currentConfig?.review || defaultReviewConfig();
+}
+
+/**
+ * The configured HOLD label, with the packaged default when config isn't loaded
+ * yet (unit tests) — see {@link LastLightConfig.holdLabel} and {@link HOLD_LABEL}.
+ *
+ * Read in exactly two places, both of which are choke points rather than
+ * policies: `resolveDispatchDisposition` (every PR-scoped route) and the
+ * router's subject-level ignore (every other workflow, PRs and issues alike).
+ * Nothing else may branch on it — a hold that some routes honour and others do
+ * not is worse than no hold at all.
+ */
+export function getHoldLabel(): string {
+  return currentConfig?.holdLabel || HOLD_LABEL;
 }
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
@@ -603,6 +630,7 @@ export function loadConfig(): LastLightConfig {
     slack,
     approval,
     bootstrapLabel: fileCfg.bootstrapLabel,
+    holdLabel: fileCfg.holdLabel,
     exploreDefaultRepo: fileCfg.exploreDefaultRepo,
     publicUrl: resolvePublicUrl(),
     reviewPostsCheck: fileCfg.review.postsCheck,
@@ -636,6 +664,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   deploy: { version: string | null };
   approval: Record<string, boolean>;
   bootstrapLabel: string;
+  holdLabel: string;
   exploreDefaultRepo?: string;
   review: ReviewConfig;
   fix: FixConfig;
@@ -656,6 +685,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const buildAssetsRaw = isPlainObject(raw.buildAssets) ? raw.buildAssets : {};
   const deployRaw = isPlainObject(raw.deploy) ? raw.deploy : {};
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {};
+  const holdRaw = isPlainObject(raw.hold) ? raw.hold : {};
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
   const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
@@ -681,6 +711,13 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const buildAssets = buildAssetsLocation(buildAssetsRaw.location, "buildAssets.location");
   const deployVersion = typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
   const bootstrapLabel = typeof bootstrapRaw.label === "string" ? bootstrapRaw.label : "lastlight:bootstrap";
+  // Lenient like every other leaf here, and with one extra rule: an EMPTY
+  // string falls back to the packaged default rather than disabling the hold.
+  // `labels.includes("")` is never true, so an operator who wrote `hold.label:
+  // ""` would silently get a bot that can no longer be told to stay off
+  // anything — a failure mode with no symptom until it matters.
+  const holdLabel =
+    typeof holdRaw.label === "string" && holdRaw.label.trim() ? holdRaw.label.trim() : HOLD_LABEL;
   const exploreDefaultRepo = typeof exploreRaw.defaultRepo === "string" ? exploreRaw.defaultRepo : undefined;
   // ── The fix / dependencies / review policy blocks (issues #251, #252) ──────
   //
@@ -821,6 +858,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     deploy: { version: deployVersion },
     approval,
     bootstrapLabel,
+    holdLabel,
     exploreDefaultRepo,
     review,
     fix,
@@ -1112,6 +1150,7 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
 
   if (env.GITHUB_APP_BOT_NAME) layer.botName = env.GITHUB_APP_BOT_NAME;
   if (env.BOOTSTRAP_LABEL) layer.bootstrap = { label: env.BOOTSTRAP_LABEL };
+  if (env.LASTLIGHT_HOLD_LABEL) layer.hold = { label: env.LASTLIGHT_HOLD_LABEL };
   if (env.EXPLORE_DEFAULT_REPO) layer.explore = { defaultRepo: env.EXPLORE_DEFAULT_REPO };
   if (env.REVIEW_POSTS_CHECK !== undefined && env.REVIEW_POSTS_CHECK !== "") {
     layer.review = { postsCheck: parseBool(env.REVIEW_POSTS_CHECK) };

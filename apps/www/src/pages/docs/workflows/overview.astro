@@ -269,6 +269,18 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		</tbody>
 	</table>
 
+	<p>
+		<strong>One label stops all of it.</strong> Apply the <em>hold</em> label —
+		<code>lastlight-ignore</code> by default, configurable as
+		<code>hold.label</code> — to any issue or pull request and no workflow in
+		this table runs on it: not triage, not review, not a fix, not a merge, and
+		no comment. It is checked before every routing rule and before every
+		dispatch, so the crons, the webhooks and a direct
+		<code>@last-light …</code> request all honour it — the direct request gets
+		exactly one reply naming the label, so it is refused rather than silently
+		ignored. Remove the label and the bot resumes, with nothing to clear.
+	</p>
+
 	<h2>Permission profiles</h2>
 
 	<p>

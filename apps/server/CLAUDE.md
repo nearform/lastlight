@@ -189,12 +189,16 @@ src/
                         panel renders it beside the snapshot.
     pr-escalation.ts    What a TERMINAL skip does to the PR: applies
                         requires-human + one comment naming the case, the
-                        attempts spent and each attempt's class/cause — and
+                        attempts spent and each attempt's class/cause, and
+                        the four exits (three retries + the hold) — and
                         RECORDS A RUN ROW first, because escalatedAtSha is
                         read back off the prior run's context and a skip
-                        otherwise writes none (without it the bot reads its
-                        own label as a human's permanent hold). Called from
-                        BOTH dispatch gates.
+                        otherwise writes none (without it the guard never
+                        binds and every later event re-escalates and
+                        re-comments). Called from BOTH dispatch gates. Also
+                        holds `recordIntervention` — the mirror-image row for
+                        a RETRY that produced no run, so an ask the gate then
+                        skipped for an unrelated reason isn't lost.
     pr-decisions.ts     PURE functions over that snapshot — mayMerge,
                         resolveFixDisposition, resolveMergeDisposition,
                         resolveReviewTrigger, resolveDispatchDisposition,
@@ -315,6 +319,14 @@ src/
                         PR discoverers for the discovery crons (which fan out
                         per discovered PR, so src/index.ts narrows their repo
                         list through resolveCronRepos itself).
+                        dependabot-discovery.ts is also THE single source of
+                        truth for the label vocabulary — the dependency
+                        lifecycle + impact labels, plus HOLD_LABEL
+                        (`lastlight-ignore`) and its colour. It sits there
+                        rather than in config/ so the hold reads correctly
+                        beside the labels it is not; the packaged prompts
+                        hardcode the same strings and
+                        tests/cron/label-vocab.test.ts pins them together.
 
 workflows/              YAML workflow definitions consumed by the loader.
                         build.yaml, pr-fix.yaml, pr-review.yaml,
@@ -402,7 +414,19 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   (attempts or cost exhausted, or a diagnosis outside `fix.retryableClasses`)
   is not dropped silently: `pr-escalation.ts` records a run row, labels the PR
   `requires-human` and posts one comment. The row is the load-bearing part —
-  see its module header. `pr-review` crosses the same gate, through
+  see its module header. **Getting un-stuck is a recorded fact, not an
+  inference from a commit** (`PrState.intervention`,
+  `docs/plans/stuck-pr-recovery/03-retry-intervention.md`): a maintainer can
+  push, comment `@<bot> retry [reason]`, remove `requires-human`, or run
+  `lastlight pr retry <owner/repo#N> [reason]`
+  (`POST /admin/api/prs/:owner/:repo/:number/retry`, the one surface with no
+  event of its own — so it crosses `applyPrDispatchGate` in the admin route and
+  dispatches itself), and all
+  four re-arm the attempt counter *and* the cost baseline through the one
+  `sameProblem` boundary. A retry keeps the agent's journal (`priorAttempts`)
+  and marks the seam; a push still wipes it, because the code changed.
+  Applying the **hold** label instead keeps the bot off entirely and beats
+  every one of them. `pr-review` crosses the same gate, through
   `resolveReviewTrigger` — **the only implementation of `review.trigger`
   anywhere**, so `review-discovery.ts` is a candidate finder that knows nothing
   about modes, drafts or settled checks, an explicit `@bot review` is a decision
@@ -753,6 +777,15 @@ Runtime:
   a recreate, `lastlight server start agent`; see the `instance/` note above).
 - `STATE_DIR` — persistent state dir (default `./data`)
 - `DB_PATH` — override SQLite path
+- `LASTLIGHT_HOLD_LABEL` — the **hold** label a maintainer applies to an issue
+  or PR to stop Last Light acting on it at all (default `lastlight-ignore`;
+  overlay `hold.label`). Read by `getHoldLabel()` at exactly two choke points —
+  `resolveDispatchDisposition` and the router's subject-level ignore — so it
+  covers every workflow and every route. Distinct from `requires-human`, which
+  the bot *writes* as a notification and nothing reads. Renaming it changes what
+  the code gates on, but the packaged dependency prompts still create the
+  **default** name in their `github_ensure_labels` pass — so a rename wants a
+  forked prompt too, or the label created by hand.
 - `LASTLIGHT_HOME` — working directory for the host-local `lastlight server`
   lifecycle commands (start/stop/restart/update/status): a full repo checkout +
   `instance/` overlay + `docker-compose.override.yml` symlink (the docker build
@@ -861,7 +894,18 @@ Sandbox workspace provisioning (issue #107):
   `origin/<base>` ref and deepens *both* refs (base + the depth-1 head) until
   they share a merge-base — depth 50 → 500 → full unshallow. Best-effort: on
   failure the plain clone stands and `post-review` demotes to its two-dot / body
-  fallback. Runs on both the fresh-clone and per-PR-reuse refresh paths.
+  fallback. Runs on **every** provisioning path — the fresh clone, the
+  per-PR-reuse refresh, *and* a later phase of the same run (the k8s init
+  container's `ensure_base` mirrors all three). That last one matters: the
+  same-run path preserves the checkout, and it used to return before any fetch,
+  so `origin/<base>` was frozen from the run's first phase and a fix phase
+  merged a base tens of minutes stale — leaving the PR `dirty`, which GitHub
+  cannot compute a merge ref for, so no `pull_request` workflow runs at all.
+  Refreshing there is safe because it writes remote-tracking refs only — never
+  HEAD, the index or the working tree. It also adds the base to
+  `remote.origin.fetch` (`git remote set-branches --add`), since `--depth`
+  implies `--single-branch` and the agent's own `git fetch origin <base>` would
+  otherwise move `FETCH_HEAD` and nothing else.
 - **Per-PR workspace reuse** — `pr-review` / `pr-fix` workspaces are keyed
   by (repo, PR) and reused across runs. A `<workDir>/.lastlight-run` marker
   records the owning run: same run → preserve the checkout for the next
