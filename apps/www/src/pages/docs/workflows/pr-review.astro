@@ -83,7 +83,10 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		Skipped without a run: draft PRs (<code>review.skipDraft</code>, matching
 		what the sweep has always done), a commit we already reviewed, and a PR
 		another Last Light run is currently working on — reviewing a tree a fix run
-		is rewriting produces a review that is stale before it lands.
+		is rewriting produces a review that is stale before it lands. All three are
+		read off one resolved snapshot of the pull request, and the
+		<code>last-light/review</code> check each decision leaves behind differs; see
+		<a href="/docs/pr-state">the PR state model</a>.
 	</p>
 
 	<div class="docs-next">

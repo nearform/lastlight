@@ -22,6 +22,12 @@ export const docsNav: DocsNavSection[] = [
 		],
 	},
 	{
+		title: 'Concepts',
+		items: [
+			{ slug: 'pr-state', label: 'The PR state model' },
+		],
+	},
+	{
 		title: 'Workflows',
 		items: [
 			{ slug: 'workflows/overview', label: 'Overview' },

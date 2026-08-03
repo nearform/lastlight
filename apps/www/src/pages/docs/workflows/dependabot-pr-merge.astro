@@ -45,13 +45,14 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	</p>
 
 	<p>
-		That verdict is computed in code and handed to the run as a decided answer
-		— the prompt reads it rather than re-deriving it, so the log line, the
-		audit comment and the admin panel all state the same case. It is an
-		<em>instruction</em> to the agent, though, not a capability lock: the run
-		still holds the merge tools when the gate is shut, because the same phase
-		also labels and comments. Separately, the dispatch gate refuses to start a
-		merge run at all while checks are still <code>pending</code>.
+		That verdict is <code>mayMerge</code>, computed in code over the
+		<a href="/docs/pr-state">resolved snapshot of the pull request</a> and handed
+		to the run as a decided answer — the prompt reads it rather than re-deriving
+		it, so the log line, the audit comment and the admin panel all state the same
+		case. It is an <em>instruction</em> to the agent, though, not a capability
+		lock: the run still holds the merge tools when the gate is shut, because the
+		same phase also labels and comments. Separately, the dispatch gate refuses to
+		start a merge run at all while checks are still <code>pending</code>.
 	</p>
 
 	<p>

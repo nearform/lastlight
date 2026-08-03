@@ -101,9 +101,8 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		worth spending: a fork PR, a base branch that is red on its own account, an
 		exhausted attempt or cost budget for that PR, a head commit already
 		assessed, or another run already working the PR all refuse it before a
-		sandbox is provisioned. Only one of the four PR-scoped workflows may be in
-		flight for a PR at a time — see <a href="/docs/workflows/pr-fix">PR fix</a>
-		for the full list.
+		sandbox is provisioned. Only one run may be in flight for a PR at a time,
+		across every PR-scoped workflow.
 	</p>
 
 	<p>
@@ -111,9 +110,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		budget — and terminal refusals are never silent: the PR gets
 		<code>requires-human</code> and one comment saying which budget ran out and
 		what each attempt found, without a sandbox ever starting. The rest stay
-		quiet, because they are temporary or not this PR's fault. See
-		<a href="/docs/workflows/pr-fix">PR fix</a> for what the comment says and
-		how pushing a commit clears it.
+		quiet, because they are temporary or not this PR's fault.
 	</p>
 
 	<p>
@@ -122,8 +119,10 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		<a href="/docs/workflows/pr-fix">PR fix</a> and a cron dispatch of this
 		workflow share one counter, one budget and one attempt history, because
 		"how many times have we tried to fix this PR" is a fact about the PR
-		rather than about how the event arrived. See
-		<a href="/docs/workflows/pr-fix">PR fix</a> for what each attempt carries
+		rather than about how the event arrived.
+		<a href="/docs/pr-state">The PR state model</a> covers the whole gate — every
+		refusal in order, what each one leaves on the PR, and how it is cleared;
+		<a href="/docs/workflows/pr-fix">PR fix</a> covers what each attempt carries
 		forward and which verdicts cost one.
 	</p>
 
@@ -151,20 +150,14 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		owned entirely by <a href="/docs/workflows/dependabot-pr-merge">dependabot-pr-merge</a>,
 		which keeps the classification in one place. <code>requires-human</code> is a
 		<strong>notification, not a state</strong>, and nothing in the harness reads
-		it: what actually holds a PR back is the record that one of our own runs
-		escalated it at a particular head commit, so a maintainer pushing to the PR
-		re-arms it automatically, with no label to remove. Two other things re-arm
-		it identically — commenting <code>@last-light retry [reason]</code>, and
-		removing <code>requires-human</code> by hand — and all three reset the
-		attempt counter and the cost budget together (see
-		<a href="/docs/workflows/pr-fix">PR fix</a>). To tell Last Light to
-		stay off a PR entirely, apply the <strong>hold</strong> label
-		(<code>lastlight-ignore</code>, configurable as <code>hold.label</code>) —
-		it blocks every workflow, beats an explicit request, and lifts when you
-		remove it. That one rule is applied at dispatch, so the crons and the
-		webhooks agree; previously the crons treated <code>requires-human</code> as
-		a one-way door while the webhooks cleared it on success.
-		Labels are created on demand (<code>github_ensure_labels</code>).
+		it; the <strong>hold</strong> label (<code>lastlight-ignore</code>) is the one
+		that tells Last Light to stay off a PR entirely. Both, and the four ways to
+		re-arm an escalated PR, are covered on
+		<a href="/docs/pr-state">the PR state model</a> page — the rules are applied at
+		dispatch, so the crons and the webhooks agree, where previously the crons
+		treated <code>requires-human</code> as a one-way door while the webhooks
+		cleared it on success. Labels are created on demand
+		(<code>github_ensure_labels</code>).
 	</p>
 
 	<div class="docs-next">
