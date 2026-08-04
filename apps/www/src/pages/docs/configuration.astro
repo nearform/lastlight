@@ -107,9 +107,14 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			</tr>
 			<tr>
 				<td><code>GITHUB_APP_INSTALLATION_ID</code></td>
-				<td>Yes</td>
+				<td>No</td>
 				<td>—</td>
-				<td>Installation ID — from the URL after installing the app on a repo.</td>
+				<td>
+					Optional. Last Light discovers every installation of your app from its own
+					credentials and picks the right one per repository owner, so an app installed
+					on several accounts (your user plus one or more orgs) works with nothing set
+					here. Set it only as a fallback if outbound lookups are blocked.
+				</td>
 			</tr>
 			<tr>
 				<td><code>WEBHOOK_SECRET</code></td>

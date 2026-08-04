@@ -12,39 +12,66 @@ export const DEFAULT_MANAGED_REPOS: string[] = [];
 export const MANAGED_REPOS = DEFAULT_MANAGED_REPOS;
 
 /**
- * In-memory list of repositories the GitHub App installation can access,
- * discovered at boot (`GitHubClient.listInstallationRepos()`) and kept live by
- * `installation` / `installation_repositories` webhooks. `null` means "not yet
- * discovered" (distinct from "discovered, empty"). Only used when the overlay's
- * `managedRepos` is empty — see `getManagedRepos()`.
+ * Repositories the GitHub App can access, **keyed by installation id** —
+ * discovered at boot (`GitHubClient.listAllInstallationRepos()`) and kept live
+ * by `installation` / `installation_repositories` webhooks. Only used when the
+ * overlay's `managedRepos` is empty — see `getManagedRepos()`.
+ *
+ * Keyed rather than flat because an App installed on several accounts gets one
+ * `installation` event stream per account: `created` carries only that
+ * account's repos and `deleted` means only that account went away. Against a
+ * single flat set those two would reset and clear the WHOLE list, so installing
+ * the App on a second org silently unmanaged every repo in the first.
  */
-let installationRepos: Set<string> | null = null;
+const installationRepos = new Map<string, Set<string>>();
 let installationReposRefreshedAt: string | null = null;
 
-/** Replace the discovered installation-repo list wholesale (boot fetch, initial install, uninstall). */
-export function setInstallationRepos(repos: string[]): void {
-  installationRepos = new Set(repos);
+function touch(): void {
   installationReposRefreshedAt = new Date().toISOString();
 }
 
-/** Add repos to the discovered list (installation_repositories → added). */
-export function addInstallationRepos(repos: string[]): void {
-  const next = installationRepos ?? new Set<string>();
+/** Replace ONE installation's repo set (boot fetch, initial install). */
+export function setInstallationRepos(installationId: string, repos: string[]): void {
+  installationRepos.set(String(installationId), new Set(repos));
+  touch();
+}
+
+/** Add repos to one installation's set (installation_repositories → added). */
+export function addInstallationRepos(installationId: string, repos: string[]): void {
+  const key = String(installationId);
+  const next = installationRepos.get(key) ?? new Set<string>();
   for (const r of repos) next.add(r);
-  installationRepos = next;
-  installationReposRefreshedAt = new Date().toISOString();
+  installationRepos.set(key, next);
+  touch();
 }
 
-/** Remove repos from the discovered list (installation_repositories → removed). */
-export function removeInstallationRepos(repos: string[]): void {
-  if (!installationRepos) return;
-  for (const r of repos) installationRepos.delete(r);
-  installationReposRefreshedAt = new Date().toISOString();
+/** Remove repos from one installation's set (installation_repositories → removed). */
+export function removeInstallationRepos(installationId: string, repos: string[]): void {
+  const set = installationRepos.get(String(installationId));
+  if (!set) return;
+  for (const r of repos) set.delete(r);
+  touch();
 }
 
-/** Snapshot of the discovered installation-repo list (empty before boot fetch). */
+/** Drop an installation entirely — the App was uninstalled from that account. */
+export function removeInstallation(installationId: string): void {
+  installationRepos.delete(String(installationId));
+  touch();
+}
+
+/** Union of every installation's repos (empty before the first discovery). */
 export function getInstallationRepos(): string[] {
-  return installationRepos ? [...installationRepos] : [];
+  const all = new Set<string>();
+  for (const set of installationRepos.values()) for (const r of set) all.add(r);
+  return [...all];
+}
+
+/** Per-installation breakdown, for the admin/ops surface. */
+export function getInstallationRepoBreakdown(): Array<{ installationId: string; repos: string[] }> {
+  return [...installationRepos].map(([installationId, repos]) => ({
+    installationId,
+    repos: [...repos],
+  }));
 }
 
 /** ISO timestamp of the last installation-repo cache update, or null if never. */
@@ -54,7 +81,7 @@ export function getInstallationReposRefreshedAt(): string | null {
 
 /** Test-only: clear the discovered installation-repo cache. */
 export function resetInstallationReposForTests(): void {
-  installationRepos = null;
+  installationRepos.clear();
   installationReposRefreshedAt = null;
 }
 

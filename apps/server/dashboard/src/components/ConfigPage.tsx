@@ -84,13 +84,50 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
         <span className="font-medium text-base-content">
           {data.source === "config"
             ? "overlay config (managedRepos is set)"
-            : "GitHub App installation (managedRepos empty — tracking the App grant)"}
+            : "GitHub App installations (managedRepos empty — tracking the App grant across every account)"}
         </span>
         .{" "}
         {data.refreshedAt && (
           <>Installation list refreshed <code className="text-xs">{new Date(data.refreshedAt).toLocaleString()}</code>.</>
         )}
       </div>
+      {/* A GitHub App is installed per ACCOUNT, and each installation mints its
+          own tokens — so an owner with no installation can't be acted on at all.
+          Surfaced here because the alternative is finding out from a 422 in the
+          middle of a run. */}
+      <div className="rounded border border-base-300 ll-surface p-3">
+        <div className="text-sm font-medium text-base-content mb-2">App installations</div>
+        {data.installations.length === 0 ? (
+          <div className="text-sm text-warning">
+            The GitHub App has no installations — install it on an account before it can act.
+          </div>
+        ) : (
+          <ul className="text-xs font-mono grid gap-1">
+            {data.installations.map((i) => (
+              <li
+                key={i.id}
+                className="rounded border border-base-300/50 px-2 py-1 text-base-content flex gap-2"
+              >
+                <span className="font-medium">{i.account}</span>
+                <span className="text-base-content/50">#{i.id}</span>
+                <span className="text-base-content/50">
+                  {i.repoCount} repo{i.repoCount === 1 ? "" : "s"} · {i.repositorySelection}
+                </span>
+                {i.suspended && <span className="text-warning">suspended</span>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {data.uninstalledOwners.length > 0 && (
+        <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+          The App is not installed on{" "}
+          <strong>{data.uninstalledOwners.join(", ")}</strong> — every run against{" "}
+          {data.uninstalledOwners.length === 1 ? "that owner" : "those owners"} will fail to mint
+          a token. Install it there, or drop them from{" "}
+          <code className="text-xs">managedRepos</code>.
+        </div>
+      )}
       {data.effective.length === 0 ? (
         <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
           No managed repos — the bot will respond to nothing. Set an overlay{" "}
@@ -104,7 +141,8 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
         </ul>
       )}
       <p className="text-xs text-base-content/50">
-        {data.configured.length} configured · {data.installation.length} accessible to the App installation
+        {data.configured.length} configured · {data.installation.length} accessible across{" "}
+        {data.installations.length} installation{data.installations.length === 1 ? "" : "s"}
       </p>
     </div>
   );
@@ -141,7 +179,8 @@ export function ConfigPage() {
           Read-only startup config. Secrets are omitted; changes require a harness restart.
           The Sources pane shows each value's provenance (default / overlay / env); the
           Overrides pane lists assets the deployment overlay forks; the Managed repos pane
-          shows which repos events are gated to and where that list comes from.
+          shows which repos events are gated to, where that list comes from, and every
+          account the GitHub App is installed on.
         </p>
       </div>
       <div className="flex gap-1 border-b border-base-300 bg-base-200/60 px-4 py-2">

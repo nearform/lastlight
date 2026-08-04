@@ -22,7 +22,8 @@ LASTLIGHT_OVERLAY_DIR=/app/instance
 GITHUB_APP_ID=123456
 # PEM lives at instance/secrets/app.pem; the entrypoint symlinks it to /app/app.pem.
 GITHUB_APP_PRIVATE_KEY_PATH=./app.pem
-GITHUB_APP_INSTALLATION_ID=789012
+# Optional — installations are auto-discovered and resolved per repository owner.
+# GITHUB_APP_INSTALLATION_ID=789012
 
 # ── Webhook (required) — must match the GitHub App's webhook secret ──
 WEBHOOK_SECRET=<openssl rand -hex 32>

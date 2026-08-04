@@ -6,8 +6,10 @@ import {
   isManagedRepo,
   setInstallationRepos,
   addInstallationRepos,
+  removeInstallation,
   removeInstallationRepos,
 } from "../managed-repos.js";
+import { getInstallationDirectory } from "../engine/github/installations.js";
 import { logger } from "../logging/logger.js";
 
 const log = logger("github");
@@ -55,6 +57,12 @@ export interface GitHubWebhookConfig {
    * reads as "not after-checks".
    */
   reviewTrigger?: () => "eager" | "after-checks" | "on-request";
+  /**
+   * Called when the App is uninstalled from an account, with that installation
+   * id. Lets the harness drop any client memoized against it, so a later
+   * re-install (which mints a NEW installation id) can't reuse a dead one.
+   */
+  onInstallationRemoved?: (installationId: string) => void;
 }
 
 /** The check-run name whose "Re-run" button is a review request. */
@@ -139,10 +147,20 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
 
       const action = payload.action;
 
+      // EVERY delivery names the installation it came from. That is the
+      // cheapest and freshest owner→installation mapping there is, and the App
+      // may be installed on several accounts — so record it before anything
+      // else, including on deliveries we go on to filter out. Signature is
+      // already verified, so the payload is trusted here.
+      getInstallationDirectory()?.note(
+        payload.installation?.account?.login ?? payload.repository?.owner?.login,
+        payload.installation?.id,
+      );
+
       // Keep the discovered installation-repo list live. These events carry no
       // `payload.repository` (they're app-wide) and `installation`/`deleted`
       // would otherwise be dropped by IGNORED_ACTIONS below — so handle them
-      // first, before any action/repo filtering. Signature is already verified.
+      // first, before any action/repo filtering.
       if (eventType === "installation" || eventType === "installation_repositories") {
         this.handleInstallationEvent(eventType, action, payload);
         return c.json({ accepted: true, kind: "installation-sync" }, 200);
@@ -244,6 +262,12 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
    * managed-repo list (src/managed-repos.ts). We apply the payload diff directly
    * — the events carry the affected repos' `full_name`, so no API round-trip is
    * needed. The list is seeded at boot; these keep it current between restarts.
+   *
+   * **Scoped to `payload.installation.id`.** These events are per-account: a
+   * `created` lists only the new account's repos and a `deleted` means only that
+   * account went away. Applying either to a single global set — as this used to
+   * — made installing the App on a second org reset the managed list to just
+   * that org, and uninstalling from it clear the list entirely.
    */
   private handleInstallationEvent(
     eventType: string,
@@ -252,29 +276,55 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
   ): void {
     const names = (repos: any): string[] =>
       Array.isArray(repos) ? repos.map((r: any) => r?.full_name).filter(Boolean) : [];
+    const installationId = payload.installation?.id;
+    const account = payload.installation?.account?.login;
+    if (installationId === undefined || installationId === null) {
+      log.warn("Installation event without an installation id — ignored", { eventType, action });
+      return;
+    }
+    const id = String(installationId);
 
     if (eventType === "installation_repositories") {
       if (action === "added") {
         const added = names(payload.repositories_added);
-        addInstallationRepos(added);
-        log.info("Installation repos added", { repos: added });
+        addInstallationRepos(id, added);
+        log.info("Installation repos added", { installationId: id, account, repos: added });
       } else if (action === "removed") {
         const removed = names(payload.repositories_removed);
-        removeInstallationRepos(removed);
-        log.info("Installation repos removed", { repos: removed });
+        removeInstallationRepos(id, removed);
+        log.info("Installation repos removed", { installationId: id, account, repos: removed });
       }
       return;
     }
 
     // eventType === "installation"
-    if (action === "created") {
-      // The initial-install payload lists the granted repos; reset to exactly them.
+    if (action === "created" || action === "unsuspend") {
+      // Both payloads list the granted repos; set exactly them for THIS
+      // installation, leaving every other account's set alone. `unsuspend` is
+      // grouped with `created` because a suspension takes the account out of
+      // service entirely (below) — coming back is the same restoration.
       const repos = names(payload.repositories);
-      setInstallationRepos(repos);
-      log.info("App installed", { repoCount: repos.length });
-    } else if (action === "deleted") {
-      setInstallationRepos([]);
-      log.info("App uninstalled — cleared installation repos");
+      setInstallationRepos(id, repos);
+      getInstallationDirectory()?.setSuspended(id, false);
+      log.info(action === "created" ? "App installed" : "App unsuspended", {
+        installationId: id,
+        account,
+        repoCount: repos.length,
+      });
+    } else if (action === "deleted" || action === "suspend") {
+      // A SUSPENDED installation still exists and keeps its id, but every token
+      // mint against it 403s — so as far as the harness is concerned it is out
+      // of service exactly like an uninstall, and its repos must stop being
+      // managed. The difference is only in the directory: `suspend` keeps the
+      // account visible (flagged) for the admin surface, `deleted` forgets it.
+      removeInstallation(id);
+      if (action === "suspend") getInstallationDirectory()?.setSuspended(id, true);
+      else getInstallationDirectory()?.forget(id);
+      this.config.onInstallationRemoved?.(id);
+      log.info(action === "deleted" ? "App uninstalled" : "App suspended", {
+        installationId: id,
+        account,
+      });
     }
   }
 

@@ -1,6 +1,7 @@
 import { resolve } from "path";
 import { randomUUID } from "crypto";
 import { refreshGitAuth } from "./github/git-auth.js";
+import { getInstallationDirectory } from "./github/installations.js";
 import {
   GITHUB_PERMISSION_PROFILES,
   type ExecutorConfig,
@@ -33,8 +34,15 @@ const log = logger("executor");
 export { RunResultAccumulator, stageSkillBundle, excludeFromGit, resetVerifyScript, VERIFY_SCRIPT_NAME, detectAccountError, mapStopReason, reclassifySuccess } from "./executors/shared.js";
 export type { CommandSpec } from "./executors/orchestrator.js";
 
-/** The GitHub App credentials a run mints from, or undefined for the PAT path. */
-type GithubAppCreds = { appId: string; privateKeyPath: string; installationId: string };
+/**
+ * The GitHub App credentials a run mints from, or undefined for the PAT path.
+ *
+ * `installationId` is deliberately absent: a mint is scoped to ONE installation
+ * and the App may be installed on several accounts, so it is resolved from the
+ * run's owner at mint time (via `InstallationDirectory`) rather than carried as
+ * a single configured value.
+ */
+type GithubAppCreds = { appId: string; privateKeyPath: string };
 
 /**
  * Resolve the App credentials to mint with from **boot config**, falling back to
@@ -56,12 +64,11 @@ type GithubAppCreds = { appId: string; privateKeyPath: string; installationId: s
 function resolveGithubApp(config: ExecutorConfig): GithubAppCreds | undefined {
   if (config.githubApiBaseUrl) return undefined;
   const fromConfig = getRuntimeConfig()?.githubApp;
-  if (fromConfig) return fromConfig;
+  if (fromConfig) return { appId: fromConfig.appId, privateKeyPath: fromConfig.privateKeyPath };
   if (!process.env.GITHUB_APP_ID) return undefined;
   return {
     appId: process.env.GITHUB_APP_ID,
     privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
-    installationId: process.env.GITHUB_APP_INSTALLATION_ID || "",
   };
 }
 
@@ -91,6 +98,8 @@ async function prepareRun(
    * the run can only flail. Callers fail the phase fast with this message.
    */
   mintError?: string;
+  /** Which of the two failure modes {@link mintFailureResult} should describe. */
+  mintErrorKind?: MintErrorKind;
 }> {
   const taskId = opts?.taskId || `task-${randomUUID().slice(0, 8)}`;
   const stateDir = config.stateDir || resolve("data");
@@ -117,31 +126,64 @@ async function prepareRun(
   const ghEnv: Record<string, string> = {};
   let mintedToken: string | undefined;
   let mintError: string | undefined;
+  let mintErrorKind: MintErrorKind | undefined;
   const access = opts?.githubAccess;
   const allowAppAuth = access?.allowMcpAppAuth === true;
   const app = resolveGithubApp(config);
-  if (app && allowAppAuth) {
+
+  // WHICH installation to mint against is a function of the run's OWNER. A
+  // GitHub App installed on N accounts has N installation ids, and a token
+  // minted against the wrong one 422s ("at least one repository ... is not
+  // accessible to the parent installation") — which is precisely what every run
+  // against a second org used to do. Resolved before the mint so an owner the
+  // App simply isn't installed on fails with that sentence rather than GitHub's.
+  //
+  // A run with no owner at all (a repo-less Slack-scoped run) has nothing to
+  // resolve against, so it falls back to the sole installation when there is
+  // exactly one — see `soleInstallationId`.
+  const directory = app ? getInstallationDirectory() : undefined;
+  const installationId = access?.owner
+    ? await directory?.resolve(access.owner)
+    : await directory?.soleInstallationId();
+
+  if (app && allowAppAuth && installationId) {
     ghEnv.GITHUB_APP_ID = app.appId;
-    ghEnv.GITHUB_APP_INSTALLATION_ID = app.installationId;
+    ghEnv.GITHUB_APP_INSTALLATION_ID = installationId;
     ghEnv.GITHUB_APP_PRIVATE_KEY_PATH = app.privateKeyPath;
   }
-  if (app && access) {
+  if (app && access?.owner && !installationId) {
+    mintErrorKind = "not-installed";
+    mintError = `the GitHub App is not installed on "${access.owner}"`;
+    log.warn("No GitHub App installation for owner", {
+      taskId,
+      owner: access.owner,
+      repo: access.repo || "none",
+      profile: access.profile,
+    });
+  } else if (app && access && !installationId) {
+    // Ownerless run, several installations — no defensible pick. Not fatal:
+    // there is no repo to act on, so the agent simply runs without a token.
+    log.warn("Ownerless run with multiple App installations — no token minted", { taskId });
+  } else if (app && access && installationId) {
     try {
       const permissions = GITHUB_PERMISSION_PROFILES[access.profile];
       const repositories = access.repo ? [access.repo] : undefined;
       // `task=` matters when runs overlap: several in-process runs interleave
       // their mints in one log, and without the task id you can't tell which
-      // credential belongs to the run that later 403s (issue #215).
+      // credential belongs to the run that later 403s (issue #215). `installation`
+      // matters for the same reason across accounts.
       log.info("Minting git token", {
         taskId,
         profile: access.profile,
+        owner: access.owner,
+        installationId,
         repo: access.repo || "(unscoped)",
         permissions: permissions ? Object.keys(permissions).join(",") : "all",
       });
       const { token } = await refreshGitAuth({
         appId: app.appId,
         privateKeyPath: app.privateKeyPath,
-        installationId: app.installationId,
+        installationId,
         permissions,
         repositories,
       });
@@ -150,11 +192,19 @@ async function prepareRun(
       ghEnv.GIT_TOKEN = token;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      // A repo-scoped mint that 422s means the installation can't access this
-      // repo (deleted / transferred to another org / access revoked). Record it
-      // so the caller fails the phase loudly instead of running a toolless agent.
+      // A repo-scoped mint that 422s against the RIGHT installation means the
+      // installation can't access this repo (deleted / transferred / access
+      // revoked). Record it so the caller fails the phase loudly instead of
+      // running a toolless agent.
       mintError = msg;
-      log.warn("Could not mint git token", { repo: access.repo || "none", profile: access.profile, err });
+      mintErrorKind = "mint-failed";
+      log.warn("Could not mint git token", {
+        owner: access.owner,
+        repo: access.repo || "none",
+        installationId,
+        profile: access.profile,
+        err,
+      });
     }
   } else if (access) {
     // PAT fallback: no GitHub App, but a static Personal Access Token is set.
@@ -274,8 +324,22 @@ async function prepareRun(
         }
       : undefined;
 
-  return { taskId, stateDir, backend, ghEnv, mintedToken, prePopulate, mintError };
+  return { taskId, stateDir, backend, ghEnv, mintedToken, prePopulate, mintError, mintErrorKind };
 }
+
+/**
+ * Why a run has no scoped GitHub token. Two genuinely different operator
+ * actions, so they get two different sentences:
+ *  - `not-installed` — the App has no usable installation on the repo's
+ *    ACCOUNT: never installed, uninstalled, or suspended (a suspended
+ *    installation still exists but 403s every mint). Install or un-suspend it
+ *    there. (The 422 GitHub returns for the first case says "repository ... not
+ *    accessible to the parent installation", which reads like a repo problem
+ *    and sent the operator looking in the wrong place.)
+ *  - `mint-failed`   — the right installation exists but rejected the mint:
+ *    the repo was deleted, transferred, or its access revoked.
+ */
+type MintErrorKind = "not-installed" | "mint-failed";
 
 /**
  * Build the failed {@link ExecutionResult} returned when a scoped GitHub token
@@ -286,8 +350,17 @@ async function prepareRun(
 function mintFailureResult(
   access: GitSandboxAccess | undefined,
   mintError: string,
+  kind: MintErrorKind = "mint-failed",
 ): ExecutionResult {
   const target = access ? `${access.owner}/${access.repo}` : "the target repo";
+  const remedy =
+    kind === "not-installed"
+      ? `Install the GitHub App on the "${access?.owner ?? "target"}" account — ` +
+        `or un-suspend it there if it is installed but suspended, or remove ` +
+        `${access?.owner ?? "that owner"}/* from managedRepos.`
+      : `The GitHub App installation can't access this repo (deleted, ` +
+        `transferred to another org, or access revoked) — remove it from ` +
+        `managedRepos or grant the App access to the repo.`;
   return {
     success: false,
     output: "",
@@ -296,10 +369,7 @@ function mintFailureResult(
     stopReason: "error_fatal",
     error:
       `Could not mint a scoped GitHub token for ${target} ` +
-      `(profile=${access?.profile ?? "?"}): ${mintError}. The GitHub App ` +
-      `installation likely can't access this repo (deleted, transferred to ` +
-      `another org, or access revoked) — remove it from managedRepos or ` +
-      `reinstall the App on the repo.`,
+      `(profile=${access?.profile ?? "?"}): ${mintError}. ${remedy}`,
   };
 }
 
@@ -319,12 +389,13 @@ export async function executeAgent(
     sandboxFactory?: SandboxFactory;
   },
 ): Promise<ExecutionResult> {
-  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError } = await prepareRun(config, opts);
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind } =
+    await prepareRun(config, opts);
   const access = opts?.githubAccess;
 
   // Fail fast: an expected-but-failed token mint means no github_* tools (and a
   // doomed pre-clone). Don't burn a sandbox on a toolless run.
-  if (mintError) return mintFailureResult(access, mintError);
+  if (mintError) return mintFailureResult(access, mintError, mintErrorKind);
 
   const runModel = config.model || DEFAULT_MODEL;
   const { system, modelName } = splitProviderModel(runModel);
@@ -392,10 +463,11 @@ export async function executeCommand(
     sandboxFactory?: SandboxFactory;
   },
 ): Promise<ExecutionResult> {
-  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError } = await prepareRun(config, opts);
+  const { taskId, stateDir, backend, ghEnv, prePopulate, mintError, mintErrorKind } =
+    await prepareRun(config, opts);
   const access = opts?.githubAccess;
 
-  if (mintError) return mintFailureResult(access, mintError);
+  if (mintError) return mintFailureResult(access, mintError, mintErrorKind);
 
   const spanAttrs = safeSpanAttributes({
     "agent.runtime": spec.kind,

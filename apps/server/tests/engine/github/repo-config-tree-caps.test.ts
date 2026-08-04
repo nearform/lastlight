@@ -68,7 +68,7 @@ function fakeOctokit(entries: Entry[]) {
 
 function clientWith(octokit: unknown): GitHubClient {
   const c = GitHubClient.withToken("t", "http://mock");
-  (c as unknown as { octokit: unknown }).octokit = octokit;
+  (c as unknown as { staticOctokit: unknown }).staticOctokit = octokit;
   return c;
 }
 

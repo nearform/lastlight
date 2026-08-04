@@ -450,13 +450,20 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   via `getManagedRepos()` (runtime config, not a baked constant). **Effective
   managed-repo list:** a non-empty configured `managedRepos` wins and restricts
   to exactly those repos; when it's **empty**, the list is instead sourced from
-  the **GitHub App installation** — the repos the App can access, fetched once at
-  boot (`GitHubClient.listInstallationRepos()`, wired in `src/index.ts`) into an
-  in-memory cache and kept live by `installation` / `installation_repositories`
-  webhooks (`src/connectors/github-webhook.ts`). So an org install that already
+  the **GitHub App installations** — the union of the repos every installation
+  can access, fetched once at boot
+  (`GitHubClient.listAllInstallationRepos()`, wired in `src/index.ts`) into an
+  in-memory cache **keyed by installation id** and kept live by `installation` /
+  `installation_repositories` webhooks (`src/connectors/github-webhook.ts`).
+  Keyed rather than flat because those events are per-account: applied to one
+  global set, a second org's `created` reset the list to just that org and its
+  `deleted` cleared it entirely. So an org install that already
   limits the App to a subset of repos need not maintain a second copy in config.
   The admin `/managed-repos` endpoint (Config → Managed repos pane) surfaces the
-  configured / installation / effective lists + source. Caveat: for a
+  configured / installation / effective lists + source, plus every
+  **installation** (account, id, repo count) and `uninstalledOwners` — any
+  `managedRepos` owner the App isn't installed on, which would otherwise surface
+  only as a failed mint mid-run. Caveat: for a
   `repository_selection: "all"` install, a newly-created org repo isn't picked up
   until the next boot fetch (no webhook fires); the `selected` case is fully
   covered. In the
@@ -730,8 +737,21 @@ RUN_SANDBOX_IT=1 npx vitest run tests/sandbox/command-exec.integration.test.ts
 
 Required:
 
-- `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, `GITHUB_APP_INSTALLATION_ID`
+- `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`
 - `WEBHOOK_SECRET` — must match the GitHub App webhook secret
+- **`GITHUB_APP_INSTALLATION_ID` is OPTIONAL** (legacy seed). A GitHub App is
+  installed per **account**, each with its own installation id, and a token
+  minted against the wrong one is rejected (`422 … not accessible to the parent
+  installation`). So installations are **discovered** from the App JWT
+  (`GET /app/installations`, plus every webhook's `payload.installation`) and
+  resolved **per repo owner** by `InstallationDirectory`
+  (`src/engine/github/installations.ts`) — the one authority the per-run mint,
+  `GitHubClient` and the chat GitHub tools all go through. One instance
+  therefore serves every account the App is installed on. The env var carries no
+  account, so it's used only when that lookup itself fails (network, revoked
+  PEM), keeping an old single-installation deployment on its previous behaviour.
+  `GET /admin/api/managed-repos` lists the installations and any
+  `uninstalledOwners`.
 - **Bot identity** (optional; defaults to `last-light`) — `botName` is the
   GitHub App slug (no `[bot]` suffix) and the single source of truth for the
   bot's identity. Set it in the overlay `config.yaml` (`botName:

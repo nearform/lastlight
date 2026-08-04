@@ -50,7 +50,7 @@ interface LastLightConfig {
   githubApp?: {
     appId: string;
     privateKeyPath: string;
-    installationId: string;
+    installationId?: string;              // legacy seed only — installations are DISCOVERED
   };
   githubToken?: string;                   // PAT fallback — ONLY when no App is configured
   slack?: SlackConfig;
@@ -412,7 +412,7 @@ missing `GITHUB_APP_ID` is fine for a chat-only deployment.
 | Var | Required for | Default |
 |---|---|---|
 | `GITHUB_APP_ID` | GitHub integration | — (its presence is what gates the whole `githubApp` block) |
-| `GITHUB_APP_INSTALLATION_ID` | GitHub integration | — (**required** once `GITHUB_APP_ID` is set) |
+| `GITHUB_APP_INSTALLATION_ID` | nothing — **optional legacy seed**. Installations are discovered from the App JWT and resolved per repo owner (see "Multi-installation GitHub Apps" below); this is only the last-resort answer when that lookup itself fails. | — |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | GitHub integration | — (**required** once `GITHUB_APP_ID` is set; the deploy stack points it at `secrets/app.pem`) |
 | `GITHUB_TOKEN` | PAT **fallback** — read-only GitHub in chat + CLI-driven read-only workflows without the App. Ignored whenever a GitHub App is configured (App always wins). | — |
 | `WEBHOOK_SECRET` | webhook signature verification | empty (verification **disabled**) |
@@ -809,8 +809,8 @@ secrets volume — never inlined in env or sandbox args.
 
 Low-trust sandboxes are simply never *given* the App env at all: the executor
 builds a per-run credential map and only writes `GITHUB_APP_ID` /
-`GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` into it when the
-profile sets `allowMcpAppAuth`. An absent key means "no credential", so nothing
+`GITHUB_APP_INSTALLATION_ID` (the one **resolved for the run's owner**) /
+`GITHUB_APP_PRIVATE_KEY_PATH` into it when the profile sets `allowMcpAppAuth`. An absent key means "no credential", so nothing
 has to be blanked out — and the map is never spliced into the harness's shared
 `process.env` (issue #215; see `09-sandbox.md`).
 

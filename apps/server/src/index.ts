@@ -17,6 +17,10 @@ import { configureWorkflowAssets, validateAssets, getWorkflow } from "./workflow
 import { ChatRunner } from "./engine/chat/chat-runner.js";
 import { buildReadSkillTool, loadChatSkillCatalogue } from "./engine/chat/chat-skills.js";
 import { configureGitAuth } from "./engine/github/git-auth.js";
+import {
+  getInstallationDirectory,
+  initInstallationDirectory,
+} from "./engine/github/installations.js";
 import { StateDb, isTriggerActorType, type TriggerActorType } from "./state/db.js";
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
@@ -107,9 +111,13 @@ function validateConfig(config: ReturnType<typeof loadConfig>): void {
   };
 
   if (config.githubApp) {
-    const { appId, privateKeyPath, installationId } = config.githubApp;
-    if (!appId || !installationId) {
-      fatal("GITHUB_APP_ID and GITHUB_APP_INSTALLATION_ID are required when the GitHub App is configured.");
+    const { appId, privateKeyPath } = config.githubApp;
+    // No installation-id check: installations are DISCOVERED from the App JWT
+    // and resolved per repo owner, because an App installed on several accounts
+    // has one id per account. `GITHUB_APP_INSTALLATION_ID` is honoured as a
+    // legacy fallback when set, and is no longer required.
+    if (!appId) {
+      fatal("GITHUB_APP_ID is required when the GitHub App is configured.");
     }
     if (!existsSync(resolve(privateKeyPath))) {
       fatal(`GITHUB_APP_PRIVATE_KEY_PATH points to "${privateKeyPath}" which does not exist.`);
@@ -261,20 +269,16 @@ async function main() {
     chatLog.warn("No skills loaded — frontmatter missing or no matching SKILL.md found");
   }
 
-  // Configure git with GitHub App credentials — agents can git clone/push natively.
-  // Non-fatal: the token is refreshed before each agent execution anyway, so a
-  // transient failure here (DNS, rate limit) doesn't block startup.
+  // The App may be installed on several ACCOUNTS, each with its own installation
+  // id — and a token minted against the wrong one is rejected. The directory is
+  // the single owner→installation authority every mint and every App-authed
+  // Octokit resolves through, so it has to exist before either.
   if (config.githubApp) {
-    try {
-      await configureGitAuth({
-        appId: config.githubApp.appId,
-        privateKeyPath: config.githubApp.privateKeyPath,
-        installationId: config.githubApp.installationId,
-        botLogin: config.botLogin,
-      });
-    } catch (err: any) {
-      logger("git-auth").warn("Initial token mint failed (will retry per-execution)", { err });
-    }
+    initInstallationDirectory({
+      appId: config.githubApp.appId,
+      privateKeyPath: config.githubApp.privateKeyPath,
+      fallbackInstallationId: config.githubApp.installationId,
+    });
   }
 
   // GitHub API client for harness-level operations (posting comments, fetching
@@ -297,20 +301,61 @@ async function main() {
     botMention: `@${config.botName}`,
   });
 
-  // Discover the repos the App installation can access and seed the managed-repo
-  // list. When the overlay's `managedRepos` is empty this becomes the effective
-  // allowlist (getManagedRepos falls back to it); a configured list still wins.
-  // Kept live afterwards by installation webhooks (github-webhook.ts). Non-fatal:
-  // on failure we fall back to whatever `managedRepos` config provides. Runs
-  // before the HTTP listener opens, so the list is warm before the first event.
+  // Discover the repos the App can access — across EVERY installation — and seed
+  // the managed-repo list. When the overlay's `managedRepos` is empty this
+  // becomes the effective allowlist (getManagedRepos falls back to the union); a
+  // configured list still wins. Kept live afterwards by installation webhooks
+  // (github-webhook.ts). Non-fatal: on failure we fall back to whatever
+  // `managedRepos` config provides. Runs before the HTTP listener opens, so the
+  // list is warm before the first event.
   if (github && config.githubApp) {
     const githubLog = logger("github");
     try {
-      const repos = await github.listInstallationRepos();
-      setInstallationRepos(repos);
-      githubLog.info("Discovered installation repos", { count: repos.length });
+      const grants = await github.listAllInstallationRepos();
+      for (const grant of grants) {
+        if (grant.error) {
+          githubLog.warn("Installation repo discovery failed for one account", {
+            account: grant.account,
+            installationId: grant.installationId,
+            error: grant.error,
+          });
+          continue;
+        }
+        setInstallationRepos(grant.installationId, grant.repos);
+      }
+      githubLog.info("Discovered App installations", {
+        installations: grants.length,
+        accounts: grants.map((g) => `${g.account}=${g.installationId}(${g.repos.length})`).join(","),
+      });
+      if (grants.length === 0) {
+        githubLog.warn(
+          "The GitHub App has no installations — install it on an account before it can act",
+        );
+      }
     } catch (err) {
-      githubLog.warn("Installation repo discovery failed", { err });
+      githubLog.warn("Installation discovery failed", { err });
+    }
+  }
+
+  // Configure git with a GitHub App token — only meaningful when the operator
+  // opted into a global `~/.gitconfig` write (LASTLIGHT_WRITE_GLOBAL_GIT=1) and
+  // only defensible with a single installation, since a global credential can
+  // name exactly one. Every agent run mints its own owner-scoped token
+  // regardless, so this is non-fatal and skipped when ambiguous.
+  if (config.githubApp) {
+    const gitAuthLog = logger("git-auth");
+    try {
+      const soleInstallation = await getInstallationDirectory()?.soleInstallationId();
+      if (soleInstallation) {
+        await configureGitAuth({
+          appId: config.githubApp.appId,
+          privateKeyPath: config.githubApp.privateKeyPath,
+          installationId: soleInstallation,
+          botLogin: config.botLogin,
+        });
+      }
+    } catch (err: any) {
+      gitAuthLog.warn("Initial token mint failed (will retry per-execution)", { err });
     }
   }
 
@@ -1031,6 +1076,9 @@ async function main() {
       // and a repo that opts itself into `after-checks` under an `eager`
       // operator is covered by the 30-minute `check-prs-awaiting-review` sweep.
       reviewTrigger: () => config.review.trigger,
+      // The harness client memoizes an Octokit per installation; drop it when
+      // the App is uninstalled so a re-install can't be served by a dead one.
+      onInstallationRemoved: (installationId) => github?.forgetInstallation(installationId),
     });
     registry.register(githubConnector);
   }

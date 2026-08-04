@@ -1,9 +1,7 @@
 import { execFileSync } from "child_process";
-import { createSign } from "crypto";
-import { readFileSync } from "fs";
-import { resolve } from "path";
 import { GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue } from "../../sandbox/git-http-auth.js";
 import { logger } from "../../logging/logger.js";
+import { appJwt } from "./app-jwt.js";
 
 const log = logger("git-auth");
 
@@ -139,16 +137,7 @@ async function getInstallationToken(config: {
   repositories?: string[];
   permissions?: GitHubTokenPermissions;
 }): Promise<{ token: string; expiresAt: string }> {
-  const privateKey = readFileSync(resolve(config.privateKeyPath), "utf-8");
-
-  // Generate JWT (RS256, no external dependency)
-  const now = Math.floor(Date.now() / 1000);
-  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({ iat: now - 60, exp: now + 600, iss: config.appId })).toString("base64url");
-  const signer = createSign("RSA-SHA256");
-  signer.update(`${header}.${payload}`);
-  const signature = signer.sign(privateKey, "base64url");
-  const jwtToken = `${header}.${payload}.${signature}`;
+  const jwtToken = appJwt(config.appId, config.privateKeyPath);
 
   // Exchange for installation token
   const requestBody: Record<string, unknown> = {};

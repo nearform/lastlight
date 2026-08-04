@@ -675,15 +675,17 @@ describe("GitHubWebhookConnector — installation repo sync", () => {
   });
 
   it("adds and removes repos on installation_repositories events", async () => {
-    setInstallationRepos(["acme/one"]);
+    setInstallationRepos("1", ["acme/one"]);
     await postInstallationEvent(connector(), "installation_repositories", {
       action: "added",
+      installation: { id: 1 },
       repositories_added: [{ full_name: "acme/two" }, { full_name: "acme/three" }],
     });
     expect(getInstallationRepos().sort()).toEqual(["acme/one", "acme/three", "acme/two"]);
 
     await postInstallationEvent(connector(), "installation_repositories", {
       action: "removed",
+      installation: { id: 1 },
       repositories_removed: [{ full_name: "acme/one" }],
     });
     expect(getInstallationRepos().sort()).toEqual(["acme/three", "acme/two"]);
@@ -691,7 +693,7 @@ describe("GitHubWebhookConnector — installation repo sync", () => {
   });
 
   it("clears the cache when the app is uninstalled", async () => {
-    setInstallationRepos(["acme/one", "acme/two"]);
+    setInstallationRepos("1", ["acme/one", "acme/two"]);
     await postInstallationEvent(connector(), "installation", {
       action: "deleted",
       installation: { id: 1 },
@@ -702,13 +704,77 @@ describe("GitHubWebhookConnector — installation repo sync", () => {
   it("processes installation events even when the action is in IGNORED_ACTIONS (deleted)", async () => {
     // `deleted` is an ignored action for repo events, but installation/deleted
     // must still be handled — it's intercepted before the IGNORED_ACTIONS filter.
-    setInstallationRepos(["acme/one"]);
+    setInstallationRepos("1", ["acme/one"]);
     const { json } = await postInstallationEvent(connector(), "installation", {
       action: "deleted",
       installation: { id: 1 },
     });
     expect(json.kind).toBe("installation-sync");
     expect(getInstallationRepos()).toEqual([]);
+  });
+
+  // The App may be installed on several accounts, and these events are
+  // per-account. Applied to one global set — what this used to do — a second
+  // org's `created` reset the list to just that org and its `deleted` cleared
+  // everything, silently unmanaging every repo of the first.
+  it("a `created` for a second account leaves the first account's repos alone", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    await postInstallationEvent(connector(), "installation", {
+      action: "created",
+      installation: { id: 2, account: { login: "other" } },
+      repositories: [{ full_name: "other/one" }],
+    });
+    expect(getInstallationRepos().sort()).toEqual(["acme/one", "other/one"]);
+  });
+
+  it("a `deleted` removes only its own account's repos", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    setInstallationRepos("2", ["other/one"]);
+
+    await postInstallationEvent(connector(), "installation", {
+      action: "deleted",
+      installation: { id: 2, account: { login: "other" } },
+    });
+
+    expect(getInstallationRepos()).toEqual(["acme/one"]);
+  });
+
+  // A suspended installation still exists and keeps its id, but every token
+  // mint against it 403s — so its repos must stop being managed exactly as if
+  // it were uninstalled, and come back when it is restored.
+  it("stops managing an account's repos when its installation is suspended", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    setInstallationRepos("2", ["other/one"]);
+
+    await postInstallationEvent(connector(), "installation", {
+      action: "suspend",
+      installation: { id: 2, account: { login: "other" } },
+    });
+
+    expect(getInstallationRepos()).toEqual(["acme/one"]);
+    expect(isManagedRepo("other/one")).toBe(false);
+  });
+
+  it("restores them on unsuspend", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    await postInstallationEvent(connector(), "installation", {
+      action: "suspend",
+      installation: { id: 2, account: { login: "other" } },
+    });
+
+    await postInstallationEvent(connector(), "installation", {
+      action: "unsuspend",
+      installation: { id: 2, account: { login: "other" } },
+      repositories: [{ full_name: "other/one" }],
+    });
+
+    expect(getInstallationRepos().sort()).toEqual(["acme/one", "other/one"]);
+  });
+
+  it("ignores an installation event carrying no installation id", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    await postInstallationEvent(connector(), "installation", { action: "deleted" });
+    expect(getInstallationRepos()).toEqual(["acme/one"]);
   });
 });
 

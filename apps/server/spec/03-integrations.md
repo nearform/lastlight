@@ -54,7 +54,7 @@ session management, allowlist enforcement, and message chunking.
 | **Transport** | HTTP POST to `/webhooks/github` on the Hono app the GitHub connector exposes |
 | **Auth** | HMAC-SHA256 over the request body, header `X-Hub-Signature-256`. Timing-safe compare. Runs *before* JSON parse. (`src/connectors/github-webhook.ts:146–155`) |
 | **Allowlist** | Repo allowlist check via `isManagedRepo()`. Events from non-managed repos short-circuit. The effective list is the overlay's `managedRepos` when non-empty; when empty it falls back to the repos the **GitHub App installation** can access (discovered at boot, kept live by installation webhooks — see below). So an org install that limits the App to a subset need not duplicate the list in config. |
-| **Installation sync** | `installation` and `installation_repositories` events are intercepted at the top of the handler (before the ignored-action + repo filters, since they carry no `payload.repository`) and applied to the in-memory installation-repo cache: `created` seeds it, `deleted` clears it, `installation_repositories` added/removed patch it. They produce no envelope (return `installation-sync`, 200). See `src/managed-repos.ts`. |
+| **Installation sync** | `installation` and `installation_repositories` events are intercepted at the top of the handler (before the ignored-action + repo filters, since they carry no `payload.repository`) and applied to the in-memory installation-repo cache, **scoped to `payload.installation.id`**: `created` / `unsuspend` set that installation's set, `deleted` / `suspend` remove it, `installation_repositories` added/removed patch it. A **suspended** installation still exists and keeps its id but 403s every mint, so it is out of service exactly like an uninstall — the only difference is that the directory keeps it visible, flagged, instead of forgetting it. They produce no envelope (return `installation-sync`, 200). Every delivery — these included — also records its `payload.installation` in the installation directory (below). See `src/managed-repos.ts`. |
 | **Normalize** | `GitHubWebhookConnector.normalize()` (`line 157–260`). Runs *after* signature + allowlist. Returns `null` for ignored actions (does not produce an envelope). |
 | **Event types** | `issue.opened`, `issue.reopened`, `issue.closed`, `pr.opened`, `pr.synchronize`, `pr.reopened`, `pr.closed`, `pr.merged`, `pr.checks_failed`, `pr.checks_passed`, `pr.checks_settled`, `pr.labeled`, `pr.review_requested`, `comment.created`, `pr_review.submitted`, `pr_review_comment.created` |
 | **Review signals** | Three `pull_request` actions carry the `review.trigger` machinery. `ready_for_review` normalizes to **`pr.opened` semantics** — a draft becoming ready is the moment the PR first asks to be looked at, and it is the event that un-defers a review `review.skipDraft` held back. `labeled` normalizes to `pr.labeled` carrying `addedLabel`, so `review.requestLabel` works; every other label is hard-ignored by the router, so the widening costs a `normalize()` call rather than a dispatch. `review_requested` normalizes to `pr.review_requested` carrying `requested_reviewer.login` (or `team/<slug>`) — **opportunistic only**: GitHub App bot users are not selectable in the reviewer picker, so `on-request` mode must not depend on it, and the label + comment + Re-run paths are the real mechanism. All three inherit the self-review guard: a PR the bot authored is dropped. |
@@ -67,6 +67,45 @@ session management, allowlist enforcement, and message chunking.
 
 If `WEBHOOK_SECRET` is empty (allowed but warned during boot), signature
 verification is disabled. Production deployments must set it.
+
+### Multi-installation GitHub Apps
+
+A GitHub App is installed **per account**, and each installation has its own id.
+A token is minted against exactly one of them
+(`POST /app/installations/{id}/access_tokens`), so a token minted against the
+wrong installation is rejected — GitHub answers `422 There is at least one
+repository that does not exist or is not accessible to the parent installation`,
+which reads like a repo problem and is not one.
+
+One instance therefore serves **every account its App is installed on**, and the
+account is resolved per call. `InstallationDirectory`
+(`src/engine/github/installations.ts`) is the single owner→installation
+authority. Two feeds:
+
+- **Webhook payloads.** Every delivery carries `payload.installation.id`
+  alongside the account login. Authoritative, free, recorded before any
+  filtering.
+- **`GET /app/installations`**, under an App JWT. Needed by the routes with no
+  webhook behind them — boot discovery, the cron fan-out, CLI/API triggers.
+  Concurrent misses share one request, and a negative is cached briefly, so a
+  fan-out over N repos costs one call rather than N.
+
+Three consumers resolve through it, and nothing else knows an installation id:
+
+| Consumer | Resolves from |
+|---|---|
+| The per-run scoped token mint (`prepareRun`, `src/engine/agent-executor.ts`) | `githubAccess.owner` |
+| `GitHubClient` — every harness-side comment, reaction, check run, `.lastlight/` fetch (`src/engine/github/github.ts`) | the `owner` argument every method already takes; one memoized Octokit per installation |
+| The read-only chat GitHub tools (`src/engine/github/github-tools.ts`) | each tool's `owner` param; the two `search` tools read it from the query's `repo:` / `org:` / `user:` qualifier, since an installation token can only search its own account |
+
+An owner with no usable installation — never installed, uninstalled, or
+suspended — fails the phase immediately, with that sentence: no sandbox, no API
+call. `GITHUB_APP_INSTALLATION_ID` is optional and
+carries no account, so it is used only when the JWT lookup itself fails
+(network, revoked PEM): a pre-existing single-installation deployment then
+degrades to exactly its old behaviour. `GET /admin/api/managed-repos` reports
+every installation plus `uninstalledOwners` — any `managedRepos` account with no
+installation — so the condition is visible before it becomes a failed run.
 
 ### App permission: `Actions: read` (optional, recommended)
 

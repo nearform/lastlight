@@ -66,6 +66,9 @@ vi.mock("#src/engine/github/git-auth.js", async (importActual) => {
 });
 
 const { executeAgent } = await import("#src/engine/agent-executor.js");
+const { initInstallationDirectory, resetInstallationDirectoryForTests } = await import(
+  "#src/engine/github/installations.js"
+);
 
 function stateDirs() {
   const stateDir = mkdtempSync(join(tmpdir(), "ll-exec-creds-"));
@@ -97,8 +100,13 @@ describe("executeAgent — per-run GitHub credentials (issue #215)", () => {
     process.env.GITHUB_APP_PRIVATE_KEY_PATH = "/app/data/secrets/app.pem";
     process.env.GITHUB_APP_INSTALLATION_ID = "67890";
     delete process.env.GITHUB_TOKEN;
+    // Which installation a run mints against is resolved from its OWNER, so the
+    // directory has to know `acme` before either run can get a token.
+    initInstallationDirectory({ appId: "12345", privateKeyPath: "/app/data/secrets/app.pem" })
+      .note("acme", "67890");
   });
   afterEach(() => {
+    resetInstallationDirectoryForTests();
     for (const [key, value] of [
       ["GITHUB_APP_ID", saved.appId],
       ["GITHUB_APP_PRIVATE_KEY_PATH", saved.pem],

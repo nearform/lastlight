@@ -186,7 +186,16 @@ export interface LastLightConfig {
   githubApp?: {
     appId: string;
     privateKeyPath: string;
-    installationId: string;
+    /**
+     * LEGACY seed only. Installations are discovered from the App JWT and
+     * resolved per repo OWNER (`engine/github/installations.ts`), because an App
+     * installed on several accounts has one id per account and a token minted
+     * against the wrong one is rejected. Kept because an existing deployment
+     * still sets `GITHUB_APP_INSTALLATION_ID`: it is the last-resort answer when
+     * the JWT lookup itself fails, so such a deployment degrades to exactly its
+     * old single-installation behaviour rather than to none.
+     */
+    installationId?: string;
   };
   /**
    * Fallback GitHub auth: a raw Personal Access Token, used ONLY when no GitHub
@@ -558,7 +567,8 @@ export function loadConfig(): LastLightConfig {
     ? {
         appId: process.env.GITHUB_APP_ID,
         privateKeyPath: requireEnv("GITHUB_APP_PRIVATE_KEY_PATH"),
-        installationId: requireEnv("GITHUB_APP_INSTALLATION_ID"),
+        // Optional — see the type. Discovery is the real mechanism.
+        installationId: process.env.GITHUB_APP_INSTALLATION_ID || undefined,
       }
     : undefined;
 
@@ -1324,7 +1334,7 @@ export function resolveKubernetesConfig(): KubernetesConfig {
  * construction site (chat tools, harness client) branches identically.
  */
 export type ResolvedGithubAuth =
-  | { kind: "app"; appId: string; privateKeyPath: string; installationId: string }
+  | { kind: "app"; appId: string; privateKeyPath: string; installationId?: string }
   | { kind: "token"; token: string };
 
 export function resolveGithubAuth(

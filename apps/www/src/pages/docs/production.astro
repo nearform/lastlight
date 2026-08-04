@@ -96,7 +96,7 @@ printf 'managedRepos:\n  - your-org/repo-one\n' &gt; instance/config.yaml</code>
 	<p>Edit <code>instance/secrets/.env</code> and fill in at minimum:</p>
 
 	<ul>
-		<li><code>GITHUB_APP_ID</code>, <code>GITHUB_APP_INSTALLATION_ID</code>, <code>GITHUB_APP_PRIVATE_KEY_PATH</code> (use <code>./app.pem</code> — the entrypoint symlinks it)</li>
+		<li><code>GITHUB_APP_ID</code>, <code>GITHUB_APP_PRIVATE_KEY_PATH</code> (use <code>./app.pem</code> — the entrypoint symlinks it)</li>
 		<li><code>WEBHOOK_SECRET</code></li>
 		<li><code>DOMAIN</code> — your public hostname, used by Caddy for automatic TLS</li>
 		<li><code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, and/or <code>OPENROUTER_API_KEY</code> — must match whichever provider <code>LASTLIGHT_MODEL</code> resolves to (default <code>anthropic/claude-sonnet-4-6</code>). One OpenRouter key covers most providers if you want a single billing surface.</li>

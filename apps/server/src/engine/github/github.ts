@@ -1,9 +1,6 @@
 import type { Octokit } from "octokit";
-import {
-  githubAppClient,
-  githubTokenClient,
-  type GitHubAppClientConfig,
-} from "./github-app-client.js";
+import { githubAppClient, githubTokenClient } from "./github-app-client.js";
+import { getInstallationDirectory } from "./installations.js";
 import type { InlineComment, ReviewEvent } from "./review-poster.js";
 
 /** GitHub reaction emoji values accepted by the reactions API. */
@@ -198,14 +195,50 @@ function excludingApp<T extends { app?: { slug?: string | null } | null }>(
 }
 
 /**
+ * Raised when a harness-side call targets an account the GitHub App is not
+ * installed on. Distinct from a 404 so callers can say the actionable thing
+ * ("install the App on `<owner>`") rather than GitHub's opaque wording.
+ */
+export class NoInstallationError extends Error {
+  constructor(readonly owner: string) {
+    super(
+      `The GitHub App is not installed on "${owner}". Install it on that ` +
+        `account (or remove ${owner}/* from managedRepos).`,
+    );
+    this.name = "NoInstallationError";
+  }
+}
+
+/** App creds a {@link GitHubClient} mints from — no installation id: see `kit()`. */
+export interface GitHubClientAppConfig {
+  appId: string;
+  privateKeyPath: string;
+  baseUrl?: string;
+}
+
+/**
  * GitHub client for the harness — uses GitHub App auth.
  * Used by the orchestrator to post comments, not by agent sessions.
+ *
+ * **Owner-aware.** A GitHub App installed on N accounts has N installation ids,
+ * and an Octokit is bound to exactly one of them. Every method here already
+ * takes `owner` first, so the client resolves (and memoizes) one Octokit *per
+ * installation* through {@link InstallationDirectory} rather than binding a
+ * single configured installation id at construction — which is what made every
+ * harness-side call against a second org 404 (see `installations.ts`). Callers
+ * are unaffected: signatures are unchanged.
+ *
+ * In token mode ({@link GitHubClient.withToken}) there is no installation to
+ * resolve, so one static Octokit serves every owner.
  */
 export class GitHubClient {
-  private octokit: Octokit;
+  private appConfig?: GitHubClientAppConfig;
+  private staticOctokit?: Octokit;
+  /** installation id → Octokit. Built lazily, reused for the process's life. */
+  private byInstallation = new Map<string, Octokit>();
 
-  constructor(config: GitHubAppClientConfig) {
-    this.octokit = githubAppClient(config);
+  constructor(config: GitHubClientAppConfig) {
+    this.appConfig = config;
   }
 
   /**
@@ -218,8 +251,33 @@ export class GitHubClient {
    */
   static withToken(token: string, baseUrl?: string): GitHubClient {
     const client = Object.create(GitHubClient.prototype) as GitHubClient;
-    client.octokit = githubTokenClient(token, baseUrl);
+    client.byInstallation = new Map();
+    client.staticOctokit = githubTokenClient(token, baseUrl);
     return client;
+  }
+
+  /**
+   * The Octokit authorized for `owner`'s installation of the App.
+   *
+   * Throws {@link NoInstallationError} when the App isn't installed there —
+   * a hard, legible failure, because every alternative (falling back to some
+   * other installation's token) produces a 404 or, worse, acts on a
+   * same-named repo in the wrong account.
+   */
+  private async kit(owner: string): Promise<Octokit> {
+    if (this.staticOctokit) return this.staticOctokit;
+    const installationId = await getInstallationDirectory()?.resolve(owner);
+    if (!installationId) throw new NoInstallationError(owner);
+    return this.octokitForInstallation(installationId);
+  }
+
+  /**
+   * Drop the memoized Octokit for an installation — called when the App is
+   * uninstalled from an account so a later re-install doesn't reuse a client
+   * bound to a dead installation.
+   */
+  forgetInstallation(installationId: string): void {
+    this.byInstallation.delete(installationId);
   }
 
   /**
@@ -229,7 +287,8 @@ export class GitHubClient {
    * just post a one-off comment can ignore the return.
    */
   async postComment(owner: string, repo: string, issueNumber: number, body: string): Promise<number> {
-    const { data } = await this.octokit.rest.issues.createComment({
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.issues.createComment({
       owner,
       repo,
       issue_number: issueNumber,
@@ -261,8 +320,9 @@ export class GitHubClient {
     issueNumber: number,
     labels: string[],
   ): Promise<void> {
+    const kit = await this.kit(owner);
     if (labels.length === 0) return;
-    await this.octokit.rest.issues.addLabels({
+    await kit.rest.issues.addLabels({
       owner,
       repo,
       issue_number: issueNumber,
@@ -271,18 +331,63 @@ export class GitHubClient {
   }
 
   /**
-   * List every repository the App installation can access, as `owner/repo`
-   * full names. Used at boot to seed the managed-repo list from the App grant
-   * (see src/managed-repos.ts). The installation id is bound by the App auth
-   * strategy, so no argument is needed. Paginated — handles installs with
-   * hundreds of repos.
+   * List every repository ONE installation can access, as `owner/repo` full
+   * names. Paginated — handles installs with hundreds of repos.
+   *
+   * Takes the installation id explicitly (rather than relying on the auth
+   * strategy's bound installation, as it used to) because the App may be
+   * installed on several accounts and each grant is separate.
    */
-  async listInstallationRepos(): Promise<string[]> {
-    const repos = await this.octokit.paginate(
-      this.octokit.rest.apps.listReposAccessibleToInstallation,
-      { per_page: 100 },
-    );
+  async listInstallationRepos(installationId: string): Promise<string[]> {
+    const kit = this.staticOctokit ?? this.octokitForInstallation(installationId);
+    const repos = await kit.paginate(kit.rest.apps.listReposAccessibleToInstallation, {
+      per_page: 100,
+    });
     return repos.map((r) => r.full_name);
+  }
+
+  /**
+   * The App's full repo grant, one entry per installation. Used at boot to seed
+   * the managed-repo list (see `src/managed-repos.ts`), which keys its sets by
+   * installation id so an install/uninstall on one account can't disturb
+   * another's. Best-effort per installation: one account failing (suspended,
+   * rate-limited) still yields the others.
+   */
+  async listAllInstallationRepos(): Promise<
+    Array<{ installationId: string; account: string; repos: string[]; error?: string }>
+  > {
+    const directory = getInstallationDirectory();
+    if (!directory) return [];
+    const installations = await directory.refresh();
+    const out: Array<{ installationId: string; account: string; repos: string[]; error?: string }> = [];
+    for (const installation of installations) {
+      try {
+        out.push({
+          installationId: installation.id,
+          account: installation.account,
+          repos: await this.listInstallationRepos(installation.id),
+        });
+      } catch (err: unknown) {
+        out.push({
+          installationId: installation.id,
+          account: installation.account,
+          repos: [],
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return out;
+  }
+
+  /** Memoized App-authed Octokit for a known installation id. */
+  private octokitForInstallation(installationId: string): Octokit {
+    const config = this.appConfig;
+    if (!config) throw new Error("GitHubClient has no auth configured");
+    const cached = this.byInstallation.get(installationId);
+    if (cached) return cached;
+    const kit = githubAppClient({ ...config, installationId });
+    this.byInstallation.set(installationId, kit);
+    return kit;
   }
 
   /**
@@ -292,7 +397,8 @@ export class GitHubClient {
    * watchers on edits, which is exactly why this keeps the thread quiet.
    */
   async updateComment(owner: string, repo: string, commentId: number, body: string): Promise<void> {
-    await this.octokit.rest.issues.updateComment({
+    const kit = await this.kit(owner);
+    await kit.rest.issues.updateComment({
       owner,
       repo,
       comment_id: commentId,
@@ -308,7 +414,8 @@ export class GitHubClient {
    * admitted. Only ever call this on a comment id this harness created.
    */
   async deleteComment(owner: string, repo: string, commentId: number): Promise<void> {
-    await this.octokit.rest.issues.deleteComment({
+    const kit = await this.kit(owner);
+    await kit.rest.issues.deleteComment({
       owner,
       repo,
       comment_id: commentId,
@@ -329,7 +436,8 @@ export class GitHubClient {
     commentId: number,
     content: ReactionContent = "rocket",
   ): Promise<void> {
-    await this.octokit.rest.reactions.createForIssueComment({
+    const kit = await this.kit(owner);
+    await kit.rest.reactions.createForIssueComment({
       owner,
       repo,
       comment_id: commentId,
@@ -348,7 +456,8 @@ export class GitHubClient {
     issueNumber: number,
     content: ReactionContent = "eyes",
   ): Promise<void> {
-    await this.octokit.rest.reactions.createForIssue({
+    const kit = await this.kit(owner);
+    await kit.rest.reactions.createForIssue({
       owner,
       repo,
       issue_number: issueNumber,
@@ -367,7 +476,8 @@ export class GitHubClient {
     commentId: number,
     content: ReactionContent = "eyes",
   ): Promise<void> {
-    await this.octokit.rest.reactions.createForPullRequestReviewComment({
+    const kit = await this.kit(owner);
+    await kit.rest.reactions.createForPullRequestReviewComment({
       owner,
       repo,
       comment_id: commentId,
@@ -376,7 +486,8 @@ export class GitHubClient {
   }
 
   async getIssue(owner: string, repo: string, issueNumber: number) {
-    const { data } = await this.octokit.rest.issues.get({
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.issues.get({
       owner,
       repo,
       issue_number: issueNumber,
@@ -391,7 +502,8 @@ export class GitHubClient {
    * issue body).
    */
   async getIssueBody(owner: string, repo: string, issueNumber: number): Promise<string> {
-    const { data } = await this.octokit.rest.issues.get({
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.issues.get({
       owner,
       repo,
       issue_number: issueNumber,
@@ -410,8 +522,9 @@ export class GitHubClient {
     repo: string,
     issueNumber: number,
   ): Promise<Array<{ user: string; body: string; createdAt: string }>> {
-    const data = await this.octokit.paginate(
-      this.octokit.rest.issues.listComments,
+    const kit = await this.kit(owner);
+    const data = await kit.paginate(
+      kit.rest.issues.listComments,
       { owner, repo, issue_number: issueNumber, per_page: 100 },
     );
     return data.map((c) => ({
@@ -422,7 +535,8 @@ export class GitHubClient {
   }
 
   async getPullRequest(owner: string, repo: string, pullNumber: number) {
-    const { data } = await this.octokit.rest.pulls.get({
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.pulls.get({
       owner,
       repo,
       pull_number: pullNumber,
@@ -455,7 +569,8 @@ export class GitHubClient {
       headSha: string;
     }>
   > {
-    const prs = await this.octokit.paginate(this.octokit.rest.pulls.list, {
+    const kit = await this.kit(owner);
+    const prs = await kit.paginate(kit.rest.pulls.list, {
       owner,
       repo,
       state: "open",
@@ -481,7 +596,8 @@ export class GitHubClient {
    * reviewer runs. See the `baseBranch` plumbing in src/index.ts.
    */
   async getDefaultBranch(owner: string, repo: string): Promise<string> {
-    const { data } = await this.octokit.rest.repos.get({ owner, repo });
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.repos.get({ owner, repo });
     return data.default_branch;
   }
 
@@ -517,13 +633,14 @@ export class GitHubClient {
     repo: string,
     options: RepoConfigTreeOptions = {},
   ): Promise<RepoConfigTreeResult> {
+    const kit = await this.kit(owner);
     const maxFiles = options.maxFiles ?? REPO_CONFIG_DEFAULT_MAX_FILES;
     const maxBytes = options.maxBytes ?? REPO_CONFIG_DEFAULT_MAX_BYTES;
 
     // The trust ref. Resolved every time — a repo can rename its default branch,
     // and caching the name would silently keep reading a stale (possibly
     // unprotected) ref.
-    const { data: repoData } = await this.octokit.rest.repos.get({ owner, repo });
+    const { data: repoData } = await kit.rest.repos.get({ owner, repo });
     const defaultBranch = repoData.default_branch;
 
     // Conditional read of the branch's root tree. `If-None-Match` is only worth
@@ -533,7 +650,7 @@ export class GitHubClient {
     const conditional = options.etag && options.treeSha;
     let rootTree;
     try {
-      rootTree = await this.octokit.rest.git.getTree({
+      rootTree = await kit.rest.git.getTree({
         owner,
         repo,
         tree_sha: defaultBranch,
@@ -567,7 +684,7 @@ export class GitHubClient {
 
     let subtree;
     try {
-      subtree = await this.octokit.rest.git.getTree({
+      subtree = await kit.rest.git.getTree({
         owner,
         repo,
         tree_sha: treeSha,
@@ -593,7 +710,7 @@ export class GitHubClient {
         truncated = true;
         continue;
       }
-      const { data: blob } = await this.octokit.rest.git.getBlob({ owner, repo, file_sha: entry.sha });
+      const { data: blob } = await kit.rest.git.getBlob({ owner, repo, file_sha: entry.sha });
       const content = Buffer.from(blob.content ?? "", (blob.encoding as BufferEncoding) ?? "base64");
       // Re-check against the ACTUAL length. `entry.size` is absent on some tree
       // entries and defaults to 0 above, so the pre-check degrades to
@@ -616,7 +733,8 @@ export class GitHubClient {
 
   /** Convenience: fetch only the PR's head commit SHA. Used by check-run code. */
   async getPullRequestHeadSha(owner: string, repo: string, pullNumber: number): Promise<string> {
-    const { data } = await this.octokit.rest.pulls.get({
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.pulls.get({
       owner,
       repo,
       pull_number: pullNumber,
@@ -650,8 +768,9 @@ export class GitHubClient {
       output?: { title: string; summary: string };
     } = {},
   ): Promise<number> {
+    const kit = await this.kit(owner);
     const status = options.status ?? "in_progress";
-    const { data } = await this.octokit.rest.checks.create({
+    const { data } = await kit.rest.checks.create({
       owner,
       repo,
       name,
@@ -693,7 +812,8 @@ export class GitHubClient {
       output?: { title: string; summary: string };
     },
   ): Promise<void> {
-    await this.octokit.rest.checks.update({
+    const kit = await this.kit(owner);
+    await kit.rest.checks.update({
       owner,
       repo,
       check_run_id: checkRunId,
@@ -721,7 +841,8 @@ export class GitHubClient {
     headSha: string,
     botLogin = "last-light[bot]",
   ): Promise<{ state: string; body: string | null; submittedAt: string | null } | null> {
-    const reviews = await this.octokit.paginate(this.octokit.rest.pulls.listReviews, {
+    const kit = await this.kit(owner);
+    const reviews = await kit.paginate(kit.rest.pulls.listReviews, {
       owner,
       repo,
       pull_number: pullNumber,
@@ -747,7 +868,8 @@ export class GitHubClient {
    * than a local `git diff`, with no dependency on checkout/fetch state.
    */
   async getPullRequestDiff(owner: string, repo: string, pullNumber: number): Promise<string> {
-    const res = await this.octokit.rest.pulls.get({
+    const kit = await this.kit(owner);
+    const res = await kit.rest.pulls.get({
       owner,
       repo,
       pull_number: pullNumber,
@@ -772,7 +894,8 @@ export class GitHubClient {
     pullNumber: number,
     review: { body: string; event: ReviewEvent; comments?: InlineComment[]; commitId?: string },
   ): Promise<void> {
-    await this.octokit.rest.pulls.createReview({
+    const kit = await this.kit(owner);
+    await kit.rest.pulls.createReview({
       owner,
       repo,
       pull_number: pullNumber,
@@ -839,9 +962,10 @@ export class GitHubClient {
     settledCount: number;
     pendingCount: number;
   }> {
+    const kit = await this.kit(owner);
     const [{ data: checks }, { data: status }] = await Promise.all([
-      this.octokit.rest.checks.listForRef({ owner, repo, ref, filter: "latest" }),
-      this.octokit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
+      kit.rest.checks.listForRef({ owner, repo, ref, filter: "latest" }),
+      kit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
     ]);
     // Drop OUR OWN check runs when the caller is deciding whether to TRIGGER
     // work — see {@link ChecksQueryOptions.excludeApp}.
@@ -886,7 +1010,8 @@ export class GitHubClient {
    * that simply never equals `botLogin` rather than a null to branch on.
    */
   async getCommitAuthorName(owner: string, repo: string, ref: string): Promise<string> {
-    const { data } = await this.octokit.rest.repos.getCommit({ owner, repo, ref });
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.repos.getCommit({ owner, repo, ref });
     return data.commit?.author?.name ?? "";
   }
 
@@ -940,7 +1065,8 @@ export class GitHubClient {
     ref: string,
     opts: ChecksQueryOptions = {},
   ): Promise<CiFailureReport> {
-    const { data } = await this.octokit.rest.checks.listForRef({
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.checks.listForRef({
       owner,
       repo,
       ref,
@@ -967,7 +1093,7 @@ export class GitHubClient {
     const workflowPathFor = (runId: number): Promise<string | undefined> => {
       let pending = workflowPaths.get(runId);
       if (!pending) {
-        pending = this.octokit.rest.actions
+        pending = kit.rest.actions
           .getWorkflowRun({ owner, repo, run_id: runId, request })
           .then((res) => res.data.path as string | undefined)
           .catch(() => undefined);
@@ -994,11 +1120,11 @@ export class GitHubClient {
           // expired log on one must not cost us the other two. Only the LOG
           // read's failure is classified: it is the one the banner speaks about.
           const [log, job, path] = await Promise.all([
-            this.octokit.rest.actions
+            kit.rest.actions
               .downloadJobLogsForWorkflowRun({ owner, repo, job_id: jobId, request })
               .then((res) => ({ ok: true as const, data: res.data as unknown }))
               .catch((err: unknown) => ({ ok: false as const, cause: logFetchCause(err) })),
-            this.octokit.rest.actions
+            kit.rest.actions
               .getJobForWorkflowRun({ owner, repo, job_id: jobId, request })
               .then((res) => res.data)
               .catch(() => null),
@@ -1033,7 +1159,7 @@ export class GitHubClient {
         }
 
         if (!logExcerpt) {
-          logExcerpt = await fetchAnnotationExcerpt(this.octokit, owner, repo, run.id);
+          logExcerpt = await fetchAnnotationExcerpt(kit, owner, repo, run.id);
         }
 
         return {

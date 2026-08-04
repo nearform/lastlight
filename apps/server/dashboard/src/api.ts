@@ -78,6 +78,24 @@ export interface ManagedRepos {
   /** ISO timestamp of the last installation-repo cache update, or null. */
   refreshedAt: string | null;
   /**
+   * Every ACCOUNT the GitHub App is installed on. An App is installed per
+   * account and each installation mints its own tokens, so this is the list
+   * that determines which owners the harness can act on at all.
+   */
+  installations: {
+    id: string;
+    account: string;
+    accountType: string;
+    repositorySelection: "all" | "selected";
+    suspended: boolean;
+    repoCount: number;
+  }[];
+  /**
+   * Owners appearing in `effective` that have NO installation — every run
+   * against them will fail to mint a token. Empty is the healthy state.
+   */
+  uninstalledOwners: string[];
+  /**
    * Per-effective-repo `.lastlight/` presence, read from the harness's in-memory
    * cache only (no network). `hasRepoConfig: false` means "nothing cached yet",
    * not necessarily "no repo config" — opening the repo's Config tab settles it.

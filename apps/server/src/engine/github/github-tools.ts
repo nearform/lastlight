@@ -10,16 +10,31 @@
  * loop calls when the model emits a tool_call.
  */
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
+import type { Octokit } from "octokit";
 import type { Tool, ToolCall } from "@earendil-works/pi-ai";
-import { githubAppClient, githubTokenClient, type GitHubAppClientConfig } from "./github-app-client.js";
+import { githubAppClient, githubTokenClient } from "./github-app-client.js";
+import { getInstallationDirectory } from "./installations.js";
 
 /**
- * Auth for the read-only chat GitHub tools. Either a GitHub App config or a
- * raw Personal Access Token (the PAT fallback). Both resolve to an Octokit.
+ * Auth for the read-only chat GitHub tools. Either a GitHub App config (no
+ * installation id — the account is resolved per call, see `kit()` below) or a
+ * raw Personal Access Token (the PAT fallback).
  */
 export type ChatGitHubAuth =
-  | GitHubAppClientConfig
+  | { appId: string; privateKeyPath: string; baseUrl?: string }
   | { token: string; baseUrl?: string };
+
+/**
+ * The account a search is authorized against, read out of the query's own
+ * scoping qualifier. An installation token can only see its own account, so a
+ * cross-account search is not a thing an App can do — the qualifier the agent
+ * already writes (`repo:owner/name`, `org:x`, `user:x`) is exactly the signal
+ * needed to pick the installation.
+ */
+export function ownerFromSearchQuery(q: string): string | undefined {
+  const match = /(?:^|\s)(?:repo:([^/\s]+)\/\S+|org:(\S+)|user:(\S+))/.exec(q);
+  return match ? (match[1] ?? match[2] ?? match[3]) : undefined;
+}
 
 export interface ChatGitHubToolset {
   tools: Tool[];
@@ -48,9 +63,42 @@ function tool<P extends TSchema>(
 }
 
 export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
-  const octokit = "token" in auth
-    ? githubTokenClient(auth.token, auth.baseUrl)
-    : githubAppClient(auth);
+  const staticOctokit = "token" in auth ? githubTokenClient(auth.token, auth.baseUrl) : undefined;
+  const byInstallation = new Map<string, Octokit>();
+
+  /**
+   * The Octokit authorized for `owner`'s installation.
+   *
+   * The App may be installed on several accounts, each with its own
+   * installation id, so the client is resolved per call rather than bound once
+   * at construction — every tool below already takes an `owner`.
+   */
+  const octokitFor = async (owner: string): Promise<Octokit> => {
+    if (staticOctokit) return staticOctokit;
+    const app = auth as { appId: string; privateKeyPath: string; baseUrl?: string };
+    const installationId = await getInstallationDirectory()?.resolve(owner);
+    if (!installationId) {
+      throw new Error(`The GitHub App is not installed on "${owner}", so it can't be read.`);
+    }
+    const cached = byInstallation.get(installationId);
+    if (cached) return cached;
+    const kit = githubAppClient({ ...app, installationId });
+    byInstallation.set(installationId, kit);
+    return kit;
+  };
+
+  /** Same, for a search query whose account comes from its scoping qualifier. */
+  const octokitForQuery = async (q: string): Promise<Octokit> => {
+    if (staticOctokit) return staticOctokit;
+    const owner = ownerFromSearchQuery(q);
+    if (!owner) {
+      throw new Error(
+        "Scope the search to an account with a `repo:owner/name`, `org:name` or " +
+          "`user:name` qualifier — a GitHub App can only search accounts it is installed on.",
+      );
+    }
+    return octokitFor(owner);
+  };
 
   const entries: ToolEntry[] = [
     tool(
@@ -61,6 +109,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         repo: Type.String(),
       }),
       async ({ owner, repo }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.repos.get({ owner, repo });
         return {
           full_name: data.full_name,
@@ -82,6 +131,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         issue_number: Type.Number(),
       }),
       async ({ owner, repo, issue_number }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.issues.get({ owner, repo, issue_number });
         return {
           number: data.number,
@@ -107,6 +157,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         per_page: Type.Optional(Type.Number()),
       }),
       async ({ owner, repo, issue_number, per_page }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.issues.listComments({
           owner,
           repo,
@@ -135,6 +186,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         per_page: Type.Optional(Type.Number()),
       }),
       async ({ owner, repo, state, labels, per_page }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.issues.listForRepo({
           owner,
           repo,
@@ -164,6 +216,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         pull_number: Type.Number(),
       }),
       async ({ owner, repo, pull_number }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.pulls.get({ owner, repo, pull_number });
         return {
           number: data.number,
@@ -189,6 +242,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         pull_number: Type.Number(),
       }),
       async ({ owner, repo, pull_number }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.pulls.get({
           owner,
           repo,
@@ -211,6 +265,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         per_page: Type.Optional(Type.Number()),
       }),
       async ({ owner, repo, state, per_page }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.pulls.list({
           owner,
           repo,
@@ -240,6 +295,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         ref: Type.Optional(Type.String()),
       }),
       async ({ owner, repo, path, ref }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.repos.getContent({ owner, repo, path, ref });
         if (Array.isArray(data)) {
           return data.map((d) => ({ name: d.name, type: d.type, size: d.size, path: d.path }));
@@ -263,6 +319,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         per_page: Type.Optional(Type.Number()),
       }),
       async ({ owner, repo, sha, path, per_page }) => {
+        const octokit = await octokitFor(owner);
         const { data } = await octokit.rest.repos.listCommits({
           owner,
           repo,
@@ -288,6 +345,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         per_page: Type.Optional(Type.Number()),
       }),
       async ({ q, per_page }) => {
+        const octokit = await octokitForQuery(q);
         const { data } = await octokit.rest.search.issuesAndPullRequests({
           q,
           per_page: per_page ?? 20,
@@ -313,6 +371,7 @@ export function buildChatGitHubTools(auth: ChatGitHubAuth): ChatGitHubToolset {
         per_page: Type.Optional(Type.Number()),
       }),
       async ({ q, per_page }) => {
+        const octokit = await octokitForQuery(q);
         const { data } = await octokit.rest.search.code({ q, per_page: per_page ?? 20 });
         return {
           total_count: data.total_count,

@@ -51,10 +51,12 @@ import {
 } from "../workflows/triggers.js";
 import {
   getManagedRepos,
+  getInstallationRepoBreakdown,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
   isManagedRepo,
 } from "../managed-repos.js";
+import { getInstallationDirectory } from "../engine/github/installations.js";
 import {
   getRuntimeConfig,
   getRoutes,
@@ -691,12 +693,38 @@ export function createAdminRoutes(
   app.get("/managed-repos", (c) => {
     const configured = getRuntimeConfig()?.managedRepos ?? [];
     const effective = getManagedRepos();
+    // Every ACCOUNT the App is installed on, with its repo grant. A GitHub App
+    // is installed per account and each installation mints its own tokens, so a
+    // `managedRepos` entry whose owner has no installation cannot be acted on —
+    // `uninstalledOwners` names them here, where an operator can see it, rather
+    // than letting it surface as a 422 mid-run.
+    const repoCounts = new Map(
+      getInstallationRepoBreakdown().map((g) => [g.installationId, g.repos.length]),
+    );
+    const installations = getInstallationDirectory()?.list() ?? [];
+    const installedOwners = new Set(installations.map((i) => i.account.toLowerCase()));
+    const uninstalledOwners = [
+      ...new Set(
+        effective
+          .map((r) => r.split("/")[0] ?? "")
+          .filter((owner) => owner && !installedOwners.has(owner.toLowerCase())),
+      ),
+    ];
     return c.json({
       configured,
       installation: getInstallationRepos(),
       effective,
       source: configured.length > 0 ? "config" : "installation",
       refreshedAt: getInstallationReposRefreshedAt(),
+      installations: installations.map((i) => ({
+        id: i.id,
+        account: i.account,
+        accountType: i.accountType,
+        repositorySelection: i.repositorySelection,
+        suspended: i.suspended,
+        repoCount: repoCounts.get(i.id) ?? 0,
+      })),
+      uninstalledOwners,
       // Which of the effective repos have committed a `.lastlight/` layer.
       // Read from the in-memory cache ONLY (`getCachedRepoLayer`) so this stays
       // a cheap no-network list route — a repo not yet fetched simply reports

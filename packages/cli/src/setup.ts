@@ -141,7 +141,12 @@ export function buildEnvContent(config: SetupConfig): string {
       `GITHUB_APP_ID=${config.GITHUB_APP_ID}`,
       // PEM lives at instance/secrets/app.pem; the entrypoint symlinks it to /app/app.pem.
       `GITHUB_APP_PRIVATE_KEY_PATH=./app.pem`,
-      `GITHUB_APP_INSTALLATION_ID=${config.GITHUB_APP_INSTALLATION_ID}`,
+      // Optional. Installations are discovered from the App JWT and resolved
+      // per repository owner, so an App installed on several accounts needs
+      // nothing here. Set only as a fallback for a locked-down network.
+      config.GITHUB_APP_INSTALLATION_ID
+        ? `GITHUB_APP_INSTALLATION_ID=${config.GITHUB_APP_INSTALLATION_ID}`
+        : "# GITHUB_APP_INSTALLATION_ID=   # optional — auto-discovered",
       "",
       "# ── Webhook (required) ──────────────────────────────────",
       `WEBHOOK_SECRET=${config.WEBHOOK_SECRET}`,
@@ -353,6 +358,7 @@ function preflight(): void {
 
 async function collectGitHubApp(): Promise<{
   appId: string;
+  /** Blank when left to auto-discovery — the normal answer. */
   installationId: string;
   pemSourcePath: string;
 }> {
@@ -372,14 +378,19 @@ async function collectGitHubApp(): Promise<{
     }),
   );
 
+  // Optional. The server discovers every installation of the App from its own
+  // JWT and picks the right one per repository owner, so an App installed on
+  // several accounts works with nothing configured here. Only worth answering
+  // as a fallback for a locked-down network where that lookup can't run.
   const installationId = required(
     await p.text({
-      message: "Installation ID",
+      message: "Installation ID (optional — press enter to auto-discover)",
       placeholder: "789012",
+      defaultValue: "",
       validate: (v) =>
-        v && isPositiveInt(v) ? undefined : "Must be a positive integer.",
+        !v || isPositiveInt(v) ? undefined : "Must be a positive integer (or blank).",
     }),
-  );
+  ).trim();
 
   // Search cwd and parent for .pem files to offer as choices
   const pemCandidates: string[] = [];

@@ -63,7 +63,6 @@ export function resolveReviewGitHubClient(runConfig: { githubApiBaseUrl?: string
   return new GitHubClient({
     appId: process.env.GITHUB_APP_ID || "",
     privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
-    installationId: process.env.GITHUB_APP_INSTALLATION_ID || "",
   });
 }
 
