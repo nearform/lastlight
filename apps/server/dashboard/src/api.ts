@@ -89,12 +89,20 @@ export interface ManagedRepos {
     repositorySelection: "all" | "selected";
     suspended: boolean;
     repoCount: number;
+    /**
+     * GitHub's settings page for this install (repo grant / suspend /
+     * uninstall). Null when the account type isn't known yet, since the path
+     * shape depends on it — render plain text rather than a guessed link.
+     */
+    htmlUrl: string | null;
   }[];
   /**
    * Owners appearing in `effective` that have NO installation — every run
    * against them will fail to mint a token. Empty is the healthy state.
    */
   uninstalledOwners: string[];
+  /** GitHub's "install this App on an account" page, for fixing the above. */
+  appInstallUrl: string;
   /**
    * Per-effective-repo `.lastlight/` presence, read from the harness's in-memory
    * cache only (no network). `hasRepoConfig: false` means "nothing cached yet",

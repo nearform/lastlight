@@ -56,7 +56,10 @@ import {
   getInstallationReposRefreshedAt,
   isManagedRepo,
 } from "../managed-repos.js";
-import { getInstallationDirectory } from "../engine/github/installations.js";
+import {
+  getInstallationDirectory,
+  installationSettingsUrl,
+} from "../engine/github/installations.js";
 import {
   getRuntimeConfig,
   getRoutes,
@@ -723,8 +726,16 @@ export function createAdminRoutes(
         repositorySelection: i.repositorySelection,
         suspended: i.suspended,
         repoCount: repoCounts.get(i.id) ?? 0,
+        // Deep link to GitHub's settings page for this install — where the repo
+        // grant, suspension and uninstall actually live. Built server-side
+        // because the path shape depends on the account type.
+        htmlUrl: installationSettingsUrl(i) ?? null,
       })),
       uninstalledOwners,
+      // Where to go and fix an uninstalled owner. `botName` IS the App slug
+      // (see the bot-identity contract), so this resolves without storing the
+      // App's URL anywhere.
+      appInstallUrl: `https://github.com/apps/${getBotName()}/installations/new`,
       // Which of the effective repos have committed a `.lastlight/` layer.
       // Read from the in-memory cache ONLY (`getCachedRepoLayer`) so this stays
       // a cheap no-network list route — a repo not yet fetched simply reports

@@ -107,6 +107,18 @@ degrades to exactly its old behaviour. `GET /admin/api/managed-repos` reports
 every installation plus `uninstalledOwners` — any `managedRepos` account with no
 installation — so the condition is visible before it becomes a failed run.
 
+Each installation carries an `htmlUrl` deep link to its GitHub settings page
+(where the repo grant, suspension and uninstall live), built server-side by
+`installationSettingsUrl()` because **the path shape depends on the account
+type** and guessing wrong 404s: an org install is
+`/organizations/<login>/settings/installations/<id>`, a personal one a
+viewer-scoped `/settings/installations/<id>`. It is `null` when the type isn't
+known yet — a record seeded from a webhook that carried no `account.type` — so a
+caller renders plain text rather than a link that may not resolve. The response
+also carries `appInstallUrl`, the App's own install page, derived from `botName`
+(which **is** the App slug), so an `uninstalledOwners` warning can offer the fix
+rather than just naming the problem.
+
 ### App permission: `Actions: read` (optional, recommended)
 
 `Checks: read` gets the harness the check *runs* — names, conclusions, and annotations. It does **not** get it the GitHub Actions **job logs** behind them. That is a separate App permission, `Actions: read`, and it is **not** the same thing as `Workflows: write` (which only governs pushing files under `.github/workflows/`).

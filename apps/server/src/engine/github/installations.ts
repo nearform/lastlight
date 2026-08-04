@@ -13,10 +13,35 @@ export interface AppInstallation {
   id: string;
   /** Account login the App is installed on (`cliftonc`, `mirevue`, …). */
   account: string;
+  /** `Organization` | `User` — decides the settings URL shape, see below. */
   accountType: string;
   /** `all` = every repo in the account; `selected` = an explicit subset. */
   repositorySelection: "all" | "selected";
   suspended: boolean;
+}
+
+/**
+ * GitHub's settings page for one installation — where an operator goes to
+ * change its repo grant, suspend it, or uninstall.
+ *
+ * The path differs by account type, which is the whole reason this is a
+ * function rather than a template: an **org** install lives under
+ * `/organizations/<login>/settings/installations/<id>`, a **personal** one under
+ * `/settings/installations/<id>` (no login in the path — GitHub scopes it to the
+ * viewer). Guessing wrong 404s.
+ *
+ * Returns `undefined` when the account type isn't known yet — a record seeded
+ * from a webhook that carried no `account.type` — so a caller renders plain text
+ * rather than a link that might not resolve.
+ */
+export function installationSettingsUrl(installation: AppInstallation): string | undefined {
+  if (installation.accountType === "Organization") {
+    return `https://github.com/organizations/${installation.account}/settings/installations/${installation.id}`;
+  }
+  if (installation.accountType === "User") {
+    return `https://github.com/settings/installations/${installation.id}`;
+  }
+  return undefined;
 }
 
 export interface InstallationDirectoryConfig {
@@ -83,7 +108,12 @@ export class InstallationDirectory {
    * Record an owner→installation mapping learned out of band (a webhook
    * payload). Cheaper and fresher than any lookup, so it always wins.
    */
-  note(owner: string, id: string | number | undefined | null): void {
+  note(
+    owner: string,
+    id: string | number | undefined | null,
+    /** `account.type` from the payload — lets the admin surface link the install. */
+    accountType?: string,
+  ): void {
     if (!owner || id === undefined || id === null || id === "") return;
     const key = owner.toLowerCase();
     const value = String(id);
@@ -92,17 +122,23 @@ export class InstallationDirectory {
     // service against tokens GitHub will 403.
     if (this.byId.get(value)?.suspended) return;
     this.negative.delete(key);
-    if (this.byOwner.get(key) === value) return;
-    this.byOwner.set(key, value);
-    if (!this.byId.has(value)) {
+
+    const known = this.byId.get(value);
+    if (known) {
+      // Fill in a type we didn't have — a record seeded by an earlier event
+      // that carried no `account.type` can't be linked until we learn it.
+      if (!known.accountType && accountType) known.accountType = accountType;
+    } else {
       this.byId.set(value, {
         id: value,
         account: owner,
-        accountType: "",
+        accountType: accountType ?? "",
         repositorySelection: "all",
         suspended: false,
       });
     }
+    if (this.byOwner.get(key) === value) return;
+    this.byOwner.set(key, value);
     log.info("Learned installation from event", { owner, installationId: value });
   }
 
