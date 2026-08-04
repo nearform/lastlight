@@ -155,6 +155,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       getInstallationDirectory()?.note(
         payload.installation?.account?.login ?? payload.repository?.owner?.login,
         payload.installation?.id,
+        payload.installation?.account?.type ?? payload.repository?.owner?.type,
       );
 
       // Keep the discovered installation-repo list live. These events carry no

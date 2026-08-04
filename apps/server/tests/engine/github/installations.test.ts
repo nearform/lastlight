@@ -13,7 +13,10 @@ import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { generateKeyPairSync } from "crypto";
-import { InstallationDirectory } from "#src/engine/github/installations.js";
+import {
+  InstallationDirectory,
+  installationSettingsUrl,
+} from "#src/engine/github/installations.js";
 
 /** A real RSA key, because the directory signs a genuine RS256 App JWT. */
 function writePem(): string {
@@ -140,6 +143,45 @@ describe("InstallationDirectory.resolve", () => {
   });
 });
 
+/**
+ * The settings-page path differs by account type, and guessing wrong 404s — an
+ * org install lives under `/organizations/<login>/settings/...`, a personal one
+ * under a bare `/settings/...` that GitHub scopes to the viewer. Pinned because
+ * these are the links an operator clicks to fix exactly the condition this
+ * whole subsystem reports.
+ */
+describe("installationSettingsUrl", () => {
+  const base = { repositorySelection: "all" as const, suspended: false };
+
+  it("points an ORG install at the org's installation settings", () => {
+    expect(
+      installationSettingsUrl({
+        ...base,
+        id: "150854297",
+        account: "mirevue",
+        accountType: "Organization",
+      }),
+    ).toBe("https://github.com/organizations/mirevue/settings/installations/150854297");
+  });
+
+  it("points a PERSONAL install at the viewer-scoped settings page", () => {
+    expect(
+      installationSettingsUrl({
+        ...base,
+        id: "121130978",
+        account: "cliftonc",
+        accountType: "User",
+      }),
+    ).toBe("https://github.com/settings/installations/121130978");
+  });
+
+  it("returns undefined for an unknown account type rather than guessing", () => {
+    expect(
+      installationSettingsUrl({ ...base, id: "1", account: "who", accountType: "" }),
+    ).toBeUndefined();
+  });
+});
+
 describe("InstallationDirectory.note", () => {
   it("answers from a webhook-learned mapping with no lookup at all", async () => {
     const dir = directory();
@@ -156,6 +198,24 @@ describe("InstallationDirectory.note", () => {
 
     dir.note("mirevue", 150854297);
 
+    expect(await dir.resolve("mirevue")).toBe("150854297");
+  });
+
+  it("records the account type, so a webhook-learned install is still linkable", async () => {
+    const dir = directory();
+    dir.note("mirevue", 150854297, "Organization");
+
+    expect(installationSettingsUrl(dir.list()[0])).toBe(
+      "https://github.com/organizations/mirevue/settings/installations/150854297",
+    );
+  });
+
+  it("fills in a type learned later without disturbing the mapping", async () => {
+    const dir = directory();
+    dir.note("mirevue", 150854297); // an early event with no account.type
+    dir.note("mirevue", 150854297, "Organization");
+
+    expect(dir.list()[0].accountType).toBe("Organization");
     expect(await dir.resolve("mirevue")).toBe("150854297");
   });
 

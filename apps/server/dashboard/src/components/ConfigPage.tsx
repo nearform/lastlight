@@ -106,9 +106,24 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
             {data.installations.map((i) => (
               <li
                 key={i.id}
-                className="rounded border border-base-300/50 px-2 py-1 text-base-content flex gap-2"
+                className="rounded border border-base-300/50 px-2 py-1 text-base-content flex gap-2 items-center"
               >
-                <span className="font-medium">{i.account}</span>
+                {/* Deep link to the install's own settings page — where the repo
+                    grant, suspension and uninstall live. That page is the next
+                    click from every question this pane raises. */}
+                {i.htmlUrl ? (
+                  <a
+                    href={i.htmlUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-medium text-primary hover:underline"
+                    title={`Manage this installation on GitHub (#${i.id})`}
+                  >
+                    {i.account} ↗
+                  </a>
+                ) : (
+                  <span className="font-medium">{i.account}</span>
+                )}
                 <span className="text-base-content/50">#{i.id}</span>
                 <span className="text-base-content/50">
                   {i.repoCount} repo{i.repoCount === 1 ? "" : "s"} · {i.repositorySelection}
@@ -124,8 +139,11 @@ function ManagedReposPane({ data }: { data: ManagedRepos | null }) {
           The App is not installed on{" "}
           <strong>{data.uninstalledOwners.join(", ")}</strong> — every run against{" "}
           {data.uninstalledOwners.length === 1 ? "that owner" : "those owners"} will fail to mint
-          a token. Install it there, or drop them from{" "}
-          <code className="text-xs">managedRepos</code>.
+          a token.{" "}
+          <a href={data.appInstallUrl} target="_blank" rel="noreferrer" className="underline">
+            Install it there ↗
+          </a>{" "}
+          or drop them from <code className="text-xs">managedRepos</code>.
         </div>
       )}
       {data.effective.length === 0 ? (
