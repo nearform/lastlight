@@ -157,6 +157,30 @@ review:
   trigger: after-checks
   requestLabel: null           # label that requests a review in `on-request` mode
   skipDraft: true              # skip draft PRs (what the review cron has always done)
+  # Paths whose contents are DERIVED, not authored (issue #271). When every path
+  # changed since our last posted review matches one of these, the re-review is
+  # skipped — a lock-file re-derivation is a new head SHA, and per-head dedup
+  # alone made that a second, byte-identical formal review.
+  #
+  # Never suppresses a FIRST review, an explicit `@bot review`/request label, or
+  # a push that also touched a hand-written file. Set to `[]` to turn the gate
+  # off. Patterns: `*` stops at a `/`, `**` crosses one, and a pattern with no
+  # `/` matches a basename anywhere in the tree.
+  #
+  # Repo-settable, SUPERSET-only — a repo may add its own generator output, but
+  # dropping one of these entries buys it more review runs and is restored.
+  generatedPaths:
+    - "*.lock"
+    - package-lock.json
+    - npm-shrinkwrap.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - bun.lockb
+    - go.sum
+    - "*.min.js"
+    - "*.min.css"
+    - "*.generated.*"
+    - "**/__generated__/**"
 
 # Retry policy for every PR_FIX_SHAPED workflow — pr-fix and dependabot-ci-fix
 # (issue #251). The loop diagnoses a CI failure before it retries, and these are

@@ -841,6 +841,34 @@ export class GitHubClient {
     headSha: string,
     botLogin = "last-light[bot]",
   ): Promise<{ state: string; body: string | null; submittedAt: string | null } | null> {
+    return (await this.getBotReviewHistory(owner, repo, pullNumber, headSha, botLogin)).atHead;
+  }
+
+  /**
+   * Both facts one pass over `pulls.listReviews` can answer about OUR reviews:
+   * the one on the current head (`atHead`, what {@link getLatestBotReview}
+   * returns) and the most recent one at ANY head (`latest`, with the SHA it was
+   * submitted against).
+   *
+   * `latest` is what the generated-only re-review gate keys on (issue #271):
+   * "what did we last actually SAY, and what has changed since?". It has to be
+   * the POSTED review rather than the last SHA we ran a review at — a run whose
+   * `post-review` skipped (a stale head, an agent `skip`) said nothing, so its
+   * SHA must not become the baseline a later push is diffed against, or the
+   * change it never reviewed would be suppressed forever.
+   *
+   * One paginated call serves both, so the extra fact is free.
+   */
+  async getBotReviewHistory(
+    owner: string,
+    repo: string,
+    pullNumber: number,
+    headSha: string,
+    botLogin = "last-light[bot]",
+  ): Promise<{
+    atHead: { state: string; body: string | null; submittedAt: string | null } | null;
+    latest: { state: string; sha: string; body: string | null; submittedAt: string | null } | null;
+  }> {
     const kit = await this.kit(owner);
     const reviews = await kit.paginate(kit.rest.pulls.listReviews, {
       owner,
@@ -852,13 +880,53 @@ export class GitHubClient {
     // recent one tied to this SHA. `commit_id` on a review is the head sha at
     // the time the review was submitted, which is exactly the discriminator
     // we want — re-pushes invalidate stale reviews here naturally.
+    let atHead: { state: string; body: string | null; submittedAt: string | null } | null = null;
+    let latest: { state: string; sha: string; body: string | null; submittedAt: string | null } | null = null;
     for (let i = reviews.length - 1; i >= 0; i--) {
       const r = reviews[i]!;
-      if (r.user?.login === botLogin && r.commit_id === headSha) {
-        return { state: r.state, body: r.body ?? null, submittedAt: r.submitted_at ?? null };
+      if (r.user?.login !== botLogin) continue;
+      if (!latest && r.commit_id) {
+        latest = {
+          state: r.state,
+          sha: r.commit_id,
+          body: r.body ?? null,
+          submittedAt: r.submitted_at ?? null,
+        };
       }
+      if (!atHead && r.commit_id === headSha) {
+        atHead = { state: r.state, body: r.body ?? null, submittedAt: r.submitted_at ?? null };
+      }
+      if (atHead && latest) break;
     }
-    return null;
+    return { atHead, latest };
+  }
+
+  /**
+   * The file paths that differ between two commits on this repo, or `null` when
+   * the answer cannot be trusted.
+   *
+   * `null` — not `[]` — for every degraded case, because the one caller (the
+   * generated-only re-review gate, issue #271) asks "is EVERY changed path
+   * derived?" and an empty list would answer that vacuously yes and suppress a
+   * review. GitHub's compare endpoint caps `files` at 300 entries, so a
+   * truncated response is degraded too; a 300-file push is materially different
+   * by any reading anyway.
+   */
+  async getChangedPathsBetween(
+    owner: string,
+    repo: string,
+    baseSha: string,
+    headSha: string,
+  ): Promise<string[] | null> {
+    const kit = await this.kit(owner);
+    const res = await kit.rest.repos.compareCommitsWithBasehead({
+      owner,
+      repo,
+      basehead: `${baseSha}...${headSha}`,
+    });
+    const files = res.data.files;
+    if (!files || files.length >= 300) return null;
+    return files.map((f) => f.filename);
   }
 
   /**

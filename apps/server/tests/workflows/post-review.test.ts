@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -22,6 +23,8 @@ import type { PhaseReporter } from "lastlight-workflow-engine";
 import type { TemplateContext } from "#src/workflows/templates.js";
 import type { AgentWorkflowDefinition, PhaseDefinition } from "#src/workflows/schema.js";
 import type { DagNode } from "#src/workflows/dag.js";
+import { setRuntimeConfig, resetRuntimeConfigForTests } from "#src/config/config.js";
+import { defaultReviewConfig, type ReviewConfig } from "lastlight-shared/config-types";
 
 /**
  * Integration test for the first-class `post-review` action
@@ -56,10 +59,23 @@ const PR_DIFF = [
   "",
 ].join("\n");
 
-function startMock(): { server: Server; url: string; reviews: RecordedReview[] } {
+function startMock(): {
+  server: Server;
+  url: string;
+  reviews: RecordedReview[];
+  comparedBaseheads: string[];
+  setCompareFiles: (files: string[]) => void;
+  setPriorReviews: (reviews: unknown[]) => void;
+} {
   const reviews: RecordedReview[] = [];
+  const comparedBaseheads: string[] = [];
+  let compareFiles: string[] = [];
+  let priorReviews: unknown[] = [];
   const server = createServer((req, res) => {
-    const m = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/([^/]+)\/reviews$/.exec(req.url || "");
+    // `?per_page=100` rides along on the paginated GET, so the path must not be
+    // `$`-anchored — it was, so every reviews read 404'd and the idempotency
+    // check silently never fired.
+    const m = /^\/repos\/([^/]+)\/([^/]+)\/pulls\/([^/]+)\/reviews(?:\?|$)/.exec(req.url || "");
     if (req.method === "POST" && m) {
       let raw = "";
       req.on("data", (c) => (raw += c));
@@ -70,10 +86,21 @@ function startMock(): { server: Server; url: string; reviews: RecordedReview[] }
       });
       return;
     }
-    // getLatestBotReview lists reviews — return empty so we never short-circuit.
+    // getBotReviewHistory lists reviews — empty by default so we never
+    // short-circuit; `setPriorReviews` seeds a history for the duplicate guard.
     if (req.method === "GET" && m) {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end("[]");
+      res.end(JSON.stringify(priorReviews));
+      return;
+    }
+    // repos.compareCommitsWithBasehead — the staleness check's delta read
+    // (issue #271). `compareFiles` is set per-test; unset means "no comparison
+    // was expected here".
+    const cm = /^\/repos\/([^/]+)\/([^/]+)\/compare\/(.+)$/.exec(req.url || "");
+    if (req.method === "GET" && cm) {
+      comparedBaseheads.push(decodeURIComponent(cm[3]!));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ files: compareFiles.map((filename) => ({ filename })) }));
       return;
     }
     // pulls.get — the GitHub-API fallback for head SHA (JSON) or the PR diff
@@ -93,7 +120,18 @@ function startMock(): { server: Server; url: string; reviews: RecordedReview[] }
     }
     res.writeHead(404).end("{}");
   });
-  return { server, url: "", reviews };
+  return {
+    server,
+    url: "",
+    reviews,
+    comparedBaseheads,
+    setCompareFiles: (files: string[]) => {
+      compareFiles = files;
+    },
+    setPriorReviews: (reviews: unknown[]) => {
+      priorReviews = reviews;
+    },
+  };
 }
 
 function makeReporter() {
@@ -127,6 +165,9 @@ describe("post-review action (runPostReview)", () => {
   let server: Server;
   let baseUrl: string;
   let reviews: RecordedReview[];
+  let comparedBaseheads: string[];
+  let setCompareFiles: (files: string[]) => void;
+  let setPriorReviews: (reviews: unknown[]) => void;
   let stateDir: string;
   let savedToken: string | undefined;
 
@@ -134,6 +175,9 @@ describe("post-review action (runPostReview)", () => {
     const mock = startMock();
     server = mock.server;
     reviews = mock.reviews;
+    comparedBaseheads = mock.comparedBaseheads;
+    setCompareFiles = mock.setCompareFiles;
+    setPriorReviews = mock.setPriorReviews;
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     stateDir = mkdtempSync(join(tmpdir(), "post-review-"));
@@ -308,5 +352,190 @@ describe("post-review action (runPostReview)", () => {
     expect(outcome.status).toBe("failed");
     expect(rep.failed.length).toBeGreaterThan(0);
     expect(reviews).toHaveLength(0);
+  });
+  /**
+   * The staleness guard (issue #271) — don't post a review of a tree that no
+   * longer exists.
+   *
+   * Dropping a review is only acceptable when a replacement is guaranteed, so
+   * all three conditions have to hold: the head really moved, the trigger is
+   * automatic, and the delta is MATERIAL. That last one is
+   * `resolveReviewTrigger`'s generated-only gate read backwards — a material
+   * push is one that gate lets through, so a fresh review is certain; a
+   * generated-only push is one it suppresses, and dropping this review would
+   * leave the PR with none at all.
+   */
+  describe("staleness — the head moved while the agent was reviewing", () => {
+    /**
+     * A real git checkout at a SHA of its own, so the run's REVIEWED head
+     * genuinely differs from the PR head the mock reports. Without one,
+     * `gitHeadSha` returns undefined and the handler falls back to the API
+     * head — which is by definition never stale.
+     */
+    function seedCheckout(taskId: string, repo: string): void {
+      const dir = join(stateDir, "sandboxes", taskId, repo);
+      mkdirSync(dir, { recursive: true });
+      const git = (...args: string[]) =>
+        execFileSync("git", ["-C", dir, ...args], { stdio: "ignore" });
+      git("init", "-q", "-b", "main");
+      git("config", "user.email", "t@example.com");
+      git("config", "user.name", "t");
+      writeFileSync(join(dir, "README.md"), "hi");
+      git("add", "-A");
+      git("commit", "-qm", "reviewed head");
+    }
+
+    function withReviewConfig(over: Partial<ReviewConfig> = {}) {
+      setRuntimeConfig({
+        review: { ...defaultReviewConfig(), ...over },
+      } as unknown as Parameters<typeof setRuntimeConfig>[0]);
+    }
+
+    afterEach(() => resetRuntimeConfigForTests());
+
+    it("skips the post when a MATERIAL change landed on the PR mid-run", async () => {
+      withReviewConfig({ trigger: "after-checks" });
+      setCompareFiles(["pnpm-lock.yaml", "src/auth.ts"]);
+      const taskId = "widget-42-stale";
+      seedCheckout(taskId, "widget");
+      seedFindings(taskId, "widget", { summary: "ok", event: "APPROVE", findings: [] });
+
+      const { executor, rep } = makeExecutor(taskId);
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).toBe("succeeded");
+      expect(rep.failed).toHaveLength(0);
+      expect(reviews).toHaveLength(0);
+      expect(outcome.results[0]!.output).toMatch(/^stale:/);
+      // Compared the head we REVIEWED against the head that is live now.
+      expect(comparedBaseheads).toHaveLength(1);
+      expect(comparedBaseheads[0]).toMatch(new RegExp(`\\.\\.\\.${HEAD_SHA}$`));
+    });
+
+    it("POSTS when only generated files landed — nothing else will review this PR", async () => {
+      // The gate that would suppress the re-review is the same one that makes
+      // this delta immaterial, so skipping here would lose the review entirely.
+      withReviewConfig({ trigger: "after-checks" });
+      setCompareFiles(["pnpm-lock.yaml"]);
+      const taskId = "widget-42-stale-generated";
+      seedCheckout(taskId, "widget");
+      seedFindings(taskId, "widget", { summary: "ok", event: "APPROVE", findings: [] });
+
+      const { executor } = makeExecutor(taskId);
+      expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+      expect(reviews).toHaveLength(1);
+    });
+
+    it("POSTS under on-request — nothing re-dispatches, so the human who asked would get nothing", async () => {
+      withReviewConfig({ trigger: "on-request" });
+      setCompareFiles(["src/auth.ts"]);
+      const taskId = "widget-42-stale-onrequest";
+      seedCheckout(taskId, "widget");
+      seedFindings(taskId, "widget", { summary: "ok", event: "APPROVE", findings: [] });
+
+      const { executor } = makeExecutor(taskId);
+      expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+      expect(reviews).toHaveLength(1);
+      expect(comparedBaseheads).toHaveLength(0);
+    });
+
+    it("POSTS when the compare read fails — a degraded read never drops a review", async () => {
+      withReviewConfig({ trigger: "eager" });
+      setCompareFiles([]); // an empty file list proves nothing material changed
+      const taskId = "widget-42-stale-degraded";
+      seedCheckout(taskId, "widget");
+      seedFindings(taskId, "widget", { summary: "ok", event: "APPROVE", findings: [] });
+
+      const { executor } = makeExecutor(taskId);
+      expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+      expect(reviews).toHaveLength(1);
+    });
+  });
+  /**
+   * The duplicate-review guard (issue #271).
+   *
+   * nearform/skillspro#1641: two APPROVEs six minutes and 400 identical bytes
+   * apart. The trigger gate's generated-only skip cannot catch it — the two
+   * reviewed SHAs differ by `package.json` and `jest.config.js` as well as the
+   * lock file, so the delta is material by any file-level test. Only the review
+   * TEXT identifies it, and that isn't knowable until the agent has written it.
+   */
+  describe("duplicate — word-for-word the review we already posted", () => {
+    const SUMMARY = "Completes the ESLint 8 to 10 migration. No blocking issues.";
+    const priorApprove = (sha: string, body: string) => [
+      {
+        id: 1,
+        state: "APPROVED",
+        commit_id: sha,
+        body,
+        submitted_at: "2026-08-05T20:14:46Z",
+        user: { login: "last-light[bot]" },
+      },
+    ];
+
+    it("skips the post when the body and verdict are byte-identical", async () => {
+      setPriorReviews(priorApprove("5491287206e7b6d11ffd6b8ca08b9c1747f2aac2", SUMMARY));
+      const taskId = "widget-42-dupe";
+      seedFindings(taskId, "widget", { summary: SUMMARY, event: "APPROVE", findings: [] });
+
+      const { executor, rep } = makeExecutor(taskId);
+      const outcome = await executor.execute(NODE, {});
+
+      expect(outcome.status).toBe("succeeded");
+      expect(rep.failed).toHaveLength(0);
+      expect(reviews).toHaveLength(0);
+      expect(outcome.results[0]!.output).toMatch(/^duplicate: .* 5491287/);
+    });
+
+    it("posts when a single word changed — this is not a fuzzy match", async () => {
+      setPriorReviews(priorApprove("0ldsha0", SUMMARY));
+      const taskId = "widget-42-dupe-differs";
+      seedFindings(taskId, "widget", {
+        summary: SUMMARY + " Nice work.",
+        event: "APPROVE",
+        findings: [],
+      });
+      const { executor } = makeExecutor(taskId);
+      expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+      expect(reviews).toHaveLength(1);
+    });
+
+    // The APPROVE restriction is the check run, not squeamishness: skipping the
+    // post leaves `concludeReviewCheck` with no review at this head, which it
+    // concludes `neutral`. For an APPROVE that changes nothing (both pass branch
+    // protection); for a CHANGES_REQUESTED it would turn a `failure` check into
+    // a passing one and open the merge gate the review deliberately closed.
+    it("posts a repeated CHANGES_REQUESTED — suppressing it would clear the merge gate", async () => {
+      setPriorReviews([
+        {
+          id: 1,
+          state: "CHANGES_REQUESTED",
+          commit_id: "0ldsha0",
+          body: SUMMARY,
+          submitted_at: "2026-08-05T20:14:46Z",
+          user: { login: "last-light[bot]" },
+        },
+      ]);
+      const taskId = "widget-42-dupe-changes";
+      seedFindings(taskId, "widget", { summary: SUMMARY, event: "REQUEST_CHANGES", findings: [] });
+      const { executor } = makeExecutor(taskId);
+      expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+      expect(reviews).toHaveLength(1);
+    });
+
+    it("posts an identical summary that now carries findings", async () => {
+      setPriorReviews(priorApprove("0ldsha0", SUMMARY));
+      const taskId = "widget-42-dupe-findings";
+      seedFindings(taskId, "widget", {
+        summary: SUMMARY,
+        event: "APPROVE",
+        findings: [
+          { path: "src/foo.ts", line: 10, side: "RIGHT", severity: "Important", title: "bug", body: "fix" },
+        ],
+      });
+      const { executor } = makeExecutor(taskId, { baseBranch: "main" });
+      expect((await executor.execute(NODE, {})).status).toBe("succeeded");
+      expect(reviews).toHaveLength(1);
+    });
   });
 });

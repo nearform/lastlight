@@ -286,6 +286,10 @@ review:
 				<td><code>review.postsCheck</code>, <code>review.skipDraft</code></td>
 				<td>turn them <strong>on</strong>. A repo may ask for the check run and may skip drafts; it may not suppress a check a branch-protection rule is requiring, or force reviews onto drafts.</td>
 			</tr>
+			<tr>
+				<td><code>review.generatedPaths</code></td>
+				<td><strong>add</strong> patterns — its own generator output, say. A longer list suppresses more re-reviews, which is the conservative direction. Dropping one of yours buys the repo an extra agent run per lock-file bump on your budget, so an omitted pattern is put back.</td>
+			</tr>
 		</tbody>
 	</table>
 

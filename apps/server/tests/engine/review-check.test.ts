@@ -400,4 +400,62 @@ describe("postReviewCheckForSkip — the deferred placeholder", () => {
     await postReviewCheckForSkip({ ...args, workflowName: "pr-fix", placement: "queued" }, { github });
     expect(github.createCheckRun).not.toHaveBeenCalled();
   });
+
+  /**
+   * `carried-over` — the generated-only skip (issue #271).
+   *
+   * Every OTHER review skip either already has a check on this head
+   * (`already-reviewed`) or must not have one (draft, hold, lock). This one
+   * leaves a brand-new head SHA with none, and on a deployment whose branch
+   * protection requires `last-light/review` a missing check is an unmergeable
+   * PR. So it restates the review that still stands instead of staying silent.
+   */
+  describe("carried-over — the review that still stands", () => {
+    const carried = (state: string) => ({
+      ...args,
+      placement: "carried-over" as const,
+      carriedOver: { sha: "0ld5ha0000000", state },
+    });
+
+    it("mirrors the prior verdict rather than fixing a conclusion", async () => {
+      for (const [state, conclusion] of [
+        ["APPROVED", "success"],
+        // The one that matters: carrying a CHANGES_REQUESTED forward as
+        // `success` would clear the merge gate the review deliberately closed.
+        ["CHANGES_REQUESTED", "failure"],
+        ["COMMENTED", "neutral"],
+      ] as const) {
+        const github = fakeGithub();
+        await postReviewCheckForSkip(carried(state), { github, botMention: "@bot" });
+        const opts = github.createCheckRun.mock.calls[0][4];
+        expect(opts, state).toMatchObject({ status: "completed", conclusion });
+        expect(opts.output.summary).toContain("0ld5ha0");
+        // The escape hatch is named on the check itself.
+        expect(opts.output.summary).toContain("@bot review");
+      }
+    });
+
+    it("is exempt from the attention-only route limit", async () => {
+      // Under the packaged `after-checks` trigger the decision is taken on the
+      // `checks-settled` route. Limiting it to attention would leave the
+      // required check missing on exactly the heads this exists to cover.
+      for (const route of ["attention", "checks-settled", "sweep"] as const) {
+        const github = fakeGithub();
+        await postReviewCheckForSkip({ ...carried("APPROVED"), route }, { github });
+        expect(github.createCheckRun, route).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it("posts nothing without the prior review to restate", async () => {
+      const github = fakeGithub();
+      await postReviewCheckForSkip({ ...args, placement: "carried-over" }, { github });
+      expect(github.createCheckRun).not.toHaveBeenCalled();
+    });
+
+    it("still respects review.postsCheck", async () => {
+      const github = fakeGithub();
+      await postReviewCheckForSkip({ ...carried("APPROVED"), postsCheck: false }, { github });
+      expect(github.createCheckRun).not.toHaveBeenCalled();
+    });
+  });
 });

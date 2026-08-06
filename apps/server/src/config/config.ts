@@ -793,6 +793,11 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         ? reviewRaw.requestLabel.trim()
         : null,
     skipDraft: typeof reviewRaw.skipDraft === "boolean" ? reviewRaw.skipDraft : reviewDefaults.skipDraft,
+    // An explicit `[]` is meaningful — it turns the generated-only re-review
+    // gate OFF — so only a non-array falls back to the packaged list.
+    generatedPaths: Array.isArray(reviewRaw.generatedPaths)
+      ? reviewRaw.generatedPaths.filter((p): p is string => typeof p === "string" && !!p.trim()).map((p) => p.trim())
+      : reviewDefaults.generatedPaths,
   };
 
   const maxWorkflows =

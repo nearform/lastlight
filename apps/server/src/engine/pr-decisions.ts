@@ -109,6 +109,21 @@ export interface Decision<T> {
    */
   review?: ReviewTriggerDecision;
   /**
+   * Set ONLY on the generated-only review skip (issue #271), carrying the review
+   * that still stands and the SHA it was posted against.
+   *
+   * The typed field, not the reason prose, is what tells the check-run
+   * projection this skip is DIFFERENT from every other one. Every other review
+   * skip leaves no check on the new head because it either already has one
+   * (`already-reviewed`) or must not have one (draft, hold, lock). This skip
+   * leaves a head SHA with none — and on a deployment whose branch protection
+   * requires `last-light/review`, a missing check is an unmergeable PR. So it
+   * carries the prior verdict forward instead ({@link ReviewCheckPlacement}
+   * `carried-over`), which is also the honest statement: the review that stands
+   * is the one we already posted.
+   */
+  reviewUnchanged?: { sha: string; state: string };
+  /**
    * Set ONLY on a skip produced by {@link readDegradedDrop} — the PR read
    * itself failed, so nothing below it was decided on facts.
    *
@@ -634,21 +649,132 @@ export type ReviewTriggerDecision = "dispatch" | "defer" | "skip";
  * - `neutral` — `on-request` is waiting for a human. `neutral` counts as
  *   passing for branch protection, so it never blocks a merge, and the check's
  *   own Re-run button becomes the request affordance.
+ * - `carried-over` — the generated-only skip (issue #271). A COMPLETED check on
+ *   the new head repeating the verdict of the review we already posted, so a
+ *   push that changed nothing a reviewer could read does not strand a required
+ *   check. Its conclusion mirrors that prior review rather than being fixed:
+ *   carrying a CHANGES_REQUESTED forward as `success` would clear a gate the
+ *   review deliberately closed.
  * - `none` — leave the PR alone.
  */
-export type ReviewCheckPlacement = "in-progress" | "queued" | "neutral" | "none";
+export type ReviewCheckPlacement = "in-progress" | "queued" | "neutral" | "carried-over" | "none";
 
 /**
  * Which check the decision implies. Keyed on the TYPED decision plus the mode,
  * never on the reason prose — the same rule the escalation applier follows.
+ *
+ * `unchanged` is {@link Decision.reviewUnchanged} — the one skip that leaves a
+ * check behind. It is a separate argument rather than a fourth
+ * {@link ReviewTriggerDecision} because it changes nothing about whether a run
+ * dispatches, which is the only question that type answers.
  */
 export function reviewCheckPlacement(
   decision: ReviewTriggerDecision,
   cfg: ReviewConfig,
+  opts: { unchanged?: boolean } = {},
 ): ReviewCheckPlacement {
   if (decision === "dispatch") return "in-progress";
-  if (decision === "skip") return "none";
+  if (decision === "skip") return opts.unchanged ? "carried-over" : "none";
   return cfg.trigger === "on-request" ? "neutral" : "queued";
+}
+
+// ---------------------------------------------------------------------------
+// Generated-path matching — the input to the generated-only re-review gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Compiled `review.generatedPaths` patterns, keyed by the pattern text.
+ *
+ * The list is config, so it is the same handful of strings for the life of the
+ * process; compiling them per dispatch would be pure waste. Unbounded only in
+ * the sense that config is — a repo layer can add entries, and the repo-layer
+ * bounds cap the file that supplies them.
+ */
+const globCache = new Map<string, RegExp>();
+
+/**
+ * One glob pattern as a RegExp, with the segment-aware semantics `*` implies
+ * everywhere else it appears in this codebase:
+ *
+ * - `*` matches within one path segment (it stops at a `/`)
+ * - `**` crosses segments; `**​/` specifically matches ZERO or more leading
+ *   segments, so `**​/__generated__/**` catches `__generated__/api.ts` as well
+ *   as `src/__generated__/api.ts`
+ * - `?` matches one non-`/` character
+ *
+ * Everything else is escaped, so a pattern is never accidentally a regex.
+ */
+function globToRegExp(pattern: string): RegExp {
+  const cached = globCache.get(pattern);
+  if (cached) return cached;
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!;
+    if (c === "*") {
+      if (pattern[i + 1] === "*") {
+        if (pattern[i + 2] === "/") {
+          re += "(?:[^/]*/)*";
+          i += 2;
+        } else {
+          re += ".*";
+          i += 1;
+        }
+      } else {
+        re += "[^/]*";
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else {
+      re += c.replace(/[.+^${}()|[\]\\]/, "\\$&");
+    }
+  }
+  const compiled = new RegExp(`^${re}$`);
+  globCache.set(pattern, compiled);
+  return compiled;
+}
+
+/**
+ * Is this path DERIVED rather than authored, per `review.generatedPaths`?
+ *
+ * A pattern containing no `/` is matched against the BASENAME anywhere in the
+ * tree — `pnpm-lock.yaml` means the lock file wherever it lives, which is what
+ * an operator writing that line means, and a workspace monorepo has one per
+ * package. A pattern with a `/` is matched against the whole path.
+ */
+export function isGeneratedPath(path: string, patterns: readonly string[]): boolean {
+  const basename = path.slice(path.lastIndexOf("/") + 1);
+  return patterns.some((p) => globToRegExp(p).test(p.includes("/") ? path : basename));
+}
+
+/**
+ * Is this delta made ENTIRELY of generated files?
+ *
+ * `false` for an empty or absent list — the caller is asking "may I suppress a
+ * review?", and "nothing changed as far as I can tell" is a degraded read, not
+ * evidence. See `PrState.pathsSinceLastBotReview`.
+ */
+export function allPathsGenerated(
+  paths: readonly string[] | null,
+  patterns: readonly string[],
+): boolean {
+  if (!paths || paths.length === 0 || patterns.length === 0) return false;
+  return paths.every((p) => isGeneratedPath(p, patterns));
+}
+
+/**
+ * Does this delta contain at least one path a human WROTE?
+ *
+ * The mirror of {@link allPathsGenerated} rather than its negation: both answer
+ * `false` for a `null` or empty delta, because both are asked by a caller
+ * looking for permission to suppress something and neither may be granted it on
+ * a degraded read.
+ */
+export function hasMaterialChange(
+  paths: readonly string[] | null,
+  patterns: readonly string[],
+): boolean {
+  if (!paths || paths.length === 0) return false;
+  return paths.some((p) => !isGeneratedPath(p, patterns));
 }
 
 /** Everything `resolveReviewTrigger` needs beyond the snapshot. */
@@ -700,6 +826,9 @@ export function resolveReviewTrigger(
     isDraft: state.isDraft,
     checksState: state.checksState,
     botReviewAtHead: state.botReviewAtHead?.state ?? null,
+    lastBotReviewSha: state.lastBotReview?.sha ?? null,
+    pathsSinceLastBotReview: state.pathsSinceLastBotReview,
+    generatedPaths: cfg.generatedPaths,
     runInFlight: state.runInFlight,
     route,
     explicitRequest: !!opts.explicitRequest,
@@ -748,6 +877,48 @@ export function resolveReviewTrigger(
     return {
       decision: "skip",
       reason: `already-reviewed: we reviewed ${state.headSha.slice(0, 7)} (${state.botReviewAtHead.state})`,
+      inputs,
+    };
+  }
+
+  // NOTHING NEW TO SAY (issue #271). Per-head dedup above was the only
+  // suppression gate, so every new head SHA earned a full formal review by
+  // design — and a lock file re-derivation is a new head SHA.
+  // nearform/skillspro#1641 got two byte-identical APPROVEs six minutes apart
+  // for exactly that, at $0.44 a pair.
+  //
+  // Three properties make this safe to skip rather than defer:
+  //
+  // - It is BELOW the explicit-request branch, so `@bot review`, the request
+  //   label and the check's Re-run button all still force a review. The gate
+  //   answers "was this push worth an unprompted review?", never "may a human
+  //   ask?".
+  // - The baseline is the review we POSTED (`lastBotReview`), not the last head
+  //   we ran at. A run that reviewed a SHA and then declined to post said
+  //   nothing about it, so its changes stay in the next delta rather than being
+  //   suppressed by a review that does not exist.
+  // - The delta is authoritative-or-absent. `pathsSinceLastBotReview` is `null`
+  //   whenever the read was degraded or truncated, and `allPathsGenerated`
+  //   answers `false` for `null` and for an empty pattern list — so every
+  //   uncertain case dispatches.
+  //
+  // `skip`, not `defer`: there is no future event that turns this same delta
+  // into a review, which is exactly the distinction the two decisions carry.
+  //
+  // `lastBotReview` is checked here rather than assumed from a non-null delta:
+  // the resolver only ever fills the two together, but this function is pure
+  // over a snapshot anyone can construct — including a persisted one written
+  // before this field existed — and the review it would name is the whole
+  // justification for the skip.
+  const prior = state.lastBotReview;
+  if (prior && allPathsGenerated(state.pathsSinceLastBotReview, cfg.generatedPaths)) {
+    const n = state.pathsSinceLastBotReview?.length ?? 0;
+    return {
+      decision: "skip",
+      reason:
+        `generated-only: the ${n} file${n === 1 ? "" : "s"} changed since we reviewed ` +
+        `${prior.sha.slice(0, 7)} are all generated`,
+      reviewUnchanged: { sha: prior.sha, state: prior.state },
       inputs,
     };
   }
@@ -1010,6 +1181,9 @@ export function resolveDispatchDisposition(
       // placeholder check against a head SHA we could not read.
       ...(review.runInFlight ? { runInFlight: review.runInFlight } : {}),
       ...(review.readDegraded ? { readDegraded: true as const } : {}),
+      // Same rule again: the check projection needs the finer verdict, and the
+      // collapse to run/skip is exactly what would lose it.
+      ...(review.reviewUnchanged ? { reviewUnchanged: review.reviewUnchanged } : {}),
     };
   }
   return {

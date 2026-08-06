@@ -1,7 +1,7 @@
 ---
 name: pr-review
 description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. A pure code review — no building. Use when asked to review a PR or on a cron PR scan.
-version: 7.1.0
+version: 7.2.0
 tags: [github, review, code-quality]
 ---
 
@@ -60,7 +60,45 @@ A review advances the conversation, don't restart it. Fetch and absorb:
 `github_list_pull_request_review_comments`. Done when you can say: which findings
 were already raised (don't repeat them), which threads the author resolved
 (treat as done unless the fix is wrong), which are still open (surface those —
-higher signal than a fresh nit), and whether a human already approved.
+higher signal than a fresh nit), and what the humans' review states are.
+
+**Two states change what you're allowed to conclude:**
+
+- A **human APPROVE** lowers the bar for blocking — prefer COMMENT over
+  REQUEST_CHANGES on anything non-critical.
+- An **open human `CHANGES_REQUESTED`** (their latest review on this PR, not
+  dismissed and not replaced by a later APPROVE from the same person) means your
+  `event` **must not be `APPROVE`** — use `COMMENT`, or `REQUEST_CHANGES` if you
+  have your own blocking finding. Say in the summary which of their points the
+  current diff addresses and which it doesn't. A bot APPROVE stacked on top of
+  an open human block is the review reading as an override of a person who knows
+  the codebase better than you.
+
+### 2b. If you have reviewed this PR before — re-derive, don't assume
+
+You have already reviewed this PR whenever §2 turned up a `last-light[bot]`
+review at an earlier SHA. A re-review is **not** "what's new since last time";
+it is a fresh verdict on the whole current diff, and the prior findings are its
+starting point rather than settled history.
+
+For **every** finding in your previous review, work out which of these it is and
+say so in the summary:
+
+- **Fixed** — you re-read the code at `path:line` *as it is now* and the problem
+  is genuinely gone. Not "the author replied that they fixed it", not "the
+  thread is resolved", not "a commit message says so". Re-read it.
+- **Still open** — re-raise it as a finding. A finding that survives a round trip
+  is higher signal than anything new you might find, not lower.
+- **Pinned by a test** — the change added or edited a test that asserts the
+  *current, wrong* behaviour. That is not a fix; it is the bug made permanent.
+  Re-raise the original finding and flag the test as its own Critical/Important
+  finding, quoting the assertion.
+- **Withdrawn** — you now believe the finding was wrong. Name what refuted it.
+
+Only once every prior finding lands in one of those four may you approve.
+"Nothing new since the last push" is not a review; if the current diff still
+contains a problem you raised, the correct `event` is still
+`REQUEST_CHANGES`/`COMMENT`, whoever pushed last.
 
 ### 3. Get the diff
 
@@ -91,7 +129,8 @@ speculate about whether this builds.**
 ### 5. Assess and write your findings
 
 Apply the **code-review** skill's rubric — read each changed file in context;
-check correctness / edge-cases / security / regression-risk / test-coverage.
+check correctness / **contracts** / edge-cases / security / regression-risk /
+test-coverage.
 Reason about the code statically; **don't build or run it** — CI is the build
 gate and it has already spoken (§4); spend your effort on what a human reviewer
 sees.
@@ -99,10 +138,24 @@ Follow that skill's **precision-first** rule: keep **only Critical and Important
 findings, each anchored to a `path:line` with a one-line concrete impact (what
 breaks, for which input or caller). Drop Suggestions and Nits.
 
+**Do the cross-file pass before you decide anything.** For every unit the diff
+changed the *shape* of — return value, field name, enum, event payload, status
+code, header, units, nullability, ordering — grep the repo for its consumers and
+open them, including ones the diff doesn't touch. Then state both halves:
+*producer now emits X; consumer at `path:line` still reads Y*. Same for a rule
+that has to hold on more than one side (a limit, an expiry/max-age, an auth
+check): a value the client sets and the server never verifies is not enforced.
+These mismatches are invisible in the diff — each file reads fine alone — and
+they are the findings a human most needs from you.
+
 Before writing anything, run the **confidence gate**: re-read each finding
-against the actual code and try to refute it; drop any you can't defend against
-what the code really does. A clean PR should be approved with few or no
-findings — that is a good review, not a lazy one.
+against the actual code and try to refute it. Dropping one requires naming what
+refutes it — the guard, the validating caller, the unreachable type. Being
+unsure about a Critical-tier claim means *go read the other side*, not delete it.
+
+A clean PR approved with no findings is a good review — **when it is clean.**
+An empty `APPROVE` is you claiming you did the cross-file pass above and found
+nothing, so only write one when that is true.
 
 **Do not call `github_create_pull_request_review` (or any review-submitting
 tool).** Write your findings to `.lastlight/pr-review/findings.json` instead. A
@@ -147,7 +200,16 @@ Rules:
   nothing else; GitHub renders it as an applyable suggestion.
 - `event` is `APPROVE` / `REQUEST_CHANGES` / `COMMENT`, matching what survived
   the gate. A clean PR is an `APPROVE` with an empty `findings` array and a short
-  `summary`.
+  `summary`. Two hard constraints on it:
+  - **Never `APPROVE` over an open human `CHANGES_REQUESTED`** (§2) — downgrade
+    to `COMMENT`.
+  - **Never `APPROVE` while one of your own prior findings is still open** (§2b)
+    — including one the change only "fixed" by adding a test that asserts the
+    broken behaviour.
+- On a re-review, the `summary` opens with the prior-findings ledger from §2b —
+  one line per earlier finding, each marked fixed / still open / pinned by a test
+  / withdrawn. That is what makes the second review worth its cost; a re-review
+  whose summary is interchangeable with the first one had nothing to say.
 - Create the dir and keep the file out of git first:
   `mkdir -p .lastlight/pr-review && echo '.lastlight/' >> .git/info/exclude`.
 

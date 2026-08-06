@@ -380,6 +380,14 @@ review:
   trigger: after-checks        # eager | after-checks | on-request
   requestLabel: null           # the label that asks for a review in `on-request`
   skipDraft: true              # skip draft PRs
+  generatedPaths:              # a push touching only these earns no re-review
+    - "*.lock"
+    - package-lock.json
+    - pnpm-lock.yaml
+    - go.sum
+    - "*.min.js"
+    - "*.generated.*"
+    - "**/__generated__/**"
 
 fix:                           # every PR-fixing workflow: pr-fix, dependabot-ci-fix
   maxAttempts: 3               # attempts ACROSS runs for one PR, then a human is asked
@@ -433,6 +441,36 @@ dependencies:
 		the mechanism to rely on.) Under <code>after-checks</code> with
 		<code>postsCheck</code> on, the check is posted <code>queued</code> while CI
 		runs, so branch protection can require it without racing.
+	</p>
+
+	<p>
+		<code>generatedPaths</code> is the answer to a re-review with nothing new to
+		say. Before it, the only thing suppressing a second review was
+		"we already reviewed this exact head SHA" — and a lock file re-derivation
+		<em>is</em> a new head SHA, so a dependency bump could earn two formal
+		reviews minutes apart. When <strong>every</strong> path changed since the
+		review we posted matches one of these patterns, the re-review is skipped.
+	</p>
+
+	<p>
+		It is deliberately hard to trip. It never suppresses a first review, never
+		suppresses an explicit <code>@last-light review</code> or the request label,
+		and never fires when the push also touched a hand-written file — one
+		non-generated path and the review runs. Any read it can't trust (a compare
+		that failed, a diff GitHub truncated) dispatches. Set it to <code>[]</code>
+		to turn it off. Patterns: <code>*</code> stops at a <code>/</code>,
+		<code>**</code> crosses one, and a pattern with no <code>/</code> matches a
+		basename anywhere in the tree — so <code>pnpm-lock.yaml</code> means the lock
+		file in every package of a workspace.
+	</p>
+
+	<p>
+		With <code>postsCheck</code> on, this skip is the one that still leaves a
+		check: the new head SHA gets a completed <code>last-light/review</code>
+		repeating the verdict of the review that still stands. Every other skip
+		leaves the PR alone, but this one would otherwise strand a required check on
+		a head nobody reviewed. Its conclusion mirrors that earlier review, so a
+		<code>CHANGES_REQUESTED</code> carried forward still blocks the merge.
 	</p>
 
 	<p>

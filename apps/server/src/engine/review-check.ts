@@ -227,16 +227,47 @@ export async function bindQueuedReviewCheck(
  * check *is* the button (`check_run.rerequested` on this name is normalised to
  * an explicit review request).
  *
+ * `carried-over` (the generated-only skip, issue #271): a COMPLETED check
+ * restating the verdict of the review already posted against an earlier SHA.
+ * Not a "not yet" like the other two — it is the answer, it just isn't a new
+ * one. Its conclusion mirrors that prior review (`args.carriedOver.state`),
+ * because a CHANGES_REQUESTED carried forward as `success` would clear the
+ * merge gate the review deliberately closed.
+ *
  * Never throws; a placeholder is advisory.
  */
 export async function postPlaceholderReviewCheck(
-  args: { owner: string; repo: string; headSha: string },
+  args: {
+    owner: string;
+    repo: string;
+    headSha: string;
+    /** Required for `carried-over` — the review whose verdict is being repeated. */
+    carriedOver?: { sha: string; state: string };
+  },
   placement: Exclude<ReviewCheckPlacement, "in-progress" | "none">,
   deps: ReviewCheckDeps,
 ): Promise<void> {
   const { github } = deps;
   if (!github || !args.headSha) return;
   const mention = deps.botMention ?? "@last-light";
+  const carriedOverOptions = () => {
+    const prior = args.carriedOver!;
+    const state = prior.state;
+    const conclusion =
+      state === "APPROVED" ? ("success" as const)
+      : state === "CHANGES_REQUESTED" ? ("failure" as const)
+      : ("neutral" as const);
+    return {
+      status: "completed" as const,
+      conclusion,
+      output: {
+        title: "No re-review needed",
+        summary:
+          `Only generated files changed since the review of \`${prior.sha.slice(0, 7)}\`, so that ` +
+          `review still stands (${state}). Comment \`${mention} review\` to force a fresh one.`,
+      },
+    };
+  };
   const options =
     placement === "queued"
       ? {
@@ -246,14 +277,16 @@ export async function postPlaceholderReviewCheck(
             summary: "Waiting for CI to finish before reviewing.",
           },
         }
-      : {
-          status: "completed" as const,
-          conclusion: "neutral" as const,
-          output: {
-            title: "Review available on request",
-            summary: `Review available on request — use Re-run, or comment \`${mention} review\`.`,
-          },
-        };
+      : placement === "carried-over" && args.carriedOver
+        ? carriedOverOptions()
+        : {
+            status: "completed" as const,
+            conclusion: "neutral" as const,
+            output: {
+              title: "Review available on request",
+              summary: `Review available on request — use Re-run, or comment \`${mention} review\`.`,
+            },
+          };
   try {
     const id = await github.createCheckRun(
       args.owner,
@@ -282,6 +315,13 @@ export async function postPlaceholderReviewCheck(
  * placeholder is a statement about a head SHA, and `pr.opened` / `synchronize` /
  * `reopened` / `ready_for_review` arrive roughly once per SHA, whereas the
  * 30-minute sweep would re-post one on every tick for the life of the PR.
+ *
+ * `carried-over` is exempt from that route limit, and has to be. Under the
+ * packaged `review.trigger: after-checks` the generated-only decision is taken
+ * on the `checks-settled` route, not on attention — so limiting it to attention
+ * would leave the required check missing on exactly the heads it exists to
+ * cover. Re-posting is harmless: GitHub shows the latest check run of a given
+ * name on a SHA, so a repeat supersedes rather than accumulates.
  */
 export async function postReviewCheckForSkip(
   args: {
@@ -292,14 +332,19 @@ export async function postReviewCheckForSkip(
     owner: string;
     repo: string;
     headSha: string;
+    carriedOver?: { sha: string; state: string };
   },
   deps: ReviewCheckDeps,
 ): Promise<void> {
   if (args.workflowName !== REVIEW_WORKFLOW || !args.postsCheck) return;
-  if (args.route !== "attention") return;
-  if (args.placement !== "queued" && args.placement !== "neutral") return;
+  if (args.placement === "carried-over") {
+    if (!args.carriedOver) return;
+  } else {
+    if (args.route !== "attention") return;
+    if (args.placement !== "queued" && args.placement !== "neutral") return;
+  }
   await postPlaceholderReviewCheck(
-    { owner: args.owner, repo: args.repo, headSha: args.headSha },
+    { owner: args.owner, repo: args.repo, headSha: args.headSha, carriedOver: args.carriedOver },
     args.placement,
     deps,
   );

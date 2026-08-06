@@ -669,6 +669,35 @@ describe("resolveRepoConfig — review policy", () => {
     expect(codes(result.warnings)).toEqual(["policy-downgrade", "policy-downgrade"]);
   });
 
+  // `generatedPaths` is superset-only — the mirror of `fix.retryableClasses`
+  // (issue #271). Adding a pattern suppresses MORE re-reviews, which is the
+  // conservative direction; dropping one buys the repo an extra agent run per
+  // lock-file bump on the operator's budget.
+  it("lets a repo ADD its own generated paths", () => {
+    const result = resolveRepoConfig(
+      policyBase(),
+      policyBlocks(),
+      layerWith({ review: { generatedPaths: [...defaultReviewConfig().generatedPaths, "gen/**"] } }),
+    );
+
+    expect(result.merged.review.generatedPaths).toContain("gen/**");
+    expect(result.merged.review.generatedPaths).toContain("pnpm-lock.yaml");
+    expect(codes(result.warnings)).toEqual([]);
+  });
+
+  it("restores an operator pattern a repo tried to drop", () => {
+    const result = resolveRepoConfig(
+      policyBase({ review: { ...defaultReviewConfig(), generatedPaths: ["pnpm-lock.yaml", "go.sum"] } }),
+      policyBlocks(),
+      layerWith({ review: { generatedPaths: ["go.sum", "gen/**"] } }),
+    );
+
+    // The repo's addition survives; the omission does not.
+    expect(result.merged.review.generatedPaths).toEqual(["pnpm-lock.yaml", "go.sum", "gen/**"]);
+    expect(codes(result.warnings)).toEqual(["policy-downgrade"]);
+    expect(result.warnings[0]?.message).toMatch(/pnpm-lock\.yaml/);
+  });
+
   it("is dropped wholesale when the operator narrows it out of allowKeys", () => {
     const result = resolveRepoConfig(
       policyBase(),

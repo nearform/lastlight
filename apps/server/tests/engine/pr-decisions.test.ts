@@ -22,6 +22,9 @@ import {
   resolveDispatchDisposition,
   reviewCheckPlacement,
   renderContext,
+  isGeneratedPath,
+  allPathsGenerated,
+  hasMaterialChange,
 } from "#src/engine/pr-decisions.js";
 import {
   defaultDependenciesConfig,
@@ -49,6 +52,8 @@ function state(over: Partial<PrState> = {}): PrState {
     settledCheckCount: 3,
     baseChecksState: "passing",
     botReviewAtHead: null,
+    lastBotReview: null,
+    pathsSinceLastBotReview: null,
     ciReport: null,
     attempt: 1,
     flakyDeferrals: 0,
@@ -754,6 +759,173 @@ describe("resolveReviewTrigger", () => {
     const d = resolveReviewTrigger(state(over), { ...review, ...cfgOver }, opts);
     expect(d.decision).toBe(expected);
     expect(d.reason).toMatch(reason);
+  });
+});
+
+/**
+ * The generated-only re-review gate (issue #271).
+ *
+ * Per-head dedup was the ONLY suppression gate, so every new head SHA earned a
+ * full formal review — and a lock file re-derivation is a new head SHA.
+ * nearform/skillspro#1641 posted two byte-identical APPROVEs six minutes apart
+ * for exactly that.
+ *
+ * Every case below is really about the SAFETY DIRECTION: the gate may only ever
+ * suppress on positive evidence that the delta is entirely derived, so each
+ * degraded or ambiguous input has to dispatch.
+ */
+describe("resolveReviewTrigger — nothing new to say", () => {
+  /** A PR whose head moved past a review we posted, with `paths` in between. */
+  const moved = (paths: string[] | null, over: Partial<PrState> = {}) =>
+    state({
+      checksState: "passing",
+      lastBotReview: { state: "APPROVED", sha: "0ld5ha0000000000" },
+      pathsSinceLastBotReview: paths,
+      ...over,
+    });
+
+  const eager = { ...review, trigger: "eager" as const };
+
+  it("skips a push that only re-derived the lock file", () => {
+    const d = resolveReviewTrigger(moved(["pnpm-lock.yaml"]), eager);
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^generated-only: the 1 file changed since we reviewed 0ld5ha0/);
+    // The typed field, not the prose, is what carries the prior verdict onto
+    // the new head's check run.
+    expect(d.reviewUnchanged).toEqual({ sha: "0ld5ha0000000000", state: "APPROVED" });
+  });
+
+  it("skips a whole workspace's worth of lock files", () => {
+    const d = resolveReviewTrigger(
+      moved(["pnpm-lock.yaml", "packages/a/package-lock.json", "go.sum"]),
+      eager,
+    );
+    expect(d.decision).toBe("skip");
+    expect(d.reason).toMatch(/^generated-only: the 3 files/);
+  });
+
+  it("dispatches when ONE hand-written file rode along", () => {
+    const d = resolveReviewTrigger(moved(["pnpm-lock.yaml", "src/auth.ts"]), eager);
+    expect(d.decision).toBe("dispatch");
+    expect(d.reviewUnchanged).toBeUndefined();
+  });
+
+  // Every remaining case is a degraded read. The delta is the only evidence
+  // that a re-review would be pointless, so anything less than a complete,
+  // trusted list has to dispatch — a review we didn't need costs $0.22, a
+  // review we skipped wrongly costs the bug.
+  it("dispatches when the compare read failed or was truncated (null)", () => {
+    expect(resolveReviewTrigger(moved(null), eager).decision).toBe("dispatch");
+  });
+
+  it("dispatches on an empty delta — 'nothing changed' is not evidence", () => {
+    expect(resolveReviewTrigger(moved([]), eager).decision).toBe("dispatch");
+  });
+
+  it("dispatches when the operator emptied review.generatedPaths — that IS the off switch", () => {
+    const d = resolveReviewTrigger(moved(["pnpm-lock.yaml"]), { ...eager, generatedPaths: [] });
+    expect(d.decision).toBe("dispatch");
+  });
+
+  it("dispatches a FIRST review — no prior review means no baseline", () => {
+    const d = resolveReviewTrigger(
+      state({ checksState: "passing", pathsSinceLastBotReview: ["pnpm-lock.yaml"] }),
+      eager,
+    );
+    expect(d.decision).toBe("dispatch");
+  });
+
+  // The gate sits BELOW the explicit-request branch on purpose: it answers "was
+  // this push worth an unprompted review?", never "may a human ask?".
+  it("an explicit @bot review overrides it", () => {
+    const d = resolveReviewTrigger(moved(["pnpm-lock.yaml"]), eager, { explicitRequest: true });
+    expect(d.decision).toBe("dispatch");
+    expect(d.reason).toMatch(/^requested:/);
+  });
+
+  it("the request label overrides it too", () => {
+    const d = resolveReviewTrigger(moved(["pnpm-lock.yaml"], { labels: ["needs-review"] }), {
+      ...eager,
+      trigger: "on-request",
+      requestLabel: "needs-review",
+    });
+    expect(d.decision).toBe("dispatch");
+    expect(d.reason).toMatch(/^requested: the `needs-review` label/);
+  });
+
+  // Ordering: per-head dedup still wins when it applies, because its reason is
+  // the more specific one and `resolvePrState` doesn't even fetch the delta.
+  it("stays behind the per-head dedup", () => {
+    const d = resolveReviewTrigger(
+      moved(["pnpm-lock.yaml"], { botReviewAtHead: { state: "APPROVED" } }),
+      eager,
+    );
+    expect(d.reason).toMatch(/^already-reviewed:/);
+  });
+
+  it("projects onto a carried-over check so a required check is never missing", () => {
+    const d = resolveDispatchDisposition("pr-review", moved(["pnpm-lock.yaml"]), {
+      fix,
+      dependencies: deps,
+      review: eager,
+    });
+    expect(d.decision).toBe("skip");
+    expect(d.review).toBe("skip");
+    expect(d.reviewUnchanged).toEqual({ sha: "0ld5ha0000000000", state: "APPROVED" });
+    expect(reviewCheckPlacement(d.review!, eager, { unchanged: true })).toBe("carried-over");
+    // Any OTHER skip still leaves the PR alone.
+    expect(reviewCheckPlacement("skip", eager)).toBe("none");
+  });
+});
+
+describe("isGeneratedPath", () => {
+  const patterns = defaultReviewConfig().generatedPaths;
+
+  it.each([
+    // A pattern with no `/` matches the BASENAME anywhere — which is what an
+    // operator writing `pnpm-lock.yaml` means, and what a workspace monorepo
+    // with one lock file per package needs.
+    ["pnpm-lock.yaml", true],
+    ["packages/cli/pnpm-lock.yaml", true],
+    ["deep/nested/dir/yarn.lock", true],
+    ["Cargo.lock", true],
+    ["go.sum", true],
+    ["static/app.min.js", true],
+    ["src/api/types.generated.ts", true],
+    ["src/__generated__/schema.ts", true],
+    ["__generated__/schema.ts", true],
+    // Hand-written code that merely LOOKS adjacent to the patterns.
+    ["src/auth.ts", false],
+    ["src/lock.ts", false],
+    ["src/generated.ts", false],
+    ["docs/go.sum.md", false],
+    ["src/min.js", false],
+  ])("%s → %s", (path, expected) => {
+    expect(isGeneratedPath(path, patterns)).toBe(expected);
+  });
+
+  it("never lets a pattern act as a regex", () => {
+    // `.` is escaped, so this matches the literal name and nothing else.
+    expect(isGeneratedPath("goxsum", ["go.sum"])).toBe(false);
+    expect(isGeneratedPath("go.sum", ["go.sum"])).toBe(true);
+  });
+
+  it("keeps `*` inside one path segment and lets `**` cross", () => {
+    expect(isGeneratedPath("a/b/c.pb.go", ["*.pb.go"])).toBe(true); // basename rule
+    expect(isGeneratedPath("a/b/c.pb.go", ["gen/*.pb.go"])).toBe(false);
+    expect(isGeneratedPath("gen/c.pb.go", ["gen/*.pb.go"])).toBe(true);
+    expect(isGeneratedPath("gen/deep/c.pb.go", ["gen/*.pb.go"])).toBe(false);
+    expect(isGeneratedPath("gen/deep/c.pb.go", ["gen/**"])).toBe(true);
+  });
+
+  // The two predicates are mirrors, not negations: both refuse to answer `true`
+  // on a degraded read, because both are asked by a caller looking for
+  // permission to suppress something.
+  it("answers false in both directions for a degraded delta", () => {
+    for (const delta of [null, []]) {
+      expect(allPathsGenerated(delta, patterns)).toBe(false);
+      expect(hasMaterialChange(delta, patterns)).toBe(false);
+    }
   });
 });
 
