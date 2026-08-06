@@ -5,6 +5,7 @@ import {
   CartesianGrid,
   ComposedChart,
   Line,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -123,6 +124,22 @@ export function FeedbackPage() {
     [daily],
   );
 
+  /**
+   * The count axis is pinned SYMMETRIC around zero, because the plot carries two
+   * Y scales and the reader sees only one horizontal zero.
+   *
+   * Left to recharts, this axis auto-fits the data — one +1 and one -1 gives
+   * `[-1, 3]`, whose zero sits near the bottom of the plot while the score
+   * axis's zero (symmetric `[-2, 2]`) sits in the middle. The bars then rise
+   * correctly from *their* zero and appear, to anyone reading the visible
+   * gridline, to float below it. A symmetric domain makes the two zeros the
+   * same pixel by construction rather than by luck.
+   */
+  const countMax = useMemo(
+    () => Math.max(1, ...(daily ?? []).map((d) => Math.max(d.positive, d.negative))),
+    [daily],
+  );
+
   const totals = useMemo(() => {
     const rows = summary ?? [];
     const positive = rows.reduce((n, r) => n + r.positive, 0);
@@ -212,6 +229,7 @@ export function FeedbackPage() {
                   <YAxis
                     yAxisId="count"
                     width={40}
+                    domain={[-countMax, countMax]}
                     tick={{ fontSize: 10, fill: CHART.axis }}
                     stroke={CHART.axis}
                     allowDecimals={false}
@@ -233,6 +251,8 @@ export function FeedbackPage() {
                     }}
                     cursor={{ fill: "rgba(255,255,255,0.04)" }}
                   />
+                  {/* The one zero both scales share — drawn, not implied. */}
+                  <ReferenceLine yAxisId="count" y={0} stroke={CHART.axis} />
                   <Bar yAxisId="count" dataKey="positive" fill={CHART.positive} name="positive" />
                   <Bar yAxisId="count" dataKey="negative" fill={CHART.negative} name="negative" />
                   <Line
