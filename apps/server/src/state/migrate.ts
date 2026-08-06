@@ -110,6 +110,94 @@ export function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_users_login ON users(login);
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
     CREATE INDEX IF NOT EXISTS idx_users_slack ON users(slack_user_id);
+
+    -- Feedback signals (issue #255) — a 👍/👎 on something the bot wrote, scored
+    -- against the run that wrote it. Two tables, because a reaction names a
+    -- MESSAGE and we need a run:
+    --
+    --   feedback_anchors  one row per reactable artefact the bot posted, and the
+    --                     run it came from. Written when we POST (Slack, where
+    --                     the ts is only ever known at send time) or when a run
+    --                     finishes (GitHub discovery).
+    --   feedback_signals  one row per (anchor, reactor, emoji).
+    --
+    -- Surface-agnostic from the start: \`source\` discriminates slack/github so a
+    -- single query averages across both, and the GitHub poller adds rows rather
+    -- than columns.
+    CREATE TABLE IF NOT EXISTS feedback_anchors (
+      id TEXT PRIMARY KEY,                    -- randomUUID
+      source TEXT NOT NULL,                   -- slack | github
+      kind TEXT NOT NULL,                     -- slack_message | issue_comment | review_comment | issue
+      -- Slack message ts, or the GitHub comment/issue id as a string. Kept TEXT
+      -- for both: a Slack ts ("1712000000.000100") is not a number, and a
+      -- GitHub id read back as a float would lose precision.
+      external_id TEXT NOT NULL,
+      -- GitHub GraphQL global id. The batched reactions query keys on this, so
+      -- the poller never has to re-resolve an id it already saw.
+      node_id TEXT,
+      channel TEXT,                           -- Slack channel id; null for GitHub
+      owner TEXT,
+      repo TEXT,
+      issue_number INTEGER,
+      -- The attribution. Null is legal and deliberate: a bot comment we cannot
+      -- tie to a run is still worth recording — dropping it would silently lose
+      -- the reaction rather than the run.
+      workflow_run_id TEXT,
+      workflow_name TEXT,
+      -- The Slack THREAD's messaging session, for a chat turn — which has no
+      -- workflow run. Deliberately not called \`execution_id\`: it is
+      -- \`messaging_sessions.id\`, which is what an \`executions\` row for a chat
+      -- turn carries as its \`trigger_id\`, NOT an \`executions.id\`.
+      messaging_session_id TEXT,
+      created_at TEXT NOT NULL,               -- when the bot posted it
+      last_polled_at TEXT,                    -- github only; slack arrives live
+      UNIQUE(source, channel, external_id)
+    );
+    -- The reverse lookup a Slack reaction hits: (channel, ts) → anchor.
+    CREATE INDEX IF NOT EXISTS idx_feedback_anchors_lookup
+      ON feedback_anchors(source, channel, external_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_anchors_run
+      ON feedback_anchors(workflow_run_id);
+    -- The poller's rotation: least-recently-polled first, within the window.
+    CREATE INDEX IF NOT EXISTS idx_feedback_anchors_poll
+      ON feedback_anchors(source, created_at, last_polled_at);
+
+    CREATE TABLE IF NOT EXISTS feedback_signals (
+      id TEXT PRIMARY KEY,
+      anchor_id TEXT NOT NULL,
+      -- Denormalized from the anchor so every analytics query is one table.
+      -- These never change for a given anchor, so there is nothing to keep in
+      -- sync — the anchor's attribution is fixed the moment it is created.
+      source TEXT NOT NULL,
+      workflow_run_id TEXT,
+      workflow_name TEXT,
+      messaging_session_id TEXT,
+      owner TEXT,
+      repo TEXT,
+      issue_number INTEGER,
+      emoji TEXT NOT NULL,                    -- canonical name (see engine/feedback/reactions.ts)
+      score INTEGER NOT NULL,                 -- -2..+2; 0 means "recorded, not scored"
+      sentiment TEXT NOT NULL,
+      reactor TEXT,                           -- GitHub login / Slack user id
+      reacted_at TEXT,                        -- when they reacted, when known
+      observed_at TEXT NOT NULL,              -- when WE saw it
+      -- Set when the reaction is taken away. Retracting rather than deleting
+      -- keeps "somebody thumbed this and then thought better of it" visible,
+      -- which is itself a signal; every score query filters on IS NULL.
+      removed_at TEXT,
+      -- OTel export watermark. Null means not yet exported, so a restart can't
+      -- double-emit and signals recorded while telemetry was off can be
+      -- backfilled later.
+      exported_at TEXT,
+      UNIQUE(anchor_id, reactor, emoji)
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_anchor ON feedback_signals(anchor_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_run ON feedback_signals(workflow_run_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_observed
+      ON feedback_signals(observed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_workflow
+      ON feedback_signals(workflow_name, observed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_export ON feedback_signals(exported_at);
   `);
 
   // Actor logging (issue #205): who triggered a run and how. Additive on both
@@ -165,6 +253,20 @@ export function migrate(db: Database.Database): void {
     );
   } catch {
     // Column already exists — ignore
+  }
+
+  // The run's OTel trace/span context (issue #255). A feedback signal can
+  // arrive days after the run finished and its span closed, so the only way to
+  // put the score on the trace it grades is to remember where that trace was.
+  // Captured by the observability adapter in `src/workflows/runner.ts` when the
+  // `lastlight.workflow.run` span opens; null whenever telemetry was disabled,
+  // in which case the signal exports as its own root span instead.
+  for (const col of ["trace_id TEXT", "span_id TEXT"]) {
+    try {
+      db.exec(`ALTER TABLE workflow_runs ADD COLUMN ${col}`);
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   // Gate flavor: 'approve' (explicit approve/reject) vs 'reply' (resolves

@@ -66,6 +66,9 @@ import {
 } from "./engine/review-check.js";
 import { runDashboardUrl } from "./notify/model.js";
 import { harvestFixMarkers } from "./engine/fix-harvest.js";
+import { handleSlackReaction, registerSlackAnchor } from "./engine/feedback/slack.js";
+import { feedbackAnchorObserver, pollFeedbackReactions } from "./cron/feedback-poll.js";
+import { drainFeedbackExport } from "./engine/feedback/ingest.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
 import { createAdmissionController, type AdmissionController } from "./workflows/admission.js";
@@ -300,6 +303,12 @@ async function main() {
     botLogin: config.botLogin,
     botMention: `@${config.botName}`,
   });
+
+  // Feedback signals recorded while telemetry was off carry no export watermark
+  // (issue #255), so enabling OTel later can still put them on the traces they
+  // grade instead of starting the backend from zero. Bounded per boot; a no-op
+  // when telemetry is disabled or there is no backlog.
+  if (config.feedback.enabled && config.feedback.otel) drainFeedbackExport(db);
 
   // Discover the repos the App can access — across EVERY installation — and seed
   // the managed-repo list. When the overlay's `managedRepos` is empty this
@@ -825,10 +834,28 @@ async function main() {
       }
     }
 
+    // Set by `onRunStart` below, read by `onPhaseEnd` and the Slack poster.
+    // Undefined only for the window before the run row exists, during which
+    // neither can have fired.
+    let harvestRunId: string | undefined;
+
     const slackPost = slackTriggerId && slackConnector && typeof channelId === "string" && typeof threadId === "string"
       ? async (msg: string) => {
           try {
-            await slackConnector!.sendMessage(channelId, threadId, msg);
+            const ts = await slackConnector!.sendMessage(channelId, threadId, msg);
+            // This message IS the run's answer, so it is the one most worth a
+            // 👍/👎 (issue #255). Registering it here — with the run id — is
+            // what lets a reaction minutes later resolve to this exact run
+            // rather than merely to the thread.
+            if (typeof ts === "string" && config.feedback.enabled) {
+              registerSlackAnchor(db, {
+                channelId,
+                threadId,
+                messageId: ts,
+                workflowRunId: harvestRunId,
+                workflowName,
+              });
+            }
             // This is the workflow's ANSWER — the substantive thing the thread
             // will be asked follow-up questions about — so it belongs in the
             // thread's conversation alongside the turns `ChatRunner` records.
@@ -882,10 +909,6 @@ async function main() {
       /* unknown workflow — surfaced downstream by runSimpleWorkflow */
     }
 
-    // Set by `onRunStart` below, read by `onPhaseEnd`. Undefined only for the
-    // window before the run row exists, during which no phase can have ended.
-    let harvestRunId: string | undefined;
-
     let notifier: ProgressNotifier | undefined;
     const reporterProxy: ProgressReporter | undefined = statusChecklist
       ? {
@@ -928,6 +951,19 @@ async function main() {
                   thread: threadId,
                   ts: saved.slackTs,
                   save: (ts) => persist({ slackTs: ts, slackChannel: channelId, slackThread: threadId }),
+                  // Every message the notifier posts is reactable: the status
+                  // checklist, the terminal summary, an approval prompt
+                  // (issue #255).
+                  onPost: config.feedback.enabled
+                    ? (ts) =>
+                        void registerSlackAnchor(db, {
+                          channelId,
+                          threadId,
+                          messageId: ts,
+                          workflowRunId: runId,
+                          workflowName,
+                        })
+                    : undefined,
                 }),
               );
             }
@@ -1118,10 +1154,35 @@ async function main() {
         // run/approval attributes to their GitHub login (issue #205).
         users: db.users,
         botIdentifier: "", // Will be resolved from Slack API on connect
+        // Every chat reply the bot posts becomes a reaction target (issue
+        // #255). The `ts` is only ever knowable here, in the send response —
+        // and the connector layer must not reach for the database itself, so
+        // the write is injected as a hook.
+        onBotMessage: config.feedback.enabled
+          ? ({ channelId, messageId, sessionId }) =>
+              void registerSlackAnchor(db, { channelId, messageId, messagingSessionId: sessionId })
+          : undefined,
       },
       sessionManager
     );
     registry.register(slackConnector);
+
+    // Score emoji reactions on the bot's own messages (issue #255). Needs the
+    // `reactions:read` bot scope + the reaction_added/removed subscriptions;
+    // without them Slack never delivers and this is simply dormant.
+    if (config.feedback.enabled) {
+      slackConnector.onReactionAction((event) =>
+        void handleSlackReaction(
+          {
+            db,
+            botLogin: config.botLogin,
+            otel: config.feedback.otel,
+            allowedUsers: config.slack?.allowedUsers,
+          },
+          event,
+        ),
+      );
+    }
 
     // Register Slack as a delivery target for cron reports
     if (config.slack.deliveryChannel) {
@@ -1710,6 +1771,35 @@ async function main() {
           maxDirs: sweepCfg.maxDirs,
         });
       },
+    });
+  }
+
+  // GitHub feedback signals (issue #255) — OFF by default (`feedback.github`).
+  // GitHub sends no webhook for reactions, so this is the only half of the
+  // feature that has a recurring cost, and it should be switched on knowingly.
+  // Two pieces: anchor discovery on each terminal run (one listing, attributed
+  // while we still hold the run), and a batched GraphQL refresh on a cron
+  // (100 anchors per request, one rate-limit point each).
+  if (config.feedback.enabled && config.feedback.github && github) {
+    const feedbackDeps = {
+      db,
+      github,
+      botLogin: config.botLogin,
+      otel: config.feedback.otel,
+      windowDays: config.feedback.windowDays,
+      maxAnchorsPerTick: config.feedback.maxAnchorsPerTick,
+      retentionDays: config.feedback.retentionDays,
+    };
+    db.runs.addTerminalObserver(feedbackAnchorObserver(feedbackDeps));
+    cron.registerDirect({
+      name: "feedback-poll",
+      schedule: config.feedback.pollSchedule,
+      handler: () => pollFeedbackReactions(feedbackDeps).then(() => {}),
+    });
+    logger("feedback").info("GitHub reaction polling enabled", {
+      schedule: config.feedback.pollSchedule,
+      windowDays: config.feedback.windowDays,
+      maxAnchorsPerTick: config.feedback.maxAnchorsPerTick,
     });
   }
 

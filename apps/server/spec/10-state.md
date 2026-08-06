@@ -22,7 +22,7 @@ into the resume state read by every dashboard query.
 
 ## SQLite tables
 
-`src/state/migrate.ts` defines six tables (the per-table stores in
+`src/state/migrate.ts` defines eight tables (the per-table stores in
 `src/state/*-store.ts` operate on them; `src/state/db.ts` wires the
 stores together). All rows are append-only unless marked mutable.
 Migrations are additive — `CREATE TABLE IF NOT EXISTS` plus
@@ -422,6 +422,77 @@ The partial unique index enforces "one active session per
 (platform, channel, thread, user)" while allowing old inactive rows
 to stack. See [Chat](/spec/11-chat) for the session lifecycle.
 
+### `feedback_anchors` + `feedback_signals`
+
+The eval-signal ledger (issue #255): a 👍/👎 somebody left on something the bot
+wrote, scored against the workflow run that wrote it. Two tables, because a
+reaction names a **message** and the signal needs a **run**.
+
+```sql
+CREATE TABLE IF NOT EXISTS feedback_anchors (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,                  -- "slack" | "github"
+  kind TEXT NOT NULL,                    -- slack_message | issue_comment | review_comment | issue
+  external_id TEXT NOT NULL,             -- Slack ts, or the GitHub comment id as TEXT
+  node_id TEXT,                          -- GraphQL global id (github; the batch key)
+  channel TEXT,                          -- Slack channel; NULL for github
+  owner TEXT, repo TEXT, issue_number INTEGER,
+  workflow_run_id TEXT,                  -- the attribution; NULL is legal
+  workflow_name TEXT,
+  messaging_session_id TEXT,             -- chat turns, which have no run
+  created_at TEXT NOT NULL,              -- when the bot posted it
+  last_polled_at TEXT,                   -- github only
+  UNIQUE(source, channel, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS feedback_signals (
+  id TEXT PRIMARY KEY,
+  anchor_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  workflow_run_id TEXT, workflow_name TEXT, messaging_session_id TEXT,
+  owner TEXT, repo TEXT, issue_number INTEGER,
+  emoji TEXT NOT NULL,                   -- canonical name (engine/feedback/reactions.ts)
+  score INTEGER NOT NULL,                -- -2..+2; 0 = recorded, not scored (👀)
+  sentiment TEXT NOT NULL,
+  reactor TEXT, reacted_at TEXT, observed_at TEXT NOT NULL,
+  removed_at TEXT,                       -- retraction, not deletion
+  exported_at TEXT,                      -- OTel watermark
+  UNIQUE(anchor_id, reactor, emoji)
+);
+```
+
+An **anchor** is written when the bot posts (Slack, where the message ts is only
+knowable in the `chat.postMessage` response) or when a run finishes (GitHub
+discovery). Attribution is fixed at that moment and never recomputed — later
+there is nothing left to attribute *from* but timestamps. The run columns are
+denormalized onto `feedback_signals` for the same reason the rest of this page
+avoids joins on hot paths: every analytics query then reads one table.
+
+Two invariants the schema encodes:
+
+- **`UNIQUE(anchor_id, reactor, emoji)` makes ingest idempotent.** Slack
+  redelivers, and the GitHub poller re-reads the same reactions every tick;
+  both must be replayable without inflating the count.
+- **A retraction is a fact, not a delete.** `removed_at` is stamped and the row
+  stays. Every scoring query filters `removed_at IS NULL`.
+- **`exported_at` is only stamped when a span was actually emitted.** Marking a
+  signal exported while telemetry was off would silently discard it — enabling
+  OTel later would find an empty backlog and the whole pre-OTel history would be
+  absent from the backend forever. `drainFeedbackExport` (called at boot) is
+  what catches up, so the watermark has to mean what it says.
+
+`workflow_runs` also carries `trace_id` / `span_id` for this feature — see the
+next section.
+
+### `workflow_runs.trace_id` / `span_id`
+
+Written by the observability adapter in `src/workflows/runner.ts` when the
+`lastlight.workflow.run` span opens. A feedback signal can arrive days after
+that span closed, and these two columns are the only way to export it *onto the
+trace it grades* rather than as a disconnected trace of its own. NULL whenever
+telemetry was disabled during the run, in which case the signal exports as its
+own root span.
+
 `messaging_messages` is the **thread's** conversation, not chat's — a message
 answered by a workflow is recorded here too, by `thread-transcript.ts` rather
 than by `ChatRunner`, so the next chat turn in that thread can see it. Reads are
@@ -537,6 +608,10 @@ session recreation after timeouts.
   losing data.
 - **Partial unique index** on `messaging_sessions` allows
   multiple inactive rows but exactly one active per key.
+- **A feedback anchor's attribution is write-once.** It is set when the
+  artefact is posted (Slack) or when its run finishes (GitHub) — the only
+  moments the run is in hand. Nothing recomputes it later, because by then the
+  only evidence would be timestamps.
 - **List queries exclude blob columns.** The dashboard polls every
   5 s; reading `context` + `scratch` + `node_statuses` for every row
   would dominate the query cost. The list endpoint's projection is
@@ -552,6 +627,11 @@ session recreation after timeouts.
 | `ExecutionStore` — `executions` table + ops | `src/state/execution-store.ts` |
 | `ApprovalStore` — `workflow_approvals` | `src/state/approval-store.ts` |
 | `UserStore` — `users` identity + Slack/email matching | `src/state/user-store.ts` |
+| `FeedbackStore` — `feedback_anchors` + `feedback_signals` (issue #255) | `src/state/feedback-store.ts` |
+| Emoji → score vocabulary (both surfaces) | `src/engine/feedback/reactions.ts` |
+| Reaction → signal ingest + OTel export | `src/engine/feedback/ingest.ts` |
+| Slack anchors + live reaction handling | `src/engine/feedback/slack.ts` |
+| GitHub anchor discovery + batched reaction poll | `src/cron/feedback-poll.ts` |
 | JSONL writer + envelope translation | `src/engine/event-shim.ts` |
 | Sandbox session reader (dashboard) | `src/admin/SessionReader.ts` |
 | Chat session reader (dashboard, DB-backed) | `src/admin/ChatSessionReader.ts` |

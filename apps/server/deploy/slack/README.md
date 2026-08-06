@@ -28,11 +28,18 @@ paste it into an existing app's *App Manifest* editor.
 | `users:read` | Resolve a user ID → username for display (`users.info`) | `connector.ts` |
 | `assistant:write` | The "Thinking…" thread status indicator (`assistant.threads.setStatus`) | `connector.ts` |
 | `reactions:write` | Fallback 👀 ack reaction when the assistant status API isn't available (`reactions.add`) | `connector.ts` |
+| `reactions:read` | Receive `reaction_added` / `reaction_removed` — the 👍/👎 feedback signals of issue #255 | `src/engine/feedback/slack.ts` |
 
 ### Event subscriptions
 
 - `app_mention` — needs `app_mentions:read`.
 - `message.im` — needs `im:history`.
+- `reaction_added` / `reaction_removed` — needs `reactions:read`. These carry the
+  feedback signals (issue #255): a 👍 or 👎 on a message the bot posted is scored
+  against the workflow run that produced it. Only reactions on messages Last
+  Light itself posted are recorded — everything else is dropped on an indexed
+  lookup miss. In **channels** the bot must be a member to receive these; DMs are
+  covered by the existing `im:history`.
 
 ### User token scopes ("Sign in with Slack", dashboard login only)
 
@@ -79,6 +86,8 @@ no code path uses:
   bundle, but `is_mcp_enabled` is `false` and there's no MCP integration. User
   scopes also require per-user consent and grant access to that user's private
   channels, DMs, and files — a needless privacy/blast-radius liability.
+  (`reactions:read` and `reactions:write` stay dropped **as user scopes** — both
+  are granted on the *bot* token above, which is the token the code uses.)
 - **Bot scopes dropped:** `channels:read`, `files:write`, `im:read`, `im:write`,
   `channels:history`, `groups:history` — none are called by the connector, and
   the two `*:history` channel scopes only matter for Socket Mode (see above).
@@ -86,6 +95,12 @@ no code path uses:
   `reactions:write`. The code calls both on the **bot** token; the original
   granted `reactions:write` only as a *user* scope and omitted `assistant:write`
   entirely, so those features were failing with `missing_scope`.
+- **Bot scope ADDED for feedback signals (issue #255):** `reactions:read`, with
+  the `reaction_added` / `reaction_removed` subscriptions. **Re-consent the app
+  after adding it** — Slack does not grant a new scope to an existing
+  installation, and until it is granted no reaction event is delivered at all
+  (silently: the handler is simply never called). Feedback is off in that state,
+  not broken; everything else keeps working.
 - **Events dropped:** `message.channels`, `message.groups` — the handlers act on
   DMs (`message.im`) and mentions (`app_mention`); the code ignores plain
   channel/group messages, so subscribing to them just delivers events nothing

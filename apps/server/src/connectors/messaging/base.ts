@@ -44,6 +44,34 @@ export abstract class MessagingConnector extends EventEmitter implements Connect
   async clearTyping(_channelId: string, _threadId: string): Promise<void> {}
 
   /**
+   * Hand a just-posted bot message to the `onBotMessage` hook (issue #255).
+   *
+   * Tolerant of a `sendMessage` that returns nothing: the abstract signature is
+   * `Promise<string | void>` and a platform that can't tell us its message id
+   * simply has no anchor to register — which must not become an error at the
+   * call site. Swallows everything, for the same reason the transcript writer
+   * does: bookkeeping may never break the reply it is bookkeeping about.
+   */
+  protected noteBotMessage(info: {
+    channelId: string;
+    threadId: string | null;
+    messageId: string | void;
+    sessionId?: string;
+  }): void {
+    if (!this.config.onBotMessage || typeof info.messageId !== "string") return;
+    try {
+      this.config.onBotMessage({
+        channelId: info.channelId,
+        threadId: info.threadId,
+        messageId: info.messageId,
+        sessionId: info.sessionId,
+      });
+    } catch (err: unknown) {
+      log.warn("onBotMessage hook failed", { platform: this.name, err });
+    }
+  }
+
+  /**
    * Process an incoming message from any platform.
    * Called by platform-specific event listeners.
    */
@@ -109,7 +137,11 @@ export abstract class MessagingConnector extends EventEmitter implements Connect
       // Chunk long messages
       const chunks = this.chunkMessage(msg);
       for (const chunk of chunks) {
-        await this.sendMessage(channelId, replyThreadId, chunk);
+        const messageId = await this.sendMessage(channelId, replyThreadId, chunk);
+        // Register each posted chunk as a reaction target (issue #255). Every
+        // chunk, not just the first: the user reacts to whichever one they were
+        // reading, and they are all this turn's answer.
+        this.noteBotMessage({ channelId, threadId: replyThreadId, messageId, sessionId: session.id });
       }
     };
 

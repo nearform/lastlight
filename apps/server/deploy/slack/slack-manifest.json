@@ -33,6 +33,7 @@
                 "assistant:write",
                 "chat:write",
                 "im:history",
+                "reactions:read",
                 "reactions:write",
                 "users:read"
             ]
@@ -44,7 +45,9 @@
             "request_url": "https://YOUR_INSTANCE_DOMAIN/webhooks/slack",
             "bot_events": [
                 "app_mention",
-                "message.im"
+                "message.im",
+                "reaction_added",
+                "reaction_removed"
             ]
         },
         "org_deploy_enabled": true,

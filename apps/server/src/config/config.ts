@@ -253,6 +253,16 @@ export interface LastLightConfig {
    */
   cleanup: { sandbox: SandboxCleanupConfig };
   /**
+   * Reaction-derived eval signals (issue #255) — a 👍/👎 on something the bot
+   * wrote, scored against the run that wrote it.
+   *
+   * Operator-only, deliberately: it governs API spend and telemetry export, and
+   * a target repo has no business tuning either. It is absent from
+   * `repoConfig.allowKeys`, and the repo-layer sanitizer drops unknown keys
+   * anyway — so no clamp is needed for it to stay ours.
+   */
+  feedback: FeedbackConfig;
+  /**
    * Operator bounds on the per-repository config layer (issue #180) — what a
    * managed repo's committed `.lastlight/lastlight.yml` is allowed to override
    * for runs against that repo. Always normalized (never undefined) and inert
@@ -336,6 +346,39 @@ export interface SandboxCleanupConfig {
   retentionHours: number;
   /** LRU cap on dir count — bounds the reusable per-PR cache. */
   maxDirs: number;
+}
+
+/**
+ * Feedback signals (issue #255).
+ *
+ * The two switches are separate because the two surfaces cost different things.
+ * **Slack is free and live** — `reaction_added` is a real event, so `enabled`
+ * turns on a webhook handler and nothing else. **GitHub has to be polled**:
+ * GitHub delivers no webhook for reactions at all, so `github` opts into a cron
+ * that batches reaction reads over the GraphQL API. That one is off by default
+ * — an operator should switch it on knowingly and watch the numbers, even
+ * though the bound below makes them small.
+ *
+ * The spend is a property of the DATA, not the schedule: we poll *anchors*
+ * (individual bot comments a run produced), never issues, each anchor retires
+ * after `windowDays`, and `maxAnchorsPerTick / 100` is the exact number of
+ * GraphQL requests a tick can issue — each costing one rate-limit point.
+ */
+export interface FeedbackConfig {
+  /** Master switch. Off means no anchors are registered and no signals recorded. */
+  enabled: boolean;
+  /** Opt into the GitHub reaction poller. Slack is unaffected by this. */
+  github: boolean;
+  /** Cron schedule for the GitHub poller. Ignored when `github` is false. */
+  pollSchedule: string;
+  /** How long after posting an anchor stays pollable. Reactions arrive in hours. */
+  windowDays: number;
+  /** Hard per-tick bound. 100 anchors = one GraphQL request = one rate-limit point. */
+  maxAnchorsPerTick: number;
+  /** Anchors are pruned past this; the signals themselves are kept forever. */
+  retentionDays: number;
+  /** Export each signal as an OTel span + metric (no-op when telemetry is off). */
+  otel: boolean;
 }
 
 let currentConfig: LastLightConfig | undefined;
@@ -652,6 +695,7 @@ export function loadConfig(): LastLightConfig {
     dependencies: fileCfg.dependencies,
     concurrency: fileCfg.concurrency,
     cleanup: fileCfg.cleanup,
+    feedback: fileCfg.feedback,
     repoConfig: fileCfg.repoConfig,
   };
   setRuntimeConfig(config);
@@ -685,6 +729,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   otel: OtelConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   cleanup: { sandbox: SandboxCleanupConfig };
+  feedback: FeedbackConfig;
   repoConfig: RepoConfigPolicy;
 } {
   const managedRepos = stringArray(raw.managedRepos, "managedRepos");
@@ -707,6 +752,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const otelRaw = isPlainObject(raw.otel) ? raw.otel : {};
   const cronsRaw = isPlainObject(raw.crons) ? raw.crons : {};
   const concurrencyRaw = isPlainObject(raw.concurrency) ? raw.concurrency : {};
+  const feedbackRaw = isPlainObject(raw.feedback) ? raw.feedback : {};
   const cleanupRaw = isPlainObject(raw.cleanup) ? raw.cleanup : {};
   const sandboxCleanupRaw = isPlainObject(cleanupRaw.sandbox) ? cleanupRaw.sandbox : {};
   const repoConfigRaw = isPlainObject(raw.repoConfig) ? raw.repoConfig : {};
@@ -826,6 +872,32 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         : 40,
   };
 
+  // Feedback signals (issue #255). Lenient, like every block above: a mistyped
+  // key degrades to the shipped default rather than failing boot. `github`
+  // defaults to FALSE — the poller is the only part with a recurring cost, so
+  // it must be asked for, while `enabled` (Slack, event-driven, free) is on.
+  const feedback: FeedbackConfig = {
+    enabled: feedbackRaw.enabled !== false,
+    github: feedbackRaw.github === true,
+    pollSchedule:
+      typeof feedbackRaw.pollSchedule === "string" && feedbackRaw.pollSchedule.trim()
+        ? feedbackRaw.pollSchedule.trim()
+        : "*/30 * * * *",
+    windowDays:
+      typeof feedbackRaw.windowDays === "number" && feedbackRaw.windowDays > 0
+        ? feedbackRaw.windowDays
+        : 14,
+    maxAnchorsPerTick:
+      typeof feedbackRaw.maxAnchorsPerTick === "number" && feedbackRaw.maxAnchorsPerTick > 0
+        ? feedbackRaw.maxAnchorsPerTick
+        : 500,
+    retentionDays:
+      typeof feedbackRaw.retentionDays === "number" && feedbackRaw.retentionDays > 0
+        ? feedbackRaw.retentionDays
+        : 90,
+    otel: feedbackRaw.otel !== false,
+  };
+
   // Cron participation (issue #180). Lenient like the blocks above — a
   // mistyped `crons.disable` degrades to "nothing listed" rather than taking
   // the harness down at boot, because the same block is also read out of an
@@ -884,6 +956,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     otel: normalizeOtelFileConfig(otelRaw),
     concurrency: { maxWorkflows, maxQueueWaitMs },
     cleanup: { sandbox: sandboxCleanup },
+    feedback,
     repoConfig,
   };
 }
@@ -1160,6 +1233,18 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   setBoolEnv(otel, "strict", env.LASTLIGHT_OTEL_STRICT);
   setBoolEnv(otel, "metrics", env.LASTLIGHT_OTEL_METRICS_ENABLED);
   if (Object.keys(otel).length) layer.otel = otel;
+
+  // Feedback signals (issue #255). The two switches are separate on purpose —
+  // `LASTLIGHT_FEEDBACK_GITHUB` turns on the poller (the part that costs API
+  // calls) without touching the free, event-driven Slack half.
+  const feedback: Record<string, unknown> = {};
+  setBoolEnv(feedback, "enabled", env.LASTLIGHT_FEEDBACK_ENABLED);
+  setBoolEnv(feedback, "github", env.LASTLIGHT_FEEDBACK_GITHUB);
+  setBoolEnv(feedback, "otel", env.LASTLIGHT_FEEDBACK_OTEL);
+  if (env.LASTLIGHT_FEEDBACK_WINDOW_DAYS) {
+    feedback.windowDays = parseInt(env.LASTLIGHT_FEEDBACK_WINDOW_DAYS, 10);
+  }
+  if (Object.keys(feedback).length) layer.feedback = feedback;
 
   const concurrency: Record<string, unknown> = {};
   if (env.MAX_CONCURRENT_WORKFLOWS) concurrency.maxWorkflows = parseInt(env.MAX_CONCURRENT_WORKFLOWS, 10);

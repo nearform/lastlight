@@ -230,6 +230,15 @@ never inspects `raw` — all routing decisions use top-level fields.
 - **No factory.** Connectors build literals inline. A re-implementation
   may add a builder helper but should not add a validation step — the
   connector is the contract.
+- **Not everything a platform sends is an event *here*.** A Slack emoji
+  reaction (issue #255) is deliberately NOT normalized into an envelope. The
+  envelope pipeline exists to decide **what work to do** — it runs the message
+  batcher, the intent classifier and the PR dispatch gate — and a 👍 asks for
+  none of that: it is a fact to record about work already done. Routing it
+  through would mean widening the closed `EventType` union, teaching the
+  batcher to skip it, and teaching the classifier to ignore it, for no
+  dispatch. It goes through a direct connector callback instead
+  (`onReactionAction`), the same shape as the approval-button hook.
 - **Fields look optional but aren't, for some events.** A workflow that
   expects `repo` should refuse to run if `envelope.repo` is missing.
   The schema is permissive; the consumers' contracts are not.

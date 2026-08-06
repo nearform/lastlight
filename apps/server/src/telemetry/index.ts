@@ -52,6 +52,14 @@ const METRIC_ATTR_ALLOWLIST = new Set([
   "success",
   "stop_reason",
   "github.profile",
+  // Feedback signals (issue #255). Low-cardinality by construction — five
+  // sentiments, a dozen emoji, two sources, four anchor kinds — so they are
+  // safe as metric dimensions. The reactor is deliberately NOT here: it is a
+  // person, and it would make every series unbounded.
+  "feedback.source",
+  "feedback.sentiment",
+  "feedback.emoji",
+  "feedback.anchor.kind",
 ]);
 
 const EXPLICIT_CONTENT_ATTR_ALLOWLIST = new Set([

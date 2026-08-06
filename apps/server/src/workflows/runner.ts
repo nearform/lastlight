@@ -25,6 +25,7 @@ import { qaImageAvailable, SANDBOX_IMAGE_QA } from "../sandbox/images.js";
 import { executeAgent, executeCommand } from "../engine/agent-executor.js";
 import { listRunningContainers } from "../admin/docker.js";
 import { withSpan, recordExecutionMetrics, recordError } from "../telemetry/index.js";
+import type { Span } from "@opentelemetry/api";
 import { isTerminated, type PhaseRunContext } from "./phase-executor.js";
 import { runWorkflowCore } from "lastlight-workflow-engine";
 import type {
@@ -254,6 +255,44 @@ const telemetryObservability: ObservabilityPort = {
     recordExecutionMetrics(surface as "workflow" | "phase" | "agent" | "chat", attrs),
   recordError: (surface, error, attrs) => recordError(surface, error, attrs),
 };
+
+/**
+ * The observability port, plus one side effect: when the run-level span opens,
+ * persist its trace/span ids onto the run row (issue #255).
+ *
+ * A feedback signal — somebody reacting 👍 on what this run wrote — can arrive
+ * days later, long after every span has closed. Without the trace's coordinates
+ * the score can only be exported as a disconnected trace of its own; with them
+ * it is emitted as a late child of `lastlight.workflow.run` and lands *on the
+ * trace it grades*, which is the whole point of exporting it.
+ *
+ * This lives here, in the app's adapter, rather than in the engine: the engine
+ * has no database and no OTel dependency, and the span is already flowing
+ * through this one function. Best-effort — a failed write must never take down
+ * a run over telemetry bookkeeping.
+ */
+function runScopedObservability(db: StateDb, workflowId: string): ObservabilityPort {
+  let captured = false;
+  return {
+    ...telemetryObservability,
+    withSpan: (name, attrs, fn) =>
+      obsWithSpan(name, attrs, (span) => {
+        if (!captured && name === RUN_SPAN_NAME && span) {
+          captured = true;
+          try {
+            const ctx = (span as unknown as Span).spanContext();
+            if (ctx?.traceId && ctx.spanId) db.runs.setTraceContext(workflowId, ctx.traceId, ctx.spanId);
+          } catch (err: unknown) {
+            logger("runner").debug("Could not record run trace context", { workflowId, err });
+          }
+        }
+        return fn(span);
+      }),
+  };
+}
+
+/** The engine's run-level span name — the parent a feedback signal attaches to. */
+const RUN_SPAN_NAME = "lastlight.workflow.run";
 
 // ── Unified workflow scheduler (composition root) ────────────────────────────
 
@@ -546,7 +585,7 @@ export async function runWorkflow(
         }
       : defaultAssetLoader,
     liveness: dockerLivenessPort,
-    observability: telemetryObservability,
+    observability: db && workflowId ? runScopedObservability(db, workflowId) : telemetryObservability,
     verdictReader: fileVerdictReader,
     handlers: new Map([
       ["post-review", makePostReviewHandler({ ctx, config: runConfig, taskId, store: db, workflowId }, phaseReporter)],

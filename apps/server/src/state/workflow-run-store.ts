@@ -77,6 +77,15 @@ export interface WorkflowRun {
   updatedAt: string;
   finishedAt?: string;
   /**
+   * The OTel trace this run was exported under (issue #255). A feedback signal
+   * can land days after the run's span closed, so remembering where the trace
+   * was is the only way to hang the score on the trace it grades rather than a
+   * disconnected one. Absent whenever telemetry was disabled during the run.
+   */
+  traceId?: string;
+  /** The `lastlight.workflow.run` span id — the parent a feedback span attaches to. */
+  spanId?: string;
+  /**
    * Rolled-up totals across the run's executions (SUM of `cost_usd` and
    * input+output+cache-read tokens). Populated only by {@link WorkflowRunStore.list}
    * for the dashboard's runs view via a LEFT JOIN on `executions`; absent on
@@ -119,8 +128,13 @@ export interface PhaseMarker {
 /**
  * Notified once a run reaches a TERMINAL status, whichever path took it there.
  *
- * The one consumer today is the `last-light/review` check run
- * (`src/engine/review-check.ts`). 09-state-machine.md → S2 found that check
+ * There are two consumers: the `last-light/review` check run
+ * (`src/engine/review-check.ts`) and the GitHub feedback-anchor discovery of
+ * issue #255 — which is why observers are a LIST. They were a single slot
+ * originally, and a second `setTerminalObserver` call would have silently
+ * displaced the review check rather than failing loudly.
+ *
+ * 09-state-machine.md → S2 found that check
  * being completed inside a `.then()` chained onto an in-memory promise in
  * `dispatcher.ts` — so it stranded `in_progress` on every server restart
  * mid-review (i.e. **every deploy**), every queued-then-resumed run, every
@@ -133,7 +147,8 @@ export interface PhaseMarker {
  *
  * Contract: **synchronous, never throws, never re-enters the store.** It is
  * called after the row is written (outside any transaction), and an
- * implementation that needs I/O fires it and returns.
+ * implementation that needs I/O fires it and returns. One observer throwing
+ * does not stop the others.
  */
 export type TerminalRunObserver = (
   run: WorkflowRun,
@@ -143,30 +158,40 @@ export type TerminalRunObserver = (
 export class WorkflowRunStore {
   private db: Database.Database;
   private approvals: ApprovalStore;
-  private terminalObserver?: TerminalRunObserver;
+  private terminalObservers: TerminalRunObserver[] = [];
 
   constructor(db: Database.Database, deps: { approvals: ApprovalStore }) {
     this.db = db;
     this.approvals = deps.approvals;
   }
 
-  /** Install the {@link TerminalRunObserver}. Wired once, at boot. */
-  setTerminalObserver(fn: TerminalRunObserver): void {
-    this.terminalObserver = fn;
+  /** Add a {@link TerminalRunObserver}. Wired at boot; order is registration order. */
+  addTerminalObserver(fn: TerminalRunObserver): void {
+    this.terminalObservers.push(fn);
   }
 
   /**
-   * Fire the terminal observer for a row that has just been written. Swallows
-   * everything: a terminal transition is already persisted by the time we get
-   * here, and no projection of it may undo that.
+   * Fire the terminal observers for a row that has just been written. Swallows
+   * everything, per observer: a terminal transition is already persisted by the
+   * time we get here, no projection of it may undo that, and one projection
+   * failing must not cost the others their notification.
    */
   private notifyTerminal(id: string, status: "succeeded" | "failed" | "cancelled"): void {
-    if (!this.terminalObserver) return;
+    if (this.terminalObservers.length === 0) return;
+    let run: WorkflowRun | null = null;
     try {
-      const run = this.getRun(id);
-      if (run) this.terminalObserver(run, status);
+      run = this.getRun(id);
     } catch (err: unknown) {
-      log.warn("Terminal observer failed", { runId: id, err });
+      log.warn("Could not read a terminal run for its observers", { runId: id, err });
+      return;
+    }
+    if (!run) return;
+    for (const observe of this.terminalObservers) {
+      try {
+        observe(run, status);
+      } catch (err: unknown) {
+        log.warn("Terminal observer failed", { runId: id, err });
+      }
     }
   }
 
@@ -219,6 +244,23 @@ export class WorkflowRunStore {
     this.db
       .prepare(`UPDATE workflow_runs SET scratch = ?, updated_at = ? WHERE id = ?`)
       .run(serialized, now, id);
+  }
+
+  /**
+   * Remember which OTel trace this run is being exported under (issue #255).
+   *
+   * Deliberately NOT touching `updated_at`: this is bookkeeping about the run,
+   * not activity on it, and the liveness checks that read `updated_at` would
+   * otherwise see a heartbeat the run never produced.
+   *
+   * Write-once in practice (the run span opens exactly once), and harmless if
+   * repeated — a resume re-opens a span under a new trace, and the newest trace
+   * is the right one for a signal arriving now.
+   */
+  setTraceContext(id: string, traceId: string, spanId: string): void {
+    this.db
+      .prepare(`UPDATE workflow_runs SET trace_id = ?, span_id = ? WHERE id = ?`)
+      .run(traceId, spanId, id);
   }
 
   /**
@@ -760,6 +802,8 @@ export class WorkflowRunStore {
       startedAt: row.started_at as string,
       updatedAt: row.updated_at as string,
       finishedAt: row.finished_at as string | undefined,
+      traceId: (row.trace_id as string | null) ?? undefined,
+      spanId: (row.span_id as string | null) ?? undefined,
       // Present only on `list()` rows (the executions JOIN); undefined on getRun.
       totalCostUsd: typeof row.total_cost_usd === "number" ? row.total_cost_usd : undefined,
       totalTokens: typeof row.total_tokens === "number" ? row.total_tokens : undefined,

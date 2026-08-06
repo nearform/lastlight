@@ -780,7 +780,7 @@ describe("migrate() owner backfill", () => {
 describe("terminal run observer", () => {
   function observed() {
     const seen: Array<[string, string]> = [];
-    db.runs.setTerminalObserver((run, status) => seen.push([run.id, status]));
+    db.runs.addTerminalObserver((run, status) => seen.push([run.id, status]));
     return seen;
   }
 
@@ -796,7 +796,7 @@ describe("terminal run observer", () => {
   it("fires AFTER the row is written, so the observer reads terminal state", () => {
     let statusAtNotify: string | undefined;
     const id = makeRun();
-    db.runs.setTerminalObserver((run) => { statusAtNotify = run.status; });
+    db.runs.addTerminalObserver((run) => { statusAtNotify = run.status; });
     db.runs.finishRun(id, "succeeded");
     expect(statusAtNotify).toBe("succeeded");
   });
@@ -824,9 +824,35 @@ describe("terminal run observer", () => {
 
   it("a throwing observer never fails the transition it observes", () => {
     const id = makeRun();
-    db.runs.setTerminalObserver(() => { throw new Error("boom"); });
+    db.runs.addTerminalObserver(() => { throw new Error("boom"); });
     expect(() => db.runs.finishRun(id, "succeeded")).not.toThrow();
     expect(db.runs.getRun(id)?.status).toBe("succeeded");
+  });
+
+  it("notifies EVERY registered observer — a second one must not displace the first", () => {
+    // Observers were a single slot until issue #255 added feedback-anchor
+    // discovery beside the `last-light/review` check. With `set` semantics the
+    // second registration silently unhooked the check, which is a bug that
+    // would only ever show up in production as a stranded `in_progress`.
+    const first: string[] = [];
+    const second: string[] = [];
+    db.runs.addTerminalObserver((run) => first.push(run.id));
+    db.runs.addTerminalObserver((run) => second.push(run.id));
+
+    const id = makeRun();
+    db.runs.finishRun(id, "succeeded");
+    expect(first).toEqual([id]);
+    expect(second).toEqual([id]);
+  });
+
+  it("one observer throwing does not cost the others their notification", () => {
+    const survivor: string[] = [];
+    db.runs.addTerminalObserver(() => { throw new Error("boom"); });
+    db.runs.addTerminalObserver((run) => survivor.push(run.id));
+
+    const id = makeRun();
+    expect(() => db.runs.finishRun(id, "failed")).not.toThrow();
+    expect(survivor).toEqual([id]);
   });
 
   it("still commits the terminal marker transaction before notifying", () => {

@@ -445,7 +445,7 @@ export async function concludeReviewCheck(
  * once, at boot.
  */
 export function installReviewCheckObserver(db: StateDb, deps: ReviewCheckDeps): void {
-  db.runs.setTerminalObserver((run, status) => {
+  db.runs.addTerminalObserver((run, status) => {
     if (!readReviewCheck(run)) return;
     concludeReviewCheck(db, run, status, deps).catch((err: unknown) => {
       log.warn("Terminal conclusion failed for run", { runId: run.id, err });

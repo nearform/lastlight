@@ -78,6 +78,25 @@ concurrency:
 # backstop for failed/crashed leftovers: it removes non-live dirs older than
 # retentionHours and, if more than maxDirs remain, evicts the oldest (LRU). A dir
 # whose sandbox container is still running is never removed.
+# Feedback signals (issue #255) — a 👍/👎 on something Last Light wrote, scored
+# against the workflow run that wrote it, so the effect of prompt/skill changes
+# is measurable over time.
+#
+# Slack is LIVE (reaction_added is a real event) and on by default. GitHub sends
+# no webhook for reactions at all, so it has to be polled — that half is opt-in.
+# The cost is bounded by the data, not the schedule: we poll individual bot
+# comments ("anchors"), never issues, each retires after windowDays, and
+# maxAnchorsPerTick/100 is exactly how many GraphQL requests a tick can make
+# (one rate-limit point each, against a 5000/hour budget).
+feedback:
+  enabled: true              # master switch (Slack signals, live)
+  github: false              # opt into the GitHub reaction poller
+  pollSchedule: "*/30 * * * *"
+  windowDays: 14             # how long an anchor stays pollable
+  maxAnchorsPerTick: 500     # = 5 GraphQL requests per tick
+  retentionDays: 90          # anchors pruned after this; signals kept
+  otel: true                 # export each signal as a span on the run's trace
+
 cleanup:
   sandbox:
     enabled: true              # master switch for the TTL/LRU sweep
