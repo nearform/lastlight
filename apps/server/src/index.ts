@@ -1806,6 +1806,7 @@ async function main() {
             maxDirs: sweepCfg.maxDirs,
             stateDir: config.stateDir,
             sandboxDir: config.sandboxDir,
+            trigger: "cron",
           });
           return;
         }

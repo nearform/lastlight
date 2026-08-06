@@ -60,6 +60,11 @@ const METRIC_ATTR_ALLOWLIST = new Set([
   "feedback.sentiment",
   "feedback.emoji",
   "feedback.anchor.kind",
+  // Sandbox sweep (issue #106). `SweepTrigger` is a closed union of four —
+  // cron | manual | startup | library — so it is bounded by construction. It is
+  // also the dimension the `{trigger="cron"}` liveness query selects on: absent
+  // here, `safeMetricAttributes` drops it and every sweep series is emitted flat.
+  "trigger",
 ]);
 
 const EXPLICIT_CONTENT_ATTR_ALLOWLIST = new Set([
@@ -240,6 +245,52 @@ export function recordExecutionMetrics(surface: "workflow" | "phase" | "agent" |
   if (inputTokens !== undefined) m.createCounter("lastlight.execution.input_tokens").add(inputTokens, metricAttrs);
   if (outputTokens !== undefined) m.createCounter("lastlight.execution.output_tokens").add(outputTokens, metricAttrs);
   m.createCounter("lastlight.execution.count").add(1, metricAttrs);
+}
+
+/** What one sandbox sweep observed and did. Mirrors the summary log event so the
+ *  two signals never disagree — see {@link recordSandboxSweep}. */
+export interface SandboxSweepCounts {
+  pvcsFound: number;
+  pvcsLive: number;
+  pvcsStale: number;
+  pvcsCurrent: number;
+  deletedStale: number;
+  deletedOverCap: number;
+  deletedFailed: number;
+  durationMs: number;
+}
+
+/**
+ * Metrics for one sweep run, emitted whether or not anything was reclaimed.
+ *
+ * The `runs` counter is the liveness signal: a job that stops running stops
+ * incrementing it, which is directly alertable
+ * (`increase(lastlight_sandbox_sweep_runs_total[2h]) == 0`) without parsing logs
+ * or depending on log retention. `pvcs{state="found"}` climbing while `deleted`
+ * stays flat is a sweep that runs but never reclaims.
+ *
+ * Deletions are split by the policy that evicted (`stale` vs `over_cap`) because
+ * the two call for different responses — shortening `retentionHours` versus
+ * raising `maxIdlePVCs` — and a combined total hides which one is binding.
+ */
+export function recordSandboxSweep(counts: SandboxSweepCounts, attrs: TelemetryAttributes = {}): void {
+  if (!enabled) return;
+  const metricAttrs = safeMetricAttributes(attrs);
+  const m = meter();
+  m.createCounter("lastlight.sandbox.sweep.runs").add(1, metricAttrs);
+  m.createHistogram("lastlight.sandbox.sweep.duration_ms").record(counts.durationMs, metricAttrs);
+  const deleted = m.createCounter("lastlight.sandbox.sweep.deleted");
+  deleted.add(counts.deletedStale, { ...metricAttrs, policy: "stale" });
+  deleted.add(counts.deletedOverCap, { ...metricAttrs, policy: "over_cap" });
+  m.createCounter("lastlight.sandbox.sweep.delete_failures").add(counts.deletedFailed, metricAttrs);
+  // A gauge, not a counter: this is the population observed this run, not a
+  // cumulative total. OTel attributes are flat, so the breakdown the log event
+  // nests under `pvcs` becomes a `state` dimension here.
+  const pvcs = m.createGauge("lastlight.sandbox.sweep.pvcs");
+  pvcs.record(counts.pvcsFound, { ...metricAttrs, state: "found" });
+  pvcs.record(counts.pvcsLive, { ...metricAttrs, state: "live" });
+  pvcs.record(counts.pvcsStale, { ...metricAttrs, state: "stale" });
+  pvcs.record(counts.pvcsCurrent, { ...metricAttrs, state: "current" });
 }
 
 export function recordWorkflowRunStart(attrs: TelemetryAttributes = {}): void {

@@ -113,4 +113,14 @@ describe("telemetry helpers", () => {
       success: true,
     });
   });
+
+  it("keeps the sweep trigger as a dimension but still drops trigger.id", () => {
+    // `SweepTrigger` is a closed union of four, so it is bounded; `trigger.id`
+    // is per-run and stays out. Without `trigger` the `{trigger="cron"}`
+    // liveness query over the sweep metrics matches nothing.
+    expect(safeMetricAttributes({
+      trigger: "cron",
+      "trigger.id": "owner/repo#1",
+    })).toEqual({ trigger: "cron" });
+  });
 });
