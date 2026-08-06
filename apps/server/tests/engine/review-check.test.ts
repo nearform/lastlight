@@ -69,7 +69,7 @@ function fakeDb() {
         for (const [k, v] of Object.entries(patch)) if (v === null) delete next[k];
         run.scratch = next;
       }),
-      setTerminalObserver: vi.fn(),
+      addTerminalObserver: vi.fn(),
     },
   };
   return store as any;
@@ -191,7 +191,7 @@ describe("openAndBindReviewCheck + bindQueuedReviewCheck — creation and persis
     // ...and it is therefore CONCLUDED when the queued run reaches a terminal
     // status — the TTL expiry (`expireQueued`) notifies the same observer.
     const observers: Array<(r: WorkflowRun, s: any) => void> = [];
-    db.runs.setTerminalObserver.mockImplementation((fn: any) => observers.push(fn));
+    db.runs.addTerminalObserver.mockImplementation((fn: any) => observers.push(fn));
     installReviewCheckObserver(db, { github });
     observers[0](db.rows.get("run-q")!, "cancelled");
     await new Promise((r) => setTimeout(r, 0));
@@ -345,10 +345,10 @@ describe("installReviewCheckObserver", () => {
   it("hangs the projection on the store's terminal transition, once", () => {
     const db = fakeDb();
     installReviewCheckObserver(db, { github: fakeGithub() });
-    expect(db.runs.setTerminalObserver).toHaveBeenCalledTimes(1);
+    expect(db.runs.addTerminalObserver).toHaveBeenCalledTimes(1);
     // A run with no check short-circuits before any I/O — this is what keeps the
     // hook free for the ~all runs that are not reviews.
-    const observer = db.runs.setTerminalObserver.mock.calls[0][0];
+    const observer = db.runs.addTerminalObserver.mock.calls[0][0];
     expect(() => observer(makeRun(), "succeeded")).not.toThrow();
   });
 });

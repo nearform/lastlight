@@ -622,6 +622,37 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   (`@last-light approve` / `reject`), Slack slash command (`/approve`,
   `/reject`), or the dashboard. Resume logic is in `src/workflows/resume.ts`
   and is runtime-agnostic — it operates on `ExecutionResult` + DB rows.
+- **Feedback signals** (`src/engine/feedback/`, `src/state/feedback-store.ts`,
+  issue #255) — a 👍/👎 someone leaves on something the bot wrote, scored
+  against the workflow run that wrote it, so a prompt/skill change's effect on
+  quality is measurable rather than felt. Analytical only: nothing reads a
+  signal back into the agent's behaviour. Scores: 🎉🚀❤️ +2, 👍😄 +1, 👀 **0**
+  (recorded, not scored — it is the bot's own ack emoji, so counting it as
+  criticism would poison the dataset), 👎 -1, 😕 -2.
+  - **Attribution runs through an ANCHOR**, because a reaction names a *message*
+    and a signal needs a *run*. Anchors are written at the only moment the
+    association is free: when we post (Slack — `sendMessage`'s returned `ts`,
+    which every send site used to discard) or when a run finishes (GitHub
+    discovery of what it posted). Nothing recomputes it later; by then the only
+    evidence would be timestamps.
+  - **Slack is live and on**; `reaction_added` is a real event. Needs the
+    `reactions:read` bot scope + subscriptions (see Environment) and an app
+    re-consent.
+  - **GitHub must be POLLED and ships off** (`feedback.github`) — GitHub sends
+    no webhook for reactions at all. `src/cron/feedback-poll.ts` refreshes the
+    least-recently-polled anchors through one batched GraphQL `nodes(ids:)`
+    query per 100, measured at **one rate-limit point per request** with the
+    reactors included. The bound is on the data, not the schedule: individual
+    bot comments (never issues), retired after `feedback.windowDays`, capped at
+    `feedback.maxAnchorsPerTick` (÷100 = the tick's request count).
+  - A **retraction is a fact, not a delete** — removing a reaction stamps
+    `removed_at`; every score query filters `removed_at IS NULL`. And
+    `exported_at` is stamped only when a span really went out, so turning OTel
+    on later still gets the backlog (`drainFeedbackExport`, at boot).
+  - Surfaces: the dashboard's **Feedback** tab + a per-run badge,
+    `GET /admin/api/feedback/{signals,summary,daily}` and
+    `/admin/api/workflow-runs/:id/feedback`, and an OTel span on the run's own
+    trace (see the OpenTelemetry section).
 - **Sandbox HTTP egress allowlist** — both backends apply a default-deny
   HTTP egress policy. The host list lives in `src/sandbox/egress-allowlist.ts`
   (`GITHUB_HOSTS` + `PROVIDER_HOSTS` + `PACKAGE_REGISTRY_HOSTS`).
@@ -673,7 +704,8 @@ a Docker volume in production).
 data/
   lastlight.db              SQLite — executions, workflow_runs,
                             workflow_approvals, messaging_sessions,
-                            messaging_messages, plus daily/hourly stat
+                            messaging_messages, feedback_anchors,
+                            feedback_signals, plus daily/hourly stat
                             rollups.
   agent-sessions/           Shim destination (override with
                             `LASTLIGHT_SESSIONS_DIR`). Its `projects/` subdir is
@@ -1000,6 +1032,7 @@ OpenTelemetry (optional):
 - Last Light exports workflow/phase/agent/chat metadata by default. `LASTLIGHT_OTEL_INCLUDE_CONTENT=true` opts into sensitive prompt/message/tool-result content (truncated).
 - **Span tree + OpenInference (issue #224).** A run exports a nested span tree — `lastlight.workflow.run` (CHAIN) → `lastlight.workflow.phase` (CHAIN) → `lastlight.agent.execute` (AGENT) → a span per model turn (LLM) → a span per tool call (TOOL) — carrying OpenInference attributes (`openinference.span.kind`, `llm.model_name`/`llm.system`, `llm.token_count.*`, `llm.cost.total`, `tool.name`, `tool.is_error`). So an OpenInference-aware backend (e.g. Arize Phoenix) renders a proper agent tree with per-turn tokens + cost instead of a flat two-span shape. The OpenInference keys are set via `setSpanAttributes` (a direct `span.setAttribute` path) to bypass the `safeSpanAttributes` content scrubber, which would otherwise strip `token`/`prompt`/`content` keys; content values (`input.value`/`output.value`/tool args+results) stay gated behind `LASTLIGHT_OTEL_INCLUDE_CONTENT`. Constants live in `src/telemetry/openinference.ts`; the turn/tool tree is built by `AgentSpanTree` (`src/telemetry/pi-events.ts`) from the same pi event stream that still emits the flat `pi.*` span events as a fallback.
 - `LASTLIGHT_OTEL_METRICS_ENABLED=false` (default true; overlay `otel.metrics: false`) disables the OTLP **metrics** signal while keeping traces — for a traces-only backend that rejects metrics (Arize Phoenix 404s the metrics endpoint). The metric reader is then never started (`initTelemetry`), so `meter()` hands back a no-op and `recordExecutionMetrics`/… silently do nothing.
+- **Feedback signals on the trace (issue #255).** A 👍/👎 somebody leaves on the bot's output exports one more span, `lastlight.feedback.signal` (OpenInference `EVALUATOR`), carrying `feedback.{source,emoji,score,sentiment,anchor.kind,anchor.url}` plus `langfuse.score.user_feedback`. It is **parented on the original run's span**, rebuilt from `workflow_runs.trace_id`/`span_id` as a remote context (`src/telemetry/feedback.ts`) — because the reaction arrives long after that span closed, and starting a fresh span would produce a second, disconnected trace nobody can relate to the work. No recorded trace (telemetry was off during the run) → it exports as its own root span. Caveat: Langfuse does not yet map `langfuse.score.*` on OTLP ingest, so today those attributes ride along on a correctly-placed span rather than becoming a Score; Phoenix reads the `EVALUATOR` kind now. Metrics: `lastlight.feedback.signals` + `lastlight.feedback.score`.
 - `LASTLIGHT_OTEL_FORWARD_TO_SANDBOX=true` (default) enables sandbox telemetry. On the **docker** backend, sandboxes export OTLP to an in-network `otel-collector` compose service (static IP `172.30.0.30` on `sandbox-egress`, dual-homed onto `proxy-egress`), which re-exports to the real backend; the sandbox is given only that internal endpoint (`http://172.30.0.30:4318`), never the backend endpoint or `OTEL_EXPORTER_OTLP_HEADERS`. The collector config is generated from the harness OTEL_* env by `writeOtelCollectorConfig` (`src/sandbox/egress-firewall-config.ts`). This is why custom-port/plaintext collectors no longer need firewall changes — the backend hop runs on the collector's trusted outbound leg, not through `ssl_preread`. On **gondolin**/**none** (agentic-pi runs in-process), `OTEL_*` env is forwarded directly and `LASTLIGHT_OTEL_COLLECTOR_HOSTS` (+ parsed endpoint hosts) feed gondolin's egress allowlist.
 
 Web search (optional, opt-in per workflow phase):
@@ -1046,6 +1079,7 @@ Slack (optional):
   (OIDC via arctic, uses `openid.connect.userInfo`; requests the `email` scope
   so a Slack login matches a `users` row by email — issue #205)
 - `SLACK_ALLOWED_WORKSPACE` — restrict OAuth login to one team_id / domain
+- **Slack bot scope `reactions:read`** (setup step, issue #255) — required for **feedback signals**: with it (plus the `reaction_added` / `reaction_removed` event subscriptions, both in `deploy/slack/slack-manifest.json`) a 👍/👎 on a message the bot posted is scored against the workflow run that produced it. Without it Slack never delivers the event and the feature is dormant — silently, and harmlessly. **Re-consent the Slack app after adding it.**
 - **Slack bot scope `users:read.email`** (setup step, issue #205) — required
   for **Slack → user matching**: with it, `web.users.info` returns the user's
   `profile.email` so a Slack-initiated run/approval attributes to the same

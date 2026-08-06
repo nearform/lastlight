@@ -17,6 +17,7 @@ import {
   type WorkflowDefinition,
   type WorkflowRunExecution,
   type TriggeredByUser,
+  type FeedbackSignal,
 } from "../api";
 import { ActorChip } from "./ActorChip";
 import { WorkflowPipeline } from "./WorkflowPipeline";
@@ -69,6 +70,56 @@ const STATUS_ICON_FALLBACK: StatusIconMeta = { Icon: QuestionMarkCircleIcon, cls
 function StatusIcon({ status, className }: { status: WorkflowRun["status"]; className?: string }) {
   const { Icon, cls } = STATUS_ICON[status] ?? STATUS_ICON_FALLBACK;
   return <Icon className={clsx("shrink-0", cls, className ?? "w-4 h-4")} title={status} />;
+}
+
+/** The emoji a canonical reaction name renders as (issue #255). */
+const FEEDBACK_GLYPH: Record<string, string> = {
+  "+1": "👍",
+  "-1": "👎",
+  laugh: "😄",
+  hooray: "🎉",
+  rocket: "🚀",
+  heart: "❤️",
+  confused: "😕",
+  eyes: "👀",
+  smile: "😄",
+  smiley: "😄",
+  grinning: "😀",
+  heart_eyes: "😍",
+  disappointed: "😞",
+  cry: "😢",
+  sob: "😭",
+};
+
+/**
+ * What people said about this run, as a compact chip: the reactions themselves
+ * plus the mean of the SCORED ones. 👀 shows in the glyphs but is left out of
+ * the average — it is the bot's own ack idiom, so counting it as an opinion
+ * would drag every score toward zero.
+ */
+function FeedbackBadge({ signals }: { signals: FeedbackSignal[] }) {
+  if (signals.length === 0) return null;
+  const scored = signals.filter((s) => s.score !== 0);
+  const average = scored.length
+    ? scored.reduce((n, s) => n + s.score, 0) / scored.length
+    : null;
+  const tone =
+    average === null ? "text-base-content/50" : average > 0 ? "text-success" : average < 0 ? "text-error" : "text-base-content/50";
+  const glyphs = signals.map((s) => FEEDBACK_GLYPH[s.emoji] ?? `:${s.emoji}:`).join("");
+  return (
+    <span
+      className={clsx("badge badge-xs badge-ghost gap-1", tone)}
+      title={`${signals.length} feedback signal${signals.length === 1 ? "" : "s"}`}
+    >
+      <span>{glyphs}</span>
+      {average !== null && (
+        <span className="font-mono">
+          {average > 0 ? "+" : ""}
+          {average.toFixed(1)}
+        </span>
+      )}
+    </span>
+  );
 }
 
 interface DetailPanelProps {
@@ -264,6 +315,25 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
     };
   }, [run.id, run.status, approvalRefresh]);
 
+  // Feedback signals on this run (issue #255). Fetched once, not polled: a
+  // reaction can arrive at any time, but nobody is watching a run detail panel
+  // waiting for one, and the Feedback tab is where you go to look.
+  const [feedback, setFeedback] = useState<FeedbackSignal[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .workflowRunFeedback(run.id)
+      .then((res) => {
+        if (!cancelled) setFeedback(res.signals);
+      })
+      .catch(() => {
+        /* a run with no feedback and a failed fetch look the same: no badge */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [run.id]);
+
   const pendingApprovals = runApprovals.filter((a) => a.status === "pending");
   const handleApprovalResponded = () => {
     setApprovalRefresh((n) => n + 1);
@@ -386,6 +456,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
           </button>
         )}
         <StatusIcon status={run.status} className="w-5 h-5" />
+        <FeedbackBadge signals={feedback} />
         {run.repo &&
           (() => {
             const href = repoUrl(runRepoPath(run));

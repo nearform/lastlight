@@ -764,6 +764,34 @@ dependencies:
 		</tbody>
 	</table>
 
+	<h2>Feedback signals (optional)</h2>
+
+	<p>
+		A 👍 or 👎 on something Last Light wrote becomes an eval signal against the
+		workflow run that produced it. Slack works out of the box (it sends a real
+		<code>reaction_added</code> event); the GitHub half has to be polled —
+		GitHub delivers no webhook for reactions at all — so it ships off:
+	</p>
+
+	<pre><code>{`feedback:
+  enabled: true              # Slack signals, live
+  github: false              # opt into the GitHub reaction poller
+  pollSchedule: "*/30 * * * *"
+  windowDays: 14             # how long a bot comment stays pollable
+  maxAnchorsPerTick: 500     # = 5 GraphQL requests per tick
+  retentionDays: 90
+  otel: true                 # export each signal onto the run's trace`}</code></pre>
+
+	<p>
+		Env overrides: <code>LASTLIGHT_FEEDBACK_ENABLED</code>,
+		<code>LASTLIGHT_FEEDBACK_GITHUB</code>,
+		<code>LASTLIGHT_FEEDBACK_OTEL</code>,
+		<code>LASTLIGHT_FEEDBACK_WINDOW_DAYS</code>. Operator-only — a target repo
+		cannot set these. See <a href="/docs/feedback-signals">Feedback signals</a>
+		for the emoji vocabulary, the Slack scope you need to add, and how the
+		polling budget stays bounded.
+	</p>
+
 	<div class="docs-next">
 		<a href="/docs/workflows/demo">
 			<span class="label">← Previous</span>

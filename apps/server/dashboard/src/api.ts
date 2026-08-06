@@ -487,6 +487,51 @@ export interface DailyStat {
   costUsd: number;
 }
 
+// ── Feedback signals (issue #255) ──────────────────────────────────────────
+// Hand-mirrored from `src/state/feedback-store.ts` — the dashboard is a
+// separate Vite app with no import edge to core, so every server type is
+// copied here by hand.
+
+/** One 👍/👎 on something the bot wrote, scored against the run that wrote it. */
+export interface FeedbackSignal {
+  id: string;
+  anchorId: string;
+  source: "slack" | "github";
+  workflowRunId: string | null;
+  workflowName: string | null;
+  messagingSessionId: string | null;
+  owner: string | null;
+  repo: string | null;
+  issueNumber: number | null;
+  emoji: string;
+  /** -2..+2. Zero means "recorded, not scored" — 👀. */
+  score: number;
+  sentiment: "very_good" | "good" | "neutral" | "bad" | "very_bad";
+  reactor: string | null;
+  reactedAt: string | null;
+  observedAt: string;
+  removedAt: string | null;
+  exportedAt: string | null;
+}
+
+export interface FeedbackSummaryRow {
+  workflowName: string | null;
+  total: number;
+  positive: number;
+  negative: number;
+  /** 👀 — counted, but excluded from `averageScore`. */
+  neutral: number;
+  averageScore: number;
+}
+
+export interface FeedbackDailyRow {
+  date: string;
+  total: number;
+  positive: number;
+  negative: number;
+  averageScore: number;
+}
+
 export interface Health {
   status: string;
   stateDir: string;
@@ -733,6 +778,24 @@ export const api = {
   dailyStats: (days = 30) => req<{ daily: DailyStat[] }>(`/stats/daily?days=${days}`),
   hourlyStats: (hours = 24) =>
     req<{ hourly: DailyStat[] }>(`/stats/hourly?hours=${hours}`),
+  feedbackSignals: (opts: { limit?: number; workflow?: string; source?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.limit) qs.set("limit", String(opts.limit));
+    if (opts.workflow) qs.set("workflow", opts.workflow);
+    if (opts.source) qs.set("source", opts.source);
+    const q = qs.toString();
+    return req<{ signals: FeedbackSignal[]; total: number }>(
+      `/feedback/signals${q ? `?${q}` : ""}`,
+    );
+  },
+  feedbackSummary: (days = 30) =>
+    req<{ summary: FeedbackSummaryRow[]; days: number }>(`/feedback/summary?days=${days}`),
+  feedbackDaily: (days = 30, workflow?: string) =>
+    req<{ daily: FeedbackDailyRow[] }>(
+      `/feedback/daily?days=${days}${workflow ? `&workflow=${encodeURIComponent(workflow)}` : ""}`,
+    ),
+  workflowRunFeedback: (id: string) =>
+    req<{ signals: FeedbackSignal[] }>(`/workflow-runs/${id}/feedback`),
   executions: (opts: { limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams();
     if (opts.limit) qs.set("limit", String(opts.limit));

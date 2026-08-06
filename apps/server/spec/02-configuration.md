@@ -98,6 +98,16 @@ interface SandboxCleanupConfig {
   maxDirs: number;                        // LRU cap on workspace dirs (default 40)
 }
 
+interface FeedbackConfig {                // issue #255 — operator-only, never repo-settable
+  enabled: boolean;                       // master switch; Slack signals are live (default true)
+  github: boolean;                        // opt into the GitHub reaction poller (default FALSE)
+  pollSchedule: string;                   // cron expr for that poller (default "*/30 * * * *")
+  windowDays: number;                     // how long an anchor stays pollable (default 14)
+  maxAnchorsPerTick: number;              // hard budget: /100 = GraphQL requests (default 500)
+  retentionDays: number;                  // anchors pruned past this; signals kept (default 90)
+  otel: boolean;                          // export each signal onto the run's trace (default true)
+}
+
 interface CronsConfig {                   // valid at EVERY layer (default / overlay / repo)
   enable: string[];
   disable: string[];                      // the legacy `disabled.crons` list is unioned in here
@@ -643,6 +653,32 @@ per-turn/per-run tokens + cost, so an OpenInference backend (e.g. Arize Phoenix)
 renders a proper agent tree. Constants: `src/telemetry/openinference.ts`; tree:
 `AgentSpanTree` (`src/telemetry/pi-events.ts`).
 
+A **feedback signal** (issue #255) exports one more span,
+`lastlight.feedback.signal` (OpenInference `EVALUATOR`), carrying
+`feedback.{source,emoji,score,sentiment,anchor.kind,anchor.url}` plus
+`langfuse.score.user_feedback` + `.data_type` for Langfuse's vocabulary. The
+reactor's identity is content, so it rides behind
+`LASTLIGHT_OTEL_INCLUDE_CONTENT` like every other content value.
+
+The span is **parented on the original run's span**, reconstructed from
+`workflow_runs.trace_id` / `span_id` as a remote context. That is the whole
+point: a 👍 arrives minutes or days after the run's spans have closed, so
+starting a span *now* would produce a disconnected second trace that no backend
+can relate to the work. Instead the score lands on the trace it grades. With no
+recorded trace (telemetry was off during the run) it exports as its own root
+span — losing the association beats losing the signal.
+
+Caveat worth stating plainly: **Langfuse does not yet map `langfuse.score.*` to
+first-class Scores on its OTLP ingest path** ([langfuse discussion
+#14652](https://github.com/orgs/langfuse/discussions/14652)). Today the
+attributes ride along on a span that is correctly placed on the trace; they
+become a real Score the day that ships, with no change here. Phoenix reads the
+`EVALUATOR` span kind today.
+
+Metrics: `lastlight.feedback.signals` (counter) + `lastlight.feedback.score`
+(histogram — a distribution, not a sum, so one 🎉 cannot cancel one 👎 and
+report silence).
+
 | Var | Purpose | Default |
 |---|---|---|
 | `LASTLIGHT_OTEL_ENABLED` | master switch for all telemetry export | `false` |
@@ -664,6 +700,10 @@ renders a proper agent tree. Constants: `src/telemetry/openinference.ts`; tree:
 | `REVIEW_POSTS_CHECK` | post a Check Run on PR head SHA after pr-review | `false` |
 | `MAX_CONCURRENT_WORKFLOWS` | global cap on sandboxed workflow runs executing at once; excess triggers are persisted as `queued` and admitted FIFO as slots free (overlay `concurrency.maxWorkflows`) | `4` |
 | `MAX_QUEUE_WAIT_MS` | how long a `queued` run may wait before it's dropped (cancelled with a "waited too long" notice) by the admission sweeper (overlay `concurrency.maxQueueWaitMs`) | `3600000` (1 hr) |
+| `LASTLIGHT_FEEDBACK_ENABLED` | master switch for reaction-derived eval signals (overlay `feedback.enabled`) | `true` |
+| `LASTLIGHT_FEEDBACK_GITHUB` | opt into the GitHub reaction poller — GitHub sends no webhook for reactions, so this half must be polled (overlay `feedback.github`) | `false` |
+| `LASTLIGHT_FEEDBACK_OTEL` | export each signal as a span on the run's own trace (overlay `feedback.otel`) | `true` |
+| `LASTLIGHT_FEEDBACK_WINDOW_DAYS` | how long a GitHub anchor stays in the poll rotation (overlay `feedback.windowDays`) | `14` |
 | `LASTLIGHT_GIT_CREDENTIALS` | **inert** — legacy credentials-file path; git auth now flows via a github.com-scoped `http.extraheader` (`GIT_CONFIG_*` env), not a credentials file | unset |
 | `LASTLIGHT_WRITE_GLOBAL_GIT` | when `"1"`, also write the bot identity + `http.extraheader` auth to the harness user's global `~/.gitconfig` (non-sandboxed direct-exec path only) | `0` |
 | `LASTLIGHT_GIT_SHA` | core git SHA baked into the image (Dockerfile `ARG`); surfaced by `GET /admin/api/server/info` for the dashboard drift banner | empty → "unknown" |
@@ -750,6 +790,7 @@ These have no env var — they're set in `config/default.yaml` or the overlay's
 | `buildAssets.location` | `repo` \| `server` | Where build handoff docs live. | no |
 | `concurrency.maxWorkflows` / `.maxQueueWaitMs` | `4` / `3600000` | Global admission cap. | no |
 | `cleanup.sandbox.{enabled,reapOnCompletion,sweepSchedule,retentionHours,maxDirs}` | `true` / `true` / `"0 * * * *"` / `12` / `40` | Sandbox-workspace reaping: reap an ephemeral run's workspace on terminal success, plus an hourly TTL + LRU backstop sweep that bounds the reusable per-PR cache. See `09-sandbox.md`. | no |
+| `feedback.{enabled,github,pollSchedule,windowDays,maxAnchorsPerTick,retentionDays,otel}` | `true` / `false` / `"*/30 * * * *"` / `14` / `500` / `90` / `true` | Reaction-derived eval signals (issue #255): a 👍/👎 on something the bot wrote, scored against the run that wrote it. **Two switches because the two surfaces cost different things.** Slack is event-driven and free — `reaction_added` is a real event, so `enabled` turns on a webhook handler and nothing else. GitHub delivers **no webhook for reactions at all**, so `github` opts into a poller and ships **off**. What bounds that poller is the data, not the schedule: it polls individual bot comments ("anchors"), never issues; each retires after `windowDays`; and `maxAnchorsPerTick / 100` is exactly how many batched GraphQL requests a tick may issue, at one rate-limit point each. Env: `LASTLIGHT_FEEDBACK_ENABLED` / `_GITHUB` / `_OTEL` / `_WINDOW_DAYS`. | no — it governs API spend and telemetry export, neither of which is a target repo's business |
 | `repoConfig.{enabled,allowKeys,allowedModels,allowAssets}` | see the per-repository layer above | The operator's bounds on the repo layer. | **never** — a repo can't widen its own bounds |
 | `deploy.version` | `string \| null`, `null` | Core-version pin (git tag/ref). Deployment config, not runtime behaviour. Env: `LASTLIGHT_CORE_VERSION`. | no |
 | `bootstrap.label` / `explore.defaultRepo` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO`. | no |

@@ -160,14 +160,28 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod</code></pre>
 		startup instead, which is useful when telemetry is a hard requirement.
 	</p>
 
+	<h2>Human feedback on the trace</h2>
+
+	<p>
+		When somebody reacts 👍 or 👎 to something Last Light wrote, that score is
+		exported as a <code>lastlight.feedback.signal</code> span attached to the
+		<strong>original run's trace</strong> — a late child of that run's span,
+		reconstructed from the trace and span ids the run recorded. So the grade
+		appears on the very trace it grades, beside the prompts, tokens and cost
+		that produced the output, instead of in a disconnected trace of its own.
+		The span carries OpenInference's <code>EVALUATOR</code> kind and Langfuse's
+		<code>langfuse.score.*</code> attributes. See
+		<a href="/docs/feedback-signals">Feedback signals</a>.
+	</p>
+
 	<div class="docs-next">
 		<a href="/docs/repo-config">
 			<span class="label">← Previous</span>
 			<span class="title">Per-repo config</span>
 		</a>
-		<a href="/docs/cli">
+		<a href="/docs/feedback-signals">
 			<span class="label">Next →</span>
-			<span class="title">CLI</span>
+			<span class="title">Feedback signals</span>
 		</a>
 	</div>
 </DocsLayout>

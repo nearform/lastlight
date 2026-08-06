@@ -23,6 +23,13 @@ export const SpanKind = {
   AGENT: "AGENT",
   LLM: "LLM",
   TOOL: "TOOL",
+  /**
+   * A judgement ABOUT another span rather than work performed. Used for the
+   * human feedback signals of issue #255 — a 👍/👎 exported as a late child of
+   * the run it grades — which is exactly what Phoenix renders in its evaluation
+   * lane instead of the agent timeline.
+   */
+  EVALUATOR: "EVALUATOR",
 } as const;
 export type SpanKindValue = (typeof SpanKind)[keyof typeof SpanKind];
 

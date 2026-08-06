@@ -1263,6 +1263,50 @@ export function createAdminRoutes(
     return c.json({ hourly: db.executions.hourlyStats(hours) });
   });
 
+  // ── Feedback signals (issue #255) ─────────────────────────────────────────
+  // A 👍/👎 on something the bot wrote, scored against the run that wrote it.
+  // Read-only: signals are written by the Slack reaction handler and the GitHub
+  // poller, never by an operator — the whole point is that the data is what
+  // people actually did.
+
+  // The raw feed, newest first. Retracted signals are excluded unless asked for.
+  app.get("/feedback/signals", (c) => {
+    const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "50", 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query("offset") ?? "0", 10) || 0, 0);
+    const source = c.req.query("source");
+    const { signals, total } = db.feedback.list({
+      limit,
+      offset,
+      workflowName: c.req.query("workflow") || undefined,
+      repo: c.req.query("repo") || undefined,
+      source: source === "slack" || source === "github" ? source : undefined,
+      includeRemoved: c.req.query("includeRemoved") === "1",
+    });
+    return c.json({ signals, total });
+  });
+
+  // Per-workflow standing — the leaderboard. `averageScore` covers scored
+  // signals only, so a run everybody merely glanced at (👀) isn't reported as
+  // mediocre.
+  app.get("/feedback/summary", (c) => {
+    const days = Math.min(Math.max(1, parseInt(c.req.query("days") ?? "30", 10) || 30), 365);
+    return c.json({ summary: db.feedback.summaryByWorkflow(days), days });
+  });
+
+  // Zero-filled daily series for the chart, optionally for one workflow.
+  app.get("/feedback/daily", (c) => {
+    const days = Math.min(Math.max(1, parseInt(c.req.query("days") ?? "30", 10) || 30), 90);
+    const workflow = c.req.query("workflow") || undefined;
+    return c.json({ daily: db.feedback.dailyScores(days, workflow) });
+  });
+
+  // Everything said about one run — the run-detail badge.
+  app.get("/workflow-runs/:id/feedback", (c) => {
+    const run = db.runs.getRun(c.req.param("id"));
+    if (!run) return c.json({ error: "workflow run not found" }, 404);
+    return c.json({ signals: db.feedback.forRun(run.id) });
+  });
+
   // Running Docker containers
   app.get("/containers", async (c) => {
     const containers = await listRunningContainers();

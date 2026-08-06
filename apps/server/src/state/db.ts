@@ -5,6 +5,7 @@ import { ExecutionStore } from "./execution-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { WorkflowRunStore } from "./workflow-run-store.js";
 import { UserStore } from "./user-store.js";
+import { FeedbackStore } from "./feedback-store.js";
 
 // Re-export the types that moved out to the per-table stores so existing
 // import sites (`import { WorkflowRun } from "../state/db.js"`, etc.) keep
@@ -15,10 +16,20 @@ export type { ExecutionRecord } from "./execution-store.js";
 export type { WorkflowApproval } from "./approval-store.js";
 export type { WorkflowRun, PhaseHistoryEntry, PhaseMarker } from "./workflow-run-store.js";
 export type { User, TriggerActorType } from "./user-store.js";
+export type {
+  FeedbackAnchor,
+  FeedbackAnchorInput,
+  FeedbackAnchorKind,
+  FeedbackSignal,
+  FeedbackSummaryRow,
+  FeedbackDailyRow,
+  FeedbackListOptions,
+} from "./feedback-store.js";
 export { ExecutionStore } from "./execution-store.js";
 export { ApprovalStore } from "./approval-store.js";
 export { WorkflowRunStore } from "./workflow-run-store.js";
 export { UserStore, TRIGGER_ACTOR_TYPES, isTriggerActorType } from "./user-store.js";
+export { FeedbackStore } from "./feedback-store.js";
 
 const DEFAULT_DB_PATH = "lastlight.db";
 
@@ -67,6 +78,8 @@ export class StateDb {
   readonly runs: WorkflowRunStore;
   /** First-class user identity — populated on dashboard login (issue #205). */
   readonly users: UserStore;
+  /** Reaction-derived eval signals + the anchors they hang on (issue #255). */
+  readonly feedback: FeedbackStore;
 
   constructor(dbPath?: string) {
     // ":memory:" stays a real per-connection in-memory DB (used by tests for
@@ -83,6 +96,7 @@ export class StateDb {
     this.approvals = new ApprovalStore(this.db);
     this.runs = new WorkflowRunStore(this.db, { approvals: this.approvals });
     this.users = new UserStore(this.db);
+    this.feedback = new FeedbackStore(this.db);
   }
 
   // ── Cron overrides ─────────────────────────────────────────────

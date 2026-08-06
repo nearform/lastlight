@@ -1266,6 +1266,152 @@ export class GitHubClient {
       return `Could not fetch check runs: ${message}`;
     }
   }
+
+  // ── Feedback signals (issue #255) ────────────────────────────────────────
+
+  /**
+   * Everything the bot posted on one issue/PR that a human can react to.
+   *
+   * Called ONCE per finished run, not per poll: this is discovery, and the
+   * recurring cost lives in {@link fetchReactions} instead. `since` is the
+   * run's own start, so a long-lived PR with fifty comments only yields the few
+   * this run actually wrote.
+   *
+   * Note the two spellings of our own login this has to survive: REST answers
+   * `last-light[bot]` here, while the GraphQL `author.login` for the same
+   * account answers `last-light`. The caller compares with `isSelfReactor`,
+   * which strips the suffix.
+   */
+  async listBotComments(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    opts: { botLogin: string; isPr?: boolean; since?: string },
+  ): Promise<FeedbackCandidate[]> {
+    const kit = await this.kit(owner);
+    const matches = (login: string | undefined) =>
+      !!login && login.toLowerCase().replace(/\[bot\]$/, "") ===
+        opts.botLogin.toLowerCase().replace(/\[bot\]$/, "");
+
+    const out: FeedbackCandidate[] = [];
+
+    const issueComments = await kit.paginate(kit.rest.issues.listComments, {
+      owner,
+      repo,
+      issue_number: issueNumber,
+      per_page: 100,
+      ...(opts.since ? { since: opts.since } : {}),
+    });
+    for (const c of issueComments) {
+      if (!matches(c.user?.login)) continue;
+      out.push({
+        kind: "issue_comment",
+        externalId: String(c.id),
+        nodeId: c.node_id,
+        createdAt: c.created_at,
+      });
+    }
+
+    // Inline review findings — the highest-value signal there is, because a
+    // reaction lands on ONE finding rather than on a whole review. (The review
+    // BODY is not reactable: GitHub exposes no reactions endpoint for a
+    // pull-request review, and its UI offers no picker.)
+    if (opts.isPr) {
+      const reviewComments = await kit.paginate(kit.rest.pulls.listReviewComments, {
+        owner,
+        repo,
+        pull_number: issueNumber,
+        per_page: 100,
+        ...(opts.since ? { since: opts.since } : {}),
+      });
+      for (const c of reviewComments) {
+        if (!matches(c.user?.login)) continue;
+        out.push({
+          kind: "review_comment",
+          externalId: String(c.id),
+          nodeId: c.node_id,
+          createdAt: c.created_at,
+        });
+      }
+    }
+
+    return out;
+  }
+
+  /**
+   * Reactions for up to 100 artefacts in ONE request (issue #255).
+   *
+   * The only GraphQL call in this client, and it earns its keep: measured
+   * against the live API, 100 nodes with their reactors costs **one**
+   * rate-limit point, where the REST equivalent is 100 requests. That single
+   * fact is what makes polling GitHub for reactions affordable at all — a
+   * fixed-size working set of anchors refreshes for single-digit points a tick.
+   *
+   * It also returns the REACTORS, not just counts, so there is no second
+   * "who was that?" round-trip: identity is what lets us dedupe, attribute and
+   * notice a retraction.
+   *
+   * Absent nodes come back as nulls (a deleted comment) and are simply skipped
+   * — the anchor ages out on its own.
+   */
+  async fetchReactions(owner: string, nodeIds: string[]): Promise<Map<string, ReactionRead[]>> {
+    const out = new Map<string, ReactionRead[]>();
+    if (nodeIds.length === 0) return out;
+    const kit = await this.kit(owner);
+
+    const query = `
+      query($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          __typename
+          ... on IssueComment { id reactionGroups { content reactors(first: 50) { nodes { __typename ... on User { login } ... on Bot { login } } } } }
+          ... on PullRequestReviewComment { id reactionGroups { content reactors(first: 50) { nodes { __typename ... on User { login } ... on Bot { login } } } } }
+          ... on Issue { id reactionGroups { content reactors(first: 50) { nodes { __typename ... on User { login } ... on Bot { login } } } } }
+        }
+      }`;
+
+    for (let i = 0; i < nodeIds.length; i += REACTION_BATCH_SIZE) {
+      const batch = nodeIds.slice(i, i + REACTION_BATCH_SIZE);
+      const res = await kit.graphql<{ nodes: (GraphQlReactable | null)[] }>(query, { ids: batch });
+      for (const node of res.nodes ?? []) {
+        if (!node?.id) continue;
+        const reactions: ReactionRead[] = [];
+        for (const group of node.reactionGroups ?? []) {
+          for (const reactor of group.reactors?.nodes ?? []) {
+            if (reactor?.login) reactions.push({ content: group.content, reactor: reactor.login });
+          }
+        }
+        out.set(node.id, reactions);
+      }
+    }
+    return out;
+  }
+}
+
+/** GitHub's own cap on `nodes(ids:)`, and the unit our poll budget is counted in. */
+export const REACTION_BATCH_SIZE = 100;
+
+/** A bot-authored artefact a human could react to. */
+export interface FeedbackCandidate {
+  kind: "issue_comment" | "review_comment" | "issue";
+  /** REST id, as a string — a GitHub id read back as a float would lose precision. */
+  externalId: string;
+  /** GraphQL global id; the key {@link GitHubClient.fetchReactions} batches on. */
+  nodeId: string;
+  createdAt: string;
+}
+
+/** One reaction as GraphQL reports it: SCREAMING_CASE content + who left it. */
+export interface ReactionRead {
+  content: string;
+  reactor: string;
+}
+
+interface GraphQlReactable {
+  id?: string;
+  reactionGroups?: Array<{
+    content: string;
+    reactors?: { nodes?: Array<{ login?: string } | null> };
+  }>;
 }
 
 // ---------------------------------------------------------------------------

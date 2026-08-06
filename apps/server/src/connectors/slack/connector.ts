@@ -7,6 +7,7 @@ import type { SessionManager } from "../messaging/session-manager.js";
 import type { MessagingConfig } from "../messaging/types.js";
 import type { EventEnvelope } from "../types.js";
 import type { UserStore } from "../../state/user-store.js";
+import type { SlackReactionEvent } from "../../engine/feedback/slack.js";
 import { hasMarkdownImage, markdownToSlackBlocks, markdownToSlackMrkdwn } from "./mrkdwn.js";
 import { logger } from "../../logging/logger.js";
 
@@ -96,6 +97,8 @@ export class SlackConnector extends MessagingConnector {
   private seenEventOrder: string[] = [];
   /** App-provided hook that routes an approval button click into the dispatcher. */
   private approvalHandler?: (action: SlackApprovalAction) => Promise<void>;
+  /** App-provided hook that turns an emoji reaction into a feedback signal. */
+  private reactionHandler?: (event: SlackReactionEvent) => void;
 
   constructor(config: SlackConnectorConfig, sessionManager: SessionManager) {
     super(config, sessionManager);
@@ -132,6 +135,24 @@ export class SlackConnector extends MessagingConnector {
     this.approvalHandler = handler;
     // Socket mode needs Bolt action listeners; webhook mode uses the HTTP route.
     if (this.bolt) this.setupInteractionListeners();
+  }
+
+  /**
+   * Register the hook that scores an emoji reaction as a feedback signal
+   * (issue #255). Requires the `reactions:read` bot scope and the
+   * `reaction_added` / `reaction_removed` event subscriptions — without them
+   * Slack simply never delivers, and this stays dormant.
+   *
+   * Deliberately NOT an `EventEnvelope`: a reaction is not a conversational
+   * turn. Routing it through the registry would put it into the message
+   * batcher, the classifier and the dispatch gate, all of which exist to decide
+   * what work to do — and a 👍 asks for none.
+   */
+  onReactionAction(handler: (event: SlackReactionEvent) => void): void {
+    this.reactionHandler = handler;
+    // Socket mode subscribes per event type; webhook mode routes through
+    // `dispatchSlackEvent`, which already sees everything.
+    if (this.bolt) this.setupReactionListeners();
   }
 
   async start(): Promise<void> {
@@ -443,6 +464,22 @@ export class SlackConnector extends MessagingConnector {
       await this.onMessageEvent(event);
     } else if (event.type === "app_mention") {
       await this.onAppMention(event);
+    } else if (event.type === "reaction_added" || event.type === "reaction_removed") {
+      this.onReactionEvent(event);
+    }
+  }
+
+  /**
+   * A raw `reaction_added` / `reaction_removed` event, from either mode.
+   * Synchronous and swallowing: recording a thumb must never delay an ack or
+   * surface as a webhook error, which would make Slack retry it.
+   */
+  private onReactionEvent(event: SlackReactionEvent): void {
+    if (!this.reactionHandler) return;
+    try {
+      this.reactionHandler(event);
+    } catch (err: unknown) {
+      log.warn("Reaction handler failed", { type: event?.type, err });
     }
   }
 
@@ -473,6 +510,20 @@ export class SlackConnector extends MessagingConnector {
     this.bolt!.event("app_mention", async ({ event }) => {
       await this.onAppMention(event as any);
     });
+  }
+
+  /**
+   * Socket-mode reaction listeners. Webhook mode needs none — every event goes
+   * through `dispatchSlackEvent` — but Bolt dispatches per subscribed type, so
+   * the two modes wire up separately here exactly as messages and mentions do.
+   */
+  private setupReactionListeners(): void {
+    if (!this.bolt) return;
+    for (const type of ["reaction_added", "reaction_removed"] as const) {
+      this.bolt.event(type, async ({ event }) => {
+        this.onReactionEvent(event as unknown as SlackReactionEvent);
+      });
+    }
   }
 
   // ── Shared event handling (both modes feed these) ──────────────────────

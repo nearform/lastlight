@@ -1,0 +1,168 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+---
+<DocsLayout
+	slug="feedback-signals"
+	description="React 👍 or 👎 on what Last Light writes and it becomes an eval signal against the workflow run that produced it — stored, charted, and exported onto the run's OpenTelemetry trace."
+>
+	<p>
+		Last Light writes a lot: triage summaries, PR review findings, fix reports,
+		answers in Slack. <strong>Feedback signals</strong> let a human grade any of
+		it with a single emoji reaction. The score is recorded against the specific
+		workflow run that produced the output, so you can watch what a change to a
+		prompt or a skill actually did to quality — instead of guessing.
+	</p>
+	<p>
+		It is <strong>analytical only</strong>. Nothing about the agent's behaviour
+		changes when you thumb something down; the signal is data for you, not an
+		instruction for it.
+	</p>
+
+	<h2>What the reactions mean</h2>
+
+	<table>
+		<thead>
+			<tr><th>Score</th><th>GitHub</th><th>Slack also accepts</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><strong>+2</strong></td><td>🎉 🚀 ❤️</td><td><code>:tada:</code> <code>:heart_eyes:</code></td></tr>
+			<tr><td><strong>+1</strong></td><td>👍 😄</td><td><code>:smile:</code> <code>:smiley:</code> <code>:grinning:</code></td></tr>
+			<tr><td><strong>0</strong></td><td>👀</td><td><code>:eyes:</code></td></tr>
+			<tr><td><strong>-1</strong></td><td>👎</td><td><code>:thumbsdown:</code></td></tr>
+			<tr><td><strong>-2</strong></td><td>😕</td><td><code>:disappointed:</code> <code>:cry:</code> <code>:sob:</code></td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		👀 is recorded but scores <strong>zero</strong>, and is excluded from every
+		average. That is deliberate: 👀 is Last Light's own "I've seen it" ack
+		emoji, so people copy the idiom back onto its comments to mean "noted".
+		Counting that as criticism would quietly poison the dataset.
+	</p>
+	<p>
+		Anything outside the table is ignored rather than stored — a 🍕 is not
+		feedback, and recording it would only dilute the numbers it sat next to.
+		Reactions from the bot itself never count.
+	</p>
+
+	<h2>Slack works out of the box</h2>
+
+	<p>
+		Slack sends a real <code>reaction_added</code> event, so a Slack signal is
+		recorded within a second of the click, with no polling and no API budget.
+		It is on by default.
+	</p>
+	<p>
+		You do need to grant one scope. Add the <code>reactions:read</code>
+		<strong>bot</strong> scope and subscribe to <code>reaction_added</code> and
+		<code>reaction_removed</code> (both are in the reference manifest at
+		<code>deploy/slack/slack-manifest.json</code>), then <strong>re-consent the
+		app</strong> — Slack does not grant a new scope to an existing install.
+		Until you do, no reaction event is delivered and the feature is simply
+		dormant; nothing else is affected. In channels the bot must be a member to
+		receive reactions; DMs are already covered.
+	</p>
+
+	<h2>GitHub has to be polled, and is off by default</h2>
+
+	<p>
+		GitHub delivers <strong>no webhook for emoji reactions</strong> — there is
+		no <code>reaction</code> event, and none of the <code>issue_comment</code>
+		actions cover one. So the GitHub half has to ask, on a schedule, and it
+		ships off:
+	</p>
+
+	<pre><code>{`feedback:
+  enabled: true              # Slack signals, live
+  github: true               # opt into the GitHub poller
+  pollSchedule: "*/30 * * * *"
+  windowDays: 14             # how long a comment stays pollable
+  maxAnchorsPerTick: 500     # = 5 GraphQL requests per tick
+  retentionDays: 90
+  otel: true`}</code></pre>
+
+	<p>
+		What keeps that affordable is that the cost is a property of the
+		<em>data</em>, not of the schedule. Last Light polls individual bot
+		comments — never issues, never repositories. Each is discovered once, when
+		the run that wrote it finishes, and retires from the rotation after
+		<code>windowDays</code> (reactions arrive within hours; nobody thumbs a
+		two-month-old review). Reactions are then read in batches of 100 through a
+		single GraphQL query that costs <strong>one rate-limit point</strong> and
+		returns who reacted. A steady state of a few hundred live comments is
+		single-digit points per tick, against a 5,000/hour budget —
+		<code>maxAnchorsPerTick / 100</code> is the exact request bound.
+	</p>
+	<p>
+		One thing GitHub makes impossible: a pull-request <em>review body</em> has
+		no reactions endpoint and no picker. Only its inline comments can be
+		reacted to — which is the better granularity anyway, since a 👎 then names
+		one finding rather than a whole review.
+	</p>
+
+	<h2>Where the signals go</h2>
+
+	<p>
+		The <strong>Feedback</strong> tab in the admin dashboard charts the score
+		over time, ranks workflows, and lists the raw signals; each run's detail
+		panel carries a badge with what people said about it. The same data is on
+		the admin API at <code>/admin/api/feedback/signals</code>,
+		<code>/feedback/summary</code>, <code>/feedback/daily</code> and
+		<code>/admin/api/workflow-runs/:id/feedback</code>.
+	</p>
+
+	<h3>And onto the trace, if you run OpenTelemetry</h3>
+
+	<p>
+		With <a href="/docs/observability">telemetry</a> enabled, each signal is
+		also exported as a <code>lastlight.feedback.signal</code> span — attached to
+		the <strong>original run's trace</strong>, as a late child of that run's
+		span. So in Arize Phoenix or Langfuse the score appears on the very trace
+		it grades, next to the prompts, tokens and cost that produced it, rather
+		than in a disconnected trace of its own. Last Light remembers each run's
+		trace and span ids for exactly this reason.
+	</p>
+	<p>
+		The span carries OpenInference's <code>EVALUATOR</code> kind (which Phoenix
+		reads today) alongside <code>langfuse.score.user_feedback</code>. One
+		caveat worth stating plainly: Langfuse does not yet map
+		<code>langfuse.score.*</code> to first-class Scores on its OTLP ingest
+		path, so for now those attributes ride along on a correctly-placed span
+		rather than becoming a Score object. When Langfuse ships that mapping it
+		will start working with no change here. Metrics
+		(<code>lastlight.feedback.signals</code>,
+		<code>lastlight.feedback.score</code>) are emitted either way.
+	</p>
+	<p>
+		The reactor's identity is treated as content: it is only attached to a span
+		when <code>LASTLIGHT_OTEL_INCLUDE_CONTENT=true</code>, like every other
+		content value.
+	</p>
+
+	<p>
+		Signals recorded while telemetry was off are <strong>not</strong> marked
+		exported, so switching OpenTelemetry on later backfills them onto the traces
+		they belong to at the next restart — rather than starting your backend from
+		zero.
+	</p>
+
+	<h2>Removing a reaction</h2>
+
+	<p>
+		Take a reaction away and the signal is <strong>retracted, not deleted</strong>
+		— it stops counting toward every score immediately, but the row stays.
+		"Somebody thumbed this and then thought better of it" is itself worth
+		knowing.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/observability">
+			<span class="label">← Previous</span>
+			<span class="title">Observability</span>
+		</a>
+		<a href="/docs/cli">
+			<span class="label">Next →</span>
+			<span class="title">CLI</span>
+		</a>
+	</div>
+</DocsLayout>
