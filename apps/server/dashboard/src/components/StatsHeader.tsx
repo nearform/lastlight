@@ -34,40 +34,44 @@ const TIME_RANGES = [
 ];
 
 /**
- * The escape hatch for per-repo visibility (issue #169): "my repos" narrows
- * every list to what the user's GitHub teams can reach, "all" turns the
- * narrowing off everywhere at once.
+ * The optional "my teams' repos" filter (issue #169) — OFF unless the user
+ * turns it on, and remembered per browser once they do.
  *
- * **Wherever something is filtered by team, this is how you get out of it.**
- * That is the point of putting it in the header rather than per-panel: one
- * control with one meaning, so an empty list is never ambiguous about whether
- * there is no activity or just none of yours.
+ * Opt-in rather than opt-out because GitHub team grants describe involvement,
+ * not access: an org owner reaches every repo without a team grant anywhere, so
+ * as a default this would hide people's own projects. As a filter somebody
+ * chose, narrowing to their teams' repos is exactly the decluttering they asked
+ * for, and one click undoes it.
  *
- * Renders nothing at all unless the server actually resolved team grants for
- * this person — for a password/Slack login, a deployment with the feature off,
- * or any fail-open case there is nothing being narrowed, and a switch that
- * changes nothing is worse than no switch.
+ * Renders nothing unless the server resolved real team grants — for a
+ * password/Slack login, a deployment with the feature off, or somebody in no
+ * team there is nothing to narrow to, and a control that does nothing is worse
+ * than no control.
  */
 function RepoScopeToggle() {
-  const { scope, setScope, canScope, meta } = useVisibleRepos();
-  if (!canScope) return null;
+  const { scope, setScope, canScope, degraded, meta } = useVisibleRepos();
+  if (!canScope && !degraded) return null;
   const count = meta?.repos?.length ?? 0;
-  const mine = scope === "mine";
+  const on = scope === "mine";
   return (
     <button
-      onClick={() => setScope(mine ? "all" : "mine")}
+      onClick={() => setScope(on ? "all" : "mine")}
       className={clsx(
-        "btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs",
-        mine ? "btn-ghost text-base-content/70" : "btn-ghost text-base-content/40",
+        "btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs btn-ghost",
+        on ? "text-base-content/70" : "text-base-content/40",
       )}
       title={
-        mine
-          ? `Showing the ${count} repo${count === 1 ? "" : "s"} your GitHub teams can reach. Click to see all repos.`
-          : "Showing every managed repo. Click to narrow to your GitHub teams' repos."
+        degraded
+          ? "Your teams couldn't be resolved, so nothing is filtered. Click to turn the filter off."
+          : on
+            ? `Filtered to the ${count} repo${count === 1 ? "" : "s"} your GitHub teams own. Click to show all repos.`
+            : "Showing every managed repo. Click to filter to your GitHub teams' repos."
       }
     >
-      <Filter className={clsx("w-3.5 h-3.5", mine && "text-primary")} />
-      <span className="font-mono">{mine ? `my repos (${count})` : "all repos"}</span>
+      <Filter className={clsx("w-3.5 h-3.5", on && !degraded && "text-primary")} />
+      <span className="font-mono">
+        {degraded ? "my teams (unavailable)" : on ? `my teams (${count})` : "all repos"}
+      </span>
     </button>
   );
 }

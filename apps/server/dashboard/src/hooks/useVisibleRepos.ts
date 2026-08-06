@@ -2,31 +2,44 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type MeRepos } from "../api";
 
 /**
- * Which repos to show the logged-in user (issue #169).
+ * The optional "my teams' repos" filter (issue #169).
  *
- * `allowed === null` means **no filter** — show everything. That is the answer
- * for a password/Slack login, a deployment with the feature off, every failure
- * mode including "the request blew up", and whenever the user has chosen the
- * `all` scope. Filtering here is declutter, not access control: the server
- * still returns global data on every list endpoint, so the safe direction to
- * fail is *more visible*, never less.
+ * **Opt-in, and off by default.** Everyone sees every managed repo until they
+ * choose otherwise; choosing is remembered per browser. That inversion is the
+ * whole design, and it is what makes the underlying rule safe to use: GitHub
+ * team grants do NOT describe what a person can access — an org owner reaches
+ * every repo with no team grant anywhere — so as a *default* this would hide
+ * repos people work in daily. As a filter somebody switched on for themselves,
+ * "the repos my teams own" is just a useful narrowing, and it is reversible in
+ * one click.
+ *
+ * `allowed === null` means **no filter**. That is the answer whenever the user
+ * hasn't opted in, and also for every failure path once they have — a
+ * password/Slack login, the feature off, an over-budget resolution, a GitHub
+ * error. The safe direction is always *more visible*, never less.
  */
 export interface VisibleRepos {
   allowed: Set<string> | null;
   /** The raw server answer, for a "why am I seeing this?" hint. Null until loaded. */
   meta: MeRepos | null;
   loading: boolean;
-  /** Current scope. `all` means the user explicitly opted out of narrowing. */
+  /** Current scope. `all` is the default; `mine` is opted into. */
   scope: RepoScope;
   setScope: (scope: RepoScope) => void;
   /**
-   * Whether narrowing is even possible — i.e. the server resolved real team
-   * grants for this person. False for a password/Slack login, a deployment
-   * with the feature off, and every fail-open case. The scope control is
-   * hidden entirely when this is false: offering "my repos / all repos" to
-   * somebody we can't scope would be a switch that does nothing.
+   * Whether the filter is offerable — i.e. the server resolved real team grants
+   * for this person. False for a password/Slack login, a deployment with the
+   * feature off, and every fail-open case. The control is hidden entirely when
+   * this is false: offering a filter that would narrow to nothing, or to
+   * everything, is worse than not offering it.
    */
   canScope: boolean;
+  /**
+   * True when the user opted in but there is no filter to apply — the teams
+   * couldn't be resolved. The control says so rather than silently behaving
+   * like "all", which would look like the opt-in didn't take.
+   */
+  degraded: boolean;
   /** Force a re-resolution server-side, then refresh every subscriber. */
   resync: () => Promise<void>;
 }
@@ -50,10 +63,12 @@ const REFRESH_MS = 5 * 60_000;
 
 function readStoredScope(): RepoScope {
   try {
-    return localStorage.getItem(SCOPE_KEY) === "all" ? "all" : "mine";
+    // Defaults to "all" — the filter is opt-in. Only an explicit, remembered
+    // "mine" narrows anything.
+    return localStorage.getItem(SCOPE_KEY) === "mine" ? "mine" : "all";
   } catch {
-    // Private mode / storage disabled — default to the narrowed view.
-    return "mine";
+    // Private mode / storage disabled — unfiltered, like any other unset case.
+    return "all";
   }
 }
 
@@ -133,7 +148,16 @@ export function useVisibleRepos(): VisibleRepos {
     await load(true);
   }, []);
 
-  return { allowed, meta, loading: meta === null, scope, setScope, canScope, resync };
+  return {
+    allowed,
+    meta,
+    loading: meta === null,
+    scope,
+    setScope,
+    canScope,
+    degraded: scope === "mine" && allowed === null,
+    resync,
+  };
 }
 
 /**

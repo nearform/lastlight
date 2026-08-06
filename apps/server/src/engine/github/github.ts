@@ -380,6 +380,21 @@ export class GitHubClient {
   }
 
   /**
+   * Is this the "that login isn't an organization" GraphQL error?
+   *
+   * `organization(login:)` against a personal account answers
+   * `{ data: { organization: null }, errors: [{ type: "NOT_FOUND", path: ["organization"] }] }`,
+   * and Octokit throws on any `errors` array. Distinguishing it from a real
+   * failure (permission, rate limit, network) is what keeps a personal-account
+   * owner in `managedRepos` from being treated as a broken resolution.
+   */
+  private static isOrganizationNotFoundError(err: unknown): boolean {
+    const errors = (err as { errors?: Array<{ type?: string; path?: unknown[] }> })?.errors;
+    if (!Array.isArray(errors) || errors.length === 0) return false;
+    return errors.every((e) => e?.type === "NOT_FOUND" && e?.path?.[0] === "organization");
+  }
+
+  /**
    * The teams in `org` that `login` belongs to (issue #169).
    *
    * GraphQL rather than REST, for one reason: `Organization.teams` takes a
@@ -404,27 +419,40 @@ export class GitHubClient {
     let after: string | null = null;
     let requests = 0;
     for (let page = 0; page < maxPages; page++) {
-      const res: {
+      let res: {
         organization: {
           teams: {
             pageInfo: { hasNextPage: boolean; endCursor: string | null };
             nodes: Array<{ slug: string; name: string | null } | null> | null;
           };
         } | null;
-      } = await kit.graphql(
-        `query($org: String!, $login: String!, $after: String) {
-           organization(login: $org) {
-             teams(first: 100, userLogins: [$login], after: $after) {
-               pageInfo { hasNextPage endCursor }
-               nodes { slug name }
+      };
+      try {
+        res = await kit.graphql(
+          `query($org: String!, $login: String!, $after: String) {
+             organization(login: $org) {
+               teams(first: 100, userLogins: [$login], after: $after) {
+                 pageInfo { hasNextPage endCursor }
+                 nodes { slug name }
+               }
              }
-           }
-         }`,
-        { org, login, after },
-      );
+           }`,
+          { org, login, after },
+        );
+      } catch (err: unknown) {
+        // A PERSONAL account owner is not an error, it is an answer: "no teams
+        // here". GraphQL reports it as `organization: null` PLUS a NOT_FOUND
+        // entry in `errors`, and Octokit throws whenever `errors` is present —
+        // so this cannot be detected by checking for a null organization, which
+        // is never reached. Left to the caller it would log a warning per
+        // personal-account owner on every single resolution, and (worse) mark
+        // the whole pass as failed.
+        if (GitHubClient.isOrganizationNotFoundError(err)) {
+          return { teams: [], requests: requests + 1 };
+        }
+        throw err;
+      }
       requests++;
-      // Null for a USER account (there is no organization to have teams) — the
-      // cheap way to skip a personal-account owner without a separate probe.
       const connection = res.organization?.teams;
       if (!connection) break;
       for (const node of connection.nodes ?? []) {

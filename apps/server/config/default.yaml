@@ -97,21 +97,32 @@ feedback:
   retentionDays: 90          # anchors pruned after this; signals kept
   otel: true                 # export each signal as a span on the run's trace
 
-# GitHub team-based per-repo visibility in the admin dashboard (issue #169).
-# A GitHub-authenticated user sees only the managed repos their org teams can
-# reach. UI declutter ONLY — every list endpoint still returns global data, so
-# this is not access control and every budget below fails OPEN (shows more).
+# The optional "my teams' repos" dashboard filter (issue #169).
 #
-# OFF by default: it needs the GitHub App's organization `Members: read`
-# permission, which requires re-consenting the App on each installation. Turn it
-# on in your overlay's config.yaml once that is done.
+# Offers each GitHub-authenticated user a header toggle that narrows every list
+# to the managed repos their GitHub org teams own. **Opt-in and off by default**
+# — nobody's view changes until they choose it, and the choice is remembered per
+# browser.
+#
+# Opt-in is load-bearing, not timidity. Team grants describe INVOLVEMENT, not
+# access: an org owner reaches every repo without a team grant anywhere. Applied
+# as a default this hides people's own work — measured against the live nearform
+# install, one maintainer's single team covered 4 of 8 managed repos and hid
+# `nearform/lastlight`, which they own. Applied as a filter somebody switched on,
+# the same narrowing is exactly the decluttering they asked for.
+#
+# This flag is the OPERATOR switch: it needs the GitHub App's organization
+# `Members: read` permission, so turn it on once you've granted that and
+# re-consented the App on each installation. Without it the toggle never
+# appears. UI only — every list endpoint still returns global data, and each
+# budget below fails OPEN (shows more).
 #
 # Nothing is crawled up front. A user's teams are resolved on demand, on their
 # first dashboard request, and cached — so an org with thousands of repos and
 # hundreds of teams costs a handful of GraphQL requests per logged-in person,
 # not a full-org walk.
 teamVisibility:
-  enabled: false             # needs the App's org `Members: read` re-consent
+  enabled: false             # operator switch — needs the App's `Members: read`
   ttlMinutes: 60             # how long a resolved answer is reused
   maxTeamsPerUser: 50        # more teams than this ⇒ fail open
   maxPagesPerTeam: 20        # 100 repos/page; a bigger grant ⇒ fail open

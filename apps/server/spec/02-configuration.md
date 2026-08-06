@@ -637,23 +637,33 @@ right methods (no dead password box for an OAuth-only gate); `POST /login`
 refuses password auth — never minting an open token — whenever auth is on but
 no password is set.
 
-**Per-repo visibility** (`teamVisibility`, issue #169) narrows what a
-GitHub-authenticated admin sees by default to the managed repos their org teams
-can reach — `GET /admin/api/me/repos` returns `{ repos, synced, reason }`, which
-the SPA passes back as the `?repos=` query filter on the run lists (so paging
-and totals stay honest) and applies locally to the session list. A header
-toggle — **"my repos" / "all repos"**, persisted per browser — turns the
-narrowing off everywhere at once, and is rendered only when there is a real team
-answer to narrow by, so an empty list is never ambiguous about whether there is
-no activity or merely none of yours. It is
-**off by default** and needs a **setup step**: grant the GitHub App the
-organization **`Members: read`** permission and subscribe it to the `team`,
-`membership` and `organization` webhook events, then re-consent the App on each
-installation. Without that the resolver simply errors and everyone keeps seeing
-everything. `repos: null` is the fail-open sentinel meaning "no filter", and it
-is what a password/Slack login, an `allowedOrg: "*"` deployment, an over-budget
-resolution and any GitHub error all return. This is **not** access control: the
-server keeps returning global data on `/workflow-runs`, `/sessions` and `/stats`.
+**The "my teams' repos" filter** (`teamVisibility`, issue #169) offers each
+GitHub-authenticated admin a header toggle that narrows every list to the
+managed repos their GitHub org teams own. `GET /admin/api/me/repos` returns
+`{ repos, synced, reason }`, which the SPA passes back as the `?repos=` query
+filter on the run lists (so paging and totals stay honest) and applies locally
+to the session list.
+
+**Opt-in, off by default, remembered per browser.** That inversion is
+load-bearing. Team grants describe **involvement, not access** — an org owner
+reaches every repo without a team grant anywhere — so applied as a default this
+hides people's own work. Measured against the live `nearform` install: of 8
+managed repos, one maintainer's single team covered 4, and the 4 it hid included
+`nearform/lastlight`, on which they hold `admin` via org ownership. Applied as a
+filter somebody switched on, the same narrowing is exactly what they asked for,
+and one click undoes it. So the toggle is never pre-applied, and the feature is
+never described to a user as visibility or access. It renders only when there
+are real team grants to narrow to.
+
+The `enabled` flag is the **operator** switch, and needs a setup step: grant the
+GitHub App the organization **`Members: read`** permission, subscribe it to the
+`team` / `membership` / `organization` webhook events, and re-consent the App on
+each installation. Without that the resolver errors, the toggle never appears,
+and nothing changes for anyone. `repos: null` is the fail-open sentinel meaning
+"no filter" — returned for a password/Slack login, an `allowedOrg: "*"`
+deployment, an over-budget resolution and any GitHub error. This is **not**
+access control: the server keeps returning global data on `/workflow-runs`,
+`/sessions` and `/stats`.
 
 ### Web search (opt-in per phase)
 

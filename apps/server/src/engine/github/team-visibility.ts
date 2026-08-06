@@ -69,6 +69,26 @@ export interface TeamVisibilityDeps {
  * Resolves "which managed repos should this person see in the dashboard?" —
  * the server half of issue #169.
  *
+ * ## This answers a PREFERENCE, not an entitlement
+ *
+ * The repos returned here are the ones a person's teams own — which is **not**
+ * the same as the repos they can reach. Org owners and direct collaborators
+ * reach repos no team grants them: a dry run against the live nearform install
+ * found one maintainer's single team (`nearformers`) covering 4 of 8 managed
+ * repos, hiding `nearform/lastlight` itself, on which they hold `admin` via org
+ * ownership.
+ *
+ * That is precisely why the dashboard filter this feeds is **opt-in and off by
+ * default**. As a default it would hide people's own work; as a filter somebody
+ * switched on for themselves it is the decluttering they asked for, reversible
+ * in one click. The distinction to hold onto is between "what can you reach"
+ * (permission) and "what do you work on" (involvement) — they coincide for a
+ * regular org member and diverge completely for an owner, for whom no
+ * access-derived rule could declutter anything at all.
+ *
+ * So: never present this as visibility or access, and never apply it to a user
+ * who did not ask for it.
+ *
  * ## Why this is lazy
  *
  * The obvious design is an org-wide sync: walk every managed repo, list the
@@ -232,9 +252,11 @@ export class TeamVisibilityResolver {
         requests += res.requests;
         orgTeams = res.teams;
       } catch (err: unknown) {
-        // The App not being installed on this owner, a personal account, or a
-        // missing `Members: read` grant all land here. Record it and fail open
-        // rather than treating "we couldn't ask" as "you're in no team".
+        // The App not being installed on this owner, or a missing
+        // `Members: read` grant. Either way we did not learn this org's answer,
+        // so the whole pass fails open — see the status computation below.
+        // (A personal-account owner is NOT here: `listUserTeams` reports it as
+        // an empty team list, because "not an org" is an answer, not a fault.)
         failure = err instanceof Error ? err.message : String(err);
         log.warn("Could not list teams for user", { org, login, err });
         continue;
@@ -274,11 +296,15 @@ export class TeamVisibilityResolver {
       if (overBudget || tooManyTeams) break;
     }
 
-    const status: VisibilitySyncStatus = tooManyTeams || overBudget
-      ? "truncated"
-      : truncated
+    // ANY failure fails the whole pass, even when other orgs answered cleanly.
+    // A partial org set is a PARTIAL ANSWER: if `nearform` resolves and
+    // `mirevue` errors, filtering to nearform's repos alone hides every mirevue
+    // repo the person can see. Same reasoning as `truncated` — the only safe
+    // incomplete answer is no answer.
+    const status: VisibilitySyncStatus =
+      tooManyTeams || overBudget || truncated
         ? "truncated"
-        : failure && teams.length === 0
+        : failure
           ? "error"
           : teams.some((t) => t.repos.length > 0)
             ? "ok"

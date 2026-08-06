@@ -249,6 +249,22 @@ describe("TeamVisibilityResolver — every budget fails OPEN", () => {
     expectFailOpen(await r.visibleRepos("alice"), "error");
   });
 
+  it("fails open when ONE org errors, even though another answered cleanly", async () => {
+    // The dangerous case: filtering to the org that worked would hide every
+    // repo in the org that didn't. A partial org set is a partial answer.
+    const github = {
+      async listUserTeams(org: string) {
+        if (org === "mirevue") throw new Error("Resource not accessible by integration");
+        return { teams: [{ slug: "platform", name: null }], requests: 1 };
+      },
+      async listTeamRepos() {
+        return { repos: ["nearform/lastlight"], truncated: false, requests: 1 };
+      },
+    } as unknown as GitHubClient;
+    const r = resolver(github, ["nearform/lastlight", "mirevue/app"]);
+    expectFailOpen(await r.visibleRepos("alice"), "error");
+  });
+
   it("fails open — not blank — when the login is in no granting team", async () => {
     const { github } = fakeGithub({ teams: { nearform: [] } });
     const r = resolver(github, ["nearform/lastlight"]);
@@ -330,5 +346,45 @@ describe("TeamVisibilityResolver — staleness", () => {
     db.teams.invalidateLogin("alice");
     await r.visibleRepos("alice");
     expect(calls.listUserTeams).toBe(2);
+  });
+});
+
+describe("GitHubClient.listUserTeams — a personal account is an answer, not a fault", () => {
+  // `organization(login:)` against a USER account returns
+  // `{ organization: null }` PLUS a NOT_FOUND error, and Octokit throws on any
+  // `errors` array — so this can't be handled by checking for a null
+  // organization, which is never reached. Left unclassified it logs a warning
+  // per personal-account owner on every resolution AND fails the whole pass,
+  // since any failure now fails open.
+  const classify = async () => {
+    const { GitHubClient } = await import("#src/engine/github/github.js");
+    return (
+      GitHubClient as unknown as { isOrganizationNotFoundError: (e: unknown) => boolean }
+    ).isOrganizationNotFoundError;
+  };
+
+  const withErrors = (errors: unknown[]) =>
+    Object.assign(new Error("graphql"), { errors, data: { organization: null } });
+
+  it("recognises the not-an-organization error", async () => {
+    const isNotFound = await classify();
+    expect(isNotFound(withErrors([{ type: "NOT_FOUND", path: ["organization"] }]))).toBe(true);
+  });
+
+  it("does NOT swallow a real failure", async () => {
+    const isNotFound = await classify();
+    expect(isNotFound(new Error("rate limited"))).toBe(false);
+    expect(isNotFound(withErrors([{ type: "FORBIDDEN", path: ["organization"] }]))).toBe(false);
+    // A NOT_FOUND on some other path is a different problem entirely.
+    expect(isNotFound(withErrors([{ type: "NOT_FOUND", path: ["repository"] }]))).toBe(false);
+    // Mixed: one genuine error alongside it must not be classified away.
+    expect(
+      isNotFound(
+        withErrors([
+          { type: "NOT_FOUND", path: ["organization"] },
+          { type: "RATE_LIMITED", path: ["organization"] },
+        ]),
+      ),
+    ).toBe(false);
   });
 });
