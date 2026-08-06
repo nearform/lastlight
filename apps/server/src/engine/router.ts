@@ -1108,6 +1108,13 @@ export async function routeEvent(
           // answer workflow (web search + repo docs), delivered back to this
           // thread. A repo-less question can't seed a sandbox workspace, so it
           // falls through to in-process chat for a quick answer (mirrors build).
+          //
+          // Reaching here at all is deliberately NARROW: `answer.yaml`'s
+          // classification block downgrades to CHAT every question chat's own
+          // read-only GitHub tools can answer (issues, PR diffs, file contents,
+          // code search), so what survives is the two things chat genuinely
+          // cannot do — the web, and exploring a checkout. Naming a repo is not
+          // enough to get here; a sandbox provision is the cost of being wrong.
           if (!classifiedRepo) {
             return {
               action: "handler",

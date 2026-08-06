@@ -205,6 +205,30 @@ describe("buildClassifierPrompt — composition", () => {
     // A workflow-contributed example made it into the Examples block.
     expect(prompt).toContain("INTENT: QATEST");
   });
+
+  it("draws the QUESTION/CHAT line on capability, and teaches it with counter-examples", () => {
+    // QUESTION provisions a sandbox; CHAT answers in-process in seconds. The
+    // classifier is the only thing standing between a "what does X do?" and a
+    // container, so the rule (in the base prompt) and the counter-examples (in
+    // answer.yaml) are both load-bearing — a prompt fork that drops either
+    // silently restores the over-firing.
+    const prompt = buildClassifierPrompt();
+
+    // The rule is capability-based, not seriousness-based.
+    expect(prompt).toMatch(/QUESTION only when answering needs the WEB or real exploration of a repo checkout/i);
+    // …and it names what chat can already reach, so "it mentions a repo" is
+    // not evidence of weight.
+    expect(prompt).toMatch(/CHAT can already read repos, issues, comments, pull requests and their diffs/i);
+    // The GitHub-issue carve-out: an issue has no chat surface to fall back to.
+    expect(prompt).toMatch(/GitHub ISSUE that asks a question is the exception/i);
+
+    // At least one repo-scoped question is taught as CHAT — without a negative
+    // example the model reads "REPO: <x>" as the signal to fire.
+    const chatExamples = prompt
+      .split("\n")
+      .filter((l) => /INTENT: CHAT, REPO: \S+\//.test(l));
+    expect(chatExamples.length).toBeGreaterThan(0);
+  });
 });
 
 describe("classifyIssueIntent — injected chat", () => {
