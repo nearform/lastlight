@@ -55,7 +55,7 @@
     "typecheck": "tsc --noEmit && pnpm run lint:boundaries"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.82.1",
+    "@earendil-works/pi-ai": "^0.83.0",
     "lastlight-shared": "workspace:*",
     "lastlight-workflow-engine": "workspace:*",
     "@hono/node-server": "^2.0.12",
@@ -79,7 +79,7 @@
     "arctic": "^3.7.0",
     "better-sqlite3": "^13.0.1",
     "croner": "^10.0.1",
-    "hono": "^4.12.32",
+    "hono": "^4.12.33",
     "octokit": "^5.0.5",
     "pino": "10.3.1",
     "pino-pretty": "13.1.3",
