@@ -159,7 +159,7 @@ export class FeedbackStore {
         input.kind,
         input.externalId,
         input.nodeId ?? null,
-        input.channel ?? null,
+        channelKey(input.channel),
         input.owner ?? null,
         input.repo ?? null,
         input.issueNumber ?? null,
@@ -182,9 +182,9 @@ export class FeedbackStore {
     const row = this.db
       .prepare(
         `SELECT * FROM feedback_anchors
-          WHERE source = ? AND external_id = ? AND channel IS ?`,
+          WHERE source = ? AND external_id = ? AND channel = ?`,
       )
-      .get(source, externalId, channel) as Record<string, unknown> | undefined;
+      .get(source, externalId, channelKey(channel)) as Record<string, unknown> | undefined;
     return row ? this.deserializeAnchor(row) : null;
   }
 
@@ -472,12 +472,22 @@ export class FeedbackStore {
 
   // ── OTel export watermark ──────────────────────────────────────
 
-  /** Signals not yet exported to OTel, oldest first. */
+  /**
+   * Signals not yet exported to OTel, oldest first.
+   *
+   * **Retracted signals are excluded.** A reaction added and then withdrawn
+   * while telemetry was off has no `exported_at` and a `removed_at`; exporting
+   * it on the backlog drain would put a +1 the person explicitly took back onto
+   * the trace, with nothing to say it was withdrawn. The live path never has
+   * this problem (a retraction can't reach `exportSignal`), so the gap was
+   * only ever reachable through the backfill.
+   */
   pendingExport(limit = 200): FeedbackSignal[] {
     return this.db
       .prepare(
         `SELECT ${SIGNAL_COLUMNS} FROM feedback_signals
-          WHERE exported_at IS NULL ORDER BY observed_at ASC LIMIT ?`,
+          WHERE exported_at IS NULL AND removed_at IS NULL
+          ORDER BY observed_at ASC LIMIT ?`,
       )
       .all(limit) as FeedbackSignal[];
   }
@@ -500,7 +510,7 @@ export class FeedbackStore {
       kind: row.kind as FeedbackAnchorKind,
       externalId: row.external_id as string,
       nodeId: (row.node_id as string | null) ?? null,
-      channel: (row.channel as string | null) ?? null,
+      channel: (row.channel as string | null) || null,
       owner: (row.owner as string | null) ?? null,
       repo: (row.repo as string | null) ?? null,
       issueNumber: (row.issue_number as number | null) ?? null,
@@ -515,4 +525,18 @@ export class FeedbackStore {
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * The stored form of `channel`: '' for a surface that has none (GitHub).
+ *
+ * SQLite treats NULLs as DISTINCT in a UNIQUE constraint, so a nullable channel
+ * makes `UNIQUE(source, channel, external_id)` — and the `ON CONFLICT` that
+ * targets it — silently inoperative for every GitHub anchor. Normalizing here
+ * keeps that one constraint honest for both surfaces without a second upsert
+ * path; {@link FeedbackStore.deserializeAnchor} maps it back to null so the
+ * type callers see is still `string | null`.
+ */
+function channelKey(channel: string | null | undefined): string {
+  return channel ?? "";
 }

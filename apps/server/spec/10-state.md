@@ -435,7 +435,7 @@ CREATE TABLE IF NOT EXISTS feedback_anchors (
   kind TEXT NOT NULL,                    -- slack_message | issue_comment | review_comment | issue
   external_id TEXT NOT NULL,             -- Slack ts, or the GitHub comment id as TEXT
   node_id TEXT,                          -- GraphQL global id (github; the batch key)
-  channel TEXT,                          -- Slack channel; NULL for github
+  channel TEXT NOT NULL DEFAULT '',      -- Slack channel; '' for github (see below)
   owner TEXT, repo TEXT, issue_number INTEGER,
   workflow_run_id TEXT,                  -- the attribution; NULL is legal
   workflow_name TEXT,
@@ -473,8 +473,18 @@ Two invariants the schema encodes:
 - **`UNIQUE(anchor_id, reactor, emoji)` makes ingest idempotent.** Slack
   redelivers, and the GitHub poller re-reads the same reactions every tick;
   both must be replayable without inflating the count.
+- **`channel` is `''`, never NULL, for a surface that has none.** SQLite treats
+  NULLs as DISTINCT in a UNIQUE constraint, so a nullable channel makes
+  `UNIQUE(source, channel, external_id)` — and the `ON CONFLICT` targeting it —
+  silently inoperative for every GitHub anchor. The sentinel keeps one
+  uniqueness rule and one upsert path for both surfaces; `FeedbackStore` maps
+  it back to null at its boundary.
 - **A retraction is a fact, not a delete.** `removed_at` is stamped and the row
   stays. Every scoring query filters `removed_at IS NULL`.
+- **The export backlog excludes retracted signals.** A reaction added and then
+  withdrawn while telemetry was off has no `exported_at` and a `removed_at`;
+  `pendingExport` filters on both, so the drain can't put a score onto a trace
+  that its author took back.
 - **`exported_at` is only stamped when a span was actually emitted.** Marking a
   signal exported while telemetry was off would silently discard it — enabling
   OTel later would find an empty backlog and the whole pre-OTel history would be

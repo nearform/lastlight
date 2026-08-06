@@ -135,7 +135,15 @@ export function migrate(db: Database.Database): void {
       -- GitHub GraphQL global id. The batched reactions query keys on this, so
       -- the poller never has to re-resolve an id it already saw.
       node_id TEXT,
-      channel TEXT,                           -- Slack channel id; null for GitHub
+      -- Slack channel id. GitHub has no channel and stores the empty string
+      -- rather than NULL, because **SQLite treats NULLs as DISTINCT in a UNIQUE
+      -- constraint** — with NULL here, the UNIQUE below (and the ON CONFLICT
+      -- that targets it) is silently inoperative for every GitHub anchor, and
+      -- re-discovering the same comment forks a second row. A sentinel keeps
+      -- ONE uniqueness rule and ONE upsert path for both surfaces; the store
+      -- maps '' back to null at its boundary so callers still see
+      -- \`channel: string | null\`.
+      channel TEXT NOT NULL DEFAULT '',
       owner TEXT,
       repo TEXT,
       issue_number INTEGER,
@@ -253,6 +261,19 @@ export function migrate(db: Database.Database): void {
     );
   } catch {
     // Column already exists — ignore
+  }
+
+  // `feedback_anchors.channel` moved from nullable to a '' sentinel (issue
+  // #255) so its UNIQUE actually binds for GitHub — see the CREATE TABLE above.
+  // `CREATE TABLE IF NOT EXISTS` can't restate a column, so backfill any rows
+  // written by a build that predates the fix. Guarded like every ALTER here: on
+  // a table that already accumulated NULL-channel duplicates the UPDATE trips
+  // the constraint, and leaving those rows alone is strictly better than
+  // failing boot over a cache of reaction anchors.
+  try {
+    db.exec(`UPDATE feedback_anchors SET channel = '' WHERE channel IS NULL`);
+  } catch {
+    // Pre-existing duplicates — they age out via `retentionDays`.
   }
 
   // The run's OTel trace/span context (issue #255). A feedback signal can

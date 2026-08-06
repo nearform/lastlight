@@ -211,6 +211,20 @@ describe("drainFeedbackExport", () => {
     expect(drainFeedbackExport(db)).toBe(0);
   });
 
+  it("does not backfill a reaction the person withdrew before OTel was enabled", () => {
+    // The one route this was reachable through: the live path can't export a
+    // retraction, so only the drain could have put a withdrawn +1 on a trace.
+    telemetry.enabled = false;
+    const anchor = anchorFor()!;
+    handleSlackReaction(deps(), reaction());
+    handleSlackReaction(deps(), reaction({ type: "reaction_removed" }));
+
+    telemetry.enabled = true;
+    expect(drainFeedbackExport(db)).toBe(0);
+    expect(emitted.calls).toHaveLength(0);
+    expect(anchor).not.toBeNull();
+  });
+
   it("does nothing while telemetry is still off", () => {
     telemetry.enabled = false;
     anchorFor();

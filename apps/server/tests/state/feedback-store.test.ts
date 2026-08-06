@@ -59,6 +59,9 @@ function githubAnchor(over: Partial<FeedbackAnchorInput> = {}): FeedbackAnchor {
   });
 }
 
+const rowCount = () =>
+  (db.database.prepare("SELECT COUNT(*) AS n FROM feedback_anchors").get() as { n: number }).n;
+
 const thumbsUp = { emoji: "+1", score: 1, sentiment: "good" as const };
 const thumbsDown = { emoji: "-1", score: -1, sentiment: "bad" as const };
 const eyes = { emoji: "eyes", score: 0, sentiment: "neutral" as const };
@@ -82,6 +85,30 @@ describe("anchors", () => {
     const first = slackAnchor();
     const second = slackAnchor();
     expect(second.id).toBe(first.id);
+    expect(rowCount()).toBe(1);
+  });
+
+  it("is idempotent for GITHUB anchors too, which have no channel", () => {
+    // SQLite treats NULLs as DISTINCT in a UNIQUE constraint, so a nullable
+    // `channel` made `ON CONFLICT(source, channel, external_id)` silently
+    // inoperative for every GitHub anchor: re-discovering the same comment —
+    // which a retried run does, since its `since` window is unchanged — forked
+    // a second row that the poller then spent budget on. Hence the '' sentinel.
+    const first = githubAnchor();
+    const second = githubAnchor();
+    expect(second.id).toBe(first.id);
+    expect(rowCount()).toBe(1);
+  });
+
+  it("keeps the sentinel out of the type callers see", () => {
+    expect(githubAnchor().channel).toBeNull();
+    expect(slackAnchor().channel).toBe("C123");
+  });
+
+  it("does not collide a slack ts with a github id that happens to match", () => {
+    githubAnchor({ externalId: "555" });
+    slackAnchor({ externalId: "555" });
+    expect(rowCount()).toBe(2);
   });
 
   it("enriches an existing anchor rather than nulling out what it already knows", () => {
@@ -252,5 +279,24 @@ describe("export watermark", () => {
     expect(db.feedback.pendingExport().map((x) => x.id)).toEqual([s.id]);
     db.feedback.markExported([s.id]);
     expect(db.feedback.pendingExport()).toEqual([]);
+  });
+
+  it("never hands out a signal the reactor already withdrew", () => {
+    // Added and retracted while telemetry was off: it has no `exported_at` and
+    // a `removed_at`. Exporting it on the backlog drain would put a +1 the
+    // person explicitly took back onto the trace, with nothing saying so.
+    const anchor = slackAnchor();
+    const s = db.feedback.recordSignal({ anchor, ...thumbsUp, reactor: "U1" })!;
+    db.feedback.removeSignal(anchor.id, "U1", "+1");
+    expect(s.exportedAt).toBeNull();
+    expect(db.feedback.pendingExport()).toEqual([]);
+  });
+
+  it("hands out a signal that was withdrawn and then re-added", () => {
+    const anchor = slackAnchor();
+    db.feedback.recordSignal({ anchor, ...thumbsUp, reactor: "U1" });
+    db.feedback.removeSignal(anchor.id, "U1", "+1");
+    db.feedback.recordSignal({ anchor, ...thumbsUp, reactor: "U1" });
+    expect(db.feedback.pendingExport()).toHaveLength(1);
   });
 });
