@@ -666,6 +666,43 @@ describe("repo-scoped queries", () => {
     expect(page.runs).toHaveLength(1);
   });
 
+  it("list({ repos }) scopes to a SET of repos (the visibility scope, issue #169)", () => {
+    makeRun({ owner: "nearform", repo: "lastlight" });
+    makeRun({ owner: "nearform", repo: "www" });
+    makeRun({ owner: "nearform", repo: "unrelated" });
+
+    const { runs, total } = db.runs.list({
+      repos: ["nearform/lastlight", "nearform/www"],
+    });
+    expect(total).toBe(2);
+    expect(runs.map((r) => r.repo).sort()).toEqual(["lastlight", "www"]);
+  });
+
+  it("list({ repos }) matches BARE rows — a plain IN() would return nothing", () => {
+    // The regression: the real create path stores `repo` bare with `owner`
+    // beside it, while the caller filters by the qualified `owner/repo`. An
+    // `IN (…)` against the column matches no modern row at all, which would
+    // silently show an empty dashboard rather than a filtered one.
+    makeRun({ owner: "nearform", repo: "lastlight" });
+    // ...alongside a legacy row that stored the qualified string in `repo`.
+    makeRun({ owner: undefined, repo: "nearform/www" });
+
+    const { runs } = db.runs.list({ repos: ["nearform/lastlight", "nearform/www"] });
+    expect(runs).toHaveLength(2);
+  });
+
+  it("list({ repo }) wins over `repos` — the Repos tab's narrower ask", () => {
+    makeRun({ owner: "nearform", repo: "lastlight" });
+    makeRun({ owner: "nearform", repo: "www" });
+
+    const { runs } = db.runs.list({
+      repo: "nearform/lastlight",
+      repos: ["nearform/lastlight", "nearform/www"],
+    });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.repo).toBe("lastlight");
+  });
+
   it("distinctRepos() groups by repo with run counts, newest activity first", () => {
     makeRun({ repo: "acme/web", startedAt: "2026-01-01T00:00:00.000Z" });
     makeRun({ repo: "acme/api", startedAt: "2026-02-01T00:00:00.000Z" });

@@ -155,6 +155,30 @@ export type TerminalRunObserver = (
   status: "succeeded" | "failed" | "cancelled",
 ) => void;
 
+/**
+ * Match one `owner/repo` against a `workflow_runs` row, in SQL.
+ *
+ * Exists because **the column does not hold the value callers filter by.** The
+ * dashboard (Repos tab, per-repo visibility) speaks qualified `owner/repo`,
+ * while the table stores the BARE repo in `repo` with the account in a separate
+ * `owner` column — except for legacy rows written before that split, which put
+ * the qualified string in `repo` itself. So both shapes have to be matched, and
+ * a plain `repo IN (…)` silently returns nothing for every modern row.
+ *
+ * A bare filter value (no slash) has no owner to split off, so it matches
+ * `repo` alone.
+ */
+function repoMatchClause(repo: string): { sql: string; values: string[] } {
+  const slash = repo.indexOf("/");
+  if (slash > 0) {
+    return {
+      sql: "((owner = ? AND repo = ?) OR repo = ?)",
+      values: [repo.slice(0, slash), repo.slice(slash + 1), repo],
+    };
+  }
+  return { sql: "repo = ?", values: [repo] };
+}
+
 export class WorkflowRunStore {
   private db: Database.Database;
   private approvals: ApprovalStore;
@@ -439,6 +463,15 @@ export class WorkflowRunStore {
     sinceIso?: string;
     workflowName?: string;
     repo?: string;
+    /**
+     * Restrict to a SET of repos — the dashboard's per-repo visibility scope
+     * (issue #169), where a user's GitHub teams resolve to several repos at
+     * once. Plural sibling of `repo`, matched with the same both-shapes rule;
+     * an empty array means "no rows", which the caller must avoid by not
+     * passing it. Ignored when `repo` is also set (the single-repo Repos tab
+     * is the narrower ask).
+     */
+    repos?: string[];
     statuses?: string[];
   } = {}): { runs: WorkflowRun[]; total: number } {
     const limit = opts.limit ?? 20;
@@ -455,19 +488,15 @@ export class WorkflowRunStore {
       params.push(opts.workflowName);
     }
     if (opts.repo) {
-      // The Repos tab filters by the qualified `owner/repo`, but the column is
-      // the bare repo (+ a separate `owner`). Match EITHER shape: new rows
-      // (`owner` set, `repo` bare) via `owner = ? AND repo = ?`, OR legacy rows
-      // that stored the qualified string in `repo` itself via `repo = ?`. A
-      // bare filter value has no owner to split, so it just matches `repo`.
-      const slash = opts.repo.indexOf("/");
-      if (slash > 0) {
-        where.push("((owner = ? AND repo = ?) OR repo = ?)");
-        params.push(opts.repo.slice(0, slash), opts.repo.slice(slash + 1), opts.repo);
-      } else {
-        where.push("repo = ?");
-        params.push(opts.repo);
-      }
+      const { sql, values } = repoMatchClause(opts.repo);
+      where.push(sql);
+      params.push(...values);
+    } else if (opts.repos && opts.repos.length > 0) {
+      // OR the per-repo clauses. Not an `IN (...)`, because the column doesn't
+      // hold the value being matched — see `repoMatchClause`.
+      const parts = opts.repos.map((r) => repoMatchClause(r));
+      where.push(`(${parts.map((p) => p.sql).join(" OR ")})`);
+      for (const p of parts) params.push(...p.values);
     }
     if (opts.statuses && opts.statuses.length > 0) {
       where.push(`status IN (${opts.statuses.map(() => "?").join(",")})`);

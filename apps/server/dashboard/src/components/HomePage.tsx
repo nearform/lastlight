@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -16,15 +16,7 @@ import { api, type WorkflowRun, type ContainerStats, type ContainerKind, type Ho
 import { useStatsSeries } from "../hooks/useDailyStats";
 import { useTheme } from "../hooks/useTheme";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
-import { useVisibleRepos, isRepoVisible } from "../hooks/useVisibleRepos";
-
-/**
- * How many runs the two home-page panels fetch before the per-repo visibility
- * filter (issue #169) narrows them to the 5 / 3 they actually show. The filter
- * is client-side, so asking for exactly what fits would show an empty panel to
- * anybody whose repos aren't in the global most-recent handful.
- */
-const HOME_RUN_FETCH_LIMIT = 40;
+import { useVisibleRepos, repoScopeParam } from "../hooks/useVisibleRepos";
 import { GhLink } from "./GhLink";
 import { ActorChip } from "./ActorChip";
 import clsx from "clsx";
@@ -126,23 +118,28 @@ function useLiveActivity() {
   const [liveWorkflows, setLiveWorkflows] = useState<WorkflowRun[]>([]);
   const [containerCount, setContainerCount] = useState(0);
   const { allowed: allowedRepos } = useVisibleRepos();
+  // The per-repo scope goes to the SERVER (issue #169), so these panels ask for
+  // exactly the five rows they render. Narrowing client-side would mean either
+  // over-fetching or showing a panel that looks empty because the user's repos
+  // happened not to be in the global most-recent handful — and `total` would
+  // still be the global count, which is the number the header shows.
+  //
+  // Memoized on the already-stable `allowed`; a fresh array identity per render
+  // would make the effect below refetch on every render.
+  const repos = useMemo(() => repoScopeParam(allowedRepos), [allowedRepos]);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
         const [wf, queued, ct] = await Promise.all([
-          // Over-fetch, then narrow to the user's repos and slice (issue #169).
-          // Asking the server for exactly 5 and filtering after would leave the
-          // panel empty for anybody whose repos aren't in the global top 5.
-          api.workflowRuns({ status: "running,paused", limit: HOME_RUN_FETCH_LIMIT }),
-          api.workflowRuns({ status: "queued", limit: 1 }),
+          api.workflowRuns({ status: "running,paused", limit: 5, repos }),
+          api.workflowRuns({ status: "queued", limit: 1, repos }),
           api.containers(),
         ]);
         if (!cancelled) {
-          const visible = wf.workflowRuns.filter((r) => isRepoVisible(r.repo, allowedRepos));
-          setWorkflowCount(allowedRepos ? visible.length : wf.total);
-          setLiveWorkflows(visible.slice(0, 5));
+          setWorkflowCount(wf.total);
+          setLiveWorkflows(wf.workflowRuns);
           setQueuedCount(queued.total);
           setContainerCount(ct.containers.length);
         }
@@ -153,7 +150,7 @@ function useLiveActivity() {
     load();
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [allowedRepos]);
+  }, [repos]);
 
   return { workflowCount, queuedCount, liveWorkflows, containerCount };
 }
@@ -324,6 +321,9 @@ function ResourceUsageSection({
 function useRecentWorkflows() {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   const { allowed: allowedRepos } = useVisibleRepos();
+  // Memoized on the already-stable `allowed` — a fresh array identity per
+  // render would make the effect below refetch on every render.
+  const repos = useMemo(() => repoScopeParam(allowedRepos), [allowedRepos]);
 
   useEffect(() => {
     let cancelled = false;
@@ -331,14 +331,12 @@ function useRecentWorkflows() {
       try {
         // Only finished runs — queued/running/paused live in Live Activity,
         // not "Recent". Terminal statuses = succeeded, failed, cancelled.
-        // Over-fetched then narrowed for the same reason as Live Activity.
         const res = await api.workflowRuns({
           status: "succeeded,failed,cancelled",
-          limit: HOME_RUN_FETCH_LIMIT,
+          limit: 3,
+          repos,
         });
-        if (!cancelled) {
-          setRuns(res.workflowRuns.filter((r) => isRepoVisible(r.repo, allowedRepos)).slice(0, 3));
-        }
+        if (!cancelled) setRuns(res.workflowRuns);
       } catch {
         /* ignore */
       }
@@ -346,7 +344,7 @@ function useRecentWorkflows() {
     load();
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [allowedRepos]);
+  }, [repos]);
 
   return runs;
 }

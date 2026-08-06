@@ -809,13 +809,22 @@ dependencies:
   maxRequestsPerResolve: 60  # ceiling for one cache miss`}</code></pre>
 
 	<p>
-		<strong>This is declutter, not access control.</strong> The server still
-		returns global data on every list endpoint — the filtering happens in the
-		browser, and a hand-crafted API call still sees everything. That is
-		deliberate, and it is what lets every budget above fail <em>open</em>: when a
-		team is too big to enumerate, or someone is in too many teams, or GitHub
-		refuses the query, you see more than strictly necessary rather than a
-		partial list that quietly hides work you own.
+		<strong>This is declutter, not access control.</strong> The scope travels as
+		an ordinary <code>?repos=</code> query filter the dashboard asks for; omit it
+		and the server returns global data exactly as before, and a hand-crafted API
+		call still sees everything. That is deliberate, and it is what lets every
+		budget above fail <em>open</em>: when a team is too big to enumerate, or
+		someone is in too many teams, or GitHub refuses the query, you see more than
+		strictly necessary rather than a partial list that quietly hides work you own.
+	</p>
+
+	<p>
+		There is always a way out. A <strong>"my repos" / "all repos"</strong> toggle
+		sits in the dashboard header beside the time filter and turns the narrowing
+		off across every view at once; the choice is remembered per browser. It
+		appears only when there are real team grants to narrow by, so an empty list
+		is never ambiguous about whether there is no activity or merely none of
+		yours.
 	</p>
 
 	<p>

@@ -639,8 +639,13 @@ no password is set.
 
 **Per-repo visibility** (`teamVisibility`, issue #169) narrows what a
 GitHub-authenticated admin sees by default to the managed repos their org teams
-can reach — `GET /admin/api/me/repos` returns `{ repos, synced, reason }` and the
-SPA filters workflow runs, sessions and the home-page panels against it. It is
+can reach — `GET /admin/api/me/repos` returns `{ repos, synced, reason }`, which
+the SPA passes back as the `?repos=` query filter on the run lists (so paging
+and totals stay honest) and applies locally to the session list. A header
+toggle — **"my repos" / "all repos"**, persisted per browser — turns the
+narrowing off everywhere at once, and is rendered only when there is a real team
+answer to narrow by, so an empty list is never ambiguous about whether there is
+no activity or merely none of yours. It is
 **off by default** and needs a **setup step**: grant the GitHub App the
 organization **`Members: read`** permission and subscribe it to the `team`,
 `membership` and `organization` webhook events, then re-consent the App on each

@@ -71,6 +71,31 @@ export interface ExecutionRecord {
  * single shared `Database` so it sits in the same connection / transaction
  * scope as the other stores.
  */
+/**
+ * `executions.repo`, normalized to a qualified `owner/repo` — or NULL when it
+ * can't be (issue #169).
+ *
+ * The column is written in **two shapes**. The dispatcher stores the qualified
+ * string (`context.repo`), but the phase executor stores the BARE repo name,
+ * because `runSimpleWorkflow` carries `owner` and `repo` as separate fields —
+ * so every workflow run's phase rows are bare. There is no `owner` column on
+ * `executions` to consult, so the owner comes from the run that owns the
+ * execution (`workflow_run_id` → `workflow_runs.owner`).
+ *
+ * **NULL is the safe answer, and deliberate.** A consumer of this treats null
+ * as "no repo, always visible"; returning a bare name instead would produce a
+ * value that matches nothing in a qualified allow-list and would therefore
+ * HIDE the row. Requires the joined alias to be `e` (executions) and `r`
+ * (workflow_runs).
+ */
+const QUALIFIED_REPO_SQL = `
+  CASE
+    WHEN e.repo IS NULL OR e.repo = '' THEN NULL
+    WHEN instr(e.repo, '/') > 0 THEN e.repo
+    WHEN r.owner IS NOT NULL AND r.owner <> '' THEN r.owner || '/' || e.repo
+    ELSE NULL
+  END`;
+
 export class ExecutionStore {
   constructor(private db: Database.Database) {}
 
@@ -262,11 +287,13 @@ export class ExecutionStore {
         ms.agent_session_id       AS agentSessionId,
         ms.platform               AS platform,
         -- The thread's repo, for the dashboard's per-repo visibility filter
-        -- (issue #169). MAX() rather than a GROUP BY member because it skips
-        -- NULLs: most chat turns carry no repo, and one that does should name
-        -- the whole thread. A thread that genuinely spans repos picks one —
-        -- acceptable, since a repo-less thread stays visible either way.
-        MAX(e.repo)               AS repo,
+        -- (issue #169), qualified to owner/repo — a bare name would match
+        -- nothing in the allow-list and so HIDE the row. MAX() rather than a
+        -- GROUP BY member because it skips NULLs: most chat turns carry no
+        -- repo, and one that does should name the whole thread. A thread that
+        -- genuinely spans repos picks one — acceptable, since a repo-less
+        -- thread stays visible either way.
+        MAX(${QUALIFIED_REPO_SQL}) AS repo,
         MIN(e.started_at)         AS firstStartedAt,
         MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
         COUNT(*)                  AS turnCount,
@@ -283,6 +310,7 @@ export class ExecutionStore {
         ) AS lastAssistantContent
       FROM executions e
       LEFT JOIN messaging_sessions ms ON ms.id = e.trigger_id
+      LEFT JOIN workflow_runs r ON r.id = e.workflow_run_id
       WHERE e.skill = 'chat'
       GROUP BY e.trigger_id
       ORDER BY lastActivityAt DESC
@@ -341,6 +369,7 @@ export class ExecutionStore {
         ) AS lastAssistantContent
       FROM executions e
       LEFT JOIN messaging_sessions ms ON ms.id = e.trigger_id
+      LEFT JOIN workflow_runs r ON r.id = e.workflow_run_id
       WHERE e.skill = 'chat' AND e.trigger_id = ?
       GROUP BY e.trigger_id
     `).get(triggerId) as {
@@ -372,9 +401,11 @@ export class ExecutionStore {
   repoForSessionId(sessionId: string): string | null {
     const row = this.db
       .prepare(
-        `SELECT repo FROM executions
-          WHERE session_id = ? AND repo IS NOT NULL
-          ORDER BY started_at DESC
+        `SELECT ${QUALIFIED_REPO_SQL} AS repo
+           FROM executions e
+           LEFT JOIN workflow_runs r ON r.id = e.workflow_run_id
+          WHERE e.session_id = ? AND e.repo IS NOT NULL
+          ORDER BY e.started_at DESC
           LIMIT 1`,
       )
       .get(sessionId) as { repo: string | null } | undefined;

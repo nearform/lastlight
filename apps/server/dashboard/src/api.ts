@@ -850,6 +850,13 @@ export const api = {
       workflow?: string;
       /** Filter to one repo (`owner/repo`) — used by the Repos tab. */
       repo?: string;
+      /**
+       * Scope to a SET of repos — the per-repo visibility scope (issue #169),
+       * so a list asks for exactly the rows it renders rather than fetching
+       * globally and narrowing in the browser. A caller-supplied query filter,
+       * not enforcement: omit it and you get global data as before.
+       */
+      repos?: string[];
       /** "active" → running+paused; or comma-separated explicit statuses. */
       status?: string;
     } = {},
@@ -860,6 +867,7 @@ export const api = {
     if (opts.since) qs.set("since", opts.since);
     if (opts.workflow) qs.set("workflow", opts.workflow);
     if (opts.repo) qs.set("repo", opts.repo);
+    if (opts.repos && opts.repos.length > 0) qs.set("repos", opts.repos.join(","));
     if (opts.status) qs.set("status", opts.status);
     const qss = qs.toString();
     return req<{ workflowRuns: WorkflowRun[]; total: number }>(

@@ -61,6 +61,14 @@ import {
   installationSettingsUrl,
 } from "../engine/github/installations.js";
 import { TeamVisibilityResolver } from "../engine/github/team-visibility.js";
+
+/**
+ * Most repos a `?repos=` scope may name (issue #169). Past this the client is
+ * told to stop filtering rather than have the server build a WHERE clause with
+ * thousands of OR branches — and since the scope is declutter, dropping it just
+ * shows more.
+ */
+const MAX_REPO_SCOPE = 200;
 import {
   getRuntimeConfig,
   getRoutes,
@@ -782,12 +790,18 @@ export function createAdminRoutes(
     });
   });
 
-  // Force a re-resolution for the caller (or, for an operator debugging someone
-  // else's view, an explicit `?login=`). The fallback for orgs where the
+  // Force a re-resolution for the CALLER. The fallback for orgs where the
   // `team`/`membership`/`organization` webhooks aren't wired up yet — those
   // events normally invalidate the cache for us.
+  //
+  // Always self, never an arbitrary `?login=`. The response carries `teams`,
+  // which names the GitHub org teams a person belongs to — including secret
+  // ones — and the admin dashboard's authenticated population is not the same
+  // as "people entitled to enumerate org membership". A password-only session
+  // has no GitHub identity at all, so an override param would have let it read
+  // any login's teams with nothing to check it against.
   app.post("/me/repos/resync", async (c) => {
-    const login = c.req.query("login") ?? actorFromContext(c);
+    const login = actorFromContext(c);
     if (!login) return c.json({ error: "no GitHub identity on this session" }, 400);
     const result = await teamVisibility.resync(login);
     return c.json({
@@ -1535,6 +1549,19 @@ export function createAdminRoutes(
     const since = c.req.query("since") || undefined;
     const workflowName = c.req.query("workflow") || undefined;
     const repo = c.req.query("repo") || undefined;
+    // Per-repo visibility scope (issue #169) — the caller's allowed repo set,
+    // so the dashboard's panels ask for exactly the rows they show instead of
+    // over-fetching and narrowing in the browser.
+    //
+    // This is a QUERY FILTER, not enforcement: the caller supplies it, omitting
+    // it still returns global data, and it is the plural sibling of the `repo`
+    // param the Repos tab has always used. Capped so a pathological query
+    // string can't build a WHERE clause with thousands of OR branches.
+    const repos = (c.req.query("repos") || "")
+      .split(",")
+      .map((r) => r.trim())
+      .filter(Boolean)
+      .slice(0, MAX_REPO_SCOPE);
     const statusParam = c.req.query("status");
     const limit = Math.min(Math.max(parseInt(rawLimit ?? "20", 10) || 20, 1), 200);
     const offset = Math.max(parseInt(rawOffset ?? "0", 10) || 0, 0);
@@ -1554,6 +1581,7 @@ export function createAdminRoutes(
       sinceIso: since,
       workflowName,
       repo,
+      repos: repos.length > 0 ? repos : undefined,
       statuses,
     });
     return c.json({ workflowRuns: runs, total });

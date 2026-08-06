@@ -5,35 +5,65 @@ import { api, type MeRepos } from "../api";
  * Which repos to show the logged-in user (issue #169).
  *
  * `allowed === null` means **no filter** — show everything. That is the answer
- * for a password/Slack login, a deployment with the feature off, and every
- * failure mode including "the request blew up". Filtering here is declutter, not
- * access control: the server keeps returning global data on every list endpoint,
- * so the safe direction to fail is *more visible*, never less.
+ * for a password/Slack login, a deployment with the feature off, every failure
+ * mode including "the request blew up", and whenever the user has chosen the
+ * `all` scope. Filtering here is declutter, not access control: the server
+ * still returns global data on every list endpoint, so the safe direction to
+ * fail is *more visible*, never less.
  */
 export interface VisibleRepos {
   allowed: Set<string> | null;
   /** The raw server answer, for a "why am I seeing this?" hint. Null until loaded. */
   meta: MeRepos | null;
   loading: boolean;
+  /** Current scope. `all` means the user explicitly opted out of narrowing. */
+  scope: RepoScope;
+  setScope: (scope: RepoScope) => void;
+  /**
+   * Whether narrowing is even possible — i.e. the server resolved real team
+   * grants for this person. False for a password/Slack login, a deployment
+   * with the feature off, and every fail-open case. The scope control is
+   * hidden entirely when this is false: offering "my repos / all repos" to
+   * somebody we can't scope would be a switch that does nothing.
+   */
+  canScope: boolean;
   /** Force a re-resolution server-side, then refresh every subscriber. */
   resync: () => Promise<void>;
 }
 
+export type RepoScope = "mine" | "all";
+
+const SCOPE_KEY = "lastlight-repo-scope";
+
 /**
- * One fetch for the whole app. The three filtered views (workflow runs,
- * sessions, repo-keyed stats) all mount independently, and this answer changes
- * about as often as somebody's GitHub team membership — so it is cached at
- * module scope and shared, rather than refetched per component.
+ * One fetch for the whole app. The filtered views all mount independently, and
+ * this answer changes about as often as somebody's GitHub team membership — so
+ * it is cached at module scope and shared, rather than refetched per component.
+ * The chosen scope lives here too, so flipping it updates every view at once.
  */
 let cached: MeRepos | null = null;
 let inFlight: Promise<MeRepos | null> | null = null;
-const subscribers = new Set<(value: MeRepos | null) => void>();
+let scope: RepoScope = readStoredScope();
+const subscribers = new Set<() => void>();
 
 const REFRESH_MS = 5 * 60_000;
 
+function readStoredScope(): RepoScope {
+  try {
+    return localStorage.getItem(SCOPE_KEY) === "all" ? "all" : "mine";
+  } catch {
+    // Private mode / storage disabled — default to the narrowed view.
+    return "mine";
+  }
+}
+
+function notify(): void {
+  for (const fn of subscribers) fn();
+}
+
 function publish(value: MeRepos | null): void {
   cached = value;
-  for (const notify of subscribers) notify(value);
+  notify();
 }
 
 async function load(force = false): Promise<MeRepos | null> {
@@ -65,27 +95,45 @@ async function load(force = false): Promise<MeRepos | null> {
 }
 
 export function useVisibleRepos(): VisibleRepos {
-  const [meta, setMeta] = useState<MeRepos | null>(cached);
+  const [, forceRender] = useState(0);
 
   useEffect(() => {
-    subscribers.add(setMeta);
+    const rerender = () => forceRender((n) => n + 1);
+    subscribers.add(rerender);
     if (cached === null) void load();
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => {
-      subscribers.delete(setMeta);
+      subscribers.delete(rerender);
       clearInterval(timer);
     };
   }, []);
 
-  // Memoized on the resolved answer, not rebuilt per render. Callers put
-  // `allowed` in `useEffect` / `useMemo` dependency arrays, and a fresh Set
+  const meta = cached;
+  const canScope = Boolean(meta?.repos && meta.repos.length > 0);
+
+  // Memoized on the resolved answer + scope, not rebuilt per render. Callers
+  // put `allowed` in `useEffect` / `useMemo` dependency arrays, and a fresh Set
   // identity every render would turn a 15s poll into a render loop.
-  const allowed = useMemo(() => (meta?.repos ? new Set(meta.repos) : null), [meta]);
+  const allowed = useMemo(
+    () => (scope === "mine" && meta?.repos ? new Set(meta.repos) : null),
+    [meta, scope],
+  );
+
+  const setScope = useCallback((next: RepoScope) => {
+    scope = next;
+    try {
+      localStorage.setItem(SCOPE_KEY, next);
+    } catch {
+      // Storage unavailable — the choice just won't survive a reload.
+    }
+    notify();
+  }, []);
+
   const resync = useCallback(async () => {
     await load(true);
   }, []);
 
-  return { allowed, meta, loading: meta === null, resync };
+  return { allowed, meta, loading: meta === null, scope, setScope, canScope, resync };
 }
 
 /**
@@ -103,4 +151,14 @@ export function isRepoVisible(
   if (!allowed) return true;
   if (!repo) return true;
   return allowed.has(repo);
+}
+
+/**
+ * The `repos` query-param value for a server-side scope, or undefined for "no
+ * scope". Used by the run lists so they ask for exactly the rows they render
+ * instead of over-fetching and narrowing in the browser.
+ */
+export function repoScopeParam(allowed: Set<string> | null): string[] | undefined {
+  if (!allowed || allowed.size === 0) return undefined;
+  return [...allowed];
 }

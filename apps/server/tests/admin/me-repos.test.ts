@@ -103,16 +103,85 @@ describe("GET /me/repos", () => {
   });
 });
 
+describe("GET /workflow-runs?repos= — the visibility scope as a query filter", () => {
+  function seedRun(id: string, owner: string, repo: string) {
+    db.runs.createRun({
+      id,
+      workflowName: "pr-review",
+      triggerId: `${owner}/${repo}#1`,
+      owner,
+      repo,
+      issueNumber: 1,
+      currentPhase: "review",
+      status: "running",
+      startedAt: "2026-08-06T10:00:00.000Z",
+      updatedAt: "2026-08-06T10:00:00.000Z",
+    });
+  }
+
+  it("scopes to the named repos, with a matching total", async () => {
+    build({ adminPassword: "" });
+    seedRun("r1", "nearform", "lastlight");
+    seedRun("r2", "nearform", "www");
+    seedRun("r3", "nearform", "unrelated");
+
+    const { body } = await get("/workflow-runs?repos=nearform/lastlight,nearform/www");
+    expect(body.total).toBe(2);
+    expect(body.workflowRuns.map((r: any) => r.repo).sort()).toEqual(["lastlight", "www"]);
+  });
+
+  it("returns global data when the param is omitted — it is a filter, not a gate", async () => {
+    build({ adminPassword: "" });
+    seedRun("r1", "nearform", "lastlight");
+    seedRun("r2", "nearform", "unrelated");
+
+    const { body } = await get("/workflow-runs");
+    expect(body.total).toBe(2);
+  });
+
+  it("ignores an empty/blank param rather than matching nothing", async () => {
+    build({ adminPassword: "" });
+    seedRun("r1", "nearform", "lastlight");
+
+    const { body } = await get("/workflow-runs?repos=");
+    expect(body.total).toBe(1);
+  });
+});
+
 describe("POST /me/repos/resync", () => {
-  it("rejects a session with no GitHub identity and no explicit login", async () => {
-    build({ adminPassword: "hunter2" });
-    const token = createToken(SECRET, "password");
-    const res = await app.fetch(
-      new Request("http://localhost/me/repos/resync", {
+  async function resync(token: string, qs = "") {
+    return app.fetch(
+      new Request(`http://localhost/me/repos/resync${qs}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       }),
     );
+  }
+
+  it("rejects a session with no GitHub identity", async () => {
+    build({ adminPassword: "hunter2" });
+    const res = await resync(createToken(SECRET, "password"));
     expect(res.status).toBe(400);
+  });
+
+  it("ignores ?login= — a session can only resync itself", async () => {
+    // The response carries `teams`, naming the GitHub org teams a person
+    // belongs to (including secret ones). A password-only session has no
+    // identity to check an override against, so honouring the param would let
+    // any authenticated caller enumerate anyone's membership.
+    build({ adminPassword: "hunter2" });
+    const res = await resync(createToken(SECRET, "password"), "?login=alice");
+    expect(res.status).toBe(400);
+  });
+
+  it("resyncs the session's own login, not the query param's", async () => {
+    build({ adminPassword: "hunter2" });
+    const res = await resync(createToken(SECRET, "github", "bob"), "?login=alice");
+    expect(res.status).toBe(200);
+    // teamVisibility is off by default, so this is the fail-open sentinel —
+    // the point is that it answered for the SESSION rather than for alice.
+    const body = await res.json();
+    expect(body.repos).toBeNull();
+    expect(body.reason).toBe("disabled");
   });
 });

@@ -30,7 +30,7 @@ import {
   nullableStringParser,
   nullableStringSerializer,
 } from "../hooks/useUrlState";
-import { useVisibleRepos, isRepoVisible } from "../hooks/useVisibleRepos";
+import { useVisibleRepos, repoScopeParam } from "../hooks/useVisibleRepos";
 import { timeRangeToSince } from "../lib/timeRange";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
 import { GhLink } from "./GhLink";
@@ -578,13 +578,24 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
   );
   const [availableWorkflows, setAvailableWorkflows] = useState<string[]>([]);
   const { allowed: allowedRepos } = useVisibleRepos();
+  // Per-repo visibility (issue #169) is applied SERVER-side, via the `repos`
+  // query param, so paging and the `total` count stay honest — filtering after
+  // the fact would return short pages and a total that counts rows the user
+  // can't see. Skipped when the Repos tab has already pinned a single repo
+  // (`repo` is the narrower ask), and absent whenever the scope is the
+  // fail-open sentinel. Memoized: a fresh array identity per render would
+  // refetch on every render.
+  const scopedRepos = useMemo(
+    () => (repo ? undefined : repoScopeParam(allowedRepos)),
+    [repo, allowedRepos],
+  );
 
   // Reset pagination whenever a filter changes — otherwise an inflated `limit`
   // from a previous, larger result set would silently keep showing too many
   // rows after the user narrows.
   useEffect(() => {
     setLimit(WORKFLOW_PAGE_SIZE);
-  }, [timeRange, workflowFilter, repo]);
+  }, [timeRange, workflowFilter, repo, scopedRepos]);
 
   // Clear the selected run when the Repos tab switches to a different repo.
   // WorkflowList isn't remounted on a repo switch (the `?run=` param survives),
@@ -612,6 +623,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
           status,
           workflow: workflowFilter ?? undefined,
           repo,
+          repos: scopedRepos,
         }),
         api.approvals().catch(() => ({ approvals: [] as WorkflowApproval[] })),
         // Queued-run count, scoped to the same date/workflow/repo filters, for
@@ -623,6 +635,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
             since,
             workflow: workflowFilter ?? undefined,
             repo,
+            repos: scopedRepos,
           })
           .catch(() => ({ total: 0, workflowRuns: [] as WorkflowRun[] })),
       ]);
@@ -634,7 +647,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     }
-  }, [limit, timeRange, workflowFilter, repo]);
+  }, [limit, timeRange, workflowFilter, repo, scopedRepos]);
 
   useEffect(() => {
     load();
@@ -665,11 +678,6 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     // Queued runs are hidden unless the toggle is on — they're pending work,
     // not activity, and flood the list when a cron fans out a big batch.
     let list = showQueued ? runs : runs.filter((r) => r.status !== "queued");
-    // Per-repo visibility (issue #169) — show only the repos this user's GitHub
-    // teams can reach. Skipped entirely when the Repos tab has already pinned a
-    // single repo, and a no-op whenever `allowed` is null (the fail-open
-    // sentinel). Repo-less runs (cron, Slack) always stay.
-    if (!repo) list = list.filter((r) => isRepoVisible(r.repo, allowedRepos));
     if (query) {
       const q = query.toLowerCase();
       list = list.filter((r) => {
@@ -682,7 +690,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
       });
     }
     return list;
-  }, [runs, query, showQueued, repo, allowedRepos]);
+  }, [runs, query, showQueued]);
 
   // Auto-select the first run only when nothing is currently selected. We
   // intentionally do NOT clear an existing selectedId just because it's not
