@@ -26,6 +26,16 @@ function clamp(text: string): string {
  *
  * Best-effort by construction: the transcript is context for the NEXT turn, so
  * a write that fails must never fail the turn that produced it.
+ *
+ * **Record only what was DELIVERED.** Every caller sending an assistant
+ * message must record *after* the send resolves, inside whatever error
+ * handling it has — a transport that swallows its own failure (the workflow
+ * runner's Slack `postComment` does) would otherwise write a message the user
+ * never saw, and the next chat turn would rehydrate it as fact. That is the
+ * same context drift this module exists to prevent, arriving from the other
+ * direction. The three senders differ in error policy on purpose (propagate /
+ * swallow-and-log / promise chain), so this is a rule they each keep rather
+ * than a wrapper they share.
  */
 export function recordThreadMessage(
   sessionManager: SessionManager,

@@ -123,6 +123,12 @@ double-recorded (`src/connectors/messaging/thread-transcript.ts`):
 | Anything else on a messaging envelope — a workflow dispatch, a router refusal, an approval or status reply | `withThreadTranscript`, which records the inbound message and wraps `envelope.reply` |
 | A workflow's own output into the thread (the runner's `postComment`, live and on boot-recovery) | `recordThreadMessageForThread`, addressed by (platform, channel, thread) — the runner never sees a messaging session id |
 
+Each writer records **only what was delivered** — after the send resolves,
+inside its own error handling. The runner's Slack transport swallows and logs a
+send failure, so recording outside that would write a message the user never saw
+and have the next chat turn rehydrate it as fact: the same context drift, from
+the other direction.
+
 Every write also `touchSession()`s, so a thread carried entirely by workflow
 turns cannot lapse into `SESSION_TIMEOUT_MS` staleness and silently re-key to a
 fresh session mid-conversation. The by-thread writer deliberately looks past

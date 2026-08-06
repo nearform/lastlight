@@ -829,22 +829,27 @@ async function main() {
       ? async (msg: string) => {
           try {
             await slackConnector!.sendMessage(channelId, threadId, msg);
+            // This is the workflow's ANSWER — the substantive thing the thread
+            // will be asked follow-up questions about — so it belongs in the
+            // thread's conversation alongside the turns `ChatRunner` records.
+            // Addressed by thread because the runner never sees a messaging
+            // session id; a thread with no live session records nothing.
+            //
+            // INSIDE the try, after the await: this transport swallows a send
+            // failure, so recording outside it would write a message the user
+            // never saw and have the next chat turn rehydrate it as fact —
+            // the exact context drift the transcript exists to prevent.
+            recordThreadMessageForThread(
+              sessionManager,
+              "slack",
+              channelId,
+              threadId,
+              "assistant",
+              msg,
+            );
           } catch (err: unknown) {
             log.warn("Failed to post to Slack thread", { err });
           }
-          // This is the workflow's ANSWER — the substantive thing the thread
-          // will be asked follow-up questions about — so it belongs in the
-          // thread's conversation alongside the turns `ChatRunner` records.
-          // Addressed by thread because the runner never sees a messaging
-          // session id; a thread with no live session records nothing.
-          recordThreadMessageForThread(
-            sessionManager,
-            "slack",
-            channelId,
-            threadId,
-            "assistant",
-            msg,
-          );
         }
       : undefined;
 
