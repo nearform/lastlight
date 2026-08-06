@@ -239,11 +239,31 @@ describe("drainFeedbackExport", () => {
 
 describe("chat-turn attribution", () => {
   it("attributes a reaction on a chat reply to its messaging session", () => {
-    registerSlackAnchor(db, { channelId: CHANNEL, messageId: TS, messagingSessionId: "session-7" });
+    // How `src/index.ts` registers a chat reply: no run, but a named surface.
+    registerSlackAnchor(db, {
+      channelId: CHANNEL,
+      messageId: TS,
+      messagingSessionId: "session-7",
+      workflowName: "chat",
+    });
     handleSlackReaction(deps(), reaction());
     expect(db.feedback.list().signals[0]).toMatchObject({
       messagingSessionId: "session-7",
       workflowRunId: null,
+      workflowName: "chat",
     });
+  });
+
+  it("gives chat its own row in the leaderboard rather than lumping it into 'unattributed'", () => {
+    registerSlackAnchor(db, {
+      channelId: CHANNEL,
+      messageId: TS,
+      messagingSessionId: "session-7",
+      workflowName: "chat",
+    });
+    handleSlackReaction(deps(), reaction());
+    expect(db.feedback.summaryByWorkflow(30)).toEqual([
+      { workflowName: "chat", total: 1, positive: 1, negative: 0, neutral: 0, averageScore: 1 },
+    ]);
   });
 });

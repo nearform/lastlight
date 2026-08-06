@@ -1158,9 +1158,19 @@ async function main() {
         // #255). The `ts` is only ever knowable here, in the send response —
         // and the connector layer must not reach for the database itself, so
         // the write is injected as a hook.
+        // `workflowName: "chat"` because a chat turn has no workflow run to
+        // borrow a name from, and a null there renders as "unattributed" — the
+        // label for a signal we could not place at all. Chat is placed
+        // precisely; it just isn't a workflow. Matches how the executions
+        // ledger already names this surface (`skill: "chat"`).
         onBotMessage: config.feedback.enabled
           ? ({ channelId, messageId, sessionId }) =>
-              void registerSlackAnchor(db, { channelId, messageId, messagingSessionId: sessionId })
+              void registerSlackAnchor(db, {
+                channelId,
+                messageId,
+                messagingSessionId: sessionId,
+                workflowName: "chat",
+              })
           : undefined,
       },
       sessionManager
