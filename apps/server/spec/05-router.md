@@ -259,6 +259,25 @@ sends a `QUESTION` intent to the `answer` workflow, everything else to triage
 (the safe default). This replaced a separate hardcoded question-vs-work prompt —
 `answer.yaml` now owns the `QUESTION` category, so the two share one vocabulary.
 
+**`QUESTION` vs `CHAT` is a CAPABILITY test, not a seriousness one.** `answer`
+provisions a sandbox; chat answers in-process in seconds — and chat is not
+toolless, it reads repos, issues and their comments, pull requests **and their
+diffs**, file contents, commit history, and both code and issue search
+(`src/engine/github/github-tools.ts`). So `answer.yaml`'s category admits only
+the two things chat genuinely cannot do: **the web** (`web_search: true` — a
+comparison against another tool, upstream docs, current external facts) and
+**real exploration of a checkout** (tracing a behaviour across many files,
+following call paths). A question answerable from chat's own reads classifies
+`CHAT` however technical it is, and naming a repo is explicitly *not* evidence
+of weight — the counter-examples in `answer.yaml` teach exactly that, because
+without them the model reads `REPO: <x>` as the signal to fire.
+
+The one carve-out is the surface: the downgrade applies to **chat/Slack messages
+only**, where a chat path exists to catch it. A newly-opened GitHub **issue**
+that asks a question is always `QUESTION` — an issue has no chat surface, so
+`CHAT` there means the question is silently triaged as a work item instead of
+answered.
+
 A second, smaller helper — `classifyCommentAddsInfo` — answers a single
 yes/no question (does a reporter's plain comment add substantive information,
 or is it social noise?) and gates the [reporter-driven re-triage](#reporter-driven-re-triage)

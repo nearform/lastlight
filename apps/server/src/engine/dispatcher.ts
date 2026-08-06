@@ -1,6 +1,10 @@
 import { randomUUID } from "crypto";
 import type { EventEnvelope } from "../connectors/types.js";
 import type { SessionManager } from "../connectors/index.js";
+// Imported from the module, not the `connectors/` barrel — the barrel is a
+// value import that would drag every connector (Slack, the GitHub webhook)
+// into the dispatcher's module graph.
+import { withThreadTranscript } from "../connectors/messaging/thread-transcript.js";
 import type { StateDb } from "../state/db.js";
 import type { GitHubClient } from "./github/github.js";
 import type { ChatResult } from "./chat/chat.js";
@@ -139,10 +143,10 @@ export type DispatchOutcome =
  * former `registry.onEvent` closure so every event branch is testable.
  */
 export async function dispatch(
-  envelope: EventEnvelope,
+  inbound: EventEnvelope,
   deps: DispatchDeps,
 ): Promise<DispatchOutcome> {
-  const route = await (deps.route ?? routeEvent)(envelope, {
+  const route = await (deps.route ?? routeEvent)(inbound, {
     db: deps.db,
     github: deps.github,
     // Threaded one level up so the `pr.labeled` branch can see a repo's own
@@ -154,6 +158,26 @@ export async function dispatch(
   if (route.action === "ignore") {
     return { kind: "ignored", reason: route.reason };
   }
+
+  // ── The thread transcript ──────────────────────────────────────────────────
+  //
+  // A Slack thread is ONE conversation whichever way each message was handled,
+  // but only `ChatRunner` ever wrote to `messaging_messages` — so a message the
+  // classifier sent to a workflow (`answer`, `build`, `explore`, a repo-less
+  // "reply" refusal, …) left the thread's history untouched, and the next chat
+  // turn in that same thread rehydrated nothing and answered as if it had just
+  // been introduced to the user. Wrap every path `ChatRunner` does NOT own, so
+  // the inbound message and each reply are recorded on the thread's session.
+  //
+  // Skipping the chat handlers is what keeps the two writers from double-
+  // writing a turn (the bug that moved persistence into `ChatRunner` in the
+  // first place); `chat-reset` is skipped because it deactivates the session it
+  // would be writing to.
+  const chatOwnsTranscript =
+    route.action === "handler" && (route.handler === "chat" || route.handler === "chat-reset");
+  const envelope = chatOwnsTranscript
+    ? inbound
+    : withThreadTranscript(inbound, deps.sessionManager);
 
   if (route.action === "reply") {
     await envelope.reply(route.message);

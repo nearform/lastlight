@@ -180,6 +180,12 @@ artifact must fetch it via the platform API separately.
 at the call site (`src/index.ts:994`). A re-implementation that wants
 to surface delivery failures must thread errors through explicitly.
 
+Being a closure on the envelope is what makes it **decoratable**: the dispatcher
+replaces a messaging envelope's `reply` with one that also records the message
+into the thread's conversation (`withThreadTranscript`), so every non-chat
+messaging path gets a transcript without any handler knowing. The decorator
+sends first and records after, and a send failure still propagates.
+
 ## `raw`
 
 The original platform payload, plus connector-attached metadata for

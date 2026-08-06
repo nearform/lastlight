@@ -422,6 +422,12 @@ The partial unique index enforces "one active session per
 (platform, channel, thread, user)" while allowing old inactive rows
 to stack. See [Chat](/spec/11-chat) for the session lifecycle.
 
+`messaging_messages` is the **thread's** conversation, not chat's — a message
+answered by a workflow is recorded here too, by `thread-transcript.ts` rather
+than by `ChatRunner`, so the next chat turn in that thread can see it. Reads are
+newest-N (`getHistory`), and the sessions table is addressable by thread alone
+(`findActiveThreadSession`) for the writer that knows only the channel + thread.
+
 ## JSONL event log
 
 Per-session, append-only, one file per agent session.

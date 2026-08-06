@@ -3,10 +3,26 @@ name: answer
 classification:
   intent: question
   description: |
-    QUESTION — The user is asking a substantive INFORMATIONAL question that warrants research to answer well: "how does X work?", "what's the difference between X and Y?", "how does <repo> compare to <other tool>?", "is it possible to do Z?", "why does X happen?". The deliverable is an ANSWER, not code and not a spec. QUESTION is for real questions that benefit from reading docs/code or searching the web — NOT casual chat, thanks, or one-word replies (those stay CHAT). EXPLORE shapes a NEW idea into a spec; QUESTION answers an EXISTING question about how something works or compares.
+    QUESTION — A substantive informational question whose answer needs research the CHAT path cannot do. The deliverable is an ANSWER, not code and not a spec. Exactly two things qualify it:
+      (a) THE WEB — comparisons against other tools or products, upstream/third-party documentation, current external facts, anything outside the repo.
+      (b) REAL EXPLORATION OF A CHECKOUT — tracing a behaviour across many files, following call paths, reading build/test/config output, "why does X actually happen?" where finding out means grepping around the tree rather than opening a file or two.
+    Chat already reads GitHub directly: repo metadata, issues and their comments, pull requests AND their diffs, file contents, commit history, and both code and issue search. A question answerable from those reads is CHAT — even when it names a repo, and even when it is a serious technical question. Naming a repo is not evidence a question is heavy; needing the web or a checkout is.
+    This downgrade applies to CHAT/SLACK MESSAGES ONLY, where a chat path exists to catch it. A newly-opened GitHub ISSUE that asks a question is always QUESTION: an issue has no chat surface, and the alternative is silently triaging a question as a work item.
+    EXPLORE shapes a NEW idea into a spec; QUESTION answers an EXISTING question that needs research beyond a few file reads.
   examples:
+    # (a) the web — no amount of repo reading answers this.
     - '"how does cliftonc/lastlight compare to Vercel''s Eve framework?" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
-    - '"what''s the difference between a sandbox phase and a chat session in cliftonc/lastlight?" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
+    # (b) a checkout — "actually" / "trace it" is asking for the code path, not a file.
+    - '"why does the dependency cron sometimes skip a PR in cliftonc/lastlight? trace it through the code" → INTENT: QUESTION, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
+    # Counter-examples: serious, repo-scoped, and answerable from chat''s own
+    # GitHub reads. These are the ones that used to burn a sandbox.
+    - '"what does the pr-review workflow do in cliftonc/lastlight?" → INTENT: CHAT, REPO: cliftonc/lastlight, ISSUE: NONE, REASON: NONE'
+    - '"what changed in cliftonc/lastlight#273?" → INTENT: CHAT, REPO: cliftonc/lastlight, ISSUE: 273, REASON: NONE'
+    - '"why was cliftonc/lastlight#40 closed?" → INTENT: CHAT, REPO: cliftonc/lastlight, ISSUE: 40, REASON: NONE'
+    # The GitHub carve-out, deliberately near-identical to the CHAT
+    # counter-example above: on an ISSUE there is no chat to downgrade TO, and
+    # the alternative is triaging a question as a work item.
+    - '"what does the pr-review workflow actually do?" with ISSUE TITLE "Question: what does pr-review do?" → INTENT: QUESTION, REPO: NONE, ISSUE: NONE, REASON: NONE'
 description: |
   Answer a question issue directly. Used when a newly-opened issue asks for
   information, an explanation, or a comparison rather than a code change — the
@@ -22,7 +38,12 @@ description: |
 
   Triggered by:
     - issue.opened webhook when the router classifies the issue as a question
-    - a Slack message classified as a question against a managed repo
+    - a Slack message classified as a question against a managed repo — only
+      one chat cannot answer itself; see the `classification:` block above.
+      Chat reads GitHub directly (issues, PR diffs, file contents, code
+      search), so this workflow's edge is the WEB (`web_search: true`) and a
+      real checkout to explore. A question needing neither is CHAT, which
+      answers in-process in seconds instead of provisioning a sandbox.
     - manual override via routes.github.issue_answer / routes.slack.answer
 
 phases:

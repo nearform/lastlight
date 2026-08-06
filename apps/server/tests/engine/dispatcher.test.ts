@@ -1328,6 +1328,98 @@ describe('dispatch — generic messaging dispatch', () => {
   });
 });
 
+describe('dispatch — the Slack thread transcript', () => {
+  // A Slack thread is one conversation however each message was handled, but
+  // only ChatRunner wrote to messaging_messages — so a message the classifier
+  // sent to a workflow left no trace, and the next chat turn in the SAME
+  // thread rehydrated an empty history and answered as if freshly introduced.
+
+  /** A SessionManager stub recording just the two writes the transcript makes. */
+  function transcriptSpy() {
+    return {
+      addMessage: vi.fn(),
+      touchSession: vi.fn(),
+      getSession: vi.fn().mockReturnValue(undefined),
+      setAgentSessionId: vi.fn(),
+      findActiveThreadSession: vi.fn().mockReturnValue(null),
+    };
+  }
+
+  const slackEnvelope = () =>
+    makeEnvelope({
+      type: 'message',
+      source: 'slack',
+      body: 'how does the sandbox work in cliftonc/lastlight?',
+      raw: { sessionId: 'sess-1', channelId: 'C1', threadId: 'T1' },
+    });
+
+  it('records the inbound message and the acks of a workflow-routed turn', async () => {
+    const envelope = slackEnvelope();
+    const sessionManager = transcriptSpy();
+    const deps = makeDeps(
+      {
+        action: 'handler',
+        handler: 'answer',
+        context: { repo: 'cliftonc/lastlight', sender: 'clifton' },
+      },
+      { sessionManager: sessionManager as any, dispatchWorkflow: vi.fn().mockResolvedValue({ success: true }) },
+    );
+
+    await dispatch(envelope, deps);
+    // handleMessageDispatch acks through the wrapped reply on a floating
+    // promise — let it settle.
+    await new Promise((r) => setImmediate(r));
+
+    const recorded = sessionManager.addMessage.mock.calls.map((c) => [c[1], c[2]]);
+    expect(recorded[0]).toEqual(['user', 'how does the sandbox work in cliftonc/lastlight?']);
+    expect(recorded.some(([role, text]) => role === 'assistant' && /completed/.test(text))).toBe(true);
+    expect(sessionManager.touchSession).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('leaves the chat path alone — ChatRunner owns that transcript', async () => {
+    const envelope = slackEnvelope();
+    const sessionManager = transcriptSpy();
+    const deps = makeDeps(
+      { action: 'handler', handler: 'chat', context: { sessionId: 'sess-1', message: 'hi', sender: 'clifton' } },
+      { sessionManager: sessionManager as any, runChat: vi.fn().mockResolvedValue(chatResult()) },
+    );
+
+    await dispatch(envelope, deps);
+
+    // Recording here as well is exactly the double-write that moved
+    // persistence into ChatRunner in the first place.
+    expect(sessionManager.addMessage).not.toHaveBeenCalled();
+  });
+
+  it('records a router refusal, so the thread knows what it was told', async () => {
+    const envelope = slackEnvelope();
+    const sessionManager = transcriptSpy();
+    const deps = makeDeps(
+      { action: 'reply', message: "I don't manage that repo." },
+      { sessionManager: sessionManager as any },
+    );
+
+    await dispatch(envelope, deps);
+
+    expect(sessionManager.addMessage.mock.calls.map((c) => [c[1], c[2]])).toEqual([
+      ['user', 'how does the sandbox work in cliftonc/lastlight?'],
+      ['assistant', "I don't manage that repo."],
+    ]);
+  });
+
+  it('does not record a github event', async () => {
+    const sessionManager = transcriptSpy();
+    const deps = makeDeps(
+      { action: 'handler', handler: 'issue-triage', context: { repo: 'cliftonc/lastlight' } },
+      { sessionManager: sessionManager as any },
+    );
+
+    await dispatch(makeEnvelope({ type: 'issue.opened' }), deps);
+
+    expect(sessionManager.addMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe('dispatch — the pr-review trigger gate (Phase 7)', () => {
   // `review.trigger` used to be enforceable in four places, only one of which
   // was config-aware. It is now ONE pure function over the PR snapshot, called

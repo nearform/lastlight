@@ -17,9 +17,13 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			chat loop to reply. Every Slack thread becomes a growing, DB-backed
 			conversation; the harness rehydrates the message history from the
 			<code>messaging_messages</code> SQLite table on every turn, so context stays
-			coherent across hours or days. Events arrive over the <strong>HTTP Events
-			API</strong> by default (reliable, retried delivery); Socket Mode is
-			available as a dev fallback.
+			coherent across hours or days. That transcript covers the <em>whole</em>
+			thread, not just its chat turns — when the classifier sends a message to a
+			workflow instead (a question to <code>answer</code>, a request to
+			<code>build</code>), the question and the workflow's reply are recorded too,
+			so a follow-up like "can you summarise that?" still knows what was said.
+			Events arrive over the <strong>HTTP Events API</strong> by default
+			(reliable, retried delivery); Socket Mode is available as a dev fallback.
 		</li>
 		<li>
 			<strong>OAuth dashboard login</strong> — the admin dashboard offers "Login

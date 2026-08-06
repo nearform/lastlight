@@ -125,7 +125,18 @@ src/
                         Socket Mode dev fallback) + mrkdwn formatter.
     messaging/          Base class for all messaging platforms
                         (slack now, discord later). Owns SessionManager — the
-                        per-thread conversation store.
+                        per-thread conversation store — and
+                        thread-transcript.ts, which records the turns
+                        SessionManager's other writer does NOT: a Slack thread
+                        is one conversation however each message was handled,
+                        but only chat-runner.ts wrote to messaging_messages, so
+                        a message the classifier routed to a WORKFLOW
+                        (answer/build/explore) left no trace and the next chat
+                        turn in that thread rehydrated nothing. The two writers
+                        are mutually exclusive per turn (the dispatcher skips
+                        the wrap for `chat`), so the double-write that moved
+                        persistence into chat-runner isn't reintroduced. See
+                        spec/11-chat.md → "The thread transcript".
   engine/
     router.ts           Deterministic, code-based routing of EventEnvelope
                         → { skill, context }. Classifies build intent via a

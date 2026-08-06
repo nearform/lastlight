@@ -163,6 +163,8 @@ repo that made it a *required* check has an unmergeable PR forever. See
 | **Progress** | Workflow progress renders as a Block Kit checklist (a `header` + `context` meta + `divider` + sectioned steps with per-status emoji, via `renderProgressBlocks`) edited in place through `chat.update`, with the rendered markdown kept as the `text:` notification/accessibility fallback. The GitHub transport consumes the same `ProgressModel` as markdown — one content source, two renderings (`src/notify/`). |
 | **Interactivity** | Approval gates post Approve/Reject buttons (Block Kit `actions`, `renderApprovalBlocks`). Slack POSTs a click to `POST /webhooks/slack/interactions` (signature-verified like events; deduped by `trigger_id`); it routes into the same `approval-response` resolution as the `/approve` slash command / `@last-light approve` comment, and the prompt message is rewritten to a button-free resolved state. `onApprovalAction` is wired in `src/index.ts`; socket mode uses Bolt `action` listeners. |
 
+| **Transcript** | The connector builds the session and stops there — it records no conversation (that double-wrote every chat turn). The thread's transcript is written one layer up, by `ChatRunner` for chat turns and by `src/connectors/messaging/thread-transcript.ts` for every other messaging path, so a workflow-answered turn is still visible to the next chat turn in the same thread. See [Chat](/spec/11-chat#the-thread-transcript--chat-is-not-the-only-writer). |
+
 The chat skill running on top of Slack messages is *not* a connector
 concern — see [Chat](/spec/11-chat).
 
@@ -319,6 +321,7 @@ renders exactly those three outcomes (see `packages/cli/CLAUDE.md`).
 | Registry (`startAll`/`stopAll`/`onEvent`) | `src/connectors/index.ts` |
 | GitHub webhook connector | `src/connectors/github-webhook.ts` |
 | Messaging base (allowlist, sessions, chunking) | `src/connectors/messaging/base.ts` |
+| Thread transcript (the non-chat writer) | `src/connectors/messaging/thread-transcript.ts` |
 | Slack connector | `src/connectors/slack/connector.ts` |
 | CLI client | `src/cli/cli.ts` |
 | API endpoints (`/api/run`, `/api/build`) | `src/index.ts:481–557` |
