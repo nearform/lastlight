@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { loadConfig, resolveModel, resolveVariant, resolveGithubAuth } from "./config/config.js";
-import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService } from "./connectors/index.js";
+import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService, recordThreadMessageForThread } from "./connectors/index.js";
 import {
   dispatch,
   applyPrDispatchGate,
@@ -832,6 +832,19 @@ async function main() {
           } catch (err: unknown) {
             log.warn("Failed to post to Slack thread", { err });
           }
+          // This is the workflow's ANSWER — the substantive thing the thread
+          // will be asked follow-up questions about — so it belongs in the
+          // thread's conversation alongside the turns `ChatRunner` records.
+          // Addressed by thread because the runner never sees a messaging
+          // session id; a thread with no live session records nothing.
+          recordThreadMessageForThread(
+            sessionManager,
+            "slack",
+            channelId,
+            threadId,
+            "assistant",
+            msg,
+          );
         }
       : undefined;
 
@@ -1265,8 +1278,14 @@ async function main() {
     approvalConfig: config.approval,
     bootstrapLabel: config.bootstrapLabel,
     publicUrl: config.publicUrl,
+    // Boot-recovery's Slack transport. Records into the thread's conversation
+    // for the same reason the live `slackPost` above does — a run that finished
+    // after a restart still owes its thread a transcript.
     slackPoster: slackConnector
-      ? (channelId, threadId, msg) => slackConnector!.sendMessage(channelId, threadId, msg).then(() => {})
+      ? (channelId, threadId, msg) =>
+          slackConnector!.sendMessage(channelId, threadId, msg).then(() => {
+            recordThreadMessageForThread(sessionManager, "slack", channelId, threadId, "assistant", msg);
+          })
       : undefined,
   };
 

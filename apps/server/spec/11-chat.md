@@ -106,6 +106,38 @@ The `agent_session_id` is the join key into the JSONL — Slack thread
 ↔ messaging_session ↔ agent_session_id ↔
 `projects/-app/<agent_session_id>.jsonl`. See [State](/spec/10-state).
 
+### The thread transcript — chat is not the only writer
+
+A Slack thread is **one conversation regardless of how each message was
+handled**. Most messages in a thread never reach `ChatRunner` at all: the
+classifier routes a substantive question to the `answer` workflow, a build
+request to `build`, and so on. Those turns are answered from a sandbox, and
+`messaging_messages` is what carries them across to the next chat turn.
+
+So two writers, kept **mutually exclusive per turn** so a turn is never
+double-recorded (`src/connectors/messaging/thread-transcript.ts`):
+
+| Turn | Writer |
+|---|---|
+| Chat (`handler: chat`) | `ChatRunner`, per the flow above |
+| Anything else on a messaging envelope — a workflow dispatch, a router refusal, an approval or status reply | `withThreadTranscript`, which records the inbound message and wraps `envelope.reply` |
+| A workflow's own output into the thread (the runner's `postComment`, live and on boot-recovery) | `recordThreadMessageForThread`, addressed by (platform, channel, thread) — the runner never sees a messaging session id |
+
+Every write also `touchSession()`s, so a thread carried entirely by workflow
+turns cannot lapse into `SESSION_TIMEOUT_MS` staleness and silently re-key to a
+fresh session mid-conversation. The by-thread writer deliberately looks past
+that cutoff (`findActiveThreadSession(..., { includeStale: true })`): a workflow
+can easily run longer than the window between a question and its answer, and
+recording revives the session so the user's next message continues it.
+
+Written text is clamped to `MAX_TRANSCRIPT_CHARS` (4 000), keeping its **tail** —
+a long health report or review write-up would otherwise dominate the next chat
+turn's rehydrated prompt, and a follow-up question refers back to the end.
+
+Without this the symptom is precise and confusing: a question answered by a
+workflow, followed by "can you summarise that?" in the same thread, rehydrates
+an empty history and answers as if the user had just been introduced.
+
 ## Tools
 
 Two toolsets, merged into a single tool list at construction time
@@ -260,11 +292,22 @@ so the next turn isn't blocked by a prior crash.
   go through the session manager — not the agent's tool surface.
 - **Same Slack thread → same agent session id.** Always. A
   reset is the only way to get a new id for an existing thread.
+- **A thread's transcript covers the whole thread, not just its chat
+  turns.** Exactly one writer per turn — `ChatRunner` for chat,
+  `thread-transcript.ts` for every other messaging path. A
+  re-implementation that lets both write the same turn reintroduces the
+  double-recording this split exists to prevent; one that lets neither
+  write a workflow turn reintroduces the amnesia it exists to fix.
 - **Tool rounds are capped.** Eight is enough; a chat that wants to
   exceed this should be redirected to a workflow.
-- **History is a rolling 50-message window.** No token-aware
-  truncation. A re-implementation that adds it should be careful to
-  preserve assistant ↔ user pairing.
+- **History is a rolling 50-message window — the NEWEST 50.** No
+  token-aware truncation. The limit must bite at the old end
+  (`ORDER BY timestamp DESC, id DESC`, reversed for the caller): an
+  ascending `LIMIT` keeps a long thread's opening and never shows it
+  what was just said. `id` is the tiebreak because the two rows of one
+  turn routinely share a whole-millisecond timestamp. A
+  re-implementation that adds token-aware truncation should be careful
+  to preserve assistant ↔ user pairing.
 - **Screened messages reach chat with a flag, not a block.** A
   `[lastlight-flag: ...]` prefix on the user content tells the agent
   to treat it as data per `agent-context/security.md`. Chat does not
