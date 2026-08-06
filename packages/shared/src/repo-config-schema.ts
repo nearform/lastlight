@@ -1127,6 +1127,35 @@ function sanitizeReview(
         out[key] = true;
         break;
       }
+      case "generatedPaths": {
+        // SUPERSET-only — the mirror image of `fix.retryableClasses` (#271).
+        // A longer list suppresses MORE re-reviews, which is the conservative
+        // direction; DROPPING one of the operator's entries buys the repo an
+        // extra agent run per lock-file bump on the operator's budget. Arrays
+        // replace wholesale on merge, so the clamp is "keep the union" rather
+        // than "drop the leaf" — dropping it would silently restore the
+        // operator's list, which is the same answer but a confusing one to read
+        // back off the provenance view.
+        if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || !v.trim())) {
+          warn("invalid-value", path, `Ignored "${path}": it must be an array of non-empty path patterns.`);
+          continue;
+        }
+        const operator = Array.isArray(operatorRaw.generatedPaths)
+          ? (operatorRaw.generatedPaths as unknown[]).filter((v): v is string => typeof v === "string")
+          : defaults.generatedPaths;
+        const names = (value as string[]).map((v) => v.trim());
+        const dropped = operator.filter((p) => !names.includes(p));
+        if (dropped.length > 0) {
+          warn(
+            "policy-downgrade",
+            path,
+            `Restored ${dropped.map((p) => `"${p}"`).join(", ")} to "${path}": a repo may only ADD generated-path ` +
+              `patterns — removing one asks for MORE review runs than this deployment allows.`,
+          );
+        }
+        out.generatedPaths = [...operator, ...names.filter((p) => !operator.includes(p))];
+        break;
+      }
       default:
         warn("invalid-value", path, `Ignored "${path}": it is not a key of the review policy.`);
     }
@@ -1273,6 +1302,9 @@ function shapeReview(raw: unknown): ReviewConfig {
     trigger: isReviewTrigger(node.trigger) ? node.trigger : d.trigger,
     requestLabel: typeof node.requestLabel === "string" && node.requestLabel.trim() ? node.requestLabel.trim() : null,
     skipDraft: typeof node.skipDraft === "boolean" ? node.skipDraft : d.skipDraft,
+    generatedPaths: Array.isArray(node.generatedPaths)
+      ? node.generatedPaths.filter((p): p is string => typeof p === "string" && !!p.trim()).map((p) => p.trim())
+      : d.generatedPaths,
   };
 }
 

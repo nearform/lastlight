@@ -606,7 +606,7 @@ const ladderH = guards.length * rowH + 80;
 		<tbody>
 			<tr><td><code>dispatch</code></td><td>An explicit request or the request label; <code>eager</code> on PR attention; a settled check suite under <code>after-checks</code></td><td><code>in_progress</code>, completed from the run's terminal transition</td></tr>
 			<tr><td><code>defer</code></td><td><code>on-request</code> with nobody asking; <code>after-checks</code> still waiting for CI; or reached on PR attention rather than a settle</td><td><code>queued</code>, or <code>neutral</code> under <code>on-request</code> — and only on a PR-attention event</td></tr>
-			<tr><td><code>skip</code></td><td>A draft, a commit we already reviewed, or another run in flight</td><td><strong>Nothing.</strong> A run that never dispatches must not create a check and immediately conclude it</td></tr>
+			<tr><td><code>skip</code></td><td>A draft, a commit we already reviewed, a push that changed only generated files since the review we posted, or another run in flight</td><td><strong>Nothing</strong> — except the generated-only case, which repeats the standing verdict on the new head. A run that never dispatches must otherwise not create a check and immediately conclude it</td></tr>
 		</tbody>
 	</table>
 
@@ -620,7 +620,21 @@ const ladderH = guards.length * rowH + 80;
 	</p>
 
 	<p>
-		Two behaviours are worth knowing. <strong>An explicit
+		<strong>A push with nothing new to say does not earn a review.</strong>
+		&ldquo;We already reviewed this exact commit&rdquo; used to be the only
+		suppression there was — so a lock file re-derivation, being a new commit,
+		bought a second formal review saying the same thing. Now, when every path
+		changed since the review we <em>posted</em> matches
+		<a href="/docs/configuration"><code>review.generatedPaths</code></a>, the
+		resolver skips. It measures from the review we posted rather than the last
+		commit we ran against, so a run that declined to post can't suppress the
+		change it never reviewed; and an unreadable or truncated diff dispatches.
+		This is the one skip that still leaves a check, because it is the only one
+		that would otherwise strand a required check on a commit nobody reviewed.
+	</p>
+
+	<p>
+		Two more behaviours are worth knowing. <strong>An explicit
 		<code>@last-light review</code> always dispatches</strong>, overriding the
 		mode, the draft skip and the &ldquo;already reviewed this commit&rdquo; check —
 		the one thing it does not override is the run lock, because that is a physical

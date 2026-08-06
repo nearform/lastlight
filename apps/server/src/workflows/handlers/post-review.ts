@@ -9,6 +9,7 @@ import {
   type ReviewFindingsDoc,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
+import { hasMaterialChange } from "../../engine/pr-decisions.js";
 import { logger } from "../../logging/logger.js";
 
 const log = logger("post-review");
@@ -167,15 +168,25 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     let headSha = localHeadSha;
     if (!headSha) headSha = await github.getPullRequestHeadSha(owner, repo, prNumber).catch(() => undefined);
 
-    // Idempotency: skip if a bot review already exists on this head SHA (guards
-    // resume / re-entry from double-posting).
+    // One pass over our review history answers both questions asked below: is
+    // there already a review on THIS head (idempotency), and what did we last
+    // actually say (the duplicate guard). Both used to be their own paginated
+    // `listReviews`.
+    let history: Awaited<ReturnType<GitHubClient["getBotReviewHistory"]>> = { atHead: null, latest: null };
     if (headSha) {
-      try {
-        const existing = await github.getLatestBotReview(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin);
-        if (existing) return succeed(`already reviewed head ${headSha.slice(0, 7)} (${existing.state})`);
-      } catch {
-        /* best-effort — fall through and attempt the post */
+      // Best-effort: a failed read leaves both null, which posts.
+      history = await github
+        .getBotReviewHistory(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin)
+        .catch(() => ({ atHead: null, latest: null }));
+
+      // Idempotency: skip if a bot review already exists on this head SHA
+      // (guards resume / re-entry from double-posting).
+      if (history.atHead) {
+        return succeed(`already reviewed head ${headSha.slice(0, 7)} (${history.atHead.state})`);
       }
+
+      const stale = await this.staleAgainstCurrentHead(github, owner, repo, prNumber, headSha);
+      if (stale) return succeed(stale);
     }
 
     // Commentable line set from the local checkout diff. Failure → null → all
@@ -191,6 +202,12 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
     // of demoting to the body.
     if (!commentable) commentable = await this.apiCommentableDiff(github, owner, repo, prNumber);
     const review = buildReview(doc, commentable);
+
+    const repeat = this.repeatOfLastReview(history.latest, review);
+    if (repeat) {
+      log.info("Skipping a duplicate review post", { repo: `${owner}/${repo}`, prNumber, summary: repeat });
+      return succeed(repeat);
+    }
 
     try {
       await github.createPullRequestReview(owner, repo, prNumber, {
@@ -220,6 +237,98 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         return fail(`post-review: GitHub rejected the review (inline: ${msg}; body-only: ${msg2})`);
       }
     }
+  }
+
+  /**
+   * Would this review be a WORD-FOR-WORD repeat of the one we already posted
+   * (issue #271)? Returns the summary line to succeed with, or `null` to post.
+   *
+   * nearform/skillspro#1641 is the case, and it is worth being exact about why
+   * the trigger-gate half of #271 does not cover it. Two APPROVEs, six minutes
+   * and 400 identical bytes apart, on two head SHAs whose two-dot delta is
+   * `package-lock.json` **plus** `package.json` and `jest.config.js` — a force-
+   * push amend, materially different by any file-level test, so
+   * `resolveReviewTrigger`'s generated-only gate correctly lets it through. The
+   * only thing that identifies it as a duplicate is the review text itself, and
+   * that is not knowable until the agent has written it.
+   *
+   * So this saves the DUPLICATE COMMENT, not the money — the run has already
+   * happened by the time we get here. It is deliberately the narrowest rule
+   * that catches the observed shape:
+   *
+   * - the same `body`, byte for byte, as our last posted review;
+   * - `APPROVE` with **no** inline comments on both sides.
+   *
+   * The APPROVE restriction is not squeamishness, it is the check run. Skipping
+   * the post means `concludeReviewCheck` finds no review at this head and
+   * concludes `neutral`. `neutral` and `success` both pass branch protection, so
+   * suppressing a duplicate APPROVE changes nothing; suppressing a duplicate
+   * CHANGES_REQUESTED would turn a `failure` check into a passing one and open
+   * a merge gate the review deliberately closed.
+   */
+  private repeatOfLastReview(
+    last: { state: string; sha: string; body: string | null } | null,
+    review: { body: string; event: string; comments: unknown[] },
+  ): string | null {
+    if (review.event !== "APPROVE" || review.comments.length > 0) return null;
+    if (!last || last.state !== "APPROVED" || last.body !== review.body) return null;
+    return `duplicate: this APPROVE is word-for-word the one we posted on ${last.sha.slice(0, 7)}`;
+  }
+
+  /**
+   * Has the PR moved on since the SHA this run actually reviewed (issue #271)?
+   *
+   * Returns the summary line to succeed with when the review should NOT be
+   * posted, or `null` to post. Posting a review of a tree that no longer exists
+   * spends the maintainer's attention on findings GitHub will immediately mark
+   * outdated — nearform/skillspro#1587's churn is full of them.
+   *
+   * Three conditions, ALL required, because dropping a review is only
+   * acceptable when a replacement is guaranteed:
+   *
+   * 1. **The head really moved.** Any read failure leaves it unknown and posts.
+   * 2. **The trigger is automatic.** Under `on-request` nothing re-dispatches on
+   *    its own, so the human who asked would simply never get an answer.
+   * 3. **The delta is MATERIAL** — at least one changed path is not generated.
+   *    That is exactly `resolveReviewTrigger`'s generated-only gate read the
+   *    other way round: a material push is one that gate will let through, so a
+   *    fresh review of the new head is guaranteed; a generated-only push is one
+   *    it will suppress, and dropping this review would mean the PR gets none at
+   *    all.
+   *
+   * Operator-layer `review` config on purpose: this runs in-process against a
+   * run whose repo-clamped block isn't threaded here, and the clamp only ever
+   * ADDS generated paths — so the operator list is the subset, which resolves
+   * more deltas as "material" and therefore drops fewer reviews.
+   */
+  private async staleAgainstCurrentHead(
+    github: GitHubClient,
+    owner: string,
+    repo: string,
+    prNumber: number,
+    reviewedSha: string,
+  ): Promise<string | null> {
+    const review = getRuntimeConfig()?.review;
+    if (!review || review.trigger === "on-request") return null;
+
+    const currentSha = await github.getPullRequestHeadSha(owner, repo, prNumber).catch(() => undefined);
+    if (!currentSha || currentSha === reviewedSha) return null;
+
+    const changed = await github
+      .getChangedPathsBetween(owner, repo, reviewedSha, currentSha)
+      .catch((err: unknown) => {
+        log.warn("Could not compare the reviewed head with the current one; posting anyway", { err });
+        return null;
+      });
+    // `null` (degraded/truncated) and `[]` both mean "no material change proven",
+    // so both post — the same fail-open direction the trigger gate takes.
+    if (!hasMaterialChange(changed, review.generatedPaths)) return null;
+
+    const summary =
+      `stale: reviewed ${reviewedSha.slice(0, 7)} but the head is now ${currentSha.slice(0, 7)}; ` +
+      `a review of the new head will be dispatched instead`;
+    log.info("Skipping a stale review post", { repo: `${owner}/${repo}`, prNumber, summary });
+    return summary;
   }
 
   /** Host path of the run's repo checkout — mirrors sandbox/index.ts layout. */

@@ -560,12 +560,15 @@ export async function applyPrDispatchGate(
     await postReviewCheckForSkip(
       {
         workflowName,
-        placement: reviewCheckPlacement(disposition.review, policy.review),
+        placement: reviewCheckPlacement(disposition.review, policy.review, {
+          unchanged: !!disposition.reviewUnchanged,
+        }),
         postsCheck: policy.review.postsCheck,
         route,
         owner: state.repo.split("/")[0] ?? "",
         repo: state.repo.split("/")[1] ?? "",
         headSha: state.headSha,
+        carriedOver: disposition.reviewUnchanged,
       },
       {
         github: deps.github,

@@ -61,6 +61,8 @@ function fakeGithub(over: Partial<{ headSha: string; baseChecks: string; prThrow
     getChecksSummary: vi.fn(async () => ({ state: "failing", settledCount: 3 })),
     getBaseChecksState: vi.fn(async () => over.baseChecks ?? "passing"),
     getLatestBotReview: vi.fn(async () => null),
+    getBotReviewHistory: vi.fn(async () => ({ atHead: null, latest: null })),
+    getChangedPathsBetween: vi.fn(async () => null),
     getCommitAuthorName: vi.fn(async () => "dependabot[bot]"),
     getCiFailureReport: vi.fn(async () => null),
     addLabels: vi.fn(async (_o: string, _r: string, _n: number, names: string[]) => {

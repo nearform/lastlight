@@ -116,6 +116,10 @@ function prGithubStub(
     baseChecksState?: 'passing' | 'failing' | 'pending' | 'none';
     headAuthor?: string;
     botReview?: { state: string } | null;
+    /** The bot's newest review at ANY SHA — the generated-only gate's baseline. */
+    lastBotReview?: { state: string; sha: string } | null;
+    /** What `getChangedPathsBetween` answers for that baseline → head. */
+    changedPathsSinceReview?: string[] | null;
   } = {},
   over: Record<string, any> = {},
 ) {
@@ -139,6 +143,11 @@ function prGithubStub(
     }),
     getBaseChecksState: vi.fn().mockResolvedValue(pr.baseChecksState ?? 'passing'),
     getLatestBotReview: vi.fn().mockResolvedValue(pr.botReview ?? null),
+    getBotReviewHistory: vi.fn().mockResolvedValue({
+      atHead: pr.botReview ?? null,
+      latest: pr.lastBotReview ?? (pr.botReview ? { ...pr.botReview, sha: pr.headSha ?? 'sha-current' } : null),
+    }),
+    getChangedPathsBetween: vi.fn().mockResolvedValue(pr.changedPathsSinceReview ?? null),
     getCommitAuthorName: vi.fn().mockResolvedValue(pr.headAuthor ?? 'octocat'),
     getCiFailureReport: vi.fn().mockResolvedValue({ jobs: [], logsAvailable: false }),
     postComment: vi.fn().mockResolvedValue(1),

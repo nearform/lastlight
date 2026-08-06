@@ -220,8 +220,9 @@ export function reviewTriggerRank(trigger: ReviewTrigger): number {
  * towards less automation: `postsCheck` and `skipDraft` are add-only `true` (a
  * repo may ask for the check and may skip drafts; it may not suppress an
  * operator's check or force reviews onto drafts), `trigger` takes the lower
- * {@link reviewTriggerRank} of repo and operator, and `requestLabel` is free —
- * naming a label only ever adds an explicit, human-initiated route.
+ * {@link reviewTriggerRank} of repo and operator, `generatedPaths` is
+ * superset-only (a longer list suppresses MORE re-reviews), and `requestLabel`
+ * is free — naming a label only ever adds an explicit, human-initiated route.
  */
 export interface ReviewConfig {
   /** Post the `last-light/review` Check Run. */
@@ -232,6 +233,25 @@ export interface ReviewConfig {
   requestLabel: string | null;
   /** Skip draft PRs (matching what the review cron has always done). */
   skipDraft: boolean;
+  /**
+   * Path patterns whose changes are DERIVED, not authored — lock files,
+   * minified bundles, code-generator output (issue #271).
+   *
+   * Per-head-SHA dedup was the only suppression gate on a re-review, so any new
+   * head earned a fresh formal review by design. A lock file re-derivation is a
+   * new head, so nearform/skillspro#1641 got two byte-identical APPROVEs six
+   * minutes apart. When EVERY path changed since our last posted review matches
+   * one of these, there is nothing a reviewer could say that it did not already
+   * say, and `resolveReviewTrigger` skips.
+   *
+   * Empty list = the gate is off (the pre-#271 behaviour). Matched by
+   * `isGeneratedPath` — `*` stops at a `/`, `**` crosses one, and a pattern with
+   * no `/` matches a BASENAME anywhere in the tree.
+   *
+   * This never suppresses a FIRST review, an explicit `@bot review`, or a push
+   * that also touched a hand-written file — see `resolveReviewTrigger`.
+   */
+  generatedPaths: string[];
 }
 
 /** The shipped `review:` block. Mirrors `review:` in `config/default.yaml`. */
@@ -241,5 +261,22 @@ export function defaultReviewConfig(): ReviewConfig {
     trigger: "after-checks",
     requestLabel: null,
     skipDraft: true,
+    // Deliberately narrow: only artifacts a tool WRITES from something else in
+    // the same diff. `dist/` and `build/` are not here — plenty of repos keep
+    // hand-written source under those names, and a wrong entry here silently
+    // suppresses real reviews. Operators add their own generator output.
+    generatedPaths: [
+      "*.lock",
+      "package-lock.json",
+      "npm-shrinkwrap.json",
+      "pnpm-lock.yaml",
+      "yarn.lock",
+      "bun.lockb",
+      "go.sum",
+      "*.min.js",
+      "*.min.css",
+      "*.generated.*",
+      "**/__generated__/**",
+    ],
   };
 }

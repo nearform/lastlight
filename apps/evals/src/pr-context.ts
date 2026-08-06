@@ -175,6 +175,11 @@ export function buildPrState(args: {
     settledCheckCount: s.settled_check_count ?? 0,
     baseChecksState: s.base_checks_state ?? CHECKS_DEFAULT,
     botReviewAtHead: null,
+    // No prior posted review, so the generated-only re-review gate (issue #271)
+    // has no baseline and never fires — an eval case reviews the diff it was
+    // handed, every time.
+    lastBotReview: null,
+    pathsSinceLastBotReview: null,
     ciReport: toCiReport(s.ci_jobs),
     attempt: s.attempt ?? 1,
     flakyDeferrals: s.flaky_deferrals ?? 0,

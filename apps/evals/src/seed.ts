@@ -316,6 +316,22 @@ export function ensurePrCommitsInCache(opts: {
     try {
       git(mirror, ["fetch", "--quiet", "origin", `refs/pull/${opts.pullNumber}/head`]);
     } catch {
+      /* fall through — the bare-SHA fetch below is the next resort */
+    }
+  }
+  // Still absent: the commit is off EVERY ref. A pr-review case pinned to a
+  // historical head — the SHA a human actually reviewed, which is the only
+  // honest head for a recall case — hits this the moment the branch is rebased
+  // past it. GitHub keeps such commits alive (a review references them) and
+  // serves them to a bare-SHA want, so ask for the SHA directly.
+  //
+  // Last, not first: it costs a round trip, and the two ref fetches above cover
+  // every case where the commit is still on a ref.
+  for (const sha of [opts.baseCommit, opts.headCommit]) {
+    if (mirrorHasCommit(mirror, sha)) continue;
+    try {
+      git(mirror, ["fetch", "--quiet", "origin", sha]);
+    } catch {
       /* fall through — the presence check below reports a clear error */
     }
   }
@@ -323,7 +339,8 @@ export function ensurePrCommitsInCache(opts: {
     if (!mirrorHasCommit(mirror, sha)) {
       throw new Error(
         `ensurePrCommitsInCache: ${label} commit ${sha} for PR #${opts.pullNumber} of ${opts.repo} is not reachable ` +
-          `(not on a branch and refs/pull/${opts.pullNumber}/head didn't provide it).`,
+          `(not on a branch, refs/pull/${opts.pullNumber}/head didn't provide it, and the server refused a ` +
+          `bare-SHA fetch — it may have been garbage-collected).`,
       );
     }
   }

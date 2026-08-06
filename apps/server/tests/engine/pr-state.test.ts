@@ -10,10 +10,15 @@
  * rather than hand-constructing the intermediate state.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { StateDb } from "#src/state/db.js";
 import type { WorkflowRun } from "#src/state/workflow-run-store.js";
-import { applyDerivedState, type PrState, type PrStateDeps } from "#src/engine/pr-state.js";
+import {
+  applyDerivedState,
+  resolvePrState,
+  type PrState,
+  type PrStateDeps,
+} from "#src/engine/pr-state.js";
 import { harvestFixMarkers, readHarvestedMarkers } from "#src/engine/fix-harvest.js";
 import { resolveFixDisposition } from "#src/engine/pr-decisions.js";
 import { REQUIRES_HUMAN_LABEL } from "#src/cron/dependabot-discovery.js";
@@ -42,6 +47,8 @@ function liveState(over: Partial<PrState> = {}): PrState {
     settledCheckCount: 3,
     baseChecksState: "passing",
     botReviewAtHead: null,
+    lastBotReview: null,
+    pathsSinceLastBotReview: null,
     ciReport: null,
     attempt: 1,
     flakyDeferrals: 0,
@@ -590,5 +597,99 @@ describe("harvestFixMarkers", () => {
   it("never throws when the run row is gone", () => {
     const h = harness();
     expect(() => h.finish("run-does-not-exist", "diagnose", diagnosis("flaky"))).not.toThrow();
+  });
+});
+
+/**
+ * The LIVE half's one conditional read (issue #271).
+ *
+ * `resolvePrState` runs on every PR-scoped dispatch, so a read it does not need
+ * is a request per webhook across every managed repo. The compare that feeds
+ * the generated-only re-review gate is only useful on one shape of PR — we have
+ * posted a review, and the head has moved past it — so it fires there and
+ * nowhere else.
+ */
+describe("resolvePrState — the review-delta compare", () => {
+  const emptyDb = {
+    runs: {
+      activeForTrigger: () => null,
+      latestSucceededForTriggers: () => ({}),
+      latestForTrigger: () => null,
+    },
+    executions: { costForTriggerWorkflows: () => 0, phaseSucceededInRun: () => false },
+  } as unknown as StateDb;
+
+  function githubStub(history: {
+    atHead?: { state: string } | null;
+    latest?: { state: string; sha: string } | null;
+    paths?: string[] | null;
+    comparesThrow?: boolean;
+  }) {
+    return {
+      getPullRequest: async () => ({
+        title: "t",
+        body: "",
+        draft: false,
+        labels: [],
+        head: { ref: "feature", sha: "newhead", repo: { full_name: "cliftonc/lastlight" } },
+        base: { ref: "main", repo: { full_name: "cliftonc/lastlight" } },
+      }),
+      getChecksSummary: async () => ({ state: "passing", settledCount: 1, pendingCount: 0 }),
+      getBaseChecksState: async () => "passing",
+      getBotReviewHistory: async () => ({
+        atHead: history.atHead ?? null,
+        latest: history.latest ?? null,
+      }),
+      getCommitAuthorName: async () => "octocat",
+      getChangedPathsBetween: vi.fn(async () => {
+        if (history.comparesThrow) throw new Error("422 no common ancestor");
+        return history.paths ?? null;
+      }),
+    } as any;
+  }
+
+  const resolve = (github: any) =>
+    resolvePrState("cliftonc", "lastlight", 190, { github, db: emptyDb, botLogin: BOT });
+
+  it("compares, and records both halves, when the head moved past our review", async () => {
+    const github = githubStub({
+      latest: { state: "APPROVED", sha: "oldhead" },
+      paths: ["pnpm-lock.yaml"],
+    });
+    const state = await resolve(github);
+    expect(github.getChangedPathsBetween).toHaveBeenCalledWith(
+      "cliftonc",
+      "lastlight",
+      "oldhead",
+      "newhead",
+    );
+    expect(state.lastBotReview).toEqual({ state: "APPROVED", sha: "oldhead" });
+    expect(state.pathsSinceLastBotReview).toEqual(["pnpm-lock.yaml"]);
+  });
+
+  it("does not compare when we have never reviewed this PR", async () => {
+    const github = githubStub({});
+    const state = await resolve(github);
+    expect(github.getChangedPathsBetween).not.toHaveBeenCalled();
+    expect(state.pathsSinceLastBotReview).toBeNull();
+  });
+
+  it("does not compare when our review IS at the head — per-head dedup answers first", async () => {
+    const github = githubStub({
+      atHead: { state: "APPROVED" },
+      latest: { state: "APPROVED", sha: "newhead" },
+    });
+    const state = await resolve(github);
+    expect(github.getChangedPathsBetween).not.toHaveBeenCalled();
+    expect(state.botReviewAtHead).toEqual({ state: "APPROVED" });
+  });
+
+  // Never throws, and degrades to the value that cannot cause a skip — the same
+  // contract every other read in this resolver holds to.
+  it("degrades a failed compare to null and notes it", async () => {
+    const github = githubStub({ latest: { state: "APPROVED", sha: "oldhead" }, comparesThrow: true });
+    const state = await resolve(github);
+    expect(state.pathsSinceLastBotReview).toBeNull();
+    expect(state.readErrors.join()).toMatch(/getChangedPathsBetween/);
   });
 });

@@ -196,6 +196,26 @@ export interface PrState {
    */
   botReviewAtHead: { state: string } | null;
   /**
+   * The bot's most recent posted review at ANY head SHA, with the SHA it was
+   * submitted against — the baseline the generated-only re-review gate diffs
+   * from (issue #271). Null when we have never reviewed this PR.
+   *
+   * Distinct from `assessedHeadShaByWorkflow["pr-review"]`, which records that a
+   * run HAPPENED. A run whose `post-review` skipped said nothing, so it must not
+   * become the baseline — see `GitHubClient.getBotReviewHistory`.
+   */
+  lastBotReview: { state: string; sha: string } | null;
+  /**
+   * Every path that changed between {@link lastBotReview}'s SHA and the current
+   * head — what a re-review would actually be reviewing.
+   *
+   * `null` means "we don't know", which is the value that cannot cause a skip:
+   * there is no prior review, the head hasn't moved since it, the compare read
+   * failed, or GitHub truncated the file list. Only a non-empty list of
+   * exclusively generated paths suppresses a review.
+   */
+  pathsSinceLastBotReview: string[] | null;
+  /**
    * Structured CI evidence for the head SHA (Phase 1), or null when the checks
    * are not failing — the report costs one Actions job-log download per failed
    * check, so it is only fetched when there is something to explain.
@@ -505,6 +525,8 @@ export async function resolvePrState(
     settledCheckCount: 0,
     baseChecksState: "none",
     botReviewAtHead: null,
+    lastBotReview: null,
+    pathsSinceLastBotReview: null,
     ciReport: null,
     attempt: 1,
     flakyDeferrals: 0,
@@ -570,12 +592,13 @@ export async function resolvePrState(
             })
           : Promise.resolve("none" as ChecksState),
         github
-          .getLatestBotReview(owner, repo, prNumber, state.headSha, deps.botLogin)
+          .getBotReviewHistory(owner, repo, prNumber, state.headSha, deps.botLogin)
           .catch((err: unknown) => {
-            note("getLatestBotReview", err);
-            // null = "not reviewed", which dispatches a review rather than
-            // suppressing one. `post-review` is itself idempotent per head SHA.
-            return null;
+            note("getBotReviewHistory", err);
+            // Both halves null = "not reviewed", which dispatches a review
+            // rather than suppressing one. `post-review` is itself idempotent
+            // per head SHA.
+            return { atHead: null, latest: null };
           }),
         github.getCommitAuthorName(owner, repo, state.headSha).catch((err: unknown) => {
           note("getCommitAuthorName", err);
@@ -587,9 +610,24 @@ export async function resolvePrState(
         state.settledCheckCount = summary.settledCount;
       }
       state.baseChecksState = baseState;
-      state.botReviewAtHead = review ? { state: review.state } : null;
+      state.botReviewAtHead = review.atHead ? { state: review.atHead.state } : null;
+      state.lastBotReview = review.latest ? { state: review.latest.state, sha: review.latest.sha } : null;
       state.headAuthor = author;
       state.headIsOurs = !!deps.botLogin && author === deps.botLogin;
+
+      // What changed since we last SAID something — the input to the
+      // generated-only re-review gate (issue #271). One compare call, and only
+      // on the path that can use it: there must be a prior review, the head
+      // must have moved since it, and the per-head dedup must not already be
+      // about to skip. Best-effort like every read here; `null` dispatches.
+      if (review.latest && !review.atHead && review.latest.sha !== state.headSha) {
+        state.pathsSinceLastBotReview = await github
+          .getChangedPathsBetween(owner, repo, review.latest.sha, state.headSha)
+          .catch((err: unknown) => {
+            note("getChangedPathsBetween", err);
+            return null;
+          });
+      }
 
       // The heavy read (one Actions job-log download per failed check) only
       // when there is a failure to explain. Phase 1's `logsAvailable` flag

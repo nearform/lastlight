@@ -738,7 +738,7 @@ the check say" are different questions:
 |---|---|---|
 | `dispatch` | an explicit request, the `review.requestLabel`, `eager` on PR attention, or a settled suite under `after-checks` | `in_progress`, completed from the run's terminal transition |
 | `defer` | `on-request` with nobody asking; `after-checks` waiting for CI (on every route but the sweep — see below), or reached on PR attention rather than a settle | `queued` under `after-checks`, `neutral` under `on-request` — and only on a PR-attention event, since a placeholder is a statement about a head SHA and the 30-minute sweep would otherwise re-post one per tick |
-| `skip` | draft (`review.skipDraft`), already reviewed at this head, or another PR-scoped run in flight | **nothing.** A run that never dispatches must not create a check and immediately conclude it |
+| `skip` | draft (`review.skipDraft`), already reviewed at this head, only generated files changed since the review we posted (`review.generatedPaths`), or another PR-scoped run in flight | **nothing** — except the generated-only case, which posts a completed `carried-over` check restating the prior verdict. A run that never dispatches must otherwise not create a check and immediately conclude it |
 
 Two consequences worth stating outright:
 
@@ -765,6 +765,20 @@ Two consequences worth stating outright:
   is "on settle, either colour" — the colour was never the gate, and on the
   one route that exists to pick up what no webhook will fire for, neither is
   settling.
+- **A push with nothing new to say does not earn a review** (issue #271).
+  Per-head dedup was the only suppression gate, so every new head SHA bought a
+  full formal review *by design* — and a lock file re-derivation is a new head
+  SHA. `nearform/skillspro#1641` got two byte-identical APPROVEs six minutes
+  apart. So when every path changed since the review we **posted** matches
+  `review.generatedPaths`, the resolver skips. Three properties make that safe:
+  it sits *below* the explicit-request branch, so `@bot review`, the request
+  label and the check's Re-run button all still force one; the baseline is the
+  review we posted (`PrState.lastBotReview`) rather than the last head we ran
+  at, so a run whose `post-review` declined to post cannot suppress the change
+  it never reviewed; and the delta (`PrState.pathsSinceLastBotReview`) is `null`
+  on every degraded or truncated read, which dispatches. It is `skip` and not
+  `defer` because no future event turns *this* delta into a review. The check
+  run is the one place this skip is not silent — see `carried-over` below.
 - **Fix outranks review** on a settled-failing suite, and it needs no new
   state. `normalize()` returns one envelope per delivery and `route()`
   returns one handler, so a `check_suite.completed` fan-out into both
@@ -812,6 +826,22 @@ passing, so a review that failed to run never blocks a merge on its own.
 Boot-time reconciliation is deliberately not needed — terminal-transition
 completion plus the existing `MAX_RESTART_RESUMES` resume path covers
 restart.
+
+**`carried-over` — the one skip that still leaves a check.** Every other
+review skip either already has a check on this head (`already-reviewed`) or
+must not have one (draft, hold, run lock). The generated-only skip above is
+different: it leaves a brand-new head SHA with no `last-light/review` at all,
+and on a deployment whose branch protection requires that check, a missing
+check is an unmergeable PR. So it posts a **completed** check restating the
+review that still stands, naming the SHA it was posted against and how to force
+a fresh one. Its conclusion **mirrors that prior review** — `APPROVED` →
+`success`, `CHANGES_REQUESTED` → `failure`, anything else → `neutral` — because
+carrying a `CHANGES_REQUESTED` forward as `success` would clear a merge gate the
+review deliberately closed. It is also the one placeholder exempt from the
+PR-attention route limit: under the packaged `after-checks` trigger the decision
+is taken on the `checks-settled` route, so limiting it to attention would leave
+the check missing on exactly the heads it exists to cover. Re-posting is
+harmless — GitHub shows the latest run of a check name on a SHA.
 
 **The self-gating deadlock.** `getChecksConclusion` aggregates every check
 run on the head SHA, ours included, so a `last-light/review` sitting
