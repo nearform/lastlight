@@ -63,6 +63,17 @@ export interface GitHubWebhookConfig {
    * re-install (which mints a NEW installation id) can't reuse a dead one.
    */
   onInstallationRemoved?: (installationId: string) => void;
+  /**
+   * Invalidate the dashboard team-visibility cache (issue #169). Called on
+   * `team` / `membership` / `organization` events with the affected scope.
+   *
+   * **Invalidation, not re-derivation.** The cache is filled on demand, per
+   * logged-in user, so the right response to "this team changed" is to forget
+   * what we knew and let the next dashboard request pay for a fresh answer —
+   * not to crawl the team here, which in a big org would put an unbounded walk
+   * on the webhook hot path. Absent when the feature is off / no DB (tests).
+   */
+  onTeamChanged?: (scope: { org: string; teamSlug?: string; login?: string }) => void;
 }
 
 /** The check-run name whose "Re-run" button is a review request. */
@@ -165,6 +176,15 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       if (eventType === "installation" || eventType === "installation_repositories") {
         this.handleInstallationEvent(eventType, action, payload);
         return c.json({ accepted: true, kind: "installation-sync" }, 200);
+      }
+
+      // Team/org membership changes invalidate the dashboard visibility cache
+      // (issue #169). Handled here for the same reason as the block above:
+      // these are org-wide events with no `payload.repository`, and several of
+      // their actions (`deleted`, `edited`) are in IGNORED_ACTIONS below.
+      if (eventType === "team" || eventType === "membership" || eventType === "organization") {
+        this.handleTeamEvent(eventType, action, payload);
+        return c.json({ accepted: true, kind: "team-visibility-sync" }, 200);
       }
 
       // Filter out ignored actions
@@ -327,6 +347,66 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         account,
       });
     }
+  }
+
+  /**
+   * Keep the dashboard team-visibility cache honest (issue #169) by FORGETTING
+   * what a change invalidated — never by re-deriving it here.
+   *
+   * The cache is per-logged-in-user and filled on demand, so the cheapest
+   * correct response to any of these events is a delete: the next dashboard
+   * request re-resolves, and only for people who actually use it. Re-deriving
+   * on the webhook would put an unbounded org walk on the delivery path, which
+   * is exactly the failure mode this design exists to avoid.
+   *
+   * Scoping, by event:
+   * - `membership` — names the person AND the team. Drop that person's answer.
+   * - `team` — names the team only (created/deleted/edited, and the
+   *   `*_to_repository` pair that changes the grant). Drop the team, which
+   *   drops every member's answer with it.
+   * - `organization` — `member_removed` / `member_added` name the person;
+   *   they may have left the org entirely, so drop their answer too.
+   */
+  private handleTeamEvent(eventType: string, action: string | undefined, payload: any): void {
+    const onTeamChanged = this.config.onTeamChanged;
+    if (!onTeamChanged) return;
+    const org: string | undefined = payload.organization?.login;
+    if (!org) {
+      log.debug("Team-scope event without an organization — ignored", { eventType, action });
+      return;
+    }
+
+    if (eventType === "membership") {
+      const login: string | undefined = payload.member?.login;
+      const teamSlug: string | undefined = payload.team?.slug;
+      if (!login) return;
+      onTeamChanged({ org, teamSlug, login });
+      log.info("Team membership changed — visibility cache invalidated", {
+        org,
+        team: teamSlug,
+        login,
+        action,
+      });
+      return;
+    }
+
+    if (eventType === "organization") {
+      // Only the membership actions matter. `renamed` / `deleted` would need a
+      // wider sweep, but they also make every subsequent resolve fail open on
+      // its own, so there is nothing to protect against.
+      if (action !== "member_added" && action !== "member_removed") return;
+      const login: string | undefined = payload.membership?.user?.login;
+      if (!login) return;
+      onTeamChanged({ org, login });
+      log.info("Org membership changed — visibility cache invalidated", { org, login, action });
+      return;
+    }
+
+    // eventType === "team"
+    const teamSlug: string | undefined = payload.team?.slug;
+    if (!teamSlug) return;
+    onTeamChanged({ org, teamSlug });
+    log.info("Team changed — visibility cache invalidated", { org, team: teamSlug, action });
   }
 
   /**

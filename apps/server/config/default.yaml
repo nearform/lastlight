@@ -97,6 +97,26 @@ feedback:
   retentionDays: 90          # anchors pruned after this; signals kept
   otel: true                 # export each signal as a span on the run's trace
 
+# GitHub team-based per-repo visibility in the admin dashboard (issue #169).
+# A GitHub-authenticated user sees only the managed repos their org teams can
+# reach. UI declutter ONLY — every list endpoint still returns global data, so
+# this is not access control and every budget below fails OPEN (shows more).
+#
+# OFF by default: it needs the GitHub App's organization `Members: read`
+# permission, which requires re-consenting the App on each installation. Turn it
+# on in your overlay's config.yaml once that is done.
+#
+# Nothing is crawled up front. A user's teams are resolved on demand, on their
+# first dashboard request, and cached — so an org with thousands of repos and
+# hundreds of teams costs a handful of GraphQL requests per logged-in person,
+# not a full-org walk.
+teamVisibility:
+  enabled: false             # needs the App's org `Members: read` re-consent
+  ttlMinutes: 60             # how long a resolved answer is reused
+  maxTeamsPerUser: 50        # more teams than this ⇒ fail open
+  maxPagesPerTeam: 20        # 100 repos/page; a bigger grant ⇒ fail open
+  maxRequestsPerResolve: 60  # absolute ceiling for one cache miss
+
 cleanup:
   sandbox:
     enabled: true              # master switch for the TTL/LRU sweep

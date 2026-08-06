@@ -30,6 +30,7 @@ import {
   nullableStringParser,
   nullableStringSerializer,
 } from "../hooks/useUrlState";
+import { useVisibleRepos, isRepoVisible } from "../hooks/useVisibleRepos";
 import { timeRangeToSince } from "../lib/timeRange";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
 import { GhLink } from "./GhLink";
@@ -576,6 +577,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     nullableStringSerializer,
   );
   const [availableWorkflows, setAvailableWorkflows] = useState<string[]>([]);
+  const { allowed: allowedRepos } = useVisibleRepos();
 
   // Reset pagination whenever a filter changes — otherwise an inflated `limit`
   // from a previous, larger result set would silently keep showing too many
@@ -663,6 +665,11 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     // Queued runs are hidden unless the toggle is on — they're pending work,
     // not activity, and flood the list when a cron fans out a big batch.
     let list = showQueued ? runs : runs.filter((r) => r.status !== "queued");
+    // Per-repo visibility (issue #169) — show only the repos this user's GitHub
+    // teams can reach. Skipped entirely when the Repos tab has already pinned a
+    // single repo, and a no-op whenever `allowed` is null (the fail-open
+    // sentinel). Repo-less runs (cron, Slack) always stay.
+    if (!repo) list = list.filter((r) => isRepoVisible(r.repo, allowedRepos));
     if (query) {
       const q = query.toLowerCase();
       list = list.filter((r) => {
@@ -675,7 +682,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
       });
     }
     return list;
-  }, [runs, query, showQueued]);
+  }, [runs, query, showQueued, repo, allowedRepos]);
 
   // Auto-select the first run only when nothing is currently selected. We
   // intentionally do NOT clear an existing selectedId just because it's not

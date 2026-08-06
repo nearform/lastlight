@@ -307,6 +307,13 @@ src/
     db.ts               SQLite tables: executions, workflow_runs,
                         workflow_approvals, messaging_sessions,
                         messaging_messages, plus daily/hourly stat rollups.
+    team-store.ts       The dashboard's per-repo visibility CACHE (issue #169):
+                        github_teams / _team_repos / _team_members /
+                        github_visibility_sync. Not a mirror of the org — rows
+                        exist only for the teams of somebody who actually logged
+                        in, so absence means "unknown", never "no access", and
+                        every read path fails OPEN. Filled by
+                        engine/github/team-visibility.ts.
   cron/                 croner scheduler. Each tick dispatches a
                         cron-kind workflow via the same runner.
     scheduler.ts        register/update/unregister/has + the tick → runner.
@@ -1059,6 +1066,21 @@ Admin dashboard:
   is only fully open when *no* login method is set. Clearing the password while
   OAuth is configured keeps auth on (OAuth-only).
 - `ADMIN_SECRET` — HMAC secret for session tokens
+- **GitHub App org permission `Members: read`** (setup step, issue #169) —
+  required for **per-repo dashboard visibility**: with it (plus the `team` /
+  `membership` / `organization` webhook subscriptions and
+  `teamVisibility.enabled: true` in the overlay), a GitHub-authenticated admin
+  sees only the managed repos their org teams can reach, across workflow runs,
+  sessions and the home-page panels. **Re-consent the App on each installation
+  after adding it.** Without it the feature stays dormant, harmlessly: the
+  resolver fails open and everyone keeps seeing everything, which is exactly
+  today's behaviour. This is UI declutter — `/workflow-runs`, `/sessions` and
+  `/stats` all keep returning global data; filtering is client-side. Nothing is
+  crawled up front: a user's teams are resolved on their first dashboard request
+  (`GET /admin/api/me/repos`) and cached in SQLite, so an org with thousands of
+  repos costs a handful of GraphQL calls per logged-in person rather than a
+  full-org walk. Budgets in `teamVisibility` bound one cache miss and every one
+  of them fails open. See `spec/02-configuration.md` and `spec/10-state.md`.
 
 Slack (optional):
 

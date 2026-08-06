@@ -68,7 +68,17 @@ interface LastLightConfig {
     maxQueueWaitMs: number;               //   TTL before a queued run is dropped (default 1 hr)
   };
   cleanup: { sandbox: SandboxCleanupConfig };  // sandbox-workspace reaping
+  feedback: FeedbackConfig;               // reaction-derived eval signals
+  teamVisibility: TeamVisibilityConfig;   // per-repo dashboard visibility from GitHub teams
   repoConfig: RepoConfigPolicy;           // operator bounds on the per-repository layer
+}
+
+interface TeamVisibilityConfig {
+  enabled: boolean;                       // OFF by default — needs the App's org Members: read
+  ttlMinutes: number;                     // how long a resolved answer is reused (default 60)
+  maxTeamsPerUser: number;                // more teams than this ⇒ fail open (default 50)
+  maxPagesPerTeam: number;                // 100 repos/page; a bigger grant ⇒ fail open (default 20)
+  maxRequestsPerResolve: number;          // ceiling for one cache miss (default 60)
 }
 
 interface OtelConfig {
@@ -627,6 +637,19 @@ right methods (no dead password box for an OAuth-only gate); `POST /login`
 refuses password auth — never minting an open token — whenever auth is on but
 no password is set.
 
+**Per-repo visibility** (`teamVisibility`, issue #169) narrows what a
+GitHub-authenticated admin sees by default to the managed repos their org teams
+can reach — `GET /admin/api/me/repos` returns `{ repos, synced, reason }` and the
+SPA filters workflow runs, sessions and the home-page panels against it. It is
+**off by default** and needs a **setup step**: grant the GitHub App the
+organization **`Members: read`** permission and subscribe it to the `team`,
+`membership` and `organization` webhook events, then re-consent the App on each
+installation. Without that the resolver simply errors and everyone keeps seeing
+everything. `repos: null` is the fail-open sentinel meaning "no filter", and it
+is what a password/Slack login, an `allowedOrg: "*"` deployment, an over-budget
+resolution and any GitHub error all return. This is **not** access control: the
+server keeps returning global data on `/workflow-runs`, `/sessions` and `/stats`.
+
 ### Web search (opt-in per phase)
 
 | Var | Provider |
@@ -791,6 +814,7 @@ These have no env var — they're set in `config/default.yaml` or the overlay's
 | `concurrency.maxWorkflows` / `.maxQueueWaitMs` | `4` / `3600000` | Global admission cap. | no |
 | `cleanup.sandbox.{enabled,reapOnCompletion,sweepSchedule,retentionHours,maxDirs}` | `true` / `true` / `"0 * * * *"` / `12` / `40` | Sandbox-workspace reaping: reap an ephemeral run's workspace on terminal success, plus an hourly TTL + LRU backstop sweep that bounds the reusable per-PR cache. See `09-sandbox.md`. | no |
 | `feedback.{enabled,github,pollSchedule,windowDays,maxAnchorsPerTick,retentionDays,otel}` | `true` / `false` / `"*/30 * * * *"` / `14` / `500` / `90` / `true` | Reaction-derived eval signals (issue #255): a 👍/👎 on something the bot wrote, scored against the run that wrote it. **Two switches because the two surfaces cost different things.** Slack is event-driven and free — `reaction_added` is a real event, so `enabled` turns on a webhook handler and nothing else. GitHub delivers **no webhook for reactions at all**, so `github` opts into a poller and ships **off**. What bounds that poller is the data, not the schedule: it polls individual bot comments ("anchors"), never issues; each retires after `windowDays`; and `maxAnchorsPerTick / 100` is exactly how many batched GraphQL requests a tick may issue, at one rate-limit point each. Env: `LASTLIGHT_FEEDBACK_ENABLED` / `_GITHUB` / `_OTEL` / `_WINDOW_DAYS`. | no — it governs API spend and telemetry export, neither of which is a target repo's business |
+| `teamVisibility.{enabled,ttlMinutes,maxTeamsPerUser,maxPagesPerTeam,maxRequestsPerResolve}` | `false` / `60` / `50` / `20` / `60` | GitHub team-based per-repo visibility in the admin dashboard (issue #169): a GitHub-authenticated admin sees only the managed repos their org teams can reach. **UI declutter, not access control** — every list endpoint still returns global data and the filtering happens in the browser, which is what licenses the budgets: every one of them, when blown, shows *more* than necessary rather than a partial list. **Ships off**, because it needs the App's organization `Members: read` permission and therefore a re-consent on each installation. Nothing is crawled up front: a person's teams are resolved on their first dashboard request via one `Organization.teams(userLogins:)` GraphQL query per org plus a page or two per team, then cached for `ttlMinutes` — so the cost tracks the *user's* team count, not the org's repo count. `team` / `membership` / `organization` webhooks invalidate the cache; `POST /admin/api/me/repos/resync` is the manual fallback. No env vars. | no — it governs API spend and who sees what |
 | `repoConfig.{enabled,allowKeys,allowedModels,allowAssets}` | see the per-repository layer above | The operator's bounds on the repo layer. | **never** — a repo can't widen its own bounds |
 | `deploy.version` | `string \| null`, `null` | Core-version pin (git tag/ref). Deployment config, not runtime behaviour. Env: `LASTLIGHT_CORE_VERSION`. | no |
 | `bootstrap.label` / `explore.defaultRepo` | see Misc | Env: `BOOTSTRAP_LABEL` / `EXPLORE_DEFAULT_REPO`. | no |

@@ -15,7 +15,11 @@ export { type AdminConfig } from "./routes.js";
  */
 export function mountAdmin(app: Hono, db: StateDb, config: AdminConfig): void {
   const sessionLog = new SessionLog(config.sessionsDir);
-  const sessions = new SessionReader(sessionLog, "sandbox");
+  // The third argument is the `executions` join that gives a sandbox session a
+  // repo (issue #169) — the jsonl envelopes themselves carry none.
+  const sessions = new SessionReader(sessionLog, "sandbox", (id) =>
+    db.executions.repoForSessionId(id),
+  );
   // Chat is DB-backed: list comes from `executions` grouped by trigger_id
   // (the Slack thread), and message reads target the single jsonl owned by
   // that thread's agent_session_id rather than scanning every file in -app.

@@ -22,6 +22,16 @@ export interface SessionMeta {
   agentIds: string[];
   /** Messaging platform a chat session originated from ("slack" / "cli"). */
   platform?: string | null;
+  /**
+   * The `owner/repo` this session ran against, when we can resolve one — the
+   * key the dashboard's per-repo visibility filter matches on (issue #169).
+   *
+   * Neither session store carries a repo natively (the fs-backed one reads
+   * jsonl envelopes, the DB-backed one groups Slack threads), so both resolve
+   * it from the `executions` ledger. Null is normal — a repo-less chat thread —
+   * and null sessions are never filtered out.
+   */
+  repo?: string | null;
 }
 
 /**
@@ -78,19 +88,36 @@ export interface SessionSource {
   normalizeRawLine(raw: Record<string, unknown>): JsonlMessage[];
 }
 
+/**
+ * Resolve a session id to the `owner/repo` it ran against, or null.
+ *
+ * Injected as a function rather than handing {@link SessionReader} a `StateDb`
+ * on purpose: the reader's whole job is the on-disk jsonl tree, and the repo is
+ * a single scalar lookup from an unrelated table. A one-function seam keeps the
+ * DB out of this module's type surface and makes the repo behaviour testable
+ * with a closure instead of a migrated database.
+ */
+export type RepoForSession = (sessionId: string) => string | null;
+
 export class SessionReader implements SessionSource {
   private sessionLog: SessionLog;
   private scope: SessionLogScope;
+  private repoForSession?: RepoForSession;
   private metaCache = new Map<string, { meta: SessionMeta; cachedAt: number }>();
   private static CACHE_TTL_MS = 10_000; // 10s cache for session metadata
 
-  constructor(sessionsHomeDir: string, scope?: SessionReaderScope);
-  constructor(sessionLog: SessionLog, scope?: SessionReaderScope);
-  constructor(sessionsHomeDirOrLog: string | SessionLog, scope: SessionReaderScope = "sandbox") {
+  constructor(sessionsHomeDir: string, scope?: SessionReaderScope, repoForSession?: RepoForSession);
+  constructor(sessionLog: SessionLog, scope?: SessionReaderScope, repoForSession?: RepoForSession);
+  constructor(
+    sessionsHomeDirOrLog: string | SessionLog,
+    scope: SessionReaderScope = "sandbox",
+    repoForSession?: RepoForSession,
+  ) {
     this.sessionLog = typeof sessionsHomeDirOrLog === "string"
       ? new SessionLog(sessionsHomeDirOrLog)
       : sessionsHomeDirOrLog;
     this.scope = scope;
+    this.repoForSession = repoForSession;
   }
 
   exists(sessionId: string): boolean {
@@ -237,6 +264,8 @@ export class SessionReader implements SessionSource {
       conversation_message_count: conversationMessageCount,
       last_assistant_content: lastAssistantContent,
       agentIds,
+      // Best-effort: a session whose repo we can't resolve stays visible.
+      repo: this.repoForSession?.(sessionId) ?? null,
     };
   }
 

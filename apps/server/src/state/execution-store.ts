@@ -254,12 +254,19 @@ export class ExecutionStore {
     outputTokens: number;
     cacheReadTokens: number;
     lastAssistantContent: string | null;
+    repo: string | null;
   }[] {
     const rows = this.db.prepare(`
       SELECT
         e.trigger_id              AS triggerId,
         ms.agent_session_id       AS agentSessionId,
         ms.platform               AS platform,
+        -- The thread's repo, for the dashboard's per-repo visibility filter
+        -- (issue #169). MAX() rather than a GROUP BY member because it skips
+        -- NULLs: most chat turns carry no repo, and one that does should name
+        -- the whole thread. A thread that genuinely spans repos picks one —
+        -- acceptable, since a repo-less thread stays visible either way.
+        MAX(e.repo)               AS repo,
         MIN(e.started_at)         AS firstStartedAt,
         MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
         COUNT(*)                  AS turnCount,
@@ -292,6 +299,7 @@ export class ExecutionStore {
       cacheReadTokens: number;
       lastAssistantContent: string | null;
       platform: string | null;
+      repo: string | null;
     }>;
     return rows;
   }
@@ -309,12 +317,14 @@ export class ExecutionStore {
     outputTokens: number;
     cacheReadTokens: number;
     lastAssistantContent: string | null;
+    repo: string | null;
   } | null {
     const row = this.db.prepare(`
       SELECT
         e.trigger_id              AS triggerId,
         ms.agent_session_id       AS agentSessionId,
         ms.platform               AS platform,
+        MAX(e.repo)               AS repo,
         MIN(e.started_at)         AS firstStartedAt,
         MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
         COUNT(*)                  AS turnCount,
@@ -345,8 +355,30 @@ export class ExecutionStore {
       outputTokens: number;
       cacheReadTokens: number;
       lastAssistantContent: string | null;
+      repo: string | null;
     } | undefined;
     return row ?? null;
+  }
+
+  /**
+   * The repo a sandbox session ran against, resolved from the `executions`
+   * ledger by its `session_id` (issue #169).
+   *
+   * The fs-backed {@link SessionReader} reads jsonl envelopes that carry no
+   * repo of their own, so this is the join that lets the dashboard filter the
+   * session list by the same allowed-repo set as everything else. Returns null
+   * for a session we have no execution row for — those stay visible.
+   */
+  repoForSessionId(sessionId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT repo FROM executions
+          WHERE session_id = ? AND repo IS NOT NULL
+          ORDER BY started_at DESC
+          LIMIT 1`,
+      )
+      .get(sessionId) as { repo: string | null } | undefined;
+    return row?.repo ?? null;
   }
 
   /** Check if a skill is currently running for a given trigger */

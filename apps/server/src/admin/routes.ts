@@ -60,6 +60,7 @@ import {
   getInstallationDirectory,
   installationSettingsUrl,
 } from "../engine/github/installations.js";
+import { TeamVisibilityResolver } from "../engine/github/team-visibility.js";
 import {
   getRuntimeConfig,
   getRoutes,
@@ -678,6 +679,14 @@ export function createAdminRoutes(
   }
   const githubAllowAnyUser = config.githubAllowedOrg === "*";
 
+  // Per-repo dashboard visibility (issue #169). Constructed unconditionally —
+  // it is inert (and answers the fail-open sentinel) when `teamVisibility` is
+  // off or there is no GitHub client, which is what tests and chat-only mode see.
+  const teamVisibility = new TeamVisibilityResolver({
+    store: db.teams,
+    github: config.github ?? null,
+  });
+
   // Auth is required when ANY login method is configured — a password OR a
   // working OAuth provider. Gating on the password alone left the dashboard
   // fully open whenever ADMIN_PASSWORD was cleared, even with OAuth set up.
@@ -744,6 +753,49 @@ export function createAdminRoutes(
         const layer = getCachedRepoLayer(repo);
         return { repo, hasRepoConfig: Boolean(layer), fetchedAt: layer?.fetchedAt ?? null };
       }),
+    });
+  });
+
+  // The managed repos THIS user should see by default, from their GitHub team
+  // grants (issue #169).
+  //
+  // Read `repos: null` as "no filter" — it is the sentinel, and it is what every
+  // non-happy path returns: a password/Slack login (no GitHub identity), an
+  // `allowedOrg: "*"` deployment, the feature switched off, a team too large to
+  // enumerate, or GitHub refusing the query. This is UI declutter, NOT access
+  // control: `/workflow-runs`, `/sessions` and `/stats` all keep returning
+  // global data and the filtering happens in the browser, so failing open costs
+  // nothing but a noisier list.
+  //
+  // Cheap by design — served from the SQLite cache, with a stale answer returned
+  // immediately while it refreshes behind the request. Only a genuine first
+  // resolution touches GitHub, and even that is a handful of GraphQL calls
+  // scoped to this one person's teams (see engine/github/team-visibility.ts).
+  app.get("/me/repos", async (c) => {
+    const result = await teamVisibility.visibleRepos(actorFromContext(c));
+    return c.json({
+      repos: result.repos,
+      synced: result.synced,
+      reason: result.reason,
+      teams: result.teams,
+      syncedAt: result.syncedAt,
+    });
+  });
+
+  // Force a re-resolution for the caller (or, for an operator debugging someone
+  // else's view, an explicit `?login=`). The fallback for orgs where the
+  // `team`/`membership`/`organization` webhooks aren't wired up yet — those
+  // events normally invalidate the cache for us.
+  app.post("/me/repos/resync", async (c) => {
+    const login = c.req.query("login") ?? actorFromContext(c);
+    if (!login) return c.json({ error: "no GitHub identity on this session" }, 400);
+    const result = await teamVisibility.resync(login);
+    return c.json({
+      repos: result.repos,
+      synced: result.synced,
+      reason: result.reason,
+      teams: result.teams,
+      syncedAt: result.syncedAt,
     });
   });
 

@@ -792,6 +792,50 @@ dependencies:
 		polling budget stays bounded.
 	</p>
 
+	<h2>Dashboard repo visibility (optional)</h2>
+
+	<p>
+		By default every admin who logs into the dashboard sees every managed repo's
+		runs and sessions. In an org with a lot of repos that is mostly noise. Turn
+		this on and a GitHub-authenticated admin sees only the repos their GitHub
+		org teams can reach:
+	</p>
+
+	<pre><code>{`teamVisibility:
+  enabled: false             # needs the App's org \`Members: read\` re-consent
+  ttlMinutes: 60             # how long a resolved answer is reused
+  maxTeamsPerUser: 50        # more teams than this ⇒ show everything
+  maxPagesPerTeam: 20        # 100 repos/page; a bigger grant ⇒ show everything
+  maxRequestsPerResolve: 60  # ceiling for one cache miss`}</code></pre>
+
+	<p>
+		<strong>This is declutter, not access control.</strong> The server still
+		returns global data on every list endpoint — the filtering happens in the
+		browser, and a hand-crafted API call still sees everything. That is
+		deliberate, and it is what lets every budget above fail <em>open</em>: when a
+		team is too big to enumerate, or someone is in too many teams, or GitHub
+		refuses the query, you see more than strictly necessary rather than a
+		partial list that quietly hides work you own.
+	</p>
+
+	<p>
+		<strong>Setup.</strong> Grant the GitHub App the organization
+		<code>Members: read</code> permission, subscribe it to the
+		<code>team</code>, <code>membership</code> and <code>organization</code>
+		webhook events, and re-consent the App on each installation. Until you do,
+		leaving <code>enabled: true</code> set is harmless — resolution simply fails
+		open and everyone keeps seeing everything.
+	</p>
+
+	<p>
+		Nothing is crawled up front. A person's teams are resolved on their first
+		dashboard request — one GraphQL query per org plus a page or two per team —
+		and cached in SQLite, so the cost tracks <em>their</em> team count, not the
+		org's repo count. The webhooks above invalidate the cache when membership or
+		a team's repo grant changes; <code>POST /admin/api/me/repos/resync</code> is
+		the manual fallback. Operator-only — a target repo cannot set these.
+	</p>
+
 	<div class="docs-next">
 		<a href="/docs/workflows/demo">
 			<span class="label">← Previous</span>

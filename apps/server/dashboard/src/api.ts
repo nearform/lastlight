@@ -16,6 +16,12 @@ export interface Session {
   live?: boolean;
   /** Origin platform for chat sessions ("slack" / "cli"). */
   platform?: string | null;
+  /**
+   * `owner/repo` this session ran against, when resolvable — the key the
+   * per-repo visibility filter matches on. Null (a repo-less chat thread) is
+   * never filtered out.
+   */
+  repo?: string | null;
   // Optional fields from execution correlation
   title?: string | null;
   estimated_cost_usd?: number | null;
@@ -63,6 +69,34 @@ export interface ConfigBundle {
   merged: Record<string, unknown>;
   /** Provenance tree mirroring `merged`; leaves are "default" | "overlay" | "env". */
   sources: Record<string, unknown>;
+}
+
+/**
+ * Which managed repos to show the logged-in user by default — the admin
+ * `/me/repos` endpoint (issue #169).
+ *
+ * `repos: null` is the fail-open sentinel: **no filter, show everything.** It is
+ * what a password/Slack login, an `allowedOrg: "*"` deployment, a disabled
+ * feature, an over-budget resolution and a GitHub error all return. Treat any
+ * failure to fetch this the same way — the server still returns global data on
+ * every list endpoint, so filtering is a convenience, never a boundary.
+ */
+export interface MeRepos {
+  repos: string[] | null;
+  /** Coarse "we have a resolved answer for this person" flag, for a UI hint. */
+  synced: boolean;
+  reason:
+    | "ok"
+    | "no-identity"
+    | "disabled"
+    | "unavailable"
+    | "no-teams"
+    | "too-many-teams"
+    | "truncated"
+    | "budget"
+    | "error";
+  teams: Array<{ org: string; slug: string }>;
+  syncedAt: string | null;
 }
 
 /** Effective managed-repo list — see the admin `/managed-repos` endpoint. */
@@ -979,6 +1013,9 @@ export const api = {
   config: () => req<ConfigBundle>("/config"),
   overrides: () => req<OverridesBundle>("/overrides"),
   managedRepos: () => req<ManagedRepos>("/managed-repos"),
+  // Repos this user's GitHub teams can reach — the client-side declutter filter.
+  meRepos: () => req<MeRepos>("/me/repos"),
+  meReposResync: () => req<MeRepos>("/me/repos/resync", { method: "POST" }),
   // Repo-centric index for the Repos tab — managed repos ∪ active repos, each
   // with run/artifact activity, newest-activity first.
   repos: () => req<{ repos: RepoEntry[] }>("/repos"),
