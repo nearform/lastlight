@@ -84,7 +84,9 @@ tree when only the contents change.
 ```bash
 BR=main
 OID=$(gh api "repos/$REPO/git/ref/heads/$BR" --jq .object.sha)
-B64=$(printf '#!/bin/sh\necho v2\n' | base64)
+# `tr -d '\n'` because GNU base64 wraps at 76 columns and BSD/macOS base64 has
+# no `-w` flag — this is the one form that works on both.
+B64=$(printf '#!/bin/sh\necho v2\n' | base64 | tr -d '\n')
 gh api graphql -f query='
 mutation($input: CreateCommitOnBranchInput!) {
   createCommitOnBranch(input: $input) {
@@ -132,7 +134,7 @@ where the mutation starts refusing:
 
 ```bash
 for MB in 1 4 8 16; do
-  head -c $((MB*1024*1024)) /dev/urandom | base64 -w0 > /tmp/big.b64
+  head -c $((MB*1024*1024)) /dev/urandom | base64 | tr -d '\n' > /tmp/big.b64
   OID=$(gh api "repos/$REPO/git/ref/heads/$BR" --jq .object.sha)
   gh api graphql -f query='mutation($input: CreateCommitOnBranchInput!) {
     createCommitOnBranch(input: $input) { commit { oid } } }' \
@@ -250,18 +252,18 @@ describe("diffWorktreeAgainst", () => {
   test("reports added, modified and deleted files against the base commit", () => {
     const r = repo();
     try {
-      writeFileSync(join(r.dir, "keep.txt"), "two\n");
-      writeFileSync(join(r.dir, "new.txt"), "hello\n");
-      rmSync(join(r.dir, "keep.txt"));
-      writeFileSync(join(r.dir, "keep.txt"), "two\n");
-      rmSync(join(r.dir, "keep.txt"));
-      writeFileSync(join(r.dir, "added.txt"), "x\n");
-      const cs = diffWorktreeAgainst(r.dir, r.base);
+      writeFileSync(join(r.dir, "tracked.txt"), "one\n");
+      r.git("add", "-A");
+      r.git("commit", "-qm", "second tracked file");
+      const base = r.git("rev-parse", "HEAD").trim();
+
+      writeFileSync(join(r.dir, "tracked.txt"), "changed\n"); // modified
+      writeFileSync(join(r.dir, "added.txt"), "x\n"); // added
+      rmSync(join(r.dir, "keep.txt")); // deleted
+
+      const cs = diffWorktreeAgainst(r.dir, base);
       assert.deepEqual(cs.deletions, [{ path: "keep.txt" }]);
-      assert.deepEqual(
-        cs.additions.map((a) => a.path).sort(),
-        ["added.txt", "new.txt"],
-      );
+      assert.deepEqual(cs.additions.map((a) => a.path).sort(), ["added.txt", "tracked.txt"]);
       assert.deepEqual(cs.unsupported, []);
     } finally {
       r.cleanup();
@@ -1282,7 +1284,7 @@ Append to `publish-tool.test.ts`:
 
 ```ts
 describe("github_publish local sync", () => {
-  test("moves the local branch onto the published commit without touching files", async () => {
+  test("reports a failed sync instead of throwing, and never touches the files", async () => {
     const r = repo();
     const fake = await fakeGitHub(r.base);
     try {
@@ -1673,7 +1675,13 @@ import { join } from "node:path";
  */
 const PROMPTS_DIR = join(import.meta.dirname, "../../workflows/prompts");
 
-const FORBIDDEN = [/git push\b/, /git commit\b/];
+/**
+ * `git push` is the load-bearing prohibition. A local `git commit` is NOT —
+ * `dependabot-ci-fix.md` completes a base merge with `git add -A && git commit
+ * --no-edit`, and that is exactly the scratch working state the design permits.
+ * What must never happen is a locally-built commit reaching the branch.
+ */
+const FORBIDDEN = /git push\b/;
 
 describe("packaged prompts publish through github_publish", () => {
   const files = readdirSync(PROMPTS_DIR).filter((f) => f.endsWith(".md"));
@@ -1683,11 +1691,9 @@ describe("packaged prompts publish through github_publish", () => {
   });
 
   for (const file of files) {
-    it(`${file} does not hand-roll a published commit`, () => {
+    it(`${file} does not push a locally-built commit`, () => {
       const text = readFileSync(join(PROMPTS_DIR, file), "utf8");
-      for (const pattern of FORBIDDEN) {
-        expect(text, `${file} still uses ${pattern}`).not.toMatch(pattern);
-      }
+      expect(text, `${file} still uses git push`).not.toMatch(FORBIDDEN);
     });
   }
 });
@@ -1702,6 +1708,9 @@ pnpm --filter lastlight-core exec vitest run tests/workflows/signed-publish.test
 Expected: FAIL for `executor.md`, `fix.md`, `pr-fix.md`, `pr.md`, `reviewer.md`,
 `re-reviewer.md`, `architect.md`, `guardrails.md`. `dependabot-ci-fix.md` already
 passes from Task 7 — if it does not, Task 7 is incomplete.
+
+Its `git add -A && git commit --no-edit` for the base merge (line ~77) **stays**.
+That commit never leaves the sandbox; the guard deliberately does not forbid it.
 
 - [ ] **Step 3: Convert `executor.md`**
 
