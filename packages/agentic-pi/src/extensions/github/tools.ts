@@ -27,6 +27,7 @@ import {
   MIN_LOG_EXCERPT_BYTES,
   excerptJobLog,
 } from "./log-excerpt.js";
+import { currentBranch, diffWorktreeAgainst, hasLocalCommit } from "./worktree-diff.js";
 
 interface MaybeHttpError extends Error {
   status?: number;
@@ -223,6 +224,106 @@ export function buildGitHubTools(
       }),
       ({ owner, repo, branch, files, message }) =>
         gh.pushFiles(owner, repo, branch, files, message),
+    ),
+
+    tool(
+      "github_publish",
+      "Publish your work: commit the whole working tree and push it, in one step, as a SIGNED commit. Use this INSTEAD of `git add`/`git commit`/`git push` — a commit built by git in this sandbox is unsigned, and a repository that requires signed commits blocks it permanently. GitHub builds and signs the commit for you, attributed to the bot. Local commits you already made are folded in; the published commit is the working tree as it stands now. Fails rather than publishing if a change needs a file mode it cannot express (a new executable file, a symlink, a submodule pointer) — do not work around that with `git push`.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        message: Type.String({
+          description: "Commit message. First line is the headline; anything after a blank line is the body.",
+        }),
+        branch: Type.Optional(
+          Type.String({ description: "Branch to publish to (default: the checked-out branch)" }),
+        ),
+        base_branch: Type.Optional(
+          Type.String({
+            description: "If the branch does not exist on GitHub yet, create it from this one (default: the repo's default branch)",
+          }),
+        ),
+        path: Type.Optional(
+          Type.String({ description: "Path to the git working tree (default: the current directory)" }),
+        ),
+        exclude: Type.Optional(
+          Type.Array(Type.String(), {
+            description: 'Pathspecs to leave out of the commit, e.g. ".lastlight"',
+          }),
+        ),
+      }),
+      async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude }) => {
+        const cwd = repoPath || process.cwd();
+        const target = branch || currentBranch(cwd);
+
+        let tip = await gh.getBranchTip(owner, repo, target);
+        if (tip === null) {
+          const from = base_branch || (await gh.getRepository(owner, repo)).default_branch;
+          await gh.createBranch(owner, repo, target, from);
+          tip = await gh.getBranchTip(owner, repo, target);
+          if (tip === null) throw new Error(`created ${target} but could not read its tip back`);
+        }
+
+        // The diff needs the remote tip in the local object store. A shallow
+        // clone may not have it; fetching by sha is cheap and precise.
+        if (!hasLocalCommit(cwd, tip)) {
+          const token = await auth.getToken();
+          try {
+            execFileSync("git", ["fetch", "--depth=1", "origin", tip], {
+              cwd,
+              stdio: "pipe",
+              timeout: 120_000,
+              env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+            });
+          } catch {
+            // fall through to the check below with a message naming the sha
+          }
+        }
+        if (!hasLocalCommit(cwd, tip)) {
+          throw new Error(
+            `the remote tip of ${target} (${tip}) is not in this clone and could not be fetched — someone else has pushed. Re-run the phase against the current branch; do NOT git push.`,
+          );
+        }
+
+        const changes = diffWorktreeAgainst(cwd, tip, exclude ?? []);
+        if (changes.unsupported.length > 0) {
+          const listed = changes.unsupported.map((u) => `${u.path}: ${u.reason}`).join("; ");
+          throw new Error(
+            `refusing to publish — ${changes.unsupported.length} change(s) need a file mode the signed-commit API cannot set: ${listed}. Nothing was published. Do NOT fall back to git push (it would produce an unsigned commit); flag this for a human.`,
+          );
+        }
+        if (changes.additions.length === 0 && changes.deletions.length === 0) {
+          return {
+            published: false,
+            reason: "nothing to publish — the working tree matches the branch",
+          };
+        }
+
+        const [headline, ...rest] = message.split("\n");
+        const body = rest.join("\n").trim();
+        const commit = await gh.publishSignedCommit({
+          owner,
+          repo,
+          branch: target,
+          expectedHeadOid: tip,
+          headline: (headline ?? "").trim() || message.trim(),
+          ...(body ? { body } : {}),
+          additions: changes.additions,
+          deletions: changes.deletions,
+        });
+
+        return {
+          published: true,
+          commit: commit.oid,
+          url: commit.url,
+          branch: target,
+          verified: commit.signature?.wasSignedByGitHub ?? null,
+          committer: commit.committer,
+          added: changes.additions.filter((a) => a.status === "A").map((a) => a.path),
+          modified: changes.additions.filter((a) => a.status === "M").map((a) => a.path),
+          deleted: changes.deletions.map((d) => d.path),
+        };
+      },
     ),
 
     tool(

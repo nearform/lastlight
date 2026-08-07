@@ -415,7 +415,10 @@ export class GitHubClient {
                 ? { headline: opts.headline, body: opts.body }
                 : { headline: opts.headline },
               expectedHeadOid: opts.expectedHeadOid,
-              fileChanges: { additions: opts.additions, deletions: opts.deletions },
+              fileChanges: {
+                additions: opts.additions.map((a) => ({ path: a.path, contents: a.contents })),
+                deletions: opts.deletions,
+              },
             },
           },
         );

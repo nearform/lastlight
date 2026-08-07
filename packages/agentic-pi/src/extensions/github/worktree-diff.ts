@@ -33,6 +33,8 @@ export interface PublishAddition {
   path: string;
   /** base64 of the file's bytes — what `FileAddition.contents` wants. */
   contents: string;
+  /** `A` for a file that did not exist at the base, `M` for a change. */
+  status: "A" | "M";
 }
 
 export interface PublishDeletion {
@@ -141,6 +143,7 @@ export function diffWorktreeAgainst(
       additions.push({
         path: rec.path,
         contents: git(cwd, ["cat-file", "blob", rec.dstSha]).toString("base64"),
+        status: rec.status === "A" ? "A" : "M",
       });
     }
     return { additions, deletions, unsupported };

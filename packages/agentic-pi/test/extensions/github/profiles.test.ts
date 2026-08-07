@@ -81,7 +81,7 @@ describe("PROFILE_TOOLS", () => {
     assert.equal(PROFILE_TOOLS.read.length, 21);
     assert.equal(PROFILE_TOOLS["issues-write"].length, 28);
     assert.equal(PROFILE_TOOLS["review-write"].length, 30);
-    assert.equal(PROFILE_TOOLS["repo-write"].length, 36);
+    assert.equal(PROFILE_TOOLS["repo-write"].length, 37);
   });
 });
 
