@@ -66,8 +66,8 @@ describe("chatSystemSuffix — composed from the packaged workflows", () => {
 
   it("renders a deflect bullet with its quoted phrasings and reply", () => {
     expect(prompt()).toContain(
-      '- "triage" / "scan issues" / "go through open issues on <repo>"\n' +
-        '  → reply: "tell me `triage owner/repo`"',
+      '- "triage this issue" / "triage <repo>#<n>" / "label this issue"\n' +
+        '  → reply: "tell me `triage owner/repo#N`"',
     );
   });
 
