@@ -322,6 +322,65 @@ describe("GitHubClient.getCiFailureReport — superseded re-runs", () => {
   });
 });
 
+/**
+ * The FORK-PR lookup (nearform/lastlight#282). `check_suite` / `check_run`
+ * payloads carry `pull_requests[]` only for a same-repo PR, so this is how a
+ * fork PR's checks find their PR at all. Its two filters are the whole safety
+ * argument — the endpoint answers a looser question than we are asking.
+ */
+describe("GitHubClient.listOpenPrNumbersForHeadSha", () => {
+  const pr = (number: number, state: string, headSha: string) => ({
+    number,
+    state,
+    head: { sha: headSha },
+  });
+
+  function octokitWith(prs: unknown[]) {
+    return {
+      rest: {
+        repos: {
+          listPullRequestsAssociatedWithCommit: async () => ({ data: prs }),
+        },
+      },
+    };
+  }
+
+  it("returns the open PR this commit HEADS", async () => {
+    const c = clientWith(octokitWith([pr(282, "open", "969b698")]));
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([282]);
+  });
+
+  it("ignores a PR that merely CONTAINS the commit", async () => {
+    // The endpoint returns every associated PR. A commit sitting in the middle
+    // of another PR's branch must never point a review at that PR.
+    const c = clientWith(
+      octokitWith([pr(282, "open", "969b698"), pr(300, "open", "deadbee")]),
+    );
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([282]);
+  });
+
+  it("ignores a CLOSED PR with the same head", async () => {
+    // A settled check on a commit that also heads a closed PR is not a reason
+    // to do anything to the closed PR.
+    const c = clientWith(octokitWith([pr(199, "closed", "969b698")]));
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([]);
+  });
+
+  it("returns nothing when the commit heads no open PR", async () => {
+    const c = clientWith(octokitWith([]));
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([]);
+  });
+
+  it("sorts ascending, so a caller taking [0] is deterministic", async () => {
+    // One commit can head two open PRs (the same branch targeted at two bases).
+    // Whichever we pick must not depend on GitHub's response order.
+    const c = clientWith(
+      octokitWith([pr(310, "open", "969b698"), pr(282, "open", "969b698")]),
+    );
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([282, 310]);
+  });
+});
+
 describe("GitHubClient.getBaseChecksState", () => {
   it("delegates to getChecksConclusion against the base ref", async () => {
     const c = clientWith(fakeOctokit([run("completed", "failure")], noStatus));

@@ -99,6 +99,41 @@ and read `pending`. No event ever fired; under `review.postsCheck` the `queued`
 placeholder sat on the PR until it was merged hours later. Nothing about the PR
 was unusual: the outcome depended purely on the order CI settled in.
 
+### Fork PRs and the check payloads
+
+GitHub populates `check_suite.pull_requests[]` / `check_run.pull_requests[]`
+**only when the head branch lives on the base repo**. A PR opened from a fork
+carries an empty array, so every route keyed on it — the settle emit and both
+Re-run buttons — used to drop the delivery outright.
+
+That was invisible until `after-checks` became the packaged default. Under
+`eager` the review fires from `pr.opened`, a `pull_request` event that always
+carries the PR object, so forks never touched the check path at all. Under
+`after-checks` a fork PR defers on `pr.opened`, posts its `queued` placeholder,
+and then no settle event can ever conclude it — the check sits there for the
+life of the PR, and on a repo that made it required the PR is unmergeable
+(nearform/lastlight#282).
+
+So an empty array falls back to asking the **base** repo which open PR this
+commit heads (`listPullRequestsAssociatedWithCommit`). The base repo is the one
+the App is installed on, so this needs no access to the fork. Two filters make
+it a safe substitute for the payload's own array: `head.sha` must equal the
+commit (the endpoint also returns PRs that merely *contain* it), and the PR must
+be **open**. Results are sorted ascending so the rare commit heading two open
+PRs resolves deterministically.
+
+The lookup is resolved **after** the "does anyone consume this?" test, so a
+delivery no route wants still costs nothing, and a same-repo PR never reaches it
+at all.
+
+**The maintainer-approval gate comes for free.** GitHub withholds Actions runs on
+a fork PR from a first-time contributor until a maintainer approves them. No
+approval means no checks, which means the aggregate is `none` and never settles,
+which means no review. Gating on "CI settled" inherits GitHub's own gate exactly,
+with no permission logic on our side — and it is why reviewing fork PRs is safe
+to do by default: the same human decision that lets fork code run in Actions is
+the one that lets it reach the review sandbox.
+
 ### Superseded check re-runs
 
 `checks.listForRef?filter=latest` de-dupes per check **suite**, not per check

@@ -612,6 +612,52 @@ export class GitHubClient {
   }
 
   /**
+   * The OPEN pull request whose HEAD is this commit — the fork-PR answer to a
+   * question `check_suite` / `check_run` payloads cannot answer themselves.
+   *
+   * GitHub populates `pull_requests[]` on those payloads only for a **same-repo**
+   * PR. A PR opened from a fork carries an empty array, so every route keyed on
+   * it drops the delivery: under `review.trigger: after-checks` the review
+   * defers on `pr.opened` (a `pull_request` event, which DOES carry the PR),
+   * posts its `queued` placeholder, and then no settle event can ever fire —
+   * the check sits queued for the life of the PR. That is a regression of the
+   * trigger change, not a property of forks: under `eager` the review fired
+   * from `pr.opened` and forks were never involved in the check path at all.
+   *
+   * `listPullRequestsAssociatedWithCommit` answers it from the BASE repo, which
+   * is the repo the App is installed on — no access to the fork required.
+   *
+   * Two filters make it a safe substitute for the payload's own array:
+   *
+   * - **`head.sha === sha`.** The endpoint returns every PR the commit is
+   *   associated with, including ones that merely CONTAIN it. Acting on those
+   *   would review a PR whose head is somewhere else entirely.
+   * - **open only.** A settled check on a commit that also sits in a closed PR
+   *   is not a reason to do anything to the closed PR.
+   *
+   * Returns the numbers, ascending, so a caller taking `[0]` gets the oldest —
+   * a stable choice on the rare commit that heads two open PRs, rather than
+   * whichever order GitHub happened to answer in.
+   */
+  async listOpenPrNumbersForHeadSha(
+    owner: string,
+    repo: string,
+    sha: string,
+  ): Promise<number[]> {
+    const kit = await this.kit(owner);
+    const { data } = await kit.rest.repos.listPullRequestsAssociatedWithCommit({
+      owner,
+      repo,
+      commit_sha: sha,
+      per_page: 100,
+    });
+    return data
+      .filter((pr) => pr.state === "open" && pr.head?.sha === sha)
+      .map((pr) => pr.number)
+      .sort((a, b) => a - b);
+  }
+
+  /**
    * List a repo's open pull requests as light records (number / title / draft /
    * author login / labels / head ref + sha). Deterministic discovery for the
    * dependency-merge and dependency-ci-fix crons: they filter these by author +

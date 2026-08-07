@@ -47,6 +47,23 @@ export interface GitHubWebhookConfig {
     ref: string,
   ) => Promise<"passing" | "failing" | "pending" | "none">;
   /**
+   * The open PR(s) whose HEAD is this commit (delegates to
+   * `GitHubClient.listOpenPrNumbersForHeadSha`) — the FORK-PR fallback for
+   * `check_suite` / `check_run` payloads, whose own `pull_requests[]` is empty
+   * unless the PR's head branch lives on the base repo.
+   *
+   * Without it every check-driven route is same-repo-only, which under
+   * `review.trigger: after-checks` means a fork PR defers on `pr.opened`,
+   * posts the `queued` placeholder, and never gets the settle event that would
+   * conclude it. When unset (standalone unit tests) the connector keeps the
+   * payload-only behaviour.
+   */
+  listOpenPrNumbersForHeadSha?: (
+    owner: string,
+    repo: string,
+    sha: string,
+  ) => Promise<number[]>;
+  /**
    * The OPERATOR's `review.trigger`, read live.
    *
    * `check_suite.completed` is broadened past dependency PRs — to
@@ -353,6 +370,53 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
   }
 
   /**
+   * The PR a `check_suite` / `check_run` delivery is about.
+   *
+   * The payload's own `pull_requests[]` is authoritative and free — but GitHub
+   * fills it only when the head branch lives on the base repo. A FORK PR gets
+   * an empty array, and every check-driven route keyed on it (the settle emit,
+   * the Re-run buttons) then drops the delivery entirely.
+   *
+   * So when the array is empty we ask the base repo which open PR this commit
+   * heads. One extra call, only on that path, and only when a head SHA is
+   * present — a same-repo PR never reaches it.
+   *
+   * Returns `undefined` rather than throwing on any failure: a PR we cannot
+   * identify is exactly the situation before this fallback existed, and a
+   * transient lookup error must not be louder than the event it was resolving.
+   */
+  private async prNumberForCheckPayload(
+    payloadPrs: Array<{ number?: number }> | undefined,
+    repoFullName: string | undefined,
+    sha: string | undefined,
+  ): Promise<number | undefined> {
+    const fromPayload = payloadPrs?.[0]?.number;
+    if (fromPayload) return fromPayload;
+    if (!this.config.listOpenPrNumbersForHeadSha || !repoFullName || !sha) return undefined;
+    const [owner, repo] = repoFullName.split("/");
+    try {
+      const numbers = await this.config.listOpenPrNumbersForHeadSha(owner, repo, sha);
+      const found = numbers[0];
+      if (found) {
+        log.debug("Resolved a fork PR from its head SHA", {
+          repoFullName,
+          sha: sha.slice(0, 7),
+          prNumber: found,
+          ...(numbers.length > 1 ? { alsoHeads: numbers.slice(1) } : {}),
+        });
+      }
+      return found;
+    } catch (err) {
+      log.warn("listOpenPrNumbersForHeadSha failed", {
+        repoFullName,
+        sha: sha.slice(0, 7),
+        err,
+      });
+      return undefined;
+    }
+  }
+
+  /**
    * Is the operator running `review.trigger: after-checks`? Only then does a
    * settled check suite on a PR neither check-outcome route claimed become a
    * `pr.checks_settled` event; every other mode has no consumer for it.
@@ -498,14 +562,21 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // check_run.rerequested (one check) or check_suite.rerequested (all) to
       // the App that owns the check. Map either to pr.synchronize so the runner
       // re-reviews the PR's current head — the same path a fresh push takes.
-      // The associated PR comes from the event's `pull_requests[]` (populated
-      // for same-repo PRs). Other check_run/check_suite actions (created /
-      // completed / requested, fired on every check) leave `type` null and are
-      // ignored. NOTE: requires the GitHub App to be subscribed to the "Check
+      // The associated PR comes from the event's `pull_requests[]`, falling back
+      // to a head-SHA lookup for a fork PR, whose array is always empty — see
+      // {@link prNumberForCheckPayload}. Without that fallback the Re-run button
+      // on `last-light/review`, which is the documented manual escape hatch for
+      // a stuck review, did nothing at all on exactly the PRs most likely to be
+      // stuck. Other check_run/check_suite actions (created / completed /
+      // requested, fired on every check) leave `type` null and are ignored. NOTE: requires the GitHub App to be subscribed to the "Check
       // run" / "Check suite" events — without that GitHub never delivers these.
       case "check_run":
         if (action === "rerequested" || action === "requested_action") {
-          prNumber = payload.check_run?.pull_requests?.[0]?.number;
+          prNumber = await this.prNumberForCheckPayload(
+            payload.check_run?.pull_requests,
+            repoFullName,
+            payload.check_run?.head_sha,
+          );
           issueNumber = prNumber;
           if (prNumber) {
             // Re-running OUR OWN review check is an explicit review request,
@@ -526,7 +597,11 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
 
       case "check_suite":
         if (action === "rerequested") {
-          prNumber = payload.check_suite?.pull_requests?.[0]?.number;
+          prNumber = await this.prNumberForCheckPayload(
+            payload.check_suite?.pull_requests,
+            repoFullName,
+            payload.check_suite?.head_sha,
+          );
           issueNumber = prNumber;
           if (prNumber) type = "pr.synchronize";
         } else if (action === "completed") {
@@ -553,9 +628,6 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           const suiteRed = suiteConclusion === "failure" || suiteConclusion === "timed_out";
           const suiteGreen = suiteConclusion === "success";
           if (suiteRed || suiteGreen) {
-            // `pull_requests[]` is populated for same-repo PRs (fork PRs carry
-            // an empty array and are dropped below).
-            const pr = payload.check_suite?.pull_requests?.[0];
             const sha: string | undefined = payload.check_suite?.head_sha;
             // The check_suite `pull_requests[]` entry is minimal (number/refs
             // only — no title or author). The head commit carries the useful
@@ -586,7 +658,17 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
             // aggregate read. An ordinary human PR under a mode with no
             // consumer for a settle event never makes the call.
             const wanted = isDependency || isOurOwnPush || this.afterChecks();
-            if (pr?.number && wanted) {
+            // Resolved AFTER `wanted`, because for a fork PR this costs an API
+            // call (`pull_requests[]` is empty unless the head branch is on the
+            // base repo) and a delivery nobody consumes should cost nothing.
+            const suitePr = wanted
+              ? await this.prNumberForCheckPayload(
+                  payload.check_suite?.pull_requests,
+                  repoFullName,
+                  sha,
+                )
+              : undefined;
+            if (suitePr) {
               // Fire only once the head SHA has FULLY SETTLED, so a repo with
               // several check-reporting apps produces exactly one event per SHA
               // — the last suite to settle — rather than one per app. Absent a
@@ -602,7 +684,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
               // all `normalize()` can return — so the precedence below is not a
               // policy choice bolted on later, it is the shape of the pipeline.
               if (settled === "failing" && (isDependency || isOurOwnPush)) {
-                prNumber = pr.number;
+                prNumber = suitePr;
                 issueNumber = prNumber;
                 headSha = sha;
                 type = "pr.checks_failed";
@@ -618,7 +700,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
                 // A green dependency PR goes to the MERGE route, not a review.
                 // We deliberately do NOT fire this for every green PR — that
                 // would flood the router with events for unrelated work.
-                prNumber = pr.number;
+                prNumber = suitePr;
                 issueNumber = prNumber;
                 headSha = sha;
                 type = "pr.checks_passed";
@@ -632,7 +714,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
                 // COLOUR — "on settle, either colour" is the documented
                 // contract (09 → S2, locked decision 14), a red result is
                 // useful review input, and a PR we gave up on never goes green.
-                prNumber = pr.number;
+                prNumber = suitePr;
                 issueNumber = prNumber;
                 headSha = sha;
                 type = "pr.checks_settled";
