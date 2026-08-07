@@ -446,20 +446,6 @@ export function buildGitHubTools(
     ),
 
     tool(
-      "github_push_files",
-      "Push multiple files in a single commit",
-      Type.Object({
-        owner: Type.String(),
-        repo: Type.String(),
-        branch: Type.String(),
-        files: Type.Array(Type.Object({ path: Type.String(), content: Type.String() })),
-        message: Type.String(),
-      }),
-      ({ owner, repo, branch, files, message }) =>
-        gh.pushFiles(owner, repo, branch, files, message),
-    ),
-
-    tool(
       "github_publish",
       "Publish your work: commit the whole working tree and push it, in one step, as a SIGNED commit. Use this INSTEAD of `git add`/`git commit`/`git push` — a commit built by git in this sandbox is unsigned, and a repository that requires signed commits blocks it permanently. GitHub builds and signs the commit for you, attributed to the bot. Local commits you already made are folded in; the published commit is the working tree as it stands now. Fails rather than publishing if a change needs a file mode it cannot express (a new executable file, a symlink, a submodule pointer) — do not work around that with `git push`.",
       Type.Object({

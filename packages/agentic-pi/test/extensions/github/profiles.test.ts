@@ -29,7 +29,7 @@ describe("PROFILE_TOOLS", () => {
     const repoOnly = [
       "github_clone_repo",
       "github_create_or_update_file",
-      "github_push_files",
+      "github_publish",
       "github_create_branch",
       "github_merge_pull_request",
       "github_enable_auto_merge",
@@ -81,7 +81,7 @@ describe("PROFILE_TOOLS", () => {
     assert.equal(PROFILE_TOOLS.read.length, 21);
     assert.equal(PROFILE_TOOLS["issues-write"].length, 28);
     assert.equal(PROFILE_TOOLS["review-write"].length, 30);
-    assert.equal(PROFILE_TOOLS["repo-write"].length, 37);
+    assert.equal(PROFILE_TOOLS["repo-write"].length, 36);
   });
 });
 

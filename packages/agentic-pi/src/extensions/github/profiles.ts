@@ -77,7 +77,6 @@ const REPO_WRITE_TOOLS = [
   ...REVIEW_WRITE_TOOLS,
   "github_clone_repo",
   "github_create_or_update_file",
-  "github_push_files",
   "github_publish",
   "github_create_branch",
   "github_merge_pull_request",

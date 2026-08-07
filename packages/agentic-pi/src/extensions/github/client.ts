@@ -309,70 +309,6 @@ export class GitHubClient {
     });
   }
 
-  async pushFiles(
-    owner: string,
-    repo: string,
-    branch: string,
-    files: Array<{ path: string; content: string }>,
-    message: string,
-  ) {
-    return this.withRetry(async () => {
-      const ok = await this.octokit();
-      // getRef and createRef both return the `git-ref` schema; only ref.object.sha
-      // is read below. Typed explicitly to satisfy noImplicitAnyLet.
-      let ref: Awaited<ReturnType<typeof ok.git.getRef>>["data"];
-      try {
-        const { data } = await ok.git.getRef({ owner, repo, ref: `heads/${branch}` });
-        ref = data;
-      } catch {
-        const { data: repoData } = await ok.repos.get({ owner, repo });
-        const { data: defaultRef } = await ok.git.getRef({
-          owner,
-          repo,
-          ref: `heads/${repoData.default_branch}`,
-        });
-        const { data: newRef } = await ok.git.createRef({
-          owner,
-          repo,
-          ref: `refs/heads/${branch}`,
-          sha: defaultRef.object.sha,
-        });
-        ref = newRef;
-      }
-      const blobs = await Promise.all(
-        files.map(async (f) => {
-          const { data } = await ok.git.createBlob({
-            owner,
-            repo,
-            content: f.content,
-            encoding: "utf-8",
-          });
-          return { path: f.path, sha: data.sha, mode: "100644" as const, type: "blob" as const };
-        }),
-      );
-      const { data: tree } = await ok.git.createTree({
-        owner,
-        repo,
-        base_tree: ref.object.sha,
-        tree: blobs,
-      });
-      const { data: commit } = await ok.git.createCommit({
-        owner,
-        repo,
-        message,
-        tree: tree.sha,
-        parents: [ref.object.sha],
-      });
-      const { data: updated } = await ok.git.updateRef({
-        owner,
-        repo,
-        ref: `heads/${branch}`,
-        sha: commit.sha,
-      });
-      return { commit: commit.sha, branch, ref: updated };
-    });
-  }
-
   /**
    * The branch's current remote tip, or null if the branch does not exist.
    * A missing branch is an ordinary state on the first publish of a new
@@ -397,9 +333,11 @@ export class GitHubClient {
    * Create a commit GitHub signs for us.
    *
    * The REST Git Data API does NOT sign what it creates — its `signature` field
-   * is an input you supply, so `pushFiles()` above produces unsigned commits.
-   * This GraphQL mutation is the only path that yields `verified: true` under a
-   * GitHub App installation token, with no key held anywhere (issue #268).
+   * is an input you supply, so a blob/tree/commit/ref sequence produces unsigned
+   * commits (measured: `docs/plans/signed-commit-publish/00-findings.md` §3,
+   * which is why the tool that did that was removed). This GraphQL mutation is
+   * the only path that yields `verified: true` under a GitHub App installation
+   * token, with no key held anywhere (issue #268).
    *
    * `expectedHeadOid` is non-null by schema: if the branch moved since we read
    * its tip, GitHub rejects the mutation rather than clobbering the other push.

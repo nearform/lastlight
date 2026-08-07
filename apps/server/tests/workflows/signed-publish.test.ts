@@ -37,7 +37,10 @@ const FORBIDDEN_PUSH = /git(?:\s+-\S+(?:\s+\S+)?)*\s+push(?!`)/;
  * this is the closure half of the guard: FORBIDDEN_PUSH stops a prompt
  * regressing to `git push`, and this stops one losing its publish step
  * altogether — or quietly swapping to a tool that does not produce a signed
- * commit (`github_push_files`, `github_create_or_update_file`).
+ * commit. `github_push_files` was the measured example (REST Git Data API,
+ * `verified: false, reason: "unsigned"`) and has since been deleted;
+ * `github_create_or_update_file` takes the REST Contents path instead, which
+ * nobody has measured either way.
  */
 const PUBLISHING_PROMPTS = [
   "architect.md",
