@@ -20,6 +20,10 @@ export function migrate(db: Database.Database): void {
       trigger_type TEXT NOT NULL,
       trigger_id TEXT NOT NULL,
       skill TEXT NOT NULL,
+      -- The target repo as (owner, BARE repo) — see state/repo-ref.ts, the one
+      -- place that rule is expressed. The owner column arrives by ALTER below
+      -- on an upgraded DB; it is here too so a fresh DB reaches the same shape.
+      owner TEXT,
       repo TEXT,
       issue_number INTEGER,
       started_at TEXT NOT NULL,
@@ -37,6 +41,8 @@ export function migrate(db: Database.Database): void {
       id TEXT PRIMARY KEY,
       workflow_name TEXT NOT NULL,
       trigger_id TEXT NOT NULL,
+      -- Same (owner, BARE repo) pair as the executions ledger above.
+      owner TEXT,
       repo TEXT,
       issue_number INTEGER,
       current_phase TEXT NOT NULL,
@@ -317,6 +323,86 @@ export function migrate(db: Database.Database): void {
     );
   } catch {
     // Column already exists — ignore
+  }
+
+  // ── One repo-identifier rule: (owner, BARE repo) — issue #279 ──────────────
+  //
+  // The column above fixed the SHAPE for new rows but left two populations
+  // behind, so the same column meant two things depending on who wrote it:
+  // rows predating it hold the qualified `owner/repo` in `repo` itself, and
+  // `executions` never got an `owner` column at all — the dispatcher wrote the
+  // qualified string there while the phase executor wrote the bare name, which
+  // is every workflow phase row.
+  //
+  // Six read sites each re-derived "may be bare or qualified" and disagreed
+  // about which source wins; #278 shipped a filter built on one reading, and a
+  // non-null non-match HIDES rows rather than showing them. So converge the
+  // data instead of teaching the seventh consumer the rule.
+  //
+  // Ordering matters: `workflow_runs` first, because the `executions` owner
+  // backfill reads `workflow_runs.owner` back out. Every statement is a no-op
+  // on a second run — after it, `instr(repo, '/') = 0` — so this is safe to
+  // re-run, which it is, on every boot.
+  try {
+    db.exec(
+      `UPDATE workflow_runs
+          SET owner = CASE WHEN owner IS NULL OR owner = ''
+                           THEN substr(repo, 1, instr(repo, '/') - 1)
+                           ELSE owner END,
+              repo  = substr(repo, instr(repo, '/') + 1)
+        WHERE repo IS NOT NULL AND instr(repo, '/') > 0`,
+    );
+    // A row from before the owner column whose `context.owner` was absent has
+    // one more witness: `trigger_id`, which is built as `owner/repo#N` (or
+    // `owner/repo::workflow`) from the same pair at dispatch. `resume.ts` and
+    // the approval-resume path already PREFER it over the columns, so reading
+    // it here is the existing precedence, not a new guess. Slack-originated
+    // ids (`slack:…`) carry no repo and are excluded.
+    db.exec(
+      `UPDATE workflow_runs
+          SET owner = substr(trigger_id, 1, instr(trigger_id, '/') - 1)
+        WHERE (owner IS NULL OR owner = '')
+          AND repo IS NOT NULL
+          AND trigger_id NOT LIKE 'slack:%'
+          AND instr(trigger_id, '/') > 0`,
+    );
+  } catch {
+    // Best-effort: a run row that won't split is better left alone than
+    // failing boot. The read path still tolerates both shapes.
+  }
+
+  try {
+    db.exec(`ALTER TABLE executions ADD COLUMN owner TEXT`);
+  } catch {
+    // Column already exists — ignore
+  }
+  try {
+    // 1. The account is already in the row, on the dispatcher-written rows that
+    //    stored the qualified string.
+    db.exec(
+      `UPDATE executions
+          SET owner = substr(repo, 1, instr(repo, '/') - 1)
+        WHERE (owner IS NULL OR owner = '')
+          AND repo IS NOT NULL AND instr(repo, '/') > 0`,
+    );
+    // 2. Otherwise it comes from the run that owns the execution. This is the
+    //    bulk: every phase row, written bare from `GitSandboxAccess`.
+    //    `build-cycle` rows are covered by (1) and chat rows carry no repo at
+    //    all, so there is nothing left needing a `trigger_id` parse.
+    db.exec(
+      `UPDATE executions
+          SET owner = (SELECT r.owner FROM workflow_runs r WHERE r.id = executions.workflow_run_id)
+        WHERE (owner IS NULL OR owner = '') AND workflow_run_id IS NOT NULL`,
+    );
+    // 3. Now de-qualify, once the account has been rescued off it.
+    db.exec(
+      `UPDATE executions
+          SET repo = substr(repo, instr(repo, '/') + 1)
+        WHERE repo IS NOT NULL AND instr(repo, '/') > 0`,
+    );
+  } catch {
+    // Same best-effort rule as above — the ledger is append-only history, and
+    // an un-normalized row degrades a dashboard filter, never a run.
   }
 
   // `feedback_anchors.channel` moved from nullable to a '' sentinel (issue

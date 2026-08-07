@@ -611,6 +611,8 @@ describe("runWorkflow — requires_sandbox gate", () => {
       "gated:demo",
       expect.any(String),
       undefined,
+      // The (owner, BARE repo) pair, not a qualified string (issue #279).
+      expect.any(String),
       expect.any(String),
     );
   });
@@ -656,6 +658,8 @@ describe("runWorkflow — requires_sandbox gate", () => {
       "qa:browser",
       expect.any(String),
       undefined,
+      // The (owner, BARE repo) pair, not a qualified string (issue #279).
+      expect.any(String),
       expect.any(String),
     );
   });

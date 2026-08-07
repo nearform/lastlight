@@ -1984,19 +1984,11 @@ export function createAdminRoutes(
     const ctx = run.context ?? {};
     const ctxOwner = typeof ctx.owner === "string" ? ctx.owner : undefined;
     const branch = typeof ctx.branch === "string" ? ctx.branch : undefined;
-    const repoField = typeof run.repo === "string" ? run.repo : undefined;
-    let owner: string | undefined;
-    let repo: string | undefined;
-    if (repoField) {
-      if (repoField.includes("/")) {
-        const [maybeOwner, maybeRepo] = repoField.split("/", 2);
-        owner = ctxOwner ?? maybeOwner;
-        repo = maybeRepo;
-      } else {
-        owner = ctxOwner;
-        repo = repoField;
-      }
-    }
+    // The row IS the pair (issue #279) — `owner` plus a bare `repo`, normalized
+    // by the store on the way in and on the way out. `context.owner` stays as
+    // the fallback for a row whose owner column was never captured.
+    const repo = run.repo;
+    const owner = repo ? run.owner ?? ctxOwner : undefined;
     const issueKey = buildAssetIssueKey(run.workflowName, run.issueNumber, run.id);
     return { owner, repo, issueKey, branch };
   }
@@ -2321,13 +2313,12 @@ export function createAdminRoutes(
     } | null = null;
 
     if (approval.artifact && run && run.repo) {
-      // `workflow_runs.repo` is the BARE repo name and `owner` lives in
-      // run.context (set by simple.ts) — except in tests / legacy rows that
-      // may store "owner/repo". Handle both: prefer context.owner, else split.
+      // The row is the (owner, BARE repo) pair (issue #279); `context.owner` is
+      // the fallback for a row whose owner column was never captured.
       const ctx = run.context ?? {};
       const ctxOwner = typeof ctx.owner === "string" ? ctx.owner : undefined;
-      const repo = run.repo.includes("/") ? run.repo.split("/")[1] : run.repo;
-      const owner = ctxOwner ?? (run.repo.includes("/") ? run.repo.split("/")[0] : "");
+      const repo = run.repo;
+      const owner = run.owner ?? ctxOwner ?? "";
       if (owner && repo) {
         const mode: BuildAssetsLocation = config.buildAssets ?? "repo";
         const issueKey = buildAssetIssueKey(run.workflowName, run.issueNumber, run.id);

@@ -1444,17 +1444,16 @@ async function main() {
           return;
         }
         // Derive owner/repo for the resume dispatch. Prefer the triggerId
-        // (owner/repo#N) but fall back to the stored repo + context.owner so a
-        // run keyed on a non-GitHub triggerId (e.g. a Slack-thread override)
-        // still resumes from the dashboard/focused-approval flow.
+        // (owner/repo#N) but fall back to the row's own (owner, BARE repo) pair
+        // so a run keyed on a non-GitHub triggerId (e.g. a Slack-thread
+        // override) still resumes from the dashboard/focused-approval flow.
         let [owner, repo] = workflowRun.triggerId.includes("/")
           ? workflowRun.triggerId.replace(/#\d+$/, "").split("/")
           : ["", ""];
         if (!owner || !repo) {
           const ctxOwner = (workflowRun.context?.owner as string | undefined) || "";
-          const storedRepo = workflowRun.repo || "";
-          owner = ctxOwner || (storedRepo.includes("/") ? storedRepo.split("/")[0] : "");
-          repo = storedRepo.includes("/") ? storedRepo.split("/")[1] : storedRepo;
+          owner = workflowRun.owner || ctxOwner;
+          repo = workflowRun.repo || "";
         }
         const issueNumber = workflowRun.issueNumber;
         if (!owner || !repo || !issueNumber) {

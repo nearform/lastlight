@@ -129,6 +129,34 @@ describe("discoverRunAnchors", () => {
     });
   });
 
+  it("passes Octokit the BARE repo for a legacy qualified row (issue #279)", async () => {
+    // Discovery hangs off the terminal-run observer, so it fires for EVERY
+    // finished run, and it hands `(run.owner, run.repo)` to `listBotComments`
+    // with no split of its own. A qualified value here would not just 404 —
+    // it is persisted onward onto the `feedback_anchors` row, so the anchor URL
+    // stays corrupt long after the run is gone.
+    //
+    // Raw SQL because `createRun` normalizes; the row is then read back through
+    // the store, which is the path the observer actually takes.
+    db.database
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, status, started_at, updated_at)
+         VALUES ('run-legacy', 'pr-review', 'nearform/lastlight#255', NULL, 'nearform/lastlight', 255, 'done', 'succeeded', ?, ?)`,
+      )
+      .run("2026-08-01T10:00:00.000Z", "2026-08-01T10:20:00.000Z");
+    const stored = db.runs.getRun("run-legacy")!;
+
+    const listBotComments = vi.fn(async () => [comment()]);
+    await discoverRunAnchors({ db, github: fakeGh({ listBotComments }), botLogin: BOT }, stored);
+
+    expect(listBotComments.mock.calls[0]!.slice(0, 3)).toEqual(["nearform", "lastlight", 255]);
+    // …and the anchor it writes carries the same pair, so `anchorUrl` resolves.
+    const anchors = db.database
+      .prepare(`SELECT owner, repo FROM feedback_anchors`)
+      .all() as { owner: string; repo: string }[];
+    expect(anchors).toEqual([{ owner: "nearform", repo: "lastlight" }]);
+  });
+
   it("asks for review comments only on a PR", async () => {
     const listBotComments = vi.fn(async () => []);
     const issueRun = makeRun({ workflowName: "issue-triage", context: {} });

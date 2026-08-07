@@ -103,6 +103,13 @@ export interface FakeExecutionRow {
   dedupKey: string;
   triggerId: string;
   workflowRunId?: string;
+  /**
+   * The (owner, BARE repo) pair the row was written with. Recorded because it
+   * was silently dropped here, so no engine-side test could observe what the
+   * phase executor actually put on the ledger (issue #279).
+   */
+  owner?: string;
+  repo?: string;
   startedAt: string;
   success?: boolean;
   finished: boolean;
@@ -231,6 +238,8 @@ export class InMemoryStateStore implements WorkflowStateStore {
         dedupKey: rec.skill,
         triggerId: rec.triggerId,
         workflowRunId: rec.workflowRunId,
+        owner: rec.owner,
+        repo: rec.repo,
         startedAt: rec.startedAt,
         finished: false,
       };
@@ -253,12 +262,14 @@ export class InMemoryStateStore implements WorkflowStateStore {
       const row = this.byExecId.get(id);
       if (row) row.output = text;
     },
-    recordSkippedPhase: (dedupKey, triggerId, workflowRunId) => {
+    recordSkippedPhase: (dedupKey, triggerId, workflowRunId, repo, owner) => {
       const row: LedgerRow = {
         id: `skipped:${dedupKey}`,
         dedupKey,
         triggerId,
         workflowRunId,
+        owner,
+        repo,
         startedAt: new Date().toISOString(),
         finished: true,
         success: false,

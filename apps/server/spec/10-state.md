@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS executions (
   trigger_type TEXT NOT NULL,           -- "webhook" | "cron" | "chat" | "api"
   trigger_id TEXT NOT NULL,             -- issue URL, Slack thread id, etc.
   skill TEXT NOT NULL,                  -- "workflow-name:phase-name" or "chat"
-  repo TEXT,
+  owner TEXT,                           -- GitHub org/user; composes owner/repo
+  repo TEXT,                            -- BARE repo name (path-safe segment)
   issue_number INTEGER,
   started_at TEXT NOT NULL,
   finished_at TEXT,
@@ -248,13 +249,38 @@ dispatch that did not happen, and it carries the intervention forward, so
 counting it would make the row written to *defer* an ask read as having served
 it.
 
-`owner` + `repo` together identify the target: `repo` is stored **bare**
-(a single path-safe segment — taskIds and workspace/session dirs derive
-from it), so the org/user is kept in its own `owner` column rather than
-inside `context` alone. That lets the runs-list query (which omits the
-heavy `context` blob) compose the qualified `owner/repo` for the Repos-tab
-grouping and the dashboard's GitHub links. Added by an additive migration
-that backfills existing rows from `context.owner`.
+### One repo-identifier rule
+
+`owner` + `repo` together identify the target, on **both** `workflow_runs` and
+`executions` (and on `feedback_anchors` / `feedback_signals`, which always did).
+`repo` is stored **bare** — a single path-safe segment, because taskIds and
+workspace/session dirs derive from it — with the org/user in its own `owner`
+column. That pair is also exactly what Octokit takes, so a row read back needs
+no splitting before it reaches GitHub.
+
+Everything a *user* sees speaks the qualified `owner/repo` instead:
+`getManagedRepos()`, `EventEnvelope.repo`, `PrState.repo`, the artifact-store
+slugs, `/me/repos`, the dashboard. **`src/state/repo-ref.ts` is the only place
+that join is expressed** — `qualifyRepo` for JS, `qualifiedRepoSql` for SQL, and
+`normalizeRepoRef` for the inverse. `createRun` and `recordStart` run every
+write through it, and `deserialize` runs every read back through it.
+
+That convergence is issue #279. Before it, the same column meant two things
+depending on who wrote it: rows predating the `owner` column held the qualified
+string in `repo` itself, and `executions` had no `owner` at all — the dispatcher
+wrote qualified there while the phase executor wrote bare, which is every
+workflow phase row. Six read sites each re-derived "may be bare or qualified"
+and disagreed about which source wins; #278 shipped a filter built on one
+reading, compared `lastlight` against `{nearform/lastlight}`, and a non-null
+non-match **hides** rows rather than showing them.
+
+An idempotent backfill in `migrate()` converges both tables — `workflow_runs`
+first, since the `executions` owner is recovered by joining it. Two arms of
+compatibility survive, both documented as legacy rather than as the rule: the
+`OR repo = ?` branch of `repoMatchClause`, and `normalizeRepoRef` on read-back.
+Rows where the account was never captured anywhere cannot be backfilled and
+keep a null `owner`; a filter treats those as "no repo, always visible" rather
+than hiding them.
 
 The `queued` status is the persisted form of the global concurrency cap
 (see [Workflow Engine](/spec/06-workflow-engine)): when a fresh trigger

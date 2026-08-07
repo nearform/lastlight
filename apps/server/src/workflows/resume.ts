@@ -249,9 +249,12 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
   const stored = (run.context || {}) as Record<string, unknown>;
 
   // Derive owner/repo: GitHub trigger ids encode it as owner/repo#N;
-  // Slack-originated runs store owner in context and repo on the row.
+  // Slack-originated runs fall back to the row's own (owner, BARE repo) pair,
+  // then to context.owner for a row whose owner column was never captured.
+  // Both halves are bare here — `repo` feeds Octokit AND `workflowScopedTaskId`
+  // below, which builds a filesystem path out of it.
   const parsed = parseTriggerId(run.triggerId);
-  const owner = parsed?.owner ?? (stored.owner as string | undefined) ?? "";
+  const owner = parsed?.owner ?? run.owner ?? (stored.owner as string | undefined) ?? "";
   const repo = parsed?.repo ?? run.repo ?? "";
   const issueNumber = run.issueNumber;
   const isSlack = run.triggerId.startsWith("slack:");

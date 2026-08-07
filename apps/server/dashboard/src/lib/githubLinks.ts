@@ -22,11 +22,15 @@ export function repoUrl(repo: string | null | undefined): string | null {
 /**
  * Resolve a run's qualified `owner/repo` for linking, else `null`.
  *
- * Runs store `repo` as a BARE name (`drizzle-cube-help`) and the owner in a
- * separate `owner` column (both in the list + detail payloads), so
- * `repoUrl(run.repo)` alone never links a run — compose owner + repo. Older
- * rows may carry the owner only in `context.owner` (detail) or embedded in the
- * `owner/repo#N` / `owner/repo::workflow` `triggerId`; both are fallbacks.
+ * The client-side twin of `state/repo-ref.ts`'s `qualifyRepo` — hand-mirrored
+ * because the dashboard has no import edge to core, the same way `api.ts`
+ * mirrors the row types. Runs store the pair: a BARE `repo`
+ * (`drizzle-cube-help`) plus a separate `owner` column, in both the list and
+ * detail payloads. So `repoUrl(run.repo)` alone never links a run.
+ *
+ * Two fallbacks, for rows the #279 backfill couldn't reach: the owner may live
+ * only in `context.owner` (detail payload), or embedded in the `owner/repo#N` /
+ * `owner/repo::workflow` `triggerId`.
  */
 export function runRepoPath(run: {
   repo?: string | null;
@@ -35,14 +39,15 @@ export function runRepoPath(run: {
   context?: Record<string, unknown> | null;
 }): string | null {
   const bare = run.repo?.trim();
-  if (bare && OWNER_REPO.test(bare)) return bare;
-  // Explicit `owner` column (+ `context.owner` for pre-migration rows).
   const owner =
     run.owner?.trim() ||
     (typeof run.context?.owner === "string" ? run.context.owner.trim() : "");
   if (bare && owner && !bare.includes("/")) return `${owner}/${bare}`;
-  // Legacy fallback: pull the LEADING `owner/repo` from the trigger id, stopping
-  // at the `#` or `:` suffix so `owner/repo::repo-health` can't slip through.
+  // Legacy: a row written before the backfill put the qualified string in
+  // `repo` itself. Never re-qualify one of those.
+  if (bare && OWNER_REPO.test(bare)) return bare;
+  // Legacy: pull the LEADING `owner/repo` from the trigger id, stopping at the
+  // `#` or `:` suffix so `owner/repo::repo-health` can't slip through.
   const fromTrigger = run.triggerId?.match(/^([^/\s#:]+\/[^/\s#:]+)(?:$|[#:])/)?.[1];
   if (fromTrigger) return fromTrigger;
   return null;
