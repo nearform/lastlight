@@ -23,8 +23,19 @@ import { join } from "node:path";
  */
 const PLAIN_FILE_MODE = "100644";
 
+/**
+ * The one non-plain mode measured to survive a content-only re-add: GitHub
+ * patched the blob and kept the base tree's `100755` entry unchanged
+ * (docs/plans/signed-commit-publish/00-findings.md). Symlinks and submodule
+ * gitlinks were never measured — and for a gitlink, `dstSha` below is a
+ * commit object, not a blob, so `cat-file blob` on it throws rather than
+ * degrading to a clean refusal. Keep the relaxation scoped to what was
+ * actually measured, not "any mode left unchanged".
+ */
+const EXECUTABLE_MODE = "100755";
+
 const MODE_REASONS: Record<string, string> = {
-  "100755": "executable (100755) — createCommitOnBranch cannot set file modes",
+  [EXECUTABLE_MODE]: "executable (100755) — createCommitOnBranch cannot set file modes",
   "120000": "symlink (120000) — createCommitOnBranch would commit it as a regular file",
   "160000": "submodule pointer (160000) — createCommitOnBranch cannot write gitlinks",
 };
@@ -136,7 +147,12 @@ export function diffWorktreeAgainst(
         deletions.push({ path: rec.path });
         continue;
       }
-      if (rec.dstMode !== PLAIN_FILE_MODE) {
+      // A mode we cannot set is only a problem when it would have to CHANGE —
+      // except we only get to skip the refusal where preservation was
+      // actually measured (see the EXECUTABLE_MODE comment above).
+      const contentOnlyExecutableChange =
+        rec.srcMode === EXECUTABLE_MODE && rec.dstMode === EXECUTABLE_MODE;
+      if (rec.dstMode !== PLAIN_FILE_MODE && !contentOnlyExecutableChange) {
         unsupported.push({ path: rec.path, reason: reasonFor(rec.srcMode, rec.dstMode) });
         continue;
       }

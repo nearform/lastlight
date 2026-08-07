@@ -19,7 +19,13 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { GitHubAuth } from "./auth.js";
-import { GitHubClient, isActionsDenied, type GitHubClientOptions } from "./client.js";
+import {
+  GitHubClient,
+  isActionsDenied,
+  isStaleDataError,
+  type GitHubClientOptions,
+  type SignedCommit,
+} from "./client.js";
 import { gitAuthEnv } from "./credentials.js";
 import {
   DEFAULT_LOG_EXCERPT_BYTES,
@@ -323,27 +329,84 @@ export function buildGitHubTools(
 
         const [headline, ...rest] = message.split("\n");
         const body = rest.join("\n").trim();
-        const commit = await gh.publishSignedCommit({
-          owner,
-          repo,
-          branch: target,
-          expectedHeadOid: tip,
-          headline: (headline ?? "").trim() || message.trim(),
-          ...(body ? { body } : {}),
-          additions: changes.additions,
-          deletions: changes.deletions,
-        });
+        let commit: SignedCommit;
+        try {
+          commit = await gh.publishSignedCommit({
+            owner,
+            repo,
+            branch: target,
+            expectedHeadOid: tip,
+            headline: (headline ?? "").trim() || message.trim(),
+            ...(body ? { body } : {}),
+            additions: changes.additions,
+            deletions: changes.deletions,
+          });
+        } catch (err) {
+          // A generic GraphQL error here reads to the agent as "the branch is
+          // broken" — for STALE_DATA it is neither broken nor safe to retry
+          // automatically here: the change set above was computed as worktree
+          // vs. tip, so re-diffing against a tip that genuinely moved would
+          // render another party's additions as deletions (see
+          // docs/plans/signed-commit-publish/00-findings.md #4). Name the case
+          // so the agent re-runs the whole tool call instead of looping on a
+          // misdiagnosis.
+          if (isStaleDataError(err)) {
+            throw new Error(
+              `publish rejected: the branch tip moved between reading it and writing (STALE_DATA). This can happen even with nothing else pushing, from lag between GitHub's REST read path and its GraphQL write path — it is not a sign the branch is broken. Re-run this tool call; do not retry in a loop and do not fall back to git push.`,
+            );
+          }
+          throw err;
+        }
+
+        // The mutation is the only thing standing between us and an unsigned
+        // commit on a `required_signatures` repo. If GitHub says it did not
+        // sign, or signed but the signature doesn't verify, say so loudly — the
+        // commit is already on the branch, so a silent `verified: false` would
+        // be discovered by a blocked PR hours later. `null` means GitHub
+        // returned no signature yet, not a failure.
+        if (commit.signature && !commit.signature.wasSignedByGitHub) {
+          throw new Error(
+            `published ${commit.oid} but GitHub did not sign it (state=${commit.signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+          );
+        }
+        if (commit.signature && !commit.signature.isValid) {
+          throw new Error(
+            `published ${commit.oid} but GitHub's signature on it is not valid (state=${commit.signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+          );
+        }
+
+        // Local HEAD is now behind the branch we just wrote. `reset --mixed`
+        // moves the branch ref and the index onto the published commit and
+        // leaves every file untouched — sound precisely because the published
+        // tree IS the working tree. Best effort: a failed sync does not
+        // un-publish anything, so it is reported, never thrown.
+        let localSync = "ok";
+        try {
+          const token = await auth.getToken();
+          execFileSync("git", ["fetch", "origin", target], {
+            cwd,
+            stdio: "pipe",
+            timeout: 120_000,
+            env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+          });
+          execFileSync("git", ["reset", "--mixed", commit.oid], { cwd, stdio: "pipe" });
+        } catch (err) {
+          localSync = `skipped: ${(err as Error).message.split("\n")[0]}`;
+        }
 
         return {
           published: true,
           commit: commit.oid,
           url: commit.url,
           branch: target,
-          verified: commit.signature?.wasSignedByGitHub ?? null,
+          verified: commit.signature
+            ? commit.signature.wasSignedByGitHub && commit.signature.isValid
+            : null,
           committer: commit.committer,
           added: changes.additions.filter((a) => a.status === "A").map((a) => a.path),
           modified: changes.additions.filter((a) => a.status === "M").map((a) => a.path),
           deleted: changes.deletions.map((d) => d.path),
+          local_sync: localSync,
         };
       },
     ),

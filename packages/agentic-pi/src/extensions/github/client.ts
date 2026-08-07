@@ -171,6 +171,21 @@ function isGraphqlError(err: unknown): boolean {
   );
 }
 
+/**
+ * GitHub's REST read path can lag its GraphQL write path by a few seconds
+ * (measured — docs/plans/signed-commit-publish/00-findings.md #4): a `getRef`
+ * right after a successful mutation can return the pre-write tip. The next
+ * publish then computes `expectedHeadOid` from that stale tip, and this
+ * mutation's own concurrency check rejects it exactly as if another writer
+ * had raced us — `STALE_DATA` is GitHub's classification for that rejection.
+ * Callers use this to give a specific, re-run-friendly message instead of the
+ * generic GraphQL error text, without guessing from the message wording.
+ */
+export function isStaleDataError(err: unknown): boolean {
+  if (!isGraphqlError(err)) return false;
+  return (err as { errors: Array<{ type?: string }> }).errors.some((e) => e.type === "STALE_DATA");
+}
+
 export interface GitHubClientOptions {
   /**
    * Override the GitHub REST API base URL (Octokit's `baseUrl`). Defaults to

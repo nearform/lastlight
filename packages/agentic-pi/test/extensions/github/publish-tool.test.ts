@@ -311,3 +311,170 @@ describe("github_publish", () => {
     }
   });
 });
+
+describe("github_publish local sync", () => {
+  test("reports a failed sync instead of throwing, and never touches the files", async () => {
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(fake.url, { owner: "o", repo: "r", message: "m", path: r.dir });
+      assert.equal(out.published, true);
+      // No `origin` remote in this temp repo, so the fetch cannot succeed —
+      // the tool must report that, not throw, and must leave the file alone.
+      assert.match(out.local_sync, /^skipped: /);
+      assert.equal(execFileSync("cat", [join(r.dir, "a.txt")], { encoding: "utf8" }), "two\n");
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("fails loudly when GitHub did not sign the commit it created", async () => {
+    const r = repo();
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        if (req.url?.endsWith("/graphql")) {
+          res.end(
+            JSON.stringify({
+              data: {
+                createCommitOnBranch: {
+                  commit: {
+                    oid: "unsignedoid",
+                    url: "u",
+                    committer: null,
+                    signature: { isValid: false, state: "UNSIGNED", wasSignedByGitHub: false },
+                  },
+                },
+              },
+            }),
+          );
+          return;
+        }
+        res.end(JSON.stringify({ object: { sha: r.base } }));
+      });
+    });
+    await new Promise<void>((res2) => server.listen(0, "127.0.0.1", () => res2()));
+    const { port } = server.address() as AddressInfo;
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(`http://127.0.0.1:${port}`, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        path: r.dir,
+      });
+      assert.ok(out.error);
+      assert.match(out.error, /unsignedoid/);
+      assert.match(out.error, /did not sign/i);
+    } finally {
+      await new Promise<void>((res2) => server.close(() => res2()));
+      r.cleanup();
+    }
+  });
+});
+
+describe("github_publish signature assertion", () => {
+  test("fails loudly when GitHub signed the commit but the signature is not valid", async () => {
+    // wasSignedByGitHub can be true while isValid is false — e.g. a signature
+    // GitHub attached but could not verify. Reporting `verified: true` here
+    // would be exactly the misleading blob-nobody-reads outcome this task
+    // exists to close off.
+    const r = repo();
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        if (req.url?.endsWith("/graphql")) {
+          res.end(
+            JSON.stringify({
+              data: {
+                createCommitOnBranch: {
+                  commit: {
+                    oid: "badoid",
+                    url: "u",
+                    committer: { name: "GitHub", email: "noreply@github.com" },
+                    signature: { isValid: false, state: "BAD_CERT", wasSignedByGitHub: true },
+                  },
+                },
+              },
+            }),
+          );
+          return;
+        }
+        res.end(JSON.stringify({ object: { sha: r.base } }));
+      });
+    });
+    await new Promise<void>((res2) => server.listen(0, "127.0.0.1", () => res2()));
+    const { port } = server.address() as AddressInfo;
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(`http://127.0.0.1:${port}`, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        path: r.dir,
+      });
+      assert.ok(out.error);
+      assert.match(out.error, /badoid/);
+      assert.match(out.error, /not valid/i);
+      assert.notEqual(out.verified, true);
+    } finally {
+      await new Promise<void>((res2) => server.close(() => res2()));
+      r.cleanup();
+    }
+  });
+
+  test("names STALE_DATA explicitly instead of surfacing the raw GraphQL error", async () => {
+    // GitHub's REST getRef can lag its own GraphQL write path (see
+    // docs/plans/signed-commit-publish/00-findings.md #4), so a mutation can be
+    // rejected as stale even with nothing else pushing. A retry here is wrong —
+    // the change set is worktree-vs-tip, so rebasing onto a moved tip would
+    // render another party's additions as deletions — but the agent needs to
+    // know a plain re-run is likely to work, not that the branch is broken.
+    const r = repo();
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        if (req.url?.endsWith("/graphql")) {
+          res.end(
+            JSON.stringify({
+              errors: [
+                {
+                  type: "STALE_DATA",
+                  message: `Expected branch to point to "${r.base}" but it did not.  Pull and try again.`,
+                },
+              ],
+            }),
+          );
+          return;
+        }
+        res.end(JSON.stringify({ object: { sha: r.base } }));
+      });
+    });
+    await new Promise<void>((res2) => server.listen(0, "127.0.0.1", () => res2()));
+    const { port } = server.address() as AddressInfo;
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(`http://127.0.0.1:${port}`, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        path: r.dir,
+      });
+      assert.ok(out.error);
+      assert.match(out.error, /STALE_DATA/);
+      assert.match(out.error, /re-run/i);
+      assert.doesNotMatch(out.error, /Pull and try again/);
+    } finally {
+      await new Promise<void>((res2) => server.close(() => res2()));
+      r.cleanup();
+    }
+  });
+});

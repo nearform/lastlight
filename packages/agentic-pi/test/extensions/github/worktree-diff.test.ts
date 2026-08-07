@@ -140,6 +140,93 @@ describe("diffWorktreeAgainst", () => {
     }
   });
 
+  test("allows a content change to an already-executable file", () => {
+    const r = repo();
+    try {
+      writeFileSync(join(r.dir, "run.sh"), "#!/bin/sh\necho v1\n");
+      chmodSync(join(r.dir, "run.sh"), 0o755);
+      r.git("add", "-A");
+      r.git("commit", "-qm", "exec");
+      const base = r.git("rev-parse", "HEAD").trim();
+      writeFileSync(join(r.dir, "run.sh"), "#!/bin/sh\necho v2\n");
+      const cs = diffWorktreeAgainst(r.dir, base);
+      assert.deepEqual(cs.unsupported, []);
+      assert.deepEqual(
+        cs.additions.map((a) => a.path),
+        ["run.sh"],
+      );
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("still refuses an existing submodule pointer when its target commit changes", () => {
+    // The mode-preservation relaxation above is scoped to the executable bit
+    // ONLY — it was the one case findings.md measured. A gitlink's mode
+    // (160000) also stays unchanged when just its target commit moves, so a
+    // relaxation keyed on "mode unchanged" alone would let this slip through
+    // — and then crash: dstSha here is a commit object, not a blob, so the
+    // cat-file read that additions rely on throws instead of degrading to a
+    // clean refusal.
+    const r = repo();
+    const subDir = mkdtempSync(join(tmpdir(), "worktree-diff-sub-"));
+    const subGit = (...a: string[]) =>
+      execFileSync("git", a, {
+        cwd: subDir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@e",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@e",
+        },
+      });
+    try {
+      subGit("init", "-q", "-b", "main");
+      subGit("commit", "-q", "--allow-empty", "-m", "s1");
+      execFileSync(
+        "git",
+        ["-c", "protocol.file.allow=always", "submodule", "add", "-q", subDir, "sub"],
+        {
+          cwd: r.dir,
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@e",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@e",
+          },
+        },
+      );
+      r.git("commit", "-qm", "add submodule");
+      const base = r.git("rev-parse", "HEAD").trim();
+      // `submodule add` CLONED subDir into r.dir/sub — that clone, not the
+      // original subDir, is what the working tree actually checks out. Commit
+      // there so the submodule's checked-out HEAD (what diffWorktreeAgainst's
+      // own `git add -A` reads) is the one that moves.
+      execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "s2"], {
+        cwd: join(r.dir, "sub"),
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@e",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@e",
+        },
+      });
+
+      const cs = diffWorktreeAgainst(r.dir, base);
+      assert.deepEqual(cs.additions, []);
+      assert.equal(cs.unsupported.length, 1);
+      assert.equal(cs.unsupported[0].path, "sub");
+      assert.match(cs.unsupported[0].reason, /submodule/i);
+    } finally {
+      rmSync(subDir, { recursive: true, force: true });
+      r.cleanup();
+    }
+  });
+
   test("refuses a symlink", () => {
     const r = repo();
     try {
