@@ -637,9 +637,23 @@ right methods (no dead password box for an OAuth-only gate); `POST /login`
 refuses password auth — never minting an open token — whenever auth is on but
 no password is set.
 
-**The "my teams' repos" filter** (`teamVisibility`, issue #169) offers each
+**The "my repos" filter** (`teamVisibility`, issue #169) offers each
 GitHub-authenticated admin a header toggle that narrows every list to the
-managed repos their GitHub org teams own. `GET /admin/api/me/repos` returns
+managed repos their GitHub org teams own, **plus the ones their own account
+owns**. The ownership half closes a gap that was pure artefact rather than the
+deliberate approximation the rest of the feature makes: teams are an *org*
+concept, so a repo under a personal account can never be granted by one, and a
+strictly team-derived answer hid every personal repo an instance managed — on a
+mostly-personal deployment, most of the dashboard. The test is
+`owner === login`; the tempting restatement "the owner is not an organization"
+selects the same set on a single-owner instance and is a disclosure bug on any
+other, putting everybody else's personal repos into your filter. It costs no
+extra request — the owner is already in the managed string — and it is derived
+per request rather than persisted, so it re-intersects with the live managed
+list and has no cache of its own to go stale. An **incomplete** team answer
+(`truncated` / `error`) is deliberately *not* rescued by it: "your own repos
+plus an unknown fraction of your teams'" would confidently hide the org repos
+the failed half would have contributed. `GET /admin/api/me/repos` returns
 `{ repos, synced, reason }`, which the SPA passes back as the `?repos=` query
 filter on the run lists (so paging and totals stay honest) and applies locally
 to the session list.
@@ -652,14 +666,32 @@ managed repos, one maintainer's single team covered 4, and the 4 it hid included
 `nearform/lastlight`, on which they hold `admin` via org ownership. Applied as a
 filter somebody switched on, the same narrowing is exactly what they asked for,
 and one click undoes it. So the toggle is never pre-applied, and the feature is
-never described to a user as visibility or access. It renders only when there
-are real team grants to narrow to.
+never described to a user as visibility or access.
+
+**The control renders whenever `enabled` is on — not only once grants
+resolve.** It used to appear only when there were real grants to narrow to,
+which hid it in precisely the state where somebody needs it: they have just
+created a team or granted it repos, and the answer they must invalidate is
+cached for `ttlMinutes`, behind a stale-while-revalidate read that serves the
+old value once more after expiry. `POST /me/repos/resync` and the SPA hook's
+`resync()` both existed; nothing in the UI ever called them, so the only route
+back was waiting out the TTL and reloading twice. The unresolved states now
+render explanatory and retryable, naming the `reason` (no teams, no GitHub
+identity, over budget, GitHub error) with the re-sync on the control itself.
+`teamVisibility.enabled: false` is the one state it is still not drawn in —
+and the one a re-sync provably cannot change, since `resync()` short-circuits
+on that flag before it reaches GitHub. The mapping from each `reason` to the
+rendered state is pinned in `tests/admin/dashboard-repo-scope.test.ts` against
+the server's own `VisibilityReason` union, so adding a reason without deciding
+how the UI answers it fails the build.
 
 The `enabled` flag is the **operator** switch, and needs a setup step: grant the
 GitHub App the organization **`Members: read`** permission, subscribe it to the
 `team` / `membership` / `organization` webhook events, and re-consent the App on
-each installation. Without that the resolver errors, the toggle never appears,
-and nothing changes for anyone. `repos: null` is the fail-open sentinel meaning
+each installation. Without that the resolver fails open and nothing is filtered
+for anyone — the control still appears (the operator asked for it) and says why
+it has nothing to offer, which is how an operator finds out the setup step is
+outstanding instead of seeing a feature that silently did nothing. `repos: null` is the fail-open sentinel meaning
 "no filter" — returned for a password/Slack login, an `allowedOrg: "*"`
 deployment, an over-budget resolution and any GitHub error. This is **not**
 access control: the server keeps returning global data on `/workflow-runs`,

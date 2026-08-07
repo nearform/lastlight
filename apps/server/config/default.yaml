@@ -111,11 +111,19 @@ feedback:
 # `nearform/lastlight`, which they own. Applied as a filter somebody switched on,
 # the same narrowing is exactly the decluttering they asked for.
 #
+# The filter is your teams' repos PLUS the managed repos your own account owns.
+# Teams are an org concept, so a personal repo can never be granted by one; a
+# strictly team-derived answer hid every personal repo an instance managed. The
+# test is `owner == your login` — not "the owner isn't an org", which would put
+# other people's personal repos in your filter.
+#
 # This flag is the OPERATOR switch: it needs the GitHub App's organization
 # `Members: read` permission, so turn it on once you've granted that and
-# re-consented the App on each installation. Without it the toggle never
-# appears. UI only — every list endpoint still returns global data, and each
-# budget below fails OPEN (shows more).
+# re-consented the App on each installation. Without it the resolver fails open
+# and nothing is filtered — the toggle still appears and says why, so an
+# outstanding setup step is visible instead of silent. UI only — every list
+# endpoint still returns global data, and each budget below fails OPEN (shows
+# more).
 #
 # Nothing is crawled up front. A user's teams are resolved on demand, on their
 # first dashboard request, and cached — so an org with thousands of repos and

@@ -17,6 +17,22 @@ import { api, type MeRepos } from "../api";
  * hasn't opted in, and also for every failure path once they have — a
  * password/Slack login, the feature off, an over-budget resolution, a GitHub
  * error. The safe direction is always *more visible*, never less.
+ *
+ * **Whether to RENDER the control is a different question from whether it can
+ * narrow anything**, and conflating the two hid the one affordance that fixes
+ * the common case. The control used to appear only once real grants resolved,
+ * so somebody who had just created a team and granted it repos saw nothing —
+ * no state, no explanation, and no way to re-ask short of waiting out the 60
+ * minute TTL (and even then twice, since `visibleRepos` is
+ * stale-while-revalidate: the first load after expiry still serves the stale
+ * answer).
+ *
+ * So the gate is `offered` — the operator's `teamVisibility` switch — and the
+ * unresolved states render explanatory and retryable instead of vanishing.
+ * That gate is deliberately the same condition the server already applies:
+ * `resync()` short-circuits on `config.enabled` before touching GitHub, so the
+ * only state where the control could not possibly work is the one state where
+ * it is not drawn.
  */
 export interface VisibleRepos {
   allowed: Set<string> | null;
@@ -27,17 +43,28 @@ export interface VisibleRepos {
   scope: RepoScope;
   setScope: (scope: RepoScope) => void;
   /**
-   * Whether the filter is offerable — i.e. the server resolved real team grants
-   * for this person. False for a password/Slack login, a deployment with the
-   * feature off, and every fail-open case. The control is hidden entirely when
-   * this is false: offering a filter that would narrow to nothing, or to
-   * everything, is worse than not offering it.
+   * Whether the control is worth rendering at all — i.e. the operator turned
+   * `teamVisibility` ON. This, and not "did we resolve grants", is the gate:
+   * the operator's switch is the one authority, and it is the only condition a
+   * resync can never change (`resync()` checks `config.enabled` first and
+   * returns fail-open without touching GitHub, so a control offered here would
+   * be a guaranteed no-op).
+   */
+  offered: boolean;
+  /**
+   * Whether a real filter exists — the server resolved team grants covering at
+   * least one managed repo, so switching to `mine` actually narrows something.
    */
   canScope: boolean;
   /**
-   * True when the user opted in but there is no filter to apply — the teams
-   * couldn't be resolved. The control says so rather than silently behaving
-   * like "all", which would look like the opt-in didn't take.
+   * Offered, but with nothing to filter to: the teams resolved empty, errored,
+   * or blew the budget. The control renders in an explanatory, retryable state
+   * rather than vanishing — see the toggle in `StatsHeader`.
+   *
+   * This used to be `scope === "mine" && allowed === null`, which was
+   * unreachable: opting in requires the toggle, and the toggle was hidden in
+   * exactly this state. So the branch written to explain a failed resolution
+   * could only ever be reached by a resolution that succeeded and later broke.
    */
   degraded: boolean;
   /** Force a re-resolution server-side, then refresh every subscriber. */
@@ -45,6 +72,35 @@ export interface VisibleRepos {
 }
 
 export type RepoScope = "mine" | "all";
+
+/**
+ * What the scope control should be, given the server's answer.
+ *
+ *  - `hidden`     — the operator's `teamVisibility` switch is off (or we have
+ *                   no answer yet). The ONLY state a re-sync cannot change:
+ *                   `resync()` returns fail-open on `config.enabled` without
+ *                   touching GitHub, so a control here is a guaranteed no-op.
+ *  - `unresolved` — the feature is on but nothing resolved. Renders explanatory
+ *                   and retryable; this is the state somebody lands in right
+ *                   after creating a team, and the cached answer they need to
+ *                   invalidate lives for an hour.
+ *  - `available`  — real grants; the filter can narrow something.
+ *
+ * Pure and exported so the mapping is testable without React — it is the part
+ * that rots, and `reason` has nine values.
+ */
+export type ScopeControlState = "hidden" | "unresolved" | "available";
+
+export function scopeControlState(meta: MeRepos | null): ScopeControlState {
+  // No answer yet: draw nothing rather than flashing "none" before the first
+  // resolve lands.
+  if (!meta) return "hidden";
+  if (meta.reason === "disabled") return "hidden";
+  // `repos` is never `[]` from the server — an empty result is a fail-open
+  // `null` — but treating a stray empty array as "available" would render a
+  // filter that blanks every view, so it is handled as unresolved either way.
+  return meta.repos && meta.repos.length > 0 ? "available" : "unresolved";
+}
 
 const SCOPE_KEY = "lastlight-repo-scope";
 
@@ -124,7 +180,7 @@ export function useVisibleRepos(): VisibleRepos {
   }, []);
 
   const meta = cached;
-  const canScope = Boolean(meta?.repos && meta.repos.length > 0);
+  const control = scopeControlState(meta);
 
   // Memoized on the resolved answer + scope, not rebuilt per render. Callers
   // put `allowed` in `useEffect` / `useMemo` dependency arrays, and a fresh Set
@@ -154,8 +210,9 @@ export function useVisibleRepos(): VisibleRepos {
     loading: meta === null,
     scope,
     setScope,
-    canScope,
-    degraded: scope === "mine" && allowed === null,
+    offered: control !== "hidden",
+    canScope: control === "available",
+    degraded: control === "unresolved",
     resync,
   };
 }

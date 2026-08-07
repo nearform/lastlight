@@ -792,13 +792,14 @@ dependencies:
 		polling budget stays bounded.
 	</p>
 
-	<h2>The "my teams' repos" filter (optional)</h2>
+	<h2>The "my repos" filter (optional)</h2>
 
 	<p>
 		By default every admin who logs into the dashboard sees every managed repo's
 		runs and sessions. In an org with a lot of repos that is mostly noise. Turn
 		this on and each GitHub-authenticated admin gets a header toggle that filters
-		every list down to the repos their GitHub org teams own:
+		every list down to the repos their GitHub org teams own, plus the ones their
+		own account owns:
 	</p>
 
 	<pre><code>{`teamVisibility:
@@ -835,7 +836,20 @@ dependencies:
 		<code>Members: read</code> permission, subscribe it to the
 		<code>team</code>, <code>membership</code> and <code>organization</code>
 		webhook events, and re-consent the App on each installation. Until then the
-		toggle never appears and nothing changes for anyone.
+		resolver fails open and nothing is filtered for anyone — the toggle still
+		appears once <code>enabled</code> is on, and says why it has nothing to
+		offer, so an outstanding setup step reads as an outstanding setup step
+		rather than as a feature that silently did nothing.
+	</p>
+
+	<p>
+		<strong>Just created a team?</strong> A resolved answer is cached for
+		<code>ttlMinutes</code> (60 by default) and served
+		stale-while-revalidate, so the first load after it expires still returns the
+		old answer and refreshes behind you — it takes a second load to see a change.
+		The webhooks above make that instant by invalidating the cache the moment a
+		membership or a team's repo grant changes. Without them, click the toggle
+		while it reads <code>my repos (none)</code> to re-check immediately.
 	</p>
 
 	<p>

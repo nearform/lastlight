@@ -1070,8 +1070,13 @@ Admin dashboard:
   required for **per-repo dashboard visibility**: with it (plus the `team` /
   `membership` / `organization` webhook subscriptions and
   `teamVisibility.enabled: true` in the overlay), a GitHub-authenticated admin
-  sees only the managed repos their org teams can reach, across workflow runs,
-  sessions and the home-page panels. **Re-consent the App on each installation
+  can narrow to the managed repos their org teams own **plus the ones their own
+  account owns**, across workflow runs, sessions and the home-page panels.
+  (Ownership is unioned in because teams are an org concept — a personal repo
+  could never be team-granted, so a purely team-derived answer hid every one of
+  them. The test is `owner === login`, never "the owner isn't an org", which
+  would leak other people's personal repos into your filter.)
+  **Re-consent the App on each installation
   after adding it.** Without it the feature stays dormant, harmlessly: the
   resolver fails open and everyone keeps seeing everything, which is exactly
   today's behaviour. This is UI declutter — `/workflow-runs`, `/sessions` and
