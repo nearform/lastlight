@@ -3,6 +3,7 @@ name: issue-triage
 description: Triage GitHub issues through the canonical state machine — classify, label, deduplicate, request missing info, write agent briefs, and manage stale issues. Use on demand or on a triage cron.
 version: 2.0.0
 tags: [github, issues, triage]
+chat: true
 ---
 
 # Issue Triage

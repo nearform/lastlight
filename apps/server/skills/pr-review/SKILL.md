@@ -3,6 +3,7 @@ name: pr-review
 description: Review a GitHub pull request and post one formal review — advance the existing discussion and give precision-first, high-signal feedback. A pure code review — no building. Use when asked to review a PR or on a cron PR scan.
 version: 7.2.0
 tags: [github, review, code-quality]
+chat: true
 ---
 
 # PR Review

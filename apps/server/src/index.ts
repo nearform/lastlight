@@ -250,13 +250,22 @@ async function main() {
       : githubAuth?.kind === "token"
         ? { token: githubAuth.token }
         : undefined;
+  // Boot-stable — the persona doesn't change under us, so it stays out of the
+  // per-turn thunk below and off the filesystem on every chat message.
+  const agentContext = loadAgentContext();
   const chatRunner = new ChatRunner(
     {
       model: resolveModel(config.models, "chat"),
       thinking: resolveVariant(config.variants, "chat"),
-      systemPrompt:
-        loadAgentContext() +
-        chatSystemSuffix(githubAuth !== undefined) +
+      // A thunk, not a string: the suffix advertises the ENABLED workflow set,
+      // and the dashboard's per-workflow kill switch changes that without a
+      // restart. The persona and skill catalogue are boot-stable, so only the
+      // suffix is re-derived (and it caches on the loader's asset version).
+      systemPrompt: () =>
+        agentContext +
+        chatSystemSuffix(githubAuth !== undefined, {
+          isWorkflowEnabled: (name) => db.isWorkflowEnabled(name),
+        }) +
         chatSkills.catalogueXml,
       github: chatGithubAuth,
       extraTools: chatSkills.skills.length > 0

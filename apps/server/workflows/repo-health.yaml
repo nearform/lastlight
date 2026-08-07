@@ -1,5 +1,16 @@
 kind: health
 name: repo-health
+chat:
+  summary: A weekly repo health report
+  deflect:
+    - weekly health report
+    - repo health
+    - health check on <repo>
+  reply: >-
+    "Weekly health reports run on a cron schedule, not on demand from chat — ask a
+    maintainer to configure the repo-health cron, or run `npm run cli -- health
+    owner/repo` from the harness host." (health is NOT an interactive chat
+    trigger; do not suggest typing it here.)
 description: |
   Generate a health report for a repository: open issues, stale issues, PR
   velocity, label distribution, etc. Repo-scoped (no specific issue/PR).

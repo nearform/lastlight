@@ -549,6 +549,70 @@ export const AgentWorkflowSchema = z.object({
       examples: z.array(z.string()).optional(),
     })
     .optional(),
+  /**
+   * How the CHAT agent should ADVERTISE this workflow to a human — the phrase it
+   * tells someone to type in Slack, and the one-line summary of what they get.
+   *
+   * Deliberately separate from `classification:`, and an explicit opt-in rather
+   * than a derivation from it, because the two answer different questions.
+   * `classification:` says "the classifier can tag a message with this intent";
+   * this says "a human should be told to type this in chat". Those diverge in
+   * both directions:
+   *
+   *   - `demo` declares a `classification:` block and a `routes.slack.demo`
+   *     entry, but the Slack switch in `router.ts` has no `demo` branch and
+   *     `demo` sits in `WELL_KNOWN_INTENTS`, so `fallbackWorkflowForIntent`
+   *     returns undefined for it and a `demo`-classified message falls through
+   *     to plain chat. Advertising it would send users at a dead route.
+   *   - `dependabot-ci-fix` / `dependabot-pr-merge` are genuinely reachable from
+   *     a Slack message (they're outside `WELL_KNOWN_INTENTS`, so the `default:`
+   *     fallback dispatches them) but would arrive with a repo and no PR number.
+   *     Nobody should be told to type those.
+   *
+   * So the gate is the presence of THIS block and nothing else — `classification:`
+   * is not consulted. Absence means silence, which is the right default for those
+   * three plus every workflow with no `classification:` at all (`pr-fix`, the
+   * crons). Consumed by `assembleChatPrompt()` in
+   * `src/engine/chat/chat-prompt.ts`, which composes the chat system prompt from
+   * the ENABLED workflow set the way `assembleClassifier()` composes the
+   * classifier prompt (issue #164) — so an overlay workflow that declares this
+   * gets advertised with no core edit, and one an operator disables stops being
+   * advertised.
+   */
+  chat: z
+    .object({
+      /**
+       * The verbatim phrase to tell a user to type, e.g. `triage owner/repo`.
+       * Natural language — never with a leading `/`, which Slack intercepts
+       * before it reaches Last Light.
+       *
+       * OPTIONAL, because a workflow may want a chat bullet without being
+       * chat-triggerable at all: `repo-health` runs on a cron and has no
+       * `classification:` block, but the chat agent still needs to know what to
+       * say when someone asks for a health report. Such an entry supplies
+       * `reply` instead and never appears in the suggestable-trigger list.
+       */
+      trigger: z.string().optional(),
+      /** One line naming what the user gets, e.g. "Triage open issues on a repo". */
+      summary: z.string(),
+      /**
+       * Optional user phrasings that should be DEFLECTED to this workflow rather
+       * than attempted in-process — the "if they ask for this, name the trigger
+       * and stop" list. Rendered verbatim; falls back to `summary` when absent.
+       */
+      deflect: z.array(z.string()).optional(),
+      /**
+       * Optional override for the deflection reply. Defaults to
+       * ``tell me `<trigger>` ``. Set it when naming the trigger isn't the right
+       * answer — `answer`'s research path needs the user to include a managed
+       * repo, and `repo-health` has to explain that it's cron-only.
+       */
+      reply: z.string().optional(),
+    })
+    .refine((c) => c.trigger !== undefined || c.reply !== undefined, {
+      message: "chat: needs a `trigger` (what to type) or a `reply` (what to say instead)",
+    })
+    .optional(),
   phases: z.array(PhaseDefinitionSchema),
 });
 

@@ -15,6 +15,12 @@ classification:
     - '"please review https://github.com/foo/bar/pull/42" → INTENT: REVIEW, REPO: foo/bar, ISSUE: 42, REASON: NONE'
     - '"can you review this?" with ISSUE TITLE "Add HTML sanitizer for messages" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"take a look at this PR when you get a chance" with ISSUE TITLE "Port fastify adapter" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
+chat:
+  trigger: review PRs on owner/repo
+  summary: Review the open PRs on a repo
+  deflect:
+    - review PRs on <repo>
+    - check open PRs
 description: |
   Review a single GitHub pull request: read the diff, check for issues, and
   post structured feedback. Does not run a full build cycle and does not

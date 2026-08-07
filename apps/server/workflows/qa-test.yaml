@@ -7,6 +7,13 @@ classification:
   examples:
     - '"qa test the login flow on this PR" with ISSUE TITLE "Add login" → INTENT: QATEST, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"run through the signup flow and tell me what breaks" with ISSUE TITLE "Signup v2" → INTENT: QATEST, REPO: NONE, ISSUE: NONE, REASON: NONE'
+chat:
+  trigger: "qa-test owner/repo#N -- <steps>"
+  summary: Drive an app or CLI through a flow and report step-level pass/fail
+  deflect:
+    - qa test the <flow> flow
+    - run through <flow> and tell me what breaks
+    - smoke-test the CLI commands
 description: |
   Run an automated QA flow against a repo's CLI or locally-served app and report
   step-level pass/fail with evidence. It installs and runs the code in the

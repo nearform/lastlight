@@ -133,8 +133,18 @@ export interface ChatRunnerConfig {
   model: string;
   /** Pi thinking level (off..xhigh). Forwarded as `reasoning` option. */
   thinking?: string;
-  /** Agent persona / system prompt — composed by index.ts from agent-context + CHAT_SYSTEM_SUFFIX. */
-  systemPrompt: string;
+  /**
+   * Agent persona / system prompt — composed by index.ts from agent-context +
+   * `chatSystemSuffix()` + the skill catalogue.
+   *
+   * A THUNK is resolved per turn. The workflow triggers the suffix advertises are
+   * composed from the enabled workflow set, and an admin can disable a workflow
+   * from the dashboard mid-process (the `workflow_overrides` table, enforced at
+   * dispatch in `simple.ts`) — a boot-time string would keep naming a trigger
+   * that had since become a no-op. A plain string stays supported for callers
+   * with nothing dynamic to say.
+   */
+  systemPrompt: string | (() => string);
   /** Optional GitHub App credentials. When set, read-only github tools are registered. */
   github?: ChatGitHubAuth;
   /**
@@ -343,7 +353,8 @@ export class ChatRunner {
     messages.push(textMessage("user", prompt, new Date().toISOString()));
 
     const context: Context = {
-      systemPrompt: this.cfg.systemPrompt,
+      systemPrompt:
+        typeof this.cfg.systemPrompt === "function" ? this.cfg.systemPrompt() : this.cfg.systemPrompt,
       messages,
       tools: this.mergedTools,
     };

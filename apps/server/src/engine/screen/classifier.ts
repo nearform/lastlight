@@ -98,7 +98,13 @@ const KNOWN_WORKFLOW_INTENT_ORDER = [
   "demo",
 ];
 
-function intentOrderIndex(intent: string): number {
+/**
+ * Position of an intent in the canonical order above; unknown/overlay intents
+ * sort last. Exported so the chat prompt (`engine/chat/chat-prompt.ts`) presents
+ * workflows in the same order the classifier does, from one list rather than two.
+ */
+export function intentOrderIndex(intent: string | undefined): number {
+  if (intent === undefined) return KNOWN_WORKFLOW_INTENT_ORDER.length;
   const i = KNOWN_WORKFLOW_INTENT_ORDER.indexOf(intent);
   return i === -1 ? KNOWN_WORKFLOW_INTENT_ORDER.length : i;
 }
@@ -114,6 +120,29 @@ function intentOrderIndex(intent: string): number {
 export const WELL_KNOWN_INTENTS: ReadonlySet<string> = new Set<string>([
   ...KNOWN_WORKFLOW_INTENT_ORDER,
   ...RESERVED_CONTROL_INTENTS,
+]);
+
+/**
+ * Intents that are reachable ONLY from a GitHub event, and which the Slack
+ * fallback must therefore refuse.
+ *
+ * Both dependency workflows are `pr_scoped` and reach their real dispatch path
+ * (`handlePrFix`) through `context.prNumber`. On GitHub that arrives from the
+ * event; the Slack branches only ever set `issueNumber`. They are deliberately
+ * OUTSIDE `WELL_KNOWN_INTENTS` — the GitHub comment ladder routes them through
+ * `fallbackWorkflowForIntent` and depends on it — so on a Slack message the
+ * same fallback happily returned them and dispatched past the PR-fix path with
+ * no PR at all.
+ *
+ * A separate set rather than a `WELL_KNOWN_INTENTS` entry because the two
+ * questions differ by SURFACE: "does the router branch on this?" is per-route,
+ * and answering it globally broke GitHub to fix Slack. Consulted only by the
+ * router's `message` case, which routes these to chat instead — chat can tell
+ * the user to go and comment on the PR.
+ */
+export const GITHUB_ONLY_INTENTS: ReadonlySet<string> = new Set<string>([
+  "dependabot-ci-fix",
+  "dependabot-pr-merge",
 ]);
 
 interface ClassifierState {

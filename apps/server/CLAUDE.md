@@ -379,8 +379,10 @@ skills/                 Skill directories — each contains SKILL.md
                         catalogue and the agent reads each SKILL.md on
                         demand via its `read` tool. Chat threads use the same skills
                         in-process via a `read_skill` tool —
-                        catalogue built at boot from CHAT_SKILL_NAMES
-                        in src/engine/chat/chat-skills.ts.
+                        catalogue built from every layer-resolvable skill
+                        whose SKILL.md frontmatter sets `chat: true`
+                        (src/engine/chat/chat-skills.ts), so an overlay
+                        can add one or override a built-in.
 agent-context/          *.md files concatenated and prepended as AGENTS.md
                         for every agent session — the bot's "personality"
                         plus hard rules. Sandbox entrypoint cats these into

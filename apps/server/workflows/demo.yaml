@@ -7,6 +7,14 @@ classification:
   examples:
     - '"record a demo of this" with ISSUE TITLE "Add dark-mode toggle" → INTENT: DEMO, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"make a short before/after video of the fix on cliftonc/foo#12" → INTENT: DEMO, REPO: cliftonc/foo, ISSUE: 12, REASON: NONE'
+chat:
+  trigger: "demo owner/repo#N -- <what to show>"
+  summary: Record a short demo video of a feature or PR
+  deflect:
+    - demo this
+    - record a demo of <feature>
+    - make a video showing <X>
+    - show me a before/after of the fix
 description: |
   Record a short demo VIDEO of a PR or feature and post it. Drives the repo's
   web UI in a real headless browser, screen-records the session, and composites

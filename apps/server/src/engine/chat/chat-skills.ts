@@ -18,14 +18,21 @@
  *     SKILL.md and returns its text — same role as pi-coding-agent's
  *     built-in `read` tool when applied to a discovered SKILL.md.
  *
- * The curated list is intentionally hard-coded for v1. If chat ever
- * needs configurable skill exposure, lift this into env or settings.
+ * Which skills those are is DECLARED BY THE SKILLS, via `chat: true` in their
+ * SKILL.md frontmatter — not a hardcoded name list here, which was the v1 shape
+ * and had the two failure modes every other hardcoded list in this area had: an
+ * overlay could not expose a skill to chat at all, and the list resolved against
+ * `resolve("skills")` — the process cwd — so it bypassed the asset layer stack
+ * and never saw an overlay's version of a built-in skill either.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { Tool, ToolCall } from "@earendil-works/pi-ai";
-import { resolveSkillPaths } from "../../workflows/loader.js";
+import { listSkillNames, resolveSkillPaths } from "../../workflows/loader.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("chat-skills");
 
 /**
  * Minimal subset of pi-coding-agent's `Skill` shape — only the fields
@@ -38,18 +45,15 @@ export interface ChatSkill {
 }
 
 /**
- * Skills exposed to chat threads. `chat` is the always-on persona;
- * the others let chat assist with one-off lookups that map to these
- * domains without delegating to a full workflow run.
+ * The frontmatter key a skill sets to be exposed to chat threads. `chat` is the
+ * always-on persona; the others let chat assist with one-off lookups that map to
+ * their domain without delegating to a full workflow run.
+ *
+ * Opt-in rather than opt-out because most skills are written for a sandbox phase
+ * that has a checkout, a shell and write access — chat has none of those, so
+ * exposing one by default would advertise instructions the agent cannot follow.
  */
-export const CHAT_SKILL_NAMES = [
-  "chat",
-  "issue-triage",
-  "pr-review",
-  "repo-health",
-] as const;
-
-const SKILLS_ROOT = resolve("skills");
+export const CHAT_SKILL_FRONTMATTER_KEY = "chat";
 
 export interface ChatSkillCatalogue {
   /** Skills the chat agent can read on demand, keyed by name. */
@@ -75,19 +79,27 @@ export interface ChatSkillCatalogue {
  * unquoted single-line strings. Multi-line description values are
  * supported via YAML's `|` and `>` block scalars.
  */
-function parseSkillFrontmatter(md: string): { name?: string; description?: string } {
+function parseSkillFrontmatter(md: string): {
+  name?: string;
+  description?: string;
+  chat?: boolean;
+} {
   const lines = md.split(/\r?\n/);
   if (lines[0]?.trim() !== "---") return {};
   const end = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
   if (end < 0) return {};
   const body = lines.slice(1, end);
 
-  const out: { name?: string; description?: string } = {};
+  const out: { name?: string; description?: string; chat?: boolean } = {};
   for (let i = 0; i < body.length; i++) {
     const m = body[i].match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
     if (!m) continue;
     const key = m[1];
     const raw = m[2];
+    if (key === CHAT_SKILL_FRONTMATTER_KEY) {
+      out.chat = /^(true|yes)$/i.test(raw.trim());
+      continue;
+    }
     if (key !== "name" && key !== "description") continue;
 
     let value: string;
@@ -111,18 +123,28 @@ function parseSkillFrontmatter(md: string): { name?: string; description?: strin
 }
 
 /**
- * Load the curated chat skill catalogue from `<repo>/skills/`.
- * Skills missing `name` or `description` frontmatter are silently
- * dropped, matching pi-coding-agent's behaviour on the sandbox path.
+ * Load the chat skill catalogue: every skill resolvable through the asset layer
+ * stack whose frontmatter declares `chat: true`, in name order.
+ *
+ * Layer-aware via `resolveSkillPaths`, so an overlay's version of a built-in
+ * skill wins and an overlay-only skill can opt itself in. Skills missing `name`
+ * or `description` frontmatter are silently dropped, matching pi-coding-agent's
+ * behaviour on the sandbox path.
  */
 export function loadChatSkillCatalogue(): ChatSkillCatalogue {
   const skills: ChatSkill[] = [];
-  for (const name of CHAT_SKILL_NAMES) {
-    const filePath = join(SKILLS_ROOT, name, "SKILL.md");
-    if (!existsSync(filePath)) continue;
-    const md = readFileSync(filePath, "utf-8");
-    const fm = parseSkillFrontmatter(md);
-    if (!fm.name || !fm.description) continue;
+  for (const name of listSkillNames()) {
+    let filePath: string;
+    try {
+      filePath = join(resolveSkillPaths([name])[0], "SKILL.md");
+    } catch (err: unknown) {
+      // A skill that enumerated but won't resolve (disabled between the two
+      // calls, or a path guard) is skipped, never fatal — chat still boots.
+      log.debug("Skipping unresolvable skill", { name, err });
+      continue;
+    }
+    const fm = parseSkillFrontmatter(readFileSync(filePath, "utf-8"));
+    if (!fm.chat || !fm.name || !fm.description) continue;
     skills.push({ name: fm.name, description: fm.description, filePath });
   }
 

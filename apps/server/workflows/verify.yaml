@@ -8,6 +8,13 @@ classification:
     - '"verify that the --fork flag creates a new session in cliftonc/foo#12" → INTENT: VERIFY, REPO: cliftonc/foo, ISSUE: 12, REASON: NONE'
     - '"does this actually fix the crash?" with ISSUE TITLE "Fix null deref on resize" → INTENT: VERIFY, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"can you confirm the rate limiter actually blocks at 100 req/s?" with ISSUE TITLE "Add rate limiter" → INTENT: VERIFY, REPO: NONE, ISSUE: NONE, REASON: NONE'
+chat:
+  trigger: "verify owner/repo#N -- <claim>"
+  summary: Test whether a specific claim or behaviour actually holds, with evidence
+  deflect:
+    - verify that <X> works
+    - does this PR really fix <Y>?
+    - confirm <Z> actually happens
 description: |
   Verify a behaviour claim against a repo or PR and report whether the evidence
   confirms or refutes it. It installs and runs the code in the sandbox, captures
