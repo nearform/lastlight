@@ -111,7 +111,17 @@ function firstLineOfFailure(err: unknown): string {
 /**
  * Local HEAD is now behind the branch we just wrote. `reset --mixed` moves the
  * branch ref and the index onto the published commit and leaves every file
- * untouched — sound precisely because the published tree IS the working tree.
+ * untouched.
+ *
+ * Sound because the published commit descends from a commit this checkout
+ * already contained — `resolveDiffBase` refuses to publish otherwise — so the
+ * reset only ever moves HEAD FORWARD, never onto content the working tree has
+ * never seen. That holds for a narrowed publish too (`include` / `exclude`):
+ * the published tree then differs from the working tree, and what the reset
+ * leaves behind is an ordinary dirty checkout that the next publish computes as
+ * changes. It is not optional: the next publish's ancestry check needs the
+ * local checkout to descend from the branch tip we just created.
+ *
  * Best effort: a failed sync does not un-publish anything, so it is reported,
  * never thrown.
  *
@@ -145,63 +155,141 @@ async function syncLocalToPublished(
   }
 }
 
-/**
- * Resolve the remote tip to diff the working tree against, and make sure it is
- * in the local object store — all WITHOUT creating anything remote yet: the
- * branch's own tip if it exists, otherwise the base branch's tip
- * (`createCommitOnBranch` needs the branch to exist, but creating it here
- * would be a remote write that a later refusal could never undo). Returns
- * `from` — the base branch a missing `target` would be created from, or
- * `null` if `target` already exists — for the caller to act on only after
- * every refusal check has run.
- */
-async function resolveDiffBase(
-  gh: GitHubClient,
-  auth: GitHubAuth,
+/** Best-effort `git fetch` into the checkout. Callers re-check what they need
+ * afterwards and report the missing object themselves, so a failure here is
+ * never the error the agent reads. */
+async function fetchIntoClone(
   cwd: string,
-  owner: string,
-  repo: string,
-  target: string,
-  baseBranch: string | undefined,
-): Promise<{ tip: string; from: string | null }> {
+  auth: GitHubAuth,
+  ref: string,
+  flags: string[] = [],
+): Promise<void> {
+  const token = await auth.getToken();
+  try {
+    execFileSync("git", ["fetch", ...flags, "origin", ref], {
+      cwd,
+      stdio: "pipe",
+      timeout: 120_000,
+      env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+    });
+  } catch {
+    // the caller reports the object it still cannot find
+  }
+}
+
+/**
+ * Does this checkout's HEAD descend from `oid`?
+ *
+ * `git push` used to answer this for us — it rejects a non-fast-forward. The
+ * signed path has no equivalent and `expectedHeadOid` does not stand in for
+ * one: it catches a tip that moves AFTER we read it, not a tip that had already
+ * moved BEFORE. The change set is computed as "working tree vs that tip", so
+ * publishing against a tip the checkout does not contain records every file
+ * that commit added as a deletion. Fails closed — a git error reads as "not an
+ * ancestor" and the caller refuses.
+ */
+function descendsFrom(cwd: string, oid: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", oid, "HEAD"], { cwd, stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The newest commit both HEAD and `oid` contain, or null if they share none
+ * (or the local history is too shallow to tell). */
+function mergeBaseWith(cwd: string, oid: string): string | null {
+  try {
+    return (
+      execFileSync("git", ["merge-base", "HEAD", oid], { cwd, stdio: "pipe" })
+        .toString("utf8")
+        .trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** A base for a branch that does not exist yet: the base branch's tip when this
+ * checkout already contains it, otherwise the newest commit they share. Either
+ * is on the remote (a merge-base is an ancestor of `baseTip`), which is what
+ * `createRef` needs, and both are in HEAD's history, which is what keeps the
+ * change set from turning the base branch's newer files into deletions. */
+function branchPointFor(cwd: string, baseTip: string): string | null {
+  if (!hasLocalCommit(cwd, baseTip)) return null;
+  if (descendsFrom(cwd, baseTip)) return baseTip;
+  return mergeBaseWith(cwd, baseTip);
+}
+
+interface DiffBaseRequest {
+  gh: GitHubClient;
+  auth: GitHubAuth;
+  cwd: string;
+  owner: string;
+  repo: string;
+  target: string;
+  baseBranch?: string;
+}
+
+interface DiffBase {
+  /** The commit the change set is diffed against, and `expectedHeadOid`. */
+  tip: string;
+  /** The commit to create `target` from, or null when it already exists. */
+  createFrom: string | null;
+}
+
+/**
+ * Resolve the commit to diff the working tree against, and make sure it is both
+ * in the local object store and in HEAD's history — all WITHOUT creating
+ * anything remote yet (`createCommitOnBranch` needs the branch to exist, but
+ * creating it here would be a remote write that a later refusal could never
+ * undo). `createFrom` is handed back for the caller to act on only after every
+ * refusal check has run.
+ */
+async function resolveDiffBase(req: DiffBaseRequest): Promise<DiffBase> {
+  const { gh, auth, cwd, owner, repo, target, baseBranch } = req;
   const existingTip = await gh.getBranchTip(owner, repo, target);
-  let from: string | null = null;
-  let tip: string;
   if (existingTip !== null) {
-    tip = existingTip;
-  } else {
-    from = baseBranch || (await gh.getRepository(owner, repo)).default_branch;
-    const baseTip = await gh.getBranchTip(owner, repo, from);
-    if (baseTip === null) {
+    // The diff needs the remote tip in the local object store. A shallow clone
+    // may not have it; fetching by sha is cheap and precise.
+    if (!hasLocalCommit(cwd, existingTip)) {
+      await fetchIntoClone(cwd, auth, existingTip, ["--depth=1"]);
+    }
+    if (!hasLocalCommit(cwd, existingTip)) {
       throw new Error(
-        `base branch ${from} does not exist in ${owner}/${repo} either — cannot create ${target}`,
+        `the remote tip of ${target} (${existingTip}) is not in this clone and could not be fetched — someone else has pushed. Re-run the phase against the current branch; do NOT git push.`,
       );
     }
-    tip = baseTip;
+    if (!descendsFrom(cwd, existingTip)) {
+      throw new Error(
+        `refusing to publish — ${target} has moved on GitHub since this workspace was created: its tip ${existingTip} is not in this checkout's history. The change set is the working tree measured against that tip, so publishing now would record every file that commit added as a DELETION. Nothing was published. Run \`git fetch origin ${target} && git merge origin/${target}\`, re-check your work, then publish again; do NOT git push.`,
+      );
+    }
+    return { tip: existingTip, createFrom: null };
   }
 
-  // The diff needs the remote tip in the local object store. A shallow clone
-  // may not have it; fetching by sha is cheap and precise.
-  if (!hasLocalCommit(cwd, tip)) {
-    const token = await auth.getToken();
-    try {
-      execFileSync("git", ["fetch", "--depth=1", "origin", tip], {
-        cwd,
-        stdio: "pipe",
-        timeout: 120_000,
-        env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
-      });
-    } catch {
-      // fall through to the check below with a message naming the sha
-    }
-  }
-  if (!hasLocalCommit(cwd, tip)) {
+  const base = baseBranch || (await gh.getRepository(owner, repo)).default_branch;
+  const baseTip = await gh.getBranchTip(owner, repo, base);
+  if (baseTip === null) {
     throw new Error(
-      `the remote tip of ${target} (${tip}) is not in this clone and could not be fetched — someone else has pushed. Re-run the phase against the current branch; do NOT git push.`,
+      `base branch ${base} does not exist in ${owner}/${repo} either — cannot create ${target}`,
     );
   }
-
-  return { tip, from };
+  let from = branchPointFor(cwd, baseTip);
+  if (from === null) {
+    // Fetch the base by NAME rather than by sha: a `--depth=1` fetch of a sha
+    // lands a parentless commit, and the merge-base above needs the history
+    // that connects it to this checkout.
+    await fetchIntoClone(cwd, auth, base);
+    from = branchPointFor(cwd, baseTip);
+  }
+  if (from === null) {
+    throw new Error(
+      `refusing to create ${target} — this checkout shares no commit with ${base} (tip ${baseTip}), so there is no base for the new branch that the working tree can be measured against. Nothing was published. Run \`git fetch origin ${base} && git merge origin/${base}\`, re-check your work, then publish again; do NOT git push.`,
+    );
+  }
+  return { tip: from, createFrom: from };
 }
 
 /**
@@ -400,15 +488,15 @@ export function buildGitHubTools(
       async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude, include }) => {
         const cwd = repoPath || process.cwd();
         const target = branch || currentBranch(cwd);
-        const { tip, from } = await resolveDiffBase(
+        const { tip, createFrom } = await resolveDiffBase({
           gh,
           auth,
           cwd,
           owner,
           repo,
           target,
-          base_branch,
-        );
+          ...(base_branch ? { baseBranch: base_branch } : {}),
+        });
 
         const changes = diffWorktreeAgainst(cwd, tip, {
           ...(exclude && { exclude }),
@@ -435,8 +523,8 @@ export function buildGitHubTools(
 
         // Every refusal above has already run — nothing past this point may
         // fail for a reason unrelated to GitHub itself, so it's safe to write.
-        if (from !== null) {
-          await gh.createBranch(owner, repo, target, from);
+        if (createFrom !== null) {
+          await gh.createBranchAt(owner, repo, target, createFrom);
         }
 
         const [headline, ...rest] = message.split("\n");

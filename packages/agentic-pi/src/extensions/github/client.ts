@@ -468,14 +468,30 @@ export class GitHubClient {
   }
 
   async createBranch(owner: string, repo: string, branch: string, fromBranch: string) {
+    // `octokit()` stays inside the retried closure: withRetry drops the cached
+    // token on a 401 so the next attempt re-mints it.
+    const sha = await this.withRetry(async () => {
+      const ok = await this.octokit();
+      const { data } = await ok.git.getRef({ owner, repo, ref: `heads/${fromBranch}` });
+      return data.object.sha;
+    });
+    return this.createBranchAt(owner, repo, branch, sha);
+  }
+
+  /**
+   * Create a branch at an exact commit. `github_publish` needs this rather than
+   * `createBranch` above: the commit its new branch starts from is the newest
+   * one the sandbox checkout and the base branch share, which is not the base
+   * branch's tip whenever that branch advanced mid-run.
+   */
+  async createBranchAt(owner: string, repo: string, branch: string, sha: string) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data: ref } = await ok.git.getRef({ owner, repo, ref: `heads/${fromBranch}` });
       const { data } = await ok.git.createRef({
         owner,
         repo,
         ref: `refs/heads/${branch}`,
-        sha: ref.object.sha,
+        sha,
       });
       return data;
     });

@@ -127,20 +127,22 @@ function fakeGitHubMissingBranch(opts: {
   });
 }
 
+const git = (dir: string, ...a: string[]) =>
+  execFileSync("git", a, {
+    cwd: dir,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@e",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@e",
+    },
+  });
+
 function repo(): { dir: string; base: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "publish-tool-"));
-  const g = (...a: string[]) =>
-    execFileSync("git", a, {
-      cwd: dir,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        GIT_AUTHOR_NAME: "t",
-        GIT_AUTHOR_EMAIL: "t@e",
-        GIT_COMMITTER_NAME: "t",
-        GIT_COMMITTER_EMAIL: "t@e",
-      },
-    });
+  const g = (...a: string[]) => git(dir, ...a);
   g("init", "-q", "-b", "main");
   writeFileSync(join(dir, "a.txt"), "one\n");
   g("add", "-A");
@@ -150,6 +152,100 @@ function repo(): { dir: string; base: string; cleanup: () => void } {
     base: g("rev-parse", "HEAD").trim(),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
+}
+
+/**
+ * A checkout sitting at `base` while the remote has moved on to `remoteTip`,
+ * which added `their.txt`. Two routine situations have this exact shape: a
+ * maintainer pushing to the PR branch mid-run (a supported recovery action),
+ * and the default branch advancing while a build is in flight.
+ */
+function repoBehindRemote(): {
+  dir: string;
+  base: string;
+  remoteTip: string;
+  cleanup: () => void;
+} {
+  const r = repo();
+  writeFileSync(join(r.dir, "their.txt"), "theirs\n");
+  git(r.dir, "add", "-A");
+  git(r.dir, "commit", "-qm", "theirs");
+  const remoteTip = git(r.dir, "rev-parse", "HEAD").trim();
+  // Keep the commit reachable so it stays in the object store, then put the
+  // checkout back where it was — the remote is ahead, the checkout is not.
+  git(r.dir, "branch", "theirs");
+  git(r.dir, "reset", "--hard", "-q", r.base);
+  return { dir: r.dir, base: r.base, remoteTip, cleanup: r.cleanup };
+}
+
+/**
+ * A GitHub fake for the "create the branch, then publish to it" path:
+ * `opts.target` 404s, `opts.base` resolves to `opts.baseTip`, and both the ref
+ * creation and the publish mutation are accepted and recorded.
+ */
+function fakeGitHubNewBranch(opts: { target: string; base: string; baseTip: string }): Promise<{
+  url: string;
+  refCreations: any[];
+  mutations: any[];
+  close: () => Promise<void>;
+}> {
+  const refCreations: any[] = [];
+  const mutations: any[] = [];
+  const targetRefPath = `/git/ref/heads%2F${encodeURIComponent(opts.target)}`;
+  const baseRefPath = `/git/ref/heads%2F${encodeURIComponent(opts.base)}`;
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      const url = req.url ?? "";
+      const body = () => JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (url.endsWith("/graphql")) {
+        mutations.push(body());
+        res.end(
+          JSON.stringify({
+            data: {
+              createCommitOnBranch: {
+                commit: {
+                  oid: "newoid",
+                  url: "u",
+                  committer: { name: "bot", email: "b@e" },
+                  signature: { isValid: true, state: "VALID", wasSignedByGitHub: true },
+                },
+              },
+            },
+          }),
+        );
+        return;
+      }
+      if (url.endsWith("/git/refs") && req.method === "POST") {
+        refCreations.push(body());
+        res.end(JSON.stringify({ ref: `refs/heads/${opts.target}` }));
+        return;
+      }
+      if (url.includes(targetRefPath)) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ message: "Not Found" }));
+        return;
+      }
+      if (url.includes(baseRefPath)) {
+        res.end(JSON.stringify({ object: { sha: opts.baseTip } }));
+        return;
+      }
+      res.end(JSON.stringify({ default_branch: opts.base }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        refCreations,
+        mutations,
+        close: () => new Promise((r) => server.close(() => r())),
+      });
+    });
+  });
 }
 
 async function callPublish(baseUrl: string, params: unknown): Promise<any> {
@@ -363,6 +459,99 @@ describe("github_publish", () => {
         fake.requests.length > 0,
         "expected the tool to have read at least the branch tips",
       );
+      assert.deepEqual(
+        fake.requests.filter((req) => req.method !== "GET"),
+        [],
+        `expected only GET requests, got: ${JSON.stringify(fake.requests)}`,
+      );
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("refuses when the branch tip is not in this checkout's history", async () => {
+    // `git push` used to answer this for us by rejecting a non-fast-forward.
+    // The signed path has no equivalent: the change set is "working tree vs the
+    // tip we read", so a tip the checkout does not contain records every file
+    // that commit added as a DELETION — and `expectedHeadOid` accepts it,
+    // because the tip has not moved since we read it.
+    const r = repoBehindRemote();
+    const fake = await fakeGitHub(r.remoteTip);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(fake.url, { owner: "o", repo: "r", message: "m", path: r.dir });
+      assert.ok(out.error, "expected a refusal");
+      assert.match(out.error, new RegExp(r.remoteTip));
+      assert.match(out.error, /git fetch origin main/);
+      assert.equal(fake.mutations.length, 0);
+      assert.deepEqual(
+        fake.requests.filter((req) => req.method !== "GET"),
+        [],
+        `expected only GET requests, got: ${JSON.stringify(fake.requests)}`,
+      );
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("creates a new branch at a commit this checkout descends from", async () => {
+    // The build family creates its branch on the first publish. Basing it on
+    // the CURRENT default-branch tip strands the branch ahead of the workspace
+    // whenever `main` advanced since the clone: the local sync then leaves the
+    // checkout showing main's new files as deleted, and the next whole-tree
+    // publish deletes them for real. The shared commit is the right base.
+    const r = repoBehindRemote();
+    const fake = await fakeGitHubNewBranch({
+      target: "feat/new",
+      base: "main",
+      baseTip: r.remoteTip,
+    });
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(fake.url, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        branch: "feat/new",
+        path: r.dir,
+      });
+      assert.equal(out.published, true, `expected a publish, got ${JSON.stringify(out)}`);
+      assert.deepEqual(out.deleted, [], "main's new file must not be published as a deletion");
+      assert.deepEqual(
+        fake.refCreations.map((c) => c.sha),
+        [r.base],
+      );
+      assert.equal(fake.mutations[0].variables.input.expectedHeadOid, r.base);
+      assert.deepEqual(fake.mutations[0].variables.input.fileChanges.deletions, []);
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("refuses to create a branch when the checkout shares no commit with the base", async () => {
+    const r = repo();
+    const emptyTree = git(r.dir, "hash-object", "-t", "tree", "/dev/null").trim();
+    const unrelated = git(r.dir, "commit-tree", "-m", "unrelated", emptyTree).trim();
+    git(r.dir, "update-ref", "refs/heads/unrelated", unrelated);
+    const fake = await fakeGitHubMissingBranch({
+      target: "feat/new",
+      base: "main",
+      baseTip: unrelated,
+    });
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(fake.url, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        branch: "feat/new",
+        path: r.dir,
+      });
+      assert.ok(out.error, "expected a refusal");
+      assert.match(out.error, /main/);
       assert.deepEqual(
         fake.requests.filter((req) => req.method !== "GET"),
         [],
