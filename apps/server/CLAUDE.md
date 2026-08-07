@@ -631,8 +631,10 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   sign a commit, and one unsigned commit anywhere in a branch blocks a
   `required_signatures` PR permanently, so the tool diffs the working tree
   against the remote tip and hands the change set to GraphQL
-  `createCommitOnBranch`, which builds and signs the commit under the App's bot
-  identity (issue #268; `spec/09-sandbox.md` → "Invariant: the published commit
+  `createCommitOnBranch`, which builds and signs the commit server-side —
+  expected to be under the App's `[bot]` identity, though that half is
+  **unverified** (the probes used a user PAT; `docs/plans/signed-commit-publish/00-findings.md`
+  §5) (issue #268; `spec/09-sandbox.md` → "Invariant: the published commit
   is built by GitHub, not by git"). Local `git commit`s remain fine — they are
   folded in — and there is no `git push` fallback.
 - **Approval gates** — phases can declare `approval_gate: post_architect`.

@@ -41,9 +41,9 @@ single line you parse.
 ### 3. GitHub repo operations as first-class native tools
 
 Pi explicitly does not support MCP. agentic-pi ships a native Pi extension
-exposing **31 GitHub tools** ported from lastlight's `mcp-github-app`:
-clone/push, issues, PRs, reviews, labels, search. Tool names are prefixed
-with `github_`.
+exposing **36 GitHub tools** ported from lastlight's `mcp-github-app`:
+clone/publish, issues, PRs, reviews, labels, CI reads, search. Tool names are
+prefixed with `github_`.
 
 **Reads are projected, not raw** (`extensions/github/projections.ts`). Octokit
 returns the REST payload verbatim, which is written for API clients rather than
@@ -116,20 +116,25 @@ Five things worth knowing:
   branch that doesn't exist on GitHub yet, and there's no fallback to
   `git push` — that would produce exactly the unsigned commit this tool
   exists to avoid.
-- **It's race-safe by construction, with no retry.** The mutation pins
-  `expectedHeadOid`; if the branch moved since the tool read its tip, GitHub
-  rejects the write (`STALE_DATA`) instead of silently clobbering it. The
-  tool does not re-diff and retry on its own — the change set is computed as
-  "working tree vs. tip", so rebasing onto a tip that genuinely moved would
-  render another party's added files as deletions. A `STALE_DATA` failure
-  names itself in the error; re-running the tool call is the fix.
+- **A tip that moved is refused at both ends, with no retry.** The mutation
+  pins `expectedHeadOid`, so a branch that moves between the read and the write
+  is rejected (`STALE_DATA`) instead of being clobbered. That covers only half
+  of it: a tip that had ALREADY moved before the read passes
+  `expectedHeadOid` happily, and the change set is computed as "working tree
+  vs. that tip", so every file the other party added would be recorded as a
+  deletion. So the tool also checks the tip is in the local checkout's history
+  (`git merge-base --is-ancestor`) and refuses before writing anything if it is
+  not, naming the `git fetch` + `git merge` that clears it. It never re-diffs
+  and retries on its own; a `STALE_DATA` failure names itself in the error and
+  re-running the tool call is the fix.
 - **There's a size ceiling.** GitHub caps the whole request at 45 MB — the sum
   of every addition in one publish, not a per-file limit. Ordinary publishes
   (source edits, a lockfile) are far under it.
 - **It asserts its own signature.** Every publish checks GitHub's response and
-  fails loudly if GitHub reports the commit unsigned or the signature invalid
-  — the commit is already on the branch by then, so a silent failure here
-  would otherwise only surface later as a blocked PR.
+  fails loudly if the commit came back unsigned — including the `signature:
+  null` GraphQL returns for a commit with no signature at all — or with a
+  signature that does not verify. The commit is already on the branch by then,
+  so a silent failure here would otherwise only surface later as a blocked PR.
 
 ### 4. Permission profiles as a registration-time gate
 
@@ -137,10 +142,10 @@ Five things worth knowing:
 
 | Profile | Tool count | What it can do |
 | --- | --- | --- |
-| `read` | 18 | Repo/issue/PR reads + search. No mutations. |
-| `issues-write` | 24 | Read + issue/comment/label mutations. |
-| `review-write` | 26 | Read + issues + PR review/comment + create PR. |
-| `repo-write` | 31 | Everything: clone, push, branch, file edits, merge. |
+| `read` | 21 | Repo/issue/PR/CI reads + search. No mutations. |
+| `issues-write` | 28 | Read + issue/comment/label mutations. |
+| `review-write` | 30 | Read + issues + PR review/comment + create PR. |
+| `repo-write` | 36 | Everything: clone, publish, branch, file edits, merge. |
 
 Tools outside the active profile are **never registered** — the LLM cannot see
 them in the system prompt and cannot call them. This is a stronger guarantee

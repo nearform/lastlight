@@ -726,8 +726,12 @@ So every code-writing prompt publishes through **`github_publish`**
 `repo-write` profile — it is in `REPO_WRITE_TOOLS`, so `read` / `issues-write` /
 `review-write` never see the tool at all. It diffs the working tree against the
 branch's current remote tip and hands the change set to GraphQL
-`createCommitOnBranch`, which builds and signs the commit server-side under the
-App's bot identity. No signing key is held anywhere. Four consequences:
+`createCommitOnBranch`, which builds and signs the commit server-side. The
+committer is expected to be the App's `[bot]` identity under an installation
+token — **unverified**: the probes behind this used a user PAT and got
+`GitHub <noreply@github.com>`, so it stands until a real workflow phase is
+checked end to end (`docs/plans/signed-commit-publish/00-findings.md` §5). No
+signing key is held anywhere. Four consequences:
 
 - **Local `git commit`s stay legitimate.** The tool publishes the *working
   tree*, so anything the agent committed locally is folded into the one signed
@@ -737,24 +741,39 @@ App's bot identity. No signing key is held anywhere. Four consequences:
   `git reset --mixed`es the local branch onto the published commit, so the
   checkout a later phase inherits matches the branch.
 - **The change set is scopeable.** `include` restricts the publish to a
-  pathspec list — additions *and* deletions — and `exclude` drops one. The build
-  family's artifact steps pass `include: [".lastlight"]`, so a phase's install
-  or test run cannot sweep the rest of the checkout onto the branch.
-- **It fails loudly rather than degrading.** `expectedHeadOid` is non-null, so a
-  tip that moved is rejected, not merged over (a `STALE_DATA` rejection is named
-  as such, because GitHub's own REST-read/GraphQL-write lag can produce one with
-  nobody racing); a change needing a file mode the API cannot express — a new
-  executable file, a symlink, a submodule pointer, or a mode change on an
-  existing file — is refused *before* anything remote is written, naming the
-  files (a content-only edit to a file that is *already* executable is fine:
-  GitHub patches the base tree and keeps that entry's mode, measured in
-  `docs/plans/signed-commit-publish/00-findings.md`); and the mutation's returned
-  `signature.wasSignedByGitHub` is asserted on every publish. There is
+  pathspec list — additions *and* deletions — and `exclude` subtracts pathspecs
+  from whatever `include` left, so the two compose. The build family's artifact
+  steps pass `include: [".lastlight"]`, so a phase's install or test run cannot
+  sweep the rest of the checkout onto the branch.
+- **It fails loudly rather than degrading.** A tip that moved is rejected, not
+  merged over, at both ends: `expectedHeadOid` is non-null, so GitHub rejects a
+  tip that moves after we read it (a `STALE_DATA` rejection is named as such,
+  because GitHub's own REST-read/GraphQL-write lag can produce one with nobody
+  racing), and the tool itself refuses a tip that had already moved *before* the
+  read — `expectedHeadOid` accepts that one, and since the change set is the
+  working tree measured against the tip, publishing it would record everything
+  the other party added as a deletion. The check is `git merge-base
+  --is-ancestor <tip> HEAD` against the sandbox checkout, and the refusal names
+  the `git fetch` + `git merge` that clears it. A change needing a file mode the
+  API cannot express — a new executable file, a symlink, a submodule pointer, or
+  a mode change on an existing file — is refused *before* anything remote is
+  written, naming the files and, for a new script, the way out the agent can
+  take itself (leave it non-executable, run it through its interpreter); a
+  content-only edit to a file that is *already* executable is fine, because
+  GitHub patches the base tree and keeps that entry's mode (measured in
+  `docs/plans/signed-commit-publish/00-findings.md`). And the mutation's returned
+  signature is asserted on every publish — `wasSignedByGitHub`, `isValid`, and
+  the `signature: null` GraphQL returns for an unsigned commit. There is
   deliberately **no** fallback to `git push`: a fallback would publish exactly
   the unsigned commit the mechanism exists to prevent.
-- **The branch need not exist yet.** `base_branch` creates it from that ref
-  (default: the repo's default branch) after every refusal check has run, so the
-  build family never has to push a branch into existence first.
+- **The branch need not exist yet.** It is created after every refusal check has
+  run, so the build family never has to push a branch into existence first — at
+  the newest commit the sandbox checkout and `base_branch` share (default: the
+  repo's default branch), which is that branch's tip in the ordinary case and an
+  older shared commit when the base branch moved on mid-run. Creating it at the
+  *current* tip instead would leave the new branch ahead of the checkout, and
+  the local `reset --mixed` above would then leave the workspace looking as
+  though the base branch's newer files had been deleted.
 
 The `http.extraheader` path above is unaffected and stays: `clone` / `fetch` /
 `merge` still need the token, and the local scratch commits still need the
