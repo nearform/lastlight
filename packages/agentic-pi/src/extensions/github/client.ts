@@ -8,6 +8,7 @@
 
 import { Octokit } from "@octokit/rest";
 import type { GitHubAuth } from "./auth.js";
+import type { PublishAddition, PublishDeletion } from "./worktree-diff.js";
 import {
   capText,
   page,
@@ -132,6 +133,30 @@ function workflowRunSummary(run: {
     html_url: run.html_url,
   };
 }
+
+/**
+ * The commit `createCommitOnBranch` built for us. `signature` is what makes the
+ * whole exercise worth doing — a locally-built commit object can never be
+ * `verified` under the App's `[bot]` identity (issue #268).
+ */
+export interface SignedCommit {
+  oid: string;
+  url: string;
+  committer: { name: string; email: string } | null;
+  signature: { isValid: boolean; state: string; wasSignedByGitHub: boolean } | null;
+}
+
+const CREATE_COMMIT_ON_BRANCH = `
+mutation ($input: CreateCommitOnBranchInput!) {
+  createCommitOnBranch(input: $input) {
+    commit {
+      oid
+      url
+      committer { name email }
+      signature { isValid state wasSignedByGitHub }
+    }
+  }
+}`;
 
 export interface GitHubClientOptions {
   /**
@@ -317,6 +342,70 @@ export class GitHubClient {
         sha: commit.sha,
       });
       return { commit: commit.sha, branch, ref: updated };
+    });
+  }
+
+  /**
+   * The branch's current remote tip, or null if the branch does not exist.
+   * A missing branch is an ordinary state on the first publish of a new
+   * feature branch, so it is not an error.
+   */
+  async getBranchTip(owner: string, repo: string, branch: string): Promise<string | null> {
+    return this.withRetry(async () => {
+      const ok = await this.octokit();
+      try {
+        const { data } = await ok.git.getRef({ owner, repo, ref: `heads/${branch}` });
+        return data.object.sha;
+      } catch (err) {
+        if (((err as MaybeHttpError).status ?? (err as MaybeHttpError).response?.status) === 404) {
+          return null;
+        }
+        throw err;
+      }
+    });
+  }
+
+  /**
+   * Create a commit GitHub signs for us.
+   *
+   * The REST Git Data API does NOT sign what it creates — its `signature` field
+   * is an input you supply, so `pushFiles()` above produces unsigned commits.
+   * This GraphQL mutation is the only path that yields `verified: true` under a
+   * GitHub App installation token, with no key held anywhere (issue #268).
+   *
+   * `expectedHeadOid` is non-null by schema: if the branch moved since we read
+   * its tip, GitHub rejects the mutation rather than clobbering the other push.
+   * That is the concurrency story — there is no retry to write.
+   */
+  async publishSignedCommit(opts: {
+    owner: string;
+    repo: string;
+    branch: string;
+    expectedHeadOid: string;
+    headline: string;
+    body?: string;
+    additions: PublishAddition[];
+    deletions: PublishDeletion[];
+  }): Promise<SignedCommit> {
+    return this.withRetry(async () => {
+      const ok = await this.octokit();
+      const data = await ok.graphql<{ createCommitOnBranch: { commit: SignedCommit } }>(
+        CREATE_COMMIT_ON_BRANCH,
+        {
+          input: {
+            branch: {
+              repositoryNameWithOwner: `${opts.owner}/${opts.repo}`,
+              branchName: opts.branch,
+            },
+            message: opts.body
+              ? { headline: opts.headline, body: opts.body }
+              : { headline: opts.headline },
+            expectedHeadOid: opts.expectedHeadOid,
+            fileChanges: { additions: opts.additions, deletions: opts.deletions },
+          },
+        },
+      );
+      return data.createCommitOnBranch.commit;
     });
   }
 
