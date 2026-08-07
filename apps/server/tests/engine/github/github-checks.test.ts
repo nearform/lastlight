@@ -381,6 +381,95 @@ describe("GitHubClient.listOpenPrNumbersForHeadSha", () => {
   });
 });
 
+/**
+ * **The missing `Commit statuses: read` grant** (issue #277).
+ *
+ * The two legs of `getChecksSummary` need two different App permissions, and
+ * `Checks: read` does not imply `Commit statuses: read`. Under `Promise.all` a
+ * 403 on the status leg rejected the whole call, throwing away the check-runs
+ * result the App WAS permitted to read — so an App missing only `statuses` lost
+ * its entire CI signal. Nothing surfaced it: no scoped-token profile requests
+ * `statuses`, so the token mints cleanly and the 403 lands at call time, while
+ * the run still records `success = true`.
+ *
+ * The status half is additive, so it degrades to "no status contexts". The
+ * check-runs half is not, so it still throws.
+ */
+describe("GitHubClient.getChecksSummary — App without `Commit statuses: read`", () => {
+  const forbidden = () => Object.assign(new Error("Resource not accessible by integration"), {
+    status: 403,
+  });
+
+  /** Check runs readable, combined status 403 — the exact production shape. */
+  function octokitWithoutStatuses(runs: Run[], err: () => Error = forbidden) {
+    return {
+      rest: {
+        checks: { listForRef: async () => ({ data: { check_runs: runs } }) },
+        repos: {
+          getCombinedStatusForRef: async () => {
+            throw err();
+          },
+        },
+      },
+    };
+  }
+
+  it("still reports the check runs' verdict when the status leg 403s", async () => {
+    // Under Promise.all this threw, and the caller logged "read failed" and
+    // fell back to a value that could not gate anything.
+    const c = clientWith(octokitWithoutStatuses([run("completed", "failure")]));
+    expect(await c.getChecksConclusion("o-403-failing", "r", "sha")).toBe("failing");
+  });
+
+  it("counts only the check runs toward settledCount", async () => {
+    const c = clientWith(
+      octokitWithoutStatuses([run("completed", "success"), run("completed", "success")]),
+    );
+    expect(await c.getChecksSummary("o-403-passing", "r", "sha")).toEqual({
+      state: "passing",
+      settledCount: 2,
+      pendingCount: 0,
+    });
+  });
+
+  it("reports 'none' rather than inventing a green from the unreadable statuses", async () => {
+    // The degraded status leg must read as "no contexts", never as a passing
+    // one — `dependencies.minSettledChecks` exists to tell "CI approved this"
+    // from "nothing looked at it".
+    const c = clientWith(octokitWithoutStatuses([]));
+    expect(await c.getChecksSummary("o-403-none", "r", "sha")).toEqual({
+      state: "none",
+      settledCount: 0,
+      pendingCount: 0,
+    });
+  });
+
+  it("degrades the same way for a transient status failure, not just a 403", async () => {
+    const c = clientWith(
+      octokitWithoutStatuses([run("completed", "success")], () =>
+        Object.assign(new Error("bad gateway"), { status: 502 }),
+      ),
+    );
+    expect(await c.getChecksConclusion("o-502", "r", "sha")).toBe("passing");
+  });
+
+  it("still throws when the CHECK RUNS leg fails — that half is load-bearing", async () => {
+    const c = clientWith({
+      rest: {
+        checks: {
+          listForRef: async () => {
+            throw forbidden();
+          },
+        },
+        repos: { getCombinedStatusForRef: async () => ({ data: noStatus }) },
+      },
+    });
+    await expect(c.getChecksSummary("o-checks-403", "r", "sha")).rejects.toThrow(
+      "Resource not accessible by integration",
+    );
+  });
+});
+
 describe("GitHubClient.getBaseChecksState", () => {
   it("delegates to getChecksConclusion against the base ref", async () => {
     const c = clientWith(fakeOctokit([run("completed", "failure")], noStatus));

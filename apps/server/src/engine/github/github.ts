@@ -2,6 +2,9 @@ import type { Octokit } from "octokit";
 import { githubAppClient, githubTokenClient } from "./github-app-client.js";
 import { getInstallationDirectory } from "./installations.js";
 import type { InlineComment, ReviewEvent } from "./review-poster.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("github");
 
 /** GitHub reaction emoji values accepted by the reactions API. */
 export type ReactionContent =
@@ -1239,7 +1242,9 @@ export class GitHubClient {
    * It combines check_runs (GitHub Actions et al.) with the combined commit
    * status (classic contexts: CircleCI, external CI) so a repo whose CI reports
    * only via statuses — exactly the kind the live `check_suite` webhook never
-   * sees — isn't invisible to the backstop.
+   * sees — isn't invisible to the backstop. The status half is **additive**: an
+   * App without `Commit statuses: read` still gets a verdict from the check
+   * runs (issue #277; see {@link getChecksSummary}).
    *
    *   "none"    — no check_runs AND no status contexts (nothing to judge).
    *   "pending" — a check_run is queued/in_progress, or the combined status is
@@ -1293,10 +1298,28 @@ export class GitHubClient {
     pendingCount: number;
   }> {
     const kit = await this.kit(owner);
-    const [{ data: checks }, { data: status }] = await Promise.all([
+    // `allSettled`, not `all` — the two legs need different permissions and
+    // only one of them is load-bearing (issue #277). `getCombinedStatusForRef`
+    // requires `Commit statuses: read`, which **`Checks: read` does not imply**
+    // and which the setup docs omitted for a long time. Under `Promise.all` a
+    // 403 on that leg discarded the check-runs result too — so an App missing
+    // only `statuses` lost its ENTIRE CI signal, including the half it was
+    // permitted to read, and every `pr.synchronize` / settle event read blind
+    // while the run still recorded success. Check runs alone are a usable
+    // signal, so the status leg degrades to "no status contexts" instead.
+    const [checksRes, statusRes] = await Promise.allSettled([
       kit.rest.checks.listForRef({ owner, repo, ref, filter: "latest" }),
       kit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
     ]);
+    if (checksRes.status === "rejected") throw checksRes.reason;
+    const checks = checksRes.value.data;
+    if (statusRes.status === "rejected") noteMissingCombinedStatus(owner, statusRes.reason);
+    // The degraded shape is EMPTY, not green: `statuses: []` makes every use of
+    // `state` below inert (both the pending and the failing test are gated on
+    // there being contexts), so the ref is judged purely on its check runs and
+    // the unreadable half can neither fail it nor pad `settledCount`.
+    const status: { state: string; statuses?: Array<unknown> } =
+      statusRes.status === "fulfilled" ? statusRes.value.data : { state: "success", statuses: [] };
     // Drop OUR OWN check runs when the caller is deciding whether to TRIGGER
     // work — see {@link ChecksQueryOptions.excludeApp} — then collapse each
     // check to the run that survives a re-run ({@link latestPerCheck}), so a
@@ -1779,6 +1802,40 @@ function decodeJobLog(data: unknown): string | null {
     return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8");
   }
   return null;
+}
+
+/**
+ * `<owner>:<cause>` pairs we have already reported a combined-status read
+ * failure for.
+ *
+ * The permission is granted per **installation**, so one owner's answer holds
+ * for every repo and every ref under it — and the read runs on every
+ * `pr.synchronize` and every check settle. Logging each one buried the finding
+ * in ~30 identical warn lines a day (issue #277); the point of the line is to
+ * name a missing grant once, and the grant does not change mid-process.
+ */
+const combinedStatusWarned = new Set<string>();
+
+/**
+ * Report — once per owner per cause — that the combined commit status could not
+ * be read, so {@link GitHubClient.getChecksSummary} is judging the ref on check
+ * runs alone. A 403 means the App lacks `Commit statuses: read`; anything else
+ * is transient, and both degrade the same way, so the line states the status and
+ * lets the reader decide.
+ */
+function noteMissingCombinedStatus(owner: string, err: unknown): void {
+  const status = httpStatus(err);
+  // Keyed on the CAUSE as well as the owner, so a burst of transient 5xx can't
+  // permanently suppress the one line that names a missing grant.
+  const key = `${owner}:${status === 403 ? "forbidden" : "other"}`;
+  if (combinedStatusWarned.has(key)) return;
+  combinedStatusWarned.add(key);
+  log.warn(
+    status === 403
+      ? "Combined commit status is not readable (the App lacks `Commit statuses: read`) — judging checks on check runs alone"
+      : "Combined commit status read failed — judging checks on check runs alone",
+    { owner, status, err },
+  );
 }
 
 /** Classify a failed job-log download — see {@link CiLogUnavailableCause}. */

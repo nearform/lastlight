@@ -225,6 +225,16 @@ Grant Actions: read for full CI output.
 
 The notice is suppressed when none of the failed checks is a GitHub Actions job (a CircleCI-only repo has no Actions logs to be missing, so blaming the permission there would be wrong). The same permission backs agentic-pi's `github_list_workflow_runs` / `github_list_workflow_run_jobs` / `github_get_job_logs` tools, which return `{ ok: false, reason }` rather than throwing when it is absent.
 
+### App permission: `Commit statuses: read` (optional, recommended)
+
+The same shape again, one API over: `Checks: read` gets the harness **check runs**. It does *not* get it the **classic commit statuses** a repo's CI may post instead (CircleCI, Jenkins, anything using the legacy statuses API). GitHub exposes the two as separate permissions over separate endpoints, and neither implies the other.
+
+`GitHubClient.getChecksSummary` reads both, because the settle-aware verdict is meant to cover a repo whose CI reports *only* via statuses — exactly the population the live `check_suite` webhook never sees. The status leg is `repos.getCombinedStatusForRef`, which needs `Commit statuses: read`.
+
+**The additive half must not be able to fail the whole read** (issue #277). The two calls were a `Promise.all`, which rejects on the first rejection — so an App holding `checks` but not `statuses` 403'd on the status leg and discarded the check-runs result *it was permitted to read*, losing its entire CI signal rather than the legacy half of it. Nothing surfaced it: `statuses` is requested by no scoped-token profile, so the token still mints (no 422) and the 403 arrives at call time; the run then completes and records `success = true` while every CI gate reads blind. It is now a `Promise.allSettled` — a rejected check-runs leg still throws, a rejected status leg degrades to "no status contexts", and the ref is judged on check runs alone.
+
+That degradation is stated rather than inferred, and stated **once per owner per process**: the grant is per installation and the read runs on every `pr.synchronize` and every check settle, so a line per call buries the finding in tens of identical warnings a day.
+
 ### App permission: organization `Members: read` (optional, opt-in)
 
 Required by, and only by, **per-repo dashboard visibility** (`teamVisibility`,
