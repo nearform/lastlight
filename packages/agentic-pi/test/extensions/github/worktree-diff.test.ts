@@ -397,6 +397,23 @@ describe("diffWorktreeAgainst", () => {
     }
   });
 
+  test("the default scope is the whole tree even from a subdirectory", () => {
+    // The tool runs git with whatever path it was handed, and a phase's cwd is
+    // routinely a `<repo>/` subdirectory. A cwd-relative default would narrow
+    // the publish to that subtree and report success, dropping every change
+    // outside it without a word.
+    const r = repo();
+    try {
+      mkdirSync(join(r.dir, "sub"));
+      writeFileSync(join(r.dir, "sub", "inside.txt"), "x\n");
+      writeFileSync(join(r.dir, "outside.txt"), "y\n");
+      const cs = diffWorktreeAgainst(join(r.dir, "sub"), r.base);
+      assert.deepEqual(cs.additions.map((a) => a.path).sort(), ["outside.txt", "sub/inside.txt"]);
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("returns an empty change set when the tree matches the base", () => {
     const r = repo();
     try {

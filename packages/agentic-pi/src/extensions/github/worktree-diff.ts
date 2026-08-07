@@ -152,7 +152,11 @@ export function diffWorktreeAgainst(
   // an empty `include` must never reach git: it would silently widen to the
   // whole working tree, the exact regression `include` exists to prevent.
   // Fail closed instead — the caller gets `published: false`.
-  const stagePaths = include ?? ["."];
+  //
+  // The default is git's root-relative pathspec magic, not `.`: `cwd` is
+  // whatever path the caller passed, so a `.` under a subdirectory of the
+  // checkout would narrow the whole publish to that subtree without saying so.
+  const stagePaths = include ?? [":/"];
   const scratch = mkdtempSync(join(tmpdir(), "agentic-pi-publish-"));
   const indexFile = join(scratch, "index");
   try {
