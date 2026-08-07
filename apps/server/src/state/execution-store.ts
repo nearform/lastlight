@@ -95,6 +95,87 @@ export interface ExecutionRecord {
  */
 const QUALIFIED_REPO_SQL = qualifiedRepoSql("e.owner", "e.repo", "null");
 
+/**
+ * The column list every read that returns an {@link ExecutionRecord} selects.
+ *
+ * The table is snake_case and the record is camelCase, so `SELECT *` does not
+ * produce an `ExecutionRecord` — it produces a row that *looks* like one for
+ * the handful of single-word columns and silently leaves `issueNumber`,
+ * `startedAt` and `workflowRunId` `undefined` (issue #285). Three reads did
+ * exactly that, and the cast to `ExecutionRecord[]` made the compiler agree.
+ * The Slack status report rendered `(started undefined)` and the admin cancel
+ * loop filtered on a `workflowRunId` that never matched a row.
+ *
+ * So the aliasing lives in ONE place rather than being re-typed per query, and
+ * {@link mapExecutionRow} is its other half — a new column is added to both or
+ * to neither. No table alias is used, so this works in any single-table query.
+ */
+const EXECUTION_COLUMNS = `
+  id,
+  trigger_type      AS triggerType,
+  trigger_id        AS triggerId,
+  triggered_by      AS triggeredBy,
+  trigger_actor_type AS triggerActorType,
+  skill,
+  owner,
+  repo,
+  issue_number      AS issueNumber,
+  started_at        AS startedAt,
+  finished_at       AS finishedAt,
+  success,
+  error,
+  turns,
+  duration_ms       AS durationMs,
+  session_id        AS sessionId,
+  cost_usd          AS costUsd,
+  input_tokens      AS inputTokens,
+  cache_creation_input_tokens AS cacheCreationInputTokens,
+  cache_read_input_tokens     AS cacheReadInputTokens,
+  output_tokens     AS outputTokens,
+  api_duration_ms   AS apiDurationMs,
+  stop_reason       AS stopReason,
+  extension_status  AS extensionStatus,
+  skills_status     AS skillsStatus,
+  workflow_run_id   AS workflowRunId
+`;
+
+/**
+ * Turn a row selected with {@link EXECUTION_COLUMNS} into an
+ * {@link ExecutionRecord}: SQLite NULLs become `undefined` (the record's
+ * optional fields) and the `success` integer becomes a boolean.
+ */
+function mapExecutionRow(r: Record<string, unknown>): ExecutionRecord {
+  const nul = <T>(v: unknown): T | undefined => (v === null || v === undefined ? undefined : (v as T));
+  return {
+    id: r.id as string,
+    triggerType: r.triggerType as ExecutionRecord["triggerType"],
+    triggerId: r.triggerId as string,
+    triggeredBy: nul<string>(r.triggeredBy),
+    triggerActorType: nul<TriggerActorType>(r.triggerActorType),
+    skill: r.skill as string,
+    owner: nul<string>(r.owner),
+    repo: nul<string>(r.repo),
+    issueNumber: nul<number>(r.issueNumber),
+    startedAt: r.startedAt as string,
+    finishedAt: nul<string>(r.finishedAt),
+    success: r.success === null || r.success === undefined ? undefined : Boolean(r.success),
+    error: nul<string>(r.error),
+    turns: nul<number>(r.turns),
+    durationMs: nul<number>(r.durationMs),
+    sessionId: nul<string>(r.sessionId),
+    costUsd: nul<number>(r.costUsd),
+    inputTokens: nul<number>(r.inputTokens),
+    cacheCreationInputTokens: nul<number>(r.cacheCreationInputTokens),
+    cacheReadInputTokens: nul<number>(r.cacheReadInputTokens),
+    outputTokens: nul<number>(r.outputTokens),
+    apiDurationMs: nul<number>(r.apiDurationMs),
+    stopReason: nul<string>(r.stopReason),
+    extensionStatus: nul<string>(r.extensionStatus),
+    skillsStatus: nul<string>(r.skillsStatus),
+    workflowRunId: nul<string>(r.workflowRunId),
+  };
+}
+
 export class ExecutionStore {
   constructor(private db: Database.Database) {}
 
@@ -575,12 +656,13 @@ export class ExecutionStore {
 
   /** Get recent executions for a skill */
   recentExecutions(skill: string, limit = 10): ExecutionRecord[] {
-    return this.db.prepare(`
-      SELECT * FROM executions
+    const rows = this.db.prepare(`
+      SELECT ${EXECUTION_COLUMNS} FROM executions
       WHERE skill = ?
       ORDER BY started_at DESC
       LIMIT ?
-    `).all(skill, limit) as ExecutionRecord[];
+    `).all(skill, limit) as Array<Record<string, unknown>>;
+    return rows.map(mapExecutionRow);
   }
 
   /** Count consecutive failures for a skill (for cron failure tracking) */
@@ -602,11 +684,12 @@ export class ExecutionStore {
 
   /** Get all executions with pagination */
   allExecutions(limit = 100, offset = 0): ExecutionRecord[] {
-    return this.db.prepare(`
-      SELECT * FROM executions
+    const rows = this.db.prepare(`
+      SELECT ${EXECUTION_COLUMNS} FROM executions
       ORDER BY started_at DESC
       LIMIT ? OFFSET ?
-    `).all(limit, offset) as ExecutionRecord[];
+    `).all(limit, offset) as Array<Record<string, unknown>>;
+    return rows.map(mapExecutionRow);
   }
 
   /**
@@ -679,70 +762,24 @@ export class ExecutionStore {
   getExecutionsForWorkflowRun(workflowRunId: string, triggerId: string, workflowName?: string): ExecutionRecord[] {
     const skillPattern = workflowName ? `${workflowName}:%` : "%:%";
     const rows = this.db.prepare(`
-      SELECT
-        id,
-        trigger_type    AS triggerType,
-        trigger_id      AS triggerId,
-        skill,
-        repo,
-        issue_number    AS issueNumber,
-        started_at      AS startedAt,
-        finished_at     AS finishedAt,
-        success,
-        error,
-        turns,
-        duration_ms     AS durationMs,
-        session_id      AS sessionId,
-        cost_usd        AS costUsd,
-        input_tokens    AS inputTokens,
-        cache_creation_input_tokens AS cacheCreationInputTokens,
-        cache_read_input_tokens     AS cacheReadInputTokens,
-        output_tokens   AS outputTokens,
-        api_duration_ms AS apiDurationMs,
-        stop_reason     AS stopReason,
-        extension_status AS extensionStatus,
-        skills_status   AS skillsStatus,
-        workflow_run_id AS workflowRunId
+      SELECT ${EXECUTION_COLUMNS}
       FROM executions
       WHERE (workflow_run_id = ? OR (workflow_run_id IS NULL AND trigger_id = ?))
         AND skill LIKE ?
       ORDER BY started_at ASC
     `).all(workflowRunId, triggerId, skillPattern) as Array<Record<string, unknown>>;
 
-    return rows.map((r) => ({
-      id: r.id as string,
-      triggerType: r.triggerType as ExecutionRecord["triggerType"],
-      triggerId: r.triggerId as string,
-      skill: r.skill as string,
-      repo: (r.repo as string | null) ?? undefined,
-      issueNumber: (r.issueNumber as number | null) ?? undefined,
-      startedAt: r.startedAt as string,
-      finishedAt: (r.finishedAt as string | null) ?? undefined,
-      success: r.success === null || r.success === undefined ? undefined : Boolean(r.success),
-      error: (r.error as string | null) ?? undefined,
-      turns: (r.turns as number | null) ?? undefined,
-      durationMs: (r.durationMs as number | null) ?? undefined,
-      sessionId: (r.sessionId as string | null) ?? undefined,
-      costUsd: (r.costUsd as number | null) ?? undefined,
-      inputTokens: (r.inputTokens as number | null) ?? undefined,
-      cacheCreationInputTokens: (r.cacheCreationInputTokens as number | null) ?? undefined,
-      cacheReadInputTokens: (r.cacheReadInputTokens as number | null) ?? undefined,
-      outputTokens: (r.outputTokens as number | null) ?? undefined,
-      apiDurationMs: (r.apiDurationMs as number | null) ?? undefined,
-      stopReason: (r.stopReason as string | null) ?? undefined,
-      extensionStatus: (r.extensionStatus as string | null) ?? undefined,
-      skillsStatus: (r.skillsStatus as string | null) ?? undefined,
-      workflowRunId: (r.workflowRunId as string | null) ?? undefined,
-    }));
+    return rows.map(mapExecutionRow);
   }
 
   /** Get currently running executions (no finished_at) */
   runningExecutions(): ExecutionRecord[] {
-    return this.db.prepare(`
-      SELECT * FROM executions
+    const rows = this.db.prepare(`
+      SELECT ${EXECUTION_COLUMNS} FROM executions
       WHERE finished_at IS NULL
       ORDER BY started_at DESC
-    `).all() as ExecutionRecord[];
+    `).all() as Array<Record<string, unknown>>;
+    return rows.map(mapExecutionRow);
   }
 
   /** Aggregate execution stats */

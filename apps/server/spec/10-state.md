@@ -711,6 +711,16 @@ session recreation after timeouts.
   5 s; reading `context` + `scratch` + `node_statuses` for every row
   would dominate the query cost. The list endpoint's projection is
   deliberate.
+- **A read that returns an `ExecutionRecord` aliases every column.** The
+  table is snake_case and the record is camelCase, so `SELECT *` cast to
+  `ExecutionRecord[]` type-checks and silently yields `undefined` for every
+  multi-word field — `issueNumber`, `startedAt`, `workflowRunId` (issue #285).
+  It is not detectable by the compiler and it was not detectable by a test that
+  never read those fields, so three reads had drifted: the Slack status report
+  rendered `(started undefined)` and the admin cancel loop filtered
+  `runningExecutions()` on a `workflowRunId` that matched no row. `ExecutionStore`
+  now holds ONE aliased column list and ONE row mapper, shared by all four
+  record-returning reads, so a new column is added to both or to neither.
 
 ## Current implementation
 

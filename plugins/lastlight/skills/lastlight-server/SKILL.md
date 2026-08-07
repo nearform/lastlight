@@ -43,7 +43,10 @@ Ask for each of these (don't guess). Group the questions; explain what each is f
   too — a different permission from workflows: it lets the fix workflow read
   the actual Actions job logs instead of only check annotations. It is optional,
   so an app without it still works; the CI evidence is just weaker, and the
-  prompt says so. They install it on their repos to get the Installation ID.)
+  prompt says so. Recommend **commit statuses** (read) as well — again distinct
+  from checks: it covers the classic statuses external CI posts (CircleCI,
+  Jenkins), and without it CI is judged on check runs alone. They install it on
+  their repos to get the Installation ID.)
 - **Domain** — the public hostname for webhooks/dashboard, e.g.
   `lastlight.example.com`. Ask whether to use the bundled **Caddy** for
   automatic TLS (default yes). The GitHub App webhook URL will be

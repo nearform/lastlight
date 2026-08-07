@@ -66,6 +66,11 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td>Merge or push PRs that touch <code>.github/workflows/</code> — GitHub blocks the token otherwise. Needed for dependency PRs that bump GitHub Actions versions (e.g. <code>actions/checkout</code>), which the dependabot-pr-merge flow lands. Omit only if you never want the bot to touch Actions files.</td>
 			</tr>
 			<tr>
+				<td><strong>Commit statuses</strong> <em>(recommended)</em></td>
+				<td>Read</td>
+				<td>Read the classic commit <em>statuses</em> a repo's CI may post (CircleCI, Jenkins, other external CI) alongside check runs, so the auto-merge and fix gating see the full CI picture. Distinct from <strong>Checks</strong> above — GitHub exposes statuses and check runs as two permissions over two APIs, and one does not imply the other. Optional: without it Last Light judges CI on check runs alone and says so once in the log, rather than losing the CI signal entirely.</td>
+			</tr>
+			<tr>
 				<td><strong>Actions</strong> <em>(recommended)</em></td>
 				<td>Read</td>
 				<td>Read GitHub Actions job logs so the fix workflow can see why CI actually failed, rather than only check annotations. Distinct from <strong>Workflows</strong> above, which only governs <em>writing</em> files under <code>.github/workflows/</code>. Optional: without it Last Light still runs, falling back to check-run annotations — and it now says so explicitly in the prompt instead of degrading silently.</td>
