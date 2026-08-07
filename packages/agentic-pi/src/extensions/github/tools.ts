@@ -75,24 +75,34 @@ async function safeRun<T>(fn: () => Promise<T>, canRefresh = true) {
   }
 }
 
+type CommitSignature = NonNullable<SignedCommit["signature"]>;
+
 /**
  * The mutation is the only thing standing between us and an unsigned commit on
  * a `required_signatures` repo. If GitHub says it did not sign, or signed but
  * the signature doesn't verify, say so loudly — the commit is already on the
  * branch, so a silent `verified: false` would be discovered by a blocked PR
- * hours later. `null` means GitHub returned no signature yet, not a failure.
+ * hours later. A null `signature` is GraphQL's shape for an UNSIGNED commit,
+ * not a "not yet": the response describes the commit as created.
  */
-function assertSigned(commit: SignedCommit): void {
-  if (commit.signature && !commit.signature.wasSignedByGitHub) {
+function assertSigned(commit: SignedCommit): CommitSignature {
+  const signature = commit.signature;
+  if (!signature) {
     throw new Error(
-      `published ${commit.oid} but GitHub did not sign it (state=${commit.signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+      `published ${commit.oid} but GitHub returned no signature for it — a commit with no signature at all is reported as \`signature: null\`, so it is unsigned. A repository requiring signed commits will block it. Do not retry — report this.`,
     );
   }
-  if (commit.signature && !commit.signature.isValid) {
+  if (!signature.wasSignedByGitHub) {
     throw new Error(
-      `published ${commit.oid} but GitHub's signature on it is not valid (state=${commit.signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+      `published ${commit.oid} but GitHub did not sign it (state=${signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
     );
   }
+  if (!signature.isValid) {
+    throw new Error(
+      `published ${commit.oid} but GitHub's signature on it is not valid (state=${signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+  return signature;
 }
 
 /** The first line of whatever a failed git child actually said, not the
@@ -558,7 +568,7 @@ export function buildGitHubTools(
           throw err;
         }
 
-        assertSigned(commit);
+        const signature = assertSigned(commit);
         const localSync = await syncLocalToPublished(cwd, target, commit.oid, auth);
 
         return {
@@ -566,9 +576,7 @@ export function buildGitHubTools(
           commit: commit.oid,
           url: commit.url,
           branch: target,
-          verified: commit.signature
-            ? commit.signature.wasSignedByGitHub && commit.signature.isValid
-            : null,
+          verified: signature.wasSignedByGitHub && signature.isValid,
           committer: commit.committer,
           added: changes.additions.filter((a) => a.status === "A").map((a) => a.path),
           modified: changes.additions.filter((a) => a.status === "M").map((a) => a.path),

@@ -797,6 +797,57 @@ describe("github_publish signature assertion", () => {
     }
   });
 
+  test("fails loudly when the commit came back with no signature at all", async () => {
+    // GraphQL reports an unsigned commit as `signature: null` — it is the
+    // ordinary shape of the failure this assertion exists for, not a "not yet".
+    // Passing it through would report `published: true, verified: null` for a
+    // commit that blocks the PR, and nothing tells the agent to read `verified`.
+    const r = repo();
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        if (req.url?.endsWith("/graphql")) {
+          res.end(
+            JSON.stringify({
+              data: {
+                createCommitOnBranch: {
+                  commit: {
+                    oid: "nosigoid",
+                    url: "u",
+                    committer: { name: "GitHub", email: "noreply@github.com" },
+                    signature: null,
+                  },
+                },
+              },
+            }),
+          );
+          return;
+        }
+        res.end(JSON.stringify({ object: { sha: r.base } }));
+      });
+    });
+    await new Promise<void>((res2) => server.listen(0, "127.0.0.1", () => res2()));
+    const { port } = server.address() as AddressInfo;
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(`http://127.0.0.1:${port}`, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        path: r.dir,
+      });
+      assert.ok(out.error, "expected a structured error");
+      assert.match(out.error, /nosigoid/);
+      assert.match(out.error, /unsigned/i);
+      assert.notEqual(out.published, true);
+    } finally {
+      await new Promise<void>((res2) => server.close(() => res2()));
+      r.cleanup();
+    }
+  });
+
   test("names STALE_DATA explicitly instead of surfacing the raw GraphQL error", async () => {
     // GitHub's REST getRef can lag its own GraphQL write path (see
     // docs/plans/signed-commit-publish/00-findings.md #4), so a mutation can be
