@@ -37,8 +37,8 @@ const STATUS_LABEL: Record<StreamStatus, { text: string; color: string }> = {
  * the same reason: the control is not drawn at all when the feature is off.
  */
 const UNRESOLVED_HINT: Record<Exclude<MeRepos["reason"], "ok" | "disabled">, string> = {
-  "no-teams": "You're in no GitHub team that owns a managed repo.",
-  "no-identity": "Team filtering needs a GitHub login — this session signed in another way.",
+  "no-teams": "You own no managed repo, and you're in no GitHub team that owns one.",
+  "no-identity": "This filter needs a GitHub login — this session signed in another way.",
   unavailable: "Your teams couldn't be looked up just now.",
   "too-many-teams": "You're in too many teams to resolve within the configured budget.",
   truncated: "A team's repo list was too large to read fully.",
@@ -66,14 +66,19 @@ const TIME_RANGES = [
 ];
 
 /**
- * The optional "my teams' repos" filter (issue #169) — OFF unless the user
- * turns it on, and remembered per browser once they do.
+ * The optional "my repos" filter (issue #169) — the managed repos you own or
+ * your GitHub teams own. OFF unless the user turns it on, and remembered per
+ * browser once they do.
  *
  * Opt-in rather than opt-out because GitHub team grants describe involvement,
  * not access: an org owner reaches every repo without a team grant anywhere, so
- * as a default this would hide people's own projects. As a filter somebody
- * chose, narrowing to their teams' repos is exactly the decluttering they asked
- * for, and one click undoes it.
+ * as a default this would hide repos people work in daily. As a filter somebody
+ * chose, the narrowing is exactly the decluttering they asked for, and one
+ * click undoes it.
+ *
+ * Labelled "my repos" rather than "my teams" since the set stopped being purely
+ * team-derived: repos under your OWN account are unioned in, because teams are
+ * an org concept and a personal repo could never be granted by one.
  *
  * **Rendered whenever the operator enabled `teamVisibility`** — not only once
  * grants resolved. When there is nothing to narrow to, it says so and offers a
@@ -104,10 +109,10 @@ function RepoScopeToggle() {
         }}
         disabled={resyncing}
         className="btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs btn-ghost text-base-content/40"
-        title={`${unresolvedHint(meta?.reason)} Nothing is filtered. Click to re-check your teams.`}
+        title={`${unresolvedHint(meta?.reason)} Nothing is filtered. Click to re-check.`}
       >
         <RefreshCw className={clsx("w-3.5 h-3.5", resyncing && "animate-spin")} />
-        <span className="font-mono">{resyncing ? "checking…" : "my teams (none)"}</span>
+        <span className="font-mono">{resyncing ? "checking…" : "my repos (none)"}</span>
       </button>
     );
   }
@@ -121,12 +126,12 @@ function RepoScopeToggle() {
       )}
       title={
         on
-          ? `Filtered to the ${count} repo${count === 1 ? "" : "s"} your GitHub teams own. Click to show all repos.`
-          : "Showing every managed repo. Click to filter to your GitHub teams' repos."
+          ? `Filtered to the ${count} repo${count === 1 ? "" : "s"} you own or your GitHub teams own. Click to show all repos.`
+          : "Showing every managed repo. Click to filter to your own repos and your GitHub teams'."
       }
     >
       <Filter className={clsx("w-3.5 h-3.5", on && "text-primary")} />
-      <span className="font-mono">{on ? `my teams (${count})` : "all repos"}</span>
+      <span className="font-mono">{on ? `my repos (${count})` : "all repos"}</span>
     </button>
   );
 }

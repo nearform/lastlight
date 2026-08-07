@@ -71,12 +71,19 @@ export interface TeamVisibilityDeps {
  *
  * ## This answers a PREFERENCE, not an entitlement
  *
- * The repos returned here are the ones a person's teams own — which is **not**
- * the same as the repos they can reach. Org owners and direct collaborators
- * reach repos no team grants them: a dry run against the live nearform install
- * found one maintainer's single team (`nearformers`) covering 4 of 8 managed
- * repos, hiding `nearform/lastlight` itself, on which they hold `admin` via org
- * ownership.
+ * The repos returned here are the ones a person's teams own, **plus the ones
+ * their own account owns** — which is still **not** the same as the repos they
+ * can reach. Org owners and direct collaborators reach repos no team grants
+ * them: a dry run against the live nearform install found one maintainer's
+ * single team (`nearformers`) covering 4 of 8 managed repos, hiding
+ * `nearform/lastlight` itself, on which they hold `admin` via org ownership.
+ *
+ * The ownership union closes the one gap that was pure artefact rather than
+ * approximation: teams are an ORG concept, so a repo under somebody's personal
+ * account could never be granted by a team, and a strictly team-derived answer
+ * hid every one of them — on an instance managing mostly personal repos, that
+ * was most of the dashboard. See {@link ownedManagedRepos}, and note the test
+ * is `owner === login`, not "the owner is not an org".
  *
  * That is precisely why the dashboard filter this feeds is **opt-in and off by
  * default**. As a default it would hide people's own work; as a filter somebody
@@ -172,26 +179,64 @@ export class TeamVisibilityResolver {
     return this.resolve(login, config);
   }
 
+  /**
+   * Managed repos owned by this login's OWN account.
+   *
+   * A personal account has no teams — teams are an org concept — so a repo
+   * under your own login can never arrive via a team grant, and a purely
+   * team-derived filter hid every one of them. That is backwards: team grants
+   * are a proxy for involvement, and nobody is more involved in a repo than its
+   * owner.
+   *
+   * **The test is `owner === login`, NOT "the owner is not an organization".**
+   * The second reads as the same thing on a single-owner instance and is a
+   * disclosure bug on any other: it would put every OTHER person's personal
+   * repos into your filter. GitHub shares one namespace between users and orgs,
+   * so an exact login match is unambiguous — and free, because the owner is
+   * already in the managed string. No API call, nothing to cache.
+   */
+  private ownedManagedRepos(login: string, managed: Iterable<string>): string[] {
+    const owned: string[] = [];
+    for (const full of managed) {
+      const slash = full.indexOf("/");
+      if (slash > 0 && full.slice(0, slash) === login) owned.push(full);
+    }
+    return owned;
+  }
+
   /** Project a stored status + the cached rows into a result. */
   private fromCache(
     login: string,
     status: VisibilitySyncStatus,
     syncedAt: string | null,
   ): VisibilityResult {
-    if (status !== "ok") {
+    // An INCOMPLETE team answer stays fail-open, and is deliberately NOT
+    // rescued by the owned repos below. "Your own repos, plus an unknown
+    // fraction of your teams'" is still a partial answer, and filtering to it
+    // would hide precisely the org repos the truncated/errored half would have
+    // contributed — the same reasoning that makes a partial org set fail the
+    // whole pass. Only a COMPLETE team answer (`ok` or `empty`) is augmented.
+    if (status !== "ok" && status !== "empty") {
       const reason: VisibilityReason =
-        status === "empty" ? "no-teams" : status === "truncated" ? "truncated" : status === "disabled" ? "disabled" : "error";
-      return { ...FAIL_OPEN(reason, syncedAt), synced: status === "empty" };
+        status === "truncated" ? "truncated" : status === "disabled" ? "disabled" : "error";
+      return FAIL_OPEN(reason, syncedAt);
     }
     const cached = this.store.reposForLogin(login);
     // A team that has since been marked truncated, or rows that vanished under
     // us, must not narrow the view.
     if (cached.truncated) return FAIL_OPEN("truncated", syncedAt);
-    if (cached.repos.length === 0) return { ...FAIL_OPEN("no-teams", syncedAt), synced: true };
     // Re-intersect with the LIVE managed list: a repo removed from the
     // installation since the resolution must not linger in somebody's filter.
+    // The owned set is derived from that same live list rather than persisted,
+    // so it has no cache of its own and cannot go stale against it — which is
+    // also why `status: "empty"` (no teams at all) can still yield a filter.
     const managed = new Set(this.readManagedRepos());
-    const repos = cached.repos.filter((r) => managed.has(r));
+    const repos = [
+      ...new Set([
+        ...cached.repos.filter((r) => managed.has(r)),
+        ...this.ownedManagedRepos(login, managed),
+      ]),
+    ].sort();
     if (repos.length === 0) return { ...FAIL_OPEN("no-teams", syncedAt), synced: true };
     return { repos, synced: true, reason: "ok", teams: cached.teams, syncedAt };
   }

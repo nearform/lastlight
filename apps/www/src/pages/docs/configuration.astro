@@ -792,13 +792,14 @@ dependencies:
 		polling budget stays bounded.
 	</p>
 
-	<h2>The "my teams' repos" filter (optional)</h2>
+	<h2>The "my repos" filter (optional)</h2>
 
 	<p>
 		By default every admin who logs into the dashboard sees every managed repo's
 		runs and sessions. In an org with a lot of repos that is mostly noise. Turn
 		this on and each GitHub-authenticated admin gets a header toggle that filters
-		every list down to the repos their GitHub org teams own:
+		every list down to the repos their GitHub org teams own, plus the ones their
+		own account owns:
 	</p>
 
 	<pre><code>{`teamVisibility:
@@ -848,7 +849,7 @@ dependencies:
 		old answer and refreshes behind you — it takes a second load to see a change.
 		The webhooks above make that instant by invalidating the cache the moment a
 		membership or a team's repo grant changes. Without them, click the toggle
-		while it reads <code>my teams (none)</code> to re-check immediately.
+		while it reads <code>my repos (none)</code> to re-check immediately.
 	</p>
 
 	<p>

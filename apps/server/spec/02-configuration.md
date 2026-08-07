@@ -637,9 +637,23 @@ right methods (no dead password box for an OAuth-only gate); `POST /login`
 refuses password auth — never minting an open token — whenever auth is on but
 no password is set.
 
-**The "my teams' repos" filter** (`teamVisibility`, issue #169) offers each
+**The "my repos" filter** (`teamVisibility`, issue #169) offers each
 GitHub-authenticated admin a header toggle that narrows every list to the
-managed repos their GitHub org teams own. `GET /admin/api/me/repos` returns
+managed repos their GitHub org teams own, **plus the ones their own account
+owns**. The ownership half closes a gap that was pure artefact rather than the
+deliberate approximation the rest of the feature makes: teams are an *org*
+concept, so a repo under a personal account can never be granted by one, and a
+strictly team-derived answer hid every personal repo an instance managed — on a
+mostly-personal deployment, most of the dashboard. The test is
+`owner === login`; the tempting restatement "the owner is not an organization"
+selects the same set on a single-owner instance and is a disclosure bug on any
+other, putting everybody else's personal repos into your filter. It costs no
+extra request — the owner is already in the managed string — and it is derived
+per request rather than persisted, so it re-intersects with the live managed
+list and has no cache of its own to go stale. An **incomplete** team answer
+(`truncated` / `error`) is deliberately *not* rescued by it: "your own repos
+plus an unknown fraction of your teams'" would confidently hide the org repos
+the failed half would have contributed. `GET /admin/api/me/repos` returns
 `{ repos, synced, reason }`, which the SPA passes back as the `?repos=` query
 filter on the run lists (so paging and totals stay honest) and applies locally
 to the session list.

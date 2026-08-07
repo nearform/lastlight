@@ -388,3 +388,83 @@ describe("GitHubClient.listUserTeams — a personal account is an answer, not a 
     ).toBe(false);
   });
 });
+
+/**
+ * **Your own repos are always yours** — the ownership union.
+ *
+ * Teams are an ORG concept, so a repo under a personal account can never be
+ * granted by a team. A strictly team-derived filter therefore hid every
+ * personal repo it managed, which on a mostly-personal instance is most of the
+ * dashboard. That gap was pure artefact, not the deliberate approximation the
+ * rest of the feature makes.
+ *
+ * The rule is `owner === login`. The tempting restatement — "repos whose owner
+ * isn't an organization" — picks out the same set on a single-owner instance
+ * and is a DISCLOSURE BUG on any other, which is what the third test pins.
+ */
+describe("TeamVisibilityResolver — repos you own", () => {
+  it("includes your own repos when you're in no team at all", async () => {
+    const { github, calls } = fakeGithub({ teams: {} });
+    const r = resolver(github, ["cliftonc/drizby", "cliftonc/drizzle-cube", "mirevue/mirevue"]);
+    const result = await r.visibleRepos("cliftonc");
+    // Previously this whole case was `status: "empty"` → fail open → no filter
+    // offered, and the nine personal repos on the live instance were invisible
+    // to the feature entirely.
+    expect(result.repos).toEqual(["cliftonc/drizby", "cliftonc/drizzle-cube"]);
+    expect(result.reason).toBe("ok");
+    // Costs no extra GitHub call — the owner is already in the managed string.
+    expect(calls.listTeamRepos).toBe(0);
+  });
+
+  it("unions ownership with team grants rather than replacing them", async () => {
+    const { github } = fakeGithub({
+      teams: { mirevue: [{ slug: "core-team", name: "Core" }] },
+      teamRepos: { "core-team": ["mirevue/mirevue"] },
+    });
+    const r = resolver(github, ["cliftonc/drizby", "mirevue/mirevue", "mirevue/mirevue-www"]);
+    const result = await r.visibleRepos("cliftonc");
+    expect(result.repos).toEqual(["cliftonc/drizby", "mirevue/mirevue"]);
+  });
+
+  it("NEVER leaks somebody else's personal repos", async () => {
+    // The whole reason the rule is `owner === login`. Under "the owner is not
+    // an organization", every one of cliftonc's repos would land in alice's
+    // filter — they are not hers, and she may not be able to see them at all.
+    const { github } = fakeGithub({ teams: {} });
+    const r = resolver(github, ["cliftonc/drizby", "alice/notes"]);
+    const result = await r.visibleRepos("alice");
+    expect(result.repos).toEqual(["alice/notes"]);
+  });
+
+  it("still fails open when you own nothing and are in no team", async () => {
+    const { github } = fakeGithub({ teams: {} });
+    const r = resolver(github, ["nearform/lastlight"]);
+    expectFailOpen(await r.visibleRepos("alice"), "no-teams");
+  });
+
+  it("does NOT rescue an incomplete team answer with your own repos", async () => {
+    // The load-bearing one. A failed team pass means we do not know which ORG
+    // repos belong in the answer; narrowing to "your own repos only" would
+    // confidently hide every one of them. A partial answer is still no answer,
+    // exactly as it is for a partial org set.
+    const { github } = fakeGithub({ teams: { mirevue: [] }, failTeams: true });
+    const r = resolver(github, ["cliftonc/drizby", "mirevue/mirevue"]);
+    expectFailOpen(await r.visibleRepos("cliftonc"), "error");
+  });
+
+  it("re-intersects owned repos with the LIVE managed list", async () => {
+    // Ownership is derived per request rather than persisted, so a repo dropped
+    // from `managedRepos` leaves the filter immediately — no cache to expire.
+    const { github } = fakeGithub({ teams: {} });
+    const r = resolver(github, ["cliftonc/drizby"]);
+    expect((await r.visibleRepos("cliftonc")).repos).toEqual(["cliftonc/drizby"]);
+
+    const shrunk = new TeamVisibilityResolver({
+      store: db.teams,
+      github,
+      config: () => CONFIG,
+      managedRepos: () => ["mirevue/mirevue"],
+    });
+    expectFailOpen(await shrunk.visibleRepos("cliftonc"), "no-teams");
+  });
+});
