@@ -30,6 +30,7 @@ import {
   nullableStringParser,
   nullableStringSerializer,
 } from "../hooks/useUrlState";
+import { useVisibleRepos, repoScopeParam } from "../hooks/useVisibleRepos";
 import { timeRangeToSince } from "../lib/timeRange";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
 import { GhLink } from "./GhLink";
@@ -576,13 +577,25 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     nullableStringSerializer,
   );
   const [availableWorkflows, setAvailableWorkflows] = useState<string[]>([]);
+  const { allowed: allowedRepos } = useVisibleRepos();
+  // Per-repo visibility (issue #169) is applied SERVER-side, via the `repos`
+  // query param, so paging and the `total` count stay honest — filtering after
+  // the fact would return short pages and a total that counts rows the user
+  // can't see. Skipped when the Repos tab has already pinned a single repo
+  // (`repo` is the narrower ask), and absent whenever the scope is the
+  // fail-open sentinel. Memoized: a fresh array identity per render would
+  // refetch on every render.
+  const scopedRepos = useMemo(
+    () => (repo ? undefined : repoScopeParam(allowedRepos)),
+    [repo, allowedRepos],
+  );
 
   // Reset pagination whenever a filter changes — otherwise an inflated `limit`
   // from a previous, larger result set would silently keep showing too many
   // rows after the user narrows.
   useEffect(() => {
     setLimit(WORKFLOW_PAGE_SIZE);
-  }, [timeRange, workflowFilter, repo]);
+  }, [timeRange, workflowFilter, repo, scopedRepos]);
 
   // Clear the selected run when the Repos tab switches to a different repo.
   // WorkflowList isn't remounted on a repo switch (the `?run=` param survives),
@@ -610,6 +623,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
           status,
           workflow: workflowFilter ?? undefined,
           repo,
+          repos: scopedRepos,
         }),
         api.approvals().catch(() => ({ approvals: [] as WorkflowApproval[] })),
         // Queued-run count, scoped to the same date/workflow/repo filters, for
@@ -621,6 +635,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
             since,
             workflow: workflowFilter ?? undefined,
             repo,
+            repos: scopedRepos,
           })
           .catch(() => ({ total: 0, workflowRuns: [] as WorkflowRun[] })),
       ]);
@@ -632,7 +647,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     }
-  }, [limit, timeRange, workflowFilter, repo]);
+  }, [limit, timeRange, workflowFilter, repo, scopedRepos]);
 
   useEffect(() => {
     load();

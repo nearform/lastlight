@@ -1,7 +1,8 @@
 import clsx from "clsx";
-import { BookOpen, Clock, GitBranch, LogOut, Moon, Radio, Sun } from "lucide-react";
+import { BookOpen, Clock, Filter, GitBranch, LogOut, Moon, Radio, Sun } from "lucide-react";
 import type { StreamStatus } from "../hooks/useSessionStream";
 import { useTheme } from "../hooks/useTheme";
+import { useVisibleRepos } from "../hooks/useVisibleRepos";
 import { NearformLogo } from "./NearformLogo";
 import { VersionPin } from "./VersionPin";
 
@@ -31,6 +32,49 @@ const TIME_RANGES = [
   { key: "week", label: "7d" },
   { key: "all", label: "all" },
 ];
+
+/**
+ * The optional "my teams' repos" filter (issue #169) — OFF unless the user
+ * turns it on, and remembered per browser once they do.
+ *
+ * Opt-in rather than opt-out because GitHub team grants describe involvement,
+ * not access: an org owner reaches every repo without a team grant anywhere, so
+ * as a default this would hide people's own projects. As a filter somebody
+ * chose, narrowing to their teams' repos is exactly the decluttering they asked
+ * for, and one click undoes it.
+ *
+ * Renders nothing unless the server resolved real team grants — for a
+ * password/Slack login, a deployment with the feature off, or somebody in no
+ * team there is nothing to narrow to, and a control that does nothing is worse
+ * than no control.
+ */
+function RepoScopeToggle() {
+  const { scope, setScope, canScope, degraded, meta } = useVisibleRepos();
+  if (!canScope && !degraded) return null;
+  const count = meta?.repos?.length ?? 0;
+  const on = scope === "mine";
+  return (
+    <button
+      onClick={() => setScope(on ? "all" : "mine")}
+      className={clsx(
+        "btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs btn-ghost",
+        on ? "text-base-content/70" : "text-base-content/40",
+      )}
+      title={
+        degraded
+          ? "Your teams couldn't be resolved, so nothing is filtered. Click to turn the filter off."
+          : on
+            ? `Filtered to the ${count} repo${count === 1 ? "" : "s"} your GitHub teams own. Click to show all repos.`
+            : "Showing every managed repo. Click to filter to your GitHub teams' repos."
+      }
+    >
+      <Filter className={clsx("w-3.5 h-3.5", on && !degraded && "text-primary")} />
+      <span className="font-mono">
+        {degraded ? "my teams (unavailable)" : on ? `my teams (${count})` : "all repos"}
+      </span>
+    </button>
+  );
+}
 
 export function StatsHeader({
   timeRange,
@@ -112,6 +156,8 @@ export function StatsHeader({
           </button>
         ))}
       </div>
+
+      <RepoScopeToggle />
 
       <div className="flex-1" />
 

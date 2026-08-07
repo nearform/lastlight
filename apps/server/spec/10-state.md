@@ -494,6 +494,65 @@ Two invariants the schema encodes:
 `workflow_runs` also carries `trace_id` / `span_id` for this feature — see the
 next section.
 
+### `github_teams` + `github_team_repos` + `github_team_members` + `github_visibility_sync`
+
+The dashboard's per-repo visibility cache (issue #169): which managed repos a
+GitHub-authenticated admin sees by default, derived from their org team grants.
+
+```sql
+CREATE TABLE IF NOT EXISTS github_teams (
+  org TEXT NOT NULL, slug TEXT NOT NULL, name TEXT,
+  repos_synced_at TEXT NOT NULL,
+  truncated INTEGER NOT NULL DEFAULT 0,   -- grant too large to enumerate
+  PRIMARY KEY (org, slug)
+);
+CREATE TABLE IF NOT EXISTS github_team_repos (
+  org TEXT NOT NULL, team_slug TEXT NOT NULL, repo TEXT NOT NULL,
+  PRIMARY KEY (org, team_slug, repo)      -- repo = owner/repo, ∩ managed
+);
+CREATE TABLE IF NOT EXISTS github_team_members (
+  org TEXT NOT NULL, team_slug TEXT NOT NULL, login TEXT NOT NULL,
+  PRIMARY KEY (org, team_slug, login)
+);
+CREATE INDEX IF NOT EXISTS idx_github_team_members_login
+  ON github_team_members(login);
+CREATE TABLE IF NOT EXISTS github_visibility_sync (
+  login TEXT PRIMARY KEY,
+  synced_at TEXT NOT NULL,
+  status TEXT NOT NULL,                   -- ok | empty | truncated | error | disabled
+  detail TEXT
+);
+```
+
+**This is a cache, not a mirror of the org.** Nothing is enumerated up front:
+rows appear only for the teams of a person who actually logged in, resolved on
+their first dashboard request and refreshed per `teamVisibility.ttlMinutes`. The
+alternative — walk every managed repo, list the teams with a grant, pull each
+team's members — is thousands of API requests in an org with thousands of repos,
+almost all of it describing teams nobody using the dashboard belongs to. Safe to
+delete wholesale; it refills.
+
+Three invariants the schema encodes:
+
+- **Absence means "unknown", never "no access".** `github_team_members` records
+  membership we *learned* while resolving one login, not the team's roster. So
+  every read path fails OPEN — a miss shows everything.
+- **`truncated` forces its members open too.** When a team's grant exceeds
+  `maxPagesPerTeam`, `github_team_repos` holds a *prefix*. A partial list is the
+  one genuinely harmful answer: it hides repos the person is responsible for and
+  looks exactly like the repo having no activity. So a truncated team makes the
+  answer "no filter" rather than "these ones".
+- **`github_visibility_sync` remembers failures, not just successes.** An
+  over-budget or errored resolution is stored with its status and reused for the
+  TTL, so a permission GitHub will keep refusing isn't re-attempted on every
+  dashboard poll.
+
+Kept current by `team` / `membership` / `organization` webhooks, which
+**invalidate** (delete the affected rows) rather than re-derive — re-deriving on
+a webhook would put an unbounded org walk on the delivery path. `POST
+/admin/api/me/repos/resync` is the manual fallback where those events aren't
+wired up.
+
 ### `workflow_runs.trace_id` / `span_id`
 
 Written by the observability adapter in `src/workflows/runner.ts` when the
@@ -638,6 +697,8 @@ session recreation after timeouts.
 | `ApprovalStore` — `workflow_approvals` | `src/state/approval-store.ts` |
 | `UserStore` — `users` identity + Slack/email matching | `src/state/user-store.ts` |
 | `FeedbackStore` — `feedback_anchors` + `feedback_signals` (issue #255) | `src/state/feedback-store.ts` |
+| `TeamStore` — the four `github_team*` / `github_visibility_sync` tables (issue #169) | `src/state/team-store.ts` |
+| Lazy per-user team→repo resolver (budgets, fail-open, stale-while-revalidate) | `src/engine/github/team-visibility.ts` |
 | Emoji → score vocabulary (both surfaces) | `src/engine/feedback/reactions.ts` |
 | Reaction → signal ingest + OTel export | `src/engine/feedback/ingest.ts` |
 | Slack anchors + live reaction handling | `src/engine/feedback/slack.ts` |

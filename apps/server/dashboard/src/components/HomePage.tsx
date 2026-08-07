@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -16,6 +16,7 @@ import { api, type WorkflowRun, type ContainerStats, type ContainerKind, type Ho
 import { useStatsSeries } from "../hooks/useDailyStats";
 import { useTheme } from "../hooks/useTheme";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
+import { useVisibleRepos, repoScopeParam } from "../hooks/useVisibleRepos";
 import { GhLink } from "./GhLink";
 import { ActorChip } from "./ActorChip";
 import clsx from "clsx";
@@ -116,14 +117,24 @@ function useLiveActivity() {
   const [queuedCount, setQueuedCount] = useState(0);
   const [liveWorkflows, setLiveWorkflows] = useState<WorkflowRun[]>([]);
   const [containerCount, setContainerCount] = useState(0);
+  const { allowed: allowedRepos } = useVisibleRepos();
+  // The per-repo scope goes to the SERVER (issue #169), so these panels ask for
+  // exactly the five rows they render. Narrowing client-side would mean either
+  // over-fetching or showing a panel that looks empty because the user's repos
+  // happened not to be in the global most-recent handful — and `total` would
+  // still be the global count, which is the number the header shows.
+  //
+  // Memoized on the already-stable `allowed`; a fresh array identity per render
+  // would make the effect below refetch on every render.
+  const repos = useMemo(() => repoScopeParam(allowedRepos), [allowedRepos]);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
         const [wf, queued, ct] = await Promise.all([
-          api.workflowRuns({ status: "running,paused", limit: 5 }),
-          api.workflowRuns({ status: "queued", limit: 1 }),
+          api.workflowRuns({ status: "running,paused", limit: 5, repos }),
+          api.workflowRuns({ status: "queued", limit: 1, repos }),
           api.containers(),
         ]);
         if (!cancelled) {
@@ -139,7 +150,7 @@ function useLiveActivity() {
     load();
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, []);
+  }, [repos]);
 
   return { workflowCount, queuedCount, liveWorkflows, containerCount };
 }
@@ -309,6 +320,10 @@ function ResourceUsageSection({
 
 function useRecentWorkflows() {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  const { allowed: allowedRepos } = useVisibleRepos();
+  // Memoized on the already-stable `allowed` — a fresh array identity per
+  // render would make the effect below refetch on every render.
+  const repos = useMemo(() => repoScopeParam(allowedRepos), [allowedRepos]);
 
   useEffect(() => {
     let cancelled = false;
@@ -316,7 +331,11 @@ function useRecentWorkflows() {
       try {
         // Only finished runs — queued/running/paused live in Live Activity,
         // not "Recent". Terminal statuses = succeeded, failed, cancelled.
-        const res = await api.workflowRuns({ status: "succeeded,failed,cancelled", limit: 3 });
+        const res = await api.workflowRuns({
+          status: "succeeded,failed,cancelled",
+          limit: 3,
+          repos,
+        });
         if (!cancelled) setRuns(res.workflowRuns);
       } catch {
         /* ignore */
@@ -325,7 +344,7 @@ function useRecentWorkflows() {
     load();
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, []);
+  }, [repos]);
 
   return runs;
 }

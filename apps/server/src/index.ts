@@ -1143,6 +1143,23 @@ async function main() {
       // The harness client memoizes an Octokit per installation; drop it when
       // the App is uninstalled so a re-install can't be served by a dead one.
       onInstallationRemoved: (installationId) => github?.forgetInstallation(installationId),
+      // Team/org membership changed — forget the affected slice of the
+      // dashboard visibility cache (issue #169). Deleting rows is the whole
+      // response: the cache is filled on demand per logged-in user, so the next
+      // dashboard request re-resolves, and only for people who actually use it.
+      onTeamChanged: ({ org, teamSlug, login }) => {
+        try {
+          if (login) db.teams.invalidateLogin(login);
+          else if (teamSlug) db.teams.invalidateTeam(org, teamSlug);
+        } catch (err: unknown) {
+          logger("team-visibility").warn("Failed to invalidate team visibility cache", {
+            org,
+            teamSlug,
+            login,
+            err,
+          });
+        }
+      },
     });
     registry.register(githubConnector);
   }

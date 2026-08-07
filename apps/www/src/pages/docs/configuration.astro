@@ -792,6 +792,61 @@ dependencies:
 		polling budget stays bounded.
 	</p>
 
+	<h2>The "my teams' repos" filter (optional)</h2>
+
+	<p>
+		By default every admin who logs into the dashboard sees every managed repo's
+		runs and sessions. In an org with a lot of repos that is mostly noise. Turn
+		this on and each GitHub-authenticated admin gets a header toggle that filters
+		every list down to the repos their GitHub org teams own:
+	</p>
+
+	<pre><code>{`teamVisibility:
+  enabled: false             # operator switch — needs the App's \`Members: read\`
+  ttlMinutes: 60             # how long a resolved answer is reused
+  maxTeamsPerUser: 50        # more teams than this ⇒ show everything
+  maxPagesPerTeam: 20        # 100 repos/page; a bigger grant ⇒ show everything
+  maxRequestsPerResolve: 60  # ceiling for one cache miss`}</code></pre>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>The filter is opt-in, and that is deliberate.</strong> GitHub team
+			grants describe <em>involvement</em>, not access — an org owner can reach
+			every repo without belonging to a team that grants any of them. Applied as a
+			default, this would hide people's own projects. Applied as a filter someone
+			switched on for themselves, the same narrowing is exactly the decluttering
+			they wanted, and one click undoes it. Nobody's view changes until they
+			choose; the choice is remembered per browser.
+		</div>
+	</div>
+
+	<p>
+		<strong>This is a view preference, not access control.</strong> The filter
+		travels as an ordinary <code>?repos=</code> query parameter the dashboard asks
+		for; omit it and the server returns global data exactly as before, and a
+		hand-crafted API call still sees everything. That is what lets every budget
+		above fail <em>open</em>: when a team is too big to enumerate, or someone is in
+		too many teams, or GitHub refuses the query, you see more than strictly
+		necessary rather than a partial list that quietly hides work you own.
+	</p>
+
+	<p>
+		<strong>Setup.</strong> Grant the GitHub App the organization
+		<code>Members: read</code> permission, subscribe it to the
+		<code>team</code>, <code>membership</code> and <code>organization</code>
+		webhook events, and re-consent the App on each installation. Until then the
+		toggle never appears and nothing changes for anyone.
+	</p>
+
+	<p>
+		Nothing is crawled up front. A person's teams are resolved the first time they
+		load the dashboard — one GraphQL query per org plus a page or two per team —
+		and cached in SQLite, so the cost tracks <em>their</em> team count, not the
+		org's repo count. The webhooks above invalidate the cache when membership or a
+		team's repo grant changes; <code>POST /admin/api/me/repos/resync</code> is the
+		manual fallback. Operator-only — a target repo cannot set these.
+	</p>
+
 	<div class="docs-next">
 		<a href="/docs/workflows/demo">
 			<span class="label">← Previous</span>

@@ -206,6 +206,62 @@ export function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_feedback_signals_workflow
       ON feedback_signals(workflow_name, observed_at DESC);
     CREATE INDEX IF NOT EXISTS idx_feedback_signals_export ON feedback_signals(exported_at);
+
+    -- ── GitHub team-based dashboard visibility (issue #169) ────────────────
+    -- These four tables are a CACHE, not a mirror of the org. Nothing here is
+    -- enumerated up front: rows appear only for the teams a user who actually
+    -- logged in belongs to, resolved on demand (see engine/github/team-visibility.ts).
+    -- That is the whole scaling story — an org with thousands of repos and
+    -- hundreds of teams costs a handful of requests per logged-in person
+    -- instead of a full-org crawl. Safe to delete wholesale; it refills.
+
+    -- One row per team we have ever resolved repos for.
+    CREATE TABLE IF NOT EXISTS github_teams (
+      org TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      name TEXT,
+      -- When this team's repo grant was last enumerated.
+      repos_synced_at TEXT NOT NULL,
+      -- 1 when the enumeration hit the per-team page budget and stopped early,
+      -- so github_team_repos is a PREFIX of the real grant. A truncated team
+      -- forces its members to fail open — a partial list would hide repos the
+      -- person really can see, which is worse than not filtering at all.
+      truncated INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (org, slug)
+    );
+
+    -- A team's grant, already intersected with the managed-repo set. The repo
+    -- column holds the owner/repo full name.
+    CREATE TABLE IF NOT EXISTS github_team_repos (
+      org TEXT NOT NULL,
+      team_slug TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      PRIMARY KEY (org, team_slug, repo)
+    );
+
+    -- Membership we have LEARNED, not enumerated: one row per (team, login)
+    -- discovered while resolving that login. Absence means "unknown", never
+    -- "not a member" — which is why every read path fails open.
+    CREATE TABLE IF NOT EXISTS github_team_members (
+      org TEXT NOT NULL,
+      team_slug TEXT NOT NULL,
+      login TEXT NOT NULL,
+      PRIMARY KEY (org, team_slug, login)
+    );
+    -- reposForLogin joins membership → team_repos on this column.
+    CREATE INDEX IF NOT EXISTS idx_github_team_members_login
+      ON github_team_members(login);
+
+    -- Per-login freshness + outcome, so a resolution that failed or blew its
+    -- request budget is remembered for the TTL rather than retried on every
+    -- dashboard poll. status is one of: ok | empty | truncated | error | disabled.
+    CREATE TABLE IF NOT EXISTS github_visibility_sync (
+      login TEXT PRIMARY KEY,
+      synced_at TEXT NOT NULL,
+      status TEXT NOT NULL,
+      -- Free-text detail for the error/truncated cases (admin surface only).
+      detail TEXT
+    );
   `);
 
   // Actor logging (issue #205): who triggered a run and how. Additive on both

@@ -263,6 +263,12 @@ export interface LastLightConfig {
    */
   feedback: FeedbackConfig;
   /**
+   * GitHub team-based per-repo dashboard visibility (issue #169). Operator-only
+   * for the same reason as `feedback`: it governs API spend and who sees what,
+   * neither of which a target repo has any business tuning.
+   */
+  teamVisibility: TeamVisibilityConfig;
+  /**
    * Operator bounds on the per-repository config layer (issue #180) — what a
    * managed repo's committed `.lastlight/lastlight.yml` is allowed to override
    * for runs against that repo. Always normalized (never undefined) and inert
@@ -379,6 +385,39 @@ export interface FeedbackConfig {
   retentionDays: number;
   /** Export each signal as an OTel span + metric (no-op when telemetry is off). */
   otel: boolean;
+}
+
+/**
+ * GitHub team-based per-repo visibility in the admin dashboard (issue #169).
+ *
+ * **UI declutter, not access control.** Every list endpoint keeps returning
+ * global data; this only tells the dashboard which repos to show a given person
+ * by default. That is what makes the whole design safe to bound so aggressively
+ * — every budget below, when blown, simply shows more than strictly necessary.
+ *
+ * **Off by default**, because it needs the GitHub App's org `Members: read`
+ * permission, which existing installations have not consented to. Turning it on
+ * without that consent is harmless (resolution errors → everyone sees
+ * everything, as today) but pointless, so it must be asked for.
+ */
+export interface TeamVisibilityConfig {
+  /** Master switch. Off ⇒ `/me/repos` always returns the fail-open sentinel. */
+  enabled: boolean;
+  /** How long a resolved (or failed) answer is reused before re-resolving. */
+  ttlMinutes: number;
+  /**
+   * Cap on teams considered per login. Somebody in more teams than this fails
+   * open rather than costing a page-per-team walk on every cache miss.
+   */
+  maxTeamsPerUser: number;
+  /**
+   * Cap on 100-repo pages fetched per team. A team granted more repos than this
+   * is marked truncated, and its members fail open — a partial repo list would
+   * HIDE repos they can really see, which is worse than not filtering.
+   */
+  maxPagesPerTeam: number;
+  /** Absolute ceiling on GraphQL requests one resolution may issue. */
+  maxRequestsPerResolve: number;
 }
 
 let currentConfig: LastLightConfig | undefined;
@@ -696,6 +735,7 @@ export function loadConfig(): LastLightConfig {
     concurrency: fileCfg.concurrency,
     cleanup: fileCfg.cleanup,
     feedback: fileCfg.feedback,
+    teamVisibility: fileCfg.teamVisibility,
     repoConfig: fileCfg.repoConfig,
   };
   setRuntimeConfig(config);
@@ -730,6 +770,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   cleanup: { sandbox: SandboxCleanupConfig };
   feedback: FeedbackConfig;
+  teamVisibility: TeamVisibilityConfig;
   repoConfig: RepoConfigPolicy;
 } {
   const managedRepos = stringArray(raw.managedRepos, "managedRepos");
@@ -898,6 +939,21 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     otel: feedbackRaw.otel !== false,
   };
 
+  // Team-based dashboard visibility (issue #169). Lenient like every block
+  // above. `enabled` defaults to FALSE: it needs the App's org `Members: read`
+  // permission, so it must be asked for after that re-consent. The budgets are
+  // the scaling contract — they bound what ONE cache miss can cost in an org
+  // with thousands of repos and hundreds of teams, and blowing any of them
+  // fails open rather than showing a partial list.
+  const teamVisibilityRaw = isPlainObject(raw.teamVisibility) ? raw.teamVisibility : {};
+  const teamVisibility: TeamVisibilityConfig = {
+    enabled: teamVisibilityRaw.enabled === true,
+    ttlMinutes: positiveNumber(teamVisibilityRaw.ttlMinutes) ?? 60,
+    maxTeamsPerUser: positiveNumber(teamVisibilityRaw.maxTeamsPerUser) ?? 50,
+    maxPagesPerTeam: positiveNumber(teamVisibilityRaw.maxPagesPerTeam) ?? 20,
+    maxRequestsPerResolve: positiveNumber(teamVisibilityRaw.maxRequestsPerResolve) ?? 60,
+  };
+
   // Cron participation (issue #180). Lenient like the blocks above — a
   // mistyped `crons.disable` degrades to "nothing listed" rather than taking
   // the harness down at boot, because the same block is also read out of an
@@ -957,6 +1013,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     concurrency: { maxWorkflows, maxQueueWaitMs },
     cleanup: { sandbox: sandboxCleanup },
     feedback,
+    teamVisibility,
     repoConfig,
   };
 }

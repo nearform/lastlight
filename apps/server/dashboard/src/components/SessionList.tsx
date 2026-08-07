@@ -1,5 +1,6 @@
 import clsx from "clsx";
 import type { Session } from "../api";
+import { useVisibleRepos, isRepoVisible } from "../hooks/useVisibleRepos";
 import { getSessionType } from "../sessionTypes";
 import { ProviderIcon } from "./ProviderIcon";
 
@@ -75,7 +76,12 @@ export function SessionList({
   totalAvailable,
   showLiveOnly,
 }: Props) {
-  const displayed = showLiveOnly ? sessions.filter((s) => s.live) : sessions;
+  const { allowed: allowedRepos } = useVisibleRepos();
+  // Per-repo visibility (issue #169). `allowed === null` is the fail-open
+  // sentinel (no filter), and a session with no resolvable repo — every chat
+  // thread — always stays.
+  const visible = sessions.filter((s) => isRepoVisible(s.repo, allowedRepos));
+  const displayed = showLiveOnly ? visible.filter((s) => s.live) : visible;
 
   return (
     <aside className="w-80 shrink-0 border-r border-base-300 bg-base-200/40 overflow-y-auto flex flex-col">
@@ -147,7 +153,7 @@ export function SessionList({
       </ul>
       <div className="sticky bottom-0 border-t border-base-300 bg-base-200 p-2 flex items-center justify-between text-2xs">
         <span className="text-base-content/50 font-mono">
-          {sessions.length} / {totalAvailable}
+          {visible.length} / {totalAvailable}
         </span>
         <button className="btn btn-xs btn-ghost h-6 min-h-0" onClick={onLoadMore}>
           load more

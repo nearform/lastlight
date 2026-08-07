@@ -446,6 +446,149 @@ export class GitHubClient {
     return out;
   }
 
+  /**
+   * Is this the "that login isn't an organization" GraphQL error?
+   *
+   * `organization(login:)` against a personal account answers
+   * `{ data: { organization: null }, errors: [{ type: "NOT_FOUND", path: ["organization"] }] }`,
+   * and Octokit throws on any `errors` array. Distinguishing it from a real
+   * failure (permission, rate limit, network) is what keeps a personal-account
+   * owner in `managedRepos` from being treated as a broken resolution.
+   */
+  private static isOrganizationNotFoundError(err: unknown): boolean {
+    const errors = (err as { errors?: Array<{ type?: string; path?: unknown[] }> })?.errors;
+    if (!Array.isArray(errors) || errors.length === 0) return false;
+    return errors.every((e) => e?.type === "NOT_FOUND" && e?.path?.[0] === "organization");
+  }
+
+  /**
+   * The teams in `org` that `login` belongs to (issue #169).
+   *
+   * GraphQL rather than REST, for one reason: `Organization.teams` takes a
+   * `userLogins` filter, so GitHub does the membership intersection server-side
+   * and we pay one request for a person in four teams. The REST shapes
+   * available to an App — enumerate every team, then a membership probe per
+   * team — cost O(teams in the org), which is hundreds of requests per login in
+   * exactly the orgs this feature is for.
+   *
+   * Requires the App's org **Members: read** permission. A missing permission
+   * surfaces as a thrown GraphQL error, which the caller turns into a fail-open
+   * `error` status rather than an empty (and therefore filtering) answer.
+   */
+  async listUserTeams(
+    org: string,
+    login: string,
+    opts: { maxPages?: number } = {},
+  ): Promise<{ teams: Array<{ slug: string; name: string | null }>; requests: number }> {
+    const kit = await this.kit(org);
+    const maxPages = opts.maxPages ?? 5;
+    const teams: Array<{ slug: string; name: string | null }> = [];
+    let after: string | null = null;
+    let requests = 0;
+    for (let page = 0; page < maxPages; page++) {
+      let res: {
+        organization: {
+          teams: {
+            pageInfo: { hasNextPage: boolean; endCursor: string | null };
+            nodes: Array<{ slug: string; name: string | null } | null> | null;
+          };
+        } | null;
+      };
+      try {
+        res = await kit.graphql(
+          `query($org: String!, $login: String!, $after: String) {
+             organization(login: $org) {
+               teams(first: 100, userLogins: [$login], after: $after) {
+                 pageInfo { hasNextPage endCursor }
+                 nodes { slug name }
+               }
+             }
+           }`,
+          { org, login, after },
+        );
+      } catch (err: unknown) {
+        // A PERSONAL account owner is not an error, it is an answer: "no teams
+        // here". GraphQL reports it as `organization: null` PLUS a NOT_FOUND
+        // entry in `errors`, and Octokit throws whenever `errors` is present —
+        // so this cannot be detected by checking for a null organization, which
+        // is never reached. Left to the caller it would log a warning per
+        // personal-account owner on every single resolution, and (worse) mark
+        // the whole pass as failed.
+        if (GitHubClient.isOrganizationNotFoundError(err)) {
+          return { teams: [], requests: requests + 1 };
+        }
+        throw err;
+      }
+      requests++;
+      const connection = res.organization?.teams;
+      if (!connection) break;
+      for (const node of connection.nodes ?? []) {
+        if (node?.slug) teams.push({ slug: node.slug, name: node.name ?? null });
+      }
+      if (!connection.pageInfo.hasNextPage) break;
+      after = connection.pageInfo.endCursor;
+      if (!after) break;
+    }
+    return { teams, requests };
+  }
+
+  /**
+   * The repositories a team can reach, as `owner/repo` full names.
+   *
+   * **Bounded by construction.** A team in a large org can be granted thousands
+   * of repos, so this stops at `maxPages` and reports `truncated: true` rather
+   * than paging until the rate limit runs out. `isDone` is the cheap early
+   * exit the caller uses to stop the moment it has seen every repo it cares
+   * about (the managed set), which is the common case.
+   */
+  async listTeamRepos(
+    org: string,
+    slug: string,
+    opts: { maxPages?: number; isDone?: (repos: string[]) => boolean } = {},
+  ): Promise<{ repos: string[]; truncated: boolean; requests: number }> {
+    const kit = await this.kit(org);
+    const maxPages = opts.maxPages ?? 20;
+    const repos: string[] = [];
+    let after: string | null = null;
+    let requests = 0;
+    for (let page = 0; page < maxPages; page++) {
+      const res: {
+        organization: {
+          team: {
+            repositories: {
+              pageInfo: { hasNextPage: boolean; endCursor: string | null };
+              nodes: Array<{ nameWithOwner: string } | null> | null;
+            };
+          } | null;
+        } | null;
+      } = await kit.graphql(
+        `query($org: String!, $slug: String!, $after: String) {
+           organization(login: $org) {
+             team(slug: $slug) {
+               repositories(first: 100, after: $after) {
+                 pageInfo { hasNextPage endCursor }
+                 nodes { nameWithOwner }
+               }
+             }
+           }
+         }`,
+        { org, slug, after },
+      );
+      requests++;
+      const connection = res.organization?.team?.repositories;
+      if (!connection) break;
+      for (const node of connection.nodes ?? []) {
+        if (node?.nameWithOwner) repos.push(node.nameWithOwner);
+      }
+      if (opts.isDone?.(repos)) return { repos, truncated: false, requests };
+      if (!connection.pageInfo.hasNextPage) return { repos, truncated: false, requests };
+      after = connection.pageInfo.endCursor;
+      if (!after) return { repos, truncated: false, requests };
+    }
+    // Fell out of the loop with more pages waiting — the grant is partial.
+    return { repos, truncated: after !== null, requests };
+  }
+
   /** Memoized App-authed Octokit for a known installation id. */
   private octokitForInstallation(installationId: string): Octokit {
     const config = this.appConfig;

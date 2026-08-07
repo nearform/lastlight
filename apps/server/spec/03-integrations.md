@@ -55,6 +55,7 @@ session management, allowlist enforcement, and message chunking.
 | **Auth** | HMAC-SHA256 over the request body, header `X-Hub-Signature-256`. Timing-safe compare. Runs *before* JSON parse. (`src/connectors/github-webhook.ts:146–155`) |
 | **Allowlist** | Repo allowlist check via `isManagedRepo()`. Events from non-managed repos short-circuit. The effective list is the overlay's `managedRepos` when non-empty; when empty it falls back to the repos the **GitHub App installation** can access (discovered at boot, kept live by installation webhooks — see below). So an org install that limits the App to a subset need not duplicate the list in config. |
 | **Installation sync** | `installation` and `installation_repositories` events are intercepted at the top of the handler (before the ignored-action + repo filters, since they carry no `payload.repository`) and applied to the in-memory installation-repo cache, **scoped to `payload.installation.id`**: `created` / `unsuspend` set that installation's set, `deleted` / `suspend` remove it, `installation_repositories` added/removed patch it. A **suspended** installation still exists and keeps its id but 403s every mint, so it is out of service exactly like an uninstall — the only difference is that the directory keeps it visible, flagged, instead of forgetting it. They produce no envelope (return `installation-sync`, 200). Every delivery — these included — also records its `payload.installation` in the installation directory (below). See `src/managed-repos.ts`. |
+| **Team-visibility sync** | `team`, `membership` and `organization` events are intercepted in the same place, and for the same reason: they are org-wide, carry no `payload.repository`, and several of their actions (`deleted`, `edited`) sit in `IGNORED_ACTIONS`. They **invalidate** the dashboard's per-repo visibility cache (issue #169) rather than re-derive it — `membership` and `organization` member changes drop that one login's answer, a `team` change drops the team and every member's answer with it. Deleting is the whole response because the cache is filled on demand per logged-in user; re-deriving here would put an unbounded org walk on the delivery path. They produce no envelope (return `team-visibility-sync`, 200). See `src/state/team-store.ts` and `10-state.md`. |
 | **Normalize** | `GitHubWebhookConnector.normalize()` (`line 157–260`). Runs *after* signature + allowlist. Returns `null` for ignored actions (does not produce an envelope). |
 | **Event types** | `issue.opened`, `issue.reopened`, `issue.closed`, `pr.opened`, `pr.synchronize`, `pr.reopened`, `pr.closed`, `pr.merged`, `pr.checks_failed`, `pr.checks_passed`, `pr.checks_settled`, `pr.labeled`, `pr.review_requested`, `comment.created`, `pr_review.submitted`, `pr_review_comment.created` |
 | **Review signals** | Three `pull_request` actions carry the `review.trigger` machinery. `ready_for_review` normalizes to **`pr.opened` semantics** — a draft becoming ready is the moment the PR first asks to be looked at, and it is the event that un-defers a review `review.skipDraft` held back. `labeled` normalizes to `pr.labeled` carrying `addedLabel`, so `review.requestLabel` works; every other label is hard-ignored by the router, so the widening costs a `normalize()` call rather than a dispatch. `review_requested` normalizes to `pr.review_requested` carrying `requested_reviewer.login` (or `team/<slug>`) — **opportunistic only**: GitHub App bot users are not selectable in the reviewer picker, so `on-request` mode must not depend on it, and the label + comment + Re-run paths are the real mechanism. All three inherit the self-review guard: a PR the bot authored is dropped. |
@@ -224,6 +225,22 @@ Grant Actions: read for full CI output.
 
 The notice is suppressed when none of the failed checks is a GitHub Actions job (a CircleCI-only repo has no Actions logs to be missing, so blaming the permission there would be wrong). The same permission backs agentic-pi's `github_list_workflow_runs` / `github_list_workflow_run_jobs` / `github_get_job_logs` tools, which return `{ ok: false, reason }` rather than throwing when it is absent.
 
+### App permission: organization `Members: read` (optional, opt-in)
+
+Required by, and only by, **per-repo dashboard visibility** (`teamVisibility`,
+issue #169). With it, `GitHubClient.listUserTeams` can run one
+`Organization.teams(userLogins:)` GraphQL query to learn which teams a
+logged-in admin belongs to, and `listTeamRepos` can read those teams' repo
+grants — so the dashboard shows that person their repos rather than the org's.
+
+Deliberately optional and **off in config**: an existing installation that never
+re-consents keeps today's behaviour exactly, because a denied query resolves to
+the fail-open sentinel and nothing is filtered. Turning `teamVisibility.enabled`
+on without the permission is harmless, just pointless. The matching webhook
+subscriptions (`team`, `membership`, `organization`) are what keep the cache
+current; without them the cache still expires on its TTL and
+`POST /admin/api/me/repos/resync` still works.
+
 ### Harness-side writes (`GitHubClient`)
 
 The three settle-aware check queries — `getChecksConclusion`,
@@ -369,6 +386,7 @@ and cron dispatches of a `pr-fix`-shaped workflow identical by construction.
 | **Event types** | n/a |
 | **Resume** | When an operator approves a paused workflow, `/admin/approvals/:id/respond` calls `config.resumeWorkflow(workflowRun, "admin")` — the same callback the GitHub `@last-light approve` comment and Slack `/approve` slash command use. (`src/admin/routes.ts:813–831`, callback wired at `src/index.ts:453–476`) |
 | **Cron management** | Schedule overrides and enable/disable land in `cron_overrides`; the scheduler applies them on next tick without a process restart. **Disable re-registers rather than unregisters** — the job keeps ticking with `_cronGloballyEnabled: false` so a repo that opted into that cron from its `.lastlight/` is still honoured; usually the fan-out resolves to nobody and the tick costs nothing. "Run now" carries `_cronName` (so a repo's opt-out is respected however the tick was started) but deliberately *not* `_cronGloballyEnabled`, so the button still works on a globally-disabled cron. |
+| **Per-repo visibility** | `GET /admin/api/me/repos` → `{ repos, synced, reason, teams, syncedAt }` — the managed repos this session's GitHub login should see, resolved from their org team grants (issue #169) and cached in SQLite. `repos: null` is the fail-open sentinel meaning **no filter**, returned for a password/Slack session, `allowedOrg: "*"`, `teamVisibility.enabled: false`, an over-budget resolution, or any GitHub error. `POST /admin/api/me/repos/resync` forces a re-resolution **for the caller only** — there is deliberately no `?login=` override, because the response names the org teams a person belongs to (secret ones included) and an authenticated dashboard session is not the same standing as "entitled to enumerate org membership". The SPA applies the answer as `?repos=` on the run lists and as a local filter on sessions, with a header toggle to turn it off — **the list endpoints still return global data when the param is omitted**, so this is declutter, not access control. |
 | **PR retry** | `POST /admin/api/prs/:owner/:repo/:number/retry`, body `{ "reason"?: string }` — the third of the three surfaces that re-arm a pull request the harness escalated (see [Router](/spec/05-router#un-sticking-an-escalated-pr--the-three-retry-surfaces)). It is the only surface with no event of its own, so it resolves a `PrState` with `intervention: { via: "api", by: <session actor>, note: reason }`, crosses `applyPrDispatchGate` **itself**, and dispatches on `run` — the route that resolves is the route that gates. The workflow retried is the one that last worked the PR (`latestForTrigger` over `PR_FIX_SHAPED_WORKFLOWS`), else the configured `github.pr_fix` route. |
 
 The retry endpoint's answers, in full: **200** on dispatch (`dispatched: true`)
@@ -420,6 +438,7 @@ renders exactly those three outcomes (see `packages/cli/CLAUDE.md`).
 | Cron job loader | `src/cron/jobs.ts` |
 | Cron fan-out | `src/cron/fanout.ts` |
 | Admin routes (including approval/cron mutations) | `src/admin/routes.ts` |
+| Per-repo dashboard visibility resolver (issue #169) | `src/engine/github/team-visibility.ts` |
 
 ## Rebuild notes
 
