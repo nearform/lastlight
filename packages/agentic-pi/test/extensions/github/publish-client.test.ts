@@ -112,6 +112,11 @@ describe("publishSignedCommit", () => {
           }),
         /Expected branch to point to/,
       );
+      // A GraphQL-level rejection is terminal, not transient: resending the same
+      // mutation cannot change GitHub's answer. This is the assertion that fails
+      // if the terminal path regresses — the rejection above passes either way,
+      // since withRetry still throws lastError once its budget is exhausted.
+      assert.equal(fake.bodies.length, 1);
     } finally {
       await fake.close();
     }

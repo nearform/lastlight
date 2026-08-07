@@ -158,6 +158,19 @@ mutation ($input: CreateCommitOnBranchInput!) {
   }
 }`;
 
+/**
+ * `GraphqlResponseError` (thrown by `ok.graphql()`) carries a top-level
+ * `errors` array and no `.status` — the opposite shape from every REST error
+ * `withRetry`'s guard (`:204`) already knows how to read. Duck-typed rather
+ * than imported: `@octokit/graphql`'s error class is only a transitive
+ * dependency here, and importing it directly would be fragile.
+ */
+function isGraphqlError(err: unknown): boolean {
+  return (
+    typeof err === "object" && err !== null && Array.isArray((err as { errors?: unknown }).errors)
+  );
+}
+
 export interface GitHubClientOptions {
   /**
    * Override the GitHub REST API base URL (Octokit's `baseUrl`). Defaults to
@@ -389,23 +402,37 @@ export class GitHubClient {
   }): Promise<SignedCommit> {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const data = await ok.graphql<{ createCommitOnBranch: { commit: SignedCommit } }>(
-        CREATE_COMMIT_ON_BRANCH,
-        {
-          input: {
-            branch: {
-              repositoryNameWithOwner: `${opts.owner}/${opts.repo}`,
-              branchName: opts.branch,
+      try {
+        const data = await ok.graphql<{ createCommitOnBranch: { commit: SignedCommit } }>(
+          CREATE_COMMIT_ON_BRANCH,
+          {
+            input: {
+              branch: {
+                repositoryNameWithOwner: `${opts.owner}/${opts.repo}`,
+                branchName: opts.branch,
+              },
+              message: opts.body
+                ? { headline: opts.headline, body: opts.body }
+                : { headline: opts.headline },
+              expectedHeadOid: opts.expectedHeadOid,
+              fileChanges: { additions: opts.additions, deletions: opts.deletions },
             },
-            message: opts.body
-              ? { headline: opts.headline, body: opts.body }
-              : { headline: opts.headline },
-            expectedHeadOid: opts.expectedHeadOid,
-            fileChanges: { additions: opts.additions, deletions: opts.deletions },
           },
-        },
-      );
-      return data.createCommitOnBranch.commit;
+        );
+        return data.createCommitOnBranch.commit;
+      } catch (err) {
+        // A GraphQL-level rejection (schema error, validation error, a stale
+        // expectedHeadOid) can never succeed by resending the same mutation, and
+        // GraphqlResponseError carries no `.status` for withRetry's guard (:204) to
+        // read — without this it retries indistinguishably from a flaky transport
+        // 5xx, burning the full backoff before still failing. Tag a synthetic 4xx so
+        // that guard treats it as terminal. GitHub never sent this status; it exists
+        // only to route into the existing non-retryable path.
+        if (isGraphqlError(err)) {
+          (err as MaybeHttpError).status = 422;
+        }
+        throw err;
+      }
     });
   }
 
