@@ -199,6 +199,43 @@ describe("github_publish", () => {
     }
   });
 
+  test("include narrows what reaches GitHub to the listed pathspecs", async () => {
+    // End-to-end proof that the schema parameter is wired through to the diff,
+    // not just that diffWorktreeAgainst can narrow. The five artifact phases
+    // pass `include: [".lastlight"]` so they publish exactly what their old
+    // `git add .lastlight/` staged — a stray file the phase's test run left in
+    // the checkout must not ride along into the user's branch.
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      execFileSync("mkdir", ["-p", join(r.dir, ".lastlight")]);
+      writeFileSync(join(r.dir, ".lastlight", "verdict.md"), "APPROVED\n");
+      writeFileSync(join(r.dir, "coverage.xml"), "stray\n");
+      writeFileSync(join(r.dir, "a.txt"), "touched by the test run\n");
+
+      const out = await callPublish(fake.url, {
+        owner: "o",
+        repo: "r",
+        message: "review: verdict",
+        path: r.dir,
+        include: [".lastlight"],
+      });
+      assert.equal(out.published, true);
+      assert.deepEqual(out.added, [".lastlight/verdict.md"]);
+      assert.deepEqual(out.modified, []);
+
+      const additions = fake.mutations[0].variables.input.fileChanges.additions;
+      assert.deepEqual(
+        additions.map((a: { path: string }) => a.path),
+        [".lastlight/verdict.md"],
+        "only the included pathspec may reach the signed-commit mutation",
+      );
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
   test("reports a no-op instead of failing when nothing changed", async () => {
     const r = repo();
     const fake = await fakeGitHub(r.base);

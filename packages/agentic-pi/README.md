@@ -94,7 +94,15 @@ to GitHub's GraphQL `createCommitOnBranch` mutation, which builds and signs
 the commit server-side under the App's bot identity. No signing key is held
 anywhere.
 
-Four things worth knowing:
+Five things worth knowing:
+
+- **The change set is scopeable.** By default it is the whole working tree
+  (minus anything `.gitignore`d, since it stages with `git add -A`). `include`
+  restricts it to the given pathspecs — everything else stays at its base state
+  and so produces no diff at all — and `exclude` subtracts from whatever is
+  left, so the two compose. A caller that writes artifacts into the checkout
+  alongside the change under review wants `include`; one that writes them into
+  an otherwise-publishable tree wants `exclude`.
 
 - **It refuses what it cannot express, atomically, before any remote write.**
   `FileAddition` carries a path and base64 contents, not a file mode, so a

@@ -19,7 +19,7 @@ the typecheck command and the tests covering the fixed files.
 AFTER REVIEW:
 1. APPEND to {{issueDir}}/reviewer-verdict.md under heading "## Re-review after Fix Cycle {{fixCycle}}" (preserve the original verdict above). The new section MUST itself contain a "VERDICT: APPROVED" or "VERDICT: REQUEST_CHANGES" line.
 2. Update status.md with reviewer_status: APPROVED or REQUEST_CHANGES
-{{#if !externalizeArtifacts}}3. `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "review: re-review after fix cycle {{fixCycle}} for #{{issueNumber}}" }` — it commits the working tree as one signed commit.{{/if}}{{#if externalizeArtifacts}}3. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
+{{#if !externalizeArtifacts}}3. `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "review: re-review after fix cycle {{fixCycle}} for #{{issueNumber}}", include: [".lastlight"] }` — one signed commit of `.lastlight/` only, so nothing your test run left in the checkout rides along.{{/if}}{{#if externalizeArtifacts}}3. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
 
 OUTPUT FORMAT — your stdout MUST start with one of these two lines, EXACTLY, on its own line, with no leading whitespace:
 

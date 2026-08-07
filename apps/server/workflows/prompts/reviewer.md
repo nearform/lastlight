@@ -39,7 +39,7 @@ AFTER REVIEW:
    (paste actual output)
 
 2. Update status.md with reviewer_status: APPROVED or REQUEST_CHANGES (matching the verdict)
-{{#if !externalizeArtifacts}}3. `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "review: verdict for #{{issueNumber}}" }` — it commits the working tree as one signed commit.{{/if}}{{#if externalizeArtifacts}}3. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
+{{#if !externalizeArtifacts}}3. `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "review: verdict for #{{issueNumber}}", include: [".lastlight"] }` — one signed commit of `.lastlight/` only, so nothing your test run left in the checkout rides along.{{/if}}{{#if externalizeArtifacts}}3. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
 
 OUTPUT FORMAT — after you have written the files above, your LAST action MUST be
 a final text message (NOT a tool call). Do not end your turn on a file write or

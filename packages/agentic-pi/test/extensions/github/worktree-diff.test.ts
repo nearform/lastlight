@@ -295,13 +295,103 @@ describe("diffWorktreeAgainst", () => {
       mkdirSync(join(r.dir, ".lastlight"));
       writeFileSync(join(r.dir, ".lastlight", "plan.md"), "p\n");
       writeFileSync(join(r.dir, "src.txt"), "s\n");
-      const cs = diffWorktreeAgainst(r.dir, r.base, [".lastlight"]);
+      const cs = diffWorktreeAgainst(r.dir, r.base, { exclude: [".lastlight"] });
       assert.deepEqual(
         cs.additions.map((a) => a.path),
         ["src.txt"],
       );
       // The real index must be untouched — the agent may still be working.
       assert.equal(r.git("status", "--porcelain", "--untracked-files=all").includes("A  "), false);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("include narrows the diff to the listed pathspecs", () => {
+    // The artifact-writing build phases (reviewer, architect, guardrails, …)
+    // used to run `git add .lastlight/`, which committed that directory and
+    // NOTHING else. Publishing the whole working tree would sweep up whatever
+    // the phase's test run happened to leave behind — a non-gitignored
+    // coverage report or updated snapshot — into someone's PR branch.
+    const r = repo();
+    try {
+      mkdirSync(join(r.dir, ".lastlight"));
+      writeFileSync(join(r.dir, ".lastlight", "plan.md"), "p\n");
+      writeFileSync(join(r.dir, "coverage.xml"), "stray\n"); // untracked scratch
+      writeFileSync(join(r.dir, "keep.txt"), "modified\n"); // tracked, modified
+
+      const cs = diffWorktreeAgainst(r.dir, r.base, { include: [".lastlight"] });
+      assert.deepEqual(
+        cs.additions.map((a) => a.path),
+        [".lastlight/plan.md"],
+      );
+      assert.deepEqual(cs.deletions, []);
+      assert.deepEqual(cs.unsupported, []);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("include reports a deletion inside an included path", () => {
+    // Narrowing must not degrade to add-only: a file the phase removed from
+    // .lastlight/ has to reach GitHub as a deletion, exactly as `git add -A --
+    // .lastlight` would have staged it.
+    const r = repo();
+    try {
+      mkdirSync(join(r.dir, ".lastlight"));
+      writeFileSync(join(r.dir, ".lastlight", "stale.md"), "old\n");
+      r.git("add", "-A");
+      r.git("commit", "-qm", "artifact");
+      const base = r.git("rev-parse", "HEAD").trim();
+
+      rmSync(join(r.dir, ".lastlight", "stale.md"));
+      writeFileSync(join(r.dir, ".lastlight", "fresh.md"), "new\n");
+      rmSync(join(r.dir, "keep.txt")); // deleted OUTSIDE the include — must not surface
+
+      const cs = diffWorktreeAgainst(r.dir, base, { include: [".lastlight"] });
+      assert.deepEqual(cs.deletions, [{ path: ".lastlight/stale.md" }]);
+      assert.deepEqual(
+        cs.additions.map((a) => a.path),
+        [".lastlight/fresh.md"],
+      );
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("include and exclude compose — include narrows first, exclude subtracts", () => {
+    const r = repo();
+    try {
+      mkdirSync(join(r.dir, ".lastlight"));
+      mkdirSync(join(r.dir, ".lastlight", "tmp"));
+      writeFileSync(join(r.dir, ".lastlight", "plan.md"), "p\n");
+      writeFileSync(join(r.dir, ".lastlight", "tmp", "scratch.md"), "s\n");
+      writeFileSync(join(r.dir, "outside.txt"), "o\n");
+
+      const cs = diffWorktreeAgainst(r.dir, r.base, {
+        include: [".lastlight"],
+        exclude: [".lastlight/tmp"],
+      });
+      assert.deepEqual(
+        cs.additions.map((a) => a.path),
+        [".lastlight/plan.md"],
+      );
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("an empty include list publishes nothing — it never widens to the whole tree", () => {
+    // `git add -A --` with no pathspec at all exits 0 and stages EVERYTHING
+    // (verified against git directly), so an empty list must short-circuit
+    // rather than reach git. Failing closed here turns a caller bug into
+    // `published: false`, which the prompts already tell the agent to flag,
+    // instead of silently publishing the whole working tree.
+    const r = repo();
+    try {
+      writeFileSync(join(r.dir, "stray.txt"), "x\n");
+      const cs = diffWorktreeAgainst(r.dir, r.base, { include: [] });
+      assert.deepEqual(cs, { additions: [], deletions: [], unsupported: [] });
     } finally {
       r.cleanup();
     }

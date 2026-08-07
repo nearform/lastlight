@@ -34,6 +34,6 @@ Do NOT post a comment with the PR link — the harness adds it to the status
 checklist on the issue automatically. Just create the PR.
 
 Update status.md: current_phase = complete, add pr_number.
-{{#if !externalizeArtifacts}}Then `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "status: PR created for #{{issueNumber}}" }` — it commits the working tree as one signed commit.{{/if}}{{#if externalizeArtifacts}}Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
+{{#if !externalizeArtifacts}}Then `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "status: PR created for #{{issueNumber}}", include: [".lastlight"] }` — one signed commit of `.lastlight/` only, so nothing else in the checkout rides along.{{/if}}{{#if externalizeArtifacts}}Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
 
 OUTPUT: The PR number and URL (so the harness can link the PR from the checklist).

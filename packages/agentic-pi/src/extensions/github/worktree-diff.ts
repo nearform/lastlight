@@ -117,24 +117,49 @@ function* records(
   }
 }
 
+export interface WorktreeDiffOptions {
+  /**
+   * Git pathspecs to leave OUT of the change set (e.g. `.lastlight`) — build
+   * artifacts a phase writes into the checkout but must not commit. Mirrors the
+   * `git reset -q -- .lastlight` the prompts used to run by hand.
+   */
+  exclude?: string[];
+  /**
+   * Git pathspecs to restrict the change set TO. When given, everything else
+   * stays at its base state and so produces no diff — mirroring the
+   * `git add .lastlight/` the artifact-writing phases used to run, which
+   * committed that directory and nothing else.
+   */
+  include?: string[];
+}
+
 /**
  * Diff the working tree against `baseOid` and split the result into what the
  * signed publish path can send and what it must refuse.
  *
- * `exclude` takes git pathspecs (e.g. `.lastlight`) for build artifacts a phase
- * writes into the checkout but must not commit — mirroring the
- * `git reset -q -- .lastlight` the prompts used to run by hand.
+ * `include` narrows first and `exclude` subtracts from what is left, so the two
+ * compose. Both operate on the temporary index, which starts as a copy of the
+ * base tree — that is what makes a narrowed path a genuine no-diff rather than
+ * a deletion.
  */
 export function diffWorktreeAgainst(
   cwd: string,
   baseOid: string,
-  exclude: string[] = [],
+  opts: WorktreeDiffOptions = {},
 ): WorktreeChangeSet {
+  const { exclude = [], include } = opts;
+  // `git add -A --` with no pathspec at all exits 0 and stages EVERYTHING, so
+  // an empty `include` must never reach git: it would silently widen to the
+  // whole working tree, the exact regression `include` exists to prevent.
+  // Fail closed instead — the caller gets `published: false`.
+  const stagePaths = include ?? ["."];
   const scratch = mkdtempSync(join(tmpdir(), "agentic-pi-publish-"));
   const indexFile = join(scratch, "index");
   try {
     git(cwd, ["read-tree", baseOid], indexFile);
-    git(cwd, ["add", "-A", "--", "."], indexFile);
+    if (stagePaths.length > 0) {
+      git(cwd, ["add", "-A", "--", ...stagePaths], indexFile);
+    }
     for (const spec of exclude) {
       git(cwd, ["reset", "-q", baseOid, "--", spec], indexFile);
     }

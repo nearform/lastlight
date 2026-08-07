@@ -390,8 +390,14 @@ export function buildGitHubTools(
             description: 'Pathspecs to leave out of the commit, e.g. ".lastlight"',
           }),
         ),
+        include: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              'Pathspecs to restrict the commit to, e.g. ".lastlight". When given, nothing outside them is published, additions and deletions alike. Omit to publish the whole working tree.',
+          }),
+        ),
       }),
-      async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude }) => {
+      async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude, include }) => {
         const cwd = repoPath || process.cwd();
         const target = branch || currentBranch(cwd);
         const { tip, from } = await resolveDiffBase(
@@ -404,7 +410,10 @@ export function buildGitHubTools(
           base_branch,
         );
 
-        const changes = diffWorktreeAgainst(cwd, tip, exclude ?? []);
+        const changes = diffWorktreeAgainst(cwd, tip, {
+          ...(exclude && { exclude }),
+          ...(include && { include }),
+        });
         if (changes.unsupported.length > 0) {
           const listed = changes.unsupported.map((u) => `${u.path}: ${u.reason}`).join("; ");
           throw new Error(
