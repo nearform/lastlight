@@ -89,7 +89,8 @@ a branch blocks the pull request permanently — no token fixes that, because
 the token authenticates the *push* while a signature is a property of the
 *commit object*. `github_publish` diffs the working tree against the branch's
 current remote tip (local commits the agent already made are folded in — the
-published commit is the working tree as it stands) and hands the change set
+published commit is the working tree as it stands, or the part of it the caller
+scopes to; see `include`/`exclude` below) and hands the change set
 to GitHub's GraphQL `createCommitOnBranch` mutation, which builds and signs
 the commit server-side under the App's bot identity. No signing key is held
 anywhere.

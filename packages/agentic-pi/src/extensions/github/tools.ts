@@ -423,7 +423,13 @@ export function buildGitHubTools(
         if (changes.additions.length === 0 && changes.deletions.length === 0) {
           return {
             published: false,
-            reason: "nothing to publish — the working tree matches the branch",
+            // An empty `include` makes no path eligible, so the change set is
+            // empty however much the tree differs. Callers are told to trust
+            // this string, so it must not blame the tree for a caller error.
+            reason:
+              include?.length === 0
+                ? "nothing to publish — `include` was an empty list, so no path was eligible. The working tree may well differ from the branch. Pass the pathspecs you meant to publish, or omit `include` to publish the whole tree."
+                : "nothing to publish — the working tree matches the branch",
           };
         }
 

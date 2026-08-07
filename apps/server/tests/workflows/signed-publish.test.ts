@@ -16,14 +16,21 @@ const PROMPTS_DIR = join(import.meta.dirname, "../../workflows/prompts");
  * --no-edit`, and that is exactly the scratch working state the design permits.
  * What must never happen is a locally-built commit reaching the branch.
  *
- * This matches an INVOCATION: `git push` carrying an argument (`origin HEAD`,
- * `-u origin HEAD`). It deliberately does NOT match a bare mention inside
- * backticks — ``Do NOT use `git commit` / `git push`.`` — because every such
- * mention in these prompts is a prohibition, and those are the wording we want
- * to keep. `\s+` rather than a literal space so a hard-wrapped `git\npush
- * origin HEAD` cannot slip through the line breaks these files are full of.
+ * The discriminator is the CLOSING BACKTICK, not the presence of an argument:
+ * every `git push` mention we want to keep is written ``…`git push`.`` — the
+ * command name closed immediately by a backtick, inside a prohibition. So a
+ * `git push` followed by anything else at all — ` origin HEAD`, ` -u origin
+ * HEAD`, a space, or a line break with prose after it — is treated as an
+ * invocation and forbidden. `git -C <dir> push` is covered by the optional
+ * flag group.
+ *
+ * What this does NOT distinguish: an unbackticked prohibition written in prose
+ * ("never fall back to git push here") matches and would fail the guard. No
+ * such wording exists in the corpus, and quoting the command is the house
+ * style, so the false positive is theoretical — but it is a false positive,
+ * not a catch.
  */
-const FORBIDDEN_PUSH = /git\s+push\s+\S/;
+const FORBIDDEN_PUSH = /git(?:\s+-\S+(?:\s+\S+)?)*\s+push(?!`)/;
 
 /**
  * Prompts whose phase publishes the agent's work. Listed explicitly, because
@@ -91,6 +98,13 @@ describe("the artifact-commit branch publishes rather than pushes", () => {
       expect(block, `${file} no longer has a !externalizeArtifacts branch`).not.toBeNull();
       const body = block![1]!;
       expect(body, `${file}'s artifact branch does not publish`).toContain("github_publish");
+      // Without `include`, the publish widens to the whole working tree and
+      // sweeps whatever the phase's test run left in the checkout into the
+      // user's branch — the regression the include allowlist exists to fix.
+      // Dropping it passes every other assertion here, so pin it explicitly.
+      expect(body, `${file}'s artifact branch publishes more than .lastlight/`).toContain(
+        'include: [".lastlight"]',
+      );
       // No push verb at all — not the command, not the word. The branch is one
       // instruction long, so unlike the prose elsewhere in these files there is
       // no legitimate prohibition or aside here for this to false-positive on.

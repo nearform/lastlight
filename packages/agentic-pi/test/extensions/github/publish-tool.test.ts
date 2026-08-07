@@ -236,6 +236,32 @@ describe("github_publish", () => {
     }
   });
 
+  test("an empty include says so, rather than blaming an unchanged tree", async () => {
+    // Callers are told to trust this string — pr-fix.md routes `published:
+    // false` straight to `outcome=no-change`. Reporting "the working tree
+    // matches the branch" for what is really a caller error would have the
+    // agent record a real, unpublished change as nothing to do.
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "genuinely changed\n");
+      const out = await callPublish(fake.url, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        path: r.dir,
+        include: [],
+      });
+      assert.equal(out.published, false);
+      assert.match(out.reason, /`include` was an empty list/);
+      assert.doesNotMatch(out.reason, /working tree matches the branch/);
+      assert.equal(fake.mutations.length, 0);
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
   test("reports a no-op instead of failing when nothing changed", async () => {
     const r = repo();
     const fake = await fakeGitHub(r.base);

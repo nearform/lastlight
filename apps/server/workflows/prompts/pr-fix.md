@@ -41,7 +41,7 @@ promoted this run to a real repair attempt. Treat the failure as reproducible
 and look for the actual difference — a version, an ordering, a shared fixture, a
 race — rather than re-running the job and hoping. If you genuinely cannot make
 it green, `outcome=gave-up` with what you ruled out is the honest answer; do not
-push a speculative fix.
+publish a speculative fix.
 {{/if}}
 INSTRUCTIONS:
 1. Understand what the maintainer is asking for, and what the diagnosis says
@@ -74,6 +74,11 @@ AFTER FIXING:
    requires signed commits one unsigned commit anywhere in the branch blocks the
    PR permanently and cannot be cleared by a later run. Local commits you made
    while working are folded in automatically.
+   - A successful publish IS this phase's push: emit `outcome=pushed`. The
+     commit is on the branch and CI is running on it. You did not invoke
+     `git push` and were right not to — publishing through the tool is what
+     "pushed" means here, so do not downgrade the outcome because no `git push`
+     ran.
    - If it reports `published: false`, there was nothing to publish. Emit
      `outcome=no-change` and say so in your summary rather than looping.
    - If it refuses because a change needs a file mode it cannot set (a new
