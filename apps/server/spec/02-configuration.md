@@ -652,14 +652,32 @@ managed repos, one maintainer's single team covered 4, and the 4 it hid included
 `nearform/lastlight`, on which they hold `admin` via org ownership. Applied as a
 filter somebody switched on, the same narrowing is exactly what they asked for,
 and one click undoes it. So the toggle is never pre-applied, and the feature is
-never described to a user as visibility or access. It renders only when there
-are real team grants to narrow to.
+never described to a user as visibility or access.
+
+**The control renders whenever `enabled` is on — not only once grants
+resolve.** It used to appear only when there were real grants to narrow to,
+which hid it in precisely the state where somebody needs it: they have just
+created a team or granted it repos, and the answer they must invalidate is
+cached for `ttlMinutes`, behind a stale-while-revalidate read that serves the
+old value once more after expiry. `POST /me/repos/resync` and the SPA hook's
+`resync()` both existed; nothing in the UI ever called them, so the only route
+back was waiting out the TTL and reloading twice. The unresolved states now
+render explanatory and retryable, naming the `reason` (no teams, no GitHub
+identity, over budget, GitHub error) with the re-sync on the control itself.
+`teamVisibility.enabled: false` is the one state it is still not drawn in —
+and the one a re-sync provably cannot change, since `resync()` short-circuits
+on that flag before it reaches GitHub. The mapping from each `reason` to the
+rendered state is pinned in `tests/admin/dashboard-repo-scope.test.ts` against
+the server's own `VisibilityReason` union, so adding a reason without deciding
+how the UI answers it fails the build.
 
 The `enabled` flag is the **operator** switch, and needs a setup step: grant the
 GitHub App the organization **`Members: read`** permission, subscribe it to the
 `team` / `membership` / `organization` webhook events, and re-consent the App on
-each installation. Without that the resolver errors, the toggle never appears,
-and nothing changes for anyone. `repos: null` is the fail-open sentinel meaning
+each installation. Without that the resolver fails open and nothing is filtered
+for anyone — the control still appears (the operator asked for it) and says why
+it has nothing to offer, which is how an operator finds out the setup step is
+outstanding instead of seeing a feature that silently did nothing. `repos: null` is the fail-open sentinel meaning
 "no filter" — returned for a password/Slack login, an `allowedOrg: "*"`
 deployment, an over-budget resolution and any GitHub error. This is **not**
 access control: the server keeps returning global data on `/workflow-runs`,

@@ -1,5 +1,7 @@
 import clsx from "clsx";
-import { BookOpen, Clock, Filter, GitBranch, LogOut, Moon, Radio, Sun } from "lucide-react";
+import { useState } from "react";
+import { BookOpen, Clock, Filter, GitBranch, LogOut, Moon, Radio, RefreshCw, Sun } from "lucide-react";
+import type { MeRepos } from "../api";
 import type { StreamStatus } from "../hooks/useSessionStream";
 import { useTheme } from "../hooks/useTheme";
 import { useVisibleRepos } from "../hooks/useVisibleRepos";
@@ -26,6 +28,36 @@ const STATUS_LABEL: Record<StreamStatus, { text: string; color: string }> = {
   closed: { text: "offline", color: "bg-error" },
 };
 
+/**
+ * Why the filter has nothing to offer, in the words of the person who'd have to
+ * act on it. Keyed by the `reason` the `/me/repos` endpoint returns.
+ *
+ * `ok` is absent on purpose — it is not an unresolved state, and the type makes
+ * leaving it out a compile error if that ever changes. `disabled` is absent for
+ * the same reason: the control is not drawn at all when the feature is off.
+ */
+const UNRESOLVED_HINT: Record<Exclude<MeRepos["reason"], "ok" | "disabled">, string> = {
+  "no-teams": "You're in no GitHub team that owns a managed repo.",
+  "no-identity": "Team filtering needs a GitHub login — this session signed in another way.",
+  unavailable: "Your teams couldn't be looked up just now.",
+  "too-many-teams": "You're in too many teams to resolve within the configured budget.",
+  truncated: "A team's repo list was too large to read fully.",
+  budget: "Resolving your teams exceeded the configured request budget.",
+  error: "GitHub returned an error while resolving your teams.",
+};
+
+/**
+ * The hint for a reason the caller believes is unresolved. `ok` / `disabled`
+ * cannot reach here (the toggle branches on `degraded` and `offered` first),
+ * but the compiler can't prove that from a boolean, so they fall back rather
+ * than widening the map — which would cost the exhaustiveness check that makes
+ * a newly-added reason a build error instead of an `undefined` tooltip.
+ */
+function unresolvedHint(reason: MeRepos["reason"] | undefined): string {
+  if (!reason || reason === "ok" || reason === "disabled") return UNRESOLVED_HINT.unavailable;
+  return UNRESOLVED_HINT[reason];
+}
+
 const TIME_RANGES = [
   { key: "hour", label: "1h" },
   { key: "day", label: "24h" },
@@ -43,16 +75,43 @@ const TIME_RANGES = [
  * chose, narrowing to their teams' repos is exactly the decluttering they asked
  * for, and one click undoes it.
  *
- * Renders nothing unless the server resolved real team grants — for a
- * password/Slack login, a deployment with the feature off, or somebody in no
- * team there is nothing to narrow to, and a control that does nothing is worse
- * than no control.
+ * **Rendered whenever the operator enabled `teamVisibility`** — not only once
+ * grants resolved. When there is nothing to narrow to, it says so and offers a
+ * re-sync instead of disappearing: the common path into that state is somebody
+ * who just created a team or granted it repos, and the answer they need to
+ * invalidate is cached for an hour. Hiding the control hid the fix.
+ *
+ * The one state it is NOT drawn in is the feature being off, which is also the
+ * one state a re-sync provably cannot change — `resync()` short-circuits on
+ * `config.enabled` before it touches GitHub.
  */
 function RepoScopeToggle() {
-  const { scope, setScope, canScope, degraded, meta } = useVisibleRepos();
-  if (!canScope && !degraded) return null;
+  const { scope, setScope, offered, degraded, meta, resync } = useVisibleRepos();
+  const [resyncing, setResyncing] = useState(false);
+  if (!offered) return null;
+
   const count = meta?.repos?.length ?? 0;
   const on = scope === "mine";
+
+  // Nothing to filter to. The click re-asks the server rather than toggling a
+  // scope that would narrow nothing — the button IS the escape hatch.
+  if (degraded) {
+    return (
+      <button
+        onClick={() => {
+          setResyncing(true);
+          void resync().finally(() => setResyncing(false));
+        }}
+        disabled={resyncing}
+        className="btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs btn-ghost text-base-content/40"
+        title={`${unresolvedHint(meta?.reason)} Nothing is filtered. Click to re-check your teams.`}
+      >
+        <RefreshCw className={clsx("w-3.5 h-3.5", resyncing && "animate-spin")} />
+        <span className="font-mono">{resyncing ? "checking…" : "my teams (none)"}</span>
+      </button>
+    );
+  }
+
   return (
     <button
       onClick={() => setScope(on ? "all" : "mine")}
@@ -61,17 +120,13 @@ function RepoScopeToggle() {
         on ? "text-base-content/70" : "text-base-content/40",
       )}
       title={
-        degraded
-          ? "Your teams couldn't be resolved, so nothing is filtered. Click to turn the filter off."
-          : on
-            ? `Filtered to the ${count} repo${count === 1 ? "" : "s"} your GitHub teams own. Click to show all repos.`
-            : "Showing every managed repo. Click to filter to your GitHub teams' repos."
+        on
+          ? `Filtered to the ${count} repo${count === 1 ? "" : "s"} your GitHub teams own. Click to show all repos.`
+          : "Showing every managed repo. Click to filter to your GitHub teams' repos."
       }
     >
-      <Filter className={clsx("w-3.5 h-3.5", on && !degraded && "text-primary")} />
-      <span className="font-mono">
-        {degraded ? "my teams (unavailable)" : on ? `my teams (${count})` : "all repos"}
-      </span>
+      <Filter className={clsx("w-3.5 h-3.5", on && "text-primary")} />
+      <span className="font-mono">{on ? `my teams (${count})` : "all repos"}</span>
     </button>
   );
 }
