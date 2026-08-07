@@ -194,6 +194,73 @@ function excludingApp<T extends { app?: { slug?: string | null } | null }>(
   return opts.excludeApp ? runs.filter((r) => r.app?.slug !== opts.excludeApp) : runs;
 }
 
+/** A check run, as much of it as the de-dupe below needs. */
+type IdentifiableRun = {
+  name?: string | null;
+  app?: { slug?: string | null } | null;
+  started_at?: string | null;
+  id?: number;
+};
+
+/**
+ * Keep only the MOST RECENT run of each check, discarding the ones a re-run has
+ * superseded.
+ *
+ * `checks.listForRef?filter=latest` does NOT mean "one run per check name" —
+ * it de-dupes per check SUITE. Re-running a failed workflow from the Actions UI
+ * (or re-triggering it, as a `pull_request_target` workflow does when the PR
+ * body is edited) creates a NEW suite, so its green result arrives ALONGSIDE
+ * the old red one and both come back from the API forever:
+ *
+ *     Check linked issues  failure  suite 84337326378  10:11:39
+ *     Check linked issues  success  suite 84339674693  10:23:51   ← the re-run
+ *
+ * Without this, `some(conclusion === "failure")` pins the aggregate at
+ * `failing` for the life of the SHA and nothing a re-run does can clear it —
+ * nearform/skillspro#1646, where the review deferred on `after-checks` and its
+ * `queued` check never concluded, because the settle event fires only on a
+ * state the aggregate could no longer reach.
+ *
+ * Latest-wins is also what actually gates the merge: branch protection
+ * satisfies a required check from its most recent run. Reading the SHA any
+ * other way puts us at odds with the gate we exist to feed.
+ *
+ * Keyed on `app.slug` + `name`, never `name` alone: two apps may legitimately
+ * post the same check name, and collapsing those would let one app's green
+ * hide another's red. Ordered by `started_at` (ISO-8601 UTC, so lexicographic
+ * IS chronological) with the check-run id as a tiebreak.
+ *
+ * A run with NO name is passed through untouched rather than sharing an empty
+ * key with every other nameless run. De-duping is an identity claim — "these
+ * two are the same check, so the later one replaces the earlier" — and without
+ * a name there is no identity to claim. Keeping both is the fail-safe answer:
+ * it can only ever report a SHA redder than it is.
+ */
+function latestPerCheck<T extends IdentifiableRun>(runs: T[]): T[] {
+  const newest = new Map<string, T>();
+  const unidentified: T[] = [];
+  for (const run of runs) {
+    if (!run.name) {
+      unidentified.push(run);
+      continue;
+    }
+    // A check NAME may contain anything, spaces included; a NUL separator
+    // cannot occur in either half, so the composite key is unambiguous.
+    const key = `${run.app?.slug ?? ""}\u0000${run.name}`;
+    const seen = newest.get(key);
+    if (!seen || supersedes(run, seen)) newest.set(key, run);
+  }
+  return [...newest.values(), ...unidentified];
+}
+
+/** Is `a` the later run of the two? See {@link latestPerCheck}. */
+function supersedes(a: IdentifiableRun, b: IdentifiableRun): boolean {
+  const at = a.started_at ?? "";
+  const bt = b.started_at ?? "";
+  if (at !== bt) return at > bt;
+  return (a.id ?? 0) > (b.id ?? 0);
+}
+
 /**
  * Raised when a harness-side call targets an account the GitHub App is not
  * installed on. Distinct from a 404 so callers can say the actionable thing
@@ -1019,6 +1086,12 @@ export class GitHubClient {
    * A check run counts as settled when it has left queued/in_progress —
    * whatever it concluded. Status contexts are settled unless the combined
    * state is `pending`.
+   *
+   * The count is per CHECK, not per run: a check that has been re-run counts
+   * once, because {@link latestPerCheck} has already discarded the superseded
+   * attempts. That is the reading `dependencies.minSettledChecks` wants — it
+   * asks how many distinct things looked at this SHA, and four re-runs of one
+   * reviewer bot were never four independent opinions.
    */
   async getChecksSummary(
     owner: string,
@@ -1036,8 +1109,10 @@ export class GitHubClient {
       kit.rest.repos.getCombinedStatusForRef({ owner, repo, ref }),
     ]);
     // Drop OUR OWN check runs when the caller is deciding whether to TRIGGER
-    // work — see {@link ChecksQueryOptions.excludeApp}.
-    const runs = excludingApp(checks.check_runs, opts);
+    // work — see {@link ChecksQueryOptions.excludeApp} — then collapse each
+    // check to the run that survives a re-run ({@link latestPerCheck}), so a
+    // job that was re-run green stops reporting the SHA red forever.
+    const runs = latestPerCheck(excludingApp(checks.check_runs, opts));
     const statuses = status.statuses ?? [];
 
     const runPendingCount = runs.filter(
@@ -1141,7 +1216,12 @@ export class GitHubClient {
       filter: "latest",
     });
 
-    const failed = excludingApp(data.check_runs, opts).filter(
+    // Superseded attempts are dropped BEFORE the failure filter, or the report
+    // hands the fix agent a red job that has since been re-run green — a real
+    // log, a real error, and nothing left to fix. Same reason `getChecksSummary`
+    // de-dupes: the two must agree on what "red" means, or discovery fires a fix
+    // for evidence the prompt then can't reproduce.
+    const failed = latestPerCheck(excludingApp(data.check_runs, opts)).filter(
       (r) => r.conclusion === "failure" || r.conclusion === "timed_out"
     );
     if (failed.length === 0) return { jobs: [], logsAvailable: false };

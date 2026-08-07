@@ -529,6 +529,27 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
     expect(emitted.headSha).toBe("beef0001");
   });
 
+  it("emits pr.checks_settled when a GREEN suite settles a red aggregate", async () => {
+    // nearform/skillspro#1646. Which suite finishes last is an accident of
+    // scheduling, not a fact about the PR: here one job failed and a SIBLING
+    // suite completed green afterwards, so the aggregate is `failing` but the
+    // delivery that observes it is a success. Requiring `passing` on this
+    // branch dropped it — and the failing suite, which the red branch would
+    // have taken, had completed while the sibling was still running and read
+    // `pending`. Nothing emitted, and the `queued` review check never concluded.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+      headSha: "beef0002",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+    expect(emitted.headSha).toBe("beef0002");
+  });
+
   it("emits pr.checks_settled for a settled-RED human PR too — either colour", async () => {
     // 09 locked decision 14: the `passing` variant was deleted. A red result is
     // useful review input, and a PR we gave up on never goes green.
@@ -541,6 +562,33 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
       headBranch: "feature/whatever",
     });
     expect(emitted?.type).toBe("pr.checks_settled");
+  });
+
+  it("routes a red aggregate to the FIX path even when the last suite was green", async () => {
+    // The aggregate decides, so the fix family's claim can't be lost to the
+    // order CI settled in: this dependency PR is red, and a sibling suite
+    // finishing green afterwards must not demote it to a review. Before the
+    // arms were merged this emitted nothing at all.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 190,
+      commitAuthor: "dependabot[bot]",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+  });
+
+  it("does the same for a head WE pushed — the fix loop's CI feedback", async () => {
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 207,
+      commitAuthor: BOT_LOGIN,
+      commitMessage: "fix: address review",
+      headBranch: "lastlight/205-user-identity",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+    expect(emitted.isDependencyPr).toBe(false);
   });
 
   it("FIX OUTRANKS REVIEW — a red dependency PR stays pr.checks_failed under after-checks", async () => {

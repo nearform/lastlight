@@ -529,134 +529,116 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
           prNumber = payload.check_suite?.pull_requests?.[0]?.number;
           issueNumber = prNumber;
           if (prNumber) type = "pr.synchronize";
-        } else if (
-          action === "completed" &&
-          (payload.check_suite?.conclusion === "failure" ||
-            payload.check_suite?.conclusion === "timed_out")
-        ) {
-          // A PR's CI has gone red. Emit a dedicated event so a workflow can
-          // react (e.g. fix a failing Dependabot PR). We use check_suite
-          // (aggregate — ~one event per push) rather than per-check_run.completed
-          // to avoid a burst of duplicates. `pull_requests[]` is populated for
-          // same-repo PRs (fork PRs carry an empty array and are dropped below).
-          const pr = payload.check_suite?.pull_requests?.[0];
-          const sha: string | undefined = payload.check_suite?.head_sha;
-          // The check_suite `pull_requests[]` entry is minimal (number/refs
-          // only — no title or author). The head commit carries the useful
-          // classifier signal instead: for a Dependabot PR the commit message
-          // is the bump description ("Bump lodash from …") and the commit
-          // author name is "dependabot[bot]". The router feeds these to the
-          // classifier; the dispatcher later fetches the full PR for the fix.
-          const headCommit = payload.check_suite?.head_commit;
-          const commitAuthor: string = headCommit?.author?.name || "";
-          const headBranch: string = payload.check_suite?.head_branch || "";
-          // GATE: which red PRs may kick off the fix path at all. Commit author
-          // OR branch prefix for the dependency case, so a squashed/proxied bot
-          // commit still matches via its branch.
-          const isDependency =
-            /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
-            /^(dependabot|renovate)\//.test(headBranch);
-          // ...plus a head commit WE pushed. `git-auth.ts` stamps
-          // `user.name = <botName>[bot]` on the agent's own commits and the
-          // check_suite payload carries the same field, so this is precisely
-          // "did my fix work?" — the CI feedback loop `pr-fix` has never had
-          // (it could push a fix and never learn whether the build went green,
-          // because this event only ever fired for dependency PRs). It stays
-          // bounded: it cannot fire for an ordinary human PR the bot has not
-          // touched. It is nonetheless the one change here that can increase
-          // run volume on non-dependency PRs — watch it after rollout.
-          const isOurOwnPush = !!this.config.botLogin && commitAuthor === this.config.botLogin;
-          // Only fire once the PR's checks have FULLY SETTLED red — a repo with
-          // several check-reporting apps completes one suite at a time, and a
-          // failure in one while another is still running should not kick off a
-          // fix mid-flight. `getChecksConclusion` returns "failing" only when
-          // nothing is pending and ≥1 check concluded red, so exactly one event
-          // fires per SHA (the last suite to settle). Absent a wired client
-          // (standalone tests) we keep the legacy per-suite behaviour. Gated
-          // behind the emit check so an untouched human PR never makes the call.
-          if (pr?.number && (isDependency || isOurOwnPush)) {
-            const settled = await this.settledConclusion(repoFullName, sha, "failing");
-            if (settled === "failing") {
-              prNumber = pr.number;
-              issueNumber = prNumber;
-              headSha = sha;
-              type = "pr.checks_failed";
-              title = (headCommit?.message || "").split("\n")[0] || title;
-              issueAuthor = commitAuthor || issueAuthor;
-              // The router routes on THIS, deterministically: dependency →
-              // `dependabot-ci-fix`, everything else → `pr-fix`. Without it a
-              // human's red PR would run a dependency-bump prompt, the
-              // `dependency-*` label vocabulary and a `requires-human`
-              // preflight it was never designed for.
-              isDependencyPr = isDependency;
-            }
-          } else if (pr?.number && this.afterChecks()) {
-            // FIX OUTRANKS REVIEW (09 → S2). A settled-red PR the fix family can
-            // act on has already been claimed above; only what is LEFT becomes a
-            // review settle. One envelope per delivery is all `normalize()` can
-            // return, so this precedence is not a policy choice bolted on later
-            // — it is the shape of the pipeline.
-            const settled = await this.settledConclusion(repoFullName, sha, "failing");
-            if (settled === "failing" || settled === "passing") {
-              prNumber = pr.number;
-              issueNumber = prNumber;
-              headSha = sha;
-              type = "pr.checks_settled";
-              title = (headCommit?.message || "").split("\n")[0] || title;
-              isDependencyPr = isDependency;
-            }
-          }
-        } else if (
-          action === "completed" &&
-          payload.check_suite?.conclusion === "success"
-        ) {
-          // A PR's CI has gone fully green. Emit a dedicated event ONLY for
-          // dependency-update PRs (Dependabot / Renovate) so a workflow can
-          // enable auto-merge on the trivial ones — we deliberately do NOT fire
-          // on every green PR (that would flood the router with events for
-          // unrelated work). The dependency signal comes cheaply from the head
-          // commit author + the suite's head branch, with no extra PR fetch.
-          const pr = payload.check_suite?.pull_requests?.[0];
-          const sha: string | undefined = payload.check_suite?.head_sha;
-          const headCommit = payload.check_suite?.head_commit;
-          const commitAuthor: string = headCommit?.author?.name || "";
-          const headBranch: string = payload.check_suite?.head_branch || "";
-          const isDependency =
-            /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
-            /^(dependabot|renovate)\//.test(headBranch);
-          // Fire ONLY when the head SHA's checks have fully settled green. A
-          // suite going green while sibling suites are still running reports
-          // "pending" here and is dropped; the last suite to settle flips the
-          // aggregate to "passing", so exactly one `pr.checks_passed` fires per
-          // SHA instead of one per check-reporting app. (Legacy per-suite
-          // behaviour is preserved when no client is wired — standalone tests.)
-          if (pr?.number && isDependency) {
-            const settled = await this.settledConclusion(repoFullName, sha, "passing");
-            if (settled === "passing") {
-              prNumber = pr.number;
-              issueNumber = prNumber;
-              headSha = sha;
-              type = "pr.checks_passed";
-              title = (headCommit?.message || "").split("\n")[0] || title;
-              issueAuthor = commitAuthor || issueAuthor;
-              // Always true on this branch (the green route is dependency-only),
-              // set for symmetry so the envelope's discriminator is never
-              // undefined on a check-outcome event.
-              isDependencyPr = true;
-            }
-          } else if (pr?.number && this.afterChecks()) {
-            // The green half of the same broadening. A non-dependency PR whose
-            // CI has fully settled green is the canonical `after-checks` review:
-            // nothing is going to change about this head, and the review can now
-            // say so.
-            const settled = await this.settledConclusion(repoFullName, sha, "passing");
-            if (settled === "passing") {
-              prNumber = pr.number;
-              issueNumber = prNumber;
-              headSha = sha;
-              type = "pr.checks_settled";
-              title = (headCommit?.message || "").split("\n")[0] || title;
-              isDependencyPr = isDependency;
+        } else if (action === "completed") {
+          // A PR's checks have moved. WHICH event that becomes is decided by
+          // the AGGREGATE state of the head SHA — never by this suite's own
+          // colour, which says only which check-reporting app happened to
+          // finish last. A repo with several of them completes one suite at a
+          // time, so the suite colour is the order CI settled in, and the three
+          // routes below all care about the PR.
+          //
+          // That was the #1646 bug: the two arms were separate `else if`s on
+          // the SUITE, each with its own aggregate test, and the green one
+          // demanded `passing`. A PR with one failing job whose sibling suite
+          // finished last landed in the green arm, computed `failing`, and was
+          // dropped — while the failing suite, which the red arm would have
+          // taken, had completed while the sibling was still running and read
+          // `pending`. Nothing ever emitted; the `queued` review check sat
+          // there until the PR was merged six hours later.
+          //
+          // We still look only at settled colours: `cancelled` / `neutral` /
+          // `skipped` / `stale` say nothing happened and carry no aggregate
+          // worth paying a round trip for.
+          const suiteConclusion = payload.check_suite?.conclusion;
+          const suiteRed = suiteConclusion === "failure" || suiteConclusion === "timed_out";
+          const suiteGreen = suiteConclusion === "success";
+          if (suiteRed || suiteGreen) {
+            // `pull_requests[]` is populated for same-repo PRs (fork PRs carry
+            // an empty array and are dropped below).
+            const pr = payload.check_suite?.pull_requests?.[0];
+            const sha: string | undefined = payload.check_suite?.head_sha;
+            // The check_suite `pull_requests[]` entry is minimal (number/refs
+            // only — no title or author). The head commit carries the useful
+            // classifier signal instead: for a Dependabot PR the commit message
+            // is the bump description ("Bump lodash from …") and the commit
+            // author name is "dependabot[bot]". The router feeds these to the
+            // classifier; the dispatcher later fetches the full PR for the fix.
+            const headCommit = payload.check_suite?.head_commit;
+            const commitAuthor: string = headCommit?.author?.name || "";
+            const headBranch: string = payload.check_suite?.head_branch || "";
+            // GATE: which red PRs may kick off the fix path at all. Commit
+            // author OR branch prefix for the dependency case, so a
+            // squashed/proxied bot commit still matches via its branch.
+            const isDependency =
+              /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
+              /^(dependabot|renovate)\//.test(headBranch);
+            // ...plus a head commit WE pushed. `git-auth.ts` stamps
+            // `user.name = <botName>[bot]` on the agent's own commits and the
+            // check_suite payload carries the same field, so this is precisely
+            // "did my fix work?" — the CI feedback loop `pr-fix` has never had
+            // (it could push a fix and never learn whether the build went green,
+            // because this event only ever fired for dependency PRs). It stays
+            // bounded: it cannot fire for an ordinary human PR the bot has not
+            // touched. It is nonetheless the one change here that can increase
+            // run volume on non-dependency PRs — watch it after rollout.
+            const isOurOwnPush = !!this.config.botLogin && commitAuthor === this.config.botLogin;
+            // Nobody downstream wants this delivery — don't pay for the
+            // aggregate read. An ordinary human PR under a mode with no
+            // consumer for a settle event never makes the call.
+            const wanted = isDependency || isOurOwnPush || this.afterChecks();
+            if (pr?.number && wanted) {
+              // Fire only once the head SHA has FULLY SETTLED, so a repo with
+              // several check-reporting apps produces exactly one event per SHA
+              // — the last suite to settle — rather than one per app. Absent a
+              // wired client (standalone tests) the fallback keeps the legacy
+              // per-suite behaviour, which is this suite's own colour.
+              const settled = await this.settledConclusion(
+                repoFullName,
+                sha,
+                suiteRed ? "failing" : "passing",
+              );
+              const title0 = (headCommit?.message || "").split("\n")[0];
+              // FIX OUTRANKS REVIEW (09 → S2), and one envelope per delivery is
+              // all `normalize()` can return — so the precedence below is not a
+              // policy choice bolted on later, it is the shape of the pipeline.
+              if (settled === "failing" && (isDependency || isOurOwnPush)) {
+                prNumber = pr.number;
+                issueNumber = prNumber;
+                headSha = sha;
+                type = "pr.checks_failed";
+                title = title0 || title;
+                issueAuthor = commitAuthor || issueAuthor;
+                // The router routes on THIS, deterministically: dependency →
+                // `dependabot-ci-fix`, everything else → `pr-fix`. Without it a
+                // human's red PR would run a dependency-bump prompt, the
+                // `dependency-*` label vocabulary and a `requires-human`
+                // preflight it was never designed for.
+                isDependencyPr = isDependency;
+              } else if (settled === "passing" && isDependency) {
+                // A green dependency PR goes to the MERGE route, not a review.
+                // We deliberately do NOT fire this for every green PR — that
+                // would flood the router with events for unrelated work.
+                prNumber = pr.number;
+                issueNumber = prNumber;
+                headSha = sha;
+                type = "pr.checks_passed";
+                title = title0 || title;
+                issueAuthor = commitAuthor || issueAuthor;
+                isDependencyPr = true;
+              } else if ((settled === "failing" || settled === "passing") && this.afterChecks()) {
+                // Whatever the fix family did not claim, under `after-checks`,
+                // is the canonical review settle: nothing is going to change
+                // about this head, and the review can now say so. EITHER
+                // COLOUR — "on settle, either colour" is the documented
+                // contract (09 → S2, locked decision 14), a red result is
+                // useful review input, and a PR we gave up on never goes green.
+                prNumber = pr.number;
+                issueNumber = prNumber;
+                headSha = sha;
+                type = "pr.checks_settled";
+                title = title0 || title;
+                isDependencyPr = isDependency;
+              }
             }
           }
         }

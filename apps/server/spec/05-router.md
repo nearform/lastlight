@@ -874,6 +874,12 @@ gate, the router's dependency-comment enrichment, and both dependency
 sweeps. Commit statuses carry no app and we never post one, so nothing is
 excluded on that side, and excluding ours can never turn red into green.
 
+The same aggregate has a second way to jam: a check re-run in a fresh suite
+comes back *alongside* the attempt it replaced, so a job re-run green kept
+reporting red forever. Every settle query collapses the list to the latest run
+of each `(app, name)` first — see
+[Integrations → Superseded check re-runs](/spec/03-integrations).
+
 ### Escalation — the skips that are not silent
 
 Three of `resolveFixDisposition`'s skips are **terminal for the current

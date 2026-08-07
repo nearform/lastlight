@@ -59,14 +59,68 @@ session management, allowlist enforcement, and message chunking.
 | **Event types** | `issue.opened`, `issue.reopened`, `issue.closed`, `pr.opened`, `pr.synchronize`, `pr.reopened`, `pr.closed`, `pr.merged`, `pr.checks_failed`, `pr.checks_passed`, `pr.checks_settled`, `pr.labeled`, `pr.review_requested`, `comment.created`, `pr_review.submitted`, `pr_review_comment.created` |
 | **Review signals** | Three `pull_request` actions carry the `review.trigger` machinery. `ready_for_review` normalizes to **`pr.opened` semantics** — a draft becoming ready is the moment the PR first asks to be looked at, and it is the event that un-defers a review `review.skipDraft` held back. `labeled` normalizes to `pr.labeled` carrying `addedLabel`, so `review.requestLabel` works; every other label is hard-ignored by the router, so the widening costs a `normalize()` call rather than a dispatch. `review_requested` normalizes to `pr.review_requested` carrying `requested_reviewer.login` (or `team/<slug>`) — **opportunistic only**: GitHub App bot users are not selectable in the reviewer picker, so `on-request` mode must not depend on it, and the label + comment + Re-run paths are the real mechanism. All three inherit the self-review guard: a PR the bot authored is dropped. |
 | **Re-run checks** | `check_run.rerequested` / `check_suite.rerequested` (the GitHub "Re-run" / "Re-run all checks" buttons) normalize to `pr.synchronize` for the PR in the event's `pull_requests[]`, re-triggering pr-review against the current head. **Exception:** a re-run of *our own* `last-light/review` check normalizes to `pr.review_requested` instead — it is a human asking for a review, not "the code changed", and `pr.synchronize` is a PR-attention event that `after-checks` / `on-request` would defer, which would make the check's own button a no-op. Requires the App to subscribe to the **Check run** / **Check suite** events (App permission: Checks: read). |
-| **Failed checks** | `check_suite.completed` with a `failure` / `timed_out` conclusion normalizes to `pr.checks_failed` for two populations: a **dependency-update PR** (head commit author `dependabot[bot]` / `renovate[bot]`, or a `dependabot/` / `renovate/` head branch — commit author *or* branch, so a squashed or proxied bot commit still matches), **and** a PR whose head commit **we** pushed (`head_commit.author.name === botLogin`, which is exactly what `git-auth.ts` stamps on the agent's own commits). The second is the CI feedback loop `pr-fix` never had: it could push a fix and never learn whether the build went green, because this event only ever fired for dependency PRs. It stays bounded — it cannot fire on a human PR the bot has not touched — but it is the one gate here that can raise run volume on non-dependency PRs. **Settle-aware:** the connector emits only once the head SHA's checks have *fully settled red* (`getChecksConclusion === "failing"` — nothing pending), so a repo with several check-reporting apps fires one event per SHA, not one per suite. The dependency discriminator is **carried on the envelope** as `isDependencyPr` rather than discarded, so the router routes on it deterministically (dependency → `dependabot-ci-fix`, otherwise → `pr-fix`) instead of paying a classifier call to re-guess it — see [Router](/spec/05-router). Requires the **Check suite** subscription (Checks: read); reading the *reason* it failed additionally wants **Actions: read** — see below. |
-| **Settled checks** | Under `review.trigger: after-checks` — and only then, since emitting is what costs event volume — a settled `check_suite.completed` on a PR that **neither** check-outcome route below claimed normalizes to `pr.checks_settled`, either colour. This is the `after-checks` trigger. It is a separate event type rather than a broadening of `pr.checks_failed` because `normalize()` returns **one envelope per delivery** and `route()` returns one handler: a fan-out into both a fix and a review is not expressible, so **fix outranks review** by construction. The gap that leaves — a fix chain that ends without pushing, so no further `check_suite` ever fires — is released by the `check-prs-awaiting-review` sweep. |
-| **Passed checks** | `check_suite.completed` with a `success` conclusion normalizes to `pr.checks_passed`, but **only for dependency-update PRs** — the connector pre-filters on the head commit author (`dependabot[bot]` / `renovate[bot]`) or the suite's head branch (`dependabot/` / `renovate/`) so an ordinary green PR fires nothing. **Settle-aware:** it emits only when the head SHA has *fully settled green* (`getChecksConclusion === "passing"`); an earlier suite going green while siblings are still running sees `"pending"` and is dropped, so exactly one event fires per SHA — the last suite to settle. The router routes it deterministically (no classifier call) to the workflow claiming the `dependabot-pr-merge` intent; unclaimed → ignored. Same **Check suite** subscription (Checks: read). |
+| **Failed checks** | A `check_suite.completed` whose head SHA has **settled red in aggregate** normalizes to `pr.checks_failed` for two populations: a **dependency-update PR** (head commit author `dependabot[bot]` / `renovate[bot]`, or a `dependabot/` / `renovate/` head branch — commit author *or* branch, so a squashed or proxied bot commit still matches), **and** a PR whose head commit **we** pushed (`head_commit.author.name === botLogin`, which is exactly what `git-auth.ts` stamps on the agent's own commits). The second is the CI feedback loop `pr-fix` never had: it could push a fix and never learn whether the build went green, because this event only ever fired for dependency PRs. It stays bounded — it cannot fire on a human PR the bot has not touched — but it is the one gate here that can raise run volume on non-dependency PRs. **Settle-aware:** the connector emits only once the head SHA's checks have *fully settled red* (`getChecksConclusion === "failing"` — nothing pending), so a repo with several check-reporting apps fires one event per SHA, not one per suite. **The delivering suite's own conclusion is not the discriminator** — see "Which event a settle becomes" below. The dependency discriminator is **carried on the envelope** as `isDependencyPr` rather than discarded, so the router routes on it deterministically (dependency → `dependabot-ci-fix`, otherwise → `pr-fix`) instead of paying a classifier call to re-guess it — see [Router](/spec/05-router). Requires the **Check suite** subscription (Checks: read); reading the *reason* it failed additionally wants **Actions: read** — see below. |
+| **Settled checks** | Under `review.trigger: after-checks` — and only then, since emitting is what costs event volume — a settled `check_suite.completed` on a PR that **neither** check-outcome route below claimed normalizes to `pr.checks_settled`, either colour — **including a red aggregate observed through a green suite**, which is the ordinary shape of a PR with one failing job whose sibling suite finishes last. This is the `after-checks` trigger. It is a separate event type rather than a broadening of `pr.checks_failed` because `normalize()` returns **one envelope per delivery** and `route()` returns one handler: a fan-out into both a fix and a review is not expressible, so **fix outranks review** by construction. The gap that leaves — a fix chain that ends without pushing, so no further `check_suite` ever fires — is released by the `check-prs-awaiting-review` sweep. |
+| **Passed checks** | A `check_suite.completed` whose head SHA has **settled green in aggregate** normalizes to `pr.checks_passed`, but **only for dependency-update PRs** — the connector pre-filters on the head commit author (`dependabot[bot]` / `renovate[bot]`) or the suite's head branch (`dependabot/` / `renovate/`) so an ordinary green PR fires nothing. **Settle-aware:** it emits only when the head SHA has *fully settled green* (`getChecksConclusion === "passing"`); an earlier suite going green while siblings are still running sees `"pending"` and is dropped, so exactly one event fires per SHA — the last suite to settle. Again the aggregate decides, not this suite's conclusion. The router routes it deterministically (no classifier call) to the workflow claiming the `dependabot-pr-merge` intent; unclaimed → ignored. Same **Check suite** subscription (Checks: read). |
 | **Filtered out** | `IGNORED_ACTIONS`: `edited`, `unlabeled`, `assigned`, `closed` (except for the explicit close types above), `pinned`, `transferred`, and friends. `labeled` left the set when `review.requestLabel` landed. Bot self-events are dropped unless the bot opened/synchronised a PR **or** it's a `check_suite.completed` (the failing-CI signal is always bot-sent); a PR **authored** by the bot is dropped from pr-review entirely (self-review guard). |
 | **Reply** | Posts a comment via `replyFn(owner, repo, issueNumber, msg)` (line 237). Returns `Promise<void>`; no useful return value. No-op if `replyFn` or issue context is missing. |
 
 If `WEBHOOK_SECRET` is empty (allowed but warned during boot), signature
 verification is disabled. Production deployments must set it.
+
+### Which event a settle becomes
+
+A `check_suite.completed` delivery carries a conclusion of its own, and it is
+**not** what picks the event. The suite's colour says only which
+check-reporting app happened to finish last; the decision reads the
+**aggregate** state of the head SHA. So one `completed` branch resolves all
+three outcomes, in this order:
+
+| Aggregate | Population | Event |
+|---|---|---|
+| `failing` | dependency PR, or a head **we** pushed | `pr.checks_failed` |
+| `passing` | dependency PR | `pr.checks_passed` |
+| `failing` or `passing` | anything left, under `after-checks` | `pr.checks_settled` |
+| `pending` / `none` | — | nothing (CI is still moving) |
+
+The order is **fix outranks review** (09 → S2): `normalize()` returns one
+envelope per delivery, so the precedence is the shape of the pipeline rather
+than a policy bolted on later. Deliveries with a `cancelled` / `neutral` /
+`skipped` / `stale` conclusion are dropped without an aggregate read at all —
+nothing happened, and the round trip would buy nothing.
+
+Reading the delivering suite's colour instead was a live deadlock
+(nearform/skillspro#1646). The red and green cases were separate branches, each
+with its own aggregate test, and the green one demanded `passing`. A PR with one
+failing job whose *sibling* suite finished green afterwards landed in the green
+branch, computed `failing`, and was dropped — while the failing suite, which the
+red branch would have taken, had completed while the sibling was still running
+and read `pending`. No event ever fired; under `review.postsCheck` the `queued`
+placeholder sat on the PR until it was merged hours later. Nothing about the PR
+was unusual: the outcome depended purely on the order CI settled in.
+
+### Superseded check re-runs
+
+`checks.listForRef?filter=latest` de-dupes per check **suite**, not per check
+**name**. Re-running a failed job creates a new suite, so its green result comes
+back *alongside* the red attempt it replaced — and both keep coming back for the
+life of the SHA. Every aggregate read therefore collapses the list to the most
+recent run of each `(app, name)` before judging it, so a re-run that goes green
+actually clears the failure. Without that collapse `some(conclusion ===
+"failure")` pins the SHA at `failing` permanently and no re-run can ever move it
+— the other half of #1646, and the reason its aggregate could no longer reach a
+state any emit branch accepted.
+
+Latest-wins is also what gates the merge: branch protection satisfies a required
+check from its most recent run, so reading the SHA any other way puts the
+harness at odds with the gate it exists to feed. Two *different* apps posting the
+same check name are not collapsed (the key is `(app, name)`), and a run carrying
+no name is passed through untouched — de-duping is an identity claim, and
+keeping both can only ever report a SHA redder than it is.
+
+The same collapse applies to `getCiFailureReport`, so the fix agent is never
+handed a red job that has since been re-run green: discovery and the fix prompt
+have to agree on what "red" means.
 
 ### Multi-installation GitHub Apps
 
