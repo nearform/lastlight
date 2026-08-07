@@ -55,7 +55,7 @@ promoted this run to a real repair attempt. Treat the failure as reproducible
 and look for the actual difference — a version, an ordering, a shared fixture, a
 race — rather than re-running the job and hoping. If you genuinely cannot make
 it green, `outcome=gave-up` with what you ruled out is the honest answer; do not
-push a speculative fix.
+publish a speculative fix.
 {{/if}}
 
 INSTRUCTIONS:
@@ -135,6 +135,11 @@ AFTER FIXING:
    unsigned, and on a repo that requires signed commits one unsigned commit
    anywhere in the branch blocks the PR permanently and cannot be cleared by a
    later run. Local commits you made while working are folded in automatically.
+   - A successful publish IS this phase's push: emit `outcome=pushed`. The
+     commit is on the branch and CI is running on it. You did not invoke
+     `git push` and were right not to — publishing through the tool is what
+     "pushed" means here, so do not downgrade the outcome because no `git push`
+     ran. This is the same whether the repair was step 1's merge or a CI fix.
    - If it reports `published: false`, there was nothing to publish. That is the
      "nothing to commit or push" case in the STOP section below — flag it for a
      human rather than looping.
@@ -157,7 +162,7 @@ PUBLISH DISCIPLINE — the gate decides, and it is checked after you finish:
 
 STOP and flag for a human when you CAN'T land it, so the nightly red-dependency
 sweep won't keep re-attempting it. That covers two cases:
-- you can't make CI pass with a small, safe change (don't push a speculative
+- you can't make CI pass with a small, safe change (don't publish a speculative
   fix); or
 - there is **nothing to commit or push** and the PR still can't merge — e.g. it
   was `blocked` on a required *human* review or a gate outside this repo that

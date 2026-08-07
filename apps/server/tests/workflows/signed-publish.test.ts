@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -110,6 +110,92 @@ describe("the artifact-commit branch publishes rather than pushes", () => {
       // no legitimate prohibition or aside here for this to false-positive on.
       expect(body, `${file}'s artifact branch still talks about pushing`).not.toMatch(
         /\bpush(ed|es|ing)?\b/i,
+      );
+    });
+  }
+});
+
+/**
+ * Both fix loops end on `until: "output.contains('outcome=pushed tried=')"`, so
+ * a successful publish the agent does not report as `outcome=pushed` leaves the
+ * loop running and replays the attempt into `{{priorAttempts}}` as having
+ * changed nothing. AFTER FIXING is the one section every path through these
+ * prompts reaches, so the success outcome has to be named there rather than
+ * inside a conditional block only one path renders — which is exactly how
+ * `dependabot-ci-fix.md` came to name it on the merge-only path alone.
+ */
+describe("the fix prompts name the success outcome where they publish", () => {
+  for (const file of ["pr-fix.md", "dependabot-ci-fix.md"]) {
+    it(`${file}'s AFTER FIXING section names outcome=pushed`, () => {
+      const section = read(file).match(/AFTER FIXING:([\s\S]*?)PUBLISH DISCIPLINE/);
+      expect(section, `${file} no longer has an AFTER FIXING section`).not.toBeNull();
+      expect(section![1], `${file} publishes without naming outcome=pushed`).toContain(
+        "outcome=pushed",
+      );
+    });
+  }
+});
+
+/**
+ * The prompts are not the only text an agent reads. The `agent-context/` files
+ * are concatenated into the AGENTS.md prepended to EVERY session in every
+ * workflow, and each skill's SKILL.md is staged into the phases that publish —
+ * `fixing` and `building` are both mapped into the fix phase of `pr-fix.yaml`
+ * and `dependabot-ci-fix.yaml`, alongside the prompt. Either can steer an agent to
+ * `git push` regardless of what its phase prompt says, so the same rule and the
+ * same discriminator apply here.
+ *
+ * The limitation documented for the prompts holds here too, and matters more
+ * because these files are prose rather than instruction lists: this catches the
+ * literal invocation, not an instruction to push written without naming the
+ * command. It also only sees the PACKAGED files — an operator overlay's or a
+ * target repo's own `agent-context/*.md` is resolved at runtime and is out of
+ * reach of any test.
+ */
+const AGENT_CONTEXT_DIR = join(import.meta.dirname, "../../agent-context");
+const SKILLS_DIR = join(import.meta.dirname, "../../skills");
+
+const markdownUnder = (dir: string): string[] =>
+  readdirSync(dir).flatMap((entry) => {
+    const path = join(dir, entry);
+    if (statSync(path).isDirectory()) return markdownUnder(path);
+    return entry.endsWith(".md") ? [path] : [];
+  });
+
+/** `skills/fixing/SKILL.md` — enough to tell the many `SKILL.md`s apart. */
+const label = (path: string) => path.split("/").slice(-3).join("/");
+
+describe("the staged context agrees with the prompts", () => {
+  const files = [...markdownUnder(AGENT_CONTEXT_DIR), ...markdownUnder(SKILLS_DIR)];
+
+  it("finds the agent-context and skill files", () => {
+    expect(files.length).toBeGreaterThan(10);
+  });
+
+  for (const path of files) {
+    it(`${label(path)} does not invoke git push`, () => {
+      expect(readFileSync(path, "utf8"), `${path} invokes git push`).not.toMatch(FORBIDDEN_PUSH);
+    });
+  }
+
+  /**
+   * The closure half, and the only cover these files have for the prose case
+   * the regex above cannot see. `rules.md` is where an agent that has read
+   * nothing else learns how work reaches the branch; `fixing`/`building` are
+   * the two skills a publishing phase stages; and `security-feedback` is the
+   * one skill that carries its own publish step (it clones, edits SECURITY.md
+   * and opens a PR with no prompt of its own) — it read "commit …, push, and
+   * open a PR" for exactly as long as nothing pinned it.
+   */
+  for (const path of [
+    join(AGENT_CONTEXT_DIR, "rules.md"),
+    join(SKILLS_DIR, "fixing", "SKILL.md"),
+    join(SKILLS_DIR, "building", "SKILL.md"),
+    join(SKILLS_DIR, "security-feedback", "SKILL.md"),
+  ]) {
+    it(`${label(path)} still names github_publish`, () => {
+      expect(readFileSync(path, "utf8"), `${path} no longer names github_publish`).toContain(
+        "github_publish",
       );
     });
   }
