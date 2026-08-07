@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import type { TriggerActorType } from "./user-store.js";
+import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
 
 export interface ExecutionRecord {
   id: string;
@@ -15,6 +16,13 @@ export interface ExecutionRecord {
   /** Coarse actor category for {@link triggeredBy}. */
   triggerActorType?: TriggerActorType;
   skill: string;
+  /**
+   * GitHub org/user that owns {@link repo}. Its own column since #279, so a
+   * ledger row identifies its target without joining the run that owns it —
+   * which chat and `build-cycle` rows don't have.
+   */
+  owner?: string;
+  /** BARE repo name (no owner). See `state/repo-ref.ts` for the one rule. */
   repo?: string;
   issueNumber?: number;
   startedAt: string;
@@ -72,43 +80,45 @@ export interface ExecutionRecord {
  * scope as the other stores.
  */
 /**
- * `executions.repo`, normalized to a qualified `owner/repo` — or NULL when it
- * can't be (issue #169).
+ * `executions.repo`, composed into the qualified `owner/repo` a user-facing
+ * surface speaks — or NULL when it can't be (issues #169, #279).
  *
- * The column is written in **two shapes**. The dispatcher stores the qualified
- * string (`context.repo`), but the phase executor stores the BARE repo name,
- * because `runSimpleWorkflow` carries `owner` and `repo` as separate fields —
- * so every workflow run's phase rows are bare. There is no `owner` column on
- * `executions` to consult, so the owner comes from the run that owns the
- * execution (`workflow_run_id` → `workflow_runs.owner`).
+ * This used to reach for the owner by joining `workflow_runs` on
+ * `workflow_run_id`, because the column was written in two shapes and
+ * `executions` had no owner of its own. It now has one (#279), so the join is
+ * gone and the answer is on the row.
  *
  * **NULL is the safe answer, and deliberate.** A consumer of this treats null
  * as "no repo, always visible"; returning a bare name instead would produce a
  * value that matches nothing in a qualified allow-list and would therefore
- * HIDE the row. Requires the joined alias to be `e` (executions) and `r`
- * (workflow_runs).
+ * HIDE the row. Requires the alias to be `e` (executions).
  */
-const QUALIFIED_REPO_SQL = `
-  CASE
-    WHEN e.repo IS NULL OR e.repo = '' THEN NULL
-    WHEN instr(e.repo, '/') > 0 THEN e.repo
-    WHEN r.owner IS NOT NULL AND r.owner <> '' THEN r.owner || '/' || e.repo
-    ELSE NULL
-  END`;
+const QUALIFIED_REPO_SQL = qualifiedRepoSql("e.owner", "e.repo", "null");
 
 export class ExecutionStore {
   constructor(private db: Database.Database) {}
 
+  /**
+   * Append a started phase to the ledger.
+   *
+   * Like `createRun`, the (owner, BARE repo) invariant is enforced here rather
+   * than asked of callers (issue #279) — the engine writes the pair off
+   * `GitSandboxAccess`, the dispatcher off a split `context.repo`, and a
+   * qualified value from anywhere else is normalized rather than stored as a
+   * second shape.
+   */
   recordStart(record: Omit<ExecutionRecord, "finishedAt" | "success" | "error" | "turns" | "durationMs">): void {
+    const ref = normalizeRepoRef(record.owner, record.repo);
     this.db.prepare(`
-      INSERT INTO executions (id, trigger_type, trigger_id, skill, repo, issue_number, started_at, workflow_run_id, triggered_by, trigger_actor_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO executions (id, trigger_type, trigger_id, skill, owner, repo, issue_number, started_at, workflow_run_id, triggered_by, trigger_actor_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.id,
       record.triggerType,
       record.triggerId,
       record.skill,
-      record.repo,
+      ref.owner ?? null,
+      ref.repo ?? null,
       record.issueNumber,
       record.startedAt,
       record.workflowRunId ?? null,
@@ -237,19 +247,22 @@ export class ExecutionStore {
     triggerId: string,
     workflowRunId?: string,
     repo?: string,
+    owner?: string,
   ): void {
     const now = new Date().toISOString();
     const m = triggerId.match(/#(\d+)$/);
     const issueNumber = m ? Number(m[1]) : null;
+    const ref = normalizeRepoRef(owner, repo);
     this.db.prepare(`
       INSERT INTO executions
-        (id, trigger_type, trigger_id, skill, repo, issue_number, started_at, finished_at, success, error, stop_reason, workflow_run_id)
-      VALUES (?, 'webhook', ?, ?, ?, ?, ?, ?, 0, 'skipped: trigger rule not satisfied', 'skipped', ?)
+        (id, trigger_type, trigger_id, skill, owner, repo, issue_number, started_at, finished_at, success, error, stop_reason, workflow_run_id)
+      VALUES (?, 'webhook', ?, ?, ?, ?, ?, ?, ?, 0, 'skipped: trigger rule not satisfied', 'skipped', ?)
     `).run(
       randomUUID(),
       triggerId,
       skill,
-      repo ?? null,
+      ref.owner ?? null,
+      ref.repo ?? null,
       issueNumber,
       now,
       now,
@@ -310,7 +323,6 @@ export class ExecutionStore {
         ) AS lastAssistantContent
       FROM executions e
       LEFT JOIN messaging_sessions ms ON ms.id = e.trigger_id
-      LEFT JOIN workflow_runs r ON r.id = e.workflow_run_id
       WHERE e.skill = 'chat'
       GROUP BY e.trigger_id
       ORDER BY lastActivityAt DESC
@@ -352,7 +364,9 @@ export class ExecutionStore {
         e.trigger_id              AS triggerId,
         ms.agent_session_id       AS agentSessionId,
         ms.platform               AS platform,
-        MAX(e.repo)               AS repo,
+        -- Same qualification rule as the list above; it read the raw column
+        -- here and so disagreed with its own list view for one thread.
+        MAX(${QUALIFIED_REPO_SQL}) AS repo,
         MIN(e.started_at)         AS firstStartedAt,
         MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
         COUNT(*)                  AS turnCount,
@@ -369,7 +383,6 @@ export class ExecutionStore {
         ) AS lastAssistantContent
       FROM executions e
       LEFT JOIN messaging_sessions ms ON ms.id = e.trigger_id
-      LEFT JOIN workflow_runs r ON r.id = e.workflow_run_id
       WHERE e.skill = 'chat' AND e.trigger_id = ?
       GROUP BY e.trigger_id
     `).get(triggerId) as {
@@ -394,7 +407,7 @@ export class ExecutionStore {
    * ledger by its `session_id` (issue #169).
    *
    * The fs-backed {@link SessionReader} reads jsonl envelopes that carry no
-   * repo of their own, so this is the join that lets the dashboard filter the
+   * repo of their own, so this is the lookup that lets the dashboard filter the
    * session list by the same allowed-repo set as everything else. Returns null
    * for a session we have no execution row for — those stay visible.
    */
@@ -403,7 +416,6 @@ export class ExecutionStore {
       .prepare(
         `SELECT ${QUALIFIED_REPO_SQL} AS repo
            FROM executions e
-           LEFT JOIN workflow_runs r ON r.id = e.workflow_run_id
           WHERE e.session_id = ? AND e.repo IS NOT NULL
           ORDER BY e.started_at DESC
           LIMIT 1`,
@@ -603,6 +615,10 @@ export class ExecutionStore {
    * the `/admin/api/log-search` endpoint and the `lastlight logs search` CLI to
    * find failing/relevant phases without SSHing to the box. Parameterized; the
    * pattern is escaped so user input can't smuggle LIKE wildcards.
+   *
+   * Matches and returns the QUALIFIED repo, because that is what somebody types
+   * (issue #279) — searching `nearform/lastlight` against the bare column found
+   * no phase row at all.
    */
   searchErrors(query: string, limit = 50): Array<{
     id: string;
@@ -618,23 +634,24 @@ export class ExecutionStore {
   }> {
     const escaped = query.replace(/[\\%_]/g, (ch) => `\\${ch}`);
     const pattern = `%${escaped}%`;
+    const qualifiedRepo = qualifiedRepoSql("e.owner", "e.repo", "bare");
     const rows = this.db.prepare(`
       SELECT
-        id,
-        skill,
-        repo,
-        error,
-        success,
-        started_at      AS startedAt,
-        finished_at     AS finishedAt,
-        session_id      AS sessionId,
-        workflow_run_id AS workflowRunId,
-        trigger_id      AS triggerId
-      FROM executions
-      WHERE error LIKE ? ESCAPE '\\'
-         OR skill LIKE ? ESCAPE '\\'
-         OR repo  LIKE ? ESCAPE '\\'
-      ORDER BY started_at DESC
+        e.id,
+        e.skill,
+        ${qualifiedRepo} AS repo,
+        e.error,
+        e.success,
+        e.started_at      AS startedAt,
+        e.finished_at     AS finishedAt,
+        e.session_id      AS sessionId,
+        e.workflow_run_id AS workflowRunId,
+        e.trigger_id      AS triggerId
+      FROM executions e
+      WHERE e.error LIKE ? ESCAPE '\\'
+         OR e.skill LIKE ? ESCAPE '\\'
+         OR ${qualifiedRepo} LIKE ? ESCAPE '\\'
+      ORDER BY e.started_at DESC
       LIMIT ?
     `).all(pattern, pattern, pattern, limit) as Array<Record<string, unknown>>;
     return rows.map((r) => ({

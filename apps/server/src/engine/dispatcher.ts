@@ -6,6 +6,7 @@ import type { SessionManager } from "../connectors/index.js";
 // into the dispatcher's module graph.
 import { withThreadTranscript } from "../connectors/messaging/thread-transcript.js";
 import type { StateDb } from "../state/db.js";
+import { qualifyRepo } from "../state/repo-ref.js";
 import type { GitHubClient } from "./github/github.js";
 import type { ChatResult } from "./chat/chat.js";
 import { routeEvent, type Route, type RouterDeps } from "./router.js";
@@ -775,7 +776,11 @@ async function handleBuild(
     triggerType: envelope.type === "message" ? "chat" : "webhook",
     triggerId: String(issueNumber),
     skill: "build-cycle",
-    repo: repoStr,
+    // The pair, not the qualified string this used to write (issue #279) — a
+    // `build-cycle` row has no `workflow_run_id`, so its own columns are the
+    // only place the account can be recovered from.
+    owner,
+    repo,
     issueNumber,
     startedAt: new Date().toISOString(),
     // Actor logging (issue #205): who fired this build.
@@ -951,10 +956,14 @@ async function handleExploreReply(
   const isSlack = run.triggerId.startsWith("slack:");
   const replyChannelId = context.channelId as string | undefined;
   const replyThreadId = context.threadId as string | undefined;
-  // Reconstruct owner/repo from the stored workflow context.
+  // `dispatchWorkflow` speaks the qualified `owner/repo`, so compose it from
+  // the row's pair — through `qualifyRepo`, which is a no-op on a value that
+  // already carries a slash. This used to join unconditionally, so a legacy
+  // qualified `run.repo` produced `acme/acme/widgets`, which the dispatch split
+  // then read as the repo `acme` — a different real repository (issue #279).
   const storedCtx = (run.context || {}) as Record<string, unknown>;
   const storedOwner = storedCtx.owner as string | undefined;
-  const resumeRepo = storedOwner && run.repo ? `${storedOwner}/${run.repo}` : run.repo || undefined;
+  const resumeRepo = qualifyRepo(run.owner ?? storedOwner, run.repo);
   eventLog.info("explore-reply: resuming after reply", { workflowRunId, sender });
   deps.dispatchWorkflow("explore", {
     repo: resumeRepo || (isSlack ? undefined : run.triggerId.split("#")[0]),

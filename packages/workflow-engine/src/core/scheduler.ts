@@ -4,7 +4,7 @@ import type { TemplateContext } from "./templates.js";
 import { renderTemplate } from "./templates.js";
 import { evalSkipIf } from "./loop-eval.js";
 import { buildDag, getReadyNodes, getNodesToSkip, isComplete } from "./dag.js";
-import { PhaseExecutor, type PhaseRunContext } from "./phase-executor.js";
+import { PhaseExecutor, telemetryRepo, type PhaseRunContext } from "./phase-executor.js";
 import { OPENINFERENCE_CHAIN, OPENINFERENCE_SPAN_KIND } from "./types.js";
 import type {
   EnginePorts,
@@ -76,7 +76,7 @@ export async function runWorkflowCore(
     "workflow.name": definition.name,
     "workflow.run_id": workflowId,
     "trigger.id": triggerId,
-    repo: githubAccess.repo,
+    repo: telemetryRepo(githubAccess),
     "sandbox.backend": config.sandbox,
     [OPENINFERENCE_SPAN_KIND]: OPENINFERENCE_CHAIN,
   };
@@ -137,6 +137,7 @@ export async function runWorkflowCore(
         triggerId,
         workflowId,
         githubAccess.repo,
+        githubAccess.owner,
       );
       await reportStep(node.name, "skipped");
     }
@@ -192,6 +193,7 @@ export async function runWorkflowCore(
           triggerId,
           workflowId,
           githubAccess.repo,
+          githubAccess.owner,
         );
         await reportStep(node.name, "skipped", phaseDef?.messages?.on_skipped_done);
       }

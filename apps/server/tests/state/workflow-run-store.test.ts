@@ -648,8 +648,25 @@ describe("listActive includes queued", () => {
   });
 });
 
+/**
+ * Insert a run row with raw SQL, bypassing `createRun`'s normalization — the
+ * only way to produce a shape the store would never write itself (issue #279).
+ */
+function makeLegacyRun(overrides: { owner?: string | null; repo: string }): string {
+  const id = randomUUID();
+  db.database
+    .prepare(
+      `INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, current_phase, status, started_at, updated_at)
+       VALUES (?, 'explore', ?, ?, ?, 'socratic', 'running', ?, ?)`,
+    )
+    .run(id, `slack:${id}`, overrides.owner ?? null, overrides.repo, new Date().toISOString(), new Date().toISOString());
+  return id;
+}
+
 describe("repo-scoped queries", () => {
   it("list({ repo }) returns only that repo's runs, with the post-filter total", () => {
+    // Passing the qualified form is normalized on the way in (issue #279), so
+    // the rows come back as the (owner, BARE repo) pair regardless.
     makeRun({ repo: "acme/api" });
     makeRun({ repo: "acme/api" });
     makeRun({ repo: "acme/web" });
@@ -658,7 +675,7 @@ describe("repo-scoped queries", () => {
     const { runs, total } = db.runs.list({ repo: "acme/api" });
     expect(total).toBe(2);
     expect(runs).toHaveLength(2);
-    expect(runs.every((r) => r.repo === "acme/api")).toBe(true);
+    expect(runs.every((r) => r.owner === "acme" && r.repo === "api")).toBe(true);
 
     // The filter composes with pagination.
     const page = db.runs.list({ repo: "acme/api", limit: 1 });
@@ -684,11 +701,41 @@ describe("repo-scoped queries", () => {
     // `IN (…)` against the column matches no modern row at all, which would
     // silently show an empty dashboard rather than a filtered one.
     makeRun({ owner: "nearform", repo: "lastlight" });
-    // ...alongside a legacy row that stored the qualified string in `repo`.
-    makeRun({ owner: undefined, repo: "nearform/www" });
+    makeRun({ owner: "nearform", repo: "www" });
 
     const { runs } = db.runs.list({ repos: ["nearform/lastlight", "nearform/www"] });
     expect(runs).toHaveLength(2);
+  });
+
+  it("still matches a legacy row the backfill never reached", () => {
+    // The `OR repo = ?` arm of `repoMatchClause` is compatibility, not the rule
+    // (issue #279): `createRun` normalizes and `migrate()` converges the table,
+    // so only a row written by an older process against an un-migrated DB looks
+    // like this. Kept because dropping a row from a filter is the failure mode
+    // that hides things silently — a SELECT is the wrong place to discover that
+    // a backfill didn't run.
+    makeRun({ owner: "nearform", repo: "lastlight" });
+    const legacy = makeLegacyRun({ owner: null, repo: "nearform/www" });
+
+    const { runs } = db.runs.list({ repos: ["nearform/lastlight", "nearform/www"] });
+    expect(runs).toHaveLength(2);
+    expect(runs.map((r) => r.id)).toContain(legacy);
+
+    // …and it reads back NORMALIZED, because `deserialize` is the shim every
+    // consumer crosses. This is what lets admission.ts hand (owner, repo)
+    // straight to Octokit without a split of its own.
+    const read = db.runs.getRun(legacy)!;
+    expect([read.owner, read.repo]).toEqual(["nearform", "www"]);
+  });
+
+  it("distinctRepos() folds a legacy row in with its normalized twin", () => {
+    // The bare-vs-qualified duplicate the /repos union must never show.
+    makeRun({ owner: "nearform", repo: "www", startedAt: "2026-01-01T00:00:00.000Z" });
+    makeLegacyRun({ owner: null, repo: "nearform/www" });
+
+    const repos = db.runs.distinctRepos();
+    expect(repos.filter((r) => r.repo === "nearform/www")).toHaveLength(1);
+    expect(repos.find((r) => r.repo === "nearform/www")!.runCount).toBe(2);
   });
 
   it("list({ repo }) wins over `repos` — the Repos tab's narrower ask", () => {

@@ -301,6 +301,26 @@ describe("generic loop — the until_bash check is an open execution row in flig
     expect(store.executionRows("fix_iter_1_check")[0]!.dedupKey).toBe(`${WF}:fix_iter_1_check`);
   });
 
+  it("stamps every ledger row with the (owner, BARE repo) pair", async () => {
+    // The engine writes what `GitSandboxAccess` already carries — the pair,
+    // never a qualified string (issue #279). It used to write only the bare
+    // half, leaving the account recoverable solely by joining the owning run,
+    // which a `build-cycle` or chat row does not have.
+    //
+    // The in-memory fake dropped both fields entirely until #279, so no
+    // engine-side test could observe this at all.
+    const { store } = await runLoop(defineLoop({ max_iterations: 1, until_bash: GATE_CMD }), {
+      iterations: [agentOk("worked on it")],
+      gates: [gateRed],
+    });
+
+    const rows = store.executionRows();
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect([row.owner, row.repo]).toEqual(["acme", "widgets"]);
+    }
+  });
+
   it("closes the row with a duration once the command returns", async () => {
     const { store } = await runLoop(defineLoop({ max_iterations: 1, until_bash: GATE_CMD }), {
       iterations: [agentOk("worked on it")],

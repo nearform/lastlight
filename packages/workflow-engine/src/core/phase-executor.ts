@@ -243,6 +243,21 @@ async function isContainerAlive(liveness: LivenessPort, taskId: string): Promise
   }
 }
 
+/**
+ * The `owner/repo` a TELEMETRY consumer expects to filter traces by.
+ *
+ * The engine carries the pair separately everywhere else — that is the storage
+ * and Octokit shape (see {@link NewExecution}) — and a span attribute is the
+ * one place a whole repository name is more useful than either half. This
+ * package depends only on `zod` and may never reach `lastlight-shared` or
+ * `lastlight-core`, so it cannot import that repo's `state/repo-ref.ts`; the
+ * rule is small enough to restate, and the pair is right here on the row.
+ */
+export function telemetryRepo(access: GitSandboxAccess | undefined): string | undefined {
+  if (!access?.repo) return undefined;
+  return access.owner ? `${access.owner}/${access.repo}` : access.repo;
+}
+
 type RunPhaseResult =
   | { result: ExecutionResult; executionId: string; skipped: false }
   | { result: ExecutionResult; skipped: false }
@@ -267,13 +282,15 @@ async function runPhaseLedger(
     phaseName: string;
     taskId: string;
     triggerId: string;
+    /** BARE repo name + its account — the pair, never a qualified string. */
     repo?: string;
+    owner?: string;
     workflowRunId?: string;
   },
   deps: LedgerDeps,
   run: (onSessionId: (sessionId: string) => void) => Promise<ExecutionResult>,
 ): Promise<RunPhaseResult> {
-  const { dedupKey, phaseName, taskId, triggerId, repo, workflowRunId } = meta;
+  const { dedupKey, phaseName, taskId, triggerId, repo, owner, workflowRunId } = meta;
   const { store: db, liveness, observability } = deps;
   const log = deps.logger ?? noopLogger;
   return observability.withSpan("lastlight.workflow.phase", attrs, async (span) => {
@@ -301,6 +318,7 @@ async function runPhaseLedger(
         triggerType: "webhook",
         triggerId,
         skill: dedupKey,
+        owner,
         repo,
         issueNumber: issueNumberFromTrigger(triggerId),
         startedAt: new Date().toISOString(),
@@ -383,7 +401,7 @@ export async function runPhase(
     "workflow.run_id": workflowRunId,
     "trigger.id": triggerId,
     "task.id": taskId,
-    repo: githubAccess?.repo,
+    repo: telemetryRepo(githubAccess),
     "issue.number": issueNumberFromTrigger(triggerId),
     "sandbox.backend": config.sandbox,
     model: modelOverride || config.model,
@@ -395,7 +413,7 @@ export async function runPhase(
     ...phaseConfigBase,
     telemetry: { workflowName, phaseName, triggerId, workflowRunId },
   };
-  return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, workflowRunId }, deps, (onSessionId) =>
+  return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, owner: githubAccess?.owner, workflowRunId }, deps, (onSessionId) =>
     deps.agent.runAgent(prompt, phaseConfig, { taskId, githubAccess, onSessionId }),
   );
 }
@@ -425,14 +443,14 @@ export async function runCommandPhase(
     "workflow.run_id": workflowRunId,
     "trigger.id": triggerId,
     "task.id": taskId,
-    repo: githubAccess?.repo,
+    repo: telemetryRepo(githubAccess),
     "issue.number": issueNumberFromTrigger(triggerId),
     "sandbox.backend": config.sandbox,
     model: spec.kind,
     [OPENINFERENCE_SPAN_KIND]: OPENINFERENCE_CHAIN,
   };
   const phaseConfig: ExecutorConfig = { ...config, telemetry: { workflowName, phaseName, triggerId, workflowRunId } };
-  return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, workflowRunId }, deps, (onSessionId) =>
+  return runPhaseLedger(attrs, { dedupKey, phaseName, taskId, triggerId, repo: githubAccess?.repo, owner: githubAccess?.owner, workflowRunId }, deps, (onSessionId) =>
     deps.agent.runCommand(spec, phaseConfig, { taskId, githubAccess, onSessionId, timeoutSeconds, sandboxEnv }),
   );
 }
@@ -811,6 +829,7 @@ export class PhaseExecutor {
           triggerType: "webhook",
           triggerId,
           skill: `${definition.name}:${label}`,
+          owner: githubAccess?.owner,
           repo: githubAccess?.repo,
           issueNumber: issueNumberFromTrigger(triggerId),
           startedAt: new Date(startedAt).toISOString(),

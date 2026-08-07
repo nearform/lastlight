@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
+import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
 import { logger } from "../logging/logger.js";
 
 const log = logger("runs");
@@ -43,7 +44,13 @@ export interface WorkflowRun {
   /** GitHub org/user that owns {@link repo}. Stored as its own column so the
    *  runs list (which omits `context`) can compose the qualified `owner/repo`. */
   owner?: string;
-  /** BARE repo name (no owner) — kept path-safe for taskIds / workspace dirs. */
+  /**
+   * BARE repo name (no owner) — kept path-safe for taskIds / workspace dirs.
+   *
+   * Normalized on the way in AND on the way back out (`state/repo-ref.ts`), so
+   * a consumer can hand `(run.owner, run.repo)` to Octokit unsplit. Reach for
+   * `qualifyRepo` when you need the user-facing `owner/repo`.
+   */
   repo?: string;
   issueNumber?: number;
   /**
@@ -158,15 +165,18 @@ export type TerminalRunObserver = (
 /**
  * Match one `owner/repo` against a `workflow_runs` row, in SQL.
  *
- * Exists because **the column does not hold the value callers filter by.** The
- * dashboard (Repos tab, per-repo visibility) speaks qualified `owner/repo`,
- * while the table stores the BARE repo in `repo` with the account in a separate
- * `owner` column — except for legacy rows written before that split, which put
- * the qualified string in `repo` itself. So both shapes have to be matched, and
- * a plain `repo IN (…)` silently returns nothing for every modern row.
+ * Exists because callers filter by the qualified name while the table stores
+ * the pair — `owner` + a BARE `repo` (see `state/repo-ref.ts`). That is the
+ * rule, and `owner = ? AND repo = ?` is it. A bare filter value has no owner to
+ * split off, so it matches `repo` alone.
  *
- * A bare filter value (no slash) has no owner to split off, so it matches
- * `repo` alone.
+ * The trailing `OR repo = ?` is **legacy-row handling, not the rule** (issue
+ * #279). Rows written before the backfill put the qualified string in `repo`
+ * itself; the migration converges them and both write choke points keep new
+ * ones honest, so this arm should match nothing on a migrated DB. It is kept
+ * because a `SELECT` is not the place to discover that a backfill didn't run,
+ * and because dropping a row from a filter is the failure mode that hides
+ * things silently.
  */
 function repoMatchClause(repo: string): { sql: string; values: string[] } {
   const slash = repo.indexOf("/");
@@ -221,9 +231,17 @@ export class WorkflowRunStore {
 
   // ── Plain single-mutation operations ───────────────────────────
 
-  /** Create a new workflow run record */
+  /**
+   * Create a new workflow run record.
+   *
+   * The (owner, BARE repo) invariant is enforced HERE rather than asked of
+   * callers (issue #279) — a fixture, an eval harness or a future caller
+   * passing `"owner/repo"` is split rather than stored as a third shape. See
+   * `state/repo-ref.ts`.
+   */
   createRun(run: Omit<WorkflowRun, "phaseHistory" | "updatedAt">): void {
     const now = new Date().toISOString();
+    const ref = normalizeRepoRef(run.owner, run.repo);
     this.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, phase_history, status, context, scratch, started_at, updated_at, triggered_by, trigger_actor_type)
       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)
@@ -231,8 +249,8 @@ export class WorkflowRunStore {
       run.id,
       run.workflowName,
       run.triggerId,
-      run.owner ?? null,
-      run.repo ?? null,
+      ref.owner ?? null,
+      ref.repo ?? null,
       run.issueNumber ?? null,
       run.currentPhase,
       run.status,
@@ -636,26 +654,26 @@ export class WorkflowRunStore {
    * which annotates the managed-repo list with recent activity and sorts by it.
    * Ordered newest-activity first.
    *
-   * The `repo` key is the QUALIFIED `owner/repo` (owner-less legacy rows fall
-   * back to the bare name) so it aligns with `getManagedRepos()` and the
-   * artifact-store slugs the `/repos` endpoint unions it against — without this
-   * a repo split into two rows (bare-with-runs vs qualified-managed-with-zero).
+   * The `repo` key is the QUALIFIED `owner/repo` (owner-less rows fall back to
+   * the bare name) so it aligns with `getManagedRepos()` and the artifact-store
+   * slugs the `/repos` endpoint unions it against — without this a repo splits
+   * into two rows (bare-with-runs vs qualified-managed-with-zero).
+   *
+   * That join is the one in `state/repo-ref.ts`, expressed in SQL so it groups
+   * correctly: two rows for the same repo that disagree about shape collapse
+   * into one bucket here rather than after the fact.
    */
   distinctRepos(): { repo: string; runCount: number; lastRunAt: string }[] {
-    const rows = this.db
+    const qualified = qualifiedRepoSql("owner", "repo", "bare");
+    return this.db
       .prepare(
-        `SELECT owner, repo, COUNT(*) AS c, MAX(started_at) AS last
+        `SELECT ${qualified} AS repo, COUNT(*) AS runCount, MAX(started_at) AS lastRunAt
            FROM workflow_runs
           WHERE repo IS NOT NULL AND repo != ''
-          GROUP BY owner, repo
-          ORDER BY last DESC`,
+          GROUP BY ${qualified}
+          ORDER BY lastRunAt DESC`,
       )
-      .all() as { owner: string | null; repo: string; c: number; last: string }[];
-    return rows.map((r) => ({
-      repo: r.owner && !r.repo.includes("/") ? `${r.owner}/${r.repo}` : r.repo,
-      runCount: r.c,
-      lastRunAt: r.last,
-    }));
+      .all() as { repo: string; runCount: number; lastRunAt: string }[];
   }
 
   /**
@@ -813,12 +831,19 @@ export class WorkflowRunStore {
   }
 
   private deserialize(row: Record<string, unknown>): WorkflowRun {
+    // The compatibility shim for the (owner, BARE repo) invariant (issue #279).
+    // The backfill converges stored rows and `createRun` keeps new ones honest,
+    // so this only ever fires for a row written by an older process before the
+    // migration ran — but it fires at the ONE boundary every consumer crosses,
+    // which is what lets `admission.ts` and `feedback-poll.ts` hand
+    // `(run.owner, run.repo)` straight to Octokit with no split of their own.
+    const ref = normalizeRepoRef(row.owner as string | null, row.repo as string | null);
     return {
       id: row.id as string,
       workflowName: row.workflow_name as string,
       triggerId: row.trigger_id as string,
-      owner: (row.owner as string | null) ?? undefined,
-      repo: row.repo as string | undefined,
+      owner: ref.owner,
+      repo: ref.repo,
       issueNumber: row.issue_number as number | undefined,
       triggeredBy: (row.triggered_by as string | null) ?? undefined,
       triggerActorType: (row.trigger_actor_type as TriggerActorType | null) ?? undefined,

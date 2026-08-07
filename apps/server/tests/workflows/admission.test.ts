@@ -77,6 +77,30 @@ function makeQueuedRunWithAck(
   db.runs.mergeScratch(id, { queuedAck: { commentId } });
 }
 
+/**
+ * The same run, but written the way a process that predates the #279 backfill
+ * wrote it: the qualified `owner/repo` in the `repo` column. Raw SQL, because
+ * `createRun` now normalizes that shape away — which is the point.
+ *
+ * Octokit takes `(owner, repo)` positionally with no normalization of its own,
+ * so a row like this reaching `deleteComment` unsplit would address
+ * `/repos/acme/acme%2Fwidgets/...`.
+ */
+function makeLegacyQueuedRunWithAck(
+  db: StateDb,
+  id: string,
+  startedAt: string,
+  commentId: number,
+): void {
+  db.database
+    .prepare(
+      `INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, status, started_at, updated_at)
+       VALUES (?, 'issue-triage', ?, NULL, 'acme/widgets', 215, 'triage', 'queued', ?, ?)`,
+    )
+    .run(id, `acme/widgets#${id.slice(-2)}`, startedAt, startedAt);
+  db.runs.mergeScratch(id, { queuedAck: { commentId } });
+}
+
 function makeGithubStub() {
   return {
     postComment: vi.fn(async () => 1),
@@ -289,6 +313,46 @@ describe("createAdmissionController", () => {
     expect(github.deleteComment).toHaveBeenCalledWith("acme", "widgets", 5060108290);
     // Retracted, not rewritten — the run's own output is the real answer now.
     expect(github.updateComment).not.toHaveBeenCalled();
+  });
+
+  it("admitNext: passes Octokit the BARE repo even for a legacy qualified row", async () => {
+    // The sharp edge of #279. This code path hands `(run.owner, run.repo)`
+    // straight to Octokit with no split of its own — correct only because the
+    // store normalizes on read-back. Without that shim this would call
+    // `deleteComment("", "acme/widgets", …)`.
+    makeLegacyQueuedRunWithAck(db, "run-legacy", "2024-01-01T00:00:00.000Z", 5060108290);
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.admitNext();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(github.deleteComment).toHaveBeenCalledWith("acme", "widgets", 5060108290);
+  });
+
+  it("sweep: rewrites a legacy qualified row's ack against the BARE repo", async () => {
+    // The updateComment twin of the above — the other Octokit call reachable
+    // from a stored repo identifier.
+    const oldTime = new Date(Date.now() - 3_600_000).toISOString();
+    makeLegacyQueuedRunWithAck(db, "gh-legacy-stale", oldTime, 777);
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.sweep();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const [owner, repo] = github.updateComment.mock.calls[0] as unknown as [string, string];
+    expect([owner, repo]).toEqual(["acme", "widgets"]);
   });
 
   it("admitNext: admits normally when no ack was recorded (Slack / failed post)", async () => {
