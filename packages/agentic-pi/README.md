@@ -81,6 +81,47 @@ via a github.com-scoped `http.extraheader` (Basic `x-access-token:<token>`)
 injected as `GIT_CONFIG_*` env on the git children we spawn — nothing on disk,
 and the token can carry any character GitHub returns.
 
+Publishing is opinionated too: `github_publish` replaces `git add`/`git
+commit`/`git push` in the `repo-write` profile. A commit built by `git` inside
+the sandbox is unsigned, and on a repository with GitHub's
+`required_signatures` branch-protection rule, one unsigned commit anywhere in
+a branch blocks the pull request permanently — no token fixes that, because
+the token authenticates the *push* while a signature is a property of the
+*commit object*. `github_publish` diffs the working tree against the branch's
+current remote tip (local commits the agent already made are folded in — the
+published commit is the working tree as it stands) and hands the change set
+to GitHub's GraphQL `createCommitOnBranch` mutation, which builds and signs
+the commit server-side under the App's bot identity. No signing key is held
+anywhere.
+
+Four things worth knowing:
+
+- **It refuses what it cannot express, atomically, before any remote write.**
+  `FileAddition` carries a path and base64 contents, not a file mode, so a
+  genuine mode change is rejected up front — a new executable file, a new
+  symlink, a submodule pointer, or flipping an existing file's mode either way
+  (including `100755` → `100644`, which GitHub would otherwise silently leave
+  unchanged rather than actually downgrade). A content-only edit to a file
+  that is already `100755` is fine — GitHub preserves the base tree's mode on
+  those. This runs before the branch is even created, when publishing to a
+  branch that doesn't exist on GitHub yet, and there's no fallback to
+  `git push` — that would produce exactly the unsigned commit this tool
+  exists to avoid.
+- **It's race-safe by construction, with no retry.** The mutation pins
+  `expectedHeadOid`; if the branch moved since the tool read its tip, GitHub
+  rejects the write (`STALE_DATA`) instead of silently clobbering it. The
+  tool does not re-diff and retry on its own — the change set is computed as
+  "working tree vs. tip", so rebasing onto a tip that genuinely moved would
+  render another party's added files as deletions. A `STALE_DATA` failure
+  names itself in the error; re-running the tool call is the fix.
+- **There's a size ceiling.** GitHub caps the whole request at 45 MB — the sum
+  of every addition in one publish, not a per-file limit. Ordinary publishes
+  (source edits, a lockfile) are far under it.
+- **It asserts its own signature.** Every publish checks GitHub's response and
+  fails loudly if GitHub reports the commit unsigned or the signature invalid
+  — the commit is already on the branch by then, so a silent failure here
+  would otherwise only surface later as a blocked PR.
+
 ### 4. Permission profiles as a registration-time gate
 
 `--profile <name>` picks one of four allowlists ported from lastlight:
