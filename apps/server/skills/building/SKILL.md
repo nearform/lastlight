@@ -14,9 +14,14 @@ verifying someone else's PR.
 ## Workspace & git
 
 The harness pre-cloned the repo; your cwd is the repo root (or a `<repo>/`
-subdirectory — check with `ls -la`). Git is configured for clone/push/pull/fetch.
-If auth fails after ~1 hour, call the `github_refresh_git_auth` MCP tool. Suppress
-noise where it helps: `git clone --quiet`, `git push --quiet`, `CI=true`.
+subdirectory — check with `ls -la`). Git is configured for clone/fetch/pull and
+local commits. If auth fails after ~1 hour, call the `github_refresh_git_auth`
+MCP tool. Suppress noise where it helps: `git clone --quiet`, `CI=true`.
+
+Getting work onto the branch is not a git operation: a commit built by git here
+is unsigned and a repo that requires signed commits blocks it permanently, so a
+phase that publishes does it with `github_publish` rather than `git push`. Your
+prompt says whether yours publishes and with what arguments.
 
 ## Install-first
 

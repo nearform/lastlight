@@ -108,10 +108,23 @@ authorise it.
 When the harness invokes you via a sandboxed workflow, a short-lived
 GitHub installation token is already injected into your VM environment as
 `GITHUB_TOKEN` and `GH_TOKEN`. Git's credential helper is pre-configured
-to use it:
+to use it, so reading from GitHub and working locally just work:
 
-- `git clone https://github.com/<owner>/<repo>.git .` — just works.
-- `git push origin <branch>` — just works.
+- `git clone https://github.com/<owner>/<repo>.git .`
+- `git fetch origin <branch>`, `git merge`, and local `git commit`s.
+
+**Publishing is not a git operation.** A commit built by git in this
+sandbox is unsigned, and on a repository that requires signed commits one
+unsigned commit anywhere in a branch blocks the pull request permanently —
+the injected token cannot change that, because it authenticates the *push*
+while a signature is a property of the *commit object*. So a phase that
+writes code puts its work on the branch with the `github_publish` tool: it
+hands the working tree to GitHub, which builds and signs the commit under
+the bot's identity and folds in any local commits you made. Do not use
+`git push`, and if `github_publish` refuses a change do not work around the
+refusal with one — nothing was published, and pushing would land exactly
+the commit the refusal exists to prevent. Your phase's prompt gives the
+arguments; a phase that writes no code never publishes.
 
 **The `gh` CLI is NOT installed in the sandbox.** Do not call `gh` — it
 will fail with `command not found`. Anything beyond plain git (opening a

@@ -236,7 +236,7 @@ export function buildGitHubTools(
 
     tool(
       "github_clone_repo",
-      "Clone a repository with GitHub App authentication. Sets up the credential helper automatically; commit identity comes from the ambient git config/environment. git push/pull/fetch will just work after cloning.",
+      "Clone a repository with GitHub App authentication. Sets up the credential helper automatically; commit identity comes from the ambient git config/environment. git fetch/pull and local commits just work after cloning. To put work back on a branch use `github_publish`, not `git push` — a commit built by git is unsigned, and a repository that requires signed commits blocks it permanently.",
       Type.Object({
         owner: Type.String({ description: "Repository owner" }),
         repo: Type.String({ description: "Repository name" }),
