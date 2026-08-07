@@ -713,6 +713,53 @@ Per phase:
 The triage profile literally cannot push code, even if a prompt-
 injected attacker convinced the agent to try.
 
+### Invariant: the published commit is built by GitHub, not by git
+
+A commit object built inside the sandbox is unsigned, and the installation token
+above cannot change that — the token authenticates the *push*, whereas a
+signature is a property of the *commit object*. On a repo carrying GitHub's
+`required_signatures` rule, one unsigned commit anywhere in the branch blocks
+the pull request permanently and no later run can clear it (issue #268).
+
+So every code-writing prompt publishes through **`github_publish`**
+(`packages/agentic-pi/src/extensions/github/tools.ts`), registered only for the
+`repo-write` profile — it is in `REPO_WRITE_TOOLS`, so `read` / `issues-write` /
+`review-write` never see the tool at all. It diffs the working tree against the
+branch's current remote tip and hands the change set to GraphQL
+`createCommitOnBranch`, which builds and signs the commit server-side under the
+App's bot identity. No signing key is held anywhere. Four consequences:
+
+- **Local `git commit`s stay legitimate.** The tool publishes the *working
+  tree*, so anything the agent committed locally is folded into the one signed
+  commit rather than pushed as its own — which is what lets `dependabot-ci-fix`
+  complete a base merge with `git add -A && git commit --no-edit` and still
+  publish a signed result. Afterwards the tool `git fetch`es and
+  `git reset --mixed`es the local branch onto the published commit, so the
+  checkout a later phase inherits matches the branch.
+- **The change set is scopeable.** `include` restricts the publish to a
+  pathspec list — additions *and* deletions — and `exclude` drops one. The build
+  family's artifact steps pass `include: [".lastlight"]`, so a phase's install
+  or test run cannot sweep the rest of the checkout onto the branch.
+- **It fails loudly rather than degrading.** `expectedHeadOid` is non-null, so a
+  tip that moved is rejected, not merged over (a `STALE_DATA` rejection is named
+  as such, because GitHub's own REST-read/GraphQL-write lag can produce one with
+  nobody racing); a change needing a file mode the API cannot express — a new
+  executable file, a symlink, a submodule pointer, or a mode change on an
+  existing file — is refused *before* anything remote is written, naming the
+  files (a content-only edit to a file that is *already* executable is fine:
+  GitHub patches the base tree and keeps that entry's mode, measured in
+  `docs/plans/signed-commit-publish/00-findings.md`); and the mutation's returned
+  `signature.wasSignedByGitHub` is asserted on every publish. There is
+  deliberately **no** fallback to `git push`: a fallback would publish exactly
+  the unsigned commit the mechanism exists to prevent.
+- **The branch need not exist yet.** `base_branch` creates it from that ref
+  (default: the repo's default branch) after every refusal check has run, so the
+  build family never has to push a branch into existence first.
+
+The `http.extraheader` path above is unaffected and stays: `clone` / `fetch` /
+`merge` still need the token, and the local scratch commits still need the
+`GIT_AUTHOR_*` / `GIT_COMMITTER_*` identity.
+
 ### Invariant: an in-process run mutates no globals
 
 The container backends hand each run its own env, so they were always isolated.
