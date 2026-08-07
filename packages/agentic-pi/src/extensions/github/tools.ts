@@ -447,7 +447,7 @@ export function buildGitHubTools(
 
     tool(
       "github_publish",
-      "Publish your work: commit the whole working tree and push it, in one step, as a SIGNED commit. Use this INSTEAD of `git add`/`git commit`/`git push` — a commit built by git in this sandbox is unsigned, and a repository that requires signed commits blocks it permanently. GitHub builds and signs the commit for you, attributed to the bot. Local commits you already made are folded in; the published commit is the working tree as it stands now. Fails rather than publishing if a change needs a file mode it cannot express (a new executable file, a symlink, a submodule pointer) — do not work around that with `git push`.",
+      "Publish your work: commit the whole working tree and push it, in one step, as a SIGNED commit. Use this INSTEAD of `git add`/`git commit`/`git push` — a commit built by git in this sandbox is unsigned, and a repository that requires signed commits blocks it permanently. GitHub builds and signs the commit for you, attributed to the bot. Local commits you already made are folded in; the published commit is the working tree as it stands now. Fails rather than publishing if a change needs a file mode it cannot express (a new executable file, a symlink, a submodule pointer, or a mode change on an existing file) — do not work around that with `git push`; for a new script, leave it non-executable and run it through its interpreter (`bash scripts/verify.sh`).",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -501,7 +501,7 @@ export function buildGitHubTools(
         if (changes.unsupported.length > 0) {
           const listed = changes.unsupported.map((u) => `${u.path}: ${u.reason}`).join("; ");
           throw new Error(
-            `refusing to publish — ${changes.unsupported.length} change(s) need a file mode the signed-commit API cannot set: ${listed}. Nothing was published. Do NOT fall back to git push (it would produce an unsigned commit); flag this for a human.`,
+            `refusing to publish — ${changes.unsupported.length} change(s) need a file mode the signed-commit API cannot set: ${listed}. Nothing was published. Do NOT fall back to git push (it would produce an unsigned commit). Most of these have a way out you can take yourself: a NEW file cannot be published executable, so make it non-executable (\`chmod 644 <file>\`) and invoke it through its interpreter instead (\`bash scripts/verify.sh\`, \`python scripts/x.py\`), updating whatever calls it, then publish again. Flag it for a human only if that is not possible — a symlink, a submodule pointer, or a mode change some other file depends on.`,
           );
         }
         if (changes.additions.length === 0 && changes.deletions.length === 0) {
@@ -513,7 +513,7 @@ export function buildGitHubTools(
             reason:
               include?.length === 0
                 ? "nothing to publish — `include` was an empty list, so no path was eligible. The working tree may well differ from the branch. Pass the pathspecs you meant to publish, or omit `include` to publish the whole tree."
-                : "nothing to publish — the working tree matches the branch",
+                : "nothing to publish — the working tree matches the branch. If an earlier publish in this phase failed after the request went out (a lost response, or a STALE_DATA rejection on the retry), its commit may already be on the branch and be the reason there is nothing left: check `github_list_commits` for it before reporting that nothing changed.",
           };
         }
 

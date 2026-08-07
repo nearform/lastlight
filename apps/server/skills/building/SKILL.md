@@ -23,6 +23,14 @@ is unsigned and a repo that requires signed commits blocks it permanently, so a
 phase that publishes does it with `github_publish` rather than `git push`. Your
 prompt says whether yours publishes and with what arguments.
 
+**A new file cannot be published executable.** GitHub builds the commit from
+paths and contents, with no file mode, so a new `100755` file is refused and
+nothing is published. Adding a script is the case you will hit: leave it
+non-executable (no `chmod +x`) and invoke it through its interpreter —
+`bash scripts/verify.sh`, `python scripts/check.py` — in the docs, the CI
+workflow and anywhere else that calls it. Symlinks, submodule pointers and a
+mode change on an existing file are refused too, and those need a human.
+
 ## Install-first
 
 `node_modules` (and any other dependency dir) is **always** absent on arrival —
