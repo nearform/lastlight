@@ -273,7 +273,7 @@ async function resolveDiffBase(req: DiffBaseRequest): Promise<DiffBase> {
     }
     if (!descendsFrom(cwd, existingTip)) {
       throw new Error(
-        `refusing to publish — ${target} has moved on GitHub since this workspace was created: its tip ${existingTip} is not in this checkout's history. The change set is the working tree measured against that tip, so publishing now would record every file that commit added as a DELETION. Nothing was published. Run \`git fetch origin ${target} && git merge origin/${target}\`, re-check your work, then publish again; do NOT git push.`,
+        `refusing to publish — the tip of ${target} on GitHub (${existingTip}) is not in this checkout's history. The change set is the working tree measured against that tip, so publishing now would record every file that commit added as a DELETION. Nothing was published. Find out whose commit it is before recovering — \`github_list_commits\` with sha: "${target}" shows it — because the two cases differ. If an earlier publish in this phase landed it and this checkout could not be moved onto it, run \`git fetch origin ${target} && git reset --mixed origin/${target}\`: that moves the branch pointer and leaves every file exactly as it is. If somebody else pushed it, run \`git fetch origin ${target} && git add -A && git commit -m wip && git merge origin/${target}\` — commit first or the merge aborts on your uncommitted changes, and the local commit costs nothing because a publish folds local commits in. Then re-check your work and publish again; do NOT git push.`,
       );
     }
     return { tip: existingTip, createFrom: null };
@@ -296,7 +296,7 @@ async function resolveDiffBase(req: DiffBaseRequest): Promise<DiffBase> {
   }
   if (from === null) {
     throw new Error(
-      `refusing to create ${target} — this checkout shares no commit with ${base} (tip ${baseTip}), so there is no base for the new branch that the working tree can be measured against. Nothing was published. Run \`git fetch origin ${base} && git merge origin/${base}\`, re-check your work, then publish again; do NOT git push.`,
+      `refusing to create ${target} — this checkout shares no commit with ${base} (tip ${baseTip}), so there is no commit GitHub already has that the working tree can be measured against. Nothing was published. Merging will not fix this: histories with nothing in common do not merge. It usually means the checkout is not of this repository, or ${base}'s history was rewritten — compare \`github_list_commits\` (sha: "${base}") with your local \`git log\` and say what you found. A fresh clone with the work re-applied is the way out; do NOT git push.`,
     );
   }
   return { tip: from, createFrom: from };

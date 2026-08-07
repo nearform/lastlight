@@ -483,7 +483,16 @@ describe("github_publish", () => {
       const out = await callPublish(fake.url, { owner: "o", repo: "r", message: "m", path: r.dir });
       assert.ok(out.error, "expected a refusal");
       assert.match(out.error, new RegExp(r.remoteTip));
-      assert.match(out.error, /git fetch origin main/);
+      // Both recoveries, because they are not interchangeable: a reset for our
+      // own already-published commit, a commit-then-merge for somebody else's.
+      // A bare `git merge` is NOT one of them — it aborts on the uncommitted
+      // changes this refusal always fires with (reproduced in review).
+      assert.match(out.error, /git fetch origin main && git reset --mixed origin\/main/);
+      assert.match(
+        out.error,
+        /git fetch origin main && git add -A && git commit -m wip && git merge origin\/main/,
+      );
+      assert.match(out.error, /github_list_commits/);
       assert.equal(fake.mutations.length, 0);
       assert.deepEqual(
         fake.requests.filter((req) => req.method !== "GET"),

@@ -754,7 +754,10 @@ signing key is held anywhere. Four consequences:
   working tree measured against the tip, publishing it would record everything
   the other party added as a deletion. The check is `git merge-base
   --is-ancestor <tip> HEAD` against the sandbox checkout, and the refusal names
-  the `git fetch` + `git merge` that clears it. A change needing a file mode the
+  a recovery per cause: `git reset --mixed` when the tip is a commit an earlier
+  publish landed (the local sync having failed), and commit-then-merge when
+  somebody else pushed — a bare `git merge` is not offered, because it aborts on
+  the uncommitted changes this refusal always fires with. A change needing a file mode the
   API cannot express — a new executable file, a symlink, a submodule pointer, or
   a mode change on an existing file — is refused *before* anything remote is
   written, naming the files and, for a new script, the way out the agent can

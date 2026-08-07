@@ -414,6 +414,35 @@ describe("diffWorktreeAgainst", () => {
     }
   });
 
+  test("include and exclude pathspecs are repo-root-relative too", () => {
+    // Same defect as the default, one level in: seven prompts pass
+    // `include: [".lastlight"]`, and from a `<repo>/` subdirectory a
+    // cwd-relative spec would mean `<subdir>/.lastlight`, match nothing, and
+    // report `published: false` on a phase that really did write artifacts.
+    const r = repo();
+    try {
+      mkdirSync(join(r.dir, ".lastlight"));
+      mkdirSync(join(r.dir, "sub"));
+      writeFileSync(join(r.dir, ".lastlight", "verdict.md"), "APPROVED\n");
+      writeFileSync(join(r.dir, "sub", "inside.txt"), "x\n");
+      const sub = join(r.dir, "sub");
+
+      const included = diffWorktreeAgainst(sub, r.base, { include: [".lastlight"] });
+      assert.deepEqual(
+        included.additions.map((a) => a.path),
+        [".lastlight/verdict.md"],
+      );
+
+      const excluded = diffWorktreeAgainst(sub, r.base, { exclude: [".lastlight"] });
+      assert.deepEqual(
+        excluded.additions.map((a) => a.path),
+        ["sub/inside.txt"],
+      );
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("returns an empty change set when the tree matches the base", () => {
     const r = repo();
     try {

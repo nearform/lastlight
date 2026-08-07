@@ -124,7 +124,10 @@ Five things worth knowing:
   vs. that tip", so every file the other party added would be recorded as a
   deletion. So the tool also checks the tip is in the local checkout's history
   (`git merge-base --is-ancestor`) and refuses before writing anything if it is
-  not, naming the `git fetch` + `git merge` that clears it. It never re-diffs
+  not, naming the recovery for each cause: `git reset --mixed` when the tip is a
+  commit an earlier publish landed, and commit-then-merge when somebody else
+  pushed (a bare `git merge` aborts on the uncommitted changes this refusal
+  always fires with). It never re-diffs
   and retries on its own; a `STALE_DATA` failure names itself in the error and
   re-running the tool call is the fix.
 - **There's a size ceiling.** GitHub caps the whole request at 45 MB — the sum

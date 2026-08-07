@@ -117,18 +117,35 @@ function* records(
   }
 }
 
+/**
+ * Anchor a pathspec at the repository root.
+ *
+ * Git resolves a pathspec against the process's cwd, and `cwd` here is whatever
+ * path the caller handed the tool — routinely a `<repo>/` subdirectory. Seven
+ * prompts pass `include: [".lastlight"]`, which from one of those would quietly
+ * mean `<subdir>/.lastlight` and publish nothing. `:(top)` is git's own
+ * root-relative magic, which is what a caller naming a repo path means. A spec
+ * that already carries magic (a leading `:`) is passed through — the caller has
+ * said explicitly what it wants.
+ */
+function rootRelative(spec: string): string {
+  return spec.startsWith(":") ? spec : `:(top)${spec}`;
+}
+
 export interface WorktreeDiffOptions {
   /**
    * Git pathspecs to leave OUT of the change set (e.g. `.lastlight`) — build
    * artifacts a phase writes into the checkout but must not commit. Mirrors the
-   * `git reset -q -- .lastlight` the prompts used to run by hand.
+   * `git reset -q -- .lastlight` the prompts used to run by hand. Resolved from
+   * the repository root, not from `cwd`.
    */
   exclude?: string[];
   /**
    * Git pathspecs to restrict the change set TO. When given, everything else
    * stays at its base state and so produces no diff — mirroring the
    * `git add .lastlight/` the artifact-writing phases used to run, which
-   * committed that directory and nothing else.
+   * committed that directory and nothing else. Resolved from the repository
+   * root, not from `cwd`.
    */
   include?: string[];
 }
@@ -156,7 +173,7 @@ export function diffWorktreeAgainst(
   // The default is git's root-relative pathspec magic, not `.`: `cwd` is
   // whatever path the caller passed, so a `.` under a subdirectory of the
   // checkout would narrow the whole publish to that subtree without saying so.
-  const stagePaths = include ?? [":/"];
+  const stagePaths = (include ?? [":/"]).map(rootRelative);
   const scratch = mkdtempSync(join(tmpdir(), "agentic-pi-publish-"));
   const indexFile = join(scratch, "index");
   try {
@@ -165,7 +182,7 @@ export function diffWorktreeAgainst(
       git(cwd, ["add", "-A", "--", ...stagePaths], indexFile);
     }
     for (const spec of exclude) {
-      git(cwd, ["reset", "-q", baseOid, "--", spec], indexFile);
+      git(cwd, ["reset", "-q", baseOid, "--", rootRelative(spec)], indexFile);
     }
     const tree = gitText(cwd, ["write-tree"], indexFile).trim();
     const raw = gitText(cwd, ["diff-tree", "-r", "--no-renames", "-z", baseOid, tree], indexFile);
