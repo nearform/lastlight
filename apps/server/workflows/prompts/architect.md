@@ -38,7 +38,6 @@ AFTER WRITING:
 1. mkdir -p {{issueDir}}
 2. Write architect-plan.md
 3. Write status.md with current_phase: architect
-{{#if !externalizeArtifacts}}4. git add .lastlight/ && git commit -m "docs: architect plan for #{{issueNumber}}"
-5. git push -u origin HEAD{{/if}}{{#if externalizeArtifacts}}4. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
+{{#if !externalizeArtifacts}}4. `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "docs: architect plan for #{{issueNumber}}" }` — it commits the working tree as one signed commit, creating the branch on GitHub if it isn't there yet.{{/if}}{{#if externalizeArtifacts}}4. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
 
 OUTPUT: The branch name and a brief summary (3-5 lines).

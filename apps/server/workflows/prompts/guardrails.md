@@ -52,8 +52,7 @@ AFTER CHECKING:
 1. mkdir -p {{issueDir}}
 2. Write {{issueDir}}/guardrails-report.md with the status of each check
 3. Write {{issueDir}}/status.md with current_phase: guardrails AND guardrails_status: READY or BLOCKED
-{{#if !externalizeArtifacts}}4. git add .lastlight/ && git commit -m "docs: guardrails check for #{{issueNumber}}"
-5. git push -u origin HEAD{{/if}}{{#if externalizeArtifacts}}4. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
+{{#if !externalizeArtifacts}}4. `github_publish` with `{ owner: "{{owner}}", repo: "{{repo}}", message: "docs: guardrails check for #{{issueNumber}}" }` — it commits the working tree as one signed commit, creating the branch on GitHub if it isn't there yet.{{/if}}{{#if externalizeArtifacts}}4. Do NOT git add or commit {{issueDir}}/ — the harness persists it to the Last Light server automatically.{{/if}}
 
 ESCAPE HATCH — bootstrap tasks (CHECK THIS FIRST):
 If THE ISSUE ABOVE is itself asking to ADD the tooling you're checking for —
