@@ -126,20 +126,31 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    before you commit. Breadth is CI's job — don't also run the full suite here.
 
 AFTER FIXING:
-1. git add -A && git commit -m "fix(deps): make #{{prNumber}} mergeable"
-   (the merge from step 1 and/or your CI fix)
-2. git push origin HEAD
-   Once the push re-runs CI and it goes green, the `dependabot-pr-merge`
+1. Publish with `github_publish` — `{ owner: "{{owner}}", repo: "{{repo}}",
+   message: "fix(deps): make #{{prNumber}} mergeable" }`. It commits the whole
+   working tree (the merge from step 1 and/or your CI fix) and pushes it in one
+   step. Do NOT use `git commit` / `git push`: a commit built by git here is
+   unsigned, and on a repo that requires signed commits one unsigned commit
+   anywhere in the branch blocks the PR permanently and cannot be cleared by a
+   later run. Local commits you made while working are folded in automatically.
+   - If it reports `published: false`, there was nothing to publish. That is the
+     "nothing to commit or push" case in the STOP section below — flag it for a
+     human rather than looping.
+   - If it refuses because a change needs a file mode it cannot set (a new
+     executable file, a symlink, a submodule pointer), do NOT work around the
+     refusal with `git push`: nothing was published, and pushing would land
+     the unsigned commit the refusal exists to prevent. Flag it for a human.
+2. Once the publish re-runs CI and it goes green, the `dependabot-pr-merge`
    workflow takes over the merge — you do NOT merge or label a healthy PR.
 
 PUSH DISCIPLINE — the gate decides, and it is checked after you finish:
 {{#if iteration}}- This is local iteration {{iteration}} of {{maxIterations}}. When `{{verifyScript}}`
   exits non-zero you get another iteration to keep working; when it exits 0 the
   phase ends.{{/if}}
-- Push **only** on a green local gate. A gate that did not run is `gate=skipped`,
-  and `skipped` counts as RED — it never authorises a push.
+- Publish **only** on a green local gate. A gate that did not run is `gate=skipped`,
+  and `skipped` counts as RED — it never authorises a publish.
 - On the LAST iteration with the gate still red: emit `outcome=gave-up`,
-  `gate=red`, and do **not** push a speculative fix — flag it for a human
+  `gate=red`, and do **not** publish a speculative fix — flag it for a human
   instead (below). An unverified push costs a full CI cycle to prove nothing.
 
 STOP and flag for a human when you CAN'T land it, so the nightly red-dependency
