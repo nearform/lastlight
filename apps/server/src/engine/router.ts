@@ -1,5 +1,5 @@
 import type { EventEnvelope } from "../connectors/types.js";
-import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent, WELL_KNOWN_INTENTS } from "./screen/classifier.js";
+import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent, GITHUB_ONLY_INTENTS, WELL_KNOWN_INTENTS } from "./screen/classifier.js";
 import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getWorkflowByIntent } from "../workflows/loader.js";
@@ -1103,6 +1103,33 @@ export async function routeEvent(
           };
         }
 
+        case "demo": {
+          // `demo` shipped with a `classification:` block AND a `routes.slack.demo`
+          // entry but no branch here, and `demo` is in WELL_KNOWN_INTENTS — so
+          // `fallbackWorkflowForIntent` returned undefined for it and every
+          // demo-classified Slack message fell through to plain chat. The route
+          // was configured and unreachable; this is the branch it always needed.
+          const gate = requireManagedRepo(
+            classifiedRepo,
+            "Which repo should I demo? e.g. `demo cliftonc/repo#42 -- the dark-mode toggle`",
+          );
+          if (!gate.ok) return gate.route;
+          return {
+            action: "handler",
+            handler: slack.demo || "demo",
+            context: {
+              repo: gate.repo,
+              issueNumber: classifiedIssue,
+              sender: envelope.sender,
+              commentBody: slackText,
+              source: envelope.source,
+              triggerId: slackTriggerId,
+              channelId,
+              threadId,
+            },
+          };
+        }
+
         case "question": {
           // A substantive question targeting a managed repo → run the sandboxed
           // answer workflow (web search + repo docs), delivered back to this
@@ -1174,7 +1201,15 @@ export async function routeEvent(
           // A novel intent an overlay workflow introduced (issue #164) → route
           // to that workflow. If it named an unmanaged repo, reject on the same
           // security boundary the built-in repo-scoped intents use.
-          const novelWf = fallbackWorkflowForIntent(intent);
+          //
+          // GitHub-only intents are excluded: the dependency workflows are
+          // pr_scoped and reach `handlePrFix` through `context.prNumber`, which
+          // nothing on this route sets, so dispatching one here would run it
+          // with no PR at all. They fall through to chat, which can point the
+          // user at the PR.
+          const novelWf = GITHUB_ONLY_INTENTS.has(intent)
+            ? undefined
+            : fallbackWorkflowForIntent(intent);
           if (novelWf) {
             if (classifiedRepo && !isManagedRepo(classifiedRepo)) {
               return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };

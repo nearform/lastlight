@@ -240,10 +240,18 @@ Chat doesn't run inside pi-coding-agent's `AgentSession` — it uses
 pi-ai's lower-level `completeSimple` loop. To still give chat the
 same progressive-disclosure model, `src/engine/chat/chat-skills.ts`:
 
-1. Loads a curated chat skill list from `<repo>/skills/<name>/` using
-   `loadSkillsFromDir` (same parser pi-coding-agent uses for sandbox
-   phases). `CHAT_SKILL_NAMES` is the v1 hard-coded set:
-   `["chat", "issue-triage", "pr-review", "repo-health"]`.
+1. Enumerates every skill resolvable through the asset layer stack
+   (`listSkillNames()`) and keeps the ones whose SKILL.md frontmatter
+   declares **`chat: true`**, resolving each through `resolveSkillPaths`
+   so an overlay's version of a built-in skill wins. The packaged set is
+   `chat`, `issue-triage`, `pr-review`, `repo-health`.
+
+   Opt-in, because most skills are written for a sandbox phase with a
+   checkout, a shell and write access — chat has none of those, so
+   exposing one by default advertises instructions the agent cannot
+   follow. It replaced a hardcoded `CHAT_SKILL_NAMES` list resolved
+   against `resolve("skills")` (the process cwd), which meant an overlay
+   could neither add a chat skill nor override a built-in one.
 2. Formats an XML `<available_skills>` block (name + description per
    skill) and prepends it to the chat system prompt at boot
    (`src/index.ts`).
@@ -429,7 +437,7 @@ than from one directory.
 
 ```ts
 // src/index.ts (chat boot)
-systemPrompt: loadAgentContext() + CHAT_SYSTEM_SUFFIX + chatSkills.catalogueXml
+systemPrompt: () => agentContext + chatSystemSuffix(hasGithub, { isWorkflowEnabled }) + chatSkills.catalogueXml
 ```
 
 The same helper, injected directly into the chat system prompt rather than

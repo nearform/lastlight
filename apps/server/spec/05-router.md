@@ -182,7 +182,12 @@ VERIFY | QATEST | DEMO | APPROVE | REJECT | STATUS | RESET | CHAT
 structured `@last-light verify` / `@last-light qa-test` / `@last-light demo`
 keyword matches above short-circuit before the classifier; natural-language
 requests like "does this actually fix the crash?" reach `verify` via this
-classifier path, and "record a demo of this" reaches `demo`.)
+classifier path, and "record a demo of this" reaches `demo`. All three have a
+Slack branch too — `demo` acquired one late: it shipped with a classification
+block and a `routes.slack.demo` entry but no `case` in the `message` switch, and
+because `demo` is in `WELL_KNOWN_INTENTS` the intent fallback skipped it as
+well, so every demo-classified Slack message fell through to plain chat against
+a configured route.)
 
 **The prompt is composed, forkable, and workflow-driven (issue #164).** The
 system prompt is assembled at runtime by `buildClassifierPrompt()`, not
@@ -252,6 +257,19 @@ comments and Slack. It routes to that single workflow uniformly across surfaces;
 a deployment needing surface-specific routing for its new intent can still add
 `routes.github` / `routes.slack` overrides. Well-known intents never hit the
 fallback, so their established routing is untouched.
+
+**One surface-specific exception**, `GITHUB_ONLY_INTENTS` in `classifier.ts`:
+`dependabot-ci-fix` and `dependabot-pr-merge` are deliberately *outside*
+`WELL_KNOWN_INTENTS` because the GitHub comment ladder reaches them **through**
+this fallback (route key `intent.<name>`). Both are `pr_scoped` and reach their
+real dispatch path, `handlePrFix`, via `context.prNumber` — which the GitHub
+route supplies from the event and no Slack branch ever sets. So on a Slack
+message the same fallback dispatched them straight past the PR-fix path with no
+PR at all. The `message` case therefore excludes that set explicitly and lets
+them fall through to chat, which can point the user at the PR. The exclusion is
+per-surface rather than a `WELL_KNOWN_INTENTS` entry precisely because
+"does the router branch on this?" has different answers on the two routes —
+answering it globally breaks GitHub to fix Slack.
 
 **New issues** (`issue.opened`) route through the same composed classifier:
 `classifyIssueIntent()` runs the main classifier over the issue title + body and

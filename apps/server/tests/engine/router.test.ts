@@ -12,6 +12,10 @@ vi.mock('#src/engine/screen/classifier.js', () => ({
     'build', 'explore', 'question', 'triage', 'review', 'security',
     'verify', 'qa-test', 'demo', 'approve', 'reject', 'status', 'reset', 'chat',
   ]),
+  // Deliberately NOT in WELL_KNOWN_INTENTS — the GitHub comment ladder routes
+  // these two THROUGH the fallback. The Slack `message` case excludes them
+  // separately, because no Slack branch sets the `prNumber` they need.
+  GITHUB_ONLY_INTENTS: new Set(['dependabot-ci-fix', 'dependabot-pr-merge']),
 }));
 // Mock only the loader's getWorkflowByIntent (the router's data-driven fallback
 // lookup); keep everything else real.
@@ -792,6 +796,47 @@ describe('routeEvent — message events (classifier-driven)', () => {
       expect(result.message).toContain('unknown/repo');
     }
   });
+
+  it('routes demo intent to the demo workflow', async () => {
+    // `demo` shipped with a classification block AND a routes.slack.demo entry
+    // but no branch here, and it sits in WELL_KNOWN_INTENTS — so the novel-intent
+    // fallback skipped it too and every demo message fell through to chat. The
+    // route was configured and structurally unreachable.
+    mockClassifyComment.mockResolvedValue({ intent: 'demo', repo: 'cliftonc/lastlight', issueNumber: 42 });
+    const result = await routeEvent(makeEnvelope({
+      type: 'message',
+      body: 'record a demo of cliftonc/lastlight#42',
+    }));
+    expect(result.action).toBe('handler');
+    if (result.action === 'handler') {
+      expect(result.handler).toBe('demo');
+      expect(result.context.repo).toBe('cliftonc/lastlight');
+      expect(result.context.issueNumber).toBe(42);
+    }
+  });
+
+  it('asks which repo when demo intent names none', async () => {
+    mockClassifyComment.mockResolvedValue({ intent: 'demo' });
+    const result = await routeEvent(makeEnvelope({ type: 'message', body: 'demo this' }));
+    expect(result.action).toBe('reply');
+  });
+
+  for (const intent of ['dependabot-ci-fix', 'dependabot-pr-merge']) {
+    it(`falls back to chat for ${intent} rather than dispatching it PR-less`, async () => {
+      // Both are pr_scoped and reach `handlePrFix` via `context.prNumber`, which
+      // no Slack branch sets — so the novel-intent fallback used to dispatch
+      // them straight past the PR-fix path with no PR at all. They belong in
+      // WELL_KNOWN_INTENTS, which keeps the fallback off them.
+      mockClassifyComment.mockResolvedValue({ intent, repo: 'cliftonc/lastlight' });
+      mockGetWorkflowByIntent.mockReturnValue({ name: intent } as any);
+      const result = await routeEvent(makeEnvelope({
+        type: 'message',
+        body: 'can you sort out the dependabot PR on cliftonc/lastlight',
+      }));
+      expect(result.action).toBe('handler');
+      if (result.action === 'handler') expect(result.handler).toBe('chat');
+    });
+  }
 
   it('routes a novel overlay intent to its owning workflow (issue #164)', async () => {
     mockClassifyComment.mockResolvedValue({ intent: 'incident', repo: 'cliftonc/lastlight' });

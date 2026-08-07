@@ -359,6 +359,7 @@ export interface AssetResolver {
   loadPromptTemplate(relativePath: string): string;
   loadSkillRaw(name: string): string;
   loadSkillInstructions(name: string): string;
+  listSkillNames(): string[];
   resolveSkillPaths(names: readonly string[]): string[];
   loadAgentContext(): string;
   /**
@@ -418,6 +419,32 @@ export function createAssetResolver(
 
   function loadSkillInstructions(name: string): string {
     return loadSkillRaw(name);
+  }
+
+  /**
+   * Every skill NAME resolvable through this layer stack, deduped and sorted.
+   *
+   * The union across layers (an overlay skill of the same name shadows the
+   * built-in, and appears once), minus `disabled.skills`. Callers that need to
+   * SELECT skills by something in their frontmatter — the chat catalogue picks
+   * the ones marked `chat: true` — need to enumerate before they can read, and
+   * there was no way to do that without a hardcoded name list.
+   */
+  function listSkillNames(): string[] {
+    const names = new Set<string>();
+    for (const layer of layers) {
+      const bases = [layer.skillRoot, layer.claudeSkillRoot].filter(Boolean) as string[];
+      for (const base of bases) {
+        if (!existingDir(base)) continue;
+        for (const entry of readdirSync(base, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          if (!/^[a-zA-Z0-9_-]+$/.test(entry.name)) continue;
+          if (disabled.skills.includes(entry.name)) continue;
+          if (existsSync(join(base, entry.name, "SKILL.md"))) names.add(entry.name);
+        }
+      }
+    }
+    return [...names].sort();
   }
 
   /**
@@ -496,6 +523,7 @@ export function createAssetResolver(
     loadPromptTemplate,
     loadSkillRaw,
     loadSkillInstructions,
+    listSkillNames,
     resolveSkillPaths,
     loadAgentContext,
     // A getter, not a captured array: `loadAgentContext` REPLACES the list each
@@ -527,6 +555,10 @@ export function loadSkillRaw(name: string): string {
 
 export function loadSkillInstructions(name: string): string {
   return defaultResolver.loadSkillInstructions(name);
+}
+
+export function listSkillNames(): string[] {
+  return defaultResolver.listSkillNames();
 }
 
 export function resolveSkillPaths(names: readonly string[]): string[] {

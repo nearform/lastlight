@@ -48,6 +48,7 @@ import type { EventEnvelope, EventType } from "../connectors/types.js";
 import {
   getWorkflowTriggers,
   getWorkflowTriggerKinds,
+  resolveIntentHandler,
 } from "../workflows/triggers.js";
 import {
   getManagedRepos,
@@ -592,17 +593,6 @@ const COMMENT_CLASSIFIER_TYPES = new Set<EventType>([
 
 function playgroundRouting(type: EventType): "deterministic" | "classifier" {
   return PLAYGROUND_EVENT_TYPES.find((e) => e.type === type)?.routing ?? "deterministic";
-}
-
-/**
- * Resolve a classifier intent to the handler the router would pick, using the
- * same `routes` map the router consults (slack keys use `_`, intents use `-`),
- * falling back to the workflow that claims the intent, then the intent itself.
- */
-function resolveIntentHandler(intent: string): string {
-  const routes = getRoutes();
-  const key = intent.replace(/-/g, "_");
-  return routes.slack[intent] ?? routes.slack[key] ?? getWorkflowByIntent(intent)?.name ?? intent;
 }
 
 /** Request body for POST /route-test — a synthetic event to dry-run. */

@@ -23,6 +23,18 @@ classification:
     # counter-example above: on an ISSUE there is no chat to downgrade TO, and
     # the alternative is triaging a question as a work item.
     - '"what does the pr-review workflow actually do?" with ISSUE TITLE "Question: what does pr-review do?" → INTENT: QUESTION, REPO: NONE, ISSUE: NONE, REASON: NONE'
+chat:
+  summary: Research a question that needs the web or a deep read of a checkout
+  deflect:
+    - how does <repo> compare to <other tool>?
+    - what do the upstream docs say about <X>?
+    - a research-heavy question that needs web search or deep doc reading
+  reply: >-
+    this runs as a sandboxed answer workflow, but only when you name a managed
+    repo. If the user asked such a question without a repo, ask them to include it
+    (e.g. "how does cliftonc/lastlight compare to X?") and the answer will be
+    researched and posted back here. Don't attempt the deep research yourself
+    in-process.
 description: |
   Answer a question issue directly. Used when a newly-opened issue asks for
   information, an explanation, or a comparison rather than a code change — the

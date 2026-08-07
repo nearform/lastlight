@@ -43,6 +43,8 @@ interface LastLightConfig {
   deploy: { version: string | null };      // core-version pin (git tag/ref) or null = track main
   managedRepos: string[];                 // empty = source the list from the App installation
   routes: RouteConfig;                    // { github: Record<string,string>; slack: Record<string,string> }
+                                          // mirrored by defaultRouteConfig() for the
+                                          // no-config-loaded case; pinned equal in tests
   disabled: DisabledConfig;               // { workflows, crons, prompts, skills, agentContext }: string[]
   crons: CronsConfig;                     // { enable: string[]; disable: string[] } — cron participation
   otel: OtelConfig;                       // OpenTelemetry export (off by default)

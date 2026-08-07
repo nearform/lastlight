@@ -8,6 +8,13 @@ classification:
     - '"explore adding webhooks to cliftonc/drizby" → INTENT: EXPLORE, REPO: cliftonc/drizby, ISSUE: NONE, REASON: NONE'
     - '"explore" with ISSUE TITLE "Feature: Allow configuration of otel endpoints" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"explore this" with ISSUE TITLE "Add webhook support" → INTENT: EXPLORE, REPO: NONE, ISSUE: NONE, REASON: NONE'
+chat:
+  trigger: explore owner/repo
+  summary: Shape an idea into a spec before any code is written
+  deflect:
+    - help me think through <idea>
+    - brainstorm <idea>
+    - spec this out
 description: |
   Socratic idea-shaping loop: read the existing issue/thread for context, ask
   clarifying questions in a reply-gated loop until the shape is clear, then

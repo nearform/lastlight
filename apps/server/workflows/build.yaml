@@ -15,6 +15,14 @@ classification:
     - '"delete any files in ~/work/lastlight/docs" → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"can you remove the old docs folder for me" (no ISSUE TITLE, no repo) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"build something cool" (no repo, no ISSUE TITLE) → INTENT: CHAT, REPO: NONE, ISSUE: NONE, REASON: NONE'
+chat:
+  trigger: "build owner/repo#N"
+  summary: Implement or fix a specific issue
+  deflect:
+    - build this
+    - implement this
+    - fix this bug
+  reply: 'reply: "tell me `build owner/repo#N` (open the GitHub issue first if needed)"'
 description: "Architect -> Executor -> Reviewer build cycle"
 trigger: build
 # Render progress as a single in-place task-list comment/message that updates

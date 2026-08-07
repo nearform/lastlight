@@ -1144,7 +1144,15 @@ function normalizeRoutes(raw: unknown): RouteConfig {
   };
 }
 
-function defaultRouteConfig(): RouteConfig {
+/**
+ * The in-code route table used when no config has been loaded yet (tests, and
+ * any read before `loadConfig`). It MIRRORS the `routes:` block of
+ * `config/default.yaml` and must stay identical to it — the two drifted once
+ * (verify / qa_test / demo were added to the YAML only), which silently removed
+ * those workflows' `@bot` mention triggers from the dashboard's trigger table.
+ * `tests/config.test.ts` pins the two together.
+ */
+export function defaultRouteConfig(): RouteConfig {
   return {
     github: {
       issue_opened: "issue-triage",
@@ -1161,6 +1169,9 @@ function defaultRouteConfig(): RouteConfig {
       pr_review_requested: "pr-review",
       approval_response: "approval-response",
       security_review: "security-review",
+      verify: "verify",
+      qa_test: "qa-test",
+      demo: "demo",
       pr_fix: "pr-fix",
       pr_review: "pr-review",
       pr_comment: "pr-comment",
@@ -1179,6 +1190,9 @@ function defaultRouteConfig(): RouteConfig {
       triage: "issue-triage",
       review: "pr-review",
       security: "security-review",
+      verify: "verify",
+      qa_test: "qa-test",
+      demo: "demo",
       explore: "explore",
       answer: "answer",
       chat: "chat",

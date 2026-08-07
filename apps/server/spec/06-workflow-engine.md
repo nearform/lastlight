@@ -54,7 +54,8 @@ through — webhook dispatch, CLI, cron, admin resume.
 
 ## YAML schema
 
-**Workflow level** (`src/workflows/schema.ts:201–236`):
+**Workflow level** (`packages/workflow-engine/src/core/schema.ts:476–617`, re-exported
+as `src/workflows/schema.ts`):
 
 ```ts
 {
@@ -68,6 +69,12 @@ through — webhook dispatch, CLI, cron, admin resume.
     intent: string;      //   the intent token this workflow owns (unique; not a control intent)
     description: string; //   the category paragraph merged into the composed classifier prompt
     examples?: string[]; //   optional one-line classifier examples
+  };
+  chat?: {               // how the CHAT agent advertises this workflow to a human
+    trigger?: string;    //   the phrase to tell a user to type, e.g. "triage owner/repo"
+    summary: string;     //   one line naming what they get
+    deflect?: string[];  //   user phrasings to deflect here rather than attempt in-process
+    reply?: string;      //   override for the deflection reply (default: name the trigger)
   };
   phases: PhaseDefinition[];
 }
@@ -97,6 +104,27 @@ router**: its `description`/`examples` are composed into the classifier prompt
 router's `getWorkflowByIntent` fallback — so adding a workflow (even in an
 overlay) can add a new intent with no core change. See
 [05-router.md → Build-intent classifier](05-router.md#build-intent-classifier).
+
+The optional `chat` block is its counterpart for the **chat agent**: it is what
+the bot tells a human to type, composed into the chat system prompt from the
+enabled workflow set. It is a separate, explicit opt-in rather than a derivation
+from `classification`, because "the classifier can tag a message with this
+intent" and "a human should be told to type this" are different questions that
+diverge in both directions (`demo` is classifiable but unroutable from Slack;
+the two dependabot workflows are routable but would arrive with no PR number).
+An entry may omit `trigger` and give `reply` instead, for a workflow that must be
+explained but never typed — `repo-health` is cron-only and has no
+`classification` block at all. See
+[11-chat.md → Advertised capabilities](11-chat.md#advertised-capabilities).
+
+The same block feeds the **Slack rows of the dashboard trigger table**
+(`getWorkflowTriggers`, `src/workflows/triggers.ts`), resolved through
+`routes.slack` so an operator's remap lands on the fork. Those rows gate on the
+`classification.intent` (what the Slack switch dispatches on) rather than the
+trigger phrase, so a `chat:` entry without an intent contributes an explanation
+to the agent and no trigger row. They were a hand-kept list of five while the
+router routed nine, which is why the dashboard showed no Slack trigger for
+`verify` / `qa-test` / `demo` / `answer`.
 
 **Phase level** (`schema.ts:84–182`):
 

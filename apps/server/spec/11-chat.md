@@ -28,7 +28,8 @@ export class ChatRunner {
 interface ChatRunnerConfig {
   model: string;          // resolved via resolveModel(config.models, "chat")
   thinking?: string;      // off | minimal | low | medium | high | xhigh
-  systemPrompt: string;   // loadAgentContext() + CHAT_SYSTEM_SUFFIX + skill catalogue XML
+  systemPrompt: string | (() => string);  // agent context + chatSystemSuffix() + skill catalogue XML;
+                                          // a thunk is resolved per turn (see §System prompt)
   github?: ChatGitHubAuth;
   extraTools?: ChatExtraToolset;  // additional tools (read_skill); merged with github tools
   timeoutMs?: number;     // per-turn; default 120 s
@@ -174,7 +175,7 @@ One tool wired in via `extraTools`, defined in
 
 | Tool | Purpose |
 |---|---|
-| `read_skill` | Read the full SKILL.md for one of the curated chat skills. Parameters: `{ name: <enum of CHAT_SKILL_NAMES> }`. |
+| `read_skill` | Read the full SKILL.md for one of the chat-exposed skills. Parameters: `{ name: <enum of the loaded skill names> }`. |
 
 The chat agent's system prompt contains an XML `<available_skills>`
 catalogue (name + description per curated skill — same shape
@@ -213,21 +214,24 @@ Chat runs in the harness process itself. Real consequences:
 
 ## System prompt
 
-Built once at boot (`src/index.ts`):
+Assembled per turn (`src/index.ts` passes a thunk; `ChatRunner.turn` resolves it):
 
 ```
-systemPrompt = loadAgentContext() + CHAT_SYSTEM_SUFFIX + chatSkills.catalogueXml
+systemPrompt = agentContext + chatSystemSuffix(hasGithub, { isWorkflowEnabled }) + chatSkills.catalogueXml
 ```
 
 Three layers:
 
 - `loadAgentContext()` (`src/engine/github/profiles.ts`) concatenates all
   `.md` files under `agent-context/` in alphabetical order, joined
-  with `\n\n---\n\n` (see [Skills §AGENTS.md](/spec/08-skills)).
-- `CHAT_SYSTEM_SUFFIX` (`src/engine/chat/chat.ts`) adds the chat-specific
+  with `\n\n---\n\n` (see [Skills §AGENTS.md](/spec/08-skills)). Boot-stable,
+  so it is read once and closed over.
+- `chatSystemSuffix()` (`src/engine/chat/chat-prompt.ts`) adds the chat-specific
   constraints — read-only tools, no write actions, hand off to the
   build workflow for code changes — so the same persona file
-  (`soul.md`) can serve both surfaces without contradicting itself.
+  (`soul.md`) can serve both surfaces without contradicting itself. It is
+  **composed from the enabled workflow set**, not a constant — see
+  §Advertised capabilities below.
 - `chatSkills.catalogueXml`
   (`src/engine/chat/chat-skills.ts → loadChatSkillCatalogue`) is the XML
   `<available_skills>` block listing each curated chat skill's name +
@@ -235,9 +239,60 @@ Three layers:
   sandbox phases. The agent uses it to decide which `read_skill` call
   (if any) to make.
 
-The curated skill list is `CHAT_SKILL_NAMES` — currently `["chat",
-"issue-triage", "pr-review", "repo-health"]`. v1 is hard-coded; lift
-to env / settings if it ever needs runtime configurability.
+Which skills those are is **declared by the skills**: every skill
+resolvable through the asset layer stack whose SKILL.md frontmatter sets
+`chat: true`. The packaged set is `chat`, `issue-triage`, `pr-review`,
+`repo-health`; an overlay can add its own or override a built-in. See
+[Skills §In-process (chat)](/spec/08-skills).
+
+## Advertised capabilities
+
+What the agent tells a user it can do is **composed from the workflow
+set**, the way the classifier prompt is (see
+[Router §Intent classification](/spec/05-router)). `assembleChatPrompt()`
+(`src/engine/chat/chat-prompt.ts`) renders a forkable base template —
+`workflows/prompts/chat-system.md`, or `chat-system-no-github.md` when no
+GitHub auth is configured — substituting two placeholders:
+
+| Placeholder | Content |
+|---|---|
+| `{{workflowTriggers}}` | One deflection bullet per advertised workflow: its `chat.deflect` phrasings (quoted, ` / `-joined) and the reply that names its trigger |
+| `{{triggerList}}` | The backticked `chat.trigger` phrases, then the suggestable `RESERVED_CONTROL_INTENTS` (`approve`, `reject`, `status`, `reset` — `chat` is the router's fallback, not something a user types) |
+
+**A workflow is advertised iff it declares a `chat:` block**
+(`trigger?` / `summary` / `deflect?` / `reply?` — see
+[Workflow engine §Schema](/spec/06-workflow-engine)). `classification:` is
+deliberately **not** the gate. A classification block means "the classifier can
+tag a message with this intent"; it does not mean "a human should be told to
+type this", and the two diverge in both directions:
+
+- `demo` declares a classification block and a `routes.slack.demo` entry, but
+  the Slack switch has no `demo` branch and `demo` is in `WELL_KNOWN_INTENTS`,
+  so `fallbackWorkflowForIntent` returns undefined and a demo-classified
+  message falls through to plain chat. Advertising it would name a dead route.
+- `dependabot-ci-fix` / `dependabot-pr-merge` *are* reachable from a Slack
+  message via the overlay-intent fallback, but would arrive with a repo and no
+  PR number.
+
+An entry may omit `trigger` and supply `reply` instead — a workflow that must be
+explained but never typed. `repo-health` is the case: cron-only, no
+classification block, but the agent still has to answer "can you do a health
+report?" correctly.
+
+Two filters apply, and they are why this is composed per turn rather than
+concatenated once at boot:
+
+1. `listAgentWorkflows()` already excludes the static `disabled.workflows`.
+2. The **runtime kill switch** (`workflow_overrides`, toggled from the admin
+   dashboard and enforced at dispatch in `simple.ts`) is a per-call
+   `isWorkflowEnabled` predicate. It changes without an asset-version bump or a
+   restart, and a workflow disabled there would otherwise still be advertised —
+   typing its trigger then no-ops silently, indistinguishable from the bot
+   ignoring the user.
+
+Everything else is cached on the loader's asset version. An overlay that adds a
+workflow with a `chat:` block gets it advertised with no core edit — the same
+property `classification:` gives the classifier (issue #164).
 
 ## LLM provider routing
 

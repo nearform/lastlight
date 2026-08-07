@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { resolveModel, resolveVariant, loadConfig } from '#src/config/config.js';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import { resolveModel, resolveVariant, loadConfig, defaultRouteConfig } from '#src/config/config.js';
 import type { ModelConfig, VariantConfig } from '#src/config/config.js';
 
 describe('resolveModel', () => {
@@ -365,5 +368,25 @@ describe('loadConfig — concurrency defaults and env overrides', () => {
     vi.stubEnv('MAX_CONCURRENT_WORKFLOWS', '0');
     const config = loadConfig();
     expect(config.concurrency.maxWorkflows).toBe(4);
+  });
+});
+
+/**
+ * `defaultRouteConfig()` is a second copy of `config/default.yaml`'s `routes:`
+ * block, used whenever no config has been loaded. The two drifted once — verify
+ * / qa_test / demo were added to the YAML only — which silently dropped those
+ * workflows' `@bot` mention rows from the dashboard trigger table. Pin them.
+ */
+describe("defaultRouteConfig mirrors config/default.yaml", () => {
+  const yamlRoutes = parseYaml(
+    readFileSync(resolve("config/default.yaml"), "utf-8"),
+  ).routes as { github: Record<string, string>; slack: Record<string, string> };
+
+  it("matches the packaged github routes exactly", () => {
+    expect(defaultRouteConfig().github).toEqual(yamlRoutes.github);
+  });
+
+  it("matches the packaged slack routes exactly", () => {
+    expect(defaultRouteConfig().slack).toEqual(yamlRoutes.slack);
   });
 });

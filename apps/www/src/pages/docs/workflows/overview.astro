@@ -249,7 +249,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<tr>
 				<td><strong>Slack message</strong></td>
 				<td>explore, build, triage, review, answer, security-review, verify, qa-test, demo, all others via chat</td>
-				<td>Natural language in DMs or threads. The classifier extracts intent and repo from the message. Questions route to answer; "security review owner/repo" runs security-review.</td>
+				<td>Natural language in DMs or threads. The classifier extracts intent and repo from the message. Questions route to answer; "security review owner/repo" runs security-review. The two dependency workflows are <strong>GitHub-only</strong> — they need a PR number no Slack message carries, so such a request falls through to chat. Which triggers the bot will actually suggest in a thread is composed from the workflows that declare a <code>chat:</code> block and are enabled on that deployment, so the set is per-instance.</td>
 			</tr>
 			<tr>
 				<td><strong>Cron schedule</strong></td>
