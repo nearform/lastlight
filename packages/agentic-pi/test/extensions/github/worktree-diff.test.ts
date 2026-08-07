@@ -160,6 +160,55 @@ describe("diffWorktreeAgainst", () => {
     }
   });
 
+  test("refuses a genuine mode downgrade (100755 -> 100644), not just upgrades", () => {
+    // dstMode === PLAIN_FILE_MODE alone is not proof nothing needs to change:
+    // GitHub's FileAddition carries no mode field, so it would keep the base
+    // tree's 100755 rather than actually downgrade it. That must be refused,
+    // not silently published as if it were an ordinary plain-file addition.
+    const r = repo();
+    try {
+      writeFileSync(join(r.dir, "run.sh"), "#!/bin/sh\necho v1\n");
+      chmodSync(join(r.dir, "run.sh"), 0o755);
+      r.git("add", "-A");
+      r.git("commit", "-qm", "exec");
+      const base = r.git("rev-parse", "HEAD").trim();
+      chmodSync(join(r.dir, "run.sh"), 0o644);
+      const cs = diffWorktreeAgainst(r.dir, base);
+      assert.deepEqual(cs.additions, []);
+      assert.equal(cs.unsupported.length, 1);
+      assert.equal(cs.unsupported[0].path, "run.sh");
+      assert.match(cs.unsupported[0].reason, /100755/);
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("still refuses an existing symlink whose target changes, mode unchanged", () => {
+    // The existing "refuses a symlink" test only covers a NEW symlink
+    // (srcMode 000000), which the pre-Step-6 code would also have refused —
+    // so it doesn't pin the half of the mode-preservation deviation that the
+    // reviewer found worse than the gitlink case: cat-file blob SUCCEEDS on a
+    // symlink's target blob, so a relaxation keyed on "mode unchanged" would
+    // have silently published the retargeted symlink's bytes as a regular
+    // file instead of refusing or crashing.
+    const r = repo();
+    try {
+      symlinkSync("keep.txt", join(r.dir, "link.txt"));
+      r.git("add", "-A");
+      r.git("commit", "-qm", "add symlink");
+      const base = r.git("rev-parse", "HEAD").trim();
+      rmSync(join(r.dir, "link.txt"));
+      symlinkSync("tracked.txt", join(r.dir, "link.txt"));
+      const cs = diffWorktreeAgainst(r.dir, base);
+      assert.deepEqual(cs.additions, []);
+      assert.equal(cs.unsupported.length, 1);
+      assert.equal(cs.unsupported[0].path, "link.txt");
+      assert.match(cs.unsupported[0].reason, /symlink/i);
+    } finally {
+      r.cleanup();
+    }
+  });
+
   test("still refuses an existing submodule pointer when its target commit changes", () => {
     // The mode-preservation relaxation above is scoped to the executable bit
     // ONLY — it was the one case findings.md measured. A gitlink's mode

@@ -34,6 +34,9 @@ const PLAIN_FILE_MODE = "100644";
  */
 const EXECUTABLE_MODE = "100755";
 
+/** `diff-tree`'s srcmode for a path that did not exist at the base commit. */
+const NEW_PATH_MODE = "000000";
+
 const MODE_REASONS: Record<string, string> = {
   [EXECUTABLE_MODE]: "executable (100755) — createCommitOnBranch cannot set file modes",
   "120000": "symlink (120000) — createCommitOnBranch would commit it as a regular file",
@@ -147,12 +150,23 @@ export function diffWorktreeAgainst(
         deletions.push({ path: rec.path });
         continue;
       }
-      // A mode we cannot set is only a problem when it would have to CHANGE —
-      // except we only get to skip the refusal where preservation was
-      // actually measured (see the EXECUTABLE_MODE comment above).
-      const contentOnlyExecutableChange =
-        rec.srcMode === EXECUTABLE_MODE && rec.dstMode === EXECUTABLE_MODE;
-      if (rec.dstMode !== PLAIN_FILE_MODE && !contentOnlyExecutableChange) {
+      // A genuine mode CHANGE is unsupported in either direction — including
+      // dst landing on 100644, since GitHub would then silently keep the base
+      // tree's old (non-plain) mode rather than actually downgrade it. The one
+      // exception is the narrow case actually measured to be a no-op: content
+      // changed on a path that was already executable and stays executable
+      // (see the EXECUTABLE_MODE comment above). A brand-new path (no base
+      // entry) is never a "change" in this sense.
+      const isNewPath = rec.srcMode === NEW_PATH_MODE;
+      const modeChanged = rec.srcMode !== rec.dstMode;
+      const safeExecutableContentChange =
+        !isNewPath && !modeChanged && rec.dstMode === EXECUTABLE_MODE;
+      if (rec.dstMode !== PLAIN_FILE_MODE) {
+        if (!safeExecutableContentChange) {
+          unsupported.push({ path: rec.path, reason: reasonFor(rec.srcMode, rec.dstMode) });
+          continue;
+        }
+      } else if (modeChanged && !isNewPath) {
         unsupported.push({ path: rec.path, reason: reasonFor(rec.srcMode, rec.dstMode) });
         continue;
       }

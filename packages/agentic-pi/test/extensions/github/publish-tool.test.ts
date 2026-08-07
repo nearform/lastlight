@@ -313,17 +313,133 @@ describe("github_publish", () => {
 });
 
 describe("github_publish local sync", () => {
-  test("reports a failed sync instead of throwing, and never touches the files", async () => {
+  test("reports the git failure reason instead of throwing, and never touches the files", async () => {
     const r = repo();
     const fake = await fakeGitHub(r.base);
     try {
       writeFileSync(join(r.dir, "a.txt"), "two\n");
       const out = await callPublish(fake.url, { owner: "o", repo: "r", message: "m", path: r.dir });
       assert.equal(out.published, true);
-      // No `origin` remote in this temp repo, so the fetch cannot succeed —
-      // the tool must report that, not throw, and must leave the file alone.
-      assert.match(out.local_sync, /^skipped: /);
-      assert.equal(execFileSync("cat", [join(r.dir, "a.txt")], { encoding: "utf8" }), "two\n");
+      // No `origin` remote in this temp repo, so the fetch cannot succeed — the
+      // tool must report git's actual stderr reason (not the generic "Command
+      // failed: …" wrapper, and not throw), and must leave the file alone.
+      assert.equal(
+        out.local_sync,
+        "skipped: fatal: 'origin' does not appear to be a git repository",
+      );
+      assert.equal(readFileSync(join(r.dir, "a.txt"), "utf8"), "two\n");
+    } finally {
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("resets local HEAD onto the published commit on success", async () => {
+    // A real second repo stands in for the GitHub remote so `git fetch origin`
+    // has something to fetch — the oid the fake GraphQL server hands back has
+    // to exist as a real commit for `git reset --mixed` to succeed against it.
+    const r = repo();
+    const remoteDir = mkdtempSync(join(tmpdir(), "publish-tool-remote-"));
+    try {
+      execFileSync("git", ["clone", "-q", r.dir, remoteDir]);
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@e",
+          "commit",
+          "-q",
+          "--allow-empty",
+          "-m",
+          "published",
+        ],
+        { cwd: remoteDir },
+      );
+      const publishedOid = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: remoteDir,
+        encoding: "utf8",
+      }).trim();
+      execFileSync("git", ["remote", "add", "origin", remoteDir], { cwd: r.dir });
+
+      const server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (c) => chunks.push(c));
+        req.on("end", () => {
+          res.setHeader("content-type", "application/json");
+          if (req.url?.endsWith("/graphql")) {
+            res.end(
+              JSON.stringify({
+                data: {
+                  createCommitOnBranch: {
+                    commit: {
+                      oid: publishedOid,
+                      url: "u",
+                      committer: { name: "bot", email: "b@e" },
+                      signature: { isValid: true, state: "VALID", wasSignedByGitHub: true },
+                    },
+                  },
+                },
+              }),
+            );
+            return;
+          }
+          res.end(JSON.stringify({ object: { sha: r.base } }));
+        });
+      });
+      await new Promise<void>((res2) => server.listen(0, "127.0.0.1", () => res2()));
+      const { port } = server.address() as AddressInfo;
+      try {
+        writeFileSync(join(r.dir, "a.txt"), "two\n");
+        const out = await callPublish(`http://127.0.0.1:${port}`, {
+          owner: "o",
+          repo: "r",
+          message: "m",
+          path: r.dir,
+        });
+        assert.equal(out.local_sync, "ok");
+        assert.equal(
+          execFileSync("git", ["rev-parse", "HEAD"], { cwd: r.dir, encoding: "utf8" }).trim(),
+          publishedOid,
+        );
+      } finally {
+        await new Promise<void>((res2) => server.close(() => res2()));
+      }
+    } finally {
+      rmSync(remoteDir, { recursive: true, force: true });
+      r.cleanup();
+    }
+  });
+
+  test("skips the sync rather than repointing whichever branch is checked out", async () => {
+    // Reviewer-caught bug: `reset --mixed` moves the CURRENT branch, not
+    // necessarily `target` — `branch` can name a different branch than the one
+    // checked out. Publishing to "feature" while sitting on "main" must never
+    // silently move local "main" onto the "feature" commit.
+    const r = repo();
+    const fake = await fakeGitHub(r.base);
+    try {
+      writeFileSync(join(r.dir, "a.txt"), "two\n");
+      const out = await callPublish(fake.url, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        branch: "feature",
+        path: r.dir,
+      });
+      assert.equal(out.published, true);
+      assert.equal(out.local_sync, "skipped: published to feature, checked out on main");
+      const branchName = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+        cwd: r.dir,
+        encoding: "utf8",
+      }).trim();
+      const head = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: r.dir,
+        encoding: "utf8",
+      }).trim();
+      assert.equal(branchName, "main");
+      assert.equal(head, r.base, "local main must not have moved");
     } finally {
       await fake.close();
       r.cleanup();

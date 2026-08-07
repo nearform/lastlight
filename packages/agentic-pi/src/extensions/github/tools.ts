@@ -76,6 +76,135 @@ async function safeRun<T>(fn: () => Promise<T>, canRefresh = true) {
 }
 
 /**
+ * The mutation is the only thing standing between us and an unsigned commit on
+ * a `required_signatures` repo. If GitHub says it did not sign, or signed but
+ * the signature doesn't verify, say so loudly — the commit is already on the
+ * branch, so a silent `verified: false` would be discovered by a blocked PR
+ * hours later. `null` means GitHub returned no signature yet, not a failure.
+ */
+function assertSigned(commit: SignedCommit): void {
+  if (commit.signature && !commit.signature.wasSignedByGitHub) {
+    throw new Error(
+      `published ${commit.oid} but GitHub did not sign it (state=${commit.signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+  if (commit.signature && !commit.signature.isValid) {
+    throw new Error(
+      `published ${commit.oid} but GitHub's signature on it is not valid (state=${commit.signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+}
+
+/** The first line of whatever a failed git child actually said, not the
+ * generic "Command failed: git …" wrapper execFileSync throws — git's real
+ * cause is on stderr. Safe to surface: `gitAuthEnv` injects the token as a
+ * `GIT_CONFIG_VALUE_1` extraheader, never into a URL, so git's stderr cannot
+ * carry it (credentials.ts). Falls back to the thrown message (e.g. a
+ * detached-HEAD `Error` from `currentBranch`, which has no stderr). */
+function firstLineOfFailure(err: unknown): string {
+  const e = err as MaybeHttpError;
+  const stderr = e.stderr ? e.stderr.toString().trim() : "";
+  const text = stderr || e.message || String(err);
+  return text.split("\n")[0]!;
+}
+
+/**
+ * Local HEAD is now behind the branch we just wrote. `reset --mixed` moves the
+ * branch ref and the index onto the published commit and leaves every file
+ * untouched — sound precisely because the published tree IS the working tree.
+ * Best effort: a failed sync does not un-publish anything, so it is reported,
+ * never thrown.
+ *
+ * Only safe when the checked-out branch IS the one just published: `reset
+ * --mixed` moves whatever branch HEAD currently points at, so publishing to a
+ * different branch than the one checked out would silently repoint the
+ * checkout's own branch onto someone else's commit (measured in review).
+ */
+async function syncLocalToPublished(
+  cwd: string,
+  target: string,
+  oid: string,
+  auth: GitHubAuth,
+): Promise<string> {
+  try {
+    const current = currentBranch(cwd);
+    if (current !== target) {
+      return `skipped: published to ${target}, checked out on ${current}`;
+    }
+    const token = await auth.getToken();
+    execFileSync("git", ["fetch", "origin", target], {
+      cwd,
+      stdio: "pipe",
+      timeout: 120_000,
+      env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+    });
+    execFileSync("git", ["reset", "--mixed", oid], { cwd, stdio: "pipe" });
+    return "ok";
+  } catch (err) {
+    return `skipped: ${firstLineOfFailure(err)}`;
+  }
+}
+
+/**
+ * Resolve the remote tip to diff the working tree against, and make sure it is
+ * in the local object store — all WITHOUT creating anything remote yet: the
+ * branch's own tip if it exists, otherwise the base branch's tip
+ * (`createCommitOnBranch` needs the branch to exist, but creating it here
+ * would be a remote write that a later refusal could never undo). Returns
+ * `from` — the base branch a missing `target` would be created from, or
+ * `null` if `target` already exists — for the caller to act on only after
+ * every refusal check has run.
+ */
+async function resolveDiffBase(
+  gh: GitHubClient,
+  auth: GitHubAuth,
+  cwd: string,
+  owner: string,
+  repo: string,
+  target: string,
+  baseBranch: string | undefined,
+): Promise<{ tip: string; from: string | null }> {
+  const existingTip = await gh.getBranchTip(owner, repo, target);
+  let from: string | null = null;
+  let tip: string;
+  if (existingTip !== null) {
+    tip = existingTip;
+  } else {
+    from = baseBranch || (await gh.getRepository(owner, repo)).default_branch;
+    const baseTip = await gh.getBranchTip(owner, repo, from);
+    if (baseTip === null) {
+      throw new Error(
+        `base branch ${from} does not exist in ${owner}/${repo} either — cannot create ${target}`,
+      );
+    }
+    tip = baseTip;
+  }
+
+  // The diff needs the remote tip in the local object store. A shallow clone
+  // may not have it; fetching by sha is cheap and precise.
+  if (!hasLocalCommit(cwd, tip)) {
+    const token = await auth.getToken();
+    try {
+      execFileSync("git", ["fetch", "--depth=1", "origin", tip], {
+        cwd,
+        stdio: "pipe",
+        timeout: 120_000,
+        env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+      });
+    } catch {
+      // fall through to the check below with a message naming the sha
+    }
+  }
+  if (!hasLocalCommit(cwd, tip)) {
+    throw new Error(
+      `the remote tip of ${target} (${tip}) is not in this clone and could not be fetched — someone else has pushed. Re-run the phase against the current branch; do NOT git push.`,
+    );
+  }
+
+  return { tip, from };
+}
+
+/**
  * Build the entire GitHub tool set. Caller filters by profile.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -265,47 +394,15 @@ export function buildGitHubTools(
       async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude }) => {
         const cwd = repoPath || process.cwd();
         const target = branch || currentBranch(cwd);
-
-        // Resolve the tip to diff against WITHOUT creating anything remote yet:
-        // the branch's own tip if it exists, otherwise the base branch's tip
-        // (createCommitOnBranch needs the branch to exist, but creating it here
-        // would be a remote write that a later refusal could never undo).
-        const existingTip = await gh.getBranchTip(owner, repo, target);
-        let from: string | null = null;
-        let tip: string;
-        if (existingTip !== null) {
-          tip = existingTip;
-        } else {
-          from = base_branch || (await gh.getRepository(owner, repo)).default_branch;
-          const baseTip = await gh.getBranchTip(owner, repo, from);
-          if (baseTip === null) {
-            throw new Error(
-              `base branch ${from} does not exist in ${owner}/${repo} either — cannot create ${target}`,
-            );
-          }
-          tip = baseTip;
-        }
-
-        // The diff needs the remote tip in the local object store. A shallow
-        // clone may not have it; fetching by sha is cheap and precise.
-        if (!hasLocalCommit(cwd, tip)) {
-          const token = await auth.getToken();
-          try {
-            execFileSync("git", ["fetch", "--depth=1", "origin", tip], {
-              cwd,
-              stdio: "pipe",
-              timeout: 120_000,
-              env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
-            });
-          } catch {
-            // fall through to the check below with a message naming the sha
-          }
-        }
-        if (!hasLocalCommit(cwd, tip)) {
-          throw new Error(
-            `the remote tip of ${target} (${tip}) is not in this clone and could not be fetched — someone else has pushed. Re-run the phase against the current branch; do NOT git push.`,
-          );
-        }
+        const { tip, from } = await resolveDiffBase(
+          gh,
+          auth,
+          cwd,
+          owner,
+          repo,
+          target,
+          base_branch,
+        );
 
         const changes = diffWorktreeAgainst(cwd, tip, exclude ?? []);
         if (changes.unsupported.length > 0) {
@@ -358,41 +455,8 @@ export function buildGitHubTools(
           throw err;
         }
 
-        // The mutation is the only thing standing between us and an unsigned
-        // commit on a `required_signatures` repo. If GitHub says it did not
-        // sign, or signed but the signature doesn't verify, say so loudly — the
-        // commit is already on the branch, so a silent `verified: false` would
-        // be discovered by a blocked PR hours later. `null` means GitHub
-        // returned no signature yet, not a failure.
-        if (commit.signature && !commit.signature.wasSignedByGitHub) {
-          throw new Error(
-            `published ${commit.oid} but GitHub did not sign it (state=${commit.signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
-          );
-        }
-        if (commit.signature && !commit.signature.isValid) {
-          throw new Error(
-            `published ${commit.oid} but GitHub's signature on it is not valid (state=${commit.signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
-          );
-        }
-
-        // Local HEAD is now behind the branch we just wrote. `reset --mixed`
-        // moves the branch ref and the index onto the published commit and
-        // leaves every file untouched — sound precisely because the published
-        // tree IS the working tree. Best effort: a failed sync does not
-        // un-publish anything, so it is reported, never thrown.
-        let localSync = "ok";
-        try {
-          const token = await auth.getToken();
-          execFileSync("git", ["fetch", "origin", target], {
-            cwd,
-            stdio: "pipe",
-            timeout: 120_000,
-            env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
-          });
-          execFileSync("git", ["reset", "--mixed", commit.oid], { cwd, stdio: "pipe" });
-        } catch (err) {
-          localSync = `skipped: ${(err as Error).message.split("\n")[0]}`;
-        }
+        assertSigned(commit);
+        const localSync = await syncLocalToPublished(cwd, target, commit.oid, auth);
 
         return {
           published: true,
