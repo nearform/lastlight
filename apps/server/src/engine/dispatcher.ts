@@ -218,9 +218,12 @@ export async function dispatch(
     if (running.length === 0) {
       await envelope.reply("No tasks currently running.");
     } else {
-      const lines = running.map((r) =>
-        `• *${r.skill}*${r.repo ? ` on ${r.repo}` : ""}${r.issueNumber ? ` #${r.issueNumber}` : ""} (started ${r.startedAt})`,
-      );
+      // A status report is a user-facing surface, so it speaks the qualified
+      // `owner/repo` the ledger stores split (issue #279).
+      const lines = running.map((r) => {
+        const repo = qualifyRepo(r.owner, r.repo);
+        return `• *${r.skill}*${repo ? ` on ${repo}` : ""}${r.issueNumber ? ` #${r.issueNumber}` : ""} (started ${r.startedAt})`;
+      });
       await envelope.reply(`Running tasks:\n${lines.join("\n")}`);
     }
     return { kind: "handled", handler };

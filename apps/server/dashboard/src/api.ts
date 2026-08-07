@@ -41,19 +41,34 @@ export interface Message {
   [k: string]: unknown;
 }
 
+/**
+ * A row from `GET /admin/api/executions`. Hand-mirrors `ExecutionRecord`
+ * (`apps/server/src/state/execution-store.ts`) — camelCase, because that
+ * endpoint returns the record verbatim.
+ *
+ * It was snake_case until issue #285, matching the raw table rather than the
+ * type the endpoint claimed to return: the query behind it was a `SELECT *`
+ * cast to `ExecutionRecord[]`, so the wire shape really was snake_case and the
+ * server type was the one that lied. Aliasing the query settled it the other
+ * way, and no component reads this yet, so the mirror simply follows.
+ */
 export interface Execution {
   id: string;
-  trigger_type: string;
-  trigger_id: string;
+  triggerType: string;
+  triggerId: string;
+  triggeredBy?: string;
   skill: string;
-  repo: string | null;
-  issue_number: number | null;
-  started_at: string;
-  finished_at: string | null;
-  success: number | null;
-  error: string | null;
-  turns: number | null;
-  duration_ms: number | null;
+  owner?: string;
+  /** BARE repo name — join with `owner` for display. */
+  repo?: string;
+  issueNumber?: number;
+  startedAt: string;
+  finishedAt?: string;
+  success?: boolean;
+  error?: string;
+  turns?: number;
+  durationMs?: number;
+  workflowRunId?: string;
 }
 
 export interface PhaseHistoryEntry {
