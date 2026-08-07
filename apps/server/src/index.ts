@@ -1124,6 +1124,16 @@ async function main() {
         ? (owner, repo, ref) =>
             github.getChecksConclusion(owner, repo, ref, { excludeApp: config.botName })
         : undefined,
+      // The FORK-PR fallback. `check_suite` / `check_run` payloads carry
+      // `pull_requests[]` only for a same-repo PR, so without this every
+      // check-driven route is same-repo-only — and under the packaged
+      // `review.trigger: after-checks` a fork PR defers on `pr.opened`, posts
+      // the `queued` placeholder, and never receives the settle event that
+      // would conclude it. Asked of the BASE repo, which is the one the App is
+      // installed on, so it needs no access to the fork.
+      listOpenPrNumbersForHeadSha: github
+        ? (owner, repo, sha) => github.listOpenPrNumbersForHeadSha(owner, repo, sha)
+        : undefined,
       // Only broaden `check_suite.completed` beyond dependency PRs when the
       // operator's mode actually consumes a settle event. Deliberately the
       // OPERATOR's value, not a repo's: emitting is what costs event volume,

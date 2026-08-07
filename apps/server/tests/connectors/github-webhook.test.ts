@@ -202,6 +202,23 @@ describe("GitHubWebhookConnector — re-run checks", () => {
     expect(json.filtered).toBe(true);
     expect(emitted).toBeNull();
   });
+
+  it("resolves a FORK PR for the Re-run button, which is otherwise fork-blind", async () => {
+    // The Re-run button on `last-light/review` is the documented manual
+    // affordance for a stuck review — and it read the same empty
+    // `pull_requests[]`, so on a fork PR it did nothing at all.
+    const conn = new GitHubWebhookConnector({
+      port: 0,
+      webhookSecret: SECRET,
+      botLogin: BOT_LOGIN,
+      listOpenPrNumbersForHeadSha: async () => [282],
+    });
+    const { emitted } = await postCheckEvent(conn, "check_run", {
+      action: "rerequested",
+    });
+    expect(emitted?.type).toBe("pr.synchronize");
+    expect(emitted?.prNumber).toBe(282);
+  });
 });
 
 /** POST a signed `check_suite` webhook (with conclusion + head_commit). */
@@ -418,6 +435,11 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
   function connectorWithChecks(
     conclusion: "passing" | "failing" | "pending" | "none",
     trigger: "eager" | "after-checks" | "on-request" = "eager",
+    /**
+     * The fork-PR fallback. Wired only when a test opts in, so every existing
+     * case still proves the payload-only path on its own.
+     */
+    forkLookup?: { prs: number[]; calls: Array<[string, string, string]> },
   ): { conn: GitHubWebhookConnector; calls: Array<[string, string, string]> } {
     const calls: Array<[string, string, string]> = [];
     const conn = new GitHubWebhookConnector({
@@ -428,6 +450,14 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
         calls.push([owner, repo, ref]);
         return conclusion;
       },
+      ...(forkLookup
+        ? {
+            listOpenPrNumbersForHeadSha: async (owner: string, repo: string, sha: string) => {
+              forkLookup.calls.push([owner, repo, sha]);
+              return forkLookup.prs;
+            },
+          }
+        : {}),
       reviewTrigger: () => trigger,
     });
     return { conn, calls };
@@ -529,6 +559,27 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
     expect(emitted.headSha).toBe("beef0001");
   });
 
+  it("emits pr.checks_settled when a GREEN suite settles a red aggregate", async () => {
+    // nearform/skillspro#1646. Which suite finishes last is an accident of
+    // scheduling, not a fact about the PR: here one job failed and a SIBLING
+    // suite completed green afterwards, so the aggregate is `failing` but the
+    // delivery that observes it is a success. Requiring `passing` on this
+    // branch dropped it — and the failing suite, which the red branch would
+    // have taken, had completed while the sibling was still running and read
+    // `pending`. Nothing emitted, and the `queued` review check never concluded.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+      headSha: "beef0002",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+    expect(emitted.headSha).toBe("beef0002");
+  });
+
   it("emits pr.checks_settled for a settled-RED human PR too — either colour", async () => {
     // 09 locked decision 14: the `passing` variant was deleted. A red result is
     // useful review input, and a PR we gave up on never goes green.
@@ -541,6 +592,129 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
       headBranch: "feature/whatever",
     });
     expect(emitted?.type).toBe("pr.checks_settled");
+  });
+
+  // ── Fork PRs ────────────────────────────────────────────────────────────
+  //
+  // GitHub fills `check_suite.pull_requests[]` only when the head branch lives
+  // on the BASE repo. A PR opened from a fork carries an empty array, so every
+  // check-driven route keyed on it dropped the delivery outright.
+  //
+  // That was invisible until `review.trigger: after-checks` became the packaged
+  // default: under `eager` the review fired from `pr.opened` (a `pull_request`
+  // event, which always carries the PR) and forks never touched the check path.
+  // Afterwards a fork PR defers on `pr.opened`, posts its `queued` placeholder,
+  // and no settle event can ever conclude it — nearform/lastlight#282.
+
+  it("resolves a FORK PR from the head SHA when pull_requests[] is empty", async () => {
+    const fork = { prs: [282], calls: [] as Array<[string, string, string]> };
+    const { conn } = connectorWithChecks("passing", "after-checks", fork);
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      // no prNumber -> the payload carries `pull_requests: []`, as a fork does
+      commitAuthor: "Robin",
+      commitMessage: "feat(cron): make sandbox-sweep observable",
+      headBranch: "feat/cron-sweep-observability",
+      headSha: "969b6986",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+    expect(emitted.prNumber).toBe(282);
+    expect(emitted.headSha).toBe("969b6986");
+    expect(fork.calls).toEqual([["acme", "widgets", "969b6986"]]);
+  });
+
+  it("prefers the payload's own PR — a same-repo PR costs no extra call", async () => {
+    const fork = { prs: [999], calls: [] as Array<[string, string, string]> };
+    const { conn } = connectorWithChecks("passing", "after-checks", fork);
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(emitted?.prNumber).toBe(7);
+    expect(fork.calls).toEqual([]);
+  });
+
+  it("does not pay for the lookup when nobody consumes the delivery", async () => {
+    // A human fork PR under `eager`: no fix route claims it and no settle
+    // consumer exists, so the delivery must cost nothing at all.
+    const fork = { prs: [282], calls: [] as Array<[string, string, string]> };
+    const { conn, calls } = connectorWithChecks("passing", "eager", fork);
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      commitAuthor: "Robin",
+      commitMessage: "feat: something",
+      headBranch: "feat/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+    expect(fork.calls).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it("drops the delivery when the SHA heads no open PR", async () => {
+    // A push to a branch with no PR still produces check suites. Resolving
+    // nothing must stay a silent no-op, exactly as an empty array always was.
+    const fork = { prs: [], calls: [] as Array<[string, string, string]> };
+    const { conn } = connectorWithChecks("passing", "after-checks", fork);
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      commitAuthor: "Robin",
+      commitMessage: "chore: direct push",
+      headBranch: "some-branch",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
+  it("survives a failed lookup without dropping louder than before", async () => {
+    const conn = new GitHubWebhookConnector({
+      port: 0,
+      webhookSecret: SECRET,
+      botLogin: BOT_LOGIN,
+      getChecksConclusion: async () => "passing" as const,
+      listOpenPrNumbersForHeadSha: async () => {
+        throw new Error("502 from GitHub");
+      },
+      reviewTrigger: () => "after-checks" as const,
+    });
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      commitAuthor: "Robin",
+      commitMessage: "feat: something",
+      headBranch: "feat/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
+  it("routes a red aggregate to the FIX path even when the last suite was green", async () => {
+    // The aggregate decides, so the fix family's claim can't be lost to the
+    // order CI settled in: this dependency PR is red, and a sibling suite
+    // finishing green afterwards must not demote it to a review. Before the
+    // arms were merged this emitted nothing at all.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 190,
+      commitAuthor: "dependabot[bot]",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+  });
+
+  it("does the same for a head WE pushed — the fix loop's CI feedback", async () => {
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 207,
+      commitAuthor: BOT_LOGIN,
+      commitMessage: "fix: address review",
+      headBranch: "lastlight/205-user-identity",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+    expect(emitted.isDependencyPr).toBe(false);
   });
 
   it("FIX OUTRANKS REVIEW — a red dependency PR stays pr.checks_failed under after-checks", async () => {

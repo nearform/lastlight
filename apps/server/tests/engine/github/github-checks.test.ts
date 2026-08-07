@@ -7,7 +7,14 @@ import { GitHubClient } from "#src/engine/github/github.js";
  * getFailedChecks). We swap in a fake Octokit returning canned check_runs +
  * combined-status payloads and assert the derived verdict.
  */
-type Run = { status: string; conclusion: string | null; app?: { slug: string } };
+type Run = {
+  status: string;
+  conclusion: string | null;
+  app?: { slug: string };
+  name?: string;
+  started_at?: string;
+  id?: number;
+};
 type Combined = { state: string; statuses: unknown[] };
 
 function fakeOctokit(runs: Run[], combined: Combined) {
@@ -149,6 +156,228 @@ describe("GitHubClient.getChecksSummary — excludeApp (the self-gating deadlock
     expect(await c.getChecksConclusion("o", "r", "sha", { excludeApp: "last-light" })).toBe(
       "failing",
     );
+  });
+});
+
+/**
+ * **The superseded re-run** — nearform/skillspro#1646.
+ *
+ * `filter: "latest"` de-dupes per check SUITE, not per check NAME, so a job
+ * re-run in a fresh suite comes back ALONGSIDE the attempt it replaced. Reading
+ * every run equally pinned that SHA at `failing` forever: the review deferred
+ * on `after-checks`, posted its `queued` placeholder, and then no settle event
+ * could ever fire because the aggregate could no longer reach a state either
+ * emit branch accepted. The PR was merged six hours later with the check still
+ * queued.
+ */
+describe("GitHubClient.getChecksSummary — superseded re-runs", () => {
+  const attempt = (
+    name: string,
+    conclusion: string | null,
+    startedAt: string,
+    extra: Partial<Run> = {},
+  ): Run => ({
+    name,
+    status: conclusion === null ? "in_progress" : "completed",
+    conclusion,
+    app: { slug: "github-actions" },
+    started_at: startedAt,
+    ...extra,
+  });
+
+  it("lets a GREEN re-run clear the failure it replaced", async () => {
+    // The exact shape #1646 was stuck in.
+    const c = clientWith(
+      fakeOctokit(
+        [
+          attempt("Check linked issues", "failure", "2026-08-06T10:11:33Z"),
+          attempt("Check linked issues", "success", "2026-08-06T10:23:46Z"),
+          attempt("Lint and test", "success", "2026-08-06T10:11:40Z"),
+        ],
+        noStatus,
+      ),
+    );
+    expect(await c.getChecksConclusion("o", "r", "sha")).toBe("passing");
+  });
+
+  it("lets a RED re-run resurrect a failure — latest wins in BOTH directions", async () => {
+    // Not "prefer green": the newest attempt is the answer, whatever it says.
+    // A flake re-run that fails for real must still read red.
+    const c = clientWith(
+      fakeOctokit(
+        [
+          attempt("Lint and test", "success", "2026-08-06T10:11:33Z"),
+          attempt("Lint and test", "failure", "2026-08-06T10:23:46Z"),
+        ],
+        noStatus,
+      ),
+    );
+    expect(await c.getChecksConclusion("o", "r", "sha")).toBe("failing");
+  });
+
+  it("reports 'pending' while the re-run of a settled check is still going", async () => {
+    // The re-run is the latest attempt, so the check is back in flight — firing
+    // a review or a merge off the stale result would assess a moving target.
+    const c = clientWith(
+      fakeOctokit(
+        [
+          attempt("Lint and test", "failure", "2026-08-06T10:11:33Z"),
+          attempt("Lint and test", null, "2026-08-06T10:23:46Z"),
+        ],
+        noStatus,
+      ),
+    );
+    expect(await c.getChecksConclusion("o", "r", "sha")).toBe("pending");
+  });
+
+  it("never lets one app's green hide ANOTHER app's red of the same name", async () => {
+    // Two CI apps may both post a check called "build". They are different
+    // checks, so the key is (app, name) and neither supersedes the other.
+    const c = clientWith(
+      fakeOctokit(
+        [
+          attempt("build", "failure", "2026-08-06T10:11:33Z", { app: { slug: "circleci" } }),
+          attempt("build", "success", "2026-08-06T10:23:46Z", { app: { slug: "github-actions" } }),
+        ],
+        noStatus,
+      ),
+    );
+    expect(await c.getChecksConclusion("o", "r", "sha")).toBe("failing");
+  });
+
+  it("falls back to the check-run id when two attempts share a start time", async () => {
+    const c = clientWith(
+      fakeOctokit(
+        [
+          attempt("Lint and test", "success", "2026-08-06T10:11:33Z", { id: 2 }),
+          attempt("Lint and test", "failure", "2026-08-06T10:11:33Z", { id: 1 }),
+        ],
+        noStatus,
+      ),
+    );
+    expect(await c.getChecksConclusion("o", "r", "sha")).toBe("passing");
+  });
+
+  it("counts CHECKS, not attempts, in settledCount", async () => {
+    // `dependencies.minSettledChecks` asks how many distinct things looked at
+    // this SHA. Four re-runs of one reviewer bot were never four opinions.
+    const c = clientWith(
+      fakeOctokit(
+        [
+          attempt("copilot-pull-request-reviewer", "success", "2026-08-06T10:11:53Z"),
+          attempt("copilot-pull-request-reviewer", "success", "2026-08-06T10:25:41Z"),
+          attempt("copilot-pull-request-reviewer", "success", "2026-08-06T10:36:57Z"),
+          attempt("Lint and test", "success", "2026-08-06T10:11:40Z"),
+        ],
+        noStatus,
+      ),
+    );
+    expect(await c.getChecksSummary("o", "r", "sha")).toEqual({
+      state: "passing",
+      settledCount: 2,
+      pendingCount: 0,
+    });
+  });
+
+  it("does NOT collapse runs that carry no name — no identity, no de-dupe", async () => {
+    // Fail safe: without a name there is no claim that two runs are the same
+    // check, and keeping both can only ever report the SHA redder than it is.
+    const c = clientWith(
+      fakeOctokit([run("completed", "success"), run("completed", "failure")], noStatus),
+    );
+    expect(await c.getChecksConclusion("o", "r", "sha")).toBe("failing");
+  });
+});
+
+describe("GitHubClient.getCiFailureReport — superseded re-runs", () => {
+  it("does not hand the fix agent a failure that has since been re-run green", async () => {
+    // The report and the aggregate must agree on what "red" means, or discovery
+    // fires a fix for evidence the prompt then cannot reproduce. No logs are
+    // fetched at all here: nothing is failing once the stale attempt is dropped.
+    const c = clientWith(
+      fakeOctokit(
+        [
+          {
+            name: "Lint and test",
+            status: "completed",
+            conclusion: "failure",
+            app: { slug: "github-actions" },
+            started_at: "2026-08-06T10:11:33Z",
+          },
+          {
+            name: "Lint and test",
+            status: "completed",
+            conclusion: "success",
+            app: { slug: "github-actions" },
+            started_at: "2026-08-06T10:23:46Z",
+          },
+        ],
+        noStatus,
+      ),
+    );
+    expect(await c.getCiFailureReport("o", "r", "sha")).toEqual({
+      jobs: [],
+      logsAvailable: false,
+    });
+  });
+});
+
+/**
+ * The FORK-PR lookup (nearform/lastlight#282). `check_suite` / `check_run`
+ * payloads carry `pull_requests[]` only for a same-repo PR, so this is how a
+ * fork PR's checks find their PR at all. Its two filters are the whole safety
+ * argument — the endpoint answers a looser question than we are asking.
+ */
+describe("GitHubClient.listOpenPrNumbersForHeadSha", () => {
+  const pr = (number: number, state: string, headSha: string) => ({
+    number,
+    state,
+    head: { sha: headSha },
+  });
+
+  function octokitWith(prs: unknown[]) {
+    return {
+      rest: {
+        repos: {
+          listPullRequestsAssociatedWithCommit: async () => ({ data: prs }),
+        },
+      },
+    };
+  }
+
+  it("returns the open PR this commit HEADS", async () => {
+    const c = clientWith(octokitWith([pr(282, "open", "969b698")]));
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([282]);
+  });
+
+  it("ignores a PR that merely CONTAINS the commit", async () => {
+    // The endpoint returns every associated PR. A commit sitting in the middle
+    // of another PR's branch must never point a review at that PR.
+    const c = clientWith(
+      octokitWith([pr(282, "open", "969b698"), pr(300, "open", "deadbee")]),
+    );
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([282]);
+  });
+
+  it("ignores a CLOSED PR with the same head", async () => {
+    // A settled check on a commit that also heads a closed PR is not a reason
+    // to do anything to the closed PR.
+    const c = clientWith(octokitWith([pr(199, "closed", "969b698")]));
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([]);
+  });
+
+  it("returns nothing when the commit heads no open PR", async () => {
+    const c = clientWith(octokitWith([]));
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([]);
+  });
+
+  it("sorts ascending, so a caller taking [0] is deterministic", async () => {
+    // One commit can head two open PRs (the same branch targeted at two bases).
+    // Whichever we pick must not depend on GitHub's response order.
+    const c = clientWith(
+      octokitWith([pr(310, "open", "969b698"), pr(282, "open", "969b698")]),
+    );
+    expect(await c.listOpenPrNumbersForHeadSha("o", "r", "969b698")).toEqual([282, 310]);
   });
 });
 

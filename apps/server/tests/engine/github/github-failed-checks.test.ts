@@ -735,7 +735,14 @@ describe("GitHubClient.getCiFailureReport — log-unavailable cause", () => {
             data: {
               check_runs: [
                 failingCheck(1),
-                { ...failingCheck(2), details_url: `${ACTIONS_URL.slice(0, -3)}457` },
+                // A DIFFERENT job, so a different check name — same-name runs
+                // on one SHA are re-runs and the later one supersedes the
+                // earlier (see `latestPerCheck`), which would leave one job here.
+                {
+                  ...failingCheck(2),
+                  name: "CI / test",
+                  details_url: `${ACTIONS_URL.slice(0, -3)}457`,
+                },
               ],
             },
           }),
