@@ -13,7 +13,10 @@ const staticAuth: GitHubAuth = {
 };
 
 /** A fake GitHub that records the GraphQL bodies it was sent. */
-function graphqlServer(reply: unknown, status = 200): Promise<{
+function graphqlServer(
+  reply: unknown,
+  status = 200,
+): Promise<{
   url: string;
   bodies: any[];
   close: () => Promise<void>;
@@ -67,7 +70,7 @@ describe("publishSignedCommit", () => {
         expectedHeadOid: "deadbeef",
         headline: "fix: thing",
         body: "why",
-        additions: [{ path: "a.txt", contents: "eA==" }],
+        additions: [{ path: "a.txt", contents: "eA==", status: "M" }],
         deletions: [{ path: "b.txt" }],
       });
 
@@ -95,7 +98,7 @@ describe("publishSignedCommit", () => {
   test("surfaces a GraphQL error instead of returning a commit", async () => {
     const fake = await graphqlServer({
       data: { createCommitOnBranch: null },
-      errors: [{ message: "Expected branch to point to \"old\" but it did not." }],
+      errors: [{ message: 'Expected branch to point to "old" but it did not.' }],
     });
     try {
       const client = new GitHubClient(staticAuth, { baseUrl: fake.url });

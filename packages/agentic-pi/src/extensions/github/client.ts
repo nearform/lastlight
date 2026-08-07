@@ -442,7 +442,12 @@ export class GitHubClient {
   async listBranches(owner: string, repo: string, pageNum = 1, perPage = 30) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.repos.listBranches({ owner, repo, page: pageNum, per_page: perPage });
+      const { data } = await ok.repos.listBranches({
+        owner,
+        repo,
+        page: pageNum,
+        per_page: perPage,
+      });
       return page(data.map(summarizeBranch), pageNum, perPage);
     });
   }
@@ -901,7 +906,10 @@ export class GitHubClient {
         // reason as a non-throwing result instead of failing the whole run.
         const e = err as { message?: string; errors?: Array<{ message?: string }> };
         const reason =
-          e.errors?.map((x) => x.message).filter(Boolean).join("; ") ||
+          e.errors
+            ?.map((x) => x.message)
+            .filter(Boolean)
+            .join("; ") ||
           e.message ||
           "unknown error";
         return { ok: false, pull_number, reason };
@@ -914,7 +922,10 @@ export class GitHubClient {
   async listCommits(owner: string, repo: string, opts: Record<string, unknown> = {}) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { fullMessages, ...rest } = opts as { fullMessages?: boolean } & Record<string, unknown>;
+      const { fullMessages, ...rest } = opts as { fullMessages?: boolean } & Record<
+        string,
+        unknown
+      >;
       const perPage = Number(rest.per_page ?? 30);
       const pageNum = Number(rest.page ?? 1);
       const { data } = await ok.repos.listCommits({

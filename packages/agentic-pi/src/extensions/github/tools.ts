@@ -233,18 +233,22 @@ export function buildGitHubTools(
         owner: Type.String(),
         repo: Type.String(),
         message: Type.String({
-          description: "Commit message. First line is the headline; anything after a blank line is the body.",
+          description:
+            "Commit message. First line is the headline; everything after it is the body.",
         }),
         branch: Type.Optional(
           Type.String({ description: "Branch to publish to (default: the checked-out branch)" }),
         ),
         base_branch: Type.Optional(
           Type.String({
-            description: "If the branch does not exist on GitHub yet, create it from this one (default: the repo's default branch)",
+            description:
+              "If the branch does not exist on GitHub yet, create it from this one (default: the repo's default branch)",
           }),
         ),
         path: Type.Optional(
-          Type.String({ description: "Path to the git working tree (default: the current directory)" }),
+          Type.String({
+            description: "Path to the git working tree (default: the current directory)",
+          }),
         ),
         exclude: Type.Optional(
           Type.Array(Type.String(), {
@@ -256,12 +260,24 @@ export function buildGitHubTools(
         const cwd = repoPath || process.cwd();
         const target = branch || currentBranch(cwd);
 
-        let tip = await gh.getBranchTip(owner, repo, target);
-        if (tip === null) {
-          const from = base_branch || (await gh.getRepository(owner, repo)).default_branch;
-          await gh.createBranch(owner, repo, target, from);
-          tip = await gh.getBranchTip(owner, repo, target);
-          if (tip === null) throw new Error(`created ${target} but could not read its tip back`);
+        // Resolve the tip to diff against WITHOUT creating anything remote yet:
+        // the branch's own tip if it exists, otherwise the base branch's tip
+        // (createCommitOnBranch needs the branch to exist, but creating it here
+        // would be a remote write that a later refusal could never undo).
+        const existingTip = await gh.getBranchTip(owner, repo, target);
+        let from: string | null = null;
+        let tip: string;
+        if (existingTip !== null) {
+          tip = existingTip;
+        } else {
+          from = base_branch || (await gh.getRepository(owner, repo)).default_branch;
+          const baseTip = await gh.getBranchTip(owner, repo, from);
+          if (baseTip === null) {
+            throw new Error(
+              `base branch ${from} does not exist in ${owner}/${repo} either — cannot create ${target}`,
+            );
+          }
+          tip = baseTip;
         }
 
         // The diff needs the remote tip in the local object store. A shallow
@@ -297,6 +313,12 @@ export function buildGitHubTools(
             published: false,
             reason: "nothing to publish — the working tree matches the branch",
           };
+        }
+
+        // Every refusal above has already run — nothing past this point may
+        // fail for a reason unrelated to GitHub itself, so it's safe to write.
+        if (from !== null) {
+          await gh.createBranch(owner, repo, target, from);
         }
 
         const [headline, ...rest] = message.split("\n");
@@ -730,7 +752,9 @@ export function buildGitHubTools(
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
         full_messages: Type.Optional(
-          Type.Boolean({ description: "Return every commit message in full instead of truncating." }),
+          Type.Boolean({
+            description: "Return every commit message in full instead of truncating.",
+          }),
         ),
       }),
       ({ owner, repo, full_messages, ...opts }) =>

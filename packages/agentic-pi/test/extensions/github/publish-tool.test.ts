@@ -11,12 +11,31 @@ import { buildGitHubTools } from "../../../src/extensions/github/tools.js";
 import { PROFILE_TOOLS } from "../../../src/extensions/github/profiles.js";
 import type { GitHubAuth } from "../../../src/extensions/github/auth.js";
 
-const staticAuth: GitHubAuth = { getToken: async () => "test-token", expiresAt: null, canRefresh: false };
+const staticAuth: GitHubAuth = {
+  getToken: async () => "test-token",
+  expiresAt: null,
+  canRefresh: false,
+};
 
-/** Serves getRef for `main` and accepts the publish mutation. */
-function fakeGitHub(tip: string): Promise<{ url: string; mutations: any[]; close: () => Promise<void> }> {
+/** One request the fake server saw, so a test can prove no remote write of any
+ * kind happened — not just that no GraphQL mutation was sent. */
+interface LoggedRequest {
+  method: string;
+  url: string;
+}
+
+/** Serves getRef for `main` and accepts the publish mutation. Logs every
+ * request (not just the GraphQL ones) in `requests`. */
+function fakeGitHub(tip: string): Promise<{
+  url: string;
+  mutations: any[];
+  requests: LoggedRequest[];
+  close: () => Promise<void>;
+}> {
   const mutations: any[] = [];
+  const requests: LoggedRequest[] = [];
   const server = createServer((req, res) => {
+    requests.push({ method: req.method ?? "GET", url: req.url ?? "" });
     const chunks: Buffer[] = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
@@ -48,6 +67,60 @@ function fakeGitHub(tip: string): Promise<{ url: string; mutations: any[]; close
       resolve({
         url: `http://127.0.0.1:${port}`,
         mutations,
+        requests,
+        close: () => new Promise((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+/**
+ * A GitHub fake for the "branch does not exist yet" scenario: `opts.target`
+ * 404s (as a fresh branch would), `opts.base` resolves to `opts.baseTip`, and
+ * the repo's `default_branch` is `opts.base`. Every request is logged so a
+ * test can assert no POST — no createBranch, no createCommitOnBranch — ever
+ * reached the server.
+ */
+function fakeGitHubMissingBranch(opts: {
+  target: string;
+  base: string;
+  baseTip: string;
+}): Promise<{ url: string; requests: LoggedRequest[]; close: () => Promise<void> }> {
+  const requests: LoggedRequest[] = [];
+  const targetRefPath = `/git/ref/heads%2F${encodeURIComponent(opts.target)}`;
+  const baseRefPath = `/git/ref/heads%2F${encodeURIComponent(opts.base)}`;
+  const server = createServer((req, res) => {
+    requests.push({ method: req.method ?? "GET", url: req.url ?? "" });
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      const url = req.url ?? "";
+      if (url.includes(targetRefPath)) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ message: "Not Found" }));
+        return;
+      }
+      if (url.includes(baseRefPath)) {
+        res.end(JSON.stringify({ object: { sha: opts.baseTip } }));
+        return;
+      }
+      if (url === "/repos/o/r") {
+        res.end(JSON.stringify({ default_branch: opts.base }));
+        return;
+      }
+      // Anything else — createBranch (POST git/refs) or createCommitOnBranch
+      // (POST /graphql) — is a remote write this scenario must never reach.
+      res.statusCode = 500;
+      res.end(JSON.stringify({ message: `unexpected request in this test: ${req.method} ${url}` }));
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        requests,
         close: () => new Promise((r) => server.close(() => r())),
       });
     });
@@ -60,13 +133,23 @@ function repo(): { dir: string; base: string; cleanup: () => void } {
     execFileSync("git", a, {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e" },
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@e",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@e",
+      },
     });
   g("init", "-q", "-b", "main");
   writeFileSync(join(dir, "a.txt"), "one\n");
   g("add", "-A");
   g("commit", "-qm", "base");
-  return { dir, base: g("rev-parse", "HEAD").trim(), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return {
+    dir,
+    base: g("rev-parse", "HEAD").trim(),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
 
 async function callPublish(baseUrl: string, params: unknown): Promise<any> {
@@ -99,11 +182,17 @@ describe("github_publish", () => {
       assert.equal(out.published, true);
       assert.equal(out.commit, "newoid");
       assert.equal(out.verified, true);
-      assert.deepEqual(out.added.concat(out.modified).sort(), ["a.txt", "b.txt"]);
+      // a.txt existed at the base (modified); b.txt did not (added). Checked
+      // separately — concatenating both arrays before sorting would still pass
+      // if the split were broken and everything landed in just one of them.
+      assert.deepEqual(out.added, ["b.txt"]);
+      assert.deepEqual(out.modified, ["a.txt"]);
 
       const input = fake.mutations[0].variables.input;
       assert.equal(input.expectedHeadOid, r.base);
       assert.deepEqual(input.message, { headline: "fix: thing", body: "body line" });
+      // `status` must never reach GraphQL — FileAddition only accepts these two.
+      assert.deepEqual(Object.keys(input.fileChanges.additions[0]).sort(), ["contents", "path"]);
     } finally {
       await fake.close();
       r.cleanup();
@@ -169,10 +258,54 @@ describe("github_publish", () => {
         /git fetch --depth=1 origin some-other-tip/,
         "expected the tool to actually invoke git fetch, not skip straight to refusing",
       );
+      // The name of this test: it must fetch, never push, and never reach GitHub.
+      assert.doesNotMatch(trace, /git push/);
+      assert.equal(fake.mutations.length, 0);
     } finally {
       if (prevTrace === undefined) delete process.env.GIT_TRACE;
       else process.env.GIT_TRACE = prevTrace;
       rmSync(traceFile, { force: true });
+      await fake.close();
+      r.cleanup();
+    }
+  });
+
+  test("refuses before creating a branch that doesn't exist yet — no remote write happens", async () => {
+    // This is the scenario Important 1 in review got wrong: when the target
+    // branch is missing, createBranch used to run BEFORE the refusal checks,
+    // so an unsupported-mode refusal still left a branch created on GitHub.
+    const r = repo();
+    const fake = await fakeGitHubMissingBranch({
+      target: "feat/new",
+      base: "main",
+      baseTip: r.base,
+    });
+    try {
+      writeFileSync(join(r.dir, "run.sh"), "#!/bin/sh\n");
+      chmodSync(join(r.dir, "run.sh"), 0o755);
+      const out = await callPublish(fake.url, {
+        owner: "o",
+        repo: "r",
+        message: "m",
+        branch: "feat/new",
+        path: r.dir,
+      });
+      assert.ok(out.error, "expected a structured error");
+      assert.match(out.error, /run\.sh/);
+      assert.match(out.error, /100755/);
+      // The tool had to read the target ref (404), the repo's default_branch,
+      // and the base ref to resolve what to diff against — but must never POST
+      // (no createBranch, no createCommitOnBranch).
+      assert.ok(
+        fake.requests.length > 0,
+        "expected the tool to have read at least the branch tips",
+      );
+      assert.deepEqual(
+        fake.requests.filter((req) => req.method !== "GET"),
+        [],
+        `expected only GET requests, got: ${JSON.stringify(fake.requests)}`,
+      );
+    } finally {
       await fake.close();
       r.cleanup();
     }

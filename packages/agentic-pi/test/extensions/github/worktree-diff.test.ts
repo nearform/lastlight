@@ -59,6 +59,35 @@ describe("diffWorktreeAgainst", () => {
       assert.deepEqual(cs.deletions, [{ path: "keep.txt" }]);
       assert.deepEqual(cs.additions.map((a) => a.path).sort(), ["added.txt", "tracked.txt"]);
       assert.deepEqual(cs.unsupported, []);
+
+      const added = cs.additions.find((a) => a.path === "added.txt");
+      const modified = cs.additions.find((a) => a.path === "tracked.txt");
+      assert.equal(added?.status, "A", "a path absent at the base is an addition");
+      assert.equal(modified?.status, "M", "a path present at the base is a modification");
+    } finally {
+      r.cleanup();
+    }
+  });
+
+  test("a rename is reported as delete+add (status A), never folded into 'M'", () => {
+    // diffWorktreeAgainst calls diff-tree with --no-renames deliberately —
+    // GitHub's signed-commit API has no rename primitive, so a rename must
+    // surface as a plain deletion plus a fresh "A" addition. This pins that
+    // coupling: without --no-renames, git's rename detector could collapse
+    // this into a single R record, which the naive `status === "A" ? "A" :
+    // "M"` derivation would then misreport as "M" — a modification of a path
+    // that never existed in the base tree.
+    const r = repo();
+    try {
+      rmSync(join(r.dir, "keep.txt"));
+      // Same content as keep.txt ("one\n") — similar enough that git's rename
+      // detector would flag this as a near-100%-similarity rename if it ran.
+      writeFileSync(join(r.dir, "renamed.txt"), "one\n");
+      const cs = diffWorktreeAgainst(r.dir, r.base);
+      assert.deepEqual(cs.deletions, [{ path: "keep.txt" }]);
+      const added = cs.additions.find((a) => a.path === "renamed.txt");
+      assert.ok(added, "renamed.txt should appear as an addition, not vanish into a rename record");
+      assert.equal(added.status, "A");
     } finally {
       r.cleanup();
     }
