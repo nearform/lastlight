@@ -1,10 +1,19 @@
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import { resolveKubernetesConfig } from "../../config/config.js";
 import { sweepSandboxes } from "../../cron/sandbox-sweep.js";
 import { makeK8sApis, type K8sApis } from "./client.js";
-import { reclaimSandbox } from "./reclaim.js";
+import { reclaimSandbox, type ReclaimCensus } from "./reclaim.js";
 import { logger } from "../../logging/logger.js";
+import { recordSandboxSweep, setSpanAttributes } from "../../telemetry/index.js";
 
 const log = logger("k8s");
+const tracer = () => trace.getTracer("lastlight");
+
+/** How a sweep run was invoked. A label the job records; it never infers it —
+ *  a function cannot tell who called it, and inferring would couple the job to
+ *  its callers. Keeps `{trigger="cron"}` a valid liveness query when someone
+ *  triggers a run by hand. */
+export type SweepTrigger = "cron" | "manual" | "startup" | "library";
 
 /**
  * The `kubernetes` backend's backstop sweep (Plan 5) — it runs in place of the
@@ -50,27 +59,95 @@ export interface SweepK8sOpts {
   apis?: K8sApis;
   namespace?: string;
   isLive?: (taskId: string) => boolean;
+  /** How this run was invoked. Defaults to `library` — the honest answer when a
+   *  caller does not say. */
+  trigger?: SweepTrigger;
 }
 
+const EMPTY_CENSUS: ReclaimCensus = {
+  pvcsFound: 0,
+  pvcsLive: 0,
+  pvcsStale: 0,
+  pvcsCurrent: 0,
+  deletedStale: 0,
+  deletedOverCap: 0,
+  deletedFailed: 0,
+};
+
 export async function sweepK8sSandboxes(opts: SweepK8sOpts): Promise<void> {
-  if (opts.stateDir) {
-    sweepSandboxes({
-      stateDir: opts.stateDir,
-      sandboxDir: opts.sandboxDir,
-      retentionHours: opts.retentionHours,
-      maxDirs: opts.maxDirs ?? opts.maxIdlePVCs,
-      isLive: opts.isLive,
-    });
-  }
-  try {
-    const apis = opts.apis ?? makeK8sApis();
-    const namespace = opts.namespace ?? resolveKubernetesConfig().namespace;
-    await reclaimSandbox(apis, namespace, {
-      kind: "sweep",
-      staleByHours: opts.retentionHours,
-      maxIdlePVCs: opts.maxIdlePVCs,
-    });
-  } catch (err) {
-    log.warn("sweepK8sSandboxes: skipping PVC reclaim", { err });
-  }
+  const trigger = opts.trigger ?? "library";
+  // The job owns its span: it is triggered from cron, at startup, from an admin
+  // route, or as a library, and its telemetry must not depend on which. If a
+  // caller already has a span active this becomes its child and inherits the
+  // trace; with none active it starts a root. Either way no caller has to pass
+  // a trace id.
+  return tracer().startActiveSpan("sandbox.sweep", async (span) => {
+    const startedAt = Date.now();
+    let census: ReclaimCensus = { ...EMPTY_CENSUS };
+    let failure: unknown;
+
+    if (opts.stateDir) {
+      sweepSandboxes({
+        stateDir: opts.stateDir,
+        sandboxDir: opts.sandboxDir,
+        retentionHours: opts.retentionHours,
+        maxDirs: opts.maxDirs ?? opts.maxIdlePVCs,
+        isLive: opts.isLive,
+      });
+    }
+
+    try {
+      const apis = opts.apis ?? makeK8sApis();
+      const namespace = opts.namespace ?? resolveKubernetesConfig().namespace;
+      const result = await reclaimSandbox(apis, namespace, {
+        kind: "sweep",
+        staleByHours: opts.retentionHours,
+        maxIdlePVCs: opts.maxIdlePVCs,
+      });
+      census = result.census;
+    } catch (err) {
+      failure = err;
+      log.warn("sweepK8sSandboxes: skipping PVC reclaim", { err });
+      span.recordException(err instanceof Error ? err : new Error(String(err)));
+      span.setStatus({ code: SpanStatusCode.ERROR });
+    } finally {
+      // Reported from `finally` so a failed reclaim still says what it saw. A
+      // summary emitted only on success would go missing on exactly the runs
+      // worth reading, and an absent event is meant to mean "did not run".
+      const durationMs = Date.now() - startedAt;
+      const config = { retentionHours: opts.retentionHours, maxIdlePVCs: opts.maxIdlePVCs };
+
+      setSpanAttributes(span, {
+        trigger,
+        "pvcs.found": census.pvcsFound,
+        "pvcs.stale": census.pvcsStale,
+        "deleted.stale": census.deletedStale,
+        "deleted.overCap": census.deletedOverCap,
+        ...config,
+      });
+
+      // Unconditional: emitted with zeros on an idle run, so the shape never
+      // varies and absence of the event means the sweep did not run.
+      log.info("Sweep complete", {
+        trigger,
+        pvcs: {
+          found: census.pvcsFound,
+          live: census.pvcsLive,
+          stale: census.pvcsStale,
+          current: census.pvcsCurrent,
+        },
+        deleted: {
+          stale: census.deletedStale,
+          overCap: census.deletedOverCap,
+          failed: census.deletedFailed,
+        },
+        config,
+        durationMs,
+        ...(failure ? { err: failure } : {}),
+      });
+
+      recordSandboxSweep({ ...census, durationMs }, { trigger });
+      span.end();
+    }
+  });
 }

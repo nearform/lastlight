@@ -1,8 +1,10 @@
 import { Cron } from "croner";
+import { SpanStatusCode, trace } from "@opentelemetry/api";
 import type { StateDb } from "../state/db.js";
 import { logger } from "../logging/logger.js";
 
 const log = logger("cron");
+const tracer = () => trace.getTracer("lastlight");
 
 export interface CronJob {
   name: string;
@@ -81,18 +83,33 @@ export class CronScheduler {
     }
 
     const cronJob = new Cron(job.schedule, async () => {
+      // Logged, not a silent return: a direct job wedged in `running` would
+      // otherwise be skipped on every subsequent tick forever with no signal,
+      // where the same wedge in `register()` is visible within one interval.
       if (this.running.has(job.name)) {
+        log.info("Skipping — still running from previous tick", { job: job.name });
         return;
       }
 
       this.running.add(job.name);
-      try {
-        await job.handler();
-      } catch (err: unknown) {
-        log.error("Job failed", { job: job.name, err });
-      } finally {
-        this.running.delete(job.name);
-      }
+      // The scheduler's span covers the trigger, not the work: the tick, its
+      // duration and its failure. The handler owns whatever it does inside.
+      // Starting it active also means `logger`'s pino mixin stamps
+      // trace_id/span_id on every line the handler emits, so its logs and its
+      // trace correlate with no plumbing.
+      await tracer().startActiveSpan(`cron.${job.name}`, async (span) => {
+        log.info("Running", { job: job.name });
+        try {
+          await job.handler();
+        } catch (err: unknown) {
+          log.error("Job failed", { job: job.name, err });
+          span.recordException(err instanceof Error ? err : new Error(String(err)));
+          span.setStatus({ code: SpanStatusCode.ERROR });
+        } finally {
+          span.end();
+          this.running.delete(job.name);
+        }
+      });
     });
 
     this.jobs.set(job.name, cronJob);

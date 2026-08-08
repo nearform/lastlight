@@ -53,16 +53,35 @@ export function livePvcClaimNames(pods: V1Pod[]): Set<string> {
  * LRU-evicts the oldest of those beyond the cap, keeping the newest
  * `maxIdlePVCs`.
  */
-export function pvcsToReclaim(
+/**
+ * {@link pvcsToReclaim}'s selection, kept split by the policy that selected it.
+ * `stale` aged out past `staleByHours`; `overCap` survived the age check but was
+ * LRU-evicted beyond `maxIdlePVCs`. The two are reported separately because they
+ * call for different operator responses — shorten `retentionHours` versus raise
+ * `maxIdlePVCs` — which a combined total hides. `idle` is the population the
+ * selection ran against (everything not mounted by a live pod).
+ */
+export interface PvcReclaimPlan {
+  stale: V1PersistentVolumeClaim[];
+  overCap: V1PersistentVolumeClaim[];
+  idle: V1PersistentVolumeClaim[];
+}
+
+/** {@link pvcsToReclaim}, but retaining which policy selected each PVC. */
+export function planPvcReclaim(
   pvcs: V1PersistentVolumeClaim[],
   selector: ReclaimSelector,
   live: Set<string>,
   now: number,
-): V1PersistentVolumeClaim[] {
+): PvcReclaimPlan {
   const idle = pvcs.filter((p) => p.metadata?.name && !live.has(p.metadata.name));
 
   if (selector.kind === "run") {
-    return idle.filter((p) => p.metadata?.labels?.[RUN_ID_LABEL] === selector.runId.label);
+    return {
+      stale: idle.filter((p) => p.metadata?.labels?.[RUN_ID_LABEL] === selector.runId.label),
+      overCap: [],
+      idle,
+    };
   }
 
   const maxAgeMs = selector.staleByHours * 3_600_000;
@@ -75,20 +94,59 @@ export function pvcsToReclaim(
   const staleNames = new Set(stale.map((p) => p.metadata?.name));
   const survivors = idle.filter((p) => !staleNames.has(p.metadata?.name));
 
-  const evicted: V1PersistentVolumeClaim[] = [];
+  const overCap: V1PersistentVolumeClaim[] = [];
   if (survivors.length > selector.maxIdlePVCs) {
     // Newest first; keep the leading `maxIdlePVCs`, evict everything older.
     const byAgeAsc = [...survivors].sort((a, b) => ageOf(a) - ageOf(b));
-    evicted.push(...byAgeAsc.slice(selector.maxIdlePVCs));
+    overCap.push(...byAgeAsc.slice(selector.maxIdlePVCs));
   }
 
-  return [...stale, ...evicted];
+  return { stale, overCap, idle };
+}
+
+export function pvcsToReclaim(
+  pvcs: V1PersistentVolumeClaim[],
+  selector: ReclaimSelector,
+  live: Set<string>,
+  now: number,
+): V1PersistentVolumeClaim[] {
+  const plan = planPvcReclaim(pvcs, selector, live, now);
+  return [...plan.stale, ...plan.overCap];
 }
 
 export interface ReclaimResult {
   podsDeleted: number;
   pvcsDeleted: number;
+  /** What the reclaim observed and did, for the caller's summary event and
+   *  metrics. Reported on every path — including the RBAC no-op — so a caller
+   *  can always say what it saw, not merely what it removed. */
+  census: ReclaimCensus;
 }
+
+export interface ReclaimCensus {
+  /** Every managed PVC in the namespace, live or not. */
+  pvcsFound: number;
+  /** Mounted by a live pod, therefore never reclaimable. */
+  pvcsLive: number;
+  /** Selected by age. */
+  pvcsStale: number;
+  /** Idle, inside the retention window and under the LRU cap. */
+  pvcsCurrent: number;
+  deletedStale: number;
+  deletedOverCap: number;
+  /** Delete calls that failed and were skipped (best-effort per object). */
+  deletedFailed: number;
+}
+
+const EMPTY_CENSUS: ReclaimCensus = {
+  pvcsFound: 0,
+  pvcsLive: 0,
+  pvcsStale: 0,
+  pvcsCurrent: 0,
+  deletedStale: 0,
+  deletedOverCap: 0,
+  deletedFailed: 0,
+};
 
 export interface ReclaimOpts {
   now?: number;
@@ -139,7 +197,7 @@ export async function reclaimSandbox(
         "reclaimSandbox: RBAC for listing Pods/PVCs is not granted (Plan 7). Skipping reclaim.",
         { namespace },
       );
-      return { podsDeleted: 0, pvcsDeleted: 0 };
+      return { podsDeleted: 0, pvcsDeleted: 0, census: { ...EMPTY_CENSUS } };
     }
     throw err;
   }
@@ -158,7 +216,8 @@ export async function reclaimSandbox(
       ? livePvcClaimNames(pods.filter((p) => !isSelectorPod(p)))
       : livePvcClaimNames(pods);
 
-  const matchedPvcs = pvcsToReclaim(pvcs, selector, liveForPvcs, now);
+  const plan = planPvcReclaim(pvcs, selector, liveForPvcs, now);
+  const matchedPvcs = [...plan.stale, ...plan.overCap];
 
   let podsDeleted = 0;
   for (const pod of matchedPods) {
@@ -170,7 +229,10 @@ export async function reclaimSandbox(
     }
   }
 
-  let pvcsDeleted = 0;
+  const staleNames = new Set(plan.stale.map((p) => p.metadata?.name));
+  let deletedStale = 0;
+  let deletedOverCap = 0;
+  let deletedFailed = 0;
   for (const pvc of matchedPvcs) {
     const name = pvc.metadata?.name;
     if (!name) continue;
@@ -182,11 +244,26 @@ export async function reclaimSandbox(
         warn,
       )
     ) {
-      pvcsDeleted += 1;
+      if (staleNames.has(name)) deletedStale += 1;
+      else deletedOverCap += 1;
+    } else {
+      deletedFailed += 1;
     }
   }
 
-  return { podsDeleted, pvcsDeleted };
+  return {
+    podsDeleted,
+    pvcsDeleted: deletedStale + deletedOverCap,
+    census: {
+      pvcsFound: pvcs.length,
+      pvcsLive: pvcs.length - plan.idle.length,
+      pvcsStale: plan.stale.length,
+      pvcsCurrent: plan.idle.length - plan.stale.length - plan.overCap.length,
+      deletedStale,
+      deletedOverCap,
+      deletedFailed,
+    },
+  };
 }
 
 /** Delete one object: a 404 is success (already gone); any other error warns

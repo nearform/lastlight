@@ -105,7 +105,7 @@ describe("reclaimSandbox", () => {
     const res = await reclaimSandbox(apis, "ns", { kind: "run", runId: RunId.from("run-42") });
     expect(delPod).toHaveBeenCalledWith(expect.objectContaining({ name: "p-42" }));
     expect(delPvc).toHaveBeenCalledWith(expect.objectContaining({ name: "ws-42" }));
-    expect(res).toEqual({ podsDeleted: 1, pvcsDeleted: 1 });
+    expect(res).toMatchObject({ podsDeleted: 1, pvcsDeleted: 1 });
 
     const warn = vi.fn();
     const apis403 = {
@@ -121,7 +121,7 @@ describe("reclaimSandbox", () => {
       { onWarn: warn },
     );
     expect(warn).toHaveBeenCalledOnce();
-    expect(r2).toEqual({ podsDeleted: 0, pvcsDeleted: 0 });
+    expect(r2).toMatchObject({ podsDeleted: 0, pvcsDeleted: 0 });
   });
 
   it("cancel: reclaims the run's PVC even though its own (live) pod still mounts it", async () => {
@@ -151,7 +151,7 @@ describe("reclaimSandbox", () => {
     const res = await reclaimSandbox(apis, "ns", { kind: "run", runId: RunId.from("run-42") });
     expect(delPod).toHaveBeenCalledWith(expect.objectContaining({ name: "p-42" }));
     expect(delPvc).toHaveBeenCalledWith(expect.objectContaining({ name: "ws-42" }));
-    expect(res).toEqual({ podsDeleted: 1, pvcsDeleted: 1 });
+    expect(res).toMatchObject({ podsDeleted: 1, pvcsDeleted: 1 });
   });
 
   it("run selector never deletes a DIFFERENT live run's PVC it happens to mount", async () => {
@@ -188,7 +188,7 @@ describe("reclaimSandbox", () => {
     expect(delPod).toHaveBeenCalledWith(expect.objectContaining({ name: "p-42" }));
     expect(delPvc).toHaveBeenCalledTimes(1);
     expect(delPvc).toHaveBeenCalledWith(expect.objectContaining({ name: "ws-42" }));
-    expect(res).toEqual({ podsDeleted: 1, pvcsDeleted: 1 });
+    expect(res).toMatchObject({ podsDeleted: 1, pvcsDeleted: 1 });
   });
 
   it("sweep deletes no pods, only idle PVCs", async () => {
@@ -208,7 +208,7 @@ describe("reclaimSandbox", () => {
     const res = await reclaimSandbox(apis, "ns", sweepSelector);
     expect(delPod).not.toHaveBeenCalled();
     expect(delPvc).toHaveBeenCalledWith(expect.objectContaining({ name: "old" }));
-    expect(res).toEqual({ podsDeleted: 0, pvcsDeleted: 1 });
+    expect(res).toMatchObject({ podsDeleted: 0, pvcsDeleted: 1 });
   });
 
   it("is idempotent: a 404 on delete counts as success and does not throw", async () => {
@@ -231,7 +231,7 @@ describe("reclaimSandbox", () => {
       },
     } as any;
     const res = await reclaimSandbox(apis, "ns", { kind: "run", runId: RunId.from("run-42") });
-    expect(res).toEqual({ podsDeleted: 1, pvcsDeleted: 1 });
+    expect(res).toMatchObject({ podsDeleted: 1, pvcsDeleted: 1 });
   });
 
   it("is best-effort: a non-404 delete failure warns and continues to next", async () => {
@@ -267,7 +267,7 @@ describe("reclaimSandbox", () => {
     const res = await reclaimSandbox(apis, "ns", runSelector, { onWarn: warn });
     expect(delPod).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledOnce();
-    expect(res).toEqual({ podsDeleted: 1, pvcsDeleted: 0 });
+    expect(res).toMatchObject({ podsDeleted: 1, pvcsDeleted: 0 });
   });
 
   it("passes the managed-by label selector to both list calls", async () => {
