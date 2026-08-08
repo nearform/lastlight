@@ -34,7 +34,7 @@ describe("getWorkflowTriggers — Slack rows", () => {
   it("describes a workflow by its chat trigger phrase", () => {
     configureWorkflowAssets();
     const triage = getWorkflowTriggers("issue-triage").find((t) => t.kind === "slack");
-    expect(triage).toMatchObject({ description: "Slack: `triage owner/repo`" });
+    expect(triage).toMatchObject({ description: "Slack: `triage owner/repo#N`" });
   });
 
   it("falls back to the summary for a workflow with no phrase to type", () => {

@@ -189,6 +189,45 @@ because `demo` is in `WELL_KNOWN_INTENTS` the intent fallback skipped it as
 well, so every demo-classified Slack message fell through to plain chat against
 a configured route.)
 
+### TRIAGE on Slack needs an issue
+
+`issue-triage` triages **one** issue. Repo-wide triage is a real capability but
+it rides on `context.mode = "scan"`, and exactly two things set it: the
+webhooks-off `triage-new-issues` cron, and `lastlight triage <owner/repo>` with
+no `#N`. **The Slack branch sets neither `mode` nor `issueNumber`**, so it used
+to hand a single-issue workflow an empty target — and its clarify text
+(`triage cliftonc/repo`) advertised the repo-wide form it could not deliver.
+
+What that produced, in one real run: a Slack message classified `TRIAGE`,
+dispatched with `issueNumber: 0` and an empty `commentBody`, whereupon the agent
+improvised a `list_issues` sweep, inspected one issue, changed nothing, emitted
+`TRIAGE_COMPLETE` and recorded **succeeded** after 110 s of sandbox. The
+`requires_marker` postcondition cannot catch this: it proves the agent did not
+bail, not that it was asked anything.
+
+Two fixes, and the second is the load-bearing one:
+
+- The branch now **requires an issue** and replies asking for one otherwise —
+  after the managed-repo gate, so a missing issue can never mask an unmanaged
+  target.
+- It forwards **`commentBody: slackText`**, as `demo` and `question` already
+  did. Without it the request never reaches the agent at all: in the run above
+  the word "overdue" appears nowhere in the 775-line transcript.
+
+**The classification block is what stops the misroute happening at all.** It was
+one line, defined the intent purely by *subject matter* ("scan/triage issues on a
+repo"), and carried no deliverable and no counter-examples — while every peer
+block states what comes out ("the deliverable is an ANSWER", "make code changes
+NOW", "a short screen-recorded mp4"). So any sentence pairing "issues" with a
+repo matched it, and *"are there any issues in cliftonc/drizzle-cube that are
+overdue?"* — a question, whose deliverable is an answer — matched it best of all.
+It now states its deliverable (labels), requires one issue, and makes the CHAT
+downgrade explicit, with the real misroute as a counter-example. `QUESTION`
+already carried the same downgrade; TRIAGE simply never yielded to it, and chat
+reads issues and their comments from GitHub directly. Pinned by
+`tests/workflows/issue-triage.test.ts`, which asserts the *shape* — a deliverable,
+the downgrade, counter-examples resolving to CHAT — rather than the wording.
+
 **The prompt is composed, forkable, and workflow-driven (issue #164).** The
 system prompt is assembled at runtime by `buildClassifierPrompt()`, not
 hardcoded:

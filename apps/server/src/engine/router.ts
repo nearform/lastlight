@@ -1017,13 +1017,37 @@ export async function routeEvent(
         case "triage": {
           const gate = requireManagedRepo(
             classifiedRepo,
-            "Which repo should I triage? e.g. `triage cliftonc/repo`",
+            "Which issue should I triage? e.g. `triage cliftonc/repo#42`",
           );
           if (!gate.ok) return gate.route;
+          // `issue-triage` triages ONE issue. Repo-wide scanning exists only as
+          // the webhooks-off cron fallback, which sets `mode: scan` — nothing on
+          // this path does, so a dispatch with no issue hands a single-issue
+          // workflow an empty target. That is not hypothetical: it burned a
+          // sandbox for 110s, improvised a `list_issues` sweep, changed nothing,
+          // emitted TRIAGE_COMPLETE and recorded SUCCEEDED. The marker
+          // postcondition cannot catch it — it proves the agent didn't bail, not
+          // that we asked it anything.
+          if (!classifiedIssue) {
+            return {
+              action: "reply",
+              message: `Which issue in ${gate.repo}? Triage works on one issue — e.g. \`triage ${gate.repo}#42\`. To ask *about* a repo's issues, just ask me directly and I'll look them up.`,
+            };
+          }
           return {
             action: "handler",
             handler: slack.triage || "issue-triage",
-            context: { repo: gate.repo, sender: envelope.sender, source: envelope.source },
+            context: {
+              repo: gate.repo,
+              issueNumber: classifiedIssue,
+              sender: envelope.sender,
+              // Forward what was actually said, as `demo`/`question` do. Without
+              // it the agent never sees the request that reached it: the run
+              // above rendered an empty `commentBody`, so the word "overdue"
+              // appeared nowhere in its 775-line transcript.
+              commentBody: slackText,
+              source: envelope.source,
+            },
           };
         }
 
