@@ -892,13 +892,49 @@ describe('routeEvent — message events (classifier-driven)', () => {
     }
   });
 
-  it('routes triage intent with managed repo to issue-triage', async () => {
-    mockClassifyComment.mockResolvedValue({ intent: 'triage', repo: 'cliftonc/drizby' });
-    const result = await routeEvent(makeEnvelope({ type: 'message', body: 'triage cliftonc/drizby' }));
+  it('routes triage intent with a managed repo AND an issue to issue-triage', async () => {
+    mockClassifyComment.mockResolvedValue({
+      intent: 'triage',
+      repo: 'cliftonc/drizby',
+      issueNumber: 42,
+    });
+    const result = await routeEvent(
+      makeEnvelope({ type: 'message', body: 'triage cliftonc/drizby#42' }),
+    );
     expect(result.action).toBe('handler');
     if (result.action === 'handler') {
       expect(result.handler).toBe('issue-triage');
+      // The branch used to build its context from the repo alone, so both of
+      // these were dropped on the floor.
+      expect(result.context.issueNumber).toBe(42);
+      expect(result.context.commentBody).toBe('triage cliftonc/drizby#42');
     }
+  });
+
+  it('asks which issue rather than dispatching triage with no target', async () => {
+    // The regression. `issue-triage` triages ONE issue; repo-wide scanning is
+    // the webhooks-off cron's `mode: scan`, which this path never sets. This
+    // used to dispatch anyway with issueNumber 0 — the agent improvised a
+    // `list_issues` sweep, changed nothing, emitted TRIAGE_COMPLETE and the run
+    // recorded SUCCEEDED after 110s of sandbox.
+    mockClassifyComment.mockResolvedValue({ intent: 'triage', repo: 'cliftonc/drizby' });
+    const result = await routeEvent(makeEnvelope({ type: 'message', body: 'triage cliftonc/drizby' }));
+    expect(result.action).toBe('reply');
+    if (result.action === 'reply') {
+      expect(result.message).toContain('cliftonc/drizby#42');
+      // Points at the thing that DOES answer questions about issues, so the
+      // reply is a redirect rather than a refusal.
+      expect(result.message).toMatch(/ask me directly/i);
+    }
+  });
+
+  it('still refuses an unmanaged repo before asking for an issue', async () => {
+    // Order matters: the managed-repo gate is the security-relevant one, so a
+    // missing issue must not be able to mask an unmanaged target.
+    mockClassifyComment.mockResolvedValue({ intent: 'triage', repo: 'unknown/repo' });
+    const result = await routeEvent(makeEnvelope({ type: 'message', body: 'triage unknown/repo' }));
+    expect(result.action).toBe('reply');
+    if (result.action === 'reply') expect(result.message).toContain('unknown/repo');
   });
 
   it('routes review intent with managed repo to pr-review', async () => {
