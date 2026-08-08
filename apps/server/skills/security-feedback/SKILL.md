@@ -148,8 +148,15 @@ Pick the single best-fit bucket:
    [references/templates.md](references/templates.md) if missing.
 4. Append a row to the matching table (accepted risks OR false positives) per the
    template.
-5. Commit on branch `security/feedback-{parentIssueNumber}-{shortFingerprint}`,
-   push, and open a PR titled `security: record {accept-risk|false-positive} for {shortFingerprint}`.
+5. Publish with `github_publish` — `{ owner, repo, branch:
+   "security/feedback-{parentIssueNumber}-{shortFingerprint}", path: <the
+   directory step 3 cloned into>, message: "security: record
+   {accept-risk|false-positive} for {shortFingerprint}" }`. That branch does not
+   exist yet; the tool creates it off the default branch and has GitHub build
+   and sign the commit. Do NOT use `git commit` / `git push`: a commit built by
+   git here is unsigned, and on a repo that requires signed commits one unsigned
+   commit blocks the PR permanently. Then open a PR titled `security: record
+   {accept-risk|false-positive} for {shortFingerprint}`.
 6. Comment on the parent: `Opened PR #{prNumber} to record this in SECURITY.md.
    Once merged, this finding will be suppressed in future scans.`
 7. Do **not** tick the task-list checkbox — that marker is reserved for "broken out to sub-issue".

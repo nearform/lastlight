@@ -19,7 +19,13 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { GitHubAuth } from "./auth.js";
-import { GitHubClient, isActionsDenied, type GitHubClientOptions } from "./client.js";
+import {
+  GitHubClient,
+  isActionsDenied,
+  isStaleDataError,
+  type GitHubClientOptions,
+  type SignedCommit,
+} from "./client.js";
 import { gitAuthEnv } from "./credentials.js";
 import {
   DEFAULT_LOG_EXCERPT_BYTES,
@@ -27,6 +33,7 @@ import {
   MIN_LOG_EXCERPT_BYTES,
   excerptJobLog,
 } from "./log-excerpt.js";
+import { currentBranch, diffWorktreeAgainst, hasLocalCommit } from "./worktree-diff.js";
 
 interface MaybeHttpError extends Error {
   status?: number;
@@ -68,6 +75,233 @@ async function safeRun<T>(fn: () => Promise<T>, canRefresh = true) {
   }
 }
 
+type CommitSignature = NonNullable<SignedCommit["signature"]>;
+
+/**
+ * The mutation is the only thing standing between us and an unsigned commit on
+ * a `required_signatures` repo. If GitHub says it did not sign, or signed but
+ * the signature doesn't verify, say so loudly — the commit is already on the
+ * branch, so a silent `verified: false` would be discovered by a blocked PR
+ * hours later. A null `signature` is GraphQL's shape for an UNSIGNED commit,
+ * not a "not yet": the response describes the commit as created.
+ */
+function assertSigned(commit: SignedCommit): CommitSignature {
+  const signature = commit.signature;
+  if (!signature) {
+    throw new Error(
+      `published ${commit.oid} but GitHub returned no signature for it — a commit with no signature at all is reported as \`signature: null\`, so it is unsigned. A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+  if (!signature.wasSignedByGitHub) {
+    throw new Error(
+      `published ${commit.oid} but GitHub did not sign it (state=${signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+  if (!signature.isValid) {
+    throw new Error(
+      `published ${commit.oid} but GitHub's signature on it is not valid (state=${signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+  return signature;
+}
+
+/** The first line of whatever a failed git child actually said, not the
+ * generic "Command failed: git …" wrapper execFileSync throws — git's real
+ * cause is on stderr. Safe to surface: `gitAuthEnv` injects the token as a
+ * `GIT_CONFIG_VALUE_1` extraheader, never into a URL, so git's stderr cannot
+ * carry it (credentials.ts). Falls back to the thrown message (e.g. a
+ * detached-HEAD `Error` from `currentBranch`, which has no stderr). */
+function firstLineOfFailure(err: unknown): string {
+  const e = err as MaybeHttpError;
+  const stderr = e.stderr ? e.stderr.toString().trim() : "";
+  const text = stderr || e.message || String(err);
+  return text.split("\n")[0]!;
+}
+
+/**
+ * Local HEAD is now behind the branch we just wrote. `reset --mixed` moves the
+ * branch ref and the index onto the published commit and leaves every file
+ * untouched.
+ *
+ * Sound because the published commit descends from a commit this checkout
+ * already contained — `resolveDiffBase` refuses to publish otherwise — so the
+ * reset only ever moves HEAD FORWARD, never onto content the working tree has
+ * never seen. That holds for a narrowed publish too (`include` / `exclude`):
+ * the published tree then differs from the working tree, and what the reset
+ * leaves behind is an ordinary dirty checkout that the next publish computes as
+ * changes. It is not optional: the next publish's ancestry check needs the
+ * local checkout to descend from the branch tip we just created.
+ *
+ * Best effort: a failed sync does not un-publish anything, so it is reported,
+ * never thrown.
+ *
+ * Only safe when the checked-out branch IS the one just published: `reset
+ * --mixed` moves whatever branch HEAD currently points at, so publishing to a
+ * different branch than the one checked out would silently repoint the
+ * checkout's own branch onto someone else's commit (measured in review).
+ */
+async function syncLocalToPublished(
+  cwd: string,
+  target: string,
+  oid: string,
+  auth: GitHubAuth,
+): Promise<string> {
+  try {
+    const current = currentBranch(cwd);
+    if (current !== target) {
+      return `skipped: published to ${target}, checked out on ${current}`;
+    }
+    const token = await auth.getToken();
+    execFileSync("git", ["fetch", "origin", target], {
+      cwd,
+      stdio: "pipe",
+      timeout: 120_000,
+      env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+    });
+    execFileSync("git", ["reset", "--mixed", oid], { cwd, stdio: "pipe" });
+    return "ok";
+  } catch (err) {
+    return `skipped: ${firstLineOfFailure(err)}`;
+  }
+}
+
+/** Best-effort `git fetch` into the checkout. Callers re-check what they need
+ * afterwards and report the missing object themselves, so a failure here is
+ * never the error the agent reads. */
+async function fetchIntoClone(
+  cwd: string,
+  auth: GitHubAuth,
+  ref: string,
+  flags: string[] = [],
+): Promise<void> {
+  const token = await auth.getToken();
+  try {
+    execFileSync("git", ["fetch", ...flags, "origin", ref], {
+      cwd,
+      stdio: "pipe",
+      timeout: 120_000,
+      env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+    });
+  } catch {
+    // the caller reports the object it still cannot find
+  }
+}
+
+/**
+ * Does this checkout's HEAD descend from `oid`?
+ *
+ * `git push` used to answer this for us — it rejects a non-fast-forward. The
+ * signed path has no equivalent and `expectedHeadOid` does not stand in for
+ * one: it catches a tip that moves AFTER we read it, not a tip that had already
+ * moved BEFORE. The change set is computed as "working tree vs that tip", so
+ * publishing against a tip the checkout does not contain records every file
+ * that commit added as a deletion. Fails closed — a git error reads as "not an
+ * ancestor" and the caller refuses.
+ */
+function descendsFrom(cwd: string, oid: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", oid, "HEAD"], { cwd, stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The newest commit both HEAD and `oid` contain, or null if they share none
+ * (or the local history is too shallow to tell). */
+function mergeBaseWith(cwd: string, oid: string): string | null {
+  try {
+    return (
+      execFileSync("git", ["merge-base", "HEAD", oid], { cwd, stdio: "pipe" })
+        .toString("utf8")
+        .trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** A base for a branch that does not exist yet: the base branch's tip when this
+ * checkout already contains it, otherwise the newest commit they share. Either
+ * is on the remote (a merge-base is an ancestor of `baseTip`), which is what
+ * `createRef` needs, and both are in HEAD's history, which is what keeps the
+ * change set from turning the base branch's newer files into deletions. */
+function branchPointFor(cwd: string, baseTip: string): string | null {
+  if (!hasLocalCommit(cwd, baseTip)) return null;
+  if (descendsFrom(cwd, baseTip)) return baseTip;
+  return mergeBaseWith(cwd, baseTip);
+}
+
+interface DiffBaseRequest {
+  gh: GitHubClient;
+  auth: GitHubAuth;
+  cwd: string;
+  owner: string;
+  repo: string;
+  target: string;
+  baseBranch?: string;
+}
+
+interface DiffBase {
+  /** The commit the change set is diffed against, and `expectedHeadOid`. */
+  tip: string;
+  /** The commit to create `target` from, or null when it already exists. */
+  createFrom: string | null;
+}
+
+/**
+ * Resolve the commit to diff the working tree against, and make sure it is both
+ * in the local object store and in HEAD's history — all WITHOUT creating
+ * anything remote yet (`createCommitOnBranch` needs the branch to exist, but
+ * creating it here would be a remote write that a later refusal could never
+ * undo). `createFrom` is handed back for the caller to act on only after every
+ * refusal check has run.
+ */
+async function resolveDiffBase(req: DiffBaseRequest): Promise<DiffBase> {
+  const { gh, auth, cwd, owner, repo, target, baseBranch } = req;
+  const existingTip = await gh.getBranchTip(owner, repo, target);
+  if (existingTip !== null) {
+    // The diff needs the remote tip in the local object store. A shallow clone
+    // may not have it; fetching by sha is cheap and precise.
+    if (!hasLocalCommit(cwd, existingTip)) {
+      await fetchIntoClone(cwd, auth, existingTip, ["--depth=1"]);
+    }
+    if (!hasLocalCommit(cwd, existingTip)) {
+      throw new Error(
+        `the remote tip of ${target} (${existingTip}) is not in this clone and could not be fetched — someone else has pushed. Re-run the phase against the current branch; do NOT git push.`,
+      );
+    }
+    if (!descendsFrom(cwd, existingTip)) {
+      throw new Error(
+        `refusing to publish — the tip of ${target} on GitHub (${existingTip}) is not in this checkout's history. The change set is the working tree measured against that tip, so publishing now would record every file that commit added as a DELETION. Nothing was published. Find out whose commit it is before recovering — \`github_list_commits\` with sha: "${target}" shows it — because the two cases differ. If an earlier publish in this phase landed it and this checkout could not be moved onto it, run \`git fetch origin ${target} && git reset --mixed origin/${target}\`: that moves the branch pointer and leaves every file exactly as it is. If somebody else pushed it, run \`git fetch origin ${target} && git add -A && git commit -m wip && git merge origin/${target}\` — commit first or the merge aborts on your uncommitted changes, and the local commit costs nothing because a publish folds local commits in. Then re-check your work and publish again; do NOT git push.`,
+      );
+    }
+    return { tip: existingTip, createFrom: null };
+  }
+
+  const base = baseBranch || (await gh.getRepository(owner, repo)).default_branch;
+  const baseTip = await gh.getBranchTip(owner, repo, base);
+  if (baseTip === null) {
+    throw new Error(
+      `base branch ${base} does not exist in ${owner}/${repo} either — cannot create ${target}`,
+    );
+  }
+  let from = branchPointFor(cwd, baseTip);
+  if (from === null) {
+    // Fetch the base by NAME rather than by sha: a `--depth=1` fetch of a sha
+    // lands a parentless commit, and the merge-base above needs the history
+    // that connects it to this checkout.
+    await fetchIntoClone(cwd, auth, base);
+    from = branchPointFor(cwd, baseTip);
+  }
+  if (from === null) {
+    throw new Error(
+      `refusing to create ${target} — this checkout shares no commit with ${base} (tip ${baseTip}), so there is no commit GitHub already has that the working tree can be measured against. Nothing was published. Merging will not fix this: histories with nothing in common do not merge. It usually means the checkout is not of this repository, or ${base}'s history was rewritten — compare \`github_list_commits\` (sha: "${base}") with your local \`git log\` and say what you found. A fresh clone with the work re-applied is the way out; do NOT git push.`,
+    );
+  }
+  return { tip: from, createFrom: from };
+}
+
 /**
  * Build the entire GitHub tool set. Caller filters by profile.
  */
@@ -100,7 +334,7 @@ export function buildGitHubTools(
 
     tool(
       "github_clone_repo",
-      "Clone a repository with GitHub App authentication. Sets up the credential helper automatically; commit identity comes from the ambient git config/environment. git push/pull/fetch will just work after cloning.",
+      "Clone a repository with GitHub App authentication. Sets up the credential helper automatically; commit identity comes from the ambient git config/environment. git fetch/pull and local commits just work after cloning. To put work back on a branch use `github_publish`, not `git push` — a commit built by git is unsigned, and a repository that requires signed commits blocks it permanently.",
       Type.Object({
         owner: Type.String({ description: "Repository owner" }),
         repo: Type.String({ description: "Repository name" }),
@@ -212,17 +446,130 @@ export function buildGitHubTools(
     ),
 
     tool(
-      "github_push_files",
-      "Push multiple files in a single commit",
+      "github_publish",
+      "Publish your work: commit the whole working tree and push it, in one step, as a SIGNED commit. Use this INSTEAD of `git add`/`git commit`/`git push` — a commit built by git in this sandbox is unsigned, and a repository that requires signed commits blocks it permanently. GitHub builds and signs the commit for you, attributed to the bot. Local commits you already made are folded in; the published commit is the working tree as it stands now. Fails rather than publishing if a change needs a file mode it cannot express (a new executable file, a symlink, a submodule pointer, or a mode change on an existing file) — do not work around that with `git push`; for a new script, leave it non-executable and run it through its interpreter (`bash scripts/verify.sh`).",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
-        branch: Type.String(),
-        files: Type.Array(Type.Object({ path: Type.String(), content: Type.String() })),
-        message: Type.String(),
+        message: Type.String({
+          description:
+            "Commit message. First line is the headline; everything after it is the body.",
+        }),
+        branch: Type.Optional(
+          Type.String({ description: "Branch to publish to (default: the checked-out branch)" }),
+        ),
+        base_branch: Type.Optional(
+          Type.String({
+            description:
+              "If the branch does not exist on GitHub yet, create it from this one (default: the repo's default branch)",
+          }),
+        ),
+        path: Type.Optional(
+          Type.String({
+            description: "Path to the git working tree (default: the current directory)",
+          }),
+        ),
+        exclude: Type.Optional(
+          Type.Array(Type.String(), {
+            description: 'Pathspecs to leave out of the commit, e.g. ".lastlight"',
+          }),
+        ),
+        include: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              'Pathspecs to restrict the commit to, e.g. ".lastlight". When given, nothing outside them is published, additions and deletions alike. Omit to publish the whole working tree.',
+          }),
+        ),
       }),
-      ({ owner, repo, branch, files, message }) =>
-        gh.pushFiles(owner, repo, branch, files, message),
+      async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude, include }) => {
+        const cwd = repoPath || process.cwd();
+        const target = branch || currentBranch(cwd);
+        const { tip, createFrom } = await resolveDiffBase({
+          gh,
+          auth,
+          cwd,
+          owner,
+          repo,
+          target,
+          ...(base_branch ? { baseBranch: base_branch } : {}),
+        });
+
+        const changes = diffWorktreeAgainst(cwd, tip, {
+          ...(exclude && { exclude }),
+          ...(include && { include }),
+        });
+        if (changes.unsupported.length > 0) {
+          const listed = changes.unsupported.map((u) => `${u.path}: ${u.reason}`).join("; ");
+          throw new Error(
+            `refusing to publish — ${changes.unsupported.length} change(s) need a file mode the signed-commit API cannot set: ${listed}. Nothing was published. Do NOT fall back to git push (it would produce an unsigned commit). Most of these have a way out you can take yourself: a NEW file cannot be published executable, so make it non-executable (\`chmod 644 <file>\`) and invoke it through its interpreter instead (\`bash scripts/verify.sh\`, \`python scripts/x.py\`), updating whatever calls it, then publish again. Flag it for a human only if that is not possible — a symlink, a submodule pointer, or a mode change some other file depends on.`,
+          );
+        }
+        if (changes.additions.length === 0 && changes.deletions.length === 0) {
+          return {
+            published: false,
+            // An empty `include` makes no path eligible, so the change set is
+            // empty however much the tree differs. Callers are told to trust
+            // this string, so it must not blame the tree for a caller error.
+            reason:
+              include?.length === 0
+                ? "nothing to publish — `include` was an empty list, so no path was eligible. The working tree may well differ from the branch. Pass the pathspecs you meant to publish, or omit `include` to publish the whole tree."
+                : "nothing to publish — the working tree matches the branch. If an earlier publish in this phase failed after the request went out (a lost response, or a STALE_DATA rejection on the retry), its commit may already be on the branch and be the reason there is nothing left: check `github_list_commits` for it before reporting that nothing changed.",
+          };
+        }
+
+        // Every refusal above has already run — nothing past this point may
+        // fail for a reason unrelated to GitHub itself, so it's safe to write.
+        if (createFrom !== null) {
+          await gh.createBranchAt(owner, repo, target, createFrom);
+        }
+
+        const [headline, ...rest] = message.split("\n");
+        const body = rest.join("\n").trim();
+        let commit: SignedCommit;
+        try {
+          commit = await gh.publishSignedCommit({
+            owner,
+            repo,
+            branch: target,
+            expectedHeadOid: tip,
+            headline: (headline ?? "").trim() || message.trim(),
+            ...(body ? { body } : {}),
+            additions: changes.additions,
+            deletions: changes.deletions,
+          });
+        } catch (err) {
+          // A generic GraphQL error here reads to the agent as "the branch is
+          // broken" — for STALE_DATA it is neither broken nor safe to retry
+          // automatically here: the change set above was computed as worktree
+          // vs. tip, so re-diffing against a tip that genuinely moved would
+          // render another party's additions as deletions (see
+          // docs/plans/signed-commit-publish/00-findings.md #4). Name the case
+          // so the agent re-runs the whole tool call instead of looping on a
+          // misdiagnosis.
+          if (isStaleDataError(err)) {
+            throw new Error(
+              `publish rejected: the branch tip moved between reading it and writing (STALE_DATA). This can happen even with nothing else pushing, from lag between GitHub's REST read path and its GraphQL write path — it is not a sign the branch is broken. Re-run this tool call; do not retry in a loop and do not fall back to git push.`,
+            );
+          }
+          throw err;
+        }
+
+        const signature = assertSigned(commit);
+        const localSync = await syncLocalToPublished(cwd, target, commit.oid, auth);
+
+        return {
+          published: true,
+          commit: commit.oid,
+          url: commit.url,
+          branch: target,
+          verified: signature.wasSignedByGitHub && signature.isValid,
+          committer: commit.committer,
+          added: changes.additions.filter((a) => a.status === "A").map((a) => a.path),
+          modified: changes.additions.filter((a) => a.status === "M").map((a) => a.path),
+          deleted: changes.deletions.map((d) => d.path),
+          local_sync: localSync,
+        };
+      },
     ),
 
     tool(
@@ -629,7 +976,9 @@ export function buildGitHubTools(
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
         full_messages: Type.Optional(
-          Type.Boolean({ description: "Return every commit message in full instead of truncating." }),
+          Type.Boolean({
+            description: "Return every commit message in full instead of truncating.",
+          }),
         ),
       }),
       ({ owner, repo, full_messages, ...opts }) =>

@@ -311,7 +311,7 @@ not through in-memory state. By convention:
 `issueDir` is set in `simple.ts` based on the run scope; every
 prompt hardcodes paths under `{{issueDir}}/`. The runner never reads
 or writes these files — the prompts manage the lifecycle. Each prompt
-commits its outputs before exiting; the next phase clones the branch
+publishes its outputs before exiting; the next phase clones the branch
 and reads what it needs.
 
 **Server mode (`buildAssets.location = server`).** When externalized, the docs
@@ -325,11 +325,13 @@ root** — a sibling of the checkout — and `{{issueDir}}` becomes
 the agent's `git add -A` can never sweep them into the feature commit
 (`buildAssetsRelocated`). gondolin mounts only cwd, so there the dir stays the
 in-repo `.lastlight/<issueKey>/` and is added to `.git/info/exclude` as a
-backstop. Either way each prompt also gates its
-`git add .lastlight/ && commit` behind `{{#if !externalizeArtifacts}}` (the
-inverse flag defaults absent⇒repo so any un-tagged render still commits), and
-the executor's `git add -A` unstages `.lastlight` before committing in server
-mode as belt-and-suspenders for the gondolin (in-repo) path.
+backstop. Either way each prompt also gates its artifact publish — a
+`github_publish` scoped with `include: [".lastlight"]`, so one signed commit
+carries the docs and nothing the phase's install or test run left behind —
+behind `{{#if !externalizeArtifacts}}` (the inverse flag defaults absent⇒repo so
+any un-tagged render still publishes them), and the executor's own whole-tree
+publish passes `exclude: [".lastlight"]` in server mode as belt-and-suspenders
+for the gondolin (in-repo) path.
 PR-body links use `{{artifactUrl}}`, which resolves to the dashboard's
 Artifacts view rather than a GitHub blob URL. The browser-QA prompts instead use
 `{{artifactBaseUrl}}` — the unauthenticated, image-only public base

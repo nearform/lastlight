@@ -8,6 +8,7 @@
 
 import { Octokit } from "@octokit/rest";
 import type { GitHubAuth } from "./auth.js";
+import type { PublishAddition, PublishDeletion } from "./worktree-diff.js";
 import {
   capText,
   page,
@@ -133,6 +134,58 @@ function workflowRunSummary(run: {
   };
 }
 
+/**
+ * The commit `createCommitOnBranch` built for us. `signature` is what makes the
+ * whole exercise worth doing — a locally-built commit object can never be
+ * `verified` under the App's `[bot]` identity (issue #268).
+ */
+export interface SignedCommit {
+  oid: string;
+  url: string;
+  committer: { name: string; email: string } | null;
+  signature: { isValid: boolean; state: string; wasSignedByGitHub: boolean } | null;
+}
+
+const CREATE_COMMIT_ON_BRANCH = `
+mutation ($input: CreateCommitOnBranchInput!) {
+  createCommitOnBranch(input: $input) {
+    commit {
+      oid
+      url
+      committer { name email }
+      signature { isValid state wasSignedByGitHub }
+    }
+  }
+}`;
+
+/**
+ * `GraphqlResponseError` (thrown by `ok.graphql()`) carries a top-level
+ * `errors` array and no `.status` — the opposite shape from every REST error
+ * `withRetry`'s guard (`:204`) already knows how to read. Duck-typed rather
+ * than imported: `@octokit/graphql`'s error class is only a transitive
+ * dependency here, and importing it directly would be fragile.
+ */
+function isGraphqlError(err: unknown): boolean {
+  return (
+    typeof err === "object" && err !== null && Array.isArray((err as { errors?: unknown }).errors)
+  );
+}
+
+/**
+ * GitHub's REST read path can lag its GraphQL write path by a few seconds
+ * (measured — docs/plans/signed-commit-publish/00-findings.md #4): a `getRef`
+ * right after a successful mutation can return the pre-write tip. The next
+ * publish then computes `expectedHeadOid` from that stale tip, and this
+ * mutation's own concurrency check rejects it exactly as if another writer
+ * had raced us — `STALE_DATA` is GitHub's classification for that rejection.
+ * Callers use this to give a specific, re-run-friendly message instead of the
+ * generic GraphQL error text, without guessing from the message wording.
+ */
+export function isStaleDataError(err: unknown): boolean {
+  if (!isGraphqlError(err)) return false;
+  return (err as { errors: Array<{ type?: string }> }).errors.some((e) => e.type === "STALE_DATA");
+}
+
 export interface GitHubClientOptions {
   /**
    * Override the GitHub REST API base URL (Octokit's `baseUrl`). Defaults to
@@ -256,87 +309,127 @@ export class GitHubClient {
     });
   }
 
-  async pushFiles(
-    owner: string,
-    repo: string,
-    branch: string,
-    files: Array<{ path: string; content: string }>,
-    message: string,
-  ) {
+  /**
+   * The branch's current remote tip, or null if the branch does not exist.
+   * A missing branch is an ordinary state on the first publish of a new
+   * feature branch, so it is not an error.
+   */
+  async getBranchTip(owner: string, repo: string, branch: string): Promise<string | null> {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      // getRef and createRef both return the `git-ref` schema; only ref.object.sha
-      // is read below. Typed explicitly to satisfy noImplicitAnyLet.
-      let ref: Awaited<ReturnType<typeof ok.git.getRef>>["data"];
       try {
         const { data } = await ok.git.getRef({ owner, repo, ref: `heads/${branch}` });
-        ref = data;
-      } catch {
-        const { data: repoData } = await ok.repos.get({ owner, repo });
-        const { data: defaultRef } = await ok.git.getRef({
-          owner,
-          repo,
-          ref: `heads/${repoData.default_branch}`,
-        });
-        const { data: newRef } = await ok.git.createRef({
-          owner,
-          repo,
-          ref: `refs/heads/${branch}`,
-          sha: defaultRef.object.sha,
-        });
-        ref = newRef;
+        return data.object.sha;
+      } catch (err) {
+        if (((err as MaybeHttpError).status ?? (err as MaybeHttpError).response?.status) === 404) {
+          return null;
+        }
+        throw err;
       }
-      const blobs = await Promise.all(
-        files.map(async (f) => {
-          const { data } = await ok.git.createBlob({
-            owner,
-            repo,
-            content: f.content,
-            encoding: "utf-8",
-          });
-          return { path: f.path, sha: data.sha, mode: "100644" as const, type: "blob" as const };
-        }),
-      );
-      const { data: tree } = await ok.git.createTree({
-        owner,
-        repo,
-        base_tree: ref.object.sha,
-        tree: blobs,
-      });
-      const { data: commit } = await ok.git.createCommit({
-        owner,
-        repo,
-        message,
-        tree: tree.sha,
-        parents: [ref.object.sha],
-      });
-      const { data: updated } = await ok.git.updateRef({
-        owner,
-        repo,
-        ref: `heads/${branch}`,
-        sha: commit.sha,
-      });
-      return { commit: commit.sha, branch, ref: updated };
+    });
+  }
+
+  /**
+   * Create a commit GitHub signs for us.
+   *
+   * The REST Git Data API does NOT sign what it creates — its `signature` field
+   * is an input you supply, so a blob/tree/commit/ref sequence produces unsigned
+   * commits (measured: `docs/plans/signed-commit-publish/00-findings.md` §3,
+   * which is why the tool that did that was removed). This GraphQL mutation is
+   * the only path that yields `verified: true` under a GitHub App installation
+   * token, with no key held anywhere (issue #268).
+   *
+   * `expectedHeadOid` is non-null by schema: if the branch moved since we read
+   * its tip, GitHub rejects the mutation rather than clobbering the other push.
+   * That is the concurrency story — there is no retry to write.
+   */
+  async publishSignedCommit(opts: {
+    owner: string;
+    repo: string;
+    branch: string;
+    expectedHeadOid: string;
+    headline: string;
+    body?: string;
+    additions: PublishAddition[];
+    deletions: PublishDeletion[];
+  }): Promise<SignedCommit> {
+    return this.withRetry(async () => {
+      const ok = await this.octokit();
+      try {
+        const data = await ok.graphql<{ createCommitOnBranch: { commit: SignedCommit } }>(
+          CREATE_COMMIT_ON_BRANCH,
+          {
+            input: {
+              branch: {
+                repositoryNameWithOwner: `${opts.owner}/${opts.repo}`,
+                branchName: opts.branch,
+              },
+              message: opts.body
+                ? { headline: opts.headline, body: opts.body }
+                : { headline: opts.headline },
+              expectedHeadOid: opts.expectedHeadOid,
+              fileChanges: {
+                additions: opts.additions.map((a) => ({ path: a.path, contents: a.contents })),
+                deletions: opts.deletions,
+              },
+            },
+          },
+        );
+        return data.createCommitOnBranch.commit;
+      } catch (err) {
+        // A GraphQL-level rejection (schema error, validation error, a stale
+        // expectedHeadOid) can never succeed by resending the same mutation, and
+        // GraphqlResponseError carries no `.status` for withRetry's guard (:204) to
+        // read — without this it retries indistinguishably from a flaky transport
+        // 5xx, burning the full backoff before still failing. Tag a synthetic 4xx so
+        // that guard treats it as terminal. GitHub never sent this status; it exists
+        // only to route into the existing non-retryable path.
+        if (isGraphqlError(err)) {
+          (err as MaybeHttpError).status = 422;
+        }
+        throw err;
+      }
     });
   }
 
   async listBranches(owner: string, repo: string, pageNum = 1, perPage = 30) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data } = await ok.repos.listBranches({ owner, repo, page: pageNum, per_page: perPage });
+      const { data } = await ok.repos.listBranches({
+        owner,
+        repo,
+        page: pageNum,
+        per_page: perPage,
+      });
       return page(data.map(summarizeBranch), pageNum, perPage);
     });
   }
 
   async createBranch(owner: string, repo: string, branch: string, fromBranch: string) {
+    // `octokit()` stays inside the retried closure: withRetry drops the cached
+    // token on a 401 so the next attempt re-mints it.
+    const sha = await this.withRetry(async () => {
+      const ok = await this.octokit();
+      const { data } = await ok.git.getRef({ owner, repo, ref: `heads/${fromBranch}` });
+      return data.object.sha;
+    });
+    return this.createBranchAt(owner, repo, branch, sha);
+  }
+
+  /**
+   * Create a branch at an exact commit. `github_publish` needs this rather than
+   * `createBranch` above: the commit its new branch starts from is the newest
+   * one the sandbox checkout and the base branch share, which is not the base
+   * branch's tip whenever that branch advanced mid-run.
+   */
+  async createBranchAt(owner: string, repo: string, branch: string, sha: string) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { data: ref } = await ok.git.getRef({ owner, repo, ref: `heads/${fromBranch}` });
       const { data } = await ok.git.createRef({
         owner,
         repo,
         ref: `refs/heads/${branch}`,
-        sha: ref.object.sha,
+        sha,
       });
       return data;
     });
@@ -782,7 +875,10 @@ export class GitHubClient {
         // reason as a non-throwing result instead of failing the whole run.
         const e = err as { message?: string; errors?: Array<{ message?: string }> };
         const reason =
-          e.errors?.map((x) => x.message).filter(Boolean).join("; ") ||
+          e.errors
+            ?.map((x) => x.message)
+            .filter(Boolean)
+            .join("; ") ||
           e.message ||
           "unknown error";
         return { ok: false, pull_number, reason };
@@ -795,7 +891,10 @@ export class GitHubClient {
   async listCommits(owner: string, repo: string, opts: Record<string, unknown> = {}) {
     return this.withRetry(async () => {
       const ok = await this.octokit();
-      const { fullMessages, ...rest } = opts as { fullMessages?: boolean } & Record<string, unknown>;
+      const { fullMessages, ...rest } = opts as { fullMessages?: boolean } & Record<
+        string,
+        unknown
+      >;
       const perPage = Number(rest.per_page ?? 30);
       const pageNum = Number(rest.page ?? 1);
       const { data } = await ok.repos.listCommits({

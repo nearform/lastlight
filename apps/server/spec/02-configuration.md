@@ -568,7 +568,8 @@ the env override below.
 | `BUILD_ASSETS_DIR` | server-mode store root | `$STATE_DIR/build-assets` |
 
 - **`repo`** (default) — the agent writes the docs into `.lastlight/<issueKey>/`
-  inside the target repo and `git commit`s them onto the working branch. PR
+  inside the target repo and publishes them onto the working branch with
+  `github_publish` (`include: [".lastlight"]`, one signed commit). PR
   bodies link them via `{{branchUrl}}`/`{{artifactUrl}}` → GitHub blob URLs.
   Byte-for-byte the historical behaviour.
 - **`server`** — the docs are externalized to
@@ -578,10 +579,11 @@ the env override below.
   in `src/engine/agent-executor.ts`). For **pre-cloned** workflows (build, pr-*)
   on a whole-workspace backend (docker/none/smol) the staged dir is the
   **workspace root** — a sibling of the checkout, reached by the agent via
-  `{{issueDir}}` = `../.lastlight/<issueKey>` — so `git add -A` structurally
-  can't see it (`buildAssetsRelocated`, `hostRepoDirFor`). gondolin mounts only
+  `{{issueDir}}` = `../.lastlight/<issueKey>` — so neither `git add -A` nor the
+  publish's working-tree diff can structurally see it (`buildAssetsRelocated`,
+  `hostRepoDirFor`). gondolin mounts only
   cwd, so there (and in repo mode) the dir stays the in-repo `.lastlight/<key>/`
-  and is git-excluded as a backstop. Prompts gate their doc commit behind
+  and is git-excluded as a backstop. Prompts gate their doc publish behind
   `{{#if !externalizeArtifacts}}`, and `{{artifactUrl}}` resolves to a dashboard deep link
   (`/admin/?tab=artifacts&repo=…&key=…&doc=…`). The admin API exposes the store
   read-only at `/admin/api/artifacts[/:owner/:repo/:key[/:doc]]`.

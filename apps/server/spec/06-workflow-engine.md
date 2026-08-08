@@ -766,7 +766,12 @@ generic_loop:
 ```
 
 `outcome=pushed` in a `CI_FIX_COMPLETE` marker means the commit is already on
-the branch. GitHub's checks started against it the moment it landed and are the
+the branch — put there by `github_publish`, not by a `git push` the agent ran
+(see [Sandbox](/spec/09-sandbox) → "Invariant: the published commit is built by
+GitHub, not by git"); for this gate the two are the same fact, and the marker
+name is unchanged because the harness parses it.
+
+GitHub's checks started against that commit the moment it landed and are the
 strictly better authority — the real CI environment rather than a sandbox
 approximation of it, warm rather than a cold container, and covering the matrix
 legs the sandbox cannot reproduce. Re-running the local gate at that point

@@ -3,16 +3,27 @@ name: issue-triage
 classification:
   intent: triage
   description: |
-    TRIAGE — The user wants to scan/triage issues on a repo: "triage cliftonc/repo", "scan for new issues", "can you triage <repo>?".
+    TRIAGE — The user is ASKING YOU to classify and LABEL one specific GitHub issue: "triage cliftonc/repo#42", "can you triage this?" on an issue, "re-triage this now that I've added detail". The deliverable is LABELS AND LABEL-DRIVEN ACTIONS on that issue — never an answer, a summary, or a list.
+    TRIAGE NEEDS ONE ISSUE. It is not a repo-wide sweep: it acts on the issue named in the message, or the issue the comment is on. A request naming only a repo has no target, so it is not TRIAGE.
+    A QUESTION ABOUT ISSUES IS CHAT, NOT TRIAGE. "which issues are overdue / stale / unassigned / oldest?", "how many open bugs are there?", "what's in the backlog?" all ask for an ANSWER, and chat reads issues and their comments from GitHub directly. Mentioning "issues" and a repo in one sentence is not a triage request — wanting labels changed is. This is the same downgrade QUESTION makes, and it is the one that matters here, because a question about issues is lexically almost identical to a request to triage them.
   examples:
-    - '"could you triage https://github.com/foo/bar?" → INTENT: TRIAGE, REPO: foo/bar, ISSUE: NONE, REASON: NONE'
+    - '"triage cliftonc/drizzle-cube#42" → INTENT: TRIAGE, REPO: cliftonc/drizzle-cube, ISSUE: 42, REASON: NONE'
+    - '"could you triage this?" with ISSUE TITLE "Crash on empty CSV" → INTENT: TRIAGE, REPO: NONE, ISSUE: NONE, REASON: NONE'
+    # Counter-examples: questions ABOUT issues. Each names a repo and the word
+    # "issues", and none of them wants a label changed — chat answers all three
+    # from its own GitHub reads. The first is the real misroute this guards
+    # against: it dispatched a single-issue workflow with no issue, which
+    # improvised a repo sweep, changed nothing, and reported success.
+    - '"Are there any issues in cliftonc/drizzle-cube that are overdue?" → INTENT: CHAT, REPO: cliftonc/drizzle-cube, ISSUE: NONE, REASON: NONE'
+    - '"how many open bugs does cliftonc/drizzle-cube have?" → INTENT: CHAT, REPO: cliftonc/drizzle-cube, ISSUE: NONE, REASON: NONE'
+    - '"whats the oldest untriaged issue in cliftonc/drizzle-cube?" → INTENT: CHAT, REPO: cliftonc/drizzle-cube, ISSUE: NONE, REASON: NONE'
 chat:
-  trigger: triage owner/repo
-  summary: Triage open issues on a repo
+  trigger: triage owner/repo#N
+  summary: Triage one issue — classify and label it
   deflect:
-    - triage
-    - scan issues
-    - go through open issues on <repo>
+    - triage this issue
+    - triage <repo>#<n>
+    - label this issue
 description: |
   Triage a GitHub issue: read it, classify it, label it, and act on stale or
   incomplete reports. Single agent invocation, no PR creation.

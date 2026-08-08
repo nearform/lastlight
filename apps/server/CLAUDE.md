@@ -625,6 +625,18 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   `spec/09-sandbox.md` → "Invariant: per-run credentials never travel through
   `process.env`"). The standalone `mcp-github-app` MCP server that used to
   expose these tools was removed with the OpenCode→agentic-pi migration.
+  **`repo-write` is also the only profile that registers `github_publish`** —
+  how every code-writing phase now puts its work on the branch, in place of
+  `git add && git commit && git push`. The token authenticates a push but cannot
+  sign a commit, and one unsigned commit anywhere in a branch blocks a
+  `required_signatures` PR permanently, so the tool diffs the working tree
+  against the remote tip and hands the change set to GraphQL
+  `createCommitOnBranch`, which builds and signs the commit server-side —
+  expected to be under the App's `[bot]` identity, though that half is
+  **unverified** (the probes used a user PAT; `docs/plans/signed-commit-publish/00-findings.md`
+  §5) (issue #268; `spec/09-sandbox.md` → "Invariant: the published commit
+  is built by GitHub, not by git"). Local `git commit`s remain fine — they are
+  folded in — and there is no `git push` fallback.
 - **Approval gates** — phases can declare `approval_gate: post_architect`.
   When hit, the run persists with `status: paused`, a row in
   `workflow_approvals`, and the user can resolve it via GitHub comment
