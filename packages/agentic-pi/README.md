@@ -41,9 +41,9 @@ single line you parse.
 ### 3. GitHub repo operations as first-class native tools
 
 Pi explicitly does not support MCP. agentic-pi ships a native Pi extension
-exposing **31 GitHub tools** ported from lastlight's `mcp-github-app`:
-clone/push, issues, PRs, reviews, labels, search. Tool names are prefixed
-with `github_`.
+exposing **36 GitHub tools** ported from lastlight's `mcp-github-app`:
+clone/publish, issues, PRs, reviews, labels, CI reads, search. Tool names are
+prefixed with `github_`.
 
 **Reads are projected, not raw** (`extensions/github/projections.ts`). Octokit
 returns the REST payload verbatim, which is written for API clients rather than
@@ -81,16 +81,74 @@ via a github.com-scoped `http.extraheader` (Basic `x-access-token:<token>`)
 injected as `GIT_CONFIG_*` env on the git children we spawn — nothing on disk,
 and the token can carry any character GitHub returns.
 
+Publishing is opinionated too: `github_publish` replaces `git add`/`git
+commit`/`git push` in the `repo-write` profile. A commit built by `git` inside
+the sandbox is unsigned, and on a repository with GitHub's
+`required_signatures` branch-protection rule, one unsigned commit anywhere in
+a branch blocks the pull request permanently — no token fixes that, because
+the token authenticates the *push* while a signature is a property of the
+*commit object*. `github_publish` diffs the working tree against the branch's
+current remote tip (local commits the agent already made are folded in — the
+published commit is the working tree as it stands, or the part of it the caller
+scopes to; see `include`/`exclude` below) and hands the change set
+to GitHub's GraphQL `createCommitOnBranch` mutation, which builds and signs
+the commit server-side under the App's bot identity. No signing key is held
+anywhere.
+
+Five things worth knowing:
+
+- **The change set is scopeable.** By default it is the whole working tree
+  (minus anything `.gitignore`d, since it stages with `git add -A`). `include`
+  restricts it to the given pathspecs — everything else stays at its base state
+  and so produces no diff at all — and `exclude` subtracts from whatever is
+  left, so the two compose. A caller that writes artifacts into the checkout
+  alongside the change under review wants `include`; one that writes them into
+  an otherwise-publishable tree wants `exclude`.
+
+- **It refuses what it cannot express, atomically, before any remote write.**
+  `FileAddition` carries a path and base64 contents, not a file mode, so a
+  genuine mode change is rejected up front — a new executable file, a new
+  symlink, a submodule pointer, or flipping an existing file's mode either way
+  (including `100755` → `100644`, which GitHub would otherwise silently leave
+  unchanged rather than actually downgrade). A content-only edit to a file
+  that is already `100755` is fine — GitHub preserves the base tree's mode on
+  those. This runs before the branch is even created, when publishing to a
+  branch that doesn't exist on GitHub yet, and there's no fallback to
+  `git push` — that would produce exactly the unsigned commit this tool
+  exists to avoid.
+- **A tip that moved is refused at both ends, with no retry.** The mutation
+  pins `expectedHeadOid`, so a branch that moves between the read and the write
+  is rejected (`STALE_DATA`) instead of being clobbered. That covers only half
+  of it: a tip that had ALREADY moved before the read passes
+  `expectedHeadOid` happily, and the change set is computed as "working tree
+  vs. that tip", so every file the other party added would be recorded as a
+  deletion. So the tool also checks the tip is in the local checkout's history
+  (`git merge-base --is-ancestor`) and refuses before writing anything if it is
+  not, naming the recovery for each cause: `git reset --mixed` when the tip is a
+  commit an earlier publish landed, and commit-then-merge when somebody else
+  pushed (a bare `git merge` aborts on the uncommitted changes this refusal
+  always fires with). It never re-diffs
+  and retries on its own; a `STALE_DATA` failure names itself in the error and
+  re-running the tool call is the fix.
+- **There's a size ceiling.** GitHub caps the whole request at 45 MB — the sum
+  of every addition in one publish, not a per-file limit. Ordinary publishes
+  (source edits, a lockfile) are far under it.
+- **It asserts its own signature.** Every publish checks GitHub's response and
+  fails loudly if the commit came back unsigned — including the `signature:
+  null` GraphQL returns for a commit with no signature at all — or with a
+  signature that does not verify. The commit is already on the branch by then,
+  so a silent failure here would otherwise only surface later as a blocked PR.
+
 ### 4. Permission profiles as a registration-time gate
 
 `--profile <name>` picks one of four allowlists ported from lastlight:
 
 | Profile | Tool count | What it can do |
 | --- | --- | --- |
-| `read` | 18 | Repo/issue/PR reads + search. No mutations. |
-| `issues-write` | 24 | Read + issue/comment/label mutations. |
-| `review-write` | 26 | Read + issues + PR review/comment + create PR. |
-| `repo-write` | 31 | Everything: clone, push, branch, file edits, merge. |
+| `read` | 21 | Repo/issue/PR/CI reads + search. No mutations. |
+| `issues-write` | 28 | Read + issue/comment/label mutations. |
+| `review-write` | 30 | Read + issues + PR review/comment + create PR. |
+| `repo-write` | 36 | Everything: clone, publish, branch, file edits, merge. |
 
 Tools outside the active profile are **never registered** — the LLM cannot see
 them in the system prompt and cannot call them. This is a stronger guarantee

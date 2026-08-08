@@ -96,3 +96,36 @@ describe("dependabot-ci-fix — built-in workflow + cron", () => {
     expect(cron!.condition?.unless).toBeUndefined();
   });
 });
+
+describe("dependabot-ci-fix — the publish step", () => {
+  it("publishes through github_publish, not git push", () => {
+    const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+    expect(prompt).toContain("github_publish");
+    // A sandbox-built commit is unsigned, and one unsigned commit anywhere in
+    // the branch blocks a required_signatures PR permanently (issue #268).
+    expect(prompt).not.toContain("git push origin HEAD");
+  });
+
+  it("tells the agent not to work around a refused publish", () => {
+    const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+    expect(prompt).toMatch(/do NOT (fall back to |work around)/i);
+  });
+
+  it("does not instruct pushing in prose for the no-diagnosis merge-only path", () => {
+    // The `{{#if !phaseOutputs.diagnosis}}` block covers `dirty` / `behind` /
+    // `blocked` PRs — the common case for this workflow — and is reached
+    // BEFORE the AFTER FIXING section that actually calls `github_publish`.
+    // It used to read as a self-contained recipe ending in a raw "push, and
+    // report `outcome=pushed`", which a literal reader could follow straight
+    // into an unsigned `git push` without ever reaching AFTER FIXING. A test
+    // that only checks the literal string `git push` (as above) would not
+    // have caught this — the block never named the command, just the verb.
+    // Strip the `outcome=pushed` marker value first: that's vocabulary the
+    // harness parses (fix-markers.ts), not an instruction to push.
+    const prompt = loadPromptTemplate("prompts/dependabot-ci-fix.md");
+    const block = prompt.match(/\{\{#if !phaseOutputs\.diagnosis\}\}([\s\S]*?)\{\{\/if\}\}/);
+    expect(block).not.toBeNull();
+    const withoutMarker = block![1].replace(/outcome=pushed/g, "");
+    expect(withoutMarker).not.toMatch(/\bpush(ed|es|ing)?\b/i);
+  });
+});

@@ -29,7 +29,7 @@ describe("PROFILE_TOOLS", () => {
     const repoOnly = [
       "github_clone_repo",
       "github_create_or_update_file",
-      "github_push_files",
+      "github_publish",
       "github_create_branch",
       "github_merge_pull_request",
       "github_enable_auto_merge",

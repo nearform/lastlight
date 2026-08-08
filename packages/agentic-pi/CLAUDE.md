@@ -27,7 +27,7 @@ It is **not** a fork of Pi. It does not modify Pi. It composes Pi's SDK
    - A **library API** (`import { run } from "agentic-pi"`) that
      returns a fully-derived `RunResult` and **never** touches
      `process.stdout` / `process.stderr`.
-2. A native GitHub-tool extension (~32 tools, profile-gated) that
+2. A native GitHub-tool extension (36 tools, profile-gated) that
    replaces the MCP server lastlight used to spawn separately.
 3. An optional Gondolin micro-VM sandbox for `read`/`write`/`edit`/`bash`.
 
@@ -73,7 +73,7 @@ src/
     client.ts             Octokit wrapper with retry/backoff (ported from mcp-github-app).
     credentials.ts        gitAuthEnv() — github.com-scoped http.extraheader (GIT_CONFIG_*), no on-disk file.
     profiles.ts           4 profile names → tool name allowlists.
-    tools.ts              ~32 defineTool() registrations, github_ prefix.
+    tools.ts              36 defineTool() registrations, github_ prefix.
   extensions/web-search/  Optional web_search / web_fetch via Tavily/Brave/Exa,
                           with SSRF-safe fetch + rate limiting.
   extensions/file-search/ Bundles FFF (@ff-labs/pi-fff), a Rust-backed fuzzy

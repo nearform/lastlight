@@ -109,9 +109,12 @@ Four rules, all load-bearing — these lines are parsed:
 - **Write `class=` nowhere else in your output.** The class is read off that
   token, so a "this is not `class=flaky` because…" aside in your prose changes
   what the workflow does. Say "not flaky" in words.
-- **Report the outcome you got.** `gate=skipped` when no gate ran. Never claim
-  `pushed` without a push or `green` without a passing gate — the next attempt
-  reasons from this line.
+- **Report the outcome you got.** `gate=skipped` when no gate ran. `outcome=pushed`
+  means your repair reached the branch, and in a fix phase that means
+  `github_publish` returned a commit — a successful publish IS this phase's
+  push, so report it as one even though you ran no `git push`. Never claim it
+  when nothing was published, and never claim `green` without a passing gate:
+  the next attempt reasons from this line.
 
 ## The journal
 
@@ -169,10 +172,16 @@ mechanical call-site/type update over a behavioural change. Don't refactor,
 don't chase failures unrelated to the diagnosed cause, and don't sink your
 budget into one slow or unreproducible check.
 
-**Push only on a green local gate.** The gate is the targeted reproduction
+**Publish only on a green local gate.** The gate is the targeted reproduction
 below, written by you at runtime. If it is still red when you run out of
-iterations, emit `outcome=gave-up` and **do not push a speculative fix** — an
+iterations, emit `outcome=gave-up` and **do not publish a speculative fix** — an
 unverified push costs a full CI cycle to prove nothing.
+
+Publishing is not `git push`. A commit built by git in this sandbox is
+unsigned, and on a repo that requires signed commits one unsigned commit
+anywhere in the branch blocks the PR permanently and cannot be cleared by a
+later run — so your work reaches the branch through `github_publish`, which has
+GitHub build and sign the commit. Your phase's prompt gives the arguments.
 
 ## The gate
 
@@ -182,10 +191,10 @@ green and ends the loop.
 
 It answers exactly one question: **is the thing I diagnosed actually fixed?**
 That makes it a *targeted reproduction*, never a stand-in for CI. CI runs on the
-commit you push — real OS, real services, the whole matrix — and it is the
+commit you publish — real OS, real services, the whole matrix — and it is the
 authority on whether this PR is green. Duplicating it here buys no information
-and costs the one thing you are short of: a ten-minute gate delays the push by
-ten minutes, and CI has usually gone green before it finishes.
+and costs the one thing you are short of: a ten-minute gate delays the publish
+by ten minutes, and CI has usually gone green before it finishes.
 
 So write **the narrowest command that would have failed before your fix and
 passes after it** — one test file, one lint rule, one build target, one install.
@@ -244,7 +253,7 @@ gate anyway** — just not a CI clone. In order of preference:
 can never go green, so it spends its remaining iterations re-running the whole
 fix phase against a repair that was already finished, ends on the phase's
 failure message, and leaves you reporting `gate=skipped` — which counts as RED
-and never authorises the push the repair needed. A correct conflict resolution would be
+and never authorises the publish the repair needed. A correct conflict resolution would be
 thrown away for want of two lines of bash. The script's contents are recorded on
 the run and read by humans afterwards, so an empty gate is an inspectable claim
 you are making in writing; a missing one is indistinguishable from a broken one.
@@ -269,4 +278,4 @@ Four rules about the file:
   not need to exclude or clean them up.)
 - **No gate is a RED gate.** If you did not write the script, or you could not
   run it, report `gate=skipped` — and treat that exactly as `gate=red`: it does
-  **not** authorise a push. Only a script that actually exited 0 does.
+  **not** authorise a publish. Only a script that actually exited 0 does.

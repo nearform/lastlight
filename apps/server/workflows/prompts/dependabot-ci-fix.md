@@ -4,9 +4,10 @@ is otherwise blocked. Your job is to get it into a mergeable, green state (or,
 if you can't, hand it to a human — see the end).
 
 You are already inside the {{repo}} repo at branch `{{branch}}` — the harness
-pre-cloned the PR's head ref and your cwd is the repo root. Git is configured to
-push. Read CLAUDE.md (and CONTRIBUTING.md if present) for project-specific
-guidance.
+pre-cloned the PR's head ref and your cwd is the repo root. Git is configured
+for fetches and local commits; publishing goes through `github_publish` (see
+AFTER FIXING below), never `git push`. Read CLAUDE.md (and CONTRIBUTING.md if
+present) for project-specific guidance.
 
 CONTEXT:
 - PR #{{prNumber}}: {{issueTitle}}
@@ -54,7 +55,7 @@ promoted this run to a real repair attempt. Treat the failure as reproducible
 and look for the actual difference — a version, an ordering, a shared fixture, a
 race — rather than re-running the job and hoping. If you genuinely cannot make
 it green, `outcome=gave-up` with what you ruled out is the honest answer; do not
-push a speculative fix.
+publish a speculative fix.
 {{/if}}
 
 INSTRUCTIONS:
@@ -82,15 +83,16 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    **This step IS the job here.** No diagnosis ran, which means you were
    summoned to unblock a MERGE rather than to repair a red build — the reason
    above is `dirty` (conflict), `behind` or `blocked`. CI is not red; the PR
-   simply cannot merge. So completing the merge and pushing it is the whole
+   simply cannot merge. So completing the merge and publishing it is the whole
    repair, and there was no failure to diagnose. Do not hunt for a broken test
    to justify the run, and do not stand up a CI-sized gate for a lockfile.
    Land the merge, let a small gate confirm the repair is coherent (no conflict
-   markers left, the lockfile installs), push, and report `outcome=pushed`. CI
-   is what tells you the branch is green, and it runs on the commit you push
-   without being asked. A `dirty` PR whose conflict you resolved is a SUCCESS
-   even if the only file you changed was the lockfile. If the gate then comes
-   back red, you have a real failure and step 2 onwards applies.
+   markers left, the lockfile installs), then go straight to AFTER FIXING
+   below to publish it and report `outcome=pushed`. CI is what tells you the
+   branch is green, and it runs on the commit AFTER FIXING publishes, without
+   being asked. A `dirty` PR whose conflict you resolved is a SUCCESS even if
+   the only file you changed was the lockfile. If the gate then comes back
+   red, you have a real failure and step 2 onwards applies.
 {{/if}}
 2. {{#if phaseOutputs.diagnosis}}Work from the diagnosis above. It already names
    the cause and which checks can't be reproduced here — don't re-derive either.
@@ -107,17 +109,17 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    which is the checkout — holding the **narrowest** command that would have
    failed before your fix and passes after it: one test file, one lint rule, one
    build target, or, for a lockfile you regenerated, the install itself. Exit 0
-   means green. NOT the repo's CI pipeline: CI runs on the commit you push and
-   is the authority, so a gate that mirrors it delays the push and tells you
-   nothing new — aim for under two minutes, skip anything you already watched
-   pass this session, and never try to start docker or a database (there is
-   none here). If step 1's merge was the whole repair and nothing was ever
-   failing, gate on the repair being coherent — no conflict markers left, and
-   the lockfile installs — rather than leaving the script unwritten: a missing
-   script is `gate=skipped`, which counts as RED and would throw a correct
-   resolution away. The script is not there yet — the harness clears it at the
-   start of every attempt. Write it before you start repairing. See the
-   **fixing** skill's "The gate" for the full shape.
+   means green. NOT the repo's CI pipeline: CI runs on the commit you publish
+   and is the authority, so a gate that mirrors it delays the publish and
+   tells you nothing new — aim for under two minutes, skip anything you already
+   watched pass this session, and never try to start docker or a database
+   (there is none here). If step 1's merge was the whole repair and nothing
+   was ever failing, gate on the repair being coherent — no conflict markers
+   left, and the lockfile installs — rather than leaving the script unwritten:
+   a missing script is `gate=skipped`, which counts as RED and would throw a
+   correct resolution away. The script is not there yet — the harness clears
+   it at the start of every attempt. Write it before you start repairing. See
+   the **fixing** skill's "The gate" for the full shape.
 4. Make the **smallest** change that makes CI pass, per the **fixing** skill.
    Prefer a lockfile regeneration or a mechanical call-site/type update over a
    behavioural change. Do NOT widen the scope beyond making this update green.
@@ -126,25 +128,41 @@ one slow or unreproducible check. Run tests cheaply per the **building** skill
    before you commit. Breadth is CI's job — don't also run the full suite here.
 
 AFTER FIXING:
-1. git add -A && git commit -m "fix(deps): make #{{prNumber}} mergeable"
-   (the merge from step 1 and/or your CI fix)
-2. git push origin HEAD
-   Once the push re-runs CI and it goes green, the `dependabot-pr-merge`
+1. Publish with `github_publish` — `{ owner: "{{owner}}", repo: "{{repo}}",
+   message: "fix(deps): make #{{prNumber}} mergeable" }`. It commits the whole
+   working tree (the merge from step 1 and/or your CI fix) and pushes it in one
+   step. Do NOT use `git commit` / `git push`: a commit built by git here is
+   unsigned, and on a repo that requires signed commits one unsigned commit
+   anywhere in the branch blocks the PR permanently and cannot be cleared by a
+   later run. Local commits you made while working are folded in automatically.
+   - A successful publish IS this phase's push: emit `outcome=pushed`. The
+     commit is on the branch and CI is running on it. You did not invoke
+     `git push` and were right not to — publishing through the tool is what
+     "pushed" means here, so do not downgrade the outcome because no `git push`
+     ran. This is the same whether the repair was step 1's merge or a CI fix.
+   - If it reports `published: false`, there was nothing to publish. That is the
+     "nothing to commit or push" case in the STOP section below — flag it for a
+     human rather than looping.
+   - If it refuses because a change needs a file mode it cannot set (a new
+     executable file, a symlink, a submodule pointer), do NOT work around the
+     refusal with `git push`: nothing was published, and pushing would land
+     the unsigned commit the refusal exists to prevent. Flag it for a human.
+2. Once the publish re-runs CI and it goes green, the `dependabot-pr-merge`
    workflow takes over the merge — you do NOT merge or label a healthy PR.
 
-PUSH DISCIPLINE — the gate decides, and it is checked after you finish:
+PUBLISH DISCIPLINE — the gate decides, and it is checked after you finish:
 {{#if iteration}}- This is local iteration {{iteration}} of {{maxIterations}}. When `{{verifyScript}}`
   exits non-zero you get another iteration to keep working; when it exits 0 the
   phase ends.{{/if}}
-- Push **only** on a green local gate. A gate that did not run is `gate=skipped`,
-  and `skipped` counts as RED — it never authorises a push.
+- Publish **only** on a green local gate. A gate that did not run is `gate=skipped`,
+  and `skipped` counts as RED — it never authorises a publish.
 - On the LAST iteration with the gate still red: emit `outcome=gave-up`,
-  `gate=red`, and do **not** push a speculative fix — flag it for a human
+  `gate=red`, and do **not** publish a speculative fix — flag it for a human
   instead (below). An unverified push costs a full CI cycle to prove nothing.
 
 STOP and flag for a human when you CAN'T land it, so the nightly red-dependency
 sweep won't keep re-attempting it. That covers two cases:
-- you can't make CI pass with a small, safe change (don't push a speculative
+- you can't make CI pass with a small, safe change (don't publish a speculative
   fix); or
 - there is **nothing to commit or push** and the PR still can't merge — e.g. it
   was `blocked` on a required *human* review or a gate outside this repo that

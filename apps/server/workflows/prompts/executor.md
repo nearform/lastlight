@@ -33,10 +33,12 @@ AFTER THE GATE PASSES:
    - Test / lint / typecheck results (paste actual output)
    - Any deviations from the plan, known issues
 2. Update {{issueDir}}/status.md: current_phase = executor
-3. git add -A{{#if externalizeArtifacts}} && git reset -q -- .lastlight{{/if}} && git commit -m "feat: implement #{{issueNumber}}
+3. Publish with `github_publish` — `{ owner: "{{owner}}", repo: "{{repo}}", message: "feat: implement #{{issueNumber}}\n\nTested: {test command} -> {result}\nScope-risk: {low|medium|high}"{{#if externalizeArtifacts}}, exclude: [".lastlight"]{{/if}} }`.
+   The message's first line is the headline and everything after it is the body,
+   so fill in the actual test command, its result, and your scope-risk judgement.
+   It commits the working tree and pushes it as ONE signed commit, and folds in
+   any local commits you already made. Do NOT use `git commit` / `git push`: a
+   commit built by git here is unsigned, and a repo that requires signed commits
+   blocks it permanently.
 
-Tested: {test command} -> {result}
-Scope-risk: {low|medium|high}"
-4. git push origin HEAD
-
-OUTPUT: List of files changed, test/lint/typecheck results, commit hash.
+OUTPUT: List of files changed, test/lint/typecheck results, the published commit hash.
