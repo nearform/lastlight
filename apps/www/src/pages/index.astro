@@ -1,9 +1,12 @@
 ---
-// Last Light — self-hostable software factory for GitHub
+// Last Light: the self-hosted software factory for GitHub
 import BaseLayout from '../layouts/BaseLayout.astro';
 
-const title = "Last Light — Self-Hostable Software Factory for GitHub";
-const description = "Last Light is a self-hostable, MIT-licensed software factory for your GitHub org. It triages issues, reviews PRs, and ships fixes on a production line you own — enterprise-ready, running while you're away.";
+// "Self-hosted" (not "-hostable") and a leading "AI" are the phrasings people
+// actually search for; "software factory" stays because that's the category
+// we're claiming. See /comparisons/ for the head-to-heads that back it up.
+const title = "Last Light: Self-Hosted AI Software Factory for GitHub";
+const description = "A self-hosted, MIT-licensed AI software factory for your GitHub org, and the open-source alternative to Devin, Factory and 8090. Triages issues, reviews PRs, ships fixes.";
 ---
 
 <BaseLayout title={title} description={description} ogType="website">
@@ -14,14 +17,14 @@ const description = "Last Light is a self-hostable, MIT-licensed software factor
 			<img src="/logo.png" alt="Last Light logo" class="hero-logo" />
 			<p class="hero-name">Last Light</p>
 			<div class="hero-badges">
-				<span class="hero-badge">Self-hostable</span>
+				<span class="hero-badge">Self-hosted</span>
 				<span class="hero-badge">MIT-licensed</span>
 				<span class="hero-badge">Enterprise-ready</span>
 				<span class="hero-badge">Evals on your own code</span>
 			</div>
-			<h1>An autonomous software factory, working <span class="accent">after dark</span></h1>
+			<h1>An autonomous AI software factory, working <span class="accent">after dark</span></h1>
 			<p class="subtitle">
-				A self-hostable, MIT-licensed software factory for your GitHub org —
+				A self-hosted, MIT-licensed software factory for your GitHub org:
 				triaging issues, reviewing PRs, and shipping fixes on a production line
 				you own, while you're away. And because it's your factory, you measure it
 				on your code: evals built from your own repos, not someone else's benchmark.
@@ -37,7 +40,7 @@ const description = "Last Light is a self-hostable, MIT-licensed software factor
 	<!-- What it does -->
 	<section class="features" id="features">
 		<h2>Everything the line runs</h2>
-		<p class="section-desc">Issue triage, PR review, security scans, on-request builds, weekly health reports, Slack chat — every job on the line is a YAML workflow you can fork and edit.</p>
+		<p class="section-desc">Issue triage, PR review, security scans, on-request builds, weekly health reports, Slack chat. Every job on the line is a YAML workflow you can fork and edit.</p>
 		<div class="feature-grid">
 			<div class="feature-card">
 				<div class="feature-icon">
@@ -72,21 +75,21 @@ const description = "Last Light is a self-hostable, MIT-licensed software factor
 					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
 				</div>
 				<h3>Slack Chat</h3>
-				<p>DM the bot or @mention it in a channel. Every thread becomes a growing conversation — the agent resumes the same session on every turn, so context holds for hours or days. Every turn persisted.</p>
+				<p>DM the bot or @mention it in a channel. Every thread becomes a growing conversation: the agent resumes the same session on every turn, so context holds for hours or days. Every turn persisted.</p>
 			</div>
 			<div class="feature-card">
 				<div class="feature-icon">
 					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9c1.66 0 3.22.45 4.56 1.24"/></svg>
 				</div>
 				<h3>Approval Gates</h3>
-				<p>Workflows can pause at human-in-the-loop checkpoints. Approve or reject from a GitHub comment, a Slack slash command, or the dashboard — the run resumes exactly where it stopped.</p>
+				<p>Workflows can pause at human-in-the-loop checkpoints. Approve or reject from a GitHub comment, a Slack slash command, or the dashboard, and the run resumes exactly where it stopped.</p>
 			</div>
 			<div class="feature-card">
 				<div class="feature-icon">
 					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
 				</div>
 				<h3>YAML Workflows</h3>
-				<p>Every behavior — triage, review, build, health — is a YAML workflow you can fork. Phases run linear or as a DAG. The runner knows nothing about "build" vs "triage"; it just executes what you declare.</p>
+				<p>Every behavior (triage, review, build, health) is a YAML workflow you can fork. Phases run linear or as a DAG. The runner knows nothing about "build" vs "triage"; it just executes what you declare.</p>
 			</div>
 			<div class="feature-card">
 				<div class="feature-icon">
@@ -95,6 +98,112 @@ const description = "Last Light is a self-hostable, MIT-licensed software factor
 				<h3>Permission Profiles</h3>
 				<p>Every workflow runs with a downscoped GitHub App token: <code>read</code>, <code>issues-write</code>, <code>review-write</code>, or <code>repo-write</code>. A triage run literally cannot push code.</p>
 			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 00-3-3l-4 9v11h11.28a2 2 0 002-1.7l1.38-9a2 2 0 00-2-2.3zM7 22H4a2 2 0 01-2-2v-7a2 2 0 012-2h3"/></svg>
+				</div>
+				<h3>Feedback Signals</h3>
+				<p>A 👍 or 👎 on something the bot wrote is scored against the run that wrote it. So when you change a prompt you can measure whether quality moved, instead of guessing.</p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+				</div>
+				<h3>Per-Repo Config</h3>
+				<p>A repo can commit its own <code>.lastlight/</code> to tune models, prompts and skills for itself. Always read from the default branch, so a PR can't reconfigure the agent reviewing it, and clamped so a repo can only ever be more conservative than you.</p>
+			</div>
+			<div class="feature-card">
+				<div class="feature-icon">
+					<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+				</div>
+				<h3>Dependency Automation</h3>
+				<p>Dependency-update PRs get assessed for impact, broken CI gets the smallest fix pushed, and the trivially safe ones get auto-merge enabled. The risky ones wait for you.</p>
+			</div>
+		</div>
+	</section>
+
+	<!-- Dashboard tour -->
+	<section class="admin-section">
+		<h2>Inside the dashboard</h2>
+		<p class="section-desc">Every agent session (sandbox runs, Slack chats, cron jobs, approval gates) is logged, browsable, and streamable. The dashboard at <code>/admin</code> has eleven tabs, from runs and sessions to crons, feedback, logs and a router playground. Here are the ones you will live in. If you would rather watch it from somewhere else, every run also exports an OpenTelemetry trace with per-turn tokens and cost, which renders as a proper agent tree in Phoenix or Langfuse.</p>
+
+		<!--
+			Each shot exists twice: /screenshots/<name>.png is the dark capture and
+			<name>-light.png the light one. `data-shot` names the pair and the script
+			below swaps `src` to follow html[data-theme], so the dashboard in the
+			picture matches the site around it. Default src is the dark file because
+			dark is the site's default theme, so the common case needs no swap.
+		-->
+		<div class="dashboard-tour" id="dashboard-tour">
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="0" aria-label="View Home screenshot full size">
+					<img src="/screenshots/home.png" data-shot="home" alt="Last Light dashboard home tab: live activity, execution stats, recent workflows, resource usage charts" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Home</strong>
+					<span>Live activity, rolling execution / token / cost stats, running containers, and the most recent workflow runs at a glance.</span>
+				</figcaption>
+			</figure>
+
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="1" aria-label="View Workflow Runs screenshot full size">
+					<img src="/screenshots/workflow.png" data-shot="workflow" alt="Last Light workflow run showing a DAG pipeline with Context, Guardrails, Architect, an approval gate, Executor, Reviewer, PR and complete phases" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Workflow Runs</strong>
+					<span>The pipeline DAG for every run: Context → Guardrails → Architect → approval gate → Executor → Reviewer → PR, with fix-feedback loops stacked under the reviewer. Click any phase for its full message stream.</span>
+				</figcaption>
+			</figure>
+
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="2" aria-label="View Sandbox Sessions screenshot full size">
+					<img src="/screenshots/session.png" data-shot="session" alt="Last Light Sandbox Sessions tab showing agent conversation timeline with assistant, tool, and user messages" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Sandbox Sessions</strong>
+					<span>Drill into any sandboxed agent run. Full agent conversation (assistant thinking, tool calls, reviewer verdicts) filterable by skill, repo, and time range.</span>
+				</figcaption>
+			</figure>
+
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="3" aria-label="View Chat Sessions screenshot full size">
+					<img src="/screenshots/chat.png" data-shot="chat" alt="Last Light Chat Sessions tab showing a Slack thread's full message history" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Chat Sessions</strong>
+					<span>DB-backed history for every Slack thread. The bot rehydrates the same pi-ai conversation each turn, so one thread = one growing, coherent conversation.</span>
+				</figcaption>
+			</figure>
+
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="4" aria-label="View Feedback screenshot full size">
+					<img src="/screenshots/feedback.png" data-shot="feedback" alt="Last Light Feedback tab showing average score, score over time, a by-workflow breakdown and recent thumbs-up and thumbs-down signals" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Feedback</strong>
+					<span>Every 👍 and 👎 scored against the run that earned it, broken down by workflow and plotted over time. This is how you tell whether a prompt change actually helped.</span>
+				</figcaption>
+			</figure>
+
+			<figure class="tour-card">
+				<button type="button" class="tour-card-trigger" data-lightbox-index="5" aria-label="View per-repo Config screenshot full size">
+					<img src="/screenshots/repo-config.png" data-shot="repo-config" alt="Last Light per-repository config tab showing effective configuration with a source badge on every key and the operator's policy bounds" loading="lazy" />
+				</button>
+				<figcaption>
+					<strong>Repos → Config</strong>
+					<span>The effective config for one repo with a <code>default</code> / <code>overlay</code> / <code>repo</code> badge on every single key, the commit its <code>.lastlight/</code> layer was read from, and the operator bounds it has to live inside.</span>
+				</figcaption>
+			</figure>
+		</div>
+
+		<div class="lightbox" id="tour-lightbox" role="dialog" aria-modal="true" aria-label="Dashboard screenshot viewer" hidden>
+			<button type="button" class="lightbox-close" data-lightbox-close aria-label="Close (Esc)">&times;</button>
+			<button type="button" class="lightbox-nav lightbox-prev" data-lightbox-prev aria-label="Previous (Left arrow)">&#8249;</button>
+			<button type="button" class="lightbox-nav lightbox-next" data-lightbox-next aria-label="Next (Right arrow)">&#8250;</button>
+			<figure class="lightbox-figure">
+				<img class="lightbox-image" alt="" />
+				<figcaption class="lightbox-caption"></figcaption>
+			</figure>
 		</div>
 	</section>
 
@@ -102,10 +211,10 @@ const description = "Last Light is a self-hostable, MIT-licensed software factor
 	<section class="how-it-works">
 		<h2>How it works</h2>
 		<p class="section-desc">
-			Built on <a href="https://github.com/nearform/lastlight/tree/main/packages/agentic-pi" target="_blank" rel="noopener">agentic-pi</a> —
-			it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more (default <code>anthropic/claude-sonnet-4-6</code>).
-			Each workflow phase runs in its own sandbox — gondolin micro-VM by default, Docker on opt-in.
-			Authenticates as its own GitHub App — every action is clearly from the bot, not you.
+			Built on <a href="https://github.com/nearform/lastlight/tree/main/packages/agentic-pi" target="_blank" rel="noopener">agentic-pi</a>,
+			it runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports: Claude, GPT, Gemini, Llama, and more (default <code>anthropic/claude-sonnet-4-6</code>).
+			Each workflow phase runs in its own sandbox, and five backends sit behind one interface: a gondolin micro-VM by default, or Docker, smolvm, Kubernetes, or none.
+			Authenticates as its own GitHub App, so every action is clearly from the bot, not you.
 		</p>
 		<div class="architecture">
 			<div class="arch-step">
@@ -119,7 +228,7 @@ const description = "Last Light is a self-hostable, MIT-licensed software factor
 				<span class="step-num">2</span>
 				<div>
 					<strong>You move on to other things</strong>
-					<p>Cron jobs keep running — scanning for new issues, unreviewed PRs, stale items</p>
+					<p>Cron jobs keep running, scanning for new issues, unreviewed PRs, stale items</p>
 				</div>
 			</div>
 			<div class="arch-step">
@@ -133,25 +242,25 @@ const description = "Last Light is a self-hostable, MIT-licensed software factor
 				<span class="step-num">4</span>
 				<div>
 					<strong>The repo stays healthy</strong>
-					<p>Everything happens on GitHub — comments, labels, reviews. No extra dashboard to check</p>
+					<p>Everything happens on GitHub: comments, labels, reviews. No extra dashboard to check</p>
 				</div>
 			</div>
 		</div>
-		<p class="section-note">Build requests move down a role-based <strong>Architect→Executor→Reviewer</strong> production line — <a href="/how-it-works">read how it works</a> for the full picture. Already have an <code>AGENTS.md</code> or <code>CLAUDE.md</code> in your repo? Last Light reads those automatically — your coding conventions, testing requirements, and architectural guardrails carry over.</p>
+		<p class="section-note">Build requests move down a role-based <strong>Architect→Executor→Reviewer</strong> production line. <a href="/how-it-works">Read how it works</a> for the full picture. Already have an <code>AGENTS.md</code> or <code>CLAUDE.md</code> in your repo? Last Light reads those automatically, so your coding conventions, testing requirements, and architectural guardrails carry over.</p>
 	</section>
 
 	<!-- Evals -->
 	<section class="evals-pitch">
 		<h2>Prove it on your own code</h2>
-		<p class="section-desc">A factory you can't measure is a factory you can't trust. Last Light ships an eval harness that runs the <strong>real</strong> production workflows — the same triage, review, and build YAML that runs in prod — against a mocked GitHub, and scores them. The difference from every leaderboard you've seen: the benchmark is <strong>yours</strong>.</p>
+		<p class="section-desc">A factory you can't measure is a factory you can't trust. Last Light ships an eval harness that runs the <strong>real</strong> production workflows (the same triage, review, and build YAML that runs in prod) against a mocked GitHub, and scores them. The difference from every leaderboard you've seen: the benchmark is <strong>yours</strong>.</p>
 		<div class="evals-grid">
 			<div class="feature-card">
 				<h3>Built from your repos</h3>
-				<p>Author eval cases straight from your own merged PRs and resolved issues — <code>add-case --pr</code> / <code>--issue</code> pins the real base/head SHAs, extracts the test diff, and derives the red→green gold. Not SWE-bench. Not someone else's code. Yours.</p>
+				<p>Author eval cases straight from your own merged PRs and resolved issues. <code>add-case --pr</code> / <code>--issue</code> pins the real base/head SHAs, extracts the test diff, and derives the red→green gold. Not SWE-bench. Not someone else's code. Yours.</p>
 			</div>
 			<div class="feature-card">
 				<h3>Pick the model that earns it</h3>
-				<p>Run every workflow across Claude, GPT, Gemini, Llama and more — or replay your real per-phase config — for a deterministic, side-by-side scorecard: precision, recall, cost, tokens. Know which model can work your floor before you trust it.</p>
+				<p>Run every workflow across Claude, GPT, Gemini, Llama and more, or replay your real per-phase config, for a deterministic, side-by-side scorecard: precision, recall, cost, tokens. Know which model can work your floor before you trust it.</p>
 			</div>
 			<div class="feature-card">
 				<h3>Close the loop</h3>
@@ -164,30 +273,31 @@ const description = "Last Light is a self-hostable, MIT-licensed software factor
 	<section class="get-started" id="get-started">
 		<h2>Light it up</h2>
 		<p class="section-note" style="margin-top: 0; margin-bottom: 2rem;">
-			<strong>Two ways to get going.</strong> Let Claude Code stand it up for you (recommended), or run the steps by hand. For the full walkthrough — creating the GitHub App with the right permissions, deploying to production with Caddy TLS, wiring up Slack chat + OAuth login, and every env var the harness reads — start with <a href="/docs/quickstart">the quick start</a>.
+			<strong>Two ways to get going.</strong> Let Claude Code stand it up for you (recommended), or run the steps by hand. For the full walkthrough (creating the GitHub App with the right permissions, deploying to production with Caddy TLS, wiring up Slack chat + OAuth login, and every env var the harness reads) start with <a href="/docs/quickstart">the quick start</a>.
 		</p>
 
-		<h3 class="setup-option-heading">Option A — Set it up with Claude Code <span class="badge-warn" style="color: var(--teal); background: rgba(26, 122, 138, 0.12);">recommended</span></h3>
+		<h3 class="setup-option-heading">Option A: set it up with Claude Code <span class="badge-warn" style="color: var(--teal); background: rgba(26, 122, 138, 0.12);">recommended</span></h3>
 		<div class="step-block" style="border-top: none; padding-top: 0;">
 			<p>Last Light ships <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a> skills that install, configure and launch the whole stack for you. Install the CLI and the skills:</p>
 			<pre><code>npm i -g lastlight          # or run it via npx
 lastlight skills install    # adds the bundled Claude Code skills</code></pre>
 			<p>Then open Claude Code in an empty directory and ask:</p>
 			<pre><code>"set up a Last Light server"</code></pre>
-			<p>The <code>lastlight-server</code> skill checks prerequisites, scaffolds the working directory, walks you through the GitHub App, model and managed repos, launches the docker stack, and verifies it's healthy. Sibling skills cover the rest — <code>lastlight-client</code> (point a CLI at a server), <code>lastlight-overlay</code> (customize workflows &amp; persona), and <code>lastlight-evals</code> (scaffold an evals workspace). See the <a href="/docs/quickstart">quick start</a> or the <a href="/docs/cli#claude-code-skills">CLI reference</a> for details.</p>
+			<p>The <code>lastlight-server</code> skill checks prerequisites, scaffolds the working directory, walks you through the GitHub App, model and managed repos, launches the docker stack, and verifies it's healthy. Sibling skills cover the rest: <code>lastlight-client</code> (point a CLI at a server), <code>lastlight-overlay</code> (customize workflows &amp; persona), and <code>lastlight-evals</code> (scaffold an evals workspace). See the <a href="/docs/quickstart">quick start</a> or the <a href="/docs/cli#claude-code-skills">CLI reference</a> for details.</p>
 		</div>
 
-		<h3 class="setup-option-heading">Option B — Set it up by hand</h3>
+		<h3 class="setup-option-heading">Option B: set it up by hand</h3>
 
 		<div class="step-block" style="border-top: none; padding-top: 0;">
 			<h3><span class="step-label">Step 1</span> Set a model API key</h3>
-			<p>Last Light runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more. Set the key matching your chosen model in <code>.env</code>:</p>
+			<p>Last Light runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports: Claude, GPT, Gemini, Llama, and more. Set the key matching your chosen model in <code>.env</code>:</p>
 			<pre><code>ANTHROPIC_API_KEY=sk-ant-...
 # or
 OPENAI_API_KEY=sk-...
 # or use one OpenRouter key for Claude / GPT / Gemini / Llama / ...
 OPENROUTER_API_KEY=sk-or-v1-...</code></pre>
-			<p>The default model is <code>anthropic/claude-sonnet-4-6</code>. Override it — globally or per-phase — via <code>LASTLIGHT_MODEL</code> / <code>LASTLIGHT_MODELS</code>.</p>
+			<p>The default model is <code>anthropic/claude-sonnet-4-6</code>. Override it, globally or per-phase, via <code>LASTLIGHT_MODEL</code> / <code>LASTLIGHT_MODELS</code>.</p>
+			<p>No API key? You can pay with a subscription you already have instead. <code>lastlight oauth login</code> signs you in with Claude Pro/Max, ChatGPT Plus/Pro, or GitHub Copilot. All three work on the default gondolin sandbox, where the model call runs host-side against your credential store. The one exception is Codex on the Docker and smolvm backends: the call happens inside the guest there, and Codex has no in-guest token route.</p>
 		</div>
 
 		<div class="step-block">
@@ -203,13 +313,13 @@ npm install</code></pre>
 				Head to <a href="https://github.com/settings/apps/new" target="_blank" rel="noopener">github.com/settings/apps/new</a> and create an app with these permissions:
 			</p>
 			<ul class="permissions-list">
-				<li><strong>Issues</strong> — Read & Write</li>
-				<li><strong>Pull Requests</strong> — Read & Write</li>
-				<li><strong>Contents</strong> — Read & Write</li>
-				<li><strong>Checks</strong> — Read & Write</li>
-				<li><strong>Workflows</strong> — Read & Write (to merge PRs that touch <code>.github/workflows/</code>, e.g. Actions version bumps)</li>
-				<li><strong>Commit statuses</strong> — Read (classic CI statuses; separate from <strong>Checks</strong>)</li>
-				<li><strong>Metadata</strong> — Read</li>
+				<li><strong>Issues</strong>: Read & Write</li>
+				<li><strong>Pull Requests</strong>: Read & Write</li>
+				<li><strong>Contents</strong>: Read & Write</li>
+				<li><strong>Checks</strong>: Read & Write</li>
+				<li><strong>Workflows</strong>: Read & Write (to merge PRs that touch <code>.github/workflows/</code>, e.g. Actions version bumps)</li>
+				<li><strong>Commit statuses</strong>: Read (classic CI statuses; separate from <strong>Checks</strong>)</li>
+				<li><strong>Metadata</strong>: Read</li>
 			</ul>
 			<p>Generate a private key, save the <code>.pem</code> file into the lastlight folder, and install the app on your repos.</p>
 		</div>
@@ -240,26 +350,26 @@ npx tsx src/cli.ts owner/repo#42          # shorthand
 npx tsx src/cli.ts triage owner/repo      # triage scan
 npx tsx src/cli.ts review owner/repo      # PR review scan
 npx tsx src/cli.ts health owner/repo      # health report</code></pre>
-			<p>The CLI talks to the running server — it does not execute agents directly. Start the server first.</p>
+			<p>The CLI talks to the running server. It does not execute agents directly, so start the server first.</p>
 		</div>
 
 		<div class="step-block">
 			<h3><span class="step-label">Step 6</span> Set up GitHub webhooks</h3>
-			<p>Make Last Light react to repo events in real time — new issues, PRs, comments. The webhook listener is built into the server and starts automatically on port <code>8644</code>.</p>
+			<p>Make Last Light react to repo events in real time: new issues, PRs, comments. The webhook listener is built into the server and starts automatically on port <code>8644</code>.</p>
 
 			<p>In your GitHub App settings, set:</p>
 			<ul class="permissions-list">
-				<li><strong>Webhook URL</strong> — <code>https://your-host:8644/webhooks/github</code></li>
-				<li><strong>Secret</strong> — same value as <code>WEBHOOK_SECRET</code> in <code>.env</code></li>
+				<li><strong>Webhook URL</strong>: <code>https://your-host:8644/webhooks/github</code></li>
+				<li><strong>Secret</strong>: the same value as <code>WEBHOOK_SECRET</code> in <code>.env</code></li>
 			</ul>
 			<p>Subscribe to events: <strong>Issues</strong>, <strong>Pull requests</strong>, <strong>Issue comments</strong>, <strong>Check runs</strong>, <strong>Check suites</strong> (the last two power the "Re-run checks" buttons), and optionally <strong>PR reviews</strong>.</p>
 			<p>The endpoint must be publicly reachable. Use <a href="https://ngrok.com" target="_blank" rel="noopener">ngrok</a> or <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" target="_blank" rel="noopener">Cloudflare Tunnel</a> for testing, or deploy with the included Caddy reverse proxy for automatic TLS. See <a href="/run-it">Run It for Real</a> for production setup.</p>
-			<p>The deterministic event router handles the logic — <code>issue.opened</code> triggers triage, <code>pr.opened</code> triggers review, <code>@mention</code> from a maintainer triggers the full build cycle. No configuration needed beyond the webhook URL and secret.</p>
+			<p>The deterministic event router handles the logic. <code>issue.opened</code> triggers triage, <code>pr.opened</code> triggers review, <code>@mention</code> from a maintainer triggers the full build cycle. No configuration needed beyond the webhook URL and secret.</p>
 		</div>
 
 		<div class="step-block">
 			<h3><span class="step-label">Step 7</span> Connect Slack <span class="step-label">optional</span></h3>
-			<p>Talk to Last Light from Slack. Uses Socket Mode (WebSocket) — no public URL needed. The bot responds to DMs and @mentions in channels, with multi-turn conversation support.</p>
+			<p>Talk to Last Light from Slack. Uses Socket Mode (WebSocket), so no public URL is needed. The bot responds to DMs and @mentions in channels, with multi-turn conversation support.</p>
 
 			<p>Create an app at <a href="https://api.slack.com/apps" target="_blank" rel="noopener">api.slack.com/apps</a> with Socket Mode enabled and bot token scopes for messaging, then add to <code>.env</code>:</p>
 			<pre><code>SLACK_BOT_TOKEN=xoxb-...
@@ -267,7 +377,7 @@ SLACK_APP_TOKEN=xapp-...</code></pre>
 			<p>Optionally restrict access and set a delivery channel for cron reports:</p>
 			<pre><code>SLACK_ALLOWED_USERS=U01ABC,U02DEF    # limit who can interact
 SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
-			<p>Chat interactions are read-only by default — the bot can answer questions and create issues, but won't make code changes from Slack. Build requests go through GitHub.</p>
+			<p>Chat interactions are read-only by default. The bot can answer questions and create issues, but won't make code changes from Slack. Build requests go through GitHub.</p>
 		</div>
 	</section>
 
@@ -277,7 +387,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 		<div class="skills-grid">
 			<div class="skill">
 				<code>/pr-review</code>
-				<p>Precision-first PR review — only Critical &amp; Important findings, posted as line-anchored inline comments</p>
+				<p>Precision-first PR review: only Critical &amp; Important findings, posted as line-anchored inline comments</p>
 			</div>
 			<div class="skill">
 				<code>/issue-triage</code>
@@ -285,7 +395,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 			</div>
 			<div class="skill">
 				<code>/repo-health</code>
-				<p>Weekly health report — open/stale issues, PR velocity, and action items</p>
+				<p>Weekly health report: open/stale issues, PR velocity, and action items</p>
 			</div>
 			<div class="skill">
 				<code>/security-review</code>
@@ -293,7 +403,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 			</div>
 			<div class="skill">
 				<code>/verify</code>
-				<p>Test a behaviour claim in the sandbox — reports CONFIRMED / REFUTED / INCONCLUSIVE with evidence</p>
+				<p>Test a behaviour claim in the sandbox, reporting CONFIRMED / REFUTED / INCONCLUSIVE with evidence</p>
 			</div>
 			<div class="skill">
 				<code>/qa-test</code>
@@ -301,11 +411,27 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 			</div>
 			<div class="skill">
 				<code>/demo</code>
-				<p>Record a short demo video of a PR — headless-browser capture composited to an mp4</p>
+				<p>Record a short demo video of a PR: headless-browser capture composited to an mp4</p>
 			</div>
 			<div class="skill">
 				<code>/answer</code>
 				<p>Research repo docs + the web and post a single sourced answer to a question</p>
+			</div>
+			<div class="skill">
+				<code>/explore</code>
+				<p>A Socratic Q&amp;A loop that shapes a half-formed idea into a detailed spec, pausing to ask you questions</p>
+			</div>
+			<div class="skill">
+				<code>/pr-fix</code>
+				<p>Lightweight fix-and-push for issues raised on a PR, skipping the full architect/reviewer cycle</p>
+			</div>
+			<div class="skill">
+				<code>/security-feedback</code>
+				<p>Act on your verdict on a security finding: file it, accept the risk, mark it false-positive, or reopen</p>
+			</div>
+			<div class="skill">
+				<code>/dependabot</code>
+				<p>Bring a failing dependency PR up to date and push the smallest fix, then auto-merge it if it is trivially safe</p>
 			</div>
 			<a href="https://github.com/orgs/nearform/projects/112" class="skill skill-cta" target="_blank" rel="noopener">
 				<strong>Want more?</strong>
@@ -317,12 +443,12 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 	<!-- Schedule -->
 	<section class="schedule">
 		<h2>Pick your mode</h2>
-		<p class="section-desc">Webhooks and cron handle the same jobs — use one or the other, not both.</p>
+		<p class="section-desc">Webhooks and cron handle the same jobs, so use one or the other, not both.</p>
 
 		<div class="gateway-grid">
 			<div class="gateway-card">
 				<h4>Webhooks <span class="badge-warn" style="color: var(--teal); background: rgba(26, 122, 138, 0.12);">recommended</span></h4>
-				<p>Real-time. GitHub sends events as they happen — issues triaged instantly, PRs reviewed on open. Requires a public endpoint.</p>
+				<p>Real-time. GitHub sends events as they happen: issues triaged instantly, PRs reviewed on open. Requires a public endpoint.</p>
 				<div class="schedule-table" style="margin-top: 0.75rem;">
 					<div class="schedule-row header">
 						<span>Event</span>
@@ -344,7 +470,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 			</div>
 			<div class="gateway-card">
 				<h4>Cron</h4>
-				<p>Periodic sweeps. No public endpoint needed — the agent polls GitHub on a schedule. Simpler to set up, but slower to respond.</p>
+				<p>Periodic sweeps. No public endpoint needed, because the agent polls GitHub on a schedule. Simpler to set up, but slower to respond.</p>
 				<div class="schedule-table" style="margin-top: 0.75rem;">
 					<div class="schedule-row header">
 						<span>Job</span>
@@ -366,68 +492,29 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 			</div>
 		</div>
 
-		<p class="section-note">The weekly health report runs regardless of mode — it's useful either way.</p>
+		<p class="section-note">The weekly health report runs regardless of mode, and it's useful either way.</p>
 	</section>
 
-	<!-- Dashboard tour -->
-	<section class="admin-section">
-		<h2>Inside the dashboard</h2>
-		<p class="section-desc">Every agent session — sandbox runs, Slack chats, cron jobs, approval gates — is logged, browsable, and streamable. The dashboard at <code>/admin</code> has four tabs, each answering a different question about what the bot is doing.</p>
-
-		<div class="dashboard-tour" id="dashboard-tour">
-			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="0" aria-label="View Home screenshot full size">
-					<img src="/screenshots/home.png" alt="Last Light dashboard home tab — live activity, execution stats, recent workflows, resource usage charts" loading="lazy" />
-				</button>
-				<figcaption>
-					<strong>Home</strong>
-					<span>Live activity, rolling execution / token / cost stats, running containers, and the five most recent workflow runs at a glance.</span>
-				</figcaption>
-			</figure>
-
-			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="1" aria-label="View Workflows screenshot full size">
-					<img src="/screenshots/workflow.png" alt="Last Light Workflows tab showing a DAG pipeline with Guardrails, Architect, Executor, Reviewer, PR and complete phases" loading="lazy" />
-				</button>
-				<figcaption>
-					<strong>Workflows</strong>
-					<span>Pipeline DAG for every run — Guardrails → Architect → Executor → Reviewer → PR, with fix-feedback loops stacked under the reviewer phase. Click any phase to see its full message stream.</span>
-				</figcaption>
-			</figure>
-
-			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="2" aria-label="View Sandbox Sessions screenshot full size">
-					<img src="/screenshots/session.png" alt="Last Light Sandbox Sessions tab showing agent conversation timeline with assistant, tool, and user messages" loading="lazy" />
-				</button>
-				<figcaption>
-					<strong>Sandbox Sessions</strong>
-					<span>Drill into any sandboxed agent run. Full agent conversation — assistant thinking, tool calls, reviewer verdicts — filterable by skill, repo, and time range.</span>
-				</figcaption>
-			</figure>
-
-			<figure class="tour-card">
-				<button type="button" class="tour-card-trigger" data-lightbox-index="3" aria-label="View Chat Sessions screenshot full size">
-					<img src="/screenshots/chat.png" alt="Last Light Chat Sessions tab showing a Slack thread's full message history" loading="lazy" />
-				</button>
-				<figcaption>
-					<strong>Chat Sessions</strong>
-					<span>DB-backed history for every Slack thread. The bot rehydrates the same pi-ai conversation each turn, so one thread = one growing, coherent conversation.</span>
-				</figcaption>
-			</figure>
-		</div>
-
-		<div class="lightbox" id="tour-lightbox" role="dialog" aria-modal="true" aria-label="Dashboard screenshot viewer" hidden>
-			<button type="button" class="lightbox-close" data-lightbox-close aria-label="Close (Esc)">&times;</button>
-			<button type="button" class="lightbox-nav lightbox-prev" data-lightbox-prev aria-label="Previous (Left arrow)">&#8249;</button>
-			<button type="button" class="lightbox-nav lightbox-next" data-lightbox-next aria-label="Next (Right arrow)">&#8250;</button>
-			<figure class="lightbox-figure">
-				<img class="lightbox-image" alt="" />
-				<figcaption class="lightbox-caption"></figcaption>
-			</figure>
-		</div>
-	</section>
 
 	<script>
+		// Keep the dashboard screenshots on the same theme as the page. The Nav
+		// toggle flips html[data-theme], so observing that attribute works however
+		// the theme changed (toggle click, or the pre-paint boot script).
+		const shots = Array.from(document.querySelectorAll<HTMLImageElement>("img[data-shot]"));
+		if (shots.length) {
+			const syncShots = () => {
+				const light = document.documentElement.getAttribute("data-theme") === "light";
+				for (const img of shots) {
+					img.src = `/screenshots/${img.dataset.shot}${light ? "-light" : ""}.png`;
+				}
+			};
+			syncShots();
+			new MutationObserver(syncShots).observe(document.documentElement, {
+				attributes: true,
+				attributeFilter: ["data-theme"],
+			});
+		}
+
 		const lightbox = document.getElementById("tour-lightbox");
 		const tour = document.getElementById("dashboard-tour");
 		if (lightbox && tour) {
@@ -441,7 +528,10 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 				const figcap = btn.parentElement?.querySelector("figcaption");
 				const title = figcap?.querySelector("strong")?.textContent ?? "";
 				const desc = figcap?.querySelector("span")?.textContent ?? "";
-				return { src: img.src, alt: img.alt, title, desc };
+				// Keep the element, not its src: the theme sync above rewrites src,
+				// and a value captured here would pin the lightbox to whichever
+				// theme happened to be active at page load.
+				return { img, alt: img.alt, title, desc };
 			});
 
 			let current = 0;
@@ -449,7 +539,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 
 			const render = () => {
 				const slide = slides[current];
-				imgEl.src = slide.src;
+				imgEl.src = slide.img.src;
 				imgEl.alt = slide.alt;
 				capEl.innerHTML = `<strong>${slide.title}</strong>${slide.desc}`;
 			};
@@ -611,7 +701,7 @@ SLACK_DELIVERY_CHANNEL=C01XYZ        # channel for health reports</code></pre>
 
 	/* Sections */
 	section {
-		max-width: 1000px;
+		max-width: 1200px;
 		margin: 0 auto;
 		padding: 3rem 2rem;
 	}

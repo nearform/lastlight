@@ -12,8 +12,13 @@ export default defineConfig({
   compressHTML: true,
   integrations: [
     sitemap({
-      // /docs/ and /evals/ are meta-refresh redirects to their intro pages, not real pages
-      filter: (page) => !page.endsWith('/docs/') && !page.endsWith('/evals/'),
+      // /docs/ and /evals/ are meta-refresh redirects to their intro pages, not real pages.
+      // /spec/* is noindex (see BaseLayout's `noindex` prop) — listing a noindex
+      // page in the sitemap sends Google two contradictory signals, so drop it.
+      filter: (page) =>
+        !page.endsWith('/docs/') &&
+        !page.endsWith('/evals/') &&
+        !new URL(page).pathname.startsWith('/spec'),
     }),
   ],
 });

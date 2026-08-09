@@ -1,6 +1,13 @@
 ---
 import NearformLogo from './NearformLogo.astro';
 ---
+<!--
+	The sticky bar is the wrapper, not the <nav>: <nav> is max-width 1200 and
+	centred, so making it sticky itself would leave the page scrolling through
+	the gap either side of it. The wrapper spans the full viewport and carries
+	the background and bottom border.
+-->
+<header class="site-header">
 <nav>
 	<a href="/" class="nav-logo">
 		<NearformLogo size={24} class="nf-logo" /> Last Light
@@ -29,6 +36,7 @@ import NearformLogo from './NearformLogo.astro';
 		</button>
 	</div>
 </nav>
+</header>
 
 <script>
 	const toggle = document.querySelector<HTMLButtonElement>(".nav-toggle");

@@ -45,10 +45,16 @@ layer: one on-disk store (`$STATE_DIR/auth.json`, override `LASTLIGHT_AUTH_FILE`
 `lastlight oauth login|list|status|test|logout` (host-local,
 `packages/cli/src/oauth-cli.ts`) drives the browser flow. **Two seams, different reach:**
 the in-process **chat** path (`chat-runner.ts`) passes the token as a per-call
-`apiKey`, so all three work; the **sandbox** path (`agent-executor.ts`) resolves
-creds from env only and injects `ANTHROPIC_OAUTH_TOKEN` / `COPILOT_GITHUB_TOKEN`
-— Codex has no env-token route, so it's **chat-only** (the executor warns if a
-Codex model is used for a sandbox phase).
+`apiKey`, so all three work; on the **sandbox** path it depends on the backend.
+The **in-process backends** (`gondolin` — the default — and `none`) run the
+model call host-side, so the orchestrator hands agentic-pi `authFile` and pi's
+AuthStorage resolves **every** OAuth provider from it, Codex included. The
+**container backends** (`docker` / `smol`) run it in-guest, where that host path
+is unreadable, so `agent-executor.ts` injects `ANTHROPIC_OAUTH_TOKEN` /
+`COPILOT_GITHUB_TOKEN` instead — and Codex has no in-guest env route, so it
+cannot authenticate *there* (the executor warns and points at a host-side
+backend). Codex is **not** chat-only on a default install; it is unusable only
+on the container backends.
 
 The cheap-helper path (`src/engine/llm.ts`, used by screener + classifier)
 bypasses agentic-pi and dispatches directly to the same three providers.

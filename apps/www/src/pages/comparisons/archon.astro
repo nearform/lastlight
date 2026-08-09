@@ -1,0 +1,79 @@
+---
+// Last Light vs. Archon: the closest architectural twin. Targets
+// "archon alternative" and "open source AI harness".
+import ComparisonLayout from '../../layouts/ComparisonLayout.astro';
+
+const title = "Last Light vs. Archon: Harness Builder or Maintenance Service?";
+const description = "Archon and Last Light are both self-hosted, open-source YAML workflow engines with gates and multi-channel dispatch. Archon orchestrates your existing agent CLIs; Last Light ships its own runtime inside a hardened sandbox.";
+
+const heading = 'Last Light vs. <span class="accent">Archon</span>';
+const subtitle = "Architecturally these two are twins. Both are self-hosted, open-source, YAML workflow engines with loops, gates and conditions, multi-channel dispatch, and per-workflow model choice. The differences are subtle, and worth spelling out properly.";
+
+const rowsDuo = [
+	["What runs the agent", "Its own integrated runtime (agentic-pi / pi-ai)", "Your existing agent CLIs (Claude Code, Codex, and so on)"],
+	["Isolation", "Docker / micro-VM sandbox, default-deny egress firewall", "Per-run Git worktrees"],
+	["Framing", "Autonomous repo maintenance, running on its own", "Developer dispatch: send work from anywhere"],
+	["Channels", "GitHub webhooks, Slack, cron, CLI, dashboard", "Terminal, Slack, Telegram, GitHub comments, web"],
+	["Parallelism", "Sequential per repo, gated", "Fan-out across worktrees"],
+	["Workflows shipped", "Triage, review, build, security, health, chat", "You build them"],
+	["Agent-agnostic", "No: the runtime is part of the system", "Yes, that is the point"],
+	["Licence", "MIT, free", "Open source, free"],
+];
+---
+
+<ComparisonLayout title={title} description={description} heading={heading} subtitle={subtitle} slug="archon">
+
+	<section class="content-section">
+		<h2>The short version</h2>
+		<div class="callout-card">
+			<p><a href="https://archon.diy/" target="_blank" rel="noopener">Archon</a> bills itself as "the first open-source harness builder for AI coding", and it is the most architecturally similar tool on this site. Both projects borrow the same core idea: workflows as code, dispatched from wherever you happen to be.</p>
+			<p>The split is what sits inside the workflow. Archon <strong>orchestrates external agent CLIs</strong>, so you bring your own coding agent and it runs wherever you point it. Last Light has <strong>its own integrated runtime</strong> with model routing built in, and it runs that runtime entirely inside the sandbox boundary. Archon is the more agent-agnostic of the two; Last Light is the more self-contained.</p>
+			<p>The second split is intent. Archon is about <em>dispatch</em>: fire off many parallel runs. Last Light is about <em>maintenance</em>: a standing service that triages, reviews and reports on its own, with humans gating the interesting moments.</p>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Side by side</h2>
+		<div class="table-scroll">
+			<table class="cmp duo">
+				<thead>
+					<tr><th></th><th class="ll">Last Light</th><th>Archon</th></tr>
+				</thead>
+				<tbody>
+					{rowsDuo.map(([k, ll, other]) => (
+						<tr>
+							<th scope="row">{k}</th>
+							<td class="ll" set:html={ll} />
+							<td set:html={other} />
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>The three real differences</h2>
+		<ul class="plain-list">
+			<li><strong>What runs the agent.</strong> Archon is a harness that drives agent CLIs you already use, which makes it flexible and keeps you on tools you know. Last Light bakes the runtime in, which makes it more opinionated but means the whole agent sits inside one boundary.</li>
+			<li><strong>Isolation.</strong> Archon isolates parallel runs in per-run Git worktrees: light, collision-free, and excellent for fan-out. Last Light isolates in a Docker or micro-VM sandbox with a default-deny egress firewall and downscoped per-run tokens. That is heavier, but it is a real network and permission boundary. It is also the <em>whole agent</em> in the box, not just its tools: reasoning, bash, file I/O and egress all behind one perimeter, so a prompt injection has nowhere to escape to rather than relying on each tool call to route itself through a sandbox.</li>
+			<li><strong>Intent.</strong> Archon wants you to dispatch work from anywhere and run many agents at once. Last Light wants to be left alone to look after a repository, and to interrupt you only at an approval gate.</li>
+		</ul>
+	</section>
+
+	<section class="content-section">
+		<h2>Which should you pick?</h2>
+		<div class="choose-grid">
+			<div class="choose-card rival">
+				<div class="choose-tag">Choose Archon when</div>
+				<p>you want a lightweight, agent-agnostic harness to dispatch parallel coding runs across worktrees from many channels, driving whatever CLI agent you already use.</p>
+			</div>
+			<div class="choose-card lastlight">
+				<div class="choose-tag">Choose Last Light when</div>
+				<p>you want a self-contained repo-maintenance service with its own runtime, a hardened sandbox, egress and token boundary, and a built-in suite of triage, review, health and security workflows.</p>
+			</div>
+		</div>
+		<p class="section-note">Honestly, if you like one project's philosophy you should look at the other. They are solving adjacent problems from the same starting idea.</p>
+	</section>
+
+</ComparisonLayout>

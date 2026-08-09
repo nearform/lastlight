@@ -323,7 +323,14 @@ export interface OAuthProviderSpec {
   readonly sampleModel: string;
   /**
    * Env var pi-ai reads for this provider's OAuth token inside a sandbox, or
-   * `null` when there's no env route (⇒ chat-only; cannot run sandbox phases).
+   * `null` when there's no env route.
+   *
+   * `null` does NOT mean chat-only. It only bites on the **container** backends
+   * (docker / smol), where the model call happens in-guest and cannot read the
+   * host credential store. On the in-process backends (`gondolin`, the default,
+   * and `none`) the orchestrator passes agentic-pi `authFile` and pi's
+   * AuthStorage resolves every OAuth provider from it, Codex included. See the
+   * OAuth block in `apps/server/src/engine/agent-executor.ts`.
    */
   readonly sandboxEnvVar: string | null;
   /** True when login is mandatory (no API-key fallback). */

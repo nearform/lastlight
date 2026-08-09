@@ -872,6 +872,30 @@ Per-phase model and variant overrides resolve through
 `config.models[phaseName]` and `config.variants[phaseName]` — see
 [Configuration §models](/spec/02-configuration).
 
+### Subscription (OAuth) providers — reach depends on the backend
+
+Three providers authenticate by subscription login rather than a static key:
+`anthropic` (Claude Pro/Max), `github-copilot`, and `openai-codex` (ChatGPT
+Plus/Pro). They are registered in `OAUTH_PROVIDERS`
+(`packages/shared/src/providers.ts`, separate from the API-key `PROVIDERS`),
+and `lastlight oauth login` writes the credential store at
+`$STATE_DIR/auth.json`. Where a token can reach the model call depends on
+**where that call happens**:
+
+| Backend | Model call runs | How the OAuth credential arrives |
+|---|---|---|
+| `gondolin` (default), `none` | Host-side, in the harness process | The orchestrator passes agentic-pi `authFile` = the credential store, and pi's `AuthStorage` resolves **every** OAuth provider from it, Codex included. Nothing is injected. |
+| `docker`, `smol` | In-guest | The host path is unreadable there, so `agent-executor.ts` injects the provider's `sandboxEnvVar` (`ANTHROPIC_OAUTH_TOKEN` / `COPILOT_GITHUB_TOKEN`), refreshing it first. |
+
+**Invariant: an OAuth provider with `sandboxEnvVar: null` is unusable on the
+container backends only.** Codex is the one such provider — its chatgpt.com
+backend has no in-guest env route — so a Codex model on `docker`/`smol` cannot
+authenticate, and the executor logs a warning pointing at a host-side backend
+rather than letting the run 401 mid-phase. It is **not** chat-only: on the
+default `gondolin` backend it runs sandboxed phases like any other provider.
+`OAUTH_ONLY_PROVIDERS` (Codex, Copilot) additionally have no API-key fallback,
+so a missing login is warned about rather than silently degrading.
+
 ## Container entrypoint (docker)
 
 `deploy/sandbox-entrypoint.sh`, executed as root before privilege drop:

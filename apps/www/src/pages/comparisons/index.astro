@@ -1,0 +1,157 @@
+---
+// Last Light: the comparisons hub.
+//
+// This page keeps the section's overview content (category map, at-a-glance
+// table, limitations, decision guide) because it's the only page in the
+// section Google has actually indexed. The per-competitor head-to-heads moved
+// to /comparisons/<slug>/ so each can target its own query rather than nine
+// tools fighting over one URL.
+import ComparisonLayout from '../../layouts/ComparisonLayout.astro';
+import { comparisons } from '../../data/comparisons';
+
+const title = "Last Light vs. Devin, Factory, 8090 and OpenHands";
+const description = "How Last Light, the self-hosted, open-source AI software factory, compares to Devin, Factory droid, 8090, Copilot coding agent, OpenHands and Archon, with honest 'choose X when' guidance.";
+
+// At-a-glance comparison data
+const cols = ["Tool", "Category", "Hosting", "Trigger model", "BYO model?", "Isolation", "Human gates", "Cost model", "Best for"];
+const rows = [
+  ["Last Light", "Self-hosted software factory", "Self-hosted only", "Webhooks + Slack + cron + CLI", "Yes (Anthropic / OpenAI / OpenRouter)", "Docker / micro-VM sandbox + default-deny egress firewall", "First-class (GitHub / Slack / dashboard)", "Free / OSS + your model spend + your infra", "Self-hosted autonomous repo maintenance with approval gates", true],
+  ["Factory droid", "Commercial multi-agent platform", "SaaS (on-prem at Enterprise)", "IDE + CLI + browser + Slack + Jira/Linear", "Yes (Claude / GPT / Gemini / DeepSeek / Qwen)", "Managed cloud sandboxes (“Droid Computers”)", "Tiered autonomy levels", "$20 / $100 / $200 per mo + Team/Enterprise", "Enterprises wanting a polished multi-surface droid fleet", false],
+  ["8090", "Enterprise software factory", "Vendor-hosted or delivered as a service", "Business intent → work orders", "Vendor-managed", "Vendor-managed", "Governance + audit trail by design", "Enterprise contract", "Regulated enterprises modernising legacy applications", false],
+  ["Devin", "Autonomous cloud agent", "SaaS", "Task / issue assignment", "No (vendor model)", "Vendor cloud sandbox", "Review the PR", "Subscription", "Delegating well-scoped tasks to a “junior engineer”", false],
+  ["Copilot coding agent", "Autonomous GitHub agent", "SaaS (GitHub)", "Assign a GitHub issue", "No (vendor model)", "Sandboxed GitHub Actions", "Review the draft PR", "Copilot subscription", "Teams already living in GitHub", false],
+  ["OpenAI Codex (cloud)", "Autonomous cloud agent", "SaaS", "Task / multi-surface", "No (vendor model)", "Vendor cloud sandbox", "Review the PR", "Subscription", "GPT-5.x-grade autonomy", false],
+  ["Google Jules", "Autonomous cloud agent", "SaaS", "GitHub issue→PR", "No (Gemini)", "Google Cloud VMs", "Review the PR", "Free preview / subscription", "Gemini-grade autonomy in GCP", false],
+  ["OpenHands", "OSS agent + Resolver", "Self-hosted or cloud", "CLI/IDE and event-driven (issue label → PR)", "Yes (full BYOM)", "Sandboxed runtime", "In the loop or review the PR", "Free / OSS + your model spend (or Cloud)", "Self-hosted single-pipeline issue→PR autonomy", false],
+  ["Goose", "OSS general agent", "Self-hosted", "CLI/IDE, recipes, built-in scheduler", "Yes (full BYOM)", "Local / your choice", "Configurable approval gates", "Free / OSS + your model spend", "Composing your own autonomous / scheduled agent", false],
+  ["Archon", "OSS harness builder", "Self-hosted", "Terminal + Slack + Telegram + GitHub comments + web", "Yes (orchestrates Claude Code / Codex / etc.)", "Per-run Git worktrees", "Workflow gates", "Free / OSS + your model spend", "Dispatching parallel coding runs from anywhere", false],
+  ["Pi / OpenCode / Aider / Cline", "OSS dev-driven agents", "Self-hostable", "CLI / IDE, per task", "Yes (full BYOM)", "Local / your choice", "You’re in the loop", "Free / OSS + your model spend", "Free, private, hackable per-task coding", false],
+];
+
+const heading = 'How Last Light <span class="accent">compares</span>';
+const subtitle = "An honest, point-in-time look (June 2026) at where Last Light, a self-hosted, open-source software factory, sits among AI coding agents, against Factory.ai droid, 8090, the vendor-hosted GitHub bots, and the self-hosted open-source agents. Pricing and benchmark numbers move fast, so figures link to sources rather than being treated as durable truth.";
+---
+
+<ComparisonLayout title={title} description={description} heading={heading} subtitle={subtitle}>
+
+	<!-- TL;DR -->
+	<section class="content-section">
+		<h2>The short version</h2>
+		<div class="callout-card">
+			<p>Last Light is <strong>not</strong> in the same category as most "AI coding agent" tools, and comparing it feature-for-feature is misleading. It's a <strong>self-hosted, event-driven, single-tenant software factory</strong>: a YAML workflow engine that reacts to GitHub webhooks, Slack messages, and cron ticks by running sandboxed agents on a production line to triage issues, review PRs, build features, and report on health and security.</p>
+			<p>Almost everything it's compared to is either a <strong>developer-driven pair programmer</strong> you sit in front of (Cursor, Claude Code, Codex CLI, Pi, OpenCode, Aider, Cline), or a <strong>vendor-hosted issue&rarr;PR agent</strong> you delegate to in someone else's cloud (Devin, Copilot coding agent, Codex cloud, Jules), or its commercial-platform siblings, Factory droid and 8090.</p>
+			<p>The important exceptions, and Last Light's truest peers, are the <strong>open-source agents that also run self-hosted <em>and</em> autonomously</strong>: OpenHands (Resolver / headless), Goose (scheduler / recipes), and Archon (an OSS workflow-harness builder). Last Light is <em>not</em> alone in that quadrant. The honest distinction from those is <strong>shape</strong>, covered on each comparison page.</p>
+		</div>
+	</section>
+
+	<!-- Head-to-heads -->
+	<section class="content-section">
+		<h2>Head-to-head</h2>
+		<p class="section-intro">Each of these gets a full page: what the other tool does better, what Last Light does better, and when to pick which.</p>
+		<div class="related-grid">
+			{comparisons.map((c) => (
+				<a class="related-card" href={`/comparisons/${c.slug}/`}>
+					<span class="related-tag">{c.category}</span>
+					<span class="related-name">Last Light vs. {c.name}</span>
+					<span class="related-blurb">{c.blurb}</span>
+				</a>
+			))}
+		</div>
+	</section>
+
+	<!-- Category map -->
+	<section class="content-section">
+		<h2>The category map</h2>
+		<p class="section-intro">A flat feature table would flatter or unfairly penalise everything, because these tools live on two axes: <strong>who drives</strong> (you, per task &harr; it reacts to events) and <strong>who hosts</strong> (a vendor &harr; you). Last Light lives in the self-hosted, event-driven quadrant, but it shares it.</p>
+
+		<div class="quad-axis-top">developer-driven (you drive it, per task) &nbsp;&harr;&nbsp; event-driven / autonomous (it reacts)</div>
+		<div class="quadrant-grid">
+			<div class="quadrant-cell">
+				<div class="quad-tag">Hosted &middot; developer-driven</div>
+				<p>Cursor, Claude Code, Codex CLI, Windsurf</p>
+			</div>
+			<div class="quadrant-cell">
+				<div class="quad-tag">Hosted &middot; event-driven</div>
+				<p>Devin, Copilot coding agent, Codex cloud, Jules, <strong>Factory droid</strong>, <strong>8090</strong></p>
+			</div>
+			<div class="quadrant-cell">
+				<div class="quad-tag">Self-hosted &middot; developer-driven</div>
+				<p>Pi, OpenCode, Aider, Cline &middot; <span class="muted">OpenHands / Goose (interactive)</span></p>
+			</div>
+			<div class="quadrant-cell highlight">
+				<div class="quad-tag">Self-hosted &middot; event-driven</div>
+				<p><span class="star">&#9733; Last Light</span>, Archon, OpenHands (Resolver), Goose (scheduler / recipes)</p>
+			</div>
+		</div>
+
+		<p class="section-note">So the meaningful question isn't "is anything else self-hosted and autonomous" (things are) but <strong>what shape that autonomy takes</strong>: the vendor bots are autonomous but hosted; OpenHands / Goose are autonomous and self-hostable but as a single pipeline or a general agent you compose; Archon is a self-hosted harness that orchestrates external CLIs; Last Light ships a purpose-built, multi-workflow software factory for repo maintenance. That breadth is the point, and also why it carries operational burden a per-task CLI or a SaaS bot doesn't.</p>
+	</section>
+
+	<!-- At a glance -->
+	<section class="content-section">
+		<h2>At a glance</h2>
+		<p class="section-intro">Treat each cell as a generalisation, not a spec sheet. See each tool's own docs for specifics, and the <a href="#sources">sources</a> for where these claims come from.</p>
+		<div class="table-scroll">
+			<table class="cmp">
+				<thead>
+					<tr>{cols.map((c) => <th>{c}</th>)}</tr>
+				</thead>
+				<tbody>
+					{rows.map((r) => (
+						<tr class={r[9] ? "is-ll" : undefined}>
+							{r.slice(0, 9).map((cell, i) => (
+								i === 0 ? <th scope="row">{cell}</th> : <td>{cell}</td>
+							))}
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<!-- Honest limitations -->
+	<section class="content-section">
+		<h2>Honest limitations of Last Light</h2>
+		<p class="section-intro">The flip side of the design choices above, stated plainly.</p>
+		<ul class="plain-list">
+			<li><strong>Self-hosted only.</strong> No hosted / SaaS option. You provision a host, run the compose stack, and operate it.</li>
+			<li><strong>Single-tenant.</strong> Built around one operator/installation, with no per-user RBAC or multi-team isolation.</li>
+			<li><strong>No IDE or editor integration.</strong> No pair-programming or inline completions; it reaches you through GitHub, Slack, and the dashboard.</li>
+			<li><strong>No leaderboard numbers.</strong> There is no Terminal-Bench or SWE-bench score to point at, and quality tracks whatever models you route to. What ships instead is an <a href="/evals/introduction/">eval harness</a> that runs the real workflows against your own repos, so the number you get is about your code rather than someone else's.</li>
+			<li><strong>Smaller ecosystem, no vendor support.</strong> No SLA, support desk, or account team. It's an OSS project you read the source of.</li>
+			<li><strong>Egress caveat in open mode.</strong> The Docker firewall peeks TLS SNI without terminating it, so in opt-in <em>unrestricted-egress</em> mode a hostname resolving to a private IP could be tunnelled. Strict mode (the default) avoids this by only resolving allowlisted hosts.</li>
+		</ul>
+	</section>
+
+	<!-- Decision guide -->
+	<section class="content-section">
+		<h2>Decision guide</h2>
+		<div class="decide-list">
+			<div class="decide-row"><span class="decide-want">Write code interactively at your desk</span><span class="decide-pick">Cursor / Claude Code / Codex CLI (or OSS: Pi / OpenCode / Aider / Cline / Goose)</span></div>
+			<div class="decide-row"><span class="decide-want">Delegate a task and get a PR back, zero ops, best models</span><span class="decide-pick">Devin / Copilot coding agent / Codex cloud / Jules</span></div>
+			<div class="decide-row"><span class="decide-want">A polished, supported, multi-surface platform for a whole team</span><span class="decide-pick">Factory droid</span></div>
+			<div class="decide-row"><span class="decide-want">An enterprise programme that builds and runs the application for you, under contract</span><span class="decide-pick">8090</span></div>
+			<div class="decide-row"><span class="decide-want">A self-hosted, single-pipeline issue&rarr;PR agent</span><span class="decide-pick">OpenHands (Resolver)</span></div>
+			<div class="decide-row"><span class="decide-want">A lightweight, agent-agnostic harness to dispatch parallel runs from many channels</span><span class="decide-pick">Archon</span></div>
+			<div class="decide-row is-ll"><span class="decide-want">Autonomous repo maintenance on your own infra: your runtime and keys, a boundary you control, forkable YAML, a triage/review/health/security suite, and approval gates</span><span class="decide-pick">Last Light</span></div>
+			<div class="decide-row"><span class="decide-want">A free, private, per-task agent on your own machine</span><span class="decide-pick">Pi / OpenCode / Aider / Cline / Goose / OpenHands</span></div>
+		</div>
+	</section>
+
+	<!-- Sources -->
+	<section class="content-section last-section" id="sources">
+		<h2>Sources</h2>
+		<p class="section-intro">External claims about other tools are point-in-time (June 2026). Last Light's own specifics are drawn from the <a href="/spec/">spec</a> and the project repository.</p>
+		<ul class="src-list">
+			<li>Factory: <a href="https://factory.ai/" target="_blank" rel="noopener">product</a>, <a href="https://docs.factory.ai/pricing" target="_blank" rel="noopener">pricing</a>, <a href="https://docs.factory.ai/reference/cli-reference" target="_blank" rel="noopener">CLI docs</a>, <a href="https://factory.ai/news/terminal-bench" target="_blank" rel="noopener">Terminal-Bench</a></li>
+			<li>8090: <a href="https://8090.inc/" target="_blank" rel="noopener">site</a>, <a href="https://www.businesswire.com/news/home/20260626795833/en/8090-Raises-$135M-Series-A-to-Accelerate-Their-Rollout-of-Software-Factory" target="_blank" rel="noopener">Series A announcement</a></li>
+			<li>GitHub: <a href="https://docs.github.com/en/copilot/concepts/agents" target="_blank" rel="noopener">Copilot agents</a>, <a href="https://docs.github.com/en/copilot/concepts/agents/openai-codex" target="_blank" rel="noopener">Codex on GitHub</a>, <a href="https://github.com/features/copilot" target="_blank" rel="noopener">Copilot</a></li>
+			<li>OpenHands: <a href="https://github.com/OpenHands/OpenHands" target="_blank" rel="noopener">repo</a>, <a href="https://docs.openhands.dev/openhands/usage/run-openhands/headless-mode" target="_blank" rel="noopener">headless / Resolver docs</a></li>
+			<li>Goose: <a href="https://goose-docs.ai/" target="_blank" rel="noopener">docs</a> (recipes, scheduler, headless)</li>
+			<li>Archon: <a href="https://archon.diy/" target="_blank" rel="noopener">site</a>, <a href="https://github.com/coleam00/Archon" target="_blank" rel="noopener">repo</a></li>
+			<li>Landscape & benchmarks: <a href="https://artificialanalysis.ai/agents/coding" target="_blank" rel="noopener">Artificial Analysis</a>, <a href="https://www.morphllm.com/best-ai-coding-agents-2026" target="_blank" rel="noopener">Morph leaderboard</a></li>
+		</ul>
+		<p class="section-note">Pricing, model menus, and benchmark scores change frequently, so verify against each vendor's own pages before relying on a specific figure.</p>
+	</section>
+
+</ComparisonLayout>

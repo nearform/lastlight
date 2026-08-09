@@ -75,9 +75,9 @@ const pageDescription = description ?? `${title} — Last Light documentation.`;
 
 	.docs-sidebar {
 		position: sticky;
-		top: 1.5rem;
+		top: calc(var(--site-header-h) + 1.5rem);
 		align-self: start;
-		max-height: calc(100vh - 3rem);
+		max-height: calc(100vh - var(--site-header-h) - 3rem);
 		overflow-y: auto;
 		padding-right: 0.5rem;
 	}

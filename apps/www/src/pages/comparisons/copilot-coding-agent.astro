@@ -1,0 +1,81 @@
+---
+// Last Light vs. GitHub Copilot coding agent: targets "copilot coding agent
+// alternative" / "self-hosted copilot coding agent". Also stands in for the
+// wider vendor-hosted bot cohort (Codex cloud, Jules).
+import ComparisonLayout from '../../layouts/ComparisonLayout.astro';
+
+const title = "Last Light vs. GitHub Copilot Coding Agent: a Self-Hosted Option";
+const description = "Copilot coding agent turns an assigned issue into a draft PR with zero setup, on GitHub's models. Last Light runs the same loop on your own infrastructure with your own models and a workflow you control.";
+
+const heading = 'Last Light vs. the <span class="accent">Copilot coding agent</span>';
+const subtitle = "GitHub's own agent, and its cohort of OpenAI Codex cloud and Google Jules, are Last Light's closest behavioural peers. They share one lifecycle: ticket → cloud sandbox → autonomous edit → PR → human review. The divergence is ownership and extensibility, not the basic loop.";
+
+const rowsDuo = [
+	["Setup", "GitHub App, host, Docker stack", "Already there if you pay for Copilot"],
+	["Hosting", "Your infrastructure", "GitHub's, in sandboxed Actions"],
+	["Model choice", "BYO across providers, per workflow", "Vendor model"],
+	["Trigger", "Many webhook types, Slack, cron, CLI", "Assign a GitHub issue"],
+	["Workflow", "A YAML DAG you fork and override", "Fixed"],
+	["Egress control", "Default-deny firewall you configure", "Opaque, vendor-set"],
+	["Token scope", "Four downscoped per-run App token profiles", "Vendor-managed"],
+	["Beyond issue→PR", "Triage, review, security, health, chat", "Issue → draft PR"],
+	["Cost", "Free / MIT + model spend + infra", "Copilot subscription"],
+];
+---
+
+<ComparisonLayout title={title} description={description} heading={heading} subtitle={subtitle} slug="copilot-coding-agent">
+
+	<section class="content-section">
+		<h2>The short version</h2>
+		<div class="callout-card">
+			<p>If your team already pays for Copilot and lives inside GitHub, the coding agent is <strong>almost free to adopt</strong>. You assign an issue and a draft PR appears. There is no host, no stack, and no configuration. That is a genuinely hard advantage to argue against.</p>
+			<p>What you give up is <strong>everything below the surface</strong>: which model reads your code, where the sandbox runs, what it can reach on the network, how narrowly its GitHub token is scoped, and what the workflow does between "issue" and "PR". None of that is yours to set.</p>
+			<p>Last Light exists for teams where those are requirements rather than details. The same is broadly true of OpenAI's Codex cloud agent and Google's Jules: different clouds and models, same trade.</p>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Side by side</h2>
+		<div class="table-scroll">
+			<table class="cmp duo">
+				<thead>
+					<tr><th></th><th class="ll">Last Light</th><th>Copilot coding agent</th></tr>
+				</thead>
+				<tbody>
+					{rowsDuo.map(([k, ll, other]) => (
+						<tr>
+							<th scope="row">{k}</th>
+							<td class="ll" set:html={ll} />
+							<td set:html={other} />
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>The trade, spelled out</h2>
+		<ul class="plain-list">
+			<li><strong>The bots' advantage:</strong> zero operations, best-in-class first-party models, tight platform integration (Copilot in GitHub, Jules in GCP), a polished managed sandbox. Assign an issue, a PR appears, nothing to run.</li>
+			<li><strong>The bots' constraints:</strong> vendor-hosted (your code runs in their cloud), vendor-model-locked (no BYOM), an opaque sandbox and egress boundary you can't tighten, per-seat or usage pricing, limited ability to customise the <em>workflow</em>.</li>
+			<li><strong>Last Light's trade:</strong> you own the harness, model routing, egress allowlist, GitHub token scopes, and the workflow DAG, and you can add triage, review, health, and security behaviours the bots don't offer as a unit. The cost is that you run and maintain it yourself, with no vendor to page.</li>
+		</ul>
+		<p class="section-note"><strong>Rule of thumb:</strong> if you want an issue&rarr;PR agent and don't care where it runs, the hosted bots are less work and likely have stronger out-of-the-box models. If <em>where</em> it runs, <em>what</em> it can reach, and <em>how</em> the workflow is shaped are first-order concerns, Last Light is built for that and they aren't.</p>
+	</section>
+
+	<section class="content-section">
+		<h2>Which should you pick?</h2>
+		<div class="choose-grid">
+			<div class="choose-card rival">
+				<div class="choose-tag">Choose Copilot coding agent when</div>
+				<p>your team already has Copilot, your work starts and ends inside GitHub, and the fastest possible path from "assign an issue" to "review a PR" matters more than controlling the machinery underneath.</p>
+			</div>
+			<div class="choose-card lastlight">
+				<div class="choose-tag">Choose Last Light when</div>
+				<p>your code can't run in a vendor's cloud, you need to choose the model, or you want more than issue&rarr;PR: scheduled triage, PR review, security sweeps and health reports on the same engine, all forkable.</p>
+			</div>
+		</div>
+	</section>
+
+</ComparisonLayout>

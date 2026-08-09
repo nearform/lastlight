@@ -1,0 +1,165 @@
+---
+/**
+ * Shared chrome for /comparisons/ and every /comparisons/<slug>/ page.
+ *
+ * Holds the styles the whole section shares (they were inlined in
+ * comparisons.astro before it was split) plus the cross-links between the
+ * per-competitor pages. That internal linking is deliberate: the deep pages
+ * are the ones Google was declining to index, and the hub is the only page in
+ * the section with any authority to pass down.
+ */
+import BaseLayout from './BaseLayout.astro';
+import { otherComparisons } from '../data/comparisons';
+
+interface Props {
+	title: string;
+	description: string;
+	heading: string;
+	subtitle: string;
+	/** Slug of the current comparison, or undefined on the hub. */
+	slug?: string;
+}
+
+const { title, description, heading, subtitle, slug } = Astro.props;
+const related = slug ? otherComparisons(slug) : [];
+---
+<BaseLayout title={title} description={description}>
+
+	<section class="page-header">
+		<h1 set:html={heading} />
+		<p class="subtitle">{subtitle}</p>
+		{slug && (
+			<p class="crumb"><a href="/comparisons/">&larr; All comparisons</a></p>
+		)}
+	</section>
+
+	<slot />
+
+	{slug && (
+		<section class="content-section last-section">
+			<h2>Compare against something else</h2>
+			<div class="related-grid">
+				{related.map((c) => (
+					<a class="related-card" href={`/comparisons/${c.slug}/`}>
+						<span class="related-tag">{c.category}</span>
+						<span class="related-name">Last Light vs. {c.name}</span>
+						<span class="related-blurb">{c.blurb}</span>
+					</a>
+				))}
+			</div>
+		</section>
+	)}
+
+	<style is:global>
+		/* Page header */
+		.page-header { max-width: 1200px; margin: 0 auto; padding: 4rem 2rem 1rem; }
+		.page-header h1 { font-size: clamp(1.8rem, 4vw, 2.5rem); margin-bottom: 1rem; letter-spacing: -0.02em; }
+		.page-header .subtitle { font-size: 1.1rem; color: var(--text-muted); line-height: 1.65; }
+		.accent { color: var(--gold); }
+		.crumb { margin-top: 1.25rem; font-family: var(--mono); font-size: 0.8rem; }
+		.crumb a { color: var(--text-muted); text-decoration: none; }
+		.crumb a:hover { color: var(--gold); }
+
+		/* Content sections */
+		.content-section { max-width: 1200px; margin: 0 auto; padding: 3rem 2rem; }
+		.content-section h2 { font-size: 1.6rem; margin-bottom: 0.75rem; letter-spacing: -0.01em; width: 100%; }
+		.content-section p { line-height: 1.7; font-size: 0.95rem; }
+		.content-section h3 { letter-spacing: -0.01em; }
+		.section-intro { font-size: 0.95rem; color: var(--text-muted); line-height: 1.7; margin-bottom: 2rem; }
+		.section-note { font-size: 0.88rem; color: var(--text-muted); margin-top: 1.5rem; line-height: 1.65; }
+		.last-section { padding-bottom: 1rem; }
+
+		/* Callout card */
+		.callout-card { background: var(--bg-card); border: 1px solid var(--border); border-left: 3px solid var(--teal); border-radius: 10px; padding: 1.5rem 1.75rem; }
+		.callout-card p { font-size: 0.95rem; color: var(--text); line-height: 1.7; margin-bottom: 0.85rem; }
+		.callout-card p:last-child { margin-bottom: 0; }
+
+		/* Quadrant map */
+		.quad-axis-top { text-align: center; font-family: var(--mono); font-size: 0.74rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.85rem; }
+		.quadrant-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.85rem; }
+		.quadrant-cell { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem 1.35rem; }
+		.quadrant-cell.highlight { border-color: var(--gold); background: rgba(240, 180, 41, 0.06); }
+		.quadrant-cell p { font-size: 0.92rem; color: var(--text); margin: 0; }
+		.quadrant-cell .muted { color: var(--text-muted); }
+		.quad-tag { font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.55rem; }
+		.quadrant-cell.highlight .quad-tag { color: var(--gold); }
+		.star { color: var(--gold); font-weight: 600; }
+
+		/* At-a-glance table */
+		.table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; margin-top: 1.5rem; }
+		table.cmp { border-collapse: collapse; width: 100%; min-width: 900px; font-size: 0.82rem; }
+		table.cmp.duo { min-width: 0; }
+		table.cmp thead { background: var(--navy); }
+		table.cmp th, table.cmp td { padding: 0.7rem 0.9rem; text-align: left; vertical-align: top; line-height: 1.45; border-bottom: 1px solid var(--border); }
+		table.cmp thead th { color: var(--text-bright); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+		table.cmp tbody td { color: var(--text-muted); }
+		table.cmp tbody th[scope="row"] { color: var(--text-bright); font-weight: 600; white-space: nowrap; background: var(--bg-card); }
+		table.cmp tbody tr:last-child th, table.cmp tbody tr:last-child td { border-bottom: none; }
+		table.cmp tr.is-ll, table.cmp tbody tr.is-ll th, table.cmp tbody tr.is-ll td { background: rgba(240, 180, 41, 0.07); }
+		table.cmp tbody tr.is-ll th[scope="row"] { color: var(--gold); }
+		table.cmp.duo td.ll { background: rgba(240, 180, 41, 0.07); color: var(--text); }
+		table.cmp.duo thead th.ll { color: var(--gold); }
+
+		/* Head-to-head */
+		.hh-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 1rem; }
+		.hh-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.5rem; }
+		.hh-card h3 { font-size: 1rem; margin-bottom: 0.85rem; }
+		.card-list { list-style: none; padding: 0; margin: 0; }
+		.card-list li { font-size: 0.88rem; color: var(--text-muted); line-height: 1.6; padding-left: 1.1rem; position: relative; margin-bottom: 0.7rem; }
+		.card-list li:last-child { margin-bottom: 0; }
+		.card-list li::before { content: "\2192"; position: absolute; left: 0; color: var(--teal); }
+		.card-list strong, .plain-list strong { color: var(--text-bright); font-weight: 600; }
+
+		/* Plain lists */
+		.plain-list { list-style: none; padding: 0; margin: 1rem 0 0; }
+		.plain-list li { font-size: 0.92rem; color: var(--text-muted); line-height: 1.65; padding-left: 1.2rem; position: relative; margin-bottom: 0.85rem; }
+		.plain-list li::before { content: "\2022"; position: absolute; left: 0.15rem; color: var(--gold); }
+
+		/* Choose-when cards */
+		.choose-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-top: 1.5rem; }
+		.choose-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.4rem 1.5rem; }
+		.choose-card.lastlight { border-left: 3px solid var(--gold); }
+		.choose-card.rival { border-left: 3px solid var(--teal); }
+		.choose-card p { font-size: 0.9rem; color: var(--text); line-height: 1.65; margin: 0; }
+		.choose-tag { font-family: var(--mono); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-bright); margin-bottom: 0.6rem; }
+		.choose-card.lastlight .choose-tag { color: var(--gold); }
+		.choose-card.rival .choose-tag { color: var(--teal); }
+
+		/* Decision guide */
+		.decide-list { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-top: 1.5rem; }
+		.decide-row { display: grid; grid-template-columns: 1fr 280px; gap: 1rem; padding: 0.85rem 1.25rem; border-bottom: 1px solid var(--border); align-items: center; }
+		.decide-row:last-child { border-bottom: none; }
+		.decide-row:nth-child(odd) { background: var(--bg-card); }
+		.decide-row.is-ll { background: rgba(240, 180, 41, 0.07); }
+		.decide-want { font-size: 0.9rem; color: var(--text); line-height: 1.55; }
+		.decide-pick { font-size: 0.86rem; color: var(--text-bright); font-weight: 600; text-align: right; }
+		.decide-row.is-ll .decide-pick { color: var(--gold); }
+
+		/* Hub + related cards */
+		.related-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1.5rem; }
+		.related-card { display: flex; flex-direction: column; gap: 0.4rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem 1.35rem; text-decoration: none; transition: border-color 0.15s ease; }
+		.related-card:hover { border-color: var(--gold); }
+		.related-tag { font-family: var(--mono); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+		.related-name { font-size: 0.98rem; font-weight: 600; color: var(--text-bright); }
+		.related-blurb { font-size: 0.86rem; color: var(--text-muted); line-height: 1.55; }
+
+		/* Sources */
+		.src-list { list-style: none; padding: 0; margin: 0; }
+		.src-list li { font-size: 0.9rem; color: var(--text-muted); line-height: 1.6; padding-left: 1.2rem; position: relative; margin-bottom: 0.6rem; }
+		.src-list li::before { content: "\2022"; position: absolute; left: 0.15rem; color: var(--text-muted); }
+
+		/* Responsive */
+		@media (max-width: 900px) {
+			.related-grid { grid-template-columns: repeat(2, 1fr); }
+		}
+		@media (max-width: 720px) {
+			.quadrant-grid { grid-template-columns: 1fr; }
+			.hh-grid { grid-template-columns: 1fr; }
+			.choose-grid { grid-template-columns: 1fr; }
+			.related-grid { grid-template-columns: 1fr; }
+			.decide-row { grid-template-columns: 1fr; gap: 0.35rem; }
+			.decide-pick { text-align: left; }
+		}
+	</style>
+
+</BaseLayout>
