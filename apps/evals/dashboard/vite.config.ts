@@ -9,7 +9,7 @@ const API_PORT = process.env.LASTLIGHT_EVALS_PORT ?? "4319";
 export default defineConfig({
   base: "/",
   plugins: [react()],
-  build: { outDir: "dist", emptyOutDir: true },
+  build: { outDir: "dist", emptyOutDir: true, cssMinify: "esbuild" },
   server: {
     port: Number(process.env.CLIENT_PORT ?? 5174),
     proxy: {
