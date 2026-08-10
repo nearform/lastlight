@@ -98,8 +98,8 @@ importers:
         specifier: ^10.5.4
         version: 10.5.4(postcss@8.5.23)
       daisyui:
-        specifier: ^4.12.14
-        version: 4.12.24(postcss@8.5.23)
+        specifier: ^5.7.16
+        version: 5.7.16
       postcss:
         specifier: ^8.5.23
         version: 8.5.23
@@ -1482,13 +1482,11 @@ packages:
   '@ff-labs/fff-bun@0.10.1':
     resolution: {integrity: sha512-9oUCxypGbf2q3vNfKZ31wdzt5KqjhA9S6TwQaFol/j1lkSHVGvtIa3RvdGHPs1UUuvR/MO7b6pHj054BR9bXPQ==}
     engines: {bun: '>=1.0.0'}
-    cpu: [x64, arm64]
     os: [darwin, linux, win32, android]
 
   '@ff-labs/fff-node@0.10.1':
     resolution: {integrity: sha512-I2TIWHkey4wpLCncUQymBz/yWrjp/TE91yjrPvSLaPMUMRf3wXwEmelGNnZ5ynxy3cUauYg5b5hsUwhOK4skfA==}
     engines: {node: '>=18.0.0'}
-    cpu: [x64, arm64]
     os: [darwin, linux, win32, android]
 
   '@ff-labs/pi-fff@0.10.1':
@@ -4101,6 +4099,9 @@ packages:
   daisyui@4.12.24:
     resolution: {integrity: sha512-JYg9fhQHOfXyLadrBrEqCDM6D5dWCSSiM6eTNCRrBRzx/VlOCrLS8eDfIw9RVvs64v2mJdLooKXY8EwQzoszAA==}
     engines: {node: '>=16.9.0'}
+
+  daisyui@5.7.16:
+    resolution: {integrity: sha512-V9CJxvrWIXTDuP/0tpijjWaKaKJNYo2IrULJfTWs3/DjW9rPqswk1n8NCLQRLrTutmlG2Ech7nkJDpCnF+6Dzw==}
 
   data-uri-to-buffer@4.0.1:
     resolution: {integrity: sha512-0R9ikRb668HB7QDxT1vkpuUBtqc53YyAwMwGeUFKRojY/NWKvdZ+9UYtRfGmhqNbRkTSVpMbmyhXipFFv2cb/A==}
@@ -10683,6 +10684,8 @@ snapshots:
       postcss-js: 4.1.0(postcss@8.5.23)
     transitivePeerDependencies:
       - postcss
+
+  daisyui@5.7.16: {}
 
   data-uri-to-buffer@4.0.1: {}
 
