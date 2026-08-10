@@ -1,6 +1,82 @@
+/* daisyUI v5 pre-built CSS — imported directly because daisyUI v5's Tailwind plugin
+   generates CSS objects with array values that Tailwind v3 serializes as [object Object].
+   The plugin is still loaded in tailwind.config.js with include:[] to register color
+   variables in Tailwind's theme (so bg-accent, text-primary, etc. work as utilities). */
+@import "daisyui/daisyui.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Custom daisyUI v5 themes — defined as CSS variables since v5 no longer reads
+   themes from tailwind.config.js. Variable names follow v5's --color-* scheme;
+   values must be complete CSS color values (oklch, hex, etc.). */
+:where(:root),
+[data-theme="lastlight"],
+:has(input.theme-controller[value="lastlight"]:checked) {
+  color-scheme: dark;
+  --color-base-100: oklch(10% 0.012 265);
+  --color-base-200: oklch(14% 0.012 265);
+  --color-base-300: oklch(19% 0.012 265);
+  --color-base-content: oklch(93% 0.009 265);
+  --color-primary: oklch(82% 0.124 245);
+  --color-primary-content: oklch(12% 0.02 265);
+  --color-secondary: oklch(76% 0.12 290);
+  --color-secondary-content: oklch(11% 0.04 290);
+  --color-accent: oklch(87% 0.16 87);
+  --color-accent-content: oklch(11% 0.03 87);
+  --color-neutral: oklch(19% 0.015 265);
+  --color-neutral-content: oklch(89% 0.01 265);
+  --color-info: oklch(87% 0.11 201);
+  --color-info-content: oklch(12% 0.03 215);
+  --color-success: oklch(86% 0.16 149);
+  --color-success-content: oklch(13% 0.04 149);
+  --color-warning: oklch(87% 0.16 87);
+  --color-warning-content: oklch(11% 0.03 87);
+  --color-error: oklch(79% 0.12 22);
+  --color-error-content: oklch(10% 0.03 22);
+  --radius-selector: 0.5rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+[data-theme="neaform"],
+:has(input.theme-controller[value="neaform"]:checked) {
+  color-scheme: light;
+  --color-base-100: oklch(100% 0 0);
+  --color-base-200: oklch(95% 0.005 265);
+  --color-base-300: oklch(86% 0.01 265);
+  --color-base-content: oklch(14% 0.03 265);
+  --color-primary: oklch(57% 0.16 166);
+  --color-primary-content: oklch(100% 0 0);
+  --color-secondary: oklch(8% 0.04 265);
+  --color-secondary-content: oklch(94% 0.01 265);
+  --color-accent: oklch(80% 0.19 174);
+  --color-accent-content: oklch(22% 0.06 156);
+  --color-neutral: oklch(8% 0.04 265);
+  --color-neutral-content: oklch(94% 0.01 265);
+  --color-info: oklch(31% 0.07 245);
+  --color-info-content: oklch(100% 0 0);
+  --color-success: oklch(57% 0.16 166);
+  --color-success-content: oklch(100% 0 0);
+  --color-warning: oklch(52% 0.13 57);
+  --color-warning-content: oklch(100% 0 0);
+  --color-error: oklch(52% 0.22 22);
+  --color-error-content: oklch(100% 0 0);
+  --radius-selector: 0.5rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
 
 html,
 body,
@@ -29,16 +105,16 @@ body {
    (text-base-content/40–60). On the near-black dark bg those read fine, but on
    the neaform white bg the same low alphas wash out. Scope a bump to the light
    theme only, lifting the faint tiers while preserving the /40 < /50 < /60
-   hierarchy. daisyUI exposes base-content as `oklch(var(--bc) / <alpha>)`, so
-   we override with matching oklch(); the `[data-theme]` prefix out-specifies
+   hierarchy. daisyUI v5 stores full color values in --color-base-content, so
+   use color-mix() for opacity. The `[data-theme]` prefix out-specifies
    the generated utility, so no !important is needed. */
-[data-theme="neaform"] .text-base-content\/25 { color: oklch(var(--bc) / 0.5); }
-[data-theme="neaform"] .text-base-content\/30 { color: oklch(var(--bc) / 0.55); }
-[data-theme="neaform"] .text-base-content\/40 { color: oklch(var(--bc) / 0.62); }
-[data-theme="neaform"] .text-base-content\/45 { color: oklch(var(--bc) / 0.66); }
-[data-theme="neaform"] .text-base-content\/50 { color: oklch(var(--bc) / 0.7); }
-[data-theme="neaform"] .text-base-content\/55 { color: oklch(var(--bc) / 0.73); }
-[data-theme="neaform"] .text-base-content\/60 { color: oklch(var(--bc) / 0.78); }
+[data-theme="neaform"] .text-base-content\/25 { color: color-mix(in oklab, var(--color-base-content) 50%, transparent); }
+[data-theme="neaform"] .text-base-content\/30 { color: color-mix(in oklab, var(--color-base-content) 55%, transparent); }
+[data-theme="neaform"] .text-base-content\/40 { color: color-mix(in oklab, var(--color-base-content) 62%, transparent); }
+[data-theme="neaform"] .text-base-content\/45 { color: color-mix(in oklab, var(--color-base-content) 66%, transparent); }
+[data-theme="neaform"] .text-base-content\/50 { color: color-mix(in oklab, var(--color-base-content) 70%, transparent); }
+[data-theme="neaform"] .text-base-content\/55 { color: color-mix(in oklab, var(--color-base-content) 73%, transparent); }
+[data-theme="neaform"] .text-base-content\/60 { color: color-mix(in oklab, var(--color-base-content) 78%, transparent); }
 
 /* Inline code. `.ll-prose code` is text-accent on a bg-base-300 chip — the
    bright mint green + grey chip reads fine on the dark theme but is muddy and
@@ -94,7 +170,8 @@ body {
 
 /* Search highlight */
 .search-hit {
-  @apply bg-accent/30 text-accent-content rounded px-0.5;
+  @apply text-accent-content rounded px-0.5;
+  background-color: color-mix(in oklab, var(--color-accent) 30%, transparent);
 }
 
 /* Prose tuning for markdown inside message bubbles */
@@ -120,7 +197,10 @@ body {
   @apply bg-transparent text-inherit p-0;
 }
 .ll-prose a {
-  @apply text-primary underline underline-offset-2 hover:text-primary/80;
+  @apply text-primary underline underline-offset-2;
+}
+.ll-prose a:hover {
+  color: color-mix(in oklab, var(--color-primary) 80%, transparent);
 }
 .ll-prose ul,
 .ll-prose ol {
@@ -139,10 +219,12 @@ body {
   @apply font-semibold text-base-content;
 }
 .ll-prose em {
-  @apply italic text-base-content/90;
+  @apply italic;
+  color: color-mix(in oklab, var(--color-base-content) 90%, transparent);
 }
 .ll-prose blockquote {
-  @apply border-l-2 border-base-300 pl-3 my-2 text-base-content/80;
+  @apply border-l-2 border-base-300 pl-3 my-2;
+  color: color-mix(in oklab, var(--color-base-content) 80%, transparent);
 }
 .ll-prose h1,
 .ll-prose h2,
