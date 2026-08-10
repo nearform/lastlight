@@ -1,6 +1,56 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
+@plugin "daisyui";
+
+/* ── Custom themes (daisyUI v5 CSS-variable format) ─────────────────────── */
+:root,
+[data-theme="lastlight"] {
+  color-scheme: dark;
+  --color-primary: #7dd3fc;
+  --color-primary-content: #0c1420;
+  --color-secondary: #c4b5fd;
+  --color-secondary-content: #1a1230;
+  --color-accent: #fcd34d;
+  --color-accent-content: #1a1200;
+  --color-neutral: #1f2530;
+  --color-neutral-content: #d6dde8;
+  --color-base-100: #0d1117;
+  --color-base-200: #161b22;
+  --color-base-300: #21262d;
+  --color-base-content: #e6edf3;
+  --color-info: #67e8f9;
+  --color-info-content: #061a20;
+  --color-success: #86efac;
+  --color-success-content: #062015;
+  --color-warning: #fcd34d;
+  --color-warning-content: #1a1200;
+  --color-error: #fca5a5;
+  --color-error-content: #1a0505;
+}
+
+[data-theme="neaform"] {
+  color-scheme: light;
+  --color-primary: #07a06f;
+  --color-primary-content: #ffffff;
+  --color-secondary: #000e38;
+  --color-secondary-content: #e7ecf5;
+  --color-accent: #00e6a4;
+  --color-accent-content: #00321f;
+  --color-neutral: #000e38;
+  --color-neutral-content: #e7ecf5;
+  --color-base-100: #ffffff;
+  --color-base-200: #eceff3;
+  --color-base-300: #cbd5e1;
+  --color-base-content: #0f1a2e;
+  --color-info: #0b3b63;
+  --color-info-content: #ffffff;
+  --color-success: #07a06f;
+  --color-success-content: #ffffff;
+  --color-warning: #b45309;
+  --color-warning-content: #ffffff;
+  --color-error: #dc2626;
+  --color-error-content: #ffffff;
+}
 
 html,
 body,
@@ -29,16 +79,16 @@ body {
    (text-base-content/40–60). On the near-black dark bg those read fine, but on
    the neaform white bg the same low alphas wash out. Scope a bump to the light
    theme only, lifting the faint tiers while preserving the /40 < /50 < /60
-   hierarchy. daisyUI exposes base-content as `oklch(var(--bc) / <alpha>)`, so
-   we override with matching oklch(); the `[data-theme]` prefix out-specifies
+   hierarchy. daisyUI v5 exposes base-content as var(--color-base-content), so
+   we override with matching oklch(from ...); the `[data-theme]` prefix out-specifies
    the generated utility, so no !important is needed. */
-[data-theme="neaform"] .text-base-content\/25 { color: oklch(var(--bc) / 0.5); }
-[data-theme="neaform"] .text-base-content\/30 { color: oklch(var(--bc) / 0.55); }
-[data-theme="neaform"] .text-base-content\/40 { color: oklch(var(--bc) / 0.62); }
-[data-theme="neaform"] .text-base-content\/45 { color: oklch(var(--bc) / 0.66); }
-[data-theme="neaform"] .text-base-content\/50 { color: oklch(var(--bc) / 0.7); }
-[data-theme="neaform"] .text-base-content\/55 { color: oklch(var(--bc) / 0.73); }
-[data-theme="neaform"] .text-base-content\/60 { color: oklch(var(--bc) / 0.78); }
+[data-theme="neaform"] .text-base-content\/25 { color: oklch(from var(--color-base-content) l c h / 0.5); }
+[data-theme="neaform"] .text-base-content\/30 { color: oklch(from var(--color-base-content) l c h / 0.55); }
+[data-theme="neaform"] .text-base-content\/40 { color: oklch(from var(--color-base-content) l c h / 0.62); }
+[data-theme="neaform"] .text-base-content\/45 { color: oklch(from var(--color-base-content) l c h / 0.66); }
+[data-theme="neaform"] .text-base-content\/50 { color: oklch(from var(--color-base-content) l c h / 0.7); }
+[data-theme="neaform"] .text-base-content\/55 { color: oklch(from var(--color-base-content) l c h / 0.73); }
+[data-theme="neaform"] .text-base-content\/60 { color: oklch(from var(--color-base-content) l c h / 0.78); }
 
 /* Inline code. `.ll-prose code` is text-accent on a bg-base-300 chip — the
    bright mint green + grey chip reads fine on the dark theme but is muddy and
@@ -71,18 +121,18 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: theme("colors.base-300");
+  background: var(--color-base-300);
   border-radius: 5px;
-  border: 2px solid theme("colors.base-100");
+  border: 2px solid var(--color-base-100);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: theme("colors.neutral");
+  background: var(--color-neutral);
 }
 
 /* Flash animation for new streamed messages */
 @keyframes message-flash {
   0% {
-    background-color: theme("colors.primary / 10%");
+    background-color: oklch(from var(--color-primary) l c h / 10%);
   }
   100% {
     background-color: transparent;
