@@ -98,8 +98,8 @@ importers:
         specifier: ^10.5.4
         version: 10.5.4(postcss@8.5.23)
       daisyui:
-        specifier: ^4.12.14
-        version: 4.12.24(postcss@8.5.23)
+        specifier: ^5.7.16
+        version: 5.7.16
       postcss:
         specifier: ^8.5.23
         version: 8.5.23
