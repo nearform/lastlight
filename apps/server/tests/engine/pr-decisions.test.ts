@@ -651,6 +651,51 @@ describe("resolveReviewTrigger", () => {
       /^already-reviewed: we reviewed abcdef1 \(CHANGES_REQUESTED\)/,
     ],
     [
+      // THE SWEEP LOOP. `botReviewAtHead` above keys on a POSTED review, so a
+      // run that completed without posting one left nothing the gate could see
+      // and the 30-minute sweep re-dispatched the same SHA forever. nearform
+      // burned ~$1.30/hour on seven PRs for days this way — 1260 review
+      // executions, 0 reviews posted.
+      "a run that already assessed this head without posting is not re-dispatched",
+      { assessedHeadShaByWorkflow: { "pr-review": "abcdef1234567890" } },
+      { trigger: "eager" },
+      { route: "sweep" },
+      "skip",
+      /^already-assessed: a pr-review run already handled abcdef1/,
+    ],
+    [
+      // The dedup is PER HEAD, so a push re-arms it — otherwise the fix would
+      // trade a spend loop for a PR that is never reviewed again.
+      "a new head clears the assessment",
+      { assessedHeadShaByWorkflow: { "pr-review": "0000000deadbeef" }, checksState: "passing" },
+      { trigger: "eager" },
+      { route: "sweep" },
+      "dispatch",
+      /^eager:/,
+    ],
+    [
+      // Below the explicit-request branch, like every other suppression gate:
+      // the gate answers "was this worth an unprompted review?", never "may a
+      // human ask?". The check's Re-run button arrives here too.
+      "an explicit ask still overrides the assessment",
+      { assessedHeadShaByWorkflow: { "pr-review": "abcdef1234567890" } },
+      { trigger: "eager" },
+      { explicitRequest: true },
+      "dispatch",
+      /^requested:/,
+    ],
+    [
+      // Another workflow's assessment is not ours. `pr-fix` runs at the same
+      // head constantly; keying on the whole map would suppress the review that
+      // fix was meant to earn.
+      "another workflow's assessment at this head does not suppress the review",
+      { assessedHeadShaByWorkflow: { "pr-fix": "abcdef1234567890" }, checksState: "passing" },
+      { trigger: "eager" },
+      { route: "sweep" },
+      "dispatch",
+      /^eager:/,
+    ],
+    [
       "eager reviews on PR attention, in parallel with CI",
       { checksState: "pending" },
       { trigger: "eager" },

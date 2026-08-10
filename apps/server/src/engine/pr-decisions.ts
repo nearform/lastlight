@@ -827,6 +827,7 @@ export function resolveReviewTrigger(
     checksState: state.checksState,
     botReviewAtHead: state.botReviewAtHead?.state ?? null,
     lastBotReviewSha: state.lastBotReview?.sha ?? null,
+    assessedHeadSha: state.assessedHeadShaByWorkflow["pr-review"] ?? null,
     pathsSinceLastBotReview: state.pathsSinceLastBotReview,
     generatedPaths: cfg.generatedPaths,
     runInFlight: state.runInFlight,
@@ -877,6 +878,47 @@ export function resolveReviewTrigger(
     return {
       decision: "skip",
       reason: `already-reviewed: we reviewed ${state.headSha.slice(0, 7)} (${state.botReviewAtHead.state})`,
+      inputs,
+    };
+  }
+
+  // A REVIEW RUN ALREADY HAPPENED AT THIS HEAD AND POSTED NOTHING.
+  //
+  // `botReviewAtHead` above is the only per-head dedup the review path had, and
+  // it keys on a POSTED review — so any run that completes without posting one
+  // leaves no trace the gate can see, and the 30-minute sweep re-dispatches it
+  // at the same SHA forever. The sweep is the release mechanism for PRs no
+  // webhook will ever fire for again, which is exactly what makes it an
+  // unbounded loop rather than one wasted run.
+  //
+  // Found in production: `nearform` swept seven bot-authored PRs every 30
+  // minutes for days. Each dispatched, ran the review agent, and had the agent
+  // refuse to self-review at `post-review` — a refusal, a full sandbox, and no
+  // review to remember it by. 1260 review executions, 0 posted, ~$1.30/hour.
+  // Self-authorship is now filtered in discovery (`cron/review-discovery.ts`),
+  // but that fixes one CAUSE; this fixes the loop, which any
+  // ran-but-posted-nothing outcome reaches — an agent that errors out mid-review,
+  // a phase that concludes there is nothing to say, a `post-review` that cannot
+  // reach GitHub.
+  //
+  // `assessedHeadShaByWorkflow` is populated for every PR-scoped workflow from
+  // SUCCEEDED runs only (`applyDerivedState`), which is what keeps this from
+  // swallowing genuine retries: a run that CRASHED records nothing here and is
+  // attempted again. It is deliberately distinct from `lastBotReview` — that
+  // field is the generated-only gate's baseline and must be a review we really
+  // posted (see its docstring); this one asks the different question "did a run
+  // already look at this SHA".
+  //
+  // Placed BELOW the explicit-request branch, so `@bot review`, the request
+  // label and the check's own Re-run button still force a fresh review — the
+  // same rule the generated-only gate follows. `skip`, not `defer`: nothing
+  // about this head will change, and the dispatching run already resolved its
+  // own `last-light/review` check, so no placeholder is owed.
+  const assessedSha = state.assessedHeadShaByWorkflow["pr-review"];
+  if (assessedSha && state.headSha && assessedSha === state.headSha) {
+    return {
+      decision: "skip",
+      reason: `already-assessed: a pr-review run already handled ${state.headSha.slice(0, 7)} without posting a review`,
       inputs,
     };
   }

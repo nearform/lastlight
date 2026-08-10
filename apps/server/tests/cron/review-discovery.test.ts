@@ -93,6 +93,41 @@ describe("discoverPrsAwaitingReview", () => {
     expect(out.map((p) => p.prNumber)).toEqual([9]);
   });
 
+  it("drops a PR authored by ANOTHER bot, matching the webhook route", async () => {
+    // The nearform outage. That instance runs as `nearform-lastlight[bot]` on
+    // repos also carrying PRs from `last-light[bot]`, so the old
+    // `authorLogin !== botLogin` filter matched none of them: the webhook
+    // dropped those PRs and the sweep offered them, every 30 minutes, forever.
+    // Each dispatch ran the agent, which refused to self-review after the spend.
+    const gh = fakeGh({
+      "yo61/repo": [
+        { number: 8, title: "our own PR", draft: false, authorLogin: "nearform-lastlight[bot]" },
+        { number: 10, title: "another App's PR", draft: false, authorLogin: "last-light[bot]" },
+        { number: 11, title: "dependabot's PR", draft: false, authorLogin: "dependabot[bot]" },
+        { number: 12, title: "human PR", draft: false, authorLogin: "erin" },
+      ],
+    });
+    const out = await discoverPrsAwaitingReview(["yo61/repo"], gh, {
+      botLogin: "nearform-lastlight[bot]",
+    });
+    expect(out.map((p) => p.prNumber)).toEqual([12]);
+  });
+
+  it("still drops our own PR when BOT_LOGIN carries no `[bot]` suffix", async () => {
+    // The suffix test covers every realistic login, so `botLogin` is only
+    // load-bearing for an overridden one — which is exactly why it stays.
+    const gh = fakeGh({
+      "yo61/repo": [
+        { number: 1, title: "ours", draft: false, authorLogin: "custom-reviewer" },
+        { number: 2, title: "human PR", draft: false, authorLogin: "erin" },
+      ],
+    });
+    const out = await discoverPrsAwaitingReview(["yo61/repo"], gh, {
+      botLogin: "custom-reviewer",
+    });
+    expect(out.map((p) => p.prNumber)).toEqual([2]);
+  });
+
   it("caps candidates per repo, oldest first, so one busy repo can't spin hundreds of dispatches", async () => {
     const gh = fakeGh({
       "yo61/repo": [

@@ -802,10 +802,22 @@ whose thesis is "make the policy configurable rather than hardcoded".
 
 The split is **discovery vs. policy**, not cron vs. webhook.
 `src/cron/review-discovery.ts` is now a pure candidate finder — open PRs in
-managed repos that we did not author — and knows nothing about modes,
+managed repos that **no bot** authored — and knows nothing about modes,
 drafts or settled checks. Its old draft filter and its per-candidate
 `getLatestBotReview` call are `PrState` fields (`isDraft`,
 `botReviewAtHead`), resolved once, checked once, for every route.
+
+The bot-authorship filter is the one thing discovery does decide, and it is
+arithmetic rather than policy: GitHub 422s an attempt to review your own pull
+request. It uses the **webhook route's predicate verbatim** — any author ending
+`[bot]`, plus the configured `botLogin` — because the two routes answering this
+differently is a spend loop, not a cosmetic drift. Discovery used to compare
+against `botLogin` alone, so a PR opened by a *different* App installed on the
+same repo was dropped by the webhook and accepted by the sweep. On the `nearform`
+instance (running as `nearform-lastlight[bot]`, on repos carrying
+`last-light[bot]` PRs) that matched nothing: seven PRs were re-dispatched every
+30 minutes for days, each one running the review agent to completion before it
+refused to self-review — 1260 review executions, 0 reviews posted, ~$1.30/hour.
 
 The resolver returns three values, because "do not run" and "what should
 the check say" are different questions:
@@ -814,7 +826,7 @@ the check say" are different questions:
 |---|---|---|
 | `dispatch` | an explicit request, the `review.requestLabel`, `eager` on PR attention, or a settled suite under `after-checks` | `in_progress`, completed from the run's terminal transition |
 | `defer` | `on-request` with nobody asking; `after-checks` waiting for CI (on every route but the sweep — see below), or reached on PR attention rather than a settle | `queued` under `after-checks`, `neutral` under `on-request` — and only on a PR-attention event, since a placeholder is a statement about a head SHA and the 30-minute sweep would otherwise re-post one per tick |
-| `skip` | draft (`review.skipDraft`), already reviewed at this head, only generated files changed since the review we posted (`review.generatedPaths`), or another PR-scoped run in flight | **nothing** — except the generated-only case, which posts a completed `carried-over` check restating the prior verdict. A run that never dispatches must otherwise not create a check and immediately conclude it |
+| `skip` | draft (`review.skipDraft`), already reviewed at this head, a `pr-review` run that already assessed this head without posting, only generated files changed since the review we posted (`review.generatedPaths`), or another PR-scoped run in flight | **nothing** — except the generated-only case, which posts a completed `carried-over` check restating the prior verdict. A run that never dispatches must otherwise not create a check and immediately conclude it |
 
 Two consequences worth stating outright:
 
@@ -855,6 +867,21 @@ Two consequences worth stating outright:
   on every degraded or truncated read, which dispatches. It is `skip` and not
   `defer` because no future event turns *this* delta into a review. The check
   run is the one place this skip is not silent — see `carried-over` below.
+- **A run that posted nothing still counts as having looked.** `botReviewAtHead`
+  is evidence of a POSTED review, so for a long time it was the only per-head
+  dedup the review path had — and any run that completed without posting left no
+  trace of itself at all. The sweep exists precisely to re-pick-up PRs no webhook
+  will fire for again, so it re-dispatched the same head forever. So the resolver
+  also skips when `PrState.assessedHeadShaByWorkflow["pr-review"]` equals the
+  head SHA: a run happened here and had its say. The two fields stay distinct
+  rather than merging, and the distinction is the point — `lastBotReview` is the
+  generated-only gate's *baseline* and must be a review somebody could read,
+  while this one answers the different question "did we already spend a run on
+  this SHA". Only **succeeded** runs populate it (`applyDerivedState`), so a run
+  that crashed is retried; it sits below the explicit-request branch, so `@bot
+  review` and the Re-run button still force one; and it is keyed per workflow, so
+  a `pr-fix` run at the same head does not suppress the review that fix was meant
+  to earn. A push clears it, because the SHA moves.
 - **Fix outranks review** on a settled-failing suite, and it needs no new
   state. `normalize()` returns one envelope per delivery and `route()`
   returns one handler, so a `check_suite.completed` fan-out into both

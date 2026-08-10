@@ -52,10 +52,13 @@ export interface ReviewDiscoveryClient {
 export interface ReviewDiscoverOptions {
   log?: (msg: string) => void;
   /**
-   * Bot login incl. the `[bot]` suffix (e.g. `last-light[bot]`). The bot's own
-   * PRs are not candidates — GitHub refuses a self-review outright. Defaults to
+   * Bot login incl. the `[bot]` suffix (e.g. `last-light[bot]`). Defaults to
    * `last-light[bot]`; the caller passes the configured `botLogin` so a renamed
    * App slug matches.
+   *
+   * Only load-bearing for a `BOT_LOGIN` overridden to something without the
+   * `[bot]` suffix — {@link isBotAuthored} drops EVERY bot-authored PR, ours
+   * included, matching the webhook route.
    */
   botLogin?: string;
   /**
@@ -75,6 +78,36 @@ export interface ReviewDiscoverOptions {
 
 const DEFAULT_BOT_LOGIN = "last-light[bot]";
 const DEFAULT_MAX_PER_REPO = 25;
+
+/**
+ * Is this PR authored by a bot — ANY bot, not just us?
+ *
+ * The webhook route's predicate, verbatim (`connectors/github-webhook.ts` →
+ * `isBotAuthoredPr`), because the two routes must answer this identically. They
+ * did not: discovery compared against our own `botLogin` alone, so a PR opened
+ * by a *different* App installed on the same repo was dropped by the webhook and
+ * accepted by the sweep.
+ *
+ * That is not hypothetical. The `nearform` instance runs as
+ * `nearform-lastlight[bot]` on repos that also carry PRs opened by
+ * `last-light[bot]`; none of them matched, so all seven were re-dispatched every
+ * 30 minutes. Each run reached the agent, which correctly refused to self-review
+ * — at full sandbox cost, ~$1.30/hour indefinitely, because a refusal posts no
+ * review and the per-head dedup keys on a POSTED one. The dedup hole is closed
+ * separately (`resolveReviewTrigger`'s `already-assessed` branch); this closes
+ * the reason those PRs were candidates at all.
+ *
+ * Widening past our own login is right on the merits too: the App cannot submit
+ * a formal review of any bot's PR it authored, dependency PRs belong to the
+ * dependabot crons rather than here, and a review nobody reads is spend without
+ * a reader.
+ *
+ * `botLogin` is still checked explicitly — `BOT_LOGIN` may override it to a
+ * string that does not carry the suffix.
+ */
+function isBotAuthored(authorLogin: string, botLogin: string): boolean {
+  return authorLogin === botLogin || authorLogin.endsWith("[bot]");
+}
 
 export async function discoverPrsAwaitingReview(
   repos: string[],
@@ -103,7 +136,7 @@ export async function discoverPrsAwaitingReview(
     }
 
     const candidates = open
-      .filter((pr) => pr.authorLogin !== botLogin)
+      .filter((pr) => !isBotAuthored(pr.authorLogin, botLogin))
       .sort((a, b) => a.number - b.number) // oldest first — deterministic, fair
       .slice(0, maxPerRepo);
 
