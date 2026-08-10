@@ -1,6 +1,60 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../tailwind.config.js";
+@plugin "daisyui";
+
+/* Custom themes — daisyUI v5 uses CSS custom properties on [data-theme].
+   Variable names changed from v4 (primary → --color-primary, etc.). */
+
+/* Dark "lastlight" theme — default */
+:root,
+[data-theme="lastlight"] {
+  color-scheme: dark;
+  --color-primary: #7dd3fc;
+  --color-primary-content: #0c1420;
+  --color-secondary: #c4b5fd;
+  --color-secondary-content: #1a1230;
+  --color-accent: #fcd34d;
+  --color-accent-content: #1a1200;
+  --color-neutral: #1f2530;
+  --color-neutral-content: #d6dde8;
+  --color-base-100: #0d1117;
+  --color-base-200: #161b22;
+  --color-base-300: #21262d;
+  --color-base-content: #e6edf3;
+  --color-info: #67e8f9;
+  --color-info-content: #061a20;
+  --color-success: #86efac;
+  --color-success-content: #062015;
+  --color-warning: #fcd34d;
+  --color-warning-content: #1a1200;
+  --color-error: #fca5a5;
+  --color-error-content: #1a0505;
+}
+
+/* Light "neaform" theme — Nearform brand */
+[data-theme="neaform"] {
+  color-scheme: light;
+  --color-primary: #067049;
+  --color-primary-content: #ffffff;
+  --color-secondary: #000e38;
+  --color-secondary-content: #e7ecf5;
+  --color-accent: #047857;
+  --color-accent-content: #ffffff;
+  --color-neutral: #000e38;
+  --color-neutral-content: #e7ecf5;
+  --color-base-100: #ffffff;
+  --color-base-200: #f4f6f8;
+  --color-base-300: #e2e6ea;
+  --color-base-content: #1b2330;
+  --color-info: #0b3b63;
+  --color-info-content: #ffffff;
+  --color-success: #067049;
+  --color-success-content: #ffffff;
+  --color-warning: #b45309;
+  --color-warning-content: #ffffff;
+  --color-error: #dc2626;
+  --color-error-content: #ffffff;
+}
 
 html,
 body,
@@ -70,12 +124,12 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: theme("colors.base-300");
+  background: var(--color-base-300);
   border-radius: 5px;
-  border: 2px solid theme("colors.base-100");
+  border: 2px solid var(--color-base-100);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: theme("colors.neutral");
+  background: var(--color-neutral);
 }
 
 /* Pulsing "live" badge — runs still being written. */
