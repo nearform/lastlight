@@ -301,7 +301,7 @@ importers:
         specifier: ^8.5.23
         version: 8.5.23
       tailwindcss:
-        specifier: ^3.4.15
+        specifier: ^3.4.19
         version: 3.4.19(tsx@4.23.1)(yaml@2.9.0)
       typescript:
         specifier: ^5.6.3
@@ -1482,13 +1482,11 @@ packages:
   '@ff-labs/fff-bun@0.10.1':
     resolution: {integrity: sha512-9oUCxypGbf2q3vNfKZ31wdzt5KqjhA9S6TwQaFol/j1lkSHVGvtIa3RvdGHPs1UUuvR/MO7b6pHj054BR9bXPQ==}
     engines: {bun: '>=1.0.0'}
-    cpu: [x64, arm64]
     os: [darwin, linux, win32, android]
 
   '@ff-labs/fff-node@0.10.1':
     resolution: {integrity: sha512-I2TIWHkey4wpLCncUQymBz/yWrjp/TE91yjrPvSLaPMUMRf3wXwEmelGNnZ5ynxy3cUauYg5b5hsUwhOK4skfA==}
     engines: {node: '>=18.0.0'}
-    cpu: [x64, arm64]
     os: [darwin, linux, win32, android]
 
   '@ff-labs/pi-fff@0.10.1':
