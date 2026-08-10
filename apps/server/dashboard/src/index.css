@@ -1,6 +1,121 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 + daisyUI v5 entry point.
+   - @import "tailwindcss" replaces the old @tailwind base/components/utilities directives.
+   - @plugin "daisyui" loads daisyUI v5 (default daisyUI themes: light --default, dark --prefersdark).
+   - Custom themes are defined below as CSS variable blocks.
+   - @theme customises the Tailwind token set (font families, font sizes).      */
+@import "tailwindcss";
+@plugin "daisyui";
+
+/* -------------------------------------------------------------------------- */
+/* Theme tokens                                                                */
+/* -------------------------------------------------------------------------- */
+
+@theme {
+  /* Font families */
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
+
+  /* Font sizes — intentionally smaller than Tailwind defaults for a compact UI */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.625rem;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Custom themes                                                               */
+/* -------------------------------------------------------------------------- */
+
+/* Dark theme — applied when data-theme="lastlight" or by default under
+   prefers-color-scheme: dark (see media block below). */
+[data-theme=lastlight] {
+  color-scheme: dark;
+  --color-primary:          #7dd3fc;
+  --color-primary-content:  #0c1420;
+  --color-secondary:        #c4b5fd;
+  --color-secondary-content:#1a1230;
+  --color-accent:           #fcd34d;
+  --color-accent-content:   #1a1200;
+  --color-neutral:          #1f2530;
+  --color-neutral-content:  #d6dde8;
+  --color-base-100:         #0d1117;
+  --color-base-200:         #161b22;
+  --color-base-300:         #21262d;
+  --color-base-content:     #e6edf3;
+  --color-info:             #67e8f9;
+  --color-info-content:     #061a20;
+  --color-success:          #86efac;
+  --color-success-content:  #062015;
+  --color-warning:          #fcd34d;
+  --color-warning-content:  #1a1200;
+  --color-error:            #fca5a5;
+  --color-error-content:    #1a0505;
+}
+
+/* Apply lastlight automatically when the user has not chosen a theme and
+   their OS is set to dark mode. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --color-primary:          #7dd3fc;
+    --color-primary-content:  #0c1420;
+    --color-secondary:        #c4b5fd;
+    --color-secondary-content:#1a1230;
+    --color-accent:           #fcd34d;
+    --color-accent-content:   #1a1200;
+    --color-neutral:          #1f2530;
+    --color-neutral-content:  #d6dde8;
+    --color-base-100:         #0d1117;
+    --color-base-200:         #161b22;
+    --color-base-300:         #21262d;
+    --color-base-content:     #e6edf3;
+    --color-info:             #67e8f9;
+    --color-info-content:     #061a20;
+    --color-success:          #86efac;
+    --color-success-content:  #062015;
+    --color-warning:          #fcd34d;
+    --color-warning-content:  #1a1200;
+    --color-error:            #fca5a5;
+    --color-error-content:    #1a0505;
+  }
+}
+
+/* Nearform brand light theme. Palette from ~/work/ainative-comps
+   (src/styles/legacy.css) mapped onto daisyUI's semantic tokens. */
+[data-theme=neaform] {
+  color-scheme: light;
+  --color-primary:          #07a06f; /* nf dark green */
+  --color-primary-content:  #ffffff;
+  --color-secondary:        #000e38; /* nf deep navy */
+  --color-secondary-content:#e7ecf5;
+  --color-accent:           #00e6a4; /* nf bright green */
+  --color-accent-content:   #00321f;
+  --color-neutral:          #000e38;
+  --color-neutral-content:  #e7ecf5;
+  --color-base-100:         #ffffff; /* card / main content surface */
+  --color-base-200:         #eceff3; /* headers / sidebar / list */
+  --color-base-300:         #cbd5e1; /* borders + dividers */
+  --color-base-content:     #0f1a2e; /* near-black navy text */
+  --color-info:             #0b3b63;
+  --color-info-content:     #ffffff;
+  --color-success:          #07a06f;
+  --color-success-content:  #ffffff;
+  --color-warning:          #b45309;
+  --color-warning-content:  #ffffff;
+  --color-error:            #dc2626;
+  --color-error-content:    #ffffff;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Base                                                                        */
+/* -------------------------------------------------------------------------- */
 
 html,
 body,
@@ -71,18 +186,19 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: theme("colors.base-300");
+  background: var(--color-base-300);
   border-radius: 5px;
-  border: 2px solid theme("colors.base-100");
+  border: 2px solid var(--color-base-100);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: theme("colors.neutral");
+  background: var(--color-neutral);
 }
 
 /* Flash animation for new streamed messages */
 @keyframes message-flash {
   0% {
-    background-color: theme("colors.primary / 10%");
+    /* daisyUI v5: use color-mix() for opacity on CSS variable colors */
+    background-color: color-mix(in oklch, var(--color-primary) 10%, transparent);
   }
   100% {
     background-color: transparent;
@@ -94,7 +210,11 @@ body {
 
 /* Search highlight */
 .search-hit {
-  @apply bg-accent/30 text-accent-content rounded px-0.5;
+  /* bg-accent/30 — daisyUI v5 registers colors as var(--color-*) which
+     doesn't support Tailwind's opacity-modifier syntax in @apply; use
+     color-mix() instead. */
+  background-color: color-mix(in oklch, var(--color-accent) 30%, transparent);
+  @apply text-accent-content rounded px-0.5;
 }
 
 /* Prose tuning for markdown inside message bubbles */
@@ -120,7 +240,10 @@ body {
   @apply bg-transparent text-inherit p-0;
 }
 .ll-prose a {
-  @apply text-primary underline underline-offset-2 hover:text-primary/80;
+  @apply text-primary underline underline-offset-2;
+}
+.ll-prose a:hover {
+  color: color-mix(in oklch, var(--color-primary) 80%, transparent);
 }
 .ll-prose ul,
 .ll-prose ol {
@@ -139,10 +262,12 @@ body {
   @apply font-semibold text-base-content;
 }
 .ll-prose em {
-  @apply italic text-base-content/90;
+  @apply italic;
+  color: color-mix(in oklch, var(--color-base-content) 90%, transparent);
 }
 .ll-prose blockquote {
-  @apply border-l-2 border-base-300 pl-3 my-2 text-base-content/80;
+  @apply border-l-2 border-base-300 pl-3 my-2;
+  color: color-mix(in oklch, var(--color-base-content) 80%, transparent);
 }
 .ll-prose h1,
 .ll-prose h2,
