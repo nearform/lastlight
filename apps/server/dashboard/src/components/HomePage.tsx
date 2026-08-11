@@ -16,6 +16,7 @@ import type { LucideIcon } from "lucide-react";
 import { api, type WorkflowRun, type ContainerStats, type ContainerKind, type HostStats } from "../api";
 import { useStatsSeries } from "../hooks/useDailyStats";
 import { useTheme } from "../hooks/useTheme";
+import { STATUS } from "../lib/status-colors";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
 import { useVisibleRepos, repoScopeParam } from "../hooks/useVisibleRepos";
 import { GhLink } from "./GhLink";
@@ -29,66 +30,19 @@ type StatRange = "today" | "7d" | "30d";
 // the chart renders — CHART_DARK matches the daisyUI `lastlight` theme,
 // CHART_LIGHT matches `neaform`. Selected in-component via useTheme().
 /**
- * Execution outcome — a STATUS palette, not a categorical one (issue #325).
+ * Execution outcome, mapped onto the shared STATUS palette (issues #325, #329).
  *
- * The four bands are states, not identities, so they take reserved status hues
- * and are **mode-invariant**: the same steps clear 3:1 on both the light card
- * (`#ffffff`) and the dark one (`#161b22`), and re-stepping them per theme
- * would only re-open the separation problem below.
- *
- * Only THREE of the four are solid fills. `skipped` is a hatch (see the
- * `<pattern>` at the chart), because it is the one band that is not an
- * outcome — and because hue could not carry it: every neutral that read as
- * "absence" landed too close to the green, and the best of them (ΔE 15.9,
- * nominally over the floor) was still called out as similar on sight. A floor
- * is a minimum, not a target. Texture is a different channel, so it separates
- * unconditionally.
- *
- * With `skipped` out of the colour set there are only three solids left, and
- * that is the whole reason this palette passes every check in both modes —
- * measured, not eyeballed (OKLab ΔE×100, min of protan/deutan):
- *
- *   succeeded ↔ deferred   22.1   (normal 26.0)
- *   deferred  ↔ failed     14.6   (normal 26.1)
- *   succeeded ↔ failed      8.7   (normal 37.7)   ← worst CVD
- *
- * **The red is a crimson so the green can be a green.** These two move
- * together: a true green (`#0ca30c`) against a pure red (`#d03b3b`) measures
- * ΔE 4.1 for deuteranopes — unusable — and every greener green collides the
- * same way. Cooling the red to `#cc2b5e` buys the room, and only then does
- * `succeeded` get to look like success rather than a teal compromise. The
- * earlier emerald was the other end of the same trade.
- *
- * **`deferred` is BLUE, not amber, and that is a salience decision.** The
- * bands are not equally important — succeeded is the signal, skipped is
- * unremarkable, deferred is an indication of load, failed is bad — so visual
- * weight has to track that order (Tufte's "smallest effective difference";
- * Few's rule that saturation is a budget spent only on what needs attention).
- * A bright amber made the LEAST consequential band the loudest thing on the
- * chart. Blue also stops it overclaiming: Carbon reserves yellow/orange for
- * "regular"/"serious warning", and a full sandbox queue is neither — it is
- * informational, it costs $0, and it clears itself. It fixes the numbers too:
- * amber was the one step failing contrast on white (1.83:1).
- *
- * Red/green dichromacy is the binding constraint on the whole palette, and it
- * cannot be solved by choosing a better red OR a better green in isolation —
- * only by moving the pair apart. (The dashboard's old dark pastels,
- * `#86efac`/`#fca5a5`, measured 5.8: below the ΔE 6 floor outright.)
- *
- * Two knowingly-accepted validator complaints, both properties of a status
- * palette rather than defects:
- *  - `skipped` fails the chroma floor. It is grey ON PURPOSE — grey IS the
- *    message ("nothing ran"), and a status hue there would imply one did.
- *  - `deferred` sits outside the categorical lightness band, and is sub-3:1 on
- *    the light surface (1.83). Both are documented properties of the reference
- *    `warning` step; the prescribed mitigation is never colour alone — hence
- *    the `<Legend>`.
+ * The colours, and every measurement justifying them, live in
+ * `lib/status-colors.ts` — they are not this chart's to choose, because
+ * "good" has to mean the same green here as on the feedback page. What IS
+ * local to this chart is how the four are rendered: see the `<Bar>` stack for
+ * the hatch, the stack order and the gap.
  */
 const OUTCOME = {
-  succeeded: "#0ca30c",
-  skipped: "#6b7280",
-  deferred: "#4a7fb5",
-  failed: "#cc2b5e",
+  succeeded: STATUS.good,
+  skipped: STATUS.neutral,
+  deferred: STATUS.info,
+  failed: STATUS.bad,
 };
 
 /**
@@ -118,8 +72,6 @@ function outcomeTooltipFormatter(value: unknown, name: unknown): [string, string
 }
 
 const CHART_DARK = {
-  success: "#86efac",
-  error: "#fca5a5",
   primary: "#7dd3fc",
   secondary: "#c4b5fd",
   accent: "#fcd34d",
@@ -131,8 +83,6 @@ const CHART_DARK = {
 };
 
 const CHART_LIGHT = {
-  success: "#07a06f",
-  error: "#dc2626",
   primary: "#0b3b63",
   secondary: "#7c3aed",
   accent: "#b45309",
