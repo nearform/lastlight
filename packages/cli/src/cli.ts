@@ -824,14 +824,20 @@ async function cmdStats(): Promise<void> {
     const rows = (data.daily as any[]).map((d) => ({
       date: d.date,
       execs: String(d.executions),
-      ok: String(d.successes),
-      fail: String(d.failures),
+      ok: String(d.succeeded),
+      // Neither a pass nor a fail — see `execMark` in cli-format.ts for the
+      // per-row equivalent. `skip` is a cascade skip (the phase never ran),
+      // `defer` is a k8s ResourceQuota rejection that requeued (issue #325).
+      skip: d.skipped ? chalk.dim(String(d.skipped)) : "0",
+      defer: d.deferred ? chalk.yellow(String(d.deferred)) : "0",
+      fail: d.failed ? chalk.red(String(d.failed)) : "0",
       tokens: String(d.totalTokens ?? 0),
       cost: `$${(d.costUsd ?? 0).toFixed(2)}`,
     }));
     console.log(table(rows, [
       { key: "date", header: "DATE" }, { key: "execs", header: "EXECS" },
-      { key: "ok", header: "OK" }, { key: "fail", header: "FAIL" },
+      { key: "ok", header: "OK" }, { key: "skip", header: "SKIP" },
+      { key: "defer", header: "DEFER" }, { key: "fail", header: "FAIL" },
       { key: "tokens", header: "TOKENS" }, { key: "cost", header: "COST" },
     ]));
     return;
@@ -845,14 +851,23 @@ async function cmdStats(): Promise<void> {
   console.log(`${chalk.bold("Total executions")}  ${data.total_executions}`);
   console.log(`${chalk.bold("Today")}             ${data.today_count}`);
   console.log(`${chalk.bold("Running")}           ${data.running}`);
-  const bySkill = data.by_skill as Record<string, { count: number; success: number; fail: number }>;
+  const bySkill = data.by_skill as Record<
+    string,
+    { count: number; succeeded: number; skipped: number; deferred: number; failed: number }
+  >;
   const rows = Object.entries(bySkill).map(([skill, v]) => ({
-    skill, count: String(v.count), ok: chalk.green(String(v.success)), fail: v.fail ? chalk.red(String(v.fail)) : "0",
+    skill,
+    count: String(v.count),
+    ok: chalk.green(String(v.succeeded)),
+    skip: v.skipped ? chalk.dim(String(v.skipped)) : "0",
+    defer: v.deferred ? chalk.yellow(String(v.deferred)) : "0",
+    fail: v.failed ? chalk.red(String(v.failed)) : "0",
   }));
   console.log("");
   console.log(table(rows, [
     { key: "skill", header: "SKILL" }, { key: "count", header: "RUNS" },
-    { key: "ok", header: "OK" }, { key: "fail", header: "FAIL" },
+    { key: "ok", header: "OK" }, { key: "skip", header: "SKIP" },
+    { key: "defer", header: "DEFER" }, { key: "fail", header: "FAIL" },
   ]));
 }
 
