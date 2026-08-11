@@ -1,47 +1,104 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import {
+  DEFAULT_PREFERENCE,
+  STORAGE_KEY,
+  nextPreference,
+  parsePreference,
+  resolveTheme,
+  type Theme,
+  type ThemePreference,
+} from "../lib/theme";
 
-export type Theme = "lastlight" | "neaform";
+export type { Theme, ThemePreference };
 
 interface ThemeContextValue {
+  /** The theme actually applied — always concrete, never "system". */
   theme: Theme;
+  /** What the user asked for. `system` means "follow the OS". */
+  preference: ThemePreference;
   /** Convenience — true for the dark `lastlight` theme. */
   isDark: boolean;
-  setTheme: (t: Theme) => void;
+  setPreference: (p: ThemePreference) => void;
+  /** Advance the cycle: system → dark → light → system. */
   toggleTheme: () => void;
 }
 
-const STORAGE_KEY = "ll-theme";
-
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-/** Read the theme the inline `index.html` boot script already applied to
- * `<html>` — the single source of truth, so there's no flash and no need to
- * re-derive from localStorage / prefers-color-scheme here. */
-function currentTheme(): Theme {
-  const attr = document.documentElement.getAttribute("data-theme");
-  return attr === "neaform" ? "neaform" : "lastlight";
+const DARK_QUERY = "(prefers-color-scheme: dark)";
+
+const systemPrefersDark = (): boolean =>
+  typeof window !== "undefined" && !!window.matchMedia?.(DARK_QUERY).matches;
+
+/**
+ * The preference the pre-paint script in `index.html` already read.
+ *
+ * Read from storage rather than from the `data-theme` attribute it set: the
+ * attribute is the RESOLVED theme, and `lastlight` there is ambiguous — it
+ * could be an explicit dark choice or a `system` preference on a dark OS.
+ * Collapsing those two would silently convert everyone following the OS into
+ * a pinned preference on first render, which is the bug this replaces.
+ */
+function storedPreference(): ThemePreference {
+  try {
+    return parsePreference(localStorage.getItem(STORAGE_KEY));
+  } catch {
+    return DEFAULT_PREFERENCE;
+  }
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(currentTheme);
+  const [preference, setPreferenceState] = useState<ThemePreference>(storedPreference);
+  const [theme, setThemeState] = useState<Theme>(() =>
+    resolveTheme(storedPreference(), systemPrefersDark()),
+  );
 
-  const setTheme = useCallback((t: Theme) => {
+  const apply = useCallback((t: Theme) => {
     document.documentElement.setAttribute("data-theme", t);
-    try {
-      localStorage.setItem(STORAGE_KEY, t);
-    } catch {
-      // Private-mode / storage-disabled — theme still applies for this session.
-    }
     setThemeState(t);
   }, []);
 
+  const setPreference = useCallback(
+    (p: ThemePreference) => {
+      setPreferenceState(p);
+      apply(resolveTheme(p, systemPrefersDark()));
+      try {
+        localStorage.setItem(STORAGE_KEY, p);
+      } catch {
+        // Private-mode / storage-disabled — the theme still applies for this
+        // session, it just won't survive a reload.
+      }
+    },
+    [apply],
+  );
+
+  /**
+   * Track the OS while the preference is `system`.
+   *
+   * Without this, "follow the OS" would mean "follow the OS as it was when the
+   * tab loaded" — a machine that switches at sunset would leave the dashboard
+   * on the wrong theme until a reload. The listener is only attached for
+   * `system`, so an explicit choice costs nothing and cannot be overridden.
+   */
+  useEffect(() => {
+    if (preference !== "system") return;
+    const mq = window.matchMedia?.(DARK_QUERY);
+    if (!mq) return;
+    const onChange = (e: MediaQueryListEvent) => apply(resolveTheme("system", e.matches));
+    mq.addEventListener("change", onChange);
+    // Re-resolve on attach too: the OS may have changed between the pre-paint
+    // script running and this effect, and while another tab held the mount.
+    apply(resolveTheme("system", mq.matches));
+    return () => mq.removeEventListener("change", onChange);
+  }, [preference, apply]);
+
   const toggleTheme = useCallback(() => {
-    setTheme(theme === "lastlight" ? "neaform" : "lastlight");
-  }, [theme, setTheme]);
+    setPreference(nextPreference(preference));
+  }, [preference, setPreference]);
 
   return (
     <ThemeContext.Provider
-      value={{ theme, isDark: theme === "lastlight", setTheme, toggleTheme }}
+      value={{ theme, preference, isDark: theme === "lastlight", setPreference, toggleTheme }}
     >
       {children}
     </ThemeContext.Provider>

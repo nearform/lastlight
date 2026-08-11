@@ -5,15 +5,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <script>
       // Apply the theme before first paint to avoid a flash of the wrong one.
-      // Saved choice wins; otherwise follow the OS (dark OS -> lastlight, light
-      // OS -> neaform). Kept in sync with src/hooks/useTheme.tsx (key "ll-theme").
+      //
+      // This MIRRORS src/lib/theme.ts (`parsePreference` + `resolveTheme`, key
+      // "ll-theme") and cannot import it — this runs before the bundle exists,
+      // which is the whole point of it. `dashboard-theme-preference.test.ts`
+      // pins the two together.
+      //
+      // The stored value is a PREFERENCE (system | dark | light), not a theme.
+      // "lastlight"/"neaform" are the pre-#331 values and mean dark/light — an
+      // explicit choice someone made, so they are honoured rather than reset.
       (function () {
         try {
-          var saved = localStorage.getItem("ll-theme");
+          var raw = localStorage.getItem("ll-theme");
+          var pref =
+            raw === "dark" || raw === "lastlight"
+              ? "dark"
+              : raw === "light" || raw === "neaform"
+                ? "light"
+                : "system";
           var sysDark =
             window.matchMedia &&
             window.matchMedia("(prefers-color-scheme: dark)").matches;
-          var theme = saved || (sysDark ? "lastlight" : "neaform");
+          var theme =
+            pref === "dark"
+              ? "lastlight"
+              : pref === "light"
+                ? "neaform"
+                : sysDark
+                  ? "lastlight"
+                  : "neaform";
           document.documentElement.setAttribute("data-theme", theme);
         } catch (e) {
           document.documentElement.setAttribute("data-theme", "lastlight");

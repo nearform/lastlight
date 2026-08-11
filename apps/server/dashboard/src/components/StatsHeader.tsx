@@ -1,9 +1,9 @@
 import clsx from "clsx";
 import { useState } from "react";
-import { BookOpen, Clock, Filter, GitBranch, LogOut, Moon, Radio, RefreshCw, Sun } from "lucide-react";
+import { BookOpen, Clock, Filter, GitBranch, LogOut, Monitor, Moon, Radio, RefreshCw, Sun } from "lucide-react";
 import type { MeRepos } from "../api";
 import type { StreamStatus } from "../hooks/useSessionStream";
-import { useTheme } from "../hooks/useTheme";
+import { useTheme, type ThemePreference } from "../hooks/useTheme";
 import { useVisibleRepos } from "../hooks/useVisibleRepos";
 import { NearformLogo } from "./NearformLogo";
 import { VersionPin } from "./VersionPin";
@@ -136,6 +136,16 @@ function RepoScopeToggle() {
   );
 }
 
+/**
+ * What the control will do NEXT, not what it is — a cycling button whose
+ * tooltip named its current state would leave the third state undiscoverable.
+ */
+const THEME_TITLE: Record<ThemePreference, string> = {
+  system: "Theme: following the system — switch to dark",
+  dark: "Theme: dark — switch to light",
+  light: "Theme: light — follow the system",
+};
+
 export function StatsHeader({
   timeRange,
   onTimeRangeChange,
@@ -147,7 +157,7 @@ export function StatsHeader({
   onLogout,
 }: Props) {
   const statusInfo = STATUS_LABEL[streamStatus];
-  const { isDark, toggleTheme } = useTheme();
+  const { preference, toggleTheme } = useTheme();
 
   return (
     <header className="bg-base-200 border-b border-base-300 flex items-center gap-3 px-4 h-12 shrink-0">
@@ -245,13 +255,16 @@ export function StatsHeader({
 
       <VersionPin />
 
+      {/* Three states, so the icon shows the PREFERENCE rather than the theme:
+          on `system` a monitor, so "following the OS" is legible instead of
+          being inferred from the absence of a choice. */}
       <button
         onClick={toggleTheme}
         className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
-        title={isDark ? "Switch to light theme" : "Switch to dark theme"}
-        aria-label="Toggle light/dark theme"
+        title={THEME_TITLE[preference]}
+        aria-label={THEME_TITLE[preference]}
       >
-        {isDark ? <Sun size={14} /> : <Moon size={14} />}
+        {preference === "system" ? <Monitor size={14} /> : preference === "dark" ? <Moon size={14} /> : <Sun size={14} />}
       </button>
 
       {onLogout && (
