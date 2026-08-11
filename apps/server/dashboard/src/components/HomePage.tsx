@@ -70,8 +70,6 @@ type StatRange = "today" | "7d" | "30d";
  * informational, it costs $0, and it clears itself. It fixes the numbers too:
  * amber was the one step failing contrast on white (1.83:1).
  *
- * Two choices carry that, and neither is cosmetic:
- *
  * Red/green dichromacy is the binding constraint on the whole palette, and it
  * cannot be solved by choosing a better red OR a better green in isolation —
  * only by moving the pair apart. (The dashboard's old dark pastels,
@@ -94,11 +92,18 @@ const OUTCOME = {
 };
 
 /**
- * Bottom-to-top stack order, and the single source of it. Declared as data
- * rather than left implicit in the JSX because the tooltip has to REVERSE it:
- * a list reads top-down while a stack builds bottom-up, so listing the bands
- * in stack order puts `succeeded` at the top of the tooltip and `failed` at
- * the bottom — the mirror image of the bar the reader is pointing at.
+ * Bottom-to-top stack order — `succeeded` is the bottom band, `failed` the
+ * top — and the single source of it.
+ *
+ * Declared as data rather than left implicit in the JSX because the tooltip
+ * must list the bands in the order the eye meets them going DOWN the bar,
+ * i.e. `failed` first and `succeeded` last. A tooltip is read top-down; a
+ * stack is built bottom-up; so the tooltip needs this array reversed.
+ *
+ * That reversal is the `-` in the `itemSorter` below, and it is load-bearing:
+ * recharts sorts the payload with lodash `sortBy` (ascending), so negating
+ * the index yields failed(-3) → deferred(-2) → skipped(-1) → succeeded(0).
+ * Dropping the `-` produces exactly the mirror image of the bar.
  */
 const OUTCOME_STACK = ["succeeded", "skipped", "deferred", "failed"] as const;
 
@@ -651,9 +656,11 @@ function StatsChartsSection() {
     succeeded: d.succeeded,
     deferred: d.deferred,
     failed: d.failed,
-    // `skipped` is deliberately absent from the stack: a cascade skip is the
-    // CONSEQUENCE of another row's outcome, so stacking it renders one incident
-    // twice. It stays in the tooltip via `executions`.
+    // `skipped` IS in the stack, as a hatch rather than a solid fill — the
+    // phase never ran, so texture carries it instead of hue. Keeping it in is
+    // what makes the bar total to the "Executions" stat card above: it is 31%
+    // of rows on a busy day, so dropping it would make the two disagree by a
+    // third and silently understate the volume.
     skipped: d.skipped,
     inputTokens: d.inputTokens,
     outputTokens: d.outputTokens,
