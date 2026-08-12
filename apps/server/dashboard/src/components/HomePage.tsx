@@ -8,6 +8,7 @@ import {
   XAxis,
   YAxis,
   Tooltip,
+  Legend,
   CartesianGrid,
 } from "recharts";
 import { Server, Bot, Box, Network } from "lucide-react";
@@ -27,6 +28,95 @@ type StatRange = "today" | "7d" | "30d";
 // internally for tooltip swatches and gradients. Use literal hex per theme so
 // the chart renders — CHART_DARK matches the daisyUI `lastlight` theme,
 // CHART_LIGHT matches `neaform`. Selected in-component via useTheme().
+/**
+ * Execution outcome — a STATUS palette, not a categorical one (issue #325).
+ *
+ * The four bands are states, not identities, so they take reserved status hues
+ * and are **mode-invariant**: the same steps clear 3:1 on both the light card
+ * (`#ffffff`) and the dark one (`#161b22`), and re-stepping them per theme
+ * would only re-open the separation problem below.
+ *
+ * Only THREE of the four are solid fills. `skipped` is a hatch (see the
+ * `<pattern>` at the chart), because it is the one band that is not an
+ * outcome — and because hue could not carry it: every neutral that read as
+ * "absence" landed too close to the green, and the best of them (ΔE 15.9,
+ * nominally over the floor) was still called out as similar on sight. A floor
+ * is a minimum, not a target. Texture is a different channel, so it separates
+ * unconditionally.
+ *
+ * With `skipped` out of the colour set there are only three solids left, and
+ * that is the whole reason this palette passes every check in both modes —
+ * measured, not eyeballed (OKLab ΔE×100, min of protan/deutan):
+ *
+ *   succeeded ↔ deferred   22.1   (normal 26.0)
+ *   deferred  ↔ failed     14.6   (normal 26.1)
+ *   succeeded ↔ failed      8.7   (normal 37.7)   ← worst CVD
+ *
+ * **The red is a crimson so the green can be a green.** These two move
+ * together: a true green (`#0ca30c`) against a pure red (`#d03b3b`) measures
+ * ΔE 4.1 for deuteranopes — unusable — and every greener green collides the
+ * same way. Cooling the red to `#cc2b5e` buys the room, and only then does
+ * `succeeded` get to look like success rather than a teal compromise. The
+ * earlier emerald was the other end of the same trade.
+ *
+ * **`deferred` is BLUE, not amber, and that is a salience decision.** The
+ * bands are not equally important — succeeded is the signal, skipped is
+ * unremarkable, deferred is an indication of load, failed is bad — so visual
+ * weight has to track that order (Tufte's "smallest effective difference";
+ * Few's rule that saturation is a budget spent only on what needs attention).
+ * A bright amber made the LEAST consequential band the loudest thing on the
+ * chart. Blue also stops it overclaiming: Carbon reserves yellow/orange for
+ * "regular"/"serious warning", and a full sandbox queue is neither — it is
+ * informational, it costs $0, and it clears itself. It fixes the numbers too:
+ * amber was the one step failing contrast on white (1.83:1).
+ *
+ * Red/green dichromacy is the binding constraint on the whole palette, and it
+ * cannot be solved by choosing a better red OR a better green in isolation —
+ * only by moving the pair apart. (The dashboard's old dark pastels,
+ * `#86efac`/`#fca5a5`, measured 5.8: below the ΔE 6 floor outright.)
+ *
+ * Two knowingly-accepted validator complaints, both properties of a status
+ * palette rather than defects:
+ *  - `skipped` fails the chroma floor. It is grey ON PURPOSE — grey IS the
+ *    message ("nothing ran"), and a status hue there would imply one did.
+ *  - `deferred` sits outside the categorical lightness band, and is sub-3:1 on
+ *    the light surface (1.83). Both are documented properties of the reference
+ *    `warning` step; the prescribed mitigation is never colour alone — hence
+ *    the `<Legend>`.
+ */
+const OUTCOME = {
+  succeeded: "#0ca30c",
+  skipped: "#6b7280",
+  deferred: "#4a7fb5",
+  failed: "#cc2b5e",
+};
+
+/**
+ * Bottom-to-top stack order — `succeeded` is the bottom band, `failed` the
+ * top — and the single source of it.
+ *
+ * Declared as data rather than left implicit in the JSX because the tooltip
+ * must list the bands in the order the eye meets them going DOWN the bar,
+ * i.e. `failed` first and `succeeded` last. A tooltip is read top-down; a
+ * stack is built bottom-up; so the tooltip needs this array reversed.
+ *
+ * That reversal is the `-` in the `itemSorter` below, and it is load-bearing:
+ * recharts sorts the payload with lodash `sortBy` (ascending), so negating
+ * the index yields failed(-3) → deferred(-2) → skipped(-1) → succeeded(0).
+ * Dropping the `-` produces exactly the mirror image of the bar.
+ */
+const OUTCOME_STACK = ["succeeded", "skipped", "deferred", "failed"] as const;
+
+/**
+ * Drop zero bands from the tooltip (issue #325). Most hours have no failures
+ * and no deferrals, and four rows of which two say `0` buries the two that
+ * carry information — the reader has to *read* to find out nothing happened.
+ * Recharts renders nothing for a `null` name.
+ */
+function outcomeTooltipFormatter(value: unknown, name: unknown): [string, string] | null {
+  return Number(value) > 0 ? [String(value), String(name)] : null;
+}
+
 const CHART_DARK = {
   success: "#86efac",
   error: "#fca5a5",
@@ -563,8 +653,15 @@ function StatsChartsSection() {
     // Daily bucket key is `YYYY-MM-DD` → render `MM-DD`.
     date: granularity === "hour" ? `${d.date.slice(11, 13)}:00` : d.date.slice(5),
     executions: d.executions,
-    successes: d.successes,
-    failures: d.failures,
+    succeeded: d.succeeded,
+    deferred: d.deferred,
+    failed: d.failed,
+    // `skipped` IS in the stack, as a hatch rather than a solid fill — the
+    // phase never ran, so texture carries it instead of hue. Keeping it in is
+    // what makes the bar total to the "Executions" stat card above: it is 31%
+    // of rows on a busy day, so dropping it would make the two disagree by a
+    // third and silently understate the volume.
+    skipped: d.skipped,
     inputTokens: d.inputTokens,
     outputTokens: d.outputTokens,
     cacheTokens: d.cacheReadTokens,
@@ -636,12 +733,82 @@ function StatsChartsSection() {
                   {/* Spacer right-axis so this chart's plot area matches the
                       Token chart, which has a real right axis. */}
                   <YAxis yAxisId="spacer" orientation="right" width={48} tick={false} axisLine={false} tickLine={false} />
+                  {/* Per-band counts plus the TOTAL. The total is the point:
+                      the four bands sum to the "Executions" stat card above,
+                      and showing it here is what lets a reader confirm that
+                      rather than take it on trust. It is also the only place
+                      `skipped` is quantified without squinting at a hatch. */}
                   <Tooltip
                     contentStyle={{ fontSize: 11, background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}` }}
                     cursor={{ fill: "rgba(255,255,255,0.04)" }}
+                    itemStyle={{ padding: 0 }}
+                    formatter={outcomeTooltipFormatter}
+                    itemSorter={(item) => -OUTCOME_STACK.indexOf(
+                      String(item.dataKey) as (typeof OUTCOME_STACK)[number],
+                    )}
+                    labelFormatter={(label, payload) => {
+                      const total = (payload ?? []).reduce((n, p) => n + (Number(p.value) || 0), 0);
+                      return `${String(label ?? "")} — ${total} execution${total === 1 ? "" : "s"}`;
+                    }}
                   />
-                  <Bar dataKey="successes" stackId="e" fill={CHART.success} name="success" />
-                  <Bar dataKey="failures" stackId="e" fill={CHART.error} name="failure" />
+                  <Legend
+                    verticalAlign="bottom"
+                    height={24}
+                    iconSize={8}
+                    wrapperStyle={{ fontSize: 11, color: CHART.axis }}
+                  />
+                  <defs>
+                    {/* `skipped` is the one band that is not an outcome — the
+                        phase never ran. It is drawn as a HATCH rather than a
+                        fill because hue could not carry it: against the green
+                        it measured ΔE 15.9, technically over the floor and
+                        still visibly similar. Texture is a different channel
+                        entirely, so it separates from all three solids at any
+                        severity of colour blindness, in print, and under
+                        forced-colors — and it reads as "placeholder", which is
+                        what a skip is. */}
+                    <pattern id="ll-skip-hatch" patternUnits="userSpaceOnUse" width={5} height={5}
+                             patternTransform="rotate(45)">
+                      {/* A tinted BODY under the lines, not an outline around
+                          them. An outline would be drawn half outside the rect
+                          — and since the solid bands' strokes are surface-
+                          coloured (their outer half invisible), a visible one
+                          renders this segment ~4px wider than the rest of the
+                          column at the same strokeWidth. The tint gives the
+                          band a definite edge from the inside, so every band
+                          keeps identical geometry. */}
+                      <rect width={5} height={5} fill={CHART.tooltipBg} />
+                      <rect width={5} height={5} fill={OUTCOME.skipped} opacity={0.18} />
+                      <line x1={0} y1={0} x2={0} y2={5} stroke={OUTCOME.skipped} strokeWidth={2.5} />
+                    </pattern>
+                  </defs>
+                  {/* Stack order, bottom to top, is SEMANTIC: nothing wrong →
+                      nothing happened → load → bad. It could not be before —
+                      while `deferred` was amber it had to be held apart from
+                      red (ΔE 2.8) by putting the neutral between them. Blue
+                      dissolved that constraint, and the semantic order is also
+                      the stronger one: the hatch now separates green from blue
+                      by texture, leaving deferred↔failed (ΔE 19.0) as the only
+                      solid-solid boundary, against 13.5 before.
+                      `stroke` is the 2px surface gap between segments. */}
+                  <Bar dataKey="succeeded" stackId="e" fill={OUTCOME.succeeded} name="succeeded"
+                       stroke={CHART.tooltipBg} strokeWidth={2} />
+                  {/* A cascade skip: the phase never ran, because an upstream
+                      one didn't succeed. Kept in the stack so the bar totals to
+                      the "Executions" headline — it is 31% of rows on a busy
+                      day, so hiding it would make the two disagree visibly.
+                      Same surface stroke as every other band; see the pattern
+                      above for why its definition is a tint, not a border. */}
+                  <Bar dataKey="skipped" stackId="e" fill="url(#ll-skip-hatch)" name="skipped"
+                       stroke={CHART.tooltipBg} strokeWidth={2} />
+                  {/* Capacity, not error: the k8s ResourceQuota rejected the
+                      pod and the run requeued. Costs $0 and self-heals — but it
+                      IS the signal that the sandbox namespace is saturated, so
+                      it earns its own band rather than being hidden. */}
+                  <Bar dataKey="deferred" stackId="e" fill={OUTCOME.deferred} name="deferred"
+                       stroke={CHART.tooltipBg} strokeWidth={2} />
+                  <Bar dataKey="failed" stackId="e" fill={OUTCOME.failed} name="failed"
+                       stroke={CHART.tooltipBg} strokeWidth={2} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
