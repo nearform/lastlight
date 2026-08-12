@@ -80,7 +80,7 @@ export type ExecutionOutcome = "succeeded" | "skipped" | "deferred" | "failed";
 
 ### Where it lands
 
-- **`hourlyStats` / `dailyStats`** (`execution-store.ts:826`, `:895`): return
+- **`dailyStats` / `hourlyStats`** (`execution-store.ts:826`, `:895`): return
   `succeeded | skipped | deferred | failed` counts in place of
   `successes | failures`.
 - **`executionStats().by_skill`** (`:786`): same reclassification for `fail`.
@@ -91,8 +91,11 @@ export type ExecutionOutcome = "succeeded" | "skipped" | "deferred" | "failed";
 For that muted tone there is an exact precedent to reuse rather than invent:
 the generic-loop `until_bash` check that runs and comes back red is already
 rendered "neither green nor red" (`dashboard/src/components/pipeline-node.tsx:16`,
-the `unmet` status). It is the same semantic — a recorded non-event — and the
-two should look the same.
+the `unmet` status). Borrow the tone, not the classification. In the ledger the
+two are opposites: `condition_not_met` is stored `success = 1`, so it lands in
+`succeeded` and really cost tokens, while `skipped` is `success = 0`, $0, and
+never ran. What they share is only that neither is a failure — which is an
+argument about visual weight, not about the data model.
 
 Consider dropping `skipped` from the bar entirely and surfacing it in the
 tooltip only: it is the *consequence* of another row's outcome, so stacking it
