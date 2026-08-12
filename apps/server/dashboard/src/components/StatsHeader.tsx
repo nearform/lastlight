@@ -1,11 +1,11 @@
 import clsx from "clsx";
 import { useState } from "react";
-import { BookOpen, Clock, Filter, GitBranch, LogOut, Moon, Radio, RefreshCw, Sun } from "lucide-react";
+import { BookOpen, Clock, Filter, GitBranch, LogOut, Radio, RefreshCw } from "lucide-react";
 import type { MeRepos } from "../api";
 import type { StreamStatus } from "../hooks/useSessionStream";
-import { useTheme } from "../hooks/useTheme";
 import { useVisibleRepos } from "../hooks/useVisibleRepos";
 import { NearformLogo } from "./NearformLogo";
+import { ThemeToggle } from "./ThemeToggle";
 import { VersionPin } from "./VersionPin";
 
 interface Props {
@@ -147,7 +147,6 @@ export function StatsHeader({
   onLogout,
 }: Props) {
   const statusInfo = STATUS_LABEL[streamStatus];
-  const { isDark, toggleTheme } = useTheme();
 
   return (
     <header className="bg-base-200 border-b border-base-300 flex items-center gap-3 px-4 h-12 shrink-0">
@@ -245,14 +244,7 @@ export function StatsHeader({
 
       <VersionPin />
 
-      <button
-        onClick={toggleTheme}
-        className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
-        title={isDark ? "Switch to light theme" : "Switch to dark theme"}
-        aria-label="Toggle light/dark theme"
-      >
-        {isDark ? <Sun size={14} /> : <Moon size={14} />}
-      </button>
+      <ThemeToggle />
 
       {onLogout && (
         <button

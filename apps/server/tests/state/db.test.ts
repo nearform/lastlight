@@ -471,12 +471,12 @@ describe("dailyStats", () => {
     const d2 = rows.find((r) => r.date === day2.key);
     expect(d1).toBeDefined();
     expect(d1!.executions).toBe(2);
-    expect(d1!.successes).toBe(1);
-    expect(d1!.failures).toBe(1);
+    expect(d1!.succeeded).toBe(1);
+    expect(d1!.failed).toBe(1);
     expect(d2).toBeDefined();
     expect(d2!.executions).toBe(1);
-    expect(d2!.successes).toBe(1);
-    expect(d2!.failures).toBe(0);
+    expect(d2!.succeeded).toBe(1);
+    expect(d2!.failed).toBe(0);
   });
 
   it("sums token and cost data correctly", () => {
