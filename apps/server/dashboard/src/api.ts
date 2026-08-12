@@ -516,19 +516,34 @@ export interface HostStats {
   cpuCount: number;
 }
 
+/**
+ * How a finished execution turned out (issue #325). Hand-mirrored from
+ * `ExecutionOutcomeCounts` in `src/state/execution-store.ts`, which is where
+ * the classification is defined and documented.
+ *
+ * `deferred` and `skipped` are NOT failures: both are stored `success = 0` on
+ * purpose (resume re-evaluation and quota requeue respectively), so reading
+ * that column as health painted a wall of red on days when nothing broke.
+ * An in-flight execution is in `executions` and in none of these four.
+ */
+export interface OutcomeCounts {
+  succeeded: number;
+  skipped: number;
+  deferred: number;
+  failed: number;
+}
+
 export interface Stats {
   total_executions: number;
   today_count: number;
-  by_skill: Record<string, { count: number; success: number; fail: number }>;
+  by_skill: Record<string, OutcomeCounts & { count: number }>;
   by_trigger: Record<string, number>;
   running: number;
 }
 
-export interface DailyStat {
+export interface DailyStat extends OutcomeCounts {
   date: string;
   executions: number;
-  successes: number;
-  failures: number;
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;

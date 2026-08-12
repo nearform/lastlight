@@ -176,6 +176,58 @@ function mapExecutionRow(r: Record<string, unknown>): ExecutionRecord {
   };
 }
 
+/** The four ways a finished execution can have turned out (issue #325). */
+export interface ExecutionOutcomeCounts {
+  succeeded: number;
+  skipped: number;
+  deferred: number;
+  failed: number;
+}
+
+/**
+ * The outcome classification, as SQL — the ONE definition every aggregation
+ * selects (issue #325).
+ *
+ * `executions.success` is not a health signal and must not be read as one.
+ * Two paths write `success = 0` deliberately, having failed at nothing:
+ *
+ *  - **`skipped`** — {@link ExecutionStore.recordSkippedPhase}. Stored
+ *    `success = 0` so {@link ExecutionStore.shouldRunPhase} re-evaluates the
+ *    node on resume. The phase never ran.
+ *  - **`error_quota`** — the k8s `ResourceQuota` rejected the pod. The runner
+ *    treats it as an ordinary phase failure precisely so the run REQUEUES
+ *    (`src/workflows/runner.ts`), and it costs $0 and 0 turns.
+ *
+ * So the column correctly answers *"may this phase be skipped on resume?"*,
+ * where skipped / quota-rejected / crashed are one answer. It was never asked
+ * "did something go wrong", and rendering it as though it was painted 251 of a
+ * day's 423 executions red on an instance with zero real failures.
+ *
+ * Held here as a single fragment rather than repeated per query because three
+ * aggregations consume it, and three copies would disagree the first time one
+ * was edited — the same argument `PrState` makes against six sites each
+ * fetching an overlapping subset of the truth.
+ *
+ * `success IS NULL` (still in flight) matches no bucket on purpose: it counts
+ * toward `COUNT(*)` and toward nothing else, so a stacked bar can legitimately
+ * be shorter than the execution total.
+ *
+ * Note `condition_not_met` — a generic-loop `until_bash` check that ran and
+ * came back red — is stored `success = 1` and therefore lands in `succeeded`.
+ * It really executed and really cost tokens; only its per-row rendering is
+ * muted (`execMark`, `packages/cli/src/cli-format.ts`).
+ */
+export const EXECUTION_OUTCOME_COLUMNS = `
+        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN success = 0 AND stop_reason = 'skipped' THEN 1 ELSE 0 END) AS skipped,
+        SUM(CASE WHEN success = 0 AND stop_reason = 'error_quota' THEN 1 ELSE 0 END) AS deferred,
+        SUM(CASE WHEN success = 0
+                  AND (stop_reason IS NULL OR stop_reason NOT IN ('skipped', 'error_quota'))
+             THEN 1 ELSE 0 END) AS failed`;
+
+/** Zero-fill for a bucket with no executions in it. */
+const NO_OUTCOMES: ExecutionOutcomeCounts = { succeeded: 0, skipped: 0, deferred: 0, failed: 0 };
+
 export class ExecutionStore {
   constructor(private db: Database.Database) {}
 
@@ -786,7 +838,7 @@ export class ExecutionStore {
   executionStats(): {
     total_executions: number;
     today_count: number;
-    by_skill: Record<string, { count: number; success: number; fail: number }>;
+    by_skill: Record<string, ExecutionOutcomeCounts & { count: number }>;
     by_trigger: Record<string, number>;
     running: number;
   } {
@@ -800,14 +852,19 @@ export class ExecutionStore {
 
     const skillRows = this.db.prepare(`
       SELECT skill, COUNT(*) as count,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as fail
+        ${EXECUTION_OUTCOME_COLUMNS}
       FROM executions GROUP BY skill
-    `).all() as { skill: string; count: number; success: number; fail: number }[];
+    `).all() as ({ skill: string; count: number } & ExecutionOutcomeCounts)[];
 
-    const by_skill: Record<string, { count: number; success: number; fail: number }> = {};
+    const by_skill: Record<string, ExecutionOutcomeCounts & { count: number }> = {};
     for (const r of skillRows) {
-      by_skill[r.skill] = { count: r.count, success: r.success, fail: r.fail };
+      by_skill[r.skill] = {
+        count: r.count,
+        succeeded: r.succeeded,
+        skipped: r.skipped,
+        deferred: r.deferred,
+        failed: r.failed,
+      };
     }
 
     const triggerRows = this.db.prepare(`
@@ -823,17 +880,15 @@ export class ExecutionStore {
   }
 
   /** Daily aggregated stats for the last N days */
-  dailyStats(days: number): {
+  dailyStats(days: number): (ExecutionOutcomeCounts & {
     date: string;
     executions: number;
-    successes: number;
-    failures: number;
     totalTokens: number;
     inputTokens: number;
     outputTokens: number;
     cacheReadTokens: number;
     costUsd: number;
-  }[] {
+  })[] {
     // Build the inclusive UTC date window: [today - (days-1), today].
     // SQLite's date(started_at) returns a UTC YYYY-MM-DD string, so we
     // generate the same format here to align keys.
@@ -855,8 +910,7 @@ export class ExecutionStore {
       SELECT
         date(started_at) AS date,
         COUNT(*) AS executions,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures,
+        ${EXECUTION_OUTCOME_COLUMNS},
         COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(cache_read_input_tokens), 0) AS totalTokens,
         COALESCE(SUM(input_tokens), 0) AS inputTokens,
         COALESCE(SUM(output_tokens), 0) AS outputTokens,
@@ -865,24 +919,21 @@ export class ExecutionStore {
       FROM executions
       WHERE date(started_at) >= ?
       GROUP BY date(started_at)
-    `).all(dateKeys[0]) as {
+    `).all(dateKeys[0]) as (ExecutionOutcomeCounts & {
       date: string;
       executions: number;
-      successes: number;
-      failures: number;
       totalTokens: number;
       inputTokens: number;
       outputTokens: number;
       cacheReadTokens: number;
       costUsd: number;
-    }[];
+    })[];
 
     const byDate = new Map(rows.map((r) => [r.date, r]));
     return dateKeys.map((date) => byDate.get(date) ?? {
       date,
       executions: 0,
-      successes: 0,
-      failures: 0,
+      ...NO_OUTCOMES,
       totalTokens: 0,
       inputTokens: 0,
       outputTokens: 0,
@@ -892,17 +943,15 @@ export class ExecutionStore {
   }
 
   /** Hourly aggregated stats for the last N hours (UTC). Bucket key is `YYYY-MM-DDTHH`. */
-  hourlyStats(hours: number): {
+  hourlyStats(hours: number): (ExecutionOutcomeCounts & {
     date: string;
     executions: number;
-    successes: number;
-    failures: number;
     totalTokens: number;
     inputTokens: number;
     outputTokens: number;
     cacheReadTokens: number;
     costUsd: number;
-  }[] {
+  })[] {
     const now = new Date();
     const startUtc = new Date(Date.UTC(
       now.getUTCFullYear(),
@@ -923,8 +972,7 @@ export class ExecutionStore {
       SELECT
         strftime('%Y-%m-%dT%H', started_at) AS date,
         COUNT(*) AS executions,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures,
+        ${EXECUTION_OUTCOME_COLUMNS},
         COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(cache_read_input_tokens), 0) AS totalTokens,
         COALESCE(SUM(input_tokens), 0) AS inputTokens,
         COALESCE(SUM(output_tokens), 0) AS outputTokens,
@@ -933,24 +981,21 @@ export class ExecutionStore {
       FROM executions
       WHERE strftime('%Y-%m-%dT%H', started_at) >= ?
       GROUP BY strftime('%Y-%m-%dT%H', started_at)
-    `).all(hourKeys[0]) as {
+    `).all(hourKeys[0]) as (ExecutionOutcomeCounts & {
       date: string;
       executions: number;
-      successes: number;
-      failures: number;
       totalTokens: number;
       inputTokens: number;
       outputTokens: number;
       cacheReadTokens: number;
       costUsd: number;
-    }[];
+    })[];
 
     const byHour = new Map(rows.map((r) => [r.date, r]));
     return hourKeys.map((date) => byHour.get(date) ?? {
       date,
       executions: 0,
-      successes: 0,
-      failures: 0,
+      ...NO_OUTCOMES,
       totalTokens: 0,
       inputTokens: 0,
       outputTokens: 0,
