@@ -196,6 +196,10 @@ Effective config overrides
 				<td><code>fix</code> / <code>dependencies</code> / <code>review</code></td>
 				<td>The <a href="/docs/configuration#workflow-policy">workflow policy blocks</a> — retry budgets, major-bump auto-merge, and when a review runs. <strong>One-way</strong>: a repo may only ever be <em>more</em> conservative than the operator. See <a href="#policy">below</a>.</td>
 			</tr>
+			<tr>
+				<td><code>notifications</code></td>
+				<td>Which Slack channel this repo's <a href="/docs/slack#digest">weekly digest</a> goes to. The one key with <em>no</em> clamp direction — a channel isn't more or less conservative. See <a href="#notifications">below</a>.</td>
+			</tr>
 		</tbody>
 	</table>
 
@@ -203,6 +207,48 @@ Effective config overrides
 		Arrays <strong>replace</strong> rather than append, exactly as they do
 		between the packaged defaults and your overlay — so a repo's
 		<code>disabled.workflows</code> is the whole list for that repo.
+	</p>
+
+	<h2 id="notifications">Notifications: routing, not policy</h2>
+
+	<p>
+		A repo can name the Slack channel its weekly digest goes to:
+	</p>
+
+	<pre class="docs-code"><code># .lastlight/lastlight.yml
+notifications:
+  slack:
+    channel: C01ENGINEERING     # channel id, or "#eng-widgets"</code></pre>
+
+	<p>
+		This is the one repo-settable key with no <em>more conservative</em>
+		direction — a channel name simply isn't a budget — so unlike the policy
+		blocks below, the repo's answer wins outright. Two things make that safe,
+		and neither is a bound:
+	</p>
+
+	<ul>
+		<li>
+			The <code>.lastlight/</code> layer is <strong>always read from the repo's
+			default branch</strong>, never a pull request head. A PR cannot redirect
+			the output of the agent reviewing it.
+		</li>
+		<li>
+			Slack won't deliver to a channel the bot hasn't been invited to. The worst
+			a bad value achieves is a logged <code>channel_not_found</code>.
+		</li>
+	</ul>
+
+	<p>
+		Setting <code>channel: null</code> explicitly means <em>send me no digest</em>,
+		and beats anything the operator configured — that's different from leaving
+		the key out, which means "no opinion, use whatever's configured".
+	</p>
+
+	<p>
+		Operators who want channel choice back remove <code>notifications</code> from
+		<code>repoConfig.allowKeys</code>, and route repos themselves with the
+		<code>slack.repoChannels</code> map instead.
 	</p>
 
 	<h2 id="policy">Policy blocks: a repo may only be more careful</h2>

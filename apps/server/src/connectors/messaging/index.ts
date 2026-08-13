@@ -1,6 +1,5 @@
 export { MessagingConnector } from "./base.js";
 export { SessionManager } from "./session-manager.js";
-export { MessageDeliveryService, type DeliveryTarget } from "./delivery.js";
 export {
   withThreadTranscript,
   recordThreadMessage,

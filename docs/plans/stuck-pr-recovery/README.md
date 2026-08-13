@@ -120,13 +120,17 @@ not be deferred past it. The rest of Phase 4 can land at any point.
 
 ## What is deliberately not in this plan
 
-- **Slack digest of escalated PRs.** The daily sweep already computes
-  exactly this set and throws every verdict away — `fanOut` returns
-  `{dispatched, failures}` (`cron/fanout.ts:126`) and a skip counts as a
-  success, so an escalation is indistinguishable from a clean dispatch in
-  the cron's own reporting. Blocked on per-repo/per-team channel routing,
-  which does not exist: `slack.deliveryChannel` is a single channel.
-  **Filed separately.**
+- **Slack digest of escalated PRs.** ~~Blocked on per-repo/per-team channel
+  routing, which does not exist: `slack.deliveryChannel` is a single
+  channel.~~ **SHIPPED**, as part of the weekly repo digest
+  (`workflows/cron-digest.yaml`, `src/cron/repo-digest.ts`): per-repo channel
+  routing now exists (`notifications.slack.channel` in a repo's `.lastlight/`,
+  the operator's `slack.repoChannels` map, then `slack.deliveryChannel`), and
+  the digest reports the escalated set. Note it does NOT read it back out of
+  the sweep — `fanOut` still returns only `{dispatched, failures}` and a skip
+  still counts as a success. It asks GitHub for the open PRs carrying
+  `requires-human`, which is the same set and is true regardless of which
+  route escalated them. Per-TEAM routing remains unbuilt.
 - **A dashboard view of escalated PRs.** `prState` appears nowhere in
   `admin/routes.ts`; there is no PR surface at all today. When it comes it
   should be the *list* — what is stuck, why, what was tried, what it cost —
@@ -140,7 +144,8 @@ not be deferred past it. The rest of Phase 4 can land at any point.
 
 | Item | Blocked on | Note |
 |---|---|---|
-| Slack digest | per-repo / per-team channel config | The data already exists and is discarded |
+| ~~Slack digest~~ | — | **Shipped**: `cron-digest.yaml` + per-repo `notifications.slack.channel` |
+| Per-team channel routing | the `github_teams` cache + a policy for team-scoped content | Per-repo covers the original ask |
 | Dashboard escalated-PR list | a PR surface in the admin API | Build the list, not a button |
 | Server-level spend cap | nothing — just unbuilt | Becomes the only backstop once Phase 3 ships |
 

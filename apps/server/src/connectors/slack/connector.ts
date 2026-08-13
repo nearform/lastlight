@@ -287,18 +287,6 @@ export class SlackConnector extends MessagingConnector {
     }
   }
 
-  /** Send a message to the configured delivery channel (for cron reports) */
-  async sendToDeliveryChannel(text: string): Promise<void> {
-    if (!this.slackConfig.deliveryChannel) {
-      log.warn("No delivery channel configured");
-      return;
-    }
-    const chunks = this.chunkMessage(text);
-    for (const chunk of chunks) {
-      await this.sendMessage(this.slackConfig.deliveryChannel, null, chunk);
-    }
-  }
-
   // ── Webhook (HTTP Events API) receiver ─────────────────────────────────
 
   /**

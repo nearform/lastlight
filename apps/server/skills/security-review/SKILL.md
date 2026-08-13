@@ -27,7 +27,6 @@ exactly when composing the issue (§9).
 ## Context
 
 - `context.repo` — `owner/name` to scan
-- `context.deliverSlackSummary` — if true, output a one-line Slack summary as the final response
 - `context.issueDir` — directory for the run summary file (e.g. `.lastlight/security-<date>`)
 
 ## Procedure
@@ -199,17 +198,10 @@ Write `{issueDir}/security-summary.md`:
 On a §1.5 early exit, still write the file and state `**Early exit**: no human
 commits since prior scan`.
 
-### 11. Slack summary (optional)
+### 11. Deliver
 
-If `context.deliverSlackSummary` is true, output as the final response:
+Output the run summary file contents as the final response.
 
-- **With findings:**
-  ```
-  *Security scan: {repo}* — {n} findings filed in #{summaryIssueNumber} ({N} commits since {priorScanDate})
-  Critical: {nC} · High: {nH} · Medium: {nM} · Low: {nL}
-  ```
-- **No findings** (scanners ran clean) or **§1.5 early exit** → emit nothing;
-  silence matches the cron's low-noise design. The run summary file still records
-  what was reviewed.
-
-Otherwise output the run summary file contents as the final response.
+The findings themselves reach humans through the summary ISSUE you filed in
+step 10, not through this response: a cron-triggered scan is repo-scoped, so
+there is no issue thread and no chat thread for the harness to reply into.

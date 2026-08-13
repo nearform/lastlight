@@ -44,6 +44,7 @@ import {
   DIAGNOSIS_CLASSES,
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultNotificationsConfig,
   defaultReviewConfig,
   dependencyImpactRank,
   isDependencyImpact,
@@ -53,6 +54,7 @@ import {
   type DependenciesConfig,
   type DisabledConfig,
   type FixConfig,
+  type NotificationsConfig,
   type ReviewConfig,
 } from "./config-types.js";
 
@@ -134,6 +136,7 @@ export const DEFAULT_REPO_CONFIG_ALLOW_KEYS: readonly string[] = [
   "fix",
   "dependencies",
   "review",
+  "notifications",
 ];
 
 /**
@@ -284,6 +287,12 @@ export interface RepoMergedConfig {
   fix: FixConfig;
   dependencies: DependenciesConfig;
   review: ReviewConfig;
+  /**
+   * Where this repo's outbound notifications go (the weekly Slack digest).
+   * Routing, not policy — see {@link NotificationsConfig} for why the one-way
+   * clamp the three blocks above share does not apply here.
+   */
+  notifications: NotificationsConfig;
 }
 
 /** Provenance mirror of {@link RepoMergedConfig} — each leaf tagged with its winning layer. */
@@ -295,6 +304,7 @@ export interface RepoConfigSources {
   fix: Record<string, ConfigSource>;
   dependencies: Record<string, ConfigSource>;
   review: Record<string, ConfigSource>;
+  notifications: Record<string, ConfigSource>;
 }
 
 /** Result of {@link resolveRepoConfig}. */
@@ -605,6 +615,9 @@ export function sanitizeRepoConfigLayer(
         break;
       case "review":
         assignIfAny(layer, "review", sanitizeReview(value, policy, base, warn));
+        break;
+      case "notifications":
+        assignIfAny(layer, "notifications", sanitizeNotifications(value, policy, warn));
         break;
       default:
         // Allow-listed by the operator but not a key this module knows how to
@@ -1163,6 +1176,91 @@ function sanitizeReview(
   return out;
 }
 
+/**
+ * `notifications:` — the only repo-settable block with NO clamp direction.
+ *
+ * Every other block here answers "is the repo asking to be looser than the
+ * operator?". A Slack channel has no such ordering: it is routing, and the
+ * repo's answer simply wins. What bounds it instead is the layer's trust rule
+ * (default branch only, never a PR head) plus Slack itself — the bot can only
+ * post where it has been invited. So the validation here is purely about
+ * SHAPE: reject anything that isn't a plausible channel reference, so a typo
+ * surfaces as a warning on the run row rather than as a silent `channel_not_found`
+ * once a week.
+ *
+ * `channel: null` is meaningful and preserved: it says "I explicitly want no
+ * digest", which must beat the operator's `repoChannels` entry rather than
+ * falling through to it.
+ */
+function sanitizeNotifications(
+  raw: unknown,
+  policy: RepoConfigPolicy,
+  warn: Warn,
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(raw)) {
+    warn(
+      "invalid-value",
+      "notifications",
+      `Ignored "notifications" in .lastlight/${REPO_CONFIG_FILE}: it must be a mapping.`,
+    );
+    return undefined;
+  }
+  const out: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(raw)) {
+    const path = `notifications.${key}`;
+    if (!isAllowedKey(path, policy.allowKeys)) {
+      warn("key-not-allowed", path, `Ignored "${path}": a repo may not set this key.`);
+      continue;
+    }
+    if (key !== "slack") {
+      warn("invalid-value", path, `Ignored "${path}": the only notification target is "slack".`);
+      continue;
+    }
+    if (!isPlainObject(value)) {
+      warn("invalid-value", path, `Ignored "${path}": it must be a mapping.`);
+      continue;
+    }
+    const slack: Record<string, unknown> = {};
+    for (const [leafKey, leafValue] of Object.entries(value)) {
+      const leaf = `${path}.${leafKey}`;
+      if (!isAllowedKey(leaf, policy.allowKeys)) {
+        warn("key-not-allowed", leaf, `Ignored "${leaf}": a repo may not set this key.`);
+        continue;
+      }
+      if (leafKey !== "channel") {
+        warn("invalid-value", leaf, `Ignored "${leaf}": it is not a key of the slack notification target.`);
+        continue;
+      }
+      if (leafValue === null) {
+        slack.channel = null;
+        continue;
+      }
+      if (typeof leafValue !== "string" || !isChannelRef(leafValue.trim())) {
+        warn(
+          "invalid-value",
+          leaf,
+          `Ignored "${leaf}": it must be a Slack channel id (e.g. "C01ABCDEFGH"), a "#channel-name", or null.`,
+        );
+        continue;
+      }
+      slack.channel = leafValue.trim();
+    }
+    // `{ channel: null }` survives `assignIfAny` (one key, not an empty
+    // sub-tree) — which is what makes an explicit null distinguishable from an
+    // absent key downstream: the merge tags the leaf `repo`, and the channel
+    // resolver reads that provenance to honour "this repo wants no digest".
+    assignIfAny(out, "slack", slack);
+  }
+  return out;
+}
+
+/** A Slack channel id (`C…`/`G…`/`D…`) or a `#channel-name`. Bounded to Slack's 80-char limit. */
+function isChannelRef(value: string): boolean {
+  if (!value || value.length > 80) return false;
+  return /^#?[A-Za-z0-9._-]+$/.test(value);
+}
+
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
@@ -1258,6 +1356,19 @@ function shapeMerged(value: Record<string, unknown>): RepoMergedConfig {
     fix: shapeFix(value.fix),
     dependencies: shapeDependencies(value.dependencies),
     review: shapeReview(value.review),
+    notifications: shapeNotifications(value.notifications),
+  };
+}
+
+/** Total over `notifications:`, same contract as {@link shapeFix} and friends. */
+function shapeNotifications(raw: unknown): NotificationsConfig {
+  const d = defaultNotificationsConfig();
+  const node = isPlainObject(raw) ? raw : {};
+  const slack = isPlainObject(node.slack) ? node.slack : {};
+  return {
+    slack: {
+      channel: typeof slack.channel === "string" && slack.channel.trim() ? slack.channel.trim() : d.slack.channel,
+    },
   };
 }
 
@@ -1329,7 +1440,29 @@ function shapeSources(sources: Record<string, unknown>): RepoConfigSources {
     fix: sourceMap(sources.fix),
     dependencies: sourceMap(sources.dependencies),
     review: sourceMap(sources.review),
+    // Flattened to a dotted leaf ("slack.channel") because `notifications:` is
+    // the one block that nests, and `RepoConfigSources` is deliberately flat —
+    // the dashboard renders provenance as a leaf→layer table, not a tree.
+    notifications: nestedSourceMap(sources.notifications),
   };
+}
+
+/** Like {@link sourceMap}, but descends one level and joins with a dot. */
+function nestedSourceMap(raw: unknown): Record<string, ConfigSource> {
+  const out: Record<string, ConfigSource> = {};
+  if (!isPlainObject(raw)) return out;
+  for (const [group, node] of Object.entries(raw)) {
+    if (isConfigSource(node)) {
+      out[group] = node;
+      continue;
+    }
+    if (isPlainObject(node)) {
+      for (const [leaf, source] of Object.entries(node)) {
+        if (isConfigSource(source)) out[`${group}.${leaf}`] = source;
+      }
+    }
+  }
+  return out;
 }
 
 /** Narrow an unknown provenance leaf to a {@link ConfigSource}. */

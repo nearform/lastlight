@@ -879,6 +879,27 @@ export class ExecutionStore {
     return { total_executions: total, today_count: todayCount, by_skill, by_trigger, running };
   }
 
+  /**
+   * What ONE repo's agent work cost since `sinceIso`. The spend line of the
+   * weekly digest.
+   *
+   * `cost_usd` is nullable — rows predating the column, and every `type: bash`
+   * phase, carry no cost — so this sums with a COALESCE and reports the phase
+   * count separately rather than implying the two are the same denominator.
+   */
+  repoCostSince(owner: string, repo: string, sinceIso: string): { costUsd: number; phases: number } {
+    const qualifiedRepo = qualifiedRepoSql("e.owner", "e.repo", "bare");
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(e.cost_usd), 0) AS costUsd, COUNT(*) AS phases
+           FROM executions e
+          WHERE ${qualifiedRepo} = ?
+            AND e.started_at >= ?`,
+      )
+      .get(`${owner}/${repo}`, sinceIso) as { costUsd: number; phases: number } | undefined;
+    return { costUsd: row?.costUsd ?? 0, phases: row?.phases ?? 0 };
+  }
+
   /** Daily aggregated stats for the last N days */
   dailyStats(days: number): (ExecutionOutcomeCounts & {
     date: string;

@@ -44,6 +44,7 @@ import { resetRepoConfigForTests, type RepoConfigBase } from "#src/config/repo-c
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultNotificationsConfig,
   defaultReviewConfig,
 } from "#src/config/config.js";
 import type { GitHubClient, RepoConfigTreeResult } from "#src/engine/github/github.js";
@@ -131,6 +132,7 @@ function runRepoConfig(overrides: Partial<RunRepoConfig> & { repo: string }): Ru
     fix: defaultFixConfig(),
     dependencies: defaultDependenciesConfig(),
     review: defaultReviewConfig(),
+    notifications: defaultNotificationsConfig(),
     sources: {
       models: { default: "default" },
       variants: {},
@@ -145,6 +147,7 @@ function runRepoConfig(overrides: Partial<RunRepoConfig> & { repo: string }): Ru
       fix: {},
       dependencies: {},
       review: {},
+      notifications: {},
     },
     warnings: [],
     ...overrides,
@@ -298,6 +301,7 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
         fix: {},
         dependencies: {},
         review: {},
+        notifications: {},
       },
       warnings: [
         { code: "key-not-allowed", repo: "acme/widgets", path: "sandbox", message: "Ignored \"sandbox\"." },

@@ -60,8 +60,14 @@ Omit a section that has nothing in it rather than printing "none".
 
 ### 4. Deliver
 
-Output the report as the final response. The harness routes it (direct display
-interactively, or to the configured channel on a cron run).
+Output the report as the final response.
+
+Where that lands depends on how the run was triggered: a chat request is
+answered in the thread, and an issue-scoped run comments on the issue. A **cron**
+run is repo-scoped — no issue, no thread — so the harness has nowhere to put it
+and the report is recorded on the run only. If you want a recurring report in
+Slack, the `repo-digest` cron is the one that posts (see
+`workflows/cron-digest.yaml`).
 
 ## Verification
 

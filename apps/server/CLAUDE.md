@@ -339,6 +339,38 @@ src/
                         a repo's `.lastlight/` edit lands on the next tick
                         with no scheduler churn.
     sandbox-sweep.ts    Hourly TTL/LRU workspace sweep (issue #106).
+    handlers.ts         The HOST-SIDE cron handler registry — what a cron
+                        YAML's `handler:` key may name. Built at boot (not a
+                        constant) because each handler needs collaborators that
+                        only exist then. A cron declares EXACTLY ONE of
+                        `workflow:` (dispatch an agent workflow) or `handler:`
+                        (run code in this process). `handler:` exists for
+                        periodic work no agent can do — the digest's facts are
+                        in the harness's own SQLite, unreachable from a sandbox,
+                        and it posts to Slack, for which there is no agent tool.
+                        A `registerDirect` job could do the same work but is
+                        invisible to `getCronWorkflows()`, so it gets no
+                        dashboard toggle, no schedule override, no per-repo
+                        participation and no "Run now"; `handler:` buys all
+                        four. An unresolvable name DROPS the cron with a boot
+                        warning (it cannot fail boot — the registry is
+                        conditional). `withLedger` wraps every registered
+                        handler in ONE `executions` row per invocation
+                        (`trigger_type: "cron"`, `skill` = the cron's name), so
+                        `consecutiveFailures` and the dashboard's failure count
+                        work for a cron that dispatches nothing. It wraps here,
+                        not in the scheduler, because admin "Run now" invokes
+                        the registry directly.
+    repo-digest.ts      The weekly per-repo Slack digest: what happened in the
+                        repo (GitHub) plus what Last Light did about it (the
+                        state DB), posted to the repo's channel. Facts are
+                        computed in code — `digest.narrative` spends ONE cheap
+                        `llm.ts` call on a summary sentence, and a failure there
+                        drops the sentence, never the digest. INERT until a
+                        channel resolves: no channel, no post, no GitHub
+                        request, no model call. Narrows its own repo list
+                        through `resolveCronRepos` (nothing upstream does that
+                        for a handler cron).
     dependabot-discovery.ts / review-discovery.ts
                         PR discoverers for the discovery crons (which fan out
                         per discovered PR, so src/index.ts narrows their repo
@@ -1126,7 +1158,12 @@ Slack (optional):
   server (the same Hono app as the GitHub webhook); webhook delivery is
   at-least-once (Slack retries), unlike Socket Mode which can drop messages.
 - `SLACK_APP_TOKEN` (xapp-…) — app-level token; required only for `socket` mode.
-- `SLACK_DELIVERY_CHANNEL` — channel id for cron reports
+- `SLACK_DELIVERY_CHANNEL` — **last-resort** channel for the weekly repo digest.
+  Consulted only after the repo's own `notifications.slack.channel`
+  (`.lastlight/lastlight.yml`) and the operator's `slack.repoChannels` map
+  (overlay `config.yaml`). If none of the three resolves, that repo gets no
+  digest — which is what keeps a fresh install quiet. Resolution lives in
+  `src/notify/repo-channel.ts`.
 - `SLACK_ALLOWED_USERS` — comma-separated user ids allowlist
 - `SLACK_OAUTH_CLIENT_ID`, `SLACK_OAUTH_CLIENT_SECRET`,
   `SLACK_OAUTH_REDIRECT_URI` — enables "Login with Slack" on the dashboard

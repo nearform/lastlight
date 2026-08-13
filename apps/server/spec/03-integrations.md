@@ -308,15 +308,84 @@ without the CLI.
 | **Auth** | None — cron jobs run with implicit process trust. |
 | **Normalize** | None — cron jobs dispatch workflows directly. `_triggerType: "cron"` is added to the workflow context (`src/cron/fanout.ts:42`). |
 | **Event types** | n/a |
-| **Job source** | `workflows/cron-*.yaml` files. `getJobs({ webhooksEnabled, db, crons })` (`src/cron/jobs.ts`) loads them, applies DB overrides from `cron_overrides` **and** the operator's `crons.disable` list, and filters those marked `condition: { unless: webhooksEnabled }` when webhooks are active. A cron turned off by either lever stays **registered**, carrying `_cronGloballyEnabled: false` — see "Per-repo cron participation" below. |
+| **Job source** | `workflows/cron-*.yaml` files. `getJobs({ webhooksEnabled, db, crons, handlers })` (`src/cron/jobs.ts`) loads them, applies DB overrides from `cron_overrides` **and** the operator's `crons.disable` list, and filters those marked `condition: { unless: webhooksEnabled }` when webhooks are active. A cron turned off by either lever stays **registered**, carrying `_cronGloballyEnabled: false` — see "Per-repo cron participation" below. |
+| **Two kinds of cron** | A definition declares **exactly one** of `workflow:` (dispatch an agent workflow — the normal case) or `handler:` (run host-side code from the registry in `src/cron/handlers.ts`). `handler:` exists for periodic work that is structurally un-agentable: the repo digest's facts live in the harness's own SQLite, which a sandboxed phase cannot reach, and it posts to Slack, which no agent has a tool for. Such a cron *could* use `registerDirect` (next row) — but a direct job is invisible to `getCronWorkflows()`, so it gets no dashboard toggle, no `cron_overrides` schedule, no per-repo participation and no "Run now". An unresolvable handler name **drops** the cron with a boot warning naming it (unlike an unknown `condition.unless`, which registers anyway); it cannot fail boot, because the registry is built from collaborators that may legitimately be absent. |
+| **Handler ticks are ledgered** | A handler cron dispatches nothing, so it has no `workflow_runs` row and would otherwise be invisible — the scheduler's consecutive-failure alerting had nothing to count and `GET /crons` reported a hardcoded `recentFailures: 0` beside it. `withLedger` (`src/cron/handlers.ts`) therefore wraps every registered handler in one `executions` row per invocation (`trigger_type: "cron"`, `skill` = the **cron's** name), so `consecutiveFailures` and the dashboard's last-run/status work off the same table everything else uses — no new table. The wrap lives in the registry rather than the scheduler because the admin "Run now" route invokes handlers directly, and a manual fire that skipped the ledger would leave exactly that gap. For a *weekly* cron the difference is noticing a revoked Slack token on Monday instead of next month. |
 | **Fan-out** | `dispatchCronWorkflow()` (`src/cron/fanout.ts`) fans out across a `repos` array in the context — **all at once, with no dispatch-side throttle**. Bounding concurrency is entirely the global admission cap's job (`concurrency.maxWorkflows`): each dispatch just creates a `workflow_runs` row, and an over-cap row is persisted `queued` and promoted as slots free. Each per-repo dispatch is its own workflow run with its own taskId. A cron whose context sets `discover: <key>` instead fans out **per PR**: the runner (`src/index.ts`) resolves the key to a discoverer, finds the eligible dependency PRs in code (`src/cron/dependabot-discovery.ts`), and dispatches one bounded single-PR run each via `fanOutContexts`. |
 | **Direct jobs** | Two crons run a plain function instead of a workflow (`registerDirect`, no sandbox): `sandbox-sweep` (issue #106) and — only when `feedback.github` is on — `feedback-poll` (issue #255). The latter exists because **GitHub delivers no webhook for reactions**, so a 👍 on a bot comment can only be discovered by asking. It refreshes reactions for the least-recently-polled anchors through one batched GraphQL `nodes(ids:)` query per 100 — measured at **one rate-limit point per request**, reactors included — which is what makes polling affordable: a fixed-size working set (anchors retire after `feedback.windowDays`) costs single-digit points a tick against a 5,000/hour budget. `feedback.maxAnchorsPerTick / 100` is the hard request bound. (`src/cron/feedback-poll.ts`) |
-| **Reply** | Cron jobs don't reply per se. Output destined for humans flows through `SLACK_DELIVERY_CHANNEL` when configured. |
+| **Reply** | Cron jobs don't reply per se, and **a repo-scoped cron workflow has nowhere to reply to**: no issue and no thread, so `callbacks.postComment` is undefined and the agent's final output is recorded on the run only. A cron that wants to reach humans must either publish itself (`github_create_issue`, as `security-review` does) or be a `handler:` cron that posts directly — which is what `repo-digest` is. |
 
 The dual webhook/poll model is intentional: with webhooks enabled, the
 polling crons (`cron-triage`, `cron-review`) silently de-register; with
 webhooks disabled, they kick in to keep parity. The scheduled crons
-(`cron-health`, `cron-security`) run regardless.
+(`cron-health`, `cron-security`, `cron-digest`) run regardless.
+
+### The repo digest
+
+`cron-digest.yaml` (weekly, Monday 09:00) is the one cron that **posts to
+Slack**. It is a `handler:` cron — `runRepoDigest` in `src/cron/repo-digest.ts`
+— and its shape is deliberate:
+
+- **The facts are computed in code**, from `GET /repos/{o}/{r}/issues?state=all&since=`
+  (which returns issues and pull requests together, each PR carrying
+  `pull_request.merged_at`) plus the harness's own `workflow_runs` and
+  `executions`. So the numbers are arithmetic rather than a model's
+  self-report, and a repo costs 2–3 GitHub requests.
+- **`since` filters on `updated_at`**, so the response also contains items
+  merely touched inside the window. Every count is taken from the item's own
+  `created_at` / `closed_at` / `merged_at`, in `summarizeRepo`.
+- **One optional model call** (`digest.narrative`) turns those facts into a
+  sentence of English. It is never asked to produce a number, and a failure
+  drops the sentence rather than the digest.
+- **The escalated-PR list is asked of GitHub** (open PRs labelled
+  `requires-human`), not inferred from run rows — `fanOut` returns only
+  `{dispatched, failures}` and a skip counts as a success, so an escalation is
+  invisible in the cron's own reporting.
+
+**It is inert until a channel resolves** (next section). No channel means no
+post, no GitHub request and no model call — which is what keeps a fresh install
+quiet.
+
+**A failed repo fails the tick.** Each repo is attempted inside its own
+`try`/`catch`, so one repo's bad day doesn't cost the others their digest — but
+the tick then **throws** once the loop is done if any repo failed. Swallowing
+them and returning normally would report success, and the failures that matter
+here are not per-repo accidents: a revoked bot token, or the bot removed from
+its channels, fails every repo at once, silently, once a week. Deliberately not
+conditioned on "posted nothing": a repo with no channel is *skipped*, not
+failed, so "considered 10, posted 0" stays the correct and quiet outcome for a
+deployment that has configured nothing.
+
+### Where a repo's Slack output goes
+
+`resolveRepoChannel` (`src/notify/repo-channel.ts`), most specific first:
+
+1. the repo's own `.lastlight/lastlight.yml` → `notifications.slack.channel`
+2. the operator's `slack.repoChannels["owner/repo"]` (overlay `config.yaml`)
+3. the global `slack.deliveryChannel` (`SLACK_DELIVERY_CHANNEL`)
+
+and a fourth outcome that is **not** a fallback: nothing, meaning that repo gets
+no digest.
+
+A repo naming its own channel is safe without a clamp because of two facts that
+are not about bounds: the repo layer is **always read from the default branch**,
+never a PR head, so a pull request cannot redirect the bot's output; and Slack
+will not deliver to a channel the bot has not been invited to. The operator's
+kill switch is the generic one — drop `notifications` from
+`repoConfig.allowKeys`.
+
+`channel: null` committed by a repo means "send me nothing" and beats the
+operator's map. That is why the resolver reads **provenance**
+(`sources.notifications["slack.channel"] === "repo"`) rather than the merged
+value: a merged `null` cannot say whether the repo chose it or simply said
+nothing.
+
+> **Removed:** `MessageDeliveryService` and `SlackConnector.sendToDeliveryChannel`.
+> They were registered at boot and **never called from anywhere** — no call site
+> in `src/`, none in git history — while four documents described
+> `SLACK_DELIVERY_CHANNEL` as "the channel cron reports go to". The digest makes
+> that sentence true; the dead wiring is gone rather than left as a second
+> answer to one question.
 
 **Per-repo cron participation (issue #180).** WHICH repos a tick fans out over is
 resolved at **tick** time, not at registration: a managed repo may opt out of (or

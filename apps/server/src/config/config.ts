@@ -54,7 +54,29 @@ export interface SlackConfig {
   /** Events API signing secret. Required only when mode === "webhook". */
   signingSecret?: string;
   allowedUsers: string[];
+  /**
+   * The LAST-RESORT channel for anything the harness sends that isn't a reply
+   * to a thread — today, a repo digest whose repo named no channel of its own.
+   * From `SLACK_DELIVERY_CHANNEL` (or the `SLACK_HOME_CHANNEL` alias).
+   */
   deliveryChannel?: string;
+  /**
+   * Operator-side per-repo channel routing: `"owner/repo"` → channel id. Sits
+   * between a repo's own `notifications.slack.channel` and `deliveryChannel`.
+   * From the overlay's `slack.repoChannels` — a map is impractical in env, and
+   * this is deployment config rather than a secret.
+   */
+  repoChannels: Record<string, string>;
+}
+
+/** The weekly Slack repo digest. Operator-only — see {@link RuntimeConfig.digest}. */
+export interface DigestConfig {
+  /** How far back a digest looks, in days. */
+  windowDays: number;
+  /** Spend one cheap model call on a plain-English summary sentence. */
+  narrative: boolean;
+  /** Cap on each enumerated list (unreviewed PRs, escalations). */
+  maxItems: number;
 }
 
 export interface ModelConfig {
@@ -91,24 +113,28 @@ import {
   DIAGNOSIS_CLASSES,
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultNotificationsConfig,
   defaultReviewConfig,
   isDependencyImpact,
   isDiagnosisClass,
   isReviewTrigger,
   type DependenciesConfig,
   type FixConfig,
+  type NotificationsConfig,
   type ReviewConfig,
 } from "lastlight-shared/config-types";
 export type {
   DependenciesConfig,
   DependencyImpact,
   FixConfig,
+  NotificationsConfig,
   ReviewConfig,
   ReviewTrigger,
 } from "lastlight-shared/config-types";
 export {
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultNotificationsConfig,
   defaultReviewConfig,
 } from "lastlight-shared/config-types";
 
@@ -262,6 +288,12 @@ export interface LastLightConfig {
    * anyway — so no clamp is needed for it to stay ours.
    */
   feedback: FeedbackConfig;
+  /**
+   * The weekly Slack repo digest (`workflows/cron-digest.yaml`). Operator-only:
+   * a repo chooses WHERE its digest goes (`notifications.slack.channel`), never
+   * how far back it looks or whether it spends a model call.
+   */
+  digest: DigestConfig;
   /**
    * GitHub team-based per-repo dashboard visibility (issue #169). Operator-only
    * for the same reason as `feedback`: it governs API spend and who sees what,
@@ -685,6 +717,9 @@ export function loadConfig(): LastLightConfig {
           signingSecret: process.env.SLACK_SIGNING_SECRET || undefined,
           allowedUsers: (process.env.SLACK_ALLOWED_USERS || "").split(",").filter(Boolean),
           deliveryChannel: process.env.SLACK_DELIVERY_CHANNEL || process.env.SLACK_HOME_CHANNEL || undefined,
+          // The one Slack key that is NOT a credential, so it comes from the
+          // layered YAML rather than env — see `SlackConfig.repoChannels`.
+          repoChannels: fileCfg.slack.repoChannels,
         };
       })()
     : undefined;
@@ -735,6 +770,7 @@ export function loadConfig(): LastLightConfig {
     concurrency: fileCfg.concurrency,
     cleanup: fileCfg.cleanup,
     feedback: fileCfg.feedback,
+    digest: fileCfg.digest,
     teamVisibility: fileCfg.teamVisibility,
     repoConfig: fileCfg.repoConfig,
   };
@@ -770,6 +806,13 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   cleanup: { sandbox: SandboxCleanupConfig };
   feedback: FeedbackConfig;
+  digest: DigestConfig;
+  /**
+   * The non-secret half of the Slack config. Everything else about Slack is a
+   * credential and stays env-only; this map is deployment routing, and a map is
+   * impractical to express in an env var.
+   */
+  slack: { repoChannels: Record<string, string> };
   teamVisibility: TeamVisibilityConfig;
   repoConfig: RepoConfigPolicy;
 } {
@@ -939,6 +982,28 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     otel: feedbackRaw.otel !== false,
   };
 
+  // The weekly repo digest. Lenient like every block above. There is no
+  // `enabled` flag on purpose: the digest is gated on a CHANNEL resolving for a
+  // repo, so a deployment that configured no channel already gets nothing, and
+  // a second switch would just be a way to have the cron on and the feature off.
+  // `crons.disable: [repo-digest]` is the off switch.
+  // Operator channel routing, `"owner/repo"` → channel id. Silently drops a
+  // malformed entry rather than failing boot, like every block here: a typo'd
+  // repo key costs that repo its digest, which the admin `/config` view shows.
+  const slackRaw = isPlainObject(raw.slack) ? raw.slack : {};
+  const repoChannelsRaw = isPlainObject(slackRaw.repoChannels) ? slackRaw.repoChannels : {};
+  const slackRepoChannels: Record<string, string> = {};
+  for (const [repo, channel] of Object.entries(repoChannelsRaw)) {
+    if (typeof channel === "string" && channel.trim()) slackRepoChannels[repo.trim()] = channel.trim();
+  }
+
+  const digestRaw = isPlainObject(raw.digest) ? raw.digest : {};
+  const digest: DigestConfig = {
+    windowDays: positiveNumber(digestRaw.windowDays) ?? 7,
+    narrative: digestRaw.narrative !== false,
+    maxItems: positiveNumber(digestRaw.maxItems) ?? 5,
+  };
+
   // Team-based dashboard visibility (issue #169). Lenient like every block
   // above. `enabled` defaults to FALSE: it needs the App's org `Members: read`
   // permission, so it must be asked for after that re-consent. The budgets are
@@ -1013,6 +1078,8 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     concurrency: { maxWorkflows, maxQueueWaitMs },
     cleanup: { sandbox: sandboxCleanup },
     feedback,
+    digest,
+    slack: { repoChannels: slackRepoChannels },
     teamVisibility,
     repoConfig,
   };

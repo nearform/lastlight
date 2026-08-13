@@ -165,6 +165,28 @@ router routed nine, which is why the dashboard showed no Slack trigger for
 }
 ```
 
+**Cron level** (`kind: cron`, same file). A cron definition is not runnable
+itself — it is a schedule plus what to run:
+
+```ts
+{
+  kind: "cron";
+  name: string;          // unique cron name; the dashboard/CLI handle
+  schedule: string;      // croner expression
+  workflow?: string;     // dispatch this AgentWorkflow on each tick
+  handler?: string;      // OR run this host-side handler (src/cron/handlers.ts)
+  context?: Record<string, unknown>;   // static context merged into each tick
+  condition?: { unless: string };      // named predicate; true ⇒ do not register
+}
+```
+
+`workflow` and `handler` are **mutually exclusive and one is required** — a Zod
+refinement, because both would silently pick one and neither would register a
+cron that ticks into the void. `handler:` exists for periodic work that cannot
+be done by an agent at all (harness-only data, or a Slack post); the trade-offs
+and the failure rule are in
+[Integrations → Cron](/spec/03-integrations).
+
 Defined with Zod; loaded and cached by `loader.ts`.
 
 ## Phase types

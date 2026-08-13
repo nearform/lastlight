@@ -9,12 +9,30 @@ const tracer = () => trace.getTracer("lastlight");
 export interface CronJob {
   name: string;
   schedule: string;
-  /** Name of an agent workflow (workflows/<name>.yaml) to invoke on each tick */
-  workflow: string;
+  /**
+   * Name of an agent workflow (workflows/<name>.yaml) to invoke on each tick.
+   * Absent for a `handler:` cron — see {@link CronJob.handler}.
+   */
+  workflow?: string;
+  /**
+   * A HOST-SIDE handler to run instead of dispatching a workflow (the cron
+   * YAML's `handler:` key, resolved to a function by `jobs.ts`). Takes the same
+   * tick context a workflow dispatch would have received, so per-repo
+   * participation and the control keys reach it unchanged.
+   */
+  handler?: (context: Record<string, unknown>) => Promise<void>;
   context: Record<string, unknown>;
-  /** Maximum consecutive failures before alerting */
-  maxFailures?: number;
 }
+
+/**
+ * Consecutive failed ticks before the scheduler shouts.
+ *
+ * A constant, not a per-job field: `CronJob.maxFailures` existed for a year,
+ * was read once as `job.maxFailures || 3`, and was **never set by anything** —
+ * not the cron YAML schema (it has no such key), not `getJobs`. So it always
+ * resolved to 3 while reading like a knob an operator could turn.
+ */
+const MAX_CONSECUTIVE_FAILURES = 3;
 
 /** A lightweight direct job — runs a function, not a workflow */
 export interface DirectCronJob {
@@ -56,14 +74,21 @@ export class CronScheduler {
       log.info("Running", { job: job.name });
 
       try {
-        await this.runner(job.workflow, job.context);
+        if (job.handler) await job.handler(job.context);
+        else await this.runner(job.workflow!, job.context);
       } catch (err: unknown) {
         log.error("Job failed", { job: job.name, err });
 
-        // Check consecutive failures (tracked under the workflow name)
-        const failures = this.db.executions.consecutiveFailures(job.workflow);
-        const max = job.maxFailures || 3;
-        if (failures >= max) {
+        // Consecutive failures, counted off the `executions` ledger. A workflow
+        // cron's rows are written per phase under the WORKFLOW name; a handler
+        // cron's are written per tick under the CRON name by `withLedger`
+        // (`cron/handlers.ts`) — which exists so this branch applies to both.
+        // It used to be gated on `job.workflow`, so a handler cron failing every
+        // tick produced one log line and nothing else: no count, and an admin
+        // dashboard reporting zero failures beside it.
+        const ledgerKey = job.workflow ?? job.name;
+        const failures = this.db.executions.consecutiveFailures(ledgerKey);
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
           log.error("ALERT: job has failed consecutively", { job: job.name, failures });
           // TODO: send alert (Slack webhook, email, etc.)
         }
