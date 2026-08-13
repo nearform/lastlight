@@ -25,6 +25,16 @@ import type { LoggerPort, PhaseResult } from "lastlight-workflow-engine";
  * provisioning errors, `stopReason: "error_sandbox"`). Before this, such a
  * failure reached the run record and telemetry but never the logs.
  */
+/**
+ * The matching "Phase start" call. No failure semantics — this exists only so
+ * the pair stays together: the same three hosts emitted it as three separate
+ * literals, which is the duplication that let `logPhaseEnd`'s sites drift apart
+ * in the first place.
+ */
+export function logPhaseStart(log: LoggerPort, workflowName: string, phase: string): void {
+  log.info("Phase start", { workflowName, phase });
+}
+
 export function logPhaseEnd(
   log: LoggerPort,
   workflowName: string,

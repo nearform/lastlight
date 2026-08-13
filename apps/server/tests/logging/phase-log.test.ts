@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { LoggerPort } from "lastlight-workflow-engine";
 import type { PhaseResult } from "lastlight-workflow-engine";
-import { logPhaseEnd } from "#src/logging/phase-log.js";
+import { logPhaseEnd, logPhaseStart } from "#src/logging/phase-log.js";
 
 /**
  * "Phase end" is the ONLY record a failed phase leaves (issue #335).
@@ -40,6 +40,19 @@ function fakeLogger(): LoggerPort & { info: ReturnType<typeof vi.fn>; error: Ret
 }
 
 const ok: PhaseResult = { phase: "review", success: true, output: "done" };
+
+describe("logPhaseStart", () => {
+  it("logs at info with the workflow and phase", () => {
+    const log = fakeLogger();
+    logPhaseStart(log, "pr-review", "review");
+
+    expect(log.info).toHaveBeenCalledWith("Phase start", {
+      workflowName: "pr-review",
+      phase: "review",
+    });
+    expect(log.error).not.toHaveBeenCalled();
+  });
+});
 
 describe("logPhaseEnd", () => {
   it("logs a successful phase at info", () => {

@@ -85,7 +85,7 @@ import {
 } from "./notify/index.js";
 import type { EventEnvelope } from "./connectors/types.js";
 import { logger } from "./logging/logger.js";
-import { logPhaseEnd } from "./logging/phase-log.js";
+import { logPhaseEnd, logPhaseStart } from "./logging/phase-log.js";
 
 /**
 /**
@@ -1003,7 +1003,7 @@ async function main() {
             }
           : undefined),
       onPhaseStart: async (phase) => {
-        log.info("Phase start", { workflowName, phase });
+        logPhaseStart(log, workflowName, phase);
         // Refresh the Slack thinking indicator so long-running phases
         // don't leave the thread looking dead. threadId doubles as both
         // the message anchor and the thread root for DM threads.
