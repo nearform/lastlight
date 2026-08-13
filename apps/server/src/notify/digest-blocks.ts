@@ -48,6 +48,24 @@ export interface DigestFacts {
   botFacts: BotFacts;
 }
 
+/**
+ * A pull-request reference as a markdown link — `[#294](https://github.com/…)`.
+ *
+ * Markdown, not Slack's own `<url|text>`: `renderDigest` passes every line
+ * through `markdownToSlackMrkdwn`, which converts links itself. Emitting
+ * `<url|#294>` here would go through that converter a second time and come out
+ * escaped. Doing it this way also means the fallback `text` and the block
+ * bodies get the same links, because both are built from the same lines.
+ *
+ * Always `/pull/`: every number this renders is an OPEN PULL REQUEST — the
+ * oldest unreviewed one and the escalated list both come from
+ * `listOpenPullRequests`. (GitHub would redirect `/issues/N` to `/pull/N`
+ * anyway, but there is no reason to spend a redirect on a known answer.)
+ */
+function prRef(repo: string, number: number): string {
+  return `[#${number}](https://github.com/${repo}/pull/${number})`;
+}
+
 /** How a workflow name reads in a sentence. Unknown names fall through verbatim. */
 const WORKFLOW_LABELS: Record<string, string> = {
   "pr-review": "reviewed",
@@ -76,9 +94,7 @@ export function renderDigest(facts: DigestFacts, narrative?: string): { text: st
   );
   if (r.oldestAwaiting) {
     repoLines.push(
-      // Plain `#N`, deliberately: `<#…>` is Slack's CHANNEL reference syntax
-      // and would render a PR number as a broken channel link.
-      `• Oldest unreviewed: #${r.oldestAwaiting.number} ${truncate(r.oldestAwaiting.title)} — open ${count(r.oldestAwaiting.ageDays, "day")}`,
+      `• Oldest unreviewed: ${prRef(repo, r.oldestAwaiting.number)} ${truncate(r.oldestAwaiting.title)} — open ${count(r.oldestAwaiting.ageDays, "day")}`,
     );
   }
 
@@ -94,7 +110,7 @@ export function renderDigest(facts: DigestFacts, narrative?: string): { text: st
   if (r.escalated.length > 0) {
     botLines.push(
       `• ⚠️ ${count(r.escalated.length, "PR")} waiting on a human: ` +
-        r.escalated.map((p) => `#${p.number}`).join(", "),
+        r.escalated.map((p) => prRef(repo, p.number)).join(", "),
     );
   }
 
