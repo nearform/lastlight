@@ -415,15 +415,35 @@ describe("repo digest — rendering", () => {
     expect(text).toContain("14 runs — 12 ok, 2 failed");
     expect(text).toContain("$4.12");
     expect(text).toContain("#412");
-    expect(text).toContain("waiting on a human: #401");
+    expect(text).toContain("waiting on a human:");
     expect(blocks[0]).toMatchObject({ type: "header" });
     expect(JSON.stringify(blocks)).toContain("Last Light");
   });
 
-  it("renders a PR number as plain text, never as a Slack channel reference", () => {
-    // `<#412>` would render as a broken channel link in Slack.
+  it("links every PR number to GitHub, in Slack's <url|text> form", () => {
+    const { text } = renderDigest(facts);
+    expect(text).toContain("<https://github.com/acme/widgets/pull/412|#412>");
+    expect(text).toContain("<https://github.com/acme/widgets/pull/401|#401>");
+  });
+
+  it("links them in the BLOCK bodies too, not just the fallback text", () => {
+    // The two are built from the same lines, so they cannot disagree — but the
+    // blocks are what anyone actually reads, so assert them directly.
+    const { blocks } = renderDigest(facts);
+    const sections = blocks
+      .filter((b): b is Extract<typeof b, { type: "section" }> => b.type === "section")
+      .map((b) => (b.text as { text: string }).text)
+      .join("\n");
+    expect(sections).toContain("<https://github.com/acme/widgets/pull/412|#412>");
+    expect(sections).toContain("<https://github.com/acme/widgets/pull/401|#401>");
+  });
+
+  it("never emits `<#412>` — that is Slack's CHANNEL reference syntax", () => {
+    // The bug the link syntax has to avoid: `<#N>` renders as a broken channel
+    // link, not a PR link.
     const { text } = renderDigest(facts);
     expect(text).not.toContain("<#412>");
+    expect(text).not.toContain("<#401>");
   });
 
   it("puts the narrative above the bullets, and omits the block when absent", () => {

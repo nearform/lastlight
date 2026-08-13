@@ -337,6 +337,11 @@ Slack**. It is a `handler:` cron — `runRepoDigest` in `src/cron/repo-digest.ts
 - **One optional model call** (`digest.narrative`) turns those facts into a
   sentence of English. It is never asked to produce a number, and a failure
   drops the sentence rather than the digest.
+- **Every PR number is a link.** `prRef` emits a markdown link that
+  `markdownToSlackMrkdwn` converts to Slack's `<url|#294>` form — markdown
+  rather than that form directly, because the converter runs over these lines
+  and would escape a pre-built one. Both numbers a digest prints are open pull
+  requests (`listOpenPullRequests`), so the target is always `/pull/N`.
 - **The escalated-PR list is asked of GitHub** (open PRs labelled
   `requires-human`), not inferred from run rows — `fanOut` returns only
   `{dispatched, failures}` and a skip counts as a success, so an escalation is
