@@ -129,6 +129,78 @@ describe("getJobs — resolving a handler", () => {
   });
 });
 
+describe("withLedger — a handler cron is countable", () => {
+  /**
+   * The observability gap this closes: a handler cron has no `workflow_runs`
+   * row, so before this the scheduler's consecutive-failure check was gated off
+   * for it and the admin crons list reported a hardcoded `recentFailures: 0`.
+   * A weekly cron could fail for a month behind a healthy-looking dashboard.
+   */
+  it("records a row per invocation, keyed by the CRON name", async () => {
+    const { withLedger } = await import("#src/cron/handlers.js");
+    const { StateDb } = await import("#src/state/db.js");
+    const db = new StateDb(":memory:");
+    try {
+      const wrapped = withLedger(db, "repo-digest", async () => {});
+      await wrapped({ repos: ["acme/a"] });
+
+      const rows = db.executions.recentExecutions("repo-digest", 10);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ triggerType: "cron", skill: "repo-digest", success: true });
+      expect(rows[0].finishedAt).toBeTruthy();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("records the failure AND re-throws — the row is a record, not a swallow", async () => {
+    const { withLedger } = await import("#src/cron/handlers.js");
+    const { StateDb } = await import("#src/state/db.js");
+    const db = new StateDb(":memory:");
+    try {
+      const wrapped = withLedger(db, "repo-digest", async () => {
+        throw new Error("invalid_auth");
+      });
+
+      await expect(wrapped({})).rejects.toThrow("invalid_auth");
+
+      const [row] = db.executions.recentExecutions("repo-digest", 1);
+      expect(row).toMatchObject({ success: false, error: "invalid_auth" });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("makes consecutiveFailures — the alerting input — actually count", async () => {
+    const { withLedger } = await import("#src/cron/handlers.js");
+    const { StateDb } = await import("#src/state/db.js");
+    const db = new StateDb(":memory:");
+    try {
+      const wrapped = withLedger(db, "repo-digest", async () => {
+        throw new Error("not_in_channel");
+      });
+      for (let i = 0; i < 3; i++) await wrapped({}).catch(() => {});
+
+      expect(db.executions.consecutiveFailures("repo-digest")).toBe(3);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("attributes a manual 'Run now' to the person who pressed it", async () => {
+    const { withLedger } = await import("#src/cron/handlers.js");
+    const { StateDb } = await import("#src/state/db.js");
+    const db = new StateDb(":memory:");
+    try {
+      await withLedger(db, "repo-digest", async () => {})({ sender: "cliftonc" });
+      const [row] = db.executions.recentExecutions("repo-digest", 1);
+      expect(row.triggeredBy).toBe("cliftonc");
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("CronScheduler — running a handler job", () => {
   /** Croner takes a 6-field pattern, so a real tick is one second away. */
   const EVERY_SECOND = "* * * * * *";
@@ -165,13 +237,13 @@ describe("CronScheduler — running a handler job", () => {
     }
   });
 
-  it("survives a throwing handler — and does not consult the executions ledger for one", async () => {
+  it("counts a throwing handler's failures under the CRON name", async () => {
     const { CronScheduler } = await import("#src/cron/scheduler.js");
     const { StateDb } = await import("#src/state/db.js");
     const db = new StateDb(":memory:");
-    // A handler cron writes no executions rows, so the consecutive-failure
-    // alerting has nothing to count. Calling it with an undefined workflow name
-    // is the crash this branch exists to avoid.
+    // The gap: this used to be gated on `job.workflow`, so a handler cron
+    // failing every tick produced one log line, no count, and a dashboard
+    // reporting zero failures beside it.
     const consecutiveFailures = vi.spyOn(db.executions, "consecutiveFailures");
     const handler = vi.fn(async () => {
       throw new Error("slack is down");
@@ -180,9 +252,9 @@ describe("CronScheduler — running a handler job", () => {
     try {
       scheduler.register({ name: "repo-digest", schedule: EVERY_SECOND, handler, context: {} });
       await untilCalled(handler);
+      await untilCalled(consecutiveFailures);
 
-      expect(handler).toHaveBeenCalled();
-      expect(consecutiveFailures).not.toHaveBeenCalled();
+      expect(consecutiveFailures).toHaveBeenCalledWith("repo-digest");
     } finally {
       scheduler.stopAll();
       db.close();

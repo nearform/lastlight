@@ -354,7 +354,13 @@ src/
                         participation and no "Run now"; `handler:` buys all
                         four. An unresolvable name DROPS the cron with a boot
                         warning (it cannot fail boot — the registry is
-                        conditional).
+                        conditional). `withLedger` wraps every registered
+                        handler in ONE `executions` row per invocation
+                        (`trigger_type: "cron"`, `skill` = the cron's name), so
+                        `consecutiveFailures` and the dashboard's failure count
+                        work for a cron that dispatches nothing. It wraps here,
+                        not in the scheduler, because admin "Run now" invokes
+                        the registry directly.
     repo-digest.ts      The weekly per-repo Slack digest: what happened in the
                         repo (GitHub) plus what Last Light did about it (the
                         state DB), posted to the repo's channel. Facts are

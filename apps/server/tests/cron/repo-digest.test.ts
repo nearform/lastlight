@@ -276,7 +276,7 @@ describe("repo digest — the tick", () => {
     expect(summarize).not.toHaveBeenCalled();
   });
 
-  it("keeps going when ONE repo fails", async () => {
+  it("serves the other repos when ONE fails, then FAILS the tick", async () => {
     const post = vi.fn(async () => {});
     const github = fakeGh({
       listRepoActivitySince: vi.fn(async (_o: string, repo: string) => {
@@ -284,8 +284,36 @@ describe("repo digest — the tick", () => {
         return [];
       }),
     });
-    await runRepoDigest(deps({ post, github }), { repos: ["acme/widgets", "acme/gadgets"] });
+
+    await expect(
+      runRepoDigest(deps({ post, github }), { repos: ["acme/widgets", "acme/gadgets"] }),
+    ).rejects.toThrow(/acme\/widgets/);
+
+    // The healthy repo still got its digest — the throw is after the loop.
     expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the tick when EVERY post fails — the revoked-token case", async () => {
+    // The failure that actually matters: a revoked bot token or a bot removed
+    // from its channels fails every repo at once. Catching per repo and
+    // returning normally would report a successful tick, once a week, forever.
+    const post = vi.fn(async () => {
+      throw new Error("invalid_auth");
+    });
+
+    await expect(
+      runRepoDigest(deps({ post }), { repos: ["acme/widgets", "acme/gadgets"] }),
+    ).rejects.toThrow(/2 of 2 repos/);
+  });
+
+  it("does NOT fail a tick where every repo was merely skipped for having no channel", async () => {
+    // "considered 10, posted 0" is the correct, quiet outcome for a deployment
+    // that has configured no channels — it must not look like a broken token.
+    const post = vi.fn(async () => {});
+    await expect(
+      runRepoDigest(deps({ post, routing: { repoChannels: {} } }), { repos: ["acme/widgets"] }),
+    ).resolves.toBeUndefined();
+    expect(post).not.toHaveBeenCalled();
   });
 
   it("honours a repo's cron opt-out", async () => {

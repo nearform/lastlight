@@ -599,6 +599,27 @@ const COMMENT_CLASSIFIER_TYPES = new Set<EventType>([
   "pr_review.submitted",
 ]);
 
+/**
+ * The last tick of a `handler:` cron, projected into the `{ startedAt, status }`
+ * shape the crons list already reads off a `workflow_runs` row.
+ *
+ * A handler cron dispatches nothing, so it has no run row — its only trace is
+ * the `executions` row `withLedger` writes per tick (`cron/handlers.ts`). The
+ * status vocabulary is narrowed to what a tick can actually be: it never
+ * queues, pauses or gets cancelled.
+ */
+function lastHandlerTick(
+  db: StateDb,
+  cronName: string,
+): { startedAt: string; status: "running" | "succeeded" | "failed" } | undefined {
+  const [row] = db.executions.recentExecutions(cronName, 1);
+  if (!row) return undefined;
+  return {
+    startedAt: row.startedAt,
+    status: !row.finishedAt ? "running" : row.success ? "succeeded" : "failed",
+  };
+}
+
 function playgroundRouting(type: EventType): "deterministic" | "classifier" {
   return PLAYGROUND_EVENT_TYPES.find((e) => e.type === type)?.routing ?? "deterministic";
 }
@@ -2451,15 +2472,18 @@ export function createAdminRoutes(
       const override = overrides.get(def.name) ?? null;
       const enabled = override ? override.enabled : true;
       const live = liveByName.get(def.name) ?? null;
-      // A `handler:` cron produces no executions rows and no workflow_runs —
-      // it is host-side code, not a dispatch — so both of these are structurally
-      // unknowable for it rather than merely zero. Reported as such (0 / null)
-      // instead of querying a workflow name that doesn't exist.
-      const recentFailures = def.workflow ? db.executions.consecutiveFailures(def.workflow) : 0;
-      // Find the most recent workflow_run for this cron's workflow
+      // Both kinds of cron answer from the `executions` ledger, keyed
+      // differently: a workflow cron's rows are written per phase under the
+      // WORKFLOW name, a handler cron's per tick under the CRON name (by
+      // `withLedger` in `cron/handlers.ts`). This used to report a hardcoded
+      // `0 / null` for handler crons, so the dashboard showed a healthy-looking
+      // zero beside a cron that could have been failing for weeks.
+      const recentFailures = db.executions.consecutiveFailures(def.workflow ?? def.name);
+      // Last run: a workflow cron has a `workflow_runs` row (richer — it is the
+      // dispatched run, not the tick); a handler cron only ever has its ledger row.
       const recent = def.workflow
         ? db.runs.listRecent(50).find((r) => r.workflowName === def.workflow)
-        : undefined;
+        : lastHandlerTick(db, def.name);
       return {
         name: def.name,
         workflow: def.workflow ?? null,

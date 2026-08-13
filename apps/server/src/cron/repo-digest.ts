@@ -106,14 +106,33 @@ export async function runRepoDigest(deps: RepoDigestDeps, context: Record<string
   const since = new Date(now.getTime() - deps.config.windowDays * 24 * 60 * 60 * 1000);
 
   let posted = 0;
+  const failed: string[] = [];
   for (const target of targets) {
     try {
       posted += (await digestOneRepo(deps, target, since, now)) ? 1 : 0;
     } catch (err: unknown) {
+      failed.push(target);
       log.error("Digest failed for repo", { repo: target, err });
     }
   }
-  log.info("Digest tick complete", { considered: targets.length, posted });
+  log.info("Digest tick complete", { considered: targets.length, posted, failed: failed.length });
+
+  // One repo's bad day must not cost the others their digest — hence the
+  // per-repo catch above. But a tick that swallowed every failure and returned
+  // normally would report SUCCESS, and the failures that matter here are not
+  // per-repo accidents: a revoked bot token or a bot removed from its channels
+  // fails every repo at once, silently, once a week. So the tick fails if any
+  // repo did, AFTER the others have been served.
+  //
+  // Deliberately not conditioned on `posted === 0`: a repo with no channel is
+  // skipped, not failed, so "considered 10, posted 0" is the correct and quiet
+  // outcome for a deployment that has configured nothing.
+  if (failed.length > 0) {
+    throw new Error(
+      `Digest failed for ${failed.length} of ${targets.length} repos (${failed.join(", ")}) — ` +
+        `see the per-repo errors above. ${posted} posted.`,
+    );
+  }
 }
 
 /** @returns whether a digest was actually posted. */

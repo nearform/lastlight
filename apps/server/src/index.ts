@@ -1242,6 +1242,7 @@ async function main() {
   // naming it — which is the whole point: a cron that silently ticks into
   // nothing is exactly the failure mode this feature replaced.
   const cronHandlers = buildCronHandlers({
+    db,
     digest:
       github && slackConnector
         ? {
