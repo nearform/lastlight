@@ -3,6 +3,16 @@
 Stop the dashboard reading `executions.success` as a health signal. It is not
 one, and the chart currently paints a wall of red on a day when nothing failed.
 
+> **Status: implemented** by [#328](https://github.com/nearform/lastlight/pull/328)
+> (`ed853075`, 12 Aug 2026), which landed before this doc did.
+> [#325](https://github.com/nearform/lastlight/issues/325) is still open — the
+> PR carried no closing keyword.
+>
+> This is the design record, not outstanding work. The body below is kept as
+> written, so its line numbers are as of plan time; [What
+> landed](#what-landed) names the shipped code by symbol and records the two
+> places execution diverged from this plan.
+
 ## The evidence
 
 A homelab instance running v0.25.5, 11 Aug 2026, whole day:
@@ -84,9 +94,9 @@ export type ExecutionOutcome = "succeeded" | "skipped" | "deferred" | "failed";
   `succeeded | skipped | deferred | failed` counts in place of
   `successes | failures`.
 - **`executionStats().by_skill`** (`:786`): same reclassification for `fail`.
-- **`HomePage.tsx:643`**: four stacked `<Bar>`s — `CHART.success` for succeeded,
-  `CHART.accent` (amber) for deferred, `CHART.error` for failed, and a muted
-  tone for skipped.
+- **`dashboard/src/components/HomePage.tsx`**: four stacked `<Bar>`s —
+  `CHART.success` for succeeded, `CHART.accent` (amber) for deferred,
+  `CHART.error` for failed, and a muted tone for skipped.
 
 For that muted tone there is an exact precedent to reuse rather than invent:
 the generic-loop `until_bash` check that runs and comes back red is already
@@ -143,3 +153,50 @@ would arm an alert that then fires on skips and quota deferrals.
   `deferred` back into `failed`.
 - Re-run the evidence query after the change and confirm the instance's red
   column goes to zero on a day with no real failures.
+
+## What landed
+
+### The classifier, as designed
+
+`EXECUTION_OUTCOME_COLUMNS` (`src/state/execution-store.ts:220`) is the
+`(success, stop_reason)` matrix above as one SQL fragment, interpolated into
+all three readers — `executionStats()` (`:838`), `dailyStats` (`:883`) and
+`hourlyStats` (`:946`) — so they cannot drift. Derived at query time; no
+migration.
+
+### Divergence 1 — `skipped` is in the bar, as a hatch
+
+This doc recommended dropping it to the tooltip and flagged the call as the
+reviewer's. It shipped **in** the stack instead, and the reason is recorded at
+`HomePage.tsx:747`: the four bands have to total the "Executions" headline
+above the chart, and `skipped` is 31% of rows on a busy day, so hiding it would
+make the two disagree visibly.
+
+Keeping it forced the other half of the decision. Hue could not carry a band
+that is not an outcome — `skipped` measured ΔE 15.9 against the green, over the
+floor but still visibly similar — so it is drawn as a 45° hatch (`ll-skip-hatch`,
+`:720`): texture is a different channel, so it survives colour blindness, print
+and `forced-colors`, and it reads as "placeholder", which is what a skip is.
+
+### Divergence 2 — the colours were not this chart's to choose
+
+The plan named `CHART.success` / `CHART.accent` (amber) / `CHART.error`. The
+four outcomes instead map onto the shared `STATUS` palette (`OUTCOME`,
+`HomePage.tsx:41`, from `dashboard/src/lib/status-colors.ts`), landed by
+[#330](https://github.com/nearform/lastlight/pull/330) so that "good" means the
+same green here as on the feedback page. `deferred` is `STATUS.info` (blue),
+not amber — which also dissolved a constraint this plan never saw: amber sat
+ΔE 2.8 from red, so the stack order had to keep the neutral between them.
+Blue let the order become semantic — nothing wrong → nothing happened → load →
+bad — leaving deferred↔failed (ΔE 19.0) as the only solid-to-solid boundary,
+against 13.5 before.
+
+The `unmet` tone this doc pointed at was a precedent for visual weight only, as
+the paragraph above says. It survives as `STATUS.neutral` tinting the hatch,
+but the hatch is what does the separating.
+
+### The sibling bug
+
+Filed as [#327](https://github.com/nearform/lastlight/issues/327) and still
+open. `consecutiveFailures` has moved to `execution-store.ts:721`; the caller
+at `src/cron/scheduler.ts:64` still passes the bare workflow name.
