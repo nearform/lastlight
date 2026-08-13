@@ -550,9 +550,9 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
     review modes are equally *safe* but not equally *expensive* — `eager`
     buys a full agent review per push on the operator's budget — and the
     audit comment is the record of a major this deployment auto-merged,
-    whose only silenceable party is the one being audited.) Three leaves
-    are **operator-only** and answer
-    `key-not-allowed` instead: `fix.escalateModelAfterAttempt` (spend),
+    whose only silenceable party is the one being audited.) Three leaves are
+    **operator-only** and answer `key-not-allowed` instead:
+    `fix.escalateModelAfterAttempt` (spend),
     `fix.gateTimeoutSeconds` (shared resource), and
     `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
     weld the escape hatch shut for a repo with no CI at all. `fix` +
