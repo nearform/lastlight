@@ -39,7 +39,16 @@ import { pretty } from "./ConfigPage";
  * so a repo's budgets were invisible on the one surface an operator uses to
  * check them (#256).
  */
-const SECTIONS = ["models", "variants", "disabled", "approval", "fix", "dependencies", "review"] as const;
+const SECTIONS = [
+  "models",
+  "variants",
+  "disabled",
+  "approval",
+  "fix",
+  "dependencies",
+  "review",
+  "notifications",
+] as const;
 type Section = (typeof SECTIONS)[number];
 
 /** One row of the effective-config table. */
@@ -72,19 +81,42 @@ function SourceBadge({ source }: { source: ConfigSource }) {
   );
 }
 
-/** Flatten `merged` + `sources` into one sorted row list, section by section. */
+/**
+ * Flatten `merged` + `sources` into one sorted row list, section by section.
+ *
+ * Most sections are a flat record of scalars, so this is one row per key. One
+ * — `notifications` — nests (`slack.channel`), and the endpoint's provenance
+ * for it is already keyed by that DOTTED leaf. So a nested value is descended
+ * into and its path joined with a dot, which lands on the same key the sources
+ * map uses. Without this the tab would render a row reading
+ * `notifications.slack = [object Object]` with a provenance of "default",
+ * hiding the one value that view exists to communicate.
+ */
 function toLeaves(data: RepoConfigBundle): Leaf[] {
   const rows: Leaf[] = [];
+  const isNested = (v: unknown): v is Record<string, unknown> =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+
   for (const section of SECTIONS) {
     const values = data.merged[section] as Record<string, unknown> | undefined;
     const sources = data.sources[section] as Record<string, ConfigSource> | undefined;
-    for (const key of Object.keys(values ?? {}).sort()) {
-      rows.push({
-        path: `${section}.${key}`,
-        value: (values ?? {})[key],
-        source: (sources ?? {})[key] ?? "default",
-      });
-    }
+
+    const walk = (node: Record<string, unknown>, prefix: string) => {
+      for (const key of Object.keys(node).sort()) {
+        const leaf = prefix ? `${prefix}.${key}` : key;
+        const value = node[key];
+        if (isNested(value)) {
+          walk(value, leaf);
+          continue;
+        }
+        rows.push({
+          path: `${section}.${leaf}`,
+          value,
+          source: (sources ?? {})[leaf] ?? "default",
+        });
+      }
+    };
+    walk(values ?? {}, "");
   }
   return rows;
 }

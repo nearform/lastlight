@@ -245,6 +245,14 @@ export interface AdminConfig {
    */
   triggerCron?: (workflow: string, context: Record<string, unknown>) => Promise<void>;
   /**
+   * Run a HOST-SIDE cron handler now — the `handler:` half of the same "Run
+   * now" button (`src/cron/handlers.ts`). Wired in `src/index.ts` to the same
+   * registry the scheduler resolves against, so a manual fire and a scheduled
+   * tick execute identical code. Absent without the registry → 503, exactly
+   * like `triggerCron`.
+   */
+  runCronHandler?: (handler: string, context: Record<string, unknown>) => Promise<void>;
+  /**
    * The harness GitHub client — `null` in chat-only mode, absent in tests that
    * don't need it. The three collaborators below exist for ONE endpoint,
    * `POST /prs/:owner/:repo/:number/retry`, which has to resolve a live `PrState`
@@ -2443,12 +2451,19 @@ export function createAdminRoutes(
       const override = overrides.get(def.name) ?? null;
       const enabled = override ? override.enabled : true;
       const live = liveByName.get(def.name) ?? null;
-      const recentFailures = db.executions.consecutiveFailures(def.workflow);
+      // A `handler:` cron produces no executions rows and no workflow_runs —
+      // it is host-side code, not a dispatch — so both of these are structurally
+      // unknowable for it rather than merely zero. Reported as such (0 / null)
+      // instead of querying a workflow name that doesn't exist.
+      const recentFailures = def.workflow ? db.executions.consecutiveFailures(def.workflow) : 0;
       // Find the most recent workflow_run for this cron's workflow
-      const recent = db.runs.listRecent(50).find((r) => r.workflowName === def.workflow);
+      const recent = def.workflow
+        ? db.runs.listRecent(50).find((r) => r.workflowName === def.workflow)
+        : undefined;
       return {
         name: def.name,
-        workflow: def.workflow,
+        workflow: def.workflow ?? null,
+        handler: def.handler ?? null,
         schedule: override?.schedule ?? def.schedule,
         originalSchedule: def.schedule,
         enabled,
@@ -2577,7 +2592,10 @@ export function createAdminRoutes(
     const name = c.req.param("name");
     const def = getCronWorkflows().find((d) => d.name === name);
     if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
-    if (!config.triggerCron) {
+    // A `handler:` cron runs host-side code rather than dispatching a workflow,
+    // so it needs the other collaborator. Both are absent in the CLI-only /
+    // test harnesses, hence the per-path 503.
+    if (def.handler ? !config.runCronHandler : !config.triggerCron) {
       return c.json({ error: "cron trigger not configured" }, 503);
     }
     // Same context shape the scheduler + toggle handler build, plus the
@@ -2604,10 +2622,13 @@ export function createAdminRoutes(
       [CRON_NAME_KEY]: def.name,
       sender: actorFromContext(c),
     };
-    config.triggerCron(def.workflow, context).catch((err) => {
+    const fire = def.handler
+      ? config.runCronHandler!(def.handler, context)
+      : config.triggerCron!(def.workflow!, context);
+    fire.catch((err) => {
       log.error("Cron trigger failed", { name, err });
     });
-    return c.json({ name, workflow: def.workflow, triggered: true });
+    return c.json({ name, workflow: def.workflow, handler: def.handler, triggered: true });
   });
 
   // ── Un-stick a pull request — the third retry surface ─────────────────────

@@ -40,6 +40,7 @@ import {
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultNotificationsConfig,
   defaultReviewConfig,
   type FixConfig,
   type ModelConfig,
@@ -227,6 +228,7 @@ function runRepoConfig(models: ModelConfig): RunRepoConfig {
     fix: defaultFixConfig(),
     dependencies: defaultDependenciesConfig(),
     review: defaultReviewConfig(),
+    notifications: defaultNotificationsConfig(),
     sources: {
       models: { default: "default" },
       variants: {},
@@ -241,6 +243,7 @@ function runRepoConfig(models: ModelConfig): RunRepoConfig {
       fix: {},
       dependencies: {},
       review: {},
+      notifications: {},
     },
     warnings: [],
   };

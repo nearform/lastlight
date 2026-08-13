@@ -227,7 +227,13 @@ function populateCache(): void {
           throw new Error(`Duplicate cron workflow name "${result.data.name}" in ${layer.name} layer`);
         }
         cronNamesInLayer.add(result.data.name);
-        if (!disabled.crons.includes(result.data.name) && !disabled.workflows.includes(result.data.workflow)) {
+        // A `handler:` cron has no target workflow, so `disabled.workflows`
+        // cannot reach it — `disabled.crons` / `crons.disable` is its only
+        // off switch. Guarded rather than coerced: `includes(undefined)` is
+        // false today, but only by accident of the array's contents.
+        const targetDisabled =
+          result.data.workflow !== undefined && disabled.workflows.includes(result.data.workflow);
+        if (!disabled.crons.includes(result.data.name) && !targetDisabled) {
           cronCache.set(result.data.name, result.data);
           cronOrigins.set(result.data.name, { layer: layer.name, filePath });
         }
@@ -662,7 +668,15 @@ export function validateAssets(routes?: RouteConfig, log: LoggerPort = noopLogge
 
   // Every enabled cron must target a workflow that still exists (and isn't
   // disabled) — otherwise the cron boots fine and only fails on first tick.
+  //
+  // A `handler:` cron is deliberately NOT checked here, and cannot be: the
+  // host-side handler registry is built at runtime from collaborators that may
+  // legitimately be absent (the digest needs a Slack connector), so failing boot
+  // on a missing handler would stop a Slack-less deployment from starting at
+  // all. `jobs.ts` warns and drops such a cron at registration instead — the
+  // one layer that can tell "typo" from "not available here".
   for (const [cronName, def] of cronCache) {
+    if (!def.workflow) continue;
     if (!agentCache.has(def.workflow)) {
       throw new Error(`Cron "${cronName}" targets missing or disabled workflow: ${def.workflow}`);
     }

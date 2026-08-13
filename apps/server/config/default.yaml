@@ -176,8 +176,14 @@ repoConfig:
   # makes the operator's `crons:` block below un-overridable — the kill switch.
   # `fix` / `dependencies` / `review` are clamped one-way (see those blocks): a
   # repo can only ever be MORE conservative than the values set here.
+  # `notifications` is the exception to that rule — it is ROUTING (which Slack
+  # channel this repo's digest goes to), and a channel has no more/less
+  # conservative direction, so the repo's value simply wins. What bounds it is
+  # the default-branch trust rule above plus Slack itself: the bot can only post
+  # where it has been invited. Drop `notifications` from this list to take
+  # channel choice back.
   allowKeys: [models, variants, crons, disabled.workflows, disabled.crons, approval,
-              fix, dependencies, review]
+              fix, dependencies, review, notifications]
   allowedModels: null            # null = any model whose provider prefix is configured;
                                  # a list restricts repos to exactly those model specs
   allowAssets: true              # allow the repo's prompt/skill/agent-context overrides
@@ -359,3 +365,48 @@ routes:
 
 cron:
   webhooksEnabledCondition: true
+
+# Where a repo's outbound notifications go. TODAY this is read only by the
+# weekly Slack digest (`workflows/cron-digest.yaml`).
+#
+# This block is the BASE the per-repository layer merges onto — a managed repo
+# sets `notifications: {slack: {channel: C01ABCDEFGH}}` in its
+# `.lastlight/lastlight.yml` and its digest goes there. Leaving it `null` here
+# is the point: an operator routes repos with the `slack.repoChannels` map
+# below, which is per-repo by construction, whereas this block is not.
+#
+# `channel: null` committed by a REPO is not the same as absent — it means "send
+# me no digest" and beats the operator's map. Absent means "I have no opinion,
+# use whatever you've configured".
+notifications:
+  slack:
+    channel: null
+
+slack:
+  # Operator-side channel routing: "owner/repo" -> Slack channel id. Consulted
+  # after the repo's own `notifications.slack.channel` and before the global
+  # SLACK_DELIVERY_CHANNEL fallback. Set it in the instance overlay's
+  # config.yaml, not here.
+  #
+  #   repoChannels:
+  #     nearform/lastlight: C01ENGINEERING
+  #
+  # Channel ids are not secrets, so they show up unredacted on /admin/api/config.
+  repoChannels: {}
+
+# The weekly repo digest — what happened in a repo, and what Last Light did
+# about it, posted to that repo's Slack channel.
+#
+# It is INERT until a channel resolves for a repo (see `notifications` above):
+# no channel, no post, no cost. That is deliberate — a fresh install should not
+# start talking to a workspace nobody configured.
+#
+# The facts are computed in code, from the GitHub API and the harness's own
+# SQLite, so the numbers are right. `narrative` adds ONE cheap model call that
+# turns those facts into a sentence of plain English; it is never asked to
+# produce a number, and a failure there drops the sentence rather than the
+# digest.
+digest:
+  windowDays: 7        # how far back a digest looks
+  narrative: true      # false = bullets only, zero model spend
+  maxItems: 5          # cap on each enumerated list (unreviewed PRs, escalations)

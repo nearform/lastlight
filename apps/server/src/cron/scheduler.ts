@@ -9,8 +9,18 @@ const tracer = () => trace.getTracer("lastlight");
 export interface CronJob {
   name: string;
   schedule: string;
-  /** Name of an agent workflow (workflows/<name>.yaml) to invoke on each tick */
-  workflow: string;
+  /**
+   * Name of an agent workflow (workflows/<name>.yaml) to invoke on each tick.
+   * Absent for a `handler:` cron — see {@link CronJob.handler}.
+   */
+  workflow?: string;
+  /**
+   * A HOST-SIDE handler to run instead of dispatching a workflow (the cron
+   * YAML's `handler:` key, resolved to a function by `jobs.ts`). Takes the same
+   * tick context a workflow dispatch would have received, so per-repo
+   * participation and the control keys reach it unchanged.
+   */
+  handler?: (context: Record<string, unknown>) => Promise<void>;
   context: Record<string, unknown>;
   /** Maximum consecutive failures before alerting */
   maxFailures?: number;
@@ -56,16 +66,21 @@ export class CronScheduler {
       log.info("Running", { job: job.name });
 
       try {
-        await this.runner(job.workflow, job.context);
+        if (job.handler) await job.handler(job.context);
+        else await this.runner(job.workflow!, job.context);
       } catch (err: unknown) {
         log.error("Job failed", { job: job.name, err });
 
-        // Check consecutive failures (tracked under the workflow name)
-        const failures = this.db.executions.consecutiveFailures(job.workflow);
-        const max = job.maxFailures || 3;
-        if (failures >= max) {
-          log.error("ALERT: job has failed consecutively", { job: job.name, failures });
-          // TODO: send alert (Slack webhook, email, etc.)
+        // Check consecutive failures (tracked under the workflow name). A
+        // `handler:` cron writes no executions rows, so there is nothing to
+        // count — the throw above is its only signal, and it is already logged.
+        if (job.workflow) {
+          const failures = this.db.executions.consecutiveFailures(job.workflow);
+          const max = job.maxFailures || 3;
+          if (failures >= max) {
+            log.error("ALERT: job has failed consecutively", { job: job.name, failures });
+            // TODO: send alert (Slack webhook, email, etc.)
+          }
         }
       } finally {
         this.running.delete(job.name);

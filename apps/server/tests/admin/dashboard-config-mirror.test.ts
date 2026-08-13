@@ -21,6 +21,7 @@ import { join } from "path";
 import {
   defaultFixConfig,
   defaultDependenciesConfig,
+  defaultNotificationsConfig,
   defaultReviewConfig,
 } from "lastlight-shared/config-types";
 import type { RepoMergedConfig } from "lastlight-shared/repo-config-schema";
@@ -43,6 +44,7 @@ const BLOCKS: Record<keyof RepoMergedConfig, true> = {
   fix: true,
   dependencies: true,
   review: true,
+  notifications: true,
 };
 
 describe("dashboard's per-repo config mirror", () => {
@@ -88,5 +90,18 @@ describe("dashboard's per-repo config mirror", () => {
         ).toBe(true);
       }
     }
+  });
+
+  it("descends into `notifications`, the one block that nests", () => {
+    // `notifications` breaks the flat-record assumption above on purpose
+    // (`slack.channel`), and the endpoint keys its provenance by that DOTTED
+    // leaf. So the renderer has to walk into a nested value and join the path —
+    // otherwise the row reads `notifications.slack = [object Object]` with a
+    // provenance of "default", hiding the value the tab exists to show.
+    const channel = defaultNotificationsConfig().slack;
+    expect(typeof channel).toBe("object");
+
+    const pane = read("components/RepoConfigPane.tsx");
+    expect(pane, "toLeaves no longer descends into a nested section").toContain("walk(value, leaf)");
   });
 });

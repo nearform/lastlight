@@ -22,7 +22,7 @@ export const GET: APIRoute = async ({ site }) => {
     '',
     "> An open-source software factory that keeps the lights on in GitHub repos you've moved on from.",
     '',
-    'Last Light is a self-hostable software factory for your GitHub org — a YAML-driven workflow engine that runs an agentic-pi-powered AI agent in per-phase gondolin micro-VMs (or Docker containers) with downscoped GitHub tokens. Chat runs in-process via `@earendil-works/pi-ai`. It triages issues, reviews PRs, fixes small things, runs scheduled repo-health reports, and chats over Slack — moving work down a production line of Architect / Executor / Reviewer roles and pausing at approval gates the maintainer can resume from a comment. The harness is the product: the workflows are YAML you can fork and edit; the agent runtime, sandboxing, and policy gates are the engine that keeps the line running.',
+    'Last Light is a self-hostable software factory for your GitHub org — a YAML-driven workflow engine that runs an agentic-pi-powered AI agent in per-phase gondolin micro-VMs (or Docker containers) with downscoped GitHub tokens. Chat runs in-process via `@earendil-works/pi-ai`. It triages issues, reviews PRs, fixes small things, runs scheduled repo-health reports, posts a weekly per-repo digest to Slack, and chats over Slack — moving work down a production line of Architect / Executor / Reviewer roles and pausing at approval gates the maintainer can resume from a comment. The harness is the product: the workflows are YAML you can fork and edit; the agent runtime, sandboxing, and policy gates are the engine that keeps the line running.',
     '',
     '## Site',
     '',

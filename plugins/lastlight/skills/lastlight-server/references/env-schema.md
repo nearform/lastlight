@@ -56,7 +56,9 @@ ADMIN_SECRET=<openssl rand -hex 32>
 # ── Slack (optional) ─────────────────────────────────────
 # SLACK_BOT_TOKEN=xoxb-...
 # SLACK_APP_TOKEN=xapp-...
-# SLACK_DELIVERY_CHANNEL=C0123456
+# SLACK_DELIVERY_CHANNEL=C0123456   # fallback channel for the weekly repo digest
+#   (a repo's own notifications.slack.channel and the overlay's
+#    slack.repoChannels map both take precedence)
 # SLACK_ALLOWED_USERS=U0123,U0456
 ```
 

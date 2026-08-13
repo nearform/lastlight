@@ -28,6 +28,7 @@ import { runSimpleWorkflow, type RunRepoConfig } from "#src/workflows/simple.js"
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultNotificationsConfig,
   defaultReviewConfig,
 } from "#src/config/config.js";
 import type { ExecutorConfig } from "#src/engine/github/profiles.js";
@@ -86,6 +87,7 @@ function runRepoConfig(overrides: Partial<RunRepoConfig> & { repo: string }): Ru
     fix: defaultFixConfig(),
     dependencies: defaultDependenciesConfig(),
     review: defaultReviewConfig(),
+    notifications: defaultNotificationsConfig(),
     sources: {
       models: { default: "default" },
       variants: {},
@@ -100,6 +102,7 @@ function runRepoConfig(overrides: Partial<RunRepoConfig> & { repo: string }): Ru
       fix: {},
       dependencies: {},
       review: {},
+      notifications: {},
     },
     warnings: [],
     ...overrides,

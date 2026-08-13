@@ -243,6 +243,13 @@ export interface RepoMergedConfig {
   dependencies: Record<string, unknown>;
   /** Review trigger policy. */
   review: Record<string, unknown>;
+  /**
+   * Where this repo's outbound notifications go (the weekly Slack digest).
+   * Nested one level deeper than its siblings — the provenance mirror below
+   * flattens it to a dotted `"slack.channel"` leaf so the tab's leaf walk works
+   * unchanged.
+   */
+  notifications: Record<string, unknown>;
 }
 
 /** Provenance mirror of {@link RepoMergedConfig} — each leaf tagged with its winning layer. */
@@ -254,6 +261,8 @@ export interface RepoConfigSources {
   fix: Record<string, ConfigSource>;
   dependencies: Record<string, ConfigSource>;
   review: Record<string, ConfigSource>;
+  /** Keyed by DOTTED leaf, e.g. `"slack.channel"`. */
+  notifications: Record<string, ConfigSource>;
 }
 
 /** Response of `GET /repos/:owner/:repo/config`. */

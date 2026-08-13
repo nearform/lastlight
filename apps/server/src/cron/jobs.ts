@@ -1,4 +1,5 @@
 import type { CronJob } from "./scheduler.js";
+import type { CronHandlerRegistry } from "./handlers.js";
 import { getAccessibleManagedRepos } from "../managed-repos.js";
 import { getCronWorkflows } from "../workflows/loader.js";
 import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, operatorCrons } from "./repo-crons.js";
@@ -76,6 +77,12 @@ export function getJobs(opts?: {
   db?: StateDb;
   /** Operator cron block. Defaults to runtime config — injectable for tests. */
   crons?: CronsConfig;
+  /**
+   * Host-side handlers a cron YAML's `handler:` key may name (see
+   * `handlers.ts`). Injected rather than imported so `getJobs` stays a pure
+   * function of its inputs and the tests need no harness.
+   */
+  handlers?: CronHandlerRegistry;
 }): CronJob[] {
   const jobs: CronJob[] = [];
 
@@ -92,6 +99,24 @@ export function getJobs(opts?: {
   const crons = opts?.crons ?? operatorCrons();
 
   for (const def of cronDefs) {
+    // Resolve a `handler:` cron against the registry BEFORE anything else. An
+    // unresolvable name DROPS the cron — the opposite of `condition.unless`,
+    // where registering is the safe direction because there is still a workflow
+    // to run. Here there is nothing to run, so a registered tick would just
+    // throw once a week; the boot-time warning is the useful signal.
+    let handler: CronJob["handler"];
+    if (def.handler) {
+      handler = opts?.handlers?.[def.handler];
+      if (!handler) {
+        log.warn("Unknown cron handler — cron not registered", {
+          cron: def.name,
+          handler: def.handler,
+          known: Object.keys(opts?.handlers ?? {}),
+        });
+        continue;
+      }
+    }
+
     const override = overrides.get(def.name);
     // The dashboard toggle and the operator's `crons.disable` are the same
     // lever spelled two ways — both mean "off by default", both leave the tick
@@ -101,6 +126,7 @@ export function getJobs(opts?: {
       name: def.name,
       schedule: override?.schedule || def.schedule,
       workflow: def.workflow,
+      handler,
       // Merge managed repos into the context the workflow receives. Use the
       // installation-filtered list so a stale managedRepos entry (repo deleted /
       // transferred / access revoked) doesn't fan out into a doomed scan run

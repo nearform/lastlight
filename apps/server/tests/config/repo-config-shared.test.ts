@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
+  defaultNotificationsConfig,
   defaultReviewConfig,
 } from "lastlight-shared/config-types";
 import {
@@ -97,7 +98,7 @@ describe("default allow-list", () => {
     // Each is allow-listed AND has a validator in `sanitizeRepoConfigLayer`: an
     // allow-listed key with no validator is silently dropped as
     // `key-not-allowed`, which reads to a repo owner exactly like "not allowed".
-    for (const key of ["fix", "dependencies", "review"]) {
+    for (const key of ["fix", "dependencies", "review", "notifications"]) {
       expect(DEFAULT_REPO_CONFIG_ALLOW_KEYS).toContain(key);
       const { warnings } = sanitizeRepoConfigLayer({ [key]: {} }, defaultRepoConfigPolicy(), base(), "acme/widget");
       expect(warnings).toEqual([]);
@@ -114,6 +115,7 @@ describe("the fix / dependencies / review defaults", () => {
     expect(defaultYaml().fix).toEqual(defaultFixConfig());
     expect(defaultYaml().dependencies).toEqual(defaultDependenciesConfig());
     expect(defaultYaml().review).toEqual(defaultReviewConfig());
+    expect(defaultYaml().notifications).toEqual(defaultNotificationsConfig());
   });
 
   it("ship the decided values (a change here is a behaviour change for every deployment)", () => {
@@ -171,6 +173,102 @@ describe("a repo's crons: block", () => {
     const { warnings } = sanitizeRepoConfigLayer({ crons: { enable: ["security-scan"] } }, narrowed, base());
 
     expect(warnings.map((w) => w.code)).toEqual(["key-not-allowed"]);
+  });
+});
+
+describe("a repo's notifications: block", () => {
+  const policy = defaultRepoConfigPolicy();
+
+  /** The base a real deployment provides — `notifications` present, channel null. */
+  function notifyBase(): RepoConfigBase {
+    const b = base();
+    (b.value as Record<string, unknown>).notifications = { slack: { channel: null } };
+    (b.sources as Record<string, unknown>).notifications = { slack: { channel: "default" } };
+    return b;
+  }
+
+  it("accepts a channel id and tags the leaf `repo`", () => {
+    const resolved = resolveRepoConfig(
+      notifyBase(),
+      policy,
+      layer({ notifications: { slack: { channel: "C01ABCDEFGH" } } }),
+    );
+
+    expect(resolved.warnings).toEqual([]);
+    expect(resolved.merged.notifications.slack.channel).toBe("C01ABCDEFGH");
+    expect(resolved.sources.notifications["slack.channel"]).toBe("repo");
+  });
+
+  it("accepts a #channel-name", () => {
+    const resolved = resolveRepoConfig(
+      notifyBase(),
+      policy,
+      layer({ notifications: { slack: { channel: "#eng-widgets" } } }),
+    );
+    expect(resolved.warnings).toEqual([]);
+    expect(resolved.merged.notifications.slack.channel).toBe("#eng-widgets");
+  });
+
+  it("keeps an explicit null AND tags it `repo` — the opt-out signal", () => {
+    // The channel resolver reads that provenance to tell "send me nothing"
+    // apart from "I said nothing". A merged null alone cannot express it.
+    const resolved = resolveRepoConfig(
+      notifyBase(),
+      policy,
+      layer({ notifications: { slack: { channel: null } } }),
+    );
+
+    expect(resolved.warnings).toEqual([]);
+    expect(resolved.merged.notifications.slack.channel).toBeNull();
+    expect(resolved.sources.notifications["slack.channel"]).toBe("repo");
+  });
+
+  it("drops a channel that is not a plausible reference", () => {
+    for (const bad of ["has spaces", "a".repeat(81), 42, {}, ["C1"]]) {
+      const { layer: sanitized, warnings } = sanitizeRepoConfigLayer(
+        { notifications: { slack: { channel: bad } } },
+        policy,
+        notifyBase(),
+        "acme/widget",
+      );
+      expect(warnings.map((w) => w.code)).toEqual(["invalid-value"]);
+      expect(sanitized).toEqual({});
+    }
+  });
+
+  it("drops an unknown notification target and an unknown slack leaf", () => {
+    const discord = sanitizeRepoConfigLayer(
+      { notifications: { discord: { channel: "x" } } },
+      policy,
+      notifyBase(),
+    );
+    expect(discord.warnings.map((w) => w.path)).toEqual(["notifications.discord"]);
+
+    const leaf = sanitizeRepoConfigLayer(
+      { notifications: { slack: { mentionOnFailure: true } } },
+      policy,
+      notifyBase(),
+    );
+    expect(leaf.warnings.map((w) => w.path)).toEqual(["notifications.slack.mentionOnFailure"]);
+  });
+
+  it("is dropped with a warning when an operator narrows it out of allowKeys", () => {
+    // The kill switch: an operator who wants channel choice back removes
+    // `notifications`, and the repo is told why rather than silently ignored.
+    const narrowed = { ...policy, allowKeys: policy.allowKeys.filter((k) => k !== "notifications") };
+    const { warnings } = sanitizeRepoConfigLayer(
+      { notifications: { slack: { channel: "C01ABCDEFGH" } } },
+      narrowed,
+      notifyBase(),
+    );
+
+    expect(warnings.map((w) => w.code)).toEqual(["key-not-allowed"]);
+  });
+
+  it("resolves to the operator's value when the repo says nothing", () => {
+    const resolved = resolveRepoConfig(notifyBase(), policy, layer({}));
+    expect(resolved.merged.notifications.slack.channel).toBeNull();
+    expect(resolved.sources.notifications["slack.channel"]).toBe("default");
   });
 });
 

@@ -147,6 +147,26 @@ export interface CiFailureReport {
   logUnavailableCause?: CiLogUnavailableCause;
 }
 
+/**
+ * One issue or pull request as the repo-digest sees it — a dated item, not a
+ * count. See {@link GitHubClient.listRepoActivitySince} for why the window
+ * arithmetic is deliberately left to the caller.
+ */
+export interface RepoActivityItem {
+  number: number;
+  title: string;
+  /** True when this "issue" is really a pull request. */
+  isPr: boolean;
+  /** Non-null only for a PR that was actually merged (vs closed unmerged). */
+  mergedAt: string | null;
+  createdAt: string;
+  closedAt: string | null;
+  draft: boolean;
+  authorLogin: string;
+  labels: string[];
+  htmlUrl: string;
+}
+
 /** Options shared by the three settle-aware check queries. */
 export interface ChecksQueryOptions {
   /**
@@ -826,6 +846,7 @@ export class GitHubClient {
       labels: string[];
       headRef: string;
       headSha: string;
+      createdAt: string;
     }>
   > {
     const kit = await this.kit(owner);
@@ -845,7 +866,74 @@ export class GitHubClient {
         .filter(Boolean),
       headRef: p.head?.ref ?? "",
       headSha: p.head?.sha ?? "",
+      createdAt: p.created_at ?? "",
     }));
+  }
+
+  /**
+   * What happened in a repo between `sinceIso` and now — issues AND pull
+   * requests, opened / closed / merged.
+   *
+   * ONE endpoint answers all of it. `GET /repos/{o}/{r}/issues` returns pull
+   * requests alongside issues (a PR *is* an issue to this API), and each PR
+   * carries `pull_request.merged_at`, so "merged this week" needs no second
+   * call and no `pulls.list` pass.
+   *
+   * **`since` filters on `updated_at`, not `created_at`.** So the response also
+   * contains items created long ago and merely touched inside the window; the
+   * caller's counts must come from the per-item `createdAt` / `closedAt` /
+   * `mergedAt` fields below, not from the length of this array. That is exactly
+   * why this returns raw dated items rather than counts — the window arithmetic
+   * belongs to one place (`repo-digest.ts`) that can be unit-tested against it.
+   *
+   * Bounded to `maxPages` (3 × 100 = 300 items) because a digest is a summary:
+   * a repo busy enough to overflow that is better served by the ordering than
+   * by an exhaustive walk, and an unbounded paginate here would be a per-repo
+   * rate-limit hazard on every tick.
+   */
+  async listRepoActivitySince(
+    owner: string,
+    repo: string,
+    sinceIso: string,
+    opts: { maxPages?: number } = {},
+  ): Promise<RepoActivityItem[]> {
+    const kit = await this.kit(owner);
+    const maxPages = opts.maxPages ?? 3;
+    const items: RepoActivityItem[] = [];
+
+    for (let page = 1; page <= maxPages; page++) {
+      const { data } = await kit.rest.issues.listForRepo({
+        owner,
+        repo,
+        state: "all",
+        since: sinceIso,
+        sort: "updated",
+        direction: "desc",
+        per_page: 100,
+        page,
+      });
+      for (const item of data) {
+        items.push({
+          number: item.number,
+          title: item.title ?? "",
+          isPr: !!item.pull_request,
+          // `pull_request.merged_at` is the ONLY place this endpoint reveals a
+          // merge; `state: "closed"` alone cannot distinguish merged from
+          // abandoned, and those are opposite facts in a digest.
+          mergedAt: item.pull_request?.merged_at ?? null,
+          createdAt: item.created_at,
+          closedAt: item.closed_at ?? null,
+          draft: !!item.draft,
+          authorLogin: item.user?.login ?? "",
+          labels: (item.labels ?? [])
+            .map((l) => (typeof l === "string" ? l : l.name ?? ""))
+            .filter(Boolean),
+          htmlUrl: item.html_url ?? "",
+        });
+      }
+      if (data.length < 100) break;
+    }
+    return items;
   }
 
   /**

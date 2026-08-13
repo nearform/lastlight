@@ -36,8 +36,19 @@ repo-config-schema.ts The PURE half of the per-repository `.lastlight/` config
                       (parseRepoConfigYaml, sanitizeRepoConfigLayer), the merge
                       (mergeLayer, resolveRepoConfig) and the RepoConfigWarning
                       vocabulary. No fs, no network, no runtime config.
-                      One rule governs every validator in here: a repo may only
-                      ever be MORE conservative than the operator. `approval` is
+                      One rule governs almost every validator in here: a repo
+                      may only ever be MORE conservative than the operator. The
+                      exception is `notifications` (which Slack channel this
+                      repo's digest goes to) — routing has no more/less
+                      conservative direction, so the repo's answer wins and the
+                      validation is about SHAPE only. What bounds it is not a
+                      bound: the layer is always read from the DEFAULT BRANCH,
+                      so a PR cannot redirect the bot's output, and Slack will
+                      not deliver to a channel the bot was never invited to.
+                      Its `channel: null` is meaningful ("send me nothing") and
+                      is distinguished from an absent key by PROVENANCE, which
+                      is why that one leaf is flattened to a dotted
+                      `"slack.channel"` key in `RepoConfigSources`. `approval` is
                       the original add-only case; `fix` / `dependencies` /
                       `review` generalise it — a loosening leaf is DROPPED with
                       a `policy-downgrade` warning, and dropping is the clamp

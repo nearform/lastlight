@@ -99,7 +99,14 @@ interface SlackConfig {
   appToken?: string;                      // required only for socket mode
   signingSecret?: string;                 // required only for webhook mode
   allowedUsers: string[];
-  deliveryChannel?: string;
+  deliveryChannel?: string;                // last-resort channel (SLACK_DELIVERY_CHANNEL)
+  repoChannels: Record<string, string>;    // "owner/repo" -> channel id (overlay `slack.repoChannels`)
+}
+
+interface DigestConfig {                   // the weekly repo digest; operator-only
+  windowDays: number;                      // how far back a digest looks (default 7)
+  narrative: boolean;                      // spend one cheap model call on a summary sentence (default true)
+  maxItems: number;                        // cap on each enumerated list (default 5)
 }
 
 interface SandboxCleanupConfig {
@@ -247,7 +254,7 @@ the CLI. A repo's config file can never fail a run.
 | Key | Default | Meaning |
 |---|---|---|
 | `repoConfig.enabled` | `true` | Master switch. `false` ignores every repo's `.lastlight/` — no fetch at all. |
-| `repoConfig.allowKeys` | `[models, variants, crons, disabled.workflows, disabled.crons, approval, fix, dependencies, review]` | Dotted config paths a repo may set. An entry admits itself and everything beneath it (`models` admits `models.architect`; `disabled.workflows` does **not** admit `disabled.prompts`). |
+| `repoConfig.allowKeys` | `[models, variants, crons, disabled.workflows, disabled.crons, approval, fix, dependencies, review, notifications]` | Dotted config paths a repo may set. An entry admits itself and everything beneath it (`models` admits `models.architect`; `disabled.workflows` does **not** admit `disabled.prompts`). |
 | `repoConfig.allowedModels` | `null` | `null` = any model whose `provider/` prefix is a provider Last Light can wire. A list restricts to exactly those specs (exact match, never a prefix rule). |
 | `repoConfig.allowAssets` | `true` | Unpack and use the repo's `workflows/prompts/`, `skills/`, `agent-context/` overrides. `false` keeps `lastlight.yml` only. |
 
@@ -269,6 +276,7 @@ the fallback when config isn't in reach, and must stay identical to
 | `fix` | Retry budgets for the PR_FIX_SHAPED workflows. **One-way clamped** — see below. |
 | `dependencies` | Major-bump auto-merge policy. **One-way clamped** — see below. |
 | `review` | When `pr-review` runs, plus the draft/label rules. **One-way clamped** — see below. |
+| `notifications` | Where this repo's outbound Slack goes (`notifications.slack.channel`). The one repo-settable key with **no clamp direction** — see below. |
 
 Arrays replace, per the merge semantics above — so a repo's `disabled.workflows`
 list replaces the operator's rather than adding to it. Operators who don't want
@@ -351,6 +359,38 @@ public-config surface — one value projected two ways rather than a second sour
 of truth. Nothing reads the flat copy any more: the check lifecycle resolves
 `review.postsCheck` off the run's repo-clamped config, so a repo that asked for
 the check gets it.
+
+### `notifications:` — routing, not policy
+
+`notifications.slack.channel` is where this repo's weekly digest goes. It is the
+one repo-settable key with **no clamp direction**: a channel has no "more
+conservative" value, so the one-way rule the policy blocks share does not apply
+and the repo's answer simply wins.
+
+What bounds it instead is not a bound at all, and that is the point:
+
+- the layer is **always read from the repo's default branch**, never a PR head,
+  so a pull request cannot redirect the output of the agent reviewing it;
+- Slack will not deliver to a channel the bot has not been invited to. A hostile
+  `.lastlight/` achieves `channel_not_found`, which is logged and skipped.
+
+Validation is therefore about SHAPE only — a channel id (`C…`/`G…`/`D…`), a
+`#channel-name`, or `null`, at most 80 characters. Anything else is dropped with
+an `invalid-value` warning, so a typo surfaces on the run row rather than as a
+silent failure once a week.
+
+`channel: null` is **meaningful and preserved**: it says "send me no digest" and
+beats the operator's `slack.repoChannels` entry. Because a merged `null` cannot
+say whether the repo chose it or never set the key, the resolver reads
+**provenance** — `sources.notifications["slack.channel"] === "repo"` — which is
+exactly the question being asked. That is also why this leaf is flattened to a
+dotted key in `RepoConfigSources`, where every other block is one level deep.
+
+The operator's kill switch is the generic one: drop `notifications` from
+`repoConfig.allowKeys` and step 1 of the resolution chain disappears.
+
+Full resolution order and the operator-side `slack.repoChannels` map:
+[Integrations → Where a repo's Slack output goes](/spec/03-integrations).
 
 ### Cron participation (`crons:`)
 
@@ -456,7 +496,7 @@ parse as PEM. Missing or malformed PEM exits `78` (`EX_CONFIG`).
 | `SLACK_SIGNING_SECRET` | required for `webhook` mode (Events API signature) | — |
 | `SLACK_APP_TOKEN` | required for `socket` mode (Socket Mode) | — |
 | `SLACK_ALLOWED_USERS` | allowlist (comma-separated user IDs) | empty = all allowed |
-| `SLACK_DELIVERY_CHANNEL` / `SLACK_HOME_CHANNEL` | cron report destination | none |
+| `SLACK_DELIVERY_CHANNEL` / `SLACK_HOME_CHANNEL` | last-resort channel for the repo digest, after a repo's own `notifications.slack.channel` and the operator's `slack.repoChannels` map | none |
 | `SLACK_OAUTH_CLIENT_ID` / `SLACK_OAUTH_CLIENT_SECRET` / `SLACK_OAUTH_REDIRECT_URI` | "Login with Slack" for dashboard | none |
 | `SLACK_ALLOWED_WORKSPACE` | restrict OAuth to one team | none |
 | `CHAT_BATCH_DEBOUNCE_MS` | settle window to coalesce a bursty thread before classifying (see [Chat](/spec/11-chat)) | `700` (0 disables) |

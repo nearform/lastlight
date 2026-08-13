@@ -1,0 +1,11 @@
+kind: cron
+name: repo-digest
+schedule: "0 9 * * 1"
+# A HOST-SIDE cron (`handler:`, not `workflow:`) — the facts it reports live in
+# the harness's own database and it posts to Slack, neither of which a sandboxed
+# agent phase can reach. See src/cron/repo-digest.ts.
+#
+# On by default and inert by default: a repo with no Slack channel configured
+# (`notifications.slack.channel`, `slack.repoChannels`, or SLACK_DELIVERY_CHANNEL)
+# is skipped without a post and without a cost.
+handler: repo-digest

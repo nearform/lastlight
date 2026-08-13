@@ -621,23 +621,51 @@ export type AgentWorkflowDefinition = z.infer<typeof AgentWorkflowSchema>;
 // ── Cron workflow ─────────────────────────────────────────────────────
 //
 // Cron workflows are NOT runnable themselves — they describe a schedule that
-// triggers another workflow. The `workflow` field is the name of an
-// AgentWorkflow to invoke on each tick. (Previously this carried a `skill`
-// field referencing the legacy executeSkill path; that path no longer exists.)
+// triggers WORK. That work is one of exactly two things, and a definition names
+// precisely one of them:
+//
+//   `workflow:` — the name of an AgentWorkflow to dispatch on each tick. The
+//                 normal case: the tick fans out one sandboxed agent run per
+//                 managed repo.
+//   `handler:`  — the name of a HOST-SIDE handler, resolved at boot against a
+//                 registry the runtime supplies. No sandbox, no agent, no run
+//                 row: the handler is plain code in the harness process.
+//
+// `handler:` exists because some periodic work is structurally un-agentable.
+// The repo digest is the motivating case: its facts live in the harness's own
+// SQLite (which a sandboxed phase cannot reach) and it posts to Slack (which no
+// agent has a tool for). Such a cron could be registered with the scheduler's
+// `registerDirect`, as the sandbox sweep and feedback poll are — but a direct
+// job is invisible to `getCronWorkflows()`, so it gets no dashboard toggle, no
+// `cron_overrides` schedule, no per-repo participation and, worst of all, no
+// "Run now". Declaring it here buys all of that for the cost of one field.
+//
+// (Previously this carried a `skill` field referencing the legacy executeSkill
+// path; that path no longer exists.)
 
-export const CronWorkflowSchema = z.object({
-  kind: z.literal("cron"),
-  name: z.string(),
-  schedule: z.string(),
-  /** Name of the AgentWorkflow to run on each tick */
-  workflow: z.string(),
-  /** Static context to merge into the workflow's input on each tick */
-  context: z.record(z.string(), z.unknown()).default({}),
-  condition: z
-    .object({
-      unless: z.string().optional(),
-    })
-    .optional(),
-});
+export const CronWorkflowSchema = z
+  .object({
+    kind: z.literal("cron"),
+    name: z.string(),
+    schedule: z.string(),
+    /** Name of the AgentWorkflow to run on each tick. Mutually exclusive with `handler`. */
+    workflow: z.string().optional(),
+    /** Name of a host-side handler to invoke on each tick. Mutually exclusive with `workflow`. */
+    handler: z.string().optional(),
+    /** Static context to merge into the workflow's input on each tick */
+    context: z.record(z.string(), z.unknown()).default({}),
+    condition: z
+      .object({
+        unless: z.string().optional(),
+      })
+      .optional(),
+  })
+  // Exactly one, never both and never neither: the two are different execution
+  // paths, so a definition carrying both would silently pick one and a
+  // definition carrying neither would register a cron that ticks into the void.
+  .refine((def) => !!def.workflow !== !!def.handler, {
+    message: "a cron must declare exactly one of `workflow:` or `handler:`",
+    path: ["workflow"],
+  });
 
 export type CronWorkflowDefinition = z.infer<typeof CronWorkflowSchema>;

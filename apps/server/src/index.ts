@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { loadConfig, resolveModel, resolveVariant, resolveGithubAuth } from "./config/config.js";
-import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService, recordThreadMessageForThread } from "./connectors/index.js";
+import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, recordThreadMessageForThread } from "./connectors/index.js";
 import {
   dispatch,
   applyPrDispatchGate,
@@ -31,8 +31,11 @@ import { sweepK8sSandboxes } from "./sandbox/k8s/sweep.js";
 import {
   discoverGreenDependencyPrs,
   discoverRedDependencyPrs,
+  REQUIRES_HUMAN_LABEL,
   type DependencyPr,
 } from "./cron/dependabot-discovery.js";
+import { buildCronHandlers } from "./cron/handlers.js";
+import type { KnownBlock } from "@slack/web-api";
 import { discoverPrsAwaitingReview } from "./cron/review-discovery.js";
 import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
@@ -1098,9 +1101,6 @@ async function main() {
   // Set up connector registry
   const registry = new ConnectorRegistry();
 
-  // Message delivery service for cron output
-  const delivery = new MessageDeliveryService();
-
   // Shared HTTP server — always boots, independent of GitHub. `main()` owns the
   // Hono app + serve() lifecycle that the webhook connector used to own, so the
   // `lastlight` CLI + admin dashboard + /api/* work even with no GitHub App
@@ -1230,11 +1230,42 @@ async function main() {
       );
     }
 
-    // Register Slack as a delivery target for cron reports
-    if (config.slack.deliveryChannel) {
-      delivery.register("slack", (msg) => slackConnector!.sendToDeliveryChannel(msg));
-    }
   }
+
+  // Host-side cron handlers — what a `cron-*.yaml` may name in `handler:`.
+  // Built here rather than imported as a constant because every handler needs
+  // collaborators that only exist once the server has booted.
+  //
+  // The digest is registered only when there is BOTH a GitHub client to read
+  // repos through and a Slack connector to post with. Missing either, the
+  // handler is absent and `getJobs` drops `cron-digest.yaml` with a warning
+  // naming it — which is the whole point: a cron that silently ticks into
+  // nothing is exactly the failure mode this feature replaced.
+  const cronHandlers = buildCronHandlers({
+    digest:
+      github && slackConnector
+        ? {
+            db,
+            github,
+            configClient: github,
+            routing: config.slack
+              ? { repoChannels: config.slack.repoChannels, deliveryChannel: config.slack.deliveryChannel }
+              : undefined,
+            config: config.digest,
+            escalationLabel: REQUIRES_HUMAN_LABEL,
+            post: async (channel, text, blocks) => {
+              const ts = await slackConnector!.sendMessage(channel, null, text, blocks as KnownBlock[]);
+              // A digest is a thing the bot wrote, so a 👍/👎 on it is a real
+              // signal about whether it is worth sending (issue #255). The `ts`
+              // exists only in this response — a send site that drops it makes
+              // the reaction unattributable.
+              if (typeof ts === "string" && config.feedback.enabled) {
+                registerSlackAnchor(db, { channelId: channel, messageId: ts, workflowName: "repo-digest" });
+              }
+            },
+          }
+        : undefined,
+  });
 
   // PR discoverers keyed by a cron context's `discover` value. Each returns the
   // eligible PRs (in code, no LLM) and the runner fans out one bounded single-PR
@@ -1418,6 +1449,17 @@ async function main() {
     mountAdmin(app, db, {
       cronScheduler: cron,
       triggerCron: cronRunner,
+      // "Run now" for a host-side cron. Resolved against the SAME registry the
+      // scheduler uses, so a manual fire is indistinguishable from a tick. An
+      // unknown name throws rather than silently no-opping — the route has
+      // already established the cron exists, so an absent handler here means
+      // the registry declined to build it (e.g. no Slack connector), and that
+      // is worth surfacing to whoever pressed the button.
+      runCronHandler: async (handler, context) => {
+        const fn = cronHandlers[handler];
+        if (!fn) throw new Error(`No host-side cron handler named "${handler}" is available on this instance`);
+        await fn(context);
+      },
       // The three collaborators `POST /prs/:owner/:repo/:number/retry` needs to
       // do what `lastlight pr retry` asks: resolve the PR, cross the same gate
       // every other route crosses, and dispatch. `resolveRepoPolicy` is the very
@@ -1772,7 +1814,7 @@ async function main() {
   // otherwise fire periodic no-op dispatch failures.
   const webhooksEnabled = !!(config.webhookSecret && config.githubApp);
   if (github) {
-    const jobs = getJobs({ webhooksEnabled, db });
+    const jobs = getJobs({ webhooksEnabled, db, handlers: cronHandlers });
     for (const job of jobs) {
       cron.register(job);
     }

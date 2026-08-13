@@ -677,6 +677,33 @@ export class WorkflowRunStore {
   }
 
   /**
+   * What Last Light did for ONE repo since `sinceIso` — a count per
+   * (workflow, status) pair. The bot half of the weekly digest.
+   *
+   * Grouped in SQL rather than fetched-and-counted because a busy repo's week
+   * is hundreds of rows and the digest wants six numbers. Filtered on the
+   * QUALIFIED repo for the same reason `distinctRepos` groups on it: rows
+   * written before the owner/repo backfill carry `owner/repo` in the repo
+   * column, and a bare-name filter silently misses every one of them.
+   */
+  summarizeRepoActivity(
+    owner: string,
+    repo: string,
+    sinceIso: string,
+  ): { workflowName: string; status: string; count: number }[] {
+    const qualified = qualifiedRepoSql("owner", "repo", "bare");
+    return this.db
+      .prepare(
+        `SELECT workflow_name AS workflowName, status, COUNT(*) AS count
+           FROM workflow_runs
+          WHERE ${qualified} = ?
+            AND started_at >= ?
+          GROUP BY workflow_name, status`,
+      )
+      .all(`${owner}/${repo}`, sinceIso) as { workflowName: string; status: string; count: number }[];
+  }
+
+  /**
    * Mark a workflow run as finished. Plain status flip when called with just
    * `{ error }`; when a `terminalMarker` is supplied (the runner's
    * `on_success.set_phase`), the phase-history append and the status flip

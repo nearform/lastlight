@@ -254,6 +254,37 @@ export interface ReviewConfig {
   generatedPaths: string[];
 }
 
+/**
+ * Where a repo's outbound notifications go — today, the weekly Slack digest.
+ *
+ * Unlike `fix` / `dependencies` / `review`, this is **routing, not policy**:
+ * there is no "more conservative" direction for a channel name, so the repo
+ * layer's usual one-way clamp does not apply and a repo's value simply wins.
+ * What makes that safe is the layer's trust rule, not a bound: `.lastlight/` is
+ * always read from the repo's DEFAULT BRANCH, never a PR head, so a pull
+ * request cannot redirect the bot's output. The operator's kill switch is the
+ * generic one — drop `notifications` from `repoConfig.allowKeys`.
+ *
+ * A channel the bot isn't a member of simply fails the post (Slack answers
+ * `not_in_channel`), which is logged and skipped. There is no way to make the
+ * bot speak somewhere it hasn't been invited.
+ */
+export interface NotificationsConfig {
+  slack: {
+    /**
+     * Channel id (`C…`) or `#name`. `null` = fall through to the operator's
+     * `slack.repoChannels` map and then `slack.deliveryChannel`; if none of the
+     * three resolves, the repo gets no digest at all.
+     */
+    channel: string | null;
+  };
+}
+
+/** The shipped `notifications:` block — everything off, so the feature is inert by default. */
+export function defaultNotificationsConfig(): NotificationsConfig {
+  return { slack: { channel: null } };
+}
+
 /** The shipped `review:` block. Mirrors `review:` in `config/default.yaml`. */
 export function defaultReviewConfig(): ReviewConfig {
   return {

@@ -53,7 +53,6 @@ export { GitHubWebhookConnector, type GitHubWebhookConfig } from "./github-webho
 export {
   MessagingConnector,
   SessionManager,
-  MessageDeliveryService,
   withThreadTranscript,
   recordThreadMessage,
   recordThreadMessageForThread,

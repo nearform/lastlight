@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
-import type { DisabledConfig } from "lastlight-shared/config-types";
+import type { DisabledConfig, NotificationsConfig } from "lastlight-shared/config-types";
 import {
   defaultDependenciesConfig,
   defaultFixConfig,
@@ -114,6 +114,13 @@ export interface RunRepoConfig {
   fix: FixConfig;
   dependencies: DependenciesConfig;
   review: ReviewConfig;
+  /**
+   * Where this repo's outbound notifications go. Routing, not policy, so it is
+   * NOT clamped — read `sources.notifications["slack.channel"]` to tell a repo's
+   * deliberate answer (including an explicit `null`, "send me nothing") from the
+   * operator's default. See `resolveRepoChannel`.
+   */
+  notifications: NotificationsConfig;
   /** Per-leaf provenance — which layer won each key (`default`/`overlay`/`env`/`repo`). */
   sources: RepoConfigSources;
   /** Everything the layer dropped, fetching + validating. Never thrown. */
@@ -249,6 +256,7 @@ export async function resolveRepoRunConfig(
       fix: resolved.merged.fix,
       dependencies: resolved.merged.dependencies,
       review: resolved.merged.review,
+      notifications: resolved.merged.notifications,
       sources: resolved.sources,
       warnings: resolved.warnings,
     },
@@ -282,6 +290,14 @@ export interface RepoConfigRunRecord {
     fix?: Record<string, unknown>;
     dependencies?: Record<string, unknown>;
     review?: Record<string, unknown>;
+    /**
+     * Notification routing the repo won, keyed by the same DOTTED leaf
+     * `RepoConfigSources` uses (`"slack.channel"`) — this is the one block that
+     * nests, and flattening it here keeps the record a flat projection like
+     * every other entry. A `null` value is meaningful and preserved: it is the
+     * repo saying "send me nothing", which must survive a resume.
+     */
+    notifications?: Record<string, unknown>;
   };
   assets: string[];
   warnings: RepoConfigWarning[];
@@ -318,6 +334,7 @@ export function repoConfigRunRecord(cfg: RunRepoConfig): RepoConfigRunRecord {
       fix: wonBy(cfg.fix as unknown as Record<string, unknown>, cfg.sources.fix),
       dependencies: wonBy(cfg.dependencies as unknown as Record<string, unknown>, cfg.sources.dependencies),
       review: wonBy(cfg.review as unknown as Record<string, unknown>, cfg.sources.review),
+      notifications: wonBy({ "slack.channel": cfg.notifications.slack.channel }, cfg.sources.notifications),
     },
     assets: cfg.assets,
     warnings: cfg.warnings,
@@ -465,6 +482,14 @@ export async function restoreRepoRunConfig(
     ...(applied.dependencies ?? {}),
   };
   const review: ReviewConfig = { ...(options.review ?? operatorReview()), ...(applied.review ?? {}) };
+  // Routing, not policy, so there is nothing to re-clamp — the repo's channel
+  // (including an explicit null) is simply restored. `in`, not truthiness: a
+  // null the repo chose is a different answer from a key it never set.
+  const restoredChannel =
+    applied.notifications && "slack.channel" in applied.notifications
+      ? (applied.notifications["slack.channel"] as string | null)
+      : null;
+  const notifications: NotificationsConfig = { slack: { channel: restoredChannel } };
 
   const sourcesOf = (values: Record<string, unknown>, won?: Record<string, unknown>): Record<string, ConfigSource> => {
     const out: Record<string, ConfigSource> = {};
@@ -515,6 +540,7 @@ export async function restoreRepoRunConfig(
       fix,
       dependencies,
       review,
+      notifications,
       sources: {
         models: sourcesOf(models, applied.models),
         variants: sourcesOf(variants, applied.variants),
@@ -523,6 +549,10 @@ export async function restoreRepoRunConfig(
         fix: sourcesOf(fix as unknown as Record<string, unknown>, applied.fix),
         dependencies: sourcesOf(dependencies as unknown as Record<string, unknown>, applied.dependencies),
         review: sourcesOf(review as unknown as Record<string, unknown>, applied.review),
+        notifications: {
+          "slack.channel":
+            applied.notifications && "slack.channel" in applied.notifications ? "repo" : "default",
+        },
       },
       // The original fetch/merge warnings, plus this restore's own if it dropped
       // the asset layer — so a resumed run explains itself as fully as the first.
