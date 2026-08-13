@@ -67,6 +67,7 @@ function fakeApis(opts: FakeOpts = {}) {
   const pvcsCreated: any[] = [];
   const customCreated =
     opts.createNamespacedCustomObject ?? vi.fn(async () => ({}));
+  let podCreated = false;
   let podDeleted = false;
   let postDeletePolls = 0;
   const goneAfterDeletePolls = opts.goneAfterDeletePolls ?? 0;
@@ -75,15 +76,26 @@ function fakeApis(opts: FakeOpts = {}) {
       core: {
         createNamespacedPod: vi.fn(async ({ body }: any) => {
           if (opts.createPodThrows) throw new Error("pod create failed");
+          // A pod of this name exists again — reset the deleted-state so a
+          // SECOND run against the same fake reads back as live, the way a real
+          // namespace behaves once the name is recreated.
+          podCreated = true;
+          podDeleted = false;
+          postDeletePolls = 0;
           created.push(body);
           // Real createNamespacedPod echoes back the created object, with a
           // server-assigned uid — the ownerRef patch reads it off this return.
           return { ...body, metadata: { ...body.metadata, uid: "pod-uid-1" } };
         }),
         readNamespacedPodStatus: vi.fn(async () => {
-          // Mirrors real k8s: once the pod is actually deleted, subsequent
-          // status reads 404. `goneAfterDeletePolls` delays that 404 by N
-          // polls, for tests exercising `waitForPodGone`'s loop.
+          // Mirrors real k8s: a name that has never been created 404s. Without
+          // this the fake claimed a pod existed before `createNamespacedPod`,
+          // and `reclaimStalePod`'s pre-create probe (#336) read that phantom
+          // as a finished pod from a previous attempt and deleted it.
+          if (!podCreated) throw new ApiException(404, "Not Found", {}, {});
+          // Once the pod is actually deleted, subsequent status reads 404.
+          // `goneAfterDeletePolls` delays that 404 by N polls, for tests
+          // exercising `waitForPodGone`'s loop.
           if (podDeleted) {
             if (postDeletePolls < goneAfterDeletePolls) {
               postDeletePolls += 1;
@@ -431,8 +443,11 @@ describe("KubernetesSandbox", () => {
     await expect(
       sbx.runCommand("t1", "true", { cwd: "/w", timeoutSeconds: 30 } as any),
     ).rejects.toThrow(/init container "clone" failed \(exit 128\): Error/);
-    // Fails on the FIRST poll, not after the full ~60s start budget.
-    expect(apis.core.readNamespacedPodStatus).toHaveBeenCalledTimes(1);
+    // Fails on the FIRST start poll, not after the full ~60s start budget.
+    // Two reads, not one: `reclaimStalePod` probes for a previous attempt's
+    // tombstone before creating (#336), then `waitForContainerStart` polls once
+    // and gives up. A regression to the full budget would be ~180 reads.
+    expect(apis.core.readNamespacedPodStatus).toHaveBeenCalledTimes(2);
   });
 
   it("appends the init container's logs so the real git error is visible", async () => {
