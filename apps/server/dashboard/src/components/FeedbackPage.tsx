@@ -18,6 +18,7 @@ import {
   type FeedbackSummaryRow,
 } from "../api";
 import { useTheme } from "../hooks/useTheme";
+import { STATUS } from "../lib/status-colors";
 
 /**
  * Feedback signals (issue #255) — 👍/👎 people left on what Last Light wrote,
@@ -30,11 +31,16 @@ import { useTheme } from "../hooks/useTheme";
  */
 
 // Recharts parses fill strings internally and can't resolve `hsl(var(--p))`,
-// so the palettes are literal hex per theme. Same constraint (and the same
-// values) as HomePage's charts.
+// so what remains here is literal hex per theme: `score` is a CATEGORICAL line
+// colour and stays local.
+//
+// `positive` / `negative` are NOT themed and are NOT this page's to pick — a
+// 👍 is the same `good` as a succeeded run, so both come from the shared
+// STATUS palette (issue #329). They used to be per-theme literals here, which
+// drifted from the Home page's and, worse, made the dark pair `#86efac` /
+// `#fca5a5` — ΔE 5.8 for deuteranopes, below the floor, on the two bars in
+// this view that most need telling apart.
 const CHART_DARK = {
-  positive: "#86efac",
-  negative: "#fca5a5",
   score: "#7dd3fc",
   grid: "#21262d",
   axis: "rgba(230, 237, 243, 0.45)",
@@ -43,8 +49,6 @@ const CHART_DARK = {
 };
 
 const CHART_LIGHT = {
-  positive: "#07a06f",
-  negative: "#dc2626",
   score: "#0b3b63",
   grid: "#e2e6ea",
   axis: "rgba(27, 35, 48, 0.55)",
@@ -253,8 +257,8 @@ export function FeedbackPage() {
                   />
                   {/* The one zero both scales share — drawn, not implied. */}
                   <ReferenceLine yAxisId="count" y={0} stroke={CHART.axis} />
-                  <Bar yAxisId="count" dataKey="positive" fill={CHART.positive} name="positive" />
-                  <Bar yAxisId="count" dataKey="negative" fill={CHART.negative} name="negative" />
+                  <Bar yAxisId="count" dataKey="positive" fill={STATUS.good} name="positive" />
+                  <Bar yAxisId="count" dataKey="negative" fill={STATUS.bad} name="negative" />
                   <Line
                     yAxisId="score"
                     type="monotone"
