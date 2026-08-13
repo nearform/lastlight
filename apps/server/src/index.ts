@@ -85,6 +85,7 @@ import {
 } from "./notify/index.js";
 import type { EventEnvelope } from "./connectors/types.js";
 import { logger } from "./logging/logger.js";
+import { logPhaseEnd } from "./logging/phase-log.js";
 
 /**
 /**
@@ -1011,7 +1012,7 @@ async function main() {
         }
       },
       onPhaseEnd: async (phase, result) => {
-        log.info("Phase end", { workflowName, phase, success: result.success });
+        logPhaseEnd(log, workflowName, phase, result);
         // The marker harvest (09 → S1). This is the ONLY moment the two marker
         // lines exist in memory — `{{phaseOutputs}}` is empty across a run
         // boundary and the shared per-PR workspace is `reset --hard`-ed between
