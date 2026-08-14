@@ -546,11 +546,17 @@ mirror never caught up.
 
 > **Widening this surfaces a live bug — expect breakage and fix it, don't
 > suppress it.** `CronInfo.workflow: string` has been a lie since #333: the one
-> handler cron (`repo-digest`) already receives `null` at runtime, so the
-> dashboard renders "Run null now" today. Six sites in `CronsList.tsx` read
-> `cron.workflow`; only two of them will fail to compile. Step 5 handles all
-> six. Do NOT reach for `!`, `as string`, or `?? ""` to quiet the compiler —
-> that re-hides the bug this widening exists to expose.
+> handler cron (`repo-digest`) already receives `null` at runtime. Two
+> consequences are in production right now, not introduced by this plan:
+> the tooltips render "Run null now", and — because `lastHandlerTick` already
+> populates `lastRun` (`routes.ts:2486`) while the button is only
+> `disabled={!cron.lastRun}` — the open-runs button is **enabled** for
+> `repo-digest` and calls `onOpenRuns(null)` when clicked.
+>
+> Six sites in `CronsList.tsx` read `cron.workflow`; only two of them fail to
+> compile, because `${null}` is valid TypeScript. Step 5 handles all six. Do NOT
+> reach for `!`, `as string`, or `?? ""` to quiet the compiler — that re-hides
+> the bug this widening exists to expose.
 
 - [ ] **Step 5: Render it, and handle a null `workflow` at all six sites**
 
@@ -566,10 +572,22 @@ six:
   the narrowing is real rather than asserted, and extend the existing
   `disabled={!cron.lastRun}` at :195 to `disabled={!cron.lastRun ||
   !cron.workflow}`.
-- **:126, :196, :228 — the `title` tooltips.** Use the cron's own name for a
+- **:126 and :228 — the `title` tooltips.** Use the cron's own name for a
   handler cron. Introduce one local at the top of `CronRow`:
   `const label = cron.workflow ?? cron.handler ?? cron.name;` and interpolate
-  `label` at all three.
+  `label` at both.
+- **:196 — the disabled button's tooltip.** It must say *why* it is disabled,
+  and the two reasons differ. `"no runs yet"` is right for `!cron.lastRun` but
+  wrong for a handler cron, which has fired plenty — it simply has no
+  `workflow_runs` to open. Three-way it:
+
+  ```tsx
+  title={
+    !cron.workflow ? `${label} runs in-process — no workflow runs to open`
+    : cron.lastRun ? `Open recent runs of ${cron.workflow}`
+    : "no runs yet"
+  }
+  ```
 - **:130 — the subtitle line.** Render `label` too, so a handler cron shows its
   handler rather than a blank cell.
 
