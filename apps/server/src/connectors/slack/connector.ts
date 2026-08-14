@@ -18,6 +18,20 @@ const log = logger("slack");
  * carries a `reply()` that posts a confirmation into the button's thread, so
  * the same approval-resolution path used by `/approve` can run unchanged.
  */
+/** Per-message overrides for {@link SlackConnector.sendMessage}. */
+export interface SendMessageOptions {
+  /**
+   * Whether Slack may expand the message's links into preview cards.
+   *
+   * Omitted (the default) leaves Slack's own behaviour alone, which is right
+   * for a conversational reply: one shared link, one useful preview. Pass
+   * `false` for a message whose links are a REFERENCE LIST rather than the
+   * content — the repo digest cites several pull requests, and a preview card
+   * per citation buries the six lines of actual summary.
+   */
+  unfurl?: boolean;
+}
+
 export interface SlackApprovalAction {
   decision: "approved" | "rejected";
   /** The paused workflow run id (the button's `value`). */
@@ -187,6 +201,7 @@ export class SlackConnector extends MessagingConnector {
     threadId: string | null,
     text: string,
     blocks?: KnownBlock[],
+    opts: SendMessageOptions = {},
   ): Promise<string | void> {
     const fallbackText = markdownToSlackMrkdwn(text);
     const autoBlocks = !blocks && hasMarkdownImage(text);
@@ -195,12 +210,19 @@ export class SlackConnector extends MessagingConnector {
       : autoBlocks
       ? markdownToSlackBlocks(text)
       : undefined;
+    // Unfurling is per-message and OFF means both switches off: `unfurl_links`
+    // governs text-ish targets, `unfurl_media` images and video, and a message
+    // full of GitHub links trips whichever one Slack decides applies. Left
+    // `undefined` by default so every existing caller keeps Slack's own
+    // behaviour rather than silently losing previews.
+    const unfurl = opts.unfurl === false ? { unfurl_links: false, unfurl_media: false } : {};
     try {
       const result = await this.web.chat.postMessage({
         channel: channelId,
         text: fallbackText,
         blocks: effectiveBlocks,
         thread_ts: threadId || undefined,
+        ...unfurl,
       });
       return result.ts;
     } catch (err) {
@@ -212,6 +234,7 @@ export class SlackConnector extends MessagingConnector {
         channel: channelId,
         text: fallbackText,
         thread_ts: threadId || undefined,
+        ...unfurl,
       });
       return result.ts;
     }

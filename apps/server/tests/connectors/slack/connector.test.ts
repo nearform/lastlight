@@ -199,6 +199,46 @@ describe("SlackConnector webhook receiver", () => {
     expect(payload.text).toBe("plain");
   });
 
+  it("leaves unfurling to Slack by default — an existing caller loses no previews", async () => {
+    let payload: any;
+    (conn as any).web.chat.postMessage = async (p: any) => {
+      payload = p;
+      return { ts: "9.9" };
+    };
+    await conn.sendMessage("C1", "T1", "see https://github.com/acme/widgets/pull/1");
+    expect(payload).not.toHaveProperty("unfurl_links");
+    expect(payload).not.toHaveProperty("unfurl_media");
+  });
+
+  it("disables BOTH unfurl switches when a caller opts out", async () => {
+    // Both, not just `unfurl_links`: the two govern different target types
+    // (text-ish vs image/video) and a message full of GitHub links trips
+    // whichever one Slack decides applies.
+    let payload: any;
+    (conn as any).web.chat.postMessage = async (p: any) => {
+      payload = p;
+      return { ts: "9.9" };
+    };
+    await conn.sendMessage("C1", null, "digest", undefined, { unfurl: false });
+    expect(payload.unfurl_links).toBe(false);
+    expect(payload.unfurl_media).toBe(false);
+  });
+
+  it("keeps the opt-out on the text-only retry path", async () => {
+    // The image-block fallback re-posts; without carrying the flags through,
+    // a digest that tripped that path would unfurl after all.
+    const calls: any[] = [];
+    (conn as any).web.chat.postMessage = async (p: any) => {
+      calls.push(p);
+      if (p.blocks) throw new Error("invalid_blocks");
+      return { ts: "9.9" };
+    };
+    await conn.sendMessage("C1", null, "![x](https://bad/img.png)", undefined, { unfurl: false });
+    expect(calls).toHaveLength(2);
+    expect(calls[1].unfurl_links).toBe(false);
+    expect(calls[1].unfurl_media).toBe(false);
+  });
+
   it("auto-promotes a markdown image to an image block", async () => {
     let payload: any;
     (conn as any).web.chat.postMessage = async (p: any) => {
