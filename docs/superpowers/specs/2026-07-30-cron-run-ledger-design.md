@@ -281,10 +281,16 @@ Around the fire body:
   (`src/telemetry/index.ts:296`), with `cron.name` / `cron.status` attributes.
 
 Both are no-ops when telemetry is disabled (`meter()` / `tracer()` return
-no-ops), so this is safe on a homelab with no collector. **Verifying** the two
-signals end-to-end still needs a collector; that is a release-checklist item,
-not an implementation blocker, and it must not gate the SQLite ledger — which
-is the part the dashboard reads and the part that works with no OTel at all.
+no-ops), so a deployment without a collector loses the two signals and nothing
+else.
+
+The homelab cluster has had an OTel collector since 2026-08-14, so both signals
+are verifiable end-to-end there — span to Tempo, counter to Prometheus, both
+keyed by `cron.name` / `cron.status`. That verification is a release-checklist
+item rather than an implementation gate: the SQLite ledger is what the dashboard
+reads, and it must keep working with OTel off. This ordering is deliberate. The
+original design was parked for a fortnight waiting on the collector, which was
+never a dependency of the part that mattered.
 
 **Out of scope — span parentage.** Fanned-out `workflow.run` spans are NOT
 parented under the cron span. Dispatched runs execute asynchronously via the

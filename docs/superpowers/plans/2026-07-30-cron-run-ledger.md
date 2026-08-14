@@ -627,8 +627,12 @@ git commit -m "docs: record the cron_runs ledger and the repointed withLedger"
       the dashboard shows it green rather than blank.
 - [ ] Confirm `repo-digest` (the one handler cron) still shows a last run and a
       failure count — the #333 regression guard, on real data.
-- [ ] **OTel signals are unverified without a collector.** The SQLite ledger and
-      the dashboard work with telemetry off; the `lastlight.cron.fire` span and
-      counter cannot be confirmed end-to-end until a collector is reachable from
-      the homelab cluster. Say so in the PR body rather than implying the OTel
-      half is tested.
+- [ ] **Verify both OTel signals end-to-end.** The homelab collector has been
+      live since 2026-08-14, so this is no longer deferrable: confirm the
+      `lastlight.cron.fire` span reaches Tempo and the counter reaches
+      Prometheus, both carrying `cron.name` and `cron.status`. If the collector
+      rejects the metrics signal (`LASTLIGHT_OTEL_METRICS_ENABLED=false` is a
+      supported deployment shape), report the counter as unverified rather than
+      as tested.
+- [ ] Confirm the ledger still fills with `LASTLIGHT_OTEL_ENABLED` unset — the
+      dashboard must not depend on telemetry being on.
