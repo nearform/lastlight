@@ -85,6 +85,7 @@ import {
 } from "./notify/index.js";
 import type { EventEnvelope } from "./connectors/types.js";
 import { logger } from "./logging/logger.js";
+import { logPhaseEnd, logPhaseStart } from "./logging/phase-log.js";
 
 /**
 /**
@@ -1002,7 +1003,7 @@ async function main() {
             }
           : undefined),
       onPhaseStart: async (phase) => {
-        log.info("Phase start", { workflowName, phase });
+        logPhaseStart(log, workflowName, phase);
         // Refresh the Slack thinking indicator so long-running phases
         // don't leave the thread looking dead. threadId doubles as both
         // the message anchor and the thread root for DM threads.
@@ -1011,7 +1012,7 @@ async function main() {
         }
       },
       onPhaseEnd: async (phase, result) => {
-        log.info("Phase end", { workflowName, phase, success: result.success });
+        logPhaseEnd(log, workflowName, phase, result);
         // The marker harvest (09 → S1). This is the ONLY moment the two marker
         // lines exist in memory — `{{phaseOutputs}}` is empty across a run
         // boundary and the shared per-PR workspace is `reset --hard`-ed between
@@ -1607,6 +1608,21 @@ async function main() {
     const unmanaged = unmanagedReposInContext(context);
     if (unmanaged.length > 0) {
       return c.json({ error: `Repo not managed: ${unmanaged.join(", ")}` }, 403);
+    }
+
+    // Fail a context the dispatcher will reject BEFORE returning 202. The
+    // dispatch below is fire-and-forget, so without this the caller gets
+    // `{accepted: true}` and an execution id for a run that dies moments later
+    // in the harness log — indistinguishable, from the CLI, from success.
+    // Mirrors `dispatchWorkflow`'s own condition exactly, Slack exemption
+    // included: a `slack:`-prefixed triggerId legitimately carries no repo.
+    const hasSlackTrigger =
+      typeof context.triggerId === "string" && context.triggerId.startsWith("slack:");
+    if (typeof context.repo !== "string" && !hasSlackTrigger) {
+      return c.json(
+        { error: `Missing 'repo' in context for workflow '${workflowName}'` },
+        400,
+      );
     }
 
     apiLog.info("CLI triggered", { workflowName });
