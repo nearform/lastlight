@@ -337,11 +337,18 @@ Slack**. It is a `handler:` cron — `runRepoDigest` in `src/cron/repo-digest.ts
 - **One optional model call** (`digest.narrative`) turns those facts into a
   sentence of English. It is never asked to produce a number, and a failure
   drops the sentence rather than the digest.
-- **Every PR number is a link.** `prRef` emits a markdown link that
-  `markdownToSlackMrkdwn` converts to Slack's `<url|#294>` form — markdown
+- **Every PR number is a link, and none of them unfurl.** `prRef` emits a
+  markdown link that `markdownToSlackMrkdwn` converts to Slack's `<url|#294>`
+  form — markdown
   rather than that form directly, because the converter runs over these lines
   and would escape a pre-built one. Both numbers a digest prints are open pull
-  requests (`listOpenPullRequests`), so the target is always `/pull/N`.
+  requests (`listOpenPullRequests`), so the target is always `/pull/N`. The
+  post passes `unfurl: false`, which sets **both** `unfurl_links` and
+  `unfurl_media` — without it Slack expands each citation into a preview card
+  and buries the six lines of summary they annotate. It is opt-out per message
+  rather than a connector-wide default: for a conversational reply one shared
+  link and one useful preview is the right behaviour, and only a message whose
+  links are a REFERENCE LIST wants them off.
 - **The escalated-PR list is asked of GitHub** (open PRs labelled
   `requires-human`), not inferred from run rows — `fanOut` returns only
   `{dispatched, failures}` and a skip counts as a success, so an escalation is

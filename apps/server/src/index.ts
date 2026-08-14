@@ -1256,7 +1256,11 @@ async function main() {
             config: config.digest,
             escalationLabel: REQUIRES_HUMAN_LABEL,
             post: async (channel, text, blocks) => {
-              const ts = await slackConnector!.sendMessage(channel, null, text, blocks as KnownBlock[]);
+              // No unfurls: a digest cites several PRs, and a preview card per
+              // citation buries the six lines of summary they annotate.
+              const ts = await slackConnector!.sendMessage(channel, null, text, blocks as KnownBlock[], {
+                unfurl: false,
+              });
               // A digest is a thing the bot wrote, so a 👍/👎 on it is a real
               // signal about whether it is worth sending (issue #255). The `ts`
               // exists only in this response — a send site that drops it makes
