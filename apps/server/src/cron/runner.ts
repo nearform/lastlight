@@ -171,8 +171,9 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
       else if (outcome.status === "partial") log.warn(msg, fields);
       // Logged on SUCCESS too, not only on failure: a fully successful weekly
       // fan-out over 19 repos used to emit one "Running" line and nothing else
-      // (issue #341).
-      else log.info("Cron fire complete", fields);
+      // (issue #341). This is the COMMON path — nearly every fire is `ok` — so
+      // it is the one that most needs the cron name and counts in the message.
+      else log.info(msg, fields);
     }
   };
 }

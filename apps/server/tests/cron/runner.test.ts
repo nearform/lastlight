@@ -1,18 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
-// The runner logs one structured completion line per fire. Mock the logger so
-// the suite's stderr stays free of real pino JSON — no assertion here depends
-// on the logged content.
-vi.mock("#src/logging/logger.js", () => {
-  const noopLogger = {
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    fatal: vi.fn(),
-  };
-  return { logger: () => noopLogger };
-});
+// The runner logs one structured completion line per fire. Mocked so the
+// suite's stderr stays free of real pino JSON — and CAPTURED, so tests can
+// assert what was logged. Hoisted because `vi.mock` is lifted above ordinary
+// declarations.
+const logSpy = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  fatal: vi.fn(),
+}));
+vi.mock("#src/logging/logger.js", () => ({ logger: () => logSpy }));
 
 import { StateDb } from "#src/state/db.js";
 import { makeCronRunner, completionMessage, type CronDiscoverer } from "#src/cron/runner.js";
@@ -31,6 +30,7 @@ let db: StateDb;
 
 beforeEach(() => {
   db = new StateDb(":memory:");
+  for (const fn of Object.values(logSpy)) fn.mockClear();
 });
 
 afterEach(() => {
@@ -316,5 +316,64 @@ describe("completionMessage", () => {
     expect(
       completionMessage("e", counts({ reposEligible: null, reposScanned: null, discovered: null, dispatched: null, failures: null })),
     ).toBe("Cron fire complete: e");
+  });
+});
+
+describe("the completion line the runner actually emits", () => {
+  /**
+   * Regression: `completionMessage` was built correctly and then NOT used on
+   * the success branch, which still passed a hardcoded "Cron fire complete".
+   * Every fire is `ok` in practice, so the common path — the one issue #341 is
+   * about — shipped with none of the improvement, and unit-testing the builder
+   * in isolation could not see it. These assert the LOGGED message.
+   */
+  const runFire = async (over: Record<string, unknown> = {}) => {
+    const runner = makeCronRunner({
+      db,
+      github: fakeGh,
+      discoverers: { "green-dependency-prs": async () => [] },
+      dispatch: vi.fn(async () => ({ success: true })),
+      resolveRepos: allParticipate,
+    });
+    await runner("dependabot-pr-merge", {
+      discover: "green-dependency-prs",
+      repos: ["o/a", "o/b"],
+      _cronName: "merge-green-dependency-prs",
+      ...over,
+    });
+  };
+
+  it("names the cron and counts on the SUCCESS path", async () => {
+    await runFire();
+    const [msg] = logSpy.info.mock.calls.at(-1) as [string];
+    expect(msg).toBe("Cron fire complete: merge-green-dependency-prs — scanned 2, found 0, dispatched 0");
+  });
+
+  it("names the cron and counts on the FAILED path", async () => {
+    const runner = makeCronRunner({
+      db,
+      github: fakeGh,
+      discoverers: { "green-dependency-prs": async () => { throw new Error("gh down"); } },
+      dispatch: vi.fn(),
+      resolveRepos: allParticipate,
+    });
+    await expect(
+      runner("dependabot-pr-merge", { discover: "green-dependency-prs", repos: ["o/a"], _cronName: "c-fail" }),
+    ).rejects.toThrow();
+    const [msg] = logSpy.error.mock.calls.at(-1) as [string];
+    expect(msg).toBe("Cron fire complete: c-fail");
+  });
+
+  it("uses the builder rather than a literal, on every branch", async () => {
+    await runFire();
+    for (const fn of [logSpy.info, logSpy.warn, logSpy.error]) {
+      for (const [msg] of fn.mock.calls as [string][]) {
+        if (typeof msg === "string" && msg.startsWith("Cron fire complete")) {
+          expect(msg).toBe(completionMessage("merge-green-dependency-prs", {
+            reposEligible: 2, reposScanned: 2, discovered: 0, dispatched: 0, failures: 0,
+          }));
+        }
+      }
+    }
   });
 });
