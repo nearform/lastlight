@@ -357,6 +357,54 @@ CREATE TABLE IF NOT EXISTS cron_overrides (
 
 Mutable. Deletion reverts to YAML defaults.
 
+### `cron_runs`
+
+One row per cron **fire** — scheduled or manual, `workflow:` and `handler:`
+crons alike (issues #341/#327).
+
+```sql
+CREATE TABLE IF NOT EXISTS cron_runs (
+  id TEXT PRIMARY KEY,
+  cron_name TEXT NOT NULL,              -- THE key; never the workflow's name
+  workflow TEXT,                        -- null for a handler: cron
+  handler TEXT,                         -- null for a workflow: cron
+  source TEXT NOT NULL,                 -- schedule | manual
+  actor TEXT,                           -- who pressed "Run now"; null if scheduled
+  started_at TEXT NOT NULL,
+  finished_at TEXT,                     -- null while running
+  status TEXT NOT NULL DEFAULT 'running', -- running -> ok | partial | failed
+  repos_eligible INTEGER,               -- managed repos considered
+  repos_scanned INTEGER,                -- repos that participated (issue #180)
+  discovered INTEGER,                   -- PRs found; null for a non-discovery cron
+  dispatched INTEGER,
+  failures INTEGER,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cron_runs_name_started ON cron_runs(cron_name, started_at DESC);
+```
+
+**Why it exists.** A cron whose only work is discovery + fan-out can complete
+having dispatched **zero** runs — the normal steady state for a backstop sitting
+behind a webhook. It then writes no `workflow_runs` row and no `executions` row,
+so the dashboard showed nothing, indistinguishable from a cron that failed or
+never ran. This ledger is the only record such a fire leaves.
+
+**Why it is keyed on `cron_name`.** The same workflow is reachable from
+`/api/run`, a GitHub comment and Slack. Keyed on the workflow, a hand-triggered
+failure moved the cron's health and vice versa. Keyed on the cron, only its own
+fires count — which is what makes `CronRunStore.recentFailures` a sound input to
+the scheduler's consecutive-failure alert (issue #327).
+
+**Why not overload `executions`.** It carries no column for a fan-out's counts,
+its `success` flag is binary so a `partial` fire has nowhere to live, and its
+`success = 0` population is dominated by DAG-cascade skips and `ResourceQuota`
+deferrals — 251 in one day against zero real failures on a live instance — which
+are deliberately `success = 0` and must stay so. A cron-fire row is written by
+exactly one writer and cannot contain either.
+
+Both reads (`latestByCron`, `recentFailures`) tie-break on `rowid`, so ordering
+does not depend on `started_at` being distinct.
+
 ### `workflow_overrides`
 
 ```sql
@@ -731,6 +779,7 @@ session recreation after timeouts.
 | `WorkflowRunStore` — `workflow_runs` + atomic lifecycle ops | `src/state/workflow-run-store.ts` |
 | `ExecutionStore` — `executions` table + ops | `src/state/execution-store.ts` |
 | `ApprovalStore` — `workflow_approvals` | `src/state/approval-store.ts` |
+| `CronRunStore` — `cron_runs`, one row per cron fire (issues #341/#327) | `src/state/cron-run-store.ts` |
 | `UserStore` — `users` identity + Slack/email matching | `src/state/user-store.ts` |
 | `FeedbackStore` — `feedback_anchors` + `feedback_signals` (issue #255) | `src/state/feedback-store.ts` |
 | `TeamStore` — the four `github_team*` / `github_visibility_sync` tables (issue #169) | `src/state/team-store.ts` |

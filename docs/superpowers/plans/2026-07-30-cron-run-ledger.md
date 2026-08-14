@@ -676,12 +676,29 @@ Also correct the `cron/handlers.ts` entry, which currently states that
 (`trigger_type: \"cron\"`, `skill` = the cron's name)". That stops being true at
 Task 4.
 
-- [ ] **Step 3: Check the docs-sync hook**
+- [ ] **Step 3: Run the `docs-sync` skill**
 
-The `docs-check` pre-commit hook maps changed source files to doc surfaces. Run
-`prek run` and address anything it flags — `src/state/`, `src/cron/` and
-`src/admin/routes.ts` are all in its map, and `apps/server/spec/10-state.md`
-likely needs the new table too.
+`docs-check` is a Claude Code **PreToolUse hook**, not a git pre-commit hook —
+there is no `.pre-commit-config.yaml` in this repo and `prek run` will fail with
+"No `prek.toml` or `.pre-commit-config.yaml` found". Invoke the `docs-sync`
+skill directly instead; `src/state/**` is in its change→docs map.
+
+That map sends `src/state/**` to `apps/server/spec/10-state.md` — both the table
+section AND the "Current implementation" store table. Add the `cron_runs` schema
+there, and correct `spec/03-integrations.md`, whose "Handler ticks are ledgered"
+invariant states that `withLedger` writes an `executions` row.
+
+The spec is the source of truth for the website's `/spec/` section
+(`apps/www/scripts/sync-spec.mjs` copies it in at build), so verify with:
+
+```bash
+pnpm --filter lastlight-www run sync-spec
+pnpm --filter lastlight-www exec astro check
+```
+
+Check the site's own cron claims while you are there, but expect no edit: this
+work changes no count the homepage enumerates (tabs, backends, workflows), and
+enhances an existing dashboard tab rather than adding a capability.
 
 - [ ] **Step 4: Commit**
 
