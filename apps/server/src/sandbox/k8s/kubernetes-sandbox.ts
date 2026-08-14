@@ -20,7 +20,12 @@ import { buildRunAgentScript } from "./run-agent-script.js";
 import { podNameFor } from "./naming.js";
 import { RunId } from "./run-id.js";
 import { streamPodLog } from "./log-stream.js";
-import { awaitPodResult, waitForContainerStart, waitForPodGone } from "./pod-lifecycle.js";
+import {
+  awaitPodResult,
+  reclaimStalePod,
+  waitForContainerStart,
+  waitForPodGone,
+} from "./pod-lifecycle.js";
 import { buildCloneInitContainer } from "./init-clone.js";
 import { buildSkillsInitContainer } from "./init-skills.js";
 import { buildAgentContextInitContainer } from "./init-agent-context.js";
@@ -405,6 +410,13 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
     // it.
     const podLabel = podNameFor(taskId, "run");
     await this.ensureEgress();
+
+    // Clear a previous attempt's tombstone BEFORE creating anything (#336).
+    // These names are deterministic, so a retry of a run whose harness died
+    // mid-flight would otherwise 409 on the Secret create below — and again on
+    // the pod create, since deleting the pod is what GCs its Secrets. Only a
+    // finished pod is reclaimed; a live one still means a real collision.
+    await reclaimStalePod(this.apis.core, this.ns, podLabel.value);
 
     const secrets = await this.runSecrets.create({
       podLabel,

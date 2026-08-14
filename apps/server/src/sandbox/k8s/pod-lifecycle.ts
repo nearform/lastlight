@@ -166,6 +166,54 @@ async function initContainerLogs(
  * read error is treated as "not yet confirmed gone" and just retried
  * within the budget, never failing the caller's `dispose()`.
  */
+/** Pod phases that mean the pod has finished and holds nothing but its record. */
+const TERMINAL_POD_PHASES = new Set(["Succeeded", "Failed"]);
+
+/**
+ * Delete a previous attempt's finished pod so a retry can recreate the run.
+ *
+ * Sandbox object names are deterministic — {@link podNameFor} hashes the taskId
+ * with no attempt component — so a retry regenerates the same pod name and the
+ * same `<pod>-creds` / `<pod>-prompt` Secret names. `dispose()` normally clears
+ * all three, but a harness that dies mid-run never reaches it. The tombstone
+ * left behind makes every later attempt of that run fail: the Secret create
+ * 409s first (the Secrets are ownerRef'd to the pod, so they outlive it only
+ * because it was never deleted), and the pod create would 409 next.
+ *
+ * Only a TERMINAL pod is reclaimed. A pod still Pending or Running belongs to a
+ * live dispatch racing this one for the same taskId, and that collision must
+ * keep failing loudly — deleting it would turn a 409 into silent sabotage of
+ * someone else's run.
+ *
+ * Mirrors `dispose()`'s sequence, `waitForPodGone` included: the workspace PVC
+ * is `(repo,PR)`-scoped and RWO, so the replacement pod cannot attach it until
+ * the tombstone is really gone.
+ *
+ * Best-effort, like everything else on this path — a pod that cannot be read or
+ * deleted is left alone and the caller proceeds to fail on the create as before.
+ *
+ * @returns whether a stale pod was found and deleted.
+ */
+export async function reclaimStalePod(core: CoreV1Api, ns: string, name: string): Promise<boolean> {
+  let phase: string | undefined;
+  try {
+    const pod = await core.readNamespacedPodStatus({ name, namespace: ns });
+    phase = pod.status?.phase;
+  } catch {
+    return false; // absent (404) or unreadable — nothing to reclaim
+  }
+  if (!phase || !TERMINAL_POD_PHASES.has(phase)) return false;
+
+  try {
+    await core.deleteNamespacedPod({ name, namespace: ns });
+  } catch {
+    return false; // raced by the sweep, or forbidden — let the create surface it
+  }
+  log.info("Reclaimed a finished pod from a previous attempt", { pod: name, phase });
+  await waitForPodGone(core, ns, name);
+  return true;
+}
+
 export async function waitForPodGone(core: CoreV1Api, ns: string, name: string): Promise<void> {
   for (let attempt = 0; attempt < POD_DELETE_POLL_ATTEMPTS; attempt++) {
     try {

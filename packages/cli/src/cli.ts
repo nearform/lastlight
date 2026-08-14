@@ -1148,7 +1148,12 @@ async function cmdSkill(name: string): Promise<void> {
     if (claim) context.commentBody = claim;
     if (!JSON_OUT) console.log(`Triggering ${name} on ${parsed.owner}/${parsed.repo}#${parsed.number}…`);
   } else {
-    context = { repos: [target], mode: "scan" };
+    // `repo`, singular — `/api/run` hands the context to `dispatchWorkflow`,
+    // which requires it. `{ repos: [...] }` is the CRON fan-out shape, and only
+    // `dispatchCronWorkflow` expands it (cron/fanout.ts); sent here it reaches
+    // the plain dispatcher untranslated and every run dies with
+    // "missing 'repo' in context" — after the endpoint has already returned 202.
+    context = { repo: target, sender: "cli" };
     if (!JSON_OUT) console.log(`Triggering ${name} scan on ${target}…`);
   }
   const data = await apiPost(`/api/run`, { skill, context });
