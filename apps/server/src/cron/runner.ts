@@ -55,6 +55,39 @@ interface FireCounts {
   failures: number | null;
 }
 
+/**
+ * The counts, rendered into the completion line's MESSAGE rather than left only
+ * in its fields.
+ *
+ * A collapsed log view shows the message and nothing else — `kubectl logs`, and
+ * any Grafana Logs panel whose `line_format` renders `msg`. Without this, the
+ * one line the fire emits reads "Cron fire complete" and carries no outcome,
+ * which is most of what issue #341 was complaining about. The fields are still
+ * emitted, so the line stays queryable; this only makes it readable.
+ *
+ * Cost: the message is no longer a fixed string, so an exact `msg="Cron fire
+ * complete"` match becomes a `|~ "Cron fire complete"` prefix match. Loki
+ * indexes only stream labels, so there is no ingest-cardinality penalty.
+ */
+export function completionMessage(cronName: string, counts: FireCounts): string {
+  const parts: string[] = [];
+  if (counts.reposScanned !== null) {
+    const narrowed = counts.reposEligible !== null && counts.reposEligible !== counts.reposScanned;
+    parts.push(narrowed ? `scanned ${counts.reposScanned} of ${counts.reposEligible}` : `scanned ${counts.reposScanned}`);
+  }
+  if (counts.discovered !== null) parts.push(`found ${counts.discovered}`);
+  if (counts.dispatched !== null) parts.push(`dispatched ${counts.dispatched}`);
+  if (counts.failures) parts.push(`${counts.failures} failed`);
+
+  // The CRON NAME leads, because a collapsed view shows the message and nothing
+  // else — and with seven crons registered, "Cron fire complete: scanned 16"
+  // identifies nothing. The stable `Cron fire complete:` prefix stays first so
+  // `|~ "Cron fire complete"` still finds every fire of every cron.
+  return parts.length
+    ? `Cron fire complete: ${cronName} — ${parts.join(", ")}`
+    : `Cron fire complete: ${cronName}`;
+}
+
 export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
   const { db, github, discoverers, dispatch } = deps;
   const resolveRepos = deps.resolveRepos ?? resolveCronRepos;
@@ -133,8 +166,9 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
       recordCronFire({ "cron.name": cronName, "cron.status": outcome.status });
 
       const fields = { cron: cronName, workflow: workflowName, source, status: outcome.status, ...counts };
-      if (outcome.status === "failed") log.error("Cron fire complete", { ...fields, err: outcome.error });
-      else if (outcome.status === "partial") log.warn("Cron fire complete", fields);
+      const msg = completionMessage(cronName, counts);
+      if (outcome.status === "failed") log.error(msg, { ...fields, err: outcome.error });
+      else if (outcome.status === "partial") log.warn(msg, fields);
       // Logged on SUCCESS too, not only on failure: a fully successful weekly
       // fan-out over 19 repos used to emit one "Running" line and nothing else
       // (issue #341).

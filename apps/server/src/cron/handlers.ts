@@ -108,10 +108,27 @@ export function withLedger(db: StateDb, cronName: string, handler: CronHandler):
       // back. Widening `CronHandler` to return counts is a follow-up for when a
       // second handler cron exists to justify it.
       db.cronRuns.finish(id, { status: "ok" });
+      // Logged on SUCCESS too. Without this a healthy weekly digest completed
+      // silently, which is the same gap issue #341 raised for workflow crons —
+      // and the message names the cron, because a collapsed log view shows
+      // nothing else. Same `Cron fire complete:` prefix as `runner.ts`, so one
+      // `|~ "Cron fire complete"` finds fires of BOTH kinds of cron.
+      log.info(`Cron fire complete: ${cronName}`, {
+        cron: cronName,
+        handler: cronName,
+        source,
+        status: "ok",
+      });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       db.cronRuns.finish(id, { status: "failed", error: message });
-      log.error("Handler cron failed", { cron: cronName, err });
+      log.error(`Cron fire complete: ${cronName}`, {
+        cron: cronName,
+        handler: cronName,
+        source,
+        status: "failed",
+        err,
+      });
       throw err;
     }
   };

@@ -15,7 +15,7 @@ vi.mock("#src/logging/logger.js", () => {
 });
 
 import { StateDb } from "#src/state/db.js";
-import { makeCronRunner, type CronDiscoverer } from "#src/cron/runner.js";
+import { makeCronRunner, completionMessage, type CronDiscoverer } from "#src/cron/runner.js";
 import type { GitHubClient } from "#src/engine/github/github.js";
 
 const fakeGh = {} as unknown as GitHubClient;
@@ -261,5 +261,60 @@ describe("makeCronRunner — a fire with no cron name", () => {
 
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(db.cronRuns.latestByCron().size).toBe(0);
+  });
+});
+
+describe("completionMessage", () => {
+  const counts = (over = {}) => ({
+    reposEligible: 16,
+    reposScanned: 16,
+    discovered: 0,
+    dispatched: 0,
+    failures: 0,
+    ...over,
+  });
+
+  it("names the cron, because a collapsed log view shows the message and nothing else", () => {
+    // Seven crons are registered; "Cron fire complete: scanned 16" identifies
+    // none of them in `kubectl logs` or a Grafana panel that renders only `msg`.
+    expect(completionMessage("check-prs-awaiting-review", counts())).toBe(
+      "Cron fire complete: check-prs-awaiting-review — scanned 16, found 0, dispatched 0",
+    );
+  });
+
+  it("keeps the stable prefix first so one query finds every fire", () => {
+    // `|~ "Cron fire complete"` must still match — including the handler-cron
+    // line in cron/handlers.ts, which shares this prefix.
+    for (const m of [
+      completionMessage("a", counts()),
+      completionMessage("b", counts({ reposScanned: null, reposEligible: null, discovered: null, dispatched: null, failures: null })),
+    ]) {
+      expect(m.startsWith("Cron fire complete:")).toBe(true);
+    }
+  });
+
+  it("shows the narrowing only when repos actually opted out", () => {
+    expect(completionMessage("c", counts({ reposEligible: 19, reposScanned: 14 }))).toContain("scanned 14 of 19");
+    expect(completionMessage("c", counts())).toContain("scanned 16,");
+    expect(completionMessage("c", counts())).not.toContain(" of ");
+  });
+
+  it("omits discovered for a non-discovery cron rather than printing 0", () => {
+    // null means "this cron discovers nothing", which is different from
+    // "discovered nothing" — the message must not conflate them.
+    const msg = completionMessage("weekly-health-report", counts({ discovered: null, dispatched: 16 }));
+    expect(msg).not.toContain("found");
+    expect(msg).toContain("dispatched 16");
+  });
+
+  it("calls out failures, and stays quiet when there are none", () => {
+    expect(completionMessage("d", counts({ failures: 2 }))).toContain("2 failed");
+    expect(completionMessage("d", counts())).not.toContain("failed");
+  });
+
+  it("degrades to just the cron name when a fire threw before counting", () => {
+    expect(
+      completionMessage("e", counts({ reposEligible: null, reposScanned: null, discovered: null, dispatched: null, failures: null })),
+    ).toBe("Cron fire complete: e");
   });
 });
