@@ -135,6 +135,9 @@ describe("withLedger — a handler cron is countable", () => {
    * row, so before this the scheduler's consecutive-failure check was gated off
    * for it and the admin crons list reported a hardcoded `recentFailures: 0`.
    * A weekly cron could fail for a month behind a healthy-looking dashboard.
+   *
+   * The rows now land in `cron_runs` rather than `executions` — one ledger for
+   * every cron fire, so `GET /crons` stops branching on the kind of cron.
    */
   it("records a row per invocation, keyed by the CRON name", async () => {
     const { withLedger } = await import("#src/cron/handlers.js");
@@ -144,10 +147,14 @@ describe("withLedger — a handler cron is countable", () => {
       const wrapped = withLedger(db, "repo-digest", async () => {});
       await wrapped({ repos: ["acme/a"] });
 
-      const rows = db.executions.recentExecutions("repo-digest", 10);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ triggerType: "cron", skill: "repo-digest", success: true });
-      expect(rows[0].finishedAt).toBeTruthy();
+      const row = db.cronRuns.latestByCron().get("repo-digest")!;
+      expect(row).toMatchObject({ handler: "repo-digest", status: "ok" });
+      expect(row.finishedAt).toBeTruthy();
+      // A handler cron dispatches nothing and narrows repos inside itself, so
+      // these stay null by design (design §3).
+      expect(row.workflow).toBeNull();
+      expect(row.dispatched).toBeNull();
+      expect(row.reposScanned).toBeNull();
     } finally {
       db.close();
     }
@@ -164,14 +171,14 @@ describe("withLedger — a handler cron is countable", () => {
 
       await expect(wrapped({})).rejects.toThrow("invalid_auth");
 
-      const [row] = db.executions.recentExecutions("repo-digest", 1);
-      expect(row).toMatchObject({ success: false, error: "invalid_auth" });
+      const row = db.cronRuns.latestByCron().get("repo-digest")!;
+      expect(row).toMatchObject({ status: "failed", error: "invalid_auth" });
     } finally {
       db.close();
     }
   });
 
-  it("makes consecutiveFailures — the alerting input — actually count", async () => {
+  it("makes the alerting input — recentFailures — actually count", async () => {
     const { withLedger } = await import("#src/cron/handlers.js");
     const { StateDb } = await import("#src/state/db.js");
     const db = new StateDb(":memory:");
@@ -181,7 +188,7 @@ describe("withLedger — a handler cron is countable", () => {
       });
       for (let i = 0; i < 3; i++) await wrapped({}).catch(() => {});
 
-      expect(db.executions.consecutiveFailures("repo-digest")).toBe(3);
+      expect(db.cronRuns.recentFailures("repo-digest")).toBe(3);
     } finally {
       db.close();
     }
@@ -192,9 +199,42 @@ describe("withLedger — a handler cron is countable", () => {
     const { StateDb } = await import("#src/state/db.js");
     const db = new StateDb(":memory:");
     try {
-      await withLedger(db, "repo-digest", async () => {})({ sender: "cliftonc" });
-      const [row] = db.executions.recentExecutions("repo-digest", 1);
-      expect(row.triggeredBy).toBe("cliftonc");
+      await withLedger(db, "repo-digest", async () => {})({
+        sender: "cliftonc",
+        _cronSource: "manual",
+        _cronActor: "cliftonc",
+      });
+      const row = db.cronRuns.latestByCron().get("repo-digest")!;
+      expect(row.source).toBe("manual");
+      expect(row.actor).toBe("cliftonc");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("defaults a scheduled tick to source=schedule with no actor", async () => {
+    const { withLedger } = await import("#src/cron/handlers.js");
+    const { StateDb } = await import("#src/state/db.js");
+    const db = new StateDb(":memory:");
+    try {
+      await withLedger(db, "repo-digest", async () => {})({ repos: ["acme/a"] });
+      const row = db.cronRuns.latestByCron().get("repo-digest")!;
+      expect(row.source).toBe("schedule");
+      expect(row.actor).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("writes nothing to the executions ledger", async () => {
+    const { withLedger } = await import("#src/cron/handlers.js");
+    const { StateDb } = await import("#src/state/db.js");
+    const db = new StateDb(":memory:");
+    try {
+      await withLedger(db, "repo-digest", async () => {})({});
+      // The move is a REPLACEMENT, not a dual write — an executions row here
+      // would pollute the agent-phase views that table feeds.
+      expect(db.executions.recentExecutions("repo-digest", 10)).toHaveLength(0);
     } finally {
       db.close();
     }
