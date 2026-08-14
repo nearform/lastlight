@@ -284,13 +284,20 @@ Both are no-ops when telemetry is disabled (`meter()` / `tracer()` return
 no-ops), so a deployment without a collector loses the two signals and nothing
 else.
 
-The homelab cluster has had an OTel collector since 2026-08-14, so both signals
-are verifiable end-to-end there — span to Tempo, counter to Prometheus, both
-keyed by `cron.name` / `cron.status`. That verification is a release-checklist
-item rather than an implementation gate: the SQLite ledger is what the dashboard
-reads, and it must keep working with OTel off. This ordering is deliberate. The
-original design was parked for a fortnight waiting on the collector, which was
-never a dependency of the part that mattered.
+Both are verifiable end-to-end on the homelab today. That cluster has run an
+OpenTelemetry Collector since **2026-07-31** (flux-homelab #118) with all three
+pipelines wired — traces to Tempo, metrics through `prometheus_remote_write` to
+kube-prometheus-stack, logs to Loki — and the harness is already pointed at it:
+`LASTLIGHT_OTEL_ENABLED=true`, OTLP/HTTP to
+`otel-collector.otel.svc.cluster.local:4318`, with a `CiliumNetworkPolicy` rule
+opening that egress on an otherwise default-deny pod.
+
+Verification is nonetheless a release-checklist item rather than an
+implementation gate: the SQLite ledger is what the dashboard reads, and it must
+keep working with OTel off. That ordering is the whole lesson of this document's
+history — the original design was parked on 2026-07-30 pending a collector that
+landed the next day, then sat for a fortnight on a blocker that had already
+cleared and was never a dependency of the part that mattered.
 
 **Out of scope — span parentage.** Fanned-out `workflow.run` spans are NOT
 parented under the cron span. Dispatched runs execute asynchronously via the
