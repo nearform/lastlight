@@ -143,6 +143,9 @@ export function getJobs(opts?: {
         // let a disabled cron fan out as enabled.
         [CRON_NAME_KEY]: def.name,
         [CRON_GLOBALLY_ENABLED_KEY]: globallyEnabled,
+        // Same rule: a scheduled tick says so itself, so YAML cannot dress one
+        // up as a human's "Run now" in the ledger.
+        _cronSource: "schedule",
       },
     });
   }

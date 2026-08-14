@@ -187,14 +187,20 @@ async function fire(
   // PR rather than per repo, so it bypasses `dispatchCronWorkflow` and must
   // resolve participation itself — otherwise a repo that opted out of e.g.
   // `dependabot-merge` would still get runs.
-  const cronName = context[CRON_NAME_KEY] as string;
-  const resolved = await resolveRepos({
-    cron: cronName,
-    repos: candidates,
-    // Absent means "on" — only jobs.ts marks a cron globally off.
-    globallyEnabled: context[CRON_GLOBALLY_ENABLED_KEY] !== false,
-  });
-  const repos = resolved.repos;
+  // A missing name means a caller that built its own context, and the list is
+  // then used VERBATIM — resolving with no cron would apply participation rules
+  // that this fire never asked for.
+  const cronName = typeof context[CRON_NAME_KEY] === "string" ? (context[CRON_NAME_KEY] as string) : "";
+  const repos = cronName
+    ? (
+        await resolveRepos({
+          cron: cronName,
+          repos: candidates,
+          // Absent means "on" — only jobs.ts marks a cron globally off.
+          globallyEnabled: context[CRON_GLOBALLY_ENABLED_KEY] !== false,
+        })
+      ).repos
+    : candidates;
   if (repos.length !== candidates.length) {
     log.info("Repo(s) participate in this cron", {
       cronName,

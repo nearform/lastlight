@@ -2640,11 +2640,18 @@ export function createAdminRoutes(
     // button. A cron YAML pinning `context.repos` still overrides the managed
     // list, as everywhere else.
     const { [CRON_GLOBALLY_ENABLED_KEY]: _yamlEnabled, ...defContext } = def.context ?? {};
+    const actor = actorFromContext(c);
     const context = {
       repos: getManagedRepos(),
       ...defContext,
+      // Injected LAST, same rule as `jobs.ts` and for the same reason: operator
+      // YAML must not be able to spoof any of these. `_cronSource` decides
+      // whether the ledger records this fire as a human pressing "Run now" or
+      // as the scheduler, and `_cronActor` is who to attribute it to.
       [CRON_NAME_KEY]: def.name,
-      sender: actorFromContext(c),
+      _cronSource: "manual",
+      _cronActor: actor ?? null,
+      sender: actor,
     };
     const fire = def.handler
       ? config.runCronHandler!(def.handler, context)

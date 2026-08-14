@@ -1798,6 +1798,53 @@ describe("POST /crons/:name/trigger", () => {
     expect(context).toHaveProperty("repos");
   });
 
+  it("stamps _cronSource=manual and _cronActor on the fired context", async () => {
+    const triggerCron = vi.fn(async () => {});
+    const app = createAdminRoutes(
+      mockDb, mockSessions, mockSessions,
+      makeConfig({ adminPassword: "", triggerCron }),
+    );
+    const res = await request(app, "/crons/test-cron/trigger", { method: "POST" });
+    expect(res.status).toBe(200);
+    const [, context] = triggerCron.mock.calls[0] as [string, Record<string, unknown>];
+    // A manual fire is recorded as manual, and attributed — otherwise the
+    // ledger cannot tell "Run now" from the scheduler.
+    expect(context._cronSource).toBe("manual");
+    expect("_cronActor" in context).toBe(true);
+  });
+
+  it("injects the cron markers AFTER the YAML spread so they cannot be spoofed", async () => {
+    const { getCronWorkflows } = await import("#src/workflows/loader.js");
+    const spoofing = vi.mocked(getCronWorkflows).mockReturnValue([
+      // A cron YAML trying to claim another cron's identity and pass itself
+      // off as a scheduled fire.
+      {
+        name: "test-cron",
+        workflow: "repo-health",
+        schedule: "0 9 * * 1",
+        context: { _cronName: "some-other-cron", _cronSource: "schedule" },
+      },
+    ] as unknown as ReturnType<typeof getCronWorkflows>);
+
+    try {
+      const triggerCron = vi.fn(async () => {});
+      const app = createAdminRoutes(
+        mockDb, mockSessions, mockSessions,
+        makeConfig({ adminPassword: "", triggerCron }),
+      );
+      const res = await request(app, "/crons/test-cron/trigger", { method: "POST" });
+      expect(res.status).toBe(200);
+      const [, context] = triggerCron.mock.calls[0] as [string, Record<string, unknown>];
+      // The route's own values win. A spoofed `_cronName` would make
+      // resolveCronRepos apply another cron's per-repo participation to this
+      // tick; a spoofed `_cronSource` would misattribute the fire.
+      expect(context._cronName).toBe("test-cron");
+      expect(context._cronSource).toBe("manual");
+    } finally {
+      spoofing.mockRestore();
+    }
+  });
+
   it("returns 404 for an unknown cron", async () => {
     const triggerCron = vi.fn(async () => {});
     const app = createAdminRoutes(
