@@ -544,11 +544,38 @@ and widen `workflow` to `string | null`. The server has returned
 `workflow: … ?? null` and `handler: … ?? null` since #333; this hand-maintained
 mirror never caught up.
 
-- [ ] **Step 5: Render it**
+> **Widening this surfaces a live bug — expect breakage and fix it, don't
+> suppress it.** `CronInfo.workflow: string` has been a lie since #333: the one
+> handler cron (`repo-digest`) already receives `null` at runtime, so the
+> dashboard renders "Run null now" today. Six sites in `CronsList.tsx` read
+> `cron.workflow`; only two of them will fail to compile. Step 5 handles all
+> six. Do NOT reach for `!`, `as string`, or `?? ""` to quiet the compiler —
+> that re-hides the bug this widening exists to expose.
 
-In `CronsList.tsx`, extend the status-badge colour map for `ok` and `partial`
-(`ok` reads as success, `partial` as warning), and add a counts line under the
-"Last run" cell (:198), shown only once a fire has been recorded:
+- [ ] **Step 5: Render it, and handle a null `workflow` at all six sites**
+
+`CronsList.tsx` reads `cron.workflow` at :125, :126, :130, :194, :196 and :228.
+Only :125 and :194 break the build (`onOpenRuns` takes `string`, :27); the other
+four are template interpolations that compile fine and print `null`. Fix all
+six:
+
+- **:125 and :194 — the "open runs" buttons.** A handler cron dispatches no
+  workflow, so it has no `workflow_runs` to open; the button has nothing to show
+  and must be **disabled** when `cron.workflow === null`, not passed a
+  fallback. Guard the click (`cron.workflow && onOpenRuns(cron.workflow)`) so
+  the narrowing is real rather than asserted, and extend the existing
+  `disabled={!cron.lastRun}` at :195 to `disabled={!cron.lastRun ||
+  !cron.workflow}`.
+- **:126, :196, :228 — the `title` tooltips.** Use the cron's own name for a
+  handler cron. Introduce one local at the top of `CronRow`:
+  `const label = cron.workflow ?? cron.handler ?? cron.name;` and interpolate
+  `label` at all three.
+- **:130 — the subtitle line.** Render `label` too, so a handler cron shows its
+  handler rather than a blank cell.
+
+Then extend the status-badge colour map for `ok` and `partial` (`ok` reads as
+success, `partial` as warning), and add a counts line under the "Last run" cell
+(:198), shown only once a fire has been recorded:
 
 ```tsx
 {cron.reposScanned !== null && (
