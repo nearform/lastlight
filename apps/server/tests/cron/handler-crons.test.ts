@@ -283,8 +283,9 @@ describe("CronScheduler — running a handler job", () => {
     const db = new StateDb(":memory:");
     // The gap: this used to be gated on `job.workflow`, so a handler cron
     // failing every tick produced one log line, no count, and a dashboard
-    // reporting zero failures beside it.
-    const consecutiveFailures = vi.spyOn(db.executions, "consecutiveFailures");
+    // reporting zero failures beside it. Counting now happens at fire grain off
+    // `cron_runs` (issue #327), still keyed on the cron's own name.
+    const recentFailures = vi.spyOn(db.cronRuns, "recentFailures");
     const handler = vi.fn(async () => {
       throw new Error("slack is down");
     });
@@ -292,9 +293,9 @@ describe("CronScheduler — running a handler job", () => {
     try {
       scheduler.register({ name: "repo-digest", schedule: EVERY_SECOND, handler, context: {} });
       await untilCalled(handler);
-      await untilCalled(consecutiveFailures);
+      await untilCalled(recentFailures);
 
-      expect(consecutiveFailures).toHaveBeenCalledWith("repo-digest");
+      expect(recentFailures).toHaveBeenCalledWith("repo-digest");
     } finally {
       scheduler.stopAll();
       db.close();
