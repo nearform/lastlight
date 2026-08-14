@@ -1609,6 +1609,21 @@ async function main() {
       return c.json({ error: `Repo not managed: ${unmanaged.join(", ")}` }, 403);
     }
 
+    // Fail a context the dispatcher will reject BEFORE returning 202. The
+    // dispatch below is fire-and-forget, so without this the caller gets
+    // `{accepted: true}` and an execution id for a run that dies moments later
+    // in the harness log — indistinguishable, from the CLI, from success.
+    // Mirrors `dispatchWorkflow`'s own condition exactly, Slack exemption
+    // included: a `slack:`-prefixed triggerId legitimately carries no repo.
+    const hasSlackTrigger =
+      typeof context.triggerId === "string" && context.triggerId.startsWith("slack:");
+    if (typeof context.repo !== "string" && !hasSlackTrigger) {
+      return c.json(
+        { error: `Missing 'repo' in context for workflow '${workflowName}'` },
+        400,
+      );
+    }
+
     apiLog.info("CLI triggered", { workflowName });
 
     // Run asynchronously — return immediately with a stable id the caller
