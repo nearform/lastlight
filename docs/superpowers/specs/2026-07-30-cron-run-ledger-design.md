@@ -8,10 +8,10 @@
 
 ## Revision note (2026-08-14)
 
-The original design was parked on 2026-07-30 pending an OTel collector on the
-homelab. `main` has since moved 110 commits and two issues were filed covering
-the same ground from production evidence. This revision folds them in and
-reverses two decisions. What changed:
+The original design was parked on 2026-07-30 pending somewhere to verify its
+OTel signals against. `main` has since moved 110 commits and two issues were
+filed covering the same ground from production evidence. This revision folds
+them in and reverses two decisions. What changed:
 
 1. **`cron_runs` now covers EVERY cron, not just workflow crons.** `withLedger`
    (`cron/handlers.ts:81`, shipped with #333) gave *handler* crons a per-tick
@@ -284,20 +284,19 @@ Both are no-ops when telemetry is disabled (`meter()` / `tracer()` return
 no-ops), so a deployment without a collector loses the two signals and nothing
 else.
 
-Both are verifiable end-to-end on the homelab today. That cluster has run an
-OpenTelemetry Collector since **2026-07-31** (flux-homelab #118) with all three
-pipelines wired — traces to Tempo, metrics through `prometheus_remote_write` to
-kube-prometheus-stack, logs to Loki — and the harness is already pointed at it:
-`LASTLIGHT_OTEL_ENABLED=true`, OTLP/HTTP to
-`otel-collector.otel.svc.cluster.local:4318`, with a `CiliumNetworkPolicy` rule
-opening that egress on an otherwise default-deny pod.
+Both are verifiable end-to-end on a self-hosted Kubernetes deployment running
+the `kubernetes` sandbox backend, where an OpenTelemetry Collector has been in
+place since 2026-07-31 with all three pipelines wired — traces to Tempo, metrics
+through `prometheus_remote_write` to a kube-prometheus-stack, logs to Loki — and
+the harness already exports to it over OTLP/HTTP, with a `CiliumNetworkPolicy`
+rule opening that egress on an otherwise default-deny pod.
 
 Verification is nonetheless a release-checklist item rather than an
 implementation gate: the SQLite ledger is what the dashboard reads, and it must
-keep working with OTel off. That ordering is the whole lesson of this document's
-history — the original design was parked on 2026-07-30 pending a collector that
-landed the next day, then sat for a fortnight on a blocker that had already
-cleared and was never a dependency of the part that mattered.
+keep working with OTel off. That ordering is the lesson of this document's own
+history — it was parked on 2026-07-30 pending a collector that turned out to
+land the next day, then sat a fortnight on a blocker that had already cleared
+and was never a dependency of the part that mattered.
 
 **Out of scope — span parentage.** Fanned-out `workflow.run` spans are NOT
 parented under the cron span. Dispatched runs execute asynchronously via the
@@ -380,8 +379,9 @@ retained for progress visibility before the fan-out.
   several partial event representations (`EventEnvelope`, `executions`,
   `workflow_runs.phase_history`, the OTel span tree); a generic event substrate
   would be an N+1 standard for one concrete need.
-- **OTel-only** — insufficient alone: the dashboard reads SQLite, and a homelab
-  with no OTel backend would still be blind. OTel complements the ledger.
+- **OTel-only** — insufficient alone: the dashboard reads SQLite, and a
+  deployment with no OTel backend would still be blind. OTel complements the
+  ledger; it does not replace it.
 - **Fix `consecutiveFailures` with `skill LIKE ? || ':%'`** — rejected, and
   #327 shows it is *worse than the current bug*: the alert would then count
   DAG-cascade skips and quota deferrals as failures and fire near-constantly.
