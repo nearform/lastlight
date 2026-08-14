@@ -297,6 +297,17 @@ export function recordWorkflowRunStart(attrs: TelemetryAttributes = {}): void {
   if (enabled) meter().createCounter("lastlight.workflow.run.started").add(1, safeMetricAttributes({ ...attrs, surface: "workflow" }));
 }
 
+/**
+ * One increment per cron FIRE, keyed by `cron.name` / `cron.status`.
+ *
+ * Counts fires, not the runs a fire dispatches — a zero-discovery fire
+ * dispatches nothing, so `lastlight.workflow.run.started` cannot show that a
+ * backstop cron is alive (issue #341).
+ */
+export function recordCronFire(attrs: TelemetryAttributes = {}): void {
+  if (enabled) meter().createCounter("lastlight.cron.fire").add(1, safeMetricAttributes({ ...attrs, surface: "cron" }));
+}
+
 export function recordWorkflowRunEnd(attrs: TelemetryAttributes = {}): void {
   recordExecutionMetrics("workflow", attrs);
 }
