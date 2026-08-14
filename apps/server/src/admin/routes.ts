@@ -599,27 +599,6 @@ const COMMENT_CLASSIFIER_TYPES = new Set<EventType>([
   "pr_review.submitted",
 ]);
 
-/**
- * The last tick of a `handler:` cron, projected into the `{ startedAt, status }`
- * shape the crons list already reads off a `workflow_runs` row.
- *
- * A handler cron dispatches nothing, so it has no run row — its only trace is
- * the `executions` row `withLedger` writes per tick (`cron/handlers.ts`). The
- * status vocabulary is narrowed to what a tick can actually be: it never
- * queues, pauses or gets cancelled.
- */
-function lastHandlerTick(
-  db: StateDb,
-  cronName: string,
-): { startedAt: string; status: "running" | "succeeded" | "failed" } | undefined {
-  const [row] = db.executions.recentExecutions(cronName, 1);
-  if (!row) return undefined;
-  return {
-    startedAt: row.startedAt,
-    status: !row.finishedAt ? "running" : row.success ? "succeeded" : "failed",
-  };
-}
-
 function playgroundRouting(type: EventType): "deterministic" | "classifier" {
   return PLAYGROUND_EVENT_TYPES.find((e) => e.type === type)?.routing ?? "deterministic";
 }
@@ -2468,6 +2447,9 @@ export function createAdminRoutes(
     // cache lookups rather than asking each repo a question with one answer.
     const policy = repoConfigPolicy();
     const mayVote = repoLayerMayVote(policy);
+    // One query for the whole list rather than one per cron, under the
+    // dashboard's 10s poll.
+    const latestCronRuns = db.cronRuns.latestByCron();
     const crons = defs.map((def) => {
       const override = overrides.get(def.name) ?? null;
       const enabled = override ? override.enabled : true;
@@ -2478,12 +2460,13 @@ export function createAdminRoutes(
       // `withLedger` in `cron/handlers.ts`). This used to report a hardcoded
       // `0 / null` for handler crons, so the dashboard showed a healthy-looking
       // zero beside a cron that could have been failing for weeks.
-      const recentFailures = db.executions.consecutiveFailures(def.workflow ?? def.name);
-      // Last run: a workflow cron has a `workflow_runs` row (richer — it is the
-      // dispatched run, not the tick); a handler cron only ever has its ledger row.
-      const recent = def.workflow
-        ? db.runs.listRecent(50).find((r) => r.workflowName === def.workflow)
-        : lastHandlerTick(db, def.name);
+      // ONE ledger, keyed on the cron's own name, for both kinds of cron —
+      // which is why there is no longer a branch here. The old workflow-cron
+      // path read `db.runs.listRecent(50)` and showed whichever of the tick's
+      // dispatched children sorted first: an arbitrary run, not the tick. A
+      // zero-discovery fire dispatched no children at all, so it showed nothing.
+      const last = latestCronRuns.get(def.name) ?? null;
+      const recentFailures = db.cronRuns.recentFailures(def.name);
       return {
         name: def.name,
         workflow: def.workflow ?? null,
@@ -2493,9 +2476,13 @@ export function createAdminRoutes(
         enabled,
         registered: !!live,
         nextRun: live?.nextRun?.toISOString() ?? null,
-        lastRun: recent?.startedAt ?? null,
-        lastStatus: recent?.status ?? null,
+        lastRun: last?.startedAt ?? null,
+        lastStatus: last?.status ?? null,
         recentFailures,
+        reposEligible: last?.reposEligible ?? null,
+        reposScanned: last?.reposScanned ?? null,
+        discovered: last?.discovered ?? null,
+        dispatched: last?.dispatched ?? null,
         optedInRepos: mayVote ? optedInRepos(def.name, managedRepos, policy) : [],
         context: { repos: managedRepos, ...def.context },
         override: override

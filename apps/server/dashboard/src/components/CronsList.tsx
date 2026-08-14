@@ -117,17 +117,23 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
     }
   };
 
+  // A `handler:` cron runs host-side code and dispatches no workflow, so
+  // `cron.workflow` is null for it and there are no `workflow_runs` to open.
+  const label = cron.workflow ?? cron.handler ?? cron.name;
+  const hasRuns = !!cron.workflow;
+
   return (
     <tr className={cron.enabled ? "" : "opacity-60"}>
       <td>
         <button
           className="font-mono text-xs link link-hover text-left"
-          onClick={() => onOpenRuns(cron.workflow)}
-          title={`See recent runs of ${cron.workflow}`}
+          onClick={() => cron.workflow && onOpenRuns(cron.workflow)}
+          disabled={!hasRuns}
+          title={hasRuns ? `See recent runs of ${label}` : `${label} runs in-process — no workflow runs to open`}
         >
           {cron.name}
         </button>
-        <div className="text-2xs text-base-content/50">{cron.workflow}</div>
+        <div className="text-2xs text-base-content/50">{label}</div>
       </td>
       <td>
         <div className="flex items-center gap-1">
@@ -191,27 +197,45 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
       <td>
         <button
           className="link link-hover text-left inline-flex items-center gap-1.5"
-          onClick={() => onOpenRuns(cron.workflow)}
-          disabled={!cron.lastRun}
-          title={cron.lastRun ? `Open recent runs of ${cron.workflow}` : "no runs yet"}
+          onClick={() => cron.workflow && onOpenRuns(cron.workflow)}
+          disabled={!cron.lastRun || !hasRuns}
+          title={
+            !hasRuns
+              ? `${label} runs in-process — no workflow runs to open`
+              : cron.lastRun
+                ? `Open recent runs of ${label}`
+                : "no runs yet"
+          }
         >
           <span className="text-xs">{cron.lastRun ? formatRel(cron.lastRun) : "never"}</span>
           {cron.lastStatus && (
             <span
               className={`badge badge-2xs ${
-                cron.lastStatus === "succeeded"
+                cron.lastStatus === "ok" || cron.lastStatus === "succeeded"
                   ? "badge-success"
                   : cron.lastStatus === "failed"
                     ? "badge-error"
-                    : cron.lastStatus === "running"
-                      ? "badge-info"
-                      : ""
+                    : cron.lastStatus === "partial"
+                      ? "badge-warning"
+                      : cron.lastStatus === "running"
+                        ? "badge-info"
+                        : ""
               }`}
             >
               {cron.lastStatus}
             </span>
           )}
         </button>
+        {cron.reposScanned !== null && (
+          <div className="text-2xs text-base-content/40">
+            scanned {cron.reposScanned}
+            {cron.reposEligible !== null &&
+              cron.reposEligible !== cron.reposScanned &&
+              ` of ${cron.reposEligible}`}
+            {cron.discovered !== null && ` · found ${cron.discovered}`}
+            {cron.dispatched !== null && ` · dispatched ${cron.dispatched}`}
+          </div>
+        )}
       </td>
       <td className="text-right">
         {cron.recentFailures > 0 ? (
@@ -225,7 +249,7 @@ function CronRow({ cron, onChanged, onOpenRuns }: RowProps) {
           className="btn btn-xs btn-ghost"
           onClick={run}
           disabled={pending}
-          title={`Run ${cron.workflow} now`}
+          title={`Run ${label} now`}
         >
           {triggered ? "Triggered ✓" : "Run now"}
         </button>
