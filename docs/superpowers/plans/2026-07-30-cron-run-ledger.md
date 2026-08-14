@@ -57,11 +57,40 @@ The branch was rebased onto current `main` on 2026-08-14, so the worktree has no
 `node_modules` yet. Run from the repo root: `pnpm install`
 Expected: completes; `apps/server/node_modules` present.
 
-- [ ] **Step 2: Establish a green baseline**
+- [ ] **Step 2: Build the workspace packages — REQUIRED before any test run**
+
+Run from the repo root: `pnpm turbo run build`
+Expected: all tasks successful; `packages/{workflow-engine,shared,agentic-pi}/dist`
+all present.
+
+> **Do not skip this, and do not skip it later either.** `lastlight-core`
+> imports its workspace deps *by package name*, resolved through their
+> `exports` → `dist/`. On a cold worktree those directories do not exist, so
+> **every** bare `pnpm --filter lastlight-core test` / `npx vitest run <path>`
+> in this plan fails until a build has run once. Turbo's `^build` ordering is
+> what normally handles this; the bare `--filter` and `npx vitest` forms bypass
+> it.
+>
+> The failure mode is badly misleading — it reads as catastrophic breakage when
+> nothing is broken:
+>
+> ```
+> Test Files  123 failed | 81 passed (204)
+> Tests       991 passed (991)      ← zero actual test failures
+> Error: Failed to resolve entry for package "lastlight-workflow-engine"
+> ```
+>
+> 123 files failing to *import* with 0 failing tests means a missing build, not
+> a red baseline. Build, then re-run, before reporting anything as broken.
+
+- [ ] **Step 3: Establish a green baseline**
 
 Run from the repo root: `pnpm --filter lastlight-core test`
-Expected: PASS (docker/k8s ITs self-skip). If anything fails, STOP and report —
-do not build on a red baseline.
+Expected: PASS — ~199 files / ~3052 tests, with the docker/k8s ITs self-skipping.
+If anything fails, STOP and report — do not build on a red baseline.
+
+> Check the *reported summary*, not just the exit status: piping the command
+> through `tail` masks pnpm's non-zero exit with the pipe's own.
 
 ---
 
