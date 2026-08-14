@@ -125,6 +125,10 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
       dispatched: null,
       failures: null,
     };
+    // Diagnostic only — which discoverer ran. Carried on the LOG line, never
+    // into `cron_runs`: it is not a column, and the ledger write below spreads
+    // `counts` straight into the store.
+    let discoverKey: string | undefined;
     // On an object rather than two `let`s: TypeScript's control-flow analysis
     // does not carry the catch block's assignment into `finally`, so a narrowed
     // local reads as `"ok" | "partial"` there and the `"failed"` branch below
@@ -136,13 +140,14 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
         "lastlight.cron.fire",
         { "cron.name": cronName, "cron.workflow": workflowName, "cron.source": source },
         async (span) => {
-          counts = await fire(workflowName, context, {
+          const result = await fire(workflowName, context, {
             db,
             github,
             discoverers,
             dispatch,
             resolveRepos,
           });
+          ({ discoverKey, ...counts } = result);
           outcome.status = counts.failures && counts.failures > 0 ? "partial" : "ok";
           span?.setAttributes({
             "cron.repos_eligible": counts.reposEligible ?? 0,
@@ -165,7 +170,14 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
       db.cronRuns.finish(id, { status: outcome.status, ...counts, error: outcome.error });
       recordCronFire({ "cron.name": cronName, "cron.status": outcome.status });
 
-      const fields = { cron: cronName, workflow: workflowName, source, status: outcome.status, ...counts };
+      const fields = {
+        cron: cronName,
+        workflow: workflowName,
+        source,
+        status: outcome.status,
+        ...counts,
+        ...(discoverKey ? { discoverKey } : {}),
+      };
       const msg = completionMessage(cronName, counts);
       if (outcome.status === "failed") log.error(msg, { ...fields, err: outcome.error });
       else if (outcome.status === "partial") log.warn(msg, fields);
@@ -189,7 +201,7 @@ async function fire(
   workflowName: string,
   context: Record<string, unknown>,
   deps: Required<Omit<CronRunnerDeps, "resolveRepos">> & { resolveRepos: typeof resolveCronRepos },
-): Promise<FireCounts> {
+): Promise<FireCounts & { discoverKey?: string }> {
   const { github, discoverers, dispatch, resolveRepos } = deps;
 
   const discoverKey = typeof context.discover === "string" ? context.discover : undefined;
@@ -249,12 +261,6 @@ async function fire(
   // discoverer's `log` callback carries per-repo diagnostics that can fire once
   // per managed repo per tick, so it stays `.debug`.
   const prs = github && repos.length ? await discoverer(repos, github, { log: (m) => log.debug(m) }) : [];
-  log.info("Discovered PRs", {
-    workflowName,
-    discoverKey,
-    count: prs.length,
-    repoCount: repos.length,
-  });
 
   const contexts = prs.map((pr) => ({
     _triggerType: "cron",
@@ -282,5 +288,6 @@ async function fire(
     discovered: prs.length,
     dispatched,
     failures,
+    discoverKey,
   };
 }

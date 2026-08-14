@@ -377,3 +377,60 @@ describe("the completion line the runner actually emits", () => {
     }
   });
 });
+
+describe("the removed Discovered PRs line", () => {
+  it("carries discoverKey on the completion line instead", async () => {
+    // `Discovered PRs` fired ~1s before the completion line and duplicated its
+    // counts, without naming the cron. Its one unique datum moves here.
+    const runner = makeCronRunner({
+      db,
+      github: fakeGh,
+      discoverers: { "green-dependency-prs": async () => [] },
+      dispatch: vi.fn(async () => ({ success: true })),
+      resolveRepos: allParticipate,
+    });
+    await runner("dependabot-pr-merge", {
+      discover: "green-dependency-prs",
+      repos: ["o/a"],
+      _cronName: "c-dk",
+    });
+
+    const [, fields] = logSpy.info.mock.calls.at(-1) as [string, Record<string, unknown>];
+    expect(fields.discoverKey).toBe("green-dependency-prs");
+  });
+
+  it("omits discoverKey entirely for a non-discovery cron", async () => {
+    const runner = makeCronRunner({
+      db,
+      github: fakeGh,
+      discoverers: {},
+      dispatch: vi.fn(async () => ({ success: true })),
+      resolveRepos: allParticipate,
+    });
+    await runner("repo-health", { repos: ["o/a"], _cronName: "c-nodk" });
+
+    const [, fields] = logSpy.info.mock.calls.at(-1) as [string, Record<string, unknown>];
+    expect("discoverKey" in fields).toBe(false);
+  });
+
+  it("does not leak discoverKey into the ledger row", async () => {
+    // `finish()` spreads `counts` straight into the store; discoverKey is not a
+    // column and must not ride along.
+    const runner = makeCronRunner({
+      db,
+      github: fakeGh,
+      discoverers: { "green-dependency-prs": async () => [] },
+      dispatch: vi.fn(async () => ({ success: true })),
+      resolveRepos: allParticipate,
+    });
+    await runner("dependabot-pr-merge", {
+      discover: "green-dependency-prs",
+      repos: ["o/a"],
+      _cronName: "c-leak",
+    });
+
+    const row = db.cronRuns.latestByCron().get("c-leak")!;
+    expect(row.status).toBe("ok");
+    expect("discoverKey" in row).toBe(false);
+  });
+});
