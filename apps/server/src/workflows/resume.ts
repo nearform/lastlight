@@ -20,6 +20,7 @@ import {
   type NotifierState,
 } from "../notify/index.js";
 import { logger } from "../logging/logger.js";
+import { logPhaseEnd, logPhaseStart } from "../logging/phase-log.js";
 
 const log = logger("resume");
 
@@ -128,9 +129,9 @@ function makeCallbacks(
           }
         }
       : undefined,
-    onPhaseStart: async (phase) => log.info("Phase start", { workflowName, phase }),
+    onPhaseStart: async (phase) => logPhaseStart(log, workflowName, phase),
     onPhaseEnd: async (phase, result) => {
-      log.info("Phase end", { workflowName, phase, success: result.success });
+      logPhaseEnd(log, workflowName, phase, result);
       // The marker harvest has to be wired on the RESUME paths too, not only on
       // the fresh dispatch in `index.ts`. A fix run that paused for an approval
       // gate or was picked back up after a harness restart completes its
@@ -347,9 +348,9 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
             log.warn("Failed to post to Slack thread", { err });
           }
         },
-        onPhaseStart: async (phase) => log.info("Phase start", { workflowName: run.workflowName, phase }),
+        onPhaseStart: async (phase) => logPhaseStart(log, run.workflowName, phase),
         onPhaseEnd: async (phase, result) => {
-          log.info("Phase end", { workflowName: run.workflowName, phase, success: result.success });
+          logPhaseEnd(log, run.workflowName, phase, result);
           harvestFixMarkers(opts.db, run.id, run.workflowName, phase, result.output);
         },
       };
