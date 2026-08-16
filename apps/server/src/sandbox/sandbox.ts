@@ -319,6 +319,12 @@ class DockerSandbox implements Sandbox {
       );
     }
     this.sbx = sbx;
+    // Services join the sandbox container's network namespace, so they can only start
+    // once it exists — hence here, after createTaskSandbox, not before. `dispose` tears
+    // them down in the opposite order (see DockerSandbox.destroy).
+    if (this.opts.services && !this.opts.services.isEmpty) {
+      await sbx.sandbox.startServices(this.opts.taskId, this.opts.services);
+    }
     this.agentCwd = pre ? `${DOCKER_WORKSPACE_DIR}/${pre.repo}` : DOCKER_WORKSPACE_DIR;
     return { hostWorkspaceDir: sbx.workDir, agentCwd: this.agentCwd };
   }
