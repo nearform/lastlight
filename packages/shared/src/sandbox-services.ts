@@ -200,6 +200,66 @@ export class ServiceSet {
   }
 }
 
+/** Actions expressions cannot be resolved here, so an image carrying one is rejected. */
+const UNRESOLVED_EXPRESSION = /\$\{\{/;
+
+/**
+ * Parse one raw `services:` entry into a spec, or undefined when it cannot be
+ * represented. PURE — applies no policy; the caller decides how to report a rejection.
+ *
+ * `image` must be fully resolved. A quarter of the surveyed repos derive it from a CI
+ * matrix (one across ten postgres versions), and there is no defensible default for
+ * "which one", so the repo has to choose.
+ */
+export function parseServiceSpec(name: string, raw: unknown): ServiceSpec | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.image !== "string" || r.image.trim() === "") return undefined;
+  if (UNRESOLVED_EXPRESSION.test(r.image)) return undefined;
+
+  const rawPorts = r.ports === undefined ? [] : r.ports;
+  if (!Array.isArray(rawPorts)) return undefined;
+  const ports: PortMapping[] = [];
+  for (const p of rawPorts) {
+    if (typeof p !== "string" && typeof p !== "number") return undefined;
+    const mapping = PortMapping.parse(String(p));
+    if (!mapping) return undefined;
+    ports.push(mapping);
+  }
+
+  const env: Record<string, string> = {};
+  if (r.env !== undefined) {
+    if (typeof r.env !== "object" || r.env === null || Array.isArray(r.env)) return undefined;
+    for (const [k, v] of Object.entries(r.env as Record<string, unknown>)) {
+      if (typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") return undefined;
+      env[k] = String(v);
+    }
+  }
+
+  const healthCmd = toArgv(r.healthCmd);
+  if (r.healthCmd !== undefined && healthCmd === undefined) return undefined;
+  const command = toArgv(r.command);
+  if (r.command !== undefined && command === undefined) return undefined;
+
+  let runAsUser: number | undefined;
+  if (r.runAsUser !== undefined) {
+    if (typeof r.runAsUser !== "number" || !Number.isInteger(r.runAsUser) || r.runAsUser < 1) {
+      return undefined;
+    }
+    runAsUser = r.runAsUser;
+  }
+
+  return { name, image: r.image.trim(), env, ports, healthCmd, runAsUser, command };
+}
+
+/** `"pg_isready"` or `["pg_isready", "-U", "probe"]` → argv. */
+function toArgv(raw: unknown): readonly string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === "string") return raw.trim() === "" ? undefined : raw.trim().split(/\s+/);
+  if (Array.isArray(raw) && raw.every((x) => typeof x === "string")) return raw as string[];
+  return undefined;
+}
+
 /** Both sides of every mapping: the service binds `target`, a forwarder binds `listen`. */
 function portsClaimedBy(spec: ServiceSpec): number[] {
   const ports = new Set<number>();

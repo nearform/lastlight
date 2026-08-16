@@ -57,6 +57,7 @@ import {
   type NotificationsConfig,
   type ReviewConfig,
 } from "./config-types.js";
+import { ImageAllowlist, parseServiceSpec } from "./sandbox-services.js";
 
 // ---------------------------------------------------------------------------
 // Bounds
@@ -111,6 +112,20 @@ export interface RepoConfigPolicy {
    * `false` keeps `lastlight.yml` only.
    */
   allowAssets: boolean;
+  /**
+   * Container images a repo may declare as dependency services, registry-qualified
+   * (`docker.io/library/postgres:*`, `mcr.microsoft.com/mssql/server:*`).
+   *
+   * NOTE the polarity is the INVERSE of {@link allowedModels}: `null` (the default)
+   * denies EVERY image, where a null `allowedModels` is permissive. A model spec is a
+   * choice among providers the harness already knows how to talk to; a service image is
+   * arbitrary code pulled onto operator infrastructure, outside the sandbox's egress
+   * policy. Deny-all is the only safe default, so this stays inert until an operator
+   * opts in. See `docs/plans/sandbox-services/README.md` decision 7.
+   */
+  allowedImages: string[] | null;
+  /** Ceiling on dependency services per phase. */
+  maxServices: number;
 }
 
 /**
@@ -137,6 +152,7 @@ export const DEFAULT_REPO_CONFIG_ALLOW_KEYS: readonly string[] = [
   "dependencies",
   "review",
   "notifications",
+  "services",
 ];
 
 /**
@@ -151,6 +167,10 @@ export function defaultRepoConfigPolicy(): RepoConfigPolicy {
     allowKeys: [...DEFAULT_REPO_CONFIG_ALLOW_KEYS],
     allowedModels: null,
     allowAssets: true,
+    // Deny-all: the KEY is settable by default, the CAPABILITY is not granted until an
+    // operator lists images. See RepoConfigPolicy.allowedImages for the polarity note.
+    allowedImages: null,
+    maxServices: 2,
   };
 }
 
@@ -175,6 +195,8 @@ export type RepoConfigWarningCode =
   | "model-not-allowed"
   /** A model spec whose `provider/` prefix isn't a provider we can wire. */
   | "unknown-provider"
+  /** A service image outside `repoConfig.allowedImages`. */
+  | "service-not-allowed"
   /** An `approval` entry that would clear a gate — the layer is add-only. */
   | "approval-downgrade"
   /**
@@ -293,6 +315,18 @@ export interface RepoMergedConfig {
    * clamp the three blocks above share does not apply here.
    */
   notifications: NotificationsConfig;
+  /**
+   * Dependency services this repo's phases run against, as RAW declarations keyed by
+   * service name (`docs/plans/sandbox-services`).
+   *
+   * Deliberately untyped plain data rather than parsed `ServiceSpec`s: this record is
+   * persisted as JSON on the run and rehydrated on resume, and a `PortMapping` is a
+   * class instance that would not survive the round trip. Consumers re-parse through
+   * `parseServiceSpec`. There is no operator-side value to merge onto — an operator
+   * bounds services via `repoConfig.allowedImages`, not by declaring any — so this is
+   * always either the repo's own block or empty.
+   */
+  services: Record<string, unknown>;
 }
 
 /** Provenance mirror of {@link RepoMergedConfig} — each leaf tagged with its winning layer. */
@@ -618,6 +652,9 @@ export function sanitizeRepoConfigLayer(
         break;
       case "notifications":
         assignIfAny(layer, "notifications", sanitizeNotifications(value, policy, warn));
+        break;
+      case "services":
+        assignIfAny(layer, "services", sanitizeServices(value, policy, warn));
         break;
       default:
         // Allow-listed by the operator but not a key this module knows how to
@@ -1177,6 +1214,64 @@ function sanitizeReview(
 }
 
 /**
+ * `services:` — a CAPABILITY GRANT, not a clamp.
+ *
+ * Every policy block above answers "is the repo asking to be looser than the operator?".
+ * A service declaration has no such ordering: it is a request measured against an
+ * allowlist. So this is modelled on {@link sanitizeNotifications} — shape validation plus
+ * one bound — rather than on the `policy-downgrade` clamps, where there is an operator
+ * value to fall back to. Dropping still fails in the safe direction: no service.
+ *
+ * SET-level rules (port collisions, the count ceiling) are deliberately NOT applied here.
+ * They belong to `ServiceSet` in `sandbox-services.ts`, which is the only place the whole
+ * phase's port space is visible. This function admits one entry at a time.
+ */
+function sanitizeServices(
+  raw: unknown,
+  policy: RepoConfigPolicy,
+  warn: Warn,
+): Record<string, unknown> | undefined {
+  if (!isPlainObject(raw)) {
+    warn(
+      "invalid-value",
+      "services",
+      `Ignored "services" in .lastlight/${REPO_CONFIG_FILE}: it must be a mapping.`,
+    );
+    return undefined;
+  }
+  const allowlist = ImageAllowlist.of(policy.allowedImages);
+  const out: Record<string, unknown> = {};
+
+  for (const [name, value] of Object.entries(raw)) {
+    const path = `services.${name}`;
+    if (!isAllowedKey(path, policy.allowKeys)) {
+      warn("key-not-allowed", path, `Ignored "${path}": a repo may not set this key.`);
+      continue;
+    }
+    const spec = parseServiceSpec(name, value);
+    if (!spec) {
+      warn(
+        "invalid-value",
+        path,
+        `Ignored "${path}": each service needs a literal "image" (no \${{ }} expressions), ` +
+          `with optional string "env", "ports" like "5433:5432", "healthCmd", "runAsUser".`,
+      );
+      continue;
+    }
+    if (!allowlist.permits(spec.image)) {
+      warn(
+        "service-not-allowed",
+        path,
+        `Ignored "${path}": "${spec.image}" is not in this deployment's repoConfig.allowedImages.`,
+      );
+      continue;
+    }
+    out[name] = value;
+  }
+  return out;
+}
+
+/**
  * `notifications:` — the only repo-settable block with NO clamp direction.
  *
  * Every other block here answers "is the repo asking to be looser than the
@@ -1357,7 +1452,18 @@ function shapeMerged(value: Record<string, unknown>): RepoMergedConfig {
     dependencies: shapeDependencies(value.dependencies),
     review: shapeReview(value.review),
     notifications: shapeNotifications(value.notifications),
+    services: shapeServices(value.services),
   };
+}
+
+/** Total over `services:` — keeps each well-formed declaration as opaque plain data. */
+function shapeServices(raw: unknown): Record<string, unknown> {
+  if (!isPlainObject(raw)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (isPlainObject(value)) out[name] = value;
+  }
+  return out;
 }
 
 /** Total over `notifications:`, same contract as {@link shapeFix} and friends. */

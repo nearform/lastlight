@@ -182,11 +182,22 @@ repoConfig:
   # the default-branch trust rule above plus Slack itself: the bot can only post
   # where it has been invited. Drop `notifications` from this list to take
   # channel choice back.
+  # `services` is a third shape again: a CAPABILITY GRANT. A repo declaring a test
+  # postgres is not asking to be looser than an operator value, it is making a request
+  # measured against `allowedImages` below. Drop it from this list to refuse the whole
+  # feature outright.
   allowKeys: [models, variants, crons, disabled.workflows, disabled.crons, approval,
-              fix, dependencies, review, notifications]
+              fix, dependencies, review, notifications, services]
   allowedModels: null            # null = any model whose provider prefix is configured;
                                  # a list restricts repos to exactly those model specs
   allowAssets: true              # allow the repo's prompt/skill/agent-context overrides
+  # Container images a repo may run as dependency services, registry-qualified.
+  # NOTE the polarity is the INVERSE of allowedModels: [] / null denies EVERY image.
+  # A service image is arbitrary code pulled onto this host, outside the sandbox's
+  # egress policy, so the feature stays inert until you list images here. Example:
+  #   allowedImages: ["docker.io/library/postgres:*", "mcr.microsoft.com/mssql/server:*"]
+  allowedImages: []
+  maxServices: 2                 # ceiling on dependency services per phase
 
 bootstrap:
   label: "lastlight:bootstrap"

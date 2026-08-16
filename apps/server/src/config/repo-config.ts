@@ -45,6 +45,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { dirname, join, resolve, sep } from "path";
 import {
   DEFAULT_REPO_CONFIG_ALLOW_KEYS,
+  defaultRepoConfigPolicy,
   REPO_CONFIG_FILE,
   REPO_CONFIG_MAX_BYTES,
   REPO_CONFIG_MAX_FILES,
@@ -101,14 +102,11 @@ export interface FetchRepoLayerOptions {
  * config isn't loaded (unit tests, pre-boot code paths). Never throws.
  */
 export function repoConfigPolicy(): RepoConfigPolicy {
-  return (
-    getRuntimeConfig()?.repoConfig ?? {
-      enabled: true,
-      allowKeys: [...DEFAULT_REPO_CONFIG_ALLOW_KEYS],
-      allowedModels: null,
-      allowAssets: true,
-    }
-  );
+  // The fallback is `defaultRepoConfigPolicy()` rather than a literal spelled out here:
+  // a hand-written second copy of the shipped defaults is exactly the drift this
+  // module's own constants are kept single-sourced to avoid, and it silently went stale
+  // the moment a new bound was added.
+  return getRuntimeConfig()?.repoConfig ?? defaultRepoConfigPolicy();
 }
 
 /**

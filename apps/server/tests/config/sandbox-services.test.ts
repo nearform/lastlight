@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { ImageAllowlist, PortMapping, ServiceSet } from "lastlight-shared/sandbox-services";
 import type { ServiceSpec } from "lastlight-shared/sandbox-services";
+import { defaultRepoConfigPolicy, resolveRepoConfig, sanitizeRepoConfigLayer } from "lastlight-shared/repo-config-schema";
+import type { RepoConfigBase, RepoConfigPolicy } from "lastlight-shared/repo-config-schema";
 
 describe("PortMapping", () => {
   it("parses the Actions listen:target form", () => {
@@ -138,5 +140,112 @@ describe("ServiceSet", () => {
     expect(set.isEmpty).toBe(true);
     expect(violations).toEqual([]);
     expect(ServiceSet.empty().isEmpty).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The repo-config surface: a repo declaring services in .lastlight/lastlight.yml
+// ---------------------------------------------------------------------------
+
+const policyWith = (over: Partial<RepoConfigPolicy> = {}): RepoConfigPolicy => ({
+  ...defaultRepoConfigPolicy(),
+  allowedImages: ["docker.io/library/postgres:*"],
+  maxServices: 2,
+  ...over,
+});
+
+const emptyBase = (): RepoConfigBase => ({ value: {}, sources: {} });
+
+describe("sanitizeRepoConfigLayer — services", () => {
+  it("keeps a well-formed declaration", () => {
+    const { layer, warnings } = sanitizeRepoConfigLayer(
+      {
+        services: {
+          postgres: {
+            image: "postgres:16-alpine",
+            env: { POSTGRES_PASSWORD: "probe" },
+            ports: ["5433:5432"],
+            healthCmd: "pg_isready",
+            runAsUser: 70,
+          },
+        },
+      },
+      policyWith(),
+      emptyBase(),
+    );
+    expect(warnings).toEqual([]);
+    expect(layer.services).toBeDefined();
+  });
+
+  it("warns and drops an image outside the operator allowlist", () => {
+    const { layer, warnings } = sanitizeRepoConfigLayer(
+      { services: { redis: { image: "redis:7", ports: ["6379"] } } },
+      policyWith(),
+      emptyBase(),
+    );
+    expect(layer.services).toBeUndefined();
+    expect(warnings.map((w) => w.code)).toEqual(["service-not-allowed"]);
+  });
+
+  it("denies everything when the operator set no allowlist", () => {
+    const { warnings } = sanitizeRepoConfigLayer(
+      { services: { postgres: { image: "postgres:16-alpine", ports: ["5432"] } } },
+      policyWith({ allowedImages: null }),
+      emptyBase(),
+    );
+    expect(warnings.map((w) => w.code)).toEqual(["service-not-allowed"]);
+  });
+
+  it("rejects an image carrying an unresolved Actions expression", () => {
+    const { warnings } = sanitizeRepoConfigLayer(
+      { services: { postgres: { image: "postgres:${{ matrix.pg }}", ports: ["5432"] } } },
+      policyWith(),
+      emptyBase(),
+    );
+    expect(warnings.map((w) => w.code)).toEqual(["invalid-value"]);
+  });
+
+  it("rejects a malformed port and keeps the service out", () => {
+    const { layer, warnings } = sanitizeRepoConfigLayer(
+      { services: { postgres: { image: "postgres:16-alpine", ports: ["nope"] } } },
+      policyWith(),
+      emptyBase(),
+    );
+    expect(layer.services).toBeUndefined();
+    expect(warnings.map((w) => w.code)).toEqual(["invalid-value"]);
+  });
+
+  it("rejects a non-mapping services block", () => {
+    const { warnings } = sanitizeRepoConfigLayer({ services: ["postgres"] }, policyWith(), emptyBase());
+    expect(warnings.map((w) => w.code)).toEqual(["invalid-value"]);
+  });
+});
+
+describe("resolveRepoConfig — services reach the merged config", () => {
+  // Guards the seam the sandbox adapters read: shapeMerged builds a FIXED shape and
+  // drops anything not listed in it, so a block can be accepted by the sanitizer and
+  // still vanish before any consumer sees it.
+  it("carries a declared service through to merged.services", () => {
+    const resolved = resolveRepoConfig(emptyBase(), policyWith(), {
+      repo: "nearform/example",
+      config: {
+        services: {
+          postgres: { image: "postgres:16-alpine", ports: ["5433:5432"], healthCmd: "pg_isready" },
+        },
+      },
+      files: [],
+      warnings: [],
+    } as never);
+    expect(resolved.warnings).toEqual([]);
+    expect(Object.keys(resolved.merged.services)).toEqual(["postgres"]);
+    // Plain data, so it survives JSON persistence and resume rehydration.
+    expect(JSON.parse(JSON.stringify(resolved.merged.services)).postgres.image).toBe(
+      "postgres:16-alpine",
+    );
+  });
+
+  it("yields an empty services map when the repo declared none", () => {
+    const resolved = resolveRepoConfig(emptyBase(), policyWith(), undefined);
+    expect(resolved.merged.services).toEqual({});
   });
 });
