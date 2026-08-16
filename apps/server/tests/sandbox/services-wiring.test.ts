@@ -7,6 +7,7 @@ import {
   withSandbox,
 } from "#src/engine/executors/orchestrator.js";
 import { ImageAllowlist, PortMapping, ServiceSet } from "lastlight-shared/sandbox-services";
+import { repoConfigRunRecord } from "#src/workflows/simple.js";
 
 const postgres = {
   name: "postgres",
@@ -135,5 +136,49 @@ describe("withSandbox — unsupported backends degrade rather than fail", () => 
     );
     expect(fake.services?.specs.map((s) => s.name)).toEqual(["postgres"]);
     expect(fake.env?.LASTLIGHT_SERVICES).toBe('{"postgres":[5432]}');
+  });
+});
+
+describe("run repo config — services survive persistence and resume", () => {
+  const cfg = {
+    repo: "nearform/example",
+    defaultBranch: "main",
+    treeSha: "abc1234",
+    fetchedAt: "2026-08-16T00:00:00Z",
+    assets: [],
+    models: {},
+    variants: {},
+    approval: {},
+    disabled: { workflows: [], crons: [], prompts: [], skills: [], agentContext: [] },
+    fix: {},
+    dependencies: {},
+    review: {},
+    notifications: { slack: { channel: null } },
+    services: { postgres: { image: "postgres:16-alpine", ports: ["5433:5432"] } },
+    serviceBounds: { allowedImages: ["docker.io/library/postgres:*"], maxServices: 2 },
+    sources: {
+      models: {}, variants: {}, disabled: {}, approval: {},
+      fix: {}, dependencies: {}, review: {}, notifications: {},
+    },
+    warnings: [],
+  };
+
+  it("projects services and the bounds in force onto the persisted record", () => {
+    const record = repoConfigRunRecord(cfg as never);
+    expect(record.applied.services).toEqual(cfg.services);
+    // The BOUNDS travel with it: re-reading them live on resume would let an
+    // operator's edit admit or reject services mid-flight.
+    expect(record.applied.serviceBounds).toEqual(cfg.serviceBounds);
+  });
+
+  it("records nothing when the repo declared no services", () => {
+    const record = repoConfigRunRecord({ ...cfg, services: {} } as never);
+    expect(record.applied.services).toBeUndefined();
+    expect(record.applied.serviceBounds).toBeUndefined();
+  });
+
+  it("round-trips through JSON, which is how it is persisted", () => {
+    const record = JSON.parse(JSON.stringify(repoConfigRunRecord(cfg as never)));
+    expect(record.applied.services.postgres.ports).toEqual(["5433:5432"]);
   });
 });
