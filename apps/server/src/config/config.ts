@@ -371,6 +371,12 @@ export interface KubernetesConfig {
   harnessNamespace: string;
   /** The harness Pod's Cilium selector labels — the `toEndpoints` egress rule. */
   harnessPodLabels: Record<string, string>;
+  /**
+   * Image for the port-remap forwarder sidecar (`docs/plans/sandbox-services`).
+   * OPERATOR config, not repo config — it is never subject to
+   * `repoConfig.allowedImages`, because a repo does not choose it.
+   */
+  forwarderImage: string;
 }
 
 export interface SandboxCleanupConfig {
@@ -1520,6 +1526,7 @@ const K8S_DEFAULTS: KubernetesConfig = {
   harnessEndpoint: "http://lastlight.lastlight.svc.cluster.local:8644",
   harnessNamespace: "lastlight",
   harnessPodLabels: { "app.kubernetes.io/name": "lastlight" },
+  forwarderImage: "alpine/socat:latest",
 };
 
 /** Parse a `k=v,k=v` env string into a label map; empty/malformed → `undefined`
@@ -1552,6 +1559,8 @@ export function resolveKubernetesConfig(): KubernetesConfig {
     workspaceSize:
       process.env.LASTLIGHT_K8S_WORKSPACE_SIZE ?? k.workspaceSize ?? K8S_DEFAULTS.workspaceSize,
     runAsUser: Number.isFinite(runAsUserEnv) ? runAsUserEnv : (k.runAsUser ?? K8S_DEFAULTS.runAsUser),
+    forwarderImage:
+      process.env.LASTLIGHT_K8S_FORWARDER_IMAGE ?? k.forwarderImage ?? K8S_DEFAULTS.forwarderImage,
     harnessEndpoint:
       process.env.LASTLIGHT_K8S_HARNESS_ENDPOINT ??
       k.harnessEndpoint ??

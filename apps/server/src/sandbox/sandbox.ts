@@ -271,6 +271,7 @@ export function sandboxFor(backend: SandboxBackend, opts: SandboxFactoryOpts): S
         harnessEndpoint: k.harnessEndpoint,
         harnessNamespace: k.harnessNamespace,
         harnessPodLabels: k.harnessPodLabels,
+        forwarderImage: k.forwarderImage,
       });
     }
     default: {
