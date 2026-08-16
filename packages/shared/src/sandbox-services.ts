@@ -107,6 +107,109 @@ function normaliseImage(ref: string): string {
   return path.split("/").length === 1 ? `docker.io/library/${trimmed}` : `docker.io/${trimmed}`;
 }
 
+/** One validated dependency service. Immutable; equality is by attributes. */
+export interface ServiceSpec {
+  readonly name: string;
+  readonly image: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly ports: readonly PortMapping[];
+  /** argv for the readiness check, run inside the service container. */
+  readonly healthCmd?: readonly string[];
+  /** uid the image expects — 70 on `postgres:*-alpine`, 999 on the debian variant. */
+  readonly runAsUser?: number;
+  /** Escape hatch for self-advertising services and deliberate port moves. */
+  readonly command?: readonly string[];
+}
+
+/** The operator bounds a {@link ServiceSet} is admitted against. */
+export interface ServiceBounds {
+  allowlist: ImageAllowlist;
+  maxServices: number;
+}
+
+/** Why a declared service did not make it into the set. */
+export interface ServiceViolation {
+  name: string;
+  reason: "image-not-allowed" | "too-many" | "port-collision";
+}
+
+/**
+ * A phase's services, and the invariants only the SET can enforce.
+ *
+ * Services share the sandbox's network namespace, so the whole phase has ONE flat port
+ * space. Two services binding the same port collide and no per-item validator can see
+ * it — which is why admission is an aggregate operation rather than a loop over
+ * independent items. `maxServices` is the other set-level rule.
+ *
+ * Admission is partial by design: a rejected service is dropped and reported, never
+ * thrown. A repo's config can never fail a run.
+ */
+export class ServiceSet {
+  private constructor(private readonly accepted: readonly ServiceSpec[]) {}
+
+  static create(
+    specs: readonly ServiceSpec[],
+    bounds: ServiceBounds,
+  ): { set: ServiceSet; violations: ServiceViolation[] } {
+    const accepted: ServiceSpec[] = [];
+    const violations: ServiceViolation[] = [];
+    const claimed = new Set<number>();
+
+    for (const spec of specs) {
+      if (!bounds.allowlist.permits(spec.image)) {
+        violations.push({ name: spec.name, reason: "image-not-allowed" });
+        continue;
+      }
+      if (accepted.length >= bounds.maxServices) {
+        violations.push({ name: spec.name, reason: "too-many" });
+        continue;
+      }
+      const wanted = portsClaimedBy(spec);
+      if (wanted.some((p) => claimed.has(p))) {
+        violations.push({ name: spec.name, reason: "port-collision" });
+        continue;
+      }
+      for (const p of wanted) claimed.add(p);
+      accepted.push(spec);
+    }
+    return { set: new ServiceSet(accepted), violations };
+  }
+
+  /** The no-services case, which is every run today. */
+  static empty(): ServiceSet {
+    return new ServiceSet([]);
+  }
+
+  get specs(): readonly ServiceSpec[] {
+    return this.accepted;
+  }
+
+  get isEmpty(): boolean {
+    return this.accepted.length === 0;
+  }
+
+  /** Every mapping needing a forwarder, paired with the service it fronts. */
+  forwarders(): readonly { service: ServiceSpec; mapping: PortMapping }[] {
+    const out: { service: ServiceSpec; mapping: PortMapping }[] = [];
+    for (const service of this.accepted) {
+      for (const mapping of service.ports) {
+        if (mapping.needsForwarder) out.push({ service, mapping });
+      }
+    }
+    return out;
+  }
+}
+
+/** Both sides of every mapping: the service binds `target`, a forwarder binds `listen`. */
+function portsClaimedBy(spec: ServiceSpec): number[] {
+  const ports = new Set<number>();
+  for (const m of spec.ports) {
+    ports.add(m.target);
+    ports.add(m.listen);
+  }
+  return [...ports];
+}
+
 /** Exact match, or a trailing `:*` tag wildcard. No other globbing. */
 function matchesImage(image: string, pattern: string): boolean {
   if (pattern.endsWith(":*")) {
