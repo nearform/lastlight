@@ -185,6 +185,12 @@ does it.
 - **Every service container must satisfy `restricted` PodSecurity.** The
   sandbox namespace enforces it, by design (`deploy/k8s/sandbox-namespace.yaml`).
   See Verification notes for what that costs.
+- **Teardown is free on kubernetes and is not on docker.** A pod's sidecars die
+  with the pod; a joined docker container **outlives** `docker rm -f` of the
+  sandbox it borrowed the namespace from (verified — see Verification notes). So
+  the docker adapter's `dispose()` must remove services explicitly, and they
+  become a new labelled, sweepable resource for `reap.ts` /
+  `cron/sandbox-sweep.ts`. The kubernetes half needs neither.
 
 ## Verification notes (16 Aug 2026)
 
@@ -257,6 +263,37 @@ Three findings the probe added:
   placement: services in `containers[]` would pollute the array the harness's
   exit-code classifier indexes into.
 
+### Docker probe
+
+Docker 29.7.2, scratch `llprobe-*` containers on an `--internal` network
+mirroring `lastlight_sandbox-egress`. All objects removed at exit.
+
+| Claim | Result |
+|---|---|
+| `-p` is rejected with `--network container:` (decision 5) | **Yes**, verbatim: `conflicting options: port publishing and the container type network mode` |
+| A service joins the sandbox's namespace (decision 2) | **Yes** — `NetworkMode: container:<id>`, and `IPAddress` is empty: no namespace of its own |
+| Agent reaches the service on `localhost:5432` | **Yes** — `PostgreSQL 16.13 … musl` |
+| Forwarder serves a remapped port | **Yes** — `forwarded ok` on 5433 |
+| Health-check seam (`docker exec <svc> <healthCmd>`) | **Yes** — `pg_isready` passed after 2 s |
+| Teardown is free | **NO** — see below |
+
+**The teardown finding.** After `docker rm -f <sandbox>`, both joined service
+containers were **still running**. They do not die with the namespace owner;
+they survive holding an orphaned namespace, and `-f` bypasses the dependency
+check that would otherwise refuse the removal.
+
+This is a **genuine asymmetry with kubernetes**, where the pod is the lifecycle
+boundary and sidecars are torn down for free. Two things follow, both new
+requirements rather than design changes:
+
+- **`dispose()` must remove the service containers explicitly** on the docker
+  adapter — services first, then the sandbox.
+- **They need labelling and a sweep backstop.** A harness crash between
+  `provision()` and `dispose()` leaks them, and `reap.ts` plus the hourly
+  `sandbox-sweep.ts` currently know only about workspace directories and the
+  sandbox container. Service containers are a new reapable resource on the
+  docker backend only.
+
 ## What is deliberately not in this plan
 
 - **Testcontainers, and anything else that talks to a daemon from test code.**
@@ -286,7 +323,8 @@ Three findings the probe added:
 |---|---|---|
 | ~~Verify k8s native-sidecar support~~ | — | **Done** — homelab is v1.36.3, admission accepts the manifest. Re-check on any new target cluster |
 | ~~Confirm the stock images start under `restricted`~~ | — | **Done** — live probe, see Verification notes. postgres, socat forwarder, `localhost` reachability and sidecar teardown all verified on the homelab cluster |
-| Verify the docker half (`--network container:`, forwarder sibling) | a scratch container, not the prod host | The k8s half is now evidence-backed; the docker half is still reasoned from code alone. Nearform prod runs docker-compose, so it needs equal treatment before implementation |
+| ~~Verify the docker half~~ | — | **Done** — netns sharing, `-p` rejection, forwarder and health-check seam all verified locally. Surfaced the teardown asymmetry above |
+| Confirm name resolution is genuinely unnecessary under `coredns-strict` | the compose stack running | The design never resolves a service by name, so this should be moot — but it was reasoned from the Corefile, not observed. Cheap to check when the stack is next up |
 | Rerun the survey against the real managed-repo list | an admin API call to a running instance | Org-wide numbers are a proxy; see 00-evidence "Method" |
 | Multi-service port-collision handling | a real workload needing it | `command:` covers it manually today |
 | Self-advertising services (Kafka, Mongo replica sets) | a real workload needing it | Same escape hatch; may need per-image guidance in a skill rather than code |
