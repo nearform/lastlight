@@ -87,10 +87,11 @@ services:
       POSTGRES_DB: sqlmap
     ports: ["5433:5432"]      # Actions form, honoured by the forwarder
     healthCmd: pg_isready
+    runAsUser: 999            # uid the image expects — see Verification notes
     command: []               # escape hatch — decision 6
 ```
 
-Four fields cover all eight surveyed repos. `image` must be fully resolved: no
+Five fields cover all eight surveyed repos. `image` must be fully resolved: no
 `${{ }}`, so a repo matrixing ten postgres versions in CI picks the one it
 wants the agent to use.
 
@@ -177,9 +178,55 @@ does it.
   collide, and the forwarder cannot help because the *backend* port is what
   collides. Not present in the sample; covered by `command:` if it arises.
 - **A k8s version floor.** Native sidecars are beta-by-default from 1.29 and GA
-  in 1.33. **Unverified against the target clusters** — confirm before
-  implementation, since a cluster below the floor silently gets a service in
-  `initContainers` that blocks pod startup instead of running alongside.
+  in 1.33. **Verified on the homelab cluster (v1.36.3)** — see Verification
+  notes. A cluster below the floor would silently get a service in
+  `initContainers` that blocks pod startup instead of running alongside, so the
+  check is still a prerequisite on any new target cluster.
+- **Every service container must satisfy `restricted` PodSecurity.** The
+  sandbox namespace enforces it, by design (`deploy/k8s/sandbox-namespace.yaml`).
+  See Verification notes for what that costs.
+
+## Verification notes (16 Aug 2026)
+
+Probed against the live homelab cluster (`admin@homelab`) with server-side dry
+runs. Nothing was created.
+
+**Native sidecars are supported.** Server is **v1.36.3**, three minor versions
+past the 1.33 GA. `kubectl explain pod.spec.initContainers.restartPolicy`
+returns the sidecar semantics, including the clause the design depends on —
+*"the next init container starts immediately after this init container is
+started, or after any startupProbe has successfully [completed]"*. A compliant
+manifest passed admission.
+
+**The sandbox namespace enforces `restricted:latest` PodSecurity**, which the
+design did not account for. `lastlight-sandboxes` carries
+`pod-security.kubernetes.io/enforce: restricted`, shipped deliberately in
+`deploy/k8s/sandbox-namespace.yaml` under the comment *"No privileged component
+runs in this namespace."* A first probe without a securityContext was rejected
+for four fields: `allowPrivilegeEscalation`, `capabilities.drop`,
+`runAsNonRoot`, `seccompProfile`.
+
+Consequences for service containers:
+
+- Each needs `allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]` and
+  the pod's `seccompProfile` — mechanical, and `buildPodManifest` already emits
+  all three for the agent container.
+- **`runAsUser` is not mechanical.** Pod-level `runAsNonRoot: true` +
+  `runAsUser: 10001` (`pod.ts:96-97`) is inherited by sidecars, but the stock
+  `postgres` and `redis` images run as root and drop privileges in their own
+  entrypoints. Each service therefore needs a `runAsUser` matching the uid its
+  image expects (999 for postgres).
+- This is why `runAsUser` is a field on the declaration rather than a table in
+  the harness — the same resolution decision 6 reached for ports. The repo knows
+  its own image; the harness carries no per-image knowledge.
+
+**Two layers, two different checks.** Admission validates the *manifest*; the
+kubelet validates the *image* at container start. A dry run can pass and the
+container still fail `CreateContainerConfigError: container has runAsNonRoot and
+image will run as root`, because only the kubelet resolves the image's declared
+`USER`. **A dry run is therefore not sufficient evidence** that a given service
+image starts under `restricted` — that needs a real pod, which has not been run
+yet. See Deferred.
 
 ## What is deliberately not in this plan
 
@@ -208,7 +255,8 @@ does it.
 
 | Item | Blocked on | Note |
 |---|---|---|
-| Verify k8s native-sidecar support on the target clusters | nothing — just a check | Prerequisite, not an enhancement. Gates the whole k8s half |
+| ~~Verify k8s native-sidecar support~~ | — | **Done** — homelab is v1.36.3, admission accepts the manifest. Re-check on any new target cluster |
+| Confirm the stock images actually start under `restricted` | a real pod, not a dry run | The remaining unknown: does `postgres:16-alpine` come up as `runAsUser: 999` with all capabilities dropped? Admission cannot answer this — only the kubelet can. Cheapest possible test, and it gates the whole k8s half |
 | Rerun the survey against the real managed-repo list | an admin API call to a running instance | Org-wide numbers are a proxy; see 00-evidence "Method" |
 | Multi-service port-collision handling | a real workload needing it | `command:` covers it manually today |
 | Self-advertising services (Kafka, Mongo replica sets) | a real workload needing it | Same escape hatch; may need per-image guidance in a skill rather than code |
