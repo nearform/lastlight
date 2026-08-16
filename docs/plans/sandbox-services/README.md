@@ -178,7 +178,7 @@ does it.
   collide, and the forwarder cannot help because the *backend* port is what
   collides. Not present in the sample; covered by `command:` if it arises.
 - **A k8s version floor.** Native sidecars are beta-by-default from 1.29 and GA
-  in 1.33. **Verified on the homelab cluster (v1.36.3)** — see Verification
+  in 1.33. **Verified on a local lab cluster** — see Verification
   notes. A cluster below the floor would silently get a service in
   `initContainers` that blocks pod startup instead of running alongside, so the
   check is still a prerequisite on any new target cluster.
@@ -194,11 +194,11 @@ does it.
 
 ## Verification notes (16 Aug 2026)
 
-Probed against the live homelab cluster (`admin@homelab`) with server-side dry
-runs. Nothing was created.
+Probed against a local lab cluster running on the author's home network, using
+server-side dry runs. Nothing was created.
 
-**Native sidecars are supported.** Server is **v1.36.3**, three minor versions
-past the 1.33 GA. `kubectl explain pod.spec.initContainers.restartPolicy`
+**Native sidecars are supported.** The cluster runs 1.36.3, past the 1.33 GA.
+`kubectl explain pod.spec.initContainers.restartPolicy`
 returns the sidecar semantics, including the clause the design depends on —
 *"the next init container starts immediately after this init container is
 started, or after any startupProbe has successfully [completed]"*. A compliant
@@ -321,8 +321,8 @@ requirements rather than design changes:
 
 | Item | Blocked on | Note |
 |---|---|---|
-| ~~Verify k8s native-sidecar support~~ | — | **Done** — homelab is v1.36.3, admission accepts the manifest. Re-check on any new target cluster |
-| ~~Confirm the stock images start under `restricted`~~ | — | **Done** — live probe, see Verification notes. postgres, socat forwarder, `localhost` reachability and sidecar teardown all verified on the homelab cluster |
+| ~~Verify k8s native-sidecar support~~ | — | **Done** — the lab cluster is past the GA floor and admission accepts the manifest. Re-check on any new target cluster |
+| ~~Confirm the stock images start under `restricted`~~ | — | **Done** — live probe, see Verification notes. postgres, socat forwarder, `localhost` reachability and sidecar teardown all verified on the lab cluster |
 | ~~Verify the docker half~~ | — | **Done** — netns sharing, `-p` rejection, forwarder and health-check seam all verified locally. Surfaced the teardown asymmetry above |
 | Confirm name resolution is genuinely unnecessary under `coredns-strict` | the compose stack running | The design never resolves a service by name, so this should be moot — but it was reasoned from the Corefile, not observed. Cheap to check when the stack is next up |
 | Rerun the survey against the real managed-repo list | an admin API call to a running instance | Org-wide numbers are a proxy; see 00-evidence "Method" |
