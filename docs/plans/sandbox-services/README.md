@@ -343,7 +343,7 @@ independent of each other and can land in either order.
   model in `lastlight-shared` (`PortMapping`, `ServiceSpec`, `ServiceSet`,
   `ImageAllowlist`) and the `services:` block in the repo-config layer
   *(risk: low — pure, no I/O, no backend)*
-- [ ] **Phase 2** — [02-sandbox-port.md](02-sandbox-port.md) — carry a
+- [x] **Phase 2** — [02-sandbox-port.md](02-sandbox-port.md) — carry a
   `ServiceSet` through the Sandbox port and degrade unsupported backends
   *(risk: low — the `EgressPolicy` seam, copied)*
 - [ ] **Phase 3** — [03-k8s-adapter.md](03-k8s-adapter.md) — native sidecars,

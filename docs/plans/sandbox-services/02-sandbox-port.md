@@ -364,6 +364,26 @@ git commit -m "feat(services): resolve declared services onto the phase executor
 
 ---
 
+## Execution notes (16 Aug 2026)
+
+Phase 2 landed. Two corrections to the plan as written:
+
+- **`ExecutorConfig` lives in `lastlight-workflow-engine`, which `shared` depends on**,
+  so it cannot import `ServiceSpec` — that would invert the graph the dep-cruiser gate
+  enforces. The field is therefore the RAW declaration map (`Record<string, unknown>`)
+  plus `serviceBounds`, and the parse happens in `servicesFor` at the orchestrator
+  boundary. This is simpler than the plan's `ServiceSpec[]`: the runner now just copies
+  `merged.services` across with no mapping step.
+- **Resume needed work the plan did not mention.** `RunRepoConfig` is rebuilt from a
+  persisted `RepoConfigRunRecord` on resume, so services had to join that projection or
+  a resumed run would silently lose them. The **operator bounds are persisted alongside**
+  — re-reading them live would let an edit made while the run was paused admit or reject
+  services mid-flight, which is the same hazard `resume` already avoids by reusing the
+  persisted layer instead of re-resolving.
+
+Full suite after Phase 2: **3092 passed, 0 failed**; both typechecks and the boundary
+gate clean.
+
 ## Phase 2 done when
 
 - A repo's declared services reach `SandboxFactoryOpts.services` as a validated
