@@ -23,6 +23,12 @@ import {
   type ExecutionResult,
   type GitSandboxAccess,
 } from "../github/profiles.js";
+import {
+  ImageAllowlist,
+  parseServiceSpec,
+  ServiceSet,
+  type ServiceSpec,
+} from "lastlight-shared/sandbox-services";
 import { AgenticShim } from "../event-shim.js";
 import { QuotaExceededError } from "../../sandbox/k8s/quota.js";
 import { projectSlugForCwd } from "../../session-log.js";
@@ -94,6 +100,63 @@ export function egressPolicyFor(config: ExecutorConfig): EgressPolicy {
 }
 
 /**
+ * The backends that implement dependency services (`docs/plans/sandbox-services`,
+ * decision 8). The two container backends are what real deployments run; the rest warn
+ * once and proceed without, which lands the run exactly where it is today.
+ */
+export const SERVICE_CAPABLE_BACKENDS: ReadonlySet<SandboxBackend> = new Set([
+  "docker",
+  "kubernetes",
+]);
+
+/**
+ * Admit the phase's declared services against the operator's bounds — the services
+ * counterpart to {@link egressPolicyFor}, computed once per run.
+ *
+ * `config.services` is the RAW declaration map carried through from the repo's merged
+ * config (plain data, so it survives JSON persistence and resume), so this is also where
+ * it is parsed. A declaration that no longer parses is skipped rather than thrown on:
+ * it was already validated and warned about at the config layer, and a repo's config can
+ * never fail a run.
+ *
+ * SET-level rules (the flat port space, the count ceiling) belong to `ServiceSet`, which
+ * is the only place a phase's whole port space is visible.
+ */
+export function servicesFor(config: ExecutorConfig): ServiceSet {
+  const declared = config.services;
+  if (!declared || Object.keys(declared).length === 0) return ServiceSet.empty();
+
+  const specs: ServiceSpec[] = [];
+  for (const [name, raw] of Object.entries(declared)) {
+    const spec = parseServiceSpec(name, raw);
+    if (spec) specs.push(spec);
+  }
+  if (specs.length === 0) return ServiceSet.empty();
+
+  const { set, violations } = ServiceSet.create(specs, {
+    allowlist: ImageAllowlist.of(config.serviceBounds?.allowedImages),
+    maxServices: config.serviceBounds?.maxServices ?? 0,
+  });
+  for (const v of violations) {
+    log.warn("service dropped", { service: v.name, reason: v.reason });
+  }
+  return set;
+}
+
+/**
+ * How a phase discovers its services. Everything is on `localhost` — one shared network
+ * namespace — so only the port varies. The LISTEN side is published because that is the
+ * port to dial: when a mapping is remapped, a forwarder owns it and the service's own
+ * port is an implementation detail.
+ */
+export function serviceEnv(services: ServiceSet): Record<string, string> {
+  if (services.isEmpty) return {};
+  const map: Record<string, number[]> = {};
+  for (const s of services.specs) map[s.name] = s.ports.map((p) => p.listen);
+  return { LASTLIGHT_SERVICES: JSON.stringify(map) };
+}
+
+/**
  * The provision → work → dispose bracket. Builds the adapter via the factory
  * (or the injected one), provisions the workspace, runs `fn`, and disposes in a
  * `finally` once provisioned. A provision failure propagates to the caller (it
@@ -104,10 +167,21 @@ export async function withSandbox<T>(
   fn: (sandbox: Sandbox, provisioned: ProvisionResult) => Promise<T>,
 ): Promise<T> {
   const factory = ctx.sandboxFactory ?? sandboxFor;
+  let services = servicesFor(ctx.config);
+  if (!services.isEmpty && !SERVICE_CAPABLE_BACKENDS.has(ctx.backend)) {
+    // Degrade, never fail: the agent then hits the same missing-service wall it hits
+    // today and records the same `constraint:` note (design decision 9).
+    log.warn("backend does not support services — running without them", {
+      backend: ctx.backend,
+      services: services.specs.map((s) => s.name),
+    });
+    services = ServiceSet.empty();
+  }
   const sandbox = factory(ctx.backend, {
     taskId: ctx.taskId,
     egress: egressPolicyFor(ctx.config),
-    env: ctx.env,
+    env: { ...ctx.env, ...serviceEnv(services) },
+    services,
     stateDir: ctx.stateDir,
     sandboxDir: ctx.config.sandboxDir,
     repoSubdir: ctx.config.repoSubdir,
