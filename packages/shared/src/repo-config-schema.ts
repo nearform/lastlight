@@ -1253,8 +1253,10 @@ function sanitizeServices(
       warn(
         "invalid-value",
         path,
-        `Ignored "${path}": each service needs a literal "image" (no \${{ }} expressions), ` +
-          `with optional string "env", "ports" like "5433:5432", "healthCmd", "runAsUser".`,
+        `Ignored "${path}": the name must be lowercase alphanumeric with inner hyphens ` +
+          `(no underscores — kubernetes rejects them as container names), and the service ` +
+          `needs a literal "image" (no \${{ }} expressions), with optional string "env", ` +
+          `"ports" like "5433:5432", "healthCmd", "runAsUser".`,
       );
       continue;
     }

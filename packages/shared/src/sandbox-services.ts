@@ -204,6 +204,34 @@ export class ServiceSet {
 const UNRESOLVED_EXPRESSION = /\$\{\{/;
 
 /**
+ * An RFC 1123 label — the rule kubernetes validates CONTAINER NAMES against, quoted
+ * verbatim from the API server's own rejection message.
+ *
+ * This is stricter than the vocabulary it is adopted from, and deliberately so. GitHub
+ * Actions service IDs permit underscores and uppercase; kubernetes does not, and the
+ * backends disagree about it *silently*: the docker adapter names containers
+ * `lastlight-svc-<task>-<name>` (underscores fine), while the k8s adapter composes
+ * `svc-<name>` as a container name and the API server answers **422 at pod creation** —
+ * failing the whole run, not just the service.
+ *
+ * Rejecting here turns that into the documented behaviour instead: warn, drop the entry,
+ * run without it. A repo's config can never fail a run.
+ */
+const RFC_1123_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+
+/**
+ * Longest service name that keeps every composed container name inside the 63-character
+ * label limit. The binding case is the forwarder — `fwd-<name>-<listen>`, so 4 + name + 1
+ * + up to 5 digits.
+ */
+const MAX_SERVICE_NAME = 53;
+
+/** True iff `name` is safe as a container-name component on BOTH backends. */
+export function isValidServiceName(name: string): boolean {
+  return name.length > 0 && name.length <= MAX_SERVICE_NAME && RFC_1123_LABEL.test(name);
+}
+
+/**
  * Parse one raw `services:` entry into a spec, or undefined when it cannot be
  * represented. PURE — applies no policy; the caller decides how to report a rejection.
  *
@@ -212,6 +240,7 @@ const UNRESOLVED_EXPRESSION = /\$\{\{/;
  * "which one", so the repo has to choose.
  */
 export function parseServiceSpec(name: string, raw: unknown): ServiceSpec | undefined {
+  if (!isValidServiceName(name)) return undefined;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const r = raw as Record<string, unknown>;
   if (typeof r.image !== "string" || r.image.trim() === "") return undefined;

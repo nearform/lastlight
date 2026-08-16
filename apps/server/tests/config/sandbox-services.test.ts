@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { ImageAllowlist, PortMapping, ServiceSet } from "lastlight-shared/sandbox-services";
+import {
+  ImageAllowlist,
+  parseServiceSpec,
+  PortMapping,
+  ServiceSet,
+} from "lastlight-shared/sandbox-services";
 import type { ServiceSpec } from "lastlight-shared/sandbox-services";
 import { defaultRepoConfigPolicy, resolveRepoConfig, sanitizeRepoConfigLayer } from "lastlight-shared/repo-config-schema";
 import type { RepoConfigBase, RepoConfigPolicy } from "lastlight-shared/repo-config-schema";
@@ -31,6 +36,47 @@ describe("PortMapping", () => {
 
   it("allows a privileged TARGET — only the listen side is bound by us", () => {
     expect(PortMapping.parse("8080:80")?.target).toBe(80);
+  });
+});
+
+describe("parseServiceSpec — name validation", () => {
+  const ok = (name: string) =>
+    parseServiceSpec(name, { image: "postgres:16-alpine", ports: ["5432"] }) !== undefined;
+
+  // The k8s backend composes `svc-<name>` / `fwd-<name>-<port>` as CONTAINER names, and
+  // the API server validates those as RFC 1123 labels. An invalid name is a 422 at pod
+  // creation, which fails the WHOLE run at provision — so it must be rejected here,
+  // where a bad value is warned about and dropped instead.
+  it("rejects an underscore, which Actions allows and kubernetes does not", () => {
+    expect(ok("my_service")).toBe(false);
+  });
+
+  it("rejects a trailing hyphen — `svc-my-` is not a valid label either", () => {
+    expect(ok("my-")).toBe(false);
+  });
+
+  it("rejects a leading hyphen and uppercase", () => {
+    expect(ok("-svc")).toBe(false);
+    expect(ok("Postgres")).toBe(false);
+  });
+
+  it("accepts a leading digit, which RFC 1123 permits", () => {
+    expect(ok("123-abc")).toBe(true);
+  });
+
+  it("accepts ordinary names", () => {
+    expect(ok("postgres")).toBe(true);
+    expect(ok("my-service")).toBe(true);
+  });
+
+  it("rejects a name long enough to overflow the composed forwarder label", () => {
+    // `fwd-<name>-<port>` must stay within the 63-char label limit.
+    expect(ok("a".repeat(53))).toBe(true);
+    expect(ok("a".repeat(54))).toBe(false);
+  });
+
+  it("rejects an empty name", () => {
+    expect(ok("")).toBe(false);
   });
 });
 
