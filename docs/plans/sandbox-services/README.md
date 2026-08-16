@@ -330,7 +330,41 @@ requirements rather than design changes:
 | Self-advertising services (Kafka, Mongo replica sets) | a real workload needing it | Same escape hatch; may need per-image guidance in a skill rather than code |
 | Socket-backed testcontainers support | a trust decision nobody has asked for | Explicitly out of scope above |
 
+## Phases
+
+Execute in order. Each phase doc is self-sufficient: an agent with no prior
+context should be able to execute its phase from that doc plus this README.
+
+Phases 1 and 2 change **nothing observable at runtime** — they build the model
+and the seam. The feature first does something in Phase 3. Phases 3 and 4 are
+independent of each other and can land in either order.
+
+- [ ] **Phase 1** — [01-service-model.md](01-service-model.md) — the domain
+  model in `lastlight-shared` (`PortMapping`, `ServiceSpec`, `ServiceSet`,
+  `ImageAllowlist`) and the `services:` block in the repo-config layer
+  *(risk: low — pure, no I/O, no backend)*
+- [ ] **Phase 2** — [02-sandbox-port.md](02-sandbox-port.md) — carry a
+  `ServiceSet` through the Sandbox port and degrade unsupported backends
+  *(risk: low — the `EgressPolicy` seam, copied)*
+- [ ] **Phase 3** — [03-k8s-adapter.md](03-k8s-adapter.md) — native sidecars,
+  `startupProbe` readiness, forwarder sidecars *(risk: medium — touches
+  `buildPodManifest`, which stamps credentials onto init containers)*
+- [ ] **Phase 4** — [04-docker-adapter.md](04-docker-adapter.md) — joined
+  siblings, `docker exec` health polling, and the teardown the probe proved is
+  **not** free *(risk: medium — adds a new leakable resource)*
+
+### The model, in one paragraph
+
+A **`ServiceSpec`** is a validated declaration of one service; a **`ServiceSet`**
+is a phase's specs plus the invariants only the set can enforce. That aggregate
+is not ceremony: a shared network namespace gives the whole phase **one flat
+port space**, so a port collision is invisible to any per-item validator. The
+set is **intent-only** at the Sandbox port — exactly as `EgressPolicy` is — and
+each adapter is an anti-corruption layer translating it into that platform's
+vocabulary. Nothing above the adapter boundary knows what `restartPolicy:
+Always` or `--network container:` mean.
+
 ## Status
 
-Design only. No implementation plan yet — the phase docs (`01-…`, `02-…`)
-follow once this document is reviewed.
+Design agreed and verified on both backends. **Implementation not started** —
+the four phase docs above are the plan; no code has been written.
