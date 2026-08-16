@@ -339,7 +339,7 @@ Phases 1 and 2 change **nothing observable at runtime** — they build the model
 and the seam. The feature first does something in Phase 3. Phases 3 and 4 are
 independent of each other and can land in either order.
 
-- [ ] **Phase 1** — [01-service-model.md](01-service-model.md) — the domain
+- [x] **Phase 1** — [01-service-model.md](01-service-model.md) — the domain
   model in `lastlight-shared` (`PortMapping`, `ServiceSpec`, `ServiceSet`,
   `ImageAllowlist`) and the `services:` block in the repo-config layer
   *(risk: low — pure, no I/O, no backend)*

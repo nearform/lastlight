@@ -72,6 +72,13 @@ structural "rather than by convention".
 > via the package name (`lastlight-shared/...`) — see the existing
 > `apps/server/tests/config/repo-config-shared.test.ts` for the pattern.
 
+> **You must BUILD shared before `apps/server` tests can see a change.** `apps/server`'s
+> `vitest.config.ts` aliases only `#src`, so `lastlight-shared/*` resolves through the
+> package's `exports` map to `./dist/*.js`. A new module needs three things or the import
+> fails to resolve: the source file, an `exports` entry in
+> `packages/shared/package.json`, and `pnpm --filter lastlight-shared build`. Every
+> "run the test" step below assumes that build has just run.
+
 ---
 
 ## Task 1: PortMapping
@@ -875,6 +882,27 @@ git commit -m "feat(services): accept a services block in the repo config layer"
 ```
 
 ---
+
+## Execution notes (16 Aug 2026)
+
+Phase 1 landed. Four things the plan did not anticipate:
+
+- **`shapeMerged` drops anything not in its fixed shape.** A block can be accepted by
+  `sanitizeRepoConfigLayer` and then vanish before any consumer sees it, which would have
+  made Phase 2's `merged.services` permanently undefined and the whole feature inert.
+  `services` was added to `RepoMergedConfig` + `shapeMerged`, stored as **raw plain data**
+  — merged config is persisted as JSON and rehydrated on resume, and `PortMapping` is a
+  class instance that would not survive the round trip. Consumers re-parse via
+  `parseServiceSpec`. A test now pins the whole path through `resolveRepoConfig`.
+- **`repoConfigPolicy()` hand-wrote a second copy of the shipped defaults** and went stale
+  the moment a bound was added. It now calls `defaultRepoConfigPolicy()`.
+- **`nonEmptyStringList` returns `[]`, not undefined**, so `?? null` did not normalise the
+  shipped `allowedImages: []`. Added `emptyToNull` so "empty" and "unset" are one state.
+- **The shared build step** (see the note above) — every shared change needs it before
+  `apps/server` tests resolve the import.
+
+Full suite after Phase 1: **3077 passed, 0 failed**; both typechecks and the dep-cruiser
+boundary gate clean.
 
 ## Phase 1 done when
 

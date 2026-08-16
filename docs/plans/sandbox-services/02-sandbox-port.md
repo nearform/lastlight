@@ -46,6 +46,15 @@ platform's vocabulary.
 > per-phase `ExecutorConfig` is assembled). Confirm the exact field names in your
 > checkout — this plan names the seam, not a frozen line number.
 
+> **`merged.services` now exists** — Phase 1 added `services` to `RepoMergedConfig` and
+> `shapeMerged` after discovering that block would otherwise be dropped. It holds **raw
+> plain data** (not `ServiceSpec`s), because merged config is persisted as JSON and
+> rehydrated on resume. Task 3 therefore re-parses through `parseServiceSpec` — that is
+> not defensive coding, it is required.
+
+> **Build shared** (`pnpm --filter lastlight-shared build`) before running `apps/server`
+> tests that import a changed shared module. See Phase 1's note for why.
+
 ---
 
 ## Task 1: carry a ServiceSet on the port
