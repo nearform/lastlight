@@ -346,7 +346,7 @@ independent of each other and can land in either order.
 - [x] **Phase 2** — [02-sandbox-port.md](02-sandbox-port.md) — carry a
   `ServiceSet` through the Sandbox port and degrade unsupported backends
   *(risk: low — the `EgressPolicy` seam, copied)*
-- [ ] **Phase 3** — [03-k8s-adapter.md](03-k8s-adapter.md) — native sidecars,
+- [x] **Phase 3** — [03-k8s-adapter.md](03-k8s-adapter.md) — native sidecars,
   `startupProbe` readiness, forwarder sidecars *(risk: medium — touches
   `buildPodManifest`, which stamps credentials onto init containers)*
 - [ ] **Phase 4** — [04-docker-adapter.md](04-docker-adapter.md) — joined

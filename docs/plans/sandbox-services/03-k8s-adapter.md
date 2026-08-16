@@ -406,6 +406,27 @@ git add apps/server/tests/sandbox/k8s/kubernetes.integration.test.ts
 git commit -m "test(services): cover a real postgres sidecar in the k8s integration test"
 ```
 
+## Execution notes (16 Aug 2026)
+
+Phase 3's unit work landed; three notes:
+
+- **No casts were needed.** The installed `@kubernetes/client-node` types
+  `restartPolicy` on `V1Container` natively, so the plan's `as V1Container` casts were
+  dropped — the sidecar shape is type-checked rather than asserted.
+- **`forwarderImage` went on `KubernetesConfig`** (`K8S_DEFAULTS` +
+  `LASTLIGHT_K8S_FORWARDER_IMAGE`), not `config/default.yaml` — the k8s block has no YAML
+  presence today; its defaults live only in `config.ts`.
+- **Task 4 (the integration test) is WRITTEN BUT UNRUN.** It gates off cleanly
+  (`describe.runIf(RUN)`, 9 skipped) and needs an environment this session did not have:
+  the sandbox image pullable in-cluster plus namespace quota. It asserts reachability
+  with a raw node TCP connect rather than `psql`, because the sandbox image carries node
+  and no postgres client. **Run it before trusting the k8s half end to end** —
+  `RUN_K8S_IT=1 npx vitest run tests/sandbox/k8s/kubernetes.integration.test.ts`. The
+  live probe recorded in the design's Verification notes already proved the same
+  mechanism by hand, so this is regression cover rather than first proof.
+
+Full suite after Phase 3: **3110 passed, 0 failed**; typecheck and boundary gate clean.
+
 ## Phase 3 done when
 
 - A `kubernetes` phase with a declared service runs with it on `localhost`.

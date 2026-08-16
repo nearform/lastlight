@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { ImageAllowlist, PortMapping, ServiceSet } from "lastlight-shared/sandbox-services";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ApiException } from "@kubernetes/client-node";
@@ -675,5 +676,70 @@ describe.runIf(RUN)("KubernetesSandbox Plan 6 quota-backpressure (integration)",
       }
     },
     180_000,
+  );
+});
+
+describe.runIf(RUN)("KubernetesSandbox dependency services (integration)", () => {
+  it(
+    "runs a real postgres sidecar the phase reaches on localhost",
+    async () => {
+      const taskId = `k8s-it-svc-${Date.now()}`;
+      const services = ServiceSet.create(
+        [
+          {
+            name: "postgres",
+            image: "postgres:16-alpine",
+            env: { POSTGRES_PASSWORD: "probe", POSTGRES_USER: "probe", POSTGRES_DB: "probedb" },
+            ports: [PortMapping.parse("5432")!],
+            healthCmd: ["pg_isready", "-U", "probe"],
+            // The alpine variant runs as uid 70; the debian build uses 999. There is no
+            // harness-side default that is right for both, which is why this is declared.
+            runAsUser: 70,
+          },
+        ],
+        { allowlist: ImageAllowlist.of(["docker.io/library/postgres:*"]), maxServices: 2 },
+      ).set;
+
+      const sbx = new KubernetesSandbox(
+        {
+          taskId,
+          egress: { unrestricted: false, hosts: [] },
+          env: {},
+          stateDir: "/tmp",
+          timeoutSeconds: 180,
+          services,
+        } as any,
+        {
+          namespace: process.env.LASTLIGHT_K8S_NAMESPACE ?? "lastlight-sandboxes",
+          image: IMAGE,
+          storageClassName: process.env.LASTLIGHT_K8S_STORAGE_CLASS ?? "truenas-iscsi",
+          workspaceSize: "2Gi",
+          runAsUser: parseInt(process.env.LASTLIGHT_K8S_RUN_AS_USER ?? "10001", 10),
+          harnessEndpoint: HARNESS_ENDPOINT,
+          harnessNamespace: HARNESS_NAMESPACE,
+          harnessPodLabels: HARNESS_POD_LABELS,
+        },
+      );
+      await sbx.provision();
+      try {
+        // A raw TCP connect rather than psql: the sandbox image carries node but no
+        // postgres client, and reachability on localhost is the whole claim under test.
+        // The startupProbe already gated the agent container on `pg_isready`, so a
+        // refused connection here is a real failure, not a race.
+        const probe =
+          `node -e "const s=require('net').connect(5432,'127.0.0.1');` +
+          `s.on('connect',()=>{console.log('SERVICE_REACHABLE');s.end();process.exit(0)});` +
+          `s.on('error',e=>{console.log('SERVICE_UNREACHABLE '+e.code);process.exit(1)})"`;
+        const res = await sbx.runCommand(taskId, probe, {
+          cwd: "/home/agent/workspace",
+          timeoutSeconds: 120,
+        });
+        expect(res.stdout).toContain("SERVICE_REACHABLE");
+        expect(res.exitCode).toBe(0);
+      } finally {
+        await sbx.dispose();
+      }
+    },
+    300_000,
   );
 });
