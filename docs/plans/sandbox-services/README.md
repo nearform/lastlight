@@ -87,7 +87,7 @@ services:
       POSTGRES_DB: sqlmap
     ports: ["5433:5432"]      # Actions form, honoured by the forwarder
     healthCmd: pg_isready
-    runAsUser: 999            # uid the image expects — see Verification notes
+    runAsUser: 70             # uid the image expects: 70 on alpine, 999 on debian
     command: []               # escape hatch — decision 6
 ```
 
@@ -224,9 +224,38 @@ Consequences for service containers:
 kubelet validates the *image* at container start. A dry run can pass and the
 container still fail `CreateContainerConfigError: container has runAsNonRoot and
 image will run as root`, because only the kubelet resolves the image's declared
-`USER`. **A dry run is therefore not sufficient evidence** that a given service
-image starts under `restricted` — that needs a real pod, which has not been run
-yet. See Deferred.
+`USER`. A dry run is therefore not sufficient evidence — so a real pod was run.
+
+### Live probe — the whole design in one pod
+
+A throwaway pod (`lastlight-services-probe`, since deleted) exercised the full
+shape: a `postgres:16-alpine` native sidecar, a `alpine/socat` forwarder
+sidecar, and an agent container that queried both ports. Every claim held.
+
+| Claim | Result |
+|---|---|
+| Stock postgres starts under `restricted` PSS | **Yes** — `runAsUser: 70`, `capabilities.drop: ["ALL"]`, `runAsNonRoot: true`. Default `PGDATA` needed no relocation |
+| Agent reaches the service on `localhost` (decision 2) | **Yes** — `psql -h 127.0.0.1 -p 5432` returned `PostgreSQL 16.15 … musl` |
+| Port remap via forwarder (decision 5) | **Yes** — `psql -h 127.0.0.1 -p 5433` through socat returned `forwarded ok` |
+| Sidecars do not block pod completion (decision 3) | **Yes** — pod phase `Succeeded`; postgres terminated 1 s after the agent exited |
+| `startupProbe` gates the agent's start | **Yes** — postgres `startedAt` 18:14:15, agent `startedAt` 18:14:19 |
+
+Three findings the probe added:
+
+- **The service uid differs by image variant.** `postgres:16-alpine` runs as
+  uid **70**; the Debian `postgres:16` uses **999**. A harness table keyed on
+  "postgres" would be wrong half the time. This is direct evidence for
+  `runAsUser` being a declaration field (decision 6's reasoning, confirmed).
+- **Readiness costs ~4 s per phase** for postgres. Real, bounded, and paid once
+  per phase that declares a service — worth stating because decision 3 makes
+  every phase pay it.
+- **`pod-status.ts` needs no change.** socat exits **143** (SIGTERM) on
+  teardown and the kubelet marks it `reason: Error`, but the pod phase is still
+  `Succeeded`, and `terminalResult` reads `status.containerStatuses[0]`
+  (`pod-status.ts:25`) — the *regular* containers array, which sidecars never
+  enter. This is a second, independent argument for the `initContainers`
+  placement: services in `containers[]` would pollute the array the harness's
+  exit-code classifier indexes into.
 
 ## What is deliberately not in this plan
 
@@ -256,7 +285,8 @@ yet. See Deferred.
 | Item | Blocked on | Note |
 |---|---|---|
 | ~~Verify k8s native-sidecar support~~ | — | **Done** — homelab is v1.36.3, admission accepts the manifest. Re-check on any new target cluster |
-| Confirm the stock images actually start under `restricted` | a real pod, not a dry run | The remaining unknown: does `postgres:16-alpine` come up as `runAsUser: 999` with all capabilities dropped? Admission cannot answer this — only the kubelet can. Cheapest possible test, and it gates the whole k8s half |
+| ~~Confirm the stock images start under `restricted`~~ | — | **Done** — live probe, see Verification notes. postgres, socat forwarder, `localhost` reachability and sidecar teardown all verified on the homelab cluster |
+| Verify the docker half (`--network container:`, forwarder sibling) | a scratch container, not the prod host | The k8s half is now evidence-backed; the docker half is still reasoned from code alone. Nearform prod runs docker-compose, so it needs equal treatment before implementation |
 | Rerun the survey against the real managed-repo list | an admin API call to a running instance | Org-wide numbers are a proxy; see 00-evidence "Method" |
 | Multi-service port-collision handling | a real workload needing it | `command:` covers it manually today |
 | Self-advertising services (Kafka, Mongo replica sets) | a real workload needing it | Same escape hatch; may need per-image guidance in a skill rather than code |
