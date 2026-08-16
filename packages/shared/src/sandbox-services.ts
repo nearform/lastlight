@@ -62,3 +62,60 @@ function toPort(raw: string | undefined): number | undefined {
   const n = Number(raw);
   return n >= 1 && n <= 65535 ? n : undefined;
 }
+
+/**
+ * The operator's bound on which images a repo may ask for.
+ *
+ * Polarity is deliberately the INVERSE of `RepoConfigPolicy.allowedModels`, where `null`
+ * means permissive ("any provider we can wire"). Here absent/null/empty denies
+ * everything, because an image is arbitrary code pulled onto the operator's
+ * infrastructure — in docker by the host daemon, in kubernetes by kubelet, in both cases
+ * outside the sandbox's egress policy. Inert out of the box is the required default, and
+ * getting this backwards would ship a remote-code-execution default.
+ *
+ * Patterns are REGISTRY-QUALIFIED. An unqualified image normalises to
+ * `docker.io/library/<name>`, matching docker's own resolution, so a pattern can never be
+ * satisfied by an attacker-chosen registry.
+ */
+export class ImageAllowlist {
+  private constructor(private readonly patterns: readonly string[]) {}
+
+  static of(patterns: readonly string[] | null | undefined): ImageAllowlist {
+    return new ImageAllowlist(patterns ? patterns.map(normaliseImage) : []);
+  }
+
+  get isEmpty(): boolean {
+    return this.patterns.length === 0;
+  }
+
+  permits(image: string): boolean {
+    const candidate = normaliseImage(image);
+    return this.patterns.some((p) => matchesImage(candidate, p));
+  }
+}
+
+/** `postgres:16` → `docker.io/library/postgres:16`; registry-qualified refs pass through. */
+function normaliseImage(ref: string): string {
+  const trimmed = ref.trim();
+  const path = trimmed.split(":")[0] ?? "";
+  const firstSegment = path.split("/")[0] ?? "";
+  // The first segment is a registry only when it looks like a host: it contains a dot, a
+  // colon (port), or is exactly "localhost". Otherwise docker implies docker.io.
+  const hasRegistry =
+    firstSegment.includes(".") || firstSegment.includes(":") || firstSegment === "localhost";
+  if (hasRegistry) return trimmed;
+  return path.split("/").length === 1 ? `docker.io/library/${trimmed}` : `docker.io/${trimmed}`;
+}
+
+/** Exact match, or a trailing `:*` tag wildcard. No other globbing. */
+function matchesImage(image: string, pattern: string): boolean {
+  if (pattern.endsWith(":*")) {
+    const prefix = pattern.slice(0, -2);
+    return image === prefix || image.startsWith(`${prefix}:`);
+  }
+  // A pattern with no tag admits any tag of exactly that repository.
+  if (!pattern.includes(":") || pattern.lastIndexOf(":") < pattern.lastIndexOf("/")) {
+    return image === pattern || image.startsWith(`${pattern}:`);
+  }
+  return image === pattern;
+}
