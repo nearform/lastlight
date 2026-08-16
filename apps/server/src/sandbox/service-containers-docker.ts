@@ -39,18 +39,27 @@ export function serviceLabelArgs(taskId: string): string[] {
   return ["--label", SERVICE_LABEL_SELECTOR, "--label", `lastlight.taskId=${taskId}`];
 }
 
+/** One container to start: its name, its argv, and (for a service) which spec it is. */
+export interface ServiceRunSpec {
+  name: string;
+  args: string[];
+  /** The declaring service's name — absent for a forwarder, which has no health check. */
+  service?: string;
+}
+
 /** Every container this phase's services need, in the order they should be started. */
 export function buildServiceRunArgs(
   set: ServiceSet,
   opts: { taskId: string; sandboxContainer: string; forwarderImage: string },
-): { name: string; args: string[] }[] {
-  const out: { name: string; args: string[] }[] = [];
+): ServiceRunSpec[] {
+  const out: ServiceRunSpec[] = [];
   const join = ["--network", `container:${opts.sandboxContainer}`];
 
   for (const spec of set.specs) {
     const name = serviceContainerName(opts.taskId, spec.name);
     out.push({
       name,
+      service: spec.name,
       args: [
         "run", "-d", "--name", name,
         ...join,

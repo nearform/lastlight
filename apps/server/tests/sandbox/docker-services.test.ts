@@ -75,6 +75,21 @@ describe("DockerSandbox.startServices", () => {
     expect(dockerCalls()).toHaveLength(0);
   });
 
+  it("does not health-poll a service whose container failed to start", async () => {
+    const sbx = driverWithSandbox();
+    mockExec.mockImplementation((cmd, args) => {
+      const a = (args as string[]) ?? [];
+      if (a[0] === "run") throw new Error("no such image");
+      return "" as never;
+    });
+
+    await sbx.startServices("t1", setOf({ ...pg, healthCmd: ["pg_isready"] }));
+
+    // Without the gate this polls a nonexistent container once a second for 90s,
+    // each `docker exec` failing instantly with "No such container".
+    expect(dockerCalls().filter((a) => a[0] === "exec")).toHaveLength(0);
+  });
+
   it("does nothing when the sandbox container is unknown", async () => {
     const sbx = new DockerSandbox({ imageName: "x", env: {} });
     await sbx.startServices("nope", setOf(pg));

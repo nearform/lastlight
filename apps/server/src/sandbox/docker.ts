@@ -630,7 +630,8 @@ export class DockerSandbox {
     if (!info || set.isEmpty) return [];
 
     const started: string[] = [];
-    for (const { name, args } of buildServiceRunArgs(set, {
+    const running = new Set<string>();
+    for (const { name, service, args } of buildServiceRunArgs(set, {
       taskId,
       sandboxContainer: info.containerName,
       forwarderImage: process.env.LASTLIGHT_FORWARDER_IMAGE || "alpine/socat:latest",
@@ -638,13 +639,17 @@ export class DockerSandbox {
       try {
         execCmd("docker", args);
         started.push(name);
+        if (service) running.add(service);
       } catch (err) {
         log.warn("Failed to start service container", { name, err });
       }
     }
 
+    // Only poll something that actually started. Health-checking a container that
+    // failed to create burns the full timeout one `docker exec` at a time, each
+    // failing instantly with "No such container", and delays the phase for nothing.
     for (const spec of set.specs) {
-      if (spec.healthCmd?.length) {
+      if (spec.healthCmd?.length && running.has(spec.name)) {
         await this.waitForService(serviceContainerName(taskId, spec.name), [...spec.healthCmd]);
       }
     }
