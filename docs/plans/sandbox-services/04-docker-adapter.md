@@ -425,6 +425,27 @@ git commit -m "test(services): cover a real postgres service and its cleanup on 
 
 ---
 
+## Execution notes (16 Aug 2026)
+
+Phase 4's unit work landed; three notes:
+
+- **Teardown went in `DockerSandbox.destroy`, not the adapter's `dispose`.** `destroy` is
+  the single point every teardown path already funnels through (`cleanup` in
+  `createTaskSandbox`, and `destroyAll`), so ordering it there means nothing can bypass
+  it. The plan's placement in `sandbox.ts` would have missed `destroyAll`.
+- **The sweep backstop went in `reapSandboxWorkspace`,** which is the single safe-remove
+  authority — so the hourly `sandbox-sweep.ts` inherits it with no change of its own.
+  Reaching the removal path already means no sandbox owns the taskId, so any container
+  still carrying the label is by definition an orphan.
+- **Task 4 (the integration test) is WRITTEN BUT UNRUN**, like Phase 3's. It needs
+  `lastlight-sandbox:latest` built locally. It asserts reachability with a raw node TCP
+  connect (no postgres client in the image) and ends with a **leak assertion** — no
+  container left carrying `lastlight.taskId` — which is the direct regression guard for
+  the finding that motivated the teardown work. Run with:
+  `RUN_SANDBOX_IT=1 npx vitest run tests/sandbox/command-exec.integration.test.ts`.
+
+Full suite after Phase 4: **3129 passed, 0 failed**; typecheck and boundary gate clean.
+
 ## Phase 4 done when
 
 - A `docker` phase with a declared service runs with it on `localhost`.

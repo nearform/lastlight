@@ -349,7 +349,7 @@ independent of each other and can land in either order.
 - [x] **Phase 3** — [03-k8s-adapter.md](03-k8s-adapter.md) — native sidecars,
   `startupProbe` readiness, forwarder sidecars *(risk: medium — touches
   `buildPodManifest`, which stamps credentials onto init containers)*
-- [ ] **Phase 4** — [04-docker-adapter.md](04-docker-adapter.md) — joined
+- [x] **Phase 4** — [04-docker-adapter.md](04-docker-adapter.md) — joined
   siblings, `docker exec` health polling, and the teardown the probe proved is
   **not** free *(risk: medium — adds a new leakable resource)*
 
