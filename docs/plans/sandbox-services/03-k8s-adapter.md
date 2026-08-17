@@ -1,7 +1,11 @@
 # Phase 3 — the kubernetes adapter
 
-> **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`
-> or `superpowers:executing-plans`. Steps use `- [ ]` checkboxes.
+> **Status: implemented.** This phase shipped — see the Execution notes near the
+> end for what actually happened, including where reality diverged from the plan.
+> The steps below are the plan **as originally written**, kept unchanged on purpose:
+> the execution notes argue against them ("the plan's placement would have missed
+> `destroyAll`"), and that comparison only works if the original survives. They are
+> a record, not a to-do list.
 
 **Goal:** Translate a `ServiceSet` into native sidecar containers on the phase's Pod.
 
@@ -63,7 +67,7 @@ rather than silently running as the agent's uid and corrupting a data directory.
 probe found the correct value differs by *variant* (70 on `postgres:*-alpine`, 999 on
 debian), which is exactly why the harness must not guess.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 import { describe, it, expect } from "vitest";
@@ -136,11 +140,11 @@ describe("buildServiceContainers", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail.**
+- **Step 2: Run it and watch it fail.**
 
 Run: `cd apps/server && npx vitest run tests/sandbox/k8s/service-containers.test.ts`
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
 import type { V1Container } from "@kubernetes/client-node";
@@ -218,9 +222,9 @@ function restrictedSecurityContext(runAsUser: number) {
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass.**
+- **Step 4: Run it and watch it pass.**
 
-- [ ] **Step 5: Commit**
+- **Step 5: Commit**
 
 ```bash
 git add apps/server/src/sandbox/k8s/service-containers.ts \
@@ -241,7 +245,7 @@ git commit -m "feat(services): translate a ServiceSet into kubernetes sidecar co
 - Produces: `PodSpecInput.services?: V1Container[]`, appended to `initContainers` **after**
   the creds-stamping map.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 describe("buildPodManifest with services", () => {
@@ -288,11 +292,11 @@ describe("buildPodManifest with services", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail.**
+- **Step 2: Run it and watch it fail.**
 
 Run: `cd apps/server && npx vitest run tests/sandbox/k8s/pod.test.ts`
 
-- [ ] **Step 3: Implement** — in `pod.ts`, add the input and change the assembly so
+- **Step 3: Implement** — in `pod.ts`, add the input and change the assembly so
 services bypass the creds map:
 
 ```typescript
@@ -326,9 +330,9 @@ function hasInit(i: PodSpecInput): boolean {
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass.**
+- **Step 4: Run it and watch it pass.**
 
-- [ ] **Step 5: Commit**
+- **Step 5: Commit**
 
 ```bash
 git add apps/server/src/sandbox/k8s/pod.ts apps/server/tests/sandbox/k8s/pod.test.ts
@@ -347,12 +351,12 @@ git commit -m "feat(services): attach service sidecars without leaking the creds
 The forwarder image is **operator-chosen, not repo-chosen**, so it is deployment config
 and is deliberately *not* subject to `allowedImages`.
 
-- [ ] **Step 1: Write the failing test** — assert the manifest the adapter builds carries
+- **Step 1: Write the failing test** — assert the manifest the adapter builds carries
 the sidecars when `opts.services` is non-empty, following this file's existing harness.
 
-- [ ] **Step 2: Run it and watch it fail.**
+- **Step 2: Run it and watch it fail.**
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```yaml
 # config/default.yaml, under kubernetes:
@@ -367,14 +371,14 @@ the sidecars when `opts.services` is non-empty, following this file's existing h
       }),
 ```
 
-- [ ] **Step 4: Run it and watch it pass.**
+- **Step 4: Run it and watch it pass.**
 
-- [ ] **Step 5: Run the k8s suite**
+- **Step 5: Run the k8s suite**
 
 Run: `cd apps/server && npx vitest run tests/sandbox/k8s/`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- **Step 6: Commit**
 
 ```bash
 git add apps/server/src/sandbox/k8s apps/server/src/config apps/server/config/default.yaml \
@@ -389,17 +393,17 @@ git commit -m "feat(services): run declared services as sidecars on the kubernet
 Unit tests cannot answer whether an image starts under `restricted` — **admission
 validates the manifest, the kubelet validates the image**. Only a real pod closes that gap.
 
-- [ ] **Step 1: Extend the opt-in integration test**
+- **Step 1: Extend the opt-in integration test**
 
 Add a case to `tests/sandbox/k8s/kubernetes.integration.test.ts` that provisions a phase
 with one postgres service and asserts a `psql` against `127.0.0.1:5432` succeeds.
 
-- [ ] **Step 2: Run it against a cluster**
+- **Step 2: Run it against a cluster**
 
 Run: `cd apps/server && RUN_K8S_IT=1 npx vitest run tests/sandbox/k8s/kubernetes.integration.test.ts`
 Expected: PASS. Skips instantly with no cluster, so CI is unaffected.
 
-- [ ] **Step 3: Commit**
+- **Step 3: Commit**
 
 ```bash
 git add apps/server/tests/sandbox/k8s/kubernetes.integration.test.ts

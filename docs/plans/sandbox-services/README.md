@@ -366,5 +366,15 @@ Always` or `--network container:` mean.
 
 ## Status
 
-Design agreed and verified on both backends. **Implementation not started** —
-the four phase docs above are the plan; no code has been written.
+**Implemented.** All four phases shipped on this branch, alongside the design
+they implement — which is why this directory reads as both a plan and a record.
+Each phase doc ends with Execution notes covering what the plan got wrong.
+
+Unit tests cover the model, the config surface, the port, and both adapters.
+**The two integration tests have never been run**: they gate off without
+`RUN_K8S_IT` / `RUN_SANDBOX_IT`, and need a pullable in-cluster image and a
+locally built `lastlight-sandbox` respectively. The mechanism itself was proven
+by hand during design (see Verification notes) — those tests are regression
+cover, not first proof.
+
+The feature is inert until an operator sets `repoConfig.allowedImages`.

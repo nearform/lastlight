@@ -1,7 +1,11 @@
 # Phase 4 — the docker adapter
 
-> **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`
-> or `superpowers:executing-plans`. Steps use `- [ ]` checkboxes.
+> **Status: implemented.** This phase shipped — see the Execution notes near the
+> end for what actually happened, including where reality diverged from the plan.
+> The steps below are the plan **as originally written**, kept unchanged on purpose:
+> the execution notes argue against them ("the plan's placement would have missed
+> `destroyAll`"), and that comparison only works if the original survives. They are
+> a record, not a to-do list.
 
 **Goal:** Translate a `ServiceSet` into sibling containers sharing the sandbox's network
 namespace, and clean them up — which docker will not do for you.
@@ -63,7 +67,7 @@ two cannot drift — the same discipline `RunId.matchLabels()` enforces on the k
   - `SERVICE_LABEL_SELECTOR: string` (`"lastlight.component=service"`)
   - `buildServiceRunArgs(set, opts: { taskId: string; sandboxContainer: string; forwarderImage: string }): { name: string; args: string[] }[]`
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 import { describe, it, expect } from "vitest";
@@ -137,11 +141,11 @@ describe("buildServiceRunArgs", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail.**
+- **Step 2: Run it and watch it fail.**
 
 Run: `cd apps/server && npx vitest run tests/sandbox/service-containers-docker.test.ts`
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
 import type { ServiceSet, ServiceSpec } from "lastlight-shared/sandbox-services";
@@ -216,9 +220,9 @@ function envArgs(spec: ServiceSpec): string[] {
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass.**
+- **Step 4: Run it and watch it pass.**
 
-- [ ] **Step 5: Commit**
+- **Step 5: Commit**
 
 ```bash
 git add apps/server/src/sandbox/service-containers-docker.ts \
@@ -247,13 +251,13 @@ ends at `sleep infinity`, phases are `docker exec`), so start services immediate
 proceeds — the agent then hits a service that is not ready and reports it, which is
 today's behaviour, not a new failure mode (decision 9).
 
-- [ ] **Step 1: Write the failing test** — assert `provision()` starts one container per
+- **Step 1: Write the failing test** — assert `provision()` starts one container per
 service and polls `healthCmd`, using this suite's existing command-capture harness rather
 than a real daemon.
 
-- [ ] **Step 2: Run it and watch it fail.**
+- **Step 2: Run it and watch it fail.**
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
   /** Start this phase's services in the sandbox's namespace and wait for readiness. */
@@ -300,9 +304,9 @@ In `sandbox.ts`, `DockerSandbox.provision` after `createTaskSandbox`:
     }
 ```
 
-- [ ] **Step 4: Run it and watch it pass.**
+- **Step 4: Run it and watch it pass.**
 
-- [ ] **Step 5: Commit**
+- **Step 5: Commit**
 
 ```bash
 git add apps/server/src/sandbox
@@ -324,7 +328,7 @@ sandbox. Two mechanisms, because one is not enough:
 2. **Labelled sweep** — a harness crash between `provision()` and `dispose()` leaks them,
    and neither `reap.ts` nor the hourly sweep knows they exist today.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 it("removes service containers before the sandbox container", async () => {
@@ -342,9 +346,9 @@ it("sweeps a leaked service container by label", async () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail.**
+- **Step 2: Run it and watch it fail.**
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
   /** Remove this task's service containers. Best effort; never throws. */
@@ -378,14 +382,14 @@ the taskId it is reaping, so the hourly `sandbox-sweep.ts` inherits it for free 
 sweep already routes every removal through `reapSandboxWorkspace`, which is the single
 safe-remove authority.
 
-- [ ] **Step 4: Run it and watch it pass.**
+- **Step 4: Run it and watch it pass.**
 
-- [ ] **Step 5: Run the sandbox suite**
+- **Step 5: Run the sandbox suite**
 
 Run: `cd apps/server && npx vitest run tests/sandbox/`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- **Step 6: Commit**
 
 ```bash
 git add apps/server/src/sandbox apps/server/src/cron apps/server/tests/sandbox
@@ -396,16 +400,16 @@ git commit -m "fix(services): remove docker service containers on dispose and on
 
 ## Task 4: prove it against a real daemon
 
-- [ ] **Step 1: Extend the opt-in integration test** —
+- **Step 1: Extend the opt-in integration test** —
 `tests/sandbox/command-exec.integration.test.ts` already starts a real sandbox for a
 no-AI workflow. Add a case declaring one postgres service and asserting a `type: bash`
 phase reaches it on `127.0.0.1:5432`.
 
-- [ ] **Step 2: Add a leak assertion** — after the run, assert no container matching
+- **Step 2: Add a leak assertion** — after the run, assert no container matching
 `label=lastlight.component=service` remains. This is the regression guard for the
 finding that motivated Task 3.
 
-- [ ] **Step 3: Run it**
+- **Step 3: Run it**
 
 ```bash
 cd apps/server
@@ -416,7 +420,7 @@ RUN_SANDBOX_IT=1 npx vitest run tests/sandbox/command-exec.integration.test.ts
 
 Expected: PASS. Self-gating — skips instantly without docker or the image.
 
-- [ ] **Step 4: Commit**
+- **Step 4: Commit**
 
 ```bash
 git add apps/server/tests/sandbox/command-exec.integration.test.ts

@@ -1,7 +1,11 @@
 # Phase 1 — the service domain model
 
-> **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`
-> or `superpowers:executing-plans`. Steps use `- [ ]` checkboxes.
+> **Status: implemented.** This phase shipped — see the Execution notes near the
+> end for what actually happened, including where reality diverged from the plan.
+> The steps below are the plan **as originally written**, kept unchanged on purpose:
+> the execution notes argue against them ("the plan's placement would have missed
+> `destroyAll`"), and that comparison only works if the original survives. They are
+> a record, not a to-do list.
 
 **Goal:** Model a repo-declared dependency service as a validated domain object in
 `lastlight-shared`, and accept it from a repo's `.lastlight/lastlight.yml`.
@@ -93,7 +97,7 @@ structural "rather than by convention".
   readonly `listen: number`, readonly `target: number`, getter `needsForwarder: boolean`,
   `toString(): string`.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 import { describe, it, expect } from "vitest";
@@ -130,12 +134,12 @@ describe("PortMapping", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- **Step 2: Run it and watch it fail**
 
 Run: `cd apps/server && npx vitest run tests/config/sandbox-services.test.ts`
 Expected: FAIL — cannot resolve `lastlight-shared/sandbox-services`.
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
 /**
@@ -182,12 +186,12 @@ function toPort(raw: string | undefined): number | undefined {
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass**
+- **Step 4: Run it and watch it pass**
 
 Run: `cd apps/server && npx vitest run tests/config/sandbox-services.test.ts`
 Expected: PASS (4 tests).
 
-- [ ] **Step 5: Commit**
+- **Step 5: Commit**
 
 ```bash
 git add packages/shared/src/sandbox-services.ts apps/server/tests/config/sandbox-services.test.ts
@@ -214,7 +218,7 @@ things the harness already knows how to talk to; an image is arbitrary code pull
 the operator's infrastructure. Getting this backwards ships a remote-code-execution
 default, so the test below pins it.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 import { ImageAllowlist } from "lastlight-shared/sandbox-services";
@@ -253,12 +257,12 @@ describe("ImageAllowlist", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- **Step 2: Run it and watch it fail**
 
 Run: `cd apps/server && npx vitest run tests/config/sandbox-services.test.ts`
 Expected: FAIL — `ImageAllowlist is not exported`.
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
 /**
@@ -318,12 +322,12 @@ function matches(image: string, pattern: string): boolean {
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass**
+- **Step 4: Run it and watch it pass**
 
 Run: `cd apps/server && npx vitest run tests/config/sandbox-services.test.ts`
 Expected: PASS (9 tests).
 
-- [ ] **Step 5: Commit**
+- **Step 5: Commit**
 
 ```bash
 git add packages/shared/src/sandbox-services.ts apps/server/tests/config/sandbox-services.test.ts
@@ -349,7 +353,7 @@ git commit -m "feat(services): add the ImageAllowlist operator bound"
     `static empty(): ServiceSet`, getters `specs: readonly ServiceSpec[]`, `isEmpty: boolean`,
     and `forwarders(): readonly { service: ServiceSpec; mapping: PortMapping }[]`.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 import { ServiceSet, ImageAllowlist, PortMapping } from "lastlight-shared/sandbox-services";
@@ -427,12 +431,12 @@ describe("ServiceSet", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- **Step 2: Run it and watch it fail**
 
 Run: `cd apps/server && npx vitest run tests/config/sandbox-services.test.ts`
 Expected: FAIL — `ServiceSet is not exported`.
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
 /** One validated dependency service. Immutable; equality is by attributes. */
@@ -544,18 +548,18 @@ Then export from the barrel:
 export * from "./sandbox-services.js";
 ```
 
-- [ ] **Step 4: Run it and watch it pass**
+- **Step 4: Run it and watch it pass**
 
 Run: `cd apps/server && npx vitest run tests/config/sandbox-services.test.ts`
 Expected: PASS (16 tests).
 
-- [ ] **Step 5: Typecheck both packages**
+- **Step 5: Typecheck both packages**
 
 Run: `pnpm --filter lastlight-shared typecheck && pnpm --filter lastlight-core typecheck`
 Expected: clean. The second command also runs `lint:boundaries` — it must confirm
 `shared` still has no edge to `core`.
 
-- [ ] **Step 6: Commit**
+- **Step 6: Commit**
 
 ```bash
 git add packages/shared/src/sandbox-services.ts packages/shared/src/index.ts \
@@ -587,7 +591,7 @@ validates SHAPE only, because routing has no more/less-conservative ordering. `s
 is the same: a declaration is not a loosening of an operator value, it is a request
 against an allowlist. Reusing a `policy-downgrade` clamp here would be modelling it wrong.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 import { sanitizeRepoConfigLayer, defaultRepoConfigPolicy } from "lastlight-shared/repo-config-schema";
@@ -667,12 +671,12 @@ describe("sanitizeRepoConfigLayer — services", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- **Step 2: Run it and watch it fail**
 
 Run: `cd apps/server && npx vitest run tests/config/sandbox-services.test.ts`
 Expected: FAIL — `services` hits the `default:` branch and warns `key-not-allowed`.
 
-- [ ] **Step 3: Extend the policy, the warning vocabulary and the default allow-list**
+- **Step 3: Extend the policy, the warning vocabulary and the default allow-list**
 
 In `repo-config-schema.ts`:
 
@@ -721,7 +725,7 @@ repoConfig:
   maxServices: 2
 ```
 
-- [ ] **Step 4: Implement the sanitizer and its parser**
+- **Step 4: Implement the sanitizer and its parser**
 
 In `sandbox-services.ts`:
 
@@ -850,7 +854,7 @@ Add the import at the top of `repo-config-schema.ts`:
 import { ImageAllowlist, parseServiceSpec } from "./sandbox-services.js";
 ```
 
-- [ ] **Step 5: Update the drift pin**
+- **Step 5: Update the drift pin**
 
 `apps/server/tests/config/repo-config-shared.test.ts` compares
 `DEFAULT_REPO_CONFIG_ALLOW_KEYS` to `config/default.yaml`. It should now pass because
@@ -864,17 +868,17 @@ both were updated in Step 3. Add one explicit assertion beside the existing `cro
   });
 ```
 
-- [ ] **Step 6: Run the full config suite**
+- **Step 6: Run the full config suite**
 
 Run: `cd apps/server && npx vitest run tests/config/`
 Expected: PASS, including the pre-existing allow-key drift pin.
 
-- [ ] **Step 7: Typecheck**
+- **Step 7: Typecheck**
 
 Run: `pnpm --filter lastlight-shared typecheck && pnpm --filter lastlight-core typecheck`
 Expected: clean.
 
-- [ ] **Step 8: Commit**
+- **Step 8: Commit**
 
 ```bash
 git add packages/shared/src apps/server/config/default.yaml apps/server/tests/config

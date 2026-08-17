@@ -1,7 +1,11 @@
 # Phase 2 — thread services through the Sandbox port
 
-> **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`
-> or `superpowers:executing-plans`. Steps use `- [ ]` checkboxes.
+> **Status: implemented.** This phase shipped — see the Execution notes near the
+> end for what actually happened, including where reality diverged from the plan.
+> The steps below are the plan **as originally written**, kept unchanged on purpose:
+> the execution notes argue against them ("the plan's placement would have missed
+> `destroyAll`"), and that comparison only works if the original survives. They are
+> a record, not a to-do list.
 
 **Goal:** Carry the phase's `ServiceSet` from the run's repo config to the sandbox
 adapter, and degrade cleanly on backends that will not implement it.
@@ -67,7 +71,7 @@ platform's vocabulary.
 - Consumes: `ServiceSet` from `lastlight-shared`.
 - Produces: `SandboxFactoryOpts.services?: ServiceSet`; `FakeSandbox.services?: ServiceSet`.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 import { describe, it, expect } from "vitest";
@@ -93,12 +97,12 @@ describe("Sandbox port — services", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- **Step 2: Run it and watch it fail**
 
 Run: `cd apps/server && npx vitest run tests/sandbox/services-wiring.test.ts`
 Expected: FAIL — `services` is not a property of `SandboxFactoryOpts`.
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
 // sandbox.ts — import at top
@@ -128,9 +132,9 @@ import type { ServiceSet } from "lastlight-shared/sandbox-services";
   }
 ```
 
-- [ ] **Step 4: Run it and watch it pass** — same command, expect PASS.
+- **Step 4: Run it and watch it pass** — same command, expect PASS.
 
-- [ ] **Step 5: Commit**
+- **Step 5: Commit**
 
 ```bash
 git add apps/server/src/sandbox/sandbox.ts apps/server/tests/sandbox/services-wiring.test.ts
@@ -155,7 +159,7 @@ git commit -m "feat(services): carry a ServiceSet on the Sandbox port"
 `smol` warn **once per run** and proceed without them, landing the run exactly where it is
 today — the agent hits the same wall and records the same `constraint:` note (decision 9).
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 ```typescript
 import { servicesFor, SERVICE_CAPABLE_BACKENDS } from "#src/engine/executors/orchestrator.js";
@@ -179,9 +183,9 @@ describe("service capability by backend", () => {
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail** — `servicesFor is not exported`.
+- **Step 2: Run it and watch it fail** — `servicesFor is not exported`.
 
-- [ ] **Step 3: Implement**
+- **Step 3: Implement**
 
 ```typescript
 // orchestrator.ts
@@ -261,7 +265,7 @@ Add to `ExecutorConfig` in `profiles.ts`:
   serviceBounds?: { allowedImages: string[] | null; maxServices: number };
 ```
 
-- [ ] **Step 4: Add the degrade test, then run both**
+- **Step 4: Add the degrade test, then run both**
 
 ```typescript
 it("drops services on a backend that cannot run them, and still provisions", async () => {
@@ -288,7 +292,7 @@ it("drops services on a backend that cannot run them, and still provisions", asy
 Run: `cd apps/server && npx vitest run tests/sandbox/services-wiring.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- **Step 5: Commit**
 
 ```bash
 git add apps/server/src/engine apps/server/tests/sandbox/services-wiring.test.ts
@@ -307,7 +311,7 @@ git commit -m "feat(services): admit services in the orchestrator and degrade un
 - Consumes: `RunRepoConfig` (`workflows/simple.ts:84`).
 - Produces: `ExecutorConfig.services` / `.serviceBounds` populated per phase.
 
-- [ ] **Step 1: Write the failing test**
+- **Step 1: Write the failing test**
 
 Extend `repo-config-wiring.test.ts` — it already exercises repo config reaching a run,
 so follow its existing harness rather than inventing a new one:
@@ -321,11 +325,11 @@ it("puts the repo's declared services on the phase's ExecutorConfig", async () =
 });
 ```
 
-- [ ] **Step 2: Run it and watch it fail.**
+- **Step 2: Run it and watch it fail.**
 
 Run: `cd apps/server && npx vitest run tests/workflows/repo-config-wiring.test.ts`
 
-- [ ] **Step 3: Implement** — in `runner.ts`, where the per-phase `ExecutorConfig` is
+- **Step 3: Implement** — in `runner.ts`, where the per-phase `ExecutorConfig` is
 assembled, map the merged repo config's `services` mapping through `parseServiceSpec`:
 
 ```typescript
@@ -348,14 +352,14 @@ function phaseServices(repoConfig?: RunRepoConfig): ServiceSpec[] | undefined {
 }
 ```
 
-- [ ] **Step 4: Run it and watch it pass.**
+- **Step 4: Run it and watch it pass.**
 
-- [ ] **Step 5: Run the whole suite** — this touches the runner, which everything uses.
+- **Step 5: Run the whole suite** — this touches the runner, which everything uses.
 
 Run: `pnpm --filter lastlight-core test`
 Expected: PASS, no regressions.
 
-- [ ] **Step 6: Commit**
+- **Step 6: Commit**
 
 ```bash
 git add apps/server/src/workflows/runner.ts apps/server/tests/workflows/repo-config-wiring.test.ts
