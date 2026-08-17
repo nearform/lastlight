@@ -85,8 +85,12 @@ function fakeDb(overrides: Record<string, { enabled: boolean; schedule?: string 
   return {
     getAllCronOverrides: () => rows,
     getCronOverride: (name: string) => rows.get(name),
-    executions: { consecutiveFailures: () => 0 },
-    runs: { listRecent: () => [] },
+    // `GET /crons` reads one ledger for every cron (issues #341/#327). These
+    // tests are about participation, not fire outcomes, so an empty ledger is
+    // the honest fixture — and it cannot agree with a bug the way the old
+    // `consecutiveFailures: () => 0` stub did, since that returned exactly what
+    // the broken implementation always returned.
+    cronRuns: { latestByCron: () => new Map(), recentFailures: () => 0 },
   } as unknown as StateDb;
 }
 

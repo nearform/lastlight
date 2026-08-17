@@ -1,6 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 // src/cron/repo-crons.ts + src/cron/fanout.ts now log per-repo participation
 // diagnostics via the pino LoggerPort instead of console — mock the logger
@@ -20,6 +18,7 @@ vi.mock("#src/logging/logger.js", () => {
 
 import type { DependencyPr } from "#src/cron/dependabot-discovery.js";
 import type { CronDispatcher } from "#src/cron/fanout.js";
+import type { GitHubClient } from "#src/engine/github/github.js";
 
 /**
  * Per-repo participation on a DISCOVERY cron (issue #180).
@@ -31,10 +30,14 @@ import type { CronDispatcher } from "#src/cron/fanout.js";
  * e.g. `dependabot-merge` in its `.lastlight/lastlight.yml` still got runs.
  *
  * These tests drive the real context producer (`jobs.ts`), the real resolver
- * (`repo-crons.ts`) and the real fan-out with the repo layer stubbed at the
- * `repo-config` seam, then pin `index.ts`'s wiring to them. The wiring itself
- * has to be pinned by reading the source: `src/index.ts` calls `main()` at
- * module scope, so a test can't import it.
+ * (`repo-crons.ts`), the real fan-out and the real runner, with the repo layer
+ * stubbed at the `repo-config` seam.
+ *
+ * They used to reproduce `index.ts`'s discovery branch in a local helper and
+ * pin the original by reading its source, because `src/index.ts` calls `main()`
+ * at module scope and cannot be imported. That branch now lives in
+ * `src/cron/runner.ts` behind `makeCronRunner`, so these drive the shipping
+ * code directly and the source-scrape guard is gone with the copy it guarded.
  */
 
 const repoLayers = new Map<string, { config?: Record<string, unknown>; cached?: boolean; fail?: string }>();
@@ -80,37 +83,41 @@ vi.mock("#src/managed-repos.js", async (importOriginal) => {
 });
 
 const { getJobs } = await import("#src/cron/jobs.js");
-const { fanOutContexts } = await import("#src/cron/fanout.js");
-const { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, resolveCronRepos } = await import("#src/cron/repo-crons.js");
+const { CRON_NAME_KEY } = await import("#src/cron/repo-crons.js");
+const { makeCronRunner } = await import("#src/cron/runner.js");
+const { StateDb } = await import("#src/state/db.js");
 
 /**
- * The discovery branch of `src/index.ts`'s cron runner, reproduced over the real
- * collaborators: narrow the repos, discover across the survivors, fan out one
- * context per PR. Kept to the same shape as the source so the guard test below
- * stays meaningful.
+ * Fire the REAL runner over the real collaborators and hand back the counts it
+ * recorded. Reading them off the ledger rather than a return value is the point
+ * of the feature: the runner writes the outcome, it does not return it.
  */
 async function discoveryTick(
   job: { workflow: string; context: Record<string, unknown> },
   discoverer: (repos: string[]) => Promise<DependencyPr[]>,
   dispatch: CronDispatcher,
 ) {
-  const candidates = (job.context.repos as string[]) ?? [];
-  const cronName = typeof job.context[CRON_NAME_KEY] === "string" ? (job.context[CRON_NAME_KEY] as string) : "";
-  const repos = cronName
-    ? (
-        await resolveCronRepos({
-          cron: cronName,
-          repos: candidates,
-          globallyEnabled: job.context[CRON_GLOBALLY_ENABLED_KEY] !== false,
-        })
-      ).repos
-    : candidates;
-  const prs = repos.length ? await discoverer(repos) : [];
-  return fanOutContexts(
-    job.workflow,
-    prs.map((pr) => ({ _triggerType: "cron", repo: pr.repo, prNumber: pr.prNumber, title: pr.title })),
-    dispatch,
-  );
+  const db = new StateDb(":memory:");
+  try {
+    const runner = makeCronRunner({
+      db,
+      github: {} as unknown as GitHubClient,
+      discoverers: { "green-dependency-prs": (repos) => discoverer(repos) },
+      dispatch,
+    });
+    await runner(job.workflow, job.context);
+
+    const cronName = job.context[CRON_NAME_KEY];
+    const row = typeof cronName === "string" ? db.cronRuns.latestByCron().get(cronName) : undefined;
+    return {
+      dispatched: row?.dispatched ?? 0,
+      failures: row?.failures ?? 0,
+      reposScanned: row?.reposScanned ?? null,
+      status: row?.status ?? null,
+    };
+  } finally {
+    db.close();
+  }
 }
 
 /** A discoverer that finds exactly one PR per repo it is given. */
@@ -175,7 +182,10 @@ describe("discovery cron participation", () => {
     // No discovery calls at all — the expensive part of a sweep is the GitHub
     // listing, and there is nothing to list for.
     expect(discoverer).not.toHaveBeenCalled();
-    expect(result).toEqual({ dispatched: 0, failures: 0 });
+    expect(result).toMatchObject({ dispatched: 0, failures: 0 });
+    // Recorded, not silent: the tick is a green no-op rather than an absent row.
+    expect(result.status).toBe("ok");
+    expect(result.reposScanned).toBe(0);
   });
 
   it("does not block the tick on a repo whose layer can't be read", async () => {
@@ -199,31 +209,16 @@ describe("discovery cron participation", () => {
     const discoverer = fakeDiscoverer();
 
     await discoveryTick(
-      { workflow: "dependabot-merge", context: { repos: ["acme/in", "acme/out"] } },
+      {
+        workflow: "dependabot-merge",
+        // `discover` is what selects a discoverer at all — the cron NAME is the
+        // key deliberately absent here.
+        context: { discover: "green-dependency-prs", repos: ["acme/in", "acme/out"] },
+      },
       discoverer,
       okDispatch,
     );
 
     expect(discoverer).toHaveBeenCalledWith(["acme/in", "acme/out"]);
-  });
-});
-
-describe("src/index.ts wiring", () => {
-  /**
-   * A source-level guard, not a style check: `index.ts` runs `main()` on import,
-   * so the only way to pin its discovery branch to `resolveCronRepos` is to read
-   * it. Without the narrowing, every behaviour above is unreachable in prod.
-   */
-  const source = readFileSync(fileURLToPath(new URL("../../src/index.ts", import.meta.url)), "utf-8");
-  const branch = source.slice(source.indexOf("if (discoverer) {"), source.indexOf("fanOutContexts(workflowName, contexts"));
-
-  it("narrows the repo list through resolveCronRepos before discovering", () => {
-    expect(branch).toContain("resolveCronRepos({");
-    expect(branch.indexOf("resolveCronRepos({")).toBeLessThan(branch.indexOf("await discoverer("));
-  });
-
-  it("reads the cron name and the globally-enabled flag from the tick context", () => {
-    expect(branch).toContain("CRON_NAME_KEY");
-    expect(branch).toContain(`${"CRON_GLOBALLY_ENABLED_KEY"}] !== false`);
   });
 });

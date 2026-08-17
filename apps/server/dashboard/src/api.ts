@@ -1085,15 +1085,30 @@ export const api = {
 
 export interface CronInfo {
   name: string;
-  workflow: string;
+  /**
+   * Null for a `handler:` cron, which runs host-side code and dispatches no
+   * workflow. The server has returned `def.workflow ?? null` since #333; this
+   * hand-maintained mirror claimed `string` until #341, so every consumer below
+   * silently received `null` and rendered it.
+   */
+  workflow: string | null;
+  handler: string | null;
   schedule: string;
   originalSchedule: string;
   enabled: boolean;
   registered: boolean;
   nextRun: string | null;
   lastRun: string | null;
+  /** `running | ok | partial | failed` — one row per cron FIRE (issue #341). */
   lastStatus: string | null;
   recentFailures: number;
+  /** Managed repos the fire considered, before per-repo participation. */
+  reposEligible: number | null;
+  /** Repos that actually participated, after narrowing (issue #180). */
+  reposScanned: number | null;
+  /** PRs a discovery cron found. Null for a non-discovery cron. */
+  discovered: number | null;
+  dispatched: number | null;
   /**
    * Managed repos that opted INTO this cron from their own `.lastlight/`
    * (issue #180). Only meaningful when `enabled` is false: a globally-off cron

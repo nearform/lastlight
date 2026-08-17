@@ -311,8 +311,16 @@ src/
                         and groups by Slack thread.
   state/
     db.ts               SQLite tables: executions, workflow_runs,
-                        workflow_approvals, messaging_sessions,
+                        workflow_approvals, cron_runs, messaging_sessions,
                         messaging_messages, plus daily/hourly stat rollups.
+    cron-run-store.ts   The `cron_runs` ledger (issues #341/#327) — one row per
+                        cron FIRE, scheduled or manual, for `workflow:` and
+                        `handler:` crons alike, keyed on the CRON's name. A
+                        zero-discovery fire dispatches nothing, so it writes no
+                        `workflow_runs` and no `executions` row: this is the
+                        only record that it ran at all. Keyed on the cron
+                        rather than the workflow so a run dispatched by
+                        `/api/run` or a comment cannot skew a cron's health.
     team-store.ts       The dashboard's per-repo visibility CACHE (issue #169):
                         github_teams / _team_repos / _team_members /
                         github_visibility_sync. Not a mirror of the org — rows
@@ -355,12 +363,20 @@ src/
                         four. An unresolvable name DROPS the cron with a boot
                         warning (it cannot fail boot — the registry is
                         conditional). `withLedger` wraps every registered
-                        handler in ONE `executions` row per invocation
-                        (`trigger_type: "cron"`, `skill` = the cron's name), so
-                        `consecutiveFailures` and the dashboard's failure count
-                        work for a cron that dispatches nothing. It wraps here,
-                        not in the scheduler, because admin "Run now" invokes
-                        the registry directly.
+                        handler in ONE `cron_runs` row per invocation, keyed by
+                        the cron's name — the same ledger, keyed the same way,
+                        that a workflow cron's fire writes via `runner.ts`. So
+                        `GET /crons` and the scheduler's failure alert read one
+                        table and never branch on the kind of cron. It wraps
+                        here, not in the scheduler, because admin "Run now"
+                        invokes the registry directly.
+    runner.ts           `makeCronRunner` — the fire path for `workflow:` crons,
+                        extracted from `index.ts` so it is testable. Records the
+                        same `cron_runs` row `withLedger` does, plus the counts
+                        a fan-out produces (repos eligible/scanned, discovered,
+                        dispatched, failures) and a `lastlight.cron.fire` span
+                        + counter. Writes the outcome rather than returning it:
+                        `WorkflowRunner` stays `Promise<void>`.
     repo-digest.ts      The weekly per-repo Slack digest: what happened in the
                         repo (GitHub) plus what Last Light did about it (the
                         state DB), posted to the repo's channel. Facts are
@@ -769,7 +785,9 @@ a Docker volume in production).
 ```
 data/
   lastlight.db              SQLite — executions, workflow_runs,
-                            workflow_approvals, messaging_sessions,
+                            workflow_approvals, cron_runs (one row per cron
+                            fire, scheduled or manual, workflow and handler
+                            crons alike), messaging_sessions,
                             messaging_messages, feedback_anchors,
                             feedback_signals, plus daily/hourly stat
                             rollups.

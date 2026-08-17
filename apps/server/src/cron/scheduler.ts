@@ -79,15 +79,25 @@ export class CronScheduler {
       } catch (err: unknown) {
         log.error("Job failed", { job: job.name, err });
 
-        // Consecutive failures, counted off the `executions` ledger. A workflow
-        // cron's rows are written per phase under the WORKFLOW name; a handler
-        // cron's are written per tick under the CRON name by `withLedger`
-        // (`cron/handlers.ts`) — which exists so this branch applies to both.
-        // It used to be gated on `job.workflow`, so a handler cron failing every
-        // tick produced one log line and nothing else: no count, and an admin
-        // dashboard reporting zero failures beside it.
-        const ledgerKey = job.workflow ?? job.name;
-        const failures = this.db.executions.consecutiveFailures(ledgerKey);
+        // Consecutive failures at FIRE grain, counted off `cron_runs` and keyed
+        // on the cron itself (issue #327). Three things that buys:
+        //
+        // 1. The branch is REACHABLE. It read `executions.consecutiveFailures`,
+        //    which matches `skill` exactly while every phase row is written as
+        //    `"<workflow>:<phase>"` — so for a workflow cron the predicate could
+        //    never match and this alert has never once fired. Measured on a live
+        //    instance: 1,622 rows, zero with a bare skill.
+        // 2. `MAX_CONSECUTIVE_FAILURES` means the same thing for every cron. At
+        //    phase grain one failed 5-phase run could read as 5 consecutive
+        //    failures and a 1-phase run as 1.
+        // 3. Only THIS cron's fires count. Keyed on the workflow, a run
+        //    dispatched by `/api/run` or a GitHub comment moved the cron's
+        //    health, and vice versa.
+        //
+        // It also sidesteps the population problem #327 measured: quota
+        // deferrals and DAG-cascade skips are `success = 0` on purpose (251 in
+        // one day against zero real failures) and cannot appear here at all.
+        const failures = this.db.cronRuns.recentFailures(job.name);
         if (failures >= MAX_CONSECUTIVE_FAILURES) {
           log.error("ALERT: job has failed consecutively", { job: job.name, failures });
           // TODO: send alert (Slack webhook, email, etc.)

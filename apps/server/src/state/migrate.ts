@@ -70,6 +70,31 @@ export function migrate(db: Database.Database): void {
       updated_by TEXT
     );
 
+    -- One row per cron FIRE — scheduled or manual, workflow or handler.
+    -- Distinct from the workflow_runs a fire may (or may not) dispatch: a
+    -- zero-discovery fire dispatches nothing, so this is the only record that
+    -- a backstop cron ran at all. Keyed on cron_name, never the workflow, so
+    -- a run dispatched by /api/run or a comment cannot skew a cron's health.
+    CREATE TABLE IF NOT EXISTS cron_runs (
+      id TEXT PRIMARY KEY,
+      cron_name TEXT NOT NULL,
+      workflow TEXT,
+      handler TEXT,
+      source TEXT NOT NULL,
+      actor TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      status TEXT NOT NULL DEFAULT 'running',
+      repos_eligible INTEGER,
+      repos_scanned INTEGER,
+      discovered INTEGER,
+      dispatched INTEGER,
+      failures INTEGER,
+      error TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cron_runs_name_started ON cron_runs(cron_name, started_at DESC);
+
     CREATE TABLE IF NOT EXISTS workflow_overrides (
       name TEXT PRIMARY KEY,
       enabled INTEGER NOT NULL DEFAULT 1,
