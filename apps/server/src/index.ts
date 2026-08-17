@@ -24,8 +24,7 @@ import {
 import { StateDb, isTriggerActorType, type TriggerActorType } from "./state/db.js";
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
-import { dispatchCronWorkflow, fanOutContexts } from "./cron/fanout.js";
-import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, resolveCronRepos } from "./cron/repo-crons.js";
+import { makeCronRunner } from "./cron/runner.js";
 import { sweepSandboxes } from "./cron/sandbox-sweep.js";
 import { sweepK8sSandboxes } from "./sandbox/k8s/sweep.js";
 import {
@@ -1316,92 +1315,12 @@ async function main() {
   // (after we know whether webhooks are enabled). The runner closes over
   // `dispatchWorkflow`, which is defined earlier in this file. Named (not inline)
   // so the admin `triggerCron` callback can reuse it to fire a cron on demand.
-  const cronRunner: WorkflowRunner = async (workflowName, context) => {
-    const log = logger("cron");
-    let dispatched: number;
-    let failures: number;
-    // A cron whose context sets `discover: <key>` fans out one bounded single-PR
-    // run per discovered PR (replaces the old `mode: scan` agent sweep, which
-    // buried the model in every open PR's lockfile churn until its context
-    // overflowed). Each discoverer finds the eligible dependency PRs in code, and
-    // we dispatch one run each — the same shape the pr.checks_passed /
-    // pr.checks_failed webhooks produce. Runs queue against the global cap.
-    const discoverKey = typeof context.discover === "string" ? context.discover : undefined;
-    const discoverer = discoverKey ? PR_DISCOVERERS[discoverKey] : undefined;
-    if (discoverer) {
-      const candidates = Array.isArray(context.repos)
-        ? (context.repos as unknown[]).filter((r): r is string => typeof r === "string")
-        : [];
-      // Narrow to the repos that actually participate in THIS cron before
-      // discovering anything (issue #180). A discovery cron bypasses
-      // `dispatchCronWorkflow` — it fans out per discovered PR, not per repo —
-      // so without this it would never consult a repo's `.lastlight/` cron
-      // opt-out and a repo that dropped out of e.g. `dependabot-merge` would
-      // still get runs. Resolved exactly the way `cron/fanout.ts` resolves it:
-      // the cron's name arrives in the context (`jobs.ts`), a missing name means
-      // a caller that built its own context and the list is used verbatim, and
-      // an absent `_cronGloballyEnabled` means "on". Non-blocking by
-      // construction — warm layers come from cache, misses are fetched
-      // concurrently, and one repo's failure degrades to its inherited
-      // behaviour rather than aborting the tick.
-      const cronName = typeof context[CRON_NAME_KEY] === "string" ? (context[CRON_NAME_KEY] as string) : "";
-      const repos = cronName
-        ? (
-            await resolveCronRepos({
-              cron: cronName,
-              repos: candidates,
-              globallyEnabled: context[CRON_GLOBALLY_ENABLED_KEY] !== false,
-            })
-          ).repos
-        : candidates;
-      if (repos.length !== candidates.length) {
-        log.info("Repo(s) participate in this cron", {
-          cronName,
-          participating: repos.length,
-          candidates: candidates.length,
-        });
-      }
-      // Every repo opted out (or a globally-off cron nobody opted into) — no
-      // discovery calls, no dispatches, no failure. A cheap no-op tick.
-      // The discoverer's `log` callback only carries per-repo/per-candidate
-      // diagnostics (a skipped malformed repo, a failed listing/fetch) — one
-      // of these can fire per managed repo on every tick, so it's `.debug`,
-      // not `.info`. The once-per-tick summary below stays `.info`.
-      const prs = github && repos.length
-        ? await discoverer(repos, github, { log: (m) => log.debug(m) })
-        : [];
-      log.info("Discovered PRs", {
-        workflowName,
-        discoverKey,
-        count: prs.length,
-        repoCount: repos.length,
-      });
-      const contexts = prs.map((pr) => ({
-        _triggerType: "cron",
-        repo: pr.repo,
-        prNumber: pr.prNumber,
-        title: pr.title,
-        // Present only for the red sweep — `dispatchWorkflow` pre-clones this
-        // head ref for dependabot-ci-fix's checkout (a PR_FIX_SHAPED_WORKFLOWS).
-        ...(pr.branch ? { branch: pr.branch } : {}),
-        // Also red-sweep only — why it was summoned (checks-failing | behind |
-        // dirty | blocked), threaded into the ci-fix prompt as `{{reason}}`.
-        ...(pr.reason ? { reason: pr.reason } : {}),
-        // The review sweep announces itself, because `resolveReviewTrigger`
-        // treats it differently from a PR-attention event: `after-checks` will
-        // not fire on attention, and the sweep is the RELEASE MECHANISM for
-        // every PR whose fix chain ended without pushing — no new commit
-        // exists, so no further `check_suite` will ever fire for it (09 → S2).
-        ...(discoverKey === "prs-awaiting-review" ? { _reviewRoute: "sweep" } : {}),
-      }));
-      ({ dispatched, failures } = await fanOutContexts(workflowName, contexts, dispatchWorkflow));
-    } else {
-      ({ dispatched, failures } = await dispatchCronWorkflow(workflowName, context, dispatchWorkflow));
-    }
-    if (failures > 0) {
-      log.warn("Dispatches failed", { workflowName, failures, dispatched });
-    }
-  };
+  const cronRunner: WorkflowRunner = makeCronRunner({
+    db,
+    github,
+    discoverers: PR_DISCOVERERS,
+    dispatch: dispatchWorkflow,
+  });
   const cron = new CronScheduler(db, cronRunner);
 
   // Options for the ledger-driven resume machinery (`resumeSimpleRun`). Shared

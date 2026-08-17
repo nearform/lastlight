@@ -25,16 +25,23 @@
  * that is the difference between noticing a revoked Slack token on Monday and
  * noticing it next month.
  *
- * So `withLedger` wraps every registered handler in an `executions` row —
- * `trigger_type: "cron"`, `skill` = the cron's name — which is the same table
- * every agent phase already writes to. No new table, and `consecutiveFailures`,
- * `recentExecutions` and the dashboard's failure count all start working for
- * free. The wrap lives HERE rather than in the scheduler because the admin
- * "Run now" route invokes the registry directly, and a manual fire that skipped
- * the ledger would leave exactly the gap this closes.
+ * So `withLedger` wraps every registered handler in a `cron_runs` row, keyed by
+ * the cron's name — the same ledger, keyed the same way, that a workflow cron's
+ * fire writes via `makeCronRunner` (`./runner.ts`). One row per fire whatever
+ * kind of cron it is, so `GET /crons` and the scheduler's consecutive-failure
+ * alert read one table and never branch on the kind.
+ *
+ * (These rows lived in `executions` until issues #341/#327. That table has no
+ * column for a fan-out's counts, its `success` flag is binary so a `partial`
+ * fire has nowhere to live, and #327 measured its `success` column as unusable
+ * for cron health — 251 quota-deferral and cascade-skip rows in a day against
+ * zero real failures.)
+ *
+ * The wrap lives HERE rather than in the scheduler because the admin "Run now"
+ * route invokes the registry directly, and a manual fire that skipped the
+ * ledger would leave exactly the gap this closes.
  */
 
-import { randomUUID } from "node:crypto";
 import type { StateDb } from "../state/db.js";
 import { runRepoDigest, type RepoDigestDeps } from "./repo-digest.js";
 import { logger } from "../logging/logger.js";
@@ -72,7 +79,7 @@ export function buildCronHandlers(deps: CronHandlerDeps): CronHandlerRegistry {
 }
 
 /**
- * Wrap a handler so each invocation writes one `executions` row.
+ * Wrap a handler so each invocation writes one `cron_runs` row.
  *
  * Re-throws on failure: the row is a record, not a swallow. The scheduler still
  * logs and counts, and the admin "Run now" route still surfaces the error to
@@ -80,35 +87,48 @@ export function buildCronHandlers(deps: CronHandlerDeps): CronHandlerRegistry {
  */
 export function withLedger(db: StateDb, cronName: string, handler: CronHandler): CronHandler {
   return async (context) => {
-    const id = randomUUID();
-    const startedAt = new Date();
-    db.executions.recordStart({
-      id,
-      triggerType: "cron",
-      // Keyed by the CRON's name, not a workflow's — `consecutiveFailures` and
-      // `recentExecutions` both look up by `skill`, so this is what makes a
-      // handler cron countable at all.
-      skill: cronName,
-      triggerId: cronName,
-      triggeredBy: typeof context.sender === "string" ? context.sender : "cron",
-      triggerActorType: "cron",
-      startedAt: startedAt.toISOString(),
-    });
+    const source = context._cronSource === "manual" ? "manual" : "schedule";
+    const actor =
+      typeof context._cronActor === "string"
+        ? context._cronActor
+        : typeof context.sender === "string"
+          ? context.sender
+          : null;
+
+    // Keyed by the CRON's name, exactly as a workflow cron's row is — that is
+    // what lets `GET /crons` and the scheduler's alert read ONE ledger and stop
+    // branching on which kind of cron they are looking at.
+    const id = db.cronRuns.start({ cronName, handler: cronName, source, actor });
 
     try {
       await handler(context);
-      db.executions.recordFinish(id, {
-        success: true,
-        durationMs: Date.now() - startedAt.getTime(),
+      // `workflow`, `dispatched`, `failures` and the repo counts stay null: a
+      // handler dispatches nothing, and it narrows its own repo list INSIDE
+      // itself (`repo-digest.ts`), which a `Promise<void>` handler cannot report
+      // back. Widening `CronHandler` to return counts is a follow-up for when a
+      // second handler cron exists to justify it.
+      db.cronRuns.finish(id, { status: "ok" });
+      // Logged on SUCCESS too. Without this a healthy weekly digest completed
+      // silently, which is the same gap issue #341 raised for workflow crons —
+      // and the message names the cron, because a collapsed log view shows
+      // nothing else. Same `Cron fire complete:` prefix as `runner.ts`, so one
+      // `|~ "Cron fire complete"` finds fires of BOTH kinds of cron.
+      log.info(`Cron fire complete: ${cronName}`, {
+        cron: cronName,
+        handler: cronName,
+        source,
+        status: "ok",
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      db.executions.recordFinish(id, {
-        success: false,
-        error: message,
-        durationMs: Date.now() - startedAt.getTime(),
+      db.cronRuns.finish(id, { status: "failed", error: message });
+      log.error(`Cron fire complete: ${cronName}`, {
+        cron: cronName,
+        handler: cronName,
+        source,
+        status: "failed",
+        err,
       });
-      log.error("Handler cron failed", { cron: cronName, err });
       throw err;
     }
   };
