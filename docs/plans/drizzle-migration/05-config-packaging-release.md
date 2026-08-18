@@ -151,14 +151,43 @@ Add under "Agent Settings" next to `STATE_DIR`:
 
 ## 2. Dockerfile
 
-Current state (`apps/server/Dockerfile` ≈10-16): the apt line installs
-`python3 make g++` solely for better-sqlite3's node-gyp build, per the
-comment on line 11. **`drizzle/` is not copied by any existing COPY** — the
+> **Corrected 2026-08-18.** The Dockerfile is now a **two-stage pnpm build**
+> and it installs the toolchain **TWICE** — the original text described a
+> single install and would have left half the fix undone:
+>
+> - **Build stage, `apps/server/Dockerfile:22-25`** — `python3 make g++` for
+>   "native modules (better-sqlite3) compiled during install". This is the one
+>   that actually compiles, at the `pnpm install --frozen-lockfile --filter
+>   lastlight-core...` on `:44`.
+> - **Runtime stage, `:68-74`** — installs `python3 make g++` *again*,
+>   alongside git/ripgrep/docker-CLI/gosu. This one is already redundant today:
+>   the compiled `.node` binary is copied wholesale from the build stage at
+>   `:90` (`COPY --from=build /app /app`), and both stages are `node:22-slim`
+>   so the ABI matches. It is ~200 MB of dead toolchain in the shipped image.
+>
+> **Remove it from both.** Dropping only the runtime one leaves the (slow)
+> build-stage compile in place; dropping only the build one breaks the build
+> while better-sqlite3 is still a dependency. They come out in the same commit
+> as `pnpm remove better-sqlite3` (Phase 2's dependency-removal step).
+>
+> Unrelated but worth not breaking: the **sandbox** images
+> (`sandbox.Dockerfile:41-44`, `sandbox-base.Dockerfile:28`) also install
+> `python3 make g++` — for ssh2's `cpu-features` via gondolin, **not** for
+> better-sqlite3. Sandbox containers never open the state DB. **Leave them
+> alone.**
+>
+> Also note `:63` — `pnpm --filter lastlight-core deploy --prod /app` is what
+> shapes the runtime `node_modules`. `drizzle/` is not a dependency, so
+> `pnpm deploy` will not carry it; the explicit COPY below is genuinely
+> required.
+
+Current state: the apt lines install `python3 make g++` for better-sqlite3's
+node-gyp build. **`drizzle/` is not copied by any existing COPY** — the
 COPY set is `package*.json`, `dashboard/package.json`, `tsconfig.json`,
 `src/`, `dashboard/`, `deploy/`, `config/`, `skills/`, `agent-context/`,
 `workflows/`, `CLAUDE.md`. Without a new COPY the migrator dies at boot.
 
-1. Drop the toolchain — replace lines 10-16 with:
+1. Drop the toolchain — from **both stages** (`:22-25` and `:68-74`):
 
    ```dockerfile
    # System deps: git, ripgrep, docker CLI (for the docker-sandbox fallback
@@ -375,12 +404,30 @@ writes must be discarded.
 ## 6. Release (npm — required)
 
 The workflow-execution path changed, so per the npm-release-policy the
-`lastlight/evals` barrel consumers need a release. **Minor bump**: verify
-the current version first (`node -p "require('./package.json').version"` —
-`0.10.1` at last verification → `0.11.0`; if it has drifted again, bump
-minor from whatever it is and substitute the real numbers below — the
-legacy-rebuild `TODO(remove after v0.12)` markers in `legacy-sqlite.ts`
-assume the migration ships as v0.11; re-anchor them too if not).
+`lastlight/evals` barrel consumers need a release. **Minor bump.**
+
+> **Corrected 2026-08-18 — this is now a FIVE-package release, not one.**
+> The original text bumped `lastlight-core` alone. Locked decision 13 changes
+> `packages/workflow-engine`, and the workspace graph is
+> `lastlight-workflow-engine ← lastlight-shared ← {lastlight (cli),
+> lastlight-core} ← lastlight-evals`. A graph-aware bump therefore cascades
+> through **every** published package except `agentic-pi` (which has no
+> workspace deps and is on its own release stream).
+>
+> Follow [`docs/RELEASING.md`](../../RELEASING.md) for the bump order — it is
+> the canonical runbook and it already encodes the graph. Do not hand-roll the
+> order from this doc.
+>
+> **Version anchor**: current version at reconciliation time is **`0.25.9`**,
+> so the migration ships as **`v0.26.0`** (not the `v0.11.0` the examples below
+> still say — substitute throughout). That also **re-anchors the
+> `TODO(remove after v0.12)` markers** the plan specifies for
+> `legacy-sqlite.ts`'s messaging rebuild: they become
+> **`TODO(remove after v0.27)`**. Getting this wrong either deletes the shim
+> while deployments still need it, or keeps dead code forever.
+>
+> Verify before bumping:
+> `node -p "require('./apps/server/package.json').version"`.
 
 Transcribed from CLAUDE.md "Cutting a release" — on a clean, up-to-date
 `main`:
@@ -450,7 +497,9 @@ npm view lastlight@0.11.0 version --prefer-online   # no `v` prefix on npm
       `src/index.ts` construction site; config tests cover precedence.
 - [ ] `config/default.yaml` ships `database.url: null`; `.env.example`
       documents `DATABASE_URL`.
-- [ ] Dockerfile: `python3 make g++` removed, `COPY drizzle/ drizzle/`
+- [ ] Dockerfile: `python3 make g++` removed from **BOTH** the build stage
+      (≈22-25) and the runtime stage (≈68-74); sandbox Dockerfiles left
+      untouched; `COPY drizzle/ drizzle/`
       added; throwaway-container smoke passed.
 - [ ] `apps/server/package.json` `files` includes `"drizzle"`; pack dry-run +
       packed-tarball migrator smoke passed.

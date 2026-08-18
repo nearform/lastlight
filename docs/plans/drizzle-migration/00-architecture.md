@@ -15,32 +15,71 @@ Read together with [README.md](README.md) (locked decisions + hard constraints).
   self-migrates `messaging_sessions` + `messaging_messages`, including a legacy
   table-rebuild (`rebuildWithoutTableUnique`) that sniffs `sqlite_master` for an
   old `UNIQUE(platform,…)` constraint.
-- Four stores share the one connection (transactions are per-connection):
-  `ExecutionStore` (`executions`), `ApprovalStore` (`workflow_approvals`),
-  `WorkflowRunStore` (`workflow_runs`, injected with the approval store for
-  cross-table atomic ops), and `UserStore` (`users` — first-class user
-  identity, issue #205, wired in `db.ts` ≈85). `StateDb` itself owns
-  `cron_overrides` + `workflow_overrides`.
+- **Seven** stores share the one connection (transactions are per-connection):
+  `ExecutionStore` (`executions`, ~1,030 LOC), `ApprovalStore`
+  (`workflow_approvals`), `WorkflowRunStore` (`workflow_runs`, ~1,000 LOC,
+  injected with the approval store for cross-table atomic ops), `UserStore`
+  (`users` — issue #205), `TeamStore` (`github_teams` / `github_team_repos` /
+  `github_team_members` / `github_visibility_sync` — issue #169),
+  `FeedbackStore` (`feedback_anchors` / `feedback_signals` — issue #255),
+  `CronRunStore` (`cron_runs` — issues #341/#327). `StateDb` itself owns
+  `cron_overrides` + `workflow_overrides`. `state/` is ~4,700 LOC across ~134
+  inline `db.prepare(...)` calls — no statement caching, no query builder.
+  *(2026-08-18: the last three stores postdate the original text, which said
+  "four stores".)*
+- **Transactions live in TWO stores**: the five named atomic ops in
+  `WorkflowRunStore` **plus four in `TeamStore`** (`recordResolution`,
+  `invalidateLogin`, `invalidateTeam`, `invalidateAll`) — nine sites — and
+  `SessionManager` hand-rolls `BEGIN`/`COMMIT`/`ROLLBACK` around its legacy
+  table rebuild. See README locked decision 8: the async mutex must therefore
+  be connection-scoped, not store-scoped.
+- **`migrate.ts` carries DATA backfills as well as DDL** — the `workflow_runs`
+  owner/repo de-qualification (whose result the `executions` backfill then
+  reads back out), and the `feedback_anchors.channel` sentinel. They re-run on
+  every boot; README locked decision 14 moves them to journaled one-shot
+  migrations.
+- **A consumer sits outside `apps/server` entirely**: `packages/workflow-engine`
+  declares a **synchronous** `WorkflowStateStore` port (`ports.ts:185-210`) that
+  `StateDb` satisfies structurally, fenced by a compile-time contract test.
+  Twenty-three engine call sites read it (18 `core/phase-executor.ts`, 5
+  `core/scheduler.ts`). README locked decision 13 flips it to `Promise<T>`.
 - Timestamps are ISO-8601 TEXT everywhere; booleans are INTEGER 0/1; JSON is
-  stringified TEXT; PKs are `randomUUID()` TEXT except
-  `messaging_messages.id AUTOINCREMENT`.
+  stringified TEXT; PKs are `randomUUID()` TEXT except the three **composite**
+  PKs (`github_teams`, `github_team_repos`, `github_team_members`) and
+  `messaging_messages.id AUTOINCREMENT`. `executions.cost_usd` is the schema's
+  only REAL column. **Exactly one declared FK exists**
+  (`messaging_messages.session_id → messaging_sessions.id`, no ON DELETE), and
+  `PRAGMA foreign_keys` is **never turned on** — the sole runtime pragma is
+  `journal_mode = WAL`.
 
 ## Target file layout
 
 ```
 apps/server/src/state/
-  schema/sqlite.ts   # sqliteTable defs — 8 tables (6 state + 2 messaging), all indexes
+  schema/sqlite.ts   # sqliteTable defs — 15 tables (13 state + 2 messaging), 25 named indexes
   schema/pg.ts       # pgTable mirror: identical export names + column property names
   client.ts          # StateClient (LibSQLDatabase<typeof sqliteSchema>), StateTx,
-                     # asStateClient() cast seam for the PG instance, Dialect type
+                     # asStateClient() cast seam for the PG instance, Dialect type,
+                     # and the connection-scoped op serializer (locked decision 8)
   dialect.ts         # portability seam: rows(client, dialect, sql) / changes(result) /
                      # isUniqueViolation(err) / likeEscape() / dayBucket() / hourBucket()
+                     # / strposExpr() — instr() has no PG equivalent (hotspot table)
   legacy-sqlite.ts   # pre-drizzle compat pre-step (runs before the migrator; see below)
   db.ts              # StateDb — async factory: static open(url) / fromClient(client, dialect)
-  execution-store.ts / approval-store.ts / workflow-run-store.ts / user-store.ts  # async, drizzle
+  execution-store.ts / approval-store.ts / workflow-run-store.ts / user-store.ts
+  team-store.ts / feedback-store.ts / cron-run-store.ts            # all 7 async, drizzle
+  repo-ref.ts        # qualifiedRepoSql becomes a dialect-aware SQL fragment, not a string
+  build-assets.ts    # UNTOUCHED — filesystem-only, never opens the DB
 apps/server/drizzle/sqlite/0000_baseline.sql (+ meta/)   # hand-edited idempotent baseline
+apps/server/drizzle/sqlite/0001_backfill_*.sql           # journaled one-shot DATA backfills
+                                                         # (locked decision 14) — ORDER MATTERS
 apps/server/drizzle/pg/0000_init.sql (+ meta/)           # generated, fresh-DB only (PGlite)
 apps/server/drizzle-sqlite.config.ts / apps/server/drizzle-pg.config.ts  # at the package root
+
+packages/workflow-engine/src/
+  ports/ports.ts     # RunStore + ExecutionLedger flip to Promise<T> (locked decision 13)
+  core/phase-executor.ts / core/scheduler.ts   # await at 23 call sites
+  test-support/fakes.ts                        # InMemoryStateStore rewritten async
 ```
 
 ## Dual-dialect strategy (the honest version)
@@ -181,15 +220,38 @@ list verbatim.
 
 ## Portability hotspot ports
 
+> **Re-derived 2026-08-18.** The original table had 7 rows and was drawn from a
+> 3-store codebase. The full audit found **five more classes** the table never
+> covered — three of them **hard syntax errors** on Postgres rather than
+> behavioural drift. Those are listed in the second table below; treat both as
+> one checklist.
+
 | Hotspot (current code) | Port |
 |---|---|
-| `json_patch(COALESCE(context,'{}'), json_object('error',?))` in `WorkflowRunStore.flipFinished` | App-side read-modify-write inside the same transaction — trivial once `context` is a json-mode column (read object, `{...ctx, error}`, update) |
-| `date(started_at)` / `strftime('%Y-%m-%dT%H',…)` GROUP BY rollups in `ExecutionStore.dailyStats/hourlyStats` | `substr(started_at, 1, 10)` / `substr(started_at, 1, 13)` via `dayBucket()`/`hourBucket()` — `substr(text,int,int)` exists in both dialects; ISO text makes bucket keys identical |
-| `LIKE ? ESCAPE '\'` in `searchErrors` | `lower(col) LIKE lower(pattern) ESCAPE '\'` — identical behavior in both dialects (PG LIKE is case-sensitive, SQLite's isn't; lower() both sides). Keep the existing wildcard escaping |
-| `thread_id IS ?` null-safe compare (SessionManager) | `key.threadId == null ? isNull(col) : eq(col, value)` |
+| `json_patch(COALESCE(context,'{}'), json_object('error',?))` in `WorkflowRunStore.flipFinished` (`:742`) — **and two more the plan missed**: `expireQueued` (`:632`, same fragment) and `restartRun` (`:798`, `json_remove(COALESCE(context,'{}'), '$.error')`) | App-side read-modify-write inside the same transaction — trivial once `context` is a json-mode column (read object, `{...ctx, error}` / delete the key, update). **All three**, not just `flipFinished`. `flipFinished`'s `CASE WHEN ? IS NOT NULL` also needs an explicit cast on PG — a bare parameter there has indeterminate type |
+| `date(started_at)` / `strftime('%Y-%m-%dT%H',…)` GROUP BY rollups in `ExecutionStore.dailyStats/hourlyStats` (`:932,941,942,994,1003,1004`) — **plus `FeedbackStore.dailyScores`** (`feedback-store.ts:451,457,458`, `date(observed_at)`), which the plan never listed | `substr(col, 1, 10)` / `substr(col, 1, 13)` via `dayBucket()`/`hourBucket()` — exists in both dialects; ISO text makes bucket keys identical. The JS side already generates matching keys (`execution-store.ts:923-928,984-990`; `feedback-store.ts:434-440`), so the string form must be preserved exactly |
+| `LIKE ? ESCAPE '\'` in `searchErrors` (`:786-788`) | `lower(col) LIKE lower(pattern) ESCAPE '\'` — PG LIKE is case-sensitive, SQLite's isn't; lower() both sides. The docstring at `:748-752` explicitly relies on the case-insensitivity, so this is behaviour preservation, not cosmetics. Keep the existing wildcard escaping |
+| `thread_id IS ?` null-safe compare — **four sites, not one**: `session-manager.ts:152,163` **and `feedback-store.ts:249,319`** (`reactor IS ?`) | `x == null ? isNull(col) : eq(col, x)`. These are the identity predicates for session lookup and signal idempotency — get one wrong and rows silently fork instead of matching |
 | `SUM(CASE WHEN success = 1 …)` fragments | Successes: `CASE WHEN ${col} THEN 1 ELSE 0 END` (truthiness works on sqlite 0/1 and pg boolean; NULL falls to ELSE). Failures: `CASE WHEN ${col} = ${false} THEN 1 ELSE 0 END` — explicit comparison, NOT `WHEN NOT ${col}`; see 02b's porting table for the rationale |
 | `result.changes === 1` compare-and-set | `changes(result)` helper: libsql `rowsAffected`, PGlite/node-postgres `affectedRows`/`rowCount` |
 | `INSERT … ON CONFLICT DO UPDATE … excluded.*` upserts (cron/workflow overrides) | Drizzle `.onConflictDoUpdate({ target, set })` — portable |
+
+### Additional hotspots found 2026-08-18 (absent from the original plan)
+
+The first three are **hard syntax errors** on Postgres — the query does not
+parse, so the PGlite leg fails loudly rather than drifting. Good, but they must
+be ported before that leg can go green at all.
+
+| Hotspot | Port |
+|---|---|
+| **`rowid`** in `ORDER BY started_at DESC, rowid DESC` — `cron-run-store.ts:123,156` | **No `rowid` in Postgres.** The docstring at `:146-150` says this tiebreak is load-bearing: without it `recentFailures` reports 0 for an always-failing cron (same-timestamp rows tie arbitrarily). Needs a real monotonic tiebreak column, or ordering by the TEXT `id`. Do NOT just drop it |
+| **Unaliased derived table** — `SELECT * FROM ( … ) WHERE rn = 1`, `cron-run-store.ts:121-126` | PG **requires** an alias on a `FROM` subquery. Add one (`AS latest`) — mechanical, but a parse error until you do |
+| **`instr()`** — `repo-ref.ts:109` (`qualifiedRepoSql`, fanning out to **8 call sites** across `execution-store.ts:96,442,502,550,772,777,788,891` and `workflow-run-store.ts:667,670,673,694,699`) plus four `migrate.ts` backfills (`:374-378,387-392,408-411,424-426`) | PG has no `instr()` — use `strpos(str, sub)` / `position(sub in str)`. `substr()`, `\|\|` and `<>` are all fine. This is the single widest-reaching fragment in the codebase |
+| **`INSERT OR IGNORE`** — `team-store.ts:98,103` | PG: `ON CONFLICT DO NOTHING`. Drizzle: `.onConflictDoNothing()` |
+| **`COALESCE(?, col)` update idioms** — six sites, incl. `recordFinish`'s **ten columns in one statement** (`execution-store.ts:338-347`), `feedback-store.ts:147-154` (7 columns in an `ON CONFLICT` arm), `workflow-run-store.ts:797,852`, and `user-store.ts:141-144` — plus `user-store.ts:155`'s **reversed** `COALESCE(name, ?)` where the *existing* value wins | `COALESCE` itself is portable, but every untyped parameter inside one needs an explicit cast on PG (`COALESCE($1::text, session_id)`) or you get "could not determine data type of parameter". The builder equivalent is conditional key spreading — include a `.set()` key only when the value is defined. **Watch the reversed one**: spreading it the normal way inverts its meaning |
+| `ORDER BY last_polled_at IS NOT NULL, last_polled_at ASC` — `feedback-store.ts:211` | A boolean used as a sort key. Works on both (`false` sorts before `true`, matching SQLite's `0 < 1`) but it is fragile enough to deserve a pinning test rather than trust |
+| `COALESCE(t.truncated, 0)` over a `LEFT JOIN` — `team-store.ts:167` | Becomes `COALESCE(…, false)` on PG once `truncated` is a real boolean. The column is `NOT NULL`, so the NULL comes purely from the outer join — the COALESCE is load-bearing, not defensive |
+| `SELECT sql FROM sqlite_master …` — `session-manager.ts:62` | SQLite catalog access, inherently sqlite-only. Moves wholesale into `legacy-sqlite.ts` (Phase 2) and never runs on PG |
 
 ## Transaction design (Phase 2b detail, summarized here for orientation)
 

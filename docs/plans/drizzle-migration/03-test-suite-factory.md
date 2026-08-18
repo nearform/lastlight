@@ -29,6 +29,41 @@ hand-maintained subset that silently diverges.
 - `pnpm --filter lastlight-core test` green at the phase start. Record the
   total test count before touching anything — it is the invariant.
 
+> ### Scale correction — 2026-08-18
+>
+> This doc was written against a 2-file test surface (`tests/state/db.test.ts`
+> + `tests/state/workflow-run-store.test.ts`). Actual surface:
+>
+> - **208 test files** in `apps/server/tests`, of which **37 open a real
+>   SQLite database** — 33 via `new StateDb(":memory:")`, 6 via raw
+>   `new Database(":memory:")` + `migrate(db)`. **44 construction sites** in
+>   total.
+> - They span `tests/state/` (11), `tests/admin/` (6), `tests/cron/` (6),
+>   `tests/connectors/` (4), `tests/workflows/` (8), `tests/engine/` (2).
+>   Several files hold many sites — `tests/cron/handler-crons.test.ts` alone
+>   has 8, `tests/cron/scheduler-failure-alert.test.ts` has 4.
+> - **Three files hand-write their own `CREATE TABLE`** for the messaging
+>   tables rather than calling a migration
+>   (`tests/connectors/messaging/session-manager.test.ts:134,147,185`,
+>   `tests/admin/session-repo.test.ts:17,22`) — these break the moment
+>   `SessionManager` stops owning its DDL, and are easy to miss because they
+>   never touch `StateDb`.
+> - **Baseline on the merged branch: 203 passed / 5 skipped files, 3,115
+>   passed / 20 skipped tests.** That is the invariant this phase must
+>   preserve (+1 for the added message-append test).
+>
+> **Locked decision 15 supersedes this doc's per-file `mkdtemp` sketch**: add
+> `apps/server/tests/helpers/state-db.ts` exporting `makeTestDb()` (per-test
+> `mkdtemp` + `StateDb.open()` + registered cleanup) and convert **all 44
+> sites**, transacting or not. There is no shared test-helper module in the
+> repo today — `find apps/server/tests -name '*.ts' ! -name '*.test.ts'`
+> returns nothing — so this is the first one; put it where the next fixture
+> would also go.
+>
+> Note also `packages/workflow-engine/src/test-support/fakes.ts`'s
+> `InMemoryStateStore` (a second, non-SQLite implementation of the port, used
+> by 3 test files) must flip async in lockstep — locked decision 13.
+
 > The line numbers and describe titles below were captured against the
 > pre-Phase-2a files. Phases 2a/2b will have edited every one of these files
 > (async/await, `StateDb.open`, libsql fixtures). Match tests by **intent and

@@ -8,11 +8,30 @@ This directory is the executable plan. Each phase doc is self-sufficient: an
 agent with no prior context should be able to execute its phase from that doc
 plus this README alone.
 
+> **Reconciled 2026-08-18 (v0.25.9).** The plan was written 2026-07-06 and last
+> revised 2026-07-24 at **v0.21.8**; the state layer roughly doubled in between.
+> Phase 0 below re-derived every inventory against current `main`. The headline
+> corrections — read these before anything else:
+>
+> | Previously stated | Corrected |
+> |---|---|
+> | 7–8 tables, 12–15 indexes | **15 tables, 25 named indexes** (+ `cron_runs`, `feedback_anchors`, `feedback_signals`, `github_teams`, `github_team_repos`, `github_team_members`, `github_visibility_sync`) |
+> | 3 stores | **7 stores** (+ `UserStore`, `TeamStore`, `FeedbackStore`, `CronRunStore`); `state/` is ~4,700 LOC |
+> | "the five named atomic ops" | **9 transaction sites** — 5 in `workflow-run-store.ts`, **4 in `team-store.ts`** |
+> | `migrate.ts` DDL only | **530 lines including ordered DATA backfills** — see locked decision 14 |
+> | *(unmentioned)* | **`packages/workflow-engine` owns a synchronous `WorkflowStateStore` port** — a second published package is in scope; see locked decision 13 |
+> | `/admin/api/executions` is snake_case; re-serialize it | **Inverted — the wire format is camelCase with `success?: boolean`.** See "Hard constraints" |
+>
+> Baseline on the merged branch: **203 test files, 3,115 tests passing.**
+
 ## Status / todo list
 
 Execute strictly in this order — each phase depends on the previous one and
 each must leave the repo green before the next starts.
 
+- [x] **Phase 0** — reconcile the branch and this plan with `main`: merge (not
+  rebase — locked decision 6), verify green, and re-derive every schema /
+  consumer / test inventory in the phase docs against current source.
 - [ ] **Phase 1** — [01-schema-baseline.md](01-schema-baseline.md) — deps,
   Drizzle sqlite schema, idempotent baseline migration, schema-equivalence test
   *(risk: low)*
@@ -29,7 +48,8 @@ each must leave the repo green before the next starts.
 - [ ] **Phase 5** — [05-config-packaging-release.md](05-config-packaging-release.md)
   — config slot, Dockerfile, docs-sync, prod cutover runbook, npm release
   *(risk: low-medium)*
-- [ ] **Phase 6** — [06-prod-postgres.md](06-prod-postgres.md) — **activate the
+- [ ] **Phase 6 — DEFERRED, not in this PR** —
+  [06-prod-postgres.md](06-prod-postgres.md) — **activate the
   production Postgres runtime**: driver-selectable PG pool (node-postgres default
   **or** Neon serverless via `drizzle-orm/neon-serverless`) + `pg` /
   `@neondatabase/serverless` runtime deps (lazy per-driver), `open()` builds a
@@ -66,12 +86,12 @@ Architecture reference (read before any phase):
    natively async so SQLite and PG code paths share one shape (including async
    transactions); prebuilt binaries let us drop `python3 make g++` from the
    Dockerfile; reads the existing `lastlight.db` via `file:` URL.
-3. **PG scope** *(amended by Phase 6 — see below)*: working `pgTable` schema +
-   dialect-ported SQL, state test suite green on PGlite in CI. **Through Phase 5:
-   no prod PG deployment, no sqlite→pg data migration.** Phase 6 lifts the "no
-   prod PG deployment" half of this (activates a real node-postgres runtime so
-   operators can select Postgres); the "no sqlite→pg data migration" half still
-   holds (that stays an optional follow-on CLI, [06](06-prod-postgres.md) §8).
+3. **PG scope**: working `pgTable` schema + dialect-ported SQL, state test suite
+   green on PGlite in CI. **No prod PG deployment, no sqlite→pg data migration.**
+   *(2026-08-18: Phase 6 would lift the first half, but it is **deferred out of
+   this PR** — see decision 6. Through Phase 5, `StateDb.open()` throws on a
+   `postgres://` URL and `pg` stays out of runtime deps. The "no sqlite→pg data
+   migration" half holds permanently for now.)*
 4. **Real JSON columns on Postgres** — `jsonb` (paired with sqlite
    `text({mode:'json'})`), not text-blob JSON.
 5. Pin the latest **stable** drizzle-orm / drizzle-kit (the finius reference
@@ -79,13 +99,21 @@ Architecture reference (read before any phase):
 
 *Added after the 2026-07-06 plan grilling:*
 
-6. **Feature branch until Phase 5** — all phases land on a long-lived
-   `drizzle-migration` branch; `main` stays deployable on better-sqlite3 for
-   hotfixes throughout. The branch merges to `main` only as part of Phase 5
-   (immediately before the cutover runbook), so prod never meets the new
-   engine via an incidental `lastlight server update`. Rebase the branch onto
-   `main` before starting each phase; every phase must leave the **branch**
-   green.
+6. **Feature branch until Phase 5, landing as ONE PR** — all phases land on the
+   long-lived `drizzle-migration` branch; `main` stays deployable on
+   better-sqlite3 for hotfixes throughout. The branch merges to `main` only as
+   part of Phase 5 (immediately before the cutover runbook), so prod never meets
+   the new engine via an incidental `lastlight server update`. Every phase must
+   leave the **branch** green.
+   *(2026-08-18 amendment: **merge `main` into the branch at the start of each
+   session — do NOT rebase.** The original instruction was to rebase, but the
+   diff fully rewrites `execution-store.ts` and `workflow-run-store.ts` (~1,000
+   LOC each), so a rebase replays every migration commit over new state-layer
+   work and re-resolves the same conflicts every time; a merge resolves each
+   conflict once. Squash on final merge so the PR reads clean. Paired with a
+   **soft freeze on `apps/server/src/state/**` and `migrate.ts` on `main`** —
+   including the agent's own PRs — for the duration. **Phase 6 is out of scope
+   for this PR.**)*
 7. **Phases 2a+2b are ONE phase** ("Phase 2"). The intermediate
    async-over-sync state never ships, so the sync-twin scaffolding is
    deleted from the plan: transaction closures go straight to
@@ -93,9 +121,20 @@ Architecture reference (read before any phase):
    appendix for the ripple (inventories, landmines, fire-and-forget table);
    02b is the executable phase doc. The repo-green gate applies at the END of
    the combined phase — intermediate commits on the branch need not be green.
-8. **The in-process mutex serializing the five named atomic ops ships in
+8. **The in-process mutex serializing the named atomic ops ships in
    Phase 2 by design**, not as a probe-failure fallback. The concurrency
    probe test remains as the regression guard.
+   *(2026-08-18 correction: the mutex must be **connection-scoped, not
+   store-scoped**. As originally written it was a `private opChain` field on
+   `WorkflowRunStore` covering its five named ops — but Phase 0 found
+   **`TeamStore` opens four more transactions** (`recordResolution`,
+   `invalidateLogin`, `invalidateTeam`, `invalidateAll`) on the **same libsql
+   client**. Two overlapping `client.transaction()` calls are hazardous
+   regardless of which store started them, so a per-store chain would leave
+   run-op-vs-team-op races completely unguarded. Own the chain next to the
+   client — hand the same serializer to every store that transacts — and make
+   the concurrency probe race a run op against a team op, not just two run
+   ops.)*
 9. **`StateDb.open(pathOrUrl)` normalizes both forms**: `:memory:` as-is,
    `file:` URLs as-is, `postgres(ql)://` throws (Phase 4), anything else is
    treated as a filesystem path (`resolve` + `file:` prefix). Callers —
@@ -122,6 +161,50 @@ Architecture reference (read before any phase):
     suites that never run `client.transaction()` (schema-equivalence,
     session-manager, the wire pin test).
 
+*Added after the 2026-08-18 Phase 0 reconciliation (v0.25.9):*
+
+13. **The workflow-engine's `WorkflowStateStore` port flips to hard
+    `Promise<T>`.** `packages/workflow-engine/src/ports/ports.ts` declares
+    `RunStore` + `ExecutionLedger` synchronously; `StateDb` satisfies them
+    structurally, fenced by
+    `apps/server/tests/workflows/state-store-contract.test.ts`. An async
+    `StateDb` breaks that, so **a second published package
+    (`lastlight-workflow-engine`) is in scope.** No `Awaitable<T> = T |
+    Promise<T>` compatibility shim: the package is public but consumed only
+    inside this repo, so we take the clean break. `await` at all 23 engine call
+    sites (18 in `core/phase-executor.ts`, 5 in `core/scheduler.ts`) and rewrite
+    `test-support/fakes.ts`'s `InMemoryStateStore` async. Consequence: the
+    release bumps cascade across **all five** published packages.
+
+14. **The `migrate.ts` DATA backfills become journaled one-shot migrations**
+    (`0001_backfill_*.sql`, …), not per-boot statements. `0000_baseline.sql`
+    stays the idempotent no-op over prod's existing schema; the backfills run
+    ONCE and are recorded in `__drizzle_migrations`. Their **ordering is
+    load-bearing** — `workflow_runs`' owner/repo split must precede the
+    `executions` one, which reads `workflow_runs.owner` back out. On a fresh DB
+    they run against zero rows. This is the payoff of
+    [issue #345](https://github.com/nearform/lastlight/issues/345): today they
+    re-execute on every boot, idempotent only by hand-maintained convention.
+    Because `0001+` are the first migrations that really WRITE to production
+    data, the pre-cutover smoke against a real DB copy is mandatory.
+
+15. **One shared test fixture.** There are **37 DB-touching test files with 44
+    `new StateDb(":memory:")` sites and no shared helper** — each hand-rolls its
+    own `beforeEach`/`afterEach`. Phase 3 adds
+    `apps/server/tests/helpers/state-db.ts` exporting `makeTestDb()` (per-test
+    `mkdtemp` + `StateDb.open()` + registered cleanup) and converts **every**
+    site, transacting or not. One seam, so decision 12's hazard has exactly one
+    place to be handled.
+
+16. **Sub-agent strategy: exemplar first, then fan out.** The seam
+    (`client.ts` / `dialect.ts` / `schema/`) and ONE hand-ported store
+    (`ApprovalStore` — smallest, has both compare-and-set guards, is a
+    transaction participant) are written serially to establish the conventions
+    (`dbc` parameter, `changes()`, `nullsToUndefined`, raw-vs-builder). Only
+    then do the remaining 6 stores fan out to parallel agents. The consumer
+    ripple and the engine-port flip stay **serial** — they are a single
+    compiler chase and do not parallelize.
+
 ## Hard constraints (verified against source at planning time)
 
 > Path/tooling note: the state layer, tests, and `drizzle/` live in the
@@ -143,18 +226,47 @@ Architecture reference (read before any phase):
   preserved exactly (via the `changes()` helper).
 - The long-running sandbox dispatch is deliberately **outside** DB
   transactions — keep it that way.
-- Dashboard wire contract: `/admin/api/executions` returns **snake_case** rows
-  today (`dashboard/src/api.ts` types `trigger_id`, `started_at`,
-  `duration_ms`). Drizzle returns camelCase — the admin route must
-  re-serialize to snake_case. The dashboard itself must not need changes.
+- **Dashboard wire contract — CORRECTED 2026-08-18, the old text was inverted
+  and would have broken the dashboard.** `/admin/api/executions` returns
+  **camelCase** with `success?: boolean` — `dashboard/src/api.ts:55` types
+  `triggerType` / `triggerId` / `startedAt` / `durationMs` / `success?: boolean`.
+  Issue #285 (2026-08-07) already fixed the raw-row leak: `allExecutions` now
+  selects an explicit `EXECUTION_COLUMNS` list and maps through
+  `mapExecutionRow`, and the route (`admin/routes.ts:1470`) passes the records
+  straight through. **Do NOT write the `executionToWire` snake_case
+  re-serializer 02b specifies** — Drizzle's camelCase mapped rows are already
+  the correct shape, and boolean-mode `success` matches the dashboard type
+  exactly. The pin test still gets written, but it pins **camelCase**: assert
+  `success` is a boolean (and `null`/absent while running) and that no
+  `trigger_id`-style key leaks. The dashboard itself must not need changes.
 - CLI (`src/cli/*`) is HTTP-only — untouched. `src/state/build-assets.ts` is
   filesystem-only — untouched. Sandbox containers never open the state DB.
 
 ## Known bugs this migration fixes (do not "preserve" them)
 
-- `recentExecutions` / `allExecutions` / `runningExecutions` do `SELECT *` and
+- ~~`recentExecutions` / `allExecutions` / `runningExecutions` do `SELECT *` and
   cast raw snake_case rows to `ExecutionRecord`; `src/engine/dispatcher.ts`
   (status-report handler) reads `r.startedAt` / `r.issueNumber` — **undefined
-  at runtime today**. Drizzle's mapped rows fix this for free.
-- `consecutiveFailures()` checks `row.success === 0`; under boolean column
-  mode this must become `=== false`.
+  at runtime today**.~~ **ALREADY FIXED by #285 (2026-08-07)** — those methods
+  now select an explicit `EXECUTION_COLUMNS` list and map via
+  `mapExecutionRow`. Nothing to fix here; see the corrected wire-contract note
+  above, which this bug's existence used to justify.
+- **Still live:** `consecutiveFailures()` checks `row.success === 0`
+  (`apps/server/src/state/execution-store.ts:731`); under boolean column mode
+  this must become `=== false`. Pin it with a test — a silent inversion here
+  turns every cron-failure alert off.
+
+## Portability landmines found in Phase 0 (not in the original phase docs)
+
+Two **exported raw-SQL string fragments** are concatenated into queries by their
+callers, and both hardcode integer-boolean comparisons that PostgreSQL rejects
+outright (`operator does not exist: boolean = integer`):
+
+- `EXECUTION_OUTCOME_COLUMNS` (`apps/server/src/state/execution-store.ts:220`) —
+  a `SUM(CASE WHEN success = 1 …)` / `success = 0` rollup consumed by **three**
+  aggregations. It is deliberately held as one fragment so the three cannot
+  disagree; keep that property when porting it to a `SQL` template with bound
+  `${true}` / `${false}` params.
+- `qualifiedRepoSql` (`apps/server/src/state/repo-ref.ts:101`).
+
+Neither appears in 02b's porting table. Both must go through `dialect.ts`.

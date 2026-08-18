@@ -19,7 +19,7 @@ is `StateDb.fromClient()` from tests.
 ## Preconditions
 
 - [ ] Phases 1, 2 (combined), 3 checked off in [README.md](README.md).
-- `apps/server/src/state/schema/sqlite.ts` exists with all 8 tables + indexes
+- `apps/server/src/state/schema/sqlite.ts` exists with all **15** tables + 25 named indexes
   (Phase 1, incl. `users`).
 - Stores are async, Drizzle-backed, and route all raw SQL / rows-affected
   reads through `dialect.ts`'s `rows()` / `changes()` (Phase 2b).
@@ -66,6 +66,9 @@ Only the column builder types change, per this mapping:
 | `uniqueIndex(...).on(...).where(sql\`active = 1\`)` | `uniqueIndex(...).on(...).where(sql\`active\`)` — `active` is a real boolean on PG; `= 1` would not compile there |
 | DDL default `'[]'` on `phase_history` | `.default(sql\`'[]'::jsonb\`)` |
 | defaults `'running'`, `'pending'`, `'approve'`, `0`, `1`(bool) | same values: `.default("running")`, …, `.default(0)`, `.default(true)` |
+| **composite PKs** — `github_teams (org, slug)`, `github_team_repos (org, team_slug, repo)`, `github_team_members (org, team_slug, login)` *(added 2026-08-18)* | `primaryKey({ columns: [...] })` from `drizzle-orm/pg-core`, same column order. The parity test must compare PK **membership AND order**, not a per-column boolean |
+| **table-level `UNIQUE`** — `feedback_anchors (source, channel, external_id)`, `feedback_signals (anchor_id, reactor, emoji)` *(added 2026-08-18)* | `unique().on(...)`. Both dialects treat NULLs as distinct by default, so the `channel = ''` sentinel is **still required** on PG. PG 15+ offers `UNIQUE NULLS NOT DISTINCT`, which would let you drop it — **do not**, it would diverge from the sqlite leg and from `channelKey()`'s `'' ↔ null` boundary mapping |
+| `text()` columns holding a **qualified** `owner/repo` — `github_team_repos.repo` *(added 2026-08-18)* | `text()` — unchanged, but note this is the one place post-#279 that stores a qualified name, so the bare-repo rule and `qualifiedRepoSql` do not apply |
 
 Per-table notes (everything not listed is `text()` in both dialects):
 
@@ -249,10 +252,19 @@ import * as sqliteSchema from "../../src/state/schema/sqlite.js";
 import * as pgSchema from "../../src/state/schema/pg.js";
 
 const TABLES = [
-  "executions", "workflowRuns", "cronOverrides", "workflowOverrides",
-  "workflowApprovals", "users", "messagingSessions", "messagingMessages",
-] as const;
+  "executions", "workflowRuns", "cronOverrides", "cronRuns",
+  "workflowOverrides", "workflowApprovals", "users",
+  "feedbackAnchors", "feedbackSignals",
+  "githubTeams", "githubTeamRepos", "githubTeamMembers", "githubVisibilitySync",
+  "messagingSessions", "messagingMessages",
+] as const;   // 15 — corrected 2026-08-18
 ```
+
+**Better: derive the list rather than hand-maintaining it.** Filter the schema
+module's exports with `is(v, Table)` (both cores) and assert the derived sets
+match. A hardcoded array silently stops covering a table the day someone adds
+one to both schemas and forgets this file — which is exactly the drift the test
+exists to catch.
 
 Compare, per table (sorted so ordering never matters):
 
@@ -463,7 +475,7 @@ not sqlite" message, revert.
 
 ## Done criteria
 
-- [ ] `apps/server/src/state/schema/pg.ts` mirrors `sqlite.ts` — 8 tables
+- [ ] `apps/server/src/state/schema/pg.ts` mirrors `sqlite.ts` — 15 tables
       (incl. `users`), identical export/property/column/index names; jsonb +
       boolean + identity + doublePrecision mappings applied; identical
       `$type<T>` params.
@@ -472,7 +484,7 @@ not sqlite" message, revert.
       generated.
 - [ ] `apps/server/tests/state/schema-parity.test.ts` green; compares names /
       nullability / PKs / index name+unique+partial / FKs; excludes types;
-      failure messages name the missing column and side; 8 tables covered.
+      failure messages name the missing column and side; 15 tables covered.
 - [ ] `apps/server/tests/state/db.pg.test.ts` green: fresh PGlite per test → pg
       migrator → `StateDb.fromClient(..., "postgres")` → full
       `runStateDbSuite`, plus the cross-dialect stats bucket-key test.

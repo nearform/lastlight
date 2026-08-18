@@ -97,6 +97,91 @@ Also in scope, because they fall out of the swap:
 
 ---
 
+## Ripple scale — re-derived 2026-08-18
+
+02a's inventory was measured against a 5-class, 3-store codebase. Current
+reality:
+
+| 02a said | Actual |
+|---|---|
+| 70 public methods across 5 classes | **127 public methods across 9 classes** — StateDb 10, ExecutionStore 28, ApprovalStore 10, WorkflowRunStore 34, UserStore 8, TeamStore 8, FeedbackStore 15, CronRunStore 4, SessionManager 10 |
+| ~124 production call sites | **196**, across 28 files |
+| ~15 consumer files | **28** in `apps/server/src` + `packages/workflow-engine` |
+| 5 transaction sites | **9**, plus SessionManager's hand-rolled `BEGIN`/`COMMIT` |
+| ~10 test files | **37** |
+| landmines L1–L9 | L1–L9 **plus the eight below** |
+
+Exactly **two** public members are non-DB and stay sync:
+`WorkflowRunStore.addTerminalObserver` and `StateDb.get database` (the latter
+is deleted anyway).
+
+### Two traps that will defeat a naive codemod
+
+1. **Aliased store handles evade any receiver-prefixed grep.** Searching for
+   `db.runs.` / `db.users.` / `db.teams.` misses
+   `connectors/slack/connector.ts:643,649,651` (a bare local `users`),
+   `engine/github/team-visibility.ts:160,162,178,224,358,384` (`this.store`),
+   and `workflows/handlers/post-review.ts:117` (`this.run.store.runs.*`).
+   **Search by method name, not by receiver.**
+2. **`state/feedback-store.ts` contains two literal NUL bytes** (lines 338-339)
+   — deliberate composite-key separators in template literals
+   (`` `${k.reactor ?? ""}\0${k.emoji}` ``), written as raw control characters
+   rather than `\0` escapes. The file is valid UTF-8, but `file(1)` reports
+   `data` and plain `grep`/`wc` treat it as binary and bail. Any sweep across
+   the state layer needs `grep -a`. (Converting them to `\0` escapes would be a
+   tidy-up, but it is an unrelated behaviour-neutral change — do it separately,
+   not inside this migration.)
+
+### The eight additional landmines (none are in 02a)
+
+| # | Site | Why it is not a mechanical `await` |
+|---|---|---|
+| **L10** | `workflows/admission.ts:82-107` (`admitNext`) | The `for(;;)` loop does `countRunning()` → `listQueued()` → `admitRun()` (CAS) → `getRun()`. Today the whole body is synchronous, so **nothing can interleave between the count and the admit**. Under async, the event-driven `admitNext()` and the 15 s sweep can interleave mid-iteration: the `admitRun` CAS still protects each row, but `countRunning() >= cap` can be **over-admitted by N concurrent loops**. This is a concurrency-design decision, not a port. Decide explicitly: serialize `admitNext` through the same op-chain as the transactions, or re-check the cap after the CAS |
+| **L11** | `index.ts:1027-1029` → `notifierOnRunStart` (`:938`) | The comment states the invariant: *"Synchronous notifier setup must finish before simple.ts calls `reporter.start()` … so it runs FIRST — before the first `await` in this callback."* Awaiting destroys the guarantee the comment names. README locked decision 10 (`simple.ts` awaits `onRunStart`) is precisely the fix — re-establish the ordering explicitly and **rewrite that comment**, or the next reader trusts a dead invariant |
+| **L12** | `engine/review-check.ts:391` | `mergeScratch(run.id, { reviewCheck: null })` **must be awaited** — the comment at `:389-390` says *"Clear before the network call: a failed update must not leave a ref that re-fires on the next terminal transition."* Fire-and-forget here reintroduces double-conclude. Explicitly NOT on the fire-and-forget table |
+| **L13** | `workflows/runner.ts:487` (`failWorkflow`) | Tempting to `void`, but the k8s backpressure branch at `:483-485` depends on the fail-flip **not** having happened before `requeueRunning`'s CAS. Ordering is load-bearing; if this becomes fire-and-forget the requeue path must still await |
+| **L14** | `connectors/messaging/thread-transcript.ts:110` (`withThreadTranscript`) | Returns an `EventEnvelope` **synchronously** and is called inline at `engine/dispatcher.ts:181` (`chatOwnsTranscript ? inbound : withThreadTranscript(...)`). It cannot become async without changing the dispatch shape. Its internal `recordThreadMessage` (`:119`) is the fire-and-forget part |
+| **L15** | `engine/chat/chat-prompt.ts:138,139,159,160` | `isWorkflowEnabled` is consumed inside **`.filter()` callbacks** within a string-concatenation expression, three hops from `index.ts:267`'s sync `systemPrompt: () => …` thunk. Resolve the enabled set **once per turn** before the thunk (the cleanest option — `chat-runner.ts:357` is already inside async `doTurn`), rather than making `chatSystemSuffix` async |
+| **L16** | `admin/routes.ts:2453-2469` (`/crons`) | `defs.map((def) => { … db.cronRuns.recentFailures(def.name) … })` — one store call per cron inside a sync `.map`, under a 10 s dashboard poll. Note `latestByCron()` at `:2452` was already hoisted out deliberately ("one query for the whole list rather than one per cron") but `recentFailures` was not. Batch it the same way rather than `Promise.all`-ing N queries |
+| **L17** | `admin/routes.ts:2001-2012` (`computeArtifactMetadata`) | A sync `: ArtifactMetadata` helper doing `listByArtifact` then a `.map()` whose body calls `db.runs.getRun(...)` per row. Needs `Promise.all` inside the map, and the helper flips async for both callers (`:2261`, `:2276`) |
+
+### Interfaces that must flip (22 total)
+
+Beyond 02a's three (`PhaseReporter`, `SessionSource`, `getJobs`):
+`TerminalRunObserver` (`workflow-run-store.ts:160`) and its 2 registrations;
+`ChatPromptOptions.isWorkflowEnabled` and the `systemPrompt` thunk;
+`RepoForSession` (`admin/sessions.ts:100`); the engine's `RunStore` /
+`ExecutionLedger` / `WorkflowStateStore` / `persistPhase` / `failWorkflow`
+(locked decision 13); the four notify-transport callbacks
+(`transports/github.ts:17`, `transports/slack.ts:18,27`); the three connector
+option callbacks (`onTeamChanged`, `onBotMessage`, `onReactionAction`); and
+**18 exported sync functions** that become `Promise`-returning — including
+`applyDerivedState`, `harvestFixMarkers`, `ingestReaction`, `retractReaction`,
+`exportSignal`, `drainFeedbackExport`, `recordReviewCheck`,
+`recordThreadMessage`, `getJobs`, `summarizeBot`, `didSpendAttempt`,
+`mountAdmin`.
+
+Already `Promise`-returning and needing **body** changes only:
+`AdmissionController`, `RunnerCallbacks`, `CronHandler`, `ProgressReporter`.
+
+### Transaction sites — 9, not 5
+
+The five named ops in `WorkflowRunStore` (`:730` `finishRun`, `:934`
+`pauseForApproval`, `:958` `resolveGateAndResume`, `:976` `resolveGateAndFail`,
+`:995` `resolveReplyGateAndResume`) **plus four in `TeamStore`** (`:81`
+`recordResolution`, `:183` `invalidateLogin`, `:203` `invalidateTeam`, `:224`
+`invalidateAll`) — hence the connection-scoped serializer in README locked
+decision 8. `TeamStore`'s carry no CAS guard (they are all-or-nothing cache
+rewrites); the three `resolveGate*` ops carry the load-bearing
+`changes !== 1 → throw` guards.
+
+Also note **five CAS guards that live OUTSIDE any transaction** and must keep
+exact rows-affected semantics: `admitRun` (`:606`), `expireQueued` (`:624` —
+which fires `notifyTerminal` from *inside* the `changes === 1` branch),
+`restartRun` (`:790`), `requeue` (`:812`), `requeueRunning` (`:832`).
+
+---
+
 ## New files
 
 ### `src/state/client.ts` — the client seam
@@ -393,17 +478,29 @@ export class StateDb {
   readonly executions: ExecutionStore;
   readonly approvals: ApprovalStore;
   readonly runs: WorkflowRunStore;
-  readonly users: UserStore;   // issue #205
+  readonly users: UserStore;        // issue #205
+  readonly teams: TeamStore;        // issue #169 — TRANSACTS (4 sites)
+  readonly feedback: FeedbackStore; // issue #255
+  readonly cronRuns: CronRunStore;  // issues #341/#327
 
   private constructor(
     private readonly _client: StateClient,
     private readonly _dialect: Dialect,
     private readonly closer?: () => void,
   ) {
+    // ONE serializer per CONNECTION, shared by every store that opens a
+    // transaction (README locked decision 8). Store-scoped chains would leave
+    // WorkflowRunStore's five named ops racing TeamStore's four on the same
+    // libsql client, which is exactly the hazard the mutex exists to prevent.
+    const serialize = makeOpSerializer();
+
     this.executions = new ExecutionStore(_client);
     this.approvals = new ApprovalStore(_client);
-    this.runs = new WorkflowRunStore(_client, { approvals: this.approvals });
-    this.users = new UserStore(_client);   // issue #205
+    this.runs = new WorkflowRunStore(_client, { approvals: this.approvals, serialize });
+    this.users = new UserStore(_client);
+    this.teams = new TeamStore(_client, { serialize });
+    this.feedback = new FeedbackStore(_client);
+    this.cronRuns = new CronRunStore(_client);
   }
 
   /**
@@ -607,6 +704,91 @@ No transactions or raw sql, so `UserStore` needs no `dbc` parameter and no
 `rows()`/`run()` usage. Its `tests/state/user-store.test.ts` folds into the
 Phase 3 factory.
 
+### `UserStore` (`src/state/user-store.ts`) — 8 methods
+
+Added 2026-08-18; the original plan predates this store. Mostly plain
+builder CRUD (`getById`, `findByGithubId`, `findByLogin`, `findByEmail`,
+`findBySlackUserId`, `linkSlackUser`). Two hazards:
+
+- `getOrCreateUserByGithub` (`:74`) and `upsertSlackUser` (`:130`) are
+  **lookup-then-insert** — the same race `SessionManager.getOrCreateSession`
+  has (README locked decision 11). Under async they need the identical
+  treatment: catch `isUniqueViolation(err)` on the insert and re-read. There
+  are three column-level `UNIQUE`s on this table (`github_id`, `login`,
+  `slack_user_id`), so the violation can come from any of them.
+- **`user-store.ts:155` is `COALESCE(name, ?)` — argument order REVERSED** from
+  every other COALESCE in the codebase: the *existing* value wins. Porting it
+  as ordinary conditional key-spreading inverts the semantics. Keep it as an
+  explicit `sql` expression, or spread only when the current value is null.
+- `is_blocked` / `email_is_placeholder` have **zero write sites** — never add
+  them to an insert; the DDL defaults are the only writer.
+
+### `TeamStore` (`src/state/team-store.ts`) — 8 methods
+
+**Four of the nine transaction sites live here** (`:81` `recordResolution`,
+`:183` `invalidateLogin`, `:203` `invalidateTeam`, `:224` `invalidateAll`),
+none with a CAS guard — they are all-or-nothing cache rewrites across the three
+`github_team_*` tables. They must go through the **same connection-scoped
+serializer** as `WorkflowRunStore`'s ops (README locked decision 8), or a team
+resolution can overlap a run transaction on the shared libsql client.
+
+- `recordResolution` uses **`INSERT OR IGNORE`** ×2 (`:98`, `:103`) →
+  `.onConflictDoNothing()`.
+- `reposForLogin` (`:154`) reads `COALESCE(t.truncated, 0)` over a **LEFT
+  JOIN** (`:167`) — the NULL comes from the join, not the column, so the
+  COALESCE is load-bearing and becomes `COALESCE(…, false)` on PG. The JS side
+  then does `teams.some((t) => t.truncated === 1)` (`:176`), which must become
+  `=== true` under boolean mode — the same silent-inversion class as
+  `consecutiveFailures`.
+- `invalidateTeam`'s `SELECT` (`:199-201`) currently sits **outside** the
+  transaction. Preserve that, or move it inside deliberately — don't change it
+  by accident while adding `await`s.
+- Note the receiver is aliased as `this.store` in
+  `engine/github/team-visibility.ts` — see the codemod traps above.
+
+### `FeedbackStore` (`src/state/feedback-store.ts`) — 15 methods
+
+**Read the NUL-byte trap above before running any sweep over this file.**
+
+- Two `reactor IS ?` **null-safe compares** (`:249`, `:319`) — the idempotency
+  predicate for signal recording. Port as
+  `reactor == null ? isNull(col) : eq(col, reactor)`. Getting this wrong
+  silently forks rows instead of matching, so double-reactions accumulate.
+- `upsertAnchor` (`:138`) is an `ON CONFLICT DO UPDATE` arm with **seven**
+  `COALESCE(excluded.x, feedback_anchors.x)` columns (`:147-154`) — Drizzle
+  `.onConflictDoUpdate({ target, set })` with `sql\`coalesce(excluded…)\``
+  per column.
+- `dailyScores` (`:431`) uses `date(observed_at)` ×3 (`:451,457,458`) →
+  `dayBucket()`. The plan's hotspot table only listed `ExecutionStore`'s
+  rollups; this one is the same port.
+- `anchorsToPoll` (`:204`) orders by `last_polled_at IS NOT NULL,
+  last_polled_at ASC` (`:211`) — a boolean as a sort key. Portable, but pin it
+  with a test.
+- The `channel = ''` sentinel is **deliberate** (see Phase 1) — `channelKey()`
+  at `:530-542` maps `'' ↔ null` at the boundary. Do not let a nullable
+  Drizzle column quietly reintroduce NULLs there.
+- `score` is a **real integer** (−2..+2), NOT a boolean. `SUM(CASE WHEN score
+  > 0 …)` fragments at `:413-416` and `:453-455` are arithmetic and need no
+  boolean port.
+
+### `CronRunStore` (`src/state/cron-run-store.ts`) — 4 methods
+
+Small, but carries **two of the three hard PG syntax errors** in the codebase:
+
+- `latestByCron` (`:118`) is `SELECT * FROM ( … ) WHERE rn = 1` (`:121-126`)
+  with **no alias on the derived table** — PG requires one. `rn` is a
+  `ROW_NUMBER()`, an integer rank, so `rn = 1` is *not* a boolean literal to
+  port.
+- Both `latestByCron` (`:123`) and `recentFailures` (`:156`) order by
+  `started_at DESC, rowid DESC`. **`rowid` does not exist in PostgreSQL**, and
+  the docstring at `:146-150` says the tiebreak is load-bearing: without it,
+  `recentFailures` reports 0 for an always-failing cron whose rows share a
+  timestamp. Replace with a deterministic tiebreak (the TEXT `id`), don't drop
+  it.
+- `recentFailures` feeds the scheduler's failure alert
+  (`cron/scheduler.ts:100`), so a silent regression here turns alerting off —
+  the same failure shape as `consecutiveFailures`. Pin both with tests.
+
 ### `SessionManager` (`src/connectors/messaging/session-manager.ts`)
 
 Constructor becomes `constructor(private client: StateClient, private dialect: Dialect = "sqlite")`.
@@ -658,36 +840,37 @@ Phase 1 baseline; the rebuild moved to `legacy-sqlite.ts`.
 
 Verified against `dashboard/src/api.ts`:
 
-- **`GET /admin/api/executions`** (`src/admin/routes.ts:787-792`) — the
-  dashboard types this **snake_case** with integer success
-  (`Execution`, api.ts:38-51: `trigger_type`, `trigger_id`, `issue_number`,
-  `started_at`, `finished_at`, `success: number | null`, `duration_ms`).
-  Today the route leaks raw `SELECT *` rows; after the swap
-  `allExecutions()` returns camelCase `ExecutionRecord`s, so the route MUST
-  re-serialize:
+> ### 🛑 THIS SECTION WAS WRONG — corrected 2026-08-18
+>
+> The struck text below described the wire format as snake_case and instructed
+> you to add an `executionToWire` re-serializer. **Implementing it would break
+> the dashboard.** Issue #285 (2026-08-07) already fixed the raw-row leak this
+> section was written to compensate for.
+>
+> **Actual contract today** (`dashboard/src/api.ts:55`, `Execution`):
+> **camelCase**, with `success?: boolean` — `triggerType`, `triggerId`,
+> `triggeredBy`, `owner`, `repo`, `issueNumber`, `startedAt`, `finishedAt`,
+> `durationMs`, `workflowRunId`.
+>
+> `ExecutionStore.allExecutions` / `recentExecutions` / `runningExecutions`
+> (`execution-store.ts:710,738,828`) now each select an explicit
+> `EXECUTION_COLUMNS` list and map through `mapExecutionRow`, and the route
+> (`admin/routes.ts:1470-1474`) passes the records straight through.
+>
+> **So there is nothing to re-serialize.** Drizzle's mapped camelCase rows are
+> already the right shape, and `integer({mode:'boolean'})` on `success`
+> produces exactly the `boolean | null` the dashboard type expects — the
+> migration makes this contract *more* correct, not less. Delete
+> `executionToWire` from your mental model entirely.
+>
+> The pin test below is still worth writing; it just pins **camelCase**. See
+> the corrected assertions after the struck block.
 
-  ```ts
-  function executionToWire(r: ExecutionRecord) {
-    return {
-      id: r.id,
-      trigger_type: r.triggerType,
-      trigger_id: r.triggerId,
-      skill: r.skill,
-      repo: r.repo ?? null,
-      issue_number: r.issueNumber ?? null,
-      started_at: r.startedAt,
-      finished_at: r.finishedAt ?? null,
-      success: r.success === undefined ? null : r.success ? 1 : 0,
-      error: r.error ?? null,
-      turns: r.turns ?? null,
-      duration_ms: r.durationMs ?? null,
-      session_id: r.sessionId ?? null,
-      workflow_run_id: r.workflowRunId ?? null,
-    };
-  }
-  // routes.ts:790-791 →
-  return c.json({ executions: executions.map(executionToWire) });
-  ```
+~~- **`GET /admin/api/executions`** — the dashboard types this **snake_case**
+  with integer success; the route MUST re-serialize via `executionToWire`
+  (`trigger_type`, `started_at`, `success: 1|0|null`, `duration_ms`, …).~~
+**STRUCK — see the correction above.** The route body is unchanged by this
+phase.
 
 - **`GET /workflow-runs` / `/workflow-runs/:id`** (routes.ts:861-897) —
   **already camelCase** and stays camelCase: the dashboard's `WorkflowRun`
@@ -716,28 +899,36 @@ fixture pattern of `tests/admin/routes.test.ts`: `new Hono()` +
 wire keys and values, notably:
 
 ```ts
+// CORRECTED 2026-08-18 — camelCase, boolean success.
 expect(body.executions[0]).toMatchObject({
-  trigger_type: "webhook", trigger_id: "owner/repo#1",
-  started_at: expect.any(String), duration_ms: 1234, success: 1,
+  triggerType: "webhook", triggerId: "owner/repo#1",
+  startedAt: expect.any(String), durationMs: 1234, success: true,
 });
-// still-running row:
-expect(runningRow.success).toBe(null);
-expect(runningRow.finished_at).toBe(null);
-// no camelCase leakage:
-expect(Object.keys(body.executions[0])).not.toContain("triggerId");
+// failed row — proves the boolean didn't invert:
+expect(failedRow.success).toBe(false);
+// still-running row — proves the TRI-STATE survived (null, not false):
+expect(runningRow.success).toBeNull();
+expect(runningRow.finishedAt).toBeNull();
+// no snake_case regression:
+expect(Object.keys(body.executions[0])).not.toContain("trigger_id");
 ```
 
-## Dispatcher behavior change (bug fix, visible)
+The tri-state assertion is the load-bearing one. `success` is nullable by
+design (`null` = still in flight, `execution-store.ts:211-213`), and the single
+easiest way to break this migration is to declare the column `.notNull()` or
+default it to `false` — after which every in-flight row reads as a failure and
+the dashboard's outcome bars turn red for healthy runs.
 
-`src/engine/dispatcher.ts:106-116` (status-report handler) reads
-`r.startedAt` / `r.issueNumber` from `runningExecutions()` rows. Today those
-are `undefined` at runtime (raw snake_case rows cast to `ExecutionRecord`),
-so `/status` replies render as `• *build:executor* on repo (started
-undefined)` with the issue number silently dropped. After the swap the rows
-are properly mapped — **no dispatcher code change needed**, but the visible
-status text now shows real ISO timestamps and ` #N` issue suffixes. Mention
-this in the phase's commit message; if any test snapshot pinned the broken
-text, fix the snapshot, not the code.
+## ~~Dispatcher behavior change (bug fix, visible)~~ — ALREADY FIXED
+
+> **Struck 2026-08-18.** This section described `engine/dispatcher.ts`'s
+> status-report handler reading `r.startedAt` / `r.issueNumber` as `undefined`
+> because `runningExecutions()` cast raw snake_case rows. **Issue #285 fixed
+> that on 2026-08-07** — `runningExecutions` (`execution-store.ts:828`) selects
+> `EXECUTION_COLUMNS` and maps via `mapExecutionRow`, so those fields are
+> populated today. There is no behaviour change to announce and no snapshot to
+> update. Expect `/status` output to be **byte-identical** before and after this
+> phase; if it changes, something is wrong.
 
 ---
 
@@ -895,19 +1086,41 @@ anyway; locked decision 12):
 passing probe is weak evidence (timing-dependent, fast local disk), and
 libsql local-client overlapping transactions have failure modes beyond
 `SQLITE_BUSY` (nested-BEGIN errors, shared-handle interleaving). The
-in-process mutex serializing the five named ops is semantically free in a
+in-process mutex serializing the transacting ops is semantically free in a
 single-writer process — build it in from the start; the probe below remains
-as the regression guard:
+as the regression guard.
+
+**Corrected 2026-08-18: the chain is per-CONNECTION, not per-store.** The
+original snippet made `opChain` a private field on `WorkflowRunStore`, which
+was correct when that was the only store that transacted. `TeamStore` now
+opens four more transactions on the same libsql client, so a store-scoped
+chain leaves run-op-vs-team-op races completely unguarded. Own it next to the
+client and inject it:
 
 ```ts
-private opChain: Promise<unknown> = Promise.resolve();
-private serialize<T>(fn: () => Promise<T>): Promise<T> {
-  const next = this.opChain.then(fn, fn);
-  this.opChain = next.catch(() => {});
-  return next;
+// state/client.ts
+export type OpSerializer = <T>(fn: () => Promise<T>) => Promise<T>;
+
+export function makeOpSerializer(): OpSerializer {
+  let chain: Promise<unknown> = Promise.resolve();
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = chain.then(fn, fn);   // run regardless of the previous outcome
+    chain = next.catch(() => {});      // a rejection must not poison the chain
+    return next;
+  };
 }
-// pauseForApproval = this.serialize(() => this.client.transaction(...))
+
+// WorkflowRunStore / TeamStore both receive the SAME instance from StateDb:
+//   pauseForApproval  = this.serialize(() => this.client.transaction(...))
+//   recordResolution  = this.serialize(() => this.client.transaction(...))
 ```
+
+`StateDb.fromClient` must create one too (Phase 4's PGlite leg gets the same
+guarantee — harmless there, and it keeps the two dialects behaviourally
+identical). And the concurrency probe should race a **run op against a team
+op**, not just two run ops — two run ops would still pass under the old
+store-scoped chain, so that version of the test proves nothing about the bug
+this correction fixes.
 
 Keep the probe test — it's the regression guard for Phase 4's PG
 transactions too (where the mutex is equally harmless).

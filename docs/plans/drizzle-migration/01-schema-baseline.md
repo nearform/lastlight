@@ -8,7 +8,7 @@ column modes, hand-edited idempotent baseline).
 
 Introduce Drizzle into the repo **without touching any runtime code path**:
 install the dependencies, write the complete `sqliteTable` schema for all
-eight tables (six state + two messaging), generate the `0000_baseline.sql`
+fifteen tables (thirteen state + two messaging), generate the `0000_baseline.sql`
 migration and hand-edit it to full idempotency, and prove — mechanically, in
 a test — that the Drizzle-migrated schema is equivalent to what the legacy
 `migrate()` + `SessionManager` DDL produces today. This phase is the only
@@ -28,7 +28,7 @@ passes on a clean checkout of `main`.
 |---|---|
 | `apps/server/package.json` | deps: `drizzle-orm`, `@libsql/client`; devDep: `drizzle-kit`; script `db:generate:sqlite` |
 | `pnpm-lock.yaml` | pnpm install side effect (repo-root, one lockfile for the workspace) |
-| `apps/server/src/state/schema/sqlite.ts` | **new** — all 8 tables, all 15 indexes |
+| `apps/server/src/state/schema/sqlite.ts` | **new** — all 15 tables, all 25 named indexes |
 | `apps/server/drizzle-sqlite.config.ts` | **new** — `apps/server/` package root, drizzle-kit config |
 | `apps/server/drizzle/sqlite/0000_baseline.sql` | **new** — generated, then hand-edited |
 | `apps/server/drizzle/sqlite/meta/_journal.json` + `meta/0000_snapshot.json` | **new** — generated, committed as-is |
@@ -74,6 +74,39 @@ faithfully:
   columns first, then the ALTER-added columns in the order migrate.ts adds
   them. drizzle-kit emits columns in declaration order and the equivalence
   test compares `PRAGMA table_info` in cid order.
+
+> ### ⚠ The `owner` column-order divergence — read before writing the test
+>
+> **A fresh database and production do NOT have the same physical column
+> order, and no schema file can satisfy both.** `migrate.ts` runs
+> `ALTER TABLE ... ADD COLUMN owner TEXT` for `workflow_runs` (≈343) and
+> `executions` (≈400) — but **`owner` is already in both CREATE bodies**
+> (`executions` cid 4, `workflow_runs` cid 3). So:
+>
+> - **Fresh DB**: the CREATE wins, the ALTER throws, the `catch {}` swallows
+>   it, and `owner` sits **mid-table**.
+> - **Upgraded prod DB**: the column predates the CREATE-body change, so the
+>   ALTER genuinely appended it and `owner` sits **at the tail**.
+>
+> Consequences, all load-bearing:
+>
+> 1. **Declare the FRESH order** in `schema/sqlite.ts` (`owner` mid-table).
+>    That is what a new Drizzle-managed DB gets and what drizzle-kit diffs
+>    against.
+> 2. **Column order is NOT a correctness property.** Drizzle addresses columns
+>    by name; SQLite does too. Prod keeping `owner` at the tail forever is
+>    harmless — `CREATE TABLE IF NOT EXISTS` no-ops there anyway.
+> 3. **Therefore the equivalence test must compare cid order ONLY on the
+>    fresh-vs-fresh legs (A vs B).** The third assertion — "migrator on a
+>    legacy-shaped DB" — must compare columns as a **map keyed by name**, never
+>    as a cid-ordered array, or it will fail against the very production shape
+>    it exists to protect. Assert the *set* of columns and their types/defaults
+>    there, not their positions.
+>
+> Same applies to any future `ADD COLUMN` whose name already exists in a CREATE
+> body. Grep for duplicate column names across CREATE and ALTER before trusting
+> any transcription.
+
 - **Index names must match exactly** (legacy names below) — the test compares
   `sqlite_master` index rows by name.
 - Timestamps stay `text()` (ISO-8601), booleans `integer({ mode: "boolean" })`,
@@ -83,24 +116,79 @@ faithfully:
 
 ### JSON-column audit (verdicts, with evidence)
 
+**Re-verified 2026-08-18.** Only **five** JSON columns exist across all 15
+tables — the seven newer tables (`cron_runs`, both `feedback_*`, the four
+`github_*`) contain **no JSON at all**, only TEXT/INTEGER scalars.
+
 | Column | Verdict | Evidence |
 |---|---|---|
-| `workflow_runs.phase_history` | **json**, `$type<PhaseHistoryEntry[]>`, notNull, default `'[]'` | parsed `workflow-run-store.ts:138,358`; stringified `:142`; DDL default `migrate.ts:43` |
-| `workflow_runs.context` | **json**, `$type<Record<string, unknown>>` | stringified `workflow-run-store.ts:95`; parsed `:360`; `json_patch` consumer `:302` |
-| `workflow_runs.scratch` | **json**, `$type<Record<string, unknown>>` | parsed `workflow-run-store.ts:117,361`; stringified `:121` |
-| `executions.extension_status` | **json**, `$type<ExtensionStatusMap>` | holds JSON, but parse/stringify sit *outside* the store: stringified `src/workflows/phase-executor.ts:339`, parsed `src/admin/routes.ts:927` (`parseJsonColumn`, `routes.ts:124`). Store passes it through as an opaque string (`execution-store.ts:40,184,596`) |
-| `executions.skills_status` | **json**, `$type<SkillsStatus>` | same pattern: `phase-executor.ts:340`, `routes.ts:928`, `execution-store.ts:46,185,597` |
-| `workflow_approvals.artifact` | **plain `text()`** | it is a filename (`'architect-plan.md'`), never JSON — `approval-store.ts:19` types it `string`, `:59` binds it raw, `:183` reads it raw; intent documented at `migrate.ts:116-118` |
+| `workflow_runs.phase_history` | **json**, `$type<PhaseHistoryEntry[]>`, notNull, default `'[]'` | stringified `workflow-run-store.ts:323`; parsed `:319`, `:878`. `createRun` seeds it with the SQL literal `'[]'` (`:247`), not a JS value |
+| `workflow_runs.context` | **json**, `$type<Record<string, unknown>>` | stringified `workflow-run-store.ts:257`; parsed `:880`. **But see the SQL-mutation warning below — three writes never round-trip through JS.** |
+| `workflow_runs.scratch` | **json**, `$type<Record<string, unknown>>` | stringified `:258`, `:285`; parsed `:281`, `:881` |
+| `executions.extension_status` | **json**, `$type<ExtensionStatusMap>` — *only if both boundaries move in the same commit* | stringified in **`packages/workflow-engine/src/core/phase-executor.ts:350`**; parsed in `apps/server/src/admin/routes.ts:192` (`parseJsonColumn`), called at `:1642`. Store treats it as an opaque `string` throughout (`execution-store.ts:57,137,173,325,346`) |
+| `executions.skills_status` | same as above | `phase-executor.ts:351`; `routes.ts:193`, `:1643`; `execution-store.ts:63,138,174,328,347` |
+| `workflow_approvals.artifact` | **plain `text()`** | a filename (`'architect-plan.md'`), never JSON — `approval-store.ts:16-19`, read raw at `:193`, and queried with `WHERE artifact = ?` in `listByArtifact` `:150-157` |
 
-The `extension_status` / `skills_status` verdict means Phase 2b must also
-drop the `JSON.stringify` at `phase-executor.ts:339-340` and the
-`parseJsonColumn` calls at `routes.ts:927-928`, and retype
-`ExecutionRecord.extensionStatus` / `.skillsStatus` from `string` to the
-object types — record that as a forward note; do **not** touch those files
-in this phase. Type imports (type-only, so no runtime coupling):
-`ExtensionStatusMap` / `SkillsStatus` from `../../engine/github/profiles.js`
-(`profiles.ts:142,170`); `PhaseHistoryEntry` from `../workflow-run-store.js`
-(`workflow-run-store.ts:4-9`). Remember `.js` extensions (Node16 resolution).
+> **⚠ The two status columns are the single most dangerous item in Phase 1.**
+> Their JSON boundary sits **outside** `apps/server` entirely — the writer moved
+> into `packages/workflow-engine` when the engine was extracted (the plan's old
+> `src/workflows/phase-executor.ts:339-340` reference is dead). Declaring them
+> `{mode:'json'}` without moving **both** boundaries in the same commit
+> double-encodes on write and double-decodes on read — and the read side fails
+> **silently**: `parseJsonColumn`'s `catch` (`routes.ts:194`) swallows the throw
+> and returns `undefined`, so the dashboard just shows nothing. That is data
+> loss with no error anywhere. Either leave both `text()` (matching today's
+> contract exactly) or move `phase-executor.ts:350-351` **and**
+> `routes.ts:1642-1643` **and** retype `ExecutionRecord.extensionStatus` /
+> `.skillsStatus` together. Do not touch any of it in Phase 1 — this is a
+> forward note for Phase 2.
+
+> **⚠ `workflow_runs.context` is mutated by SQL, not by JS, in three places** —
+> `{mode:'json'}` does nothing for them and they must each be rewritten:
+> `expireQueued` (`workflow-run-store.ts:632`, `json_patch`), `flipFinished`
+> (`:742`, `json_patch` inside a `CASE`), and `restartRun` (`:798`,
+> **`json_remove`** — a construct the original plan never mentions). Only
+> `flipFinished` appears in 00-architecture's hotspot table; all three need the
+> app-side read-modify-write treatment, inside their existing transaction.
+
+**Partial-select interaction:** `WorkflowRunStore.list()` (`:543-549`)
+deliberately omits `context` and `scratch` for payload size but **does** select
+`phase_history`, and `deserialize` (`:878-881`) parses it unconditionally while
+guarding the other two. Keep `phase_history` `.notNull().default(sql\`'[]'\`)`
+and both others nullable, or `list()` starts throwing.
+
+**Type imports** (type-only, so no runtime coupling — and note the corrected
+origins, both of which moved into the engine package):
+`ExtensionStatusMap` / `SkillsStatus` from
+**`lastlight-workflow-engine`'s `core/types.ts:207-222` / `:241-247`**, not
+`engine/github/profiles.js`; `PhaseHistoryEntry` from
+`../workflow-run-store.js`. Remember `.js` extensions (Node16 resolution).
+
+### Boolean-column audit (verdicts, with evidence)
+
+**Six** boolean columns across the 15 tables. Everything else that is INTEGER
+is a genuine number — explicitly **not** booleans: `feedback_signals.score`
+(−2..+2), `messaging_sessions.message_count`, `workflow_runs.restart_count`,
+`users.github_id`, every `*_tokens` / `*_ms` / `issue_number` / `turns`, and
+all five `cron_runs` counters.
+
+| Column | Mode | Notes |
+|---|---|---|
+| `executions.success` | `integer({mode:"boolean"})` **nullable** | **TRI-STATE — `null` means still in flight.** Written `? 1 : 0` at `execution-store.ts:351` and as a SQL literal `0` at `:392,664,679,698`; `recordStart` omits it entirely. `ExecutionRecord.success?: boolean` is optional for exactly this reason |
+| `users.is_blocked` | `integer({mode:"boolean"}).notNull().default(false)` | **Zero write sites** — the DDL default is the only writer. Read at `user-store.ts:230` |
+| `users.email_is_placeholder` | same | **Zero write sites.** Read at `user-store.ts:231` |
+| `cron_overrides.enabled` | `.notNull().default(true)` | write `db.ts:173`, read `:184` |
+| `workflow_overrides.enabled` | `.notNull().default(true)` | write `db.ts:235`, reads `:202` (the hot path every dispatch crosses) and `:241` |
+| `github_teams.truncated` | `.notNull().default(false)` | write `team-store.ts:93`; read via `COALESCE(t.truncated, 0)` at `:167` — nullable **at the query level** because of a `LEFT JOIN`, so that COALESCE is load-bearing and becomes `COALESCE(…, false)` on PG |
+| `messaging_sessions.active` | `integer({mode:"boolean"}).default(true)` — **nullable**, no `.notNull()` | never written from JS; SQL literals only (`session-manager.ts:162,210`), and `INSERT` omits it |
+
+> **⚠ `consecutiveFailures` does not merely need a tweak — it silently dies.**
+> `execution-store.ts:731` reads `if (row.success === 0) count++;`. Under
+> `{mode:'boolean'}` Drizzle maps `0 → false`, so `=== 0` is **never true
+> again** and the function returns 0 forever. It backs the cron failure alert,
+> so the failure mode is "alerting quietly turns off", with nothing red
+> anywhere. Port it to `=== false` and pin it with a test that would fail on
+> the inverted form.
 
 ### `executions` (full snippet)
 
@@ -267,6 +355,107 @@ how the test compares indexes. `is_blocked` / `email_is_placeholder` stay
 `{mode:"boolean"}` — INTEGER DDL, so no equivalence impact (like every other
 boolean).
 
+### `cron_runs` (issues #341/#327)
+
+Legacy DDL `migrate.ts` ≈78-94; index ≈96. All CREATE, **no ALTERs**. One row
+per cron FIRE — the only record a zero-discovery backstop fire leaves.
+
+`id` `text().primaryKey()`; `cronName` `text("cron_name").notNull()`;
+`workflow` `text()`; `handler` `text()`; `source` `text().notNull()`; `actor`
+`text()`; `startedAt` `text("started_at").notNull()`; `finishedAt`
+`text("finished_at")`; `status` `text().notNull().default("running")`;
+`reposEligible` `integer("repos_eligible")`; `reposScanned`
+`integer("repos_scanned")`; `discovered` `integer()`; `dispatched`
+`integer()`; `failures` `integer()`; `error` `text()`.
+
+Index: `index("idx_cron_runs_name_started").on(t.cronName, sql\`${t.startedAt} DESC\`)`
+— **DESC on the second key** (`migrate.ts` ≈96).
+
+Note `workflow` and `handler` are both nullable: a cron declares exactly one.
+
+### `feedback_anchors` (issue #255)
+
+Legacy DDL `migrate.ts` ≈158-194; indexes ≈196-202. All CREATE, no ALTERs.
+
+`id` `text().primaryKey()`; `source` `text().notNull()`; `kind`
+`text().notNull()`; `externalId` `text("external_id").notNull()`; `nodeId`
+`text("node_id")`; `channel` `text().notNull().default("")`; `owner`
+`text()`; `repo` `text()`; `issueNumber` `integer("issue_number")`;
+`workflowRunId` `text("workflow_run_id")`; `workflowName`
+`text("workflow_name")`; `messagingSessionId` `text("messaging_session_id")`;
+`createdAt` `text("created_at").notNull()`; `lastPolledAt`
+`text("last_polled_at")`.
+
+**Table-level constraint** (`migrate.ts` ≈193):
+`unique().on(t.source, t.channel, t.externalId)`.
+
+Indexes: `idx_feedback_anchors_lookup` on `(source, channel, external_id)` —
+**declare it even though it duplicates the UNIQUE autoindex**;
+`idx_feedback_anchors_run` on `(workflow_run_id)`;
+`idx_feedback_anchors_poll` on `(source, created_at, last_polled_at)`.
+
+Two traps, both deliberate — do **not** "fix" either:
+
+- **`channel` is `NOT NULL DEFAULT ''`** — the empty string is a sentinel, not
+  an oversight. It exists precisely because SQLite treats NULLs as distinct,
+  which would make the three-column UNIQUE inoperative. The store maps `''` ↔
+  `null` at its boundary; the rationale is a 17-line comment at `migrate.ts`
+  ≈169-176.
+- **`workflow_run_id` is nullable on purpose** (`migrate.ts` ≈181-183) — an
+  unattributable bot comment is still worth anchoring.
+
+### `feedback_signals` (issue #255)
+
+Legacy DDL `migrate.ts` ≈204-232; indexes ≈233-239. All CREATE, no ALTERs.
+
+`id` `text().primaryKey()`; `anchorId` `text("anchor_id").notNull()`;
+`source` `text().notNull()`; `workflowRunId` `text("workflow_run_id")`;
+`workflowName` `text("workflow_name")`; `messagingSessionId`
+`text("messaging_session_id")`; `owner` `text()`; `repo` `text()`;
+`issueNumber` `integer("issue_number")`; `emoji` `text().notNull()`; `score`
+`integer().notNull()` (−2..+2, a real number — **not** a boolean);
+`sentiment` `text().notNull()`; `reactor` `text()`; `reactedAt`
+`text("reacted_at")`; `observedAt` `text("observed_at").notNull()`;
+`removedAt` `text("removed_at")`; `exportedAt` `text("exported_at")`.
+
+**Table-level constraint** (`migrate.ts` ≈231):
+`unique().on(t.anchorId, t.reactor, t.emoji)`. Note `reactor` is **nullable**,
+so unlike the anchors table this constraint does *not* bind for null reactors.
+Transcribe it as-is; do not make `reactor` NOT NULL to "fix" it.
+
+Indexes (5): `idx_feedback_signals_anchor` `(anchor_id)`;
+`idx_feedback_signals_run` `(workflow_run_id)`;
+`idx_feedback_signals_observed` `(observed_at DESC)`;
+`idx_feedback_signals_workflow` `(workflow_name, observed_at DESC)`;
+`idx_feedback_signals_export` `(exported_at)`.
+
+`anchor_id` is a logical reference to `feedback_anchors.id` with **no
+`REFERENCES` clause** — keep it a plain column.
+
+### The four `github_*` visibility-cache tables (issue #169)
+
+Legacy DDL `migrate.ts` ≈250-295. All CREATE, no ALTERs. **Three of them use
+composite primary keys** — the only composite PKs in the schema. In
+sqlite-core these are declared with the table-level
+`primaryKey({ columns: [...] })` helper, not `.primaryKey()` on a column.
+
+| table | columns | PK |
+|---|---|---|
+| `github_teams` | `org` `text().notNull()`, `slug` `text().notNull()`, `name` `text()`, `reposSyncedAt` `text("repos_synced_at").notNull()`, `truncated` `integer({mode:"boolean"}).notNull().default(false)` | **composite `(org, slug)`** |
+| `github_team_repos` | `org`, `teamSlug` `text("team_slug")`, `repo` — all `text().notNull()` | **composite `(org, team_slug, repo)`** — every column is the key |
+| `github_team_members` | `org`, `teamSlug` `text("team_slug")`, `login` — all `text().notNull()` | **composite `(org, team_slug, login)`** — every column is the key |
+| `github_visibility_sync` | `login` `text().primaryKey()`, `syncedAt` `text("synced_at").notNull()`, `status` `text().notNull()`, `detail` `text()` | single |
+
+Only one named index across all four:
+`index("idx_github_team_members_login").on(t.login)` (`migrate.ts` ≈283).
+`github_teams.truncated` is the boolean. `repo` on `github_team_repos` holds
+the **qualified** `owner/repo` full name — unlike everywhere else in the
+schema post-#279, so do not apply the bare-repo rule here.
+
+`(org, team_slug)` on the two child tables logically references
+`github_teams.(org, slug)` — note the **column-name mismatch** (`slug` vs
+`team_slug`) and that no FK is declared. Keep it that way.
+
 ### `messaging_sessions` (full snippet)
 
 Legacy DDL `session-manager.ts:22-33`; indexes `:44-45` and the partial
@@ -301,6 +490,22 @@ export const messagingSessions = sqliteTable(
 Keep the WHERE clause as the literal `sql\`active = 1\`` so the emitted text
 matches the legacy index (`session-manager.ts:68`).
 
+**Do NOT add a table-level `UNIQUE(platform, channel_id, thread_id, user_id)`.**
+That constraint used to exist and was *removed* because it broke get-or-create
+— a deactivated session still occupied the key, so a returning user could never
+start a new one. The partial unique index above is its replacement, and the
+whole `rebuildWithoutTableUnique()` path (`session-manager.ts` ≈92-136, moving
+to `legacy-sqlite.ts` in Phase 2) exists solely to strip it from databases that
+still carry it. Transcribing it back in re-introduces the bug the rebuild
+exists to undo.
+
+Two more deliberate oddities here: **`message_count` and `active` are DEFAULT
+*without* NOT NULL** — the only such columns in the schema (everything else
+pairs the two). Since `active` is the partial index's predicate, a NULL
+`active` row is silently exempt from the uniqueness rule. And **`thread_id` is
+nullable while being a key column of that unique index**, so DM-style sessions
+with no thread do not collide. Transcribe both as-is.
+
 ### `messaging_messages`
 
 Legacy DDL `session-manager.ts:35-42`; index `:46-47`. Columns: `id`
@@ -310,12 +515,42 @@ Legacy DDL `session-manager.ts:35-42`; index `:46-47`. Columns: `id`
 `text().notNull()`; `platformMessageId` `text("platform_message_id")`.
 Index: `index("idx_msg_messages_session").on(t.sessionId, t.timestamp)`.
 
-Index tally: 3 (executions) + 4 (workflow_runs) + 2 (approvals) + 3 (users:
-`idx_users_login` / `idx_users_email` / `idx_users_slack`) + 3
-(messaging_sessions incl. the partial unique) + 1 (messaging_messages) =
-**15 named indexes**, one of them partial-unique, two with DESC keys. (The
-three `users` column-level `UNIQUE` autoindexes are NOT in this count — they
-have NULL sql and are filtered out on both legs; see the users note above.)
+### Index tally — **25 named indexes** across 15 tables
+
+3 (executions) + 4 (workflow_runs) + 1 (cron_runs) + 2 (approvals) + 3 (users)
++ 3 (feedback_anchors) + 5 (feedback_signals) + 1 (github_team_members) + 3
+(messaging_sessions, incl. the partial unique) + 1 (messaging_messages) = **25**.
+
+**Five tables carry no named index at all**: `cron_overrides`,
+`workflow_overrides`, `github_teams`, `github_team_repos`,
+`github_visibility_sync`.
+
+Of the 25: exactly **one is UNIQUE and it is also the only partial one**
+(`idx_msg_sessions_unique_active ... WHERE active = 1`), and **five carry DESC
+keys** — three of them mixed ASC+DESC composites SQLite cannot satisfy by a
+reverse scan, so the DESC is load-bearing, not cosmetic:
+
+| index | keys |
+|---|---|
+| `idx_workflow_runs_started_at` | `started_at DESC` |
+| `idx_workflow_runs_name_started` | `workflow_name ASC, started_at DESC` |
+| `idx_cron_runs_name_started` | `cron_name ASC, started_at DESC` |
+| `idx_feedback_signals_observed` | `observed_at DESC` |
+| `idx_feedback_signals_workflow` | `workflow_name ASC, observed_at DESC` |
+
+**Nineteen implicit `sqlite_autoindex_*`** entries also exist (from PKs, the
+three composite PKs, `users`' three column-level `UNIQUE`s, and the two
+table-level `UNIQUE` constraints on the feedback tables). They have `sql IS
+NULL` in `sqlite_master` and step 4's extraction already filters them out on
+**both** legs, so no methodology change is needed — a legacy column-level
+`UNIQUE` and a Drizzle `.unique()` emit the identical NULL-sql autoindex.
+
+**Three named indexes are redundant with an autoindex and must STILL be
+declared** — omit them and `drizzle-kit generate` will emit `DROP INDEX`
+against prod: `idx_users_login` (duplicates the `login UNIQUE` autoindex),
+`idx_users_slack` (duplicates `slack_user_id UNIQUE`), and
+`idx_feedback_anchors_lookup` (duplicates the `UNIQUE(source, channel,
+external_id)` autoindex, same columns, same order).
 
 ## Step 3 — drizzle-kit config + baseline generation
 
@@ -379,7 +614,8 @@ Extract from each leg and deep-equal after normalization:
 
 1. **Table list**: `SELECT name FROM sqlite_master WHERE type='table'`,
    excluding `sqlite_%` and `__drizzle_migrations` (and their autoindexes).
-   Must be exactly the 8 tables (incl. `users`).
+   Must be exactly the 15 tables. Also exclude `sqlite_sequence`, which
+   `messaging_messages.id AUTOINCREMENT` creates.
 2. **Columns**: per table, `PRAGMA table_info(<t>)` in cid order, normalized
    to `{ name, type: upper, notNull: notnull === 1 || pk > 0, dflt:
    normalizeDefault(dflt_value), pk: pk > 0 }`. The `|| pk > 0` matters:
@@ -395,7 +631,21 @@ Extract from each leg and deep-equal after normalization:
    `WHERE active = 1` clause verbatim.
 4. **Foreign keys**: per table, `PRAGMA foreign_key_list(<t>)` normalized to
    `{ from, table, to, onUpdate, onDelete }` — pins the
-   `messaging_messages.session_id → messaging_sessions.id` FK.
+   `messaging_messages.session_id → messaging_sessions.id` FK. That is the
+   **only declared FK in the entire 15-table schema**, so this assertion is
+   really "exactly one FK, and it is this one". Every other cross-table
+   reference (`executions.workflow_run_id`, `workflow_approvals.workflow_run_id`,
+   `feedback_signals.anchor_id`, the `feedback_*.messaging_session_id` pair,
+   `github_team_*.（org, team_slug)`) is **logical only** — declare those as
+   plain columns, NOT `.references(...)`, or the baseline stops matching prod.
+   Note also that `PRAGMA foreign_keys` is **never enabled at runtime** (the
+   sole pragma on the connection is `journal_mode = WAL`), so the one FK is
+   declared-but-unenforced today; Phase 2's `busy_timeout` addition must not
+   accidentally turn it on.
+5. **Composite primary keys**: `PRAGMA table_info` reports `pk` as a 1-based
+   position, not a boolean. The three `github_*` tables have multi-column PKs,
+   so normalize to the ordered list of PK columns per table rather than a
+   `pk > 0` flag — a flag would pass while the key order silently diverged.
 
 (libsql is async: read Leg B's pragmas via `client.execute("PRAGMA ...")`
 — same result shape, rows as objects.)
@@ -462,7 +712,7 @@ Dashboard typecheck not needed (no admin routes touched).
 - [ ] `drizzle-orm` + `@libsql/client` in dependencies, `drizzle-kit` in
       devDependencies — all latest stable, no RC pins.
 - [ ] `db:generate:sqlite` script in package.json.
-- [ ] `apps/server/src/state/schema/sqlite.ts` defines all 8 tables, 15
+- [ ] `apps/server/src/state/schema/sqlite.ts` defines all 15 tables, 25
       named indexes (incl. the partial unique + both DESC indexes), with the
       JSON/boolean mode decisions recorded above.
 - [ ] `apps/server/drizzle/sqlite/0000_baseline.sql` exists, fully
