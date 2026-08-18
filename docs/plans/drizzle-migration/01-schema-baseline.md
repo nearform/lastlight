@@ -16,6 +16,41 @@ window in which both drivers coexist with the legacy DDL still live, so the
 schema-equivalence test is the key deliverable: it is the proof that Phase 2b
 can swap engines under a database whose shape is byte-for-byte accounted for.
 
+## Execution strategy (added 2026-08-18 — locked decision 16)
+
+Transcribing 15 tables is the one genuinely parallelisable job in this
+migration. Fan out the **transcription**, keep the **judgement** serial.
+
+**Fan out — 4 agents, one per group.** Each gets the same brief: read the DDL
+at the cited lines, emit a `sqliteTable` definition, preserve physical column
+order and exact index names, apply the JSON/boolean verdicts from this doc, and
+change nothing else.
+
+| Agent | Tables | Why grouped |
+|---|---|---|
+| A | `cron_overrides`, `workflow_overrides`, `workflow_approvals`, `cron_runs`, `users` | Plain shapes. `users` needs 3 column-level `UNIQUE`s + 3 named indexes (two redundant with autoindexes — declare both) |
+| B | `feedback_anchors`, `feedback_signals` | The two **table-level `UNIQUE`** constraints, the `channel = ''` sentinel, and 8 indexes incl. 2 DESC |
+| C | `github_teams`, `github_team_repos`, `github_team_members`, `github_visibility_sync` | All three **composite PKs** live here — one agent so the `primaryKey({columns})` idiom is applied consistently |
+| D | `messaging_sessions`, `messaging_messages` | The **partial unique index**, the only FK, the only AUTOINCREMENT, and the nullable-with-default oddities |
+
+**Keep serial — do these yourself, in this order:**
+
+1. **`executions` + `workflow_runs`.** The two largest (26 and 19 columns),
+   both with long ALTER histories, and **both carrying the `owner` cid-order
+   trap** (see the ⚠ block below). Do not delegate these.
+2. **Reconcile + generate.** Assemble `schema/sqlite.ts`, run
+   `db:generate:sqlite`, hand-edit `0000_baseline.sql` to full `IF NOT EXISTS`
+   idempotency, add the required header comment.
+3. **The equivalence test.** This is the phase's whole deliverable and the
+   `owner` trap lands squarely on it — the legacy-shaped leg must compare
+   columns **by name**, not cid order. Writing it is the judgement call the
+   fan-out exists to buy you time for.
+
+Cheap correctness check before generating: the schema file should total
+**15 tables and 25 named indexes**, with **5 DESC keys**, **1 partial unique
+index**, **1 FK**, and **3 composite PKs**. If any count is off, a group came
+back wrong.
+
 ## Preconditions
 
 None — this is the first phase. The repo must be green before starting:

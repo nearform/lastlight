@@ -8,6 +8,52 @@ This directory is the executable plan. Each phase doc is self-sufficient: an
 agent with no prior context should be able to execute its phase from that doc
 plus this README alone.
 
+---
+
+## ▶ Start here — resuming in a new session
+
+**The work happens on the `drizzle-migration` branch, not `main`.** `main`
+carries this plan (so it is readable from anywhere) and stays deployable on
+better-sqlite3 until Phase 5. Landing as ONE PR.
+
+Run this first, every session:
+
+```bash
+cd ~/work/lastlight
+git checkout drizzle-migration
+git merge main --no-edit          # MERGE, never rebase — locked decision 6
+pnpm install --frozen-lockfile
+pnpm turbo run typecheck test build    # must be green BEFORE you start
+```
+
+Then read, in order: **this README** (locked decisions + the drift ledger
+above) → **[00-architecture.md](00-architecture.md)** → **your phase doc**.
+Check "Status / todo list" below for the next unticked phase.
+
+A kickoff prompt that needs no other context:
+
+> Continue the Drizzle migration on the `drizzle-migration` branch. Read
+> `docs/plans/drizzle-migration/README.md` and `00-architecture.md`, then
+> execute the next unticked phase from its own doc. Follow the locked
+> decisions — do not relitigate them. Land nothing on `main`.
+
+**Invariants to hold**
+
+| Invariant | Value |
+|---|---|
+| Green baseline (as of Phase 0) | **203 test files, 3,115 tests passing** |
+| Branch sync | merge `main` in; never rebase |
+| `main` | docs only until Phase 5; stays on better-sqlite3 |
+| Scope | Phases 1–5. **Phase 6 is deferred out of this PR** |
+| Freeze | `apps/server/src/state/**` + `migrate.ts` on `main`, incl. the agent's own PRs |
+
+**Where the risk is:** Phase 1 is low-risk but contains the `owner` cid-order
+trap (see 01's ⚠ block — it produces a *passing* test that fails against
+production). Phase 2 is the crux: ~5,000 lines across two packages. Phases 3–5
+are consolidation.
+
+---
+
 > **Reconciled 2026-08-18 (v0.25.9).** The plan was written 2026-07-06 and last
 > revised 2026-07-24 at **v0.21.8**; the state layer roughly doubled in between.
 > Phase 0 below re-derived every inventory against current `main`. The headline
@@ -32,6 +78,14 @@ each must leave the repo green before the next starts.
 - [x] **Phase 0** — reconcile the branch and this plan with `main`: merge (not
   rebase — locked decision 6), verify green, and re-derive every schema /
   consumer / test inventory in the phase docs against current source.
+  *Completed 2026-08-18.* Branch merged with `main` (164 commits, zero
+  conflicts — its only commits touch this directory); baseline verified at 203
+  files / 3,115 tests; 872 lines of corrections across all seven docs; docs
+  landed on `main` by fast-forward. **Deviations:** none from the phase's
+  intent, but the reconciliation itself found six statements that were wrong
+  rather than merely stale — see the drift ledger above, and the struck
+  sections in 02b (`executionToWire`, the dispatcher "bug fix"). Locked
+  decisions 13–16 were added as a result. No source file was touched.
 - [ ] **Phase 1** — [01-schema-baseline.md](01-schema-baseline.md) — deps,
   Drizzle sqlite schema, idempotent baseline migration, schema-equivalence test
   *(risk: low)*
