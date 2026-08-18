@@ -6,6 +6,8 @@ import type { AgentWorkflowDefinition } from "#src/workflows/schema.js";
 import type { TemplateContext } from "#src/workflows/templates.js";
 import type { ExecutorConfig } from "#src/engine/github/profiles.js";
 import { runWorkflow } from "#src/workflows/runner.js";
+import { sandboxFor } from "#src/sandbox/sandbox.js";
+import { ImageAllowlist, PortMapping, ServiceSet } from "lastlight-shared/sandbox-services";
 
 /**
  * Integration tests that ACTUALLY start a docker sandbox and execute
@@ -202,4 +204,64 @@ describe.skipIf(!RUN)("sandbox command execution (integration)", () => {
     expect(calc?.output).toContain("py-answer: 42");
     expect(calc?.output).toContain("py-version-ok: True");
   }, TIMEOUT);
+});
+
+describe.runIf(RUN)("docker dependency services (integration)", () => {
+  it(
+    "runs a real postgres the phase reaches on localhost, and leaves nothing behind",
+    async () => {
+      const taskId = `svc-it-${Date.now()}`;
+      const services = ServiceSet.create(
+        [
+          {
+            name: "postgres",
+            image: "postgres:16-alpine",
+            env: { POSTGRES_PASSWORD: "probe", POSTGRES_USER: "probe", POSTGRES_DB: "probedb" },
+            ports: [PortMapping.parse("5432")!],
+            healthCmd: ["pg_isready", "-U", "probe"],
+          },
+        ],
+        { allowlist: ImageAllowlist.of(["docker.io/library/postgres:*"]), maxServices: 2 },
+      ).set;
+
+      const sbx = sandboxFor("docker", {
+        taskId,
+        egress: { unrestricted: false, hosts: [] },
+        env: {},
+        stateDir,
+        services,
+      });
+
+      await sbx.provision();
+      try {
+        // A raw TCP connect rather than psql: the sandbox image carries node and no
+        // postgres client, and reachability on localhost is the claim under test. The
+        // health poll in startServices already waited for pg_isready, so a refused
+        // connection here is a real failure rather than a race.
+        const probe =
+          `node -e "const s=require('net').connect(5432,'127.0.0.1');` +
+          `s.on('connect',()=>{console.log('SERVICE_REACHABLE');s.end();process.exit(0)});` +
+          `s.on('error',e=>{console.log('SERVICE_UNREACHABLE '+e.code);process.exit(1)})"`;
+        const res = await sbx.runCommand(taskId, probe, {
+          cwd: "/home/agent/workspace",
+          timeoutSeconds: 120,
+        });
+        expect(res.stdout).toContain("SERVICE_REACHABLE");
+        expect(res.exitCode).toBe(0);
+      } finally {
+        await sbx.dispose();
+      }
+
+      // The regression guard for the finding that motivated the teardown work: a joined
+      // container OUTLIVES `docker rm -f` of the sandbox, so without explicit removal
+      // this leaks one container per phase.
+      const leaked = execFileSync(
+        "docker",
+        ["ps", "-aq", "--filter", `label=lastlight.taskId=${taskId}`],
+        { encoding: "utf-8" },
+      ).trim();
+      expect(leaked).toBe("");
+    },
+    300_000,
+  );
 });

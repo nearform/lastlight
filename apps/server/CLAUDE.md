@@ -1036,6 +1036,21 @@ Sandbox (`kubernetes` backend — in development, opt-in):
   backpressure). Opt-in IT: `RUN_K8S_IT=1 npx vitest run
   tests/sandbox/k8s/kubernetes.integration.test.ts`.
 
+Sandbox dependency services (`docs/plans/sandbox-services`):
+
+- A managed repo may declare `services:` in `.lastlight/lastlight.yml` — a test
+  postgres/redis a phase runs against, in Actions' vocabulary minus expressions.
+  The harness starts them in the sandbox's own network namespace, so the phase
+  reaches them on `localhost` and the sandbox gains **no new privilege** (no
+  docker socket, no root, no docker client). `docker` + `kubernetes` only;
+  the other backends log once and run without.
+- **Inert by default**: `repoConfig.allowedImages` is deny-all until an operator
+  lists registry-qualified images — the INVERSE polarity to `allowedModels`.
+- `LASTLIGHT_K8S_FORWARDER_IMAGE` / `LASTLIGHT_FORWARDER_IMAGE` — image for the
+  port-remap forwarder sidecar (default `alpine/socat:latest`). Operator config;
+  never subject to `allowedImages`. Equivalent config: `kubernetes.forwarderImage`.
+- Full contract: `spec/09-sandbox.md` → "Dependency services".
+
 Sandbox workspace provisioning (issue #107):
 
 - **Shallow clone** — read-only workflows (everything except the

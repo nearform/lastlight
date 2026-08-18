@@ -75,6 +75,24 @@ repo-config-schema.ts The PURE half of the per-repository `.lastlight/` config
                       acquire precedence the operator's layers don't have.
                       Exported both from the barrel and as the
                       `lastlight-shared/repo-config-schema` subpath.
+sandbox-services.ts   The dependency-service domain model (a repo-declared test
+                      postgres/redis a phase runs against): PortMapping,
+                      ServiceSpec, ServiceSet, ImageAllowlist, parseServiceSpec.
+                      PURE — no fs, no network, no framework types. It says what
+                      a phase WANTS; the sandbox adapters decide how, exactly as
+                      EgressPolicy does. Here rather than in core because the CLI
+                      validates `.lastlight/` offline and may never gain an edge
+                      to core — the same reason repo-config-schema.ts is here,
+                      which imports it for the `services:` sanitizer.
+                      ServiceSet is an AGGREGATE, not a list: services share the
+                      sandbox's network namespace, so a phase has one flat port
+                      space and a collision is invisible to any per-item
+                      validator. Admission is partial by design — a rejected
+                      service is dropped and reported, never thrown.
+                      Note ImageAllowlist's polarity is the INVERSE of
+                      RepoConfigPolicy.allowedModels: absent/null/empty permits
+                      NOTHING, because a service image is arbitrary code pulled
+                      onto the operator's infrastructure.
 core-pin.ts           readCorePin() — resolve the overlay's `deploy.version` core
                       pin (a git tag/ref). Read host-side by the CLI's server
                       lifecycle and in-container for the drift banner.

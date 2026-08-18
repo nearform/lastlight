@@ -117,6 +117,12 @@ describe("loadConfig — repoConfig bounds", () => {
       allowKeys: [...DEFAULT_REPO_CONFIG_ALLOW_KEYS],
       allowedModels: null,
       allowAssets: true,
+      // "Inert" is the point of this assertion, and it is why the shipped
+      // `allowedImages: []` must normalise to null: ImageAllowlist reads null as
+      // "permit nothing", so declaring a service changes nothing until an operator
+      // lists images. Note the opposite meaning to allowedModels above.
+      allowedImages: null,
+      maxServices: 2,
     });
   });
 

@@ -157,6 +157,21 @@ export interface ExecutorConfig {
    */
   unrestrictedEgress?: boolean;
   /**
+   * Dependency services this phase runs against — the RAW declarations from the target
+   * repo's `.lastlight/lastlight.yml`, keyed by service name
+   * (`docs/plans/sandbox-services`).
+   *
+   * Deliberately opaque `unknown` rather than a parsed `ServiceSpec[]`: the parsed type
+   * lives in `lastlight-shared`, and this package is a LEAF that shared depends on —
+   * importing it here would invert the dependency graph the dep-cruiser gate enforces.
+   * Core parses these through `parseServiceSpec` at the orchestrator boundary. The
+   * values are plain data for the same reason the merged repo config stores them that
+   * way: this config is persisted as JSON and rehydrated on resume.
+   */
+  services?: Record<string, unknown>;
+  /** Operator bounds the run resolved for {@link services}. Plain data, same reasoning. */
+  serviceBounds?: { allowedImages: string[] | null; maxServices: number };
+  /**
    * Enable agentic-pi's web-search extension (`web_search` / `web_fetch`
    * tools). Default false. agentic-pi auto-enables web search whenever a
    * provider env var (`TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`,

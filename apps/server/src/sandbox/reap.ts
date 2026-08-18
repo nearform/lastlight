@@ -2,6 +2,7 @@ import { execFileSync } from "child_process";
 import { rmSync } from "fs";
 import { join, resolve, sep } from "path";
 import { logger } from "../logging/logger.js";
+import { SERVICE_LABEL_SELECTOR } from "./service-containers-docker.js";
 
 const log = logger("reap");
 
@@ -54,6 +55,37 @@ export function hasLiveContainer(taskId: string): boolean {
   }
 }
 
+/**
+ * Remove any dependency-service container left behind for `taskId`, found BY LABEL.
+ *
+ * By label because that is the only handle that survives a harness restart — the
+ * driver's in-memory container map does not. Best effort: docker absent or errored is a
+ * silent no-op, so the non-docker backends (kubernetes / gondolin / none / smol) are
+ * unaffected, exactly like {@link hasLiveContainer} above.
+ */
+export function reapServiceContainers(taskId: string): number {
+  try {
+    const ids = execFileSync(
+      "docker",
+      [
+        "ps", "-aq",
+        "--filter", `label=lastlight.taskId=${taskId}`,
+        "--filter", `label=${SERVICE_LABEL_SELECTOR}`,
+      ],
+      { encoding: "utf-8", timeout: 5000 },
+    )
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    if (!ids.length) return 0;
+    execFileSync("docker", ["rm", "-f", ...ids], { encoding: "utf-8", timeout: 30_000 });
+    log.info("Removed orphaned service containers", { taskId, count: ids.length });
+    return ids.length;
+  } catch {
+    return 0;
+  }
+}
+
 export interface ReapResult {
   removed: boolean;
   /** Why the dir was skipped, when `removed` is false. */
@@ -86,6 +118,13 @@ export function reapSandboxWorkspace(opts: {
     return { removed: false, reason: "live-container" };
   }
   try {
+    // Reaching here means no sandbox container owns this taskId any more, so any
+    // dependency-service container still carrying its label is an ORPHAN — the docker
+    // backend's services outlive `docker rm -f` of the namespace owner, so a harness
+    // that died between provision() and dispose() leaves them running with nothing to
+    // collect them. This is the backstop for that; the happy path is
+    // `DockerSandbox.destroy`. Kubernetes needs no equivalent (the pod is the boundary).
+    reapServiceContainers(opts.taskId);
     rmSync(workDir, { recursive: true, force: true });
     log.info("Removed workspace", { taskId: opts.taskId });
     return { removed: true };

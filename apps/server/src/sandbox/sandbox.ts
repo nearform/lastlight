@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { spawnSync } from "child_process";
 import type { run as agenticRunType, RunResult, ThinkingLevel } from "agentic-pi";
 import type { OtelConfig, SandboxBackend } from "../config/config.js";
+import type { ServiceSet } from "lastlight-shared/sandbox-services";
 import { resolveKubernetesConfig } from "../config/config.js";
 import { createTaskSandbox, setupTaskWorktree, prePopulateWorkspace } from "./index.js";
 import { GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue } from "./git-http-auth.js";
@@ -191,6 +192,18 @@ export interface SandboxFactoryOpts {
   imageName?: string;
   otel?: OtelConfig;
   timeoutSeconds?: number;
+  /**
+   * Dependency services this phase runs against, already admitted against the
+   * operator's bounds (`docs/plans/sandbox-services`).
+   *
+   * **Intent only**, exactly like {@link EgressPolicy} above: the set says *which*
+   * services are wanted; each adapter owns the mechanism — kubernetes native sidecars,
+   * docker containers joined to the sandbox's network namespace. Nothing about
+   * `restartPolicy: Always` or `--network container:` appears at this level.
+   *
+   * Undefined or empty means none, which is every run until a repo declares some.
+   */
+  services?: ServiceSet;
 }
 
 export type SandboxFactory = (backend: SandboxBackend, opts: SandboxFactoryOpts) => Sandbox;
@@ -258,6 +271,7 @@ export function sandboxFor(backend: SandboxBackend, opts: SandboxFactoryOpts): S
         harnessEndpoint: k.harnessEndpoint,
         harnessNamespace: k.harnessNamespace,
         harnessPodLabels: k.harnessPodLabels,
+        forwarderImage: k.forwarderImage,
       });
     }
     default: {
@@ -305,6 +319,12 @@ class DockerSandbox implements Sandbox {
       );
     }
     this.sbx = sbx;
+    // Services join the sandbox container's network namespace, so they can only start
+    // once it exists — hence here, after createTaskSandbox, not before. `dispose` tears
+    // them down in the opposite order (see DockerSandbox.destroy).
+    if (this.opts.services && !this.opts.services.isEmpty) {
+      await sbx.sandbox.startServices(this.opts.taskId, this.opts.services);
+    }
     this.agentCwd = pre ? `${DOCKER_WORKSPACE_DIR}/${pre.repo}` : DOCKER_WORKSPACE_DIR;
     return { hostWorkspaceDir: sbx.workDir, agentCwd: this.agentCwd };
   }
@@ -646,6 +666,7 @@ export class FakeSandbox implements Sandbox {
   // Recorded for assertions.
   egress?: EgressPolicy;
   env?: Record<string, string>;
+  services?: ServiceSet;
   hostWorkspaceDir = "";
   agentCwd = "";
   stagedSkillDirs?: string[];
@@ -666,6 +687,7 @@ export class FakeSandbox implements Sandbox {
       this.backend = backend;
       this.egress = opts.egress;
       this.env = opts.env;
+      this.services = opts.services;
       return this;
     };
   }

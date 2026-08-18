@@ -16,6 +16,8 @@ import { artifactStore, type ArtifactStore } from "../artifact-store.js";
 import { loadAgentContext } from "../../workflows/loader.js";
 import { makeK8sApis, type K8sApis } from "./client.js";
 import { buildPodManifest, WORKSPACE_DIR } from "./pod.js";
+import { buildServiceContainers } from "./service-containers.js";
+import { ServiceSet } from "lastlight-shared/sandbox-services";
 import { buildRunAgentScript } from "./run-agent-script.js";
 import { podNameFor } from "./naming.js";
 import { RunId } from "./run-id.js";
@@ -75,6 +77,8 @@ export interface K8sAdapterConfig {
   harnessEndpoint: string;
   harnessNamespace: string;
   harnessPodLabels: Record<string, string>;
+  /** Image for the port-remap forwarder sidecar. Operator config, never repo-chosen. */
+  forwarderImage?: string;
   /** Injectable fake `K8sApis` for tests; defaults to the real client. */
   apis?: K8sApis;
   /** Injectable registry for tests; defaults to the module singleton skillBundleRegistry. */
@@ -143,6 +147,7 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
   private readonly harnessEndpoint: string;
   private readonly harnessNamespace: string;
   private readonly harnessPodLabels: Record<string, string>;
+  private readonly forwarderImage: string;
   private readonly skillRegistry: SkillBundleRegistry;
   private readonly agentContextRegistry: AgentContextRegistry;
   private readonly artifactStore: ArtifactStore;
@@ -187,6 +192,7 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
     this.harnessEndpoint = cfg.harnessEndpoint;
     this.harnessNamespace = cfg.harnessNamespace;
     this.harnessPodLabels = cfg.harnessPodLabels;
+    this.forwarderImage = cfg.forwarderImage ?? "alpine/socat:latest";
     this.skillRegistry = cfg.skillRegistry ?? skillBundleRegistry;
     this.agentContextRegistry = cfg.agentContextRegistry ?? agentContextRegistry;
     this.artifactStore = cfg.artifactStore ?? artifactStore;
@@ -449,6 +455,11 @@ export class KubernetesSandbox implements Sandbox, AgentContextSink {
       runAsUser: this.runAsUser,
       workspace: this.provisioned?.workspace ?? { kind: "emptyDir" },
       initContainers: this.buildInitContainers(),
+      // Dependency services, translated by the anti-corruption layer. A separate field
+      // from initContainers so the creds Secret is never stamped onto them (see pod.ts).
+      services: buildServiceContainers(this.opts.services ?? ServiceSet.empty(), {
+        forwarderImage: this.forwarderImage,
+      }),
       egressPolicy: egressModeFor(this.opts.egress),
       skillsMount: this.skillToken !== undefined,
       runId: this.currentRunId(),

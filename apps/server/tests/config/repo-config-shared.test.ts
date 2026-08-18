@@ -90,6 +90,17 @@ describe("default allow-list", () => {
     expect(defaultRepoConfigPolicy().allowKeys).toContain("crons");
   });
 
+  it("allows `services` by default, but grants no image", () => {
+    // The KEY is settable so a repo's file is in bounds; the CAPABILITY is withheld
+    // until an operator lists images. Note the polarity is the inverse of
+    // allowedModels, where null means permissive — getting these two the same way
+    // round would ship a deny-nothing default for arbitrary container images.
+    expect(DEFAULT_REPO_CONFIG_ALLOW_KEYS).toContain("services");
+    expect(defaultYamlAllowKeys()).toContain("services");
+    expect(defaultRepoConfigPolicy().allowedImages).toBeNull();
+    expect(defaultRepoConfigPolicy().allowedModels).toBeNull();
+  });
+
   it("is the same constant core re-exports — one definition, not two", () => {
     expect(CORE_ALLOW_KEYS).toBe(DEFAULT_REPO_CONFIG_ALLOW_KEYS);
   });

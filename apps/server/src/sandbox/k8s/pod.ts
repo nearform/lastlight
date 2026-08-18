@@ -57,6 +57,17 @@ export interface PodSpecInput {
    *  (Task 5). Each gets the creds Secret's `envFrom` attached here so it
    *  shares the main container's `GIT_CONFIG_*` git auth. */
   initContainers?: V1Container[];
+  /**
+   * Dependency-service sidecars (`docs/plans/sandbox-services`), already fully formed by
+   * `buildServiceContainers`.
+   *
+   * A SEPARATE input from {@link initContainers} on purpose. The mapping below stamps the
+   * run's creds Secret and the init resource requests onto every entry of that array —
+   * correct for a clone/skills init container, catastrophic for a service, which would
+   * then receive the run's `GITHUB_TOKEN` and provider keys. These are appended AFTER
+   * that map, untouched.
+   */
+  services?: V1Container[];
   /** Selects which CiliumNetworkPolicy governs this pod's egress — `strict`
    *  (the allowlist) or `open` (an `unrestricted_egress` phase). Stamped as the
    *  `egress-policy` label the policy's endpointSelector matches. */
@@ -123,13 +134,18 @@ export function buildPodManifest(i: PodSpecInput): V1Pod {
           : []),
         ...(i.skillsMount ? [{ name: "skills", emptyDir: {} }] : []),
       ],
-      ...(i.initContainers && i.initContainers.length
+      ...(i.initContainers?.length || i.services?.length
         ? {
-            initContainers: i.initContainers.map((c) => ({
-              ...c,
-              envFrom: [{ secretRef: { name: i.envFromSecret } }],
-              resources: { requests: { ...SANDBOX_INIT_REQUESTS } },
-            })),
+            initContainers: [
+              ...(i.initContainers ?? []).map((c) => ({
+                ...c,
+                envFrom: [{ secretRef: { name: i.envFromSecret } }],
+                resources: { requests: { ...SANDBOX_INIT_REQUESTS } },
+              })),
+              // Appended after the map above so a service never receives the run's
+              // credentials Secret, and keeps its own resource requests.
+              ...(i.services ?? []),
+            ],
           }
         : {}),
       containers: [

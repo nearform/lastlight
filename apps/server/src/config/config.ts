@@ -375,6 +375,12 @@ export interface KubernetesConfig {
   harnessNamespace: string;
   /** The harness Pod's Cilium selector labels — the `toEndpoints` egress rule. */
   harnessPodLabels: Record<string, string>;
+  /**
+   * Image for the port-remap forwarder sidecar (`docs/plans/sandbox-services`).
+   * OPERATOR config, not repo config — it is never subject to
+   * `repoConfig.allowedImages`, because a repo does not choose it.
+   */
+  forwarderImage: string;
 }
 
 export interface SandboxCleanupConfig {
@@ -1056,6 +1062,13 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     allowKeys: nonEmptyStringList(repoConfigRaw.allowKeys) ?? [...DEFAULT_REPO_CONFIG_ALLOW_KEYS],
     allowedModels: nonEmptyStringList(repoConfigRaw.allowedModels) ?? null,
     allowAssets: repoConfigRaw.allowAssets !== false,
+    // Deny-all default, the INVERSE of allowedModels above. The shipped `[]`, an absent
+    // key and a malformed value all collapse to ONE representation — null — so no
+    // consumer has to treat "empty list" and "not set" as different states. Both mean
+    // "permit nothing" to `ImageAllowlist`; a typo must never widen the grant, because
+    // a service image is arbitrary code pulled onto this host.
+    allowedImages: emptyToNull(nonEmptyStringList(repoConfigRaw.allowedImages)),
+    maxServices: positiveInt(repoConfigRaw.maxServices, "repoConfig.maxServices") ?? 2,
   };
 
   return {
@@ -1169,6 +1182,11 @@ function nonNegativeNumber(raw: unknown): number | undefined {
  * operator's is only ever seen if we say something. `fix.maxAttempts: 2.5`
  * silently becoming the shipped default is the failure this closes (#256).
  */
+/** Collapse "absent" and "empty list" to one value, so callers test one state not two. */
+function emptyToNull(list: string[] | undefined): string[] | null {
+  return list && list.length > 0 ? list : null;
+}
+
 function positiveInt(raw: unknown, path: string): number | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw === "number" && Number.isInteger(raw) && raw >= 0) return raw;
@@ -1517,6 +1535,7 @@ const K8S_DEFAULTS: KubernetesConfig = {
   harnessEndpoint: "http://lastlight.lastlight.svc.cluster.local:8644",
   harnessNamespace: "lastlight",
   harnessPodLabels: { "app.kubernetes.io/name": "lastlight" },
+  forwarderImage: "alpine/socat:latest",
 };
 
 /** Parse a `k=v,k=v` env string into a label map; empty/malformed → `undefined`
@@ -1549,6 +1568,8 @@ export function resolveKubernetesConfig(): KubernetesConfig {
     workspaceSize:
       process.env.LASTLIGHT_K8S_WORKSPACE_SIZE ?? k.workspaceSize ?? K8S_DEFAULTS.workspaceSize,
     runAsUser: Number.isFinite(runAsUserEnv) ? runAsUserEnv : (k.runAsUser ?? K8S_DEFAULTS.runAsUser),
+    forwarderImage:
+      process.env.LASTLIGHT_K8S_FORWARDER_IMAGE ?? k.forwarderImage ?? K8S_DEFAULTS.forwarderImage,
     harnessEndpoint:
       process.env.LASTLIGHT_K8S_HARNESS_ENDPOINT ??
       k.harnessEndpoint ??
