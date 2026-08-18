@@ -629,28 +629,41 @@ async function collectDatabase(): Promise<{ url?: string }> {
     return {};
   }
 
-  const url = required(
-    await p.text({
-      message: "DATABASE_URL",
-      placeholder: "postgres://user:pass@host:5432/lastlight",
-      validate: (v) =>
-        isPostgresUrl(v ?? "")
-          ? undefined
-          : "Must be a postgres:// URL. Choose SQLite to use a file instead.",
-    }),
-  ) as string;
+  // Loop until the operator has a URL they are happy with. Returning `{}` at
+  // any point falls back to SQLite, which writes nothing — so "I got this
+  // wrong, let me out" always has an answer that leaves no half-configuration
+  // behind.
+  let url = "";
+  for (;;) {
+    url = required(
+      await p.text({
+        message: "DATABASE_URL",
+        placeholder: "postgres://user:pass@host:5432/lastlight",
+        initialValue: url,
+        validate: (v) =>
+          isPostgresUrl(v ?? "")
+            ? undefined
+            : "Must be a postgres:// URL. Choose SQLite to use a file instead.",
+      }),
+    ) as string;
 
-  // Reported, never asked: `resolvePgDriver` reads it off the host, and a
-  // second prompt buys nothing an operator can answer better than the host can.
-  const driver = resolvePgDriver(url);
-  p.log.info(
-    driver === "neon"
-      ? `Driver: ${teal("neon")} ${dim("(detected from the *.neon.tech host — serverless WebSocket pool)")}`
-      : `Driver: ${teal("pg")} ${dim("(node-postgres; set DATABASE_DRIVER=neon by hand for Neon behind a custom domain)")}`,
-  );
+    // Reported, never asked: `resolvePgDriver` reads it off the host, and a
+    // second prompt buys nothing an operator can answer better than the host can.
+    const driver = resolvePgDriver(url);
+    p.log.info(
+      driver === "neon"
+        ? `Driver: ${teal("neon")} ${dim("(detected from the *.neon.tech host — serverless WebSocket pool)")}`
+        : `Driver: ${teal("pg")} ${dim("(node-postgres; set DATABASE_DRIVER=neon by hand for Neon behind a custom domain)")}`,
+    );
 
-  await confirmReachable(url);
-  return { url };
+    const outcome = await confirmReachable(url);
+    if (outcome === "keep") return { url };
+    if (outcome === "sqlite") {
+      p.log.success(`State: ${teal("SQLite")} ${dim("(data/lastlight.db in the agent volume)")}`);
+      return {};
+    }
+    // "edit" loops with the current value pre-filled; "retry" re-probes it.
+  }
 }
 
 /**
@@ -666,12 +679,17 @@ async function collectDatabase(): Promise<{ url?: string }> {
  * built yet on a first install. `lastlight server db check` is the full probe,
  * and it exists precisely because this one stops at the transport.
  *
- * A failure OFFERS to continue rather than aborting: a firewall rule the
- * operator is about to add is a legitimate reason to proceed.
+ * A failure OFFERS to continue rather than aborting — a firewall rule the
+ * operator is about to add is a legitimate reason to proceed — but "continue"
+ * has to be CHOSEN. Returning "keep" by default would write a URL the operator
+ * just declined into `secrets/.env`, and they would meet it again as a
+ * container that will not boot.
  */
-async function confirmReachable(url: string): Promise<void> {
+type ReachOutcome = "keep" | "retry" | "edit" | "sqlite";
+
+async function confirmReachable(url: string): Promise<ReachOutcome> {
   const endpoint = parsePgEndpoint(url);
-  if (!endpoint) return;
+  if (!endpoint) return "keep";
   const spinner = p.spinner();
   spinner.start(`Reaching ${endpoint.host}:${endpoint.port}`);
   const reachable = await tcpProbe(endpoint.host, endpoint.port);
@@ -682,18 +700,25 @@ async function confirmReachable(url: string): Promise<void> {
         teal("lastlight server db check") +
         dim(" after the build for the full probe."),
     );
-    return;
+    return "keep";
   }
   spinner.stop(`Could not reach ${endpoint.host}:${endpoint.port}`);
-  const go = required(
-    await p.confirm({
-      message: "Keep this URL anyway?",
-      initialValue: true,
+  return required(
+    await p.select({
+      message: "What now?",
+      initialValue: "edit",
+      options: [
+        { value: "edit", label: "Enter a different URL" },
+        { value: "retry", label: "Try again", hint: "the server may still be starting" },
+        {
+          value: "keep",
+          label: "Use it anyway",
+          hint: "correct if you're about to open a firewall rule",
+        },
+        { value: "sqlite", label: "Use SQLite instead", hint: "writes no database config at all" },
+      ],
     }),
-  );
-  if (!go) {
-    p.log.info("Edit instance/secrets/.env later, or re-run setup.");
-  }
+  ) as ReachOutcome;
 }
 
 /** Resolves true if a TCP connection opens within the timeout. Never throws. */

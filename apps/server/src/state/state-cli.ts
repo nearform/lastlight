@@ -41,9 +41,12 @@ const USAGE = `lastlight-state — Last Light state database tools
 
 Usage:
   lastlight-state check   --url <url>
-  lastlight-state migrate --from <sqlite path|file: url> --to <postgres:// url> [options]
+  lastlight-state migrate --from <sqlite path|file: url> [--to <postgres:// url>] [options]
 
 Options (migrate):
+  --to <url>         Target. Defaults to DATABASE_URL from the environment,
+                     which is the recommended path — no credential on the
+                     command line.
   --driver pg|neon   Postgres driver. Default: auto-detected from the host.
   --batch <n>        Rows per round trip (default 500).
   --dry-run          Count and report; write nothing.
@@ -153,14 +156,27 @@ function makeProgressRenderer(): (event: MigrateProgress) => void {
 
 async function migrateCommand(flags: Args["flags"]): Promise<number> {
   const from = str(flags, "from");
-  const to = str(flags, "to");
+  // `--to` is OPTIONAL and falling back to DATABASE_URL is the RECOMMENDED
+  // path, not a convenience: `lastlight server db migrate` runs this inside the
+  // agent container, which already has DATABASE_URL from
+  // instance/secrets/.env — so the credential never has to be typed onto a
+  // command line, where it would land in the host's process list and shell
+  // history.
+  const toFlag = str(flags, "to");
+  const to = toFlag ?? process.env.DATABASE_URL?.trim();
   if (!from || !to) {
-    out("Both --from and --to are required.\n");
+    out(
+      !from
+        ? "--from is required."
+        : "--to is required when DATABASE_URL is not set in the environment.",
+    );
+    out("");
     out(USAGE);
     return 2;
   }
   if (!isPostgresUrl(to)) {
-    out(`--to must be a postgres:// URL (got "${redactDbUrl(to)}").`);
+    const source = toFlag ? "--to" : "DATABASE_URL";
+    out(`${source} must be a postgres:// URL (got "${redactDbUrl(to)}").`);
     return 2;
   }
   const driverFlag = str(flags, "driver");
@@ -176,7 +192,10 @@ async function migrateCommand(flags: Args["flags"]): Promise<number> {
   const dryRun = flags.get("dry-run") === true;
 
   if (!json) {
-    out(`${dryRun ? "Dry run" : "Migrating"}: ${from} → ${redactDbUrl(to)}`);
+    out(
+      `${dryRun ? "Dry run" : "Migrating"}: ${from} → ${redactDbUrl(to)}` +
+        (toFlag ? "" : " (from DATABASE_URL)"),
+    );
     out(`Driver: ${resolvePgDriver(to, driver)}`);
     out("");
   }

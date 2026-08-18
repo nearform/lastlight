@@ -68,10 +68,48 @@ describe("runStateCli", () => {
     expect(text).toContain('Unknown command "mgirate"');
   });
 
-  it("requires both --from and --to", async () => {
+  it("requires --from", async () => {
+    const { code, text } = await capture(["migrate", "--to", "postgres://host/db"]);
+    expect(code).toBe(2);
+    expect(text).toContain("--from is required");
+  });
+
+  /**
+   * `--to` falling back to DATABASE_URL is THE documented path, not a
+   * convenience: `lastlight server db migrate` omits `--to` entirely so the
+   * credential never reaches the host's process list, relying on the
+   * container's own DATABASE_URL. It shipped broken once — the tool demanded
+   * `--to` while the CLI, the spec and the help text all promised otherwise —
+   * so both halves are pinned here.
+   */
+  it("falls back to DATABASE_URL when --to is omitted", async () => {
+    vi.stubEnv("DATABASE_URL", "postgres://u:secret@host:5432/lastlight");
+    // Reaching a connection attempt (not an argument error) is the assertion:
+    // exit 2 is "bad arguments", and that is what the bug produced.
+    const { code, text } = await capture(["migrate", "--from", "/nonexistent/lastlight.db"]);
+    expect(code).not.toBe(2);
+    expect(text).toContain("from DATABASE_URL");
+    // …and still without echoing the password.
+    expect(text).not.toContain("secret");
+    vi.unstubAllEnvs();
+  });
+
+  it("says which of --to / DATABASE_URL is missing", async () => {
+    vi.stubEnv("DATABASE_URL", "");
     const { code, text } = await capture(["migrate", "--from", "/data/lastlight.db"]);
     expect(code).toBe(2);
-    expect(text).toContain("Both --from and --to are required");
+    expect(text).toContain("--to is required when DATABASE_URL is not set");
+    vi.unstubAllEnvs();
+  });
+
+  it("rejects a non-postgres DATABASE_URL by name, not as a --to error", async () => {
+    // A SQLite deployment has `file:` in DATABASE_URL; the message has to point
+    // at the env var the value actually came from.
+    vi.stubEnv("DATABASE_URL", "file:/app/data/lastlight.db");
+    const { code, text } = await capture(["migrate", "--from", "/data/lastlight.db"]);
+    expect(code).toBe(2);
+    expect(text).toContain("DATABASE_URL must be a postgres:// URL");
+    vi.unstubAllEnvs();
   });
 
   it("refuses a --to that is not postgres:// — the wrong-direction guard", async () => {
