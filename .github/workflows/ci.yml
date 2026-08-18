@@ -92,6 +92,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # vitest transpiles `apps/server`'s own sources on the fly, but its
+      # WORKSPACE DEPS are resolved through their package `exports` maps, which
+      # point at `dist/`. The `check` job gets those built for free (every turbo
+      # task there declares `dependsOn: ["^build"]`); this job runs vitest
+      # directly, so without this step the suite dies on
+      # `Cannot find package 'lastlight-shared/database-url'` before a single
+      # test runs. Not reproducible locally, where dist/ is always already built.
+      - name: Build workspace dependencies
+        run: pnpm turbo run build --filter=lastlight-shared --filter=lastlight-workflow-engine
+
       - name: State suite against real Postgres
         env:
           PG_INTEGRATION: "1"

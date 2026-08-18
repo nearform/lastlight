@@ -48,6 +48,15 @@ import { makeTestDb } from "../helpers/state-db.js";
 
 const MIGRATIONS = fileURLToPath(new URL("../../drizzle/pg", import.meta.url));
 
+/**
+ * Every test below stands up TWO databases (a temp-file SQLite and a PGlite
+ * instance, each migrated) and copies between them. That comfortably exceeds
+ * vitest's 5s default on a loaded CI runner — it did, on this file's first run
+ * — while taking ~0.5s on a warm laptop, so the default made it a machine-speed
+ * coin flip rather than a real assertion about the code.
+ */
+const DB_TEST_TIMEOUT_MS = 30_000;
+
 const openPglite: PGlite[] = [];
 afterEach(async () => {
   for (const p of openPglite.splice(0)) await p.close();
@@ -307,7 +316,7 @@ describe("data-migrate", () => {
       .orderBy(dst.messagingMessages.id);
     expect(messages.map((m) => m.content)).toEqual(["hello", "hi ☕"]);
     expect(messages[0].id).toBeTypeOf("number");
-  });
+  }, DB_TEST_TIMEOUT_MS);
 
   it("refuses a non-empty target unless truncate is passed", async () => {
     const source = await makeTestDb();
@@ -322,7 +331,7 @@ describe("data-migrate", () => {
     // …and with --truncate it is a clean re-run, not a duplicate.
     const again = await copyStateData(source, target, { truncate: true });
     for (const t of again.tables) expect(t.target).toBe(t.source);
-  });
+  }, DB_TEST_TIMEOUT_MS);
 
   it("dry-run counts without writing", async () => {
     const source = await makeTestDb();
@@ -334,14 +343,14 @@ describe("data-migrate", () => {
     expect(result.tables.find((t) => t.table === "executions")?.source).toBe(3);
     expect(result.totalRows).toBe(0);
     expect(await target.client.select().from(tablesOf(target.client).executions)).toHaveLength(0);
-  });
+  }, DB_TEST_TIMEOUT_MS);
 
   it("refuses to run in the wrong direction", async () => {
     const pg = await makePgTarget();
     const sqlite = await makeTestDb();
     await expect(copyStateData(pg, sqlite, {})).rejects.toThrow(/Source must be a SQLite/i);
     await expect(copyStateData(sqlite, sqlite, {})).rejects.toThrow(/Target must be a Postgres/i);
-  });
+  }, DB_TEST_TIMEOUT_MS);
 
   it("batches without skipping or repeating rows", async () => {
     const source = await makeTestDb();
@@ -368,5 +377,5 @@ describe("data-migrate", () => {
     // Distinctness is the real assertion: an off-by-one in the OFFSET walk
     // shows up as a repeated row, which the counts alone would still pass.
     expect(new Set(ids).size).toBe(25);
-  });
+  }, DB_TEST_TIMEOUT_MS);
 });
