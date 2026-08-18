@@ -381,9 +381,19 @@ export async function runWorkflow(
   // unless a repo layer applies, in which case it carries this run's composed
   // agent context (see `runAgentContext`) — the only channel through which a
   // repo's `agent-context/*.md` reaches AGENTS.md.
+  // …and this run's dependency services, which reach the sandbox adapters through
+  // `SandboxFactoryOpts.services`. Carried as the RAW declarations plus the bounds in
+  // force at dispatch; `servicesFor` parses and admits them at the orchestrator
+  // boundary. A run with no repo layer, or a repo declaring none, leaves both undefined
+  // and nothing downstream changes.
+  const runServices: Partial<ExecutorConfig> =
+    repoConfig && Object.keys(repoConfig.services ?? {}).length > 0
+      ? { services: repoConfig.services, serviceBounds: repoConfig.serviceBounds }
+      : {};
+
   const runConfig: ExecutorConfig = assets
-    ? { ...config, agentContext: runAgentContext(assets, repoConfig) }
-    : config;
+    ? { ...config, ...runServices, agentContext: runAgentContext(assets, repoConfig) }
+    : { ...config, ...runServices };
 
   const modelFor = (taskType: string): string | undefined =>
     effectiveModels ? resolveModel(effectiveModels, taskType) : undefined;

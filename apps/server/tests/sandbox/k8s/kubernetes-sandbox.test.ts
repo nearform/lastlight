@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { ImageAllowlist, PortMapping, ServiceSet } from "lastlight-shared/sandbox-services";
 import { PassThrough } from "node:stream";
 import { ApiException } from "@kubernetes/client-node";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -1211,4 +1212,63 @@ describe("KubernetesSandbox artifact upload", () => {
       expect(sharedArtifactStore.resolve(token)).toBeUndefined();
     },
   );
+});
+
+describe("KubernetesSandbox dependency services", () => {
+  const withPostgres = (ports: string[]) =>
+    ({
+      ...factoryOpts,
+      services: ServiceSet.create(
+        [
+          {
+            name: "postgres",
+            image: "postgres:16-alpine",
+            env: { POSTGRES_PASSWORD: "probe" },
+            ports: ports.map((p) => PortMapping.parse(p)!),
+            healthCmd: ["pg_isready"],
+            runAsUser: 70,
+          },
+        ],
+        { allowlist: ImageAllowlist.of(["docker.io/library/postgres:*"]), maxServices: 2 },
+      ).set,
+    }) as any;
+
+  it("adds the service as a native sidecar on the phase's pod", async () => {
+    const { apis, created } = fakeApis();
+    const sbx = new KubernetesSandbox(withPostgres(["5432"]), cfg(apis));
+    await sbx.provision();
+    await sbx.runCommand("t1", "true", { cwd: "/home/agent/workspace", timeoutSeconds: 5 });
+
+    const pod = created[0];
+    const svc = pod.spec.initContainers?.find((c: any) => c.name === "svc-postgres");
+    expect(svc).toBeDefined();
+    expect(svc.restartPolicy).toBe("Always");
+    expect(svc.startupProbe.exec.command).toEqual(["pg_isready"]);
+    // The agent container is still the one and only regular container.
+    expect(pod.spec.containers).toHaveLength(1);
+    expect(pod.spec.containers[0].name).toBe("agent");
+    // …and it never receives the run's credentials Secret.
+    expect(svc.envFrom).toBeUndefined();
+  });
+
+  it("adds a forwarder sidecar for a remapped port", async () => {
+    const { apis, created } = fakeApis();
+    const sbx = new KubernetesSandbox(withPostgres(["5433:5432"]), cfg(apis));
+    await sbx.provision();
+    await sbx.runCommand("t1", "true", { cwd: "/home/agent/workspace", timeoutSeconds: 5 });
+
+    const names = created[0].spec.initContainers.map((c: any) => c.name);
+    expect(names).toContain("svc-postgres");
+    expect(names).toContain("fwd-postgres-5433");
+  });
+
+  it("adds nothing when the phase declared no services", async () => {
+    const { apis, created } = fakeApis();
+    const sbx = new KubernetesSandbox(factoryOpts, cfg(apis));
+    await sbx.provision();
+    await sbx.runCommand("t1", "true", { cwd: "/home/agent/workspace", timeoutSeconds: 5 });
+
+    const init = created[0].spec.initContainers ?? [];
+    expect(init.some((c: any) => c.name.startsWith("svc-"))).toBe(false);
+  });
 });

@@ -47,6 +47,10 @@
       "types": "./dist/repo-config-schema.d.ts",
       "import": "./dist/repo-config-schema.js"
     },
+    "./sandbox-services": {
+      "types": "./dist/sandbox-services.d.ts",
+      "import": "./dist/sandbox-services.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

@@ -165,12 +165,14 @@ interface RepoConfigPolicy {              // lastlight-shared/repo-config-schema
   allowKeys: string[];                    // dotted config paths a repo may set
   allowedModels: string[] | null;         // null = any model whose provider prefix is known
   allowAssets: boolean;                   // unpack the repo's prompt/skill/agent-context overrides
+  allowedImages: string[] | null;         // null = NO image permitted (inverse of allowedModels)
+  maxServices: number;                    // ceiling on dependency services per phase
 }
 
 interface KubernetesConfig {              // resolved by resolveKubernetesConfig(), env > block > defaults
   namespace: string; image: string; storageClassName: string; workspaceSize: string;
   runAsUser: number; harnessEndpoint: string; harnessNamespace: string;
-  harnessPodLabels: Record<string, string>;
+  harnessPodLabels: Record<string, string>; forwarderImage: string;
 }
 ```
 
@@ -257,9 +259,11 @@ the CLI. A repo's config file can never fail a run.
 | Key | Default | Meaning |
 |---|---|---|
 | `repoConfig.enabled` | `true` | Master switch. `false` ignores every repo's `.lastlight/` — no fetch at all. |
-| `repoConfig.allowKeys` | `[models, variants, crons, disabled.workflows, disabled.crons, approval, fix, dependencies, review, notifications]` | Dotted config paths a repo may set. An entry admits itself and everything beneath it (`models` admits `models.architect`; `disabled.workflows` does **not** admit `disabled.prompts`). |
+| `repoConfig.allowKeys` | `[models, variants, crons, disabled.workflows, disabled.crons, approval, fix, dependencies, review, notifications, services]` | Dotted config paths a repo may set. An entry admits itself and everything beneath it (`models` admits `models.architect`; `disabled.workflows` does **not** admit `disabled.prompts`). |
 | `repoConfig.allowedModels` | `null` | `null` = any model whose `provider/` prefix is a provider Last Light can wire. A list restricts to exactly those specs (exact match, never a prefix rule). |
 | `repoConfig.allowAssets` | `true` | Unpack and use the repo's `workflows/prompts/`, `skills/`, `agent-context/` overrides. `false` keeps `lastlight.yml` only. |
+| `repoConfig.allowedImages` | `[]` → `null` | Container images a repo may run as dependency services, registry-qualified (`docker.io/library/postgres:*`, `mcr.microsoft.com/mssql/server:*`). **Note the polarity is the INVERSE of `allowedModels`:** absent, `null` or `[]` permits **nothing**. A service image is arbitrary code pulled onto the operator's infrastructure, so the feature is inert until images are listed. Empty normalises to `null` so "unset" and "empty" are one state. |
+| `repoConfig.maxServices` | `2` | Ceiling on dependency services per phase. |
 
 `DEFAULT_REPO_CONFIG_ALLOW_KEYS` (`packages/shared/src/repo-config-schema.ts`) is
 the fallback when config isn't in reach, and must stay identical to
@@ -280,6 +284,7 @@ the fallback when config isn't in reach, and must stay identical to
 | `dependencies` | Major-bump auto-merge policy. **One-way clamped** — see below. |
 | `review` | When `pr-review` runs, plus the draft/label rules. **One-way clamped** — see below. |
 | `notifications` | Where this repo's outbound Slack goes (`notifications.slack.channel`). The one repo-settable key with **no clamp direction** — see below. |
+| `services` | Dependency services a phase runs against (a test postgres, redis, …). A **capability grant**, not a clamp: it is a request measured against `allowedImages`, so shape is validated and a disallowed image is dropped with a `service-not-allowed` warning. See `09-sandbox.md` → "Dependency services". |
 
 Arrays replace, per the merge semantics above — so a repo's `disabled.workflows`
 list replaces the operator's rather than adding to it. Operators who don't want

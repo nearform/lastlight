@@ -106,6 +106,10 @@ export interface RunRepoConfig {
   approval: Record<string, boolean>;
   /** Effective disables. `workflows` is enforced at dispatch (see below). */
   disabled: DisabledConfig;
+  /** RAW dependency-service declarations, keyed by name (`docs/plans/sandbox-services`). */
+  services: Record<string, unknown>;
+  /** The operator bounds in force when this run was dispatched. */
+  serviceBounds: { allowedImages: string[] | null; maxServices: number };
   /**
    * Effective fix/dependency/review policy (issues #251, #252). Clamped at
    * resolve time so these are never looser than the operator's own values —
@@ -257,6 +261,12 @@ export async function resolveRepoRunConfig(
       dependencies: resolved.merged.dependencies,
       review: resolved.merged.review,
       notifications: resolved.merged.notifications,
+      services: resolved.merged.services,
+      // The operator's bounds travel WITH the declaration, not read live at use time:
+      // a run must be admitted against the bounds in force when it was dispatched, or a
+      // config edit mid-run would retarget it — the same reason `resume` reuses the
+      // persisted repoConfig rather than re-resolving.
+      serviceBounds: { allowedImages: policy.allowedImages, maxServices: policy.maxServices },
       sources: resolved.sources,
       warnings: resolved.warnings,
     },
@@ -298,6 +308,19 @@ export interface RepoConfigRunRecord {
      * repo saying "send me nothing", which must survive a resume.
      */
     notifications?: Record<string, unknown>;
+    /**
+     * The dependency services this run was dispatched with, plus the operator bounds in
+     * force at that moment. Stored WHOLE rather than diffed against a base like every
+     * entry above, because there is no operator-side `services:` to diff against — an
+     * operator bounds services via `allowedImages`, never by declaring any. So
+     * everything here is by definition what the repo won.
+     *
+     * Persisting the BOUNDS alongside is what makes a resume sound: re-reading them live
+     * would let an operator's edit, made while the run was paused, admit or reject
+     * services mid-flight.
+     */
+    services?: Record<string, unknown>;
+    serviceBounds?: { allowedImages: string[] | null; maxServices: number };
   };
   assets: string[];
   warnings: RepoConfigWarning[];
@@ -335,6 +358,8 @@ export function repoConfigRunRecord(cfg: RunRepoConfig): RepoConfigRunRecord {
       dependencies: wonBy(cfg.dependencies as unknown as Record<string, unknown>, cfg.sources.dependencies),
       review: wonBy(cfg.review as unknown as Record<string, unknown>, cfg.sources.review),
       notifications: wonBy({ "slack.channel": cfg.notifications.slack.channel }, cfg.sources.notifications),
+      services: Object.keys(cfg.services ?? {}).length > 0 ? cfg.services : undefined,
+      serviceBounds: Object.keys(cfg.services ?? {}).length > 0 ? cfg.serviceBounds : undefined,
     },
     assets: cfg.assets,
     warnings: cfg.warnings,
@@ -541,6 +566,11 @@ export async function restoreRepoRunConfig(
       dependencies,
       review,
       notifications,
+      // Restored from the record, NOT re-resolved: the run keeps the services and the
+      // bounds it was dispatched with, so a config edit made while it was paused cannot
+      // retarget it mid-flight.
+      services: applied.services ?? {},
+      serviceBounds: applied.serviceBounds ?? { allowedImages: null, maxServices: 0 },
       sources: {
         models: sourcesOf(models, applied.models),
         variants: sourcesOf(variants, applied.variants),

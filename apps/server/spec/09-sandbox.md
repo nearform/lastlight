@@ -592,6 +592,90 @@ The `onEvent` callback receives agentic-pi's `EmitterRecord` events —
 `fatal_error`. The shim (`src/engine/event-shim.ts`) translates them
 into Claude-SDK-style JSONL envelopes — see [State §JSONL](/spec/10-state).
 
+## Dependency services
+
+A managed repo may declare services its phases run against — a test postgres, a
+redis — in `.lastlight/lastlight.yml`, using GitHub Actions' vocabulary minus
+expressions. The harness starts them **on the agent's behalf**; the sandbox gains
+no new privilege (no docker socket, no root, no docker client).
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine    # must be literal — no ${{ }}
+    env: { POSTGRES_PASSWORD: postgres }
+    ports: ["5433:5432"]         # Actions form; honoured by a forwarder
+    healthCmd: pg_isready
+    runAsUser: 70                # uid the image expects: 70 alpine, 999 debian
+    command: []                  # escape hatch (self-advertising services)
+```
+
+**Bounded by the operator**, `repoConfig.allowedImages` — registry-qualified and
+**deny-all by default**, the inverse polarity of `allowedModels`
+(see [Configuration](/spec/02-configuration)). Inert until images are listed.
+
+### The model
+
+`packages/shared/src/sandbox-services.ts` — `PortMapping`, `ServiceSpec`,
+`ServiceSet`, `ImageAllowlist`. `ServiceSet` is an **aggregate** because the
+binding invariant is set-level: services share the sandbox's network namespace,
+so a phase has ONE flat port space and a collision is invisible to any per-item
+validator. Both sides of a mapping are claimed — the service binds `target`, a
+forwarder binds `listen`.
+
+The set reaches an adapter as **intent only**, the same seam `EgressPolicy` uses
+(`SandboxFactoryOpts.services`). Each backend owns its mechanism.
+
+| | kubernetes | docker |
+|---|---|---|
+| Mechanism | native sidecar (`initContainers` + `restartPolicy: Always`) | sibling with `--network container:<sandbox>` |
+| Reachable at | `localhost` | `localhost` |
+| Readiness | `healthCmd` → `startupProbe` | harness polls `docker exec <svc> <healthCmd>` |
+| Teardown | free — the pod is the boundary | **explicit** (see below) |
+
+### Invariant: a service never receives the run's credentials
+
+`buildPodManifest` maps over `initContainers` stamping the run's creds Secret
+onto every entry. Services are therefore a **separate input**, appended after
+that map — routing them through `initContainers` would hand a postgres the run's
+`GITHUB_TOKEN` and every provider key. Pinned by a test.
+
+Placing them in `initContainers` rather than `containers` is load-bearing twice
+over: a service never exits, so under `restartPolicy: Never` the pod would never
+go terminal; and `terminalResult` reads `containerStatuses[0]`
+(`src/sandbox/k8s/pod-status.ts`) for the agent's exit code, which a service in
+that array would displace.
+
+### Invariant: docker services are removed explicitly
+
+A container joined with `--network container:` **keeps running** after
+`docker rm -f` of the namespace owner, and `-f` bypasses the dependency check
+that would refuse the removal. Two mechanisms, because one is not enough:
+`DockerSandbox.destroy` removes services **first**, and `reapSandboxWorkspace`
+sweeps any container still carrying `lastlight.taskId` — the backstop for a
+harness that died between `provision()` and `dispose()`. The label is the only
+handle that survives a restart; the in-memory container map does not.
+
+### Ports
+
+Port publishing cannot work inside a shared namespace: a mapping translates
+*across* a namespace boundary, and here client and server are on the same side of
+it. Docker rejects `-p` with a joined namespace outright; a k8s `containerPort` is
+documentation only. A remapped port is served by a small forwarder process in the
+namespace instead (`kubernetes.forwarderImage`, default `alpine/socat:latest` —
+operator config, never subject to `allowedImages`).
+
+### Scope and failure
+
+Services are **per phase**, matching the `withSandbox` bracket and Actions' own
+per-job scoping. Backends: `docker` and `kubernetes` only; `gondolin`, `none` and
+`smol` log once and still provision. Every failure path — image not allowlisted,
+health timeout, unsupported backend — leaves the run exactly where it is today,
+with the agent recording the same environmental `constraint:` note.
+
+**Not covered:** testcontainers and anything else creating containers from test
+code, which needs a socket in the sandbox (root on the host).
+
 ## Egress firewall
 
 The same allowlist drives both backends. Defined in

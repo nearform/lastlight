@@ -5,6 +5,12 @@ import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { randomUUID } from "crypto";
 import { AGENTIC_PROFILES, type GitAccessProfile } from "../engine/github/profiles.js";
 import { logger } from "../logging/logger.js";
+import type { ServiceSet } from "lastlight-shared/sandbox-services";
+import {
+  buildServiceRunArgs,
+  serviceContainerName,
+  SERVICE_LABEL_SELECTOR,
+} from "./service-containers-docker.js";
 
 const execFileAsync = promisify(execFileCb);
 const log = logger("sandbox");
@@ -607,12 +613,109 @@ export class DockerSandbox {
   }
 
   /**
-   * Remove a sandbox container.
+   * Start this phase's dependency services inside the sandbox container's network
+   * namespace, then wait for each declared `healthCmd` to pass.
+   *
+   * Ordering matters: the sandbox container must already exist, because the services
+   * join ITS namespace. `create()` leaves a long-lived container (the entrypoint ends at
+   * `sleep infinity` and phases `docker exec` into it), so the namespace lasts the whole
+   * bracket.
+   *
+   * Nothing here fails the run. A service that never becomes ready warns and the phase
+   * proceeds — the agent then reports an unreachable service, which is exactly today's
+   * behaviour rather than a new failure mode.
+   */
+  async startServices(taskId: string, set: ServiceSet): Promise<string[]> {
+    const info = this.activeContainers.get(taskId);
+    if (!info || set.isEmpty) return [];
+
+    const started: string[] = [];
+    const running = new Set<string>();
+    for (const { name, service, args } of buildServiceRunArgs(set, {
+      taskId,
+      sandboxContainer: info.containerName,
+      forwarderImage: process.env.LASTLIGHT_FORWARDER_IMAGE || "alpine/socat:latest",
+    })) {
+      try {
+        execCmd("docker", args);
+        started.push(name);
+        if (service) running.add(service);
+      } catch (err) {
+        log.warn("Failed to start service container", { name, err });
+      }
+    }
+
+    // Only poll something that actually started. Health-checking a container that
+    // failed to create burns the full timeout one `docker exec` at a time, each
+    // failing instantly with "No such container", and delays the phase for nothing.
+    for (const spec of set.specs) {
+      if (spec.healthCmd?.length && running.has(spec.name)) {
+        await this.waitForService(serviceContainerName(taskId, spec.name), [...spec.healthCmd]);
+      }
+    }
+    log.info("Services started", { taskId, services: started });
+    return started;
+  }
+
+  /** Poll `docker exec <svc> <healthCmd>` until it passes. A timeout warns, never throws. */
+  private async waitForService(
+    container: string,
+    healthCmd: string[],
+    timeoutMs = 90_000,
+  ): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        await execFileAsync("docker", ["exec", container, ...healthCmd], { timeout: 5000 });
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    log.warn("Service did not become ready — continuing without it", { container });
+  }
+
+  /**
+   * Remove this task's service containers, found BY LABEL.
+   *
+   * By label rather than by remembered name because the label is the only handle that
+   * survives a harness restart — the in-memory `activeContainers` map does not. Best
+   * effort throughout: a cleanup failure must never block the sandbox removal that
+   * follows it.
+   */
+  async stopServices(taskId: string): Promise<void> {
+    try {
+      const ids = execCmd("docker", [
+        "ps", "-aq",
+        "--filter", `label=lastlight.taskId=${taskId}`,
+        "--filter", `label=${SERVICE_LABEL_SELECTOR}`,
+      ])
+        .trim()
+        .split("\n")
+        .filter(Boolean);
+      if (ids.length) {
+        execSafe("docker", ["rm", "-f", ...ids]);
+        log.info("Removed service containers", { taskId, count: ids.length });
+      }
+    } catch (err) {
+      log.warn("Failed to remove service containers", { taskId, err });
+    }
+  }
+
+  /**
+   * Remove a sandbox container — and this task's services FIRST.
+   *
+   * The order is load-bearing and was verified against a real daemon: a container joined
+   * with `--network container:` KEEPS RUNNING after `docker rm -f` of the namespace owner
+   * (and `-f` bypasses the dependency check that would otherwise refuse). Removing the
+   * sandbox first therefore orphans the services rather than collecting them. Kubernetes
+   * needs no equivalent — there the pod is the lifecycle boundary.
    */
   async destroy(taskId: string): Promise<void> {
     const info = this.activeContainers.get(taskId);
     if (!info) return;
 
+    await this.stopServices(taskId);
     execSafe("docker", ["rm", "-f", info.containerName]);
     this.activeContainers.delete(taskId);
     log.info("Destroyed", { containerName: info.containerName });

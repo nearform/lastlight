@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { buildPodManifest, PROMPT_FILE, RUN_ID_LABEL } from "#src/sandbox/k8s/pod.js";
+import {
+  buildPodManifest,
+  PROMPT_FILE,
+  RUN_ID_LABEL,
+  SANDBOX_INIT_REQUESTS,
+} from "#src/sandbox/k8s/pod.js";
 import { EGRESS_POLICY_LABEL } from "#src/sandbox/k8s/egress-policy.js";
 import { SKILLS_MOUNT_DIR } from "#src/sandbox/k8s/skill-bundle.js";
 import { RunId } from "#src/sandbox/k8s/run-id.js";
@@ -234,5 +239,64 @@ describe("buildPodManifest run-id label + fsGroupChangePolicy", () => {
     });
     expect(pod.metadata?.labels?.[RUN_ID_LABEL]).toBeUndefined();
     expect(pod.spec?.securityContext?.fsGroupChangePolicy).toBe("OnRootMismatch");
+  });
+});
+
+describe("buildPodManifest with dependency services", () => {
+  const svc = {
+    name: "svc-postgres",
+    image: "postgres:16-alpine",
+    restartPolicy: "Always",
+    resources: { requests: { cpu: "100m", memory: "256Mi" } },
+    securityContext: {
+      allowPrivilegeEscalation: false,
+      capabilities: { drop: ["ALL"] },
+      runAsUser: 70,
+    },
+  };
+
+  const base = {
+    name: "ll-x", namespace: "lastlight-sandboxes",
+    image: "ghcr.io/nearform/lastlight-sandbox:latest",
+    command: ["sh", "-c", "echo hi"], envFromSecret: "ll-x-creds",
+    cwd: "/home/agent/workspace", activeDeadlineSeconds: 1800,
+    runAsUser: 10001, workspace: { kind: "emptyDir" as const }, egressPolicy: "strict" as const,
+  };
+
+  const pod = buildPodManifest({ ...base, services: [svc] });
+
+  it("puts services in initContainers, never in containers", () => {
+    // A service in `containers` would never exit (pod restartPolicy is Never), and it
+    // would occupy containerStatuses[0], which pod-status.ts reads for the exit code.
+    expect(pod.spec?.containers).toHaveLength(1);
+    expect(pod.spec?.containers[0]!.name).toBe("agent");
+    expect(pod.spec?.initContainers?.some((c) => c.name === "svc-postgres")).toBe(true);
+  });
+
+  it("never hands the run's credentials Secret to a service container", () => {
+    // The initContainers map stamps envFrom onto every entry — a postgres must not
+    // receive the run's GITHUB_TOKEN and provider keys.
+    const svcContainer = pod.spec?.initContainers?.find((c) => c.name === "svc-postgres");
+    expect(svcContainer?.envFrom).toBeUndefined();
+  });
+
+  it("keeps the service's own resource requests, not the init defaults", () => {
+    const svcContainer = pod.spec?.initContainers?.find((c) => c.name === "svc-postgres");
+    expect(svcContainer?.resources?.requests).toEqual({ cpu: "100m", memory: "256Mi" });
+  });
+
+  it("still stamps creds and init requests onto real init containers", () => {
+    const both = buildPodManifest({
+      ...base,
+      initContainers: [{ name: "clone", image: "ghcr.io/nearform/lastlight-sandbox:latest" }],
+      services: [svc],
+    });
+    const clone = both.spec?.initContainers?.find((c) => c.name === "clone");
+    expect(clone?.envFrom?.[0]?.secretRef?.name).toBe("ll-x-creds");
+    expect(clone?.resources?.requests).toEqual({ ...SANDBOX_INIT_REQUESTS });
+  });
+
+  it("emits no initContainers block when there are neither", () => {
+    expect(buildPodManifest(base).spec?.initContainers).toBeUndefined();
   });
 });
