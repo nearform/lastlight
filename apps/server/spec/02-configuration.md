@@ -105,8 +105,10 @@ interface SlackConfig {
 
 interface DigestConfig {                   // the weekly repo digest; operator-only
   windowDays: number;                      // how far back a digest looks (default 7)
-  narrative: boolean;                      // spend one cheap model call on a summary sentence (default true)
-  maxItems: number;                        // cap on each enumerated list (default 5)
+  narrative: boolean;                      // spend one cheap model call summarizing the week (default true)
+  maxItems: number;                        // cap on the escalation list (default 5)
+  listItems: number;                       // cap on each content list — merged PRs, issues opened/closed (default 8, max 25)
+  detailItems: number;                     // how many items' text the summariser reads (default 25, max 60)
 }
 
 interface SandboxCleanupConfig {

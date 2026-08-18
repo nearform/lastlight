@@ -167,6 +167,58 @@ export interface RepoActivityItem {
   htmlUrl: string;
 }
 
+/**
+ * One issue or pull request with its text — the unit
+ * {@link GitHubClient.listRepoDigestDetail} lists.
+ *
+ * `body` is GitHub's `bodyText`: the markdown already flattened to prose, so an
+ * excerpt of it is readable rather than a slice of `<details>` scaffolding.
+ * It is returned in full; how much of it to keep is the reader's budget to set.
+ */
+export interface DigestItemDetail {
+  number: number;
+  title: string;
+  /** GitHub's own URL for the item — never reconstructed from the number. */
+  url: string;
+  authorLogin: string;
+  /** The author is a Bot (Dependabot, Renovate, us) rather than a person. */
+  authorIsBot: boolean;
+  labels: string[];
+  body: string;
+}
+
+/** An issue a merged pull request is LINKED to. Whether the merge closed it is the caller's call. */
+export interface ClosingIssueRef {
+  number: number;
+  title: string;
+  url: string;
+  closedAt: string | null;
+  /** `owner/repo` — a closing reference may point at another repository. */
+  repo: string;
+}
+
+export interface MergedPrDetail extends DigestItemDetail {
+  mergedAt: string;
+  closes: ClosingIssueRef[];
+}
+
+export interface OpenedIssueDetail extends DigestItemDetail {
+  createdAt: string;
+}
+
+export interface ClosedIssueDetail extends DigestItemDetail {
+  closedAt: string;
+  /** `COMPLETED` | `NOT_PLANNED` | `DUPLICATE` | `REOPENED` | null. */
+  stateReason: string | null;
+}
+
+/** What {@link GitHubClient.listRepoDigestDetail} returns — the week's content, in one request. */
+export interface RepoDigestDetail {
+  merged: MergedPrDetail[];
+  opened: OpenedIssueDetail[];
+  closed: ClosedIssueDetail[];
+}
+
 /** Options shared by the three settle-aware check queries. */
 export interface ChecksQueryOptions {
   /**
@@ -934,6 +986,119 @@ export class GitHubClient {
       if (data.length < 100) break;
     }
     return items;
+  }
+
+  /**
+   * The week's actual CONTENT — the merged pull requests, the issues opened and
+   * the issues closed, each with its text — in ONE GraphQL request.
+   *
+   * This is the companion to {@link listRepoActivitySince}, not a replacement:
+   * that method answers "how many", this one answers "which, and about what".
+   * They stay separate because the counts are load-bearing and long-tested,
+   * while everything here is enrichment that must be free to fail (see
+   * `cron/repo-digest.ts`).
+   *
+   * **Why `search` rather than the REST list.** `listRepoActivitySince` filters
+   * on `updated_at` and pages by it, so a pull request merged on Monday and
+   * untouched since ranks below any three-month-old issue somebody commented on
+   * Friday. For a *count* that doesn't matter (the caller re-tests each item's
+   * own timestamps); for a *list* it is the difference between reporting the
+   * week and reporting a sample of it. `search` filters on the field that
+   * actually defines each list — `merged:`, `created:`, `closed:` — so the first
+   * N results are the right N.
+   *
+   * Three aliased searches ride in one query and cost one rate-limit point
+   * between them. `bodyText` is GitHub's own markdown-flattened rendering, so
+   * the caller excerpts prose instead of `<details>` blocks and HTML comments.
+   *
+   * **`closes` is a list of CANDIDATES, not of facts.** GitHub reports every
+   * issue linked to the pull request, by keyword or through the Development
+   * sidebar, whether or not the merge is what closed it — an issue closed by
+   * hand days earlier still appears. Deciding which of them the merge actually
+   * closed needs the timestamps, so they are returned unjudged and
+   * `attributeClosures()` (`cron/repo-digest.ts`) makes the call.
+   */
+  async listRepoDigestDetail(
+    owner: string,
+    repo: string,
+    sinceIso: string,
+    opts: { first?: number } = {},
+  ): Promise<RepoDigestDetail> {
+    const kit = await this.kit(owner);
+    // Search caps a page at 100; the caller wants far fewer than that.
+    const first = Math.min(Math.max(opts.first ?? 30, 1), 100);
+    const scope = `repo:${owner}/${repo}`;
+
+    const res = await kit.graphql<GraphQlDigestSearch>(
+      `query($merged: String!, $opened: String!, $closed: String!, $first: Int!) {
+         merged: search(query: $merged, type: ISSUE, first: $first) {
+           nodes {
+             ... on PullRequest {
+               number title url mergedAt bodyText
+               author { login __typename }
+               labels(first: 10) { nodes { name } }
+               closingIssuesReferences(first: 10) {
+                 nodes { number title url closedAt state repository { nameWithOwner } }
+               }
+             }
+           }
+         }
+         opened: search(query: $opened, type: ISSUE, first: $first) {
+           nodes {
+             ... on Issue {
+               number title url createdAt bodyText
+               author { login __typename }
+               labels(first: 10) { nodes { name } }
+             }
+           }
+         }
+         closed: search(query: $closed, type: ISSUE, first: $first) {
+           nodes {
+             ... on Issue {
+               number title url closedAt stateReason bodyText
+               author { login __typename }
+               labels(first: 10) { nodes { name } }
+             }
+           }
+         }
+       }`,
+      {
+        merged: `${scope} is:pr is:merged merged:>=${sinceIso}`,
+        opened: `${scope} is:issue created:>=${sinceIso}`,
+        closed: `${scope} is:issue closed:>=${sinceIso}`,
+        first,
+      },
+    );
+
+    const merged = (res.merged?.nodes ?? [])
+      .filter((n): n is GraphQlMergedPr => !!n?.mergedAt)
+      .map((n) => ({
+        ...baseDetail(n),
+        mergedAt: n.mergedAt,
+        closes: (n.closingIssuesReferences?.nodes ?? [])
+          .filter((c): c is NonNullable<typeof c> => !!c?.number)
+          .map((c) => ({
+            number: c.number,
+            title: c.title ?? "",
+            url: c.url ?? "",
+            closedAt: c.closedAt ?? null,
+            repo: c.repository?.nameWithOwner ?? "",
+          })),
+      }));
+
+    const opened = (res.opened?.nodes ?? [])
+      .filter((n): n is GraphQlIssue => !!n?.number)
+      .map((n) => ({ ...baseDetail(n), createdAt: n.createdAt ?? "" }));
+
+    const closed = (res.closed?.nodes ?? [])
+      .filter((n): n is GraphQlIssue => !!n?.number && !!n.closedAt)
+      .map((n) => ({
+        ...baseDetail(n),
+        closedAt: n.closedAt as string,
+        stateReason: n.stateReason ?? null,
+      }));
+
+    return { merged, opened, closed };
   }
 
   /**
@@ -1792,6 +1957,57 @@ interface GraphQlReactable {
     content: string;
     reactors?: { nodes?: Array<{ login?: string } | null> };
   }>;
+}
+
+/** Fields every node of the digest search shares. An empty `{}` is a node of the other union member. */
+interface GraphQlDigestNode {
+  number?: number;
+  title?: string | null;
+  url?: string | null;
+  bodyText?: string | null;
+  author?: { login?: string | null; __typename?: string } | null;
+  labels?: { nodes?: Array<{ name?: string | null } | null> } | null;
+}
+
+interface GraphQlMergedPr extends GraphQlDigestNode {
+  number: number;
+  mergedAt: string;
+  closingIssuesReferences?: {
+    nodes?: Array<{
+      number: number;
+      title?: string | null;
+      url?: string | null;
+      closedAt?: string | null;
+      state?: string | null;
+      repository?: { nameWithOwner?: string | null } | null;
+    } | null>;
+  } | null;
+}
+
+interface GraphQlIssue extends GraphQlDigestNode {
+  number: number;
+  createdAt?: string | null;
+  closedAt?: string | null;
+  stateReason?: string | null;
+}
+
+interface GraphQlDigestSearch {
+  merged?: { nodes?: Array<GraphQlMergedPr | null> } | null;
+  opened?: { nodes?: Array<GraphQlIssue | null> } | null;
+  closed?: { nodes?: Array<GraphQlIssue | null> } | null;
+}
+
+/** The fields shared by every digest item, mapped once so the three lists can't drift. */
+function baseDetail(node: GraphQlDigestNode): DigestItemDetail {
+  return {
+    number: node.number ?? 0,
+    title: node.title ?? "",
+    url: node.url ?? "",
+    authorLogin: node.author?.login ?? "",
+    authorIsBot: node.author?.__typename === "Bot",
+    labels: (node.labels?.nodes ?? []).map((l) => l?.name ?? "").filter(Boolean),
+    body: node.bodyText ?? "",
+  };
 }
 
 // ---------------------------------------------------------------------------

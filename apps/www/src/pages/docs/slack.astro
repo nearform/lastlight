@@ -120,13 +120,29 @@ SLACK_DELIVERY_CHANNEL=C01XYZ      # Channel for cron health reports</code></pre
 
 	<pre><code>acme/widgets — week to 9 Aug
 
-A steady week: the review queue shrank and nothing is waiting on a human.
+Review reliability dominated the week: three fixes closed the last
+stranding modes and the digest stopped burying itself in preview cards.
+Dependency work stayed quiet.
+
+Merged (7)
+• #342 Stop Slack unfurling every PR link — @cliftonc   ← links to GitHub
+• #338 Reclaim a pod so a retry can proceed (closes #331)
+• #337 Log a failed phase at error level
+• …and 4 more · plus 6 bot PRs
+
+New issues (4)
+• #345 Digest says little about what went on in the repo
+• #344 k8s retry loses its PVC
+
+Closed issues (5)
+• #329 Review sweep spend loop
+• …and 1 more · 3 by merged PRs above
 
 Repo
 • 7 PRs merged, 3 opened
 • 5 issues closed, 4 opened
 • 9 PRs open (2 awaiting review)
-• Oldest unreviewed: #412 Refactor the loader — open 9 days   ← links to GitHub
+• Oldest unreviewed: #412 Refactor the loader — open 9 days
 
 Last Light
 • 14 runs — 12 ok, 2 failed
@@ -134,11 +150,27 @@ Last Light
 • $4.12 across 40 phases</code></pre>
 
 	<p>
-		The numbers are computed in code, from the GitHub API and Last Light's own
-		database — not written by a model. Only the opening sentence is generated,
-		from those already-settled facts, and if that call fails the digest still
-		goes out without it. Set <code>digest.narrative: false</code> in your overlay
-		to skip it entirely.
+		The numbers and the lists are computed in code, from the GitHub API and Last
+		Light's own database — not written by a model. Only the opening summary is
+		generated, from those already-settled facts, and if that call fails the
+		digest still goes out without it. Set <code>digest.narrative: false</code> in
+		your overlay to skip it entirely.
+	</p>
+
+	<p>
+		Two details worth knowing. An issue that a listed merged pull request closed
+		is shown once, hanging off that PR, rather than twice — and only when the
+		timestamps agree that the merge is what closed it, since GitHub reports every
+		<em>linked</em> issue whether or not the merge closed it. And pull requests
+		opened by bots are folded into a count (<code>plus 6 bot PRs</code>) so a week
+		of dependency bumps can't push the human work out of the list.
+	</p>
+
+	<p>
+		Sizes are tunable: <code>digest.listItems</code> caps each of the three
+		content lists (default 8), <code>digest.maxItems</code> caps the
+		waiting-on-a-human list (default 5), and <code>digest.detailItems</code>
+		bounds how many items' text the summariser reads (default 25).
 	</p>
 
 	<h3>Pick a channel</h3>

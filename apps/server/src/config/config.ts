@@ -73,10 +73,14 @@ export interface SlackConfig {
 export interface DigestConfig {
   /** How far back a digest looks, in days. */
   windowDays: number;
-  /** Spend one cheap model call on a plain-English summary sentence. */
+  /** Spend one cheap model call on a plain-English summary of the week. */
   narrative: boolean;
-  /** Cap on each enumerated list (unreviewed PRs, escalations). */
+  /** Cap on the escalation list. */
   maxItems: number;
+  /** Cap on each of the week's content lists (merged PRs, issues opened/closed). */
+  listItems: number;
+  /** How many items' text the summariser is shown. Clamped — it sizes a prompt. */
+  detailItems: number;
 }
 
 export interface ModelConfig {
@@ -1002,6 +1006,11 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     windowDays: positiveNumber(digestRaw.windowDays) ?? 7,
     narrative: digestRaw.narrative !== false,
     maxItems: positiveNumber(digestRaw.maxItems) ?? 5,
+    listItems: Math.min(positiveNumber(digestRaw.listItems) ?? 8, 25),
+    // Clamped, unlike the others: this one sizes a MODEL PROMPT, and a single
+    // pull-request body can run to 11 KB. An overlay typo of 500 would be a
+    // several-hundred-kilobyte request per repo per week.
+    detailItems: Math.min(positiveNumber(digestRaw.detailItems) ?? 25, 60),
   };
 
   // Team-based dashboard visibility (issue #169). Lenient like every block
