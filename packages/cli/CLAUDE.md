@@ -153,6 +153,17 @@ while the agent is up, because a concurrent writer produces a target that is
 quietly short of rows. Contract + the value-mapping details:
 `apps/server/spec/10-state.md` → "Moving an existing database to Postgres".
 
+**`server setup` refuses to nest the working directory inside another git
+repository** (`guardNestedHome`). The prompt resolves its answer against the
+current directory, so running setup from inside the lastlight checkout and
+answering `lastlight` cloned the whole core repo to `packages/cli/lastlight` —
+~50 MB of nested repo that the outer repo then staged on the next `git add -A`,
+with setup reporting success throughout. Nesting inside the **core** checkout is
+a hard refusal; any other enclosing repo asks for confirmation (defaulting to
+no), because a home directory that is itself a dotfiles repo makes `~/lastlight`
+"nested" while being exactly right. `--yes` refuses either way — CI has nobody
+to ask.
+
 `server update` (`cli-server.ts`) is the single source of truth for a deploy:
 pull the `instance/` overlay first (so a freshly-bumped `deploy.version` core pin
 is visible), converge the core checkout to that pin (`readCorePin`, else `main`),

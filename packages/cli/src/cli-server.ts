@@ -429,6 +429,76 @@ function isGitRepo(dir: string): boolean {
 }
 
 /**
+ * The nearest ANCESTOR of `dir` that is a git work tree, or null.
+ *
+ * Walks upward from the first ancestor that exists, so it answers correctly for
+ * a `home` that has not been created yet — which is the case that matters, since
+ * the whole point is to check before cloning into it.
+ */
+export function enclosingGitRepo(dir: string): string | null {
+  let current = path.dirname(path.resolve(dir));
+  for (;;) {
+    if (isGitRepo(current)) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return null; // hit the filesystem root
+    current = parent;
+  }
+}
+
+/** Does this checkout's `origin` point at the lastlight core repo? */
+async function isCoreCheckout(dir: string): Promise<boolean> {
+  const origin = await captureSoft("git", ["remote", "get-url", "origin"], dir);
+  return !!origin && /[:/]nearform\/lastlight(\.git)?$/i.test(origin.trim());
+}
+
+/**
+ * Refuse to scaffold a working directory INSIDE another git repository.
+ *
+ * The failure this prevents is not hypothetical: answering the working-directory
+ * prompt with a relative path resolves against the current directory, so running
+ * `lastlight server setup` from inside a checkout and typing `lastlight` clones
+ * the whole core repo to `<checkout>/lastlight`. It is ~50 MB of nested repo
+ * that the outer repo will happily stage on the next `git add -A`, and nothing
+ * about the successful setup output suggests anything is wrong.
+ *
+ * Nesting inside the CORE repo is always a mistake, so that is a hard refusal.
+ * Any other enclosing repo gets a confirm defaulting to NO rather than a
+ * refusal, because a legitimate case exists — a home directory that is itself a
+ * dotfiles repo makes `~/lastlight` "nested" while being exactly right.
+ */
+export async function guardNestedHome(home: string, nonInteractive = false): Promise<void> {
+  // Adopting an existing checkout AT `home` is the supported path, not nesting.
+  if (isGitRepo(home)) return;
+  const outer = enclosingGitRepo(home);
+  if (!outer) return;
+
+  if (await isCoreCheckout(outer)) {
+    p.log.error(
+      `${chalk.bold(home)} is inside the lastlight checkout at ${chalk.bold(outer)}.\n` +
+        "  Setup would clone the core repo into itself, and the outer repo would\n" +
+        "  stage all of it on the next `git add -A`.\n" +
+        `  Pick a path outside it — ${chalk.cyan("--home ~/lastlight")}, say. ` +
+        "Relative paths resolve against the current directory.",
+    );
+    process.exit(1);
+  }
+
+  p.log.warn(
+    `${chalk.bold(home)} is inside the git repository at ${chalk.bold(outer)}.\n` +
+      "  The clone would live inside that repo and get committed by a stray `git add -A`.",
+  );
+  if (nonInteractive) {
+    p.log.error("Refusing to nest a checkout in --yes mode. Pass --home <dir> with a path outside it.");
+    process.exit(1);
+  }
+  const go = await p.confirm({ message: "Continue anyway?", initialValue: false });
+  if (go !== true) {
+    p.cancel("Cancelled — nothing was written.");
+    process.exit(1);
+  }
+}
+
+/**
  * Ensure `<home>/docker-compose.override.yml` is a symlink to the overlay's
  * `instance/docker-compose.override.yml`, so `docker compose` auto-loads it.
  * No-op when the overlay ships no override, or when a real file already sits
@@ -580,12 +650,17 @@ export async function serverSetup(opts: ServerOpts & { local?: boolean }): Promi
   if (!opts.yes) {
     const answer = await p.text({
       message: "Working directory for the server (checkout + overlay)",
+      // Say it: the answer is resolved against the current directory, and a
+      // relative one typed from inside a checkout is how a repo ends up cloned
+      // into another repo (see guardNestedHome).
+      placeholder: `absolute path — relative resolves against ${process.cwd()}`,
       initialValue: home,
     });
     if (p.isCancel(answer)) { p.cancel("Cancelled."); process.exit(1); }
     home = answer;
   }
   home = path.resolve(home);
+  await guardNestedHome(home, opts.yes);
 
   // 1. Core checkout — adopt an existing one, else clone.
   if (isGitRepo(home)) {
