@@ -95,11 +95,11 @@
     "@electric-sql/pglite": "^0.5.5",
     "@opentelemetry/context-async-hooks": "^2.10.0",
     "@opentelemetry/sdk-trace-base": "^2.10.0",
-    "@types/node": "^26.1.1",
-    "concurrently": "^10.0.4",
-    "dependency-cruiser": "^18.1.0",
+    "@types/node": "^26.2.0",
+    "concurrently": "^10.0.5",
+    "dependency-cruiser": "^18.2.0",
     "drizzle-kit": "^0.31.10",
-    "tsx": "^4.23.1",
+    "tsx": "^4.23.12",
     "typescript": "^5.7.0",
     "vitest": "^4.1.10"
   }

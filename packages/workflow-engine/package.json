@@ -37,8 +37,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
-    "dependency-cruiser": "^18.1.0",
+    "@types/node": "^26.2.0",
+    "dependency-cruiser": "^18.2.0",
     "typescript": "^7.0.2"
   }
 }
