@@ -9,6 +9,10 @@ import {
 } from "../github/profiles.js";
 import { AgenticShim, truncateForLog, safeStringify } from "../event-shim.js";
 import { BuildAssetStore, type BuildAssetRef } from "../../state/build-assets.js";
+import { PR_NOTES_FILE_NAME, VERIFY_SCRIPT_NAME } from "../fix-scratch.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("executor");
 
 /**
  * Shared building blocks for the per-backend executors
@@ -33,6 +37,65 @@ export const SKILL_BUNDLE_ROOT = ".lastlight-skills";
 export const THINKING_LEVELS: ReadonlySet<string> = new Set([
   "off", "minimal", "low", "medium", "high", "xhigh",
 ]);
+
+// ── The harness's two scratch files in a PR checkout ────────────────
+//
+// The fix loop's push gate and the PR journal. Both live inside the checkout's
+// own `.git/` directory, which git never walks — the placement argument, and
+// the #256 bug that produced it, is stated once in `../fix-scratch.ts`. What
+// lives here is the half that needs `fs`: the start-of-run deletes.
+export { VERIFY_SCRIPT_NAME, PR_NOTES_FILE_NAME };
+
+/**
+ * Start-of-run reset for the push gate (09-state-machine.md §S1, requirement
+ * 3): delete any script an earlier attempt left behind.
+ *
+ * There is no `excludeFromGit` half — the gate lives under `.git/`, so nothing
+ * has to be registered for it to stay out of the PR. This is purely about
+ * STALENESS, and staleness is the whole reason it survives: the fix FAMILY
+ * shares ONE workspace per PR (§S4), so a gate written by a superseded
+ * diagnosis — possibly by the *other* fix workflow — outlives the run that
+ * wrote it; the reused-workspace refresh's `git clean -fdx` cannot reach inside
+ * `.git/`; and that clean sits inside a try/catch anyway, so a failed fetch
+ * skips it entirely. A stale gate is worse than no gate: it passes green
+ * against the wrong commands and authorises a push.
+ *
+ * Best-effort and non-fatal — a workspace we can't reset still runs, and the
+ * agent is instructed to rewrite the script unconditionally anyway. No-op when
+ * `repoDir` isn't a checkout (there is no `.git/` to write into).
+ */
+export function resetVerifyScript(repoDir: string): void {
+  try {
+    rmSync(join(repoDir, VERIFY_SCRIPT_NAME), { force: true });
+  } catch (err: unknown) {
+    log.warn(`Could not remove a stale ${VERIFY_SCRIPT_NAME}`, { err });
+  }
+}
+
+/** Legacy alias for {@link PR_NOTES_FILE_NAME}, kept for existing importers. */
+export const PR_NOTES_FILE = PR_NOTES_FILE_NAME;
+
+/**
+ * Start-of-run reset for the journal: delete anything a crashed earlier attempt
+ * left behind.
+ *
+ * As with {@link resetVerifyScript}, there is no `excludeFromGit` half any
+ * more — placement under `.git/` is the guarantee. What remains is provenance:
+ * the delete is a belt for the harvest's own drain (`drainPrNotes` removes the
+ * file after each phase), and it matters for exactly one case — a run that died
+ * between the agent writing a note and `onPhaseEnd` reading it — where the file
+ * would otherwise be re-attributed to the NEXT run, with that run's id stamped
+ * on a claim it never made. Provenance that lies is worse than a lost note.
+ *
+ * Best-effort and non-fatal; no-op when `repoDir` isn't a checkout.
+ */
+export function resetPrNotesJournal(repoDir: string): void {
+  try {
+    rmSync(join(repoDir, PR_NOTES_FILE_NAME), { force: true });
+  } catch (err: unknown) {
+    log.warn(`Could not remove a stale ${PR_NOTES_FILE_NAME}`, { err });
+  }
+}
 
 /**
  * Stage this phase's declared skills into a per-phase bundle directory at
@@ -99,6 +162,11 @@ export function skillBundleKey(config: ExecutorConfig): string {
  * sandbox checkout. Used for the gondolin backend, where the skill bundle must
  * be staged under cwd (the only mounted dir) rather than as an out-of-repo
  * sibling. No-op when `repoDir` isn't a git checkout (e.g. the workspace root).
+ *
+ * Directories only — it writes `/<entry>/`. It used to take a `kind` flag for
+ * the push gate and the PR journal, which are files; both now live under
+ * `.git/` (see the two sections above), where git cannot see them at all and
+ * nothing needs excluding. Every remaining caller registers a directory.
  */
 export function excludeFromGit(repoDir: string, entry: string): void {
   const gitDir = join(repoDir, ".git");
@@ -174,8 +242,7 @@ export function stageArtifactsIn(art: ServerArtifacts | undefined): void {
     // and are never in the repo's git tree anyway.
     excludeFromGit(art.repoDir, ARTIFACT_DIR_ROOT);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[executor] Could not stage build assets: ${msg}`);
+    log.warn("Could not stage build assets", { err });
   }
 }
 
@@ -185,8 +252,7 @@ export function harvestArtifactsOut(art: ServerArtifacts | undefined): void {
   try {
     art.store.harvestFrom(art.ref, art.dir);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[executor] Could not harvest build assets: ${msg}`);
+    log.warn("Could not harvest build assets", { err });
   }
 }
 
@@ -536,11 +602,13 @@ export function finalizeFromRunResult(
   const costUsd = stats?.cost ?? 0;
   const turns = stats?.assistantMessages ?? 0;
 
-  const costStr = costUsd > 0 ? `, $${costUsd.toFixed(4)}` : "";
-  console.log(
-    `  [executor] Result: ${stopReason} (${turns} turns, ${Math.round(durationMs / 1000)}s${costStr})` +
-    `${result.sessionId ? ` [session ${result.sessionId}]` : ""}`,
-  );
+  log.info("Result", {
+    stopReason,
+    turns,
+    durationSec: Math.round(durationMs / 1000),
+    costUsd: costUsd > 0 ? costUsd : undefined,
+    sessionId: result.sessionId,
+  });
 
   shim.finalize({
     finalText: result.finalText,
@@ -577,8 +645,8 @@ export function finalizeFromRunResult(
       ? "agent produced no final answer (empty completion — no usable output)"
       : stopReason);
   if (!success || accountError) {
-    if (accountError) console.error(`  [executor] Account error: ${errorText}`);
-    else console.error(`  [executor] Run failed (${stopReason}): ${errorText}`);
+    if (accountError) log.error("Account error", { errorText });
+    else log.error("Run failed", { stopReason, errorText });
   }
 
   return {
@@ -669,9 +737,7 @@ export function coerceThinking(raw: string | undefined): ThinkingLevel | undefin
   if (!raw) return undefined;
   const v = raw.trim().toLowerCase();
   if (!THINKING_LEVELS.has(v)) {
-    console.warn(
-      `[executor] Ignoring unknown thinking level "${raw}" — must be one of: ${[...THINKING_LEVELS].join(", ")}`,
-    );
+    log.warn("Ignoring unknown thinking level", { value: raw, allowed: [...THINKING_LEVELS] });
     return undefined;
   }
   return v as ThinkingLevel;
@@ -699,17 +765,40 @@ export function emptyResult(stopReason: string, durationMs: number) {
   };
 }
 
-/** Splice values into process.env for the duration of a sync block. */
-export function applyEnv(env: Record<string, string>): () => void {
-  const saved: Record<string, string | undefined> = {};
-  for (const [k, v] of Object.entries(env)) {
-    saved[k] = process.env[k];
-    process.env[k] = v;
+/**
+ * The GitHub credential keys agentic-pi's github extension recognises. The
+ * executor hands these to an in-process agent **as an argument**, never through
+ * the shared `process.env`.
+ *
+ * `process.env` is one global for the whole harness, but up to
+ * `concurrency.maxWorkflows` in-process runs (gondolin/none) are live in it at
+ * once — so writing a run's repo-scoped, profile-downscoped token there let
+ * another run read it (issue #215: `github_*` writes 403'd with "Resource not
+ * accessible by integration"), and interleaved restores left the harness with a
+ * dead token and a falsy `GITHUB_APP_ID` permanently. `GIT_TOKEN` is the
+ * git-only alias of the same secret (it rides `GIT_CONFIG_*`, see
+ * `agentGitIdentityEnv`), so it is listed here but not forwarded as a github
+ * credential.
+ */
+const GITHUB_CREDENTIAL_ENV_KEYS = [
+  "GITHUB_APP_ID",
+  "GITHUB_APP_INSTALLATION_ID",
+  "GITHUB_APP_PRIVATE_KEY_PATH",
+  "GITHUB_TOKEN",
+] as const;
+
+/**
+ * The run's GitHub credentials, pulled out of the sandbox env to hand agentic-pi
+ * as `githubAuthEnv`. Always authoritative — an empty object means "this run has
+ * no GitHub credential", NOT "fall back to `process.env`" (which is how a host
+ * PAT or the App PEM would otherwise reach an agent whose profile was
+ * downscoped). Empty-string values are dropped, matching agentic-pi's own
+ * truthiness check.
+ */
+export function githubAuthEnvFrom(env: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of GITHUB_CREDENTIAL_ENV_KEYS) {
+    if (env[k]) out[k] = env[k];
   }
-  return () => {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  };
+  return out;
 }

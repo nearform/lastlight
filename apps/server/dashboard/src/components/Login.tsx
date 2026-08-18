@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { Moon, Sun } from "lucide-react";
+import { ThemeToggle } from "./ThemeToggle";
 import { api, auth } from "../api";
-import { useTheme } from "../hooks/useTheme";
 import { NearformLogo } from "./NearformLogo";
 
 interface Props {
@@ -42,7 +41,6 @@ export function Login({ onAuthed, slackOAuth, githubOAuth, passwordLogin = true,
   const [busy, setBusy] = useState(false);
   const [slackRedirecting, setSlackRedirecting] = useState(false);
   const [githubRedirecting, setGithubRedirecting] = useState(false);
-  const { isDark, toggleTheme } = useTheme();
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -79,15 +77,7 @@ export function Login({ onAuthed, slackOAuth, githubOAuth, passwordLogin = true,
               <div className="text-lg font-semibold tracking-tight">Last Light</div>
               <div className="text-xs text-base-content/50">Sign in to continue</div>
             </div>
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
-              title={isDark ? "Switch to light theme" : "Switch to dark theme"}
-              aria-label="Toggle light/dark theme"
-            >
-              {isDark ? <Sun size={14} /> : <Moon size={14} />}
-            </button>
+            <ThemeToggle />
           </div>
 
           {error && (

@@ -1,4 +1,4 @@
-# Build definition for the four locally-built Last Light images, driven by
+# Build definition for the five locally-built Last Light images, driven by
 # the `images` job of .github/workflows/publish.yml via `docker buildx bake`.
 #
 # WHY BAKE: the sandbox leaves (sandbox, sandbox-qa) are `FROM
@@ -49,7 +49,7 @@ function "cache_to" {
 # The required set — must all succeed. sandbox-base is built once here and shared
 # (as a content-keyed context) by the sandbox target.
 group "core" {
-  targets = ["agent", "sandbox-base", "sandbox"]
+  targets = ["agent", "agent-qemu", "sandbox-base", "sandbox"]
 }
 
 # Only the agent Dockerfile takes GIT_SHA / BUILD_DATE (the drift banner).
@@ -60,6 +60,20 @@ target "agent" {
   args       = { GIT_SHA = GIT_SHA, BUILD_DATE = BUILD_DATE }
   cache-from = cache_from("lastlight-agent")
   cache-to   = cache_to("lastlight-agent")
+}
+
+# The QEMU-enabled agent variant (gondolin/k8s). FROM the agent image via a
+# content-keyed context (same pattern as sandbox→sandbox-base): the cache keys
+# on the base's CONTENT, not its pushed digest, so it hits across releases. The
+# bare context name `agent` matches `FROM ${AGENT_IMAGE}` after arg substitution.
+target "agent-qemu" {
+  dockerfile = "apps/server/agent-qemu.Dockerfile"
+  context    = "../.."
+  args       = { AGENT_IMAGE = "agent" }
+  contexts   = { agent = "target:agent" }
+  tags       = tags("lastlight-agent-qemu")
+  cache-from = cache_from("lastlight-agent-qemu")
+  cache-to   = cache_to("lastlight-agent-qemu")
 }
 
 target "sandbox-base" {

@@ -1,0 +1,100 @@
+---
+// Last Light vs. OpenHands: targets "openhands alternative" and the broader
+// "self-hosted autonomous coding agent" query set. OpenHands is the closest
+// genuine OSS competitor, so this page has to be scrupulously fair.
+import ComparisonLayout from '../../layouts/ComparisonLayout.astro';
+
+const title = "Last Light vs. OpenHands: Two Self-Hosted Autonomous Agents";
+const description = "OpenHands Resolver turns a labelled issue into a PR, self-hosted and fully BYO-model. Last Light does that too, plus triage, review, security and health workflows on one engine. An honest comparison of the closest OSS competitor.";
+
+const heading = 'Last Light vs. <span class="accent">OpenHands</span>';
+const subtitle = "This is the closest real competitor, so it deserves the most careful page. Both are open source, both self-host, both run fully autonomously rather than only interactively. The difference is not whether they can do the job. It is shape: one pipeline you extend, or a suite of workflows that ships assembled.";
+
+const rowsDuo = [
+	["Licence", "MIT, free", "Open source, free"],
+	["Hosting", "Self-hosted only", "Self-hosted, or OpenHands Cloud / Enterprise"],
+	["Model choice", "BYO across providers", "Full BYOM"],
+	["Autonomous trigger", "Many webhook types, Slack, cron sweeps, CLI", "Issue label via Resolver, or headless mode"],
+	["Built-in workflows", "Triage, review, build, security, health, explore, verify, chat", "One issue&rarr;PR pipeline you extend"],
+	["Isolation", "Docker / micro-VM sandbox, default-deny egress firewall", "Sandboxed runtime"],
+	["Token scoping", "Four downscoped per-run App token profiles", "Standard token"],
+	["Approval gates", "Mid-run, wired to GitHub, Slack and dashboard", "In the loop, or review the PR"],
+	["Interactive use", "None. It is a service, not a pair programmer", "Yes, CLI and IDE"],
+	["Ecosystem", "Small and young", "Large, mature, well known"],
+];
+---
+
+<ComparisonLayout title={title} description={description} heading={heading} subtitle={subtitle} slug="openhands">
+
+	<section class="content-section">
+		<h2>The short version</h2>
+		<div class="callout-card">
+			<p>Last Light is not uniquely "the self-hosted autonomous one". OpenHands got there first and is the bigger project by every measure that counts: more users, more integrations, a larger community, and a cloud option if you ever want to stop self-hosting.</p>
+			<p>Its <strong>Resolver</strong> does exactly the event-driven thing. Label an issue, and a sandboxed runtime spins up, edits code, runs tests, and opens a pull request. That is the same loop as Last Light's build line. If that loop is your requirement, OpenHands is the more proven and lower-effort path, and this page is not going to pretend otherwise.</p>
+			<p>Where Last Light differs is coverage. It is not one pipeline: it is a triage sweep, a PR reviewer, a build cycle, a weekly security pass, a health report and a Slack chat surface, all as YAML on one engine, with a hardened network boundary as the default posture rather than something you assemble.</p>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Side by side</h2>
+		<div class="table-scroll">
+			<table class="cmp duo">
+				<thead>
+					<tr><th></th><th class="ll">Last Light</th><th>OpenHands</th></tr>
+				</thead>
+				<tbody>
+					{rowsDuo.map(([k, ll, other]) => (
+						<tr>
+							<th scope="row">{k}</th>
+							<td class="ll" set:html={ll} />
+							<td set:html={other} />
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Where each one wins</h2>
+		<div class="hh-grid">
+			<div class="hh-card">
+				<h3>What OpenHands does better</h3>
+				<ul class="card-list">
+					<li><strong>Maturity and scale.</strong> A much larger project, with the community, documentation and battle-testing that comes with it.</li>
+					<li><strong>General purpose.</strong> It is an agent you can point at almost anything, not a repo-maintenance service.</li>
+					<li><strong>Interactive and autonomous.</strong> Use it at your desk through the CLI or IDE, then run the same thing headless.</li>
+					<li><strong>A managed cloud option</strong> if self-hosting stops being worth the effort.</li>
+					<li><strong>A simpler mental model</strong> for the core job: label an issue, get a PR.</li>
+					<li><strong>Broader integrations</strong> across tools and platforms.</li>
+				</ul>
+			</div>
+			<div class="hh-card">
+				<h3>What Last Light adds on top</h3>
+				<ul class="card-list">
+					<li><strong>A suite of distinct workflows, not one pipeline.</strong> Triage, PR review, the full build cycle, weekly health, weekly security, explore, verify, demo and chat, forkable out of the box.</li>
+					<li><strong>Multi-source event routing.</strong> Many GitHub webhook types, Slack, and cron sweeps through one deterministic router, rather than a single issue-label trigger.</li>
+					<li><strong>Approval gates as a built-in, mid-run primitive</strong>, wired to GitHub, Slack and the dashboard, and to the workflow graph itself.</li>
+					<li><strong>An ownership-grade security boundary by default:</strong> a default-deny egress firewall plus four downscoped per-run token profiles.</li>
+					<li><strong>Everything in the box, including the agent.</strong> Reasoning, bash, file I/O and network egress all sit behind one perimeter.</li>
+				</ul>
+			</div>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Which should you pick?</h2>
+		<div class="choose-grid">
+			<div class="choose-card rival">
+				<div class="choose-tag">Choose OpenHands when</div>
+				<p>your need is "label an issue, get a PR, self-hosted", or you want one agent that works both at your desk and in automation. It is the more proven, lower-effort path, and a bigger project to bet on.</p>
+			</div>
+			<div class="choose-card lastlight">
+				<div class="choose-tag">Choose Last Light when</div>
+				<p>you want the whole repo-maintenance suite as one purpose-built service rather than something you compose, and you want the sandbox, egress policy and token scoping to be the default posture rather than your integration work.</p>
+			</div>
+		</div>
+		<p class="section-note">If you like the philosophy of one, evaluate the other. These are adjacent projects solving overlapping problems, and OpenHands has the longer track record.</p>
+	</section>
+
+</ComparisonLayout>

@@ -3,15 +3,15 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 
 const title = "How It Works — Last Light";
-const description = "Inside Last Light: EventEnvelope, the YAML workflow engine, phases, permission profiles, approval gates, and the cross-phase handoff files under .lastlight/.";
+const description = "Inside the software factory: EventEnvelope, the YAML workflow engine that runs the production line, phases, permission profiles, approval gates, and the cross-phase handoff files under .lastlight/.";
 ---
 
 <BaseLayout title={title} description={description}>
 
 	<!-- Header -->
 	<section class="page-header">
-		<h1>How it <span class="accent">works</span></h1>
-		<p class="subtitle">Events from GitHub, Slack, or the CLI flow through a normalizer into a YAML-driven workflow engine. Each workflow runs its phases — Architect, Executor, Reviewer, and more — inside per-phase sandboxes (gondolin micro-VMs by default, Docker on opt-in) with downscoped GitHub tokens and optional human approval gates. Everything is logged to an admin dashboard you control.</p>
+		<h1>How the <span class="accent">factory</span> works</h1>
+		<p class="subtitle">Events from GitHub, Slack, or the CLI flow through a normalizer into a YAML-driven workflow engine — the production line. Each workflow runs its phases — Architect, Executor, Reviewer, and more — as stations on the line, inside per-phase sandboxes (gondolin micro-VMs by default, Docker on opt-in) with downscoped GitHub tokens and optional human approval gates. Everything is logged to an admin dashboard you control.</p>
 	</section>
 
 	<!-- Inspiration -->
@@ -30,8 +30,8 @@ const description = "Inside Last Light: EventEnvelope, the YAML workflow engine,
 		<h2>Core principles</h2>
 		<div class="principles-grid">
 			<div class="principle-card">
-				<div class="principle-header"><div class="principle-num">1</div><h3>Roles, not prompts</h3></div>
-				<p>Each agent has a distinct <strong>identity</strong> with explicit constraints and output formats. An Architect can only read. An Executor must verify before claiming done. A Reviewer has no shared context with the builder. The role defines the behaviour — not a vague instruction to "be careful."</p>
+				<div class="principle-header"><div class="principle-num">1</div><h3>Separation is structural</h3></div>
+				<p>Each phase is a fresh agent with strict boundaries — a read-only Architect that only diagnoses, an Executor that implements, an independent Reviewer that only reports. There's no shared "role" object behind them: the boundaries live in each phase's <strong>prompt</strong>, and the isolation is real — every phase runs in its own sandboxed session and hands off through files on the git branch, never a shared context.</p>
 			</div>
 			<div class="principle-card">
 				<div class="principle-header"><div class="principle-num">2</div><h3>No agent verifies its own work</h3></div>
@@ -51,7 +51,7 @@ const description = "Inside Last Light: EventEnvelope, the YAML workflow engine,
 	<!-- The YAML workflow engine -->
 	<section class="content-section">
 		<h2>The YAML workflow engine</h2>
-		<p class="section-intro">Every behavior — triage, review, build, health, chat — is a YAML workflow. The harness is workflow-agnostic: it reads a file, executes phases in order (or as a DAG), and writes the results to SQLite and the session JSONLs. Adding a new behavior means dropping a new YAML file into <code>workflows/</code>, not editing TypeScript.</p>
+		<p class="section-intro">The workflow engine is the factory floor. Every behavior — triage, review, build, health, chat — is a YAML workflow, a production line the engine runs. The harness is workflow-agnostic: it reads a file, executes phases in order (or as a DAG), and writes the results to SQLite and the session JSONLs. Adding a new line to the factory means dropping a new YAML file into <code>workflows/</code>, not editing TypeScript.</p>
 
 		<div class="code-block">
 			<div class="code-header"><a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/build.yaml" target="_blank" rel="noopener" style="color: var(--text-muted);">workflows/build.yaml</a> (excerpt)</div>
@@ -105,7 +105,7 @@ phases:
 	<!-- The Three Roles -->
 	<section class="content-section">
 		<h2>The three roles</h2>
-		<p class="section-intro">Every significant piece of work flows through three specialised agents, each with strict boundaries on what they can and cannot do. Each role is a <a href="https://github.com/nearform/lastlight/tree/main/apps/server/workflows/prompts" target="_blank" rel="noopener">prompt template</a> (<code>architect.md</code>, <code>executor.md</code>, <code>reviewer.md</code>) a build phase renders, paired with the skills it needs.</p>
+		<p class="section-intro">Every significant piece of work moves down the line through three specialised agents — three stations, each with strict boundaries on what it can and cannot do. Each role is a <a href="https://github.com/nearform/lastlight/tree/main/apps/server/workflows/prompts" target="_blank" rel="noopener">prompt template</a> (<code>architect.md</code>, <code>executor.md</code>, <code>reviewer.md</code>) a build phase renders, paired with the skills it needs.</p>
 
 		<div class="roles-grid">
 			<div class="role-card role-architect">
@@ -194,7 +194,7 @@ phases:
 	<!-- The Loop -->
 	<section class="content-section">
 		<h2>The development loop</h2>
-		<p class="section-intro">The build cycle only starts when a repository <strong>maintainer explicitly @mentions the bot</strong> on a GitHub issue. Requests from Slack are never executed directly — the bot creates a GitHub issue first, and the build runs against that issue. This is a deliberate safety constraint: the GitHub issue is the authorisation gate, and all code changes have a traceable origin.</p>
+		<p class="section-intro">The production line only starts when a repository <strong>maintainer explicitly @mentions the bot</strong> on a GitHub issue. Requests from Slack are never executed directly — the bot creates a GitHub issue first, and the build runs against that issue. This is a deliberate safety constraint: the GitHub issue is the authorisation gate, and all code changes have a traceable origin.</p>
 
 		<div class="loop-diagram">
 			<svg viewBox="0 0 800 380" xmlns="http://www.w3.org/2000/svg" class="flow-svg">
@@ -314,7 +314,7 @@ phases:
 	<!-- Events & Skills -->
 	<section class="content-section">
 		<h2>Events and workflows</h2>
-		<p class="section-intro">Every connector (GitHub webhook, Slack socket, CLI) normalizes its platform events into a canonical <code>EventEnvelope</code>. A deterministic router maps that envelope to a YAML workflow and a context object — no LLM decides the routing. Build-intent classification on <code>@mention</code> comments is the one place an LLM is called, and only to distinguish "build this" from "respond to this".</p>
+		<p class="section-intro">Every connector (GitHub webhook, Slack socket, CLI) normalizes its platform events into a canonical <code>EventEnvelope</code>. A deterministic router puts each envelope on the right production line — mapping it to a YAML workflow and a context object — no LLM decides the routing. Build-intent classification on <code>@mention</code> comments is the one place an LLM is called, and only to distinguish "build this" from "respond to this".</p>
 
 		<div class="events-grid">
 			<div class="event-card">
@@ -343,7 +343,7 @@ phases:
 					<h3>@mention from maintainer</h3>
 					<span class="event-trigger">webhook</span>
 				</div>
-				<p>Only triggers when a <strong>maintainer</strong> @mentions the bot — non-maintainers get a polite decline. The bot reacts with 🚀 on the triggering comment so you get instant visual feedback, then runs the full Guardrails → Architect → Executor → Reviewer → PR cycle with up to 2 reviewer-fix loops. Runs with the <code>repo-write</code> permission profile.</p>
+				<p>Only triggers when a <strong>maintainer</strong> @mentions the bot — non-maintainers get a polite decline. The bot reacts with 🚀 on the triggering comment so you get instant visual feedback, then runs the full Guardrails → Architect → Executor → Reviewer → PR line with up to 2 reviewer-fix loops. Runs with the <code>repo-write</code> permission profile.</p>
 				<p class="event-skill">Workflow: <a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/build.yaml" target="_blank" rel="noopener"><code>build.yaml</code></a></p>
 			</div>
 
@@ -577,8 +577,16 @@ is recorded), but the rubric below is the same.
 				<span>Install deps and run the test/lint/typecheck gate in the sandbox — package-manager detection, install-first, and (when implementing) TDD discipline. The executor and fix loop run under it.</span>
 			</div>
 			<div class="skills-table-row">
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/fixing/SKILL.md" target="_blank" rel="noopener"><code>fixing</code></a></span>
+				<span>The counterpart to <code>building</code>, for a failure that already happened. Compare the repo's CI definition against the sandbox, classify into five failure classes — reproducible, env-mismatch, flaky, infra-dependent, upstream-broken — then make the minimal repair, and push only on a green local gate.</span>
+			</div>
+			<div class="skills-table-row">
 				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/code-review/SKILL.md" target="_blank" rel="noopener"><code>code-review</code></a></span>
 				<span>The shared review rubric — finding tiers (Critical / Important / Suggestions / Nits) and what to check. Used by both the PR review and the build cycle's branch-diff reviewer.</span>
+			</div>
+			<div class="skills-table-row">
+				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/dependency-impact/SKILL.md" target="_blank" rel="noopener"><code>dependency-impact</code></a></span>
+				<span>Judge a <em>major</em> dependency bump by blast radius rather than semver magnitude — low / medium / high from release notes, dev-vs-runtime, import-site count, security sensitivity and the settled CI result, with no checkout. Unknown counts as high.</span>
 			</div>
 			<div class="skills-table-row">
 				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/pr-review/SKILL.md" target="_blank" rel="noopener"><code>pr-review</code></a></span>
@@ -616,6 +624,26 @@ is recorded), but the rubric below is the same.
 				<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/chat/SKILL.md" target="_blank" rel="noopener"><code>chat</code></a></span>
 				<span>The in-process Slack/Discord assistant — answers questions about repos, PRs, and issues, and guides users to slash commands like <code>/build</code>, <code>/triage</code>, <code>/review</code>.</span>
 			</div>
+				<div class="skills-table-row">
+					<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/verify/SKILL.md" target="_blank" rel="noopener"><code>verify</code></a></span>
+					<span>Test a behaviour claim as an investigator and report <code>CONFIRMED</code> / <code>REFUTED</code> / <code>INCONCLUSIVE</code> with bash-captured evidence — prove a fix works or that a PR does what it says.</span>
+				</div>
+				<div class="skills-table-row">
+					<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/qa-test/SKILL.md" target="_blank" rel="noopener"><code>qa-test</code></a></span>
+					<span>Run an automated QA flow against a CLI or a locally-served app and report step-level pass/fail with evidence — exercise a flow end to end or smoke-test what a PR changed.</span>
+				</div>
+				<div class="skills-table-row">
+					<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/browser-qa/SKILL.md" target="_blank" rel="noopener"><code>browser-qa</code></a></span>
+					<span>Drive a real headless browser against a locally-served UI on the Docker QA image — step-level PASS/FAIL/BLOCKED with screenshots, extracted DOM text, and console errors.</span>
+				</div>
+				<div class="skills-table-row">
+					<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/demo/SKILL.md" target="_blank" rel="noopener"><code>demo</code></a></span>
+					<span>Record a short demo video of a PR or feature — drive the UI in a headless browser and composite a titled, size-capped mp4 with ffmpeg (Docker QA image).</span>
+				</div>
+				<div class="skills-table-row">
+					<span><a href="https://github.com/nearform/lastlight/blob/main/apps/server/skills/debug-production/SKILL.md" target="_blank" rel="noopener"><code>debug-production</code></a></span>
+					<span>Debug a running instance (usually production) via the <code>lastlight</code> CLI instead of SSH — investigate a failed or stuck workflow, a phase error, or “why didn't the bot do X”.</span>
+				</div>
 		</div>
 		<p class="section-note">All skill files live in the <a href="https://github.com/nearform/lastlight/tree/main/apps/server/skills" target="_blank" rel="noopener"><code>skills/</code></a> directory; the build cycle's role prompts (<code>architect</code>, <code>executor</code>, <code>reviewer</code>) live in <a href="https://github.com/nearform/lastlight/tree/main/apps/server/workflows/prompts" target="_blank" rel="noopener"><code>workflows/prompts/</code></a>. The agent personality is defined in <a href="https://github.com/nearform/lastlight/blob/main/apps/server/agent-context/soul.md" target="_blank" rel="noopener"><code>agent-context/soul.md</code></a>.</p>
 	</section>
@@ -633,7 +661,7 @@ is recorded), but the rubric below is the same.
 <style is:global>
 	/* Page header */
 	.page-header {
-		max-width: 1000px;
+		max-width: 1200px;
 		margin: 0 auto;
 		padding: 4rem 2rem 1rem;
 	}
@@ -654,7 +682,7 @@ is recorded), but the rubric below is the same.
 
 	/* Content sections */
 	.content-section {
-		max-width: 1000px;
+		max-width: 1200px;
 		margin: 0 auto;
 		padding: 3rem 2rem;
 	}
@@ -1170,7 +1198,7 @@ is recorded), but the rubric below is the same.
 	}
 
 	.comparison-row:nth-child(odd) span:not(.comparison-label) {
-		background: rgba(20, 27, 36, 0.5);
+		background: var(--bg-card);
 	}
 
 	.last-section { padding-bottom: 1rem; }

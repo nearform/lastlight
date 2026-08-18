@@ -42,12 +42,20 @@ interface WorkflowResult {
 }
 ```
 
+The engine's own `WorkflowResult` (above) is unchanged. `runWorkflow`
+(`src/workflows/runner.ts`) returns a server-only intersection,
+`WorkflowResult & { backpressure?: boolean }` — see [Concurrency cap and
+admission](#concurrency-cap-and-admission) below. `backpressure` is set
+only on the [k8s sandbox backend](/spec/09-sandbox#kubernetes--kubernetes-backend-in-development);
+it never appears on gondolin/docker/smol/none runs.
+
 `src/workflows/simple.ts:84–310` is the entry point everything funnels
 through — webhook dispatch, CLI, cron, admin resume.
 
 ## YAML schema
 
-**Workflow level** (`src/workflows/schema.ts:201–236`):
+**Workflow level** (`packages/workflow-engine/src/core/schema.ts:476–617`, re-exported
+as `src/workflows/schema.ts`):
 
 ```ts
 {
@@ -55,15 +63,40 @@ through — webhook dispatch, CLI, cron, admin resume.
   name: string;          // unique workflow name; lookup key
   description?: string;
   trigger?: string;      // informational
+  pr_scoped?: boolean;   // this workflow runs against a PULL REQUEST — see below
   variables?: Record<string, string>;
   classification?: {     // how the intent classifier routes to this workflow (issue #164)
     intent: string;      //   the intent token this workflow owns (unique; not a control intent)
     description: string; //   the category paragraph merged into the composed classifier prompt
     examples?: string[]; //   optional one-line classifier examples
   };
+  chat?: {               // how the CHAT agent advertises this workflow to a human
+    trigger?: string;    //   the phrase to tell a user to type, e.g. "triage owner/repo"
+    summary: string;     //   one line naming what they get
+    deflect?: string[];  //   user phrasings to deflect here rather than attempt in-process
+    reply?: string;      //   override for the deflection reply (default: name the trigger)
+  };
   phases: PhaseDefinition[];
 }
 ```
+
+`pr_scoped: true` is the one key here the runner acts on. It puts a workflow
+inside the PR-scoped dispatch gate: the run lock shared with every other
+PR-scoped workflow, the per-head-SHA dedup, escalation, and the resolved
+`PrState` snapshot on `context.prState`. `prScopedWorkflows()`
+(`src/workflows/pr-scope.ts`) derives the set from this metadata, memoised on the
+loader's asset version, so a forked or renamed workflow keeps its gate by
+carrying its own key. It is metadata on the workflow because that is where the
+fact lives: the harness previously held a hardcoded set of four names while the
+handlers are operator-configurable through `routes.github.*`, so remapping a
+route to a fork silently dropped the whole gate for it — and every consequence of
+the gate is a *refusal*, so nothing looked wrong until two agents pushed the same
+branch (issue #256). `validateAssets` now warns at boot when a configured
+`routes.github.pr_*` target does not declare it. The four packaged members are
+`pr-fix`, `dependabot-ci-fix`, `dependabot-pr-merge` and `pr-review`; those four
+names are also honoured without the key, for overlays that forked them before it
+existed, with a warning naming the file. See
+[05-router.md → the PR-scoped dispatch gate](05-router.md#the-pr-scoped-dispatch-gate).
 
 The optional `classification` block makes a workflow **self-describing to the
 router**: its `description`/`examples` are composed into the classifier prompt
@@ -71,6 +104,27 @@ router**: its `description`/`examples` are composed into the classifier prompt
 router's `getWorkflowByIntent` fallback — so adding a workflow (even in an
 overlay) can add a new intent with no core change. See
 [05-router.md → Build-intent classifier](05-router.md#build-intent-classifier).
+
+The optional `chat` block is its counterpart for the **chat agent**: it is what
+the bot tells a human to type, composed into the chat system prompt from the
+enabled workflow set. It is a separate, explicit opt-in rather than a derivation
+from `classification`, because "the classifier can tag a message with this
+intent" and "a human should be told to type this" are different questions that
+diverge in both directions (`demo` is classifiable but unroutable from Slack;
+the two dependabot workflows are routable but would arrive with no PR number).
+An entry may omit `trigger` and give `reply` instead, for a workflow that must be
+explained but never typed — `repo-health` is cron-only and has no
+`classification` block at all. See
+[11-chat.md → Advertised capabilities](11-chat.md#advertised-capabilities).
+
+The same block feeds the **Slack rows of the dashboard trigger table**
+(`getWorkflowTriggers`, `src/workflows/triggers.ts`), resolved through
+`routes.slack` so an operator's remap lands on the fork. Those rows gate on the
+`classification.intent` (what the Slack switch dispatches on) rather than the
+trigger phrase, so a `chat:` entry without an intent contributes an explanation
+to the agent and no trigger row. They were a hand-kept list of five while the
+router routed nine, which is why the dashboard showed no Slack trigger for
+`verify` / `qa-test` / `demo` / `answer`.
 
 **Phase level** (`schema.ts:84–182`):
 
@@ -83,7 +137,7 @@ overlay) can add a new intent with no core change. See
   command?: string;                     // type: bash — deterministic shell command (templated)
   script?: string;                      // type: script — inline source (templated)
   runtime?: "js" | "ts" | "python";     // type: script — js/ts → node, python → uv run (default "js")
-  timeout_seconds?: number;             // type: bash/script — per-step timeout (default 300)
+  timeout_seconds?: number | { from: string; default: number };  // bash/script step timeout + until_bash budget (default 300 / 30)
   skill?: string;                       // single skill name; sugar for `skills: [<name>]`
   skills?: string[];                    // per-phase bundle: <workspaceRoot>/.lastlight-skills/<phase>/<name>/
                                         // may coexist with `prompt`; mutually exclusive with `skill`
@@ -102,6 +156,7 @@ overlay) can add a new intent with no core change. See
   web_search?: boolean;                 // enable agentic-pi web tools
   requires_sandbox?: "docker" | "gondolin" | "none";  // skip phase (non-failing) if active backend differs
   sandbox_image?: "default" | "qa";     // docker only: "qa" runs on lastlight-sandbox-qa (Playwright+Chromium+ffmpeg); skips if unbuilt
+  skip_if?: string | string[];          // skip phase (non-failing) when any expression matches the render context
   loop?: PhaseLoop;                     // reviewer-fix loop
   generic_loop?: GenericLoop;           // until-condition loop
   on_output?: OutputRule[];             // contains_BLOCKED → fail; requires_marker → fail if final output lacks this marker (postcondition against silent no-op "successes")
@@ -109,6 +164,28 @@ overlay) can add a new intent with no core change. See
   messages?: PhaseMessages;             // per-event reply templates
 }
 ```
+
+**Cron level** (`kind: cron`, same file). A cron definition is not runnable
+itself — it is a schedule plus what to run:
+
+```ts
+{
+  kind: "cron";
+  name: string;          // unique cron name; the dashboard/CLI handle
+  schedule: string;      // croner expression
+  workflow?: string;     // dispatch this AgentWorkflow on each tick
+  handler?: string;      // OR run this host-side handler (src/cron/handlers.ts)
+  context?: Record<string, unknown>;   // static context merged into each tick
+  condition?: { unless: string };      // named predicate; true ⇒ do not register
+}
+```
+
+`workflow` and `handler` are **mutually exclusive and one is required** — a Zod
+refinement, because both would silently pick one and neither would register a
+cron that ticks into the void. `handler:` exists for periodic work that cannot
+be done by an agent at all (harness-only data, or a Slack post); the trade-offs
+and the failure rule are in
+[Integrations → Cron](/spec/03-integrations).
 
 Defined with Zod; loaded and cached by `loader.ts`.
 
@@ -206,6 +283,116 @@ array in order (`runner.ts:457–1033`).
 Loop iterations always run sequentially even inside DAG-mode workflows
 (fix cycles read the prior reviewer verdict).
 
+## Gated skips
+
+Before running the ready nodes, the scheduler filters them
+(`core/scheduler.ts`). Three declarations can take a node out:
+
+| Field | Gates on | Example |
+|---|---|---|
+| `requires_sandbox` | The named backend isn't the one running | the browser-QA step that only works on docker |
+| `sandbox_image: qa` | The heavier QA image isn't built on this host (docker only; inert elsewhere) | same |
+| `skip_if` | An expression matches the run's render context | the `fix` phase after a diagnosis that says there is nothing to fix |
+
+The first two gate on the phase being **unavailable**; `skip_if` gates on
+it being **unnecessary**. All three take the *same* path: the node records
+`skipped`, a `recordSkippedPhase` row lands, `messages.on_skipped_done` is
+surfaced so a human sees why, and **the run still records `succeeded`**.
+
+That last part is the whole reason `skip_if` exists rather than being
+expressed with the pre-existing `on_output.contains_BLOCKED: { action:
+fail }`. A phase whose *correct* outcome is "there is nothing for the next
+phase to do" must not paint the run red, because `failed` has four
+mechanical consequences: `messages.on_failure` posts to the PR (actively
+wrong — "leaving it for a human" on a flaky test), the dashboard's **Retry**
+button targets `failed`/`cancelled` and so offers a retry that cannot
+succeed, the cost and failure stats are polluted, and
+`latestSucceededForTrigger` ignores failed runs, which defeats the
+already-handled-this-SHA dedup so the same dead end is re-diagnosed on
+every webhook re-fire. Recording the skip `succeeded` fixes all four, and
+turns the fourth into a positive: the dedup starts working for exactly the
+cases that must not be re-attempted.
+
+```yaml
+- name: fix
+  skip_if:                                          # one string, or a list (OR-ed)
+    - "scratch.fixMarkers.diagnosis.class == 'flaky'"
+    - "scratch.fixMarkers.diagnosis.class == 'infra-dependent'"
+    - "scratch.fixMarkers.diagnosis.class == 'upstream-broken'"
+```
+
+`dependabot-ci-fix` carries a second, simpler list on the phase *above*,
+reading a plain context value rather than a parsed marker:
+
+```yaml
+- name: diagnose
+  skip_if:
+    - "reason == 'dirty'"
+    - "reason == 'behind'"
+    - "reason == 'blocked'"
+```
+
+There is nothing to diagnose when no check is failing — the PR is
+merge-BLOCKED, and the repair (merge the base in, regenerate the conflicted
+lockfile) is mechanical. Diagnosing anyway was worse than wasteful: the
+phase's taxonomy is CI-failure-shaped, so an agent shown green checks and no
+failing job honestly answered `infra-dependent`, which is one of the three
+stopping rows above — the fix phase was skipped and the conflict left in
+place, on a `succeeded` run. A bare OR-ed list is sufficient despite the
+grammar having no negation, because `reason` carries CI's verdict **first**
+(`conclusion === "failing" ? "checks-failing" : mergeableState` in
+`src/cron/dependabot-discovery.ts`), so these three values imply CI is not
+settled-failing; a PR that is both red *and* behind arrives as
+`checks-failing` and is still diagnosed. The `fix` rows then read a
+`scratch` path that is absent, and an absent variable **fails open**, so the
+fix phase runs.
+
+Expressions use the `until:` grammar (see *Loop expression evaluator*
+below), evaluated against `{ ...ctx, phaseOutputs, scratch }` — the same
+values a prompt template can render. `output` is empty here (the phase has
+not run), so a bare `output.contains(...)` is meaningless; read an upstream
+phase instead. AND is expressible by collapsing to a single expression; the
+production consumer is a class list, which is why one expression per class
+reads better than one compound one.
+
+**Read a PARSED value out of `scratch`, not prose out of `phaseOutputs`.**
+The production rows above used to be
+`phaseOutputs.diagnosis.contains('class=flaky')`, and every way that can go
+wrong, it did: `phaseOutputs.diagnosis` is the agent's *entire* output and
+the match is a plain substring, so an agent writing "this is not
+`class=flaky`, it is reproducible" skipped the phase; a `{{priorAttempts}}`
+line replayed from an earlier attempt matched too; `class=flaky-timeout`
+matched while `class=probably-flaky` did not; and `phaseOutputs` is **empty
+across a resume boundary**, so the guard failed open and ran a full sandbox
+on exactly the verdicts it exists to stop. `scratch` is reloaded from the run
+row each iteration, and the marker harvest has already parsed and validated
+the class — so the guard reads the same value the decision layer does.
+
+There is no negation, and a *conditional* row — "skip on `class=flaky`,
+unless this PR has already deferred twice" — is therefore not expressible
+at all. The `flaky` cap needs exactly that, and resolves it without an
+operator: its second term is a fact about the PR's history known *before*
+the run starts, so the harness composes the run's guard list from it —
+`promoteFlakyDiagnosis` (`src/workflows/simple.ts`) drops the `flaky`
+expression once `flakyDeferrals >= fix.maxFlakyDeferrals`, on a shallow
+copy of the loader's cached definition. The other two rows are
+unconditional. This is the general shape for any guard whose second term
+is run-level rather than phase-level: compose the list, don't grow the
+grammar.
+
+Two scoping rules:
+
+- **Evaluated when the node becomes *ready***, i.e. after its dependencies
+  are terminal — which is what makes reading an upstream phase's output
+  well-defined.
+- **`phaseOutputs` is empty across a resume boundary** (a phase skipped as
+  already-`done` contributes nothing to the in-memory map), so a guard that
+  must survive resume should read `scratch`, which the run store rehydrates.
+
+Every expression fails **open**: an unrecognised form and an absent variable
+both evaluate false, so a malformed or not-yet-populated guard *runs* the
+phase rather than silently swallowing it.
+
 ## Loops
 
 Two flavours.
@@ -250,7 +437,7 @@ enters the next fix cycle.
 - name: socratic
   prompt: prompts/explore-ask.md
   generic_loop:
-    max_iterations: 8
+    max_iterations: 8            # or { from: <ctx path>, default: N } — see below
     until: "output.contains('READY')"
     gate_kind: "reply"           # pause after each iteration; user reply feeds next
     scratch_key: "socratic"      # accumulate Q&A under workflow_runs.scratch.socratic
@@ -262,8 +449,32 @@ enters the next fix cycle.
 ```
 
 Iteration naming: `${phaseName}_iter_${n}`; a soft-failure retry is
-`${phaseName}_iter_${n}_retry` (its own ledger row). The until-condition is
-evaluated by `loop-eval.ts` — see below.
+`${phaseName}_iter_${n}_retry` (its own ledger row) and the `until_bash` exit
+check is `${phaseName}_iter_${n}_check` (its own ledger row too — see "Recording
+a loop iteration" below). The until-condition is evaluated by `loop-eval.ts` —
+see below.
+
+**Recording a loop iteration.** The iteration is persisted the moment its *work*
+finishes — `phase_history` entry (`iteration N — work complete`) plus the
+iteration's `output_text` — **before** the exit condition is evaluated.
+Everything after the agent turn belongs to the loop, not the iteration.
+`until_bash` then opens its own `executions` row (`recordStart` → command →
+`recordFinish` + `recordOutputText`), because it is a real sandbox command that
+can run for minutes and an *open* row with a start time is how every renderer
+draws "in flight, since N". The row deliberately bypasses
+`runPhaseLedger`/`shouldRunPhase` — a condition must be re-evaluated on every
+ask, never replayed from a dedup hit — and its `success` records whether the
+check **ran**, with the verdict in `stop_reason` as `condition_met` /
+`condition_not_met`. A red gate is the loop working as designed (it is what
+earns the agent another iteration), so it must not read as a failure: the
+dashboard gives `condition_not_met` a muted `unmet` tone and the CLI a `↻`.
+When the condition is met a second entry (`iteration N — condition met`) is
+appended for the same label; readers fold a repeated label last-wins.
+
+Without this, prod run `49c101aa` spent 6m48s of a 20m31s run inside
+`until_bash` with nothing recording it, while the run advertised
+`currentPhase: "diagnose"` — a phase that had ended 12 minutes earlier — and
+omitted the completed `fix_iter_1` from `phase_history` entirely.
 
 **`on_soft_failure`** — by default any non-success iteration hard-fails the
 whole run, which is wrong for a long interactive loop (one degenerate turn
@@ -444,6 +655,16 @@ execute outside the cap). Resumes and orphan restarts **bypass** the cap:
 they re-enter `runWorkflow` directly, finishing in-flight work rather than
 re-queuing behind it.
 
+**The enqueue ack is transient.** It is a promise about the future, so it
+must not outlive the run's stay in the queue. `RunnerCallbacks.postComment`
+resolves to the created GitHub comment id (`void` on Slack, or when the post
+failed), and `simple.ts` stashes it at `scratch.queuedAck.commentId`.
+Whichever way the run then leaves the queue, the admission controller
+resolves that comment — see below. Without this the ack is the *only*
+visible trace of a run that starts and then legitimately no-ops (e.g. a
+re-triage of an already-triaged issue), which reads as "it queued and never
+came back".
+
 **Admission.** `createAdmissionController` (`src/workflows/admission.ts`)
 promotes queued runs to running as slots free, reusing `resumeSimpleRun`
 (a queued run's stored `context` is shaped exactly like a resume's, and no
@@ -454,12 +675,24 @@ phase has run yet, so the ledger runs them all). Promotion is FIFO by
 1. **Event-driven** — `admitNext()` runs in `dispatchWorkflow`'s `finally`
    block, so a just-finished run immediately pulls the next queued one in.
 2. **Periodic sweep** — a `setInterval(sweep, 15s)` also **TTL-expires**
-   queued runs older than `concurrency.maxQueueWaitMs` (default 30 min;
+   queued runs older than `concurrency.maxQueueWaitMs` (default 1 hr;
    env `MAX_QUEUE_WAIT_MS`) — transitioning them to `cancelled` with a
-   "dropped from queue after waiting too long" notice posted back to the
-   originating GitHub issue or Slack thread — before admitting. The sweeper
-   starts after boot's orphan recovery, so a run that was `queued` when the
-   harness crashed is picked up on the first tick.
+   "dropped from queue after waiting too long" reason in `context.error` —
+   before admitting. The sweeper starts after boot's orphan recovery, so a
+   run that was `queued` when the harness crashed is picked up on the first
+   tick.
+
+Both exits resolve the enqueue ack, so it never lingers as a stale promise:
+
+- **Admitted** → `retractQueuedAck` **deletes** the ack comment. It has been
+  honoured, and whatever the run itself posts is now the real answer.
+- **TTL-expired** → `postExpiryAck` **rewrites the ack in place** to the drop
+  notice. Editing adds nothing to the thread and GitHub does not notify
+  watchers on edits, so this does not reintroduce the comment flood that made
+  expiry silent on GitHub in the first place. A **Slack**-originated run
+  instead gets a normal thread reply (a human explicitly asked for the work);
+  a GitHub run that left no ack stays silent, its drop visible only in the
+  dashboard and `lastlight workflow list`.
 
 The `queued?: boolean` on `WorkflowResult` propagates up through
 `dispatchWorkflow` and the [dispatcher](/spec/06-workflow-engine): queued
@@ -469,28 +702,178 @@ workflow), and are cancellable like any live run. The dashboard shows a
 `queued` run with a neutral status badge and includes it in the `active`
 filter alongside `running`/`paused`.
 
+**k8s backpressure requeue.** The [Kubernetes sandbox
+backend](/spec/09-sandbox#kubernetes--kubernetes-backend-in-development)
+has no tuned concurrency cap of its own — the cluster namespace's
+`ResourceQuota` is the authority, so the harness admits freely (gated only
+by a sanity-fuse `K8S_SANITY_FUSE = 1000`, not `maxWorkflows`) and finds
+out capacity is exhausted only when a phase's Pod create is rejected.
+`runWorkflow` surfaces that as `backpressure: true` on its result (a
+server-layer intersection on `WorkflowResult` — the engine type itself is
+unchanged). `simple.ts` reacts by calling `db.runs.requeueRunning()`,
+transitioning the run **`running → queued`** instead of `failed` — a
+third transition alongside the fresh-trigger `→ queued` enqueue and the
+approval-gate `→ paused` pause. The `AdmissionController` then promotes it
+again like any other queued run, in a **backpressure mode**
+(`backpressureMode: config.sandbox === "kubernetes"`) that gates on
+`K8S_SANITY_FUSE` and promotes one queued run per `admitNext()` call
+instead of filling up to `maxWorkflows` — each promotion doubles as a
+quota probe. See [Sandbox → Concurrency](/spec/09-sandbox#concurrency)
+for the k8s-side half of this mechanism (the `QuotaExceededError` →
+`stopReason: "error_quota"` mapping).
+
 ## Loop expression evaluator
 
 ```ts
 // src/workflows/loop-eval.ts
 export function evalUntilExpression(expr: string, ctx: LoopEvalContext): boolean;
+export function evalSkipIf(exprs: readonly string[], ctx: LoopEvalContext): string | undefined;
 ```
 
 A custom mini-DSL (not `eval()`). Accepts:
 
 - `output.contains('text')` — substring match on the iteration's output
+- `a.b.c.contains('text')` — the same against any dotted path in the
+  context (`output` is the degenerate one-segment case). Strings and
+  numbers only: stringifying an object yields `"[object Object]"`, which
+  is a substring match waiting to surprise someone
 - `variable == 'value'` / `variable != 'value'` — equality / inequality
 - `variable == true` / `== false` — boolean coercion of bare literals
 - Dotted keys for nested access: `scratch.socratic.ready == true`
 
 Unrecognised expressions return `false` (safe default — the loop runs
-until `max_iterations`).
+until `max_iterations`; a `skip_if` guard runs its phase).
+
+One grammar, two consumers. `evalUntilExpression` drives a
+`generic_loop`'s `until:`; `evalSkipIf` OR-s a phase's `skip_if` list and
+returns the **first matching expression**, so the scheduler can name it in
+the skip reason. The longer dotted path exists for `skip_if`, which needs
+to read a *sibling* value (`scratch.fixMarkers.diagnosis.class == '…'`)
+that the loop never did.
+
+`runScope.scratch` is refreshed from the run row on each iteration, inside
+the `getRun` the cancel check already makes — so a guard reading `scratch`
+sees what a phase harvest wrote through `onPhaseEnd`, not the value the
+scope was constructed with. Without that refresh a `scratch` guard is a
+silent no-op on the fresh path: it reads state that predates the phase it is
+guarding on.
 
 `until_bash` is the alternative: a shell command whose exit code (0 →
 stop) drives the loop. It runs **inside the sandbox** (via `executeCommand`
 with `writeSession: false`) against the persisted workspace — not on the
 harness host. `{{}}` markers in the command are rejected before execution to
-prevent template-after-render injection (`validateShellCommand`).
+prevent template-after-render injection (`validateShellCommand`), so the
+command is necessarily a **literal** string — it cannot be varied per backend.
+
+Its budget is `phase.timeout_seconds ?? 30`. **Thirty seconds is a trap**: it
+kills any real build/test suite mid-run and reports a false red, so a phase
+whose gate is the repo's own CI commands must carry an explicit value. Both fix
+workflows read theirs from `fix.gateTimeoutSeconds` — see "Templated phase
+budgets" below.
+
+The two are not exclusive, and the order between them is load-bearing: `until`
+is evaluated **first**, and a match short-circuits `until_bash` entirely
+(`phase-executor.ts`: `if (!conditionMet && loop.until_bash)`). A loop can
+therefore declare both — a cheap expression that names the cases where there is
+nothing left to check, and the expensive command for everything else.
+
+**The fix family's push short-circuit.** Both `pr-fix` and `dependabot-ci-fix`
+use exactly that pairing:
+
+```yaml
+generic_loop:
+  max_iterations: { from: fix.localIterations, default: 2 }
+  until: "output.contains('outcome=pushed tried=')"
+  until_bash: "if [ -f .git/lastlight-verify.sh ]; then bash …; else … exit 1; fi"
+```
+
+`outcome=pushed` in a `CI_FIX_COMPLETE` marker means the commit is already on
+the branch — put there by `github_publish`, not by a `git push` the agent ran
+(see [Sandbox](/spec/09-sandbox) → "Invariant: the published commit is built by
+GitHub, not by git"); for this gate the two are the same fact, and the marker
+name is unchanged because the harness parses it.
+
+GitHub's checks started against that commit the moment it landed and are the
+strictly better authority — the real CI environment rather than a sandbox
+approximation of it, warm rather than a cold container, and covering the matrix
+legs the sandbox cannot reproduce. Re-running the local gate at that point
+cannot change anything: its exit code decides only whether to spend **another**
+agent iteration, and a pushed fix has nothing left to iterate on. Without the
+short-circuit a real run (`49c101aa`) pushed at 11:03:31, saw GitHub go fully
+green at 11:06:25, and still sat in a fresh container from 11:04:00 to 11:10:48
+running the same suite a third time.
+
+It fires on `pushed` **only**. `no-change` / `gave-up` pushed nothing, so there
+is no new commit, no new check run and no external authority — the local gate is
+the only evidence that exists, and its red verdict is precisely what earns the
+agent the next iteration. Short-circuiting all three outcomes would end every
+loop at iteration 1 and make `fix.localIterations` dead config.
+
+The needle carries `tried=` because `outcome=pushed` alone also appears in a
+rendered `{{priorAttempts}}` journal line from an earlier attempt
+(`renderAttemptLine` emits `… | outcome=pushed gate=green`), which the prompt
+replays into the run — the same replayed-line false match that forced the fix
+phase's `skip_if` rows off `phaseOutputs`. `scratch` is not an option inside a
+loop (it is refreshed per *phase node*, not per iteration, so it is stale
+there), but `renderAttemptLine` deliberately never renders `tried=`, so
+`outcome=pushed tried=` matches a live marker and nothing else. A marker that
+reorders its fields simply fails to match and the gate runs as before — the
+fallback is the previous behaviour, which is the right direction for a
+cost optimisation to fail in.
+
+What this gives up is stated plainly rather than left implicit: after a push the
+harness no longer has an independent check on the agent's self-reported
+`gate=green`. That is *not* a reintroduction of the `sh`-versus-`bash` defect
+(see [Sandbox](/spec/09-sandbox) → the push gate), because the gate in this flow
+runs **after** the push and therefore never gated it — the agent's self-report
+was already the only thing between a bad fix and the branch. What catches a bad
+fix is unchanged: GitHub's checks go red, `pr.checks_failed` re-dispatches the
+fix family, and `fix.maxAttempts` / `fix.maxCostUsd` bound the retries. Naming
+`bash` still matters for the unpushed path, which is where the loop's iterations
+live.
+
+### Templated phase budgets
+
+`timeout_seconds` and `generic_loop.max_iterations` accept either a plain
+positive integer or a reference into the run's template context:
+
+```yaml
+timeout_seconds: { from: fix.gateTimeoutSeconds, default: 900 }
+generic_loop:
+  max_iterations: { from: fix.localIterations, default: 2 }
+```
+
+`from` is the same dotted lookup `{{a.b}}` performs (`lookupContextKey`), so
+`fix.localIterations` resolves against the EFFECTIVE, already repo-clamped
+`fix` block the runner seeds on every run's context — a repository that lowered
+its own budget in `.lastlight/lastlight.yml` is honoured with no code path of
+its own. Resolution happens once, before the first iteration, in
+`resolveTemplatedNumber` (`core/templated-number.ts`).
+
+`default` is the value the workflow ships with, and it is used verbatim
+whenever `from` resolves to nothing usable — key absent, non-numeric, zero or
+negative — with a warning naming the phase and the path. That is why the shape
+is an object rather than a bare `"{{fix.gateTimeoutSeconds}}"`: an unresolved
+template renders to the empty string, which would leave the engine inventing a
+kill timeout for a phase it knows nothing about. A resolved non-integer is
+rounded UP (`gateTimeoutSeconds` is documented as any positive number, and
+truncating a suite's budget downward is the direction that turns a passing gate
+red).
+
+Before this, both keys were parsed, per-repo clamped, CLI-displayed and read by
+nothing: the operative numbers were literals in the YAML, whose comments asked a
+human to keep the two in step (issue #256).
+
+**A loop node honours the phase's `on_output.requires_marker` and its
+`messages.on_start` / `on_success`.** The postcondition is checked once, against
+the **last** iteration's output (the turn that reports the outcome; an earlier
+one is by definition mid-loop), and its absence fails the phase exactly as it
+does for a non-loop phase. Reaching `max_iterations` without the condition is
+**not** a failure — a fix loop that runs out of iterations reports
+`outcome=gave-up`, which is a correct outcome — only the absent sign-off is. Two
+paths are exempt because they produce no fresh turn to sign off: a deduplicated
+(already-completed) phase on resume, and the `on_soft_failure: complete`
+advance.
 
 ## Invariants
 
@@ -519,6 +902,32 @@ prevent template-after-render injection (`validateShellCommand`).
 - **Restart-count is the circuit breaker.** Three failed resumes and
   the run is failed permanently. Resist the urge to raise the limit
   without thinking about what's actually crashing.
+- **A gated skip keeps the run green.** `requires_sandbox`,
+  `sandbox_image` and `skip_if` all record the node `skipped` and leave
+  the run `succeeded`. `failed` is reserved for **malfunction** — a
+  correct "there is nothing to do here" is not one, and recording it as
+  one mis-fires four downstream mechanisms (see *Gated skips*).
+- **A skipped node is not `succeeded`.** So an `all_success`
+  `trigger_rule` downstream of a gated phase will not fire. That caveat
+  is identical for all three gates; a graph that must proceed past one
+  needs `all_done` or `none_failed_min_one_success`.
+- **A run's config is frozen at dispatch.** `runWorkflow` takes the target
+  repo's `.lastlight/` layer as a trailing, *defaulted* parameter (defaulted so
+  `runWorkflow.length` stays 9 — the frozen `lastlight/evals` surface pinned by
+  `evals-contract.test.ts`) and derives the effective models / variants /
+  approval gates from it. A **resume restores** that layer from the run row
+  rather than re-resolving it from the repo's default branch, so an edit made
+  while the run was paused, queued or dead can't retarget it half-way through.
+  See [Configuration](/spec/02-configuration) and
+  [State](/spec/10-state).
+- **Per-run asset resolution never mutates the module globals.** When a repo
+  layer applies, the runner builds an `AssetResolver` over
+  `getAssetLayers() + makeLayer("repo", …)` and passes *that* through
+  `EnginePorts.assets` (`loadPromptTemplate` / `resolveSkillPaths`) for the whole
+  run — not `configureWorkflowAssets`, which would leak one run's repo layer into
+  another's prompts. `populateCache()` additionally refuses to read workflow or
+  cron YAML from a `repo` layer, so "a repo may not define workflows" is
+  structural rather than conventional.
 
 ## Current implementation
 
@@ -534,6 +943,8 @@ prevent template-after-render injection (`validateShellCommand`).
 | Template engine | `src/workflows/templates.ts` |
 | Resume + orphan recovery | `src/workflows/resume.ts` |
 | Concurrency cap + admission | `src/workflows/admission.ts` (cap enforced in `simple.ts`) |
+| Per-repo layer: dispatch-time resolve, persist, restore | `src/workflows/simple.ts` (`resolveRepoRunConfig`, `repoConfigRunRecord`, `restoreRepoRunConfig`) |
+| Per-run asset resolver | `createAssetResolver` / `makeLayer` / `getAssetLayers` in `packages/shared/src/workflow-loader.ts`, wired in `runner.ts` |
 
 ## Rebuild notes
 

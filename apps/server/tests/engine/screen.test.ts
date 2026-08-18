@@ -1,4 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
+import { HELPER_MAX_TOKENS } from "#src/engine/llm.js";
+
+// screen.ts now logs via the pino LoggerPort instead of console — mock the
+// logger module so the "fails open" assertion below can inspect the captured
+// error call instead of console output.
+const { errorSpy } = vi.hoisted(() => ({ errorSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: errorSpy,
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
 import {
   wrapUntrusted,
   flagPrefix,
@@ -82,7 +99,7 @@ describe("screenForInjection — injected chat", () => {
         expect.objectContaining({ role: "system" }),
         expect.objectContaining({ role: "user", content: expect.stringContaining(longText) }),
       ]),
-      { maxTokens: 64 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
   });
 
@@ -94,10 +111,8 @@ describe("screenForInjection — injected chat", () => {
 
   it("fails open when chat rejects", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("network"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const r = await screenForInjection(longText, { chat, defaultFastModel: () => "openai/test" });
     expect(r.flagged).toBe(false);
     expect(errorSpy).toHaveBeenCalled();
-    errorSpy.mockRestore();
   });
 });

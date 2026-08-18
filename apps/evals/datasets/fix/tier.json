@@ -1,0 +1,5 @@
+{
+  "name": "fix",
+  "defaultWorkflow": "dependabot-ci-fix",
+  "description": "The fix loop on a RED dependency PR: does the agent reach the right diagnosis class, and does it act on it? One case per class in `DIAGNOSIS_CLASSES`, plus the promoted-flaky attempt."
+}

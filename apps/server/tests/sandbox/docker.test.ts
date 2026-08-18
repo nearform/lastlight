@@ -22,6 +22,21 @@ vi.mock("fs", async (importOriginal) => {
   return { ...actual, existsSync: vi.fn().mockReturnValue(true), readFileSync: vi.fn().mockReturnValue("{}") };
 });
 
+// docker.ts now logs via the pino LoggerPort instead of console — mock the
+// logger module so the suite's stderr stays free of real pino JSON (no
+// assertions here depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { spawn, execFileSync } from "child_process";
 import { DockerSandbox } from "#src/sandbox/docker.js";
 
@@ -137,6 +152,26 @@ describe("DockerSandbox.runAgent — prompt via stdin, not shell arg", () => {
     const shCmd = dockerArgs[dockerArgs.length - 1];
     expect(shCmd).not.toContain("--sandbox-env");
     expect(shCmd).not.toContain("GIT_AUTHOR_NAME");
+  });
+
+  it("passes --profile to agentic-pi when a valid profile is given", async () => {
+    const runPromise = manager.runAgent("task-001", "test prompt", { profile: "issues-write" });
+    process.nextTick(() => fakeChild.emit("close", 0));
+    await runPromise;
+
+    const dockerArgs = mockSpawn.mock.calls[0][1] as string[];
+    const shCmd = dockerArgs[dockerArgs.length - 1];
+    expect(shCmd).toContain("--profile issues-write");
+  });
+
+  it("rejects when profile is not one of the closed set", async () => {
+    // The `as any` simulates a value that reached here already erased to
+    // `string` (e.g. an untyped caller) — the runtime guard is the last
+    // line of defence once `GitAccessProfile` narrowing is bypassed.
+    await expect(
+      manager.runAgent("task-001", "test prompt", { profile: "admin" as any }),
+    ).rejects.toThrow(/Refusing to pass profile "admin"/);
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 

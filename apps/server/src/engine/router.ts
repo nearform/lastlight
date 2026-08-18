@@ -1,12 +1,22 @@
 import type { EventEnvelope } from "../connectors/types.js";
-import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent, WELL_KNOWN_INTENTS } from "./screen/classifier.js";
+import { classifyComment, classifyCommentAddsInfo, classifyIssueIntent, GITHUB_ONLY_INTENTS, WELL_KNOWN_INTENTS } from "./screen/classifier.js";
 import { screenForInjection, flagPrefix } from "./screen/screen.js";
 import { getManagedRepos, isManagedRepo } from "../managed-repos.js";
 import { getWorkflowByIntent } from "../workflows/loader.js";
-import { getRoutes, getBotName } from "../config/config.js";
+import {
+  getRoutes,
+  getBotName,
+  getHoldLabel,
+  getReviewConfig,
+  type ReviewConfig,
+} from "../config/config.js";
 import type { StateDb } from "../state/db.js";
 import type { GitHubClient } from "./github/github.js";
 import { isDependencyPr } from "../cron/dependabot-discovery.js";
+import { holdReply } from "./pr-decisions.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("router");
 
 /**
  * Resolve a classifier intent the router has no bespoke branch for to the
@@ -42,6 +52,73 @@ export interface RouterDeps {
    * comment classifies as normal.
    */
   github?: GitHubClient | null;
+  /**
+   * Resolve the target repo's `.lastlight/` POLICY layer — the SAME injected
+   * seam the dispatcher carries (`DispatchDeps.resolveRepoPolicy`), threaded
+   * one level up.
+   *
+   * Used by exactly one branch: `pr.labeled`, to learn a repo's own
+   * `review.requestLabel`. The router is otherwise deliberately operator-only,
+   * and that is the right default — routing is the operator's, and a router
+   * that resolves repo config on every event is a fetch per event.
+   *
+   * This one branch is different because the label route is the ONLY way a
+   * repo's `on-request` mode can actually be triggered (a GitHub App bot user
+   * cannot be picked in the reviewer dropdown), and the shipped operator
+   * default is `null` — so every `pr.labeled` event was dropped here before any
+   * repo layer was resolved, and a key documented as repo-settable on both doc
+   * surfaces did nothing (#256). The cost is one CACHED config resolution per
+   * `pr.labeled` event: `fetchRepoLayer` memoises per repo for 60 s, so it is a
+   * conditional request per repo per minute, far below the `resolvePrState`
+   * this branch's hard ignore exists to avoid.
+   *
+   * Omitted (chat-only wiring, tests) means "no repo layer" — the operator's
+   * value alone, which is exactly the old behaviour.
+   */
+  resolveRepoPolicy?: (
+    workflowName: string,
+    context: Record<string, unknown>,
+  ) => Promise<{ review?: Partial<ReviewConfig> } | undefined>;
+}
+
+/**
+ * Every label that requests a review for this PR — the operator's
+ * `review.requestLabel` plus the target repo's, when it sets one.
+ *
+ * A SET rather than one value, because both are legitimate: an operator's label
+ * is the deployment-wide affordance and a repo's is that repo's own, and
+ * honouring only one of them makes the other silently inert. The repo layer is
+ * add-only everywhere else in this codebase, and this is the same shape — a
+ * repo can name an ADDITIONAL label, never take the operator's away.
+ *
+ * Never throws and never blocks the route: the repo layer is best-effort
+ * everywhere it is read (`resolveRepoRunConfig` degrades to the operator config
+ * on a failed fetch), and a router that 500s because GitHub had a bad minute
+ * would drop the event entirely.
+ */
+async function reviewRequestLabels(
+  handler: string,
+  envelope: EventEnvelope,
+  deps: RouterDeps,
+): Promise<ReadonlySet<string>> {
+  const labels = new Set<string>();
+  const operator = getReviewConfig().requestLabel;
+  if (operator) labels.add(operator);
+  if (!deps.resolveRepoPolicy || !envelope.repo) return labels;
+  try {
+    const layer = await deps.resolveRepoPolicy(handler, {
+      repo: envelope.repo,
+      prNumber: envelope.prNumber,
+    });
+    const repoLabel = layer?.review?.requestLabel;
+    if (typeof repoLabel === "string" && repoLabel) labels.add(repoLabel);
+  } catch (err: unknown) {
+    log.warn("Could not resolve review.requestLabel; using the operator's only", {
+      repo: envelope.repo,
+      err,
+    });
+  }
+  return labels;
 }
 
 /** Friendly reply when a Slack/CLI command targets an unmanaged repo. */
@@ -96,6 +173,54 @@ function botMatchers(handle: string) {
 }
 
 /**
+ * The HOLD, at the subject level — *"Last Light, stay off this."*
+ *
+ * Locked decision 3 (02-hold-label.md): the hold blocks **every** workflow on
+ * **any** subject carrying it, PRs and issues alike. "A label nobody can
+ * remember the scope of is a label nobody reaches for."
+ *
+ * The PR-scoped half of that is enforced at the dispatch gate
+ * (`resolveDispatchDisposition`), which is where the cron fan-out and `/api/run`
+ * cross too. This is the OTHER half, and it is not redundant with it: the gate
+ * only governs the four PR-scoped workflows, so without this an
+ * `issue-triage` / `issue-comment` / `build` / `explore` / `verify` / `qa-test`
+ * on a held subject would run happily — including on a held pull request, since
+ * `pr-comment` and friends are not PR-scoped either.
+ *
+ * A ROUTER-level hard ignore, deliberately, in the same shape as `pr.labeled`'s
+ * and `pr_review.submitted`'s: it costs one array lookup on labels the envelope
+ * already carries, where deciding it further down would cost a `resolvePrState`
+ * per event on a subject we have been told not to touch.
+ *
+ * The one thing it is not silent about is a direct instruction. A maintainer who
+ * comments `@<bot> …` gets exactly one reply naming the label (locked decision
+ * 4) — the hold beats an explicit request, but silently ignoring somebody who
+ * asked is worse than refusing them. Every other event type says nothing.
+ *
+ * Fails OPEN by construction: `labels` is whatever the webhook payload carried
+ * (the parent issue's, for a comment), so a label added between the payload and
+ * the dispatch is caught by the gate below instead of here.
+ */
+function holdRoute(
+  envelope: EventEnvelope,
+  bot: ReturnType<typeof botMatchers>,
+): Route | null {
+  if (envelope.source !== "github") return null;
+  const label = getHoldLabel();
+  if (!label || !(envelope.labels ?? []).includes(label)) return null;
+  // An explicit ask, on the one event type that carries a person's words. A
+  // `pr.review_requested` is an explicit request too, but replying to it would
+  // post a comment nobody wrote a comment to get.
+  if (envelope.type === "comment.created" && bot.mention.test(envelope.body || "")) {
+    return { action: "reply", message: holdReply(label) };
+  }
+  return {
+    action: "ignore",
+    reason: `on-hold: \`${label}\` is applied to ${envelope.repo ?? "this repo"}#${envelope.issueNumber ?? "?"}`,
+  };
+}
+
+/**
  * For a comment on a dependency-update PR (Dependabot / Renovate), resolve the
  * PR author + check state to feed the classifier. Returns `{}` when the comment
  * isn't on a dependency-authored PR, when no GitHub client is available, or on
@@ -123,15 +248,18 @@ async function dependencyPrSignals(
     const pr = await github.getPullRequest(owner, repo, envelope.prNumber);
     // A `clean` PR is green with no checks to wait on; otherwise ask the light
     // check-conclusion query (the same signal the red-PR cron uses).
+    // `excludeApp`: this conclusion decides which workflow the comment TRIGGERS,
+    // so our own in-progress `last-light/review` check must not read as
+    // "pending" and route a red PR to neither branch (07 §7.2).
     const checksState =
       pr.mergeable_state === "clean"
         ? "passing"
-        : await github.getChecksConclusion(owner, repo, pr.head.sha);
+        : await github.getChecksConclusion(owner, repo, pr.head.sha, {
+            excludeApp: getBotName(),
+          });
     return { prAuthor: pr.user?.login ?? envelope.issueAuthor, checksState };
   } catch (err) {
-    console.warn(
-      `[router] dependency-PR signal fetch failed for ${envelope.repo}#${envelope.prNumber}: ${String(err)}`,
-    );
+    log.warn("Dependency-PR signal fetch failed", { repo: envelope.repo, prNumber: envelope.prNumber, err });
     return {};
   }
 }
@@ -149,6 +277,11 @@ export async function routeEvent(
   const gh = routes.github;
   const slack = routes.slack;
   const bot = botMatchers(getBotName());
+  // The HOLD, before every branch below — see `holdRoute`. Above even the
+  // reply-gate and re-triage short-circuits inside `comment.created`: "stay off
+  // this" has no carve-outs, or it is not a hold.
+  const held = holdRoute(envelope, bot);
+  if (held) return held;
   switch (envelope.type) {
     case "issue.opened": {
       // Pure question issues ("how does X work?", "X vs Y?") want an ANSWER,
@@ -160,9 +293,11 @@ export async function routeEvent(
         envelope.title || "",
         envelope.body || "",
       );
-      console.log(
-        `[router] New issue ${envelope.repo}#${envelope.issueNumber} classified as: ${isQuestion ? "question" : "work"}`,
-      );
+      log.info("New issue classified", {
+        repo: envelope.repo,
+        issueNumber: envelope.issueNumber,
+        classification: isQuestion ? "question" : "work",
+      });
       return {
         action: "handler",
         handler: isQuestion
@@ -215,35 +350,131 @@ export async function routeEvent(
         },
       };
 
+    case "pr.checks_settled": {
+      // `review.trigger: after-checks`. The connector emitted this only for a
+      // PR neither `pr.checks_failed` (fix) nor `pr.checks_passed` (merge)
+      // claimed, so there is no precedence left to apply here — routing is
+      // unconditional and the MODE is enforced once, at the dispatch gate, by
+      // `resolveReviewTrigger`. Deliberately NOT config-aware: the router's job
+      // is `event → { workflow, context }`, and a review that is deferred is
+      // still routed to `pr-review`, it just runs later (07 §7.4).
+      return {
+        action: "handler",
+        handler: gh.pr_checks_settled || gh.pr_review || "pr-review",
+        context: {
+          _routeKey: "github.pr_checks_settled",
+          repo: envelope.repo,
+          prNumber: envelope.prNumber,
+          issueNumber: envelope.issueNumber,
+          title: envelope.title,
+          body: envelope.body,
+          sender: envelope.sender,
+          labels: envelope.labels,
+          headSha: envelope.headSha,
+        },
+      };
+    }
+
+    case "pr.labeled": {
+      // `review.requestLabel` — the REAL `on-request` mechanism, since a GitHub
+      // App bot user cannot be picked in the reviewer dropdown. Every other
+      // label is dropped here rather than at the dispatch gate: this is the
+      // router-level hard ignore `pr_review.submitted` below already models, and
+      // it is what stops routine labelling costing a `resolvePrState` each time.
+      //
+      // The OPERATOR's label or the target REPO's, because either is a real
+      // request. Reading only the operator's made the key inert for repos: the
+      // shipped default is `null`, so every `pr.labeled` event was dropped right
+      // here, before any repo layer was resolved — while
+      // `resolveReviewTrigger` a level down happily honoured the repo's value
+      // for every OTHER route (#256). One cached resolution per label event
+      // buys the documented behaviour back; see `RouterDeps.resolveRepoPolicy`.
+      const handler = gh.pr_labeled || gh.pr_review || "pr-review";
+      const requestLabels = await reviewRequestLabels(handler, envelope, deps);
+      if (!envelope.addedLabel || !requestLabels.has(envelope.addedLabel)) {
+        return {
+          action: "ignore",
+          reason: `label ${envelope.addedLabel ?? "(none)"} does not request a review`,
+        };
+      }
+      return {
+        action: "handler",
+        handler,
+        context: {
+          _routeKey: "github.pr_labeled",
+          repo: envelope.repo,
+          prNumber: envelope.prNumber,
+          issueNumber: envelope.issueNumber,
+          title: envelope.title,
+          body: envelope.body,
+          sender: envelope.sender,
+          labels: envelope.labels,
+        },
+      };
+    }
+
+    case "pr.review_requested": {
+      // Opportunistic, per 07 §7.1's caveat: GitHub's reviewer picker does not
+      // offer App bot users, so `on-request` must not DEPEND on this — but the
+      // Re-run button on our own `last-light/review` check arrives here too, and
+      // that one is the documented affordance. Either way, a request naming
+      // somebody else is not ours to answer.
+      const botLogin = `${getBotName()}[bot]`;
+      if (envelope.requestedReviewer !== botLogin && envelope.requestedReviewer !== getBotName()) {
+        return {
+          action: "ignore",
+          reason: `review requested from ${envelope.requestedReviewer ?? "(unknown)"}, not us`,
+        };
+      }
+      return {
+        action: "handler",
+        handler: gh.pr_review_requested || gh.pr_review || "pr-review",
+        context: {
+          _routeKey: "github.pr_review_requested",
+          repo: envelope.repo,
+          prNumber: envelope.prNumber,
+          issueNumber: envelope.issueNumber,
+          title: envelope.title,
+          body: envelope.body,
+          sender: envelope.sender,
+          labels: envelope.labels,
+        },
+      };
+    }
+
     case "pr.checks_failed": {
-      // CI went red on a dependency-update PR. The webhook connector only emits
-      // this event for a Dependabot/Renovate PR (deterministic commit-author /
-      // branch-prefix gate, mirroring the green `pr.checks_passed` path) — so we
-      // arrive here already knowing the PR is a dependency bump; a human's red PR
-      // never reaches this case. Route through the classifier (not a fixed route
-      // key) so any workflow that claims a check-failure intent via its
-      // `classification:` block can pick it up — e.g. a Dependabot
-      // dependency-bump fixer. Only a NOVEL claimed intent (resolved via
-      // getWorkflowByIntent) is eligible; a well-known comment intent
-      // (build/review/…) is ignored here, so the general classifier can't
-      // misfire this structured event onto an unrelated workflow.
-      const text =
-        `Pull request #${envelope.prNumber} "${envelope.title || ""}" ` +
-        `by ${envelope.issueAuthor || "unknown"} — its CI checks have failed.`;
-      const { intent } = await classifyComment(text, {
-        issueTitle: envelope.title,
-        isPullRequest: true,
-      });
-      const handler = fallbackWorkflowForIntent(intent);
+      // CI went red on a PR the connector decided we should act on: a
+      // Dependabot/Renovate bump, OR a PR whose head commit WE pushed (the
+      // "did my fix work?" loop). So a human's red PR DOES reach this case now,
+      // whenever the bot has pushed to it — which is exactly why the routing
+      // below is deterministic.
+      //
+      // It used to go through the LLM classifier, and that could only ever land
+      // on `dependabot-ci-fix`: `fallbackWorkflowForIntent` resolves a workflow
+      // by its `classification.intent`, and `pr-fix.yaml` has no
+      // `classification:` block at all, so it was structurally unselectable.
+      // A human's red PR therefore ran a dependency-bump prompt, the
+      // `dependency-trivial`/`dependency-functional` label vocabulary and a
+      // `requires-human` preflight it was never designed for. The connector
+      // already computed the discriminator to decide whether to emit; carrying
+      // it here is cheaper, non-flaky, and makes the two check-outcome routes
+      // symmetric (`pr.checks_passed` below is deterministic for the same
+      // reason). See 09-state-machine.md → D5.
+      const handler = envelope.isDependencyPr
+        ? getWorkflowByIntent("dependabot-ci-fix")?.name
+        : gh.pr_fix || "pr-fix";
       if (!handler) {
         return {
           action: "ignore",
-          reason: `no workflow claims failed-checks intent '${intent}'`,
+          reason: "no workflow claims the dependabot-ci-fix intent",
         };
       }
-      console.log(
-        `[router] Failed checks on ${envelope.repo}#${envelope.prNumber} → ${handler} (intent: ${intent})`,
-      );
+      log.info("Failed checks routed", {
+        repo: envelope.repo,
+        prNumber: envelope.prNumber,
+        handler,
+        isDependencyPr: envelope.isDependencyPr,
+      });
       return {
         action: "handler",
         handler,
@@ -274,9 +505,7 @@ export async function routeEvent(
           reason: "no workflow claims the dependabot-pr-merge intent",
         };
       }
-      console.log(
-        `[router] Green checks on ${envelope.repo}#${envelope.prNumber} → ${handler}`,
-      );
+      log.info("Green checks routed", { repo: envelope.repo, prNumber: envelope.prNumber, handler });
       return {
         action: "handler",
         handler,
@@ -351,9 +580,7 @@ export async function routeEvent(
           }
 
           if (retriage) {
-            console.log(
-              `[router] Re-triaging ${triggerId} from reporter/maintainer comment`,
-            );
+            log.info("Re-triaging from reporter/maintainer comment", { triggerId });
             return {
               action: "handler",
               handler: gh.issue_opened || "issue-triage",
@@ -375,9 +602,11 @@ export async function routeEvent(
         return { action: "ignore", reason: "no bot mention in comment" };
       }
 
-      // Only maintainers (OWNER, MEMBER, COLLABORATOR) can trigger builds.
-      // For non-maintainers we reply directly via the connector — no agent
-      // invocation needed.
+      // The maintainer gate (OWNER, MEMBER, COLLABORATOR) for the ENTIRE
+      // @-mention path: approve/reject, retry, security-review, verify, qa-test,
+      // demo and every classified route below all sit behind it, so a non-maintainer
+      // mentioning the bot gets the canned reply and nothing dispatches. The
+      // reply goes out via the connector — no agent invocation needed.
       if (!MAINTAINER_ROLES.has(envelope.authorAssociation || "")) {
         return {
           action: "reply",
@@ -401,6 +630,69 @@ export async function routeEvent(
             sender: envelope.sender,
             decision: approveMatch ? "approved" : "rejected",
             reason: rejectMatch ? rejectMatch[1].trim() || undefined : undefined,
+          },
+        };
+      }
+
+      // `@<bot> retry [reason]` — the RECORDED "go again" (03-retry-intervention.md,
+      // locked decision 11's first surface).
+      //
+      // Structured rather than classified, because a retry has to be an exact
+      // instruction: the classifier would route "@bot try again" to `build` →
+      // `pr-fix`, which is a dispatch with no record behind it — the thing that
+      // used to clear the escalation guard, fall into the same budget gate, and
+      // post a duplicate escalation comment. What re-arms the PR is
+      // `_retry` below, which the dispatcher hands to `resolvePrState` so the
+      // snapshot is derived WITH the intervention rather than patched after.
+      //
+      // PR-only: the whole mechanism is scoped to the fix family's budgets, and
+      // on an issue `retry` means nothing — it falls through to classification.
+      //
+      // Already maintainer-gated: the `MAINTAINER_ROLES` check above governs the
+      // entire `@`-mention path. Nothing extra is needed here, and per locked
+      // decision 5 nothing checks WHO — `by` is recorded for display only.
+      const retryMatch = envelope.prNumber
+        ? envelope.body.match(bot.command("retry\\b([\\s\\S]*)"))
+        : null;
+      if (retryMatch) {
+        // Route to the same workflow the red-PR webhook would. `isDependencyPr`
+        // is the cheap author/title predicate rather than `envelope.isDependencyPr`,
+        // which the connector only computes on the check-suite routes: a comment
+        // envelope carries the PR's author and title and nothing else.
+        const dependencyPr = isDependencyPr({
+          authorLogin: envelope.issueAuthor ?? "",
+          title: envelope.title ?? "",
+          draft: false,
+        });
+        const handler = dependencyPr
+          ? getWorkflowByIntent("dependabot-ci-fix")?.name ?? gh.pr_fix ?? "pr-fix"
+          : gh.pr_fix || "pr-fix";
+        const note = retryMatch[1].trim();
+        log.info("Retry requested", {
+          repo: envelope.repo,
+          prNumber: envelope.prNumber,
+          by: envelope.sender,
+          handler,
+        });
+        return {
+          action: "handler",
+          handler,
+          context: {
+            _routeKey: "github.pr_fix",
+            repo: envelope.repo,
+            prNumber: envelope.prNumber,
+            issueNumber: envelope.issueNumber,
+            title: envelope.title,
+            body: envelope.body,
+            sender: envelope.sender,
+            commentBody: envelope.body,
+            // Consumed by the dispatcher and never forwarded to a workflow —
+            // `handlePrFix` builds its dispatch context field by field.
+            _retry: {
+              via: "comment" as const,
+              by: envelope.sender,
+              ...(note ? { note } : {}),
+            },
           },
         };
       }
@@ -489,10 +781,11 @@ export async function routeEvent(
         }),
         screenForInjection(envelope.body),
       ]);
-      console.log(
-        `[router] Comment classified as: ${intent}` +
-        (screen.flagged ? ` [screener flagged: ${screen.reason || "no reason"}]` : ""),
-      );
+      log.info("Comment classified", {
+        intent,
+        screenerFlagged: screen.flagged,
+        screenerReason: screen.flagged ? screen.reason || "no reason" : undefined,
+      });
 
       // When the screener flags, prefix the commentBody with a one-line
       // warning. Downstream agents anchored by agent-context/security.md
@@ -644,12 +937,13 @@ export async function routeEvent(
         issueNumber: classifiedIssue,
         reason: classifiedReason,
       } = classification;
-      console.log(
-        `[router] Slack message classified as: ${intent}` +
-        `${classifiedRepo ? ` (repo: ${classifiedRepo})` : ""}` +
-        `${classifiedIssue ? ` (#${classifiedIssue})` : ""}` +
-        (screen.flagged ? ` [screener flagged: ${screen.reason || "no reason"}]` : ""),
-      );
+      log.info("Slack message classified", {
+        intent,
+        repo: classifiedRepo,
+        issueNumber: classifiedIssue,
+        screenerFlagged: screen.flagged,
+        screenerReason: screen.flagged ? screen.reason || "no reason" : undefined,
+      });
 
       const slackText = screen.flagged ? `${flagPrefix(screen.reason)}${text}` : text;
 
@@ -723,13 +1017,37 @@ export async function routeEvent(
         case "triage": {
           const gate = requireManagedRepo(
             classifiedRepo,
-            "Which repo should I triage? e.g. `triage cliftonc/repo`",
+            "Which issue should I triage? e.g. `triage cliftonc/repo#42`",
           );
           if (!gate.ok) return gate.route;
+          // `issue-triage` triages ONE issue. Repo-wide scanning exists only as
+          // the webhooks-off cron fallback, which sets `mode: scan` — nothing on
+          // this path does, so a dispatch with no issue hands a single-issue
+          // workflow an empty target. That is not hypothetical: it burned a
+          // sandbox for 110s, improvised a `list_issues` sweep, changed nothing,
+          // emitted TRIAGE_COMPLETE and recorded SUCCEEDED. The marker
+          // postcondition cannot catch it — it proves the agent didn't bail, not
+          // that we asked it anything.
+          if (!classifiedIssue) {
+            return {
+              action: "reply",
+              message: `Which issue in ${gate.repo}? Triage works on one issue — e.g. \`triage ${gate.repo}#42\`. To ask *about* a repo's issues, just ask me directly and I'll look them up.`,
+            };
+          }
           return {
             action: "handler",
             handler: slack.triage || "issue-triage",
-            context: { repo: gate.repo, sender: envelope.sender, source: envelope.source },
+            context: {
+              repo: gate.repo,
+              issueNumber: classifiedIssue,
+              sender: envelope.sender,
+              // Forward what was actually said, as `demo`/`question` do. Without
+              // it the agent never sees the request that reached it: the run
+              // above rendered an empty `commentBody`, so the word "overdue"
+              // appeared nowhere in its 775-line transcript.
+              commentBody: slackText,
+              source: envelope.source,
+            },
           };
         }
 
@@ -809,11 +1127,45 @@ export async function routeEvent(
           };
         }
 
+        case "demo": {
+          // `demo` shipped with a `classification:` block AND a `routes.slack.demo`
+          // entry but no branch here, and `demo` is in WELL_KNOWN_INTENTS — so
+          // `fallbackWorkflowForIntent` returned undefined for it and every
+          // demo-classified Slack message fell through to plain chat. The route
+          // was configured and unreachable; this is the branch it always needed.
+          const gate = requireManagedRepo(
+            classifiedRepo,
+            "Which repo should I demo? e.g. `demo cliftonc/repo#42 -- the dark-mode toggle`",
+          );
+          if (!gate.ok) return gate.route;
+          return {
+            action: "handler",
+            handler: slack.demo || "demo",
+            context: {
+              repo: gate.repo,
+              issueNumber: classifiedIssue,
+              sender: envelope.sender,
+              commentBody: slackText,
+              source: envelope.source,
+              triggerId: slackTriggerId,
+              channelId,
+              threadId,
+            },
+          };
+        }
+
         case "question": {
           // A substantive question targeting a managed repo → run the sandboxed
           // answer workflow (web search + repo docs), delivered back to this
           // thread. A repo-less question can't seed a sandbox workspace, so it
           // falls through to in-process chat for a quick answer (mirrors build).
+          //
+          // Reaching here at all is deliberately NARROW: `answer.yaml`'s
+          // classification block downgrades to CHAT every question chat's own
+          // read-only GitHub tools can answer (issues, PR diffs, file contents,
+          // code search), so what survives is the two things chat genuinely
+          // cannot do — the web, and exploring a checkout. Naming a repo is not
+          // enough to get here; a sandbox provision is the cost of being wrong.
           if (!classifiedRepo) {
             return {
               action: "handler",
@@ -873,7 +1225,15 @@ export async function routeEvent(
           // A novel intent an overlay workflow introduced (issue #164) → route
           // to that workflow. If it named an unmanaged repo, reject on the same
           // security boundary the built-in repo-scoped intents use.
-          const novelWf = fallbackWorkflowForIntent(intent);
+          //
+          // GitHub-only intents are excluded: the dependency workflows are
+          // pr_scoped and reach `handlePrFix` through `context.prNumber`, which
+          // nothing on this route sets, so dispatching one here would run it
+          // with no PR at all. They fall through to chat, which can point the
+          // user at the PR.
+          const novelWf = GITHUB_ONLY_INTENTS.has(intent)
+            ? undefined
+            : fallbackWorkflowForIntent(intent);
           if (novelWf) {
             if (classifiedRepo && !isManagedRepo(classifiedRepo)) {
               return { action: "reply", message: unmanagedRepoReply(classifiedRepo) };

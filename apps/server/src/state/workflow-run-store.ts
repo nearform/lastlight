@@ -1,6 +1,34 @@
 import type Database from "better-sqlite3";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
+import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("runs");
+
+/**
+ * Sort key that floats in-flight runs above everything else, ahead of the
+ * `started_at DESC` tiebreak.
+ *
+ * This is a PAGINATION correctness fix, not a cosmetic one. The dashboard's
+ * Live filter asks for `queued|running|paused`, and a cron fan-out enqueues a
+ * whole batch at once — 30-40 rows whose `started_at` is newer than any run
+ * currently executing. Ordered by date alone they filled the entire first page,
+ * so the running work sat on page 2; and because the list hides queued rows by
+ * default, the user saw an EMPTY Live tab while agents were mid-run. Sorting
+ * client-side cannot fix that: the rows it would reorder were never fetched.
+ *
+ * `running` leads `paused` because a paused run already has its own surface
+ * (the approval banner), so the top of the list is the place to see what is
+ * actually moving. Everything terminal shares the last bucket and stays purely
+ * chronological among itself, which is what the day/week ranges want.
+ */
+const ACTIVE_FIRST = `CASE status
+             WHEN 'running' THEN 0
+             WHEN 'paused'  THEN 1
+             WHEN 'queued'  THEN 2
+             ELSE 3
+           END`;
 
 export interface PhaseHistoryEntry {
   phase: string;
@@ -16,7 +44,13 @@ export interface WorkflowRun {
   /** GitHub org/user that owns {@link repo}. Stored as its own column so the
    *  runs list (which omits `context`) can compose the qualified `owner/repo`. */
   owner?: string;
-  /** BARE repo name (no owner) — kept path-safe for taskIds / workspace dirs. */
+  /**
+   * BARE repo name (no owner) — kept path-safe for taskIds / workspace dirs.
+   *
+   * Normalized on the way in AND on the way back out (`state/repo-ref.ts`), so
+   * a consumer can hand `(run.owner, run.repo)` to Octokit unsplit. Reach for
+   * `qualifyRepo` when you need the user-facing `owner/repo`.
+   */
   repo?: string;
   issueNumber?: number;
   /**
@@ -49,6 +83,15 @@ export interface WorkflowRun {
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;
+  /**
+   * The OTel trace this run was exported under (issue #255). A feedback signal
+   * can land days after the run's span closed, so remembering where the trace
+   * was is the only way to hang the score on the trace it grades rather than a
+   * disconnected one. Absent whenever telemetry was disabled during the run.
+   */
+  traceId?: string;
+  /** The `lastlight.workflow.run` span id — the parent a feedback span attaches to. */
+  spanId?: string;
   /**
    * Rolled-up totals across the run's executions (SUM of `cost_usd` and
    * input+output+cache-read tokens). Populated only by {@link WorkflowRunStore.list}
@@ -89,20 +132,116 @@ export interface PhaseMarker {
  * better-sqlite3 transactions are synchronous. The atomic boundary is the DB
  * mutations only; the caller dispatches after the transaction commits.
  */
+/**
+ * Notified once a run reaches a TERMINAL status, whichever path took it there.
+ *
+ * There are two consumers: the `last-light/review` check run
+ * (`src/engine/review-check.ts`) and the GitHub feedback-anchor discovery of
+ * issue #255 — which is why observers are a LIST. They were a single slot
+ * originally, and a second `setTerminalObserver` call would have silently
+ * displaced the review check rather than failing loudly.
+ *
+ * 09-state-machine.md → S2 found that check
+ * being completed inside a `.then()` chained onto an in-memory promise in
+ * `dispatcher.ts` — so it stranded `in_progress` on every server restart
+ * mid-review (i.e. **every deploy**), every queued-then-resumed run, every
+ * `expireStaleRuns` cancellation and every crash. The fix is not routing but
+ * DURABILITY: make the check a projection of persisted run state, resolved
+ * wherever that state becomes terminal. Hanging the hook here rather than at
+ * the eight `finishRun` call sites is what makes `simple.ts`, `resume.ts`,
+ * `expireQueued` and the admin cancel all resolve it for free — and what stops
+ * a ninth call site being added without one.
+ *
+ * Contract: **synchronous, never throws, never re-enters the store.** It is
+ * called after the row is written (outside any transaction), and an
+ * implementation that needs I/O fires it and returns. One observer throwing
+ * does not stop the others.
+ */
+export type TerminalRunObserver = (
+  run: WorkflowRun,
+  status: "succeeded" | "failed" | "cancelled",
+) => void;
+
+/**
+ * Match one `owner/repo` against a `workflow_runs` row, in SQL.
+ *
+ * Exists because callers filter by the qualified name while the table stores
+ * the pair — `owner` + a BARE `repo` (see `state/repo-ref.ts`). That is the
+ * rule, and `owner = ? AND repo = ?` is it. A bare filter value has no owner to
+ * split off, so it matches `repo` alone.
+ *
+ * The trailing `OR repo = ?` is **legacy-row handling, not the rule** (issue
+ * #279). Rows written before the backfill put the qualified string in `repo`
+ * itself; the migration converges them and both write choke points keep new
+ * ones honest, so this arm should match nothing on a migrated DB. It is kept
+ * because a `SELECT` is not the place to discover that a backfill didn't run,
+ * and because dropping a row from a filter is the failure mode that hides
+ * things silently.
+ */
+function repoMatchClause(repo: string): { sql: string; values: string[] } {
+  const slash = repo.indexOf("/");
+  if (slash > 0) {
+    return {
+      sql: "((owner = ? AND repo = ?) OR repo = ?)",
+      values: [repo.slice(0, slash), repo.slice(slash + 1), repo],
+    };
+  }
+  return { sql: "repo = ?", values: [repo] };
+}
+
 export class WorkflowRunStore {
   private db: Database.Database;
   private approvals: ApprovalStore;
+  private terminalObservers: TerminalRunObserver[] = [];
 
   constructor(db: Database.Database, deps: { approvals: ApprovalStore }) {
     this.db = db;
     this.approvals = deps.approvals;
   }
 
+  /** Add a {@link TerminalRunObserver}. Wired at boot; order is registration order. */
+  addTerminalObserver(fn: TerminalRunObserver): void {
+    this.terminalObservers.push(fn);
+  }
+
+  /**
+   * Fire the terminal observers for a row that has just been written. Swallows
+   * everything, per observer: a terminal transition is already persisted by the
+   * time we get here, no projection of it may undo that, and one projection
+   * failing must not cost the others their notification.
+   */
+  private notifyTerminal(id: string, status: "succeeded" | "failed" | "cancelled"): void {
+    if (this.terminalObservers.length === 0) return;
+    let run: WorkflowRun | null = null;
+    try {
+      run = this.getRun(id);
+    } catch (err: unknown) {
+      log.warn("Could not read a terminal run for its observers", { runId: id, err });
+      return;
+    }
+    if (!run) return;
+    for (const observe of this.terminalObservers) {
+      try {
+        observe(run, status);
+      } catch (err: unknown) {
+        log.warn("Terminal observer failed", { runId: id, err });
+      }
+    }
+  }
+
   // ── Plain single-mutation operations ───────────────────────────
 
-  /** Create a new workflow run record */
+  /**
+   * Create a new workflow run record.
+   *
+   * The (owner, BARE repo) invariant is enforced HERE rather than asked of
+   * callers (issue #279) — a fixture, an eval harness or a future caller
+   * passing `"owner/repo"` is split rather than stored as a third shape. See
+   * `state/repo-ref.ts`.
+   */
   createRun(run: Omit<WorkflowRun, "phaseHistory" | "updatedAt">): void {
     const now = new Date().toISOString();
+    const ref = normalizeRepoRef(run.owner, run.repo);
     this.db.prepare(`
       INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, phase_history, status, context, scratch, started_at, updated_at, triggered_by, trigger_actor_type)
       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)
@@ -110,8 +249,8 @@ export class WorkflowRunStore {
       run.id,
       run.workflowName,
       run.triggerId,
-      run.owner ?? null,
-      run.repo ?? null,
+      ref.owner ?? null,
+      ref.repo ?? null,
       run.issueNumber ?? null,
       run.currentPhase,
       run.status,
@@ -147,6 +286,23 @@ export class WorkflowRunStore {
     this.db
       .prepare(`UPDATE workflow_runs SET scratch = ?, updated_at = ? WHERE id = ?`)
       .run(serialized, now, id);
+  }
+
+  /**
+   * Remember which OTel trace this run is being exported under (issue #255).
+   *
+   * Deliberately NOT touching `updated_at`: this is bookkeeping about the run,
+   * not activity on it, and the liveness checks that read `updated_at` would
+   * otherwise see a heartbeat the run never produced.
+   *
+   * Write-once in practice (the run span opens exactly once), and harmless if
+   * repeated — a resume re-opens a span under a new trace, and the newest trace
+   * is the right one for a signal arriving now.
+   */
+  setTraceContext(id: string, traceId: string, spanId: string): void {
+    this.db
+      .prepare(`UPDATE workflow_runs SET trace_id = ?, span_id = ? WHERE id = ?`)
+      .run(traceId, spanId, id);
   }
 
   /**
@@ -215,6 +371,84 @@ export class WorkflowRunStore {
     return row ? this.deserialize(row) : null;
   }
 
+  /**
+   * The most recent run for this trigger belonging to ANY of `workflowNames`,
+   * in ANY status.
+   *
+   * Two things distinguish it from {@link latestSucceededForTrigger}:
+   *
+   * 1. **It keys on a FAMILY, not one workflow.** "How many times have we tried
+   *    to fix this PR, and what did we try" is a fact about the pull request;
+   *    which of `pr-fix` / `dependabot-ci-fix` happened to run is an
+   *    implementation detail of how the event arrived — and routing genuinely
+   *    varies (an `@bot fix this` comment on a red Dependabot PR is an LLM
+   *    decision that can land on either). Under (workflow, PR) keying that PR
+   *    would get a second, empty attempt counter: attempt resets to 1,
+   *    `{{priorAttempts}}` renders blank, and the budget silently doubles.
+   *    See 09-state-machine.md → S1 ("Identity").
+   * 2. **It does not filter on success.** A crashed run has to be VISIBLE, so
+   *    the caller can decide it consumed no attempt. Filtering it out here
+   *    would make a crash look like "no prior attempt" and re-arm the loop
+   *    from zero.
+   */
+  latestForTrigger(workflowNames: string[], triggerId: string): WorkflowRun | null {
+    if (workflowNames.length === 0) return null;
+    const placeholders = workflowNames.map(() => "?").join(", ");
+    const row = this.db.prepare(`
+      SELECT * FROM workflow_runs
+      WHERE trigger_id = ? AND workflow_name IN (${placeholders})
+      ORDER BY started_at DESC
+      LIMIT 1
+    `).get(triggerId, ...workflowNames) as Record<string, unknown> | undefined;
+    return row ? this.deserialize(row) : null;
+  }
+
+  /**
+   * The oldest still-live (queued / running / paused) run for this trigger
+   * among `workflowNames` — the PR-scoped run lock (09-state-machine.md → S4).
+   *
+   * Oldest-first deliberately: the answer to "who holds the lock" must be the
+   * incumbent, not whichever row sorted last.
+   *
+   * `paused` counts. A paused run still owns its sandbox workspace, and the fix
+   * family now SHARES one workspace per PR — letting a second workflow in
+   * would have two agents fetch/reset/push the same branch through the same
+   * directory.
+   */
+  activeForTrigger(workflowNames: string[], triggerId: string): WorkflowRun | null {
+    if (workflowNames.length === 0) return null;
+    const placeholders = workflowNames.map(() => "?").join(", ");
+    const row = this.db.prepare(`
+      SELECT * FROM workflow_runs
+      WHERE trigger_id = ? AND workflow_name IN (${placeholders})
+        AND status IN ('queued', 'running', 'paused')
+      ORDER BY started_at ASC
+      LIMIT 1
+    `).get(triggerId, ...workflowNames) as Record<string, unknown> | undefined;
+    return row ? this.deserialize(row) : null;
+  }
+
+  /**
+   * The most recent SUCCEEDED run of EACH of `workflowNames` for this trigger,
+   * keyed by workflow name. Absent keys mean "never succeeded here".
+   *
+   * Feeds the "already assessed at this head SHA" dedup, which is per-workflow
+   * on purpose even though the fix ATTEMPT counter is per-family: `pr-fix`
+   * having succeeded at a SHA says nothing about whether `dependabot-pr-merge`
+   * has assessed it. One small indexed lookup per name — the set is four.
+   */
+  latestSucceededForTriggers(
+    workflowNames: string[],
+    triggerId: string,
+  ): Record<string, WorkflowRun> {
+    const out: Record<string, WorkflowRun> = {};
+    for (const name of workflowNames) {
+      const run = this.latestSucceededForTrigger(name, triggerId);
+      if (run) out[name] = run;
+    }
+    return out;
+  }
+
   /** List all active (queued, running, or paused) workflow runs */
   listActive(): WorkflowRun[] {
     const rows = this.db.prepare(`
@@ -247,6 +481,15 @@ export class WorkflowRunStore {
     sinceIso?: string;
     workflowName?: string;
     repo?: string;
+    /**
+     * Restrict to a SET of repos — the dashboard's per-repo visibility scope
+     * (issue #169), where a user's GitHub teams resolve to several repos at
+     * once. Plural sibling of `repo`, matched with the same both-shapes rule;
+     * an empty array means "no rows", which the caller must avoid by not
+     * passing it. Ignored when `repo` is also set (the single-repo Repos tab
+     * is the narrower ask).
+     */
+    repos?: string[];
     statuses?: string[];
   } = {}): { runs: WorkflowRun[]; total: number } {
     const limit = opts.limit ?? 20;
@@ -263,19 +506,15 @@ export class WorkflowRunStore {
       params.push(opts.workflowName);
     }
     if (opts.repo) {
-      // The Repos tab filters by the qualified `owner/repo`, but the column is
-      // the bare repo (+ a separate `owner`). Match EITHER shape: new rows
-      // (`owner` set, `repo` bare) via `owner = ? AND repo = ?`, OR legacy rows
-      // that stored the qualified string in `repo` itself via `repo = ?`. A
-      // bare filter value has no owner to split, so it just matches `repo`.
-      const slash = opts.repo.indexOf("/");
-      if (slash > 0) {
-        where.push("((owner = ? AND repo = ?) OR repo = ?)");
-        params.push(opts.repo.slice(0, slash), opts.repo.slice(slash + 1), opts.repo);
-      } else {
-        where.push("repo = ?");
-        params.push(opts.repo);
-      }
+      const { sql, values } = repoMatchClause(opts.repo);
+      where.push(sql);
+      params.push(...values);
+    } else if (opts.repos && opts.repos.length > 0) {
+      // OR the per-repo clauses. Not an `IN (...)`, because the column doesn't
+      // hold the value being matched — see `repoMatchClause`.
+      const parts = opts.repos.map((r) => repoMatchClause(r));
+      where.push(`(${parts.map((p) => p.sql).join(" OR ")})`);
+      for (const p of parts) params.push(...p.values);
     }
     if (opts.statuses && opts.statuses.length > 0) {
       where.push(`status IN (${opts.statuses.map(() => "?").join(",")})`);
@@ -320,7 +559,7 @@ export class WorkflowRunStore {
             GROUP BY workflow_run_id
          ) agg ON agg.workflow_run_id = workflow_runs.id
          ${whereClause}
-         ORDER BY started_at DESC
+         ORDER BY ${ACTIVE_FIRST}, started_at DESC
          LIMIT ? OFFSET ?`,
       )
       .all(...params, limit, offset) as Record<string, unknown>[];
@@ -394,6 +633,10 @@ export class WorkflowRunStore {
          WHERE id = ? AND status = 'queued'`,
       )
       .run(now, now, reason, id);
+    // A queued run that expires never ran a phase, but it may already own a
+    // `last-light/review` check — the whole point of hanging the projection off
+    // the terminal transition is that this path resolves it for free.
+    if (info.changes === 1) this.notifyTerminal(id, "cancelled");
     return info.changes;
   }
 
@@ -411,26 +654,53 @@ export class WorkflowRunStore {
    * which annotates the managed-repo list with recent activity and sorts by it.
    * Ordered newest-activity first.
    *
-   * The `repo` key is the QUALIFIED `owner/repo` (owner-less legacy rows fall
-   * back to the bare name) so it aligns with `getManagedRepos()` and the
-   * artifact-store slugs the `/repos` endpoint unions it against — without this
-   * a repo split into two rows (bare-with-runs vs qualified-managed-with-zero).
+   * The `repo` key is the QUALIFIED `owner/repo` (owner-less rows fall back to
+   * the bare name) so it aligns with `getManagedRepos()` and the artifact-store
+   * slugs the `/repos` endpoint unions it against — without this a repo splits
+   * into two rows (bare-with-runs vs qualified-managed-with-zero).
+   *
+   * That join is the one in `state/repo-ref.ts`, expressed in SQL so it groups
+   * correctly: two rows for the same repo that disagree about shape collapse
+   * into one bucket here rather than after the fact.
    */
   distinctRepos(): { repo: string; runCount: number; lastRunAt: string }[] {
-    const rows = this.db
+    const qualified = qualifiedRepoSql("owner", "repo", "bare");
+    return this.db
       .prepare(
-        `SELECT owner, repo, COUNT(*) AS c, MAX(started_at) AS last
+        `SELECT ${qualified} AS repo, COUNT(*) AS runCount, MAX(started_at) AS lastRunAt
            FROM workflow_runs
           WHERE repo IS NOT NULL AND repo != ''
-          GROUP BY owner, repo
-          ORDER BY last DESC`,
+          GROUP BY ${qualified}
+          ORDER BY lastRunAt DESC`,
       )
-      .all() as { owner: string | null; repo: string; c: number; last: string }[];
-    return rows.map((r) => ({
-      repo: r.owner && !r.repo.includes("/") ? `${r.owner}/${r.repo}` : r.repo,
-      runCount: r.c,
-      lastRunAt: r.last,
-    }));
+      .all() as { repo: string; runCount: number; lastRunAt: string }[];
+  }
+
+  /**
+   * What Last Light did for ONE repo since `sinceIso` — a count per
+   * (workflow, status) pair. The bot half of the weekly digest.
+   *
+   * Grouped in SQL rather than fetched-and-counted because a busy repo's week
+   * is hundreds of rows and the digest wants six numbers. Filtered on the
+   * QUALIFIED repo for the same reason `distinctRepos` groups on it: rows
+   * written before the owner/repo backfill carry `owner/repo` in the repo
+   * column, and a bare-name filter silently misses every one of them.
+   */
+  summarizeRepoActivity(
+    owner: string,
+    repo: string,
+    sinceIso: string,
+  ): { workflowName: string; status: string; count: number }[] {
+    const qualified = qualifiedRepoSql("owner", "repo", "bare");
+    return this.db
+      .prepare(
+        `SELECT workflow_name AS workflowName, status, COUNT(*) AS count
+           FROM workflow_runs
+          WHERE ${qualified} = ?
+            AND started_at >= ?
+          GROUP BY workflow_name, status`,
+      )
+      .all(`${owner}/${repo}`, sinceIso) as { workflowName: string; status: string; count: number }[];
   }
 
   /**
@@ -461,6 +731,8 @@ export class WorkflowRunStore {
     } else {
       apply();
     }
+    // AFTER the transaction commits — the observer reads the row back.
+    this.notifyTerminal(id, status);
   }
 
   private flipFinished(id: string, status: "succeeded" | "failed" | "cancelled", error?: string): void {
@@ -479,6 +751,7 @@ export class WorkflowRunStore {
     this.db.prepare(`
       UPDATE workflow_runs SET status = 'cancelled', updated_at = ?, finished_at = ? WHERE id = ?
     `).run(now, now, id);
+    this.notifyTerminal(id, "cancelled");
   }
 
   /** Pause a workflow run (waiting for approval) */
@@ -547,6 +820,26 @@ export class WorkflowRunStore {
   }
 
   /**
+   * Backpressure requeue: flip a RUNNING run back to `queued` and re-stamp its
+   * enqueue clock. Used by the k8s backend when a pod-create is rejected by the
+   * namespace `ResourceQuota` (spec/09-sandbox.md (Concurrency)) — the run isn't failed, it's waiting
+   * for capacity, and the AdmissionController promotes it again as slots free.
+   * Re-stamping `started_at` gives it a fresh `maxQueueWaitMs` window so the TTL
+   * sweep doesn't instantly expire a run that had been running for a while.
+   * CAS-guarded on `status = 'running'`; returns rows changed (0 = safe no-op,
+   * e.g. the run already finished or was cancelled between phases).
+   */
+  requeueRunning(id: string): number {
+    const now = new Date().toISOString();
+    const info = this.db.prepare(`
+      UPDATE workflow_runs
+      SET status = 'queued', started_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'running'
+    `).run(now, now, id);
+    return info.changes;
+  }
+
+  /**
    * Increment the restart counter and return the new value. Used by
    * `resumeOrphanedWorkflows` to enforce a retry budget so a run that
    * crashes the host (agent OOM, etc.) eventually self-terminates instead
@@ -565,12 +858,19 @@ export class WorkflowRunStore {
   }
 
   private deserialize(row: Record<string, unknown>): WorkflowRun {
+    // The compatibility shim for the (owner, BARE repo) invariant (issue #279).
+    // The backfill converges stored rows and `createRun` keeps new ones honest,
+    // so this only ever fires for a row written by an older process before the
+    // migration ran — but it fires at the ONE boundary every consumer crosses,
+    // which is what lets `admission.ts` and `feedback-poll.ts` hand
+    // `(run.owner, run.repo)` straight to Octokit with no split of their own.
+    const ref = normalizeRepoRef(row.owner as string | null, row.repo as string | null);
     return {
       id: row.id as string,
       workflowName: row.workflow_name as string,
       triggerId: row.trigger_id as string,
-      owner: (row.owner as string | null) ?? undefined,
-      repo: row.repo as string | undefined,
+      owner: ref.owner,
+      repo: ref.repo,
       issueNumber: row.issue_number as number | undefined,
       triggeredBy: (row.triggered_by as string | null) ?? undefined,
       triggerActorType: (row.trigger_actor_type as TriggerActorType | null) ?? undefined,
@@ -583,6 +883,8 @@ export class WorkflowRunStore {
       startedAt: row.started_at as string,
       updatedAt: row.updated_at as string,
       finishedAt: row.finished_at as string | undefined,
+      traceId: (row.trace_id as string | null) ?? undefined,
+      spanId: (row.span_id as string | null) ?? undefined,
       // Present only on `list()` rows (the executions JOIN); undefined on getRun.
       totalCostUsd: typeof row.total_cost_usd === "number" ? row.total_cost_usd : undefined,
       totalTokens: typeof row.total_tokens === "number" ? row.total_tokens : undefined,

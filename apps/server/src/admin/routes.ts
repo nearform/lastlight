@@ -20,6 +20,13 @@ import {
 import { authMiddleware, createToken, verifyTokenForRefresh, decodeToken, actorFromContext } from "./auth.js";
 import { Cron } from "croner";
 import type { CronScheduler } from "../cron/scheduler.js";
+import {
+  CRON_GLOBALLY_ENABLED_KEY,
+  CRON_NAME_KEY,
+  cronVote,
+  repoCronPrefs,
+  repoLayerMayVote,
+} from "../cron/repo-crons.js";
 import { enumerateOverlayAssets } from "lastlight-shared/overlay-assets";
 import {
   getCronWorkflows,
@@ -31,23 +38,72 @@ import {
   loadSkillRaw,
 } from "../workflows/loader.js";
 import { routeEvent, type Route } from "../engine/router.js";
+import { applyPrDispatchGate, prPolicyConfig } from "../engine/dispatcher.js";
+import { resolvePrState, prTriggerId } from "../engine/pr-state.js";
+import { holdReply, type PrPolicyConfig } from "../engine/pr-decisions.js";
+import { PR_FIX_SHAPED_WORKFLOWS } from "../workflows/target-policy.js";
+import type { GitHubClient } from "../engine/github/github.js";
 import { classifyComment, type ClassificationResult } from "../engine/screen/classifier.js";
 import type { EventEnvelope, EventType } from "../connectors/types.js";
 import {
   getWorkflowTriggers,
   getWorkflowTriggerKinds,
+  resolveIntentHandler,
 } from "../workflows/triggers.js";
 import {
   getManagedRepos,
+  getInstallationRepoBreakdown,
   getInstallationRepos,
   getInstallationReposRefreshedAt,
+  isManagedRepo,
 } from "../managed-repos.js";
-import { getRuntimeConfig, getRoutes, getBotName } from "../config/config.js";
+import {
+  getInstallationDirectory,
+  installationSettingsUrl,
+} from "../engine/github/installations.js";
+import { TeamVisibilityResolver } from "../engine/github/team-visibility.js";
+
+/**
+ * Most repos a `?repos=` scope may name (issue #169). Past this the client is
+ * told to stop filtering rather than have the server build a WHERE clause with
+ * thousands of OR branches — and since the scope is declutter, dropping it just
+ * shows more.
+ */
+const MAX_REPO_SCOPE = 200;
+import {
+  getRuntimeConfig,
+  getRoutes,
+  getBotName,
+  resolveKubernetesConfig,
+  // The redaction rule for every surface that echoes YAML back to the
+  // dashboard. IMPORTED, never mirrored: `GET /repos/:owner/:repo/config`
+  // returns a repo's UNTRUSTED `.lastlight/lastlight.yml` raw and
+  // pre-validation, so a copy that drifted behind config.ts's would leak a
+  // pasted credential. It must stay single-source (see config.ts).
+  redactPublic,
+  type RepoConfigPolicy,
+} from "../config/config.js";
+import {
+  fetchRepoLayer,
+  refreshRepoLayer,
+  getCachedRepoLayer,
+  repoConfigPolicy,
+  repoConfigBaseFromRuntime,
+  resolveRepoConfig,
+} from "../config/repo-config.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
+import { artifactStore } from "../sandbox/artifact-store.js";
+import { reclaimSandbox } from "../sandbox/k8s/reclaim.js";
+import { makeK8sApis } from "../sandbox/k8s/client.js";
+import { RunId } from "../sandbox/k8s/run-id.js";
 import { getServerVersion } from "./version.js";
 import { BuildAssetStore, buildAssetIssueKey } from "../state/build-assets.js";
 import type { WorkflowApproval } from "../state/approval-store.js";
 import type { PublicConfigBundle, BuildAssetsLocation } from "../config/config.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("admin");
+const oauthLog = logger("oauth");
 
 /**
  * Map a build-asset filename extension to a binary MIME type, or null when the
@@ -188,6 +244,44 @@ export interface AdminConfig {
    * without the runner (tests, CLI-only) → the trigger endpoint reports 503.
    */
   triggerCron?: (workflow: string, context: Record<string, unknown>) => Promise<void>;
+  /**
+   * Run a HOST-SIDE cron handler now — the `handler:` half of the same "Run
+   * now" button (`src/cron/handlers.ts`). Wired in `src/index.ts` to the same
+   * registry the scheduler resolves against, so a manual fire and a scheduled
+   * tick execute identical code. Absent without the registry → 503, exactly
+   * like `triggerCron`.
+   */
+  runCronHandler?: (handler: string, context: Record<string, unknown>) => Promise<void>;
+  /**
+   * The harness GitHub client — `null` in chat-only mode, absent in tests that
+   * don't need it. The three collaborators below exist for ONE endpoint,
+   * `POST /prs/:owner/:repo/:number/retry`, which has to resolve a live `PrState`
+   * snapshot, cross the same dispatch gate every other route crosses, and then
+   * dispatch. Without a client there is nothing to resolve, so the route reports
+   * 503 rather than acting on a snapshot made of defaults.
+   */
+  github?: GitHubClient | null;
+  /**
+   * Dispatch a workflow now. Wired in `src/index.ts` to the same
+   * `dispatchWorkflow` every route uses, so a retry's run is indistinguishable
+   * from a webhook's. Absent without the runner (tests, CLI-only) → 503.
+   */
+  dispatchWorkflow?: (
+    workflow: string,
+    context: Record<string, unknown>,
+  ) => Promise<{ success: boolean; error?: string }>;
+  /**
+   * The run's repo-clamped `fix`/`dependencies`/`review` blocks — the SAME
+   * resolution `dispatchWorkflow` performs (`resolveRepoRunConfig`), handed in
+   * for the same reason the dispatcher is handed it: a second, operator-only
+   * view of policy would read a repo's budgets LOOSER than the repo set them,
+   * which is the one direction a budget must not err in. Absent → the
+   * operator's own config (`prPolicyConfig(undefined)`).
+   */
+  resolveRepoPolicy?: (
+    workflowName: string,
+    context: Record<string, unknown>,
+  ) => Promise<Partial<PrPolicyConfig> | undefined>;
   /** Slack OAuth config (optional — enables "Login with Slack" on dashboard) */
   slackOAuthClientId?: string;
   slackOAuthClientSecret?: string;
@@ -509,17 +603,6 @@ function playgroundRouting(type: EventType): "deterministic" | "classifier" {
   return PLAYGROUND_EVENT_TYPES.find((e) => e.type === type)?.routing ?? "deterministic";
 }
 
-/**
- * Resolve a classifier intent to the handler the router would pick, using the
- * same `routes` map the router consults (slack keys use `_`, intents use `-`),
- * falling back to the workflow that claims the intent, then the intent itself.
- */
-function resolveIntentHandler(intent: string): string {
-  const routes = getRoutes();
-  const key = intent.replace(/-/g, "_");
-  return routes.slack[intent] ?? routes.slack[key] ?? getWorkflowByIntent(intent)?.name ?? intent;
-}
-
 /** Request body for POST /route-test — a synthetic event to dry-run. */
 interface RouteTestBody {
   source?: string;
@@ -594,13 +677,21 @@ export function createAdminRoutes(
   const githubCredsSet = Boolean(config.githubOAuthClientId && config.githubOAuthClientSecret);
   const githubOAuthEnabled = githubCredsSet && Boolean(config.githubAllowedOrg);
   if (githubCredsSet && !config.githubAllowedOrg) {
-    console.error(
-      "[oauth] GitHub OAuth client id/secret are set but GITHUB_ALLOWED_ORG is empty. " +
+    oauthLog.error(
+      "GitHub OAuth client id/secret are set but GITHUB_ALLOWED_ORG is empty. " +
       "Set it to a GitHub org slug to restrict login to that org, or to \"*\" to " +
       "explicitly allow any GitHub user. GitHub OAuth is disabled until this is set.",
     );
   }
   const githubAllowAnyUser = config.githubAllowedOrg === "*";
+
+  // Per-repo dashboard visibility (issue #169). Constructed unconditionally —
+  // it is inert (and answers the fail-open sentinel) when `teamVisibility` is
+  // off or there is no GitHub client, which is what tests and chat-only mode see.
+  const teamVisibility = new TeamVisibilityResolver({
+    store: db.teams,
+    github: config.github ?? null,
+  });
 
   // Auth is required when ANY login method is configured — a password OR a
   // working OAuth provider. Gating on the password alone left the dashboard
@@ -619,12 +710,104 @@ export function createAdminRoutes(
   // events (config wins when set, else installation). See src/managed-repos.ts.
   app.get("/managed-repos", (c) => {
     const configured = getRuntimeConfig()?.managedRepos ?? [];
+    const effective = getManagedRepos();
+    // Every ACCOUNT the App is installed on, with its repo grant. A GitHub App
+    // is installed per account and each installation mints its own tokens, so a
+    // `managedRepos` entry whose owner has no installation cannot be acted on —
+    // `uninstalledOwners` names them here, where an operator can see it, rather
+    // than letting it surface as a 422 mid-run.
+    const repoCounts = new Map(
+      getInstallationRepoBreakdown().map((g) => [g.installationId, g.repos.length]),
+    );
+    const installations = getInstallationDirectory()?.list() ?? [];
+    const installedOwners = new Set(installations.map((i) => i.account.toLowerCase()));
+    const uninstalledOwners = [
+      ...new Set(
+        effective
+          .map((r) => r.split("/")[0] ?? "")
+          .filter((owner) => owner && !installedOwners.has(owner.toLowerCase())),
+      ),
+    ];
     return c.json({
       configured,
       installation: getInstallationRepos(),
-      effective: getManagedRepos(),
+      effective,
       source: configured.length > 0 ? "config" : "installation",
       refreshedAt: getInstallationReposRefreshedAt(),
+      installations: installations.map((i) => ({
+        id: i.id,
+        account: i.account,
+        accountType: i.accountType,
+        repositorySelection: i.repositorySelection,
+        suspended: i.suspended,
+        repoCount: repoCounts.get(i.id) ?? 0,
+        // Deep link to GitHub's settings page for this install — where the repo
+        // grant, suspension and uninstall actually live. Built server-side
+        // because the path shape depends on the account type.
+        htmlUrl: installationSettingsUrl(i) ?? null,
+      })),
+      uninstalledOwners,
+      // Where to go and fix an uninstalled owner. `botName` IS the App slug
+      // (see the bot-identity contract), so this resolves without storing the
+      // App's URL anywhere.
+      appInstallUrl: `https://github.com/apps/${getBotName()}/installations/new`,
+      // Which of the effective repos have committed a `.lastlight/` layer.
+      // Read from the in-memory cache ONLY (`getCachedRepoLayer`) so this stays
+      // a cheap no-network list route — a repo not yet fetched simply reports
+      // false, and the per-repo endpoint below is what actually goes to GitHub.
+      repoConfig: effective.map((repo) => {
+        const layer = getCachedRepoLayer(repo);
+        return { repo, hasRepoConfig: Boolean(layer), fetchedAt: layer?.fetchedAt ?? null };
+      }),
+    });
+  });
+
+  // The managed repos THIS user should see by default, from their GitHub team
+  // grants (issue #169).
+  //
+  // Read `repos: null` as "no filter" — it is the sentinel, and it is what every
+  // non-happy path returns: a password/Slack login (no GitHub identity), an
+  // `allowedOrg: "*"` deployment, the feature switched off, a team too large to
+  // enumerate, or GitHub refusing the query. This is UI declutter, NOT access
+  // control: `/workflow-runs`, `/sessions` and `/stats` all keep returning
+  // global data and the filtering happens in the browser, so failing open costs
+  // nothing but a noisier list.
+  //
+  // Cheap by design — served from the SQLite cache, with a stale answer returned
+  // immediately while it refreshes behind the request. Only a genuine first
+  // resolution touches GitHub, and even that is a handful of GraphQL calls
+  // scoped to this one person's teams (see engine/github/team-visibility.ts).
+  app.get("/me/repos", async (c) => {
+    const result = await teamVisibility.visibleRepos(actorFromContext(c));
+    return c.json({
+      repos: result.repos,
+      synced: result.synced,
+      reason: result.reason,
+      teams: result.teams,
+      syncedAt: result.syncedAt,
+    });
+  });
+
+  // Force a re-resolution for the CALLER. The fallback for orgs where the
+  // `team`/`membership`/`organization` webhooks aren't wired up yet — those
+  // events normally invalidate the cache for us.
+  //
+  // Always self, never an arbitrary `?login=`. The response carries `teams`,
+  // which names the GitHub org teams a person belongs to — including secret
+  // ones — and the admin dashboard's authenticated population is not the same
+  // as "people entitled to enumerate org membership". A password-only session
+  // has no GitHub identity at all, so an override param would have let it read
+  // any login's teams with nothing to check it against.
+  app.post("/me/repos/resync", async (c) => {
+    const login = actorFromContext(c);
+    if (!login) return c.json({ error: "no GitHub identity on this session" }, 400);
+    const result = await teamVisibility.resync(login);
+    return c.json({
+      repos: result.repos,
+      synced: result.synced,
+      reason: result.reason,
+      teams: result.teams,
+      syncedAt: result.syncedAt,
     });
   });
 
@@ -903,7 +1086,7 @@ export function createAdminRoutes(
         "https://slack.com/user_id"?: string;
       };
       if (userInfo.ok === false) {
-        console.error("Slack openid.connect.userInfo failed:", userInfo.error);
+        oauthLog.error("Slack openid.connect.userInfo failed", { error: userInfo.error });
         return c.json({ error: "Slack userInfo failed" }, 502);
       }
 
@@ -916,9 +1099,10 @@ export function createAdminRoutes(
         const matchesId = teamId === allowed;
         const matchesDomain = teamDomain === allowed;
         if (!matchesId && !matchesDomain) {
-          console.warn(
-            `[oauth] Slack login rejected: workspace ${teamDomain ?? teamId ?? "unknown"} not in allowlist (${allowed})`,
-          );
+          oauthLog.warn("Slack login rejected: workspace not in allowlist", {
+            workspace: teamDomain ?? teamId ?? "unknown",
+            allowed,
+          });
           return c.json({ error: "workspace not allowed" }, 403);
         }
       }
@@ -939,8 +1123,7 @@ export function createAdminRoutes(
           });
           matchedLogin = user.login;
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[oauth] failed to persist Slack user ${slackUserId}: ${msg}`);
+          oauthLog.warn("Failed to persist Slack user", { slackUserId, err });
         }
       }
 
@@ -950,7 +1133,7 @@ export function createAdminRoutes(
       // bare "/admin" 404s in dev. Production static serving accepts both.
       return c.redirect(`/admin/?token=${encodeURIComponent(token)}`);
     } catch (err: unknown) {
-      console.error("OAuth exchange failed:", err);
+      oauthLog.error("Slack OAuth exchange failed", { err });
       return c.json({ error: "OAuth exchange failed" }, 502);
     }
   });
@@ -1040,7 +1223,7 @@ export function createAdminRoutes(
         memberStatus = memberRes.status;
       }
       if (!userInfo.login) {
-        console.error("GitHub /user failed: missing login field");
+        oauthLog.error("GitHub /user failed: missing login field");
         return fail("github_userinfo");
       }
       const login = userInfo.login;
@@ -1048,9 +1231,11 @@ export function createAdminRoutes(
       // Only 204 No Content means confirmed member. 302 means caller lacks
       // read:org visibility; 404 means not a member. Both cases are rejected.
       if (!githubAllowAnyUser && memberStatus !== 204) {
-        console.warn(
-          `[oauth] GitHub login rejected: ${login} not a confirmed member of ${config.githubAllowedOrg!} (status ${memberStatus})`,
-        );
+        oauthLog.warn("GitHub login rejected: not a confirmed org member", {
+          login,
+          org: config.githubAllowedOrg!,
+          memberStatus,
+        });
         return fail("github_org");
       }
 
@@ -1079,8 +1264,7 @@ export function createAdminRoutes(
             email = emails.find((e) => e.primary && e.verified)?.email ?? null;
           }
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[oauth] GitHub /user/emails lookup failed for ${login}: ${msg}`);
+          oauthLog.warn("GitHub /user/emails lookup failed", { login, err });
         }
       }
       if (typeof userInfo.id === "number") {
@@ -1094,8 +1278,7 @@ export function createAdminRoutes(
           });
         } catch (err: unknown) {
           // Identity capture is best-effort — never block a valid login on it.
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[oauth] failed to persist user ${login}: ${msg}`);
+          oauthLog.warn("Failed to persist user", { login, err });
         }
       }
 
@@ -1104,7 +1287,7 @@ export function createAdminRoutes(
       const token = createToken(config.adminSecret, "github", login);
       return c.redirect(`/admin/?token=${encodeURIComponent(token)}`);
     } catch (err: unknown) {
-      console.error("GitHub OAuth exchange failed:", err);
+      oauthLog.error("GitHub OAuth exchange failed", { err });
       return fail("oauth_exchange");
     }
   });
@@ -1142,6 +1325,50 @@ export function createAdminRoutes(
     const hoursParam = c.req.query("hours");
     const hours = Math.min(Math.max(1, parseInt(hoursParam ?? "24", 10) || 24), 168);
     return c.json({ hourly: db.executions.hourlyStats(hours) });
+  });
+
+  // ── Feedback signals (issue #255) ─────────────────────────────────────────
+  // A 👍/👎 on something the bot wrote, scored against the run that wrote it.
+  // Read-only: signals are written by the Slack reaction handler and the GitHub
+  // poller, never by an operator — the whole point is that the data is what
+  // people actually did.
+
+  // The raw feed, newest first. Retracted signals are excluded unless asked for.
+  app.get("/feedback/signals", (c) => {
+    const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "50", 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(c.req.query("offset") ?? "0", 10) || 0, 0);
+    const source = c.req.query("source");
+    const { signals, total } = db.feedback.list({
+      limit,
+      offset,
+      workflowName: c.req.query("workflow") || undefined,
+      repo: c.req.query("repo") || undefined,
+      source: source === "slack" || source === "github" ? source : undefined,
+      includeRemoved: c.req.query("includeRemoved") === "1",
+    });
+    return c.json({ signals, total });
+  });
+
+  // Per-workflow standing — the leaderboard. `averageScore` covers scored
+  // signals only, so a run everybody merely glanced at (👀) isn't reported as
+  // mediocre.
+  app.get("/feedback/summary", (c) => {
+    const days = Math.min(Math.max(1, parseInt(c.req.query("days") ?? "30", 10) || 30), 365);
+    return c.json({ summary: db.feedback.summaryByWorkflow(days), days });
+  });
+
+  // Zero-filled daily series for the chart, optionally for one workflow.
+  app.get("/feedback/daily", (c) => {
+    const days = Math.min(Math.max(1, parseInt(c.req.query("days") ?? "30", 10) || 30), 90);
+    const workflow = c.req.query("workflow") || undefined;
+    return c.json({ daily: db.feedback.dailyScores(days, workflow) });
+  });
+
+  // Everything said about one run — the run-detail badge.
+  app.get("/workflow-runs/:id/feedback", (c) => {
+    const run = db.runs.getRun(c.req.param("id"));
+    if (!run) return c.json({ error: "workflow run not found" }, 404);
+    return c.json({ signals: db.feedback.forRun(run.id) });
   });
 
   // Running Docker containers
@@ -1320,6 +1547,19 @@ export function createAdminRoutes(
     const since = c.req.query("since") || undefined;
     const workflowName = c.req.query("workflow") || undefined;
     const repo = c.req.query("repo") || undefined;
+    // Per-repo visibility scope (issue #169) — the caller's allowed repo set,
+    // so the dashboard's panels ask for exactly the rows they show instead of
+    // over-fetching and narrowing in the browser.
+    //
+    // This is a QUERY FILTER, not enforcement: the caller supplies it, omitting
+    // it still returns global data, and it is the plural sibling of the `repo`
+    // param the Repos tab has always used. Capped so a pathological query
+    // string can't build a WHERE clause with thousands of OR branches.
+    const repos = (c.req.query("repos") || "")
+      .split(",")
+      .map((r) => r.trim())
+      .filter(Boolean)
+      .slice(0, MAX_REPO_SCOPE);
     const statusParam = c.req.query("status");
     const limit = Math.min(Math.max(parseInt(rawLimit ?? "20", 10) || 20, 1), 200);
     const offset = Math.max(parseInt(rawOffset ?? "0", 10) || 0, 0);
@@ -1339,6 +1579,7 @@ export function createAdminRoutes(
       sinceIso: since,
       workflowName,
       repo,
+      repos: repos.length > 0 ? repos : undefined,
       statuses,
     });
     return c.json({ workflowRuns: runs, total });
@@ -1448,7 +1689,7 @@ export function createAdminRoutes(
               await killContainer(ctr.name);
               killed.push(ctr.name);
             } catch (err) {
-              console.warn(`[cancel] failed to kill ${ctr.name}:`, err);
+              log.warn("Cancel: failed to kill container", { container: ctr.name, err });
             }
           }),
         );
@@ -1463,21 +1704,69 @@ export function createAdminRoutes(
           }
         }
       } catch (err) {
-        console.warn(`[cancel] container enumeration failed:`, err);
+        log.warn("Cancel: container enumeration failed", { err });
       }
     }
-    // Reap the on-disk workspace too (issue #106) — the kills above stop the
-    // in-flight phase but leave the clone behind. Cancel is explicit and leaves
-    // a dirty checkout, so reap regardless of workflow class (a reusable per-PR
-    // dir just re-clones next time). The live-container guard defaults on, so a
+    // Reap the workspace too (issue #106) — the kills above stop the in-flight
+    // phase but leave the clone (or, on the `kubernetes` backend, the Pod +
+    // PVC) behind. Cancel is explicit and leaves a dirty checkout, so on the
+    // host backend reap regardless of workflow class (a reusable per-PR dir
+    // just re-clones next time). The live-container guard defaults on, so a
     // container still dying from the kills above is not raced.
     let reaped = false;
     if (typeof storedTaskId === "string" && storedTaskId) {
-      reaped = reapSandboxWorkspace({
-        taskId: storedTaskId,
-        stateDir: config.stateDir,
-        sandboxDir: getRuntimeConfig()?.sandboxDir,
-      }).removed;
+      if (getRuntimeConfig()?.sandbox === "kubernetes") {
+        // On k8s, reclaim the run's pod + PVC by run-id label. An EPHEMERAL
+        // (per-run) PVC matches and is deleted. A REUSED per-(repo,PR) PVC
+        // keeps its first run's label, so it is intentionally left as a warm
+        // cache (issue #107) and reclaimed later by the age/LRU sweep —
+        // unlike the host reap above, which removes reused dirs on cancel.
+        // `RunId.from(run.id)` sanitizes identically to the label Task 1
+        // stamped on those objects (F7 — stamp/select symmetry is now
+        // type-enforced), so the selector always matches. Best-effort: an
+        // unreachable cluster / transport error must never fail the cancel
+        // response.
+        try {
+          await reclaimSandbox(makeK8sApis(), resolveKubernetesConfig().namespace, {
+            kind: "run",
+            runId: RunId.from(run.id),
+          });
+        } catch (err) {
+          log.warn("Cancel: k8s reclaim failed", { runId: run.id, err });
+        }
+        // The pod's uploaded `.lastlight/` artifacts live host-side under
+        // `<sandboxDir>/<taskId>` even on k8s (the artifact store is host-local
+        // on every backend). `reclaimSandbox` above only touches the cluster pod
+        // + PVC, and the k8s backstop sweep only reclaims PVCs — so nothing else
+        // reaps those bytes. gc them directly here, mirroring the host `else`
+        // branch. No `reaped` gate: k8s has no host clone, so the artifact dir is
+        // the only thing to reclaim. Best-effort — a gc failure must not fail the
+        // cancel response.
+        try {
+          await artifactStore.gc(storedTaskId);
+        } catch (err) {
+          log.warn("Cancel: artifact gc failed", { taskId: storedTaskId, err });
+        }
+      } else {
+        reaped = reapSandboxWorkspace({
+          taskId: storedTaskId,
+          stateDir: config.stateDir,
+          sandboxDir: getRuntimeConfig()?.sandboxDir,
+        }).removed;
+        // GC the artifact-store namespace too (Plan 8), same "only when the
+        // workspace dir actually went away" rule as reapOnSuccess (simple.ts)
+        // — redundant with the rmSync above for the local backend, but the
+        // hook a future S3 backend needs. Cancel is a full-run abort (not a
+        // per-phase dispose), so this can never race a still-in-flight
+        // post-review the way an eager dispose-time gc would.
+        if (reaped) {
+          try {
+            await artifactStore.gc(storedTaskId);
+          } catch (err) {
+            log.warn("Cancel: artifact gc failed", { taskId: storedTaskId, err });
+          }
+        }
+      }
     }
     return c.json({ cancelled: id, killedContainers: killed, reapedWorkspace: reaped });
   });
@@ -1501,7 +1790,7 @@ export function createAdminRoutes(
     // Fire-and-forget: restartRun (inside the callback) flips status→running
     // atomically, so a second immediate retry click 400s on the status guard.
     config.retryWorkflow(run, actorFromContext(c) ?? "admin").catch((err) =>
-      console.error(`[admin] retry ${id} failed:`, err));
+      log.error("Retry failed", { id, err }));
     return c.json({ retrying: id });
   });
 
@@ -1693,19 +1982,11 @@ export function createAdminRoutes(
     const ctx = run.context ?? {};
     const ctxOwner = typeof ctx.owner === "string" ? ctx.owner : undefined;
     const branch = typeof ctx.branch === "string" ? ctx.branch : undefined;
-    const repoField = typeof run.repo === "string" ? run.repo : undefined;
-    let owner: string | undefined;
-    let repo: string | undefined;
-    if (repoField) {
-      if (repoField.includes("/")) {
-        const [maybeOwner, maybeRepo] = repoField.split("/", 2);
-        owner = ctxOwner ?? maybeOwner;
-        repo = maybeRepo;
-      } else {
-        owner = ctxOwner;
-        repo = repoField;
-      }
-    }
+    // The row IS the pair (issue #279) — `owner` plus a bare `repo`, normalized
+    // by the store on the way in and on the way out. `context.owner` stays as
+    // the fallback for a row whose owner column was never captured.
+    const repo = run.repo;
+    const owner = repo ? run.owner ?? ctxOwner : undefined;
     const issueKey = buildAssetIssueKey(run.workflowName, run.issueNumber, run.id);
     return { owner, repo, issueKey, branch };
   }
@@ -1798,6 +2079,10 @@ export function createAdminRoutes(
         runCount: activity.get(repo)?.runCount ?? 0,
         lastRunAt: activity.get(repo)?.lastRunAt ?? null,
         artifactKeyCount: artifactCounts.get(repo) ?? 0,
+        // Cache-only (no network) so the index stays cheap — it just makes the
+        // per-repo Config tab discoverable. False here means "nothing cached
+        // yet", not "no .lastlight/"; opening the tab settles it.
+        hasRepoConfig: Boolean(getCachedRepoLayer(repo)),
       }))
       .sort((a, b) => {
         // Newest activity first; repos with no runs sink below active ones,
@@ -1809,6 +2094,85 @@ export function createAdminRoutes(
       });
 
     return c.json({ repos });
+  });
+
+  /**
+   * The prompts / skills / agent-context a repo's `.lastlight/` contributes,
+   * each tagged with whether it shadows something the instance already has.
+   *
+   * A repo layer's unpacked root mirrors an overlay root exactly, so this is
+   * the same enumerator `GET /overrides`, `lastlight fork` and `server status`
+   * use — pointed at the repo's tree instead. It's run twice because a repo
+   * asset can shadow either a built-in OR an overlay fork, and "shadows" should
+   * mean "replaces something that was already in force".
+   */
+  function repoLayerAssets(root: string) {
+    const assets = enumerateOverlayAssets({ coreRoot: config.builtInRoot, overlayRoot: root });
+    const shadowsOverlay = new Set(
+      enumerateOverlayAssets({ coreRoot: config.overlayDir, overlayRoot: root })
+        .filter((a) => a.shadowsDefault)
+        .map((a) => `${a.type}:${a.name}`),
+    );
+    return assets.map((a) => ({
+      ...a,
+      shadowsDefault: a.shadowsDefault || shadowsOverlay.has(`${a.type}:${a.name}`),
+    }));
+  }
+
+  // The effective config for ONE repo — the instance layers with that repo's
+  // committed `.lastlight/` applied on top, within the operator's `repoConfig`
+  // bounds (issue #180). Powers the Repos → Config tab and `lastlight repo
+  // config show`.
+  //
+  // A repo with no `.lastlight/` is a perfectly normal 200: `repoLayer` is
+  // absent and `merged`/`sources` are simply the inherited instance config.
+  // That's the whole point of the view — "what does Last Light actually do for
+  // this repo", not "does this repo have a config file".
+  //
+  // `?refresh=1` bypasses the 60s TTL (the operator has just merged a
+  // `.lastlight/` change and doesn't want to wait it out).
+  app.get("/repos/:owner/:repo/config", async (c) => {
+    const { owner, repo: name } = c.req.param();
+    const repo = `${owner}/${name}`;
+    // Same allowlist that gates every other repo-touching path. Without it this
+    // endpoint would be an unauthenticated-by-proxy way to make the harness
+    // fetch from an arbitrary repo.
+    if (!isManagedRepo(repo)) {
+      return c.json({ error: `${repo} is not a managed repository` }, 404);
+    }
+    const runtime = getRuntimeConfig();
+    if (!runtime) return c.json({ error: "Runtime config is not loaded" }, 503);
+
+    const policy = repoConfigPolicy();
+    const refresh = c.req.query("refresh");
+    const force = refresh === "1" || refresh === "true";
+    // Both calls degrade to `undefined` rather than throwing — a GitHub failure
+    // must not turn this read-only view into a 500.
+    const layer = force
+      ? await refreshRepoLayer(repo, { policy })
+      : await fetchRepoLayer(repo, { policy });
+
+    const { merged, sources, warnings } = resolveRepoConfig(
+      repoConfigBaseFromRuntime(runtime),
+      policy,
+      layer,
+    );
+
+    return c.json({
+      repo,
+      merged: redactPublic(merged),
+      sources,
+      // RAW and pre-validation on purpose: the repo needs to see what it wrote
+      // next to the warnings explaining what was dropped. Redacted, since this
+      // is untrusted YAML.
+      repoLayer: layer?.config ? redactPublic(layer.config) : undefined,
+      warnings,
+      assets: layer ? repoLayerAssets(layer.root) : [],
+      policy,
+      fetchedAt: layer?.fetchedAt ?? null,
+      treeSha: layer?.treeSha ?? null,
+      defaultBranch: layer?.defaultBranch ?? null,
+    });
   });
 
   // List the repos that actually have stored artifacts (search + paginate).
@@ -1947,13 +2311,12 @@ export function createAdminRoutes(
     } | null = null;
 
     if (approval.artifact && run && run.repo) {
-      // `workflow_runs.repo` is the BARE repo name and `owner` lives in
-      // run.context (set by simple.ts) — except in tests / legacy rows that
-      // may store "owner/repo". Handle both: prefer context.owner, else split.
+      // The row is the (owner, BARE repo) pair (issue #279); `context.owner` is
+      // the fallback for a row whose owner column was never captured.
       const ctx = run.context ?? {};
       const ctxOwner = typeof ctx.owner === "string" ? ctx.owner : undefined;
-      const repo = run.repo.includes("/") ? run.repo.split("/")[1] : run.repo;
-      const owner = ctxOwner ?? (run.repo.includes("/") ? run.repo.split("/")[0] : "");
+      const repo = run.repo;
+      const owner = run.owner ?? ctxOwner ?? "";
       if (owner && repo) {
         const mode: BuildAssetsLocation = config.buildAssets ?? "repo";
         const issueKey = buildAssetIssueKey(run.workflowName, run.issueNumber, run.id);
@@ -2004,7 +2367,7 @@ export function createAdminRoutes(
       const workflowRun = db.runs.getRun(approval.workflowRunId);
       if (workflowRun && config.resumeWorkflow) {
         config.resumeWorkflow(workflowRun, actor).catch((err) => {
-          console.error(`[admin] Failed to resume workflow ${workflowRun.id}:`, err);
+          log.error("Failed to resume workflow", { workflowRunId: workflowRun.id, err });
         });
       }
     }
@@ -2012,6 +2375,63 @@ export function createAdminRoutes(
   });
 
   // ── Crons ──────────────────────────────────────────────────────
+
+  /**
+   * The context a cron tick carries, built exactly as `src/cron/jobs.ts` builds
+   * it at boot — including the two control keys the fan-out consumes
+   * (`_cronName`, `_cronGloballyEnabled`) and strips before dispatch.
+   *
+   * They are not optional decoration. `_cronName` is the ONLY channel by which
+   * the tick learns which cron it is (several crons can share one workflow), so
+   * a context without it makes `resolveCronRepos` a no-op and the tick ignores
+   * every repo's `.lastlight/` cron opt-out. These routes re-register jobs at
+   * runtime, so a context built here that omitted them would silently drop
+   * per-repo participation until the next restart re-registered from `jobs.ts` —
+   * the worst kind of bug, one that fixes itself while you're looking at it.
+   */
+  const cronContext = (
+    def: { name: string; context?: Record<string, unknown> },
+    globallyEnabled: boolean,
+  ): Record<string, unknown> => ({
+    repos: getManagedRepos(),
+    // Spread ahead of the control keys, deliberately: a cron YAML MAY pin its
+    // own `context.repos`. It may NOT pin the control keys — those are injected
+    // after it, so operator YAML can't spoof the cron's identity or its
+    // globally-enabled state (same ordering as `jobs.ts`).
+    ...def.context,
+    [CRON_NAME_KEY]: def.name,
+    [CRON_GLOBALLY_ENABLED_KEY]: globallyEnabled,
+  });
+
+  /**
+   * The managed repos that have opted INTO one cron from their own
+   * `.lastlight/lastlight.yml` (`crons: { enable: [...] }`).
+   *
+   * Why the list endpoint needs this at all: a globally-OFF cron still keeps its
+   * scheduler tick (see the toggle route below), so it reports a real
+   * `registered`/`nextRun`. Without naming the repos that opted in, the dashboard
+   * shows "next run in 20m" beside an off switch and the operator can't tell
+   * whether that's a real firing or a leftover timer. With them, the two
+   * disabled cases are distinguishable: nobody opted in → the tick is a no-op and
+   * the UI can honestly say "—"; somebody did → the cron genuinely runs, for
+   * exactly these repos.
+   *
+   * CACHE-ONLY, deliberately. `GET /crons` is a list endpoint polled every 10s by
+   * the dashboard; resolving this the way a tick does (`resolveCronRepos`, which
+   * falls through to `fetchRepoLayer`) would turn one page load into
+   * crons × repos conditional GitHub requests. A repo with no cached layer is
+   * simply not counted — the display is then merely conservative (it under-reports
+   * an opt-in until the next tick warms the cache), never wrong about a repo it
+   * does name.
+   */
+  const optedInRepos = (
+    cron: string,
+    repos: readonly string[],
+    policy: RepoConfigPolicy,
+  ): string[] =>
+    repos.filter(
+      (repo) => cronVote(cron, repoCronPrefs(getCachedRepoLayer(repo)?.config, policy)) === "enable",
+    );
 
   // List every cron defined in workflows/cron-*.yaml, merged with the
   // override row (if any) and the live scheduler state.
@@ -2021,25 +2441,50 @@ export function createAdminRoutes(
       (config.cronScheduler?.list() ?? []).map((j) => [j.name, j]),
     );
     const defs = getCronWorkflows();
+    const managedRepos = getManagedRepos();
+    // The operator's kill switch (repo-config off, or `crons` dropped from
+    // `allowKeys`) means no repo can opt into anything — short-circuit to zero
+    // cache lookups rather than asking each repo a question with one answer.
+    const policy = repoConfigPolicy();
+    const mayVote = repoLayerMayVote(policy);
+    // One query for the whole list rather than one per cron, under the
+    // dashboard's 10s poll.
+    const latestCronRuns = db.cronRuns.latestByCron();
     const crons = defs.map((def) => {
       const override = overrides.get(def.name) ?? null;
       const enabled = override ? override.enabled : true;
       const live = liveByName.get(def.name) ?? null;
-      const recentFailures = db.executions.consecutiveFailures(def.workflow);
-      // Find the most recent workflow_run for this cron's workflow
-      const recent = db.runs.listRecent(50).find((r) => r.workflowName === def.workflow);
+      // Both kinds of cron answer from the `executions` ledger, keyed
+      // differently: a workflow cron's rows are written per phase under the
+      // WORKFLOW name, a handler cron's per tick under the CRON name (by
+      // `withLedger` in `cron/handlers.ts`). This used to report a hardcoded
+      // `0 / null` for handler crons, so the dashboard showed a healthy-looking
+      // zero beside a cron that could have been failing for weeks.
+      // ONE ledger, keyed on the cron's own name, for both kinds of cron —
+      // which is why there is no longer a branch here. The old workflow-cron
+      // path read `db.runs.listRecent(50)` and showed whichever of the tick's
+      // dispatched children sorted first: an arbitrary run, not the tick. A
+      // zero-discovery fire dispatched no children at all, so it showed nothing.
+      const last = latestCronRuns.get(def.name) ?? null;
+      const recentFailures = db.cronRuns.recentFailures(def.name);
       return {
         name: def.name,
-        workflow: def.workflow,
+        workflow: def.workflow ?? null,
+        handler: def.handler ?? null,
         schedule: override?.schedule ?? def.schedule,
         originalSchedule: def.schedule,
         enabled,
         registered: !!live,
         nextRun: live?.nextRun?.toISOString() ?? null,
-        lastRun: recent?.startedAt ?? null,
-        lastStatus: recent?.status ?? null,
+        lastRun: last?.startedAt ?? null,
+        lastStatus: last?.status ?? null,
         recentFailures,
-        context: { repos: getManagedRepos(), ...def.context },
+        reposEligible: last?.reposEligible ?? null,
+        reposScanned: last?.reposScanned ?? null,
+        discovered: last?.discovered ?? null,
+        dispatched: last?.dispatched ?? null,
+        optedInRepos: mayVote ? optedInRepos(def.name, managedRepos, policy) : [],
+        context: { repos: managedRepos, ...def.context },
         override: override
           ? {
               updatedAt: override.updatedAt,
@@ -2065,26 +2510,25 @@ export function createAdminRoutes(
     const currentlyEnabled = override ? override.enabled : true;
     const nextEnabled = !currentlyEnabled;
     db.setCronOverride(name, { enabled: nextEnabled, updatedBy: "admin" });
-    if (nextEnabled) {
-      // Re-register with the (possibly overridden) schedule
-      const schedule = override?.schedule || def.schedule;
-      if (config.cronScheduler.has(name)) {
-        config.cronScheduler.update({
-          name,
-          schedule,
-          workflow: def.workflow,
-          context: { repos: getManagedRepos(), ...def.context },
-        });
-      } else {
-        config.cronScheduler.register({
-          name,
-          schedule,
-          workflow: def.workflow,
-          context: { repos: getManagedRepos(), ...def.context },
-        });
-      }
+    // Off is "off BY DEFAULT", not "unregistered" (issue #180): a managed repo
+    // may opt itself back into a globally-off cron from its `.lastlight/`, and
+    // that is resolved at TICK time — so the tick has to keep running. It just
+    // carries `_cronGloballyEnabled: false`, which narrows the fan-out to the
+    // repos that opted in (usually none, making it a cheap no-op tick). This
+    // mirrors `jobs.ts`, which registers a globally-off cron the same way at
+    // boot; unregistering here instead would make an opt-in do nothing until
+    // the next restart, and then quietly start working.
+    const schedule = override?.schedule || def.schedule;
+    const job = {
+      name,
+      schedule,
+      workflow: def.workflow,
+      context: cronContext(def, nextEnabled),
+    };
+    if (config.cronScheduler.has(name)) {
+      config.cronScheduler.update(job);
     } else {
-      config.cronScheduler.unregister(name);
+      config.cronScheduler.register(job);
     }
     return c.json({ name, enabled: nextEnabled });
   });
@@ -2117,7 +2561,7 @@ export function createAdminRoutes(
         name,
         schedule,
         workflow: def.workflow,
-        context: { repos: getManagedRepos(), ...def.context },
+        context: cronContext(def, true),
       });
     }
     return c.json({ name, schedule });
@@ -2132,20 +2576,18 @@ export function createAdminRoutes(
     const def = getCronWorkflows().find((d) => d.name === name);
     if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
     db.clearCronOverride(name);
+    const job = {
+      name,
+      schedule: def.schedule,
+      workflow: def.workflow,
+      // Dropping the override returns the cron to its YAML default, which is
+      // globally on.
+      context: cronContext(def, true),
+    };
     if (config.cronScheduler.has(name)) {
-      config.cronScheduler.update({
-        name,
-        schedule: def.schedule,
-        workflow: def.workflow,
-        context: { repos: getManagedRepos(), ...def.context },
-      });
+      config.cronScheduler.update(job);
     } else {
-      config.cronScheduler.register({
-        name,
-        schedule: def.schedule,
-        workflow: def.workflow,
-        context: { repos: getManagedRepos(), ...def.context },
-      });
+      config.cronScheduler.register(job);
     }
     return c.json({ name, schedule: def.schedule, enabled: true });
   });
@@ -2161,18 +2603,196 @@ export function createAdminRoutes(
     const name = c.req.param("name");
     const def = getCronWorkflows().find((d) => d.name === name);
     if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
-    if (!config.triggerCron) {
+    // A `handler:` cron runs host-side code rather than dispatching a workflow,
+    // so it needs the other collaborator. Both are absent in the CLI-only /
+    // test harnesses, hence the per-path 503.
+    if (def.handler ? !config.runCronHandler : !config.triggerCron) {
       return c.json({ error: "cron trigger not configured" }, 503);
     }
     // Same context shape the scheduler + toggle handler build, plus the
     // acting user (issue #205) so a manually-fired cron attributes to the
     // person who clicked "Run now" rather than the anonymous scheduler.
     // `dispatchWorkflow` destructures `sender` for free.
-    const context = { repos: getManagedRepos(), sender: actorFromContext(c), ...def.context };
-    config.triggerCron(def.workflow, context).catch((err) => {
-      console.error(`[admin] cron trigger ${name} failed:`, err);
+    //
+    // `_cronName` is carried so a manual fire honours the same per-repo
+    // participation a scheduled tick does — a repo that opted out of this cron
+    // in its `.lastlight/` stays out, however the tick was started. What is
+    // deliberately NOT carried is `_cronGloballyEnabled`: absent means "on", so
+    // "Run now" keeps working for a cron that is globally disabled, which is
+    // exactly what the button is for.
+    //
+    // Which is why the YAML's own context is spread ahead of `_cronName` AND has
+    // `_cronGloballyEnabled` stripped out of it first: here absence is the
+    // signal, so simply re-injecting the key after the spread would defeat the
+    // button. A cron YAML pinning `context.repos` still overrides the managed
+    // list, as everywhere else.
+    const { [CRON_GLOBALLY_ENABLED_KEY]: _yamlEnabled, ...defContext } = def.context ?? {};
+    const actor = actorFromContext(c);
+    const context = {
+      repos: getManagedRepos(),
+      ...defContext,
+      // Injected LAST, same rule as `jobs.ts` and for the same reason: operator
+      // YAML must not be able to spoof any of these. `_cronSource` decides
+      // whether the ledger records this fire as a human pressing "Run now" or
+      // as the scheduler, and `_cronActor` is who to attribute it to.
+      [CRON_NAME_KEY]: def.name,
+      _cronSource: "manual",
+      _cronActor: actor ?? null,
+      sender: actor,
+    };
+    const fire = def.handler
+      ? config.runCronHandler!(def.handler, context)
+      : config.triggerCron!(def.workflow!, context);
+    fire.catch((err) => {
+      log.error("Cron trigger failed", { name, err });
     });
-    return c.json({ name, workflow: def.workflow, triggered: true });
+    return c.json({ name, workflow: def.workflow, handler: def.handler, triggered: true });
+  });
+
+  // ── Un-stick a pull request — the third retry surface ─────────────────────
+  //
+  // `lastlight pr retry <owner/repo#N> [reason]` and (eventually) the dashboard.
+  // The other two surfaces are a `@<bot> retry` comment and taking
+  // `requires-human` off by hand; all three write the SAME record
+  // (`PrState.intervention`) and re-arm through the one `sameProblem` boundary —
+  // see `docs/plans/stuck-pr-recovery/03-retry-intervention.md` and
+  // `spec/05-router.md` → "Un-sticking an escalated PR".
+  //
+  // Modelled on `cron trigger` above: the route owns the guards and the shape,
+  // an injected callback owns the runner. Authorisation is the admin session
+  // (the `authMiddleware` at the top of this file); `by` is that session's
+  // identity, recorded for display only — per locked decision 5 no decision
+  // function reads WHO asked.
+  //
+  // ## Why it dispatches, and why it can't just record
+  //
+  // `resolvePrState` + `recordIntervention` alone would persist the ask and
+  // leave the next event to act on it. That is right for the comment/label
+  // surfaces, which arrive ON an event that is already dispatching. It is wrong
+  // here: an escalated PR is by definition one no further `check_suite` will
+  // fire for, so "the next event" is the daily sweep at best and nothing at all
+  // for a PR no cron covers — `lastlight pr retry` would report success and
+  // change nothing anyone could see. The RECORD does survive being parked
+  // (`applyDerivedState` keeps the head un-assessed until a run has served the
+  // ask), which is what makes the standalone row worth writing at all; what
+  // dispatching buys is the asker an answer.
+  //
+  // Which is why this crosses `applyPrDispatchGate` itself rather than letting
+  // `dispatchWorkflow` do it: the snapshot travels down on `_prState` (it must —
+  // it carries the intervention), and an inherited snapshot is exactly the signal
+  // `dispatchWorkflow` reads as "this route already decided". The route that
+  // resolves is the route that gates; the dispatcher does the same thing for the
+  // same reason. The gate is what makes a retry NOT override the hold label, the
+  // fork guard, the run lock, `upstream-broken` or a degraded read — and, on the
+  // skips that are none of those, what records the standalone `retry-requested`
+  // row so the ask survives to the next event.
+  app.post("/prs/:owner/:repo/:number/retry", async (c) => {
+    const { owner, repo: name } = c.req.param();
+    const repo = `${owner}/${name}`;
+    const prNumber = Number.parseInt(c.req.param("number"), 10);
+    if (!Number.isInteger(prNumber) || prNumber <= 0) {
+      return c.json({ error: `invalid pull request number: ${c.req.param("number")}` }, 400);
+    }
+    // The same allowlist that gates every other repo-touching path. A retry must
+    // not be a way to make the harness act on a repo the operator never
+    // enrolled — `dispatchWorkflow` refuses it too, but that refusal happens
+    // after this route has already resolved (and could have recorded) state
+    // against it.
+    if (!isManagedRepo(repo)) {
+      return c.json({ error: `${repo} is not a managed repository` }, 403);
+    }
+    const github = config.github ?? null;
+    if (!github || !config.dispatchWorkflow) {
+      return c.json({ error: "pull-request retry is not configured" }, 503);
+    }
+
+    // Free text from `lastlight pr retry <ref> "<reason>"`. Untrusted, and
+    // deliberately NOT sanitized here: `resolvePrState` runs it through
+    // `pr-notes.ts`'s sanitizer where the record is built, so no surface can
+    // skip that step.
+    const body = (await c.req.json().catch(() => ({}))) as { reason?: unknown };
+    const reason = typeof body?.reason === "string" && body.reason.trim() ? body.reason.trim() : undefined;
+    const by = actorFromContext(c) ?? "admin";
+
+    // Which workflow is "go again"? The one that last worked this PR — the same
+    // row `escalatePr` recorded against and the same row `resolvePrState` reads
+    // its history off, so the retry lands on the workflow that actually got
+    // stuck (`dependabot-ci-fix` for a dependency PR, `pr-fix` otherwise)
+    // without a second GitHub read to re-derive what the router already decided
+    // once. A PR we have never fixed falls back to the configured `pr_fix` route.
+    const prior = db.runs.latestForTrigger([...PR_FIX_SHAPED_WORKFLOWS], prTriggerId(repo, prNumber));
+    const workflowName = prior?.workflowName ?? getRoutes().github?.pr_fix ?? "pr-fix";
+
+    const state = await resolvePrState(owner, name, prNumber, {
+      github,
+      db,
+      botLogin: getRuntimeConfig()?.botLogin ?? "",
+      botName: getBotName(),
+      // Handed to the RESOLVER, never patched on afterwards: `sameProblem` reads
+      // the record, so an intervention stamped onto an already-derived snapshot
+      // would re-arm nothing. `at`/`atSha` are stamped in there too, so this
+      // route cannot date a retry itself or key one to a head it never read.
+      intervention: { via: "api", by, ...(reason ? { note: reason } : {}) },
+    });
+
+    const context = { repo, prNumber, title: state.title, _triggerType: "api" as const };
+    const policy = prPolicyConfig(await config.resolveRepoPolicy?.(workflowName, context));
+    const disposition = await applyPrDispatchGate(
+      { workflowName, state, policy, route: "attention", logPrefix: "[admin]" },
+      { db, github, botLogin: getRuntimeConfig()?.botLogin, botMention: `@${getBotName()}` },
+    );
+
+    const retry = state.intervention;
+    if (disposition.decision === "skip") {
+      // Three of the gate's skips deliberately record NOTHING — the hold (a
+      // maintainer said stay off), a degraded read (we know nothing), and a run
+      // already owning the PR (a row there would displace that run's own
+      // snapshot). Those are refusals: the ask did not land, and the caller is
+      // told so with a non-2xx. Every other skip already wrote the standalone
+      // `retry-requested` row inside the gate, so the ask is parked and will be
+      // honoured by the next event — a 200 with `dispatched: false`.
+      const refused = !!(disposition.onHold || disposition.runInFlight || disposition.readDegraded);
+      return c.json(
+        {
+          repo,
+          prNumber,
+          workflow: workflowName,
+          dispatched: false,
+          recorded: !refused,
+          ...(refused ? {} : { retry }),
+          // The hold is the one skip that owes a human a sentence rather than a
+          // reason string, and it is the SAME sentence the comment route gives.
+          reason: disposition.onHold ? holdReply(disposition.onHold.label) : disposition.reason,
+          ...(disposition.onHold ? { held: disposition.onHold.label } : {}),
+        },
+        refused ? 409 : 200,
+      );
+    }
+
+    // Fire-and-forget, exactly like `cron trigger` and `/api/run`: a fix run
+    // takes minutes. `_prState` carries the armed snapshot down so the run
+    // persists the intervention on its own `context.prState` — which is where
+    // the record normally lives, and why no standalone row is written here.
+    log.info("retry", { workflow: workflowName, repo, prNumber, by, reason: disposition.reason });
+    config.dispatchWorkflow(workflowName, {
+      ...context,
+      body: state.body,
+      _prState: state,
+      sender: by,
+      triggeredBy: by,
+    }).catch((err: unknown) => {
+      log.error("retry failed", { workflow: workflowName, repo, prNumber, err });
+    });
+
+    return c.json({
+      repo,
+      prNumber,
+      workflow: workflowName,
+      dispatched: true,
+      recorded: false,
+      retry,
+      reason: disposition.reason,
+    });
   });
 
   return app;

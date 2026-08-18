@@ -22,9 +22,19 @@ models:
   #   architect: anthropic/claude-opus-4-8
   #   classifier: anthropic/claude-haiku-4-5-20251001   # the intent-routing helper
   #   screener: anthropic/claude-haiku-4-5-20251001     # the prompt-injection screener
+  #   diagnose: anthropic/claude-haiku-4-5-20251001     # the CI-failure classifier
+  #   pr-fix-retry: anthropic/claude-opus-4-8           # used above fix.escalateModelAfterAttempt
   # A per-task entry wins over `default`. `classifier`/`screener` are the cheap
   # one-shot helpers (src/engine/llm.ts); when unset they fall back to the first
   # configured provider's fast model, NOT `default`.
+  #
+  # `diagnose` is worth pinning. It is the first phase of both fix workflows and
+  # it only reads logs and reproduces a command — it writes no code — so a cheap
+  # model is the point of splitting it out from `fix` at all. Left UNSET here
+  # because these examples name Anthropic models and a deployment that overrides
+  # only `default` to another provider would otherwise find this phase reaching
+  # for a provider it has no key for. Unset, it falls through to `default`, so
+  # each fix run costs one extra call at the default model until you pin it.
 
 variants: {}
 
@@ -68,6 +78,64 @@ concurrency:
 # backstop for failed/crashed leftovers: it removes non-live dirs older than
 # retentionHours and, if more than maxDirs remain, evicts the oldest (LRU). A dir
 # whose sandbox container is still running is never removed.
+# Feedback signals (issue #255) — a 👍/👎 on something Last Light wrote, scored
+# against the workflow run that wrote it, so the effect of prompt/skill changes
+# is measurable over time.
+#
+# Slack is LIVE (reaction_added is a real event) and on by default. GitHub sends
+# no webhook for reactions at all, so it has to be polled — that half is opt-in.
+# The cost is bounded by the data, not the schedule: we poll individual bot
+# comments ("anchors"), never issues, each retires after windowDays, and
+# maxAnchorsPerTick/100 is exactly how many GraphQL requests a tick can make
+# (one rate-limit point each, against a 5000/hour budget).
+feedback:
+  enabled: true              # master switch (Slack signals, live)
+  github: false              # opt into the GitHub reaction poller
+  pollSchedule: "*/30 * * * *"
+  windowDays: 14             # how long an anchor stays pollable
+  maxAnchorsPerTick: 500     # = 5 GraphQL requests per tick
+  retentionDays: 90          # anchors pruned after this; signals kept
+  otel: true                 # export each signal as a span on the run's trace
+
+# The optional "my teams' repos" dashboard filter (issue #169).
+#
+# Offers each GitHub-authenticated user a header toggle that narrows every list
+# to the managed repos their GitHub org teams own. **Opt-in and off by default**
+# — nobody's view changes until they choose it, and the choice is remembered per
+# browser.
+#
+# Opt-in is load-bearing, not timidity. Team grants describe INVOLVEMENT, not
+# access: an org owner reaches every repo without a team grant anywhere. Applied
+# as a default this hides people's own work — measured against the live nearform
+# install, one maintainer's single team covered 4 of 8 managed repos and hid
+# `nearform/lastlight`, which they own. Applied as a filter somebody switched on,
+# the same narrowing is exactly the decluttering they asked for.
+#
+# The filter is your teams' repos PLUS the managed repos your own account owns.
+# Teams are an org concept, so a personal repo can never be granted by one; a
+# strictly team-derived answer hid every personal repo an instance managed. The
+# test is `owner == your login` — not "the owner isn't an org", which would put
+# other people's personal repos in your filter.
+#
+# This flag is the OPERATOR switch: it needs the GitHub App's organization
+# `Members: read` permission, so turn it on once you've granted that and
+# re-consented the App on each installation. Without it the resolver fails open
+# and nothing is filtered — the toggle still appears and says why, so an
+# outstanding setup step is visible instead of silent. UI only — every list
+# endpoint still returns global data, and each budget below fails OPEN (shows
+# more).
+#
+# Nothing is crawled up front. A user's teams are resolved on demand, on their
+# first dashboard request, and cached — so an org with thousands of repos and
+# hundreds of teams costs a handful of GraphQL requests per logged-in person,
+# not a full-org walk.
+teamVisibility:
+  enabled: false             # operator switch — needs the App's `Members: read`
+  ttlMinutes: 60             # how long a resolved answer is reused
+  maxTeamsPerUser: 50        # more teams than this ⇒ fail open
+  maxPagesPerTeam: 20        # 100 repos/page; a bigger grant ⇒ fail open
+  maxRequestsPerResolve: 60  # absolute ceiling for one cache miss
+
 cleanup:
   sandbox:
     enabled: true              # master switch for the TTL/LRU sweep
@@ -87,17 +155,163 @@ deploy:
 
 approval: {}
 
+# Per-repository configuration (issue #180). A managed repo may commit a
+# `.lastlight/` directory — mirroring the instance overlay's on-disk shape
+# (`lastlight.yml`, `workflows/prompts/*.md`, `skills/<name>/SKILL.md`,
+# `agent-context/*.md`) — that overrides a BOUNDED subset of this config for
+# runs against that repo. Precedence: default -> overlay -> env -> repo.
+#
+# The block below is the OPERATOR's bounds on that layer; a repo can never widen
+# them. It is inert out of the box: nothing changes for an existing deployment
+# until a repo actually commits `.lastlight/lastlight.yml`.
+#
+# SECURITY: the repo layer is ALWAYS read from the repo's DEFAULT BRANCH, never
+# a PR head and never the sandbox checkout — otherwise a PR could rewrite the
+# configuration of the agent reviewing it. See src/config/repo-config.ts.
+repoConfig:
+  enabled: true                  # master switch; false ignores every repo's .lastlight/
+  # Config keys a repo may set, as dotted paths. Anything outside this list is
+  # dropped with a warning (the run still proceeds — a repo's config file can
+  # never fail a run). Narrow it to tighten the blast radius. Removing `crons`
+  # makes the operator's `crons:` block below un-overridable — the kill switch.
+  # `fix` / `dependencies` / `review` are clamped one-way (see those blocks): a
+  # repo can only ever be MORE conservative than the values set here.
+  # `notifications` is the exception to that rule — it is ROUTING (which Slack
+  # channel this repo's digest goes to), and a channel has no more/less
+  # conservative direction, so the repo's value simply wins. What bounds it is
+  # the default-branch trust rule above plus Slack itself: the bot can only post
+  # where it has been invited. Drop `notifications` from this list to take
+  # channel choice back.
+  allowKeys: [models, variants, crons, disabled.workflows, disabled.crons, approval,
+              fix, dependencies, review, notifications]
+  allowedModels: null            # null = any model whose provider prefix is configured;
+                                 # a list restricts repos to exactly those model specs
+  allowAssets: true              # allow the repo's prompt/skill/agent-context overrides
+
 bootstrap:
   label: "lastlight:bootstrap"
+
+# The HOLD label. Apply it to ANY issue or pull request and Last Light stops
+# acting on that subject entirely — no triage, no review, no fix, no merge, no
+# comment. Remove it and the bot resumes; there is no record to clear either way.
+#
+# It outranks everything except "we could not read the pull request at all",
+# including an explicit `@<bot> ...` request — which gets exactly one reply
+# naming the label, so a direct instruction is refused rather than ignored.
+# `requires-human` is a NOTIFICATION ("I stopped, a human should look") and is
+# read by nothing; this is the live precondition.
+#
+# Renaming it here changes what the CODE gates on. The packaged prompts create
+# the DEFAULT name in their `github_ensure_labels` pass, so a rename also wants
+# a forked prompt (or the label created by hand). Env: LASTLIGHT_HOLD_LABEL.
+hold:
+  label: lastlight-ignore
 
 explore:
   defaultRepo: null
 
 review:
-  postsCheck: false
+  postsCheck: false            # post the `last-light/review` Check Run
+  # When a pr-review run is triggered:
+  #   eager        — on pr.opened / synchronize / reopened, in parallel with CI
+  #   after-checks — once the head SHA's checks SETTLE, either colour (default:
+  #                  the review can then read and cite the CI result, and a
+  #                  push-storm collapses to one review per settled SHA)
+  #   on-request   — never automatically; only when explicitly asked for
+  trigger: after-checks
+  requestLabel: null           # label that requests a review in `on-request` mode
+  skipDraft: true              # skip draft PRs (what the review cron has always done)
+  # Paths whose contents are DERIVED, not authored (issue #271). When every path
+  # changed since our last posted review matches one of these, the re-review is
+  # skipped — a lock-file re-derivation is a new head SHA, and per-head dedup
+  # alone made that a second, byte-identical formal review.
+  #
+  # Never suppresses a FIRST review, an explicit `@bot review`/request label, or
+  # a push that also touched a hand-written file. Set to `[]` to turn the gate
+  # off. Patterns: `*` stops at a `/`, `**` crosses one, and a pattern with no
+  # `/` matches a basename anywhere in the tree.
+  #
+  # Repo-settable, SUPERSET-only — a repo may add its own generator output, but
+  # dropping one of these entries buys it more review runs and is restored.
+  generatedPaths:
+    - "*.lock"
+    - package-lock.json
+    - npm-shrinkwrap.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - bun.lockb
+    - go.sum
+    - "*.min.js"
+    - "*.min.css"
+    - "*.generated.*"
+    - "**/__generated__/**"
+
+# Retry policy for every PR_FIX_SHAPED workflow — pr-fix and dependabot-ci-fix
+# (issue #251). The loop diagnoses a CI failure before it retries, and these are
+# the budgets that bound it.
+#
+# Repo-settable (a repo may commit its own values in `.lastlight/lastlight.yml`),
+# clamped ONE WAY — a repo can only ever be MORE conservative than this block:
+#   maxAttempts / localIterations / maxFlakyDeferrals   min(repo, operator)
+#   maxCostUsd                                          min, `null` = unbounded
+#   retryableClasses                                    a subset of this list
+# `escalateModelAfterAttempt` (spend) and `gateTimeoutSeconds` (shared resource)
+# are OPERATOR-ONLY — a repo setting them is dropped with a warning.
+fix:
+  maxAttempts: 3               # cross-run attempts per (repo, PR) before requires-human
+  localIterations: 2           # within-run gate-loop iterations inside ONE attempt
+  gateTimeoutSeconds: 900      # until_bash budget for the repo's build/test gate
+  escalateModelAfterAttempt: 1 # attempts above this use models["pr-fix-retry"] when set
+  maxCostUsd: 5.0              # cumulative ceiling across attempts for one PR; null = off
+  maxFlakyDeferrals: 2         # a `flaky` verdict defers this often, then counts as reproducible
+  # Diagnosis classes another attempt can help with; every other class escalates
+  # immediately instead of burning budget. The vocabulary is
+  # reproducible | env-mismatch | flaky | infra-dependent | upstream-broken.
+  retryableClasses: [reproducible, env-mismatch]
+
+# How dependency PRs are merged (issue #252). Impact — not semver magnitude — is
+# what gates a MAJOR bump: a @types/* major is not a framework rewrite.
+#
+# Repo-settable and clamped one way, as above:
+#   autoMergeMaxImpact    the LOWER tier on none < low < medium < high
+#   requireSettledChecks  add-only `true` (a `false` is dropped with a warning)
+#   auditComment          free — cosmetic
+# `minSettledChecks` is OPERATOR-ONLY: clamping it `max(repo, operator)` would
+# weld the escape hatch shut for a repo with no CI at all.
+dependencies:
+  autoMergeMaxImpact: medium   # none | low | medium | high — ceiling for auto-merging a MAJOR
+  requireSettledChecks: true   # enforce settled-"passing" on ALL routes (webhook, cron, comment)
+  minSettledChecks: 1          # an auto-merge decision needs >= N settled checks; 0 = legacy behaviour
+  auditComment: true           # post the evidence comment when auto-merging a major
+
+# Which crons participate (issue #180). The SAME block is valid here, in your
+# overlay's config.yaml, and in a managed repo's .lastlight/lastlight.yml — the
+# meaning depends on the layer:
+#
+#   operator (here / overlay)  disable: [x]  → cron x is off globally
+#                              enable:  [x]  → no-op; a cron is on by default
+#   repo (.lastlight/)         disable: [x]  → THIS repo drops out of x's fan-out
+#                              enable:  [x]  → THIS repo opts in even when x is
+#                                              off globally
+#
+# A name in BOTH lists is disabled, at every layer — a cron that doesn't run is
+# the safe reading of a contradictory config.
+#
+# `disabled.crons` below is the LEGACY spelling of `crons.disable` and still
+# works exactly as before: it is unioned into this list (and additionally drops
+# the cron's definition at asset-load time, so it is the harder kill).
+#
+# NOTE: `crons.disable` here means "off BY DEFAULT" — a repo listed in
+# `repoConfig.allowKeys` can still opt itself back in. If you want a kill switch
+# no repo can override, drop `crons` from repoConfig.allowKeys (below); that
+# leaves this list as the only word on the subject.
+crons:
+  enable: []
+  disable: []
 
 disabled:
   workflows: []
+  # Legacy alias for `crons.disable` above — kept working, not deprecated.
   crons: []
   prompts: []
   skills: []
@@ -111,6 +325,14 @@ routes:
     pr_opened: pr-review
     pr_synchronize: pr-review
     pr_reopened: pr-review
+    # `review.trigger: after-checks` — the head SHA's checks have settled on a
+    # PR that neither the fix nor the merge route claimed.
+    pr_checks_settled: pr-review
+    # `review.requestLabel` was applied (the `on-request` mechanism).
+    pr_labeled: pr-review
+    # A review was requested from the bot by name, or the `last-light/review`
+    # check's Re-run button was pressed.
+    pr_review_requested: pr-review
     approval_response: approval-response
     security_review: security-review
     verify: verify
@@ -143,3 +365,54 @@ routes:
 
 cron:
   webhooksEnabledCondition: true
+
+# Where a repo's outbound notifications go. TODAY this is read only by the
+# weekly Slack digest (`workflows/cron-digest.yaml`).
+#
+# This block is the BASE the per-repository layer merges onto — a managed repo
+# sets `notifications: {slack: {channel: C01ABCDEFGH}}` in its
+# `.lastlight/lastlight.yml` and its digest goes there. Leaving it `null` here
+# is the point: an operator routes repos with the `slack.repoChannels` map
+# below, which is per-repo by construction, whereas this block is not.
+#
+# `channel: null` committed by a REPO is not the same as absent — it means "send
+# me no digest" and beats the operator's map. Absent means "I have no opinion,
+# use whatever you've configured".
+notifications:
+  slack:
+    channel: null
+
+slack:
+  # Operator-side channel routing: "owner/repo" -> Slack channel id. Consulted
+  # after the repo's own `notifications.slack.channel` and before the global
+  # SLACK_DELIVERY_CHANNEL fallback. Set it in the instance overlay's
+  # config.yaml, not here.
+  #
+  #   repoChannels:
+  #     nearform/lastlight: C01ENGINEERING
+  #
+  # Channel ids are not secrets, so they show up unredacted on /admin/api/config.
+  repoChannels: {}
+
+# The weekly repo digest — what happened in a repo, and what Last Light did
+# about it, posted to that repo's Slack channel.
+#
+# It is INERT until a channel resolves for a repo (see `notifications` above):
+# no channel, no post, no cost. That is deliberate — a fresh install should not
+# start talking to a workspace nobody configured.
+#
+# The facts are computed in code, from the GitHub API and the harness's own
+# SQLite, so the numbers are right. `narrative` adds ONE cheap model call that
+# turns the week's merged PRs and issues into a few sentences of plain English;
+# it is never asked to produce a number, and a failure there drops the summary
+# rather than the digest.
+#
+# The content lists (which PRs merged, which issues opened and closed) come from
+# a second, GraphQL request that is likewise allowed to fail: if it does, the
+# digest posts the counts alone, exactly as it did before the lists existed.
+digest:
+  windowDays: 7        # how far back a digest looks
+  narrative: true      # false = counts + lists only, zero model spend
+  maxItems: 5          # cap on the escalation list
+  listItems: 8         # cap on each content list (merged PRs, issues opened/closed); max 25
+  detailItems: 25      # how many items' text the summariser reads; max 60 — it sizes a prompt

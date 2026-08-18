@@ -24,6 +24,28 @@ export interface EventEnvelope {
    * dedup guard to skip a PR already assessed at this exact SHA.
    */
   headSha?: string;
+  /**
+   * Is this a dependency-update (Dependabot / Renovate) PR? Set on the
+   * check-outcome events, where the connector already computes it — from the
+   * head commit's author and the suite's head branch — to decide whether to
+   * emit at all.
+   *
+   * It is carried rather than discarded so the router can route
+   * `pr.checks_failed` DETERMINISTICALLY (dependency → `dependabot-ci-fix`,
+   * everything else → `pr-fix`) instead of paying a classifier call to
+   * re-derive it from a prose sentence. That call could never select `pr-fix`
+   * — `pr-fix.yaml` has no `classification:` block — so every red PR resolved
+   * to the dependency workflow (09-state-machine.md → D5).
+   */
+  isDependencyPr?: boolean;
+  /** The label just added, on a `pr.labeled` event. */
+  addedLabel?: string;
+  /**
+   * Who the review was requested FROM, on a `pr.review_requested` event — a
+   * login, or a `team/<slug>` for a team request. Set to our own `botLogin`
+   * when the request arrived as a Re-run on the `last-light/review` check.
+   */
+  requestedReviewer?: string;
   /** Login/username of the sender */
   sender: string;
   /** Login of the issue/PR original author (distinct from `sender`, the commenter) */
@@ -64,6 +86,31 @@ export type EventType =
   | "pr.merged"
   | "pr.checks_failed" // a check_suite completed with a failure conclusion
   | "pr.checks_passed" // a check_suite completed green on a dependency-update PR
+  /**
+   * The head SHA's checks have SETTLED — either colour — on a PR that neither
+   * check-outcome route above claimed.
+   *
+   * This is `review.trigger: after-checks`'s trigger, and it exists as its own
+   * type because a single `check_suite.completed` delivery cannot become two
+   * envelopes: `normalize()` returns ONE per delivery and `route()` returns one
+   * handler, so "broaden `pr.checks_failed`" is a fan-out the pipeline cannot
+   * express (09 → S2). FIX OUTRANKS REVIEW is therefore a property of which
+   * type the connector emits: a settled-red PR the fix family can act on stays
+   * `pr.checks_failed`, and only what is left becomes this.
+   */
+  | "pr.checks_settled"
+  /**
+   * A label was added to a PR. Carries {@link EventEnvelope.addedLabel} so
+   * `review.requestLabel` works; the router ignores every other label, which is
+   * what keeps this from becoming a firehose.
+   */
+  | "pr.labeled"
+  /**
+   * A review was explicitly requested from US — either through GitHub's
+   * reviewer picker (opportunistic: App bot users are not generally selectable
+   * there) or through the Re-run button on our own `last-light/review` check.
+   */
+  | "pr.review_requested"
   | "comment.created"
   | "pr_review.submitted"
   | "pr_review_comment.created"

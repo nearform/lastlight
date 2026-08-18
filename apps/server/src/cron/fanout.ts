@@ -15,7 +15,17 @@
  * dispatch-side concurrency knob — a batcher on top of the run queue only
  * serialized the fan-out, blocking each slice on completion while the queue
  * sat under-used.
+ *
+ * WHICH repos the fan-out covers is resolved here, per tick, not when the job
+ * was registered: a managed repo may opt out of (or into) a cron in its
+ * `.lastlight/lastlight.yml` and that must take effect without re-registering
+ * croner jobs. See `repo-crons.ts` for that resolution and its cost model.
  */
+
+import { CRON_GLOBALLY_ENABLED_KEY, CRON_NAME_KEY, resolveCronRepos } from "./repo-crons.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("cron-fanout");
 
 export type CronDispatcher = (
   workflow: string,
@@ -33,6 +43,11 @@ export interface FanOutResult {
  * Dispatch a cron-scheduled workflow, fanning out over `context.repos` when
  * present. When absent, behaves like a single dispatch. Always stamps
  * `_triggerType: "cron"` on the outgoing context.
+ *
+ * When the context carries the cron's name (every scheduled tick does — see
+ * `jobs.ts`), the repo list is narrowed by each repo's own `crons:` block
+ * first. Without it — a manual "Run now", or any caller that builds its own
+ * context — the list is used verbatim, exactly as before.
  */
 export async function dispatchCronWorkflow(
   workflowName: string,
@@ -47,14 +62,41 @@ export async function dispatchCronWorkflow(
     return { dispatched: 1, failures: result ? 0 : 1 };
   }
 
-  const { repos: _drop, ...rest } = base;
+  // The two cron control keys are consumed here and dropped alongside `repos`,
+  // so a dispatched run's context is byte-for-byte what it was before per-repo
+  // participation existed.
+  const { repos: _drop, [CRON_NAME_KEY]: rawCron, [CRON_GLOBALLY_ENABLED_KEY]: rawEnabled, ...rest } = base;
   const repos = (rawRepos as unknown[]).filter(
     (r): r is string => typeof r === "string" && r.length > 0,
   );
 
+  const cron = typeof rawCron === "string" && rawCron ? rawCron : undefined;
+  let targets = repos;
+  if (cron) {
+    const resolved = await resolveCronRepos({
+      cron,
+      repos,
+      // Absent means "on" — only jobs.ts marks a cron globally off.
+      globallyEnabled: rawEnabled !== false,
+    });
+    targets = resolved.repos;
+    if (resolved.optedOut.length || resolved.optedIn.length) {
+      log.info("Repo participation resolved", {
+        cron,
+        targetCount: targets.length,
+        repoCount: repos.length,
+        optedOut: resolved.optedOut,
+        optedIn: resolved.optedIn,
+      });
+    }
+  }
+
+  // An empty list is a legitimate outcome (a globally-off cron nobody opted
+  // into): fanOutContexts no-ops, so the tick costs nothing and reports no
+  // failure.
   return fanOutContexts(
     workflowName,
-    repos.map((repo) => ({ ...rest, repo })),
+    targets.map((repo) => ({ ...rest, repo })),
     dispatch,
   );
 }
@@ -98,10 +140,11 @@ async function runOne(
     const result = await dispatch(workflowName, context);
     return !!(result.success || result.paused);
   } catch (err) {
-    console.error(
-      `[cron-fanout] ${workflowName} dispatch threw for ${String(context.repo ?? "<no repo>")}:`,
+    log.error("Dispatch threw", {
+      workflowName,
+      repo: String(context.repo ?? "<no repo>"),
       err,
-    );
+    });
     return false;
   }
 }

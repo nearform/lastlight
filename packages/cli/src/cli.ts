@@ -36,7 +36,7 @@ import {
   tokenIsExpired,
   DEFAULT_URL,
 } from "./cli-config.js";
-import { table, age, colorStatus, checkmark, followSSE } from "./cli-format.js";
+import { table, age, colorStatus, checkmark, execMark, followSSE } from "./cli-format.js";
 import { renderTimeline, renderMessage, renderRaw } from "./cli-timeline.js";
 
 // ── arg parsing ────────────────────────────────────────────────────────────
@@ -48,8 +48,10 @@ const BOOLEAN_FLAGS = new Set([
   "no-core", "no-overlay", "no-build", "no-prune", "yes", "local",
   // `setup` mode selectors (skip the interactive client/server prompt)
   "client", "server",
-  // `fork` — overwrite existing overlay assets
+  // `fork` / `repo fork` — overwrite existing assets
   "force",
+  // `repo config show` — make the server bypass its repo-layer TTL
+  "refresh",
   // `skills install` — skip the claude marketplace path, copy skill dirs directly
   // (and `--local`, shared with `update`, forces the bundled marketplace source)
   "no-marketplace",
@@ -225,6 +227,37 @@ async function apiPost(path: string, body: unknown): Promise<any> {
   return handle(res, path);
 }
 
+/**
+ * `apiPost` for endpoints whose REFUSALS are answers rather than errors — today
+ * `pr retry`, where "the hold label beat you" and "another run owns this PR" are
+ * 409s the caller has to render, not stack traces. Same request as `apiPost`;
+ * the only difference is that a non-2xx comes back instead of exiting. A 401
+ * still dies, because that is about the caller's session, not the request.
+ */
+async function apiPostStatus(path: string, body: unknown): Promise<{ status: number; data: any }> {
+  await ensureFreshToken();
+  const t = target();
+  let res: Response;
+  try {
+    res = await fetch(`${t.url}${path}`, {
+      method: "POST",
+      headers: authHeaders(t.token),
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    return die(`Cannot reach ${t.url} — is the server running? (${(e as Error).message})`);
+  }
+  if (res.status === 401) die("Not logged in or token expired — run: lastlight login");
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+  return { status: res.status, data };
+}
+
 function num(flag: string | boolean | undefined, fallback: number): number {
   const n = typeof flag === "string" ? parseInt(flag, 10) : NaN;
   return Number.isFinite(n) ? n : fallback;
@@ -269,6 +302,17 @@ ${chalk.bold("Cron")} (list + trigger scheduled jobs on the instance — handy f
   lastlight cron disable <name>      Disable a cron
                                      ${chalk.dim("[--json on any]. Omit <name> for an interactive picker.")}`,
 
+  pr: `
+${chalk.bold("PR")} (act on a pull request the instance stopped on)
+  lastlight pr retry <owner/repo#N> [reason]
+                                     Tell the bot to have another go — re-arms the attempt
+                                     counter AND the cost window, and re-runs the workflow
+                                     that got stuck. The reason is recorded and reaches the
+                                     next attempt as a note. ${chalk.dim("[--json]")}
+  ${chalk.dim("Same effect as commenting `@<bot> retry` on the PR, or removing `requires-human`.")}
+  ${chalk.dim("Refused (exit 1) if the PR carries the hold label, another run owns it, or it")}
+  ${chalk.dim("could not be read — the hold beats a retry outright, by design.")}`,
+
   server: `
 ${chalk.bold("Server")} (host-local — run on the server; manages the docker stack)
   lastlight server setup             Scaffold/adopt the working dir; create or clone the overlay (+ gh repo)
@@ -293,6 +337,23 @@ ${chalk.bold("Fork")} (host-local — copy built-in assets into the deployment o
   lastlight fork agent-context <f>   Copy a single agent-context file (e.g. soul.md)
                                      [--home dir] [--force to overwrite existing]
                                      Reads built-ins bundled with the CLI — no checkout needed.`,
+
+  repo: `
+${chalk.bold("Repo")} (a managed repo's own .lastlight/ config layer — run inside your code repo)
+  lastlight repo fork                List what a repo may override into ./.lastlight/
+  lastlight repo fork all            Every workflow's prompts + skills + agent-context + classifier
+  lastlight repo fork <workflow>     A workflow's PROMPTS + SKILLS ${chalk.dim("(never its YAML — that stays the operator's)")}
+  lastlight repo fork agent-context [file]
+                                     Copy agent-context/*.md ${chalk.dim("(ADDITIVE only — rename before committing)")}
+  lastlight repo fork classifier     The base intent-classifier prompts
+                                     ${chalk.dim("[--home <core checkout>] [--force]")}
+  lastlight repo config validate     Check ./.lastlight/ offline, exactly as the server would ${chalk.dim("[--json]")}
+                                     ${chalk.dim("Exits non-zero if anything would be rejected.")}
+  lastlight repo config show <owner/repo>
+                                     The effective post-bounds config + provenance from the server
+                                     ${chalk.dim("[--refresh to bypass the server's 60s layer TTL] [--json]")}
+  ${chalk.dim("Writes to <git repo root>/.lastlight — refuses outside a git repo. Only the layer on your")}
+  ${chalk.dim("DEFAULT BRANCH is ever read (a PR head can never reconfigure the agent reviewing it).")}`,
 
   skills: `
 ${chalk.bold("Skills")} (host-local — install the Last Light Claude Code skills)
@@ -333,6 +394,7 @@ ${chalk.bold("Trigger")} (run work on a repo)
   lastlight triage|review <owner/repo[#N]>      Triage/review a whole repo (scan) or one issue/PR
   lastlight verify|qa-test <owner/repo#N>       Test a claim / drive a flow → pass/fail
   lastlight health|security <owner/repo>        Weekly health report / security review
+  lastlight pr retry <owner/repo#N> [reason]    Have another go at a PR the bot stopped on
 
 ${chalk.bold("Debug")} (read the running instance)   ${chalk.dim("→ lastlight <cmd> help")}
   workflow · session · logs · approvals · stats · cron
@@ -342,6 +404,9 @@ ${chalk.bold("Server")} (host-local docker stack)   ${chalk.dim("→ lastlight s
 
 ${chalk.bold("Overlay / host-local")}   ${chalk.dim("→ lastlight <cmd> help")}
   fork · skills · oauth
+
+${chalk.bold("Repo")} (your code repo's own .lastlight/ layer)   ${chalk.dim("→ lastlight repo help")}
+  repo fork · repo config validate · repo config show
 
 ${chalk.bold("Other")}
   lastlight setup                               First-run wizard — client (login) or server (stack)
@@ -564,7 +629,7 @@ async function cmdWorkflow(): Promise<void> {
     console.log(`status ${colorStatus(run.status)}   phase ${run.currentPhase}   repo ${run.repo ?? "-"}   started ${age(run.startedAt)}`);
     console.log("");
     const rows = execs.map((e) => ({
-      ok: checkmark(e.success),
+      ok: execMark(e.success, e.stopReason),
       phase: (e.skill ?? "").replace(`${run.workflowName}:`, ""),
       dur: e.durationMs ? `${Math.round(e.durationMs / 1000)}s` : "",
       session: e.sessionId ?? "",
@@ -759,14 +824,20 @@ async function cmdStats(): Promise<void> {
     const rows = (data.daily as any[]).map((d) => ({
       date: d.date,
       execs: String(d.executions),
-      ok: String(d.successes),
-      fail: String(d.failures),
+      ok: String(d.succeeded),
+      // Neither a pass nor a fail — see `execMark` in cli-format.ts for the
+      // per-row equivalent. `skip` is a cascade skip (the phase never ran),
+      // `defer` is a k8s ResourceQuota rejection that requeued (issue #325).
+      skip: d.skipped ? chalk.dim(String(d.skipped)) : "0",
+      defer: d.deferred ? chalk.yellow(String(d.deferred)) : "0",
+      fail: d.failed ? chalk.red(String(d.failed)) : "0",
       tokens: String(d.totalTokens ?? 0),
       cost: `$${(d.costUsd ?? 0).toFixed(2)}`,
     }));
     console.log(table(rows, [
       { key: "date", header: "DATE" }, { key: "execs", header: "EXECS" },
-      { key: "ok", header: "OK" }, { key: "fail", header: "FAIL" },
+      { key: "ok", header: "OK" }, { key: "skip", header: "SKIP" },
+      { key: "defer", header: "DEFER" }, { key: "fail", header: "FAIL" },
       { key: "tokens", header: "TOKENS" }, { key: "cost", header: "COST" },
     ]));
     return;
@@ -780,14 +851,23 @@ async function cmdStats(): Promise<void> {
   console.log(`${chalk.bold("Total executions")}  ${data.total_executions}`);
   console.log(`${chalk.bold("Today")}             ${data.today_count}`);
   console.log(`${chalk.bold("Running")}           ${data.running}`);
-  const bySkill = data.by_skill as Record<string, { count: number; success: number; fail: number }>;
+  const bySkill = data.by_skill as Record<
+    string,
+    { count: number; succeeded: number; skipped: number; deferred: number; failed: number }
+  >;
   const rows = Object.entries(bySkill).map(([skill, v]) => ({
-    skill, count: String(v.count), ok: chalk.green(String(v.success)), fail: v.fail ? chalk.red(String(v.fail)) : "0",
+    skill,
+    count: String(v.count),
+    ok: chalk.green(String(v.succeeded)),
+    skip: v.skipped ? chalk.dim(String(v.skipped)) : "0",
+    defer: v.deferred ? chalk.yellow(String(v.deferred)) : "0",
+    fail: v.failed ? chalk.red(String(v.failed)) : "0",
   }));
   console.log("");
   console.log(table(rows, [
     { key: "skill", header: "SKILL" }, { key: "count", header: "RUNS" },
-    { key: "ok", header: "OK" }, { key: "fail", header: "FAIL" },
+    { key: "ok", header: "OK" }, { key: "skip", header: "SKIP" },
+    { key: "defer", header: "DEFER" }, { key: "fail", header: "FAIL" },
   ]));
 }
 
@@ -1068,7 +1148,12 @@ async function cmdSkill(name: string): Promise<void> {
     if (claim) context.commentBody = claim;
     if (!JSON_OUT) console.log(`Triggering ${name} on ${parsed.owner}/${parsed.repo}#${parsed.number}…`);
   } else {
-    context = { repos: [target], mode: "scan" };
+    // `repo`, singular — `/api/run` hands the context to `dispatchWorkflow`,
+    // which requires it. `{ repos: [...] }` is the CRON fan-out shape, and only
+    // `dispatchCronWorkflow` expands it (cron/fanout.ts); sent here it reaches
+    // the plain dispatcher untranslated and every run dies with
+    // "missing 'repo' in context" — after the endpoint has already returned 202.
+    context = { repo: target, sender: "cli" };
     if (!JSON_OUT) console.log(`Triggering ${name} scan on ${target}…`);
   }
   const data = await apiPost(`/api/run`, { skill, context });
@@ -1138,6 +1223,45 @@ async function cmdFork(): Promise<void> {
   const home = typeof flags.home === "string" ? flags.home : undefined;
   const { fork } = await import("./fork-cli.js");
   await fork(positionals.slice(1), { home, force: flags.force === true });
+}
+
+// ── repo (a managed repo's own .lastlight/ layer) ──────────────────────────
+
+/**
+ * `lastlight repo <fork|config> …` — the per-repo config layer (issue #180)
+ * from the repo's side. `fork` + `config validate` are offline and operate on
+ * `<git repo root>/.lastlight`; `config show` reads a connected server's admin
+ * API, so `apiGet` is injected rather than reimplemented there. See
+ * src/repo-cli.ts.
+ */
+async function cmdRepo(): Promise<void> {
+  const { repoCommand } = await import("./repo-cli.js");
+  const code = await repoCommand(positionals.slice(1), {
+    home: typeof flags.home === "string" ? flags.home : undefined,
+    force: flags.force === true,
+    json: JSON_OUT,
+    refresh: flags.refresh === true,
+    dir: typeof flags.dir === "string" ? flags.dir : undefined,
+    apiGet,
+  }).catch((err: unknown) => die(err instanceof Error ? err.message : String(err)));
+  if (code !== 0) process.exit(code);
+}
+
+// ── pr (thin client) ─────────────────────────────────────────────────────────
+
+/**
+ * `lastlight pr retry <owner/repo#N> [reason]` — tell the instance to have
+ * another go at a pull request it stopped on. One POST; every guard (managed
+ * repo, the hold label, the run lock, the budgets) is the server's, decided at
+ * the same gate a webhook crosses. See src/pr-cli.ts.
+ */
+async function cmdPr(): Promise<void> {
+  const { prCommand } = await import("./pr-cli.js");
+  const code = await prCommand(positionals.slice(1), {
+    json: JSON_OUT,
+    apiPost: apiPostStatus,
+  }).catch((err: unknown) => die(err instanceof Error ? err.message : String(err)));
+  if (code !== 0) process.exit(code);
 }
 
 // ── skills (host-local) ──────────────────────────────────────────────────────
@@ -1225,6 +1349,8 @@ async function main() {
     case "cron":
     case "crons": return cmdCron();
     case "fork": return cmdFork();
+    case "pr": return cmdPr();
+    case "repo": return cmdRepo();
     case "skills": return cmdSkills();
     case "oauth":
     case "auth": return cmdOAuth();

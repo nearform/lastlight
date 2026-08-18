@@ -17,17 +17,20 @@ import {
   type WorkflowDefinition,
   type WorkflowRunExecution,
   type TriggeredByUser,
+  type FeedbackSignal,
 } from "../api";
 import { ActorChip } from "./ActorChip";
 import { WorkflowPipeline } from "./WorkflowPipeline";
 import { ApprovalBanner } from "./ApprovalBanner";
 import { PhaseDetailPanel } from "./PhaseDetailPanel";
+import { PrStatePanel } from "./PrStatePanel";
 import { MessageFeed, type MessageOrder } from "./MessageFeed";
 import {
   useUrlState,
   nullableStringParser,
   nullableStringSerializer,
 } from "../hooks/useUrlState";
+import { useVisibleRepos, repoScopeParam } from "../hooks/useVisibleRepos";
 import { timeRangeToSince } from "../lib/timeRange";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
 import { GhLink } from "./GhLink";
@@ -68,6 +71,56 @@ const STATUS_ICON_FALLBACK: StatusIconMeta = { Icon: QuestionMarkCircleIcon, cls
 function StatusIcon({ status, className }: { status: WorkflowRun["status"]; className?: string }) {
   const { Icon, cls } = STATUS_ICON[status] ?? STATUS_ICON_FALLBACK;
   return <Icon className={clsx("shrink-0", cls, className ?? "w-4 h-4")} title={status} />;
+}
+
+/** The emoji a canonical reaction name renders as (issue #255). */
+const FEEDBACK_GLYPH: Record<string, string> = {
+  "+1": "👍",
+  "-1": "👎",
+  laugh: "😄",
+  hooray: "🎉",
+  rocket: "🚀",
+  heart: "❤️",
+  confused: "😕",
+  eyes: "👀",
+  smile: "😄",
+  smiley: "😄",
+  grinning: "😀",
+  heart_eyes: "😍",
+  disappointed: "😞",
+  cry: "😢",
+  sob: "😭",
+};
+
+/**
+ * What people said about this run, as a compact chip: the reactions themselves
+ * plus the mean of the SCORED ones. 👀 shows in the glyphs but is left out of
+ * the average — it is the bot's own ack idiom, so counting it as an opinion
+ * would drag every score toward zero.
+ */
+function FeedbackBadge({ signals }: { signals: FeedbackSignal[] }) {
+  if (signals.length === 0) return null;
+  const scored = signals.filter((s) => s.score !== 0);
+  const average = scored.length
+    ? scored.reduce((n, s) => n + s.score, 0) / scored.length
+    : null;
+  const tone =
+    average === null ? "text-base-content/50" : average > 0 ? "text-success" : average < 0 ? "text-error" : "text-base-content/50";
+  const glyphs = signals.map((s) => FEEDBACK_GLYPH[s.emoji] ?? `:${s.emoji}:`).join("");
+  return (
+    <span
+      className={clsx("badge badge-xs badge-ghost gap-1", tone)}
+      title={`${signals.length} feedback signal${signals.length === 1 ? "" : "s"}`}
+    >
+      <span>{glyphs}</span>
+      {average !== null && (
+        <span className="font-mono">
+          {average > 0 ? "+" : ""}
+          {average.toFixed(1)}
+        </span>
+      )}
+    </span>
+  );
 }
 
 interface DetailPanelProps {
@@ -263,6 +316,25 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
     };
   }, [run.id, run.status, approvalRefresh]);
 
+  // Feedback signals on this run (issue #255). Fetched once, not polled: a
+  // reaction can arrive at any time, but nobody is watching a run detail panel
+  // waiting for one, and the Feedback tab is where you go to look.
+  const [feedback, setFeedback] = useState<FeedbackSignal[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .workflowRunFeedback(run.id)
+      .then((res) => {
+        if (!cancelled) setFeedback(res.signals);
+      })
+      .catch(() => {
+        /* a run with no feedback and a failed fetch look the same: no badge */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [run.id]);
+
   const pendingApprovals = runApprovals.filter((a) => a.status === "pending");
   const handleApprovalResponded = () => {
     setApprovalRefresh((n) => n + 1);
@@ -385,6 +457,7 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
           </button>
         )}
         <StatusIcon status={run.status} className="w-5 h-5" />
+        <FeedbackBadge signals={feedback} />
         {run.repo &&
           (() => {
             const href = repoUrl(runRepoPath(run));
@@ -446,6 +519,11 @@ function DetailPanel({ run, triggeredByUser, approvals, onCancel, onRetry, onApp
 
       <ApprovalBanner approvals={pendingApprovals} onResponded={handleApprovalResponded} />
 
+      {/* The snapshot the dispatch decision was taken on (09 §S3). Renders
+          itself away on any run that carries none — i.e. every non-PR-scoped
+          workflow — so there is no workflow-name list here to keep in step. */}
+      <PrStatePanel run={run} />
+
       <ResizablePipeline
         run={run}
         definition={definition}
@@ -499,13 +577,25 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     nullableStringSerializer,
   );
   const [availableWorkflows, setAvailableWorkflows] = useState<string[]>([]);
+  const { allowed: allowedRepos } = useVisibleRepos();
+  // Per-repo visibility (issue #169) is applied SERVER-side, via the `repos`
+  // query param, so paging and the `total` count stay honest — filtering after
+  // the fact would return short pages and a total that counts rows the user
+  // can't see. Skipped when the Repos tab has already pinned a single repo
+  // (`repo` is the narrower ask), and absent whenever the scope is the
+  // fail-open sentinel. Memoized: a fresh array identity per render would
+  // refetch on every render.
+  const scopedRepos = useMemo(
+    () => (repo ? undefined : repoScopeParam(allowedRepos)),
+    [repo, allowedRepos],
+  );
 
   // Reset pagination whenever a filter changes — otherwise an inflated `limit`
   // from a previous, larger result set would silently keep showing too many
   // rows after the user narrows.
   useEffect(() => {
     setLimit(WORKFLOW_PAGE_SIZE);
-  }, [timeRange, workflowFilter, repo]);
+  }, [timeRange, workflowFilter, repo, scopedRepos]);
 
   // Clear the selected run when the Repos tab switches to a different repo.
   // WorkflowList isn't remounted on a repo switch (the `?run=` param survives),
@@ -533,6 +623,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
           status,
           workflow: workflowFilter ?? undefined,
           repo,
+          repos: scopedRepos,
         }),
         api.approvals().catch(() => ({ approvals: [] as WorkflowApproval[] })),
         // Queued-run count, scoped to the same date/workflow/repo filters, for
@@ -544,6 +635,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
             since,
             workflow: workflowFilter ?? undefined,
             repo,
+            repos: scopedRepos,
           })
           .catch(() => ({ total: 0, workflowRuns: [] as WorkflowRun[] })),
       ]);
@@ -555,7 +647,7 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     }
-  }, [limit, timeRange, workflowFilter, repo]);
+  }, [limit, timeRange, workflowFilter, repo, scopedRepos]);
 
   useEffect(() => {
     load();
@@ -670,13 +762,17 @@ export function WorkflowList({ timeRange, query, repo, onOpenDefinition }: Workf
 
   const detailForSelected = detailRun?.id === selectedId ? detailRun : null;
   const listRow = visibleRuns.find((r) => r.id === selectedId) ?? null;
-  // Prefer the live-updating list row, but splice in `context` (absent from the
-  // list payload) from the detail fetch. Fall back to the full detail when the
-  // run isn't in the list at all (deep-linked / paginated out).
+  // Prefer the live-updating list row, but splice in `context` + `scratch`
+  // (both absent from the list payload — it omits the heavy JSON blobs) from
+  // the detail fetch. `PrStatePanel` reads the snapshot from one and the fix
+  // harvest from the other, so they must arrive together. Fall back to the full
+  // detail when the run isn't in the list at all (deep-linked / paginated out).
   const selectedRun: WorkflowRun | null = listRow
-    ? listRow.context
-      ? listRow
-      : { ...listRow, context: detailForSelected?.context }
+    ? {
+        ...listRow,
+        context: listRow.context ?? detailForSelected?.context,
+        scratch: listRow.scratch ?? detailForSelected?.scratch,
+      }
     : detailForSelected;
   const hasMore = runs.length < total;
 

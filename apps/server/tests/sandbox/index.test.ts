@@ -5,6 +5,27 @@ vi.mock("child_process", async (importOriginal) => {
   return { ...actual, execFileSync: vi.fn() };
 });
 
+// index.ts now logs via the pino LoggerPort instead of console — mock the
+// logger module so tests can inspect captured info/warn calls (and so the
+// suite's stderr stays free of real pino JSON) instead of spying on console.
+const { infoSpy, warnSpy } = vi.hoisted(() => ({ infoSpy: vi.fn(), warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: infoSpy,
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
+beforeEach(() => {
+  infoSpy.mockClear();
+  warnSpy.mockClear();
+});
+
 import { execFileSync } from "child_process";
 import {
   existsSync,
@@ -65,7 +86,6 @@ describe("prePopulateWorkspace token-leak protection", () => {
   });
 
   it("clones from a plain URL (no token embedded) and authenticates via -c extraheader", () => {
-    vi.spyOn(console, "log").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
     prePopulateWorkspace("/tmp/work", {
       owner: "cliftonc",
@@ -84,7 +104,6 @@ describe("prePopulateWorkspace token-leak protection", () => {
   });
 
   it("normalizes origin to a credential-free URL after cloning", () => {
-    vi.spyOn(console, "log").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
     prePopulateWorkspace("/tmp/work", {
       owner: "cliftonc", repo: "lastlight", branch: "opencode-fork", token: TOKEN,
@@ -97,7 +116,6 @@ describe("prePopulateWorkspace token-leak protection", () => {
   });
 
   it("does not leak the token into the success log line", () => {
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
     prePopulateWorkspace("/tmp/work", {
       owner: "cliftonc",
@@ -105,12 +123,11 @@ describe("prePopulateWorkspace token-leak protection", () => {
       branch: "opencode-fork",
       token: TOKEN,
     });
-    const joined = logSpy.mock.calls.flat().join("\n");
+    const joined = infoSpy.mock.calls.flat().map((v) => JSON.stringify(v)).join("\n");
     expect(joined).not.toContain(TOKEN);
   });
 
   it("redacts the token AND its base64 from the warning when git clone fails", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // execFileSync surfaces command failures with an Error whose .message
     // echoes the full command — now the `-c http.extraheader=…: basic <b64>`
     // arg rather than an auth URL. Reproduce that shape.
@@ -131,7 +148,8 @@ describe("prePopulateWorkspace token-leak protection", () => {
     });
 
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    const logged = warnSpy.mock.calls[0].join(" ");
+    const [msg, fields] = warnSpy.mock.calls[0];
+    const logged = `${msg} ${JSON.stringify(fields)}`;
     expect(logged).not.toContain(TOKEN);
     expect(logged).not.toContain(b64);
     expect(logged).toContain("[REDACTED-AUTH]");
@@ -143,7 +161,6 @@ describe("prePopulateWorkspace token-leak protection", () => {
   it("tolerates a token with URL-unsafe characters (./ /+/=)", () => {
     // The old guard threw on these; GitHub can return them. The token now
     // rides base64 inside a `-c` arg, so any charset is fine.
-    vi.spyOn(console, "log").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
     const weird = "ghs_weird.tok/en+v=";
     prePopulateWorkspace("/tmp/work", {
@@ -165,8 +182,6 @@ describe("prePopulateWorkspace clone depth + per-PR reuse (issue #107)", () => {
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "ll-prepop-"));
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
   });
   afterEach(() => {
@@ -264,8 +279,6 @@ describe("prePopulateWorkspace base merge-base availability (pr-review diff)", (
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "ll-basemb-"));
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
   });
   afterEach(() => {
@@ -284,8 +297,10 @@ describe("prePopulateWorkspace base merge-base availability (pr-review diff)", (
       owner: "cliftonc", repo: REPO, branch: "pr-head", baseBranch: "main", token: TOKEN,
       runId: "run-1", shallow: true,
     });
-    // Head clone, origin normalized, then base+head fetched and merge-base checked.
-    expect(gitVerbs()).toEqual(["clone", "remote", "fetch", "fetch", "merge-base"]);
+    // Head clone, origin normalized, the base added to the fetch refspec (read
+    // first so `--add` can't duplicate it), then base+head fetched and
+    // merge-base checked.
+    expect(gitVerbs()).toEqual(["clone", "remote", "config", "remote", "fetch", "fetch", "merge-base"]);
     // The base is materialized as a real remote-tracking ref at depth 50.
     const baseFetch = fetches().find((a) => a.includes(BASE_DEST))!;
     expect(baseFetch).toBeDefined();
@@ -349,6 +364,70 @@ describe("prePopulateWorkspace base merge-base availability (pr-review diff)", (
   });
 });
 
+describe("prePopulateWorkspace same-run base refresh (stuck-PR recovery)", () => {
+  let workDir: string;
+  const REPO = "lastlight";
+  const BASE_DEST = "+refs/heads/main:refs/remotes/origin/main";
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "ll-samerun-"));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockExec.mockReturnValue(Buffer.from(""));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    mockExec.mockReset();
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  function seedExistingClone(marker?: string): void {
+    mkdirSync(join(workDir, REPO, ".git"), { recursive: true });
+    if (marker !== undefined) writeFileSync(join(workDir, ".lastlight-run"), marker);
+  }
+
+  /** Every fetch invocation's argv. */
+  function fetches(): string[][] {
+    return calledArgs().filter((a) => gitVerb(a) === "fetch");
+  }
+
+  it("refreshes origin/<base> when a later phase of the SAME run revisits it", () => {
+    seedExistingClone("run-1");
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "pr-head", baseBranch: "main", token: TOKEN,
+      runId: "run-1", shallow: false,
+    });
+    // The base is re-fetched as a real remote-tracking ref — `origin/main` was
+    // otherwise frozen at whatever the run's FIRST phase saw, and the fix phase
+    // merges it tens of minutes later.
+    expect(fetches().some((a) => a.includes(BASE_DEST))).toBe(true);
+    // …and NOTHING that touches HEAD, the index or the working tree. That is
+    // the whole safety argument for doing this on the preserve path.
+    expect(gitVerbs()).toEqual(["config", "remote", "fetch", "fetch", "merge-base"]);
+    const setBranches = calledArgs().find((a) => a.includes("set-branches"))!;
+    expect(setBranches).toEqual(["-C", join(workDir, REPO), "remote", "set-branches", "--add", "origin", "main"]);
+  });
+
+  it("stays a pure no-op on a same-run revisit when base equals the head branch", () => {
+    seedExistingClone("run-1");
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "main", baseBranch: "main", token: TOKEN,
+      runId: "run-1",
+    });
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it("stays a pure no-op on a same-run revisit with recreateFromBase", () => {
+    seedExistingClone("run-1");
+    prePopulateWorkspace(workDir, {
+      owner: "cliftonc", repo: REPO, branch: "lastlight/1-foo", baseBranch: "main", token: TOKEN,
+      runId: "run-1", recreateFromBase: true,
+    });
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(existsSync(join(workDir, REPO, ".git"))).toBe(true);
+  });
+});
+
 describe("prePopulateWorkspace recreate-from-base (build, issue #153)", () => {
   let workDir: string;
   const REPO = "lastlight";
@@ -356,8 +435,6 @@ describe("prePopulateWorkspace recreate-from-base (build, issue #153)", () => {
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "ll-recreate-"));
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
     mockExec.mockReturnValue(Buffer.from(""));
   });
   afterEach(() => {

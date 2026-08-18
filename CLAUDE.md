@@ -62,7 +62,34 @@ workspace deps) consumed by `lastlight-core` + `lastlight-evals` (and the privat
 dashboard) via `workspace:*`. Invariants: **no edge from
 `shared`/`workflow-engine` back to `core`** (dep-cruiser gate, runs in
 `typecheck`); **the cli never gains an edge to `core`**. Turbo `^build` orders
-builds; there are no TS project references.
+builds; there are no TS project references. Those invariants are why some logic
+lives in `shared` rather than where you'd first look — e.g. the per-repository
+`.lastlight/` config schema + bounds + merge
+(`packages/shared/src/repo-config-schema.ts`, issue #180): core needs it at
+runtime and the CLI needs it offline for `lastlight repo config validate`, and
+`shared` is the only package both can reach.
+
+## Logging — use the logger, never `console.*`
+
+All operational output is **structured JSON** (one line per event, to stderr,
+with an explicit `level`) so a log sink can filter by level instead of guessing.
+Never write `console.log`/`warn`/`error` in runtime code — reach for the logger:
+
+- **`lastlight-core` (`apps/server`)**: `import { logger } from "…/logging/logger.js"`,
+  then `const log = logger("component")` at module scope and
+  `log.info("message", { field, err })`. Component = the subsystem
+  (`"router"`, `"dispatch"`, `"pr-state"`, …). Pass an `Error` as `err` — a
+  serializer expands it; don't string-interpolate it into the message.
+- **`lastlight-workflow-engine` and `lastlight-shared` (pino-free — the CLI
+  depends on them)**: never import the pino logger. Use the injected
+  `LoggerPort` — `const log = deps.ports.logger ?? noopLogger` (engine), or take
+  a `log: LoggerPort = noopLogger` parameter and have core pass `logger("…")`
+  (see `validateAssets`, `resolveTemplatedNumber`).
+- **`lastlight` (cli)**: stays pino-free; `console.*` for user-facing terminal
+  output is correct there.
+
+Levels: `debug` (per-turn / high-volume), `info`, `warn`, `error`, `fatal`.
+`LOG_LEVEL` / `LOG_FORMAT` env vars tune verbosity and pretty-printing.
 
 ## Commands (from the repo root)
 

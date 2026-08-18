@@ -3,10 +3,10 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 ---
 <DocsLayout
 	slug="slack"
-	description="Connect Last Light to Slack: the HTTP Events API for chat, OAuth for dashboard login."
+	description="Connect Last Light to Slack: the HTTP Events API for chat, the weekly repo digest, OAuth for dashboard login."
 >
 	<p>
-		Slack integration is optional but recommended. Last Light uses two independent
+		Slack integration is optional but recommended. Last Light uses three independent
 		Slack features that you can enable one at a time.
 	</p>
 
@@ -17,9 +17,18 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 			chat loop to reply. Every Slack thread becomes a growing, DB-backed
 			conversation; the harness rehydrates the message history from the
 			<code>messaging_messages</code> SQLite table on every turn, so context stays
-			coherent across hours or days. Events arrive over the <strong>HTTP Events
-			API</strong> by default (reliable, retried delivery); Socket Mode is
-			available as a dev fallback.
+			coherent across hours or days. That transcript covers the <em>whole</em>
+			thread, not just its chat turns — when the classifier sends a message to a
+			workflow instead (a question to <code>answer</code>, a request to
+			<code>build</code>), the question and the workflow's reply are recorded too,
+			so a follow-up like "can you summarise that?" still knows what was said.
+			Events arrive over the <strong>HTTP Events API</strong> by default
+			(reliable, retried delivery); Socket Mode is available as a dev fallback.
+		</li>
+		<li>
+			<strong>The weekly repo digest</strong> — a Monday-morning summary, per
+			repository, of what happened and what Last Light did about it. Posted to a
+			channel each repo chooses. See <a href="#digest">below</a>.
 		</li>
 		<li>
 			<strong>OAuth dashboard login</strong> — the admin dashboard offers "Login
@@ -102,6 +111,117 @@ SLACK_DELIVERY_CHANNEL=C01XYZ      # Channel for cron health reports</code></pre
 		</div>
 	</div>
 
+	<h2 id="digest">The weekly repo digest</h2>
+
+	<p>
+		Once a week (Monday 09:00 by default), Last Light posts a per-repository
+		summary to Slack: what happened in the repo, and what it did about it.
+	</p>
+
+	<pre><code>acme/widgets — week to 9 Aug
+
+Review reliability dominated the week: three fixes closed the last
+stranding modes and the digest stopped burying itself in preview cards.
+Dependency work stayed quiet.
+
+Merged (7)
+• #342 Stop Slack unfurling every PR link — @cliftonc   ← links to GitHub
+• #338 Reclaim a pod so a retry can proceed (closes #331)
+• #337 Log a failed phase at error level
+• …and 4 more · plus 6 bot PRs
+
+New issues (4)
+• #345 Digest says little about what went on in the repo
+• #344 k8s retry loses its PVC
+
+Closed issues (5)
+• #329 Review sweep spend loop
+• …and 1 more · 3 by merged PRs above
+
+Repo
+• 7 PRs merged, 3 opened
+• 5 issues closed, 4 opened
+• 9 PRs open (2 awaiting review)
+• Oldest unreviewed: #412 Refactor the loader — open 9 days
+
+Last Light
+• 14 runs — 12 ok, 2 failed
+• reviewed 6 · fixed CI on 3
+• $4.12 across 40 phases</code></pre>
+
+	<p>
+		The numbers and the lists are computed in code, from the GitHub API and Last
+		Light's own database — not written by a model. Only the opening summary is
+		generated, from those already-settled facts, and if that call fails the
+		digest still goes out without it. Set <code>digest.narrative: false</code> in
+		your overlay to skip it entirely.
+	</p>
+
+	<p>
+		Two details worth knowing. An issue that a listed merged pull request closed
+		is shown once, hanging off that PR, rather than twice — and only when the
+		timestamps agree that the merge is what closed it, since GitHub reports every
+		<em>linked</em> issue whether or not the merge closed it. And pull requests
+		opened by bots are folded into a count (<code>plus 6 bot PRs</code>) so a week
+		of dependency bumps can't push the human work out of the list.
+	</p>
+
+	<p>
+		Sizes are tunable: <code>digest.listItems</code> caps each of the three
+		content lists (default 8), <code>digest.maxItems</code> caps the
+		waiting-on-a-human list (default 5), and <code>digest.detailItems</code>
+		bounds how many items' text the summariser reads (default 25).
+	</p>
+
+	<h3>Pick a channel</h3>
+
+	<p>
+		<strong>The digest does nothing until a channel resolves for a repo</strong> —
+		no channel, no post, no cost. There are three ways to name one, most specific
+		first.
+	</p>
+
+	<p>
+		<strong>1. The repo chooses.</strong> A managed repo names its own channel in
+		its <a href="/docs/repo-config#notifications"><code>.lastlight/lastlight.yml</code></a>:
+	</p>
+
+	<pre><code>notifications:
+  slack:
+    channel: C01ENGINEERING</code></pre>
+
+	<p>
+		<strong>2. You route it.</strong> Map repos to channels in your overlay's
+		<code>config.yaml</code>:
+	</p>
+
+	<pre><code>slack:
+  repoChannels:
+    acme/widgets: C01ENGINEERING
+    acme/gadgets: C02PLATFORM</code></pre>
+
+	<p>
+		<strong>3. One channel for everything.</strong> Set
+		<code>SLACK_DELIVERY_CHANNEL</code> in <code>.env</code> and every repo without
+		a more specific answer lands there.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>Invite the bot to the channel.</strong> Slack won't deliver to a
+			channel the app isn't a member of — the post fails with
+			<code>not_in_channel</code>, which is logged and skipped rather than retried.
+		</div>
+	</div>
+
+	<p>
+		To turn the digest off entirely, add <code>repo-digest</code> to
+		<code>crons.disable</code>. To change the schedule, use the Crons tab in the
+		dashboard or <code>lastlight cron</code>. To see it now rather than on Monday:
+	</p>
+
+	<pre><code>lastlight cron trigger repo-digest</code></pre>
+
 	<h2>Enable OAuth dashboard login</h2>
 
 	<p>
@@ -141,9 +261,9 @@ SLACK_ALLOWED_WORKSPACE=T01ABCDEF   # Optional: restrict to one team_id or domai
 			<span class="label">← Previous</span>
 			<span class="title">Production deploy</span>
 		</a>
-		<a href="/docs/configuration" class="next">
+		<a href="/docs/pr-state" class="next">
 			<span class="label">Next →</span>
-			<span class="title">Configuration reference</span>
+			<span class="title">The PR state model</span>
 		</a>
 	</div>
 </DocsLayout>

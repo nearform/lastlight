@@ -1,4 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
+import { HELPER_MAX_TOKENS } from "#src/engine/llm.js";
+
+// classifier.ts now logs via the pino LoggerPort instead of console — mock the
+// logger module so the "falls back on error" assertions below can inspect the
+// captured error calls instead of console output.
+const { errorSpy } = vi.hoisted(() => ({ errorSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: errorSpy,
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
 import {
   buildClassifierPrompt,
   classifyComment,
@@ -97,7 +114,7 @@ describe("classifyComment — injected chat", () => {
         expect.objectContaining({ role: "system" }),
         expect.objectContaining({ role: "user", content: expect.stringContaining("@last-light can you build this?") }),
       ]),
-      { maxTokens: 128 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
   });
 
@@ -132,7 +149,7 @@ describe("classifyComment — injected chat", () => {
           content: expect.stringContaining("one-sentence justification"),
         }),
       ]),
-      { maxTokens: 128 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
   });
 
@@ -147,16 +164,14 @@ describe("classifyComment — injected chat", () => {
 
   it("falls back to chat intent when chat rejects", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("network"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    errorSpy.mockClear();
     const r = await classifyComment("@last-light can you build this?", {}, { chat, defaultFastModel: () => "openai/test" });
     expect(r).toEqual({ intent: "chat" });
     expect(errorSpy).toHaveBeenCalled();
-    errorSpy.mockRestore();
   });
 
   it("with explain, surfaces the error in reason instead of a silent chat fallback", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("401 no api key"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const r = await classifyComment(
       "@last-light can you review this?",
       {},
@@ -165,7 +180,6 @@ describe("classifyComment — injected chat", () => {
     expect(r.intent).toBe("chat");
     expect(r.reason).toContain("classifier error");
     expect(r.reason).toContain("401 no api key");
-    errorSpy.mockRestore();
   });
 });
 
@@ -191,6 +205,30 @@ describe("buildClassifierPrompt — composition", () => {
     // A workflow-contributed example made it into the Examples block.
     expect(prompt).toContain("INTENT: QATEST");
   });
+
+  it("draws the QUESTION/CHAT line on capability, and teaches it with counter-examples", () => {
+    // QUESTION provisions a sandbox; CHAT answers in-process in seconds. The
+    // classifier is the only thing standing between a "what does X do?" and a
+    // container, so the rule (in the base prompt) and the counter-examples (in
+    // answer.yaml) are both load-bearing — a prompt fork that drops either
+    // silently restores the over-firing.
+    const prompt = buildClassifierPrompt();
+
+    // The rule is capability-based, not seriousness-based.
+    expect(prompt).toMatch(/QUESTION only when answering needs the WEB or real exploration of a repo checkout/i);
+    // …and it names what chat can already reach, so "it mentions a repo" is
+    // not evidence of weight.
+    expect(prompt).toMatch(/CHAT can already read repos, issues, comments, pull requests and their diffs/i);
+    // The GitHub-issue carve-out: an issue has no chat surface to fall back to.
+    expect(prompt).toMatch(/GitHub ISSUE that asks a question is the exception/i);
+
+    // At least one repo-scoped question is taught as CHAT — without a negative
+    // example the model reads "REPO: <x>" as the signal to fire.
+    const chatExamples = prompt
+      .split("\n")
+      .filter((l) => /INTENT: CHAT, REPO: \S+\//.test(l));
+    expect(chatExamples.length).toBeGreaterThan(0);
+  });
 });
 
 describe("classifyIssueIntent — injected chat", () => {
@@ -208,7 +246,7 @@ describe("classifyIssueIntent — injected chat", () => {
         expect.objectContaining({ role: "system" }),
         expect.objectContaining({ role: "user", content: expect.stringContaining("How is lastlight different") }),
       ]),
-      { maxTokens: 128 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
   });
 
@@ -223,10 +261,9 @@ describe("classifyIssueIntent — injected chat", () => {
 
   it("defaults to false (work → triage) when chat rejects", async () => {
     const chat = vi.fn().mockRejectedValue(new Error("network"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    errorSpy.mockClear();
     const r = await classifyIssueIntent("Anything", "body", { chat, defaultFastModel: () => "openai/test" });
     expect(r).toBe(false);
     expect(errorSpy).toHaveBeenCalled();
-    errorSpy.mockRestore();
   });
 });

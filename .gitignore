@@ -26,6 +26,11 @@ memories/
 
 # State directory (mounted as Docker volume)
 data/
+# ...but `data/` is unanchored, so it also swallows apps/www/src/data/, which is
+# real source. That silently dropped a new file from a commit and broke the www
+# deploy; un-ignore it explicitly (the directory must be un-ignored before any
+# file pattern inside it can match).
+!apps/www/src/data/
 mcp-config.json
 
 # Build handoff docs — this repo is maintained by a server-mode Last Light

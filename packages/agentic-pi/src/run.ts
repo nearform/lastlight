@@ -13,6 +13,7 @@
  */
 
 import type { RunConfig } from "./args.js";
+import type { GitHubAuthEnv } from "./extensions/github/auth.js";
 
 /**
  * Pi thinking level. Matches Pi's `thinkingLevel` enum. Kept as a local
@@ -56,6 +57,18 @@ export interface RunOptions {
    * this unset (→ `https://api.github.com`).
    */
   githubApiBaseUrl?: string;
+  /**
+   * GitHub credentials for the `github_*` tools, **replacing** `process.env` for
+   * this run (`{ GITHUB_TOKEN }`, or the `GITHUB_APP_ID` /
+   * `GITHUB_APP_PRIVATE_KEY_PATH` / `GITHUB_APP_INSTALLATION_ID` triple).
+   *
+   * Pass this whenever more than one `run()` can be in flight in the same
+   * process: `process.env` is global, so per-run credentials handed over that
+   * channel leak between runs (lastlight #215 — a run used another run's
+   * repo-scoped token and every write 403'd). Unset = read `process.env`, which
+   * is correct for a single run per process.
+   */
+  githubAuthEnv?: GitHubAuthEnv;
   /** Sandbox backend. Default: "none". */
   sandbox?: "none" | "gondolin";
   /**
@@ -337,6 +350,7 @@ export async function run(options: RunOptions): Promise<RunResult> {
     profile: options.profile,
     authFile: options.authFile,
     githubApiBaseUrl: options.githubApiBaseUrl,
+    githubAuthEnv: options.githubAuthEnv,
     cwd: options.cwd ?? process.cwd(),
     noSession: options.noSession ?? false,
     sessionDir: options.sessionDir,

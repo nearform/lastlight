@@ -33,6 +33,9 @@ import {
   oauthProviderIdForModel,
   resolveOAuthApiKey,
 } from "../oauth.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("chat");
 
 const MAX_TOOL_ROUNDS = 8;
 
@@ -130,8 +133,18 @@ export interface ChatRunnerConfig {
   model: string;
   /** Pi thinking level (off..xhigh). Forwarded as `reasoning` option. */
   thinking?: string;
-  /** Agent persona / system prompt — composed by index.ts from agent-context + CHAT_SYSTEM_SUFFIX. */
-  systemPrompt: string;
+  /**
+   * Agent persona / system prompt — composed by index.ts from agent-context +
+   * `chatSystemSuffix()` + the skill catalogue.
+   *
+   * A THUNK is resolved per turn. The workflow triggers the suffix advertises are
+   * composed from the enabled workflow set, and an admin can disable a workflow
+   * from the dashboard mid-process (the `workflow_overrides` table, enforced at
+   * dispatch in `simple.ts`) — a boot-time string would keep naming a trigger
+   * that had since become a no-op. A plain string stays supported for callers
+   * with nothing dynamic to say.
+   */
+  systemPrompt: string | (() => string);
   /** Optional GitHub App credentials. When set, read-only github tools are registered. */
   github?: ChatGitHubAuth;
   /**
@@ -251,7 +264,7 @@ export class ChatRunner {
       return this.model;
     } catch (err) {
       this.modelError = err instanceof Error ? err.message : String(err);
-      console.error(`[chat] ${this.modelError}`);
+      log.error("Could not resolve model", { err });
       return undefined;
     }
   }
@@ -340,7 +353,8 @@ export class ChatRunner {
     messages.push(textMessage("user", prompt, new Date().toISOString()));
 
     const context: Context = {
-      systemPrompt: this.cfg.systemPrompt,
+      systemPrompt:
+        typeof this.cfg.systemPrompt === "function" ? this.cfg.systemPrompt() : this.cfg.systemPrompt,
       messages,
       tools: this.mergedTools,
     };
@@ -369,10 +383,12 @@ export class ChatRunner {
       try {
         assistant = await completeWithRetry(completeSimple, effectiveModel, context, opts, {
           onRetry: ({ attempt, delayMs, reason }) =>
-            console.warn(
-              `[chat] transient model error (retry ${attempt}/${CHAT_RETRY_BACKOFF_MS.length} ` +
-              `in ${delayMs / 1000}s): ${reason}`,
-            ),
+            log.warn("Transient model error, retrying", {
+              attempt,
+              maxAttempts: CHAT_RETRY_BACKOFF_MS.length,
+              delayMs,
+              reason,
+            }),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -1,6 +1,6 @@
 # Releasing Last Light
 
-The monorepo publishes **six** npm packages plus **four** Docker images.
+The monorepo publishes **six** npm packages plus **five** Docker images.
 Publishing is **automated**: cutting a GitHub Release fires `publish.yml`, which
 runs CI checks → builds+pushes the GHCR images → publishes **five** of the six
 npm packages (engine → shared → core → cli → evals) in dependency order via npm
@@ -50,9 +50,11 @@ Everything else is `private: true` and never publishes: the root package
 (`lastlight-monorepo`), `lastlight-www`, `@lastlight/dashboard`,
 `@lastlight/evals-dashboard`.
 
-**Docker (GHCR, `ghcr.io/nearform/lastlight-*`):** `agent`, `sandbox-base`,
-`sandbox` (the required trio, built as one bake graph) + `sandbox-qa`
-(non-fatal). Built and pushed by `publish.yml`'s `images` job.
+**Docker (GHCR, `ghcr.io/nearform/lastlight-*`):** `agent`, `agent-qemu`,
+`sandbox-base`, `sandbox` (the required set, built as one bake graph) +
+`sandbox-qa` (non-fatal). Built and pushed by `publish.yml`'s `images` job.
+`agent-qemu` is `agent` + QEMU (gondolin/k8s) — a variant with no separate
+version line; it tracks the release tag. See nearform/lastlight#210.
 
 ## The dependency graph (why order matters)
 

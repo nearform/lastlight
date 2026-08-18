@@ -12,7 +12,21 @@ import clsx from "clsx";
  * gates render as the diamond decision shape regardless of source.
  */
 
-export type PhaseStatus = "pending" | "active" | "paused" | "done" | "failed" | "skipped";
+/**
+ * `unmet` is the generic-loop `until_bash` exit-condition check that RAN and
+ * came back RED (`stopReason: "condition_not_met"`). It is neither a success
+ * (the loop is not finished) nor a failure (a red gate is the loop working as
+ * designed — it is what earns the agent another iteration), so it gets its own
+ * muted tone rather than borrowing green or red.
+ */
+export type PhaseStatus =
+  | "pending"
+  | "active"
+  | "paused"
+  | "done"
+  | "failed"
+  | "skipped"
+  | "unmet";
 
 export interface PhaseTag {
   label: string;
@@ -81,6 +95,9 @@ export function statusSurface(status: PhaseStatus): string {
     // Skipped: cascade-skipped by an upstream failure/gate — it never ran, so
     // read it as muted-and-not-run (a dashed neutral), distinct from red failed.
     "border-base-300 border-dashed bg-base-200/40": status === "skipped",
+    // Unmet: the loop's exit check ran and said "not yet". Solid border (it DID
+    // run, unlike skipped) but a neutral tone (it is not a pass or a failure).
+    "border-base-content/25 bg-base-200/60": status === "unmet",
   });
 }
 
@@ -195,6 +212,7 @@ export function PhaseFlowNode({ data }: NodeProps<Node<PipelineNodeData>>) {
     "bg-warning": !brand && data.status === "paused",
     "bg-base-300": !brand && data.status === "pending",
     "bg-base-300 opacity-60": !brand && data.status === "skipped",
+    "bg-base-content/30": !brand && data.status === "unmet",
   });
 
   const containerClass = clsx(

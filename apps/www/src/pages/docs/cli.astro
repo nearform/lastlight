@@ -80,6 +80,31 @@ lastlight qa-test owner/repo#42 -- "login, create a project"  # drive a flow →
 lastlight health owner/repo           # weekly health report
 lastlight security owner/repo         # security review</code></pre>
 
+	<h3>Un-sticking a pull request</h3>
+
+	<p>
+		When Last Light gives up on a PR it labels it <code>requires-human</code>,
+		comments once explaining what it tried, and stops. <code>pr retry</code> is
+		how you tell it to have another go: it re-arms both budgets — the attempt
+		counter <em>and</em> the cost window — and re-runs the workflow that got
+		stuck. The reason you type is recorded against the retry and reaches the
+		next attempt as a note, so the agent knows what you knew.
+	</p>
+
+	<pre><code>lastlight pr retry owner/repo#42
+lastlight pr retry owner/repo#42 the arm64 runner was flaky</code></pre>
+
+	<p>
+		It is the same act as commenting <code>@last-light retry</code> on the PR or
+		removing the <code>requires-human</code> label — all three write one record,
+		so none of them produces a second escalation comment. What a retry does
+		<strong>not</strong> override: the <code>lastlight-ignore</code> hold label
+		(which beats it outright), a run already working that PR, a fork PR, a red
+		base branch, or a PR the harness could not read. Those exit non-zero with
+		the reason. If the gate skips for a transient reason the ask is still
+		recorded, and the next event honours it.
+	</p>
+
 	<h2>Debugging a running instance</h2>
 
 	<p>
@@ -184,6 +209,32 @@ lastlight fork classifier             # copy the base intent-classifier prompts 
 		default" or "added".
 	</p>
 
+	<h2 id="repo-config">A repo's own <code>.lastlight/</code> layer</h2>
+	<p>
+		The mirror image of forking: instead of an operator customising the instance,
+		a <strong>managed repo</strong> commits a <code>.lastlight/</code> directory
+		that overrides a bounded subset of config for runs against itself. These
+		commands run <strong>inside your own code repo</strong> and write to
+		<code>&lt;git repo root&gt;/.lastlight/</code> — they never fall back to a
+		server's <code>instance/</code> overlay, and refuse to run outside a git repo.
+		See <a href="/docs/repo-config">Per-repo config</a> for the full contract.
+	</p>
+	<pre><code>lastlight repo fork                      # list what a repo may override
+lastlight repo fork all                  # every workflow's prompts + skills + agent-context + classifier
+lastlight repo fork &lt;workflow&gt;           # one workflow's PROMPTS + SKILLS — never its YAML
+lastlight repo fork agent-context [file] # persona files (ADDITIVE — rename before committing)
+lastlight repo fork classifier           # the base intent-classifier prompts [--home dir] [--force]
+lastlight repo config validate           # check ./.lastlight/ offline, exactly as the server would [--json]
+lastlight repo config show &lt;owner/repo&gt;  # the effective post-bounds config + provenance [--refresh] [--json]</code></pre>
+	<p>
+		<code>repo config validate</code> is fully offline — it runs the same
+		validators the server runs, against the <em>shipped default</em> bounds — and
+		exits non-zero if anything in the layer would be rejected, so it drops
+		straight into CI. <code>repo config show</code> asks a connected server what
+		it actually applies for that repo, tagging each value with the layer it came
+		from; <code>--refresh</code> makes the server bypass its 60-second cache.
+	</p>
+
 	<h2 id="claude-code-skills">Claude Code skills</h2>
 	<p>
 		Last Light ships a <a href="https://docs.claude.com/en/docs/claude-code" target="_blank" rel="noopener">Claude Code</a>
@@ -235,9 +286,9 @@ lastlight setup --server              # skip the prompt: run the full server con
 	</div>
 
 	<div class="docs-next">
-		<a href="/docs/observability">
+		<a href="/docs/feedback-signals">
 			<span class="label">← Previous</span>
-			<span class="title">Observability</span>
+			<span class="title">Feedback signals</span>
 		</a>
 		<span></span>
 	</div>

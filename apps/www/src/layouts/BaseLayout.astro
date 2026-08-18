@@ -9,9 +9,18 @@ interface Props {
 	ogImage?: string;
 	/** Override og:type. Defaults to "article" for docs, "website" elsewhere. */
 	ogType?: 'website' | 'article';
+	/**
+	 * Keep the page out of the search index (it still gets crawled, and its
+	 * links still pass equity — hence "follow"). Used by the /spec/ pages: they
+	 * exist for re-implementers, attract no search demand, and on a domain with
+	 * this little authority they were only soaking up crawl budget that the
+	 * /docs/ pages need. Pages set here must also be excluded from the sitemap
+	 * in astro.config.mjs, or we're sending Google two opposite signals.
+	 */
+	noindex?: boolean;
 }
 
-const { title, description, ogImage = '/logo-512.png', ogType = 'article' } = Astro.props;
+const { title, description, ogImage = '/logo-512.png', ogType = 'article', noindex = false } = Astro.props;
 
 const canonicalURL = new URL(Astro.url.pathname, Astro.site);
 const ogImageURL = new URL(ogImage, Astro.site);
@@ -22,6 +31,7 @@ const ogImageURL = new URL(ogImage, Astro.site);
 	<meta name="viewport" content="width=device-width, initial-scale=1" />
 	<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 	<link rel="canonical" href={canonicalURL} />
+	{noindex && <meta name="robots" content="noindex, follow" />}
 	<link rel="sitemap" href="/sitemap-index.xml" />
 	<link rel="llms-txt" href="/llms.txt" />
 	<title>{title}</title>
@@ -225,6 +235,36 @@ const ogImageURL = new URL(ogImage, Astro.site);
 	}
 
 	/* Nav */
+	/* Sticky header. The docs / evals / spec layouts have their own sticky
+	   sidebars, so this sets --site-header-h for them to offset against
+	   instead of each guessing a magic number. */
+	:root {
+		/* Measured at 74px; rounded up so the sticky sidebars clear it rather
+		   than tuck a pixel under. */
+		--site-header-h: 4.75rem;
+	}
+
+	/* Anchor targets (#get-started, #sources, …) would otherwise land under the
+	   sticky header. */
+	html {
+		scroll-padding-top: calc(var(--site-header-h) + 1rem);
+	}
+
+	.site-header {
+		position: sticky;
+		top: 0;
+		z-index: 50;
+		background: var(--bg);
+		border-bottom: 1px solid var(--border);
+	}
+
+	@supports (backdrop-filter: blur(8px)) {
+		.site-header {
+			background: color-mix(in srgb, var(--bg) 95%, transparent);
+			backdrop-filter: blur(8px);
+		}
+	}
+
 	nav {
 		display: flex;
 		justify-content: space-between;

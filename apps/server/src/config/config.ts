@@ -3,8 +3,16 @@ import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { parse as parseYaml } from "yaml";
 import { normalizeAllowlistHost } from "../sandbox/egress-allowlist.js";
+import { HOLD_LABEL } from "../cron/dependabot-discovery.js";
 import { resolveConfigLayers } from "./config-resolve.js";
+import {
+  DEFAULT_REPO_CONFIG_ALLOW_KEYS,
+  type RepoConfigPolicy,
+} from "lastlight-shared/repo-config-schema";
 import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-workflow-engine";
+import { logger } from "../logging/logger.js";
+
+const log = logger("config");
 
 /**
  * Load .env file into process.env (simple, no dependency).
@@ -46,7 +54,33 @@ export interface SlackConfig {
   /** Events API signing secret. Required only when mode === "webhook". */
   signingSecret?: string;
   allowedUsers: string[];
+  /**
+   * The LAST-RESORT channel for anything the harness sends that isn't a reply
+   * to a thread — today, a repo digest whose repo named no channel of its own.
+   * From `SLACK_DELIVERY_CHANNEL` (or the `SLACK_HOME_CHANNEL` alias).
+   */
   deliveryChannel?: string;
+  /**
+   * Operator-side per-repo channel routing: `"owner/repo"` → channel id. Sits
+   * between a repo's own `notifications.slack.channel` and `deliveryChannel`.
+   * From the overlay's `slack.repoChannels` — a map is impractical in env, and
+   * this is deployment config rather than a secret.
+   */
+  repoChannels: Record<string, string>;
+}
+
+/** The weekly Slack repo digest. Operator-only — see {@link RuntimeConfig.digest}. */
+export interface DigestConfig {
+  /** How far back a digest looks, in days. */
+  windowDays: number;
+  /** Spend one cheap model call on a plain-English summary of the week. */
+  narrative: boolean;
+  /** Cap on the escalation list. */
+  maxItems: number;
+  /** Cap on each of the week's content lists (merged PRs, issues opened/closed). */
+  listItems: number;
+  /** How many items' text the summariser is shown. Clamped — it sizes a prompt. */
+  detailItems: number;
 }
 
 export interface ModelConfig {
@@ -72,6 +106,41 @@ export type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-
 // so every existing `../config/config.js` importer keeps resolving unchanged.
 import type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types";
 export type { DisabledConfig, RouteConfig } from "lastlight-shared/config-types";
+
+// The `fix:` / `dependencies:` / `review:` policy blocks (issues #251/#252).
+// They live in `lastlight-shared` for the same reason as the two above PLUS one
+// more: they are repo-settable, so the repo-layer sanitizer — which the CLI also
+// compiles — has to name their shape and their shipped defaults. Imported for
+// in-file use and re-exported so `../config/config.js` stays the one import
+// surface for the runtime config shape.
+import {
+  DIAGNOSIS_CLASSES,
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultNotificationsConfig,
+  defaultReviewConfig,
+  isDependencyImpact,
+  isDiagnosisClass,
+  isReviewTrigger,
+  type DependenciesConfig,
+  type FixConfig,
+  type NotificationsConfig,
+  type ReviewConfig,
+} from "lastlight-shared/config-types";
+export type {
+  DependenciesConfig,
+  DependencyImpact,
+  FixConfig,
+  NotificationsConfig,
+  ReviewConfig,
+  ReviewTrigger,
+} from "lastlight-shared/config-types";
+export {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultNotificationsConfig,
+  defaultReviewConfig,
+} from "lastlight-shared/config-types";
 
 export interface PublicConfigBundle {
   default: Record<string, unknown>;
@@ -110,6 +179,15 @@ export interface LastLightConfig {
   variants: VariantConfig;
   maxTurns: number;
   sandbox: SandboxBackend;
+  /**
+   * The `kubernetes` backend's own config block (namespace/image/PVC/security
+   * context), normalized from `sandbox.kubernetes` in the YAML config. Kept as
+   * a separate field rather than reshaping `sandbox` above, which many call
+   * sites read as the plain backend string. `undefined` when the block is
+   * absent from config — {@link resolveKubernetesConfig} applies env
+   * overrides and defaults on top.
+   */
+  kubernetes?: Partial<KubernetesConfig>;
   /** Where build handoff docs live: "repo" (committed) | "server" (externalized). */
   buildAssets: BuildAssetsLocation;
   /** Filesystem root for server-mode build assets (default $STATE_DIR/build-assets). */
@@ -125,12 +203,29 @@ export interface LastLightConfig {
   managedRepos: string[];
   routes: RouteConfig;
   disabled: DisabledConfig;
+  /**
+   * Which crons participate, per layer (issue #180). Normalized here from the
+   * `crons:` block; the legacy `disabled.crons` list is unioned into
+   * {@link CronsConfig.disable} so both spellings mean the same thing. Read by
+   * `src/cron/jobs.ts` (global on/off) and `src/cron/repo-crons.ts` (per-repo
+   * fan-out). Always present — an empty pair is the "everything runs" default.
+   */
+  crons: CronsConfig;
   otel: OtelConfig;
   publicConfig: PublicConfigBundle;
   githubApp?: {
     appId: string;
     privateKeyPath: string;
-    installationId: string;
+    /**
+     * LEGACY seed only. Installations are discovered from the App JWT and
+     * resolved per repo OWNER (`engine/github/installations.ts`), because an App
+     * installed on several accounts has one id per account and a token minted
+     * against the wrong one is rejected. Kept because an existing deployment
+     * still sets `GITHUB_APP_INSTALLATION_ID`: it is the last-resort answer when
+     * the JWT lookup itself fails, so such a deployment degrades to exactly its
+     * old single-installation behaviour rather than to none.
+     */
+    installationId?: string;
   };
   /**
    * Fallback GitHub auth: a raw Personal Access Token, used ONLY when no GitHub
@@ -143,9 +238,40 @@ export interface LastLightConfig {
   slack?: SlackConfig;
   approval?: Record<string, boolean>;
   bootstrapLabel: string;
+  /**
+   * The HOLD label (`hold.label`, env `LASTLIGHT_HOLD_LABEL`) — a maintainer
+   * applies it to an issue or PR to stop Last Light acting on that subject at
+   * all. Read at the dispatch gate (`resolveDispatchDisposition`) and in the
+   * router's issue path; see {@link HOLD_LABEL} for the packaged default and
+   * why it is a live precondition rather than a stored record.
+   *
+   * Operator-only on purpose: it is not in `repoConfig.allowKeys`, because the
+   * label is the affordance a repo's own maintainers already have — a repo that
+   * could RENAME it could also rename it to something nobody applies.
+   */
+  holdLabel: string;
   exploreDefaultRepo?: string;
   publicUrl?: string;
+  /**
+   * `review.postsCheck`, flattened. Predates the `review:` block below and is
+   * still what `src/index.ts` hands the dispatcher; kept as the same value read
+   * two ways rather than a second source of truth.
+   */
   reviewPostsCheck: boolean;
+  /**
+   * When `pr-review` runs, plus the draft/label rules (Phase 7 of the
+   * dependency-PR-resilience plan). Repo-settable and add-only where it matters
+   * — see `packages/shared/src/repo-config-schema.ts`.
+   */
+  review: ReviewConfig;
+  /**
+   * Retry/escalation budgets for the PR_FIX_SHAPED workflows (issue #251) and
+   * the major-bump auto-merge policy (issue #252). Both blocks resolve through
+   * all four layers (default → overlay → env → repo) and are clamped so a repo
+   * can only ever be more conservative than the operator.
+   */
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   /**
    * Sandbox-workspace reaping (issue #106). The harness owns cleanup of the
@@ -156,6 +282,99 @@ export interface LastLightConfig {
    * dir cap (`maxDirs`). Replaces the out-of-band host cron.
    */
   cleanup: { sandbox: SandboxCleanupConfig };
+  /**
+   * Reaction-derived eval signals (issue #255) — a 👍/👎 on something the bot
+   * wrote, scored against the run that wrote it.
+   *
+   * Operator-only, deliberately: it governs API spend and telemetry export, and
+   * a target repo has no business tuning either. It is absent from
+   * `repoConfig.allowKeys`, and the repo-layer sanitizer drops unknown keys
+   * anyway — so no clamp is needed for it to stay ours.
+   */
+  feedback: FeedbackConfig;
+  /**
+   * The weekly Slack repo digest (`workflows/cron-digest.yaml`). Operator-only:
+   * a repo chooses WHERE its digest goes (`notifications.slack.channel`), never
+   * how far back it looks or whether it spends a model call.
+   */
+  digest: DigestConfig;
+  /**
+   * GitHub team-based per-repo dashboard visibility (issue #169). Operator-only
+   * for the same reason as `feedback`: it governs API spend and who sees what,
+   * neither of which a target repo has any business tuning.
+   */
+  teamVisibility: TeamVisibilityConfig;
+  /**
+   * Operator bounds on the per-repository config layer (issue #180) — what a
+   * managed repo's committed `.lastlight/lastlight.yml` is allowed to override
+   * for runs against that repo. Always normalized (never undefined) and inert
+   * by default: it only starts mattering once a repo commits `.lastlight/`.
+   */
+  repoConfig: RepoConfigPolicy;
+}
+
+/**
+ * Which crons a config layer opts in / out of (issue #180). Valid in
+ * `config/default.yaml`, in an overlay's `config.yaml`, and in a managed repo's
+ * `.lastlight/lastlight.yml` — the SAME block at every layer, read with a
+ * layer-specific meaning:
+ *
+ *   operator (default + overlay)  disable → the cron is off globally
+ *                                 enable  → a no-op re-affirmation of the default
+ *   repo (`.lastlight/`)          disable → this repo drops out of that cron's fan-out
+ *                                 enable  → this repo opts IN even when it's off globally
+ *
+ * A name listed in BOTH wins as `disable` at every layer — a cron that doesn't
+ * run is always the safe reading of a contradictory config.
+ *
+ * "Off globally" now means "off by default", not "structurally removed": the
+ * tick is still registered so a repo's opt-in can be resolved at fan-out time
+ * (see `src/cron/jobs.ts`). An operator who wants a kill switch repos can NOT
+ * override drops `crons` from `repoConfig.allowKeys` instead.
+ */
+export interface CronsConfig {
+  /** Cron names turned ON at this layer. */
+  enable: string[];
+  /**
+   * Cron names turned OFF at this layer. The legacy `disabled.crons` list is
+   * unioned in here by the normaliser, so existing deployments keep working
+   * unchanged and both spellings are read from one place.
+   */
+  disable: string[];
+}
+
+/**
+ * The per-repo config layer's bounds, re-exported from `lastlight-shared` so
+ * `src/config/config.js` stays the single import surface for the runtime config
+ * shape — but with exactly ONE definition, in the leaf package. The CLI
+ * validates a `.lastlight/` offline against the same type and constant and may
+ * never gain an edge to core, so shared is the only place both can reach; a
+ * structural copy here would be free to drift from the bounds actually enforced
+ * at resolve time. {@link DEFAULT_REPO_CONFIG_ALLOW_KEYS} must also stay in step
+ * with `repoConfig.allowKeys` in `config/default.yaml` (pinned by
+ * `tests/config/repo-config-shared.test.ts`).
+ */
+export type { RepoConfigPolicy } from "lastlight-shared/repo-config-schema";
+export { DEFAULT_REPO_CONFIG_ALLOW_KEYS } from "lastlight-shared/repo-config-schema";
+
+/** The `kubernetes` sandbox backend's own config surface — namespace, image,
+ *  and the PVC/security-context knobs later Plan-2 tasks wire into the
+ *  adapter. Resolved by {@link resolveKubernetesConfig}, never read directly
+ *  off `LastLightConfig` (kept off the `sandbox` field, which many call sites
+ *  read as the plain `SandboxBackend` string). */
+export interface KubernetesConfig {
+  namespace: string;
+  image: string;
+  storageClassName: string;
+  workspaceSize: string;
+  runAsUser: number;
+  /** Base URL the sandbox's skills initContainer fetches the bundle from
+   *  (the harness Service, cross-namespace). */
+  harnessEndpoint: string;
+  /** The harness Pod's namespace — the `toEndpoints` egress selector. */
+  harnessNamespace: string;
+  /** The harness Pod's Cilium selector labels — the `toEndpoints` egress rule. */
+  harnessPodLabels: Record<string, string>;
 }
 
 export interface SandboxCleanupConfig {
@@ -169,6 +388,72 @@ export interface SandboxCleanupConfig {
   retentionHours: number;
   /** LRU cap on dir count — bounds the reusable per-PR cache. */
   maxDirs: number;
+}
+
+/**
+ * Feedback signals (issue #255).
+ *
+ * The two switches are separate because the two surfaces cost different things.
+ * **Slack is free and live** — `reaction_added` is a real event, so `enabled`
+ * turns on a webhook handler and nothing else. **GitHub has to be polled**:
+ * GitHub delivers no webhook for reactions at all, so `github` opts into a cron
+ * that batches reaction reads over the GraphQL API. That one is off by default
+ * — an operator should switch it on knowingly and watch the numbers, even
+ * though the bound below makes them small.
+ *
+ * The spend is a property of the DATA, not the schedule: we poll *anchors*
+ * (individual bot comments a run produced), never issues, each anchor retires
+ * after `windowDays`, and `maxAnchorsPerTick / 100` is the exact number of
+ * GraphQL requests a tick can issue — each costing one rate-limit point.
+ */
+export interface FeedbackConfig {
+  /** Master switch. Off means no anchors are registered and no signals recorded. */
+  enabled: boolean;
+  /** Opt into the GitHub reaction poller. Slack is unaffected by this. */
+  github: boolean;
+  /** Cron schedule for the GitHub poller. Ignored when `github` is false. */
+  pollSchedule: string;
+  /** How long after posting an anchor stays pollable. Reactions arrive in hours. */
+  windowDays: number;
+  /** Hard per-tick bound. 100 anchors = one GraphQL request = one rate-limit point. */
+  maxAnchorsPerTick: number;
+  /** Anchors are pruned past this; the signals themselves are kept forever. */
+  retentionDays: number;
+  /** Export each signal as an OTel span + metric (no-op when telemetry is off). */
+  otel: boolean;
+}
+
+/**
+ * GitHub team-based per-repo visibility in the admin dashboard (issue #169).
+ *
+ * **UI declutter, not access control.** Every list endpoint keeps returning
+ * global data; this only tells the dashboard which repos to show a given person
+ * by default. That is what makes the whole design safe to bound so aggressively
+ * — every budget below, when blown, simply shows more than strictly necessary.
+ *
+ * **Off by default**, because it needs the GitHub App's org `Members: read`
+ * permission, which existing installations have not consented to. Turning it on
+ * without that consent is harmless (resolution errors → everyone sees
+ * everything, as today) but pointless, so it must be asked for.
+ */
+export interface TeamVisibilityConfig {
+  /** Master switch. Off ⇒ `/me/repos` always returns the fail-open sentinel. */
+  enabled: boolean;
+  /** How long a resolved (or failed) answer is reused before re-resolving. */
+  ttlMinutes: number;
+  /**
+   * Cap on teams considered per login. Somebody in more teams than this fails
+   * open rather than costing a page-per-team walk on every cache miss.
+   */
+  maxTeamsPerUser: number;
+  /**
+   * Cap on 100-repo pages fetched per team. A team granted more repos than this
+   * is marked truncated, and its members fail open — a partial repo list would
+   * HIDE repos they can really see, which is worse than not filtering.
+   */
+  maxPagesPerTeam: number;
+  /** Absolute ceiling on GraphQL requests one resolution may issue. */
+  maxRequestsPerResolve: number;
 }
 
 let currentConfig: LastLightConfig | undefined;
@@ -209,6 +494,36 @@ export function getBotName(): string {
   return currentConfig?.botName || "last-light";
 }
 
+/**
+ * The OPERATOR's `review:` block, with the packaged defaults when config isn't
+ * loaded yet (unit tests).
+ *
+ * The router uses it for exactly one thing — dropping a `pr.labeled` whose
+ * label is not `review.requestLabel` — because that is a hard ROUTER-level
+ * ignore, not a mode decision: a label nobody configured is not an event about
+ * us at all, and resolving a whole `PrState` to discover that would make
+ * routine labelling cost a handful of GitHub calls per label per PR. Every
+ * actual trigger-mode decision stays in `resolveReviewTrigger`, at the dispatch
+ * gate, where the repo layer has been folded in.
+ */
+export function getReviewConfig(): ReviewConfig {
+  return currentConfig?.review || defaultReviewConfig();
+}
+
+/**
+ * The configured HOLD label, with the packaged default when config isn't loaded
+ * yet (unit tests) — see {@link LastLightConfig.holdLabel} and {@link HOLD_LABEL}.
+ *
+ * Read in exactly two places, both of which are choke points rather than
+ * policies: `resolveDispatchDisposition` (every PR-scoped route) and the
+ * router's subject-level ignore (every other workflow, PRs and issues alike).
+ * Nothing else may branch on it — a hold that some routes honour and others do
+ * not is worse than no hold at all.
+ */
+export function getHoldLabel(): string {
+  return currentConfig?.holdLabel || HOLD_LABEL;
+}
+
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
 function defaultConfigPath(): string {
@@ -246,12 +561,24 @@ function clonePublic(obj: Record<string, unknown> | null): Record<string, unknow
  * read from YAML, so the public config bundle should never legitimately
  * contain these — but an operator could paste one into config.yaml by mistake.
  * Redact defensively so the dashboard /config view can't echo it back.
+ *
+ * SINGLE SOURCE — do not copy this rule. It guards every surface that echoes
+ * YAML back to the dashboard: the global bundle here, and the admin routes'
+ * `GET /config` + `GET /repos/:owner/:repo/config` (the latter echoes a repo's
+ * UNTRUSTED, pre-validation `.lastlight/lastlight.yml`, so it is the one place a
+ * pasted credential could round-trip out). A second copy that fell behind this
+ * one would be a leak, not a style problem, so both are exported and imported
+ * rather than mirrored by hand.
  */
-const SENSITIVE_KEY_RE =
+export const SENSITIVE_KEY_RE =
   /secret|token|password|passwd|credential|private[-_]?key|signing[-_]?key|api[-_]?key|key[-_]?path|\bpem\b/i;
 
-/** Recursively redact secret-looking keys from a public (non-secret) config tree. */
-function redactPublic<T>(value: T): T {
+/**
+ * Recursively redact secret-looking keys from a public (non-secret) config tree.
+ * Exported alongside {@link SENSITIVE_KEY_RE} for the admin routes — same rule,
+ * same walk, one definition.
+ */
+export function redactPublic<T>(value: T): T {
   if (Array.isArray(value)) return value.map((v) => redactPublic(v)) as unknown as T;
   if (isPlainObject(value)) {
     const out: Record<string, unknown> = {};
@@ -358,7 +685,8 @@ export function loadConfig(): LastLightConfig {
     ? {
         appId: process.env.GITHUB_APP_ID,
         privateKeyPath: requireEnv("GITHUB_APP_PRIVATE_KEY_PATH"),
-        installationId: requireEnv("GITHUB_APP_INSTALLATION_ID"),
+        // Optional — see the type. Discovery is the real mechanism.
+        installationId: process.env.GITHUB_APP_INSTALLATION_ID || undefined,
       }
     : undefined;
 
@@ -393,6 +721,9 @@ export function loadConfig(): LastLightConfig {
           signingSecret: process.env.SLACK_SIGNING_SECRET || undefined,
           allowedUsers: (process.env.SLACK_ALLOWED_USERS || "").split(",").filter(Boolean),
           deliveryChannel: process.env.SLACK_DELIVERY_CHANNEL || process.env.SLACK_HOME_CHANNEL || undefined,
+          // The one Slack key that is NOT a credential, so it comes from the
+          // layered YAML rather than env — see `SlackConfig.repoChannels`.
+          repoChannels: fileCfg.slack.repoChannels,
         };
       })()
     : undefined;
@@ -413,12 +744,14 @@ export function loadConfig(): LastLightConfig {
     variants,
     maxTurns,
     sandbox,
+    kubernetes: fileCfg.kubernetes,
     buildAssets,
     buildAssetsDir,
     deploy: fileCfg.deploy,
     managedRepos: fileCfg.managedRepos,
     routes: fileCfg.routes,
     disabled: fileCfg.disabled,
+    crons: fileCfg.crons,
     otel,
     publicConfig: {
       default: redactPublic(clonePublic(defaultRaw)!),
@@ -431,11 +764,19 @@ export function loadConfig(): LastLightConfig {
     slack,
     approval,
     bootstrapLabel: fileCfg.bootstrapLabel,
+    holdLabel: fileCfg.holdLabel,
     exploreDefaultRepo: fileCfg.exploreDefaultRepo,
     publicUrl: resolvePublicUrl(),
-    reviewPostsCheck: fileCfg.reviewPostsCheck,
+    reviewPostsCheck: fileCfg.review.postsCheck,
+    review: fileCfg.review,
+    fix: fileCfg.fix,
+    dependencies: fileCfg.dependencies,
     concurrency: fileCfg.concurrency,
     cleanup: fileCfg.cleanup,
+    feedback: fileCfg.feedback,
+    digest: fileCfg.digest,
+    teamVisibility: fileCfg.teamVisibility,
+    repoConfig: fileCfg.repoConfig,
   };
   setRuntimeConfig(config);
   return config;
@@ -451,18 +792,33 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   botName: string;
   routes: RouteConfig;
   disabled: DisabledConfig;
+  crons: CronsConfig;
   models: ModelConfig;
   variants: VariantConfig;
   sandbox: { backend: SandboxBackend; maxTurns: number };
+  kubernetes?: Partial<KubernetesConfig>;
   buildAssets: BuildAssetsLocation;
   deploy: { version: string | null };
   approval: Record<string, boolean>;
   bootstrapLabel: string;
+  holdLabel: string;
   exploreDefaultRepo?: string;
-  reviewPostsCheck: boolean;
+  review: ReviewConfig;
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
   otel: OtelConfig;
   concurrency: { maxWorkflows: number; maxQueueWaitMs: number };
   cleanup: { sandbox: SandboxCleanupConfig };
+  feedback: FeedbackConfig;
+  digest: DigestConfig;
+  /**
+   * The non-secret half of the Slack config. Everything else about Slack is a
+   * credential and stays env-only; this map is deployment routing, and a map is
+   * impractical to express in an env var.
+   */
+  slack: { repoChannels: Record<string, string> };
+  teamVisibility: TeamVisibilityConfig;
+  repoConfig: RepoConfigPolicy;
 } {
   const managedRepos = stringArray(raw.managedRepos, "managedRepos");
   const botName = typeof raw.botName === "string" && raw.botName.trim() ? raw.botName.trim() : "last-light";
@@ -471,16 +827,23 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const modelsRaw = isPlainObject(raw.models) ? raw.models : {};
   const variantsRaw = isPlainObject(raw.variants) ? raw.variants : {};
   const sandboxRaw = isPlainObject(raw.sandbox) ? raw.sandbox : {};
+  const kubernetesRaw = isPlainObject(sandboxRaw.kubernetes) ? sandboxRaw.kubernetes : undefined;
   const buildAssetsRaw = isPlainObject(raw.buildAssets) ? raw.buildAssets : {};
   const deployRaw = isPlainObject(raw.deploy) ? raw.deploy : {};
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {};
+  const holdRaw = isPlainObject(raw.hold) ? raw.hold : {};
   const exploreRaw = isPlainObject(raw.explore) ? raw.explore : {};
   const reviewRaw = isPlainObject(raw.review) ? raw.review : {};
+  const fixRaw = isPlainObject(raw.fix) ? raw.fix : {};
+  const dependenciesRaw = isPlainObject(raw.dependencies) ? raw.dependencies : {};
   const approvalRaw = isPlainObject(raw.approval) ? raw.approval : {};
   const otelRaw = isPlainObject(raw.otel) ? raw.otel : {};
+  const cronsRaw = isPlainObject(raw.crons) ? raw.crons : {};
   const concurrencyRaw = isPlainObject(raw.concurrency) ? raw.concurrency : {};
+  const feedbackRaw = isPlainObject(raw.feedback) ? raw.feedback : {};
   const cleanupRaw = isPlainObject(raw.cleanup) ? raw.cleanup : {};
   const sandboxCleanupRaw = isPlainObject(cleanupRaw.sandbox) ? cleanupRaw.sandbox : {};
+  const repoConfigRaw = isPlainObject(raw.repoConfig) ? raw.repoConfig : {};
 
   const models: ModelConfig = { default: typeof modelsRaw.default === "string" ? modelsRaw.default : DEFAULT_MODEL };
   for (const [k, v] of Object.entries(modelsRaw)) if (typeof v === "string") models[k] = v;
@@ -491,11 +854,86 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
 
   const backend = sandboxBackend(sandboxRaw.backend, "sandbox.backend");
   const maxTurns = typeof sandboxRaw.maxTurns === "number" ? sandboxRaw.maxTurns : 200;
+  const kubernetes = kubernetesRaw ? normalizeKubernetesFileConfig(kubernetesRaw) : undefined;
   const buildAssets = buildAssetsLocation(buildAssetsRaw.location, "buildAssets.location");
   const deployVersion = typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
   const bootstrapLabel = typeof bootstrapRaw.label === "string" ? bootstrapRaw.label : "lastlight:bootstrap";
+  // Lenient like every other leaf here, and with one extra rule: an EMPTY
+  // string falls back to the packaged default rather than disabling the hold.
+  // `labels.includes("")` is never true, so an operator who wrote `hold.label:
+  // ""` would silently get a bot that can no longer be told to stay off
+  // anything — a failure mode with no symptom until it matters.
+  const holdLabel =
+    typeof holdRaw.label === "string" && holdRaw.label.trim() ? holdRaw.label.trim() : HOLD_LABEL;
   const exploreDefaultRepo = typeof exploreRaw.defaultRepo === "string" ? exploreRaw.defaultRepo : undefined;
-  const reviewPostsCheck = reviewRaw.postsCheck === true;
+  // ── The fix / dependencies / review policy blocks (issues #251, #252) ──────
+  //
+  // Lenient, like `crons` and `repoConfig.allowKeys` above and for the same
+  // reason: the SAME blocks are also read out of an untrusted repo layer, so a
+  // malformed leaf must degrade to the documented default rather than take the
+  // harness down at boot — and the two paths must not disagree about shape. The
+  // shipped defaults come from `lastlight-shared` so `config/default.yaml`,
+  // this normaliser and the repo-layer clamps can't drift apart.
+  const fixDefaults = defaultFixConfig();
+  const fix: FixConfig = {
+    // Whole numbers, matching the repo-layer clamp in `repo-config-schema.ts`
+    // (`positiveInt`). They used to accept any positive number here while the
+    // clamp required an integer, so an operator writing `maxAttempts: 2.5` got
+    // the REPO layer silently falling back to the shipped default while the
+    // operator layer kept 2.5 — two layers disagreeing about the same leaf
+    // (#256). `gateTimeoutSeconds` is a duration, not a count, so it stays a
+    // plain positive number.
+    maxAttempts: positiveInt(fixRaw.maxAttempts, "fix.maxAttempts") ?? fixDefaults.maxAttempts,
+    localIterations:
+      positiveInt(fixRaw.localIterations, "fix.localIterations") ?? fixDefaults.localIterations,
+    gateTimeoutSeconds: positiveNumber(fixRaw.gateTimeoutSeconds) ?? fixDefaults.gateTimeoutSeconds,
+    // 0 is meaningful here ("escalate the model from the first retry"), so this
+    // one accepts zero where the budgets above require a positive number.
+    escalateModelAfterAttempt:
+      nonNegativeNumber(fixRaw.escalateModelAfterAttempt) ?? fixDefaults.escalateModelAfterAttempt,
+    // An explicit `null` is the documented "no ceiling" value, distinct from an
+    // absent/typo'd key which falls back to the shipped ceiling.
+    maxCostUsd:
+      fixRaw.maxCostUsd === null ? null : nonNegativeNumber(fixRaw.maxCostUsd) ?? fixDefaults.maxCostUsd,
+    maxFlakyDeferrals:
+      positiveInt(fixRaw.maxFlakyDeferrals, "fix.maxFlakyDeferrals") ?? fixDefaults.maxFlakyDeferrals,
+    retryableClasses: diagnosisClassList(fixRaw.retryableClasses) ?? fixDefaults.retryableClasses,
+  };
+
+  const dependenciesDefaults = defaultDependenciesConfig();
+  const dependencies: DependenciesConfig = {
+    autoMergeMaxImpact: isDependencyImpact(dependenciesRaw.autoMergeMaxImpact)
+      ? dependenciesRaw.autoMergeMaxImpact
+      : dependenciesDefaults.autoMergeMaxImpact,
+    requireSettledChecks:
+      typeof dependenciesRaw.requireSettledChecks === "boolean"
+        ? dependenciesRaw.requireSettledChecks
+        : dependenciesDefaults.requireSettledChecks,
+    minSettledChecks: nonNegativeNumber(dependenciesRaw.minSettledChecks) ?? dependenciesDefaults.minSettledChecks,
+    auditComment:
+      typeof dependenciesRaw.auditComment === "boolean"
+        ? dependenciesRaw.auditComment
+        : dependenciesDefaults.auditComment,
+  };
+
+  const reviewDefaults = defaultReviewConfig();
+  const review: ReviewConfig = {
+    // Historically `review.postsCheck` defaulted OFF for anything that wasn't
+    // literally `true`; keep that exact reading.
+    postsCheck: reviewRaw.postsCheck === true,
+    trigger: isReviewTrigger(reviewRaw.trigger) ? reviewRaw.trigger : reviewDefaults.trigger,
+    requestLabel:
+      typeof reviewRaw.requestLabel === "string" && reviewRaw.requestLabel.trim()
+        ? reviewRaw.requestLabel.trim()
+        : null,
+    skipDraft: typeof reviewRaw.skipDraft === "boolean" ? reviewRaw.skipDraft : reviewDefaults.skipDraft,
+    // An explicit `[]` is meaningful — it turns the generated-only re-review
+    // gate OFF — so only a non-array falls back to the packaged list.
+    generatedPaths: Array.isArray(reviewRaw.generatedPaths)
+      ? reviewRaw.generatedPaths.filter((p): p is string => typeof p === "string" && !!p.trim()).map((p) => p.trim())
+      : reviewDefaults.generatedPaths,
+  };
+
   const maxWorkflows =
     typeof concurrencyRaw.maxWorkflows === "number" && concurrencyRaw.maxWorkflows > 0
       ? concurrencyRaw.maxWorkflows
@@ -522,30 +960,255 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
         : 40,
   };
 
+  // Feedback signals (issue #255). Lenient, like every block above: a mistyped
+  // key degrades to the shipped default rather than failing boot. `github`
+  // defaults to FALSE — the poller is the only part with a recurring cost, so
+  // it must be asked for, while `enabled` (Slack, event-driven, free) is on.
+  const feedback: FeedbackConfig = {
+    enabled: feedbackRaw.enabled !== false,
+    github: feedbackRaw.github === true,
+    pollSchedule:
+      typeof feedbackRaw.pollSchedule === "string" && feedbackRaw.pollSchedule.trim()
+        ? feedbackRaw.pollSchedule.trim()
+        : "*/30 * * * *",
+    windowDays:
+      typeof feedbackRaw.windowDays === "number" && feedbackRaw.windowDays > 0
+        ? feedbackRaw.windowDays
+        : 14,
+    maxAnchorsPerTick:
+      typeof feedbackRaw.maxAnchorsPerTick === "number" && feedbackRaw.maxAnchorsPerTick > 0
+        ? feedbackRaw.maxAnchorsPerTick
+        : 500,
+    retentionDays:
+      typeof feedbackRaw.retentionDays === "number" && feedbackRaw.retentionDays > 0
+        ? feedbackRaw.retentionDays
+        : 90,
+    otel: feedbackRaw.otel !== false,
+  };
+
+  // The weekly repo digest. Lenient like every block above. There is no
+  // `enabled` flag on purpose: the digest is gated on a CHANNEL resolving for a
+  // repo, so a deployment that configured no channel already gets nothing, and
+  // a second switch would just be a way to have the cron on and the feature off.
+  // `crons.disable: [repo-digest]` is the off switch.
+  // Operator channel routing, `"owner/repo"` → channel id. Silently drops a
+  // malformed entry rather than failing boot, like every block here: a typo'd
+  // repo key costs that repo its digest, which the admin `/config` view shows.
+  const slackRaw = isPlainObject(raw.slack) ? raw.slack : {};
+  const repoChannelsRaw = isPlainObject(slackRaw.repoChannels) ? slackRaw.repoChannels : {};
+  const slackRepoChannels: Record<string, string> = {};
+  for (const [repo, channel] of Object.entries(repoChannelsRaw)) {
+    if (typeof channel === "string" && channel.trim()) slackRepoChannels[repo.trim()] = channel.trim();
+  }
+
+  const digestRaw = isPlainObject(raw.digest) ? raw.digest : {};
+  const digest: DigestConfig = {
+    windowDays: positiveNumber(digestRaw.windowDays) ?? 7,
+    narrative: digestRaw.narrative !== false,
+    maxItems: positiveNumber(digestRaw.maxItems) ?? 5,
+    listItems: Math.min(positiveNumber(digestRaw.listItems) ?? 8, 25),
+    // Clamped, unlike the others: this one sizes a MODEL PROMPT, and a single
+    // pull-request body can run to 11 KB. An overlay typo of 500 would be a
+    // several-hundred-kilobyte request per repo per week.
+    detailItems: Math.min(positiveNumber(digestRaw.detailItems) ?? 25, 60),
+  };
+
+  // Team-based dashboard visibility (issue #169). Lenient like every block
+  // above. `enabled` defaults to FALSE: it needs the App's org `Members: read`
+  // permission, so it must be asked for after that re-consent. The budgets are
+  // the scaling contract — they bound what ONE cache miss can cost in an org
+  // with thousands of repos and hundreds of teams, and blowing any of them
+  // fails open rather than showing a partial list.
+  const teamVisibilityRaw = isPlainObject(raw.teamVisibility) ? raw.teamVisibility : {};
+  const teamVisibility: TeamVisibilityConfig = {
+    enabled: teamVisibilityRaw.enabled === true,
+    ttlMinutes: positiveNumber(teamVisibilityRaw.ttlMinutes) ?? 60,
+    maxTeamsPerUser: positiveNumber(teamVisibilityRaw.maxTeamsPerUser) ?? 50,
+    maxPagesPerTeam: positiveNumber(teamVisibilityRaw.maxPagesPerTeam) ?? 20,
+    maxRequestsPerResolve: positiveNumber(teamVisibilityRaw.maxRequestsPerResolve) ?? 60,
+  };
+
+  // Cron participation (issue #180). Lenient like the blocks above — a
+  // mistyped `crons.disable` degrades to "nothing listed" rather than taking
+  // the harness down at boot, because the same block is also read out of an
+  // untrusted repo layer and the two paths must not disagree about shape.
+  //
+  // The legacy `disabled.crons` list is UNIONED into `crons.disable` rather
+  // than replaced by it: existing deployments (and the asset loader, which
+  // still drops a `disabled.crons` cron at load time) are unaffected, and
+  // downstream code only has to read one list. `crons.enable` at the operator
+  // layer is accepted and kept for provenance/symmetry with the repo layer,
+  // but changes nothing — a cron is on unless something disables it.
+  const disabledCrons = optionalStringArray(disabledRaw.crons, "disabled.crons");
+  const crons: CronsConfig = {
+    enable: nonEmptyStringList(cronsRaw.enable) ?? [],
+    disable: uniqueNames([...(nonEmptyStringList(cronsRaw.disable) ?? []), ...disabledCrons]),
+  };
+
+  // Per-repo config bounds (issue #180). Defaults are deliberately inert: an
+  // upgrading deployment that says nothing gets exactly the shipped allow-list
+  // and no behaviour change until a repo commits `.lastlight/`. A malformed
+  // `allowKeys` / `allowedModels` falls back to the default rather than
+  // throwing — this block bounds an untrusted layer, so failing closed on a
+  // typo would be worse than the documented default.
+  const repoConfig: RepoConfigPolicy = {
+    enabled: repoConfigRaw.enabled !== false,
+    allowKeys: nonEmptyStringList(repoConfigRaw.allowKeys) ?? [...DEFAULT_REPO_CONFIG_ALLOW_KEYS],
+    allowedModels: nonEmptyStringList(repoConfigRaw.allowedModels) ?? null,
+    allowAssets: repoConfigRaw.allowAssets !== false,
+  };
+
   return {
     managedRepos,
     botName,
     routes,
     disabled: {
       workflows: optionalStringArray(disabledRaw.workflows, "disabled.workflows"),
-      crons: optionalStringArray(disabledRaw.crons, "disabled.crons"),
+      crons: disabledCrons,
       prompts: optionalStringArray(disabledRaw.prompts, "disabled.prompts"),
       skills: optionalStringArray(disabledRaw.skills, "disabled.skills"),
       agentContext: optionalStringArray(disabledRaw.agentContext, "disabled.agentContext"),
     },
+    crons,
     models,
     variants,
     sandbox: { backend, maxTurns },
+    kubernetes,
     buildAssets,
     deploy: { version: deployVersion },
     approval,
     bootstrapLabel,
+    holdLabel,
     exploreDefaultRepo,
-    reviewPostsCheck,
+    review,
+    fix,
+    dependencies,
     otel: normalizeOtelFileConfig(otelRaw),
     concurrency: { maxWorkflows, maxQueueWaitMs },
     cleanup: { sandbox: sandboxCleanup },
+    feedback,
+    digest,
+    slack: { repoChannels: slackRepoChannels },
+    teamVisibility,
+    repoConfig,
   };
+}
+
+/**
+ * The trimmed non-empty strings of an array value, or `undefined` when the
+ * value isn't an array at all (absent / null / scalar) — so the caller can
+ * apply its own default. An explicitly empty array stays empty rather than
+ * falling back, so `allowKeys: []` means "a repo may set nothing".
+ *
+ * Deliberately lenient (unlike {@link stringArray}, which throws): this backs
+ * config blocks whose job is to BOUND untrusted input, where a typo should
+ * degrade to the documented default rather than take the harness down at boot.
+ */
+function nonEmptyStringList(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim());
+}
+
+/**
+ * `fix.retryableClasses`, validated against the closed {@link DIAGNOSIS_CLASSES}
+ * enum: unknown members are DROPPED with a warning rather than kept or fatal.
+ *
+ * Dropping is the only correct direction — a class we do not recognise cannot
+ * be retried — but doing it silently is what made this worth fixing. A typo
+ * (`reproducable`) leaves a list that looks configured and behaves as if every
+ * diagnosis were terminal: the second dispatch escalates `not-retryable`, the
+ * PR gets `requires-human`, and nothing anywhere names the cause (#256).
+ *
+ * An explicitly EMPTY result is legal and stays empty (retries off for every
+ * class), but says so once — it is a big behaviour change to reach by accident.
+ * An absent/scalar key returns `undefined` so the caller applies the default.
+ */
+function diagnosisClassList(raw: unknown): string[] | undefined {
+  const names = nonEmptyStringList(raw);
+  if (names === undefined) return undefined;
+  const unknown = names.filter((n) => !isDiagnosisClass(n));
+  if (unknown.length) {
+    log.warn("Ignoring unrecognised diagnosis classes in fix.retryableClasses", {
+      unknown,
+      allowed: DIAGNOSIS_CLASSES,
+    });
+  }
+  const kept = names.filter(isDiagnosisClass);
+  if (!kept.length) {
+    log.warn(
+      "fix.retryableClasses is empty — every diagnosis will escalate " +
+        "not-retryable on the second dispatch, and no PR will be retried",
+    );
+  }
+  return kept;
+}
+
+/**
+ * A finite number > 0, or `undefined` so the caller can apply its own default.
+ * Lenient sibling of {@link nonEmptyStringList} for the numeric policy leaves.
+ */
+function positiveNumber(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : undefined;
+}
+
+/** As {@link positiveNumber}, but 0 is a legal value rather than a fallback trigger. */
+function nonNegativeNumber(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+}
+
+/**
+ * A whole number >= 0, or `undefined` so the caller can apply its own default —
+ * the same predicate the repo-layer clamp applies (`positiveInt` in
+ * `packages/shared/src/repo-config-schema.ts`).
+ *
+ * Unlike its lenient siblings above this one WARNS on rejection, because the
+ * two paths are not symmetric: a repo's bad leaf is reported back through a
+ * structured `RepoConfigWarning` the dashboard and CLI render, while an
+ * operator's is only ever seen if we say something. `fix.maxAttempts: 2.5`
+ * silently becoming the shipped default is the failure this closes (#256).
+ */
+function positiveInt(raw: unknown, path: string): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw === "number" && Number.isInteger(raw) && raw >= 0) return raw;
+  log.warn("Ignoring invalid config value — must be a whole number >= 0; falling back to default", {
+    path,
+    value: raw,
+  });
+  return undefined;
+}
+
+/** De-duplicate a name list, preserving first-seen order (used for unioned lists). */
+function uniqueNames(names: string[]): string[] {
+  return [...new Set(names)];
+}
+
+/**
+ * Guard the `sandbox.kubernetes` YAML block field-by-field, keeping only the
+ * present, correctly-typed fields — never fills in defaults (that's
+ * {@link resolveKubernetesConfig}'s job, so env can still override a value
+ * this block leaves unset).
+ */
+function normalizeKubernetesFileConfig(raw: Record<string, unknown>): Partial<KubernetesConfig> {
+  const out: Partial<KubernetesConfig> = {};
+  if (typeof raw.namespace === "string" && raw.namespace.trim()) out.namespace = raw.namespace.trim();
+  if (typeof raw.image === "string" && raw.image.trim()) out.image = raw.image.trim();
+  if (typeof raw.storageClassName === "string" && raw.storageClassName.trim()) {
+    out.storageClassName = raw.storageClassName.trim();
+  }
+  if (typeof raw.workspaceSize === "string" && raw.workspaceSize.trim()) out.workspaceSize = raw.workspaceSize.trim();
+  if (typeof raw.runAsUser === "number" && Number.isFinite(raw.runAsUser)) out.runAsUser = raw.runAsUser;
+  if (typeof raw.harnessEndpoint === "string" && raw.harnessEndpoint.trim()) {
+    out.harnessEndpoint = raw.harnessEndpoint.trim();
+  }
+  if (typeof raw.harnessNamespace === "string" && raw.harnessNamespace.trim()) {
+    out.harnessNamespace = raw.harnessNamespace.trim();
+  }
+  if (isPlainObject(raw.harnessPodLabels)) {
+    out.harnessPodLabels = stringRecord(raw.harnessPodLabels, "kubernetes.harnessPodLabels");
+  }
+  return out;
 }
 
 function normalizeRoutes(raw: unknown): RouteConfig {
@@ -557,7 +1220,15 @@ function normalizeRoutes(raw: unknown): RouteConfig {
   };
 }
 
-function defaultRouteConfig(): RouteConfig {
+/**
+ * The in-code route table used when no config has been loaded yet (tests, and
+ * any read before `loadConfig`). It MIRRORS the `routes:` block of
+ * `config/default.yaml` and must stay identical to it — the two drifted once
+ * (verify / qa_test / demo were added to the YAML only), which silently removed
+ * those workflows' `@bot` mention triggers from the dashboard's trigger table.
+ * `tests/config.test.ts` pins the two together.
+ */
+export function defaultRouteConfig(): RouteConfig {
   return {
     github: {
       issue_opened: "issue-triage",
@@ -566,8 +1237,17 @@ function defaultRouteConfig(): RouteConfig {
       pr_opened: "pr-review",
       pr_synchronize: "pr-review",
       pr_reopened: "pr-review",
+      // Phase 7's three new PR-review routes. Each falls back to `pr_review`
+      // when unset, so an overlay that pins only `pr_review` still redirects
+      // all of them.
+      pr_checks_settled: "pr-review",
+      pr_labeled: "pr-review",
+      pr_review_requested: "pr-review",
       approval_response: "approval-response",
       security_review: "security-review",
+      verify: "verify",
+      qa_test: "qa-test",
+      demo: "demo",
       pr_fix: "pr-fix",
       pr_review: "pr-review",
       pr_comment: "pr-comment",
@@ -586,6 +1266,9 @@ function defaultRouteConfig(): RouteConfig {
       triage: "issue-triage",
       review: "pr-review",
       security: "security-review",
+      verify: "verify",
+      qa_test: "qa-test",
+      demo: "demo",
       explore: "explore",
       answer: "answer",
       chat: "chat",
@@ -616,8 +1299,8 @@ function optionalStringArray(raw: unknown, path: string): string[] {
 }
 
 function sandboxBackend(raw: unknown, path: string): SandboxBackend {
-  if (raw === "gondolin" || raw === "docker" || raw === "smol" || raw === "none") return raw;
-  throw new Error(`${path} must be one of gondolin, docker, smol, none`);
+  if (raw === "gondolin" || raw === "docker" || raw === "smol" || raw === "none" || raw === "kubernetes") return raw;
+  throw new Error(`${path} must be one of gondolin, docker, smol, none, kubernetes`);
 }
 
 function buildAssetsLocation(raw: unknown, path: string): BuildAssetsLocation {
@@ -663,10 +1346,16 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
 
   const sandbox: Record<string, unknown> = {};
   const backend = (env.LASTLIGHT_SANDBOX || "").trim().toLowerCase();
-  if (backend === "gondolin" || backend === "docker" || backend === "smol" || backend === "none") {
+  if (
+    backend === "gondolin" ||
+    backend === "docker" ||
+    backend === "smol" ||
+    backend === "none" ||
+    backend === "kubernetes"
+  ) {
     sandbox.backend = backend;
   } else if (backend) {
-    console.warn(`[config] Unknown LASTLIGHT_SANDBOX value "${backend}" — using the file/default backend`);
+    log.warn("Unknown LASTLIGHT_SANDBOX value — using the file/default backend", { value: backend });
   }
   if (env.MAX_TURNS) sandbox.maxTurns = parseInt(env.MAX_TURNS, 10);
   if (Object.keys(sandbox).length) layer.sandbox = sandbox;
@@ -675,7 +1364,7 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   if (buildAssetsLoc === "repo" || buildAssetsLoc === "server") {
     layer.buildAssets = { location: buildAssetsLoc };
   } else if (buildAssetsLoc) {
-    console.warn(`[config] Unknown LASTLIGHT_BUILD_ASSETS value "${buildAssetsLoc}" — using the file/default location`);
+    log.warn("Unknown LASTLIGHT_BUILD_ASSETS value — using the file/default location", { value: buildAssetsLoc });
   }
 
   // Core-version pin override (CI can set this instead of editing config.yaml).
@@ -689,7 +1378,20 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   setBoolEnv(otel, "includeContent", env.LASTLIGHT_OTEL_INCLUDE_CONTENT);
   setBoolEnv(otel, "forwardToSandbox", env.LASTLIGHT_OTEL_FORWARD_TO_SANDBOX);
   setBoolEnv(otel, "strict", env.LASTLIGHT_OTEL_STRICT);
+  setBoolEnv(otel, "metrics", env.LASTLIGHT_OTEL_METRICS_ENABLED);
   if (Object.keys(otel).length) layer.otel = otel;
+
+  // Feedback signals (issue #255). The two switches are separate on purpose —
+  // `LASTLIGHT_FEEDBACK_GITHUB` turns on the poller (the part that costs API
+  // calls) without touching the free, event-driven Slack half.
+  const feedback: Record<string, unknown> = {};
+  setBoolEnv(feedback, "enabled", env.LASTLIGHT_FEEDBACK_ENABLED);
+  setBoolEnv(feedback, "github", env.LASTLIGHT_FEEDBACK_GITHUB);
+  setBoolEnv(feedback, "otel", env.LASTLIGHT_FEEDBACK_OTEL);
+  if (env.LASTLIGHT_FEEDBACK_WINDOW_DAYS) {
+    feedback.windowDays = parseInt(env.LASTLIGHT_FEEDBACK_WINDOW_DAYS, 10);
+  }
+  if (Object.keys(feedback).length) layer.feedback = feedback;
 
   const concurrency: Record<string, unknown> = {};
   if (env.MAX_CONCURRENT_WORKFLOWS) concurrency.maxWorkflows = parseInt(env.MAX_CONCURRENT_WORKFLOWS, 10);
@@ -698,6 +1400,7 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
 
   if (env.GITHUB_APP_BOT_NAME) layer.botName = env.GITHUB_APP_BOT_NAME;
   if (env.BOOTSTRAP_LABEL) layer.bootstrap = { label: env.BOOTSTRAP_LABEL };
+  if (env.LASTLIGHT_HOLD_LABEL) layer.hold = { label: env.LASTLIGHT_HOLD_LABEL };
   if (env.EXPLORE_DEFAULT_REPO) layer.explore = { defaultRepo: env.EXPLORE_DEFAULT_REPO };
   if (env.REVIEW_POSTS_CHECK !== undefined && env.REVIEW_POSTS_CHECK !== "") {
     layer.review = { postsCheck: parseBool(env.REVIEW_POSTS_CHECK) };
@@ -727,7 +1430,7 @@ function applyJsonStringMap(
       }
     }
   } catch (err: any) {
-    console.warn(`[config] Invalid ${label} JSON: ${err.message}`);
+    log.warn("Invalid JSON env var", { label, err });
   }
 }
 
@@ -738,6 +1441,7 @@ function normalizeOtelFileConfig(raw: Record<string, unknown>): OtelConfig {
     includeContent: raw.includeContent === true,
     forwardToSandbox: raw.forwardToSandbox === false ? false : true,
     strict: raw.strict === true,
+    metrics: raw.metrics === false ? false : true,
     collectorHosts: parseCollectorHosts(raw.collectorHosts, "otel.collectorHosts"),
   };
 }
@@ -794,6 +1498,72 @@ export function resolveVariant(variants: VariantConfig, taskType: string): strin
   return variants[taskType] || variants.default;
 }
 
+/** Hardcoded fallback for every {@link KubernetesConfig} field, used only when
+ *  neither an env override nor the runtime `sandbox.kubernetes` block supplies
+ *  a value. The image is registry-qualified (nearform's `publish.yml` pushes
+ *  it to GHCR) — the `kubernetes` backend runs on a real cluster, which can't
+ *  resolve the docker-local `lastlight-sandbox:latest` tag the other backends
+ *  use. `storageClassName` defaults to `""`, which {@link buildPvcManifest}
+ *  (`sandbox/k8s/pvc.ts`) omits from the PVC spec so k8s falls back to the
+ *  cluster's annotated default StorageClass — any cluster-specific class
+ *  (e.g. a fork's `truenas-iscsi`) is set via `LASTLIGHT_K8S_STORAGE_CLASS`
+ *  or the `sandbox.kubernetes.storageClassName` overlay key. */
+const K8S_DEFAULTS: KubernetesConfig = {
+  namespace: "lastlight-sandboxes",
+  image: "ghcr.io/nearform/lastlight-sandbox:latest",
+  storageClassName: "",
+  workspaceSize: "5Gi",
+  runAsUser: 10001,
+  harnessEndpoint: "http://lastlight.lastlight.svc.cluster.local:8644",
+  harnessNamespace: "lastlight",
+  harnessPodLabels: { "app.kubernetes.io/name": "lastlight" },
+};
+
+/** Parse a `k=v,k=v` env string into a label map; empty/malformed → `undefined`
+ *  so callers fall through to the runtime block, then {@link K8S_DEFAULTS}. */
+function parseLabels(raw: string | undefined): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const out: Record<string, string> = {};
+  for (const pair of raw.split(",")) {
+    const [k, v] = pair.split("=").map((s) => s.trim());
+    if (k && v) out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Resolve the `kubernetes` sandbox backend's config: env override → the
+ * runtime `sandbox.kubernetes` block (if config has been loaded) → hardcoded
+ * defaults. `getRuntimeConfig()` returns `undefined` rather than throwing
+ * when no config is loaded, so this is safe to call from tests or any code
+ * path that runs before `loadConfig()`.
+ */
+export function resolveKubernetesConfig(): KubernetesConfig {
+  const k = getRuntimeConfig()?.kubernetes ?? {};
+  const runAsUserEnv = parseInt(process.env.LASTLIGHT_K8S_RUN_AS_USER ?? "", 10);
+  return {
+    namespace: process.env.LASTLIGHT_K8S_NAMESPACE ?? k.namespace ?? K8S_DEFAULTS.namespace,
+    image: process.env.K8S_SANDBOX_IMAGE ?? k.image ?? K8S_DEFAULTS.image,
+    storageClassName:
+      process.env.LASTLIGHT_K8S_STORAGE_CLASS ?? k.storageClassName ?? K8S_DEFAULTS.storageClassName,
+    workspaceSize:
+      process.env.LASTLIGHT_K8S_WORKSPACE_SIZE ?? k.workspaceSize ?? K8S_DEFAULTS.workspaceSize,
+    runAsUser: Number.isFinite(runAsUserEnv) ? runAsUserEnv : (k.runAsUser ?? K8S_DEFAULTS.runAsUser),
+    harnessEndpoint:
+      process.env.LASTLIGHT_K8S_HARNESS_ENDPOINT ??
+      k.harnessEndpoint ??
+      K8S_DEFAULTS.harnessEndpoint,
+    harnessNamespace:
+      process.env.LASTLIGHT_K8S_HARNESS_NAMESPACE ??
+      k.harnessNamespace ??
+      K8S_DEFAULTS.harnessNamespace,
+    harnessPodLabels:
+      parseLabels(process.env.LASTLIGHT_K8S_HARNESS_POD_LABELS) ??
+      k.harnessPodLabels ??
+      K8S_DEFAULTS.harnessPodLabels,
+  };
+}
+
 /**
  * Resolved GitHub auth, discriminated by mechanism. GitHub App wins when
  * configured; the PAT is a fallback. `undefined` means no GitHub auth at all
@@ -801,7 +1571,7 @@ export function resolveVariant(variants: VariantConfig, taskType: string): strin
  * construction site (chat tools, harness client) branches identically.
  */
 export type ResolvedGithubAuth =
-  | { kind: "app"; appId: string; privateKeyPath: string; installationId: string }
+  | { kind: "app"; appId: string; privateKeyPath: string; installationId?: string }
   | { kind: "token"; token: string };
 
 export function resolveGithubAuth(

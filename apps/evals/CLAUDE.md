@@ -152,7 +152,9 @@ The release commit is conventionally just the two version-file lines
 | `src/discovery.ts` | Multi-root tier discovery (`tier.json` → `defaultWorkflow`). |
 | `src/init.ts` | `init` — scaffold + `gh repo create` an overlay+evals repo. |
 | `src/add-case.ts` | `add-case` — author an instance from a real GitHub PR/issue (`gh`+`git`: base/head SHAs, `test_patch`, red→green verdicts). |
-| `src/fake-github.ts` | In-process fake GitHub REST API (seeds fixtures, records mutations). |
+| `src/fake-github.ts` | In-process fake GitHub REST API (seeds fixtures, records mutations) **plus** the non-REST `fetchRepoConfigTree` seam for a repo's `.lastlight/`. |
+| `src/repo-config.ts` | Per-repo config layer (#180): reads a case's fixture tree and drives core's OWN resolver over it. The one file with deep `lastlight-core/dist/...` imports — see below. |
+| `src/pr-context.ts` | PR state machine (#251/#252): builds the `PrState` snapshot a case seeds and hands it to core's OWN `renderContext`. Same shape as `repo-config.ts` — the harness supplies what core normally reads from live GitHub, core does the projection. No second copy of it here. |
 | `src/seed.ts` / `src/grade.ts` / `src/metrics.ts` | Workspace seeding (vendored fixture, git-source `base_commit` checkout, OR pr-review PR-head checkout — all from the `./.eval-cache/` mirror) / grading (execution TAP, behavioral, + `gradeReview` judge) / token-cost roll-up. |
 | `src/judge.ts` | One-shot LLM client for `gradeReview` (pr-review only) — direct provider `fetch`, temp 0. `EVAL_JUDGE_MODEL` overrides `defaultJudgeModel()`. |
 | `scripts/import-martian.ts` | Import Martian's Code Review Bench offline set (50 PRs) into the `pr-review` tier (`gh`+`git`: resolves base/head, pins SHAs). |
@@ -162,7 +164,7 @@ The release commit is conventionally just the two version-file lines
 | `src/serve.ts` | Tiny dependency-free server: `/api/index` (fs scan), `/data/*` (raw artifacts), the SPA + fallback. |
 | `dashboard/` | The JSON-driven dashboard SPA (Vite + React + Tailwind/daisyUI + TanStack Query); ships prebuilt as `dashboard/dist`. |
 | `.claude/hooks/check-cli-skill.sh` | PostToolUse hook: nudges a skill review when `run.ts`/`init.ts` (the CLI surface) change. |
-| `datasets/<tier>/` | Shipped sample tiers (`instances.json` + `tier.json` [+ `repos/` `tests/`]). |
+| `datasets/<tier>/` | Shipped sample tiers (`instances.json` + `tier.json` [+ `repos/` `tests/` `context/<id>/` `lastlight/<id>/`]). |
 | `models.json` | Default + compare model registry. |
 
 ## Common tasks
@@ -197,9 +199,31 @@ The release commit is conventionally just the two version-file lines
   for the skill/agent to refine; `--no-validate` skips running the repo's tests.
   Suite mode (no TAP names ⇒ graded on the test command's exit code) covers
   non-`node --test` runners via `test_cmd`/`setup_cmd`.
+- **Give a case a committed `.lastlight/` (issue #180):** drop the tree at
+  `datasets/<tier>/lastlight/<instance_id>/` — `lastlight.yml`,
+  `workflows/prompts/*.md`, `skills/<name>/SKILL.md`, `agent-context/*.md`, laid
+  out exactly as the repo commits it. No instance field, no flag. Files the
+  bounds reject (a `workflows/*.yaml`, an out-of-bounds key, a symlink) are seeded
+  verbatim on purpose, so a case can measure the rejection path; what survived
+  lands on the result's `repoLayer`. The shipped `repo-config` tier is the worked
+  example.
 - **Add a tier:** drop a dir with `instances.json` + `tier.json`
   (`{ name, defaultWorkflow, description }`). No code change — `discovery.ts`
   finds it. The workflow must be resolvable by core's `getWorkflow`.
+- **Add a PR-scoped case (fix / dependency-merge):** give it a `pr_state` block.
+  The harness projects it through **core's own** `renderContext`
+  (`src/pr-context.ts`), which is where `{{ciSection}}`, `{{attempt}}`,
+  `{{mayMerge}}` and `{{priorNotes}}` come from in production — a case without
+  one runs those workflows with every `{{#if}}` guard on the empty branch.
+  Grade the verdict with `expect_markers` (`diagnosis_class`,
+  `assessment_impact`, …): for those tiers the marker line IS the deliverable,
+  and a wrong diagnosis touches no GitHub state, so `expect_github` alone scores
+  it green.
+- **Give a vendored case a real PR commit:** `repos/<id>/` is the base tree,
+  `repos-head/<id>/` is the PR's commit applied on the branch. Without the
+  second, base and head are identical and an agent that checks whether `main` is
+  broken too correctly answers yes — every red-dependency case then reads as
+  `upstream-broken`.
 - **Add a model:** add an entry to `models.json` `compare` (`id`, `label`,
   `envKey`); it runs only when its `envKey` is set.
 - **Eval an overlay's own workflows + datasets:**
@@ -212,7 +236,10 @@ The release commit is conventionally just the two version-file lines
   `getWorkflow`, `runWorkflow`, `ExecutorConfig`, `TemplateContext` from
   `lastlight/evals` (core's `src/evals-api.ts`). Never reach into
   `lastlight/dist/...` deep paths — the barrel is the stable contract. `init.ts`
-  also pulls `detectGh` / `bootstrapOverlayRepo` from it.
+  also pulls `detectGh` / `bootstrapOverlayRepo` from it, and `src/repo-config.ts`
+  pulls `resolveRepoRunConfig` / `invalidateRepoLayer` / `RunRepoConfig` (issue
+  #180). `"./dist/*"` is in core's `exports` map and so a deep path *would*
+  resolve — don't; add the symbol to `evals-api.ts` instead.
 - **The asset-bootstrap footgun (`bootstrap.ts`).** Core's `getWorkflow`
   resolves built-in workflows/skills/agent-context from `DEFAULT_ROOT =
   resolve(".")` (the cwd). In-repo that was the core checkout; here the cwd is
@@ -247,6 +274,12 @@ the whole point is to test what ships.
 
 ## How the mock actually works (don't break these)
 
+- **Auto-merge is GraphQL, not REST.** `github_enable_auto_merge` has no REST
+  equivalent — GitHub exposes `enablePullRequestAutoMerge` only through
+  GraphQL — so `fake-github.ts` serves `POST /graphql` for that one mutation. A
+  REST-only fake 404s the merge workflow's *preferred* path and the agent
+  silently falls back to a direct merge, which would make every
+  dependency-merge case measure the fallback.
 - **The base-URL seam.** The `github_*` tools are agentic-pi's *built-in*
   extension (not a swappable MCP server). agentic-pi ≥ 0.2.11 exposes
   `githubApiBaseUrl`; Last Light threads it `ExecutorConfig.githubApiBaseUrl →
@@ -268,6 +301,23 @@ the whole point is to test what ships.
 - **Gates need a DB.** A phase only pauses when `db && workflowId && the gate is
   enabled`. The eval passes **no `db`** and an **empty `approvalConfig`**, so
   every gate is a no-op. Don't add a db just for metrics (see below).
+- **The per-repo config layer is NOT a REST route (issue #180).** A managed repo's
+  committed `.lastlight/` is read by the HARNESS, not by an agent tool, through
+  `GitHubClient.fetchRepoConfigTree` — core's own seam for exactly this ("lives on
+  the client rather than raw octokit at the call site because the evals harness
+  swaps this whole seam for fixtures"). So `fake-github.ts` implements that
+  *method*, not the git-tree + blob endpoints underneath it, and a `FakeGitHub` is
+  structurally a `GitHubClient` for the one call `fetchRepoLayer` makes. A case
+  declares a layer by dropping the tree at `<datasetDir>/lastlight/<instance_id>/`
+  (presence IS the declaration — same zero-config spirit as `context/<id>/`); no
+  fixture ⇒ `status: "absent"` ⇒ **no layer**, which is the path every pre-#180
+  case takes and must stay bit-identical. `run-instance.ts` then hands the
+  resolved `RunRepoConfig` to `runWorkflow`'s 10th argument exactly as
+  `dispatchWorkflow` does in prod. Everything in between — bounds, unpack, merge,
+  provenance, warnings, the per-run asset resolver — is core's, unmodified; the
+  harness only supplies the two things core normally reads from boot state (the
+  base config to merge onto, projected from the ARM, and a per-run cache root).
+  See `src/repo-config.ts` and the shipped `repo-config` tier.
 - **Repo-context injection (pr-review).** `injectRepoContext` (`seed.ts`) writes a
   synthetic `AGENTS.md`/`CLAUDE.md` into the seeded checkout so the reviewing agent
   reads it (Pi auto-loads the first of `AGENTS.md`>`CLAUDE.md` walking up from the

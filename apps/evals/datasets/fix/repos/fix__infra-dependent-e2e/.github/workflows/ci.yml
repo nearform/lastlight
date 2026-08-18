@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm test
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Needs the deployed staging API and its credentials.
+      - run: node --test e2e/
+        env:
+          STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
+          STAGING_TOKEN: ${{ secrets.STAGING_TOKEN }}

@@ -35,6 +35,13 @@ export interface EventEnvelope {
    *  carry the settled check_suite's head_sha). Lets the dependency-workflow
    *  dedup guard skip a PR already assessed at this exact SHA. */
   headSha?: string;
+  /** Is this a dependency-update (Dependabot / Renovate) PR? Set on the
+   *  check-outcome events, where the connector already computes it — from the
+   *  head commit's author and the suite's head branch — to decide whether to
+   *  emit at all. Carried rather than discarded so the router can route
+   *  `pr.checks_failed` deterministically instead of paying a classifier call
+   *  to re-derive it from a prose sentence. */
+  isDependencyPr?: boolean;
   /** Login / username of the originator. */
   sender: string;
   /** Login of the issue/PR original author — distinct from `sender` (the
@@ -67,8 +74,14 @@ export type EventType =
   | "pr.reopened"
   | "pr.closed"
   | "pr.merged"
-  | "pr.checks_failed"    // a dependency PR's checks settled RED (aggregate)
+  | "pr.checks_failed"    // checks settled RED (aggregate) on a dependency PR,
+                          // or on any PR whose head commit the bot pushed
   | "pr.checks_passed"    // a dependency PR's checks settled GREEN (aggregate)
+  | "pr.checks_settled"   // checks settled EITHER COLOUR on a PR neither of the
+                          // two above claimed — `review.trigger: after-checks`
+  | "pr.labeled"          // a label was added; carries `addedLabel`
+  | "pr.review_requested" // a review was asked of us by name, or our own
+                          // `last-light/review` check's Re-run was pressed
   | "comment.created"
   | "pr_review.submitted"
   | "pr_review_comment.created"
@@ -93,8 +106,13 @@ The order of events through the system:
 1. Connector receives a platform payload.
 2. Connector runs auth (HMAC, allowlist, etc.).
 3. Connector decides whether the payload should produce an envelope at
-   all. Many GitHub actions (`labeled`, `edited`, etc.) drop here. See
-   [Integrations](/spec/03-integrations).
+   all. Many GitHub actions (`edited`, `unlabeled`, `assigned`, …) drop
+   here. `labeled` no longer does — `review.requestLabel` is the real
+   `on-request` review mechanism, since a GitHub App bot user cannot be
+   picked in the reviewer dropdown — but a label on an *issue* still falls
+   out with a null type, and the router hard-ignores every PR label that is
+   not the configured one, so the widening costs a `normalize()` call
+   rather than a dispatch. See [Integrations](/spec/03-integrations).
 4. Connector constructs the envelope and emits `event`.
 5. `ConnectorRegistry` forwards it to the central handler in the
    harness.
@@ -111,7 +129,10 @@ the workflow context where dispatched code may pull fields from it.
 | `repo` | always | never |
 | `issueNumber` | issues + PRs + comments + reviews | never |
 | `prNumber` | PR events + PR comments only | never |
-| `headSha` | `pr.checks_passed` / `pr.checks_failed` (the settled suite's head SHA) | never |
+| `headSha` | `pr.checks_passed` / `pr.checks_failed` / `pr.checks_settled` (the settled suite's head SHA) | never |
+| `isDependencyPr` | `pr.checks_passed` (always `true`) / `pr.checks_failed` (`true` for a bump, `false` for a PR the bot pushed to) / `pr.checks_settled` | never |
+| `addedLabel` | `pr.labeled` only — the label just added, matched against `review.requestLabel` | never |
+| `requestedReviewer` | `pr.review_requested` only — a login, or `team/<slug>` for a team request; set to our own `botLogin` when the request arrived as a Re-run on the `last-light/review` check | never |
 | `title` | issues + PRs (+ comments via parent) | never |
 | `issueAuthor` | issues + PRs + comments (parent author) | never |
 | `labels` | issues + PRs (snapshot at event time) | never |
@@ -159,6 +180,12 @@ artifact must fetch it via the platform API separately.
 at the call site (`src/index.ts:994`). A re-implementation that wants
 to surface delivery failures must thread errors through explicitly.
 
+Being a closure on the envelope is what makes it **decoratable**: the dispatcher
+replaces a messaging envelope's `reply` with one that also records the message
+into the thread's conversation (`withThreadTranscript`), so every non-chat
+messaging path gets a transcript without any handler knowing. The decorator
+sends first and records after, and a send failure still propagates.
+
 ## `raw`
 
 The original platform payload, plus connector-attached metadata for
@@ -203,6 +230,15 @@ never inspects `raw` — all routing decisions use top-level fields.
 - **No factory.** Connectors build literals inline. A re-implementation
   may add a builder helper but should not add a validation step — the
   connector is the contract.
+- **Not everything a platform sends is an event *here*.** A Slack emoji
+  reaction (issue #255) is deliberately NOT normalized into an envelope. The
+  envelope pipeline exists to decide **what work to do** — it runs the message
+  batcher, the intent classifier and the PR dispatch gate — and a 👍 asks for
+  none of that: it is a fact to record about work already done. Routing it
+  through would mean widening the closed `EventType` union, teaching the
+  batcher to skip it, and teaching the classifier to ignore it, for no
+  dispatch. It goes through a direct connector callback instead
+  (`onReactionAction`), the same shape as the approval-button hook.
 - **Fields look optional but aren't, for some events.** A workflow that
   expects `repo` should refuse to run if `envelope.repo` is missing.
   The schema is permissive; the consumers' contracts are not.

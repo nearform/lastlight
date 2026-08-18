@@ -1,5 +1,12 @@
 kind: review
 name: pr-review
+# PR-scoped (09-state-machine.md §S1/§S4): this workflow runs against a pull
+# request, so it crosses the PR-scoped dispatch gate — the run lock shared with
+# every other PR-scoped workflow, the per-head-SHA dedup, escalation, and the
+# resolved `PrState` snapshot on `context.prState`. A fork of this workflow that
+# drops the key silently loses all four; `validateAssets` warns when a
+# `routes.github.pr_*` target is missing it.
+pr_scoped: true
 classification:
   intent: review
   description: |
@@ -8,6 +15,12 @@ classification:
     - '"please review https://github.com/foo/bar/pull/42" → INTENT: REVIEW, REPO: foo/bar, ISSUE: 42, REASON: NONE'
     - '"can you review this?" with ISSUE TITLE "Add HTML sanitizer for messages" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
     - '"take a look at this PR when you get a chance" with ISSUE TITLE "Port fastify adapter" → INTENT: REVIEW, REPO: NONE, ISSUE: NONE, REASON: NONE'
+chat:
+  trigger: review PRs on owner/repo
+  summary: Review the open PRs on a repo
+  deflect:
+    - review PRs on <repo>
+    - check open PRs
 description: |
   Review a single GitHub pull request: read the diff, check for issues, and
   post structured feedback. Does not run a full build cycle and does not

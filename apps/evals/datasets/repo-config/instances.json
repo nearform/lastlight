@@ -1,0 +1,35 @@
+[
+  {
+    "instance_id": "repoconfig__prompt-override",
+    "repo": "lastlight-evals/lantern",
+    "workflow": "answer",
+    "problem_statement": "What does the `default` key under `models` mean?",
+    "issue": {
+      "number": 201,
+      "title": "What does the `default` key under `models` do?",
+      "body": "Reading the config docs I see a `models:` block with a `default:` key and a few per-task keys next to it. Which one wins for a task that isn't listed? Just want to understand the precedence — not a bug.",
+      "labels": [],
+      "user": "erin"
+    },
+    "expect_github": {
+      "labels_added": ["question", "repo-prompt-applied"]
+    }
+  },
+  {
+    "instance_id": "repoconfig__no-layer",
+    "repo": "lastlight-evals/plain",
+    "workflow": "answer",
+    "problem_statement": "What does the `default` key under `models` mean?",
+    "issue": {
+      "number": 202,
+      "title": "What does the `default` key under `models` do?",
+      "body": "Reading the config docs I see a `models:` block with a `default:` key and a few per-task keys next to it. Which one wins for a task that isn't listed? Just want to understand the precedence — not a bug.",
+      "labels": [],
+      "user": "erin"
+    },
+    "expect_github": {
+      "labels_added": ["question"],
+      "labels_absent": ["repo-prompt-applied"]
+    }
+  }
+]

@@ -17,15 +17,20 @@ import { SANDBOX_IMAGE_QA } from "../../sandbox/index.js";
 import { DEFAULT_ALLOWLIST, mergeAllowlist } from "../../sandbox/egress-allowlist.js";
 import {
   AGENTIC_PROFILE_FOR,
-  loadAgentContext,
+  agentContextFor,
+  provideAgentContext,
   type ExecutorConfig,
   type ExecutionResult,
   type GitSandboxAccess,
 } from "../github/profiles.js";
 import { AgenticShim } from "../event-shim.js";
+import { QuotaExceededError } from "../../sandbox/k8s/quota.js";
 import { projectSlugForCwd } from "../../session-log.js";
-import { recordError, recordExecutionMetrics } from "../../telemetry/index.js";
-import { recordPiEvent } from "../../telemetry/pi-events.js";
+import type { Span } from "@opentelemetry/api";
+import { recordError, recordExecutionMetrics, setSpanAttributes } from "../../telemetry/index.js";
+import { AgentSpanTree, recordPiEvent } from "../../telemetry/pi-events.js";
+import { OI, llmTokenAttributes } from "../../telemetry/openinference.js";
+import { logger } from "../../logging/logger.js";
 import {
   DEFAULT_MODEL,
   RunResultAccumulator,
@@ -38,6 +43,8 @@ import {
   skillBundleKey,
   stageArtifactsIn,
 } from "./shared.js";
+
+const log = logger("executor");
 
 /**
  * The **Sandbox orchestrator** — the deep module that owns one agent/command
@@ -116,14 +123,43 @@ export async function withSandbox<T>(
   }
 }
 
-/** Drop AGENTS.md into the workspace — agentic-pi reads it as system context. */
-function writeAgentsMd(hostWorkspaceDir: string, config: ExecutorConfig): void {
+/**
+ * Deliver the run's agent context (the bot's persona + hard rules) to the agent
+ * as `AGENTS.md`.
+ *
+ * ONE composition, two deliveries. The text comes from {@link agentContextFor},
+ * which prefers the value the runner resolved for this run — the only one that
+ * includes the target repo's additive `agent-context/*.md` (issue #180) — and
+ * falls back to the module-level loader when no repo layer applies. Composing it
+ * here rather than in each delivery path is what keeps the host-shared and
+ * kubernetes backends from drifting apart, and what stops a repo's own
+ * `security.md` sneaking in unfiltered: the additive-only rule was applied once,
+ * upstream, to the value we are handed.
+ *
+ *   - host-shared backends (docker/gondolin/none/smol): written into the
+ *     workspace, a sibling of any checkout. An empty context writes no file, so
+ *     the sandbox entrypoint's baked `cat /app/agent-context/*.md` fallback
+ *     still applies — a file written here always wins over it.
+ *   - kubernetes: `hostWorkspaceDir` is an in-pod path that doesn't exist on the
+ *     harness host, so a write here would always ENOENT. The adapter takes the
+ *     text through the {@link provideAgentContext} sink instead and serves it
+ *     over its own per-run init-fetch channel (see `KubernetesSandbox.runAgent`).
+ *     Offered even when empty, so the adapter never falls back to re-composing a
+ *     value we have already resolved.
+ *
+ * Best-effort: a failure here degrades the agent's context, it must never fail
+ * the phase.
+ */
+function deliverAgentContext(sandbox: Sandbox, ctx: SandboxRunContext, prov: ProvisionResult): void {
   try {
-    const md = loadAgentContext(config.agentContextDir);
-    if (md) writeFileSync(join(hostWorkspaceDir, "AGENTS.md"), md);
+    const md = agentContextFor(ctx.config);
+    if (ctx.backend === "kubernetes") {
+      provideAgentContext(sandbox, md);
+      return;
+    }
+    if (md) writeFileSync(join(prov.hostWorkspaceDir, "AGENTS.md"), md);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[executor] Could not write AGENTS.md: ${msg}`);
+    log.warn("Could not deliver AGENTS.md", { err });
   }
 }
 
@@ -153,25 +189,31 @@ function hostRepoDirFor(
  * `executeSmol` / `executeInProcess` — the three slightly-different fallback
  * paths are converged into the single catch below.
  */
-export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext): Promise<ExecutionResult> {
+export async function runSandboxedAgent(
+  prompt: string,
+  ctx: SandboxRunContext,
+  span?: Span,
+): Promise<ExecutionResult> {
   const { config, access } = ctx;
   const startTime = Date.now();
   const model = config.model || DEFAULT_MODEL;
+  const includeContent = config.otel?.includeContent === true;
   const thinking = coerceThinking(config.variant);
   const profile = access ? AGENTIC_PROFILE_FOR[access.profile] : undefined;
   const sessionsDir = resolveSessionsDir(config);
 
   return withSandbox(ctx, async (sandbox, prov) => {
-    console.log(`  [executor] Running agent (task: ${ctx.taskId}, sandbox: ${ctx.backend})`);
-    writeAgentsMd(prov.hostWorkspaceDir, config);
+    log.info("Running agent", { taskId: ctx.taskId, sandbox: ctx.backend });
+    // AGENTS.md — composed once, delivered the way this backend needs it
+    // (workspace write, or the k8s adapter's own init-fetch channel).
+    deliverAgentContext(sandbox, ctx, prov);
 
     // Stage this phase's skills (adapter decides symlink/copy + path mapping).
     let skillDirs: string[] | undefined;
     try {
       skillDirs = sandbox.stageSkills(skillBundleKey(config), config.skillPaths);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[executor] Could not stage skills: ${msg}`);
+      log.warn("Could not stage skills", { err });
     }
 
     // Server-mode build assets: stage in before, harvest after (even on error).
@@ -188,12 +230,17 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
       initialPrompt: prompt,
     });
     const acc = new RunResultAccumulator();
+    // OpenInference span tree (turn = LLM, tool = TOOL) nested under the active
+    // `lastlight.agent.execute` (AGENT) span. No-ops when telemetry is off (span
+    // undefined). The flat pi.* events (recordPiEvent) stay as a fallback.
+    const tree = new AgentSpanTree({ parent: span, includeContent, model });
     let notifiedSessionId = false;
     const onEvent = (record: SandboxEvent): void => {
       acc.feed(record);
       shim.feed(record as Parameters<typeof shim.feed>[0]);
+      tree.feed(record);
       recordPiEvent(record, {
-        includeContent: config.otel?.includeContent === true,
+        includeContent,
         surface: "agent",
         workflowName: config.telemetry?.workflowName,
         phaseName: config.telemetry?.phaseName,
@@ -240,18 +287,24 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
       // The single converged fallback path (was three near-identical catches).
       const msg = err instanceof Error ? err.message : String(err);
       const durationMs = Date.now() - startTime;
+      // A k8s ResourceQuota rejection is backpressure, not a sandbox failure:
+      // a distinct stop reason lets the runner requeue the run (spec/09-sandbox.md (Concurrency)).
+      const stopReason = err instanceof QuotaExceededError ? "error_quota" : "error_sandbox";
       const tags = {
         "sandbox.backend": ctx.backend,
         model,
         success: false,
-        stop_reason: "error_sandbox",
+        stop_reason: stopReason,
         "workflow.name": config.telemetry?.workflowName,
         "phase.name": config.telemetry?.phaseName,
       };
-      recordError("agent", err, tags);
+      // A quota rejection is backpressure, not an error — don't pollute the
+      // error telemetry with it (the run requeues; see the outer .catch).
+      if (!(err instanceof QuotaExceededError)) recordError("agent", err, tags);
       recordExecutionMetrics("agent", { ...tags, durationMs });
+      tree.end();
       const synthesizedId = await shim
-        .finalizeWithFallback(emptyResult("error_sandbox", durationMs), `exec-${basename(ctx.taskId)}`, msg)
+        .finalizeWithFallback(emptyResult(stopReason, durationMs), `exec-${basename(ctx.taskId)}`, msg)
         .catch(() => null);
       harvestArtifactsOut(artifacts);
       return {
@@ -261,11 +314,13 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
         error: msg,
         durationMs,
         sessionId: synthesizedId ?? undefined,
-        stopReason: "error_sandbox",
+        stopReason,
       } satisfies ExecutionResult;
     }
 
     harvestArtifactsOut(artifacts);
+    // Close any turn/tool spans still open before we decorate the agent span.
+    tree.end();
 
     // Reconstruct the RunResult: the in-process adapter returns its
     // authoritative one; docker/smol return undefined → build from the
@@ -297,7 +352,45 @@ export async function runSandboxedAgent(prompt: string, ctx: SandboxRunContext):
       "workflow.name": config.telemetry?.workflowName,
       "phase.name": config.telemetry?.phaseName,
     });
+    // Decorate the AGENT span with the run's total tokens + cost (so Phoenix
+    // shows real figures, not $0) via the scrubber-bypassing path. input/output
+    // text are content — gated behind LASTLIGHT_OTEL_INCLUDE_CONTENT.
+    setSpanAttributes(span, {
+      ...llmTokenAttributes({
+        input: finalResult.inputTokens,
+        output: finalResult.outputTokens,
+        cacheRead: finalResult.cacheReadInputTokens,
+        cacheWrite: finalResult.cacheCreationInputTokens,
+        cost: finalResult.costUsd,
+      }),
+      ...(includeContent
+        ? {
+            [OI.INPUT_VALUE]: prompt,
+            [OI.INPUT_MIME_TYPE]: "text/plain",
+            [OI.OUTPUT_VALUE]: finalResult.output,
+            [OI.OUTPUT_MIME_TYPE]: "text/plain",
+          }
+        : {}),
+    });
     return finalResult;
+  }).catch((err: unknown): ExecutionResult => {
+    // A ResourceQuota rejection during PROVISIONING (pod-create) throws OUTSIDE
+    // the in-callback runAgent catch above — `withSandbox` provisions before it
+    // runs `fn`. Surface it as an error_quota RESULT (not a throw) so the runner
+    // flags backpressure and requeues, instead of the run terminal-failing red.
+    // Mirrors runSandboxedCommand's outer catch; every other provision failure
+    // propagates unchanged (withSandbox already disposed).
+    if (err instanceof QuotaExceededError) {
+      return {
+        success: false,
+        output: "",
+        turns: 0,
+        error: err.message,
+        durationMs: Date.now() - startTime,
+        stopReason: "error_quota",
+      };
+    }
+    throw err;
   });
 }
 
@@ -360,6 +453,22 @@ export async function runSandboxedCommand(
   ctx: SandboxRunContext,
   cmdOpts: CommandRunOpts,
 ): Promise<ExecutionResult> {
+  // A type:script phase stages the script bytes into the sandbox by writing them
+  // to `prov.hostWorkspaceDir` — correct for every host-shared backend
+  // (docker/smol/none), where that dir is bind-mounted into the guest. The k8s
+  // backend has no host-shared workspace (skills + AGENTS.md reach the pod over
+  // HTTP init-fetch channels instead), and nothing stages the script into the
+  // pod, so the write would land on the harness FS and the pod would hit a
+  // confusing `No such file or directory`. Fail fast with an actionable message.
+  // type:bash is unaffected — it runs the command directly, staging no file.
+  if (ctx.backend === "kubernetes" && spec.kind === "script") {
+    throw new Error(
+      "type:script phases are not yet supported on the kubernetes backend " +
+        "(no host-shared workspace to stage the script into the pod); use a " +
+        "type:bash phase, or run this workflow on the docker/gondolin backend",
+    );
+  }
+
   const { config } = ctx;
   const model = config.model || DEFAULT_MODEL;
   const sessionsDir = resolveSessionsDir(config);
@@ -368,61 +477,80 @@ export async function runSandboxedCommand(
   const displayPrompt =
     spec.kind === "bash" ? `$ ${spec.command}` : `${spec.runtime} script: ${spec.name}\n\n${spec.script}`;
 
-  return withSandbox(ctx, async (sandbox, prov) => {
-    // Per-phase script-bundle dir, a workspace-root sibling of the skill bundle.
-    const scriptDir = spec.kind === "script" ? `${SCRIPT_BUNDLE_ROOT}/${spec.name}` : SCRIPT_BUNDLE_ROOT;
+  try {
+    return await withSandbox(ctx, async (sandbox, prov) => {
+      // Per-phase script-bundle dir, a workspace-root sibling of the skill bundle.
+      const scriptDir = spec.kind === "script" ? `${SCRIPT_BUNDLE_ROOT}/${spec.name}` : SCRIPT_BUNDLE_ROOT;
 
-    let command: string;
-    let toolInput: Record<string, unknown>;
-    if (spec.kind === "bash") {
-      command = spec.command;
-      toolInput = { command: spec.command };
-    } else {
-      const { fileName, run } = scriptInvocation(spec);
-      mkdirSync(join(prov.hostWorkspaceDir, scriptDir), { recursive: true });
-      writeFileSync(join(prov.hostWorkspaceDir, scriptDir, fileName), spec.script);
-      command = run(sandbox.sandboxPathFor(`${scriptDir}/${fileName}`));
-      toolInput = { command, runtime: spec.runtime };
-    }
+      let command: string;
+      let toolInput: Record<string, unknown>;
+      if (spec.kind === "bash") {
+        command = spec.command;
+        toolInput = { command: spec.command };
+      } else {
+        const { fileName, run } = scriptInvocation(spec);
+        mkdirSync(join(prov.hostWorkspaceDir, scriptDir), { recursive: true });
+        writeFileSync(join(prov.hostWorkspaceDir, scriptDir, fileName), spec.script);
+        command = run(sandbox.sandboxPathFor(`${scriptDir}/${fileName}`));
+        toolInput = { command, runtime: spec.runtime };
+      }
 
-    // Git identity + auth, same as the agent path (runSandboxedAgent) — so a
-    // commit made by a deterministic bash/script phase (e.g. a status-doc commit)
-    // is authored as the configured botLogin, not left identity-less. The
-    // caller's sandboxEnv (upstream phase outputs) wins on key collision.
-    //
-    // Also forward the GitHub API base-url override (evals fake): the agent path
-    // threads `githubApiBaseUrl` too, so a GitHub-mutating script (e.g.
-    // pr-review's post-review step) hits the fake in evals. Prod-inert —
-    // `githubApiBaseUrl` is undefined outside the eval harness.
-    const sandboxEnv = {
-      ...agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`, ctx.env.GIT_TOKEN),
-      ...(cmdOpts.sandboxEnv ?? {}),
-      ...(config.githubApiBaseUrl ? { GITHUB_API_URL: config.githubApiBaseUrl } : {}),
-    };
-    const res = await sandbox.runCommand(ctx.taskId, command, {
-      cwd: prov.agentCwd,
-      sandboxEnv,
-      timeoutSeconds,
+      // Git identity + auth, same as the agent path (runSandboxedAgent) — so a
+      // commit made by a deterministic bash/script phase (e.g. a status-doc commit)
+      // is authored as the configured botLogin, not left identity-less. The
+      // caller's sandboxEnv (upstream phase outputs) wins on key collision.
+      //
+      // Also forward the GitHub API base-url override (evals fake): the agent path
+      // threads `githubApiBaseUrl` too, so a GitHub-mutating script (e.g.
+      // pr-review's post-review step) hits the fake in evals. Prod-inert —
+      // `githubApiBaseUrl` is undefined outside the eval harness.
+      const sandboxEnv = {
+        ...agentGitIdentityEnv(getRuntimeConfig()?.botLogin ?? `${getBotName()}[bot]`, ctx.env.GIT_TOKEN),
+        ...(cmdOpts.sandboxEnv ?? {}),
+        ...(config.githubApiBaseUrl ? { GITHUB_API_URL: config.githubApiBaseUrl } : {}),
+      };
+      const res = await sandbox.runCommand(ctx.taskId, command, {
+        cwd: prov.agentCwd,
+        sandboxEnv,
+        timeoutSeconds,
+      });
+      const durationMs = Date.now() - startTime;
+      const sessionId =
+        cmdOpts.writeSession === false
+          ? null
+          : await writeCommandSession({
+              sessionsDir,
+              projectSlug: projectSlugForCwd(prov.agentCwd),
+              model,
+              displayPrompt,
+              toolName: "bash",
+              toolInput,
+              stdout: res.stdout,
+              stderr: res.stderr,
+              exitCode: res.exitCode,
+              durationMs,
+            });
+      if (sessionId && ctx.onSessionId) ctx.onSessionId(sessionId);
+      return buildCommandResult(res, durationMs, sessionId);
     });
-    const durationMs = Date.now() - startTime;
-    const sessionId =
-      cmdOpts.writeSession === false
-        ? null
-        : await writeCommandSession({
-            sessionsDir,
-            projectSlug: projectSlugForCwd(prov.agentCwd),
-            model,
-            displayPrompt,
-            toolName: "bash",
-            toolInput,
-            stdout: res.stdout,
-            stderr: res.stderr,
-            exitCode: res.exitCode,
-            durationMs,
-          });
-    if (sessionId && ctx.onSessionId) ctx.onSessionId(sessionId);
-    return buildCommandResult(res, durationMs, sessionId);
-  });
+  } catch (err: unknown) {
+    // A k8s ResourceQuota rejection on a bash/script phase is backpressure too:
+    // surface it as an error_quota RESULT so the runner requeues (spec/09-sandbox.md (Concurrency)).
+    // Every other throw propagates exactly as before (the engine records it as a
+    // failed phase) — we do NOT swallow real command failures.
+    if (err instanceof QuotaExceededError) {
+      const durationMs = Date.now() - startTime;
+      return {
+        success: false,
+        output: "",
+        turns: 0,
+        error: err.message,
+        durationMs,
+        stopReason: "error_quota",
+      } satisfies ExecutionResult;
+    }
+    throw err;
+  }
 }
 
 /**

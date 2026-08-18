@@ -14,7 +14,7 @@ vi.mock("#src/workflows/runner.js", () => ({
   runWorkflow: vi.fn(async () => ({ success: true, phases: [] })),
 }));
 
-import { createAdmissionController } from "#src/workflows/admission.js";
+import { createAdmissionController, K8S_SANITY_FUSE } from "#src/workflows/admission.js";
 import { StateDb } from "#src/state/db.js";
 import { resumeSimpleRun } from "#src/workflows/resume.js";
 import type { ResumeOptions } from "#src/workflows/resume.js";
@@ -50,6 +50,73 @@ function makeQueuedRun(db: StateDb, id: string, startedAt: string): void {
     currentPhase: "socratic",
     status: "queued",
     startedAt,
+  });
+}
+
+/**
+ * A queued GitHub-triggered run that left an enqueue ack behind — the shape
+ * `simple.ts` persists when it posts the "…is queued" comment (#244).
+ */
+function makeQueuedRunWithAck(
+  db: StateDb,
+  id: string,
+  startedAt: string,
+  commentId: number,
+): void {
+  db.runs.createRun({
+    id,
+    workflowName: "issue-triage",
+    triggerId: `acme/widgets#${id.slice(-2)}`,
+    owner: "acme",
+    repo: "widgets",
+    issueNumber: 215,
+    currentPhase: "triage",
+    status: "queued",
+    startedAt,
+  });
+  db.runs.mergeScratch(id, { queuedAck: { commentId } });
+}
+
+/**
+ * The same run, but written the way a process that predates the #279 backfill
+ * wrote it: the qualified `owner/repo` in the `repo` column. Raw SQL, because
+ * `createRun` now normalizes that shape away — which is the point.
+ *
+ * Octokit takes `(owner, repo)` positionally with no normalization of its own,
+ * so a row like this reaching `deleteComment` unsplit would address
+ * `/repos/acme/acme%2Fwidgets/...`.
+ */
+function makeLegacyQueuedRunWithAck(
+  db: StateDb,
+  id: string,
+  startedAt: string,
+  commentId: number,
+): void {
+  db.database
+    .prepare(
+      `INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, status, started_at, updated_at)
+       VALUES (?, 'issue-triage', ?, NULL, 'acme/widgets', 215, 'triage', 'queued', ?, ?)`,
+    )
+    .run(id, `acme/widgets#${id.slice(-2)}`, startedAt, startedAt);
+  db.runs.mergeScratch(id, { queuedAck: { commentId } });
+}
+
+function makeGithubStub() {
+  return {
+    postComment: vi.fn(async () => 1),
+    updateComment: vi.fn(async () => {}),
+    deleteComment: vi.fn(async () => {}),
+  };
+}
+
+function makeRunningRun(db: StateDb, id: string): void {
+  db.runs.createRun({
+    id,
+    workflowName: "build",
+    triggerId: `acme/widgets#${id.slice(-2)}`,
+    currentPhase: "architect",
+    status: "running",
+    startedAt: new Date().toISOString(),
   });
 }
 
@@ -223,6 +290,134 @@ describe("createAdmissionController", () => {
     expect(postComment).not.toHaveBeenCalled();
   });
 
+  // ── enqueue-ack lifecycle (issue #244) ──────────────────────────────────
+  //
+  // The ack promises "it'll start automatically when a slot frees", so it must
+  // not survive the run leaving the queue — otherwise a run that starts and
+  // then legitimately no-ops leaves that comment as its only visible trace.
+
+  it("admitNext: deletes the enqueue ack once the run is admitted", async () => {
+    makeQueuedRunWithAck(db, "run-ack", "2024-01-01T00:00:00.000Z", 5060108290);
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.admitNext();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(db.runs.getRun("run-ack")!.status).toBe("running");
+    expect(github.deleteComment).toHaveBeenCalledWith("acme", "widgets", 5060108290);
+    // Retracted, not rewritten — the run's own output is the real answer now.
+    expect(github.updateComment).not.toHaveBeenCalled();
+  });
+
+  it("admitNext: passes Octokit the BARE repo even for a legacy qualified row", async () => {
+    // The sharp edge of #279. This code path hands `(run.owner, run.repo)`
+    // straight to Octokit with no split of its own — correct only because the
+    // store normalizes on read-back. Without that shim this would call
+    // `deleteComment("", "acme/widgets", …)`.
+    makeLegacyQueuedRunWithAck(db, "run-legacy", "2024-01-01T00:00:00.000Z", 5060108290);
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.admitNext();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(github.deleteComment).toHaveBeenCalledWith("acme", "widgets", 5060108290);
+  });
+
+  it("sweep: rewrites a legacy qualified row's ack against the BARE repo", async () => {
+    // The updateComment twin of the above — the other Octokit call reachable
+    // from a stored repo identifier.
+    const oldTime = new Date(Date.now() - 3_600_000).toISOString();
+    makeLegacyQueuedRunWithAck(db, "gh-legacy-stale", oldTime, 777);
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.sweep();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const [owner, repo] = github.updateComment.mock.calls[0] as unknown as [string, string];
+    expect([owner, repo]).toEqual(["acme", "widgets"]);
+  });
+
+  it("admitNext: admits normally when no ack was recorded (Slack / failed post)", async () => {
+    makeQueuedRun(db, "run-noack", "2024-01-01T00:00:00.000Z");
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.admitNext();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(db.runs.getRun("run-noack")!.status).toBe("running");
+    expect(github.deleteComment).not.toHaveBeenCalled();
+  });
+
+  it("admitNext: a failing retract does not block the run from dispatching", async () => {
+    makeQueuedRunWithAck(db, "run-boom", "2024-01-01T00:00:00.000Z", 42);
+    const github = makeGithubStub();
+    github.deleteComment.mockRejectedValue(new Error("404 comment gone"));
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.admitNext();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(db.runs.getRun("run-boom")!.status).toBe("running");
+    expect(mockResumeSimpleRun).toHaveBeenCalledOnce();
+  });
+
+  it("sweep: rewrites the stale ack IN PLACE on TTL expiry rather than posting anew", async () => {
+    const oldTime = new Date(Date.now() - 3_600_000).toISOString();
+    makeQueuedRunWithAck(db, "gh-ack-stale", oldTime, 777);
+    const github = makeGithubStub();
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: { ...makeResumeOpts(db), github: github as never },
+      maxWorkflows: 4,
+      maxQueueWaitMs: 1_800_000,
+    });
+    await ctrl.sweep();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(db.runs.getRun("gh-ack-stale")!.status).toBe("cancelled");
+    expect(github.updateComment).toHaveBeenCalledOnce();
+    const [owner, repo, commentId, body] = github.updateComment.mock.calls[0] as unknown as [
+      string,
+      string,
+      number,
+      string,
+    ];
+    expect([owner, repo, commentId]).toEqual(["acme", "widgets", 777]);
+    expect(body).toMatch(/waiting too long/);
+    // Editing an existing comment, never adding one — that was the noise source.
+    expect(github.postComment).not.toHaveBeenCalled();
+  });
+
   it("start/stop: can start the interval and stop it without throwing", () => {
     const ctrl = createAdmissionController({
       db,
@@ -233,5 +428,58 @@ describe("createAdmissionController", () => {
     });
     ctrl.start();
     ctrl.stop(); // should not throw
+  });
+
+  it("backpressure mode promotes at most one queued run per admitNext", async () => {
+    makeQueuedRun(db, "run-01", "2024-01-01T00:00:00.000Z");
+    makeQueuedRun(db, "run-02", "2024-01-01T00:01:00.000Z");
+    makeQueuedRun(db, "run-03", "2024-01-01T00:02:00.000Z");
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: makeResumeOpts(db),
+      maxWorkflows: 1,
+      maxQueueWaitMs: 60_000,
+      backpressureMode: true,
+    });
+    await ctrl.admitNext();
+
+    expect(db.runs.countRunning()).toBe(1); // only ONE promoted despite 3 queued
+  });
+
+  it("default mode still fills up to maxWorkflows", async () => {
+    makeQueuedRun(db, "run-01", "2024-01-01T00:00:00.000Z");
+    makeQueuedRun(db, "run-02", "2024-01-01T00:01:00.000Z");
+    makeQueuedRun(db, "run-03", "2024-01-01T00:02:00.000Z");
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: makeResumeOpts(db),
+      maxWorkflows: 2,
+      maxQueueWaitMs: 60_000,
+      // backpressureMode omitted
+    });
+    await ctrl.admitNext();
+
+    expect(db.runs.countRunning()).toBe(2);
+  });
+
+  it("backpressure mode gates on the sanity fuse, not maxWorkflows", async () => {
+    // maxWorkflows=1 with one already running would block default mode;
+    // backpressure mode admits because countRunning (1) < K8S_SANITY_FUSE.
+    makeRunningRun(db, "running-1");
+    makeQueuedRun(db, "run-01", "2024-01-01T00:00:00.000Z");
+
+    const ctrl = createAdmissionController({
+      db,
+      resumeOpts: makeResumeOpts(db),
+      maxWorkflows: 1,
+      maxQueueWaitMs: 60_000,
+      backpressureMode: true,
+    });
+    await ctrl.admitNext();
+
+    expect(db.runs.countRunning()).toBe(2);
+    expect(K8S_SANITY_FUSE).toBeGreaterThan(100);
   });
 });

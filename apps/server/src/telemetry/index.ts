@@ -1,12 +1,17 @@
 import { context, SpanStatusCode, trace, metrics, type Span, type SpanOptions } from "@opentelemetry/api";
 import { NodeSDK } from "@opentelemetry/sdk-node";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import { OTLPTraceExporter as OTLPTraceExporterProto } from "@opentelemetry/exporter-trace-otlp-proto";
+import { OTLPTraceExporter as OTLPTraceExporterJson } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPMetricExporter as OTLPMetricExporterProto } from "@opentelemetry/exporter-metrics-otlp-proto";
+import { OTLPMetricExporter as OTLPMetricExporterJson } from "@opentelemetry/exporter-metrics-otlp-http";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
 import type { OtelConfig } from "../config/config.js";
 import { OTEL_COLLECTOR_SANDBOX_ENDPOINT } from "../sandbox/egress-firewall-config.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("otel");
 
 export type TelemetryPrimitive = string | number | boolean;
 export type TelemetryAttributes = Record<string, unknown>;
@@ -47,6 +52,19 @@ const METRIC_ATTR_ALLOWLIST = new Set([
   "success",
   "stop_reason",
   "github.profile",
+  // Feedback signals (issue #255). Low-cardinality by construction — five
+  // sentiments, a dozen emoji, two sources, four anchor kinds — so they are
+  // safe as metric dimensions. The reactor is deliberately NOT here: it is a
+  // person, and it would make every series unbounded.
+  "feedback.source",
+  "feedback.sentiment",
+  "feedback.emoji",
+  "feedback.anchor.kind",
+  // Sandbox sweep (issue #106). `SweepTrigger` is a closed union of four —
+  // cron | manual | startup | library — so it is bounded by construction. It is
+  // also the dimension the `{trigger="cron"}` liveness query selects on: absent
+  // here, `safeMetricAttributes` drops it and every sweep series is emitted flat.
+  "trigger",
 ]);
 
 const EXPLICIT_CONTENT_ATTR_ALLOWLIST = new Set([
@@ -59,6 +77,34 @@ const EXPLICIT_CONTENT_ATTR_ALLOWLIST = new Set([
 let sdk: NodeSDK | undefined;
 let enabled = false;
 let includeContent = false;
+
+/**
+ * Resolve the OTLP/HTTP encoding for a signal from the standard env vars —
+ * signal-specific (`OTEL_EXPORTER_OTLP_{TRACES,METRICS}_PROTOCOL`) wins over the
+ * generic `OTEL_EXPORTER_OTLP_PROTOCOL`, defaulting to `http/protobuf` (the OTLP
+ * spec default). We bundle only the two HTTP transports; `grpc` (or anything
+ * unrecognized) warns and falls back to protobuf. Protobuf is the right default:
+ * many OTLP backends (e.g. Arize Phoenix) accept protobuf only and 415 on JSON.
+ */
+export function resolveOtlpProtocol(signalEnv: string | undefined): "http/protobuf" | "http/json" {
+  const raw = (signalEnv || process.env.OTEL_EXPORTER_OTLP_PROTOCOL || "").trim().toLowerCase();
+  if (raw === "http/json") return "http/json";
+  if (raw === "" || raw === "http/protobuf") return "http/protobuf";
+  log.warn("Unsupported OTEL_EXPORTER_OTLP_PROTOCOL; using http/protobuf", { raw });
+  return "http/protobuf";
+}
+
+function makeTraceExporter() {
+  return resolveOtlpProtocol(process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL) === "http/json"
+    ? new OTLPTraceExporterJson()
+    : new OTLPTraceExporterProto();
+}
+
+function makeMetricExporter() {
+  return resolveOtlpProtocol(process.env.OTEL_EXPORTER_OTLP_METRICS_PROTOCOL) === "http/json"
+    ? new OTLPMetricExporterJson()
+    : new OTLPMetricExporterProto();
+}
 const tracer = () => trace.getTracer("lastlight");
 const meter = () => metrics.getMeter("lastlight");
 
@@ -75,6 +121,32 @@ export function isTelemetryEnabled(): boolean {
 
 export function telemetryIncludesContent(): boolean {
   return includeContent;
+}
+
+/**
+ * Set attributes DIRECTLY on a span, bypassing {@link safeSpanAttributes}' content
+ * scrubber. Use only for values that are non-sensitive by construction (span
+ * kinds, token counts, cost, model ids) or that the caller has already gated
+ * behind the include-content flag — the scrubber's `token`/`prompt`/`content`
+ * regex would otherwise silently strip OpenInference keys like
+ * `llm.token_count.prompt` and `input.value`. No-op when telemetry is disabled or
+ * the span is undefined. Strings are truncated to a generous limit; non-finite
+ * numbers and other non-primitives are skipped.
+ */
+export function setSpanAttributes(span: Span | undefined, attrs: TelemetryAttributes = {}): void {
+  // A defined span implies telemetry is enabled (withSpan hands out undefined
+  // when it isn't), so gating on the span alone is sufficient — and keeps this
+  // unit-testable with a stub span without booting the SDK.
+  if (!span) return;
+  for (const [key, value] of Object.entries(attrs)) {
+    if (typeof value === "string") {
+      span.setAttribute(key, value.length > 4096 ? value.slice(0, 4095) + "…" : value);
+    } else if (typeof value === "number" && Number.isFinite(value)) {
+      span.setAttribute(key, value);
+    } else if (typeof value === "boolean") {
+      span.setAttribute(key, value);
+    }
+  }
 }
 
 export function safeSpanAttributes(attrs: TelemetryAttributes = {}): Record<string, TelemetryPrimitive> {
@@ -108,19 +180,26 @@ export async function initTelemetry(config: OtelConfig, opts: { packageVersion?:
       [ATTR_SERVICE_NAME]: config.serviceName,
       ...(opts.packageVersion ? { [ATTR_SERVICE_VERSION]: opts.packageVersion } : {}),
     });
+    // Metrics are opt-out: a traces-only backend (e.g. Arize Phoenix) rejects the
+    // OTLP metrics signal, so skip the reader entirely when disabled — the meter()
+    // API then hands back a no-op meter and recordExecutionMetrics/… silently do
+    // nothing, while traces still flow.
+    const metricsEnabled = config.metrics !== false;
     sdk = new NodeSDK({
       resource,
-      traceExporter: new OTLPTraceExporter(),
-      metricReader: new PeriodicExportingMetricReader({ exporter: new OTLPMetricExporter() }),
+      traceExporter: makeTraceExporter(),
+      ...(metricsEnabled
+        ? { metricReader: new PeriodicExportingMetricReader({ exporter: makeMetricExporter() }) }
+        : {}),
     });
+    if (!metricsEnabled) log.info("Metrics disabled (traces only)");
     await sdk.start();
     enabled = true;
   } catch (err) {
     sdk = undefined;
     enabled = false;
-    const msg = err instanceof Error ? err.message : String(err);
     if (config.strict) throw err;
-    console.warn(`[otel] initialization failed; continuing without telemetry: ${msg}`);
+    log.warn("Initialization failed; continuing without telemetry", { err });
   }
 }
 
@@ -130,8 +209,7 @@ export async function shutdownTelemetry(): Promise<void> {
   sdk = undefined;
   enabled = false;
   await active.shutdown().catch((err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[otel] shutdown failed: ${msg}`);
+    log.warn("Shutdown failed", { err });
   });
 }
 
@@ -169,8 +247,65 @@ export function recordExecutionMetrics(surface: "workflow" | "phase" | "agent" |
   m.createCounter("lastlight.execution.count").add(1, metricAttrs);
 }
 
+/** What one sandbox sweep observed and did. Mirrors the summary log event so the
+ *  two signals never disagree — see {@link recordSandboxSweep}. */
+export interface SandboxSweepCounts {
+  pvcsFound: number;
+  pvcsLive: number;
+  pvcsStale: number;
+  pvcsCurrent: number;
+  deletedStale: number;
+  deletedOverCap: number;
+  deletedFailed: number;
+  durationMs: number;
+}
+
+/**
+ * Metrics for one sweep run, emitted whether or not anything was reclaimed.
+ *
+ * The `runs` counter is the liveness signal: a job that stops running stops
+ * incrementing it, which is directly alertable
+ * (`increase(lastlight_sandbox_sweep_runs_total[2h]) == 0`) without parsing logs
+ * or depending on log retention. `pvcs{state="found"}` climbing while `deleted`
+ * stays flat is a sweep that runs but never reclaims.
+ *
+ * Deletions are split by the policy that evicted (`stale` vs `over_cap`) because
+ * the two call for different responses — shortening `retentionHours` versus
+ * raising `maxIdlePVCs` — and a combined total hides which one is binding.
+ */
+export function recordSandboxSweep(counts: SandboxSweepCounts, attrs: TelemetryAttributes = {}): void {
+  if (!enabled) return;
+  const metricAttrs = safeMetricAttributes(attrs);
+  const m = meter();
+  m.createCounter("lastlight.sandbox.sweep.runs").add(1, metricAttrs);
+  m.createHistogram("lastlight.sandbox.sweep.duration_ms").record(counts.durationMs, metricAttrs);
+  const deleted = m.createCounter("lastlight.sandbox.sweep.deleted");
+  deleted.add(counts.deletedStale, { ...metricAttrs, policy: "stale" });
+  deleted.add(counts.deletedOverCap, { ...metricAttrs, policy: "over_cap" });
+  m.createCounter("lastlight.sandbox.sweep.delete_failures").add(counts.deletedFailed, metricAttrs);
+  // A gauge, not a counter: this is the population observed this run, not a
+  // cumulative total. OTel attributes are flat, so the breakdown the log event
+  // nests under `pvcs` becomes a `state` dimension here.
+  const pvcs = m.createGauge("lastlight.sandbox.sweep.pvcs");
+  pvcs.record(counts.pvcsFound, { ...metricAttrs, state: "found" });
+  pvcs.record(counts.pvcsLive, { ...metricAttrs, state: "live" });
+  pvcs.record(counts.pvcsStale, { ...metricAttrs, state: "stale" });
+  pvcs.record(counts.pvcsCurrent, { ...metricAttrs, state: "current" });
+}
+
 export function recordWorkflowRunStart(attrs: TelemetryAttributes = {}): void {
   if (enabled) meter().createCounter("lastlight.workflow.run.started").add(1, safeMetricAttributes({ ...attrs, surface: "workflow" }));
+}
+
+/**
+ * One increment per cron FIRE, keyed by `cron.name` / `cron.status`.
+ *
+ * Counts fires, not the runs a fire dispatches — a zero-discovery fire
+ * dispatches nothing, so `lastlight.workflow.run.started` cannot show that a
+ * backstop cron is alive (issue #341).
+ */
+export function recordCronFire(attrs: TelemetryAttributes = {}): void {
+  if (enabled) meter().createCounter("lastlight.cron.fire").add(1, safeMetricAttributes({ ...attrs, surface: "cron" }));
 }
 
 export function recordWorkflowRunEnd(attrs: TelemetryAttributes = {}): void {
@@ -242,7 +377,7 @@ export function getOtelEnvForSandbox(env: NodeJS.ProcessEnv = process.env): Reco
     // down with it. OTLP header values legitimately almost never contain a
     // single quote; when they do, the operator gets a clear log line.
     if (/[\r\n']/.test(value)) {
-      console.warn(`[otel] not forwarding ${key}: value contains a newline or single quote`);
+      log.warn("Not forwarding OTEL env var: value contains a newline or single quote", { key });
       continue;
     }
     out[key] = value;

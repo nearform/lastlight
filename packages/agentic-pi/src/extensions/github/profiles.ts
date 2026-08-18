@@ -8,9 +8,17 @@
  *
  * Mirrors lastlight's `GITHUB_PERMISSION_PROFILES` token scopes:
  *   read         → contents:r, issues:r, pull_requests:r, metadata:r
- *   issues-write → ditto + issues:w
- *   review-write → ditto + pull_requests:w
- *   repo-write   → ditto + contents:w
+ *   issues-write → ditto + issues:w + pull_requests:w
+ *   review-write → same scopes as issues-write
+ *   repo-write   → ditto + contents:w + workflows:w
+ *
+ * `issues-write` and `review-write` carry the same TOKEN scopes: commenting or
+ * labelling on a pull request requires `pull_requests: write` (GitHub checks
+ * the target's type, not the endpoint's path — lastlight issue #239), and
+ * that is also the coarsest grain GitHub offers. The profiles diverge here, in
+ * the tool sets: only `review-write`+ registers `github_create_pull_request` /
+ * `github_create_pull_request_review`. This gate — not the token — is what
+ * keeps a comment workflow from submitting a formal review.
  */
 
 export type GitAccessProfile = "read" | "issues-write" | "review-write" | "repo-write";
@@ -35,6 +43,13 @@ const READ_TOOLS = [
   "github_get_pull_request_diff",
   "github_list_pull_request_reviews",
   "github_list_pull_request_review_comments",
+  // Actions / CI read. Read-only evidence about why CI failed, so it belongs in
+  // the base profile even though the underlying App permission (`Actions: read`)
+  // is separate and optional — the tools degrade to a "not permitted" result
+  // rather than an error when it is absent.
+  "github_list_workflow_runs",
+  "github_list_workflow_run_jobs",
+  "github_get_job_logs",
   // search
   "github_search_repositories",
   "github_search_issues",
@@ -62,7 +77,7 @@ const REPO_WRITE_TOOLS = [
   ...REVIEW_WRITE_TOOLS,
   "github_clone_repo",
   "github_create_or_update_file",
-  "github_push_files",
+  "github_publish",
   "github_create_branch",
   "github_merge_pull_request",
   "github_enable_auto_merge",

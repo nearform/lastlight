@@ -16,6 +16,12 @@ export interface Session {
   live?: boolean;
   /** Origin platform for chat sessions ("slack" / "cli"). */
   platform?: string | null;
+  /**
+   * `owner/repo` this session ran against, when resolvable — the key the
+   * per-repo visibility filter matches on. Null (a repo-less chat thread) is
+   * never filtered out.
+   */
+  repo?: string | null;
   // Optional fields from execution correlation
   title?: string | null;
   estimated_cost_usd?: number | null;
@@ -35,19 +41,34 @@ export interface Message {
   [k: string]: unknown;
 }
 
+/**
+ * A row from `GET /admin/api/executions`. Hand-mirrors `ExecutionRecord`
+ * (`apps/server/src/state/execution-store.ts`) — camelCase, because that
+ * endpoint returns the record verbatim.
+ *
+ * It was snake_case until issue #285, matching the raw table rather than the
+ * type the endpoint claimed to return: the query behind it was a `SELECT *`
+ * cast to `ExecutionRecord[]`, so the wire shape really was snake_case and the
+ * server type was the one that lied. Aliasing the query settled it the other
+ * way, and no component reads this yet, so the mirror simply follows.
+ */
 export interface Execution {
   id: string;
-  trigger_type: string;
-  trigger_id: string;
+  triggerType: string;
+  triggerId: string;
+  triggeredBy?: string;
   skill: string;
-  repo: string | null;
-  issue_number: number | null;
-  started_at: string;
-  finished_at: string | null;
-  success: number | null;
-  error: string | null;
-  turns: number | null;
-  duration_ms: number | null;
+  owner?: string;
+  /** BARE repo name — join with `owner` for display. */
+  repo?: string;
+  issueNumber?: number;
+  startedAt: string;
+  finishedAt?: string;
+  success?: boolean;
+  error?: string;
+  turns?: number;
+  durationMs?: number;
+  workflowRunId?: string;
 }
 
 export interface PhaseHistoryEntry {
@@ -65,6 +86,34 @@ export interface ConfigBundle {
   sources: Record<string, unknown>;
 }
 
+/**
+ * Which managed repos to show the logged-in user by default — the admin
+ * `/me/repos` endpoint (issue #169).
+ *
+ * `repos: null` is the fail-open sentinel: **no filter, show everything.** It is
+ * what a password/Slack login, an `allowedOrg: "*"` deployment, a disabled
+ * feature, an over-budget resolution and a GitHub error all return. Treat any
+ * failure to fetch this the same way — the server still returns global data on
+ * every list endpoint, so filtering is a convenience, never a boundary.
+ */
+export interface MeRepos {
+  repos: string[] | null;
+  /** Coarse "we have a resolved answer for this person" flag, for a UI hint. */
+  synced: boolean;
+  reason:
+    | "ok"
+    | "no-identity"
+    | "disabled"
+    | "unavailable"
+    | "no-teams"
+    | "too-many-teams"
+    | "truncated"
+    | "budget"
+    | "error";
+  teams: Array<{ org: string; slug: string }>;
+  syncedAt: string | null;
+}
+
 /** Effective managed-repo list — see the admin `/managed-repos` endpoint. */
 export interface ManagedRepos {
   /** The overlay `managedRepos` list (empty when unset). */
@@ -77,6 +126,38 @@ export interface ManagedRepos {
   source: "config" | "installation";
   /** ISO timestamp of the last installation-repo cache update, or null. */
   refreshedAt: string | null;
+  /**
+   * Every ACCOUNT the GitHub App is installed on. An App is installed per
+   * account and each installation mints its own tokens, so this is the list
+   * that determines which owners the harness can act on at all.
+   */
+  installations: {
+    id: string;
+    account: string;
+    accountType: string;
+    repositorySelection: "all" | "selected";
+    suspended: boolean;
+    repoCount: number;
+    /**
+     * GitHub's settings page for this install (repo grant / suspend /
+     * uninstall). Null when the account type isn't known yet, since the path
+     * shape depends on it — render plain text rather than a guessed link.
+     */
+    htmlUrl: string | null;
+  }[];
+  /**
+   * Owners appearing in `effective` that have NO installation — every run
+   * against them will fail to mint a token. Empty is the healthy state.
+   */
+  uninstalledOwners: string[];
+  /** GitHub's "install this App on an account" page, for fixing the above. */
+  appInstallUrl: string;
+  /**
+   * Per-effective-repo `.lastlight/` presence, read from the harness's in-memory
+   * cache only (no network). `hasRepoConfig: false` means "nothing cached yet",
+   * not necessarily "no repo config" — opening the repo's Config tab settles it.
+   */
+  repoConfig: { repo: string; hasRepoConfig: boolean; fetchedAt: string | null }[];
 }
 
 /**
@@ -95,6 +176,12 @@ export interface RepoEntry {
   lastRunAt: string | null;
   /** Number of stored artifact run-keys (build assets) for this repo. */
   artifactKeyCount: number;
+  /**
+   * True when the harness has a cached `.lastlight/` layer for this repo — a
+   * cache-only hint (no network) that makes the repo's Config tab discoverable.
+   * False can also mean "not fetched yet"; the Config tab is always available.
+   */
+  hasRepoConfig: boolean;
 }
 
 export type OverlayAssetType = "workflow" | "cron" | "prompt" | "skill" | "agent-context";
@@ -111,6 +198,92 @@ export interface OverridesBundle {
   overrides: OverlayAsset[];
 }
 
+// ── Per-repository configuration (issue #180) ────────────────────────────────
+
+/** Which layer a resolved config leaf came from. `repo` is the `.lastlight/` layer. */
+export type ConfigSource = "default" | "overlay" | "env" | "repo";
+
+/** One thing the harness dropped out of a repo's `.lastlight/`, and why. */
+export interface RepoConfigWarning {
+  /** Machine code — `invalid-yaml`, `key-not-allowed`, `model-not-allowed`, … */
+  code: string;
+  repo?: string;
+  /** The config path (`models.architect`) or file path (`workflows/x.yaml`) at fault. */
+  path: string;
+  message: string;
+}
+
+/** The operator's bounds on what a repo may set (overlay `repoConfig:`). */
+export interface RepoConfigPolicy {
+  enabled: boolean;
+  allowKeys: string[];
+  /** Exact-match model allow-list, or null for "any wireable provider/model". */
+  allowedModels: string[] | null;
+  allowAssets: boolean;
+}
+
+/**
+ * The effective, repo-specific values for the keys a repo is allowed to touch.
+ *
+ * Hand-mirrored from `RepoMergedConfig` in `packages/shared/src/
+ * repo-config-schema.ts` — the dashboard has no import edge to core. The three
+ * policy blocks below were missing from this copy while the endpoint was
+ * already returning them with provenance, so the per-repo Config tab silently
+ * hid the budgets a repo had actually set (#256). Keep the two in step: a leaf
+ * absent HERE is a leaf that does not exist as far as an operator can see.
+ */
+export interface RepoMergedConfig {
+  models: Record<string, string>;
+  variants: Record<string, string>;
+  disabled: Record<string, string[]>;
+  approval: Record<string, boolean>;
+  /** Retry/escalation budgets for the fix family (issue #251). */
+  fix: Record<string, unknown>;
+  /** Major-bump auto-merge policy (issue #252). */
+  dependencies: Record<string, unknown>;
+  /** Review trigger policy. */
+  review: Record<string, unknown>;
+  /**
+   * Where this repo's outbound notifications go (the weekly Slack digest).
+   * Nested one level deeper than its siblings — the provenance mirror below
+   * flattens it to a dotted `"slack.channel"` leaf so the tab's leaf walk works
+   * unchanged.
+   */
+  notifications: Record<string, unknown>;
+}
+
+/** Provenance mirror of {@link RepoMergedConfig} — each leaf tagged with its winning layer. */
+export interface RepoConfigSources {
+  models: Record<string, ConfigSource>;
+  variants: Record<string, ConfigSource>;
+  disabled: Record<string, ConfigSource>;
+  approval: Record<string, ConfigSource>;
+  fix: Record<string, ConfigSource>;
+  dependencies: Record<string, ConfigSource>;
+  review: Record<string, ConfigSource>;
+  /** Keyed by DOTTED leaf, e.g. `"slack.channel"`. */
+  notifications: Record<string, ConfigSource>;
+}
+
+/** Response of `GET /repos/:owner/:repo/config`. */
+export interface RepoConfigBundle {
+  repo: string;
+  /** Effective config for THIS repo, post-bounds. */
+  merged: RepoMergedConfig;
+  /** Per-leaf provenance mirroring {@link merged}. */
+  sources: RepoConfigSources;
+  /** The repo's `lastlight.yml` as committed, PRE-validation. Absent when the
+   *  repo has no `.lastlight/` — a normal state, not an error. */
+  repoLayer?: Record<string, unknown>;
+  warnings: RepoConfigWarning[];
+  /** Prompts / skills / agent-context the repo contributes, and what each shadows. */
+  assets: OverlayAsset[];
+  policy: RepoConfigPolicy;
+  fetchedAt: string | null;
+  treeSha: string | null;
+  defaultBranch: string | null;
+}
+
 export interface WorkflowRun {
   id: string;
   workflowName: string;
@@ -124,6 +297,13 @@ export interface WorkflowRun {
   phaseHistory: PhaseHistoryEntry[];
   status: "queued" | "running" | "paused" | "succeeded" | "failed" | "cancelled";
   context?: Record<string, unknown>;
+  /**
+   * The run's mutable phase-to-phase state. Present on the single-run detail
+   * fetch only (the list query omits the heavy JSON blobs). Carries the fix
+   * harvest under `fixMarkers` — the attempt markers, the PR journal, and the
+   * push gate the agent wrote for itself — which `PrStatePanel` renders.
+   */
+  scratch?: Record<string, unknown>;
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -345,24 +525,84 @@ export interface HostStats {
   cpuCount: number;
 }
 
+/**
+ * How a finished execution turned out (issue #325). Hand-mirrored from
+ * `ExecutionOutcomeCounts` in `src/state/execution-store.ts`, which is where
+ * the classification is defined and documented.
+ *
+ * `deferred` and `skipped` are NOT failures: both are stored `success = 0` on
+ * purpose (resume re-evaluation and quota requeue respectively), so reading
+ * that column as health painted a wall of red on days when nothing broke.
+ * An in-flight execution is in `executions` and in none of these four.
+ */
+export interface OutcomeCounts {
+  succeeded: number;
+  skipped: number;
+  deferred: number;
+  failed: number;
+}
+
 export interface Stats {
   total_executions: number;
   today_count: number;
-  by_skill: Record<string, { count: number; success: number; fail: number }>;
+  by_skill: Record<string, OutcomeCounts & { count: number }>;
   by_trigger: Record<string, number>;
   running: number;
 }
 
-export interface DailyStat {
+export interface DailyStat extends OutcomeCounts {
   date: string;
   executions: number;
-  successes: number;
-  failures: number;
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+}
+
+// ── Feedback signals (issue #255) ──────────────────────────────────────────
+// Hand-mirrored from `src/state/feedback-store.ts` — the dashboard is a
+// separate Vite app with no import edge to core, so every server type is
+// copied here by hand.
+
+/** One 👍/👎 on something the bot wrote, scored against the run that wrote it. */
+export interface FeedbackSignal {
+  id: string;
+  anchorId: string;
+  source: "slack" | "github";
+  workflowRunId: string | null;
+  workflowName: string | null;
+  messagingSessionId: string | null;
+  owner: string | null;
+  repo: string | null;
+  issueNumber: number | null;
+  emoji: string;
+  /** -2..+2. Zero means "recorded, not scored" — 👀. */
+  score: number;
+  sentiment: "very_good" | "good" | "neutral" | "bad" | "very_bad";
+  reactor: string | null;
+  reactedAt: string | null;
+  observedAt: string;
+  removedAt: string | null;
+  exportedAt: string | null;
+}
+
+export interface FeedbackSummaryRow {
+  workflowName: string | null;
+  total: number;
+  positive: number;
+  negative: number;
+  /** 👀 — counted, but excluded from `averageScore`. */
+  neutral: number;
+  averageScore: number;
+}
+
+export interface FeedbackDailyRow {
+  date: string;
+  total: number;
+  positive: number;
+  negative: number;
+  averageScore: number;
 }
 
 export interface Health {
@@ -611,6 +851,24 @@ export const api = {
   dailyStats: (days = 30) => req<{ daily: DailyStat[] }>(`/stats/daily?days=${days}`),
   hourlyStats: (hours = 24) =>
     req<{ hourly: DailyStat[] }>(`/stats/hourly?hours=${hours}`),
+  feedbackSignals: (opts: { limit?: number; workflow?: string; source?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.limit) qs.set("limit", String(opts.limit));
+    if (opts.workflow) qs.set("workflow", opts.workflow);
+    if (opts.source) qs.set("source", opts.source);
+    const q = qs.toString();
+    return req<{ signals: FeedbackSignal[]; total: number }>(
+      `/feedback/signals${q ? `?${q}` : ""}`,
+    );
+  },
+  feedbackSummary: (days = 30) =>
+    req<{ summary: FeedbackSummaryRow[]; days: number }>(`/feedback/summary?days=${days}`),
+  feedbackDaily: (days = 30, workflow?: string) =>
+    req<{ daily: FeedbackDailyRow[] }>(
+      `/feedback/daily?days=${days}${workflow ? `&workflow=${encodeURIComponent(workflow)}` : ""}`,
+    ),
+  workflowRunFeedback: (id: string) =>
+    req<{ signals: FeedbackSignal[] }>(`/workflow-runs/${id}/feedback`),
   executions: (opts: { limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams();
     if (opts.limit) qs.set("limit", String(opts.limit));
@@ -631,6 +889,13 @@ export const api = {
       workflow?: string;
       /** Filter to one repo (`owner/repo`) — used by the Repos tab. */
       repo?: string;
+      /**
+       * Scope to a SET of repos — the per-repo visibility scope (issue #169),
+       * so a list asks for exactly the rows it renders rather than fetching
+       * globally and narrowing in the browser. A caller-supplied query filter,
+       * not enforcement: omit it and you get global data as before.
+       */
+      repos?: string[];
       /** "active" → running+paused; or comma-separated explicit statuses. */
       status?: string;
     } = {},
@@ -641,6 +906,7 @@ export const api = {
     if (opts.since) qs.set("since", opts.since);
     if (opts.workflow) qs.set("workflow", opts.workflow);
     if (opts.repo) qs.set("repo", opts.repo);
+    if (opts.repos && opts.repos.length > 0) qs.set("repos", opts.repos.join(","));
     if (opts.status) qs.set("status", opts.status);
     const qss = qs.toString();
     return req<{ workflowRuns: WorkflowRun[]; total: number }>(
@@ -794,9 +1060,19 @@ export const api = {
   config: () => req<ConfigBundle>("/config"),
   overrides: () => req<OverridesBundle>("/overrides"),
   managedRepos: () => req<ManagedRepos>("/managed-repos"),
+  // Repos this user's GitHub teams can reach — the client-side declutter filter.
+  meRepos: () => req<MeRepos>("/me/repos"),
+  meReposResync: () => req<MeRepos>("/me/repos/resync", { method: "POST" }),
   // Repo-centric index for the Repos tab — managed repos ∪ active repos, each
   // with run/artifact activity, newest-activity first.
   repos: () => req<{ repos: RepoEntry[] }>("/repos"),
+  // Effective config for ONE repo: the instance layers with that repo's
+  // committed `.lastlight/` applied on top, within the operator's bounds.
+  // `refresh` bypasses the harness's 60s repo-layer TTL.
+  repoConfig: (repo: string, opts: { refresh?: boolean } = {}) =>
+    req<RepoConfigBundle>(
+      `/repos/${repo.split("/").map(encodeURIComponent).join("/")}/config${opts.refresh ? "?refresh=1" : ""}`,
+    ),
   // Event Router Playground: static graph + hermetic dry-run of a synthetic event.
   routeGraph: () => req<RouteGraphResponse>("/route-graph"),
   routeTest: (input: RouteTestRequest) =>
@@ -809,15 +1085,38 @@ export const api = {
 
 export interface CronInfo {
   name: string;
-  workflow: string;
+  /**
+   * Null for a `handler:` cron, which runs host-side code and dispatches no
+   * workflow. The server has returned `def.workflow ?? null` since #333; this
+   * hand-maintained mirror claimed `string` until #341, so every consumer below
+   * silently received `null` and rendered it.
+   */
+  workflow: string | null;
+  handler: string | null;
   schedule: string;
   originalSchedule: string;
   enabled: boolean;
   registered: boolean;
   nextRun: string | null;
   lastRun: string | null;
+  /** `running | ok | partial | failed` — one row per cron FIRE (issue #341). */
   lastStatus: string | null;
   recentFailures: number;
+  /** Managed repos the fire considered, before per-repo participation. */
+  reposEligible: number | null;
+  /** Repos that actually participated, after narrowing (issue #180). */
+  reposScanned: number | null;
+  /** PRs a discovery cron found. Null for a non-discovery cron. */
+  discovered: number | null;
+  dispatched: number | null;
+  /**
+   * Managed repos that opted INTO this cron from their own `.lastlight/`
+   * (issue #180). Only meaningful when `enabled` is false: a globally-off cron
+   * keeps its scheduler tick so these repos can still be served, which is why
+   * `registered`/`nextRun` stay populated while the toggle reads off.
+   * Cache-only server-side, so it can under-report until a tick warms the cache.
+   */
+  optedInRepos: string[];
   context: Record<string, unknown>;
   override: { updatedAt: string; updatedBy: string | null; hasScheduleOverride: boolean } | null;
 }

@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   ReactFlow,
+  useNodesState,
+  useEdgesState,
   type Node,
   type Edge,
   type ReactFlowInstance,
@@ -24,6 +26,78 @@ import {
 type PhaseNodeData = PipelineNodeData;
 
 const nodeTypes = pipelineNodeTypes;
+
+/** Compare the run-view fields we actually render, to skip needless updates. */
+function nodeDataEqual(a: PhaseNodeData, b: PhaseNodeData): boolean {
+  return (
+    a.label === b.label &&
+    a.status === b.status &&
+    a.timestamp === b.timestamp &&
+    a.duration === b.duration &&
+    a.selected === b.selected &&
+    a.kind === b.kind &&
+    a.pulse === b.pulse
+  );
+}
+
+/**
+ * Merge freshly-computed nodes into the live xyflow state, preserving the
+ * object identity — and thus xyflow's measured dimensions — of any node whose
+ * id, position and rendered data are unchanged. Returns `prev` untouched when
+ * nothing changed so React bails out of the update entirely. The pipeline
+ * polls every few seconds, so this keeps the per-poll churn (and the window for
+ * the fitView-vs-store-update race that blanked the canvas) to a minimum.
+ */
+function reconcileNodes(
+  prev: Node<PhaseNodeData>[],
+  next: Node<PhaseNodeData>[],
+): Node<PhaseNodeData>[] {
+  const prevById = new Map(prev.map((n) => [n.id, n] as const));
+  let changed = prev.length !== next.length;
+  const merged = next.map((n) => {
+    const old = prevById.get(n.id);
+    if (
+      old &&
+      old.position.x === n.position.x &&
+      old.position.y === n.position.y &&
+      nodeDataEqual(old.data, n.data)
+    ) {
+      return old; // unchanged — keep identity + xyflow's measured dimensions
+    }
+    changed = true;
+    return old ? { ...old, position: n.position, data: n.data, style: n.style } : n;
+  });
+  if (!changed) {
+    for (let i = 0; i < merged.length; i++) {
+      if (merged[i] !== prev[i]) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  return changed ? merged : prev;
+}
+
+/** Same idea for edges — they only change when nodes are added / removed. */
+function reconcileEdges(prev: Edge[], next: Edge[]): Edge[] {
+  const prevById = new Map(prev.map((e) => [e.id, e] as const));
+  let changed = prev.length !== next.length;
+  const merged = next.map((e) => {
+    const old = prevById.get(e.id);
+    if (old && old.source === e.source && old.target === e.target) return old;
+    changed = true;
+    return e;
+  });
+  if (!changed) {
+    for (let i = 0; i < merged.length; i++) {
+      if (merged[i] !== prev[i]) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  return changed ? merged : prev;
+}
 
 const NODE_WIDTH = 110;
 const NODE_GAP = 40;
@@ -100,7 +174,7 @@ export function WorkflowPipeline({
   selectedPhase,
   onPhaseClick,
 }: Props) {
-  const { nodes, edges, canvasHeight } = useMemo(() => {
+  const computed = useMemo(() => {
     if (!definition) {
       return { nodes: [] as Node<PhaseNodeData>[], edges: [] as Edge[], canvasHeight: 0 };
     }
@@ -178,7 +252,12 @@ export function WorkflowPipeline({
         if (typeof exec.durationMs === "number") {
           duration = exec.durationMs / 1000;
         }
-        if (exec.success === true) status = "done";
+        if (exec.success === true)
+          // A generic-loop `until_bash` check (`<phase>_iter_N_check`) records
+          // success = "did the check run", with the verdict in stopReason. A
+          // RED gate ran fine but did NOT finish the loop — neither green nor
+          // red, so give it the muted `unmet` tone.
+          status = exec.stopReason === "condition_not_met" ? "unmet" : "done";
         else if (exec.success === false)
           // A cascade-skipped phase is stored as success=0 (so it re-evaluates
           // on resume) but carries stopReason="skipped" — it never ran, so don't
@@ -207,7 +286,11 @@ export function WorkflowPipeline({
           const lastExec = execByPhase.get(kids[kids.length - 1]!);
           if (kidExecs.some((kx) => kx.success === undefined))
             status = isTerminalRun ? "failed" : "active";
-          else if (lastExec?.success === true) status = "done";
+          else if (lastExec?.success === true)
+            // Same rule as the leaf above: a loop whose LAST child is a red
+            // exit check ran out of iterations without its gate ever going
+            // green. That is not a failure, but it is not a pass either.
+            status = lastExec.stopReason === "condition_not_met" ? "unmet" : "done";
           else if (lastExec?.success === false)
             status = lastExec.stopReason === "skipped" ? "skipped" : "failed";
           // Span the loop: earliest iteration start + summed iteration durations.
@@ -384,18 +467,46 @@ export function WorkflowPipeline({
     return { nodes: reactFlowNodes, edges: reactFlowEdges, canvasHeight };
   }, [definition, run, executions, approvals, selectedPhase]);
 
-  // Re-center on resize. The pipeline section is wrapped in a draggable
-  // divider; without this the nodes drift off-screen as the section shrinks.
-  // The `mounted` guard + try/catch + no-animation prevent xyflow's async
-  // tick from accessing a torn-down store when the component is unmounted
-  // or the run is swapped mid-fit (manifests as
-  // `Cannot read properties of undefined (reading 'payload')`).
-  //
-  // Hooks must be declared before any conditional return — keep these above
-  // the `!definition` short-circuit to satisfy the rules of hooks.
+  // ── Live React Flow state ──────────────────────────────────────────────
+  // Hold the graph in xyflow's own state and reconcile `computed` into it each
+  // poll, rather than feeding <ReactFlow> a brand-new node/edge array every few
+  // seconds. Reusing node identities (and their measured dimensions) cuts the
+  // per-poll churn that widened the fitView-vs-store-update race window.
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node<PhaseNodeData>>(computed.nodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(computed.edges);
+  useEffect(() => {
+    setNodes((prev) => reconcileNodes(prev, computed.nodes));
+  }, [computed.nodes, setNodes]);
+  useEffect(() => {
+    setEdges((prev) => reconcileEdges(prev, computed.edges));
+  }, [computed.edges, setEdges]);
+
   const wrapperRef = useRef<HTMLDivElement>(null);
   const flowRef = useRef<ReactFlowInstance<Node<PhaseNodeData>, Edge> | null>(null);
   const mountedRef = useRef(true);
+
+  // Fit the viewport, but never leave it collapsed. xyflow throws
+  // `Cannot read properties of undefined (reading 'payload')` when fitView
+  // races a node-list / store update mid-poll; the old code swallowed that
+  // throw and the canvas stayed blank until a resize that never came. Retry
+  // once on the next frame so a transient race self-heals instead of blanking.
+  const safeFitView = useCallback((retry = true) => {
+    if (!mountedRef.current) return;
+    const flow = flowRef.current;
+    if (!flow) return;
+    try {
+      if (flow.getNodes().length === 0) return;
+      flow.fitView({ padding: 0.2, minZoom: 0.4, maxZoom: 1 });
+    } catch {
+      if (retry) requestAnimationFrame(() => safeFitView(false));
+    }
+  }, []);
+
+  // Re-center on resize. The pipeline section is wrapped in a draggable
+  // divider; without this the nodes drift off-screen as the section shrinks.
+  //
+  // Hooks must be declared before any conditional return — keep these above
+  // the `!definition` short-circuit to satisfy the rules of hooks.
   useEffect(() => {
     mountedRef.current = true;
     const el = wrapperRef.current;
@@ -403,17 +514,7 @@ export function WorkflowPipeline({
     let raf = 0;
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        if (!mountedRef.current) return;
-        const flow = flowRef.current;
-        if (!flow) return;
-        try {
-          if (flow.getNodes().length === 0) return;
-          flow.fitView({ padding: 0.2, minZoom: 0.4, maxZoom: 1 });
-        } catch {
-          /* fitView raced against unmount / node-list update — safe to ignore */
-        }
-      });
+      raf = requestAnimationFrame(() => safeFitView());
     });
     ro.observe(el);
     return () => {
@@ -422,7 +523,26 @@ export function WorkflowPipeline({
       ro.disconnect();
       flowRef.current = null;
     };
-  }, []);
+  }, [safeFitView]);
+
+  // Re-fit whenever the graph's *topology* changes — a phase or loop iteration
+  // appearing / disappearing shifts every downstream node, so the previous fit
+  // no longer frames the graph. Keyed on the node id set (not their data), so a
+  // plain status / timing tick doesn't jerk the viewport. Double-rAF so xyflow
+  // has measured the new nodes before we fit to them.
+  const topoKey = useMemo(() => computed.nodes.map((n) => n.id).join("|"), [computed.nodes]);
+  useEffect(() => {
+    if (!topoKey) return undefined;
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => safeFitView());
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [topoKey, safeFitView]);
 
   if (!definition) {
     return (
@@ -434,13 +554,15 @@ export function WorkflowPipeline({
   // `height` prop is the minimum (used by simple linear runs); when there
   // are children, expand to fit them.
   const numericHeight = typeof height === "number" ? height : 180;
-  const effectiveHeight = Math.max(numericHeight, canvasHeight);
+  const effectiveHeight = Math.max(numericHeight, computed.canvasHeight);
 
   return (
     <div ref={wrapperRef} style={{ width: "100%", height: effectiveHeight }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
         nodeTypes={nodeTypes}
         fitView
         // Cap auto-fit zoom so single-node workflows (e.g. triage) don't

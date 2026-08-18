@@ -15,9 +15,12 @@
  * `getWorkflowByIntent` fallback all read one source of truth.
  */
 
-import { chat as realChat, defaultFastModel as realDefaultFastModel, type ChatFunction } from "../llm.js";
+import { HELPER_MAX_TOKENS, chat as realChat, defaultFastModel as realDefaultFastModel, type ChatFunction } from "../llm.js";
 import { getAssetVersion, listAgentWorkflows, loadPromptTemplate } from "../../workflows/loader.js";
 import { intentToken, RESERVED_CONTROL_INTENTS } from "../../workflows/schema.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("classifier");
 
 /**
  * A classifier intent. The well-known intents the router has bespoke handling
@@ -95,7 +98,13 @@ const KNOWN_WORKFLOW_INTENT_ORDER = [
   "demo",
 ];
 
-function intentOrderIndex(intent: string): number {
+/**
+ * Position of an intent in the canonical order above; unknown/overlay intents
+ * sort last. Exported so the chat prompt (`engine/chat/chat-prompt.ts`) presents
+ * workflows in the same order the classifier does, from one list rather than two.
+ */
+export function intentOrderIndex(intent: string | undefined): number {
+  if (intent === undefined) return KNOWN_WORKFLOW_INTENT_ORDER.length;
   const i = KNOWN_WORKFLOW_INTENT_ORDER.indexOf(intent);
   return i === -1 ? KNOWN_WORKFLOW_INTENT_ORDER.length : i;
 }
@@ -111,6 +120,29 @@ function intentOrderIndex(intent: string): number {
 export const WELL_KNOWN_INTENTS: ReadonlySet<string> = new Set<string>([
   ...KNOWN_WORKFLOW_INTENT_ORDER,
   ...RESERVED_CONTROL_INTENTS,
+]);
+
+/**
+ * Intents that are reachable ONLY from a GitHub event, and which the Slack
+ * fallback must therefore refuse.
+ *
+ * Both dependency workflows are `pr_scoped` and reach their real dispatch path
+ * (`handlePrFix`) through `context.prNumber`. On GitHub that arrives from the
+ * event; the Slack branches only ever set `issueNumber`. They are deliberately
+ * OUTSIDE `WELL_KNOWN_INTENTS` — the GitHub comment ladder routes them through
+ * `fallbackWorkflowForIntent` and depends on it — so on a Slack message the
+ * same fallback happily returned them and dispatched past the PR-fix path with
+ * no PR at all.
+ *
+ * A separate set rather than a `WELL_KNOWN_INTENTS` entry because the two
+ * questions differ by SURFACE: "does the router branch on this?" is per-route,
+ * and answering it globally broke GitHub to fix Slack. Consulted only by the
+ * router's `message` case, which routes these to chat instead — chat can tell
+ * the user to go and comment on the PR.
+ */
+export const GITHUB_ONLY_INTENTS: ReadonlySet<string> = new Set<string>([
+  "dependabot-ci-fix",
+  "dependabot-pr-merge",
 ]);
 
 interface ClassifierState {
@@ -254,11 +286,11 @@ export async function classifyCommentAddsInfo(
         { role: "system", content: loadPromptTemplate(ADDS_INFO_PROMPT_PATH) },
         { role: "user", content: userPrompt },
       ],
-      { maxTokens: 16 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
     return /\bADDS_INFO\b/i.test(output);
   } catch (err: any) {
-    console.error(`[classifier] Error classifying comment info: ${err.message}`);
+    log.error("Error classifying comment info", { err });
     return false;
   }
 }
@@ -305,7 +337,7 @@ export async function classifyComment(
         { role: "system", content: prompt },
         { role: "user", content: userPrompt },
       ],
-      { maxTokens: 128 },
+      { maxTokens: HELPER_MAX_TOKENS },
     );
 
     const upper = output.trim().toUpperCase();
@@ -340,10 +372,25 @@ export async function classifyComment(
       ? reasonMatch[1].trim()
       : undefined;
 
-    // Introspection: when no INTENT line parsed, the model returned empty or
-    // malformed output (e.g. a reasoning model whose small token budget was
-    // consumed by hidden reasoning before it emitted anything) — the parser then
-    // silently defaults to `chat`. Surface that instead of hiding it.
+    // When no INTENT line parsed, the model returned empty or malformed output
+    // (e.g. a reasoning model whose token budget was consumed by hidden
+    // reasoning before it emitted anything) and the parser silently defaults to
+    // `chat`.
+    //
+    // That default is indistinguishable from a correctly-classified question:
+    // on a PR `chat` falls through to `pr-comment`, on an issue it routes to
+    // `ignore`. So a wholly dead classifier looks exactly like a quiet day, and
+    // one ran that way in production unnoticed. The `explain` copy below is
+    // introspection-only, but the WARNING is not — a fallback this consequential
+    // has to leave a trace on the route it actually ran.
+    if (!intentMatch) {
+      log.warn(
+        "No parseable INTENT — defaulting to chat. If this repeats, the model is " +
+          "returning nothing: raise HELPER_MAX_TOKENS or pin models.classifier to a model " +
+          "that answers within it",
+        { model: resolvedModel, raw: output.slice(0, 160) },
+      );
+    }
     if (explain && !intentMatch) {
       reason = `classifier returned no parseable INTENT — the model output was empty or malformed (raw: ${JSON.stringify(
         output.slice(0, 160),
@@ -354,7 +401,7 @@ export async function classifyComment(
       ? { intent, repo, issueNumber, reason, model: resolvedModel }
       : { intent, repo, issueNumber, reason };
   } catch (err: any) {
-    console.error(`[classifier] Error classifying comment: ${err.message}`);
+    log.error("Error classifying comment", { err });
     // Fail-safe: an error must never launch a workflow, so default to chat.
     // In introspection/`explain` mode, though, surface the error (and which
     // model it tried) in `reason` — otherwise a failed LLM call (e.g. a missing

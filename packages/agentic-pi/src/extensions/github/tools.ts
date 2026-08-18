@@ -19,8 +19,21 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import type { GitHubAuth } from "./auth.js";
-import { GitHubClient, type GitHubClientOptions } from "./client.js";
+import {
+  GitHubClient,
+  isActionsDenied,
+  isStaleDataError,
+  type GitHubClientOptions,
+  type SignedCommit,
+} from "./client.js";
 import { gitAuthEnv } from "./credentials.js";
+import {
+  DEFAULT_LOG_EXCERPT_BYTES,
+  MAX_LOG_EXCERPT_BYTES,
+  MIN_LOG_EXCERPT_BYTES,
+  excerptJobLog,
+} from "./log-excerpt.js";
+import { currentBranch, diffWorktreeAgainst, hasLocalCommit } from "./worktree-diff.js";
 
 interface MaybeHttpError extends Error {
   status?: number;
@@ -39,7 +52,7 @@ function jsonContent(data: unknown) {
  * Wrap a handler so errors become structured JSON results instead of throws.
  * Matches mcp-github-app's `run()` helper exactly.
  */
-async function safeRun<T>(fn: () => Promise<T>) {
+async function safeRun<T>(fn: () => Promise<T>, canRefresh = true) {
   try {
     return jsonContent(await fn());
   } catch (err) {
@@ -54,10 +67,239 @@ async function safeRun<T>(fn: () => Promise<T>) {
       hint: isTransient
         ? "This is a transient error. The request was retried automatically but still failed. Wait and try again."
         : status === 401
-          ? "Authentication failed. Call github_refresh_git_auth to get a fresh token."
+          ? canRefresh
+            ? "Authentication failed. Call github_refresh_git_auth to get a fresh token."
+            : "Authentication failed and the token CANNOT be refreshed here — a fixed GITHUB_TOKEN was injected for this run, so github_refresh_git_auth can't re-mint it. Do not retry in a loop; report the auth failure."
           : null,
     });
   }
+}
+
+type CommitSignature = NonNullable<SignedCommit["signature"]>;
+
+/**
+ * The mutation is the only thing standing between us and an unsigned commit on
+ * a `required_signatures` repo. If GitHub says it did not sign, or signed but
+ * the signature doesn't verify, say so loudly — the commit is already on the
+ * branch, so a silent `verified: false` would be discovered by a blocked PR
+ * hours later. A null `signature` is GraphQL's shape for an UNSIGNED commit,
+ * not a "not yet": the response describes the commit as created.
+ */
+function assertSigned(commit: SignedCommit): CommitSignature {
+  const signature = commit.signature;
+  if (!signature) {
+    throw new Error(
+      `published ${commit.oid} but GitHub returned no signature for it — a commit with no signature at all is reported as \`signature: null\`, so it is unsigned. A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+  if (!signature.wasSignedByGitHub) {
+    throw new Error(
+      `published ${commit.oid} but GitHub did not sign it (state=${signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+  if (!signature.isValid) {
+    throw new Error(
+      `published ${commit.oid} but GitHub's signature on it is not valid (state=${signature.state}). A repository requiring signed commits will block it. Do not retry — report this.`,
+    );
+  }
+  return signature;
+}
+
+/** The first line of whatever a failed git child actually said, not the
+ * generic "Command failed: git …" wrapper execFileSync throws — git's real
+ * cause is on stderr. Safe to surface: `gitAuthEnv` injects the token as a
+ * `GIT_CONFIG_VALUE_1` extraheader, never into a URL, so git's stderr cannot
+ * carry it (credentials.ts). Falls back to the thrown message (e.g. a
+ * detached-HEAD `Error` from `currentBranch`, which has no stderr). */
+function firstLineOfFailure(err: unknown): string {
+  const e = err as MaybeHttpError;
+  const stderr = e.stderr ? e.stderr.toString().trim() : "";
+  const text = stderr || e.message || String(err);
+  return text.split("\n")[0]!;
+}
+
+/**
+ * Local HEAD is now behind the branch we just wrote. `reset --mixed` moves the
+ * branch ref and the index onto the published commit and leaves every file
+ * untouched.
+ *
+ * Sound because the published commit descends from a commit this checkout
+ * already contained — `resolveDiffBase` refuses to publish otherwise — so the
+ * reset only ever moves HEAD FORWARD, never onto content the working tree has
+ * never seen. That holds for a narrowed publish too (`include` / `exclude`):
+ * the published tree then differs from the working tree, and what the reset
+ * leaves behind is an ordinary dirty checkout that the next publish computes as
+ * changes. It is not optional: the next publish's ancestry check needs the
+ * local checkout to descend from the branch tip we just created.
+ *
+ * Best effort: a failed sync does not un-publish anything, so it is reported,
+ * never thrown.
+ *
+ * Only safe when the checked-out branch IS the one just published: `reset
+ * --mixed` moves whatever branch HEAD currently points at, so publishing to a
+ * different branch than the one checked out would silently repoint the
+ * checkout's own branch onto someone else's commit (measured in review).
+ */
+async function syncLocalToPublished(
+  cwd: string,
+  target: string,
+  oid: string,
+  auth: GitHubAuth,
+): Promise<string> {
+  try {
+    const current = currentBranch(cwd);
+    if (current !== target) {
+      return `skipped: published to ${target}, checked out on ${current}`;
+    }
+    const token = await auth.getToken();
+    execFileSync("git", ["fetch", "origin", target], {
+      cwd,
+      stdio: "pipe",
+      timeout: 120_000,
+      env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+    });
+    execFileSync("git", ["reset", "--mixed", oid], { cwd, stdio: "pipe" });
+    return "ok";
+  } catch (err) {
+    return `skipped: ${firstLineOfFailure(err)}`;
+  }
+}
+
+/** Best-effort `git fetch` into the checkout. Callers re-check what they need
+ * afterwards and report the missing object themselves, so a failure here is
+ * never the error the agent reads. */
+async function fetchIntoClone(
+  cwd: string,
+  auth: GitHubAuth,
+  ref: string,
+  flags: string[] = [],
+): Promise<void> {
+  const token = await auth.getToken();
+  try {
+    execFileSync("git", ["fetch", ...flags, "origin", ref], {
+      cwd,
+      stdio: "pipe",
+      timeout: 120_000,
+      env: { ...process.env, ...gitAuthEnv(token), GIT_TERMINAL_PROMPT: "0" },
+    });
+  } catch {
+    // the caller reports the object it still cannot find
+  }
+}
+
+/**
+ * Does this checkout's HEAD descend from `oid`?
+ *
+ * `git push` used to answer this for us — it rejects a non-fast-forward. The
+ * signed path has no equivalent and `expectedHeadOid` does not stand in for
+ * one: it catches a tip that moves AFTER we read it, not a tip that had already
+ * moved BEFORE. The change set is computed as "working tree vs that tip", so
+ * publishing against a tip the checkout does not contain records every file
+ * that commit added as a deletion. Fails closed — a git error reads as "not an
+ * ancestor" and the caller refuses.
+ */
+function descendsFrom(cwd: string, oid: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", oid, "HEAD"], { cwd, stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The newest commit both HEAD and `oid` contain, or null if they share none
+ * (or the local history is too shallow to tell). */
+function mergeBaseWith(cwd: string, oid: string): string | null {
+  try {
+    return (
+      execFileSync("git", ["merge-base", "HEAD", oid], { cwd, stdio: "pipe" })
+        .toString("utf8")
+        .trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** A base for a branch that does not exist yet: the base branch's tip when this
+ * checkout already contains it, otherwise the newest commit they share. Either
+ * is on the remote (a merge-base is an ancestor of `baseTip`), which is what
+ * `createRef` needs, and both are in HEAD's history, which is what keeps the
+ * change set from turning the base branch's newer files into deletions. */
+function branchPointFor(cwd: string, baseTip: string): string | null {
+  if (!hasLocalCommit(cwd, baseTip)) return null;
+  if (descendsFrom(cwd, baseTip)) return baseTip;
+  return mergeBaseWith(cwd, baseTip);
+}
+
+interface DiffBaseRequest {
+  gh: GitHubClient;
+  auth: GitHubAuth;
+  cwd: string;
+  owner: string;
+  repo: string;
+  target: string;
+  baseBranch?: string;
+}
+
+interface DiffBase {
+  /** The commit the change set is diffed against, and `expectedHeadOid`. */
+  tip: string;
+  /** The commit to create `target` from, or null when it already exists. */
+  createFrom: string | null;
+}
+
+/**
+ * Resolve the commit to diff the working tree against, and make sure it is both
+ * in the local object store and in HEAD's history — all WITHOUT creating
+ * anything remote yet (`createCommitOnBranch` needs the branch to exist, but
+ * creating it here would be a remote write that a later refusal could never
+ * undo). `createFrom` is handed back for the caller to act on only after every
+ * refusal check has run.
+ */
+async function resolveDiffBase(req: DiffBaseRequest): Promise<DiffBase> {
+  const { gh, auth, cwd, owner, repo, target, baseBranch } = req;
+  const existingTip = await gh.getBranchTip(owner, repo, target);
+  if (existingTip !== null) {
+    // The diff needs the remote tip in the local object store. A shallow clone
+    // may not have it; fetching by sha is cheap and precise.
+    if (!hasLocalCommit(cwd, existingTip)) {
+      await fetchIntoClone(cwd, auth, existingTip, ["--depth=1"]);
+    }
+    if (!hasLocalCommit(cwd, existingTip)) {
+      throw new Error(
+        `the remote tip of ${target} (${existingTip}) is not in this clone and could not be fetched — someone else has pushed. Re-run the phase against the current branch; do NOT git push.`,
+      );
+    }
+    if (!descendsFrom(cwd, existingTip)) {
+      throw new Error(
+        `refusing to publish — the tip of ${target} on GitHub (${existingTip}) is not in this checkout's history. The change set is the working tree measured against that tip, so publishing now would record every file that commit added as a DELETION. Nothing was published. Find out whose commit it is before recovering — \`github_list_commits\` with sha: "${target}" shows it — because the two cases differ. If an earlier publish in this phase landed it and this checkout could not be moved onto it, run \`git fetch origin ${target} && git reset --mixed origin/${target}\`: that moves the branch pointer and leaves every file exactly as it is. If somebody else pushed it, run \`git fetch origin ${target} && git add -A && git commit -m wip && git merge origin/${target}\` — commit first or the merge aborts on your uncommitted changes, and the local commit costs nothing because a publish folds local commits in. Then re-check your work and publish again; do NOT git push.`,
+      );
+    }
+    return { tip: existingTip, createFrom: null };
+  }
+
+  const base = baseBranch || (await gh.getRepository(owner, repo)).default_branch;
+  const baseTip = await gh.getBranchTip(owner, repo, base);
+  if (baseTip === null) {
+    throw new Error(
+      `base branch ${base} does not exist in ${owner}/${repo} either — cannot create ${target}`,
+    );
+  }
+  let from = branchPointFor(cwd, baseTip);
+  if (from === null) {
+    // Fetch the base by NAME rather than by sha: a `--depth=1` fetch of a sha
+    // lands a parentless commit, and the merge-base above needs the history
+    // that connects it to this checkout.
+    await fetchIntoClone(cwd, auth, base);
+    from = branchPointFor(cwd, baseTip);
+  }
+  if (from === null) {
+    throw new Error(
+      `refusing to create ${target} — this checkout shares no commit with ${base} (tip ${baseTip}), so there is no commit GitHub already has that the working tree can be measured against. Nothing was published. Merging will not fix this: histories with nothing in common do not merge. It usually means the checkout is not of this repository, or ${base}'s history was rewritten — compare \`github_list_commits\` (sha: "${base}") with your local \`git log\` and say what you found. A fresh clone with the work re-applied is the way out; do NOT git push.`,
+    );
+  }
+  return { tip: from, createFrom: from };
 }
 
 /**
@@ -83,7 +325,7 @@ export function buildGitHubTools(
       description,
       parameters,
       async execute(_id, params) {
-        return safeRun(() => handler(params));
+        return safeRun(() => handler(params), auth.canRefresh);
       },
     });
 
@@ -92,7 +334,7 @@ export function buildGitHubTools(
 
     tool(
       "github_clone_repo",
-      "Clone a repository with GitHub App authentication. Sets up the credential helper automatically; commit identity comes from the ambient git config/environment. git push/pull/fetch will just work after cloning.",
+      "Clone a repository with GitHub App authentication. Sets up the credential helper automatically; commit identity comes from the ambient git config/environment. git fetch/pull and local commits just work after cloning. To put work back on a branch use `github_publish`, not `git push` — a commit built by git is unsigned, and a repository that requires signed commits blocks it permanently.",
       Type.Object({
         owner: Type.String({ description: "Repository owner" }),
         repo: Type.String({ description: "Repository name" }),
@@ -140,7 +382,19 @@ export function buildGitHubTools(
         path: Type.String({ description: "Path to the git repository" }),
       }),
       async ({ path }) => {
-        // Refresh-if-expired; the (possibly new) token flows into every
+        // A static injected token has no private key to re-mint from — calling
+        // getToken() would hand back the SAME value. Report that honestly rather
+        // than a misleading `refreshed: true`, so the agent stops looping on a
+        // credential that can't change (the sandbox case).
+        if (!auth.canRefresh) {
+          return {
+            refreshed: false,
+            path,
+            reason:
+              "This run uses a fixed GITHUB_TOKEN that cannot be re-minted here; the credential is unchanged. If calls keep 401-ing the token is stuck — report the failure rather than retrying.",
+          };
+        }
+        // App auth: refresh-if-expired; the (possibly new) token flows into every
         // subsequent git child via gitAuthEnv (and the harness's ambient env in
         // the sandbox). No file to rewrite.
         await auth.getToken();
@@ -156,7 +410,7 @@ export function buildGitHubTools(
 
     tool(
       "github_get_repository",
-      "Get repository metadata",
+      "Get repository metadata: name, full_name, description, private/fork/archived, default_branch, language, topics, star + open-issue counts, html_url, pushed_at.",
       Type.Object({ owner: Type.String(), repo: Type.String() }),
       ({ owner, repo }) => gh.getRepository(owner, repo),
     ),
@@ -192,22 +446,135 @@ export function buildGitHubTools(
     ),
 
     tool(
-      "github_push_files",
-      "Push multiple files in a single commit",
+      "github_publish",
+      "Publish your work: commit the whole working tree and push it, in one step, as a SIGNED commit. Use this INSTEAD of `git add`/`git commit`/`git push` — a commit built by git in this sandbox is unsigned, and a repository that requires signed commits blocks it permanently. GitHub builds and signs the commit for you, attributed to the bot. Local commits you already made are folded in; the published commit is the working tree as it stands now. Fails rather than publishing if a change needs a file mode it cannot express (a new executable file, a symlink, a submodule pointer, or a mode change on an existing file) — do not work around that with `git push`; for a new script, leave it non-executable and run it through its interpreter (`bash scripts/verify.sh`).",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
-        branch: Type.String(),
-        files: Type.Array(Type.Object({ path: Type.String(), content: Type.String() })),
-        message: Type.String(),
+        message: Type.String({
+          description:
+            "Commit message. First line is the headline; everything after it is the body.",
+        }),
+        branch: Type.Optional(
+          Type.String({ description: "Branch to publish to (default: the checked-out branch)" }),
+        ),
+        base_branch: Type.Optional(
+          Type.String({
+            description:
+              "If the branch does not exist on GitHub yet, create it from this one (default: the repo's default branch)",
+          }),
+        ),
+        path: Type.Optional(
+          Type.String({
+            description: "Path to the git working tree (default: the current directory)",
+          }),
+        ),
+        exclude: Type.Optional(
+          Type.Array(Type.String(), {
+            description: 'Pathspecs to leave out of the commit, e.g. ".lastlight"',
+          }),
+        ),
+        include: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              'Pathspecs to restrict the commit to, e.g. ".lastlight". When given, nothing outside them is published, additions and deletions alike. Omit to publish the whole working tree.',
+          }),
+        ),
       }),
-      ({ owner, repo, branch, files, message }) =>
-        gh.pushFiles(owner, repo, branch, files, message),
+      async ({ owner, repo, message, branch, base_branch, path: repoPath, exclude, include }) => {
+        const cwd = repoPath || process.cwd();
+        const target = branch || currentBranch(cwd);
+        const { tip, createFrom } = await resolveDiffBase({
+          gh,
+          auth,
+          cwd,
+          owner,
+          repo,
+          target,
+          ...(base_branch ? { baseBranch: base_branch } : {}),
+        });
+
+        const changes = diffWorktreeAgainst(cwd, tip, {
+          ...(exclude && { exclude }),
+          ...(include && { include }),
+        });
+        if (changes.unsupported.length > 0) {
+          const listed = changes.unsupported.map((u) => `${u.path}: ${u.reason}`).join("; ");
+          throw new Error(
+            `refusing to publish — ${changes.unsupported.length} change(s) need a file mode the signed-commit API cannot set: ${listed}. Nothing was published. Do NOT fall back to git push (it would produce an unsigned commit). Most of these have a way out you can take yourself: a NEW file cannot be published executable, so make it non-executable (\`chmod 644 <file>\`) and invoke it through its interpreter instead (\`bash scripts/verify.sh\`, \`python scripts/x.py\`), updating whatever calls it, then publish again. Flag it for a human only if that is not possible — a symlink, a submodule pointer, or a mode change some other file depends on.`,
+          );
+        }
+        if (changes.additions.length === 0 && changes.deletions.length === 0) {
+          return {
+            published: false,
+            // An empty `include` makes no path eligible, so the change set is
+            // empty however much the tree differs. Callers are told to trust
+            // this string, so it must not blame the tree for a caller error.
+            reason:
+              include?.length === 0
+                ? "nothing to publish — `include` was an empty list, so no path was eligible. The working tree may well differ from the branch. Pass the pathspecs you meant to publish, or omit `include` to publish the whole tree."
+                : "nothing to publish — the working tree matches the branch. If an earlier publish in this phase failed after the request went out (a lost response, or a STALE_DATA rejection on the retry), its commit may already be on the branch and be the reason there is nothing left: check `github_list_commits` for it before reporting that nothing changed.",
+          };
+        }
+
+        // Every refusal above has already run — nothing past this point may
+        // fail for a reason unrelated to GitHub itself, so it's safe to write.
+        if (createFrom !== null) {
+          await gh.createBranchAt(owner, repo, target, createFrom);
+        }
+
+        const [headline, ...rest] = message.split("\n");
+        const body = rest.join("\n").trim();
+        let commit: SignedCommit;
+        try {
+          commit = await gh.publishSignedCommit({
+            owner,
+            repo,
+            branch: target,
+            expectedHeadOid: tip,
+            headline: (headline ?? "").trim() || message.trim(),
+            ...(body ? { body } : {}),
+            additions: changes.additions,
+            deletions: changes.deletions,
+          });
+        } catch (err) {
+          // A generic GraphQL error here reads to the agent as "the branch is
+          // broken" — for STALE_DATA it is neither broken nor safe to retry
+          // automatically here: the change set above was computed as worktree
+          // vs. tip, so re-diffing against a tip that genuinely moved would
+          // render another party's additions as deletions (see
+          // docs/plans/signed-commit-publish/00-findings.md #4). Name the case
+          // so the agent re-runs the whole tool call instead of looping on a
+          // misdiagnosis.
+          if (isStaleDataError(err)) {
+            throw new Error(
+              `publish rejected: the branch tip moved between reading it and writing (STALE_DATA). This can happen even with nothing else pushing, from lag between GitHub's REST read path and its GraphQL write path — it is not a sign the branch is broken. Re-run this tool call; do not retry in a loop and do not fall back to git push.`,
+            );
+          }
+          throw err;
+        }
+
+        const signature = assertSigned(commit);
+        const localSync = await syncLocalToPublished(cwd, target, commit.oid, auth);
+
+        return {
+          published: true,
+          commit: commit.oid,
+          url: commit.url,
+          branch: target,
+          verified: signature.wasSignedByGitHub && signature.isValid,
+          committer: commit.committer,
+          added: changes.additions.filter((a) => a.status === "A").map((a) => a.path),
+          modified: changes.additions.filter((a) => a.status === "M").map((a) => a.path),
+          deleted: changes.deletions.map((d) => d.path),
+          local_sync: localSync,
+        };
+      },
     ),
 
     tool(
       "github_list_branches",
-      "List branches in a repository",
+      "List branches in a repository — each { name, sha, protected }. Paged: returns { items, page, per_page, has_more, next_page }.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -233,7 +600,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_issues",
-      "List open issues in a repository",
+      "SEARCH a repository's issues when you do NOT already know the number. Returns { items, page, per_page, has_more, next_page }; each item is a summary (number, title, state, author, labels, assignees, comment count, timestamps, is_pull_request) — NOT the body. Call github_get_issue for one issue's body. If you were handed an issue_number, skip this.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -253,9 +620,20 @@ export function buildGitHubTools(
 
     tool(
       "github_get_issue",
-      "Get a specific issue by number",
-      Type.Object({ owner: Type.String(), repo: Type.String(), issue_number: Type.Number() }),
-      ({ owner, repo, issue_number }) => gh.getIssue(owner, repo, issue_number),
+      "Get one issue by number: the list summary plus body (truncated past 4000 chars — pass full_body to lift that), closed_at and milestone.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        issue_number: Type.Number(),
+        full_body: Type.Optional(
+          Type.Boolean({
+            description:
+              "Return the complete body instead of the first 4000 chars. Only set this when the truncated head was not enough.",
+          }),
+        ),
+      }),
+      ({ owner, repo, issue_number, full_body }) =>
+        gh.getIssue(owner, repo, issue_number, { fullBody: full_body }),
     ),
 
     tool(
@@ -302,16 +680,22 @@ export function buildGitHubTools(
 
     tool(
       "github_list_issue_comments",
-      "List comments on an issue",
+      "List comments on an issue or PR, oldest first. Returns { items, page, per_page, has_more, next_page } — 30 per page by default, each body truncated past 4000 chars. A long thread is PAGED, never silently cut: when has_more is true, re-call with the next_page value. Prefer paging over raising per_page.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
         issue_number: Type.Number(),
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
+        full_bodies: Type.Optional(
+          Type.Boolean({
+            description:
+              "Return every comment body in full instead of truncating each at 4000 chars. Expensive on a long thread — prefer reading the truncated page first.",
+          }),
+        ),
       }),
-      ({ owner, repo, issue_number, ...opts }) =>
-        gh.listIssueComments(owner, repo, issue_number, opts),
+      ({ owner, repo, issue_number, full_bodies, ...opts }) =>
+        gh.listIssueComments(owner, repo, issue_number, { ...opts, fullBodies: full_bodies }),
     ),
 
     tool(
@@ -340,7 +724,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_labels",
-      "List all labels in a repository",
+      "List all labels in a repository — each { name, color, description }.",
       Type.Object({ owner: Type.String(), repo: Type.String() }),
       ({ owner, repo }) => gh.listLabels(owner, repo),
     ),
@@ -382,7 +766,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_pull_requests",
-      "List pull requests in a repository",
+      "SEARCH a repository's pull requests when you do NOT already know the number. Returns { items, page, per_page, has_more, next_page }; each item is a summary (number, title, state, draft, author, head, base, labels, timestamps) — NOT the body or the diff. If you were handed a specific pull_number, skip this and call github_get_pull_request directly; listing to 'confirm' a PR you already have is wasted context.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -408,9 +792,20 @@ export function buildGitHubTools(
 
     tool(
       "github_get_pull_request",
-      "Get a specific pull request by number",
-      Type.Object({ owner: Type.String(), repo: Type.String(), pull_number: Type.Number() }),
-      ({ owner, repo, pull_number }) => gh.getPullRequest(owner, repo, pull_number),
+      "Get one pull request by number: the list summary plus body (truncated past 4000 chars — pass full_body to lift that), mergeable/mergeable_state, merged, additions/deletions/changed_files/commits, and head/base SHAs. Use it for mergeability and metadata — for the changed files call github_list_pull_request_files, and for the diff github_get_pull_request_diff.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        full_body: Type.Optional(
+          Type.Boolean({
+            description:
+              "Return the complete body instead of the first 4000 chars. Dependabot/Renovate changelogs run to tens of kB, so only set this when the truncated head was not enough — e.g. you need a breaking-changes section that fell past the cut.",
+          }),
+        ),
+      }),
+      ({ owner, repo, pull_number, full_body }) =>
+        gh.getPullRequest(owner, repo, pull_number, { fullBody: full_body }),
     ),
 
     tool(
@@ -430,9 +825,33 @@ export function buildGitHubTools(
 
     tool(
       "github_list_pull_request_files",
-      "List files changed in a pull request",
-      Type.Object({ owner: Type.String(), repo: Type.String(), pull_number: Type.Number() }),
-      ({ owner, repo, pull_number }) => gh.listPullRequestFiles(owner, repo, pull_number),
+      "List files changed in a pull request. Returns { items, page, per_page, has_more, next_page }; each item is { filename, status, additions, deletions, changes }. The per-file PATCH IS OMITTED by default — a lockfile patch alone runs to tens of thousands of lines. The file list plus line counts is usually the whole signal you need; when it isn't, prefer reading the one file you care about (github_get_file_contents) or the local checkout over pulling patches for everything.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+        include_patch: Type.Optional(
+          Type.Boolean({
+            description:
+              "Include each file's patch, capped at 2000 chars per file. Set this only after the file list alone proved insufficient, and narrow with per_page first.",
+          }),
+        ),
+        full_patch: Type.Optional(
+          Type.Boolean({
+            description:
+              "With include_patch, return each patch uncapped. Very expensive on a PR that touches a lockfile — avoid unless you have narrowed to a specific small file.",
+          }),
+        ),
+      }),
+      ({ owner, repo, pull_number, include_patch, full_patch, page, per_page }) =>
+        gh.listPullRequestFiles(owner, repo, pull_number, {
+          includePatch: include_patch,
+          fullPatch: full_patch,
+          page,
+          perPage: per_page,
+        }),
     ),
 
     tool(
@@ -444,16 +863,44 @@ export function buildGitHubTools(
 
     tool(
       "github_list_pull_request_reviews",
-      "List submitted reviews on a pull request (each with state APPROVED/CHANGES_REQUESTED/COMMENTED, reviewer login, body, and commit SHA). Use to check whether the bot has already reviewed this PR.",
-      Type.Object({ owner: Type.String(), repo: Type.String(), pull_number: Type.Number() }),
-      ({ owner, repo, pull_number }) => gh.listPullRequestReviews(owner, repo, pull_number),
+      "List submitted reviews on a pull request — each { id, author, state (APPROVED/CHANGES_REQUESTED/COMMENTED), submitted_at, body }, body truncated past 4000 chars. Paged: returns { items, page, per_page, has_more, next_page }. Use to check whether the bot has already reviewed this PR.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+        full_bodies: Type.Optional(
+          Type.Boolean({ description: "Return every review body in full instead of truncating." }),
+        ),
+      }),
+      ({ owner, repo, pull_number, full_bodies, page, per_page }) =>
+        gh.listPullRequestReviews(owner, repo, pull_number, {
+          fullBodies: full_bodies,
+          page,
+          perPage: per_page,
+        }),
     ),
 
     tool(
       "github_list_pull_request_review_comments",
-      "List line-level review comments on a pull request (each with path, line, body, commit_id, reviewer login). Distinct from issue comments — these are anchored to specific diff lines.",
-      Type.Object({ owner: Type.String(), repo: Type.String(), pull_number: Type.Number() }),
-      ({ owner, repo, pull_number }) => gh.listPullRequestReviewComments(owner, repo, pull_number),
+      "List line-level review comments on a pull request — each { id, author, path, line, created_at, body, in_reply_to_id }, body truncated past 4000 chars. Distinct from issue comments: these are anchored to specific diff lines. Paged: returns { items, page, per_page, has_more, next_page }.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        pull_number: Type.Number(),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+        full_bodies: Type.Optional(
+          Type.Boolean({ description: "Return every comment body in full instead of truncating." }),
+        ),
+      }),
+      ({ owner, repo, pull_number, full_bodies, page, per_page }) =>
+        gh.listPullRequestReviewComments(owner, repo, pull_number, {
+          fullBodies: full_bodies,
+          page,
+          perPage: per_page,
+        }),
     ),
 
     tool(
@@ -520,7 +967,7 @@ export function buildGitHubTools(
 
     tool(
       "github_list_commits",
-      "List commits on a repository or branch",
+      "List commits on a repository or branch — each { sha, message, author, date, html_url }, message truncated past 4000 chars. Paged: returns { items, page, per_page, has_more, next_page }.",
       Type.Object({
         owner: Type.String(),
         repo: Type.String(),
@@ -528,15 +975,98 @@ export function buildGitHubTools(
         path: Type.Optional(Type.String({ description: "Only commits touching this path" })),
         page: Type.Optional(Type.Number()),
         per_page: Type.Optional(Type.Number()),
+        full_messages: Type.Optional(
+          Type.Boolean({
+            description: "Return every commit message in full instead of truncating.",
+          }),
+        ),
       }),
-      ({ owner, repo, ...opts }) => gh.listCommits(owner, repo, opts),
+      ({ owner, repo, full_messages, ...opts }) =>
+        gh.listCommits(owner, repo, { ...opts, fullMessages: full_messages }),
+    ),
+
+    // ── Actions (CI) ──────────────────────────────────────────────────
+    //
+    // Read-only CI evidence. The harness pre-fetches a failure summary into the
+    // prompt, but that snapshot is static: diagnosing a red PR often means
+    // asking a question the harness didn't anticipate — "did this same job pass
+    // on the previous commit?", "which step actually failed?", "what does the
+    // log say 200 lines before the error?". These three answer those.
+    //
+    // All three need the App's `Actions: read` permission and return
+    // `{ ok: false, reason }` rather than throwing when it is absent.
+
+    tool(
+      "github_list_workflow_runs",
+      "List GitHub Actions workflow runs for a repository, newest first. Filter by branch, head_sha, status, or workflow_id (a workflow file name like 'ci.yml', or its numeric id) to find how the SAME workflow behaved on an earlier commit — the comparison that separates a flaky failure from a reproducible one. Returns a trimmed projection of each run, not the full API object. Requires the App's 'Actions: read' permission; returns { ok: false, reason } when it is missing — do not retry in that case.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        workflow_id: Type.Optional(
+          Type.String({ description: "Workflow file name (e.g. 'ci.yml') or numeric id" }),
+        ),
+        branch: Type.Optional(Type.String()),
+        head_sha: Type.Optional(Type.String()),
+        event: Type.Optional(Type.String({ description: "e.g. 'push', 'pull_request'" })),
+        status: Type.Optional(
+          Type.String({ description: "e.g. 'completed', 'in_progress', 'failure', 'success'" }),
+        ),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+      }),
+      ({ owner, repo, ...opts }) => gh.listWorkflowRuns(owner, repo, opts),
+    ),
+
+    tool(
+      "github_list_workflow_run_jobs",
+      "List the jobs of one GitHub Actions workflow run, each with its steps and per-step conclusions. Use it to locate the exact step that failed before spending a log fetch on the whole job. Requires the App's 'Actions: read' permission; returns { ok: false, reason } when it is missing — do not retry in that case.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        run_id: Type.Number({ description: "Workflow run id (from github_list_workflow_runs)" }),
+        filter: Type.Optional(
+          Type.Union([Type.Literal("latest"), Type.Literal("all")], {
+            description: "'latest' (default) returns only the last attempt of each job",
+          }),
+        ),
+        page: Type.Optional(Type.Number()),
+        per_page: Type.Optional(Type.Number()),
+      }),
+      ({ owner, repo, run_id, ...opts }) => gh.listWorkflowRunJobs(owner, repo, run_id, opts),
+    ),
+
+    tool(
+      "github_get_job_logs",
+      "Fetch one GitHub Actions job's log, EXCERPTED — timestamps stripped, anchored on the error lines with surrounding context, and hard-capped in bytes with a truncation notice. Use it when the CI failure summary in your prompt is inconclusive. The full log can be megabytes, so this never returns all of it; narrow with github_list_workflow_run_jobs first. Requires the App's 'Actions: read' permission; returns { ok: false, reason } when it is missing — do not retry in that case.",
+      Type.Object({
+        owner: Type.String(),
+        repo: Type.String(),
+        job_id: Type.Number({ description: "Job id (from github_list_workflow_run_jobs)" }),
+        max_bytes: Type.Optional(
+          Type.Number({
+            description: `Byte cap on the returned excerpt (default ${DEFAULT_LOG_EXCERPT_BYTES}, clamped to ${MIN_LOG_EXCERPT_BYTES}–${MAX_LOG_EXCERPT_BYTES})`,
+          }),
+        ),
+      }),
+      async ({ owner, repo, job_id, max_bytes }) => {
+        const log = await gh.getJobLogs(owner, repo, job_id);
+        if (isActionsDenied(log)) return log;
+        const excerpt = excerptJobLog(log, max_bytes ?? DEFAULT_LOG_EXCERPT_BYTES);
+        return {
+          job_id,
+          truncated: excerpt.truncated,
+          bytes: excerpt.bytes,
+          original_bytes: excerpt.originalBytes,
+          log: excerpt.text,
+        };
+      },
     ),
 
     // ── Search ────────────────────────────────────────────────────────
 
     tool(
       "github_search_repositories",
-      "Search for GitHub repositories",
+      "Search for GitHub repositories. Returns { total_count, incomplete_results, items, page, per_page, has_more, next_page }; each item is { full_name, description, language, stargazers_count, default_branch, html_url }.",
       Type.Object({
         query: Type.String(),
         page: Type.Optional(Type.Number()),
@@ -547,7 +1077,7 @@ export function buildGitHubTools(
 
     tool(
       "github_search_issues",
-      "Search issues and pull requests across repositories",
+      "Search issues and pull requests across repositories. Returns { total_count, incomplete_results, items, page, per_page, has_more, next_page }; each item is a summary (number, title, state, repository, author, labels, timestamps, is_pull_request) — NOT the body. Fetch one with github_get_issue.",
       Type.Object({
         query: Type.String({
           description: "GitHub search query (e.g. 'repo:owner/name is:open label:bug')",
@@ -560,7 +1090,7 @@ export function buildGitHubTools(
 
     tool(
       "github_search_code",
-      "Search code across repositories",
+      "Search code across repositories. Returns { total_count, incomplete_results, items, page, per_page, has_more, next_page }; each item is { path, repository, html_url } — the MATCHING LINES ARE NOT RETURNED, so read the file (github_get_file_contents) or the local checkout when you need context. Counting hits (e.g. import sites) needs only total_count.",
       Type.Object({
         query: Type.String({ description: "GitHub code search query" }),
         page: Type.Optional(Type.Number()),

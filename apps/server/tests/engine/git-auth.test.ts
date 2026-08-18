@@ -26,6 +26,22 @@ vi.mock("crypto", async (importOriginal) => {
   };
 });
 
+// git-auth now logs via the pino LoggerPort instead of console — mock the
+// logger module so the "Mint granted" assertion below can inspect the
+// captured info-call fields instead of console output.
+const { infoSpy } = vi.hoisted(() => ({ infoSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: infoSpy,
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { execSync, execFileSync } from "child_process";
 import * as fs from "fs";
 import { configureGitAuth, refreshGitAuth } from "#src/engine/github/git-auth.js";
@@ -71,6 +87,29 @@ describe("git-auth — global ~/.gitconfig writes are opt-in", () => {
     const out = await configureGitAuth(baseConfig);
     expect(out.token).toBe("ghs_testtoken123");
     expect(out.expiresAt).toBe("2099-01-01T00:00:00Z");
+  });
+
+  it("logs the GRANTED repository_selection + permissions from the mint response (issue #215)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          token: "ghs_scoped",
+          expires_at: "2099-01-01T00:00:00Z",
+          repository_selection: "selected",
+          permissions: { issues: "write", pull_requests: "write", contents: "write" },
+          repositories: [{ full_name: "owner/private-repo-a" }],
+        }),
+      }),
+    );
+    await refreshGitAuth({ ...baseConfig, repositories: ["private-repo-a"] });
+
+    const call = infoSpy.mock.calls.find(([msg]) => msg === "Mint granted")!;
+    const fields = call[1] as Record<string, unknown>;
+    expect(fields.repositorySelection).toBe("selected");
+    expect(fields.permissions).toMatchObject({ issues: "write", pull_requests: "write", contents: "write" });
+    expect(fields.repositories).toBe("owner/private-repo-a");
   });
 });
 

@@ -1,0 +1,102 @@
+---
+// Last Light vs. Devin: targets "devin alternative" / "open source devin" /
+// "self-hosted devin".
+import ComparisonLayout from '../../layouts/ComparisonLayout.astro';
+
+const title = "Last Light vs. Devin: the Self-Hosted, Open-Source Alternative";
+const description = "Devin is a vendor-hosted autonomous engineer; Last Light is an MIT-licensed software factory you run yourself. Same issue→PR loop, opposite answers on hosting, BYO models, and workflow control.";
+
+const heading = 'Last Light vs. <span class="accent">Devin</span>';
+const subtitle = "Devin popularised the idea of handing a ticket to an AI engineer and getting a pull request back. Last Light runs the same loop, but on your infrastructure, with your model keys, and with every step of the workflow readable and forkable.";
+
+const rowsDuo = [
+	["Hosting", "Self-hosted only: your host, your Docker stack", "SaaS: your code runs in Cognition's cloud"],
+	["Model choice", "BYO: Anthropic, OpenAI, OpenRouter and others", "Vendor model, no BYOM"],
+	["Trigger", "GitHub webhooks, Slack, cron sweeps, CLI", "Task / issue assignment"],
+	["Workflow control", "YAML DAGs you fork and override in an <code>instance/</code> overlay", "Fixed product behaviour"],
+	["Isolation", "Docker / micro-VM sandbox with default-deny egress firewall", "Vendor cloud sandbox"],
+	["Human gates", "Built-in mid-run approvals via GitHub, Slack or dashboard", "Review the PR at the end"],
+	["Scope", "A suite: triage, review, build, security, health, chat", "Task → PR"],
+	["Cost", "Free / MIT + your model spend + your infra", "Subscription"],
+	["Support", "None. Read the source", "Commercial vendor"],
+];
+---
+
+<ComparisonLayout title={title} description={description} heading={heading} subtitle={subtitle} slug="devin">
+
+	<section class="content-section">
+		<h2>The short version</h2>
+		<div class="callout-card">
+			<p>Devin and Last Light share a lifecycle: <strong>a ticket goes in, a sandboxed agent plans and edits code, a pull request comes out, a human reviews it.</strong> If that loop is all you need, Devin is far less work. There is nothing to run.</p>
+			<p>They diverge on <strong>ownership</strong>. Devin is a product: a vendor's model, a vendor's sandbox, a vendor's idea of how the work should flow. Last Light is a harness you operate: your keys, your egress policy, your GitHub token scopes, and a workflow graph you can read and change. That is the entire trade: convenience against control.</p>
+			<p>Last Light is also <em>broader</em>. Devin is an issue&rarr;PR agent. Last Light additionally does scheduled triage sweeps, PR review, security review, repo-health reporting, and Slack chat, all as workflows on the same engine.</p>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Side by side</h2>
+		<div class="table-scroll">
+			<table class="cmp duo">
+				<thead>
+					<tr><th></th><th class="ll">Last Light</th><th>Devin</th></tr>
+				</thead>
+				<tbody>
+					{rowsDuo.map(([k, ll, other]) => (
+						<tr>
+							<th scope="row">{k}</th>
+							<td class="ll" set:html={ll} />
+							<td set:html={other} />
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Where each one wins</h2>
+		<div class="hh-grid">
+			<div class="hh-card">
+				<h3>What Devin does that Last Light doesn't</h3>
+				<ul class="card-list">
+					<li><strong>Zero operations.</strong> No host to provision, no compose stack, no sandbox images to build or update.</li>
+					<li><strong>A tuned first-party model and scaffold</strong>, developed together, so you inherit that work rather than tuning prompts yourself.</li>
+					<li><strong>A commercial relationship.</strong> Support, a roadmap, someone to escalate to.</li>
+					<li><strong>A polished session UI</strong> for watching and steering a run in real time.</li>
+					<li><strong>Onboarding that ends at "log in"</strong>, rather than at a GitHub App, a private key, and a firewall policy.</li>
+				</ul>
+			</div>
+			<div class="hh-card">
+				<h3>What Last Light does that Devin doesn't</h3>
+				<ul class="card-list">
+					<li><strong>Your code never leaves your infrastructure.</strong> The agent, its bash, its file I/O and its egress all sit inside a boundary you configure.</li>
+					<li><strong>Bring your own model.</strong> Route different workflows to different providers, and change that in config.</li>
+					<li><strong>Workflows as open config.</strong> Every phase, prompt and permission profile is YAML you can fork in an <code>instance/</code> overlay.</li>
+					<li><strong>A default-deny egress firewall</strong> plus four downscoped, per-run GitHub App token profiles.</li>
+					<li><strong>Mid-run approval gates.</strong> Pause after the architect's plan and resume from a GitHub comment, Slack, or the dashboard.</li>
+					<li><strong>Standing cron sweeps.</strong> Weekly health and security passes, not just reactive tasks.</li>
+					<li><strong>Per-repo self-service.</strong> A repo commits its own <code>.lastlight/</code> to tune models, prompts and skills for itself, read from the default branch and clamped so it can only ever be more conservative than you set.</li>
+					<li><strong>Feedback you can measure.</strong> A 👍 or 👎 on the bot's output is scored against the run that produced it, so a prompt change's effect on quality is a number rather than a feeling.</li>
+					<li><strong>Evals on your own code.</strong> The <a href="/evals/introduction/">harness</a> runs the real workflows against cases built from your own merged PRs, so you can compare models on your repos before trusting one.</li>
+					<li><strong>Free and MIT-licensed</strong>, with no per-seat cost.</li>
+				</ul>
+			</div>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Which should you pick?</h2>
+		<div class="choose-grid">
+			<div class="choose-card rival">
+				<div class="choose-tag">Choose Devin when</div>
+				<p>you want an autonomous engineer working today with nothing to operate, you're comfortable with your source running in a vendor's cloud on a vendor's model, and you'd rather buy the result than run the machine.</p>
+			</div>
+			<div class="choose-card lastlight">
+				<div class="choose-tag">Choose Last Light when</div>
+				<p>where the code runs, which model sees it, and what the agent can reach on the network are first-order requirements, and you want repo maintenance as a whole suite of forkable workflows rather than a single ticket&rarr;PR product.</p>
+			</div>
+		</div>
+		<p class="section-note"><strong>The honest caveat:</strong> if you pick Last Light you are taking on operations. You provision the host, you run the stack, you keep the images current, and there is no vendor to page at 2am. That cost is real, and it only pays for itself if self-hosting is something you actually need rather than something that merely sounds better.</p>
+	</section>
+
+</ComparisonLayout>

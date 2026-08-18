@@ -3,7 +3,7 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 
 const title = "FAQ — Last Light";
-const description = "Frequently asked questions about Last Light — the self-hostable, MIT-licensed AI coding agent for GitHub. Setup, architecture, customization, operations.";
+const description = "Frequently asked questions about Last Light — the self-hostable, MIT-licensed software factory for GitHub. Setup, architecture, customization, operations.";
 ---
 
 <BaseLayout title={title} description={description}>
@@ -138,7 +138,15 @@ const description = "Frequently asked questions about Last Light — the self-ho
 			<details class="faq-item">
 				<summary>How do I add more repos?</summary>
 				<div class="faq-answer">
-					<p>Just install the GitHub App on additional repos — no code changes needed. The bot handles all installed repos automatically. If you want different behavior per repo, you'd need to add conditional logic to the skill files (check <code>repository.full_name</code> in the webhook payload).</p>
+					<p>Just install the GitHub App on additional repos — no code changes needed. The bot handles all installed repos automatically.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Can a single repo have its own settings?</summary>
+				<div class="faq-answer">
+					<p>Yes — a managed repo can commit a <code>.lastlight/</code> directory that overrides a bounded subset of config for runs against itself: models and reasoning effort, extra approval gates, which scheduled jobs it takes part in, and its own prompts, skills and agent-context files. Same on-disk shape as the deployment overlay, so <code>lastlight repo fork</code> scaffolds it from the real built-ins and <code>lastlight repo config validate</code> checks it offline before you push.</p>
+					<p>It is always read from the repo's <strong>default branch</strong>, never a pull-request head — so a PR can't reconfigure the agent reviewing it. A repo can never contribute workflow YAML (phases, permission profiles and gates stay yours), can only <em>add</em> approval gates rather than remove them, and can only add agent-context files rather than shadow your <code>rules.md</code>/<code>security.md</code>. What's on offer at all is bounded by a <code>repoConfig:</code> block you control, and the whole feature can be switched off with <code>repoConfig.enabled: false</code>. See <a href="/docs/repo-config">Per-repo config</a>.</p>
 				</div>
 			</details>
 		</div>
@@ -163,6 +171,29 @@ const description = "Frequently asked questions about Last Light — the self-ho
 			</details>
 
 			<details class="faq-item">
+				<summary>How do I tell the bot to leave one issue or PR alone?</summary>
+				<div class="faq-answer">
+					<p>Apply the <strong>hold</strong> label — <code>lastlight-ignore</code> by default. Last Light then stops acting on that issue or pull request entirely: no triage, no review, no fix, no merge, and no comment. It outranks every other rule except "we couldn't read the pull request at all", including a direct <code>@last-light …</code> request — which gets exactly one reply naming the label, so a direct instruction is refused rather than silently ignored.</p>
+					<p>Remove the label and the bot resumes. Nothing is persisted either way, which is the point: it is a live precondition re-read on every event, not a stored verdict you have to clear. GitHub already requires triage permission to change a label, so it needs no separate permission model. Rename it with <code>LASTLIGHT_HOLD_LABEL</code> (overlay key <code>hold.label</code>) — but the packaged prompts create the default name, so a rename means creating the label by hand or forking that prompt.</p>
+					<p>Don't use <code>requires-human</code> for this. That one is a <em>notification</em> the bot writes when it gives up; nothing reads it, and taking it off now means the opposite — "have another go".</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Last Light gave up on my PR. How do I get it going again?</summary>
+				<div class="faq-answer">
+					<p>When the attempt or cost budget for a PR runs out, Last Light labels it <code>requires-human</code>, comments once explaining what it tried, and stops. Four things un-stick it, and they all do exactly the same thing — re-arm the attempt counter <em>and</em> the cost window for a fresh full budget:</p>
+					<ul>
+						<li>Push a commit to the branch (anyone's but the bot's).</li>
+						<li>Comment <code>@last-light retry</code>, optionally with a reason: <code>@last-light retry the arm64 runner was flaky</code>. The reason is recorded and handed to the next attempt.</li>
+						<li>Remove the <code>requires-human</code> label.</li>
+						<li>Run <code>lastlight pr retry owner/repo#42 [reason]</code> from a terminal — the only one that dispatches the stuck workflow immediately rather than waiting for the next event.</li>
+					</ul>
+					<p>A retry keeps what the earlier attempts learned; a push wipes it, because a push changed the code. Retries are unbounded — each buys a full window — so it is a real spending decision, and each one is recorded (who asked, when, why) on the run that follows. Nothing you ask for overrides the hold label, a run already working that PR, a fork PR, a red base branch, or a PR the harness could not read.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
 				<summary>Is there a risk of the bot going rogue?</summary>
 				<div class="faq-answer">
 					<p>The bot can only do what its GitHub App permissions allow. It can't delete repos, manage org settings, or access repos where it's not installed. Build requests only trigger when a maintainer explicitly @mentions the bot. All actions are logged as session trajectories in <code>logs/</code>.</p>
@@ -177,7 +208,7 @@ const description = "Frequently asked questions about Last Light — the self-ho
 
 <style is:global>
 	section {
-		max-width: 1000px;
+		max-width: 1200px;
 		margin: 0 auto;
 		padding: 3rem 2rem;
 	}
@@ -192,7 +223,7 @@ const description = "Frequently asked questions about Last Light — the self-ho
 
 	/* Page header */
 	.page-header {
-		max-width: 1000px;
+		max-width: 1200px;
 		margin: 0 auto;
 		padding: 4rem 2rem 1rem;
 	}

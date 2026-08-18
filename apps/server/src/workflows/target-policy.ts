@@ -44,21 +44,15 @@ export const PER_TARGET_REUSE_WORKFLOWS = new Set([
  */
 export const PR_FIX_SHAPED_WORKFLOWS = new Set(["pr-fix", "dependabot-ci-fix"]);
 
-/**
- * Dependency-update workflows reached from an automated check_suite webhook
- * (`pr.checks_passed` → `dependabot-pr-merge`, `pr.checks_failed` →
- * `dependabot-ci-fix`). The dispatcher applies a pre-sandbox idempotency guard
- * to these — skip a PR carrying `requires-human`, or one already assessed at its
- * current head SHA — so a re-fired suite / cron overlap doesn't burn tokens
- * re-doing work. Scoped to the two dependency workflows because that's where the
- * `requires-human` disposition and the "assess once per green SHA" contract
- * live; a human `@bot` request is an intentional override and is NOT gated
- * (the guard keys off the webhook event type, not just the handler).
- */
-export const DEPENDENCY_WEBHOOK_WORKFLOWS = new Set([
-  "dependabot-pr-merge",
-  "dependabot-ci-fix",
-]);
+// `DEPENDENCY_WEBHOOK_WORKFLOWS` lived here: the set the dispatcher's
+// pre-sandbox idempotency guard was scoped to (skip a PR carrying
+// `requires-human`, or one already assessed at its current head SHA). Both
+// signals are now fields of the resolved `PrState` snapshot and the guard is a
+// pure decision over it (`engine/pr-decisions.ts` → `resolveFixDisposition`),
+// which applies to every PR-scoped workflow and every route rather than to two
+// workflows on the webhook path — so the set had no readers left. The span the
+// snapshot covers is `prScopedWorkflows()` in `./pr-scope.ts`, derived from each
+// workflow's own `pr_scoped: true` metadata.
 
 /**
  * Workflows whose per-target workspace is **recreated from the default branch**

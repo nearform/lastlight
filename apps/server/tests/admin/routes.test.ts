@@ -8,6 +8,12 @@ import { mountAdmin } from "#src/admin/index.js";
 import { BuildAssetStore } from "#src/state/build-assets.js";
 import type { StateDb } from "#src/state/db.js";
 import type { SessionReader } from "#src/admin/sessions.js";
+import {
+  setRuntimeConfig,
+  resetRuntimeConfigForTests,
+  type LastLightConfig,
+} from "#src/config/config.js";
+import { RunId } from "#src/sandbox/k8s/run-id.js";
 
 // Mock docker so tests don't need a running daemon
 vi.mock("#src/admin/docker.js", () => ({
@@ -16,6 +22,35 @@ vi.mock("#src/admin/docker.js", () => ({
   getContainerStats: vi.fn(async () => []),
   getHostStats: vi.fn(async () => null),
 }));
+
+// Mock the k8s client + reclaim modules so the cancel-route tests never touch
+// a real cluster: `makeK8sApis` would throw off-cluster (no kubeconfig)
+// before the route even reaches `reclaimSandbox`.
+vi.mock("#src/sandbox/k8s/client.js", () => ({
+  makeK8sApis: vi.fn(() => ({}) as unknown),
+}));
+vi.mock("#src/sandbox/k8s/reclaim.js", () => ({
+  reclaimSandbox: vi.fn(async () => ({ podsDeleted: 0, pvcsDeleted: 0 })),
+}));
+
+// The cancel route's workspace reap (src/sandbox/reap.js) — and now several
+// admin-route diagnostics (OAuth config/callback failures, cancel/retry/resume
+// failures) — log via the pino LoggerPort instead of console. Mock the logger
+// module so the suite's stderr stays free of real pino JSON, and expose
+// error/warn as named hoisted spies so the OAuth tests below can assert a
+// failure was logged (previously done via `vi.spyOn(console, ...)`).
+const { errorSpy, warnSpy } = vi.hoisted(() => ({ errorSpy: vi.fn(), warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: errorSpy,
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
 
 // Pin the cron definitions the /crons routes resolve against, so the trigger
 // tests don't depend on the bundled workflows/cron-*.yaml fixture set. Other
@@ -294,7 +329,7 @@ describe("GET /auth-required (GitHub OAuth)", () => {
   });
 
   it("returns githubOAuth: false when id+secret set but allowed org is missing", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    errorSpy.mockClear();
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
       githubOAuthClientId: "GH_CLIENT",
       githubOAuthClientSecret: "GH_SECRET",
@@ -302,8 +337,7 @@ describe("GET /auth-required (GitHub OAuth)", () => {
     const res = await request(app, "/auth-required");
     const body = await res.json() as { githubOAuth: boolean };
     expect(body.githubOAuth).toBe(false);
-    expect(errSpy).toHaveBeenCalled();
-    errSpy.mockRestore();
+    expect(errorSpy).toHaveBeenCalled();
   });
 });
 
@@ -315,14 +349,12 @@ describe("GET /oauth/github/authorize", () => {
   });
 
   it("returns 404 when id+secret set but allowed org is missing", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
       githubOAuthClientId: "GH_CLIENT",
       githubOAuthClientSecret: "GH_SECRET",
     }));
     const res = await request(app, "/oauth/github/authorize");
     expect(res.status).toBe(404);
-    errSpy.mockRestore();
   });
 
   it("redirects to GitHub when configured with an allowed org", async () => {
@@ -480,7 +512,7 @@ describe("GET /oauth/github/callback", () => {
 
   it("redirects to /admin/?error=github_org when membership returns 404 (not a member)", async () => {
     const originalFetch = global.fetch;
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnSpy.mockClear();
     global.fetch = mockGithubFetch({ userLogin: "alice", orgStatus: 404 });
 
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
@@ -497,14 +529,14 @@ describe("GET /oauth/github/callback", () => {
     const res = await app.fetch(req);
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/admin/?error=github_org");
+    expect(warnSpy).toHaveBeenCalled();
 
     global.fetch = originalFetch;
-    warnSpy.mockRestore();
   });
 
   it("redirects to /admin/?error=github_org when membership returns 302 (insufficient visibility)", async () => {
     const originalFetch = global.fetch;
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnSpy.mockClear();
     global.fetch = mockGithubFetch({ userLogin: "alice", orgStatus: 302 });
 
     const app = createAdminRoutes(mockDb, mockSessions, mockSessions, makeConfig({
@@ -521,9 +553,9 @@ describe("GET /oauth/github/callback", () => {
     const res = await app.fetch(req);
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/admin/?error=github_org");
+    expect(warnSpy).toHaveBeenCalled();
 
     global.fetch = originalFetch;
-    warnSpy.mockRestore();
   });
 });
 
@@ -901,6 +933,8 @@ describe("POST /workflow-runs/:id/cancel", () => {
   it("reaps the run's on-disk workspace after cancelling (issue #106)", async () => {
     const dockerMod = await import("#src/admin/docker.js");
     vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+    const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+    vi.mocked(reclaimSandbox).mockClear();
 
     const stateDir = mkdtempSync(join(tmpdir(), "cancel-reap-"));
     const taskId = "acme-7-build";
@@ -912,7 +946,115 @@ describe("POST /workflow-runs/:id/cancel", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).reapedWorkspace).toBe(true);
     expect(existsSync(join(stateDir, "sandboxes", taskId))).toBe(false);
+    // Non-k8s backend (no runtime config set → `sandbox` is undefined): the
+    // host reap path runs and the k8s reclaim is never invoked.
+    expect(reclaimSandbox).not.toHaveBeenCalled();
     rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  describe("kubernetes backend", () => {
+    afterEach(() => resetRuntimeConfigForTests());
+
+    it("reclaims the run's pod + PVC via reclaimSandbox with the sanitized run id", async () => {
+      setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
+      const dockerMod = await import("#src/admin/docker.js");
+      vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+      const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+      vi.mocked(reclaimSandbox).mockClear();
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 1, pvcsDeleted: 1 });
+
+      const runId = "Run With!Odd.Chars";
+      const { db } = makeCancelDb({
+        run: { id: runId, status: "running", triggerId: "t1", taskId: "task-xyz" },
+      });
+      const app = createAdminRoutes(
+        db, mockSessions, mockSessions,
+        makeConfig({ adminPassword: "" }),
+      );
+      const res = await request(app, `/workflow-runs/${encodeURIComponent(runId)}/cancel`, {
+        method: "POST",
+      });
+
+      expect(res.status).toBe(200);
+      expect(reclaimSandbox).toHaveBeenCalledTimes(1);
+      expect(reclaimSandbox).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.any(String),
+        { kind: "run", runId: RunId.from(runId) },
+      );
+    });
+
+    it("gc's the run's host-side artifacts on cancel (the artifact store is host-local even on k8s)", async () => {
+      setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
+      const dockerMod = await import("#src/admin/docker.js");
+      vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+      const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+      vi.mocked(reclaimSandbox).mockClear();
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 1, pvcsDeleted: 0 });
+
+      // reclaimSandbox handles the cluster pod + PVC; the pod's uploaded
+      // `.lastlight/` lands host-side under `<sandboxDir>/<taskId>` even on k8s,
+      // and nothing else reaps it (the host-dir sweep is disabled on k8s), so
+      // cancel must gc it directly — same call the host `else` branch makes.
+      const { artifactStore } = await import("#src/sandbox/artifact-store.js");
+      const gcSpy = vi.spyOn(artifactStore, "gc").mockResolvedValue();
+
+      const { db } = makeCancelDb({
+        run: { id: "r1", status: "running", triggerId: "t1", taskId: "task-xyz" },
+      });
+      const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
+      const res = await request(app, "/workflow-runs/r1/cancel", { method: "POST" });
+
+      expect(res.status).toBe(200);
+      expect(gcSpy).toHaveBeenCalledWith("task-xyz");
+      gcSpy.mockRestore();
+    });
+
+    it("still returns success when artifact gc throws on k8s cancel (best-effort)", async () => {
+      setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
+      const dockerMod = await import("#src/admin/docker.js");
+      vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+      const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+      vi.mocked(reclaimSandbox).mockClear();
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 0, pvcsDeleted: 0 });
+
+      const { artifactStore } = await import("#src/sandbox/artifact-store.js");
+      const gcSpy = vi.spyOn(artifactStore, "gc").mockRejectedValueOnce(new Error("disk gone"));
+
+      const { db, cancels } = makeCancelDb({
+        run: { id: "r1", status: "running", triggerId: "t1", taskId: "task-xyz" },
+      });
+      const app = createAdminRoutes(db, mockSessions, mockSessions, makeConfig({ adminPassword: "" }));
+      const res = await request(app, "/workflow-runs/r1/cancel", { method: "POST" });
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).cancelled).toBe("r1");
+      expect(cancels).toEqual(["r1"]);
+      gcSpy.mockRestore();
+    });
+
+    it("still returns success when the k8s reclaim throws (best-effort)", async () => {
+      setRuntimeConfig({ sandbox: "kubernetes" } as unknown as LastLightConfig);
+      const dockerMod = await import("#src/admin/docker.js");
+      vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
+      const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
+      vi.mocked(reclaimSandbox).mockClear();
+      vi.mocked(reclaimSandbox).mockRejectedValueOnce(new Error("ECONNREFUSED"));
+
+      const { db, cancels } = makeCancelDb({
+        run: { id: "r1", status: "running", triggerId: "t1", taskId: "task-xyz" },
+      });
+      const app = createAdminRoutes(
+        db, mockSessions, mockSessions,
+        makeConfig({ adminPassword: "" }),
+      );
+      const res = await request(app, "/workflow-runs/r1/cancel", { method: "POST" });
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).cancelled).toBe("r1");
+      expect(cancels).toEqual(["r1"]);
+      expect(reclaimSandbox).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
@@ -1654,6 +1796,53 @@ describe("POST /crons/:name/trigger", () => {
     // Context merges the managed-repo list with the cron def's own context.
     expect(context).toMatchObject({ foo: "bar" });
     expect(context).toHaveProperty("repos");
+  });
+
+  it("stamps _cronSource=manual and _cronActor on the fired context", async () => {
+    const triggerCron = vi.fn(async () => {});
+    const app = createAdminRoutes(
+      mockDb, mockSessions, mockSessions,
+      makeConfig({ adminPassword: "", triggerCron }),
+    );
+    const res = await request(app, "/crons/test-cron/trigger", { method: "POST" });
+    expect(res.status).toBe(200);
+    const [, context] = triggerCron.mock.calls[0] as [string, Record<string, unknown>];
+    // A manual fire is recorded as manual, and attributed — otherwise the
+    // ledger cannot tell "Run now" from the scheduler.
+    expect(context._cronSource).toBe("manual");
+    expect("_cronActor" in context).toBe(true);
+  });
+
+  it("injects the cron markers AFTER the YAML spread so they cannot be spoofed", async () => {
+    const { getCronWorkflows } = await import("#src/workflows/loader.js");
+    const spoofing = vi.mocked(getCronWorkflows).mockReturnValue([
+      // A cron YAML trying to claim another cron's identity and pass itself
+      // off as a scheduled fire.
+      {
+        name: "test-cron",
+        workflow: "repo-health",
+        schedule: "0 9 * * 1",
+        context: { _cronName: "some-other-cron", _cronSource: "schedule" },
+      },
+    ] as unknown as ReturnType<typeof getCronWorkflows>);
+
+    try {
+      const triggerCron = vi.fn(async () => {});
+      const app = createAdminRoutes(
+        mockDb, mockSessions, mockSessions,
+        makeConfig({ adminPassword: "", triggerCron }),
+      );
+      const res = await request(app, "/crons/test-cron/trigger", { method: "POST" });
+      expect(res.status).toBe(200);
+      const [, context] = triggerCron.mock.calls[0] as [string, Record<string, unknown>];
+      // The route's own values win. A spoofed `_cronName` would make
+      // resolveCronRepos apply another cron's per-repo participation to this
+      // tick; a spoofed `_cronSource` would misattribute the fire.
+      expect(context._cronName).toBe("test-cron");
+      expect(context._cronSource).toBe("manual");
+    } finally {
+      spoofing.mockRestore();
+    }
   });
 
   it("returns 404 for an unknown cron", async () => {

@@ -32,7 +32,6 @@ npm install</code></pre>
 
 	<pre><code>GITHUB_APP_ID=123456
 GITHUB_APP_PRIVATE_KEY_PATH=./your-app.private-key.pem
-GITHUB_APP_INSTALLATION_ID=789012
 WEBHOOK_SECRET=your-webhook-secret</code></pre>
 
 	<p>
@@ -141,6 +140,7 @@ lastlight logs search "ECONNREFUSED"            # search errors / transcripts
 lastlight approvals list                        # pending approval gates
 lastlight cron list                             # scheduled jobs + next/last run
 lastlight cron trigger &lt;name&gt;                    # fire a cron now (testing)
+lastlight pr retry owner/repo#42 "flaky runner"  # un-stick a PR the bot gave up on
 lastlight stats --daily 14                      # cost / token rollups</code></pre>
 
 	<p>

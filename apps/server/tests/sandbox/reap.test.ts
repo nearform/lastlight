@@ -1,7 +1,23 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+
+// reap.ts now logs via the pino LoggerPort instead of console — mock the
+// logger module so the suite's stderr stays free of real pino JSON (no
+// assertions here depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { reapSandboxWorkspace, sandboxRoot } from "#src/sandbox/reap.js";
 
 const tmps: string[] = [];

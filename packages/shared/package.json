@@ -1,6 +1,6 @@
 {
   "name": "lastlight-shared",
-  "version": "0.1.3",
+  "version": "0.3.7",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nearform/lastlight.git",
@@ -11,14 +11,42 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-    "./providers": { "types": "./dist/providers.d.ts", "import": "./dist/providers.js" },
-    "./oauth": { "types": "./dist/oauth.d.ts", "import": "./dist/oauth.js" },
-    "./overlay-bootstrap": { "types": "./dist/overlay-bootstrap.d.ts", "import": "./dist/overlay-bootstrap.js" },
-    "./overlay-assets": { "types": "./dist/overlay-assets.d.ts", "import": "./dist/overlay-assets.js" },
-    "./core-pin": { "types": "./dist/core-pin.d.ts", "import": "./dist/core-pin.js" },
-    "./workflow-loader": { "types": "./dist/workflow-loader.d.ts", "import": "./dist/workflow-loader.js" },
-    "./config-types": { "types": "./dist/config-types.d.ts", "import": "./dist/config-types.js" },
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./providers": {
+      "types": "./dist/providers.d.ts",
+      "import": "./dist/providers.js"
+    },
+    "./oauth": {
+      "types": "./dist/oauth.d.ts",
+      "import": "./dist/oauth.js"
+    },
+    "./overlay-bootstrap": {
+      "types": "./dist/overlay-bootstrap.d.ts",
+      "import": "./dist/overlay-bootstrap.js"
+    },
+    "./overlay-assets": {
+      "types": "./dist/overlay-assets.d.ts",
+      "import": "./dist/overlay-assets.js"
+    },
+    "./core-pin": {
+      "types": "./dist/core-pin.d.ts",
+      "import": "./dist/core-pin.js"
+    },
+    "./workflow-loader": {
+      "types": "./dist/workflow-loader.d.ts",
+      "import": "./dist/workflow-loader.js"
+    },
+    "./config-types": {
+      "types": "./dist/config-types.d.ts",
+      "import": "./dist/config-types.js"
+    },
+    "./repo-config-schema": {
+      "types": "./dist/repo-config-schema.d.ts",
+      "import": "./dist/repo-config-schema.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -34,9 +62,9 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
-    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-ai": "^0.84.1",
     "lastlight-workflow-engine": "workspace:*",
-    "chalk": "^5.6.2",
+    "chalk": "^6.0.0",
     "yaml": "^2.8.3"
   },
   "devDependencies": {

@@ -28,7 +28,8 @@ export class ChatRunner {
 interface ChatRunnerConfig {
   model: string;          // resolved via resolveModel(config.models, "chat")
   thinking?: string;      // off | minimal | low | medium | high | xhigh
-  systemPrompt: string;   // loadAgentContext() + CHAT_SYSTEM_SUFFIX + skill catalogue XML
+  systemPrompt: string | (() => string);  // agent context + chatSystemSuffix() + skill catalogue XML;
+                                          // a thunk is resolved per turn (see §System prompt)
   github?: ChatGitHubAuth;
   extraTools?: ChatExtraToolset;  // additional tools (read_skill); merged with github tools
   timeoutMs?: number;     // per-turn; default 120 s
@@ -106,6 +107,44 @@ The `agent_session_id` is the join key into the JSONL — Slack thread
 ↔ messaging_session ↔ agent_session_id ↔
 `projects/-app/<agent_session_id>.jsonl`. See [State](/spec/10-state).
 
+### The thread transcript — chat is not the only writer
+
+A Slack thread is **one conversation regardless of how each message was
+handled**. Most messages in a thread never reach `ChatRunner` at all: the
+classifier routes a substantive question to the `answer` workflow, a build
+request to `build`, and so on. Those turns are answered from a sandbox, and
+`messaging_messages` is what carries them across to the next chat turn.
+
+So two writers, kept **mutually exclusive per turn** so a turn is never
+double-recorded (`src/connectors/messaging/thread-transcript.ts`):
+
+| Turn | Writer |
+|---|---|
+| Chat (`handler: chat`) | `ChatRunner`, per the flow above |
+| Anything else on a messaging envelope — a workflow dispatch, a router refusal, an approval or status reply | `withThreadTranscript`, which records the inbound message and wraps `envelope.reply` |
+| A workflow's own output into the thread (the runner's `postComment`, live and on boot-recovery) | `recordThreadMessageForThread`, addressed by (platform, channel, thread) — the runner never sees a messaging session id |
+
+Each writer records **only what was delivered** — after the send resolves,
+inside its own error handling. The runner's Slack transport swallows and logs a
+send failure, so recording outside that would write a message the user never saw
+and have the next chat turn rehydrate it as fact: the same context drift, from
+the other direction.
+
+Every write also `touchSession()`s, so a thread carried entirely by workflow
+turns cannot lapse into `SESSION_TIMEOUT_MS` staleness and silently re-key to a
+fresh session mid-conversation. The by-thread writer deliberately looks past
+that cutoff (`findActiveThreadSession(..., { includeStale: true })`): a workflow
+can easily run longer than the window between a question and its answer, and
+recording revives the session so the user's next message continues it.
+
+Written text is clamped to `MAX_TRANSCRIPT_CHARS` (4 000), keeping its **tail** —
+a long health report or review write-up would otherwise dominate the next chat
+turn's rehydrated prompt, and a follow-up question refers back to the end.
+
+Without this the symptom is precise and confusing: a question answered by a
+workflow, followed by "can you summarise that?" in the same thread, rehydrates
+an empty history and answers as if the user had just been introduced.
+
 ## Tools
 
 Two toolsets, merged into a single tool list at construction time
@@ -136,7 +175,7 @@ One tool wired in via `extraTools`, defined in
 
 | Tool | Purpose |
 |---|---|
-| `read_skill` | Read the full SKILL.md for one of the curated chat skills. Parameters: `{ name: <enum of CHAT_SKILL_NAMES> }`. |
+| `read_skill` | Read the full SKILL.md for one of the chat-exposed skills. Parameters: `{ name: <enum of the loaded skill names> }`. |
 
 The chat agent's system prompt contains an XML `<available_skills>`
 catalogue (name + description per curated skill — same shape
@@ -175,21 +214,24 @@ Chat runs in the harness process itself. Real consequences:
 
 ## System prompt
 
-Built once at boot (`src/index.ts`):
+Assembled per turn (`src/index.ts` passes a thunk; `ChatRunner.turn` resolves it):
 
 ```
-systemPrompt = loadAgentContext() + CHAT_SYSTEM_SUFFIX + chatSkills.catalogueXml
+systemPrompt = agentContext + chatSystemSuffix(hasGithub, { isWorkflowEnabled }) + chatSkills.catalogueXml
 ```
 
 Three layers:
 
 - `loadAgentContext()` (`src/engine/github/profiles.ts`) concatenates all
   `.md` files under `agent-context/` in alphabetical order, joined
-  with `\n\n---\n\n` (see [Skills §AGENTS.md](/spec/08-skills)).
-- `CHAT_SYSTEM_SUFFIX` (`src/engine/chat/chat.ts`) adds the chat-specific
+  with `\n\n---\n\n` (see [Skills §AGENTS.md](/spec/08-skills)). Boot-stable,
+  so it is read once and closed over.
+- `chatSystemSuffix()` (`src/engine/chat/chat-prompt.ts`) adds the chat-specific
   constraints — read-only tools, no write actions, hand off to the
   build workflow for code changes — so the same persona file
-  (`soul.md`) can serve both surfaces without contradicting itself.
+  (`soul.md`) can serve both surfaces without contradicting itself. It is
+  **composed from the enabled workflow set**, not a constant — see
+  §Advertised capabilities below.
 - `chatSkills.catalogueXml`
   (`src/engine/chat/chat-skills.ts → loadChatSkillCatalogue`) is the XML
   `<available_skills>` block listing each curated chat skill's name +
@@ -197,9 +239,60 @@ Three layers:
   sandbox phases. The agent uses it to decide which `read_skill` call
   (if any) to make.
 
-The curated skill list is `CHAT_SKILL_NAMES` — currently `["chat",
-"issue-triage", "pr-review", "repo-health"]`. v1 is hard-coded; lift
-to env / settings if it ever needs runtime configurability.
+Which skills those are is **declared by the skills**: every skill
+resolvable through the asset layer stack whose SKILL.md frontmatter sets
+`chat: true`. The packaged set is `chat`, `issue-triage`, `pr-review`,
+`repo-health`; an overlay can add its own or override a built-in. See
+[Skills §In-process (chat)](/spec/08-skills).
+
+## Advertised capabilities
+
+What the agent tells a user it can do is **composed from the workflow
+set**, the way the classifier prompt is (see
+[Router §Intent classification](/spec/05-router)). `assembleChatPrompt()`
+(`src/engine/chat/chat-prompt.ts`) renders a forkable base template —
+`workflows/prompts/chat-system.md`, or `chat-system-no-github.md` when no
+GitHub auth is configured — substituting two placeholders:
+
+| Placeholder | Content |
+|---|---|
+| `{{workflowTriggers}}` | One deflection bullet per advertised workflow: its `chat.deflect` phrasings (quoted, ` / `-joined) and the reply that names its trigger |
+| `{{triggerList}}` | The backticked `chat.trigger` phrases, then the suggestable `RESERVED_CONTROL_INTENTS` (`approve`, `reject`, `status`, `reset` — `chat` is the router's fallback, not something a user types) |
+
+**A workflow is advertised iff it declares a `chat:` block**
+(`trigger?` / `summary` / `deflect?` / `reply?` — see
+[Workflow engine §Schema](/spec/06-workflow-engine)). `classification:` is
+deliberately **not** the gate. A classification block means "the classifier can
+tag a message with this intent"; it does not mean "a human should be told to
+type this", and the two diverge in both directions:
+
+- `demo` declares a classification block and a `routes.slack.demo` entry, but
+  the Slack switch has no `demo` branch and `demo` is in `WELL_KNOWN_INTENTS`,
+  so `fallbackWorkflowForIntent` returns undefined and a demo-classified
+  message falls through to plain chat. Advertising it would name a dead route.
+- `dependabot-ci-fix` / `dependabot-pr-merge` *are* reachable from a Slack
+  message via the overlay-intent fallback, but would arrive with a repo and no
+  PR number.
+
+An entry may omit `trigger` and supply `reply` instead — a workflow that must be
+explained but never typed. `repo-health` is the case: cron-only, no
+classification block, but the agent still has to answer "can you do a health
+report?" correctly.
+
+Two filters apply, and they are why this is composed per turn rather than
+concatenated once at boot:
+
+1. `listAgentWorkflows()` already excludes the static `disabled.workflows`.
+2. The **runtime kill switch** (`workflow_overrides`, toggled from the admin
+   dashboard and enforced at dispatch in `simple.ts`) is a per-call
+   `isWorkflowEnabled` predicate. It changes without an asset-version bump or a
+   restart, and a workflow disabled there would otherwise still be advertised —
+   typing its trigger then no-ops silently, indistinguishable from the bot
+   ignoring the user.
+
+Everything else is cached on the loader's asset version. An overlay that adds a
+workflow with a `chat:` block gets it advertised with no core edit — the same
+property `classification:` gives the classifier (issue #164).
 
 ## LLM provider routing
 
@@ -260,11 +353,22 @@ so the next turn isn't blocked by a prior crash.
   go through the session manager — not the agent's tool surface.
 - **Same Slack thread → same agent session id.** Always. A
   reset is the only way to get a new id for an existing thread.
+- **A thread's transcript covers the whole thread, not just its chat
+  turns.** Exactly one writer per turn — `ChatRunner` for chat,
+  `thread-transcript.ts` for every other messaging path. A
+  re-implementation that lets both write the same turn reintroduces the
+  double-recording this split exists to prevent; one that lets neither
+  write a workflow turn reintroduces the amnesia it exists to fix.
 - **Tool rounds are capped.** Eight is enough; a chat that wants to
   exceed this should be redirected to a workflow.
-- **History is a rolling 50-message window.** No token-aware
-  truncation. A re-implementation that adds it should be careful to
-  preserve assistant ↔ user pairing.
+- **History is a rolling 50-message window — the NEWEST 50.** No
+  token-aware truncation. The limit must bite at the old end
+  (`ORDER BY timestamp DESC, id DESC`, reversed for the caller): an
+  ascending `LIMIT` keeps a long thread's opening and never shows it
+  what was just said. `id` is the tiebreak because the two rows of one
+  turn routinely share a whole-millisecond timestamp. A
+  re-implementation that adds token-aware truncation should be careful
+  to preserve assistant ↔ user pairing.
 - **Screened messages reach chat with a flag, not a block.** A
   `[lastlight-flag: ...]` prefix on the user content tells the agent
   to treat it as data per `agent-context/security.md`. Chat does not

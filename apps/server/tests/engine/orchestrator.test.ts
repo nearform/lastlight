@@ -14,6 +14,8 @@ import { join } from "path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { executeAgent, executeCommand } from "#src/engine/agent-executor.js";
 import { FakeSandbox, type SandboxEvent } from "#src/sandbox/sandbox.js";
+import { QuotaExceededError } from "#src/sandbox/k8s/quota.js";
+import { configureWorkflowAssets } from "#src/workflows/loader.js";
 
 /** Poll a predicate for up to `timeoutMs` — the agent-path shim flushes its
  * jsonl fire-and-forget (`void shim.flush()`), so the write lands just after
@@ -120,6 +122,76 @@ describe("Sandbox orchestrator (FakeSandbox)", () => {
     expect(fake.disposed).toBe(true);
   });
 
+  it("maps a QuotaExceededError to stopReason error_quota on the agent path", async () => {
+    const fake = new FakeSandbox({ throwOnRunAgent: new QuotaExceededError("exceeded quota: pods") });
+
+    const result = await executeAgent(
+      "do the thing",
+      { sandbox: "none", stateDir, sessionsDir },
+      { sandboxFactory: fake.asFactory() },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.stopReason).toBe("error_quota");
+    expect(result.error).toContain("exceeded quota");
+  });
+
+  it("maps a provision-time QuotaExceededError to stopReason error_quota on the agent path", async () => {
+    // The pod-create rejection happens during provisioning, OUTSIDE the
+    // in-callback runAgent try/catch — it must still surface as an error_quota
+    // RESULT (not a throw) so the runner flags backpressure and requeues, rather
+    // than the run terminal-failing red.
+    const fake = new FakeSandbox({ throwOnProvision: new QuotaExceededError("exceeded quota: pods") });
+
+    const result = await executeAgent(
+      "do the thing",
+      { sandbox: "none", stateDir, sessionsDir },
+      { sandboxFactory: fake.asFactory() },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.stopReason).toBe("error_quota");
+    expect(result.error).toContain("exceeded quota");
+  });
+
+  it("propagates a generic provision throw on the agent path (not backpressure)", async () => {
+    const fake = new FakeSandbox({ throwOnProvision: new Error("docker unavailable") });
+
+    await expect(
+      executeAgent(
+        "do the thing",
+        { sandbox: "none", stateDir, sessionsDir },
+        { sandboxFactory: fake.asFactory() },
+      ),
+    ).rejects.toThrow("docker unavailable");
+  });
+
+  it("keeps error_sandbox for a generic sandbox throw on the agent path", async () => {
+    const fake = new FakeSandbox({ throwOnRunAgent: new Error("boom") });
+
+    const result = await executeAgent(
+      "do the thing",
+      { sandbox: "none", stateDir, sessionsDir },
+      { sandboxFactory: fake.asFactory() },
+    );
+
+    expect(result.stopReason).toBe("error_sandbox");
+  });
+
+  it("maps a QuotaExceededError to stopReason error_quota on the command path", async () => {
+    const fake = new FakeSandbox({ throwOnRunCommand: new QuotaExceededError("exceeded quota: pods") });
+
+    const result = await executeCommand(
+      { kind: "bash", command: "echo hi" },
+      { sandbox: "none", stateDir, sessionsDir },
+      { sandboxFactory: fake.asFactory() },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.stopReason).toBe("error_quota");
+    expect(result.error).toContain("exceeded quota");
+  });
+
   it("computes a strict EgressPolicy by default and passes it at construction", async () => {
     const fake = new FakeSandbox({ events: successEvents() });
     await executeAgent(
@@ -213,6 +285,47 @@ describe("Sandbox orchestrator (FakeSandbox)", () => {
     );
   });
 
+  it("rejects a type:script phase on the kubernetes backend with a clear error", async () => {
+    // k8s has no host-shared workspace to stage the script into the pod (skills +
+    // AGENTS.md reach the pod over HTTP init-fetch channels instead), so the
+    // host-side writeFileSync would land on the harness FS and the pod would hit
+    // a confusing `No such file or directory`. Fail fast with an actionable
+    // message instead. FakeSandbox hands back a REAL host dir regardless of
+    // backend, so the write WOULD succeed here if attempted — proving the
+    // rejection below is the guard firing, not an ENOENT accident.
+    const fake = new FakeSandbox({
+      commandResult: { exitCode: 0, stdout: "", stderr: "", timedOut: false },
+    });
+
+    await expect(
+      executeCommand(
+        { kind: "script", script: "console.log(1)", runtime: "js", name: "probe" },
+        { sandbox: "kubernetes", stateDir, sessionsDir },
+        { sandboxFactory: fake.asFactory() },
+      ),
+    ).rejects.toThrow(/type:script phases are not yet supported on the kubernetes backend/);
+
+    // Fails fast: it never entered the sandbox bracket, so nothing was provisioned.
+    expect(fake.provisionCalls).toBe(0);
+  });
+
+  it("allows a type:bash phase on the kubernetes backend (the guard is script-only)", async () => {
+    // The guard must be narrow: bash phases stage no file (they run the command
+    // directly), so they work on k8s exactly as on every other backend.
+    const fake = new FakeSandbox({
+      commandResult: { exitCode: 0, stdout: "ok\n", stderr: "", timedOut: false },
+    });
+
+    const result = await executeCommand(
+      { kind: "bash", command: "echo ok" },
+      { sandbox: "kubernetes", stateDir, sessionsDir },
+      { sandboxFactory: fake.asFactory() },
+    );
+
+    expect(result.success).toBe(true);
+    expect(fake.provisionCalls).toBe(1);
+  });
+
   it("forwards config.githubApiBaseUrl into the command env as GITHUB_API_URL", async () => {
     // The eval harness sets githubApiBaseUrl to the fake GitHub URL. Command/
     // script phases (e.g. pr-review's post-review) must receive it so a
@@ -262,6 +375,71 @@ describe("Sandbox orchestrator (FakeSandbox)", () => {
     const env = fake.receivedCommandOpts?.sandboxEnv;
     expect(env?.GIT_AUTHOR_NAME).toBe("last-light[bot]");
     expect(env?.GIT_COMMITTER_NAME).toBe("last-light[bot]");
+  });
+
+  describe("AGENTS.md host write (host-shared backends vs kubernetes)", () => {
+    let agentContextRoot: string;
+
+    beforeEach(() => {
+      agentContextRoot = mkdtempSync(join(tmpdir(), "ll-agent-ctx-"));
+      mkdirSync(join(agentContextRoot, "agent-context"), { recursive: true });
+      writeFileSync(join(agentContextRoot, "agent-context", "persona.md"), "BE HELPFUL");
+      configureWorkflowAssets({ builtInRoot: agentContextRoot });
+    });
+
+    afterEach(() => {
+      configureWorkflowAssets();
+      rmSync(agentContextRoot, { recursive: true, force: true });
+    });
+
+    it("writes AGENTS.md to the host workspace on a host-shared backend", async () => {
+      const fake = new FakeSandbox({ events: successEvents() });
+      // `dispose()` removes the fake host workspace dir once the run
+      // completes, so check the write while the sandbox is still live — the
+      // "session" event (first in successEvents()) fires from inside
+      // sandbox.runAgent(), after writeAgentsMd already ran.
+      let sawDuringRun: { exists: boolean; content: string } | undefined;
+      await executeAgent(
+        "do the thing",
+        { sandbox: "none", stateDir, sessionsDir },
+        {
+          sandboxFactory: fake.asFactory(),
+          onSessionId: () => {
+            const agentsMdPath = join(fake.hostWorkspaceDir, "AGENTS.md");
+            sawDuringRun = {
+              exists: existsSync(agentsMdPath),
+              content: existsSync(agentsMdPath) ? readFileSync(agentsMdPath, "utf8") : "",
+            };
+          },
+        },
+      );
+
+      expect(sawDuringRun?.exists).toBe(true);
+      expect(sawDuringRun?.content).toContain("BE HELPFUL");
+    });
+
+    it("skips the host AGENTS.md write on the kubernetes backend (no host-visible workspace)", async () => {
+      const fake = new FakeSandbox({ events: successEvents() });
+      // Same dispose-timing note as above: check DURING the run, not after —
+      // `dispose()` removes the whole fake host dir regardless of whether the
+      // write happened, so a post-run check would pass trivially either way.
+      let sawDuringRun: boolean | undefined;
+      await executeAgent(
+        "do the thing",
+        { sandbox: "kubernetes", stateDir, sessionsDir },
+        {
+          sandboxFactory: fake.asFactory(),
+          onSessionId: () => {
+            // FakeSandbox hands back a REAL host dir regardless of backend, so
+            // a write would succeed here if attempted — proving `false` below
+            // is a deliberate skip, not an ENOENT accident swallowed silently.
+            sawDuringRun = existsSync(join(fake.hostWorkspaceDir, "AGENTS.md"));
+          },
+        },
+      );
+
+      expect(sawDuringRun).toBe(false);
+    });
   });
 
   it("skips the session jsonl when writeSession is false", async () => {

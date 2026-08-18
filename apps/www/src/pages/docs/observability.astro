@@ -49,11 +49,36 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod</code></pre>
 	</p>
 
 	<ul>
-		<li><strong>Traces</strong> — a span per workflow phase (<code>lastlight.workflow.phase</code>) and per agent execution (<code>lastlight.agent.execute</code>), tagged with the workflow name, phase, repo, issue number, model, sandbox backend, and stop reason.</li>
+		<li><strong>Traces</strong> — a nested span tree per run: <code>lastlight.workflow.run</code> → <code>lastlight.workflow.phase</code> → <code>lastlight.agent.execute</code> → a span per model turn → a span per tool call, tagged with the workflow name, phase, repo, issue number, model, sandbox backend, and stop reason, plus per-turn/per-run tokens and cost.</li>
 		<li><strong>Metrics</strong> — execution duration, cost (USD), input/output tokens, run and error counts, dimensioned by workflow, phase, repo, model, backend, and success/stop-reason.</li>
-		<li><strong>PI event streams</strong> — the agent's own tool-use / text / error events, recorded as span events.</li>
 		<li><strong>Chat turns</strong> — each in-process Slack chat turn, alongside the same execution metrics.</li>
 	</ul>
+
+	<div class="docs-callout">
+		<div class="docs-callout-body">
+			<strong>OpenInference / Arize Phoenix.</strong> Spans carry
+			<a href="https://github.com/Arize-ai/openinference">OpenInference</a>
+			attributes (<code>openinference.span.kind</code> of <code>CHAIN</code> /
+			<code>AGENT</code> / <code>LLM</code> / <code>TOOL</code>, plus
+			<code>llm.model_name</code>, token counts, and cost), so an
+			OpenInference-aware backend such as <a href="https://arize.com/docs/phoenix">Phoenix</a>
+			renders a run as a proper agent tree with per-turn tokens and cost
+			instead of a flat span. The flat <code>pi.*</code> span events are also
+			kept as a fallback. Phoenix ingests traces but not OTLP metrics — set
+			<code>LASTLIGHT_OTEL_METRICS_ENABLED=false</code> (below) for a
+			traces-only backend.
+		</div>
+	</div>
+
+	<h2>Disabling metrics</h2>
+
+	<p>
+		Metrics are on by default. Some backends accept traces but reject the OTLP
+		metrics signal (Arize Phoenix, for example, 404s the metrics endpoint). Set
+		<code>LASTLIGHT_OTEL_METRICS_ENABLED=false</code> (or <code>otel.metrics: false</code>
+		in the overlay <code>config.yaml</code>) to skip the metric exporter entirely —
+		traces still flow, and nothing is sent to a metrics endpoint that would error.
+	</p>
 
 	<h2>Content redaction</h2>
 
@@ -135,14 +160,28 @@ OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod</code></pre>
 		startup instead, which is useful when telemetry is a hard requirement.
 	</p>
 
+	<h2>Human feedback on the trace</h2>
+
+	<p>
+		When somebody reacts 👍 or 👎 to something Last Light wrote, that score is
+		exported as a <code>lastlight.feedback.signal</code> span attached to the
+		<strong>original run's trace</strong> — a late child of that run's span,
+		reconstructed from the trace and span ids the run recorded. So the grade
+		appears on the very trace it grades, beside the prompts, tokens and cost
+		that produced the output, instead of in a disconnected trace of its own.
+		The span carries OpenInference's <code>EVALUATOR</code> kind and Langfuse's
+		<code>langfuse.score.*</code> attributes. See
+		<a href="/docs/feedback-signals">Feedback signals</a>.
+	</p>
+
 	<div class="docs-next">
-		<a href="/docs/configuration">
+		<a href="/docs/repo-config">
 			<span class="label">← Previous</span>
-			<span class="title">Configuration</span>
+			<span class="title">Per-repo config</span>
 		</a>
-		<a href="/docs/cli">
+		<a href="/docs/feedback-signals">
 			<span class="label">Next →</span>
-			<span class="title">CLI</span>
+			<span class="title">Feedback signals</span>
 		</a>
 	</div>
 </DocsLayout>

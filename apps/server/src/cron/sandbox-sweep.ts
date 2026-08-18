@@ -1,6 +1,9 @@
 import { existsSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { hasLiveContainer, reapSandboxWorkspace, sandboxRoot } from "../sandbox/reap.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("sandbox-sweep");
 
 /**
  * The in-harness backstop sweep for sandbox workspaces (issue #106). Reap-on-
@@ -85,7 +88,7 @@ export function sweepSandboxes(opts: SweepOpts): SweepResult {
 
   const kept = candidates.length - swept;
   if (swept > 0) {
-    console.log(`[sandbox-sweep] swept ${swept}, kept ${kept}, live ${live}`);
+    log.info("Sweep complete", { swept, kept, live });
   }
   return { swept, kept, live };
 }

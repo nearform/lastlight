@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import type { TriggerActorType } from "./user-store.js";
+import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
 
 export interface ExecutionRecord {
   id: string;
@@ -15,6 +16,13 @@ export interface ExecutionRecord {
   /** Coarse actor category for {@link triggeredBy}. */
   triggerActorType?: TriggerActorType;
   skill: string;
+  /**
+   * GitHub org/user that owns {@link repo}. Its own column since #279, so a
+   * ledger row identifies its target without joining the run that owns it —
+   * which chat and `build-cycle` rows don't have.
+   */
+  owner?: string;
+  /** BARE repo name (no owner). See `state/repo-ref.ts` for the one rule. */
   repo?: string;
   issueNumber?: number;
   startedAt: string;
@@ -71,19 +79,179 @@ export interface ExecutionRecord {
  * single shared `Database` so it sits in the same connection / transaction
  * scope as the other stores.
  */
+/**
+ * `executions.repo`, composed into the qualified `owner/repo` a user-facing
+ * surface speaks — or NULL when it can't be (issues #169, #279).
+ *
+ * This used to reach for the owner by joining `workflow_runs` on
+ * `workflow_run_id`, because the column was written in two shapes and
+ * `executions` had no owner of its own. It now has one (#279), so the join is
+ * gone and the answer is on the row.
+ *
+ * **NULL is the safe answer, and deliberate.** A consumer of this treats null
+ * as "no repo, always visible"; returning a bare name instead would produce a
+ * value that matches nothing in a qualified allow-list and would therefore
+ * HIDE the row. Requires the alias to be `e` (executions).
+ */
+const QUALIFIED_REPO_SQL = qualifiedRepoSql("e.owner", "e.repo", "null");
+
+/**
+ * The column list every read that returns an {@link ExecutionRecord} selects.
+ *
+ * The table is snake_case and the record is camelCase, so `SELECT *` does not
+ * produce an `ExecutionRecord` — it produces a row that *looks* like one for
+ * the handful of single-word columns and silently leaves `issueNumber`,
+ * `startedAt` and `workflowRunId` `undefined` (issue #285). Three reads did
+ * exactly that, and the cast to `ExecutionRecord[]` made the compiler agree.
+ * The Slack status report rendered `(started undefined)` and the admin cancel
+ * loop filtered on a `workflowRunId` that never matched a row.
+ *
+ * So the aliasing lives in ONE place rather than being re-typed per query, and
+ * {@link mapExecutionRow} is its other half — a new column is added to both or
+ * to neither. No table alias is used, so this works in any single-table query.
+ */
+const EXECUTION_COLUMNS = `
+  id,
+  trigger_type      AS triggerType,
+  trigger_id        AS triggerId,
+  triggered_by      AS triggeredBy,
+  trigger_actor_type AS triggerActorType,
+  skill,
+  owner,
+  repo,
+  issue_number      AS issueNumber,
+  started_at        AS startedAt,
+  finished_at       AS finishedAt,
+  success,
+  error,
+  turns,
+  duration_ms       AS durationMs,
+  session_id        AS sessionId,
+  cost_usd          AS costUsd,
+  input_tokens      AS inputTokens,
+  cache_creation_input_tokens AS cacheCreationInputTokens,
+  cache_read_input_tokens     AS cacheReadInputTokens,
+  output_tokens     AS outputTokens,
+  api_duration_ms   AS apiDurationMs,
+  stop_reason       AS stopReason,
+  extension_status  AS extensionStatus,
+  skills_status     AS skillsStatus,
+  workflow_run_id   AS workflowRunId
+`;
+
+/**
+ * Turn a row selected with {@link EXECUTION_COLUMNS} into an
+ * {@link ExecutionRecord}: SQLite NULLs become `undefined` (the record's
+ * optional fields) and the `success` integer becomes a boolean.
+ */
+function mapExecutionRow(r: Record<string, unknown>): ExecutionRecord {
+  const nul = <T>(v: unknown): T | undefined => (v === null || v === undefined ? undefined : (v as T));
+  return {
+    id: r.id as string,
+    triggerType: r.triggerType as ExecutionRecord["triggerType"],
+    triggerId: r.triggerId as string,
+    triggeredBy: nul<string>(r.triggeredBy),
+    triggerActorType: nul<TriggerActorType>(r.triggerActorType),
+    skill: r.skill as string,
+    owner: nul<string>(r.owner),
+    repo: nul<string>(r.repo),
+    issueNumber: nul<number>(r.issueNumber),
+    startedAt: r.startedAt as string,
+    finishedAt: nul<string>(r.finishedAt),
+    success: r.success === null || r.success === undefined ? undefined : Boolean(r.success),
+    error: nul<string>(r.error),
+    turns: nul<number>(r.turns),
+    durationMs: nul<number>(r.durationMs),
+    sessionId: nul<string>(r.sessionId),
+    costUsd: nul<number>(r.costUsd),
+    inputTokens: nul<number>(r.inputTokens),
+    cacheCreationInputTokens: nul<number>(r.cacheCreationInputTokens),
+    cacheReadInputTokens: nul<number>(r.cacheReadInputTokens),
+    outputTokens: nul<number>(r.outputTokens),
+    apiDurationMs: nul<number>(r.apiDurationMs),
+    stopReason: nul<string>(r.stopReason),
+    extensionStatus: nul<string>(r.extensionStatus),
+    skillsStatus: nul<string>(r.skillsStatus),
+    workflowRunId: nul<string>(r.workflowRunId),
+  };
+}
+
+/** The four ways a finished execution can have turned out (issue #325). */
+export interface ExecutionOutcomeCounts {
+  succeeded: number;
+  skipped: number;
+  deferred: number;
+  failed: number;
+}
+
+/**
+ * The outcome classification, as SQL — the ONE definition every aggregation
+ * selects (issue #325).
+ *
+ * `executions.success` is not a health signal and must not be read as one.
+ * Two paths write `success = 0` deliberately, having failed at nothing:
+ *
+ *  - **`skipped`** — {@link ExecutionStore.recordSkippedPhase}. Stored
+ *    `success = 0` so {@link ExecutionStore.shouldRunPhase} re-evaluates the
+ *    node on resume. The phase never ran.
+ *  - **`error_quota`** — the k8s `ResourceQuota` rejected the pod. The runner
+ *    treats it as an ordinary phase failure precisely so the run REQUEUES
+ *    (`src/workflows/runner.ts`), and it costs $0 and 0 turns.
+ *
+ * So the column correctly answers *"may this phase be skipped on resume?"*,
+ * where skipped / quota-rejected / crashed are one answer. It was never asked
+ * "did something go wrong", and rendering it as though it was painted 251 of a
+ * day's 423 executions red on an instance with zero real failures.
+ *
+ * Held here as a single fragment rather than repeated per query because three
+ * aggregations consume it, and three copies would disagree the first time one
+ * was edited — the same argument `PrState` makes against six sites each
+ * fetching an overlapping subset of the truth.
+ *
+ * `success IS NULL` (still in flight) matches no bucket on purpose: it counts
+ * toward `COUNT(*)` and toward nothing else, so a stacked bar can legitimately
+ * be shorter than the execution total.
+ *
+ * Note `condition_not_met` — a generic-loop `until_bash` check that ran and
+ * came back red — is stored `success = 1` and therefore lands in `succeeded`.
+ * It really executed and really cost tokens; only its per-row rendering is
+ * muted (`execMark`, `packages/cli/src/cli-format.ts`).
+ */
+export const EXECUTION_OUTCOME_COLUMNS = `
+        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN success = 0 AND stop_reason = 'skipped' THEN 1 ELSE 0 END) AS skipped,
+        SUM(CASE WHEN success = 0 AND stop_reason = 'error_quota' THEN 1 ELSE 0 END) AS deferred,
+        SUM(CASE WHEN success = 0
+                  AND (stop_reason IS NULL OR stop_reason NOT IN ('skipped', 'error_quota'))
+             THEN 1 ELSE 0 END) AS failed`;
+
+/** Zero-fill for a bucket with no executions in it. */
+const NO_OUTCOMES: ExecutionOutcomeCounts = { succeeded: 0, skipped: 0, deferred: 0, failed: 0 };
+
 export class ExecutionStore {
   constructor(private db: Database.Database) {}
 
+  /**
+   * Append a started phase to the ledger.
+   *
+   * Like `createRun`, the (owner, BARE repo) invariant is enforced here rather
+   * than asked of callers (issue #279) — the engine writes the pair off
+   * `GitSandboxAccess`, the dispatcher off a split `context.repo`, and a
+   * qualified value from anywhere else is normalized rather than stored as a
+   * second shape.
+   */
   recordStart(record: Omit<ExecutionRecord, "finishedAt" | "success" | "error" | "turns" | "durationMs">): void {
+    const ref = normalizeRepoRef(record.owner, record.repo);
     this.db.prepare(`
-      INSERT INTO executions (id, trigger_type, trigger_id, skill, repo, issue_number, started_at, workflow_run_id, triggered_by, trigger_actor_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO executions (id, trigger_type, trigger_id, skill, owner, repo, issue_number, started_at, workflow_run_id, triggered_by, trigger_actor_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.id,
       record.triggerType,
       record.triggerId,
       record.skill,
-      record.repo,
+      ref.owner ?? null,
+      ref.repo ?? null,
       record.issueNumber,
       record.startedAt,
       record.workflowRunId ?? null,
@@ -212,19 +380,22 @@ export class ExecutionStore {
     triggerId: string,
     workflowRunId?: string,
     repo?: string,
+    owner?: string,
   ): void {
     const now = new Date().toISOString();
     const m = triggerId.match(/#(\d+)$/);
     const issueNumber = m ? Number(m[1]) : null;
+    const ref = normalizeRepoRef(owner, repo);
     this.db.prepare(`
       INSERT INTO executions
-        (id, trigger_type, trigger_id, skill, repo, issue_number, started_at, finished_at, success, error, stop_reason, workflow_run_id)
-      VALUES (?, 'webhook', ?, ?, ?, ?, ?, ?, 0, 'skipped: trigger rule not satisfied', 'skipped', ?)
+        (id, trigger_type, trigger_id, skill, owner, repo, issue_number, started_at, finished_at, success, error, stop_reason, workflow_run_id)
+      VALUES (?, 'webhook', ?, ?, ?, ?, ?, ?, ?, 0, 'skipped: trigger rule not satisfied', 'skipped', ?)
     `).run(
       randomUUID(),
       triggerId,
       skill,
-      repo ?? null,
+      ref.owner ?? null,
+      ref.repo ?? null,
       issueNumber,
       now,
       now,
@@ -254,12 +425,21 @@ export class ExecutionStore {
     outputTokens: number;
     cacheReadTokens: number;
     lastAssistantContent: string | null;
+    repo: string | null;
   }[] {
     const rows = this.db.prepare(`
       SELECT
         e.trigger_id              AS triggerId,
         ms.agent_session_id       AS agentSessionId,
         ms.platform               AS platform,
+        -- The thread's repo, for the dashboard's per-repo visibility filter
+        -- (issue #169), qualified to owner/repo — a bare name would match
+        -- nothing in the allow-list and so HIDE the row. MAX() rather than a
+        -- GROUP BY member because it skips NULLs: most chat turns carry no
+        -- repo, and one that does should name the whole thread. A thread that
+        -- genuinely spans repos picks one — acceptable, since a repo-less
+        -- thread stays visible either way.
+        MAX(${QUALIFIED_REPO_SQL}) AS repo,
         MIN(e.started_at)         AS firstStartedAt,
         MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
         COUNT(*)                  AS turnCount,
@@ -292,6 +472,7 @@ export class ExecutionStore {
       cacheReadTokens: number;
       lastAssistantContent: string | null;
       platform: string | null;
+      repo: string | null;
     }>;
     return rows;
   }
@@ -309,12 +490,16 @@ export class ExecutionStore {
     outputTokens: number;
     cacheReadTokens: number;
     lastAssistantContent: string | null;
+    repo: string | null;
   } | null {
     const row = this.db.prepare(`
       SELECT
         e.trigger_id              AS triggerId,
         ms.agent_session_id       AS agentSessionId,
         ms.platform               AS platform,
+        -- Same qualification rule as the list above; it read the raw column
+        -- here and so disagreed with its own list view for one thread.
+        MAX(${QUALIFIED_REPO_SQL}) AS repo,
         MIN(e.started_at)         AS firstStartedAt,
         MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
         COUNT(*)                  AS turnCount,
@@ -345,8 +530,31 @@ export class ExecutionStore {
       outputTokens: number;
       cacheReadTokens: number;
       lastAssistantContent: string | null;
+      repo: string | null;
     } | undefined;
     return row ?? null;
+  }
+
+  /**
+   * The repo a sandbox session ran against, resolved from the `executions`
+   * ledger by its `session_id` (issue #169).
+   *
+   * The fs-backed {@link SessionReader} reads jsonl envelopes that carry no
+   * repo of their own, so this is the lookup that lets the dashboard filter the
+   * session list by the same allowed-repo set as everything else. Returns null
+   * for a session we have no execution row for — those stay visible.
+   */
+  repoForSessionId(sessionId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT ${QUALIFIED_REPO_SQL} AS repo
+           FROM executions e
+          WHERE e.session_id = ? AND e.repo IS NOT NULL
+          ORDER BY e.started_at DESC
+          LIMIT 1`,
+      )
+      .get(sessionId) as { repo: string | null } | undefined;
+    return row?.repo ?? null;
   }
 
   /** Check if a skill is currently running for a given trigger */
@@ -356,6 +564,52 @@ export class ExecutionStore {
       WHERE skill = ? AND trigger_id = ? AND finished_at IS NULL
       LIMIT 1
     `).get(skill, triggerId);
+    return !!row;
+  }
+
+  /**
+   * Total USD spent by every execution belonging to a run of one of
+   * `workflowNames` for this trigger — the cumulative per-PR cost the
+   * `fix.maxCostUsd` brake is enforced against (09-state-machine.md → S1).
+   *
+   * Cost is recorded per PHASE (one `executions` row each) and only ever rolled
+   * up per RUN, so there was no way to ask "what has this pull request cost us
+   * across every attempt". This is that question, and it is deliberately asked
+   * of the same (family, PR) key as `latestForTrigger`: a budget that resets
+   * because routing moved from `pr-fix` to `dependabot-ci-fix` is not a budget.
+   *
+   * Rows with a NULL `cost_usd` (a phase that reported none, or an
+   * OAuth/subscription run) contribute 0 — the brake must never be tripped by
+   * missing data.
+   */
+  costForTriggerWorkflows(triggerId: string, workflowNames: string[]): number {
+    if (workflowNames.length === 0) return 0;
+    const placeholders = workflowNames.map(() => "?").join(", ");
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(e.cost_usd), 0) AS total
+      FROM executions e
+      JOIN workflow_runs r ON r.id = e.workflow_run_id
+      WHERE r.trigger_id = ? AND r.workflow_name IN (${placeholders})
+    `).get(triggerId, ...workflowNames) as { total: number } | undefined;
+    return row?.total ?? 0;
+  }
+
+  /**
+   * Did `workflowRunId` complete phase `phaseName` successfully?
+   *
+   * Phase ledger rows are keyed `"<workflow>:<phase>"` (the engine's dedup
+   * key), so this is a run-scoped `shouldRunPhase` that does not need to know
+   * which workflow of a family ran. Used to decide whether a prior fix run
+   * actually SPENT an attempt: `diagnose` carries
+   * `on_output.requires_marker: DIAGNOSIS_COMPLETE`, so a succeeded row for it
+   * is equivalent to the marker having been emitted.
+   */
+  phaseSucceededInRun(workflowRunId: string, phaseName: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 FROM executions
+      WHERE workflow_run_id = ? AND skill LIKE ? AND success = 1
+      LIMIT 1
+    `).get(workflowRunId, `%:${phaseName}`);
     return !!row;
   }
 
@@ -454,12 +708,13 @@ export class ExecutionStore {
 
   /** Get recent executions for a skill */
   recentExecutions(skill: string, limit = 10): ExecutionRecord[] {
-    return this.db.prepare(`
-      SELECT * FROM executions
+    const rows = this.db.prepare(`
+      SELECT ${EXECUTION_COLUMNS} FROM executions
       WHERE skill = ?
       ORDER BY started_at DESC
       LIMIT ?
-    `).all(skill, limit) as ExecutionRecord[];
+    `).all(skill, limit) as Array<Record<string, unknown>>;
+    return rows.map(mapExecutionRow);
   }
 
   /** Count consecutive failures for a skill (for cron failure tracking) */
@@ -481,11 +736,12 @@ export class ExecutionStore {
 
   /** Get all executions with pagination */
   allExecutions(limit = 100, offset = 0): ExecutionRecord[] {
-    return this.db.prepare(`
-      SELECT * FROM executions
+    const rows = this.db.prepare(`
+      SELECT ${EXECUTION_COLUMNS} FROM executions
       ORDER BY started_at DESC
       LIMIT ? OFFSET ?
-    `).all(limit, offset) as ExecutionRecord[];
+    `).all(limit, offset) as Array<Record<string, unknown>>;
+    return rows.map(mapExecutionRow);
   }
 
   /**
@@ -494,6 +750,10 @@ export class ExecutionStore {
    * the `/admin/api/log-search` endpoint and the `lastlight logs search` CLI to
    * find failing/relevant phases without SSHing to the box. Parameterized; the
    * pattern is escaped so user input can't smuggle LIKE wildcards.
+   *
+   * Matches and returns the QUALIFIED repo, because that is what somebody types
+   * (issue #279) — searching `nearform/lastlight` against the bare column found
+   * no phase row at all.
    */
   searchErrors(query: string, limit = 50): Array<{
     id: string;
@@ -509,23 +769,24 @@ export class ExecutionStore {
   }> {
     const escaped = query.replace(/[\\%_]/g, (ch) => `\\${ch}`);
     const pattern = `%${escaped}%`;
+    const qualifiedRepo = qualifiedRepoSql("e.owner", "e.repo", "bare");
     const rows = this.db.prepare(`
       SELECT
-        id,
-        skill,
-        repo,
-        error,
-        success,
-        started_at      AS startedAt,
-        finished_at     AS finishedAt,
-        session_id      AS sessionId,
-        workflow_run_id AS workflowRunId,
-        trigger_id      AS triggerId
-      FROM executions
-      WHERE error LIKE ? ESCAPE '\\'
-         OR skill LIKE ? ESCAPE '\\'
-         OR repo  LIKE ? ESCAPE '\\'
-      ORDER BY started_at DESC
+        e.id,
+        e.skill,
+        ${qualifiedRepo} AS repo,
+        e.error,
+        e.success,
+        e.started_at      AS startedAt,
+        e.finished_at     AS finishedAt,
+        e.session_id      AS sessionId,
+        e.workflow_run_id AS workflowRunId,
+        e.trigger_id      AS triggerId
+      FROM executions e
+      WHERE e.error LIKE ? ESCAPE '\\'
+         OR e.skill LIKE ? ESCAPE '\\'
+         OR ${qualifiedRepo} LIKE ? ESCAPE '\\'
+      ORDER BY e.started_at DESC
       LIMIT ?
     `).all(pattern, pattern, pattern, limit) as Array<Record<string, unknown>>;
     return rows.map((r) => ({
@@ -553,77 +814,31 @@ export class ExecutionStore {
   getExecutionsForWorkflowRun(workflowRunId: string, triggerId: string, workflowName?: string): ExecutionRecord[] {
     const skillPattern = workflowName ? `${workflowName}:%` : "%:%";
     const rows = this.db.prepare(`
-      SELECT
-        id,
-        trigger_type    AS triggerType,
-        trigger_id      AS triggerId,
-        skill,
-        repo,
-        issue_number    AS issueNumber,
-        started_at      AS startedAt,
-        finished_at     AS finishedAt,
-        success,
-        error,
-        turns,
-        duration_ms     AS durationMs,
-        session_id      AS sessionId,
-        cost_usd        AS costUsd,
-        input_tokens    AS inputTokens,
-        cache_creation_input_tokens AS cacheCreationInputTokens,
-        cache_read_input_tokens     AS cacheReadInputTokens,
-        output_tokens   AS outputTokens,
-        api_duration_ms AS apiDurationMs,
-        stop_reason     AS stopReason,
-        extension_status AS extensionStatus,
-        skills_status   AS skillsStatus,
-        workflow_run_id AS workflowRunId
+      SELECT ${EXECUTION_COLUMNS}
       FROM executions
       WHERE (workflow_run_id = ? OR (workflow_run_id IS NULL AND trigger_id = ?))
         AND skill LIKE ?
       ORDER BY started_at ASC
     `).all(workflowRunId, triggerId, skillPattern) as Array<Record<string, unknown>>;
 
-    return rows.map((r) => ({
-      id: r.id as string,
-      triggerType: r.triggerType as ExecutionRecord["triggerType"],
-      triggerId: r.triggerId as string,
-      skill: r.skill as string,
-      repo: (r.repo as string | null) ?? undefined,
-      issueNumber: (r.issueNumber as number | null) ?? undefined,
-      startedAt: r.startedAt as string,
-      finishedAt: (r.finishedAt as string | null) ?? undefined,
-      success: r.success === null || r.success === undefined ? undefined : Boolean(r.success),
-      error: (r.error as string | null) ?? undefined,
-      turns: (r.turns as number | null) ?? undefined,
-      durationMs: (r.durationMs as number | null) ?? undefined,
-      sessionId: (r.sessionId as string | null) ?? undefined,
-      costUsd: (r.costUsd as number | null) ?? undefined,
-      inputTokens: (r.inputTokens as number | null) ?? undefined,
-      cacheCreationInputTokens: (r.cacheCreationInputTokens as number | null) ?? undefined,
-      cacheReadInputTokens: (r.cacheReadInputTokens as number | null) ?? undefined,
-      outputTokens: (r.outputTokens as number | null) ?? undefined,
-      apiDurationMs: (r.apiDurationMs as number | null) ?? undefined,
-      stopReason: (r.stopReason as string | null) ?? undefined,
-      extensionStatus: (r.extensionStatus as string | null) ?? undefined,
-      skillsStatus: (r.skillsStatus as string | null) ?? undefined,
-      workflowRunId: (r.workflowRunId as string | null) ?? undefined,
-    }));
+    return rows.map(mapExecutionRow);
   }
 
   /** Get currently running executions (no finished_at) */
   runningExecutions(): ExecutionRecord[] {
-    return this.db.prepare(`
-      SELECT * FROM executions
+    const rows = this.db.prepare(`
+      SELECT ${EXECUTION_COLUMNS} FROM executions
       WHERE finished_at IS NULL
       ORDER BY started_at DESC
-    `).all() as ExecutionRecord[];
+    `).all() as Array<Record<string, unknown>>;
+    return rows.map(mapExecutionRow);
   }
 
   /** Aggregate execution stats */
   executionStats(): {
     total_executions: number;
     today_count: number;
-    by_skill: Record<string, { count: number; success: number; fail: number }>;
+    by_skill: Record<string, ExecutionOutcomeCounts & { count: number }>;
     by_trigger: Record<string, number>;
     running: number;
   } {
@@ -637,14 +852,19 @@ export class ExecutionStore {
 
     const skillRows = this.db.prepare(`
       SELECT skill, COUNT(*) as count,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as fail
+        ${EXECUTION_OUTCOME_COLUMNS}
       FROM executions GROUP BY skill
-    `).all() as { skill: string; count: number; success: number; fail: number }[];
+    `).all() as ({ skill: string; count: number } & ExecutionOutcomeCounts)[];
 
-    const by_skill: Record<string, { count: number; success: number; fail: number }> = {};
+    const by_skill: Record<string, ExecutionOutcomeCounts & { count: number }> = {};
     for (const r of skillRows) {
-      by_skill[r.skill] = { count: r.count, success: r.success, fail: r.fail };
+      by_skill[r.skill] = {
+        count: r.count,
+        succeeded: r.succeeded,
+        skipped: r.skipped,
+        deferred: r.deferred,
+        failed: r.failed,
+      };
     }
 
     const triggerRows = this.db.prepare(`
@@ -659,18 +879,37 @@ export class ExecutionStore {
     return { total_executions: total, today_count: todayCount, by_skill, by_trigger, running };
   }
 
+  /**
+   * What ONE repo's agent work cost since `sinceIso`. The spend line of the
+   * weekly digest.
+   *
+   * `cost_usd` is nullable — rows predating the column, and every `type: bash`
+   * phase, carry no cost — so this sums with a COALESCE and reports the phase
+   * count separately rather than implying the two are the same denominator.
+   */
+  repoCostSince(owner: string, repo: string, sinceIso: string): { costUsd: number; phases: number } {
+    const qualifiedRepo = qualifiedRepoSql("e.owner", "e.repo", "bare");
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(e.cost_usd), 0) AS costUsd, COUNT(*) AS phases
+           FROM executions e
+          WHERE ${qualifiedRepo} = ?
+            AND e.started_at >= ?`,
+      )
+      .get(`${owner}/${repo}`, sinceIso) as { costUsd: number; phases: number } | undefined;
+    return { costUsd: row?.costUsd ?? 0, phases: row?.phases ?? 0 };
+  }
+
   /** Daily aggregated stats for the last N days */
-  dailyStats(days: number): {
+  dailyStats(days: number): (ExecutionOutcomeCounts & {
     date: string;
     executions: number;
-    successes: number;
-    failures: number;
     totalTokens: number;
     inputTokens: number;
     outputTokens: number;
     cacheReadTokens: number;
     costUsd: number;
-  }[] {
+  })[] {
     // Build the inclusive UTC date window: [today - (days-1), today].
     // SQLite's date(started_at) returns a UTC YYYY-MM-DD string, so we
     // generate the same format here to align keys.
@@ -692,8 +931,7 @@ export class ExecutionStore {
       SELECT
         date(started_at) AS date,
         COUNT(*) AS executions,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures,
+        ${EXECUTION_OUTCOME_COLUMNS},
         COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(cache_read_input_tokens), 0) AS totalTokens,
         COALESCE(SUM(input_tokens), 0) AS inputTokens,
         COALESCE(SUM(output_tokens), 0) AS outputTokens,
@@ -702,24 +940,21 @@ export class ExecutionStore {
       FROM executions
       WHERE date(started_at) >= ?
       GROUP BY date(started_at)
-    `).all(dateKeys[0]) as {
+    `).all(dateKeys[0]) as (ExecutionOutcomeCounts & {
       date: string;
       executions: number;
-      successes: number;
-      failures: number;
       totalTokens: number;
       inputTokens: number;
       outputTokens: number;
       cacheReadTokens: number;
       costUsd: number;
-    }[];
+    })[];
 
     const byDate = new Map(rows.map((r) => [r.date, r]));
     return dateKeys.map((date) => byDate.get(date) ?? {
       date,
       executions: 0,
-      successes: 0,
-      failures: 0,
+      ...NO_OUTCOMES,
       totalTokens: 0,
       inputTokens: 0,
       outputTokens: 0,
@@ -729,17 +964,15 @@ export class ExecutionStore {
   }
 
   /** Hourly aggregated stats for the last N hours (UTC). Bucket key is `YYYY-MM-DDTHH`. */
-  hourlyStats(hours: number): {
+  hourlyStats(hours: number): (ExecutionOutcomeCounts & {
     date: string;
     executions: number;
-    successes: number;
-    failures: number;
     totalTokens: number;
     inputTokens: number;
     outputTokens: number;
     cacheReadTokens: number;
     costUsd: number;
-  }[] {
+  })[] {
     const now = new Date();
     const startUtc = new Date(Date.UTC(
       now.getUTCFullYear(),
@@ -760,8 +993,7 @@ export class ExecutionStore {
       SELECT
         strftime('%Y-%m-%dT%H', started_at) AS date,
         COUNT(*) AS executions,
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes,
-        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures,
+        ${EXECUTION_OUTCOME_COLUMNS},
         COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(cache_read_input_tokens), 0) AS totalTokens,
         COALESCE(SUM(input_tokens), 0) AS inputTokens,
         COALESCE(SUM(output_tokens), 0) AS outputTokens,
@@ -770,24 +1002,21 @@ export class ExecutionStore {
       FROM executions
       WHERE strftime('%Y-%m-%dT%H', started_at) >= ?
       GROUP BY strftime('%Y-%m-%dT%H', started_at)
-    `).all(hourKeys[0]) as {
+    `).all(hourKeys[0]) as (ExecutionOutcomeCounts & {
       date: string;
       executions: number;
-      successes: number;
-      failures: number;
       totalTokens: number;
       inputTokens: number;
       outputTokens: number;
       cacheReadTokens: number;
       costUsd: number;
-    }[];
+    })[];
 
     const byHour = new Map(rows.map((r) => [r.date, r]));
     return hourKeys.map((date) => byHour.get(date) ?? {
       date,
       executions: 0,
-      successes: 0,
-      failures: 0,
+      ...NO_OUTCOMES,
       totalTokens: 0,
       inputTokens: 0,
       outputTokens: 0,

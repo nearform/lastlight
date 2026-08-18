@@ -26,6 +26,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type {
   AuthInteraction,
+  ProviderAuthInteraction,
   OAuthAuth,
   OAuthCredential,
   OAuthCredentials,
@@ -150,9 +151,14 @@ function resolveOAuthAuth(id: string): OAuthAuth | undefined {
  * Adapt the old `OAuthLoginCallbacks` shape to the new `AuthInteraction`
  * interface expected by `OAuthAuth.login()`.
  */
-function adaptToAuthInteraction(callbacks: OAuthLoginCallbacks): AuthInteraction {
+function adaptToAuthInteraction(callbacks: OAuthLoginCallbacks): ProviderAuthInteraction {
   return {
-    signal: callbacks.signal,
+    // pi-ai 0.83 made `signal` REQUIRED on the provider-facing interaction (and
+    // on `refresh`). The old callback surface leaves it optional, so fall back
+    // to a controller nobody aborts — that is exactly the previous behaviour
+    // (no cancellation), rather than inventing a timeout the caller never asked
+    // for.
+    signal: callbacks.signal ?? new AbortController().signal,
     notify(event) {
       if (event.type === "auth_url") {
         callbacks.onAuth({ url: event.url, instructions: event.instructions });
@@ -237,7 +243,7 @@ async function resolveOAuthApiKeyInternal(
 
   // Refresh if expired (60 s buffer to pre-empt clock skew).
   if (typeof credential.expires === "number" && credential.expires < Date.now() + 60_000) {
-    credential = await oauthAuth.refresh(credential);
+    credential = await oauthAuth.refresh(credential, new AbortController().signal);
   }
 
   const auth = await oauthAuth.toAuth(credential);

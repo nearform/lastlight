@@ -4,6 +4,10 @@ import { isAbsolute, join, relative, resolve, sep } from "path";
 import { DockerSandbox, type WorkspaceMount } from "./docker.js";
 import { SANDBOX_IMAGE, isSandboxAvailable } from "./images.js";
 import { githubBasicAuthB64, githubExtraheaderArgs } from "./git-http-auth.js";
+import { resetPrNotesJournal, resetVerifyScript } from "../engine/executors/shared.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("sandbox");
 
 export { DockerSandbox } from "./docker.js";
 export {
@@ -25,7 +29,7 @@ export function cleanupOrphanedSandboxes(): void {
 
     const ids = out.trim().split("\n").filter(Boolean);
     if (ids.length > 0) {
-      console.log(`[sandbox] Cleaning up ${ids.length} orphaned sandbox container(s)`);
+      log.info("Cleaning up orphaned sandbox containers", { count: ids.length });
       execFileSync("docker", ["rm", "-f", ...ids], { stdio: "ignore", timeout: 15000 });
     }
   } catch {
@@ -40,9 +44,9 @@ export function sandboxAvailable(): boolean {
   if (_sandboxAvailable === null) {
     _sandboxAvailable = isSandboxAvailable();
     if (_sandboxAvailable) {
-      console.log(`[sandbox] Docker sandbox available (image: ${SANDBOX_IMAGE})`);
+      log.info("Docker sandbox available", { image: SANDBOX_IMAGE });
     } else {
-      console.log(`[sandbox] Docker not available — running agents directly`);
+      log.info("Docker not available — running agents directly");
     }
   }
   return _sandboxAvailable;
@@ -175,8 +179,8 @@ export async function createTaskSandbox(opts: {
       workDir,
       cleanup: () => sandbox.destroy(opts.taskId),
     };
-  } catch (err: any) {
-    console.warn(`[sandbox] Failed to create sandbox: ${err.message}`);
+  } catch (err) {
+    log.warn("Failed to create sandbox", { err });
     return null;
   }
 }
@@ -267,6 +271,19 @@ type PrePopulate = {
  *   - `recreateFromBase` (build): delete the stale checkout and re-clone from
  *     the default branch — a re-triggered incomplete build starts again off
  *     current `main` (issue #153).
+ *
+ * Every path that starts a NEW run also calls `resetVerifyScript` and
+ * `resetPrNotesJournal` on the checkout, deleting the file an earlier attempt
+ * left behind (`.git/lastlight-verify.sh`, `.git/lastlight-notes`). Both live
+ * under `.git/`, so neither can be committed into the PR whatever we do here —
+ * this is purely about STALENESS, and it is the only thing that clears them,
+ * since `git clean -fdx` never enters `.git/`. The same-run preserve path
+ * deliberately does not reset — the fix loop's later iterations keep the gate
+ * the first one wrote, and the journal is drained per phase by the harvest
+ * rather than per run. The kubernetes backend does the same two deletes inside
+ * its clone init container (`sandbox/k8s/init-clone.ts`), which is the only
+ * place with access to that checkout. See `engine/executors/shared.ts` → the
+ * push gate and the PR journal.
  */
 export { prePopulateWorkspace as __prePopulateWorkspaceForTest };
 
@@ -303,9 +320,20 @@ export function prePopulateWorkspace(
     // Same run (or a caller that doesn't track runs): preserve the workspace
     // exactly — earlier phases may have written uncommitted scratch here.
     if (!pre.runId || lastRun === pre.runId) {
-      console.log(
-        `[sandbox] Pre-clone skipped: ${repoDir} already a git repo (same run).`,
-      );
+      // Preserve the checkout — but NOT the base ref. `origin/<base>` was
+      // fetched when this run's FIRST phase provisioned, and the fix phase
+      // merges it minutes later; on a repo taking several dependency bumps a
+      // day the merge lands a base that is already superseded, leaving the PR
+      // `dirty` and therefore un-buildable by GitHub (no merge ref → no
+      // `pull_request` workflows at all, so `checksState` then reads green off
+      // whatever commit-status app is left). This writes remote-tracking refs
+      // only — never HEAD, the index or the working tree — so it cannot
+      // disturb the uncommitted scratch this path exists to keep.
+      ensureBaseAvailable(repoDir, pre, authArgs, url, scrub);
+      log.info("Pre-clone skipped: already a git repo (same run)", {
+        repoDir,
+        refreshedBase: pre.baseBranch ?? null,
+      });
       return;
     }
     if (pre.recreateFromBase) {
@@ -314,20 +342,29 @@ export function prePopulateWorkspace(
       // (below) so the re-triggered build starts again off current `main`.
       try {
         rmSync(repoDir, { recursive: true, force: true });
-        console.log(
-          `[sandbox] Recreating ${repoDir} from the default branch ` +
-          `(discarded stale workspace from run ${lastRun ?? "unknown"}).`,
-        );
-      } catch (err: any) {
-        console.warn(
-          `[sandbox] Failed to remove stale workspace ${repoDir} ` +
-          `(${scrub(err?.message)}); attempting a fresh clone anyway.`,
-        );
+        log.info("Recreating from the default branch (discarded stale workspace)", {
+          repoDir,
+          lastRun: lastRun ?? "unknown",
+        });
+      } catch (err) {
+        log.warn("Failed to remove stale workspace — attempting a fresh clone anyway", {
+          repoDir,
+          err,
+        });
       }
       // fall through to the recreate-from-base clone below.
     } else {
       // Different run reusing this PR's workspace — refresh in place.
       refreshExistingClone(repoDir, markerPath, pre);
+      // A NEW run against a reused workspace is exactly the case the push gate
+      // must not inherit: the fix family shares one workspace per PR, so a
+      // `.git/lastlight-verify.sh` from a superseded diagnosis (possibly
+      // written by the other fix workflow) is still sitting there. The
+      // refresh's `git clean -fdx` cannot reach it — nothing cleans `.git/` —
+      // so this delete is the only thing that does, and it sits outside the
+      // refresh's try/catch on purpose: a failed fetch skips the clean entirely.
+      resetVerifyScript(repoDir);
+      resetPrNotesJournal(repoDir);
       return;
     }
   }
@@ -347,14 +384,16 @@ export function prePopulateWorkspace(
       [...authArgs, "clone", "--branch", pre.branch, "--depth", depth, ...shallowArgs, url, repoDir],
       { stdio: "pipe", timeout: 120_000 },
     );
-    normalizeOrigin(repoDir, pre, scrub);
+    normalizeOrigin(repoDir, pre);
     ensureBaseAvailable(repoDir, pre, authArgs, url, scrub);
     writeMarker(markerPath, pre.runId);
+    // A no-op on a fresh clone — kept so "every path that starts a new run
+    // resets the scratch files" holds without a reader having to work out
+    // which paths can and cannot have inherited one.
+    resetVerifyScript(repoDir);
+    resetPrNotesJournal(repoDir);
     const ms = Date.now() - start;
-    console.log(
-      `[sandbox] Pre-cloned ${pre.owner}/${pre.repo}@${pre.branch} into ${repoDir} ` +
-      `(depth ${depth}, ${ms}ms)`,
-    );
+    log.info("Pre-cloned", { owner: pre.owner, repo: pre.repo, branch: pre.branch, repoDir, depth, durationMs: ms });
   } catch (err: any) {
     const firstError = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
     const looksLikeMissingBranch = /Remote branch .* not found|not found in upstream/i.test(firstError);
@@ -372,10 +411,12 @@ export function prePopulateWorkspace(
     // CRITICAL: execFileSync errors echo the failing command line, which
     // includes the `-c http.extraheader=AUTHORIZATION: basic <b64>` arg. The
     // base64 credential is scrubbed above before anything reaches the logs.
-    console.warn(
-      `[sandbox] Pre-clone of ${pre.owner}/${pre.repo}@${pre.branch} failed (${firstError}). ` +
-      `Agent will need to clone via MCP.`,
-    );
+    log.warn("Pre-clone failed — agent will need to clone via MCP", {
+      owner: pre.owner,
+      repo: pre.repo,
+      branch: pre.branch,
+      reason: firstError,
+    });
   }
 }
 
@@ -410,19 +451,25 @@ function cloneDefaultAndCreateBranch(
       ["-C", repoDir, "checkout", "-B", pre.branch],
       { stdio: "pipe", timeout: 30_000 },
     );
-    normalizeOrigin(repoDir, pre, scrub);
+    normalizeOrigin(repoDir, pre);
     writeMarker(markerPath, pre.runId);
+    resetVerifyScript(repoDir);
+    resetPrNotesJournal(repoDir);
     const ms = Date.now() - start;
-    console.log(
-      `[sandbox] Pre-cloned ${pre.owner}/${pre.repo} (default branch) into ${repoDir} ` +
-      `and created local branch ${pre.branch} (${ms}ms)`,
-    );
+    log.info("Pre-cloned default branch and created local branch", {
+      owner: pre.owner,
+      repo: pre.repo,
+      repoDir,
+      branch: pre.branch,
+      durationMs: ms,
+    });
   } catch (err: any) {
     const reason = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
-    console.warn(
-      `[sandbox] Default-branch clone of ${pre.owner}/${pre.repo} failed (${reason}). ` +
-      `Agent will need to clone via MCP.`,
-    );
+    log.warn("Default-branch clone failed — agent will need to clone via MCP", {
+      owner: pre.owner,
+      repo: pre.repo,
+      reason,
+    });
   }
 }
 
@@ -442,6 +489,10 @@ function cloneDefaultAndCreateBranch(
  * plain clone (post-review's two-dot fallback still anchors the PR's own lines)
  * and never fails provisioning. Runs only for PR-diff workflows (a `baseBranch`
  * distinct from the head, never a recreate-from-base build).
+ *
+ * Called on EVERY provisioning path, including a later phase of the same run —
+ * `origin/<base>` is otherwise frozen for the whole run and the fix phase
+ * merges a base that is tens of minutes stale.
  */
 function ensureBaseAvailable(
   repoDir: string,
@@ -465,10 +516,35 @@ function ensureBaseAvailable(
     }
   };
   // Deepen both the base ref and the head branch to the same absolute depth.
+  // Always with an EXPLICIT `--depth`: a bare fetch into a shallow repository
+  // has awkward depth semantics and can deepen much further than intended.
   const fetchBoth = (depthArgs: string[]): void => {
     try { run([...authArgs, "fetch", ...depthArgs, url, dest]); } catch { /* best-effort */ }
     try { run([...authArgs, "fetch", ...depthArgs, url, pre.branch]); } catch { /* best-effort */ }
   };
+  // Put the base into `remote.origin.fetch`, so the ref we materialize below is
+  // also REFRESHABLE by a plain `git fetch origin <base>` — the fix prompt's own
+  // step 1. `--depth` implies `--single-branch`, so the configured refspec
+  // covers the head branch only; git's opportunistic remote-tracking update
+  // then skips `<base>` and the agent's fetch writes FETCH_HEAD and nothing
+  // else, leaving the very next `git merge origin/<base>` on the stale ref.
+  // `set-branches --add` does not dedupe and this runs once per phase, so read
+  // the refspecs first. Best-effort on both halves — it is a second line of
+  // defence, not the mechanism.
+  const configuredRefspecs = (): string[] => {
+    try {
+      return String(execFileSync(
+        "git",
+        ["-C", repoDir, "config", "--get-all", "remote.origin.fetch"],
+        { stdio: ["ignore", "pipe", "ignore"], timeout: 15_000 },
+      )).split("\n").map((l) => l.trim()).filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  if (!configuredRefspecs().includes(dest)) {
+    try { run(["remote", "set-branches", "--add", "origin", base], 15_000); } catch { /* best-effort */ }
+  }
   try {
     fetchBoth(["--depth", "50"]);
     if (hasMergeBase()) return;
@@ -477,16 +553,19 @@ function ensureBaseAvailable(
     if (hasMergeBase()) return;
     fetchBoth(["--unshallow"]);
     if (!hasMergeBase()) {
-      console.warn(
-        `[sandbox] ${pre.owner}/${pre.repo}: no merge-base between ${base} and ${pre.branch} ` +
-        `after deepening; post-review will anchor via its two-dot fallback.`,
-      );
+      log.warn("No merge-base found after deepening — post-review will anchor via its two-dot fallback", {
+        owner: pre.owner,
+        repo: pre.repo,
+        base,
+        branch: pre.branch,
+      });
     }
   } catch (err: any) {
-    console.warn(
-      `[sandbox] Could not ensure base ${base} for ${repoDir} (${scrub(err?.message)}); ` +
-      `continuing with the plain clone.`,
-    );
+    log.warn("Could not ensure base — continuing with the plain clone", {
+      base,
+      repoDir,
+      reason: scrub(err?.message),
+    });
   }
 }
 
@@ -519,7 +598,6 @@ function writeMarker(markerPath: string, runId: string | undefined): void {
 function normalizeOrigin(
   repoDir: string,
   pre: PrePopulate,
-  scrub: (s: unknown) => string,
 ): void {
   const url = `https://github.com/${pre.owner}/${pre.repo}.git`;
   try {
@@ -528,11 +606,11 @@ function normalizeOrigin(
       ["-C", repoDir, "remote", "set-url", "origin", url],
       { stdio: "pipe", timeout: 15_000 },
     );
-  } catch (err: any) {
-    console.warn(
-      `[sandbox] Could not normalize origin for ${repoDir} (${scrub(err?.message)}); ` +
-      `continuing (auth rides the GIT_CONFIG_* extraheader, not origin.url).`,
-    );
+  } catch (err) {
+    log.warn("Could not normalize origin — continuing (auth rides the GIT_CONFIG_* extraheader, not origin.url)", {
+      repoDir,
+      err,
+    });
   }
 }
 
@@ -587,19 +665,20 @@ function refreshExistingClone(
       ["-C", repoDir, "clean", "-fdx", "-e", "node_modules"],
       { stdio: "pipe", timeout: 60_000 },
     );
-    normalizeOrigin(repoDir, pre, scrub);
+    normalizeOrigin(repoDir, pre);
     ensureBaseAvailable(repoDir, pre, authArgs, url, scrub);
     writeMarker(markerPath, pre.runId);
     const ms = Date.now() - start;
-    console.log(
-      `[sandbox] Refreshed reused workspace ${repoDir} → ${pre.branch} ` +
-      `(fetch+reset+clean, node_modules kept, ${ms}ms)`,
-    );
+    log.info("Refreshed reused workspace (fetch+reset+clean, node_modules kept)", {
+      repoDir,
+      branch: pre.branch,
+      durationMs: ms,
+    });
   } catch (err: any) {
     const reason = scrub(err?.message) || scrub(err?.stderr?.toString?.()) || "unknown error";
-    console.warn(
-      `[sandbox] Refresh of reused workspace ${repoDir} failed (${reason}). ` +
-      `Leaving it untouched; agent can re-fetch via MCP.`,
-    );
+    log.warn("Refresh of reused workspace failed — leaving it untouched; agent can re-fetch via MCP", {
+      repoDir,
+      reason,
+    });
   }
 }

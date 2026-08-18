@@ -28,6 +28,7 @@ const ReposPage = lazy(() =>
 const RouterPlayground = lazy(() =>
   import("./components/RouterPlayground").then((m) => ({ default: m.RouterPlayground })),
 );
+import { FeedbackPage } from "./components/FeedbackPage";
 import {
   HomeIcon,
   PlayCircleIcon,
@@ -39,6 +40,7 @@ import {
   FolderIcon,
   CommandLineIcon,
   ShareIcon,
+  HandThumbUpIcon,
 } from "@heroicons/react/24/outline";
 import {
   useUrlState,
@@ -51,11 +53,11 @@ import {
 } from "./hooks/useUrlState";
 
 type AuthState = "checking" | "required" | "ok";
-type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "repos" | "crons" | "logs" | "config" | "router-playground";
+type Tab = "home" | "sessions" | "chat-sessions" | "workflows" | "runs" | "repos" | "crons" | "feedback" | "logs" | "config" | "router-playground";
 
 const PAGE_SIZE = 50;
 
-const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "repos", "crons", "logs", "config", "router-playground"] as const;
+const TABS = ["home", "workflows", "runs", "sessions", "chat-sessions", "repos", "crons", "feedback", "logs", "config", "router-playground"] as const;
 
 const SESSION_SOURCE_PATHS: Record<"sessions" | "chat-sessions", string> = {
   sessions: "/admin/api/sessions",
@@ -302,6 +304,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               { id: "chat-sessions", label: "Chat Sessions", Icon: ChatBubbleLeftRightIcon },
               { id: "repos", label: "Repos", Icon: FolderIcon },
               { id: "crons", label: "Crons", Icon: ClockIcon },
+              { id: "feedback", label: "Feedback", Icon: HandThumbUpIcon },
               { id: "logs", label: "Logs", Icon: CommandLineIcon },
               { id: "router-playground", label: "Router Playground", Icon: ShareIcon },
               { id: "config", label: "Config", Icon: Cog6ToothIcon },
@@ -397,6 +400,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         </Suspense>
       ) : tab === "logs" ? (
         <LogsPage />
+      ) : tab === "feedback" ? (
+        <FeedbackPage />
       ) : tab === "config" ? (
         <ConfigPage />
       ) : tab === "repos" ? (

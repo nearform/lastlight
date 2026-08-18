@@ -3,7 +3,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const octokitInstance = { sentinel: "octokit" };
+const hookError = vi.fn();
+const octokitInstance = { sentinel: "octokit", hook: { error: hookError }, auth: vi.fn() };
 const createAppAuth = vi.fn();
 const Octokit = vi.fn(function () {
   return octokitInstance;
@@ -16,6 +17,22 @@ vi.mock("octokit", () => ({
 vi.mock("@octokit/auth-app", () => ({
   createAppAuth,
 }));
+
+// The diagnostic now logs via the pino LoggerPort instead of console — mock
+// the logger module so the assertions below can inspect the captured warn
+// call's fields instead of console output.
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: warnSpy,
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
 
 const tempDirs: string[] = [];
 
@@ -48,5 +65,52 @@ describe("githubAppClient", () => {
         installationId: "456",
       },
     });
+    // The 403/404 scope diagnostic is wired onto the client's request-error hook.
+    expect(hookError).toHaveBeenCalledWith("request", expect.any(Function));
+  });
+});
+
+describe("githubAppClient — 403/404 scope diagnostic", () => {
+  async function buildAndCaptureHandler() {
+    const tempDir = mkdtempSync(join(tmpdir(), "github-app-client-"));
+    tempDirs.push(tempDir);
+    const privateKeyPath = join(tempDir, "app.pem");
+    writeFileSync(privateKeyPath, "-----BEGIN PRIVATE KEY-----\nk\n-----END PRIVATE KEY-----\n");
+    const { githubAppClient } = await import("#src/engine/github/github-app-client.js");
+    githubAppClient({ appId: "123", installationId: "456", privateKeyPath });
+    return hookError.mock.calls.at(-1)![1] as (err: unknown, opts: unknown) => Promise<void>;
+  }
+
+  it("logs the endpoint's required perms + the token's actual scope on a 404, then re-throws", async () => {
+    octokitInstance.auth.mockResolvedValue({
+      repositorySelection: "all",
+      permissions: { issues: "write", pull_requests: "write" },
+    });
+    const handler = await buildAndCaptureHandler();
+
+    const err = {
+      status: 404,
+      response: { headers: { "x-accepted-github-permissions": "pull_requests=read" } },
+    };
+    await expect(handler(err, { method: "GET", url: "/repos/o/private/pulls" })).rejects.toBe(err);
+
+    const call = warnSpy.mock.calls.find(([msg]) => msg === "Request denied by GitHub")!;
+    const fields = call[1] as Record<string, unknown>;
+    expect(fields.method).toBe("GET");
+    expect(fields.url).toBe("/repos/o/private/pulls");
+    expect(fields.status).toBe(404);
+    expect(fields.acceptedPermissions).toBe("pull_requests=read");
+    expect(fields.tokenRepositorySelection).toBe("all");
+    // Permission LEVELS are logged, not just names — so a read grant where write
+    // is required is visible against x-accepted-github-permissions (#213/#215).
+    expect(fields.tokenPermissions).toBe("issues=write,pull_requests=write");
+  });
+
+  it("does not log for non-403/404 errors but still re-throws", async () => {
+    const handler = await buildAndCaptureHandler();
+
+    const err = { status: 500 };
+    await expect(handler(err, { method: "GET", url: "/x" })).rejects.toBe(err);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });

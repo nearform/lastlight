@@ -64,6 +64,9 @@ export class ChatSessionReader implements SessionSource {
       last_assistant_content: t.lastAssistantContent,
       agentIds: [],
       platform: t.platform,
+      // Sourced straight from `executions.repo` (issue #169) — a repo-less
+      // Slack thread reports null and is never filtered out.
+      repo: t.repo,
     };
   }
 

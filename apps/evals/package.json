@@ -1,6 +1,6 @@
 {
   "name": "lastlight-evals",
-  "version": "0.7.24",
+  "version": "0.9.24",
   "description": "Eval harness for Last Light workflows — drives the real production workflows against a mocked GitHub and grades deterministically (SWE-bench compatible).",
   "type": "module",
   "bin": {
@@ -44,18 +44,18 @@
   "dependencies": {
     "@clack/prompts": "^1.7.0",
     "lastlight-core": "workspace:*",
-    "chalk": "^5.6.2",
+    "chalk": "^6.0.0",
     "yaml": "^2.5.0"
   },
   "peerDependencies": {
-    "agentic-pi": "^0.3.0"
+    "agentic-pi": "^0.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "agentic-pi": "workspace:*",
-    "tsx": "^4.0.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.4",
-    "wrangler": "^4.105.0"
+    "vitest": "^4.1.10",
+    "wrangler": "^4.114.0"
   }
 }

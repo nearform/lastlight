@@ -12,10 +12,24 @@
  * `../config`, etc. — the dependency-cruiser boundary gate enforces that.
  */
 
+// ── OpenInference span vocabulary ────────────────────────────────────────────
+//
+// The engine tags its workflow/phase spans as OpenInference `CHAIN` spans so an
+// OpenInference-aware backend (e.g. Arize Phoenix) renders a run as a proper
+// tree (workflow → phase → agent). The engine depends only on zod, so it can't
+// import the app's `telemetry/openinference.ts`; it passes these string literals
+// through the injected `ObservabilityPort.withSpan` attrs instead. Keep the
+// key/value in sync with `apps/server/src/telemetry/openinference.ts`.
+
+/** OpenInference span-kind attribute key. */
+export const OPENINFERENCE_SPAN_KIND = "openinference.span.kind";
+/** OpenInference span kind for a deterministic step that orchestrates children. */
+export const OPENINFERENCE_CHAIN = "CHAIN";
+
 // ── Config sub-types (were in config/config.ts) ──────────────────────────────
 
 /** Workflow sandbox backend. */
-export type SandboxBackend = "gondolin" | "docker" | "smol" | "none";
+export type SandboxBackend = "gondolin" | "docker" | "smol" | "none" | "kubernetes";
 
 /** Where build handoff docs live for a run. */
 export type BuildAssetsLocation = "repo" | "server";
@@ -28,6 +42,13 @@ export interface OtelConfig {
   forwardToSandbox: boolean;
   strict: boolean;
   collectorHosts: string[];
+  /**
+   * Export OTLP metrics. Default true. Set false for a traces-only backend that
+   * rejects the metrics signal (e.g. Arize Phoenix ingests traces but not OTLP
+   * metrics) — the metric reader is then never started, so nothing is exported
+   * to a metrics endpoint that would 404/415.
+   */
+  metrics: boolean;
 }
 
 // ── ExecutorConfig (was in engine/github/profiles.ts) ────────────────────────
@@ -50,6 +71,27 @@ export interface ExecutorConfig {
   variant?: string;
   /** Path to agent context directory. */
   agentContextDir?: string;
+  /**
+   * The run's already-composed agent context — the body of the `AGENTS.md` the
+   * sandbox hands the agent as system context (persona + hard rules).
+   *
+   * The seam exists because agent-context is resolved LAYER-WISE and a run may
+   * carry an extra, per-run layer the module-level loader knows nothing about:
+   * the target repo's own `.lastlight/agent-context/*.md` (issue #180). The
+   * runner composes the text ONCE off that run's asset resolver and threads it
+   * here, so both delivery paths — the host-shared backends' workspace write and
+   * the kubernetes per-run init-fetch channel — serve the same bytes.
+   *
+   * **Security-critical.** The value MUST come from a resolver built with
+   * `agentContextAdditiveOnly: true` for the repo layer, which is what stops a
+   * managed repo neutering the operator's `security.md` / `rules.md` by
+   * committing a file of the same name. Consumers use this value as-is and never
+   * re-compose it.
+   *
+   * Absent (every run without a repo layer) ⇒ consumers fall back to the
+   * module-level loader exactly as they always did.
+   */
+  agentContext?: string;
   /** Directory for persistent state. */
   stateDir?: string;
   /** Directory for agent sandboxes (cloned repos). */

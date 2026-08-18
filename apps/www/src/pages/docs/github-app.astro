@@ -66,6 +66,16 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td>Merge or push PRs that touch <code>.github/workflows/</code> — GitHub blocks the token otherwise. Needed for dependency PRs that bump GitHub Actions versions (e.g. <code>actions/checkout</code>), which the dependabot-pr-merge flow lands. Omit only if you never want the bot to touch Actions files.</td>
 			</tr>
 			<tr>
+				<td><strong>Commit statuses</strong> <em>(recommended)</em></td>
+				<td>Read</td>
+				<td>Read the classic commit <em>statuses</em> a repo's CI may post (CircleCI, Jenkins, other external CI) alongside check runs, so the auto-merge and fix gating see the full CI picture. Distinct from <strong>Checks</strong> above — GitHub exposes statuses and check runs as two permissions over two APIs, and one does not imply the other. Optional: without it Last Light judges CI on check runs alone and says so once in the log, rather than losing the CI signal entirely.</td>
+			</tr>
+			<tr>
+				<td><strong>Actions</strong> <em>(recommended)</em></td>
+				<td>Read</td>
+				<td>Read GitHub Actions job logs so the fix workflow can see why CI actually failed, rather than only check annotations. Distinct from <strong>Workflows</strong> above, which only governs <em>writing</em> files under <code>.github/workflows/</code>. Optional: without it Last Light still runs, falling back to check-run annotations — and it now says so explicitly in the prompt instead of degrading silently.</td>
+			</tr>
+			<tr>
 				<td><strong>Metadata</strong></td>
 				<td>Read</td>
 				<td>Default — required to see repo details.</td>
@@ -102,10 +112,19 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		<li>On the settings page, click <strong>Generate a private key</strong> and save the <code>.pem</code> file — you will need it in a moment.</li>
 		<li>Note the <strong>App ID</strong> at the top of the settings page.</li>
 		<li>In the left sidebar click <strong>Install App</strong>, then install it on the repositories you want Last Light to manage.</li>
-		<li>After installing, the URL will be <code>github.com/settings/installations/<em>12345678</em></code> — copy that ID. That's your <strong>Installation ID</strong>.</li>
 	</ol>
 
-	<h2>5. Collect the four values</h2>
+	<p>
+		You can install the same app on <strong>several accounts</strong> — your personal
+		account plus one or more organisations. Each install is separate and gets its own
+		installation ID, but there is nothing to configure: Last Light discovers them all
+		from the app's own credentials and picks the right one per repository owner. Just
+		list repos from any of those accounts in <code>managedRepos</code>. If an owner
+		appears there that the app was never installed on, the Config → Managed repos pane
+		in the dashboard flags it.
+	</p>
+
+	<h2>5. Collect the three values</h2>
 
 	<p>At this point you should have:</p>
 
@@ -118,7 +137,6 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</thead>
 		<tbody>
 			<tr><td>App ID</td><td><code>GITHUB_APP_ID</code></td></tr>
-			<tr><td>Installation ID</td><td><code>GITHUB_APP_INSTALLATION_ID</code></td></tr>
 			<tr><td>Path to the <code>.pem</code> you saved</td><td><code>GITHUB_APP_PRIVATE_KEY_PATH</code></td></tr>
 			<tr><td>Webhook secret you generated</td><td><code>WEBHOOK_SECRET</code></td></tr>
 		</tbody>

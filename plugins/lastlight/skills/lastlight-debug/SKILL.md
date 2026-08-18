@@ -58,6 +58,20 @@ If it failed on a transient/infra hiccup, re-run from the failed phase:
 lastlight workflow retry <run-id>        # resumes from the phase that failed (same workspace/context)
 ```
 
+**Not the same thing as `pr retry`.** `workflow retry` resumes one FAILED run.
+When the bot *correctly* gave up on a pull request — `requires-human` applied,
+one comment explaining what it tried, no failed run to resume — the budgets are
+what stand in the way, and moving them is `pr retry`:
+
+```bash
+lastlight pr retry <owner/repo#N>                  # re-arm the attempt counter AND the cost window
+lastlight pr retry <owner/repo#N> arm64 was flaky  # the reason reaches the next attempt as a note
+```
+
+Same act as commenting `@<bot> retry` on the PR or removing `requires-human`.
+It exits non-zero (and does nothing) if the PR carries the `lastlight-ignore`
+hold label, if a run already owns the PR, or if the PR could not be read.
+
 ## 4. Read / tail the agent transcript
 
 ```bash
@@ -124,7 +138,7 @@ lastlight stats --hourly 24              # last 24 hours (spot a spike / stuck l
   failed phase's session → `session log <session-id>` → if it's a recurring
   symptom, `logs search "<error text>"` to see how often it happens.
 - These are read-only except `approvals approve/reject`, `cron
-  enable/disable/trigger`, `workflow retry`, and the trigger commands
+  enable/disable/trigger`, `workflow retry`, `pr retry`, and the trigger commands
   (`build`/`triage`/`review`/…) — plain debugging never mutates the box.
 
 ## Done when

@@ -6,8 +6,13 @@ import {
   isManagedRepo,
   setInstallationRepos,
   addInstallationRepos,
+  removeInstallation,
   removeInstallationRepos,
 } from "../managed-repos.js";
+import { getInstallationDirectory } from "../engine/github/installations.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("github");
 
 export interface GitHubWebhookConfig {
   /**
@@ -41,7 +46,55 @@ export interface GitHubWebhookConfig {
     repo: string,
     ref: string,
   ) => Promise<"passing" | "failing" | "pending" | "none">;
+  /**
+   * The open PR(s) whose HEAD is this commit (delegates to
+   * `GitHubClient.listOpenPrNumbersForHeadSha`) — the FORK-PR fallback for
+   * `check_suite` / `check_run` payloads, whose own `pull_requests[]` is empty
+   * unless the PR's head branch lives on the base repo.
+   *
+   * Without it every check-driven route is same-repo-only, which under
+   * `review.trigger: after-checks` means a fork PR defers on `pr.opened`,
+   * posts the `queued` placeholder, and never gets the settle event that would
+   * conclude it. When unset (standalone unit tests) the connector keeps the
+   * payload-only behaviour.
+   */
+  listOpenPrNumbersForHeadSha?: (
+    owner: string,
+    repo: string,
+    sha: string,
+  ) => Promise<number[]>;
+  /**
+   * The OPERATOR's `review.trigger`, read live.
+   *
+   * `check_suite.completed` is broadened past dependency PRs — to
+   * `pr.checks_settled` — only under `after-checks`, because that is the only
+   * mode with a consumer. Emitting is what costs event volume, and a repo that
+   * opts itself into `after-checks` under an `eager` operator is covered by the
+   * 30-minute `check-prs-awaiting-review` sweep. Unset (standalone unit tests)
+   * reads as "not after-checks".
+   */
+  reviewTrigger?: () => "eager" | "after-checks" | "on-request";
+  /**
+   * Called when the App is uninstalled from an account, with that installation
+   * id. Lets the harness drop any client memoized against it, so a later
+   * re-install (which mints a NEW installation id) can't reuse a dead one.
+   */
+  onInstallationRemoved?: (installationId: string) => void;
+  /**
+   * Invalidate the dashboard team-visibility cache (issue #169). Called on
+   * `team` / `membership` / `organization` events with the affected scope.
+   *
+   * **Invalidation, not re-derivation.** The cache is filled on demand, per
+   * logged-in user, so the right response to "this team changed" is to forget
+   * what we knew and let the next dashboard request pay for a fresh answer —
+   * not to crawl the team here, which in a big org would put an unbounded walk
+   * on the webhook hot path. Absent when the feature is off / no DB (tests).
+   */
+  onTeamChanged?: (scope: { org: string; teamSlug?: string; login?: string }) => void;
 }
+
+/** The check-run name whose "Re-run" button is a review request. */
+const REVIEW_CHECK_NAME = "last-light/review";
 
 /**
  * GitHub webhook actions we skip — these are noisy and never need agent work.
@@ -52,11 +105,18 @@ export interface GitHubWebhookConfig {
  * would block merges after a REQUEST_CHANGES + fix-commit cycle (the new
  * SHA would never get a check posted against it). The handler maps it to
  * `pr.synchronize` and routes to pr-review.
+ *
+ * `labeled` left this set in Phase 7: `review.requestLabel` is the real
+ * `on-request` mechanism (GitHub App bot users are not selectable in the
+ * reviewer picker, so `review_requested` cannot be). Everything that is not a
+ * `pull_request` label still falls out of `normalize()` with a null type and is
+ * answered `{ filtered: true, reason: "unmapped event" }`, and the router drops
+ * every PR label that is not the configured one — so the widening costs a
+ * normalize call, not a dispatch.
  */
 const IGNORED_ACTIONS = new Set([
   "deleted",
   "edited",
-  "labeled",
   "unlabeled",
   "assigned",
   "unassigned",
@@ -115,13 +175,33 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
 
       const action = payload.action;
 
+      // EVERY delivery names the installation it came from. That is the
+      // cheapest and freshest owner→installation mapping there is, and the App
+      // may be installed on several accounts — so record it before anything
+      // else, including on deliveries we go on to filter out. Signature is
+      // already verified, so the payload is trusted here.
+      getInstallationDirectory()?.note(
+        payload.installation?.account?.login ?? payload.repository?.owner?.login,
+        payload.installation?.id,
+        payload.installation?.account?.type ?? payload.repository?.owner?.type,
+      );
+
       // Keep the discovered installation-repo list live. These events carry no
       // `payload.repository` (they're app-wide) and `installation`/`deleted`
       // would otherwise be dropped by IGNORED_ACTIONS below — so handle them
-      // first, before any action/repo filtering. Signature is already verified.
+      // first, before any action/repo filtering.
       if (eventType === "installation" || eventType === "installation_repositories") {
         this.handleInstallationEvent(eventType, action, payload);
         return c.json({ accepted: true, kind: "installation-sync" }, 200);
+      }
+
+      // Team/org membership changes invalidate the dashboard visibility cache
+      // (issue #169). Handled here for the same reason as the block above:
+      // these are org-wide events with no `payload.repository`, and several of
+      // their actions (`deleted`, `edited`) are in IGNORED_ACTIONS below.
+      if (eventType === "team" || eventType === "membership" || eventType === "organization") {
+        this.handleTeamEvent(eventType, action, payload);
+        return c.json({ accepted: true, kind: "team-visibility-sync" }, 200);
       }
 
       // Filter out ignored actions
@@ -152,7 +232,18 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         senderLogin.endsWith("[bot]");
       const isPrAttention =
         eventType === "pull_request" &&
-        (action === "opened" || action === "synchronize" || action === "reopened");
+        (action === "opened" ||
+          action === "synchronize" ||
+          action === "reopened" ||
+          // A draft becoming ready is exactly when a deferred review should
+          // fire, so it carries the same exemption as `opened` — which it maps
+          // to (07 §7.3). Pairs with `review.skipDraft`.
+          action === "ready_for_review");
+      // The two new review-request signals. They do NOT get the bot-sender
+      // exemption above (a human applies a label or asks for a review), but they
+      // DO get the bot-authored-PR filter below — we can never review our own PR.
+      const isPrReviewSignal =
+        eventType === "pull_request" && (action === "labeled" || action === "review_requested");
       // A `check_suite.completed` (CI went red) is always sent by a bot — the
       // CI app / github-actions[bot] — so it would be dropped by the bot-sender
       // filter below without this exception. It carries nothing the agent
@@ -173,7 +264,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // through while the bot's own PRs are dropped before any sandbox spawns.
       const prAuthor = payload.pull_request?.user?.login || "";
       const isBotAuthoredPr =
-        isPrAttention &&
+        (isPrAttention || isPrReviewSignal) &&
         (prAuthor === this.config.botLogin || prAuthor.endsWith("[bot]"));
       if (isBotAuthoredPr) {
         return c.json(
@@ -187,7 +278,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // manage. See src/managed-repos.ts.
       const repoFullName = payload.repository?.full_name;
       if (!isManagedRepo(repoFullName)) {
-        console.log(`[github] Filtered webhook for unmanaged repo: ${repoFullName}`);
+        log.info("Filtered webhook for unmanaged repo", { repoFullName });
         return c.json({ filtered: true, reason: `repo not managed: ${repoFullName}` }, 200);
       }
 
@@ -209,6 +300,12 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
    * managed-repo list (src/managed-repos.ts). We apply the payload diff directly
    * — the events carry the affected repos' `full_name`, so no API round-trip is
    * needed. The list is seeded at boot; these keep it current between restarts.
+   *
+   * **Scoped to `payload.installation.id`.** These events are per-account: a
+   * `created` lists only the new account's repos and a `deleted` means only that
+   * account went away. Applying either to a single global set — as this used to
+   * — made installing the App on a second org reset the managed list to just
+   * that org, and uninstalling from it clear the list entirely.
    */
   private handleInstallationEvent(
     eventType: string,
@@ -217,30 +314,116 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
   ): void {
     const names = (repos: any): string[] =>
       Array.isArray(repos) ? repos.map((r: any) => r?.full_name).filter(Boolean) : [];
+    const installationId = payload.installation?.id;
+    const account = payload.installation?.account?.login;
+    if (installationId === undefined || installationId === null) {
+      log.warn("Installation event without an installation id — ignored", { eventType, action });
+      return;
+    }
+    const id = String(installationId);
 
     if (eventType === "installation_repositories") {
       if (action === "added") {
         const added = names(payload.repositories_added);
-        addInstallationRepos(added);
-        console.log(`[github] Installation repos added: ${added.join(", ") || "(none)"}`);
+        addInstallationRepos(id, added);
+        log.info("Installation repos added", { installationId: id, account, repos: added });
       } else if (action === "removed") {
         const removed = names(payload.repositories_removed);
-        removeInstallationRepos(removed);
-        console.log(`[github] Installation repos removed: ${removed.join(", ") || "(none)"}`);
+        removeInstallationRepos(id, removed);
+        log.info("Installation repos removed", { installationId: id, account, repos: removed });
       }
       return;
     }
 
     // eventType === "installation"
-    if (action === "created") {
-      // The initial-install payload lists the granted repos; reset to exactly them.
+    if (action === "created" || action === "unsuspend") {
+      // Both payloads list the granted repos; set exactly them for THIS
+      // installation, leaving every other account's set alone. `unsuspend` is
+      // grouped with `created` because a suspension takes the account out of
+      // service entirely (below) — coming back is the same restoration.
       const repos = names(payload.repositories);
-      setInstallationRepos(repos);
-      console.log(`[github] App installed with ${repos.length} repos`);
-    } else if (action === "deleted") {
-      setInstallationRepos([]);
-      console.log(`[github] App uninstalled — cleared installation repos`);
+      setInstallationRepos(id, repos);
+      getInstallationDirectory()?.setSuspended(id, false);
+      log.info(action === "created" ? "App installed" : "App unsuspended", {
+        installationId: id,
+        account,
+        repoCount: repos.length,
+      });
+    } else if (action === "deleted" || action === "suspend") {
+      // A SUSPENDED installation still exists and keeps its id, but every token
+      // mint against it 403s — so as far as the harness is concerned it is out
+      // of service exactly like an uninstall, and its repos must stop being
+      // managed. The difference is only in the directory: `suspend` keeps the
+      // account visible (flagged) for the admin surface, `deleted` forgets it.
+      removeInstallation(id);
+      if (action === "suspend") getInstallationDirectory()?.setSuspended(id, true);
+      else getInstallationDirectory()?.forget(id);
+      this.config.onInstallationRemoved?.(id);
+      log.info(action === "deleted" ? "App uninstalled" : "App suspended", {
+        installationId: id,
+        account,
+      });
     }
+  }
+
+  /**
+   * Keep the dashboard team-visibility cache honest (issue #169) by FORGETTING
+   * what a change invalidated — never by re-deriving it here.
+   *
+   * The cache is per-logged-in-user and filled on demand, so the cheapest
+   * correct response to any of these events is a delete: the next dashboard
+   * request re-resolves, and only for people who actually use it. Re-deriving
+   * on the webhook would put an unbounded org walk on the delivery path, which
+   * is exactly the failure mode this design exists to avoid.
+   *
+   * Scoping, by event:
+   * - `membership` — names the person AND the team. Drop that person's answer.
+   * - `team` — names the team only (created/deleted/edited, and the
+   *   `*_to_repository` pair that changes the grant). Drop the team, which
+   *   drops every member's answer with it.
+   * - `organization` — `member_removed` / `member_added` name the person;
+   *   they may have left the org entirely, so drop their answer too.
+   */
+  private handleTeamEvent(eventType: string, action: string | undefined, payload: any): void {
+    const onTeamChanged = this.config.onTeamChanged;
+    if (!onTeamChanged) return;
+    const org: string | undefined = payload.organization?.login;
+    if (!org) {
+      log.debug("Team-scope event without an organization — ignored", { eventType, action });
+      return;
+    }
+
+    if (eventType === "membership") {
+      const login: string | undefined = payload.member?.login;
+      const teamSlug: string | undefined = payload.team?.slug;
+      if (!login) return;
+      onTeamChanged({ org, teamSlug, login });
+      log.info("Team membership changed — visibility cache invalidated", {
+        org,
+        team: teamSlug,
+        login,
+        action,
+      });
+      return;
+    }
+
+    if (eventType === "organization") {
+      // Only the membership actions matter. `renamed` / `deleted` would need a
+      // wider sweep, but they also make every subsequent resolve fail open on
+      // its own, so there is nothing to protect against.
+      if (action !== "member_added" && action !== "member_removed") return;
+      const login: string | undefined = payload.membership?.user?.login;
+      if (!login) return;
+      onTeamChanged({ org, login });
+      log.info("Org membership changed — visibility cache invalidated", { org, login, action });
+      return;
+    }
+
+    // eventType === "team"
+    const teamSlug: string | undefined = payload.team?.slug;
+    if (!teamSlug) return;
+    onTeamChanged({ org, teamSlug });
+    log.info("Team changed — visibility cache invalidated", { org, team: teamSlug, action });
   }
 
   /**
@@ -261,9 +444,68 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     try {
       return await this.config.getChecksConclusion(owner, repo, sha);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[github] getChecksConclusion(${repoFullName}@${sha.slice(0, 7)}) failed: ${msg}`);
+      log.warn("getChecksConclusion failed", { repoFullName, sha: sha.slice(0, 7), err });
       return fallback;
+    }
+  }
+
+  /**
+   * The PR a `check_suite` / `check_run` delivery is about.
+   *
+   * The payload's own `pull_requests[]` is authoritative and free — but GitHub
+   * fills it only when the head branch lives on the base repo. A FORK PR gets
+   * an empty array, and every check-driven route keyed on it (the settle emit,
+   * the Re-run buttons) then drops the delivery entirely.
+   *
+   * So when the array is empty we ask the base repo which open PR this commit
+   * heads. One extra call, only on that path, and only when a head SHA is
+   * present — a same-repo PR never reaches it.
+   *
+   * Returns `undefined` rather than throwing on any failure: a PR we cannot
+   * identify is exactly the situation before this fallback existed, and a
+   * transient lookup error must not be louder than the event it was resolving.
+   */
+  private async prNumberForCheckPayload(
+    payloadPrs: Array<{ number?: number }> | undefined,
+    repoFullName: string | undefined,
+    sha: string | undefined,
+  ): Promise<number | undefined> {
+    const fromPayload = payloadPrs?.[0]?.number;
+    if (fromPayload) return fromPayload;
+    if (!this.config.listOpenPrNumbersForHeadSha || !repoFullName || !sha) return undefined;
+    const [owner, repo] = repoFullName.split("/");
+    try {
+      const numbers = await this.config.listOpenPrNumbersForHeadSha(owner, repo, sha);
+      const found = numbers[0];
+      if (found) {
+        log.debug("Resolved a fork PR from its head SHA", {
+          repoFullName,
+          sha: sha.slice(0, 7),
+          prNumber: found,
+          ...(numbers.length > 1 ? { alsoHeads: numbers.slice(1) } : {}),
+        });
+      }
+      return found;
+    } catch (err) {
+      log.warn("listOpenPrNumbersForHeadSha failed", {
+        repoFullName,
+        sha: sha.slice(0, 7),
+        err,
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * Is the operator running `review.trigger: after-checks`? Only then does a
+   * settled check suite on a PR neither check-outcome route claimed become a
+   * `pr.checks_settled` event; every other mode has no consumer for it.
+   */
+  private afterChecks(): boolean {
+    try {
+      return this.config.reviewTrigger?.() === "after-checks";
+    } catch {
+      return false;
     }
   }
 
@@ -296,6 +538,16 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     let labels: string[] = [];
     let issueAuthor: string | undefined;
     let headSha: string | undefined;
+    // The dependency discriminator, CARRIED rather than discarded. The
+    // connector has to compute it to decide whether to emit at all; the router
+    // used to pay an LLM classifier call to re-guess it from a prose sentence,
+    // and got it wrong — see the `pr.checks_failed` case in `engine/router.ts`
+    // (09-state-machine.md → D5).
+    let isDependencyPr: boolean | undefined;
+    /** `pr.labeled` only — the label just added, for `review.requestLabel`. */
+    let addedLabel: string | undefined;
+    /** `pr.review_requested` only — who the review was asked of. */
+    let requestedReviewer: string | undefined;
 
     switch (githubEvent) {
       case "issues":
@@ -323,6 +575,34 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
         else if (action === "synchronize") type = "pr.synchronize";
         // reopened: closed-then-reopened PRs deserve a fresh look too.
         else if (action === "reopened") type = "pr.reopened";
+        // A draft marked ready maps to `pr.opened` SEMANTICS — it is the moment
+        // the PR first asks to be looked at. This is what un-defers a review
+        // `review.skipDraft` held back; without it a PR opened as a draft and
+        // later marked ready would get no webhook-driven review at all.
+        else if (action === "ready_for_review") type = "pr.opened";
+        // A label was added. The router drops every label that is not the
+        // configured `review.requestLabel`, so this only ever reaches a
+        // dispatch when somebody asked for a review by label.
+        else if (action === "labeled") {
+          const name = payload.label?.name;
+          if (typeof name === "string" && name) {
+            type = "pr.labeled";
+            addedLabel = name;
+          }
+        }
+        // Opportunistic (07 §7.1's caveat): GitHub App bot users are not
+        // selectable in the reviewer picker, so `on-request` must NOT depend on
+        // this — it costs almost nothing and future-proofs. The router discards
+        // a request naming anybody else.
+        else if (action === "review_requested") {
+          const reviewer =
+            payload.requested_reviewer?.login ??
+            (payload.requested_team?.slug ? `team/${payload.requested_team.slug}` : undefined);
+          if (reviewer) {
+            type = "pr.review_requested";
+            requestedReviewer = reviewer;
+          }
+        }
         break;
 
       case "issue_comment":
@@ -362,107 +642,165 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       // check_run.rerequested (one check) or check_suite.rerequested (all) to
       // the App that owns the check. Map either to pr.synchronize so the runner
       // re-reviews the PR's current head — the same path a fresh push takes.
-      // The associated PR comes from the event's `pull_requests[]` (populated
-      // for same-repo PRs). Other check_run/check_suite actions (created /
-      // completed / requested, fired on every check) leave `type` null and are
-      // ignored. NOTE: requires the GitHub App to be subscribed to the "Check
+      // The associated PR comes from the event's `pull_requests[]`, falling back
+      // to a head-SHA lookup for a fork PR, whose array is always empty — see
+      // {@link prNumberForCheckPayload}. Without that fallback the Re-run button
+      // on `last-light/review`, which is the documented manual escape hatch for
+      // a stuck review, did nothing at all on exactly the PRs most likely to be
+      // stuck. Other check_run/check_suite actions (created / completed /
+      // requested, fired on every check) leave `type` null and are ignored. NOTE: requires the GitHub App to be subscribed to the "Check
       // run" / "Check suite" events — without that GitHub never delivers these.
       case "check_run":
         if (action === "rerequested" || action === "requested_action") {
-          prNumber = payload.check_run?.pull_requests?.[0]?.number;
+          prNumber = await this.prNumberForCheckPayload(
+            payload.check_run?.pull_requests,
+            repoFullName,
+            payload.check_run?.head_sha,
+          );
           issueNumber = prNumber;
-          if (prNumber) type = "pr.synchronize";
+          if (prNumber) {
+            // Re-running OUR OWN review check is an explicit review request,
+            // not "the code changed". That distinction is what makes the
+            // `on-request` placeholder check work as advertised: `neutral`
+            // never blocks a merge and its Re-run button IS the affordance —
+            // but only if pressing it overrides the mode, which `pr.synchronize`
+            // (an attention event) would not.
+            if (payload.check_run?.name === REVIEW_CHECK_NAME) {
+              type = "pr.review_requested";
+              requestedReviewer = this.config.botLogin;
+            } else {
+              type = "pr.synchronize";
+            }
+          }
         }
         break;
 
       case "check_suite":
         if (action === "rerequested") {
-          prNumber = payload.check_suite?.pull_requests?.[0]?.number;
+          prNumber = await this.prNumberForCheckPayload(
+            payload.check_suite?.pull_requests,
+            repoFullName,
+            payload.check_suite?.head_sha,
+          );
           issueNumber = prNumber;
           if (prNumber) type = "pr.synchronize";
-        } else if (
-          action === "completed" &&
-          (payload.check_suite?.conclusion === "failure" ||
-            payload.check_suite?.conclusion === "timed_out")
-        ) {
-          // A PR's CI has gone red. Emit a dedicated event so a workflow can
-          // react (e.g. fix a failing Dependabot PR). We use check_suite
-          // (aggregate — ~one event per push) rather than per-check_run.completed
-          // to avoid a burst of duplicates. `pull_requests[]` is populated for
-          // same-repo PRs (fork PRs carry an empty array and are dropped below).
-          const pr = payload.check_suite?.pull_requests?.[0];
-          const sha: string | undefined = payload.check_suite?.head_sha;
-          // The check_suite `pull_requests[]` entry is minimal (number/refs
-          // only — no title or author). The head commit carries the useful
-          // classifier signal instead: for a Dependabot PR the commit message
-          // is the bump description ("Bump lodash from …") and the commit
-          // author name is "dependabot[bot]". The router feeds these to the
-          // classifier; the dispatcher later fetches the full PR for the fix.
-          const headCommit = payload.check_suite?.head_commit;
-          const commitAuthor: string = headCommit?.author?.name || "";
-          const headBranch: string = payload.check_suite?.head_branch || "";
-          // GATE: only a dependency-update PR (Dependabot / Renovate) may kick
-          // off the red-CI fix path — the exact deterministic check the green
-          // `pr.checks_passed` path below applies. Without it, EVERY red PR
-          // (including a human's) reached the router's LLM classifier as the
-          // sole authority, which misfired human PRs onto `dependabot-ci-fix`
-          // (a repo-write sandbox run). Commit author OR branch prefix, so a
-          // squashed/proxied bot commit still matches via its branch.
-          const isDependencyPr =
-            /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
-            /^(dependabot|renovate)\//.test(headBranch);
-          // Only fire once the PR's checks have FULLY SETTLED red — a repo with
-          // several check-reporting apps completes one suite at a time, and a
-          // failure in one while another is still running should not kick off a
-          // fix mid-flight. `getChecksConclusion` returns "failing" only when
-          // nothing is pending and ≥1 check concluded red, so exactly one event
-          // fires per SHA (the last suite to settle). Absent a wired client
-          // (standalone tests) we keep the legacy per-suite behaviour. Gated
-          // behind isDependencyPr so a human's red PR never even makes the call.
-          if (pr?.number && isDependencyPr) {
-            const settled = await this.settledConclusion(repoFullName, sha, "failing");
-            if (settled === "failing") {
-              prNumber = pr.number;
-              issueNumber = prNumber;
-              headSha = sha;
-              type = "pr.checks_failed";
-              title = (headCommit?.message || "").split("\n")[0] || title;
-              issueAuthor = commitAuthor || issueAuthor;
-            }
-          }
-        } else if (
-          action === "completed" &&
-          payload.check_suite?.conclusion === "success"
-        ) {
-          // A PR's CI has gone fully green. Emit a dedicated event ONLY for
-          // dependency-update PRs (Dependabot / Renovate) so a workflow can
-          // enable auto-merge on the trivial ones — we deliberately do NOT fire
-          // on every green PR (that would flood the router with events for
-          // unrelated work). The dependency signal comes cheaply from the head
-          // commit author + the suite's head branch, with no extra PR fetch.
-          const pr = payload.check_suite?.pull_requests?.[0];
-          const sha: string | undefined = payload.check_suite?.head_sha;
-          const headCommit = payload.check_suite?.head_commit;
-          const commitAuthor: string = headCommit?.author?.name || "";
-          const headBranch: string = payload.check_suite?.head_branch || "";
-          const isDependencyPr =
-            /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
-            /^(dependabot|renovate)\//.test(headBranch);
-          // Fire ONLY when the head SHA's checks have fully settled green. A
-          // suite going green while sibling suites are still running reports
-          // "pending" here and is dropped; the last suite to settle flips the
-          // aggregate to "passing", so exactly one `pr.checks_passed` fires per
-          // SHA instead of one per check-reporting app. (Legacy per-suite
-          // behaviour is preserved when no client is wired — standalone tests.)
-          if (pr?.number && isDependencyPr) {
-            const settled = await this.settledConclusion(repoFullName, sha, "passing");
-            if (settled === "passing") {
-              prNumber = pr.number;
-              issueNumber = prNumber;
-              headSha = sha;
-              type = "pr.checks_passed";
-              title = (headCommit?.message || "").split("\n")[0] || title;
-              issueAuthor = commitAuthor || issueAuthor;
+        } else if (action === "completed") {
+          // A PR's checks have moved. WHICH event that becomes is decided by
+          // the AGGREGATE state of the head SHA — never by this suite's own
+          // colour, which says only which check-reporting app happened to
+          // finish last. A repo with several of them completes one suite at a
+          // time, so the suite colour is the order CI settled in, and the three
+          // routes below all care about the PR.
+          //
+          // That was the #1646 bug: the two arms were separate `else if`s on
+          // the SUITE, each with its own aggregate test, and the green one
+          // demanded `passing`. A PR with one failing job whose sibling suite
+          // finished last landed in the green arm, computed `failing`, and was
+          // dropped — while the failing suite, which the red arm would have
+          // taken, had completed while the sibling was still running and read
+          // `pending`. Nothing ever emitted; the `queued` review check sat
+          // there until the PR was merged six hours later.
+          //
+          // We still look only at settled colours: `cancelled` / `neutral` /
+          // `skipped` / `stale` say nothing happened and carry no aggregate
+          // worth paying a round trip for.
+          const suiteConclusion = payload.check_suite?.conclusion;
+          const suiteRed = suiteConclusion === "failure" || suiteConclusion === "timed_out";
+          const suiteGreen = suiteConclusion === "success";
+          if (suiteRed || suiteGreen) {
+            const sha: string | undefined = payload.check_suite?.head_sha;
+            // The check_suite `pull_requests[]` entry is minimal (number/refs
+            // only — no title or author). The head commit carries the useful
+            // classifier signal instead: for a Dependabot PR the commit message
+            // is the bump description ("Bump lodash from …") and the commit
+            // author name is "dependabot[bot]". The router feeds these to the
+            // classifier; the dispatcher later fetches the full PR for the fix.
+            const headCommit = payload.check_suite?.head_commit;
+            const commitAuthor: string = headCommit?.author?.name || "";
+            const headBranch: string = payload.check_suite?.head_branch || "";
+            // GATE: which red PRs may kick off the fix path at all. Commit
+            // author OR branch prefix for the dependency case, so a
+            // squashed/proxied bot commit still matches via its branch.
+            const isDependency =
+              /^(dependabot|renovate)\[bot\]$/.test(commitAuthor) ||
+              /^(dependabot|renovate)\//.test(headBranch);
+            // ...plus a head commit WE pushed. `git-auth.ts` stamps
+            // `user.name = <botName>[bot]` on the agent's own commits and the
+            // check_suite payload carries the same field, so this is precisely
+            // "did my fix work?" — the CI feedback loop `pr-fix` has never had
+            // (it could push a fix and never learn whether the build went green,
+            // because this event only ever fired for dependency PRs). It stays
+            // bounded: it cannot fire for an ordinary human PR the bot has not
+            // touched. It is nonetheless the one change here that can increase
+            // run volume on non-dependency PRs — watch it after rollout.
+            const isOurOwnPush = !!this.config.botLogin && commitAuthor === this.config.botLogin;
+            // Nobody downstream wants this delivery — don't pay for the
+            // aggregate read. An ordinary human PR under a mode with no
+            // consumer for a settle event never makes the call.
+            const wanted = isDependency || isOurOwnPush || this.afterChecks();
+            // Resolved AFTER `wanted`, because for a fork PR this costs an API
+            // call (`pull_requests[]` is empty unless the head branch is on the
+            // base repo) and a delivery nobody consumes should cost nothing.
+            const suitePr = wanted
+              ? await this.prNumberForCheckPayload(
+                  payload.check_suite?.pull_requests,
+                  repoFullName,
+                  sha,
+                )
+              : undefined;
+            if (suitePr) {
+              // Fire only once the head SHA has FULLY SETTLED, so a repo with
+              // several check-reporting apps produces exactly one event per SHA
+              // — the last suite to settle — rather than one per app. Absent a
+              // wired client (standalone tests) the fallback keeps the legacy
+              // per-suite behaviour, which is this suite's own colour.
+              const settled = await this.settledConclusion(
+                repoFullName,
+                sha,
+                suiteRed ? "failing" : "passing",
+              );
+              const title0 = (headCommit?.message || "").split("\n")[0];
+              // FIX OUTRANKS REVIEW (09 → S2), and one envelope per delivery is
+              // all `normalize()` can return — so the precedence below is not a
+              // policy choice bolted on later, it is the shape of the pipeline.
+              if (settled === "failing" && (isDependency || isOurOwnPush)) {
+                prNumber = suitePr;
+                issueNumber = prNumber;
+                headSha = sha;
+                type = "pr.checks_failed";
+                title = title0 || title;
+                issueAuthor = commitAuthor || issueAuthor;
+                // The router routes on THIS, deterministically: dependency →
+                // `dependabot-ci-fix`, everything else → `pr-fix`. Without it a
+                // human's red PR would run a dependency-bump prompt, the
+                // `dependency-*` label vocabulary and a `requires-human`
+                // preflight it was never designed for.
+                isDependencyPr = isDependency;
+              } else if (settled === "passing" && isDependency) {
+                // A green dependency PR goes to the MERGE route, not a review.
+                // We deliberately do NOT fire this for every green PR — that
+                // would flood the router with events for unrelated work.
+                prNumber = suitePr;
+                issueNumber = prNumber;
+                headSha = sha;
+                type = "pr.checks_passed";
+                title = title0 || title;
+                issueAuthor = commitAuthor || issueAuthor;
+                isDependencyPr = true;
+              } else if ((settled === "failing" || settled === "passing") && this.afterChecks()) {
+                // Whatever the fix family did not claim, under `after-checks`,
+                // is the canonical review settle: nothing is going to change
+                // about this head, and the review can now say so. EITHER
+                // COLOUR — "on settle, either colour" is the documented
+                // contract (09 → S2, locked decision 14), a red result is
+                // useful review input, and a PR we gave up on never goes green.
+                prNumber = suitePr;
+                issueNumber = prNumber;
+                headSha = sha;
+                type = "pr.checks_settled";
+                title = title0 || title;
+                isDependencyPr = isDependency;
+              }
             }
           }
         }
@@ -487,6 +825,9 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
       issueNumber,
       prNumber,
       headSha,
+      isDependencyPr,
+      addedLabel,
+      requestedReviewer,
       sender,
       issueAuthor,
       senderIsBot: false, // already filtered bots above
@@ -505,7 +846,7 @@ export class GitHubWebhookConnector extends EventEmitter implements Connector {
     // already registered on the shared app at construction time. This connector
     // stays registered purely so its `emit("event", …)` flows through the
     // ConnectorRegistry.
-    console.log("[github] Webhook routes registered on shared HTTP server");
+    log.info("Webhook routes registered on shared HTTP server");
   }
 
   async stop(): Promise<void> {

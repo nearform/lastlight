@@ -1,10 +1,25 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import { StateDb } from "#src/state/db.js";
 import { migrate } from "#src/state/migrate.js";
 import { ApprovalStore } from "#src/state/approval-store.js";
 import { WorkflowRunStore } from "#src/state/workflow-run-store.js";
+
+// workflow-run-store.ts logs a throwing terminal observer via the pino
+// LoggerPort. Mock the logger so the suite's stderr stays free of real pino
+// JSON from the "a throwing observer never fails the transition" test below.
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
 
 let db: StateDb;
 
@@ -429,6 +444,36 @@ describe("requeue — refresh a queued orphan's clock on boot", () => {
   });
 });
 
+describe("requeueRunning — backpressure requeue on quota rejection", () => {
+  it("requeueRunning flips a running run back to queued and re-stamps the clock", () => {
+    const id = "run-bp-1";
+    db.runs.createRun({
+      id, workflowName: "build", triggerId: "t1", owner: "o", repo: "r",
+      issueNumber: 1, currentPhase: "phase_0", status: "running",
+      startedAt: new Date(Date.now() - 3_600_000).toISOString(), // 1h ago
+    } as any);
+
+    const before = db.runs.getRun(id)!;
+    const changed = db.runs.requeueRunning(id);
+
+    expect(changed).toBe(1);
+    const after = db.runs.getRun(id)!;
+    expect(after.status).toBe("queued");
+    expect(Date.parse(after.startedAt)).toBeGreaterThan(Date.parse(before.startedAt));
+  });
+
+  it("requeueRunning is a no-op on a non-running run (CAS guard)", () => {
+    const id = "run-bp-2";
+    db.runs.createRun({
+      id, workflowName: "build", triggerId: "t2", owner: "o", repo: "r",
+      issueNumber: 2, currentPhase: "phase_0", status: "queued",
+      startedAt: new Date().toISOString(),
+    } as any);
+    expect(db.runs.requeueRunning(id)).toBe(0);
+    expect(db.runs.getRun(id)!.status).toBe("queued");
+  });
+});
+
 describe("latestSucceededForTrigger", () => {
   it("returns the newest SUCCEEDED run for the workflow+trigger, ignoring others", () => {
     const trigger = "acme/widgets#190";
@@ -603,8 +648,25 @@ describe("listActive includes queued", () => {
   });
 });
 
+/**
+ * Insert a run row with raw SQL, bypassing `createRun`'s normalization — the
+ * only way to produce a shape the store would never write itself (issue #279).
+ */
+function makeLegacyRun(overrides: { owner?: string | null; repo: string }): string {
+  const id = randomUUID();
+  db.database
+    .prepare(
+      `INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, current_phase, status, started_at, updated_at)
+       VALUES (?, 'explore', ?, ?, ?, 'socratic', 'running', ?, ?)`,
+    )
+    .run(id, `slack:${id}`, overrides.owner ?? null, overrides.repo, new Date().toISOString(), new Date().toISOString());
+  return id;
+}
+
 describe("repo-scoped queries", () => {
   it("list({ repo }) returns only that repo's runs, with the post-filter total", () => {
+    // Passing the qualified form is normalized on the way in (issue #279), so
+    // the rows come back as the (owner, BARE repo) pair regardless.
     makeRun({ repo: "acme/api" });
     makeRun({ repo: "acme/api" });
     makeRun({ repo: "acme/web" });
@@ -613,12 +675,79 @@ describe("repo-scoped queries", () => {
     const { runs, total } = db.runs.list({ repo: "acme/api" });
     expect(total).toBe(2);
     expect(runs).toHaveLength(2);
-    expect(runs.every((r) => r.repo === "acme/api")).toBe(true);
+    expect(runs.every((r) => r.owner === "acme" && r.repo === "api")).toBe(true);
 
     // The filter composes with pagination.
     const page = db.runs.list({ repo: "acme/api", limit: 1 });
     expect(page.total).toBe(2);
     expect(page.runs).toHaveLength(1);
+  });
+
+  it("list({ repos }) scopes to a SET of repos (the visibility scope, issue #169)", () => {
+    makeRun({ owner: "nearform", repo: "lastlight" });
+    makeRun({ owner: "nearform", repo: "www" });
+    makeRun({ owner: "nearform", repo: "unrelated" });
+
+    const { runs, total } = db.runs.list({
+      repos: ["nearform/lastlight", "nearform/www"],
+    });
+    expect(total).toBe(2);
+    expect(runs.map((r) => r.repo).sort()).toEqual(["lastlight", "www"]);
+  });
+
+  it("list({ repos }) matches BARE rows — a plain IN() would return nothing", () => {
+    // The regression: the real create path stores `repo` bare with `owner`
+    // beside it, while the caller filters by the qualified `owner/repo`. An
+    // `IN (…)` against the column matches no modern row at all, which would
+    // silently show an empty dashboard rather than a filtered one.
+    makeRun({ owner: "nearform", repo: "lastlight" });
+    makeRun({ owner: "nearform", repo: "www" });
+
+    const { runs } = db.runs.list({ repos: ["nearform/lastlight", "nearform/www"] });
+    expect(runs).toHaveLength(2);
+  });
+
+  it("still matches a legacy row the backfill never reached", () => {
+    // The `OR repo = ?` arm of `repoMatchClause` is compatibility, not the rule
+    // (issue #279): `createRun` normalizes and `migrate()` converges the table,
+    // so only a row written by an older process against an un-migrated DB looks
+    // like this. Kept because dropping a row from a filter is the failure mode
+    // that hides things silently — a SELECT is the wrong place to discover that
+    // a backfill didn't run.
+    makeRun({ owner: "nearform", repo: "lastlight" });
+    const legacy = makeLegacyRun({ owner: null, repo: "nearform/www" });
+
+    const { runs } = db.runs.list({ repos: ["nearform/lastlight", "nearform/www"] });
+    expect(runs).toHaveLength(2);
+    expect(runs.map((r) => r.id)).toContain(legacy);
+
+    // …and it reads back NORMALIZED, because `deserialize` is the shim every
+    // consumer crosses. This is what lets admission.ts hand (owner, repo)
+    // straight to Octokit without a split of its own.
+    const read = db.runs.getRun(legacy)!;
+    expect([read.owner, read.repo]).toEqual(["nearform", "www"]);
+  });
+
+  it("distinctRepos() folds a legacy row in with its normalized twin", () => {
+    // The bare-vs-qualified duplicate the /repos union must never show.
+    makeRun({ owner: "nearform", repo: "www", startedAt: "2026-01-01T00:00:00.000Z" });
+    makeLegacyRun({ owner: null, repo: "nearform/www" });
+
+    const repos = db.runs.distinctRepos();
+    expect(repos.filter((r) => r.repo === "nearform/www")).toHaveLength(1);
+    expect(repos.find((r) => r.repo === "nearform/www")!.runCount).toBe(2);
+  });
+
+  it("list({ repo }) wins over `repos` — the Repos tab's narrower ask", () => {
+    makeRun({ owner: "nearform", repo: "lastlight" });
+    makeRun({ owner: "nearform", repo: "www" });
+
+    const { runs } = db.runs.list({
+      repo: "nearform/lastlight",
+      repos: ["nearform/lastlight", "nearform/www"],
+    });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.repo).toBe("lastlight");
   });
 
   it("distinctRepos() groups by repo with run counts, newest activity first", () => {
@@ -721,5 +850,174 @@ describe("migrate() owner backfill", () => {
     };
     expect(row.owner).toBe("nearform");
     raw.close();
+  });
+});
+
+/**
+ * The terminal-transition observer (09 → S2). It exists so the
+ * `last-light/review` check can be a projection of run state rather than of an
+ * in-memory promise — hung on the STORE rather than on the eight `finishRun`
+ * call sites, which is what makes `simple.ts`, `resume.ts`, the queued-run TTL
+ * expiry and the admin cancel all resolve an open check for free, and what
+ * stops a ninth call site being added without one.
+ */
+describe("terminal run observer", () => {
+  function observed() {
+    const seen: Array<[string, string]> = [];
+    db.runs.addTerminalObserver((run, status) => seen.push([run.id, status]));
+    return seen;
+  }
+
+  it("fires on every finishRun status", () => {
+    const seen = observed();
+    for (const status of ["succeeded", "failed", "cancelled"] as const) {
+      const id = makeRun();
+      db.runs.finishRun(id, status);
+      expect(seen.at(-1)).toEqual([id, status]);
+    }
+  });
+
+  it("fires AFTER the row is written, so the observer reads terminal state", () => {
+    let statusAtNotify: string | undefined;
+    const id = makeRun();
+    db.runs.addTerminalObserver((run) => { statusAtNotify = run.status; });
+    db.runs.finishRun(id, "succeeded");
+    expect(statusAtNotify).toBe("succeeded");
+  });
+
+  it("fires for a queued run dropped by the TTL sweep — the case that used to strand a check", () => {
+    const seen = observed();
+    const id = makeRun({ status: "queued" });
+    expect(db.runs.expireQueued(id, "dropped from queue after waiting too long")).toBe(1);
+    expect(seen).toEqual([[id, "cancelled"]]);
+  });
+
+  it("does NOT fire when the expiry CAS loses the race", () => {
+    const id = makeRun({ status: "running" });
+    const seen = observed();
+    expect(db.runs.expireQueued(id, "too long")).toBe(0);
+    expect(seen).toEqual([]);
+  });
+
+  it("fires for the admin cancel", () => {
+    const seen = observed();
+    const id = makeRun();
+    db.runs.cancelRun(id);
+    expect(seen).toEqual([[id, "cancelled"]]);
+  });
+
+  it("a throwing observer never fails the transition it observes", () => {
+    const id = makeRun();
+    db.runs.addTerminalObserver(() => { throw new Error("boom"); });
+    expect(() => db.runs.finishRun(id, "succeeded")).not.toThrow();
+    expect(db.runs.getRun(id)?.status).toBe("succeeded");
+  });
+
+  it("notifies EVERY registered observer — a second one must not displace the first", () => {
+    // Observers were a single slot until issue #255 added feedback-anchor
+    // discovery beside the `last-light/review` check. With `set` semantics the
+    // second registration silently unhooked the check, which is a bug that
+    // would only ever show up in production as a stranded `in_progress`.
+    const first: string[] = [];
+    const second: string[] = [];
+    db.runs.addTerminalObserver((run) => first.push(run.id));
+    db.runs.addTerminalObserver((run) => second.push(run.id));
+
+    const id = makeRun();
+    db.runs.finishRun(id, "succeeded");
+    expect(first).toEqual([id]);
+    expect(second).toEqual([id]);
+  });
+
+  it("one observer throwing does not cost the others their notification", () => {
+    const survivor: string[] = [];
+    db.runs.addTerminalObserver(() => { throw new Error("boom"); });
+    db.runs.addTerminalObserver((run) => survivor.push(run.id));
+
+    const id = makeRun();
+    expect(() => db.runs.finishRun(id, "failed")).not.toThrow();
+    expect(survivor).toEqual([id]);
+  });
+
+  it("still commits the terminal marker transaction before notifying", () => {
+    const seen = observed();
+    const id = makeRun();
+    db.runs.finishRun(id, "succeeded", {
+      terminalMarker: { phase: "complete", summary: "done" },
+    });
+    expect(seen).toEqual([[id, "succeeded"]]);
+    expect(db.runs.getRun(id)?.phaseHistory.at(-1)?.phase).toBe("complete");
+  });
+});
+
+describe("list() ordering — in-flight runs float above the queue", () => {
+  /** Seed a run with an explicit start time so ordering is deterministic. */
+  const at = (status: string, minutesAgo: number) =>
+    makeRun({
+      status: status as Parameters<WorkflowRunStore["createRun"]>[0]["status"],
+      startedAt: new Date(Date.now() - minutesAgo * 60_000).toISOString(),
+    });
+
+  it("keeps a running run on page 1 when a cron fan-out floods the queue", () => {
+    // The reported bug: a batch of freshly-queued runs is NEWER than the work
+    // actually executing, so a date-only sort pushed the running run to page 2.
+    // The dashboard hides queued rows by default, so the Live tab rendered
+    // empty while an agent was mid-run.
+    const running = at("running", 30);
+    for (let i = 0; i < 40; i++) at("queued", 1);
+
+    const { runs, total } = db.runs.list({
+      limit: 20,
+      statuses: ["queued", "running", "paused"],
+    });
+
+    expect(total).toBe(41);
+    expect(runs[0]!.id).toBe(running);
+    expect(runs.filter((r) => r.status !== "queued")).toHaveLength(1);
+  });
+
+  it("orders running before paused before queued", () => {
+    // Dates deliberately run OPPOSITE to the wanted order — queued is newest,
+    // running oldest — so a date-only sort produces the exact reverse and this
+    // test can only pass on the status key.
+    const running = at("running", 3);
+    const paused = at("paused", 2);
+    const queued = at("queued", 1);
+
+    const { runs } = db.runs.list({ statuses: ["queued", "running", "paused"] });
+
+    expect(runs.map((r) => r.id)).toEqual([running, paused, queued]);
+  });
+
+  it("leaves terminal runs purely chronological — the day/week ranges are unchanged", () => {
+    const older = at("succeeded", 20);
+    const newer = at("failed", 10);
+    const newest = at("cancelled", 5);
+
+    const { runs } = db.runs.list();
+
+    expect(runs.map((r) => r.id)).toEqual([newest, newer, older]);
+  });
+
+  it("floats an in-flight run above terminal ones even in an unfiltered range", () => {
+    at("succeeded", 1);
+    const running = at("running", 90);
+
+    const { runs } = db.runs.list();
+
+    expect(runs[0]!.id).toBe(running);
+  });
+
+  it("paginates consistently — page 2 never repeats or drops a row", () => {
+    const running = at("running", 60);
+    for (let i = 0; i < 30; i++) at("queued", 30 - i);
+
+    const p1 = db.runs.list({ limit: 20, statuses: ["queued", "running", "paused"] });
+    const p2 = db.runs.list({ limit: 20, offset: 20, statuses: ["queued", "running", "paused"] });
+
+    expect(p1.runs[0]!.id).toBe(running);
+    const ids = [...p1.runs, ...p2.runs].map((r) => r.id);
+    expect(ids).toHaveLength(31);
+    expect(new Set(ids).size).toBe(31);
   });
 });

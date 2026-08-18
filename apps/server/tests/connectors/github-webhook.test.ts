@@ -1,5 +1,22 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "crypto";
+
+// src/connectors/github-webhook.ts now logs webhook/installation events via
+// the pino LoggerPort instead of console — mock the logger module so the
+// suite's stderr stays free of real pino JSON (no assertions here depend on
+// the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { GitHubWebhookConnector } from "#src/connectors/github-webhook.js";
 import {
   setRuntimeConfig,
@@ -185,6 +202,23 @@ describe("GitHubWebhookConnector — re-run checks", () => {
     expect(json.filtered).toBe(true);
     expect(emitted).toBeNull();
   });
+
+  it("resolves a FORK PR for the Re-run button, which is otherwise fork-blind", async () => {
+    // The Re-run button on `last-light/review` is the documented manual
+    // affordance for a stuck review — and it read the same empty
+    // `pull_requests[]`, so on a fork PR it did nothing at all.
+    const conn = new GitHubWebhookConnector({
+      port: 0,
+      webhookSecret: SECRET,
+      botLogin: BOT_LOGIN,
+      listOpenPrNumbersForHeadSha: async () => [282],
+    });
+    const { emitted } = await postCheckEvent(conn, "check_run", {
+      action: "rerequested",
+    });
+    expect(emitted?.type).toBe("pr.synchronize");
+    expect(emitted?.prNumber).toBe(282);
+  });
 });
 
 /** POST a signed `check_suite` webhook (with conclusion + head_commit). */
@@ -292,6 +326,43 @@ describe("GitHubWebhookConnector — failed checks", () => {
     expect(emitted).toBeNull();
   });
 
+  it("emits pr.checks_failed on a human PR whose head commit WE pushed", async () => {
+    // The CI feedback loop `pr-fix` has never had: it could push a fix and
+    // never learn whether the build went green, because this event only ever
+    // fired for dependency PRs. `git-auth.ts` stamps `user.name = botLogin` on
+    // our commits and the check_suite payload carries the same field.
+    const { emitted } = await postCheckSuiteCompleted(connector(), {
+      conclusion: "failure",
+      prNumber: 207,
+      commitAuthor: BOT_LOGIN,
+      commitMessage: "fix(ci): pin vitest to 3.2.4",
+      headBranch: "lastlight/205-user-identity",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+    // ...and the router must send it to `pr-fix`, not the dependency workflow.
+    expect(emitted.isDependencyPr).toBe(false);
+  });
+
+  it("carries isDependencyPr: true for a genuine bump", async () => {
+    const { emitted } = await postCheckSuiteCompleted(connector(), {
+      conclusion: "failure",
+      prNumber: 681,
+    });
+    expect(emitted.isDependencyPr).toBe(true);
+  });
+
+  it("still ignores a human PR the bot has never pushed to", async () => {
+    const { json, emitted } = await postCheckSuiteCompleted(connector(), {
+      conclusion: "failure",
+      prNumber: 207,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
   it("emits pr.checks_failed for a Renovate PR detected by head branch", async () => {
     // The commit author isn't the bot (squashed/proxied), but the branch is.
     const { emitted } = await postCheckSuiteCompleted(connector(), {
@@ -363,6 +434,12 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
   /** A connector whose aggregate check-conclusion lookup is stubbed. */
   function connectorWithChecks(
     conclusion: "passing" | "failing" | "pending" | "none",
+    trigger: "eager" | "after-checks" | "on-request" = "eager",
+    /**
+     * The fork-PR fallback. Wired only when a test opts in, so every existing
+     * case still proves the payload-only path on its own.
+     */
+    forkLookup?: { prs: number[]; calls: Array<[string, string, string]> },
   ): { conn: GitHubWebhookConnector; calls: Array<[string, string, string]> } {
     const calls: Array<[string, string, string]> = [];
     const conn = new GitHubWebhookConnector({
@@ -373,6 +450,15 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
         calls.push([owner, repo, ref]);
         return conclusion;
       },
+      ...(forkLookup
+        ? {
+            listOpenPrNumbersForHeadSha: async (owner: string, repo: string, sha: string) => {
+              forkLookup.calls.push([owner, repo, sha]);
+              return forkLookup.prs;
+            },
+          }
+        : {}),
+      reviewTrigger: () => trigger,
     });
     return { conn, calls };
   }
@@ -421,6 +507,246 @@ describe("GitHubWebhookConnector — settle-aware emit gate", () => {
     const { json, emitted } = await postCheckSuiteCompleted(conn, {
       conclusion: "failure",
       prNumber: 7,
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
+  it("applies the settle gate to a bot-authored head too", async () => {
+    // The broadened emit (§3.4) does NOT get a free pass on settling: a repo
+    // with several check-reporting apps must still fire once per SHA, not once
+    // per suite, when the head commit is ours.
+    const { conn, calls } = connectorWithChecks("pending");
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "failure",
+      prNumber: 207,
+      commitAuthor: BOT_LOGIN,
+      headBranch: "lastlight/205-user-identity",
+      headSha: "cafe1234",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+    expect(calls).toEqual([["acme", "widgets", "cafe1234"]]);
+  });
+
+  it("does not broaden past dependency PRs unless review.trigger is after-checks", async () => {
+    // Emitting is what costs event volume, so the broadening is gated on the
+    // operator's mode actually having a consumer for the settle event.
+    const { conn, calls } = connectorWithChecks("passing", "eager");
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it("emits pr.checks_settled for a settled-GREEN non-dependency PR under after-checks", async () => {
+    const { conn } = connectorWithChecks("passing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+      headSha: "beef0001",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+    expect(emitted.headSha).toBe("beef0001");
+  });
+
+  it("emits pr.checks_settled when a GREEN suite settles a red aggregate", async () => {
+    // nearform/skillspro#1646. Which suite finishes last is an accident of
+    // scheduling, not a fact about the PR: here one job failed and a SIBLING
+    // suite completed green afterwards, so the aggregate is `failing` but the
+    // delivery that observes it is a success. Requiring `passing` on this
+    // branch dropped it — and the failing suite, which the red branch would
+    // have taken, had completed while the sibling was still running and read
+    // `pending`. Nothing emitted, and the `queued` review check never concluded.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+      headSha: "beef0002",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+    expect(emitted.headSha).toBe("beef0002");
+  });
+
+  it("emits pr.checks_settled for a settled-RED human PR too — either colour", async () => {
+    // 09 locked decision 14: the `passing` variant was deleted. A red result is
+    // useful review input, and a PR we gave up on never goes green.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "failure",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+  });
+
+  // ── Fork PRs ────────────────────────────────────────────────────────────
+  //
+  // GitHub fills `check_suite.pull_requests[]` only when the head branch lives
+  // on the BASE repo. A PR opened from a fork carries an empty array, so every
+  // check-driven route keyed on it dropped the delivery outright.
+  //
+  // That was invisible until `review.trigger: after-checks` became the packaged
+  // default: under `eager` the review fired from `pr.opened` (a `pull_request`
+  // event, which always carries the PR) and forks never touched the check path.
+  // Afterwards a fork PR defers on `pr.opened`, posts its `queued` placeholder,
+  // and no settle event can ever conclude it — nearform/lastlight#282.
+
+  it("resolves a FORK PR from the head SHA when pull_requests[] is empty", async () => {
+    const fork = { prs: [282], calls: [] as Array<[string, string, string]> };
+    const { conn } = connectorWithChecks("passing", "after-checks", fork);
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      // no prNumber -> the payload carries `pull_requests: []`, as a fork does
+      commitAuthor: "Robin",
+      commitMessage: "feat(cron): make sandbox-sweep observable",
+      headBranch: "feat/cron-sweep-observability",
+      headSha: "969b6986",
+    });
+    expect(emitted?.type).toBe("pr.checks_settled");
+    expect(emitted.prNumber).toBe(282);
+    expect(emitted.headSha).toBe("969b6986");
+    expect(fork.calls).toEqual([["acme", "widgets", "969b6986"]]);
+  });
+
+  it("prefers the payload's own PR — a same-repo PR costs no extra call", async () => {
+    const fork = { prs: [999], calls: [] as Array<[string, string, string]> };
+    const { conn } = connectorWithChecks("passing", "after-checks", fork);
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
+    });
+    expect(emitted?.prNumber).toBe(7);
+    expect(fork.calls).toEqual([]);
+  });
+
+  it("does not pay for the lookup when nobody consumes the delivery", async () => {
+    // A human fork PR under `eager`: no fix route claims it and no settle
+    // consumer exists, so the delivery must cost nothing at all.
+    const fork = { prs: [282], calls: [] as Array<[string, string, string]> };
+    const { conn, calls } = connectorWithChecks("passing", "eager", fork);
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      commitAuthor: "Robin",
+      commitMessage: "feat: something",
+      headBranch: "feat/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+    expect(fork.calls).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it("drops the delivery when the SHA heads no open PR", async () => {
+    // A push to a branch with no PR still produces check suites. Resolving
+    // nothing must stay a silent no-op, exactly as an empty array always was.
+    const fork = { prs: [], calls: [] as Array<[string, string, string]> };
+    const { conn } = connectorWithChecks("passing", "after-checks", fork);
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      commitAuthor: "Robin",
+      commitMessage: "chore: direct push",
+      headBranch: "some-branch",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
+  it("survives a failed lookup without dropping louder than before", async () => {
+    const conn = new GitHubWebhookConnector({
+      port: 0,
+      webhookSecret: SECRET,
+      botLogin: BOT_LOGIN,
+      getChecksConclusion: async () => "passing" as const,
+      listOpenPrNumbersForHeadSha: async () => {
+        throw new Error("502 from GitHub");
+      },
+      reviewTrigger: () => "after-checks" as const,
+    });
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      commitAuthor: "Robin",
+      commitMessage: "feat: something",
+      headBranch: "feat/whatever",
+    });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
+  it("routes a red aggregate to the FIX path even when the last suite was green", async () => {
+    // The aggregate decides, so the fix family's claim can't be lost to the
+    // order CI settled in: this dependency PR is red, and a sibling suite
+    // finishing green afterwards must not demote it to a review. Before the
+    // arms were merged this emitted nothing at all.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 190,
+      commitAuthor: "dependabot[bot]",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+  });
+
+  it("does the same for a head WE pushed — the fix loop's CI feedback", async () => {
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 207,
+      commitAuthor: BOT_LOGIN,
+      commitMessage: "fix: address review",
+      headBranch: "lastlight/205-user-identity",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+    expect(emitted.isDependencyPr).toBe(false);
+  });
+
+  it("FIX OUTRANKS REVIEW — a red dependency PR stays pr.checks_failed under after-checks", async () => {
+    // One envelope per delivery is all `normalize()` can return, so the
+    // precedence is the shape of the pipeline, not a policy bolted on later.
+    const { conn } = connectorWithChecks("failing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "failure",
+      prNumber: 190,
+      commitAuthor: "dependabot[bot]",
+    });
+    expect(emitted?.type).toBe("pr.checks_failed");
+  });
+
+  it("a green dependency PR still routes to the MERGE path, not a review", async () => {
+    const { conn } = connectorWithChecks("passing", "after-checks");
+    const { emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 190,
+      commitAuthor: "dependabot[bot]",
+    });
+    expect(emitted?.type).toBe("pr.checks_passed");
+  });
+
+  it("still drops a settle whose aggregate has not settled", async () => {
+    const { conn } = connectorWithChecks("pending", "after-checks");
+    const { json, emitted } = await postCheckSuiteCompleted(conn, {
+      conclusion: "success",
+      prNumber: 7,
+      commitAuthor: "Ada Lovelace",
+      commitMessage: "feat: something human",
+      headBranch: "feature/whatever",
     });
     expect(json.filtered).toBe(true);
     expect(emitted).toBeNull();
@@ -523,15 +849,17 @@ describe("GitHubWebhookConnector — installation repo sync", () => {
   });
 
   it("adds and removes repos on installation_repositories events", async () => {
-    setInstallationRepos(["acme/one"]);
+    setInstallationRepos("1", ["acme/one"]);
     await postInstallationEvent(connector(), "installation_repositories", {
       action: "added",
+      installation: { id: 1 },
       repositories_added: [{ full_name: "acme/two" }, { full_name: "acme/three" }],
     });
     expect(getInstallationRepos().sort()).toEqual(["acme/one", "acme/three", "acme/two"]);
 
     await postInstallationEvent(connector(), "installation_repositories", {
       action: "removed",
+      installation: { id: 1 },
       repositories_removed: [{ full_name: "acme/one" }],
     });
     expect(getInstallationRepos().sort()).toEqual(["acme/three", "acme/two"]);
@@ -539,7 +867,7 @@ describe("GitHubWebhookConnector — installation repo sync", () => {
   });
 
   it("clears the cache when the app is uninstalled", async () => {
-    setInstallationRepos(["acme/one", "acme/two"]);
+    setInstallationRepos("1", ["acme/one", "acme/two"]);
     await postInstallationEvent(connector(), "installation", {
       action: "deleted",
       installation: { id: 1 },
@@ -550,13 +878,77 @@ describe("GitHubWebhookConnector — installation repo sync", () => {
   it("processes installation events even when the action is in IGNORED_ACTIONS (deleted)", async () => {
     // `deleted` is an ignored action for repo events, but installation/deleted
     // must still be handled — it's intercepted before the IGNORED_ACTIONS filter.
-    setInstallationRepos(["acme/one"]);
+    setInstallationRepos("1", ["acme/one"]);
     const { json } = await postInstallationEvent(connector(), "installation", {
       action: "deleted",
       installation: { id: 1 },
     });
     expect(json.kind).toBe("installation-sync");
     expect(getInstallationRepos()).toEqual([]);
+  });
+
+  // The App may be installed on several accounts, and these events are
+  // per-account. Applied to one global set — what this used to do — a second
+  // org's `created` reset the list to just that org and its `deleted` cleared
+  // everything, silently unmanaging every repo of the first.
+  it("a `created` for a second account leaves the first account's repos alone", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    await postInstallationEvent(connector(), "installation", {
+      action: "created",
+      installation: { id: 2, account: { login: "other" } },
+      repositories: [{ full_name: "other/one" }],
+    });
+    expect(getInstallationRepos().sort()).toEqual(["acme/one", "other/one"]);
+  });
+
+  it("a `deleted` removes only its own account's repos", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    setInstallationRepos("2", ["other/one"]);
+
+    await postInstallationEvent(connector(), "installation", {
+      action: "deleted",
+      installation: { id: 2, account: { login: "other" } },
+    });
+
+    expect(getInstallationRepos()).toEqual(["acme/one"]);
+  });
+
+  // A suspended installation still exists and keeps its id, but every token
+  // mint against it 403s — so its repos must stop being managed exactly as if
+  // it were uninstalled, and come back when it is restored.
+  it("stops managing an account's repos when its installation is suspended", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    setInstallationRepos("2", ["other/one"]);
+
+    await postInstallationEvent(connector(), "installation", {
+      action: "suspend",
+      installation: { id: 2, account: { login: "other" } },
+    });
+
+    expect(getInstallationRepos()).toEqual(["acme/one"]);
+    expect(isManagedRepo("other/one")).toBe(false);
+  });
+
+  it("restores them on unsuspend", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    await postInstallationEvent(connector(), "installation", {
+      action: "suspend",
+      installation: { id: 2, account: { login: "other" } },
+    });
+
+    await postInstallationEvent(connector(), "installation", {
+      action: "unsuspend",
+      installation: { id: 2, account: { login: "other" } },
+      repositories: [{ full_name: "other/one" }],
+    });
+
+    expect(getInstallationRepos().sort()).toEqual(["acme/one", "other/one"]);
+  });
+
+  it("ignores an installation event carrying no installation id", async () => {
+    setInstallationRepos("1", ["acme/one"]);
+    await postInstallationEvent(connector(), "installation", { action: "deleted" });
+    expect(getInstallationRepos()).toEqual(["acme/one"]);
   });
 });
 
@@ -577,5 +969,196 @@ describe("GitHubWebhookConnector — issue_comment normalization", () => {
     expect(emitted.issueAuthor).toBe("reporter");
     expect(emitted.sender).toBe("someone-else");
     expect(emitted.labels).toContain("needs-info");
+  });
+});
+
+/**
+ * Phase 7's new PR-review signals. `normalize()` is the first of the four
+ * places `review.trigger` used to be enforceable, and the only one that decides
+ * whether a GitHub action becomes an event AT ALL — before this, `labeled`,
+ * `review_requested` and `ready_for_review` all produced nothing and the
+ * delivery was answered `{ filtered: true, reason: "unmapped event" }`.
+ */
+describe("GitHubWebhookConnector — review-request signals", () => {
+  beforeEach(() => {
+    setRuntimeConfig({ managedRepos: [REPO] } as unknown as LastLightConfig);
+  });
+  afterEach(() => resetRuntimeConfigForTests());
+
+  async function postPr(
+    conn: GitHubWebhookConnector,
+    payloadOver: Record<string, unknown>,
+  ): Promise<{ json: any; emitted: any | null }> {
+    let emitted: any = null;
+    conn.on("event", (e) => { emitted = e; });
+    const payload = {
+      repository: { full_name: REPO },
+      sender: { login: "maintainer", type: "User" },
+      pull_request: {
+        number: 42,
+        title: "Add X",
+        body: "",
+        labels: [{ name: "enhancement" }],
+        draft: false,
+        user: { login: "alice" },
+      },
+      ...payloadOver,
+    };
+    const body = JSON.stringify(payload);
+    const res = await conn.honoApp.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": sign(body),
+        "x-github-event": "pull_request",
+        "x-github-delivery": "d",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    const json = await res.json();
+    await new Promise((r) => setImmediate(r));
+    return { json, emitted };
+  }
+
+  it("maps ready_for_review to pr.opened SEMANTICS — the event that un-defers a draft", async () => {
+    // With `review.skipDraft: true` and nothing else, a PR opened as a draft and
+    // later marked ready would get no webhook-driven review at all.
+    const { emitted } = await postPr(connector(), { action: "ready_for_review" });
+    expect(emitted?.type).toBe("pr.opened");
+    expect(emitted.prNumber).toBe(42);
+  });
+
+  it("maps labeled to pr.labeled, carrying the label that was just added", async () => {
+    const { emitted } = await postPr(connector(), {
+      action: "labeled",
+      label: { name: "lastlight:review" },
+    });
+    expect(emitted?.type).toBe("pr.labeled");
+    expect(emitted.addedLabel).toBe("lastlight:review");
+  });
+
+  it("maps review_requested to pr.review_requested, carrying the reviewer", async () => {
+    const { emitted } = await postPr(connector(), {
+      action: "review_requested",
+      requested_reviewer: { login: "last-light[bot]" },
+    });
+    expect(emitted?.type).toBe("pr.review_requested");
+    expect(emitted.requestedReviewer).toBe("last-light[bot]");
+  });
+
+  it("carries a TEAM request too — the router decides it isn't ours", async () => {
+    const { emitted } = await postPr(connector(), {
+      action: "review_requested",
+      requested_team: { slug: "reviewers" },
+    });
+    expect(emitted?.requestedReviewer).toBe("team/reviewers");
+  });
+
+  it("still never reviews a PR the bot itself authored, on either new signal", async () => {
+    for (const over of [
+      { action: "labeled", label: { name: "lastlight:review" } },
+      { action: "review_requested", requested_reviewer: { login: BOT_LOGIN } },
+    ]) {
+      const { json, emitted } = await postPr(connector(), {
+        ...over,
+        pull_request: {
+          number: 42,
+          title: "Bot PR",
+          body: "",
+          labels: [],
+          draft: false,
+          user: { login: BOT_LOGIN },
+        },
+      });
+      expect(json.filtered).toBe(true);
+      expect(emitted).toBeNull();
+    }
+  });
+
+  it("a label with no name produces nothing rather than an event with an empty label", async () => {
+    const { json, emitted } = await postPr(connector(), { action: "labeled", label: {} });
+    expect(json.filtered).toBe(true);
+    expect(emitted).toBeNull();
+  });
+
+  it("a Re-run on OUR check is a review REQUEST, not a synchronize", async () => {
+    // `pr.synchronize` is an attention event, which `after-checks`/`on-request`
+    // defer — so routing the Re-run there would make the check's own button a
+    // no-op, which is precisely what it is advertised as.
+    const conn = connector();
+    let emitted: any = null;
+    conn.on("event", (e) => { emitted = e; });
+    const payload = {
+      action: "rerequested",
+      repository: { full_name: REPO },
+      sender: { login: "maintainer", type: "User" },
+      check_run: { name: "last-light/review", pull_requests: [{ number: 42 }] },
+    };
+    const body = JSON.stringify(payload);
+    await conn.honoApp.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": sign(body),
+        "x-github-event": "check_run",
+        "x-github-delivery": "d",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(emitted?.type).toBe("pr.review_requested");
+    expect(emitted.requestedReviewer).toBe(BOT_LOGIN);
+  });
+
+  it("a Re-run on somebody ELSE's check still means 'the checks changed'", async () => {
+    const conn = connector();
+    let emitted: any = null;
+    conn.on("event", (e) => { emitted = e; });
+    const payload = {
+      action: "rerequested",
+      repository: { full_name: REPO },
+      sender: { login: "maintainer", type: "User" },
+      check_run: { name: "CI / build", pull_requests: [{ number: 42 }] },
+    };
+    const body = JSON.stringify(payload);
+    await conn.honoApp.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": sign(body),
+        "x-github-event": "check_run",
+        "x-github-delivery": "d",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(emitted?.type).toBe("pr.synchronize");
+  });
+
+  it("an ISSUE label is still nothing — the widening costs a normalize, not a dispatch", async () => {
+    const conn = connector();
+    let emitted: any = null;
+    conn.on("event", (e) => { emitted = e; });
+    const payload = {
+      action: "labeled",
+      repository: { full_name: REPO },
+      sender: { login: "maintainer", type: "User" },
+      issue: { number: 9, title: "t", body: "", labels: [], user: { login: "alice" } },
+      label: { name: "bug" },
+    };
+    const body = JSON.stringify(payload);
+    const res = await conn.honoApp.request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "x-hub-signature-256": sign(body),
+        "x-github-event": "issues",
+        "x-github-delivery": "d",
+        "content-type": "application/json",
+      },
+      body,
+    });
+    expect((await res.json()).filtered).toBe(true);
+    await new Promise((r) => setImmediate(r));
+    expect(emitted).toBeNull();
   });
 });

@@ -1,0 +1,37 @@
+# Concurrency ceiling for the kubernetes sandbox backend. Pod-count only (NOT
+# requests.cpu/requests.memory): the sandbox pod spec the harness creates
+# declares no resources of its own, so a requests-based ResourceQuota would
+# reject every pod with a "must specify requests" admission error — which the
+# harness's quota-backpressure detection (isQuotaExceeded,
+# apps/server/src/sandbox/k8s/quota.ts) does NOT match, turning graceful
+# backpressure into a hard failure. A `pods` quota instead yields the
+# `exceeded quota` message the harness requeues the run on. Scale by editing
+# this one number.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: lastlight-sandboxes-quota
+  namespace: lastlight-sandboxes
+spec:
+  hard:
+    pods: "4"
+---
+# Because the ResourceQuota above is pod-count only, every sandbox pod's
+# containers (init + main) still need requests/limits or the scheduler has
+# nothing to bin-pack on. This LimitRange injects a per-pod default so the
+# resource-less pod spec is bounded and schedulable without the harness
+# needing to know cluster capacity.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: lastlight-sandboxes-limits
+  namespace: lastlight-sandboxes
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 500m
+        memory: 1Gi
+      default:
+        cpu: "2"
+        memory: 4Gi

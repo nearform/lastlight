@@ -7,19 +7,31 @@ import type { StateDb } from "../state/db.js";
 import type { PhaseHistoryEntry } from "../state/db.js";
 import type { ModelConfig, VariantConfig } from "../config/config.js";
 import { resolveModel, resolveVariant, getBotName } from "../config/config.js";
+import { logger } from "../logging/logger.js";
 import type { AgentWorkflowDefinition } from "./schema.js";
-import { loadPromptTemplate, resolveSkillPaths } from "./loader.js";
+import {
+  createAssetResolver,
+  getAssetLayers,
+  getDisabledAssets,
+  loadPromptTemplate,
+  makeLayer,
+  resolveSkillPaths,
+  type AssetResolver,
+} from "./loader.js";
 import { renderTemplate, type TemplateContext } from "./templates.js";
+import type { RunRepoConfig } from "./simple.js";
 import { PER_TARGET_RECREATE_WORKFLOWS } from "./target-policy.js";
 import { qaImageAvailable, SANDBOX_IMAGE_QA } from "../sandbox/images.js";
 import { executeAgent, executeCommand } from "../engine/agent-executor.js";
 import { listRunningContainers } from "../admin/docker.js";
 import { withSpan, recordExecutionMetrics, recordError } from "../telemetry/index.js";
+import type { Span } from "@opentelemetry/api";
 import { isTerminated, type PhaseRunContext } from "./phase-executor.js";
 import { runWorkflowCore } from "lastlight-workflow-engine";
 import type {
   EnginePorts,
   EngineSpan,
+  ExecutionResult,
   ObservabilityPort,
   PhaseReporter,
   PhaseResolver,
@@ -31,12 +43,15 @@ import type {
 } from "lastlight-workflow-engine";
 import { makePostReviewHandler } from "./handlers/post-review.js";
 import { fileVerdictReader } from "./handlers/verdict-reader.js";
+import { QuotaExceededError } from "../sandbox/k8s/quota.js";
 import type { ProgressReporter } from "../notify/types.js";
 import { collapseDetail } from "../notify/render.js";
 
 // `isTerminated` used to live here; re-exported for API stability.
 export { isTerminated };
 export type { PhaseResult, WorkflowResult };
+
+const repoConfigLog = logger("repo-config");
 
 /**
  * Map of approval gate name → enabled. Gate names are arbitrary strings
@@ -48,7 +63,14 @@ export type ApprovalGateConfig = Record<string, boolean>;
 export interface RunnerCallbacks {
   onPhaseStart?: (phase: string) => Promise<void>;
   onPhaseEnd?: (phase: string, result: PhaseResult) => Promise<void>;
-  postComment?: (body: string) => Promise<void>;
+  /**
+   * Post a one-off comment to whichever surface triggered the run. Resolves to
+   * the created GitHub comment id when the surface is a GitHub issue/PR and the
+   * id is known, so a caller can retract or edit that comment later — the
+   * enqueue ack does this (issue #244). Resolves to `void` for Slack and for
+   * any post that failed; callers posting a permanent comment ignore it.
+   */
+  postComment?: (body: string) => Promise<number | void>;
   /**
    * In-place "task list" progress surface. When set (workflows that opt in via
    * `status_checklist: true`), the runner drives this instead of posting a new
@@ -86,7 +108,8 @@ export function gitAccessProfileForWorkflow(workflowName: string): GitAccessProf
     case "answer":
     case "security-review":
     // verify / qa-test / demo read the repo and post a findings/demo comment —
-    // they never push code, so issues-write (contents:read + issues:write) is
+    // they never push code, so issues-write (contents:read + issues:write +
+    // pull_requests:write, the last needed to comment on a PR at all) is
     // enough.
     case "verify":
     case "qa-test":
@@ -137,17 +160,77 @@ export function gitSandboxAccessForWorkflow(
 //
 // Thin delegations to the real app functions; injected into the engine so the
 // core stays domain-agnostic. Built once at module load (they hold no run
-// state) except the post-review handler, which is per-run.
-
-const defaultAgentPort: EnginePorts["agent"] = {
-  runAgent: (prompt, config, opts) => executeAgent(prompt, config, opts),
-  runCommand: (spec, config, opts) => executeCommand(spec, config, opts),
-};
+// state) except the post-review handler and the agent/command port (both
+// per-run — the latter closes over a per-run quota-detection flag, below).
 
 const defaultAssetLoader: EnginePorts["assets"] = {
   loadPromptTemplate: (relativePath) => loadPromptTemplate(relativePath),
   resolveSkillPaths: (names) => resolveSkillPaths(names),
 };
+
+/**
+ * The asset resolver for one run.
+ *
+ * With no repo layer this is `undefined` and every asset call goes through the
+ * module-level facade exactly as before — the no-repo path must stay
+ * bit-identical, since it is every run today.
+ *
+ * With a repo layer we build a resolver over `globals + the repo layer` and use
+ * THAT for the whole run. Not `configureWorkflowAssets` — several workflows (and
+ * a cron fan-out across every managed repo) are in flight at once, so mutating
+ * the module globals would let one run's repo layer leak into another's prompts.
+ *
+ * `agentContextAdditiveOnly` is non-negotiable for a repo layer: without it a
+ * repo could neuter the operator's `security.md` / `rules.md` for every run
+ * against itself simply by committing a file of the same name.
+ */
+function runAssetResolver(repoConfig?: RunRepoConfig): AssetResolver | undefined {
+  if (!repoConfig?.assetRoot) return undefined;
+  try {
+    return createAssetResolver(
+      [...getAssetLayers(), makeLayer("repo", repoConfig.assetRoot)],
+      getDisabledAssets(),
+      { agentContextAdditiveOnly: true },
+    );
+  } catch (err: unknown) {
+    // Warn, drop the layer, run anyway — the repo-config failure rule. A repo
+    // whose cache dir vanished mid-run must not take the run down with it.
+    repoConfigLog.warn("Could not build the per-run asset resolver", { repo: repoConfig.repo, err });
+    return undefined;
+  }
+}
+
+/**
+ * Compose this run's agent context (the AGENTS.md body) off the per-run
+ * resolver, ONCE.
+ *
+ * This is the only path by which a target repo's `.lastlight/agent-context/*.md`
+ * reaches the agent: every downstream composition site (the orchestrator's
+ * workspace write, the kubernetes init-fetch channel) reads
+ * `ExecutorConfig.agentContext` and never re-derives the text, because the
+ * module-level loader has no knowledge of a per-run repo layer.
+ *
+ * **Security boundary.** `assets` was built with `agentContextAdditiveOnly` (see
+ * `runAssetResolver`), so a repo file whose basename an operator layer already
+ * owns — `soul.md`, `rules.md`, `security.md` — is DROPPED here rather than
+ * replacing it. Composing once, here, is what makes that structural: nothing
+ * downstream can reach the repo layer except through this value, so a repo
+ * cannot neuter the operator's rules by naming a file after one of them. The
+ * drops are recorded as resolver warnings and surfaced on the run by
+ * {@link recordAssetWarnings}.
+ *
+ * Best-effort, like the resolver itself: a read failure drops back to the
+ * operator-only context (`undefined` ⇒ the module-level facade downstream)
+ * rather than failing the run.
+ */
+function runAgentContext(assets: AssetResolver, repoConfig?: RunRepoConfig): string | undefined {
+  try {
+    return assets.loadAgentContext();
+  } catch (err: unknown) {
+    repoConfigLog.warn("Could not compose the run's agent context", { repo: repoConfig?.repo ?? "?", err });
+    return undefined;
+  }
+}
 
 const dockerLivenessPort: EnginePorts["liveness"] = {
   isPhaseContainerAlive: async (taskId) => {
@@ -173,6 +256,44 @@ const telemetryObservability: ObservabilityPort = {
   recordError: (surface, error, attrs) => recordError(surface, error, attrs),
 };
 
+/**
+ * The observability port, plus one side effect: when the run-level span opens,
+ * persist its trace/span ids onto the run row (issue #255).
+ *
+ * A feedback signal — somebody reacting 👍 on what this run wrote — can arrive
+ * days later, long after every span has closed. Without the trace's coordinates
+ * the score can only be exported as a disconnected trace of its own; with them
+ * it is emitted as a late child of `lastlight.workflow.run` and lands *on the
+ * trace it grades*, which is the whole point of exporting it.
+ *
+ * This lives here, in the app's adapter, rather than in the engine: the engine
+ * has no database and no OTel dependency, and the span is already flowing
+ * through this one function. Best-effort — a failed write must never take down
+ * a run over telemetry bookkeeping.
+ */
+function runScopedObservability(db: StateDb, workflowId: string): ObservabilityPort {
+  let captured = false;
+  return {
+    ...telemetryObservability,
+    withSpan: (name, attrs, fn) =>
+      obsWithSpan(name, attrs, (span) => {
+        if (!captured && name === RUN_SPAN_NAME && span) {
+          captured = true;
+          try {
+            const ctx = (span as unknown as Span).spanContext();
+            if (ctx?.traceId && ctx.spanId) db.runs.setTraceContext(workflowId, ctx.traceId, ctx.spanId);
+          } catch (err: unknown) {
+            logger("runner").debug("Could not record run trace context", { workflowId, err });
+          }
+        }
+        return fn(span);
+      }),
+  };
+}
+
+/** The engine's run-level span name — the parent a feedback signal attaches to. */
+const RUN_SPAN_NAME = "lastlight.workflow.run";
+
 // ── Unified workflow scheduler (composition root) ────────────────────────────
 
 /**
@@ -191,7 +312,13 @@ export async function runWorkflow(
   approvalConfig?: ApprovalGateConfig,
   workflowId?: string,
   variants?: VariantConfig,
-): Promise<WorkflowResult> {
+  // The target repo's `.lastlight/` layer (issue #180), resolved at dispatch.
+  // DEFAULTED rather than optional on purpose: `runWorkflow.length` is the
+  // frozen `lastlight/evals` surface (evals-contract.test.ts pins it at 9), and
+  // a parameter with a default doesn't count toward it. Existing callers are
+  // unaffected — omitting it reproduces today's behaviour exactly.
+  repoConfig: RunRepoConfig | undefined = undefined,
+): Promise<WorkflowResult & { backpressure?: boolean }> {
   const outputs: Record<string, unknown> = {};
   const { taskId } = ctx;
   // Slack-originated runs carry an explicit `slack:` trigger id — everything
@@ -229,14 +356,35 @@ export async function runWorkflow(
     .reverse()
     .find((p) => (p.type ?? "agent") !== "context")?.name;
 
+  // Effective (base ⊕ repo) config. `simple.ts` already hands us the merged
+  // maps, but re-applying here is idempotent (the repo maps ARE the merged
+  // ones) and makes the runner correct for any caller that passes a repo layer
+  // without pre-merging — notably `resume.ts` when it grows the same wiring.
+  const effectiveModels = repoConfig?.models ?? models;
+  const effectiveVariants = repoConfig?.variants ?? variants;
+  const effectiveApproval = repoConfig?.approval ?? approvalConfig;
+
+  // Per-run asset stack. `assets` is undefined for every run without a repo
+  // layer, in which case the module-level functions are used unchanged.
+  const assets = runAssetResolver(repoConfig);
+  const loadPrompt = assets ? assets.loadPromptTemplate : loadPromptTemplate;
+
+  // The config every phase of this run executes with. Identical to the caller's
+  // unless a repo layer applies, in which case it carries this run's composed
+  // agent context (see `runAgentContext`) — the only channel through which a
+  // repo's `agent-context/*.md` reaches AGENTS.md.
+  const runConfig: ExecutorConfig = assets
+    ? { ...config, agentContext: runAgentContext(assets, repoConfig) }
+    : config;
+
   const modelFor = (taskType: string): string | undefined =>
-    models ? resolveModel(models, taskType) : undefined;
+    effectiveModels ? resolveModel(effectiveModels, taskType) : undefined;
   const variantFor = (taskType: string): string | undefined =>
-    variants ? resolveVariant(variants, taskType) : undefined;
+    effectiveVariants ? resolveVariant(effectiveVariants, taskType) : undefined;
 
   /** Render a prompt template with current context + outputs. */
   const renderPrompt = (promptPath: string, extraCtx?: Partial<TemplateContext>): string => {
-    const template = loadPromptTemplate(promptPath);
+    const template = loadPrompt(promptPath);
     return renderTemplate(template, { ...ctx, phaseOutputs: outputs, ...(extraCtx || {}) });
   };
 
@@ -318,16 +466,36 @@ export async function runWorkflow(
     }
   };
 
+  // Backpressure flag (k8s ResourceQuota, spec/09-sandbox.md (Concurrency)). Set by `noteStopReason`
+  // / `flagQuotaThrow` (wired into the agent port below) the moment a phase comes
+  // back `error_quota` or throws `QuotaExceededError`. Declared HERE — above
+  // `failWorkflow`/`noteTerminal` — because both must defer to the backpressure
+  // requeue: the engine treats `error_quota` as an ordinary phase failure and
+  // calls `failWorkflow`, but if that finalized the run `failed` the later
+  // `requeueRunning` (CAS on `status = 'running'`) would no-op and the run would
+  // be stuck failed instead of re-queued. This is the root cause #8/#11 missed:
+  // they converted the RESULT/THROW to backpressure but not the fail-flip that
+  // ran first.
+  const quota = { hit: false };
+
   /** Mark the workflow run as failed. */
   const failWorkflow = (errorMsg?: string) => {
+    // Backpressure, not a failure: leave the run `running` so the caller
+    // (`simple.ts`/`resume.ts`) can requeue it for the next admission probe.
+    if (quota.hit) return;
     if (db && workflowId) {
       db.runs.finishRun(workflowId, "failed", { error: errorMsg });
     }
   };
 
-  /** Should an approval gate with this name actually pause the workflow? */
+  /**
+   * Should an approval gate with this name actually pause the workflow?
+   * Reads the EFFECTIVE map, so a repo that raised a gate for runs against
+   * itself pauses here. The repo layer is add-only (enforced in
+   * `config/repo-config.ts`), so this can never drop an operator's gate.
+   */
   const gateEnabled = (gateName: string | undefined): boolean =>
-    !!gateName && approvalConfig?.[gateName] === true;
+    !!gateName && effectiveApproval?.[gateName] === true;
 
   /** Fold a workflow's final synthesized result into the checklist footer. */
   const footer = async (markdown: string): Promise<void> => {
@@ -337,6 +505,9 @@ export async function runWorkflow(
 
   /** Post the run's completion ping — terminal-ping surfaces (Slack) only. */
   const noteTerminal = async (markdown: string): Promise<void> => {
+    // On backpressure the run is being re-queued, not finished — suppress the
+    // `❌ … failed` ping so a quota-deferred run doesn't look like a failure.
+    if (quota.hit) return;
     if (reporter) await reporter.noteTerminal(markdown);
   };
 
@@ -345,7 +516,7 @@ export async function runWorkflow(
   const runScope: PhaseRunContext = {
     definition,
     ctx,
-    config,
+    config: runConfig,
     taskId,
     triggerId,
     githubAccess,
@@ -373,23 +544,108 @@ export async function runWorkflow(
     gateEnabled,
   };
 
+  // Backpressure detection: a phase whose ExecutionResult carries
+  // `stopReason: "error_quota"` means the k8s ResourceQuota rejected its pod
+  // (spec/09-sandbox.md (Concurrency)). `quota.hit` (declared above, next to `failWorkflow`) is
+  // flipped here so the terminal handlers defer to the requeue instead of
+  // failing. The engine (runWorkflowCore) stays backend-agnostic — this lives
+  // entirely in the server-owned port wrapper.
+  const noteStopReason = (r: ExecutionResult): ExecutionResult => {
+    if (r.stopReason === "error_quota") quota.hit = true;
+    return r;
+  };
+  // A quota rejection usually surfaces as a resolved `error_quota` ExecutionResult
+  // (noteStopReason above), but on some paths it propagates as a THROWN
+  // QuotaExceededError — the `.then` is skipped, so flag it here too. Re-throw so
+  // the phase still fails; the run is converted to backpressure (requeue) at the
+  // return AND the catch below, both gated on `quota.hit`.
+  const flagQuotaThrow = (err: unknown): never => {
+    if (err instanceof QuotaExceededError) quota.hit = true;
+    throw err;
+  };
+  const agentPort: EnginePorts["agent"] = {
+    runAgent: (prompt, cfg, opts) =>
+      executeAgent(prompt, cfg, opts).then(noteStopReason).catch(flagQuotaThrow),
+    runCommand: (spec, cfg, opts) =>
+      executeCommand(spec, cfg, opts).then(noteStopReason).catch(flagQuotaThrow),
+  };
+
   const ports: EnginePorts = {
-    agent: defaultAgentPort,
-    assets: defaultAssetLoader,
+    agent: agentPort,
+    logger: logger("runner"),
+    // The repo's prompt/skill overrides reach the agent through this port:
+    // `resolveSkillPaths` returns HOST paths (the repo-config cache dir is just
+    // another one), which the orchestrator stages into the sandbox exactly like
+    // a built-in or overlay skill — copy for docker, tar for kubernetes. No
+    // backend needs to know a repo layer exists.
+    assets: assets
+      ? {
+          loadPromptTemplate: (relativePath) => assets.loadPromptTemplate(relativePath),
+          resolveSkillPaths: (names) => assets.resolveSkillPaths(names),
+        }
+      : defaultAssetLoader,
     liveness: dockerLivenessPort,
-    observability: telemetryObservability,
+    observability: db && workflowId ? runScopedObservability(db, workflowId) : telemetryObservability,
     verdictReader: fileVerdictReader,
     handlers: new Map([
-      ["post-review", makePostReviewHandler({ ctx, config, taskId, store: db, workflowId }, phaseReporter)],
+      ["post-review", makePostReviewHandler({ ctx, config: runConfig, taskId, store: db, workflowId }, phaseReporter)],
     ]),
   };
 
-  return runWorkflowCore(runScope, {
-    reporter: phaseReporter,
-    resolver: phaseResolver,
-    ports,
-    store: db,
-    reporterActive: !!reporter,
-    capabilities: { qaImageAvailable, qaImageName: SANDBOX_IMAGE_QA },
-  }, outputs);
+  try {
+    const result = await runWorkflowCore(runScope, {
+      reporter: phaseReporter,
+      resolver: phaseResolver,
+      ports,
+      store: db,
+      reporterActive: !!reporter,
+      capabilities: { qaImageAvailable, qaImageName: SANDBOX_IMAGE_QA },
+    }, outputs);
+    return quota.hit ? { ...result, backpressure: true } : result;
+  } catch (err) {
+    // A hard phase failure — notably a single-phase workflow (e.g. issue-triage)
+    // whose only phase fails — throws OUT of the engine, bypassing the quota.hit
+    // check above. `noteStopReason` already flagged quota.hit on the resolved
+    // `error_quota` result, so convert it to backpressure here too — otherwise
+    // the run terminal-fails red instead of requeuing. Every other error (a real
+    // failure) propagates unchanged.
+    if (quota.hit || err instanceof QuotaExceededError) {
+      return { success: false, phases: [], backpressure: true };
+    }
+    throw err;
+  } finally {
+    // Asset-level drops are only knowable once the resolver has been exercised,
+    // so they can't ride along on the run row's `context.repoConfig` (written at
+    // creation). Record them beside it, on scratch, on every exit path —
+    // including a failed run, where "the repo's prompt override was ignored" is
+    // exactly the thing someone will want to see.
+    recordAssetWarnings(assets, repoConfig, db, workflowId);
+  }
+}
+
+/**
+ * Persist the per-run resolver's warnings (e.g. a repo `agent-context/*.md`
+ * dropped because a higher-trust layer already owns that filename) to
+ * `workflow_runs.scratch.repoConfig.assetWarnings`, next to the config-time
+ * warnings on `context.repoConfig.warnings`.
+ *
+ * Best-effort and silent when there's nothing to say — this is reporting, and a
+ * reporting failure must never surface as a run failure.
+ */
+function recordAssetWarnings(
+  assets: AssetResolver | undefined,
+  repoConfig: RunRepoConfig | undefined,
+  db?: StateDb,
+  workflowId?: string,
+): void {
+  const warnings = assets?.warnings ?? [];
+  if (!warnings.length || !db || !workflowId) return;
+  try {
+    for (const w of warnings) {
+      repoConfigLog.warn(w.message, { repo: repoConfig?.repo ?? "?" });
+    }
+    db.runs.mergeScratch(workflowId, { repoConfig: { assetWarnings: [...warnings] } });
+  } catch (err: unknown) {
+    repoConfigLog.warn("Could not record asset warnings", { runId: workflowId, err });
+  }
 }

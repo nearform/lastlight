@@ -1,8 +1,11 @@
 import clsx from "clsx";
-import { BookOpen, Clock, GitBranch, LogOut, Moon, Radio, Sun } from "lucide-react";
+import { useState } from "react";
+import { BookOpen, Clock, Filter, GitBranch, LogOut, Radio, RefreshCw } from "lucide-react";
+import type { MeRepos } from "../api";
 import type { StreamStatus } from "../hooks/useSessionStream";
-import { useTheme } from "../hooks/useTheme";
+import { useVisibleRepos } from "../hooks/useVisibleRepos";
 import { NearformLogo } from "./NearformLogo";
+import { ThemeToggle } from "./ThemeToggle";
 import { VersionPin } from "./VersionPin";
 
 interface Props {
@@ -25,12 +28,113 @@ const STATUS_LABEL: Record<StreamStatus, { text: string; color: string }> = {
   closed: { text: "offline", color: "bg-error" },
 };
 
+/**
+ * Why the filter has nothing to offer, in the words of the person who'd have to
+ * act on it. Keyed by the `reason` the `/me/repos` endpoint returns.
+ *
+ * `ok` is absent on purpose — it is not an unresolved state, and the type makes
+ * leaving it out a compile error if that ever changes. `disabled` is absent for
+ * the same reason: the control is not drawn at all when the feature is off.
+ */
+const UNRESOLVED_HINT: Record<Exclude<MeRepos["reason"], "ok" | "disabled">, string> = {
+  "no-teams": "You own no managed repo, and you're in no GitHub team that owns one.",
+  "no-identity": "This filter needs a GitHub login — this session signed in another way.",
+  unavailable: "Your teams couldn't be looked up just now.",
+  "too-many-teams": "You're in too many teams to resolve within the configured budget.",
+  truncated: "A team's repo list was too large to read fully.",
+  budget: "Resolving your teams exceeded the configured request budget.",
+  error: "GitHub returned an error while resolving your teams.",
+};
+
+/**
+ * The hint for a reason the caller believes is unresolved. `ok` / `disabled`
+ * cannot reach here (the toggle branches on `degraded` and `offered` first),
+ * but the compiler can't prove that from a boolean, so they fall back rather
+ * than widening the map — which would cost the exhaustiveness check that makes
+ * a newly-added reason a build error instead of an `undefined` tooltip.
+ */
+function unresolvedHint(reason: MeRepos["reason"] | undefined): string {
+  if (!reason || reason === "ok" || reason === "disabled") return UNRESOLVED_HINT.unavailable;
+  return UNRESOLVED_HINT[reason];
+}
+
 const TIME_RANGES = [
   { key: "hour", label: "1h" },
   { key: "day", label: "24h" },
   { key: "week", label: "7d" },
   { key: "all", label: "all" },
 ];
+
+/**
+ * The optional "my repos" filter (issue #169) — the managed repos you own or
+ * your GitHub teams own. OFF unless the user turns it on, and remembered per
+ * browser once they do.
+ *
+ * Opt-in rather than opt-out because GitHub team grants describe involvement,
+ * not access: an org owner reaches every repo without a team grant anywhere, so
+ * as a default this would hide repos people work in daily. As a filter somebody
+ * chose, the narrowing is exactly the decluttering they asked for, and one
+ * click undoes it.
+ *
+ * Labelled "my repos" rather than "my teams" since the set stopped being purely
+ * team-derived: repos under your OWN account are unioned in, because teams are
+ * an org concept and a personal repo could never be granted by one.
+ *
+ * **Rendered whenever the operator enabled `teamVisibility`** — not only once
+ * grants resolved. When there is nothing to narrow to, it says so and offers a
+ * re-sync instead of disappearing: the common path into that state is somebody
+ * who just created a team or granted it repos, and the answer they need to
+ * invalidate is cached for an hour. Hiding the control hid the fix.
+ *
+ * The one state it is NOT drawn in is the feature being off, which is also the
+ * one state a re-sync provably cannot change — `resync()` short-circuits on
+ * `config.enabled` before it touches GitHub.
+ */
+function RepoScopeToggle() {
+  const { scope, setScope, offered, degraded, meta, resync } = useVisibleRepos();
+  const [resyncing, setResyncing] = useState(false);
+  if (!offered) return null;
+
+  const count = meta?.repos?.length ?? 0;
+  const on = scope === "mine";
+
+  // Nothing to filter to. The click re-asks the server rather than toggling a
+  // scope that would narrow nothing — the button IS the escape hatch.
+  if (degraded) {
+    return (
+      <button
+        onClick={() => {
+          setResyncing(true);
+          void resync().finally(() => setResyncing(false));
+        }}
+        disabled={resyncing}
+        className="btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs btn-ghost text-base-content/40"
+        title={`${unresolvedHint(meta?.reason)} Nothing is filtered. Click to re-check.`}
+      >
+        <RefreshCw className={clsx("w-3.5 h-3.5", resyncing && "animate-spin")} />
+        <span className="font-mono">{resyncing ? "checking…" : "my repos (none)"}</span>
+      </button>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => setScope(on ? "all" : "mine")}
+      className={clsx(
+        "btn btn-xs h-7 min-h-0 gap-1 px-2 text-2xs btn-ghost",
+        on ? "text-base-content/70" : "text-base-content/40",
+      )}
+      title={
+        on
+          ? `Filtered to the ${count} repo${count === 1 ? "" : "s"} you own or your GitHub teams own. Click to show all repos.`
+          : "Showing every managed repo. Click to filter to your own repos and your GitHub teams'."
+      }
+    >
+      <Filter className={clsx("w-3.5 h-3.5", on && "text-primary")} />
+      <span className="font-mono">{on ? `my repos (${count})` : "all repos"}</span>
+    </button>
+  );
+}
 
 export function StatsHeader({
   timeRange,
@@ -43,7 +147,6 @@ export function StatsHeader({
   onLogout,
 }: Props) {
   const statusInfo = STATUS_LABEL[streamStatus];
-  const { isDark, toggleTheme } = useTheme();
 
   return (
     <header className="bg-base-200 border-b border-base-300 flex items-center gap-3 px-4 h-12 shrink-0">
@@ -113,6 +216,8 @@ export function StatsHeader({
         ))}
       </div>
 
+      <RepoScopeToggle />
+
       <div className="flex-1" />
 
       <a
@@ -139,14 +244,7 @@ export function StatsHeader({
 
       <VersionPin />
 
-      <button
-        onClick={toggleTheme}
-        className="btn btn-ghost btn-xs h-7 min-h-0 px-2 text-base-content/50 hover:text-base-content"
-        title={isDark ? "Switch to light theme" : "Switch to dark theme"}
-        aria-label="Toggle light/dark theme"
-      >
-        {isDark ? <Sun size={14} /> : <Moon size={14} />}
-      </button>
+      <ThemeToggle />
 
       {onLogout && (
         <button

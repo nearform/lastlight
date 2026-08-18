@@ -27,7 +27,7 @@ It is **not** a fork of Pi. It does not modify Pi. It composes Pi's SDK
    - A **library API** (`import { run } from "agentic-pi"`) that
      returns a fully-derived `RunResult` and **never** touches
      `process.stdout` / `process.stderr`.
-2. A native GitHub-tool extension (~32 tools, profile-gated) that
+2. A native GitHub-tool extension (36 tools, profile-gated) that
    replaces the MCP server lastlight used to spawn separately.
 3. An optional Gondolin micro-VM sandbox for `read`/`write`/`edit`/`bash`.
 
@@ -73,7 +73,7 @@ src/
     client.ts             Octokit wrapper with retry/backoff (ported from mcp-github-app).
     credentials.ts        gitAuthEnv() — github.com-scoped http.extraheader (GIT_CONFIG_*), no on-disk file.
     profiles.ts           4 profile names → tool name allowlists.
-    tools.ts              ~32 defineTool() registrations, github_ prefix.
+    tools.ts              36 defineTool() registrations, github_ prefix.
   extensions/web-search/  Optional web_search / web_fetch via Tavily/Brave/Exa,
                           with SSRF-safe fetch + rate limiting.
   extensions/file-search/ Bundles FFF (@ff-labs/pi-fff), a Rust-backed fuzzy
@@ -229,13 +229,21 @@ echo "list files in src/" | node dist/cli.js run \
 
 # GitHub tools (read profile)
 echo "list open PRs on owner/repo" | node dist/cli.js run \
-  --model openai/gpt-5.4-nano --thinking off --no-session --profile read
+  --model openai/gpt-5.4-nano --thinking off --no-session --no-skills --profile read
 
 # Gondolin sandbox (requires QEMU on host; native only)
 echo "create a file note.txt with 'hello' in it" | node dist/cli.js run \
   --model openai/gpt-5.4-nano --thinking off --no-session \
   --sandbox gondolin --cwd /tmp/scratch
 ```
+
+**Capture fixtures in a CLEAN env, from a neutral cwd.** `--no-skills` plus
+`env -i` carrying only `PATH` / `HOME` / the provider key / `GITHUB_TOKEN`, and
+`--cwd /tmp`. Otherwise the capturer's own `~/.agents/skills` catalogue, their
+`TAVILY_API_KEY` and their working directory are all baked into the committed
+evidence, and the next person's re-capture differs for reasons that have
+nothing to do with the code. `GITHUB_TOKEN` is enough for the `read` profile —
+the App PEM is not needed to capture one.
 
 Env vars typically needed when developing (mirror lastlight's `.env`):
 

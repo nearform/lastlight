@@ -106,27 +106,31 @@ the agent's bash and read tools.
 
 ## Skill loader
 
-```ts
-// src/workflows/loader.ts:208
-export function resolveSkillPaths(names: readonly string[]): string[] {
-  return names.map((name) => {
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      throw new Error(`Invalid skill name: ${name}`);
-    }
-    for (const base of SKILL_BASES) {
-      const dir = join(base, name);
-      if (existsSync(join(dir, "SKILL.md"))) return dir;
-    }
-    throw new Error(`Skill not found: skills/${name}/SKILL.md`);
-  });
-}
-```
+`resolveSkillPaths(names)` lives in `packages/shared/src/workflow-loader.ts`
+(re-exported by `src/workflows/loader.ts`). It validates each name against
+`/^[a-zA-Z0-9_-]+$/`, refuses a name in `disabled.skills`, and walks the **layer
+stack in reverse** — last layer wins — returning the first
+`<base>/<name>/SKILL.md` that exists, with an `isInside` escape check per
+candidate.
 
-Returns absolute **directory** paths — one per declared skill. Search
-order: `skills/<name>/`, then `.claude/skills/<name>/` (legacy). The
-loader does **not** recurse into nested directories —
+The stack is built by `configureWorkflowAssets`: `built-in` (the packaged root),
+then `overlay` (`$LASTLIGHT_OVERLAY_DIR`) when one is configured. A run against a
+repo that commits `.lastlight/skills/<name>/` gets a **third, per-run** layer on
+top, via a resolver built with `createAssetResolver([...getAssetLayers(),
+makeLayer("repo", …)], …)` — see [Configuration](/spec/02-configuration). Each
+layer has a `skillRoot` (`<root>/skills`); the built-in and legacy layers also
+carry a `claudeSkillRoot` (`.claude/skills`) fallback, which the overlay and repo
+layers deliberately do not.
+
+Returns absolute **directory** paths — one per declared skill. The loader does
+**not** recurse into nested directories —
 `skills/software-development/architect` is not addressable as
 `software-development/architect`. Names are flat and alphanumeric.
+
+Because a repo skill resolves to an ordinary host path (inside the repo-config
+cache), the orchestrator stages it exactly like a built-in or overlay skill —
+copy for docker, tar for kubernetes. No sandbox backend knows a repo layer
+exists.
 
 `loadSkillRaw(name)` (same file) is retained for the admin dashboard's
 skill viewer — it returns the raw SKILL.md text for display. The
@@ -236,10 +240,18 @@ Chat doesn't run inside pi-coding-agent's `AgentSession` — it uses
 pi-ai's lower-level `completeSimple` loop. To still give chat the
 same progressive-disclosure model, `src/engine/chat/chat-skills.ts`:
 
-1. Loads a curated chat skill list from `<repo>/skills/<name>/` using
-   `loadSkillsFromDir` (same parser pi-coding-agent uses for sandbox
-   phases). `CHAT_SKILL_NAMES` is the v1 hard-coded set:
-   `["chat", "issue-triage", "pr-review", "repo-health"]`.
+1. Enumerates every skill resolvable through the asset layer stack
+   (`listSkillNames()`) and keeps the ones whose SKILL.md frontmatter
+   declares **`chat: true`**, resolving each through `resolveSkillPaths`
+   so an overlay's version of a built-in skill wins. The packaged set is
+   `chat`, `issue-triage`, `pr-review`, `repo-health`.
+
+   Opt-in, because most skills are written for a sandbox phase with a
+   checkout, a shell and write access — chat has none of those, so
+   exposing one by default advertises instructions the agent cannot
+   follow. It replaced a hardcoded `CHAT_SKILL_NAMES` list resolved
+   against `resolve("skills")` (the process cwd), which meant an overlay
+   could neither add a chat skill nor override a built-in one.
 2. Formats an XML `<available_skills>` block (name + description per
    skill) and prepends it to the chat system prompt at boot
    (`src/index.ts`).
@@ -265,8 +277,10 @@ chat runtime:
 | `repo-health` | Weekly health report (open / stale / velocity / labels) | `repo-health.yaml`, `cron-health.yaml`, chat |
 | `security-review` | Diff-based security scan since last review | `security-review.yaml`, `cron-security.yaml` |
 | `security-feedback` | Break out scan findings into individual issues | `security-feedback.yaml` |
-| `building` | Shared craft: install deps + run the test/lint/typecheck gate in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml` |
+| `building` | Shared craft: install deps + run the repo's CI gate (build + test + lint + typecheck, mirroring `.github/workflows` / AGENTS.md) in the sandbox (package-manager detection from lockfile, install-first, TDD discipline when implementing, a decomposition budget (~15 cyclomatic), no compiler-silencing assertions, and building a runnable in-sandbox verification path when the only test path needs an unavailable external service) | build executor + reviewer, `pr-fix.yaml`, `dependabot-ci-fix.yaml` |
+| `fixing` | Diagnose a red PR **before** repairing it: read the real failure, read the CI definition, name the CI-versus-sandbox differences explicitly, reproduce the exact failing command, then classify into exactly one of five classes — `reproducible`, `env-mismatch`, `flaky`, `infra-dependent`, `upstream-broken`. Also owns publish discipline (publish only on a green local gate; never a speculative publish; the phase's work reaches the branch through `github_publish`, never `git push`, and a successful publish IS the phase's push — so it is reported `outcome=pushed`), the runtime-written `.git/lastlight-verify.sh` gate script (inside the checkout's `.git/`, which git never walks, so it cannot be committed; deleted by the harness each attempt so a superseded diagnosis cannot gate this one; run by the loop as `bash <script>`, so it must be a bash script and the harness scores the same gate the agent ran; `gate=skipped` counts as red) and **what belongs in it** — a *targeted reproduction* of the diagnosed failure, the narrowest command that would have failed before the fix and passes after it (one test file, one lint rule, one build target, one install; under two minutes), never a clone of the repo's CI pipeline (CI runs on the published commit and is the authority), never a check already watched passing in the same session, never anything that starts a service (there is no docker in the sandbox, so the guarded branches are dead code) and never anything that mutates git state (the harness re-runs it); a repair with **nothing** to reproduce — a resolved merge conflict is the motivating case — still writes one, either the coherence check the repair implies (no conflict marker left, the lockfile installs) or an honest one-line `exit 0` saying why, because leaving it unwritten burns the loop's remaining iterations on a finished repair and reports `gate=skipped`, the `DIAGNOSIS_COMPLETE` / `CI_FIX_COMPLETE` marker formats, and the **PR journal** — `<kind>: <one line>` appended to `.git/lastlight-notes` (same placement and same per-run delete), where `finding` / `constraint` / `ruled-out` / `todo` are the four kinds, `ruled-out` is the only one recording a verified negative, `class=` in a note is rejected outright because that token is parsed, and a note read back is a hint that can never authorise a push or stand in for the gate | `pr-fix.yaml`, `dependabot-ci-fix.yaml` (primary on both, both phases) |
 | `code-review` | Shared review rubric, precision-first: post **only Critical / Important** (Suggestions / Nits are dropped as noise), each with a concrete-impact line, past a self-refutation confidence gate + what to check (correctness incl. silent-default/dropped-output as a bug, security, edge cases, complexity, duplication, type-safety, regression risk, test coverage) | build cycle's branch-diff reviewer, `pr-review.yaml` (same rubric, different procedure) |
+| `dependency-impact` | Judge a **major** dependency bump by blast radius rather than semver magnitude — `low` / `medium` / `high` from evidence gathered with **no checkout** (dev-vs-runtime, release notes in the PR body, direct import-site count via `github_search_code`, security sensitivity, the settled check result), with **unknown ⇒ high**. Also owns the audit-evidence format an auto-merged major is recorded with | `dependabot-pr-merge.yaml` (alongside `code-review`) |
 | `issue-answer` | Answer a question directly: sourced neutral reply to a GitHub issue or Slack thread; research repo docs + web; label `question` (GitHub only); never write a brief, mark ready-for-agent, or change code | `answer.yaml` |
 | `verify` | Test a behaviour claim as an investigator: install + run the code in the sandbox, capture bash/text evidence, report CONFIRMED / REFUTED / INCONCLUSIVE; never fabricate or stage evidence | `verify.yaml` (text phase) |
 | `qa-test` | Drive a CLI or locally-served app through a flow and report step-level pass/fail with evidence; continue past failures unless one blocks everything | `qa-test.yaml` (text phase) |
@@ -276,10 +290,80 @@ chat runtime:
 
 `building` and `code-review` are not optional libraries — they're live
 shared building blocks staged into multiple workflows (`code-review` in the
-build cycle and `pr-review`; `building` in the build cycle and `pr-fix`), the
-same way `issue-triage` is reused across webhook and cron. The "Used by"
-column lists every workflow that stages each. Note `pr-review` stages
-`code-review` but **not** `building` — it's a pure code review.
+build cycle and `pr-review`; `building` in the build cycle and both fix
+workflows), the same way `issue-triage` is reused across webhook and cron.
+The "Used by" column lists every workflow that stages each. Note `pr-review`
+stages `code-review` but **not** `building` — it's a pure code review.
+
+### `fixing` vs `building`
+
+They divide by tense. `building` is about *implementing* — it assumes you
+know what you are trying to build. `fixing` is about **a failure that
+already happened**: find out why, decide whether it can be fixed here at
+all, and only then repair it, minimally. So on both fix workflows the
+`diagnose` phase stages `skill: fixing` alone and the `fix` phase stages
+`skills: [fixing, building]` — `fixing` first, so it is the primary, and
+`building` alongside it for the install + gate mechanics `fixing` defers
+to. Both phases set `prompt:` as well, and both prompts name the skill
+explicitly rather than relying on the auto-generated nudge.
+
+The five classes are the skill's load-bearing output, because the workflow
+branches on them:
+
+| Class | Meaning | Disposition |
+|---|---|---|
+| `reproducible` | The same command fails here too | Fix it |
+| `env-mismatch` | Passes here, fails in CI on a version / OS / flag difference | Align to CI and re-verify — the repair is often config, not code |
+| `flaky` | A timeout or network blip, or the same job passed on a prior SHA | Change nothing |
+| `infra-dependent` | Needs secrets, a live service, a deployed backend, a browser | Cannot be fixed here — escalate, naming the checks |
+| `upstream-broken` | The base branch is red too | Not this PR's fault; self-heals when the base goes green |
+
+The last three are **stopping** verdicts. Reaching one is a *correct*
+outcome, not a failure — stopping cheaply is the entire point of diagnosing
+first — which is why the `fix` phase's `skip_if` skips rather than fails on
+them and the run still records `succeeded`
+([Workflow Engine](/spec/06-workflow-engine)). The skill says so explicitly,
+because an agent's natural bias is to round a stopping verdict up to
+`reproducible` in order to look useful.
+
+Markdown cannot import, so the class vocabulary is pinned from the code side
+instead: `tests/skills/fixing.test.ts` asserts all five names appear verbatim
+in `SKILL.md`, the same pattern (and for the same reason) as
+`tests/cron/label-vocab.test.ts`.
+
+### `dependency-impact` — impact, not magnitude
+
+The only rule about bump magnitude in the codebase used to be one prose
+conjunct in the merge prompt's TRIVIAL test — *"it is not a **major**
+version bump of a runtime dependency"* — so every major escalated, whether
+it was a `@types/*` dev bump or a runtime framework rewrite. This skill
+replaces that conjunct with a rubric over evidence (issue #252).
+
+It is a skill rather than more prompt prose for two reasons. **Progressive
+disclosure:** the assess prompt is already long and the rubric is needed
+only when the PR *is* a major, which pi's on-demand catalogue handles for
+free. **Per-repo tunability:** a managed repo can override
+`skills/dependency-impact/SKILL.md` in its own `.lastlight/` — exactly the
+per-repo tuning this work exists to enable — without the operator widening
+`repoConfig.allowKeys`.
+
+| Tier | When | Effect |
+|---|---|---|
+| `low` | Dev-only dependency, **or** a GitHub Actions tag bump, **or** zero direct import sites; no documented breaking changes; CI settled `passing` | Auto-merges at `autoMergeMaxImpact >= low` |
+| `medium` | Runtime dependency, CI settled `passing`, breaking changes documented but none matching this repo's usage, not security-sensitive | Auto-merges at `autoMergeMaxImpact >= medium` (the packaged default) |
+| `high` | Security-sensitive domain, **or** many import sites, **or** breaking changes plausibly touching used APIs, **or** CI not settled `passing`, **or** release notes missing/unparseable | `dependency-functional` + `requires-human`, as every major used to get |
+
+**Unknown ⇒ high** is the load-bearing clause: inability to gather the
+evidence is itself a high-impact signal, not licence to guess low. It is
+why a repo with no CI at all cannot produce `low` or `medium` for a major —
+there is no behavioural evidence to weigh — while its non-major bumps
+continue down the unchanged trivial path.
+
+The tiers, the three impact labels and their hex colours are a contract
+between the skill, the merge prompt and `src/cron/dependabot-discovery.ts`,
+which markdown cannot import; `tests/cron/label-vocab.test.ts` and
+`tests/workflows/dependabot-pr-merge.test.ts` pin them, the same pattern as
+the `fixing` classes above.
 
 Nested skill directories (`skills/software-development/architect`,
 `skills/github/github-pr-workflow`, etc.) exist as a category library —
@@ -291,7 +375,8 @@ them directly.
 
 Three files in `agent-context/`, read in alphabetical order:
 
-- **`rules.md`** — operational guardrails. Workspace conventions,
+- **`rules.md`** — operational guardrails. Workspace conventions, the
+  prohibition on satisfying a check by disabling it (issue #264),
   GitHub-first coordination, git auth, managed repos, review and
   triage guidelines, label standards.
 - **`security.md`** — security boundaries. Untrusted user content
@@ -303,40 +388,66 @@ Three files in `agent-context/`, read in alphabetical order:
   (Architect / Executor / Reviewer). GitHub-first coordination,
   delegation model.
 
-## AGENTS.md materialization
+## Composition
 
-Two surfaces, with a subtle inconsistency.
+`loadAgentContext()` walks the layer stack **forwards**, keyed by **basename**,
+so a later layer's `rules.md` replaces an earlier one's, then joins the surviving
+files (alphabetically) with `\n\n---\n\n`. `disabled.agentContext` removes a file
+by exact filename (`rules.md`) or stem (`rules`).
+
+**A repo layer is additive only.** A resolver built with
+`agentContextAdditiveOnly: true` — which is the only way the runner ever builds
+one for a repo — keeps last-wins for built-in ⊕ overlay but *drops* a `repo`
+file whose basename an operator-owned layer already provides, recording an
+`agent-context-dropped` `AssetWarning`. Without that rule, committing a
+`security.md` would neuter the operator's security boundaries for every run
+against that repo. A repo can still **add** context under any other filename.
+See [Configuration](/spec/02-configuration).
+
+## AGENTS.md materialization
 
 ### Sandbox
 
-The harness writes `AGENTS.md` into the workspace before each agent
-run (`src/engine/agent-executor.ts`):
+The runner composes the run's context **once**, off that run's asset resolver,
+and threads it as `ExecutorConfig.agentContext`. The orchestrator's
+`deliverAgentContext` (`src/engine/executors/orchestrator.ts`) then picks the
+delivery, reading the value through `agentContextFor(config)` —
+`config.agentContext ?? loadAgentContext(...)`, so a run with no repo layer is
+byte-identical to the pre-#180 behaviour:
 
-```ts
-const md = loadAgentContext(config.agentContextDir);
-if (md) writeFileSync(join(workDir, "AGENTS.md"), md);
-```
+- **host-shared backends** (docker / gondolin / none / smol) — written to
+  `<hostWorkspaceDir>/AGENTS.md`. An empty context writes no file.
+- **kubernetes** — `hostWorkspaceDir` is an in-pod path, so the text goes to the
+  adapter through the `AgentContextSink` capability
+  (`provideAgentContext(sandbox, md)` → `KubernetesSandbox.setAgentContext`) and
+  is served over its own per-run init-fetch channel. See
+  [Sandbox](/spec/09-sandbox).
 
-`loadAgentContext()` (`src/engine/github/profiles.ts`) joins
-`agent-context/*.md` with `\n\n---\n\n`. pi-coding-agent's discovery
-walks up from cwd and reads it.
+Best-effort on both paths: a failure degrades the agent's context, it never
+fails the phase. The value is used **verbatim** downstream — re-composing it
+anywhere else would drop the repo layer, or include it without the
+additive-only filter.
+
+`loadAgentContext(_dir?)` (`src/engine/github/profiles.ts`) is the
+operator-only composition; its directory argument is accepted for call-site
+compatibility and ignored, because agent context is resolved layer-wise rather
+than from one directory.
 
 ### In-process (chat)
 
 ```ts
 // src/index.ts (chat boot)
-systemPrompt: loadAgentContext() + CHAT_SYSTEM_SUFFIX + chatSkills.catalogueXml
+systemPrompt: () => agentContext + chatSystemSuffix(hasGithub, { isWorkflowEnabled }) + chatSkills.catalogueXml
 ```
 
-Same `loadAgentContext()` helper, but injected directly into the
-chat system prompt rather than dropped on disk. The chat-specific
-suffix and the skill catalogue XML are appended.
+The same helper, injected directly into the chat system prompt rather than
+dropped on disk, with the chat-specific suffix and the skill catalogue XML
+appended. Chat is not repo-scoped, so it carries **no** repo layer.
 
-Both paths use the same `\n\n---\n\n` separator now. The legacy
-sandbox-entrypoint `cat /app/agent-context/*.md` (raw concatenation)
-applies only to the docker backend's container entrypoint and is on
-its way out — the in-process AGENTS.md write happens first, so the
-on-disk file is canonical.
+The docker sandbox image's entrypoint still ships a
+`cat /app/agent-context/*.md` fallback, but it is guarded by
+`[ ! -f "$WORKSPACE/AGENTS.md" ]` and the orchestrator's write overwrites the
+same path — so it only ever applies when the composition was empty.
 
 ## Skills vs prompts vs full workflows
 
@@ -383,7 +494,8 @@ state belongs in `workflows/prompts/`.
 
 | Piece | File |
 |---|---|
-| Skill name validation + path resolution | `src/workflows/loader.ts` (`resolveSkillPaths`, `loadSkillRaw`) |
+| Skill name validation + path resolution | `packages/shared/src/workflow-loader.ts` (`resolveSkillPaths`, `loadSkillRaw`), re-exported by `src/workflows/loader.ts` |
+| Layer stack + per-run resolver | `packages/shared/src/workflow-loader.ts` (`AssetLayer`, `makeLayer`, `configureWorkflowAssets`, `getAssetLayers`, `getDisabledAssets`, `createAssetResolver`, `AssetWarning`) |
 | Phase config overlay (resolves `skill:`/`skills:` into `ExecutorConfig.skillPaths`) | `src/workflows/runner.ts` (`phaseConfigFor`) |
 | User prompt generation | `src/workflows/runner.ts` (`buildPhasePrompt`) |
 | Per-phase bundle staging (symlink/copy) | `src/engine/agent-executor.ts` (`stageSkillBundle`, `skillBundleKey`, `excludeFromGit`) |
@@ -391,7 +503,8 @@ state belongs in `workflows/prompts/`.
 | Chat catalogue wiring | `src/index.ts` (ChatRunner boot) |
 | Skills | `skills/<name>/SKILL.md` |
 | Agent context layer | `agent-context/{rules,security,soul}.md` |
-| In-process `loadAgentContext()` | `src/engine/github/profiles.ts` |
+| In-process `loadAgentContext()` / per-run `agentContextFor()` / `AgentContextSink` | `src/engine/github/profiles.ts` |
+| AGENTS.md delivery (workspace write vs k8s sink) | `src/engine/executors/orchestrator.ts` (`deliverAgentContext`) |
 
 ## Rebuild notes
 

@@ -9,11 +9,25 @@ import {
   RESERVED_CONTROL_INTENTS,
   type AgentWorkflowDefinition,
   type CronWorkflowDefinition,
+  type LoggerPort,
+  noopLogger,
 } from "lastlight-workflow-engine";
 import type { DisabledConfig, RouteConfig } from "./config-types.js";
 
-interface AssetLayer {
-  name: "built-in" | "overlay" | "legacy";
+/**
+ * One root that can contribute assets. The ordered stack is resolved
+ * last-wins for prompts/skills and (by basename) for agent-context.
+ *
+ * `repo` is the odd one out: a PER-RUN layer rooted at a managed repo's own
+ * `.lastlight/` directory. It is never installed into the module-level `layers`
+ * stack — it's handed to `createAssetResolver()` for the duration of a single
+ * run — because up to `concurrency.maxWorkflows` runs (plus a cron fan-out
+ * across every managed repo) are in flight at once and a global would race.
+ * It is also asset-only: `populateCache()` refuses to read workflow/cron YAML
+ * from it (a repo may not define workflows).
+ */
+export interface AssetLayer {
+  name: "built-in" | "overlay" | "legacy" | "repo";
   root: string;
   workflowRoot: string;
   skillRoot: string;
@@ -35,6 +49,13 @@ export interface WorkflowOrigin {
 const DEFAULT_ROOT = resolve(".");
 let layers: AssetLayer[] = [makeLayer("built-in", DEFAULT_ROOT)];
 let disabled: DisabledConfig = emptyDisabled();
+
+/**
+ * The resolver every module-level asset export delegates to. Rebuilt (never
+ * mutated) whenever `layers`/`disabled` change, so the exported facade behaves
+ * exactly as it did when those functions read the globals directly.
+ */
+let defaultResolver: AssetResolver = createAssetResolver(layers, disabled);
 
 const agentCache = new Map<string, AgentWorkflowDefinition>();
 const cronCache = new Map<string, CronWorkflowDefinition>();
@@ -72,7 +93,16 @@ function existingDir(path: string): boolean {
   }
 }
 
-function makeLayer(name: AssetLayer["name"], rootOrWorkflowDir: string): AssetLayer {
+/**
+ * Build a layer from a root directory. Deliberately shape-identical for every
+ * layer name, including `repo`: a managed repo's `.lastlight/` mirrors the
+ * overlay's on-disk layout exactly (`workflows/prompts/x.md`, `skills/<n>/SKILL.md`,
+ * `agent-context/*.md`), so there is one shape to learn and `lastlight fork`
+ * output drops straight into a repo. Only `claudeSkillRoot` differs — the
+ * `.claude/skills` fallback is a built-in/legacy convenience, not an overlay or
+ * repo surface.
+ */
+export function makeLayer(name: AssetLayer["name"], rootOrWorkflowDir: string): AssetLayer {
   const root = resolve(rootOrWorkflowDir);
   const workflowRoot = join(root, "workflows");
   return {
@@ -92,7 +122,34 @@ export function configureWorkflowAssets(config: WorkflowAssetConfig = {}): void 
   if (config.overlayRoot) next.push(makeLayer("overlay", config.overlayRoot));
   layers = next;
   disabled = mergeDisabled(config.disabled);
+  defaultResolver = createAssetResolver(layers, disabled);
   clearWorkflowCache();
+}
+
+/**
+ * The layer stack + disables the module-level facade currently resolves
+ * against. Exposed so a caller can compose a per-run resolver on top of them
+ * without reaching for the globals or re-deriving the built-in/overlay roots:
+ *
+ *   createAssetResolver(
+ *     [...getAssetLayers(), makeLayer("repo", join(repoRoot, ".lastlight"))],
+ *     getDisabledAssets(),
+ *     { agentContextAdditiveOnly: true },
+ *   )
+ */
+export function getAssetLayers(): readonly AssetLayer[] {
+  return layers;
+}
+
+/** Copy of the effective disables (see `getAssetLayers`); safe to hand out. */
+export function getDisabledAssets(): DisabledConfig {
+  return {
+    workflows: [...disabled.workflows],
+    crons: [...disabled.crons],
+    prompts: [...disabled.prompts],
+    skills: [...disabled.skills],
+    agentContext: [...disabled.agentContext],
+  };
 }
 
 /** Legacy wrapper used by older tests to point directly at a workflow directory. */
@@ -107,6 +164,7 @@ export function setWorkflowDir(dir: string): void {
     agentContextRoot: resolve("agent-context"),
   }];
   disabled = emptyDisabled();
+  defaultResolver = createAssetResolver(layers, disabled);
   clearWorkflowCache();
 }
 
@@ -147,6 +205,12 @@ function populateCache(): void {
   cachePopulated = true;
 
   for (const layer of layers) {
+    // A repo layer contributes ASSETS ONLY — a managed repo may never define a
+    // workflow or a cron (that would let any repo we watch schedule arbitrary
+    // agent runs on the operator's instance). Repo layers are only ever passed
+    // to `createAssetResolver`, never into this global stack, but the guard
+    // makes the invariant structural instead of merely conventional.
+    if (layer.name === "repo") continue;
     const namesInLayer = new Set<string>();
     const cronNamesInLayer = new Set<string>();
     for (const file of workflowFiles(layer.workflowRoot)) {
@@ -163,7 +227,13 @@ function populateCache(): void {
           throw new Error(`Duplicate cron workflow name "${result.data.name}" in ${layer.name} layer`);
         }
         cronNamesInLayer.add(result.data.name);
-        if (!disabled.crons.includes(result.data.name) && !disabled.workflows.includes(result.data.workflow)) {
+        // A `handler:` cron has no target workflow, so `disabled.workflows`
+        // cannot reach it — `disabled.crons` / `crons.disable` is its only
+        // off switch. Guarded rather than coerced: `includes(undefined)` is
+        // false today, but only by accident of the array's contents.
+        const targetDisabled =
+          result.data.workflow !== undefined && disabled.workflows.includes(result.data.workflow);
+        if (!disabled.crons.includes(result.data.name) && !targetDisabled) {
           cronCache.set(result.data.name, result.data);
           cronOrigins.set(result.data.name, { layer: layer.name, filePath });
         }
@@ -238,11 +308,6 @@ export function loadWorkflowYamlRaw(name: string): string {
   return readFileSync(origin.filePath, "utf-8");
 }
 
-export function loadPromptTemplate(relativePath: string): string {
-  const filePath = resolvePromptPath(relativePath);
-  return readFileSync(filePath, "utf-8");
-}
-
 function assertSafeRelative(relativePath: string, kind: string): void {
   if (!relativePath || relativePath.length === 0) throw new Error(`${kind} path is empty`);
   if (relativePath.startsWith("/") || relativePath.includes("\0")) {
@@ -256,87 +321,258 @@ function isInside(filePath: string, root: string): boolean {
   return f === r || f.startsWith(r + "/");
 }
 
-export function resolvePromptPath(relativePath: string): string {
-  assertSafeRelative(relativePath, "Prompt");
-  if (disabled.prompts.includes(relativePath) || disabled.prompts.includes(basename(relativePath))) {
-    throw new Error(`Prompt template is disabled: ${relativePath}`);
-  }
-  for (const layer of [...layers].reverse()) {
-    const filePath = resolve(layer.workflowRoot, relativePath);
-    if (!isInside(filePath, layer.workflowRoot)) throw new Error(`Prompt path escapes workflow directory: ${relativePath}`);
-    if (existsSync(filePath)) return filePath;
-  }
-  throw new Error(`Prompt template not found: ${relativePath}`);
+/**
+ * A non-fatal thing the resolver noticed while loading assets. Today the only
+ * kind is an agent-context file a repo layer wasn't allowed to override
+ * (see `agentContextAdditiveOnly`) — surfaced rather than thrown because the
+ * run should still proceed, just with the operator's file winning. Callers are
+ * expected to log it / echo it back to the repo so the drop isn't silent.
+ */
+export interface AssetWarning {
+  kind: "agent-context-dropped";
+  /** Basename of the dropped file, e.g. `security.md`. */
+  name: string;
+  /** Absolute path of the file that was ignored. */
+  filePath: string;
+  /** The layer the ignored file came from. */
+  layer: AssetLayer["name"];
+  /** One-liner, safe to put in a log line or a PR comment. */
+  message: string;
 }
 
-export function loadSkillRaw(name: string): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error(`Invalid skill name: ${name}`);
-  if (disabled.skills.includes(name)) throw new Error(`Skill is disabled: ${name}`);
-  for (const layer of [...layers].reverse()) {
-    const bases = [layer.skillRoot, layer.claudeSkillRoot].filter(Boolean) as string[];
-    for (const base of bases) {
-      const filePath = join(base, name, "SKILL.md");
-      if (!isInside(filePath, base)) throw new Error(`Skill path escapes skill directory: ${name}`);
-      if (existsSync(filePath)) return readFileSync(filePath, "utf-8");
-    }
-  }
-  throw new Error(`Skill not found: skills/${name}/SKILL.md`);
-}
-
-export function loadSkillInstructions(name: string): string {
-  return loadSkillRaw(name);
+export interface AssetResolverOptions {
+  /**
+   * When true, a layer named `repo` may only ADD agent-context files: one whose
+   * basename an earlier (operator-owned) layer already provides is dropped
+   * instead of replacing it, and recorded in `warnings`. Off by default so the
+   * built-in → overlay stack keeps its normal last-wins behaviour.
+   */
+  agentContextAdditiveOnly?: boolean;
 }
 
 /**
- * Resolve a list of skill names to their absolute directory paths.
- * Each returned path is the skill folder root (containing `SKILL.md`
- * plus any `scripts/`, `references/`, `assets/`) — not the .md file.
- * The sandbox staging step in agent-executor uses these to symlink or
- * copy the whole folder into the phase's bundle at
- * `<workspaceRoot>/.lastlight-skills/<phase>/<name>/`.
- * Layer-aware: overlay skills win over built-ins (same precedence and
- * disabled-skill handling as `loadSkillRaw`).
+ * The layer-dependent half of the loader, bound to one specific layer stack.
+ *
+ * Exists so a caller can resolve assets against `globals + one extra per-run
+ * layer` WITHOUT installing that layer into the module-level stack: several
+ * workflows run concurrently (and a cron fan-out fires across every managed
+ * repo at once), so a mutated global would race between runs. The module-level
+ * exports below are a thin facade over one of these built from the last
+ * `configureWorkflowAssets` call.
  */
-export function resolveSkillPaths(names: readonly string[]): string[] {
-  return names.map((name) => {
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      throw new Error(`Invalid skill name: ${name}`);
+export interface AssetResolver {
+  resolvePromptPath(relativePath: string): string;
+  loadPromptTemplate(relativePath: string): string;
+  loadSkillRaw(name: string): string;
+  loadSkillInstructions(name: string): string;
+  listSkillNames(): string[];
+  resolveSkillPaths(names: readonly string[]): string[];
+  loadAgentContext(): string;
+  /**
+   * Warnings from the most recent `loadAgentContext()` call — a snapshot, not
+   * an append-only log, so repeated loads can't grow it unboundedly. Empty
+   * until `loadAgentContext()` has run at least once.
+   */
+  readonly warnings: readonly AssetWarning[];
+}
+
+/**
+ * Build a resolver over an explicit layer stack. See `getAssetLayers()` for the
+ * composition idiom. The `layers`/`disabled` parameters deliberately shadow the
+ * module-level globals of the same name: everything inside this closure reads
+ * the captured stack, and the shadowing makes it impossible for a body in here
+ * to reach the globals by accident.
+ */
+export function createAssetResolver(
+  layers: readonly AssetLayer[],
+  disabled: DisabledConfig,
+  options: AssetResolverOptions = {},
+): AssetResolver {
+  const additiveOnly = options.agentContextAdditiveOnly === true;
+  let warnings: AssetWarning[] = [];
+
+  function resolvePromptPath(relativePath: string): string {
+    assertSafeRelative(relativePath, "Prompt");
+    if (disabled.prompts.includes(relativePath) || disabled.prompts.includes(basename(relativePath))) {
+      throw new Error(`Prompt template is disabled: ${relativePath}`);
     }
-    if (disabled.skills.includes(name)) {
-      throw new Error(`Skill is disabled: ${name}`);
+    for (const layer of [...layers].reverse()) {
+      const filePath = resolve(layer.workflowRoot, relativePath);
+      if (!isInside(filePath, layer.workflowRoot)) throw new Error(`Prompt path escapes workflow directory: ${relativePath}`);
+      if (existsSync(filePath)) return filePath;
     }
+    throw new Error(`Prompt template not found: ${relativePath}`);
+  }
+
+  function loadPromptTemplate(relativePath: string): string {
+    const filePath = resolvePromptPath(relativePath);
+    return readFileSync(filePath, "utf-8");
+  }
+
+  function loadSkillRaw(name: string): string {
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error(`Invalid skill name: ${name}`);
+    if (disabled.skills.includes(name)) throw new Error(`Skill is disabled: ${name}`);
     for (const layer of [...layers].reverse()) {
       const bases = [layer.skillRoot, layer.claudeSkillRoot].filter(Boolean) as string[];
       for (const base of bases) {
-        const dir = join(base, name);
-        const skillFile = join(dir, "SKILL.md");
-        if (!isInside(skillFile, base)) throw new Error(`Skill path escapes skill directory: ${name}`);
-        if (existsSync(skillFile)) return dir;
+        const filePath = join(base, name, "SKILL.md");
+        if (!isInside(filePath, base)) throw new Error(`Skill path escapes skill directory: ${name}`);
+        if (existsSync(filePath)) return readFileSync(filePath, "utf-8");
       }
     }
     throw new Error(`Skill not found: skills/${name}/SKILL.md`);
-  });
+  }
+
+  function loadSkillInstructions(name: string): string {
+    return loadSkillRaw(name);
+  }
+
+  /**
+   * Every skill NAME resolvable through this layer stack, deduped and sorted.
+   *
+   * The union across layers (an overlay skill of the same name shadows the
+   * built-in, and appears once), minus `disabled.skills`. Callers that need to
+   * SELECT skills by something in their frontmatter — the chat catalogue picks
+   * the ones marked `chat: true` — need to enumerate before they can read, and
+   * there was no way to do that without a hardcoded name list.
+   */
+  function listSkillNames(): string[] {
+    const names = new Set<string>();
+    for (const layer of layers) {
+      const bases = [layer.skillRoot, layer.claudeSkillRoot].filter(Boolean) as string[];
+      for (const base of bases) {
+        if (!existingDir(base)) continue;
+        for (const entry of readdirSync(base, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          if (!/^[a-zA-Z0-9_-]+$/.test(entry.name)) continue;
+          if (disabled.skills.includes(entry.name)) continue;
+          if (existsSync(join(base, entry.name, "SKILL.md"))) names.add(entry.name);
+        }
+      }
+    }
+    return [...names].sort();
+  }
+
+  /**
+   * Resolve a list of skill names to their absolute directory paths.
+   * Each returned path is the skill folder root (containing `SKILL.md`
+   * plus any `scripts/`, `references/`, `assets/`) — not the .md file.
+   * The sandbox staging step in agent-executor uses these to symlink or
+   * copy the whole folder into the phase's bundle at
+   * `<workspaceRoot>/.lastlight-skills/<phase>/<name>/`.
+   * Layer-aware: later layers win over earlier ones (same precedence and
+   * disabled-skill handling as `loadSkillRaw`).
+   */
+  function resolveSkillPaths(names: readonly string[]): string[] {
+    return names.map((name) => {
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+        throw new Error(`Invalid skill name: ${name}`);
+      }
+      if (disabled.skills.includes(name)) {
+        throw new Error(`Skill is disabled: ${name}`);
+      }
+      for (const layer of [...layers].reverse()) {
+        const bases = [layer.skillRoot, layer.claudeSkillRoot].filter(Boolean) as string[];
+        for (const base of bases) {
+          const dir = join(base, name);
+          const skillFile = join(dir, "SKILL.md");
+          if (!isInside(skillFile, base)) throw new Error(`Skill path escapes skill directory: ${name}`);
+          if (existsSync(skillFile)) return dir;
+        }
+      }
+      throw new Error(`Skill not found: skills/${name}/SKILL.md`);
+    });
+  }
+
+  /**
+   * Concatenate resolved agent-context/*.md with overlay filename replacement.
+   * Later layers replace earlier files by basename; disabled.agentContext removes
+   * either exact filenames (rules.md) or stem names (rules).
+   */
+  function loadAgentContext(): string {
+    const files = new Map<string, string>();
+    const drops: AssetWarning[] = [];
+    for (const layer of layers) {
+      if (!existingDir(layer.agentContextRoot)) continue;
+      for (const f of readdirSync(layer.agentContextRoot).filter((n) => n.endsWith(".md")).sort()) {
+        const filePath = join(layer.agentContextRoot, f);
+        // Additive-only: a managed repo may ADD context, never REPLACE what an
+        // operator-owned layer already provides — otherwise committing a file
+        // called `security.md` / `rules.md` would neuter the operator's rules
+        // for every run against that repo. Non-repo layers keep last-wins.
+        if (additiveOnly && layer.name === "repo" && files.has(f)) {
+          drops.push({
+            kind: "agent-context-dropped",
+            name: f,
+            filePath,
+            layer: layer.name,
+            message: `Ignored repo agent-context file "${f}": a higher-trust layer already provides it (repo context is additive only).`,
+          });
+          continue;
+        }
+        files.set(f, filePath);
+      }
+    }
+    const disabledNames = new Set(disabled.agentContext.flatMap((n) => [n, n.endsWith(".md") ? n.slice(0, -3) : `${n}.md`]));
+    // Recomputed per call (not appended) — `warnings` is a snapshot of the last
+    // load. A drop of a name that's disabled anyway isn't worth reporting.
+    warnings = drops.filter(({ name }) => !disabledNames.has(name) && !disabledNames.has(name.slice(0, -3)));
+    return Array.from(files.entries())
+      .filter(([name]) => !disabledNames.has(name) && !disabledNames.has(name.slice(0, -3)))
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, filePath]) => readFileSync(filePath, "utf-8"))
+      .join("\n\n---\n\n");
+  }
+
+  return {
+    resolvePromptPath,
+    loadPromptTemplate,
+    loadSkillRaw,
+    loadSkillInstructions,
+    listSkillNames,
+    resolveSkillPaths,
+    loadAgentContext,
+    // A getter, not a captured array: `loadAgentContext` REPLACES the list each
+    // call, so a snapshot property would go stale after the first load.
+    get warnings(): readonly AssetWarning[] {
+      return warnings;
+    },
+  };
 }
 
-/**
- * Concatenate resolved agent-context/*.md with overlay filename replacement.
- * Later layers replace earlier files by basename; disabled.agentContext removes
- * either exact filenames (rules.md) or stem names (rules).
- */
+// ---------------------------------------------------------------------------
+// Module-level asset facade. Thin delegations to the default resolver — kept so
+// every existing call site (runner, classifier, chat-skills, admin routes,
+// profiles, the CLI's `fork`, the evals bootstrap) is unchanged by the
+// introduction of per-run resolvers.
+// ---------------------------------------------------------------------------
+
+export function resolvePromptPath(relativePath: string): string {
+  return defaultResolver.resolvePromptPath(relativePath);
+}
+
+export function loadPromptTemplate(relativePath: string): string {
+  return defaultResolver.loadPromptTemplate(relativePath);
+}
+
+export function loadSkillRaw(name: string): string {
+  return defaultResolver.loadSkillRaw(name);
+}
+
+export function loadSkillInstructions(name: string): string {
+  return defaultResolver.loadSkillInstructions(name);
+}
+
+export function listSkillNames(): string[] {
+  return defaultResolver.listSkillNames();
+}
+
+export function resolveSkillPaths(names: readonly string[]): string[] {
+  return defaultResolver.resolveSkillPaths(names);
+}
+
 export function loadAgentContext(): string {
-  const files = new Map<string, string>();
-  for (const layer of layers) {
-    if (!existingDir(layer.agentContextRoot)) continue;
-    for (const f of readdirSync(layer.agentContextRoot).filter((n) => n.endsWith(".md")).sort()) {
-      files.set(f, join(layer.agentContextRoot, f));
-    }
-  }
-  const disabledNames = new Set(disabled.agentContext.flatMap((n) => [n, n.endsWith(".md") ? n.slice(0, -3) : `${n}.md`]));
-  return Array.from(files.entries())
-    .filter(([name]) => !disabledNames.has(name) && !disabledNames.has(name.slice(0, -3)))
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([, filePath]) => readFileSync(filePath, "utf-8"))
-    .join("\n\n---\n\n");
+  return defaultResolver.loadAgentContext();
 }
 
 // Route targets that are IN-PROCESS handlers, not workflow YAML files — so
@@ -354,6 +590,58 @@ const INTERNAL_ROUTE_TARGETS: Record<string, ReadonlySet<string>> = {
   "slack.explore_reply": new Set(["explore-reply"]),
 };
 
+/**
+ * Route keys whose target MUST be a PR-scoped workflow (`pr_scoped: true`).
+ *
+ * A list of ROUTE KEYS, not of workflow names — that distinction is the whole
+ * point. The router's branches are code and cannot be reconfigured; the
+ * workflow each one dispatches can be. Remapping one of these to a workflow
+ * that does not declare `pr_scoped` drops the PR run lock, the per-head-SHA
+ * dedup and escalation for it, and every one of those is a REFUSAL, so nothing
+ * looks wrong until two agents push the same branch (issue #256).
+ *
+ * `pr_comment` is deliberately absent: it routes to a conversational workflow
+ * that is not, and should not be, PR-scoped.
+ */
+const PR_SCOPED_ROUTE_KEYS: ReadonlySet<string> = new Set([
+  "github.pr_opened",
+  "github.pr_synchronize",
+  "github.pr_reopened",
+  "github.pr_checks_settled",
+  "github.pr_labeled",
+  "github.pr_review_requested",
+  "github.pr_fix",
+  "github.pr_review",
+  "slack.review",
+]);
+
+/**
+ * Warn — never throw — when a configured route that dispatches against a pull
+ * request targets a workflow that does not declare `pr_scoped: true`.
+ *
+ * A warning because the operator may have a reason: a route pointed at a
+ * genuinely non-PR workflow is a choice, and failing boot over it would be
+ * worse than the silence it replaces. What matters is that the choice is
+ * VISIBLE, which it was not.
+ */
+function warnUnscopedPrRoutes(routes: RouteConfig | undefined, log: LoggerPort): void {
+  if (!routes) return;
+  for (const [surface, values] of Object.entries(routes) as Array<[keyof RouteConfig, Record<string, string>]>) {
+    for (const [routeName, target] of Object.entries(values)) {
+      const routeKey = `${surface}.${routeName}`;
+      if (!PR_SCOPED_ROUTE_KEYS.has(routeKey)) continue;
+      const def = agentCache.get(target);
+      if (!def || def.pr_scoped === true) continue;
+      log.warn(
+        "PR-scoped route targets a workflow that does not declare pr_scoped: true — " +
+        "the PR run lock, per-head-SHA dedup and escalation will not apply; " +
+        "add `pr_scoped: true` to its workflow YAML if that is not intended",
+        { routeKey, target },
+      );
+    }
+  }
+}
+
 function validateRouteTargets(routes?: RouteConfig): void {
   if (!routes) return;
   for (const [surface, values] of Object.entries(routes) as Array<[keyof RouteConfig, Record<string, string>]>) {
@@ -370,7 +658,7 @@ function validateRouteTargets(routes?: RouteConfig): void {
   }
 }
 
-export function validateAssets(routes?: RouteConfig): void {
+export function validateAssets(routes?: RouteConfig, log: LoggerPort = noopLogger): void {
   populateCache();
   for (const route of ["workflows", "crons"] as const) {
     for (const name of disabled[route]) {
@@ -380,7 +668,15 @@ export function validateAssets(routes?: RouteConfig): void {
 
   // Every enabled cron must target a workflow that still exists (and isn't
   // disabled) — otherwise the cron boots fine and only fails on first tick.
+  //
+  // A `handler:` cron is deliberately NOT checked here, and cannot be: the
+  // host-side handler registry is built at runtime from collaborators that may
+  // legitimately be absent (the digest needs a Slack connector), so failing boot
+  // on a missing handler would stop a Slack-less deployment from starting at
+  // all. `jobs.ts` warns and drops such a cron at registration instead — the
+  // one layer that can tell "typo" from "not available here".
   for (const [cronName, def] of cronCache) {
+    if (!def.workflow) continue;
     if (!agentCache.has(def.workflow)) {
       throw new Error(`Cron "${cronName}" targets missing or disabled workflow: ${def.workflow}`);
     }
@@ -460,4 +756,5 @@ export function validateAssets(routes?: RouteConfig): void {
   }
 
   validateRouteTargets(routes);
+  warnUnscopedPrRoutes(routes, log);
 }

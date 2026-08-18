@@ -1,0 +1,101 @@
+---
+// Last Light vs. 8090: targets "8090 software factory" / "software factory
+// alternative" / "open source software factory". Both use the term; they mean
+// very different things by it, and saying so plainly is the useful content.
+import ComparisonLayout from '../../layouts/ComparisonLayout.astro';
+
+const title = "Last Light vs. 8090: Two Very Different Software Factories";
+const description = "8090 builds enterprise applications for regulated industries with people and agents under one governance model. Last Light is an open-source software factory that maintains repositories you already have. Same term, different problems.";
+
+const heading = 'Last Light vs. <span class="accent">8090</span>';
+const subtitle = "Both call themselves a software factory. 8090 means an enterprise delivery platform that takes business intent all the way to a production application; Last Light means a self-hosted service that maintains repositories you already own. Knowing which problem you have decides this one quickly.";
+
+const rowsDuo = [
+	["What it produces", "Maintenance of existing repos: triage, review, fixes, reports", "New or modernised enterprise applications"],
+	["Starting point", "A GitHub repository and a webhook", "Business intent, requirements, architecture"],
+	["Buyer", "A platform or engineering team", "An enterprise programme, often with a systems integrator"],
+	["Delivery", "Software you install and run", "A platform, or a full build-host-manage engagement"],
+	["Hosting", "Self-hosted only, by you", "Vendor-hosted or vendor-managed"],
+	["Governance", "Approval gates, scoped tokens, and a full transcript of every run, all on your infra", "Governance and audit of every decision, by design"],
+	["Industries", "Any team on GitHub", "Regulated: healthcare, finance, aerospace, government"],
+	["Licence", "MIT, free, source on GitHub", "Commercial, enterprise contract"],
+	["Time to value", "An afternoon, if you can run Docker", "A procurement cycle and a delivery programme"],
+];
+---
+
+<ComparisonLayout title={title} description={description} heading={heading} subtitle={subtitle} slug="8090">
+
+	<section class="content-section">
+		<h2>The short version</h2>
+		<div class="callout-card">
+			<p><strong>These are not competitors, and pretending otherwise would be dishonest.</strong> 8090 sells a way for regulated enterprises to get applications built, connecting business intent, requirements, architecture, work orders, code, testing and production maintenance into one governed pipeline that people and agents share. It raised a $135M Series A led by Salesforce in June 2026 and works with healthcare, insurance, life sciences, aerospace, energy, manufacturing, financial services and US government customers.</p>
+			<p>Last Light does something much narrower: it sits on repositories you already have and keeps them healthy. Issues get triaged, pull requests get reviewed, security sweeps run weekly, fixes get proposed. It does not take requirements, it does not produce an application, and it does not come with a delivery team.</p>
+			<p>The term "software factory" covers both because both describe software work as a production line. But one is a line for <em>building new systems under enterprise governance</em>, and the other is a line for <em>maintaining existing repositories</em>.</p>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Side by side</h2>
+		<div class="table-scroll">
+			<table class="cmp duo">
+				<thead>
+					<tr><th></th><th class="ll">Last Light</th><th>8090</th></tr>
+				</thead>
+				<tbody>
+					{rowsDuo.map(([k, ll, other]) => (
+						<tr>
+							<th scope="row">{k}</th>
+							<td class="ll" set:html={ll} />
+							<td set:html={other} />
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Where each one wins</h2>
+		<div class="hh-grid">
+			<div class="hh-card">
+				<h3>What 8090 does that Last Light doesn't</h3>
+				<ul class="card-list">
+					<li><strong>Takes business intent as input.</strong> Requirements, architecture and work orders are first-class artefacts; Last Light starts at a GitHub issue.</li>
+					<li><strong>Builds and modernises whole applications</strong>, including legacy replatforming. That is far beyond repo maintenance.</li>
+					<li><strong>Traceability from business intent onwards.</strong> Requirement to work order to deployment is one governed chain. Last Light's trail is thorough but starts at the GitHub event, so it cannot tell you which requirement a change served.</li>
+					<li><strong>A managed option</strong> where 8090 builds, hosts and runs the application for you.</li>
+					<li><strong>Enterprise motion:</strong> contracts, accountability, and partnerships such as the EY.ai PDLC launch.</li>
+					<li><strong>Capital and scale</strong> behind the roadmap.</li>
+				</ul>
+			</div>
+			<div class="hh-card">
+				<h3>What Last Light does that 8090 doesn't</h3>
+				<ul class="card-list">
+					<li><strong>Runs entirely on your own infrastructure</strong>, with your model keys. Nothing is vendor-hosted or vendor-managed.</li>
+					<li><strong>Is free and MIT-licensed</strong>, with the whole implementation readable on GitHub.</li>
+					<li><strong>Installs in an afternoon:</strong> a GitHub App and a Docker stack, not a procurement cycle.</li>
+					<li><strong>Is event-driven on the repo itself.</strong> Webhooks, Slack and cron, reacting continuously rather than running a delivery programme.</li>
+					<li><strong>Is forkable end to end.</strong> Every workflow, prompt and persona is config you can override.</li>
+					<li><strong>Keeps the whole record itself.</strong> Every phase, tool call, approval and dollar of cost is persisted to SQLite plus a per-session JSONL transcript on your own disk, browsable in the dashboard and exportable as OpenTelemetry traces. None of the audit trail depends on a vendor keeping it for you.</li>
+					<li><strong>Fits a single team</strong> without an enterprise programme around it.</li>
+				</ul>
+			</div>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Which should you pick?</h2>
+		<div class="choose-grid">
+			<div class="choose-card rival">
+				<div class="choose-tag">Choose 8090 when</div>
+				<p>you need applications built or modernised in a regulated environment, the audit trail from business intent to production is a compliance requirement, and you're buying a platform and a delivery capability rather than installing a tool.</p>
+			</div>
+			<div class="choose-card lastlight">
+				<div class="choose-tag">Choose Last Light when</div>
+				<p>the code already exists and the problem is keeping up with it (triage, review, security sweeps and small fixes) and you want that running on your own infrastructure, for free, with every behaviour open to inspection.</p>
+			</div>
+		</div>
+		<p class="section-note">These can also coexist: nothing about an enterprise build programme prevents a self-hosted maintenance agent running on the repositories it produces. Details about 8090 are point-in-time (June 2026) and drawn from public sources. See the <a href="/comparisons/#sources">sources</a> on the comparisons hub.</p>
+	</section>
+
+</ComparisonLayout>

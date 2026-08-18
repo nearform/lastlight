@@ -1,6 +1,9 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
 import type { ConversationKey, ConversationSession, ConversationMessage } from "./types.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("messaging");
 
 /** Inactivity timeout before a session is considered stale (30 minutes) */
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
@@ -87,7 +90,7 @@ export class SessionManager {
    * loudly rather than commit a half-broken schema.
    */
   private rebuildWithoutTableUnique() {
-    console.log("[messaging] migrating messaging_sessions: dropping unconditional UNIQUE constraint");
+    log.info("Migrating messaging_sessions: dropping unconditional UNIQUE constraint");
     const fkOriginal = this.db.pragma("foreign_keys", { simple: true });
     this.db.pragma("foreign_keys = OFF");
     try {
@@ -215,14 +218,25 @@ export class SessionManager {
     `).run(sessionId, role, content, new Date().toISOString(), platformMessageId || null);
   }
 
-  /** Get conversation history for a session (most recent N messages) */
+  /**
+   * Get conversation history for a session — the most recent N messages, in
+   * chronological order.
+   *
+   * The `ORDER BY` is DESC precisely because the limit must bite at the OLD
+   * end: an `ASC … LIMIT 50` keeps the FIRST fifty messages of the thread, so
+   * a long-running thread rehydrates its opening and never sees what was just
+   * said. Reversed back to ASC here so the caller still gets oldest-first.
+   * `id` breaks ties — `timestamp` is a whole-millisecond ISO string and the
+   * user + assistant rows of one turn are routinely written inside the same
+   * millisecond.
+   */
   getHistory(sessionId: string, limit = 50): ConversationMessage[] {
-    const rows = this.db.prepare(`
+    const rows = (this.db.prepare(`
       SELECT * FROM messaging_messages
       WHERE session_id = ?
-      ORDER BY timestamp ASC
+      ORDER BY timestamp DESC, id DESC
       LIMIT ?
-    `).all(sessionId, limit) as any[];
+    `).all(sessionId, limit) as any[]).reverse();
 
     return rows.map((r) => ({
       id: r.id,
@@ -234,16 +248,45 @@ export class SessionManager {
     }));
   }
 
-  /** Check if the bot is already participating in a thread (any user, any active non-stale session) */
-  hasActiveThread(platform: string, channelId: string, threadId: string): boolean {
-    const cutoff = new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();
+  /**
+   * The live session for a thread, whichever user opened it — the thread's
+   * conversation as Slack itself scopes it.
+   *
+   * Sessions are keyed per (thread, user) so two people talking in one thread
+   * keep separate agent contexts, but a message the HARNESS posts belongs to
+   * the thread rather than to a user, and its writer (the workflow's
+   * `postComment`) knows only the channel + thread. Most-recently-active wins.
+   *
+   * `includeStale` drops the inactivity cutoff, for the one caller that is
+   * WRITING to the thread rather than deciding whether to answer in it: a
+   * workflow can easily run longer than `SESSION_TIMEOUT_MS` between the
+   * question and its answer, and dropping that answer because the clock lapsed
+   * mid-run is the very gap the transcript exists to close. Recording revives
+   * the session (every write touches it), so the user's next message continues
+   * this conversation instead of starting a fresh one.
+   */
+  findActiveThreadSession(
+    platform: string,
+    channelId: string,
+    threadId: string,
+    opts: { includeStale?: boolean } = {},
+  ): ConversationSession | null {
+    const cutoff = opts.includeStale
+      ? new Date(0).toISOString()
+      : new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();
     const row = this.db.prepare(`
-      SELECT 1 FROM messaging_sessions
+      SELECT * FROM messaging_sessions
       WHERE platform = ? AND channel_id = ? AND thread_id = ?
         AND active = 1 AND last_activity_at >= ?
+      ORDER BY last_activity_at DESC
       LIMIT 1
-    `).get(platform, channelId, threadId);
-    return !!row;
+    `).get(platform, channelId, threadId, cutoff) as Record<string, unknown> | undefined;
+    return row ? this.rowToSession(row) : null;
+  }
+
+  /** Check if the bot is already participating in a thread (any user, any active non-stale session) */
+  hasActiveThread(platform: string, channelId: string, threadId: string): boolean {
+    return !!this.findActiveThreadSession(platform, channelId, threadId);
   }
 
   /** Clean up old inactive sessions (call from cron) */

@@ -9,13 +9,14 @@ should require **only a YAML file** in `workflows/`, no runner changes.
 
 | File | Role |
 |---|---|
-| `schema.ts` | Zod schema for `AgentWorkflowDefinition`, `PhaseDefinition`, `PhaseLoop`, `GenericLoop`, `CronWorkflowDefinition`. Source of truth for what a YAML file is allowed to contain. Also home to the optional top-level `classification:` block (`intent`/`description`/`examples`) — how a workflow contributes its category to the composed intent classifier and claims a routable intent (issue #164) — plus `RESERVED_CONTROL_INTENTS` + `intentToken()`. |
+| `schema.ts` | Zod schema for `AgentWorkflowDefinition`, `PhaseDefinition`, `PhaseLoop`, `GenericLoop`, `CronWorkflowDefinition`. Source of truth for what a YAML file is allowed to contain. Also home to the optional top-level `classification:` block (`intent`/`description`/`examples`) — how a workflow contributes its category to the composed intent classifier and claims a routable intent (issue #164) — its chat-facing counterpart `chat:` (`trigger`/`summary`/`deflect`/`reply`), which is how a workflow advertises itself in the composed chat system prompt (`src/engine/chat/chat-prompt.ts`; an explicit opt-in, NOT derived from `classification` — see the schema doc for the three workflows where the two diverge), plus `RESERVED_CONTROL_INTENTS` + `intentToken()`, and the top-level `pr_scoped:` flag (see `pr-scope.ts`). |
 | `loader.ts` | Reads `workflows/*.yaml`, validates against the schema, caches parsed definitions. `getWorkflow(name)` is the only lookup the rest of the code uses. |
 | `templates.ts` | Mustache-ish template engine. Handles `{{branch}}`, `{{issueDir}}`, `{{contextSnapshot}}`, `{{models.architect}}`, `{{phaseOutputs.guardrails.output}}`, list iteration, and `unless_*` clauses. |
 | `simple.ts` | Top-of-stack entry: `runSimpleWorkflow(workflowName, request, …)`. Picks the trigger id, builds the template context, creates or reuses a `workflow_runs` row, then calls `runWorkflow`. |
 | `runner.ts` | The **scheduler**. One sequential walk over a chain-synthesized DAG — no separate linear/DAG paths. Owns the `phases[]`/`outputs{}` accumulation, node status, cancel/skip handling, and the terminal `set_phase`/PR wrap-up. Delegates each node's body to `PhaseExecutor`. Also: `gitAccessProfileForWorkflow`, `gitSandboxAccessForWorkflow`. Re-exports `isTerminated`. |
 | `phase-executor.ts` | `PhaseExecutor` — owns every per-phase body (context / standard agent / reviewer-loop / generic-loop, plus approval & reply gates) behind `execute(node, outputs) → PhaseOutcome`. Constructed once per run from three collaborators: run-scoped data, a `PhaseReporter`, a `PhaseResolver`. Also home to `runPhase`, `buildPhasePrompt`, `phaseConfigFor`, `isTerminated`. Unit-tested with fakes (`phase-executor.test.ts`). |
 | `dag.ts` | Pure graph logic: `buildDag(phases, { chainIfNoDeps })`, `evaluateTriggerRule`, `getReadyNodes`, `getNodesToSkip`, `isComplete`, `topoSort`. No IO. `chainIfNoDeps` synthesizes a previous-phase chain when no phase declares `depends_on`. |
+| `pr-scope.ts` | Which workflows are PR-SCOPED, derived from each definition's `pr_scoped: true` and memoised on the loader's asset version. The span of the PR run lock, the per-head-SHA dedup, escalation and the `PrState` snapshot. Metadata rather than a hardcoded name set because the handlers are operator-configurable through `routes.github.*` — remapping a route to a fork used to drop the whole gate silently (issue #256). The four original built-ins are honoured without the key, with a warning. |
 | `phase-ref.ts` | `PhaseRef` value object — the single authority for building loop-iteration labels (`format()`) and parsing them back (`parse()` → base + kind). No IO. |
 | `verdict.ts` | `parseReviewerVerdict(output) → { verdict, viaFallback }` — the one pure parser for a reviewer phase's `VERDICT:` marker (with the fallback heuristic). Both runner verdict sites call it. |
 | `loop-eval.ts` | Expression evaluator for `generic_loop.until` conditions (`output.contains('PASS')`, `verdict == 'APPROVED'`). |
@@ -210,6 +211,33 @@ against the persisted workspace — exit 0 ends the loop. (It used to run on the
 harness host via `execSync`; it now executes in the same container the phase
 does.)
 
+**`until` short-circuits `until_bash`.** A loop may declare both; `until` is
+evaluated first and a match skips the command entirely. That pairing is how the
+fix family stops paying for a gate that has nothing left to gate: both fix
+workflows carry `until: "output.contains('outcome=pushed tried=')"` alongside
+the `.git/lastlight-verify.sh` gate, so once the agent's `CI_FIX_COMPLETE`
+marker says it pushed, the harness does **not** spin up a fresh container to
+re-run a slower copy of the CI suite GitHub is already running on that commit.
+It fires on `pushed` only — `no-change` / `gave-up` pushed nothing, so no
+external check exists, the local gate is the only evidence there is, and its red
+verdict is what earns the agent the next iteration (short-circuiting those too
+would make `fix.localIterations` dead config). `tried=` is in the needle because
+`renderAttemptLine` writes a replayed `{{priorAttempts}}` line *without* it, so
+a quoted journal line from an earlier attempt can't trip the short-circuit —
+`scratch` isn't available as an alternative inside a loop, since the scheduler
+refreshes it per phase node rather than per iteration. Full contract +
+the safety trade-off in [`spec/06-workflow-engine.md`](../../spec/06-workflow-engine.md).
+
+**Templated phase budgets.** `timeout_seconds` and
+`generic_loop.max_iterations` take either a plain positive integer or
+`{ from: <dotted context path>, default: N }`. `from` is the same lookup
+`{{a.b}}` performs, resolved once before the first iteration
+(`resolveTemplatedNumber`, in the engine's `core/templated-number.ts`);
+`default` is used verbatim, with a warning, when it resolves to nothing usable.
+Both fix workflows read `fix.localIterations` / `fix.gateTimeoutSeconds` this
+way, against the run's effective (already repo-clamped) `fix` block — the two
+keys were otherwise parsed, clamped and read by nothing (issue #256).
+
 **Soft-failure policy (`generic_loop.on_soft_failure`).** By default any
 non-success iteration hard-fails the whole workflow. That's wrong for a
 long interactive loop like `explore`'s `socratic` phase: a single degenerate
@@ -272,6 +300,50 @@ docker backend the scheduler *also* skips it when the QA image isn't built
 it), recorded as the same non-failing skip. So the phase runs only where browser
 QA is genuinely possible; otherwise it no-ops. This is the Tier B browser-QA
 mechanism — see `docs/tier-b-browser-qa-scope.md` and `skills/browser-qa/`.
+
+## Conditional skip (`skip_if`)
+
+A phase can declare `skip_if:` — one expression, or a list (OR-ed) — evaluated
+when the node becomes *ready*, against `{ ...ctx, phaseOutputs, scratch }`. A
+match takes the **same non-failing skip path** as `requires_sandbox` above, so
+the run still records `succeeded`. The grammar is the `until:` one
+(`core/loop-eval.ts`); the useful form is a dotted read of a value an upstream
+phase already **parsed** into `scratch`, e.g.
+`scratch.fixMarkers.diagnosis.class == 'flaky'` on `pr-fix`/`dependabot-ci-fix`.
+A `.contains()` against `phaseOutputs.<phase>` is available and is what those
+rows used to do — don't: that is a substring match on the agent's whole
+free-form output, so prose ("this is not `class=flaky`…") and a replayed
+`{{priorAttempts}}` line both match it, `class=flaky-timeout` matches while
+`class=probably-flaky` doesn't, and it is empty across a resume boundary (next
+paragraph) so it fails open on exactly the verdicts it guards.
+
+`requires_sandbox` gates on the phase being *unavailable*; `skip_if` gates on it
+being *unnecessary*. The distinction from `on_output.contains_BLOCKED:
+{action: fail}` is the whole point: a phase whose correct outcome is "there is
+nothing downstream to do" must not paint the run red — a red run posts
+`messages.on_failure`, offers a Retry that cannot succeed, pollutes the cost and
+failure stats, and defeats the SHA dedup (which ignores failed runs).
+
+Two scoping notes: `phaseOutputs` is empty across a resume boundary (see the
+caveat above), so a guard that must survive resume should read `scratch`; and
+every expression fails **open** — an unrecognised form or an absent variable
+runs the phase. The `all_success` caveat for downstream phases applies here too.
+
+**The guard list is composed per run, not just declared.** The grammar has no
+negation, so a conditional row is not expressible — and the `flaky` cap needs
+one ("skip on `class=flaky`, *unless* this PR already deferred twice"). Its
+second term is a fact about the PR known before the run starts, so
+`promoteFlakyDiagnosis` (`simple.ts`) drops that one expression from the `fix`
+phase when `flakyDeferrals >= fix.maxFlakyDeferrals`, on a shallow copy of the
+loader's cached definition (it is a process-global). Same seam, same run:
+`escalateFixModel` swaps `models["pr-fix"]` for `models["pr-fix-retry"]` above
+`fix.escalateModelAfterAttempt`, before `context.models` is persisted so the
+admin panel shows the model the attempt used. Both read off `request.extra`,
+where `renderContext` put them at dispatch, and both are inert when those are
+absent — `promoteFlakyDiagnosis` reads `flakyDeferrals`, and `escalateFixModel`
+reads `priorAttempts.length` rather than `attempt`: `attempt` re-arms on a push
+or a recorded retry, the journal survives a retry, so the journal is the count
+that knows how many times the PR has actually been tried.
 
 ## Per-phase egress policy
 
@@ -363,6 +435,10 @@ cycle:
   iteration whose first attempt came back soft (see `on_soft_failure` above); it
   gets its own ledger row so resume/dedup treats it as a distinct step, and the
   dashboard's longest-prefix grouping still nests it under the parent
+- `${parentPhaseName}_iter_${n}_check` — the `generic_loop.until_bash` exit
+  check that follows iteration n (see "Recording the loop" below). Ledger row
+  only: it is never a phase, never enters `phase_history`, and never becomes
+  `current_phase`.
 
 The legacy bare-numeric re-review form (`reviewer_2`) is **dropped** — it was
 untagged, ambiguous with literal phase names, and inconsistent with the
@@ -370,8 +446,43 @@ untagged, ambiguous with literal phase names, and inconsistent with the
 
 The dashboard's `WorkflowPipeline.tsx` uses a longest-prefix match to
 group these under the declared parent (`reviewer_fix_1` → belongs to
-`reviewer`) and stacks them vertically below that column in the pipeline
-diagram.
+`reviewer`; `fix_iter_1_check` → belongs to `fix`) and stacks them vertically
+below that column in the pipeline diagram.
+
+### Recording the loop
+
+**An iteration is persisted when its WORK finishes, not when the loop's exit
+condition resolves.** Everything after the agent turn — the `until` expression
+and especially the `until_bash` command — is the loop asking "are we done?", not
+the iteration still working. So `persistPhase(<phase>_iter_N, "iteration N —
+work complete")` and the iteration's `recordOutputText` both fire *before* the
+condition is evaluated. Prod run `49c101aa` is why: it sat 6m48s in `until_bash`
+advertising `currentPhase: "diagnose"` (a phase that had ended 12 minutes
+earlier) with `fix_iter_1` missing from `phase_history` although it had
+completed.
+
+**`until_bash` gets its own `executions` row** (`<phase>_iter_N_check`) —
+`recordStart` before the command, `recordFinish` + `recordOutputText` after. It
+is a real sandbox command that can run for minutes, and an open row with a start
+time is how every renderer already draws "in flight, since N". Two deliberate
+properties:
+
+- It **bypasses** `runPhaseLedger` / `shouldRunPhase`. A condition must be
+  re-evaluated every time it is asked; a dedup hit replaying a stale verdict
+  against a since-changed workspace is the bug the row exists to expose. Its
+  dedup key is distinct from the iteration's, so it can never mark a phase done
+  or be resumed into.
+- `success` records whether the check **ran**, not what it said. A red gate is
+  the loop working as designed, so the verdict lands in `stop_reason` as
+  `condition_met` / `condition_not_met`. The dashboard renders the latter as its
+  own muted `unmet` tone (neither green nor red) and the CLI as `↻`.
+
+When the condition IS met, a *second* history entry is appended for the same
+label (`iteration N — condition met`). Two distinct events, and keeping them
+apart is what makes the gap legible; every reader folds a repeated label
+last-wins (the pipeline's history `Map`, both resume paths' `Set` of names,
+`PhaseDetailPanel`'s `.at(-1)`). Covered by
+`tests/workflows/generic-loop-check-row.test.ts`.
 
 ## Approval gates
 
@@ -447,13 +558,24 @@ a resumed run lands in the same sandbox dir the original started in.
 
 **Per-PR reuse exception (issue #107).** The workflows in
 `PER_TARGET_REUSE_WORKFLOWS` (`pr-review`, `pr-fix`) **drop** the run-id
-suffix — their taskId is `${repo}-${prNumber}-${workflowName}`, keyed by
-(repo, PR) rather than per-run. A re-review of the same PR (push →
-`synchronize`, cron PR-review fanout) therefore lands in the **same**
-sandbox dir, so `prePopulateWorkspace` does `git fetch` + `reset --hard` +
-`git clean -fdx -e node_modules` instead of a fresh 1.3G clone + full
-install, and N dirs/PR collapse to 1 (cutting the #106 churn at its
-source).
+suffix — their taskId is keyed by (repo, PR) rather than per-run. A
+re-review of the same PR (push → `synchronize`, cron PR-review fanout)
+therefore lands in the **same** sandbox dir, so `prePopulateWorkspace` does
+`git fetch` + `reset --hard` + `git clean -fdx -e node_modules` instead of
+a fresh 1.3G clone + full install, and N dirs/PR collapse to 1 (cutting the
+#106 churn at its source).
+
+**The fix family shares one workspace.** Every workflow in
+`PR_FIX_SHAPED_WORKFLOWS` (`pr-fix`, `dependabot-ci-fix`) uses the *same*
+key, `${repo}-${prNumber}-fix`, rather than `…-${workflowName}`. The
+PR-scoped run lock (below) means only one of them can be in flight for a PR
+at a time, so two directories were pure waste — and routing genuinely
+varies: an `@bot fix this` comment on a red Dependabot PR is an LLM
+decision that can land on either workflow, so attempt 2 would otherwise
+re-clone and re-install from cold just because the event arrived
+differently. Everything else keeps `${repo}-${number}-${workflowName}`;
+`dependabot-pr-merge` has no checkout to share and `pr-review` must not
+share a tree with an agent that is rewriting it.
 
 **Per-target recreate (issue #153).** `PER_TARGET_RECREATE_WORKFLOWS`
 (`build`) *also* drops the run-id suffix (taskId `${repo}-${issueNumber}-build`)
@@ -465,13 +587,66 @@ and its `lastlight/N-slug` branch is always cut from the latest default, never a
 stale pushed branch. This is driven by `recreateFromBase` on `GitSandboxAccess`
 / `PrePopulateSpec` (set in `gitSandboxAccessForWorkflow`).
 
-Concurrency is held off by the dispatcher's `isRunning(skill, triggerId)` guard
-plus `runs.getByTrigger` reuse; the cross-run vs same-run distinction is made by
+Concurrency on a PR is held off by the **PR-scoped run lock** — the
+`runInFlight` field of the snapshot the dispatch gate resolves
+(`src/engine/pr-state.ts`; one live run at a time across `pr-fix`,
+`dependabot-ci-fix`, `dependabot-pr-merge`, `pr-review`, `paused` included,
+because a paused run still owns its workspace). This is not a refinement of the
+old `isRunning(skill, triggerId)` guard: **that guard never worked at all.** It
+is called with a bare workflow name and a bare issue number, while every phase
+ledger row is written by `phase-executor.ts` with `skill = "<workflow>:<phase>"`
+and `trigger_id = "owner/repo#N"` — no row could ever match both predicates, so
+it always returned false. It survives only for the non-PR workflows, which have
+no snapshot. Everything else here is unchanged: `runs.getByTrigger` reuse, and
+the cross-run vs same-run distinction made by
 a `<workDir>/.lastlight-run` marker stamped with the owning run id (same id →
 preserve the checkout for the next phase — the architect's `plan.md` survives;
 different id → refresh for pr-review/pr-fix, recreate-from-base for build). The
 workspace-provisioning policy sets live in `src/workflows/target-policy.ts`; the
 clone logic is in `src/sandbox/index.ts`.
+
+## Per-repo config layer (issue #180)
+
+The target repo may commit a `.lastlight/` directory that overrides a bounded
+subset of config for runs against itself (full contract:
+`apps/server/CLAUDE.md` → "Per-repo config layer", `spec/02-configuration.md`).
+What the runner has to know:
+
+- **Where it enters.** `resolveRepoRunConfig` (`simple.ts`) runs once at the
+  `dispatchWorkflow` choke point in `src/index.ts` and the result rides
+  `SimpleWorkflowRequest.repoConfig`. `runWorkflow` takes it as a trailing,
+  **defaulted** 10th parameter — defaulted so `runWorkflow.length` stays 9, the
+  frozen `lastlight/evals` surface pinned by `evals-contract.test.ts`.
+- **Effective maps, not deltas.** `repoConfig.models` / `.variants` / `.approval`
+  are already `base ⊕ repo`, so `simple.ts` and `runWorkflow` just substitute
+  them (`effectiveModels`, `effectiveVariants`, `effectiveApproval`) — the
+  `{{models.<phase>}}` template chain and `gateEnabled` need no knowledge of the
+  layer. No repo layer ⇒ these are the caller's own maps by identity.
+- **Per-run asset resolver, never a global.** `runAssetResolver()` builds
+  `createAssetResolver([...getAssetLayers(), makeLayer("repo", assetRoot)],
+  getDisabledAssets(), { agentContextAdditiveOnly: true })` and that resolver
+  backs `EnginePorts.assets` (`loadPromptTemplate` + `resolveSkillPaths`) for the
+  whole run. **Not** `configureWorkflowAssets` — several workflows and a cron
+  fan-out are in flight at once, so mutating the module globals would leak one
+  repo's prompts into another run.
+- **Agent context is composed once, here.** `runAgentContext()` calls
+  `assets.loadAgentContext()` and the result is threaded as
+  `ExecutorConfig.agentContext`. This is the *only* channel by which a repo's
+  `agent-context/*.md` reaches `AGENTS.md`, and `agentContextAdditiveOnly` is
+  what stops a repo shadowing `soul.md` / `rules.md` / `security.md`. Downstream
+  (the orchestrator's workspace write, the k8s `AgentContextSink`) uses the value
+  verbatim.
+- **Failure rule.** Every step above is best-effort: a missing cache dir or an
+  unreadable file drops the layer with a logged warning and the run continues on
+  the operator's assets. A repo's config can never fail a run.
+- **Reporting.** Resolver warnings (a dropped repo agent-context file) are
+  written to `workflow_runs.scratch.repoConfig.assetWarnings` in `runWorkflow`'s
+  `finally`, so a failed run still explains what was ignored.
+- **Resume restores, never re-resolves.** `resume.ts` rebuilds the layer from
+  `context.repoConfig` (`restoreRepoRunConfig`), pinning the asset tree by exact
+  tree sha; an edit made while the run was paused/queued/dead cannot retarget it
+  mid-flight. If the tree is gone, the asset layer is dropped with a
+  `scratch.repoConfig.restoreWarnings` note rather than swapped for today's.
 
 ## Templates
 
@@ -481,7 +656,8 @@ notification strings. Variables come from two places:
 - **Run-scoped context** built in `simple.ts`: `owner`, `repo`,
   `issueNumber`, `issueTitle`, `issueBody`, `issueLabels`, `commentBody`,
   `sender`, `branch`, `taskId`, `issueDir`, `contextSnapshot`, plus the
-  `models` map and `...request.extra`.
+  **effective** `models` / `variants` maps (the repo layer already folded in)
+  and `...request.extra`.
 - **Phase-scoped context** assembled inside `runPhase`: `phaseOutputs`
   (a map keyed by declared `output_var` in each phase), `fixCycle`
   (loop only), and the most recent `previousOutput`.

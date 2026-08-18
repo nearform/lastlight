@@ -1,0 +1,103 @@
+---
+// Last Light vs. Factory droid: targets "factory ai alternative" /
+// "factory droid alternative" / "self-hosted factory ai".
+import ComparisonLayout from '../../layouts/ComparisonLayout.astro';
+
+const title = "Last Light vs. Factory Droid: the Open-Source, Self-Hosted Alternative";
+const description = "Factory droid is a polished commercial multi-agent platform with on-prem only at Enterprise tier. Last Light is an MIT-licensed software factory that is self-hosted at every tier. An honest head-to-head.";
+
+const heading = 'Last Light vs. <span class="accent">Factory droid</span>';
+const subtitle = "These two look superficially similar. Both run AI coding agents with a planner/reviewer split, both are model-agnostic, both reach Slack. That makes this the comparison worth doing carefully. The real difference is commercial platform vs. self-hosted software factory.";
+
+const rowsDuo = [
+	["Hosting", "Self-hosted at every tier", "SaaS; on-prem only on Enterprise"],
+	["Surfaces", "GitHub, Slack, dashboard, CLI", "Terminal, VS Code, JetBrains, Vim, browser, Slack"],
+	["Model choice", "BYO: Anthropic, OpenAI, OpenRouter and others", "Claude, GPT-5.x, Gemini, DeepSeek, Qwen"],
+	["Ticketing", "GitHub-issue-centric", "Jira and Linear first-class"],
+	["Isolation", "Docker / micro-VM sandbox + default-deny egress firewall", "Managed cloud sandboxes (“Droid Computers”)"],
+	["Customisation", "Fork any workflow, prompt or persona via the overlay", "Configurable within the product"],
+	["Benchmarks", "None published; ships an eval harness you point at your own repos", "Published Terminal-Bench leadership"],
+	["Compliance", "Whatever you build. You own the boundary", "SOC 2 Type II, support, SLA"],
+	["Cost", "Free / MIT + your model spend + your infra", "$20 / $100 / $200 per mo + Team/Enterprise"],
+];
+---
+
+<ComparisonLayout title={title} description={description} heading={heading} subtitle={subtitle} slug="factory-ai">
+
+	<section class="content-section">
+		<h2>The short version</h2>
+		<div class="callout-card">
+			<p>Factory is the more <strong>complete product</strong>, and it isn't close. It reaches more surfaces, ships managed sandboxes, integrates with the ticketing systems enterprises actually use, publishes benchmark results, and comes with SOC 2, support and an SLA.</p>
+			<p>Last Light is the more <strong>ownable system</strong>. It is self-hosted at every tier rather than only at Enterprise, every behaviour is YAML you can read and fork, and the security boundary (egress firewall, per-run token scopes) is yours to set rather than the vendor's to assert.</p>
+			<p>If you're evaluating both, the question that decides it is rarely a feature: it's whether "on-prem" is a line item you're willing to buy an Enterprise contract for, or a property you need from day one.</p>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Side by side</h2>
+		<div class="table-scroll">
+			<table class="cmp duo">
+				<thead>
+					<tr><th></th><th class="ll">Last Light</th><th>Factory droid</th></tr>
+				</thead>
+				<tbody>
+					{rowsDuo.map(([k, ll, other]) => (
+						<tr>
+							<th scope="row">{k}</th>
+							<td class="ll" set:html={ll} />
+							<td set:html={other} />
+						</tr>
+					))}
+				</tbody>
+			</table>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Where each one wins</h2>
+		<div class="hh-grid">
+			<div class="hh-card">
+				<h3>What Factory does that Last Light doesn't</h3>
+				<ul class="card-list">
+					<li><strong>Multi-surface presence.</strong> Droids live in the terminal, VS Code, JetBrains, Vim, browser, and Slack. Last Light has no editor integration.</li>
+					<li><strong>Managed cloud sandboxes</strong> ("Droid Computers"), zero setup. Last Light expects you to run the sandbox on your host.</li>
+					<li><strong>Ticket-native work.</strong> Jira and Linear are first-class. Last Light is GitHub-issue-centric.</li>
+					<li><strong>Broader model menu:</strong> Claude, GPT-5.x, Gemini, DeepSeek, Qwen.</li>
+					<li><strong>Published benchmark leadership</strong> (state-of-the-art Terminal-Bench results). Last Light publishes none, and hands you an <a href="/evals/introduction/">eval harness</a> instead.</li>
+					<li><strong>A commercial product:</strong> SOC 2 Type II, support, SLA, managed upgrades, polished UX.</li>
+					<li><strong>Mature multi-agent coordination</strong> across Code/Reviewer/Tester/Knowledge/Reliability droids.</li>
+				</ul>
+			</div>
+			<div class="hh-card">
+				<h3>What Last Light does that Factory doesn't</h3>
+				<ul class="card-list">
+					<li><strong>Truly self-hosted at every tier.</strong> Code, prompts, and model traffic stay on your infra with your keys. Factory on-prem is Enterprise-only.</li>
+					<li><strong>Workflows as open config</strong>, not a closed product. Read, fork, and override every behaviour via the <code>instance/</code> overlay.</li>
+					<li><strong>An egress policy you own:</strong> a default-deny firewall plus four downscoped, per-run GitHub App token profiles.</li>
+					<li><strong>First-class approval gates.</strong> Pause after the architect plan; resume via GitHub comment, Slack, or dashboard.</li>
+					<li><strong>Standing event + cron service:</strong> real-time webhooks <em>and</em> scheduled weekly health/security sweeps, plus a weekly per-repo Slack digest of what shipped and what the agent did about it.</li>
+					<li><strong>Per-repo self-service.</strong> Each repo can commit a bounded <code>.lastlight/</code> layer of its own, so teams tune the agent for their code without going through you.</li>
+					<li><strong>Feedback scored against the run.</strong> A 👍 or 👎 on the bot's output attaches to the workflow run that produced it, which makes prompt changes measurable.</li>
+					<li><strong>Evals on your own code.</strong> The <a href="/evals/introduction/">harness</a> replays the real triage, review and build workflows against a mocked GitHub and scores them, with cases built from your own merged PRs.</li>
+					<li><strong>Free and OSS</strong>, with no per-seat or per-tier cost.</li>
+				</ul>
+			</div>
+		</div>
+	</section>
+
+	<section class="content-section">
+		<h2>Which should you pick?</h2>
+		<div class="choose-grid">
+			<div class="choose-card rival">
+				<div class="choose-tag">Choose Factory droid when</div>
+				<p>you want a polished, supported, multi-surface platform your whole team can adopt today, you're fine with a SaaS vendor (or buying Enterprise for on-prem), and you value benchmark-leading models and zero-ops sandboxes over owning the stack.</p>
+			</div>
+			<div class="choose-card lastlight">
+				<div class="choose-tag">Choose Last Light when</div>
+				<p>you need the agent on your own infrastructure with your own keys and a network boundary you control, you want repo-maintenance behaviours as forkable YAML, and you'd rather operate an OSS harness than pay and trust a SaaS, accepting that you own the ops.</p>
+			</div>
+		</div>
+		<p class="section-note">Point-in-time as of June 2026. Factory's pricing, model menu and benchmark scores move quickly, so check <a href="https://docs.factory.ai/pricing" target="_blank" rel="noopener">their pricing page</a> before relying on a figure here.</p>
+	</section>
+
+</ComparisonLayout>

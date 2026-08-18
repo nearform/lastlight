@@ -1,5 +1,8 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import { logger } from "../logging/logger.js";
+
+const log = logger("tail");
 
 export interface TailedLine {
   index: number;
@@ -117,7 +120,7 @@ export async function tailJsonl(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") {
-        console.error(`[tail] ${filePath}: ${(err as Error).message}`);
+        log.error("Tail read failed", { filePath, err });
       }
     } finally {
       tickInFlight = false;

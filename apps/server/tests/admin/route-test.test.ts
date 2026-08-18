@@ -11,6 +11,7 @@ vi.mock("#src/engine/screen/classifier.js", () => ({
     "build", "explore", "question", "triage", "review", "security",
     "verify", "qa-test", "demo", "approve", "reject", "status", "reset", "chat",
   ]),
+  GITHUB_ONLY_INTENTS: new Set(["dependabot-ci-fix", "dependabot-pr-merge"]),
 }));
 vi.mock("#src/engine/screen/screen.js", async () => {
   const actual = await vi.importActual<typeof import("#src/engine/screen/screen.js")>("#src/engine/screen/screen.js");

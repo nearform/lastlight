@@ -23,7 +23,7 @@ how you submit.
 |---|---|---|---|
 | `skip` | boolean | no | `true` → you decided not to review (bot-authored / merged / already reviewed at head). The action posts nothing. |
 | `summary` | string | yes | One or two sentences on what the PR does + your overall assessment. Becomes the review body. |
-| `event` | string | yes | `APPROVE` \| `REQUEST_CHANGES` \| `COMMENT`. A clean PR is `APPROVE` with an empty `findings` array. |
+| `event` | string | yes | `APPROVE` \| `REQUEST_CHANGES` \| `COMMENT`. A clean PR is `APPROVE` with an empty `findings` array — but never `APPROVE` over an open human `CHANGES_REQUESTED`, or while one of your own prior findings is still open (SKILL.md §2/§2b). |
 | `findings` | array | yes | The surviving Critical/Important findings (may be empty). |
 
 ## Finding object

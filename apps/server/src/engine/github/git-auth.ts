@@ -1,8 +1,9 @@
 import { execFileSync } from "child_process";
-import { createSign } from "crypto";
-import { readFileSync } from "fs";
-import { resolve } from "path";
 import { GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue } from "../../sandbox/git-http-auth.js";
+import { logger } from "../../logging/logger.js";
+import { appJwt } from "./app-jwt.js";
+
+const log = logger("git-auth");
 
 export type GitHubPermissionLevel = "read" | "write";
 
@@ -71,9 +72,12 @@ export async function configureGitAuth(config: {
   const token = await getInstallationToken(config);
 
   if (!shouldWriteGlobalGitConfig()) {
-    console.log(`[git-auth] Minted GitHub App token (expires: ${token.expiresAt}). ` +
-      `Global git config left untouched; sandboxes receive the token via GIT_TOKEN + ` +
-      `a GIT_CONFIG_* http.extraheader. Set LASTLIGHT_WRITE_GLOBAL_GIT=1 to also write ~/.gitconfig.`);
+    log.info(
+      "Minted GitHub App token — global git config left untouched; sandboxes receive the token " +
+        "via GIT_TOKEN + a GIT_CONFIG_* http.extraheader (set LASTLIGHT_WRITE_GLOBAL_GIT=1 to also " +
+        "write ~/.gitconfig)",
+      { expiresAt: token.expiresAt },
+    );
     return token;
   }
 
@@ -87,7 +91,7 @@ export async function configureGitAuth(config: {
   execGit(["config", "--global", "user.name", botLogin]);
   execGit(["config", "--global", "user.email", `${botLogin}@users.noreply.github.com`]);
 
-  console.log(`[git-auth] Configured GLOBAL git with GitHub App token via http.extraheader (expires: ${token.expiresAt})`);
+  log.info("Configured GLOBAL git with GitHub App token via http.extraheader", { expiresAt: token.expiresAt });
 
   return token;
 }
@@ -120,7 +124,7 @@ export async function refreshGitAuth(config: {
   // (idempotent — safe to call standalone).
   execGit(["config", "--global", GITHUB_EXTRAHEADER_KEY, githubExtraheaderValue(token.token)]);
 
-  console.log(`[git-auth] Refreshed token in GLOBAL git config via http.extraheader (expires: ${token.expiresAt})`);
+  log.info("Refreshed token in GLOBAL git config via http.extraheader", { expiresAt: token.expiresAt });
   return token;
 }
 
@@ -133,16 +137,7 @@ async function getInstallationToken(config: {
   repositories?: string[];
   permissions?: GitHubTokenPermissions;
 }): Promise<{ token: string; expiresAt: string }> {
-  const privateKey = readFileSync(resolve(config.privateKeyPath), "utf-8");
-
-  // Generate JWT (RS256, no external dependency)
-  const now = Math.floor(Date.now() / 1000);
-  const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({ iat: now - 60, exp: now + 600, iss: config.appId })).toString("base64url");
-  const signer = createSign("RSA-SHA256");
-  signer.update(`${header}.${payload}`);
-  const signature = signer.sign(privateKey, "base64url");
-  const jwtToken = `${header}.${payload}.${signature}`;
+  const jwtToken = appJwt(config.appId, config.privateKeyPath);
 
   // Exchange for installation token
   const requestBody: Record<string, unknown> = {};
@@ -173,6 +168,23 @@ async function getInstallationToken(config: {
   }
 
   const data = await res.json();
+
+  // Log the scope GitHub actually GRANTED the minted token (the executor already
+  // logs the *requested* profile before this call). The mint response carries
+  // `repository_selection` + `permissions` — the exact datapoint that
+  // distinguishes "the injected token is correctly write-scoped, so a downstream
+  // 403 is a transit/env narrowing" from "the mint itself came back read-only /
+  // wrong-repo" (issue #215). For a repo-scoped mint `repositories` names the
+  // covered repos; for a full-installation mint it's absent and selection="all".
+  const grantedRepos = Array.isArray(data.repositories)
+    ? data.repositories.map((r: { full_name?: string; name?: string }) => r.full_name ?? r.name).join(",")
+    : "(all)";
+  log.info("Mint granted", {
+    repositorySelection: data.repository_selection ?? "?",
+    permissions: data.permissions ?? "?",
+    repositories: grantedRepos,
+  });
+
   return { token: data.token, expiresAt: data.expires_at };
 }
 

@@ -392,6 +392,7 @@ If KVM isn't available, fall back to the Docker deploy above with `LASTLIGHT_SAN
    - **Pull Requests**: Read & Write
    - **Contents**: Read & Write
    - **Checks**: Read & Write (post the `last-light/review` check; receive its "Re-run" requests)
+   - **Commit statuses**: Read (classic CI statuses — CircleCI, Jenkins, other external CI. Separate from **Checks**; without it CI is judged on check runs alone)
    - **Metadata**: Read
 4. Subscribe to **events**: `Issues`, `Pull request`, `Issue comment`, `Check run`, `Check suite` (the last two enable the GitHub "Re-run checks" buttons to re-trigger a review)
 5. Click **Create GitHub App**

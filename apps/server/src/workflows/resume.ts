@@ -4,8 +4,14 @@ import type { GitHubClient } from "../engine/github/github.js";
 import type { ModelConfig, VariantConfig } from "../config/config.js";
 import { runWorkflow, type ApprovalGateConfig, type RunnerCallbacks } from "./runner.js";
 import { getWorkflow } from "./loader.js";
-import { workflowScopedTaskId } from "./simple.js";
+import {
+  restoreRepoRunConfig,
+  workflowScopedTaskId,
+  type RepoConfigRunRecord,
+  type RunRepoConfig,
+} from "./simple.js";
 import { slugify, type TemplateContext } from "./templates.js";
+import { harvestFixMarkers } from "../engine/fix-harvest.js";
 import {
   ProgressNotifier,
   GitHubTransport,
@@ -13,6 +19,10 @@ import {
   runDashboardUrl,
   type NotifierState,
 } from "../notify/index.js";
+import { logger } from "../logging/logger.js";
+import { logPhaseEnd, logPhaseStart } from "../logging/phase-log.js";
+
+const log = logger("resume");
 
 export interface ResumeOptions {
   db: StateDb;
@@ -90,8 +100,7 @@ async function refetchIssue(
       ).filter(Boolean),
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[resume] Could not refetch ${owner}/${repo}#${issueNumber}: ${msg}`);
+    log.warn("Could not refetch issue", { repo: `${owner}/${repo}`, issueNumber, err });
     return fallback;
   }
 }
@@ -107,6 +116,8 @@ function makeCallbacks(
   repo: string,
   issueNumber: number | undefined,
   workflowName: string,
+  db: StateDb,
+  runId: string,
 ): RunnerCallbacks {
   return {
     postComment: github && issueNumber
@@ -114,15 +125,106 @@ function makeCallbacks(
           try {
             await github.postComment(owner, repo, issueNumber, msg);
           } catch (err: unknown) {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[resume] Failed to post comment: ${m}`);
+            log.warn("Failed to post comment", { err });
           }
         }
       : undefined,
-    onPhaseStart: async (phase) => console.log(`[resume] ▶ ${workflowName}/${phase}`),
-    onPhaseEnd: async (phase, result) =>
-      console.log(`[resume] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`),
+    onPhaseStart: async (phase) => logPhaseStart(log, workflowName, phase),
+    onPhaseEnd: async (phase, result) => {
+      logPhaseEnd(log, workflowName, phase, result);
+      // The marker harvest has to be wired on the RESUME paths too, not only on
+      // the fresh dispatch in `index.ts`. A fix run that paused for an approval
+      // gate or was picked back up after a harness restart completes its
+      // `diagnose`/`fix` phases HERE — harvesting only in `index.ts` would lose
+      // every marker on exactly the runs whose attempt counter matters most.
+      harvestFixMarkers(db, runId, workflowName, phase, result.output);
+    },
   };
+}
+
+/** A JSON-decoded `Record<string, string>` off a run row, or undefined. */
+function storedStringMap(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, v] of Object.entries(value)) if (typeof v === "string") out[key] = v;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** The persisted repo-config record, if the row has a well-formed one. */
+function storedRepoConfigRecord(stored: Record<string, unknown>): RepoConfigRunRecord | undefined {
+  const record = stored.repoConfig as RepoConfigRunRecord | undefined;
+  if (!record || typeof record !== "object") return undefined;
+  if (typeof record.repo !== "string" || typeof record.treeSha !== "string") return undefined;
+  return { ...record, assets: record.assets ?? [], warnings: record.warnings ?? [] };
+}
+
+/** The effective config a resumed run continues under. */
+interface ResumedRunConfig {
+  models?: ModelConfig;
+  variants?: VariantConfig;
+  approval?: ApprovalGateConfig;
+  repoConfig?: RunRepoConfig;
+}
+
+/**
+ * The effective (base ⊕ repo) config for a run being CONTINUED (issue #180).
+ *
+ * A resume is not a new dispatch: `resumeSimpleRun` re-enters a run that has
+ * already executed phases, and those phases used the models, variants, gates and
+ * assets resolved at its FIRST dispatch. So we reuse what that dispatch
+ * persisted — `context.models` / `context.variants` (already the effective maps)
+ * and `context.repoConfig` (the repo layer, pinned by tree sha) — instead of
+ * re-resolving from the repo's default branch. Re-resolving would let an edit
+ * made while the run was paused, queued or dead retarget it mid-flight, so half
+ * a build ran on one model and half on another; it would also mean a network
+ * round-trip on every boot-recovery sweep.
+ *
+ * The one thing that genuinely can't be pinned is the unpacked ASSET root (a
+ * cache path — see `restoreRepoRunConfig`): when the tree the run used is gone,
+ * the layer degrades to the operator's assets with a warning recorded on the
+ * run, never a crash and never a silent swap to whatever the repo says today.
+ *
+ * Falls back to the operator's boot maps for rows written before any of this was
+ * persisted, which is byte-identical to the pre-issue-#180 resume path.
+ */
+async function resumedRunConfig(run: WorkflowRun, opts: ResumeOptions): Promise<ResumedRunConfig> {
+  const stored = (run.context || {}) as Record<string, unknown>;
+  const models = (storedStringMap(stored.models) as ModelConfig | undefined) ?? opts.models;
+  const variants = (storedStringMap(stored.variants) as VariantConfig | undefined) ?? opts.variants;
+  const base: ResumedRunConfig = { models, variants, approval: opts.approvalConfig };
+
+  const record = storedRepoConfigRecord(stored);
+  if (!record) return base;
+
+  try {
+    const { repoConfig, warning } = await restoreRepoRunConfig(record, {
+      models,
+      variants,
+      approval: opts.approvalConfig,
+    });
+    if (warning) {
+      // Recorded on the run so "why did this resumed run ignore the repo's
+      // prompt?" is answerable from the row alone. `mergeScratch` replaces the
+      // whole `repoConfig` node, but the two writers can't collide: this one
+      // only fires when the asset layer was DROPPED, and the runner's
+      // `assetWarnings` only when it was applied.
+      try {
+        opts.db.runs.mergeScratch(run.id, { repoConfig: { restoreWarnings: [warning] } });
+      } catch (err: unknown) {
+        log.warn("Could not record the repo-config restore warning", { runId: run.id, err });
+      }
+    }
+    return {
+      models: repoConfig.models,
+      variants: repoConfig.variants,
+      approval: repoConfig.approval,
+      repoConfig,
+    };
+  } catch (err: unknown) {
+    // The repo-config failure rule: warn, drop the layer, run anyway.
+    log.warn("Could not restore the repo config", { repo: record.repo, runId: run.id, err });
+    return base;
+  }
 }
 
 /**
@@ -148,15 +250,18 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
   const stored = (run.context || {}) as Record<string, unknown>;
 
   // Derive owner/repo: GitHub trigger ids encode it as owner/repo#N;
-  // Slack-originated runs store owner in context and repo on the row.
+  // Slack-originated runs fall back to the row's own (owner, BARE repo) pair,
+  // then to context.owner for a row whose owner column was never captured.
+  // Both halves are bare here — `repo` feeds Octokit AND `workflowScopedTaskId`
+  // below, which builds a filesystem path out of it.
   const parsed = parseTriggerId(run.triggerId);
-  const owner = parsed?.owner ?? (stored.owner as string | undefined) ?? "";
+  const owner = parsed?.owner ?? run.owner ?? (stored.owner as string | undefined) ?? "";
   const repo = parsed?.repo ?? run.repo ?? "";
   const issueNumber = run.issueNumber;
   const isSlack = run.triggerId.startsWith("slack:");
 
   if (!owner && !repo && !isSlack) {
-    console.warn(`[resume] Skipping ${run.id}: cannot derive owner/repo from triggerId ${run.triggerId}`);
+    log.warn("Skipping — cannot derive owner/repo from triggerId", { runId: run.id, triggerId: run.triggerId });
     return;
   }
 
@@ -164,8 +269,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
   try {
     definition = getWorkflow(run.workflowName);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[resume] Skipping ${run.id}: workflow definition "${run.workflowName}" not found: ${msg}`);
+    log.warn("Skipping — workflow definition not found", { runId: run.id, workflowName: run.workflowName, err });
     opts.db.runs.finishRun(run.id, "failed", { error: `harness restarted; workflow definition not found` });
     return;
   }
@@ -173,6 +277,11 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
   const issue = issueNumber && owner && repo
     ? await refetchIssue(opts.github, owner, repo, issueNumber)
     : { title: "", body: "", labels: [] as string[] };
+
+  // What this run has been executing under all along — its own effective models,
+  // variants, gates and repo asset layer, not whatever the operator/repo config
+  // says right now. See `resumedRunConfig`.
+  const effective = await resumedRunConfig(run, opts);
 
   // Reconstruct the template context using the bits we stored on creation +
   // refreshed issue data. taskId/branch/issueDir were saved on the original
@@ -211,13 +320,17 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     prePopulateBranch: typeof stored.prePopulateBranch === "string"
       ? stored.prePopulateBranch
       : undefined,
-    models: opts.models as unknown as Record<string, unknown>,
+    // EFFECTIVE maps — the repo layer this run started under is already folded
+    // in, so `{{models.<phase>}}` renders exactly what the first dispatch did.
+    models: effective.models as unknown as Record<string, unknown>,
     triggerIdOverride: isSlack ? run.triggerId : undefined,
   };
 
-  console.log(
-    `[resume] Re-dispatching ${run.workflowName} for ${run.triggerId} (was on phase=${run.currentPhase})`,
-  );
+  log.info("Re-dispatching", {
+    workflowName: run.workflowName,
+    triggerId: run.triggerId,
+    currentPhase: run.currentPhase,
+  });
 
   // For Slack-originated runs, post progress to the Slack thread instead
   // of GitHub. The channelId/threadId were stored in context by the
@@ -232,19 +345,21 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
         postComment: async (msg: string) => {
           try { await poster(ch, th, msg); }
           catch (err: unknown) {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[resume] Failed to post to Slack thread: ${m}`);
+            log.warn("Failed to post to Slack thread", { err });
           }
         },
-        onPhaseStart: async (phase) => console.log(`[resume] ▶ ${run.workflowName}/${phase}`),
-        onPhaseEnd: async (phase, result) =>
-          console.log(`[resume] ◀ ${run.workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`),
+        onPhaseStart: async (phase) => logPhaseStart(log, run.workflowName, phase),
+        onPhaseEnd: async (phase, result) => {
+          logPhaseEnd(log, run.workflowName, phase, result);
+          harvestFixMarkers(opts.db, run.id, run.workflowName, phase, result.output);
+        },
       };
     }
   }
 
   let callbacks: RunnerCallbacks =
-    slackCallbacks || makeCallbacks(opts.github, owner, repo, issueNumber, run.workflowName);
+    slackCallbacks ||
+    makeCallbacks(opts.github, owner, repo, issueNumber, run.workflowName, opts.db, run.id);
 
   // Re-attach the in-place checklist on GitHub boot-recovery so a run that was
   // mid-flight when the harness died keeps editing its original status comment
@@ -284,8 +399,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
       );
       callbacks = { ...callbacks, reporter: notifier };
     } catch (err: unknown) {
-      const m = err instanceof Error ? err.message : String(err);
-      console.warn(`[resume] notifier setup failed: ${m}`);
+      log.warn("Notifier setup failed", { err });
     }
   }
 
@@ -310,14 +424,23 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
       runConfig,
       callbacks,
       opts.db,
-      opts.models,
-      opts.approvalConfig,
+      effective.models,
+      effective.approval,
       run.id,           // <-- key bit: reuse the existing workflow run id
-      opts.variants,
+      effective.variants,
+      // 10th arg: the repo layer, restored from the run row rather than
+      // re-resolved, so a resumed run keeps the prompts/skills/agent-context
+      // (and the models above) it started with.
+      effective.repoConfig,
     );
 
     if (result.success) {
       opts.db.runs.finishRun(run.id, "succeeded");
+    } else if (result.backpressure) {
+      // Same backpressure requeue as the fresh-dispatch path: a promoted run
+      // that re-hits the quota goes back to `queued` for the next admission tick.
+      opts.db.runs.requeueRunning(run.id);
+      log.info("Requeued — cluster at capacity", { workflowName: run.workflowName, runId: run.id });
     } else if (!result.paused) {
       opts.db.runs.finishRun(run.id, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed during resume",
@@ -325,7 +448,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[resume] ${run.workflowName} resume for ${run.id} threw: ${msg}`);
+    log.error("Resume threw", { workflowName: run.workflowName, runId: run.id, err });
     opts.db.runs.finishRun(run.id, "failed", { error: `resume threw: ${msg}` });
   }
 }
@@ -366,17 +489,17 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     for (const run of queued) {
       requeued += opts.db.runs.requeue(run.id);
     }
-    console.log(`[resume] Refreshed queue clock for ${requeued} queued orphan(s) — admission will promote them`);
+    log.info("Refreshed queue clock for queued orphan(s) — admission will promote them", { requeued });
   }
 
   const orphans = active.filter((r) => r.status === "running");
 
   if (orphans.length === 0) {
-    console.log("[resume] No orphaned running workflow runs to recover");
+    log.info("No orphaned running workflow runs to recover");
     return;
   }
 
-  console.log(`[resume] Found ${orphans.length} orphaned running workflow run(s) — recovering`);
+  log.info("Found orphaned running workflow run(s) — recovering", { count: orphans.length });
 
   for (const run of orphans) {
     // Clear any "still running" execution rows so dedup works on resume.
@@ -385,7 +508,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
       "stale: harness restarted",
     );
     if (cleared > 0) {
-      console.log(`[resume] Cleared ${cleared} stale execution(s) for ${run.triggerId}`);
+      log.info("Cleared stale execution(s)", { triggerId: run.triggerId, cleared });
     }
 
     // Circuit breaker: bump the per-run restart counter, and if we've now
@@ -395,7 +518,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     const attempts = opts.db.runs.incrementRestartCount(run.id);
     if (attempts > MAX_RESTART_RESUMES) {
       const msg = `harness restarted ${attempts - 1}x while this run was active — giving up after ${MAX_RESTART_RESUMES} resume attempts`;
-      console.warn(`[resume] ${run.workflowName} run ${run.id}: ${msg}`);
+      log.warn(msg, { workflowName: run.workflowName, runId: run.id });
       opts.db.runs.finishRun(run.id, "failed", { error: msg });
       continue;
     }
@@ -403,7 +526,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     // Dispatch in the background — we don't want one slow resume to block
     // the others (or the rest of the boot sequence).
     resumeSimpleRun(run, opts).catch((err) =>
-      console.error(`[resume] ${run.workflowName} run ${run.id} crashed:`, err),
+      log.error("Crashed during resume", { workflowName: run.workflowName, runId: run.id, err }),
     );
   }
 }

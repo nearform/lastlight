@@ -226,6 +226,20 @@ export function seedWorkspace(opts: {
   /** Seed into a `<workspace>/<repoSubdir>/` child dir (production's nested
    * layout) instead of the workspace root. See {@link workDirFor}. */
   repoSubdir?: string;
+  /**
+   * Files that make up the PR's own COMMIT, applied over the base tree on the
+   * working branch (`repos-head/<instance_id>/` in a dataset).
+   *
+   * Without this a vendored fixture has base and head at identical content, and
+   * an agent that checks — which a diagnosing agent does, because "is this
+   * broken on main too?" is the first question worth asking — correctly
+   * concludes the failure is not this PR's doing. Every red-dependency case
+   * would then read as `upstream-broken`. The overlay is what makes the fixture
+   * an actual pull request: `main` at the pre-bump state, one commit on top.
+   */
+  headDir?: string;
+  /** Subject line for that commit — conventionally the PR title. */
+  headMessage?: string;
 }): SeedResult {
   const def = opts.defaultBranch ?? "main";
   const workDir = workDirFor(opts.stateDir, opts.taskId, opts.repoSubdir);
@@ -242,6 +256,14 @@ export function seedWorkspace(opts: {
 
   const branch = opts.branch ?? def;
   if (branch !== def) git(workDir, ["checkout", "-q", "-b", branch]);
+
+  // The PR's commit, on the branch and nowhere else — so `git diff main...HEAD`
+  // shows the bump and `git log main` does not.
+  if (opts.headDir && existsSync(opts.headDir)) {
+    cpSync(opts.headDir, workDir, { recursive: true });
+    git(workDir, ["add", "-A"]);
+    git(workDir, ["commit", "-q", "-m", opts.headMessage ?? "Bump dependency"]);
+  }
 
   return { workDir, originDir, baseCommit, branch };
 }
@@ -294,6 +316,22 @@ export function ensurePrCommitsInCache(opts: {
     try {
       git(mirror, ["fetch", "--quiet", "origin", `refs/pull/${opts.pullNumber}/head`]);
     } catch {
+      /* fall through — the bare-SHA fetch below is the next resort */
+    }
+  }
+  // Still absent: the commit is off EVERY ref. A pr-review case pinned to a
+  // historical head — the SHA a human actually reviewed, which is the only
+  // honest head for a recall case — hits this the moment the branch is rebased
+  // past it. GitHub keeps such commits alive (a review references them) and
+  // serves them to a bare-SHA want, so ask for the SHA directly.
+  //
+  // Last, not first: it costs a round trip, and the two ref fetches above cover
+  // every case where the commit is still on a ref.
+  for (const sha of [opts.baseCommit, opts.headCommit]) {
+    if (mirrorHasCommit(mirror, sha)) continue;
+    try {
+      git(mirror, ["fetch", "--quiet", "origin", sha]);
+    } catch {
       /* fall through — the presence check below reports a clear error */
     }
   }
@@ -301,7 +339,8 @@ export function ensurePrCommitsInCache(opts: {
     if (!mirrorHasCommit(mirror, sha)) {
       throw new Error(
         `ensurePrCommitsInCache: ${label} commit ${sha} for PR #${opts.pullNumber} of ${opts.repo} is not reachable ` +
-          `(not on a branch and refs/pull/${opts.pullNumber}/head didn't provide it).`,
+          `(not on a branch, refs/pull/${opts.pullNumber}/head didn't provide it, and the server refused a ` +
+          `bare-SHA fetch — it may have been garbage-collected).`,
       );
     }
   }

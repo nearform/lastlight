@@ -1,0 +1,22 @@
+# Per-repository Last Light configuration (issue #180).
+#
+# This file is committed by the repository and read ONLY from its default
+# branch, so a pull request can never reconfigure the agent that reviews it.
+# It may set a bounded subset of keys — the deployment's
+# `repoConfig.allowKeys` — and anything outside that is dropped with a warning
+# rather than failing the run.
+
+# In bounds: this repo opts itself out of the deployment's weekly security cron.
+# Inert for the `answer` workflow this eval case runs, which is deliberate — it
+# proves the config half parses, merges and records `repo` provenance without
+# perturbing what the case actually measures (the prompt override below).
+disabled:
+  crons:
+    - weekly-security-scan
+
+# OUT of bounds: a repo may not pick the deployment's sandbox backend. Dropped
+# with a `key-not-allowed` warning and surfaced on the result's
+# `repoLayer.warnings`, so the failure rule — warn, drop the bad bits, run
+# anyway — is measured here too.
+sandbox:
+  backend: docker

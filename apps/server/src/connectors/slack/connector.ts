@@ -7,13 +7,31 @@ import type { SessionManager } from "../messaging/session-manager.js";
 import type { MessagingConfig } from "../messaging/types.js";
 import type { EventEnvelope } from "../types.js";
 import type { UserStore } from "../../state/user-store.js";
+import type { SlackReactionEvent } from "../../engine/feedback/slack.js";
 import { hasMarkdownImage, markdownToSlackBlocks, markdownToSlackMrkdwn } from "./mrkdwn.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("slack");
 
 /**
  * A resolved approval-button click, handed to the app for routing. `envelope`
  * carries a `reply()` that posts a confirmation into the button's thread, so
  * the same approval-resolution path used by `/approve` can run unchanged.
  */
+/** Per-message overrides for {@link SlackConnector.sendMessage}. */
+export interface SendMessageOptions {
+  /**
+   * Whether Slack may expand the message's links into preview cards.
+   *
+   * Omitted (the default) leaves Slack's own behaviour alone, which is right
+   * for a conversational reply: one shared link, one useful preview. Pass
+   * `false` for a message whose links are a REFERENCE LIST rather than the
+   * content — the repo digest cites several pull requests, and a preview card
+   * per citation buries the six lines of actual summary.
+   */
+  unfurl?: boolean;
+}
+
 export interface SlackApprovalAction {
   decision: "approved" | "rejected";
   /** The paused workflow run id (the button's `value`). */
@@ -93,6 +111,8 @@ export class SlackConnector extends MessagingConnector {
   private seenEventOrder: string[] = [];
   /** App-provided hook that routes an approval button click into the dispatcher. */
   private approvalHandler?: (action: SlackApprovalAction) => Promise<void>;
+  /** App-provided hook that turns an emoji reaction into a feedback signal. */
+  private reactionHandler?: (event: SlackReactionEvent) => void;
 
   constructor(config: SlackConnectorConfig, sessionManager: SessionManager) {
     super(config, sessionManager);
@@ -131,19 +151,37 @@ export class SlackConnector extends MessagingConnector {
     if (this.bolt) this.setupInteractionListeners();
   }
 
+  /**
+   * Register the hook that scores an emoji reaction as a feedback signal
+   * (issue #255). Requires the `reactions:read` bot scope and the
+   * `reaction_added` / `reaction_removed` event subscriptions — without them
+   * Slack simply never delivers, and this stays dormant.
+   *
+   * Deliberately NOT an `EventEnvelope`: a reaction is not a conversational
+   * turn. Routing it through the registry would put it into the message
+   * batcher, the classifier and the dispatch gate, all of which exist to decide
+   * what work to do — and a 👍 asks for none.
+   */
+  onReactionAction(handler: (event: SlackReactionEvent) => void): void {
+    this.reactionHandler = handler;
+    // Socket mode subscribes per event type; webhook mode routes through
+    // `dispatchSlackEvent`, which already sees everything.
+    if (this.bolt) this.setupReactionListeners();
+  }
+
   async start(): Promise<void> {
     if (this.bolt) {
       await this.bolt.start();
-      console.log(`[slack] Connected via Socket Mode`);
+      log.info("Connected via Socket Mode");
     } else {
-      console.log(`[slack] Listening via HTTP Events API at /webhooks/slack`);
+      log.info("Listening via HTTP Events API at /webhooks/slack");
     }
   }
 
   async stop(): Promise<void> {
     if (this.bolt) {
       await this.bolt.stop();
-      console.log(`[slack] Disconnected`);
+      log.info("Disconnected");
     }
     // Webhook mode shares the GitHub connector's HTTP server; nothing to stop.
   }
@@ -163,6 +201,7 @@ export class SlackConnector extends MessagingConnector {
     threadId: string | null,
     text: string,
     blocks?: KnownBlock[],
+    opts: SendMessageOptions = {},
   ): Promise<string | void> {
     const fallbackText = markdownToSlackMrkdwn(text);
     const autoBlocks = !blocks && hasMarkdownImage(text);
@@ -171,23 +210,31 @@ export class SlackConnector extends MessagingConnector {
       : autoBlocks
       ? markdownToSlackBlocks(text)
       : undefined;
+    // Unfurling is per-message and OFF means both switches off: `unfurl_links`
+    // governs text-ish targets, `unfurl_media` images and video, and a message
+    // full of GitHub links trips whichever one Slack decides applies. Left
+    // `undefined` by default so every existing caller keeps Slack's own
+    // behaviour rather than silently losing previews.
+    const unfurl = opts.unfurl === false ? { unfurl_links: false, unfurl_media: false } : {};
     try {
       const result = await this.web.chat.postMessage({
         channel: channelId,
         text: fallbackText,
         blocks: effectiveBlocks,
         thread_ts: threadId || undefined,
+        ...unfurl,
       });
       return result.ts;
     } catch (err) {
       // Only auto-generated image blocks are worth retrying without — an
       // explicit-blocks caller owns its payload and should see the error.
       if (!autoBlocks) throw err;
-      console.warn(`[slack] image blocks rejected, falling back to text: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn("Image blocks rejected, falling back to text", { err });
       const result = await this.web.chat.postMessage({
         channel: channelId,
         text: fallbackText,
         thread_ts: threadId || undefined,
+        ...unfurl,
       });
       return result.ts;
     }
@@ -263,18 +310,6 @@ export class SlackConnector extends MessagingConnector {
     }
   }
 
-  /** Send a message to the configured delivery channel (for cron reports) */
-  async sendToDeliveryChannel(text: string): Promise<void> {
-    if (!this.slackConfig.deliveryChannel) {
-      console.warn("[slack] No delivery channel configured");
-      return;
-    }
-    const chunks = this.chunkMessage(text);
-    for (const chunk of chunks) {
-      await this.sendMessage(this.slackConfig.deliveryChannel, null, chunk);
-    }
-  }
-
   // ── Webhook (HTTP Events API) receiver ─────────────────────────────────
 
   /**
@@ -315,7 +350,7 @@ export class SlackConnector extends MessagingConnector {
         // Slack will retry (and we'd handle it twice if it slipped past dedup).
         setImmediate(() => {
           this.dispatchSlackEvent(event).catch((err) =>
-            console.error("[slack] event handler error:", err),
+            log.error("Event handler error", { err }),
           );
         });
       }
@@ -344,7 +379,7 @@ export class SlackConnector extends MessagingConnector {
       // Ack within Slack's 3s window; resolve the gate asynchronously.
       setImmediate(() => {
         this.handleInteraction(payload).catch((err) =>
-          console.error("[slack] interaction handler error:", err),
+          log.error("Interaction handler error", { err }),
         );
       });
       return c.body(null, 200);
@@ -357,7 +392,7 @@ export class SlackConnector extends MessagingConnector {
     const handle = async ({ ack, body }: { ack: () => Promise<void>; body: unknown }) => {
       await ack();
       await this.handleInteraction(body).catch((err) =>
-        console.error("[slack] interaction handler error:", err),
+        log.error("Interaction handler error", { err }),
       );
     };
     this.bolt.action("approval_approve", handle);
@@ -440,6 +475,22 @@ export class SlackConnector extends MessagingConnector {
       await this.onMessageEvent(event);
     } else if (event.type === "app_mention") {
       await this.onAppMention(event);
+    } else if (event.type === "reaction_added" || event.type === "reaction_removed") {
+      this.onReactionEvent(event);
+    }
+  }
+
+  /**
+   * A raw `reaction_added` / `reaction_removed` event, from either mode.
+   * Synchronous and swallowing: recording a thumb must never delay an ack or
+   * surface as a webhook error, which would make Slack retry it.
+   */
+  private onReactionEvent(event: SlackReactionEvent): void {
+    if (!this.reactionHandler) return;
+    try {
+      this.reactionHandler(event);
+    } catch (err: unknown) {
+      log.warn("Reaction handler failed", { type: event?.type, err });
     }
   }
 
@@ -472,6 +523,20 @@ export class SlackConnector extends MessagingConnector {
     });
   }
 
+  /**
+   * Socket-mode reaction listeners. Webhook mode needs none — every event goes
+   * through `dispatchSlackEvent` — but Bolt dispatches per subscribed type, so
+   * the two modes wire up separately here exactly as messages and mentions do.
+   */
+  private setupReactionListeners(): void {
+    if (!this.bolt) return;
+    for (const type of ["reaction_added", "reaction_removed"] as const) {
+      this.bolt.event(type, async ({ event }) => {
+        this.onReactionEvent(event as unknown as SlackReactionEvent);
+      });
+    }
+  }
+
   // ── Shared event handling (both modes feed these) ──────────────────────
 
   /** A raw Slack `message` event (DM or channel). */
@@ -479,13 +544,19 @@ export class SlackConnector extends MessagingConnector {
     // Log EVERY inbound message before any filtering. When a DM looks like it
     // "dropped" messages, this line tells us whether Slack delivered the event
     // at all and, if so, why we ignored it (a subtype like message_changed, a
-    // bot_id, or empty text) — versus Slack never sending it.
-    console.log(
-      `[slack] inbound msg ch=${msg.channel ?? "-"} ts=${msg.ts ?? "-"} ` +
-      `thread_ts=${msg.thread_ts ?? "-"} subtype=${msg.subtype ?? "-"} ` +
-      `bot_id=${msg.bot_id ?? "-"} channel_type=${msg.channel_type ?? "-"} ` +
-      `user=${msg.user ?? "-"} hasText=${msg.text ? "y" : "n"}`,
-    );
+    // bot_id, or empty text) — versus Slack never sending it. Debug: this is a
+    // raw per-message protocol trace (fires for every inbound Socket Mode
+    // event, filtered or not), not a business-meaningful lifecycle line.
+    log.debug("Inbound message", {
+      channel: msg.channel ?? null,
+      ts: msg.ts ?? null,
+      threadTs: msg.thread_ts ?? null,
+      subtype: msg.subtype ?? null,
+      botId: msg.bot_id ?? null,
+      channelType: msg.channel_type ?? null,
+      user: msg.user ?? null,
+      hasText: Boolean(msg.text),
+    });
     // Filter out non-standard message subtypes (edits, deletes, joins, etc.)
     if (msg.subtype) return;
     if (!msg.user || !msg.text) return;
@@ -581,8 +652,7 @@ export class SlackConnector extends MessagingConnector {
         return byEmail.login ?? null;
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[slack] user identity match failed for ${userId}: ${msg}`);
+      log.warn("User identity match failed", { userId, err });
     }
     return null;
   }

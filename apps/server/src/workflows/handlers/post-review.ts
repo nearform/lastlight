@@ -9,6 +9,10 @@ import {
   type ReviewFindingsDoc,
 } from "../../engine/github/review-poster.js";
 import { getRuntimeConfig } from "../../config/config.js";
+import { hasMaterialChange } from "../../engine/pr-decisions.js";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("post-review");
 import type { ExecutorConfig } from "lastlight-workflow-engine";
 import type { TemplateContext } from "lastlight-workflow-engine";
 import type { PhaseDefinition } from "lastlight-workflow-engine";
@@ -29,6 +33,38 @@ export interface PostReviewRunScope {
   taskId: string;
   store?: WorkflowStateStore;
   workflowId?: string;
+}
+
+/**
+ * Build post-review's own GitHub client from STABLE config, never the live
+ * `process.env`. An in-process (gondolin) run used to clear `GITHUB_APP_*` in the
+ * shared `process.env` for the duration of its agent turn; reading the PEM path
+ * mid-clear yielded `""` → `resolve("")` = the cwd (a directory) →
+ * `readFileSync` EISDIR. The pr-review cron surfaced it by fanning out
+ * concurrent runs, but it bit any two overlapping in-process runs.
+ *
+ * That splice is gone — per-run GitHub credentials are threaded explicitly now
+ * (issue #215, `githubAuthEnvFrom` + agentic-pi's `githubAuthEnv`) — so nothing
+ * writes those keys at runtime any more. This stays config-first regardless:
+ * `getRuntimeConfig()` is loaded once at boot, so it cannot be raced by anything
+ * that mutates the process env in future. Exported for the concurrent-clear
+ * regression test.
+ */
+export function resolveReviewGitHubClient(runConfig: { githubApiBaseUrl?: string }): GitHubClient {
+  const baseUrl = runConfig.githubApiBaseUrl;
+  if (baseUrl) {
+    // Eval / test path: the mock ignores auth; any bearer token works.
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "eval-fake-token";
+    return GitHubClient.withToken(token, baseUrl);
+  }
+  const cfg = getRuntimeConfig();
+  if (cfg?.githubApp) return new GitHubClient(cfg.githubApp);
+  if (cfg?.githubToken) return GitHubClient.withToken(cfg.githubToken);
+  // Last resort — runtime config not loaded (shouldn't happen in a live harness).
+  return new GitHubClient({
+    appId: process.env.GITHUB_APP_ID || "",
+    privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
+  });
 }
 
 /**
@@ -86,7 +122,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         });
       }
       this.reporter.failWorkflow(error);
-      console.error(`[post-review] ${error}`);
+      log.error(error);
       return { results: [result], status: "failed" };
     };
 
@@ -121,23 +157,57 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
     // Head SHA + base ref come from the checkout / run context, never the agent.
     const baseRef = typeof ctx.baseBranch === "string" && ctx.baseBranch ? ctx.baseBranch : undefined;
-    const headSha = this.gitHeadSha(hostRepoDir);
+    // `git rev-parse HEAD` doubles as the "is there a local checkout?" probe: it
+    // returns a SHA on host-checkout backends (docker/none/gondolin) and
+    // undefined on k8s, where the workspace lives in a sandbox PVC and only the
+    // harvested `.lastlight/` reaches the harness.
+    const localHeadSha = this.gitHeadSha(hostRepoDir);
+    // No local checkout (k8s) — fetch the head SHA from the GitHub API so the
+    // idempotency check below and inline comments (which require a commit id)
+    // both work.
+    let headSha = localHeadSha;
+    if (!headSha) headSha = await github.getPullRequestHeadSha(owner, repo, prNumber).catch(() => undefined);
 
-    // Idempotency: skip if a bot review already exists on this head SHA (guards
-    // resume / re-entry from double-posting).
+    // One pass over our review history answers both questions asked below: is
+    // there already a review on THIS head (idempotency), and what did we last
+    // actually say (the duplicate guard). Both used to be their own paginated
+    // `listReviews`.
+    let history: Awaited<ReturnType<GitHubClient["getBotReviewHistory"]>> = { atHead: null, latest: null };
     if (headSha) {
-      try {
-        const existing = await github.getLatestBotReview(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin);
-        if (existing) return succeed(`already reviewed head ${headSha.slice(0, 7)} (${existing.state})`);
-      } catch {
-        /* best-effort — fall through and attempt the post */
+      // Best-effort: a failed read leaves both null, which posts.
+      history = await github
+        .getBotReviewHistory(owner, repo, prNumber, headSha, getRuntimeConfig()?.botLogin)
+        .catch(() => ({ atHead: null, latest: null }));
+
+      // Idempotency: skip if a bot review already exists on this head SHA
+      // (guards resume / re-entry from double-posting).
+      if (history.atHead) {
+        return succeed(`already reviewed head ${headSha.slice(0, 7)} (${history.atHead.state})`);
       }
+
+      const stale = await this.staleAgainstCurrentHead(github, owner, repo, prNumber, headSha);
+      if (stale) return succeed(stale);
     }
 
     // Commentable line set from the local checkout diff. Failure → null → all
-    // findings demoted to the body (the review still posts).
-    const commentable = baseRef ? this.gitCommentableDiff(hostRepoDir, baseRef) : null;
+    // findings demoted to the body (the review still posts). Gated on a local
+    // checkout actually existing: without that guard, k8s (no `.git` on the
+    // harness) runs a guaranteed-to-fail `git diff` that dumps a usage block and
+    // a FALSE "demoting all findings to the body" on every run — before the API
+    // fallback silently rescues the findings.
+    let commentable =
+      localHeadSha && baseRef ? this.gitCommentableDiff(hostRepoDir, baseRef) : null;
+    // No local checkout (or no base ref) — fall back to GitHub's own PR diff
+    // (the same merge-base diff) so findings still anchor inline on k8s instead
+    // of demoting to the body.
+    if (!commentable) commentable = await this.apiCommentableDiff(github, owner, repo, prNumber);
     const review = buildReview(doc, commentable);
+
+    const repeat = this.repeatOfLastReview(history.latest, review);
+    if (repeat) {
+      log.info("Skipping a duplicate review post", { repo: `${owner}/${repo}`, prNumber, summary: repeat });
+      return succeed(repeat);
+    }
 
     try {
       await github.createPullRequestReview(owner, repo, prNumber, {
@@ -151,7 +221,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[post-review] inline review POST failed: ${msg}; retrying body-only`);
+      log.warn("Inline review POST failed; retrying body-only", { err });
       // Off-diff anchors (e.g. a stale diff) 422 — retry with everything in the
       // body so the review still lands.
       const bodyOnly = buildBodyOnlyReview(doc);
@@ -167,6 +237,98 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
         return fail(`post-review: GitHub rejected the review (inline: ${msg}; body-only: ${msg2})`);
       }
     }
+  }
+
+  /**
+   * Would this review be a WORD-FOR-WORD repeat of the one we already posted
+   * (issue #271)? Returns the summary line to succeed with, or `null` to post.
+   *
+   * nearform/skillspro#1641 is the case, and it is worth being exact about why
+   * the trigger-gate half of #271 does not cover it. Two APPROVEs, six minutes
+   * and 400 identical bytes apart, on two head SHAs whose two-dot delta is
+   * `package-lock.json` **plus** `package.json` and `jest.config.js` — a force-
+   * push amend, materially different by any file-level test, so
+   * `resolveReviewTrigger`'s generated-only gate correctly lets it through. The
+   * only thing that identifies it as a duplicate is the review text itself, and
+   * that is not knowable until the agent has written it.
+   *
+   * So this saves the DUPLICATE COMMENT, not the money — the run has already
+   * happened by the time we get here. It is deliberately the narrowest rule
+   * that catches the observed shape:
+   *
+   * - the same `body`, byte for byte, as our last posted review;
+   * - `APPROVE` with **no** inline comments on both sides.
+   *
+   * The APPROVE restriction is not squeamishness, it is the check run. Skipping
+   * the post means `concludeReviewCheck` finds no review at this head and
+   * concludes `neutral`. `neutral` and `success` both pass branch protection, so
+   * suppressing a duplicate APPROVE changes nothing; suppressing a duplicate
+   * CHANGES_REQUESTED would turn a `failure` check into a passing one and open
+   * a merge gate the review deliberately closed.
+   */
+  private repeatOfLastReview(
+    last: { state: string; sha: string; body: string | null } | null,
+    review: { body: string; event: string; comments: unknown[] },
+  ): string | null {
+    if (review.event !== "APPROVE" || review.comments.length > 0) return null;
+    if (!last || last.state !== "APPROVED" || last.body !== review.body) return null;
+    return `duplicate: this APPROVE is word-for-word the one we posted on ${last.sha.slice(0, 7)}`;
+  }
+
+  /**
+   * Has the PR moved on since the SHA this run actually reviewed (issue #271)?
+   *
+   * Returns the summary line to succeed with when the review should NOT be
+   * posted, or `null` to post. Posting a review of a tree that no longer exists
+   * spends the maintainer's attention on findings GitHub will immediately mark
+   * outdated — nearform/skillspro#1587's churn is full of them.
+   *
+   * Three conditions, ALL required, because dropping a review is only
+   * acceptable when a replacement is guaranteed:
+   *
+   * 1. **The head really moved.** Any read failure leaves it unknown and posts.
+   * 2. **The trigger is automatic.** Under `on-request` nothing re-dispatches on
+   *    its own, so the human who asked would simply never get an answer.
+   * 3. **The delta is MATERIAL** — at least one changed path is not generated.
+   *    That is exactly `resolveReviewTrigger`'s generated-only gate read the
+   *    other way round: a material push is one that gate will let through, so a
+   *    fresh review of the new head is guaranteed; a generated-only push is one
+   *    it will suppress, and dropping this review would mean the PR gets none at
+   *    all.
+   *
+   * Operator-layer `review` config on purpose: this runs in-process against a
+   * run whose repo-clamped block isn't threaded here, and the clamp only ever
+   * ADDS generated paths — so the operator list is the subset, which resolves
+   * more deltas as "material" and therefore drops fewer reviews.
+   */
+  private async staleAgainstCurrentHead(
+    github: GitHubClient,
+    owner: string,
+    repo: string,
+    prNumber: number,
+    reviewedSha: string,
+  ): Promise<string | null> {
+    const review = getRuntimeConfig()?.review;
+    if (!review || review.trigger === "on-request") return null;
+
+    const currentSha = await github.getPullRequestHeadSha(owner, repo, prNumber).catch(() => undefined);
+    if (!currentSha || currentSha === reviewedSha) return null;
+
+    const changed = await github
+      .getChangedPathsBetween(owner, repo, reviewedSha, currentSha)
+      .catch((err: unknown) => {
+        log.warn("Could not compare the reviewed head with the current one; posting anyway", { err });
+        return null;
+      });
+    // `null` (degraded/truncated) and `[]` both mean "no material change proven",
+    // so both post — the same fail-open direction the trigger gate takes.
+    if (!hasMaterialChange(changed, review.generatedPaths)) return null;
+
+    const summary =
+      `stale: reviewed ${reviewedSha.slice(0, 7)} but the head is now ${currentSha.slice(0, 7)}; ` +
+      `a review of the new head will be dispatched instead`;
+    log.info("Skipping a stale review post", { repo: `${owner}/${repo}`, prNumber, summary });
+    return summary;
   }
 
   /** Host path of the run's repo checkout — mirrors sandbox/index.ts layout. */
@@ -185,22 +347,18 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
   /** Build the GitHub client for the post: token+baseUrl in evals, App auth in prod. */
   private buildReviewClient(): GitHubClient {
-    const baseUrl = this.run.config.githubApiBaseUrl;
-    if (baseUrl) {
-      // Eval / test path: the mock ignores auth; any bearer token works.
-      const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "eval-fake-token";
-      return GitHubClient.withToken(token, baseUrl);
-    }
-    return new GitHubClient({
-      appId: process.env.GITHUB_APP_ID || "",
-      privateKeyPath: process.env.GITHUB_APP_PRIVATE_KEY_PATH || "",
-      installationId: process.env.GITHUB_APP_INSTALLATION_ID || "",
-    });
+    return resolveReviewGitHubClient(this.run.config);
   }
 
   private gitHeadSha(repoDir: string): string | undefined {
     try {
-      return execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      // Also the "is there a local checkout?" probe (undefined on k8s), so it
+      // runs on every run — silence stderr ("fatal: not a git repository") that
+      // execFileSync otherwise inherits to the console.
+      return execFileSync("git", ["-C", repoDir, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
     } catch {
       return undefined;
     }
@@ -273,8 +431,26 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
   }
 
   private diffFailed(msg: string): null {
-    console.warn(`[post-review] could not compute commentable diff (${msg}); demoting all findings to the body`);
+    log.warn("Could not compute commentable diff; demoting all findings to the body", { reason: msg });
     return null;
+  }
+
+  /** Fetch the PR's diff from the GitHub API and parse it into a commentable
+   *  set — the fallback when there's no local checkout (k8s). GitHub's PR diff
+   *  is the same merge-base…head diff the local three-dot path targets, so the
+   *  anchor set is identical. Best-effort: any failure returns null and every
+   *  finding demotes to the body (the review still posts). */
+  private async apiCommentableDiff(
+    github: GitHubClient,
+    owner: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<Map<string, Set<string>> | null> {
+    try {
+      return parseDiff(await github.getPullRequestDiff(owner, repo, prNumber));
+    } catch (err) {
+      return this.diffFailed(err instanceof Error ? err.message : String(err));
+    }
   }
 }
 

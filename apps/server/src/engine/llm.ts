@@ -32,6 +32,37 @@ export interface ChatMessage {
   content: string;
 }
 
+/**
+ * Output-token cap for the cheap helpers (screener, classifier, adds-info).
+ *
+ * Sized for the model's THINKING, not for its answer. Every one of these calls
+ * answers in a few short lines — an `INTENT:/REPO:/ISSUE:/REASON:` block, an
+ * `INJECTION: YES|NO`, a single token — so the old per-call budgets (128 / 64 /
+ * 16) were generous headroom over the visible reply and nothing else.
+ *
+ * On a reasoning model `max_tokens` bounds reasoning AND visible output
+ * together, so that headroom silently became zero: the model spent the whole
+ * budget thinking and returned `""`. The parse then failed and every caller
+ * fell back to its safe default — `intent: "chat"` and `flagged: false` — which
+ * is indistinguishable from a real answer. A drizby instance ran that way with
+ * no error, no metric and no log line: comments misrouted, issue mentions
+ * dropped, injection screening a no-op.
+ *
+ * The classifier is the reason the number is this big rather than merely
+ * bigger. Its system prompt is composed from EVERY workflow's `classification:`
+ * block — 11 workflows, ~34 examples, ~3.7k tokens today — and it grows with
+ * each workflow an operator adds. More intents to weigh means more reasoning
+ * before the first visible token, so a budget that fits today's taxonomy is not
+ * evidence it fits tomorrow's.
+ *
+ * Raising it is close to free: this is a CAP, not an allocation. Billing is on
+ * tokens actually generated, a non-reasoning model still emits ~30 of them, and
+ * the only exposure is latency on a runaway generation — which the cap itself
+ * bounds. Measured against the real composed prompt, `gpt-5.4-nano` classified
+ * correctly at 2048 and returned the wrong intent for the same comment at 128.
+ */
+export const HELPER_MAX_TOKENS = 2048;
+
 export interface ChatOptions {
   /** Hard cap on output tokens (default: 256 — these calls are tiny). */
   maxTokens?: number;

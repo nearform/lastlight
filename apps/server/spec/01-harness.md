@@ -118,6 +118,44 @@ differ.
   (dispatch is fire-and-forget `202`, so the choke-point rejection alone
   would be invisible to the CLI caller). Contexts with no concrete repo
   (Slack triggers) pass through.
+- **The per-repository config layer resolves at the same choke point.** Right
+  after the managed-repo guard, `dispatchWorkflow()` calls
+  `resolveRepoRunConfig(workflowName, context, { client: github })`
+  (`src/workflows/simple.ts`) so every trigger path — webhook, router, cron,
+  `/api/run`, `/api/build`, approval resume — gets one answer from one place. The
+  result is carried on the `SimpleWorkflowRequest` as `repoConfig`, never
+  installed into a module global (concurrent runs and cron fan-outs share the
+  process). It never throws and never fails a run; the single refusal it can
+  return is the repo disabling that workflow for itself in
+  `.lastlight/lastlight.yml`, reported in the same `{ success: false }` shape as
+  the unmanaged-repo guard. Only a context naming exactly one repo resolves a
+  layer. See [Configuration](/spec/02-configuration).
+- **The PR state machine resolves at the same choke point.** For any workflow
+  declaring `pr_scoped: true` in its YAML (the packaged four are `pr-fix`,
+  `dependabot-ci-fix`, `dependabot-pr-merge` and `pr-review`;
+  `prScopedWorkflows()` in `src/workflows/pr-scope.ts` derives the set from that
+  metadata), `dispatchWorkflow()` resolves one `PrState` snapshot per dispatch
+  (`resolvePrState`, `src/engine/pr-state.ts`) and decides whether to run from it
+  by pure function (`src/engine/pr-decisions.ts`). The webhook route resolves it
+  one level earlier — the dispatcher needs the run lock before it can decide to
+  dispatch at all — and hands it down on the context, so it is never fetched
+  twice; the cron fan-out and the direct API triggers arrive cold and resolve
+  here. That is the point: the fan-out calls this function *directly*, so before
+  this every nightly dependency-fix run was dispatched with none of the
+  enrichment the webhook route did by hand. **Cron discoverers are therefore
+  pure candidate finders** — they answer "does this PR look like it needs this
+  workflow?" and know nothing about escalation, budgets, dedup or forks. A skip
+  here is `{ success: true }`, not an error: correctly determining there is
+  nothing to do would otherwise paint a cron tick red. The snapshot then travels
+  on the run row as `context.prState` (see [State](/spec/10-state)) and its
+  projection supplies the prompts' `{{ciSection}}` / `{{attempt}}` /
+  `baseBranch`. Contract + rationale: the
+  [dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
+  The dispatcher's copy of the gate resolves the **repo's** `fix` /
+  `dependencies` / `review` blocks first, through the same injected
+  `resolveRepoPolicy` seam (hitting the same 60 s cache `dispatchWorkflow` uses
+  one level down), so the gate and the prompt are never judging by different
+  budgets.
 - **HTTP server is provided by the GitHub webhook connector.** No
   standalone listener. The admin dashboard, `/api/run`, and `/api/build`
   all silently disappear if there is no GitHub App configured.
@@ -165,6 +203,8 @@ Supporting files referenced by name during boot:
 | `CronScheduler` + `getJobs()` | `src/cron/*` |
 | Admin dashboard mount | `src/admin/index.ts` |
 | Router | `src/engine/router.ts` |
+| Dispatch gate (route → workflow) | `src/engine/dispatcher.ts` |
+| PR snapshot + pure decisions over it | `src/engine/pr-state.ts`, `src/engine/pr-decisions.ts` |
 | `dispatchWorkflow` → `runSimpleWorkflow` | `src/workflows/simple.ts` |
 | `resumeOrphanedWorkflows` | `src/workflows/resume.ts` |
 

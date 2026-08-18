@@ -2,6 +2,9 @@ import { createAppAuth } from "@octokit/auth-app";
 import { readFileSync } from "fs";
 import { Octokit } from "octokit";
 import { resolve } from "path";
+import { logger } from "../../logging/logger.js";
+
+const log = logger("github-diag");
 
 export interface GitHubAppClientConfig {
   appId: string;
@@ -20,10 +23,61 @@ function normalizeBaseUrl(baseUrl: string | undefined): string | undefined {
   return baseUrl ? baseUrl.replace(/\/+$/, "") : undefined;
 }
 
+/**
+ * Log a diagnostic on a 403/404 from the GitHub REST API and re-throw — no
+ * behaviour change. Records the request, the endpoint's REQUIRED permissions
+ * (`x-accepted-github-permissions`), and — for App-auth clients — the actual
+ * `repository_selection` + permissions of the installation token that was used.
+ *
+ * This is the shared instrument for the two open token-scope bugs: the
+ * private-repo enumeration 404 (issue #213 — is the enumeration token's
+ * `repository_selection` really `all`, and does the 404 endpoint want a
+ * permission the token lacks?) and any "Resource not accessible by integration"
+ * 403. The token introspection reuses the strategy's CACHED installation auth
+ * (the request we just made minted it), so it adds no extra network round-trip.
+ */
+function installScopeDiagnostics(octokit: Octokit, appAuth: boolean): void {
+  octokit.hook.error("request", async (error, options) => {
+    const status = (error as { status?: number }).status;
+    if (status === 403 || status === 404) {
+      const headers =
+        (error as { response?: { headers?: Record<string, string> } }).response?.headers ?? {};
+      const accepted = headers["x-accepted-github-permissions"] ?? "(none)";
+      let tokenRepositorySelection: string | undefined;
+      let tokenPermissions: string | undefined;
+      if (appAuth) {
+        try {
+          const auth = (await octokit.auth({ type: "installation" })) as {
+            repositorySelection?: string;
+            permissions?: Record<string, string>;
+          };
+          tokenRepositorySelection = auth.repositorySelection ?? "?";
+          tokenPermissions = auth.permissions
+            ? Object.entries(auth.permissions)
+                .map(([name, level]) => `${name}=${level}`)
+                .join(",")
+            : "?";
+        } catch {
+          // Introspection is best-effort — never mask the real request error.
+        }
+      }
+      log.warn("Request denied by GitHub", {
+        method: options.method,
+        url: options.url,
+        status,
+        acceptedPermissions: accepted,
+        tokenRepositorySelection,
+        tokenPermissions,
+      });
+    }
+    throw error;
+  });
+}
+
 export function githubAppClient(config: GitHubAppClientConfig): Octokit {
   const privateKey = readFileSync(resolve(config.privateKeyPath), "utf-8");
   const baseUrl = normalizeBaseUrl(config.baseUrl);
-  return new Octokit({
+  const octokit = new Octokit({
     authStrategy: createAppAuth,
     auth: {
       appId: config.appId,
@@ -32,6 +86,8 @@ export function githubAppClient(config: GitHubAppClientConfig): Octokit {
     },
     ...(baseUrl ? { baseUrl } : {}),
   });
+  installScopeDiagnostics(octokit, true);
+  return octokit;
 }
 
 /**
@@ -44,5 +100,9 @@ export function githubAppClient(config: GitHubAppClientConfig): Octokit {
  */
 export function githubTokenClient(token: string, baseUrl?: string): Octokit {
   const url = normalizeBaseUrl(baseUrl);
-  return new Octokit({ auth: token, ...(url ? { baseUrl: url } : {}) });
+  const octokit = new Octokit({ auth: token, ...(url ? { baseUrl: url } : {}) });
+  // Raw-bearer client carries no App installation to introspect — log only the
+  // request + the endpoint's required permissions.
+  installScopeDiagnostics(octokit, false);
+  return octokit;
 }

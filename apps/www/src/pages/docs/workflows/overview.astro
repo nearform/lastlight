@@ -120,8 +120,8 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">PR fix</span>
 			</div>
-			<p>Lightweight fix-and-push — no architect or reviewer, just fix the issue and push.</p>
-			<span class="workflow-card-meta">1 phase &middot; webhook</span>
+			<p>Lightweight diagnose-then-fix-and-push — no architect or reviewer. Classifies why the PR is red first, then fixes it and pushes, or stops if nothing here can repair it.</p>
+			<span class="workflow-card-meta">2 phases &middot; webhook</span>
 		</a>
 
 		<a href="/docs/workflows/dependabot-ci-fix" class="workflow-card">
@@ -131,7 +131,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">Dependabot CI fix</span>
 			</div>
-			<p>Fixes a dependency-update PR whose checks failed — brings the branch up to date, pushes the smallest fix, and hands the merge decision to dependabot-pr-merge once CI is green. Via webhook and a daily per-PR cron backstop.</p>
+			<p>Fixes a dependency-update PR whose checks failed — diagnoses the breakage first, brings the branch up to date, pushes the smallest fix, and hands the merge decision to dependabot-pr-merge once CI is green. Via webhook and a daily per-PR cron backstop.</p>
 			<span class="workflow-card-meta">2 phases &middot; webhook + cron</span>
 		</a>
 
@@ -142,7 +142,7 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 				</span>
 				<span class="workflow-card-name">Dependabot PR merge</span>
 			</div>
-			<p>Finds already-green dependency-update PRs and enables auto-merge on the trivial ones — via webhook and a daily per-PR cron backstop.</p>
+			<p>Finds already-green dependency-update PRs and enables auto-merge on the safe ones — including a major bump whose <em>impact</em> is low enough — via webhook and a daily per-PR cron backstop.</p>
 			<span class="workflow-card-meta">1 phase &middot; webhook + cron</span>
 		</a>
 
@@ -244,17 +244,17 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			<tr>
 				<td><strong>GitHub webhook</strong></td>
 				<td>issue-triage, pr-review, build, pr-fix, dependabot-ci-fix, dependabot-pr-merge, issue-comment, answer, pr-comment, security-feedback, verify, qa-test, demo</td>
-				<td>GitHub App sends events to the harness. The router + LLM classifier decides which workflow to run. A newly-opened issue classified as a question routes to answer; a comment on a PR routes to pr-comment; an <code>@last-light</code> mention on a security-labelled issue routes to security-feedback. A PR whose CI fails (a <code>check_suite</code> failure) is classified and routes to dependabot-ci-fix when it's a dependency update; a dependency PR whose CI passes (a <code>check_suite</code> success) routes deterministically to dependabot-pr-merge. <code>@last-light verify &lt;claim&gt;</code> / <code>qa-test &lt;target&gt;</code> / <code>demo &lt;notes&gt;</code> (or the equivalent classifier intent) route to verify / qa-test / demo.</td>
+				<td>GitHub App sends events to the harness. The router + LLM classifier decides which workflow to run. A newly-opened issue classified as a question routes to answer; a comment on a PR routes to pr-comment; an <code>@last-light</code> mention on a security-labelled issue routes to security-feedback. A PR whose CI fails (a <code>check_suite</code> failure) is classified and routes to dependabot-ci-fix when it's a dependency update; a dependency PR whose CI passes (a <code>check_suite</code> success) routes deterministically to dependabot-pr-merge. Under <code>review.trigger: after-checks</code>, a settled check suite on any other PR routes to pr-review; adding the <code>review.requestLabel</code>, requesting a review from the bot, or pressing Re-run on the <code>last-light/review</code> check all do the same. <code>@last-light verify &lt;claim&gt;</code> / <code>qa-test &lt;target&gt;</code> / <code>demo &lt;notes&gt;</code> (or the equivalent classifier intent) route to verify / qa-test / demo.</td>
 			</tr>
 			<tr>
 				<td><strong>Slack message</strong></td>
 				<td>explore, build, triage, review, answer, security-review, verify, qa-test, demo, all others via chat</td>
-				<td>Natural language in DMs or threads. The classifier extracts intent and repo from the message. Questions route to answer; "security review owner/repo" runs security-review.</td>
+				<td>Natural language in DMs or threads. The classifier extracts intent and repo from the message. Questions route to answer; "security review owner/repo" runs security-review. The two dependency workflows are <strong>GitHub-only</strong> — they need a PR number no Slack message carries, so such a request falls through to chat. Which triggers the bot will actually suggest in a thread is composed from the workflows that declare a <code>chat:</code> block and are enabled on that deployment, so the set is per-instance.</td>
 			</tr>
 			<tr>
 				<td><strong>Cron schedule</strong></td>
 				<td>issue-triage, pr-review, repo-health, security-review, dependabot-pr-merge, dependabot-ci-fix</td>
-				<td>Periodic scans. Triage and review crons are fallbacks when webhooks aren't configured. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo. The two dependency-PR backstops run daily even with webhooks on — <code>dependabot-pr-merge</code> (14:00) discovers green (<code>clean</code>) dependency PRs and <code>dependabot-ci-fix</code> (15:00) discovers ones that can't merge on their own — settled-red checks, or a <code>behind</code> / <code>dirty</code> / <code>blocked</code> <code>mergeable_state</code> — each fanning out one bounded run per PR as a safety net for the real-time <code>pr.checks_passed</code> / <code>pr.checks_failed</code> paths. Both skip PRs labelled <code>requires-human</code>.</td>
+				<td>Periodic scans. The triage cron is a fallback for deployments without webhooks. <strong>The review sweep (every 30 min) runs even with webhooks on</strong>: it is what reaches a PR whose fix chain ended without pushing a commit — attempts exhausted, an infrastructure failure, a flaky deferral — where no further <code>check_suite</code> event will ever fire, and it is the re-pickup that makes dropping (rather than queueing) the loser of the per-PR run lock safe. The security-review cron runs weekly (Monday 10:00), fanning out one run per managed repo. The two dependency-PR backstops run daily even with webhooks on — <code>dependabot-pr-merge</code> (14:00) discovers green (<code>clean</code>) dependency PRs and <code>dependabot-ci-fix</code> (15:00) discovers ones that can't merge on their own — settled-red checks, or a <code>behind</code> / <code>dirty</code> / <code>blocked</code> <code>mergeable_state</code> — each fanning out one bounded run per PR as a safety net for the real-time <code>pr.checks_passed</code> / <code>pr.checks_failed</code> paths. The sweeps only <em>find</em> candidates; whether a PR may be acted on (escalation, budgets, already-assessed, forks, a run already in flight) is decided at dispatch, in one place both they and the webhooks pass through.</td>
 			</tr>
 			<tr>
 				<td><strong>CLI</strong></td>
@@ -268,6 +268,18 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			</tr>
 		</tbody>
 	</table>
+
+	<p>
+		<strong>One label stops all of it.</strong> Apply the <em>hold</em> label —
+		<code>lastlight-ignore</code> by default, configurable as
+		<code>hold.label</code> — to any issue or pull request and no workflow in
+		this table runs on it: not triage, not review, not a fix, not a merge, and
+		no comment. It is checked before every routing rule and before every
+		dispatch, so the crons, the webhooks and a direct
+		<code>@last-light …</code> request all honour it — the direct request gets
+		exactly one reply naming the label, so it is refused rather than silently
+		ignored. Remove the label and the bot resumes, with nothing to clear.
+	</p>
 
 	<h2>Permission profiles</h2>
 
@@ -314,9 +326,9 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 	</table>
 
 	<div class="docs-next">
-		<a href="/docs/slack" class="prev">
+		<a href="/docs/pr-state" class="prev">
 			<span class="label">&larr; Prev</span>
-			<span class="title">Slack integration</span>
+			<span class="title">The PR state model</span>
 		</a>
 		<a href="/docs/workflows/build" class="next">
 			<span class="label">Next &rarr;</span>

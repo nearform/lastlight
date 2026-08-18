@@ -13,7 +13,7 @@ const nav = await getSpecNav();
 const pageTitle = `${title} — Last Light Spec`;
 const pageDescription = description ?? `${title} — Last Light specification.`;
 ---
-<BaseLayout title={pageTitle} description={pageDescription}>
+<BaseLayout title={pageTitle} description={pageDescription} noindex>
 	<div class="spec-shell">
 		<aside class="spec-sidebar">
 			<button type="button" class="spec-sidebar-toggle" aria-expanded="false" aria-controls="spec-nav-list">
@@ -76,9 +76,9 @@ const pageDescription = description ?? `${title} — Last Light specification.`;
 
 	.spec-sidebar {
 		position: sticky;
-		top: 1.5rem;
+		top: calc(var(--site-header-h) + 1.5rem);
 		align-self: start;
-		max-height: calc(100vh - 3rem);
+		max-height: calc(100vh - var(--site-header-h) - 3rem);
 		overflow-y: auto;
 		padding-right: 0.5rem;
 	}

@@ -142,6 +142,17 @@ export interface NewExecution {
   triggerType: "webhook" | "cron" | "chat" | "api";
   triggerId: string;
   skill: string;
+  /**
+   * GitHub org/user that owns {@link repo}. Both come straight off
+   * {@link GitSandboxAccess}, which already carries them separately.
+   */
+  owner?: string;
+  /**
+   * The BARE repo name — a single path-safe segment, NOT `owner/repo`. The two
+   * travel as a pair everywhere the engine touches a repository, so an embedder
+   * can hand them to Octokit without splitting anything (lastlight-core stores
+   * them as two columns for the same reason).
+   */
   repo?: string;
   issueNumber?: number;
   startedAt: string;
@@ -187,7 +198,8 @@ export interface ExecutionLedger {
   recordFinish(id: string, result: ExecutionFinish): void;
   recordSessionId(id: string, sessionId: string): void;
   recordOutputText(id: string, text: string): void;
-  recordSkippedPhase(dedupKey: string, triggerId: string, workflowRunId?: string, repo?: string): void;
+  /** `repo` is the BARE name and `owner` its account — see {@link NewExecution}. */
+  recordSkippedPhase(dedupKey: string, triggerId: string, workflowRunId?: string, repo?: string, owner?: string): void;
   getPhaseOutput(dedupKey: string, triggerId: string, workflowRunId?: string): string | null;
   getExecutionOutput(id: string): string | null;
 }
@@ -227,6 +239,32 @@ export interface ObservabilityPort {
   recordExecutionMetrics(surface: string, attrs: Record<string, unknown>): void;
   recordError(surface: string, error: unknown, attrs: Record<string, unknown>): void;
 }
+
+// ── LoggerPort — structured JSON logging ──────────────────────────────────────
+//
+// The engine's structured logging seam. The app owns the pino logger, so the
+// engine takes an injected logger port instead of importing a concrete logger.
+// The default adapter wraps the real logger; the test/no-op impl is silent.
+
+export interface LoggerPort {
+  debug(msg: string, fields?: Record<string, unknown>): void;
+  info(msg: string, fields?: Record<string, unknown>): void;
+  warn(msg: string, fields?: Record<string, unknown>): void;
+  error(msg: string, fields?: Record<string, unknown>): void;
+  fatal(msg: string, fields?: Record<string, unknown>): void;
+  child(component: string): LoggerPort;
+}
+
+export const noopLogger: LoggerPort = {
+  debug() {},
+  info() {},
+  warn() {},
+  error() {},
+  fatal() {},
+  child() {
+    return noopLogger;
+  },
+};
 
 // ── PhaseReporter — progress / notification surface ──────────────────────────
 
@@ -313,6 +351,7 @@ export interface EnginePorts {
   assets: AssetLoader;
   liveness: LivenessPort;
   observability: ObservabilityPort;
+  logger?: LoggerPort;
   /** Reviewer verdict-artifact fallback reader (see {@link VerdictArtifactReader}). */
   verdictReader?: VerdictArtifactReader;
   /** App-registered handlers for non-generic phase types (e.g. post-review). */

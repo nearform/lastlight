@@ -2,9 +2,12 @@ import Database from "better-sqlite3";
 import { resolve } from "path";
 import { migrate } from "./migrate.js";
 import { ExecutionStore } from "./execution-store.js";
+import { CronRunStore } from "./cron-run-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { WorkflowRunStore } from "./workflow-run-store.js";
 import { UserStore } from "./user-store.js";
+import { TeamStore } from "./team-store.js";
+import { FeedbackStore } from "./feedback-store.js";
 
 // Re-export the types that moved out to the per-table stores so existing
 // import sites (`import { WorkflowRun } from "../state/db.js"`, etc.) keep
@@ -15,10 +18,29 @@ export type { ExecutionRecord } from "./execution-store.js";
 export type { WorkflowApproval } from "./approval-store.js";
 export type { WorkflowRun, PhaseHistoryEntry, PhaseMarker } from "./workflow-run-store.js";
 export type { User, TriggerActorType } from "./user-store.js";
+export type { CronRunRecord, CronRunSource, CronRunStatus } from "./cron-run-store.js";
+export type {
+  ResolvedTeam,
+  CachedVisibility,
+  VisibilitySync,
+  VisibilitySyncStatus,
+} from "./team-store.js";
+export type {
+  FeedbackAnchor,
+  FeedbackAnchorInput,
+  FeedbackAnchorKind,
+  FeedbackSignal,
+  FeedbackSummaryRow,
+  FeedbackDailyRow,
+  FeedbackListOptions,
+} from "./feedback-store.js";
 export { ExecutionStore } from "./execution-store.js";
 export { ApprovalStore } from "./approval-store.js";
 export { WorkflowRunStore } from "./workflow-run-store.js";
 export { UserStore, TRIGGER_ACTOR_TYPES, isTriggerActorType } from "./user-store.js";
+export { TeamStore } from "./team-store.js";
+export { FeedbackStore } from "./feedback-store.js";
+export { CronRunStore } from "./cron-run-store.js";
 
 const DEFAULT_DB_PATH = "lastlight.db";
 
@@ -67,6 +89,20 @@ export class StateDb {
   readonly runs: WorkflowRunStore;
   /** First-class user identity — populated on dashboard login (issue #205). */
   readonly users: UserStore;
+  /**
+   * GitHub team → managed-repo visibility cache (issue #169). Populated lazily,
+   * per logged-in user — see {@link TeamStore} for why it is a cache and not a
+   * mirror of the org.
+   */
+  readonly teams: TeamStore;
+  /** Reaction-derived eval signals + the anchors they hang on (issue #255). */
+  readonly feedback: FeedbackStore;
+  /**
+   * One row per cron FIRE (issues #341/#327). The only record a zero-discovery
+   * backstop fire leaves — it dispatches nothing, so it writes no
+   * `workflow_runs` and no `executions` row.
+   */
+  readonly cronRuns: CronRunStore;
 
   constructor(dbPath?: string) {
     // ":memory:" stays a real per-connection in-memory DB (used by tests for
@@ -83,6 +119,9 @@ export class StateDb {
     this.approvals = new ApprovalStore(this.db);
     this.runs = new WorkflowRunStore(this.db, { approvals: this.approvals });
     this.users = new UserStore(this.db);
+    this.teams = new TeamStore(this.db);
+    this.feedback = new FeedbackStore(this.db);
+    this.cronRuns = new CronRunStore(this.db);
   }
 
   // ── Cron overrides ─────────────────────────────────────────────

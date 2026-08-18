@@ -26,6 +26,22 @@ vi.mock("#src/engine/agent-executor.js", () => ({
   executeCommand: vi.fn(),
 }));
 
+// reapOnSuccess's underlying reapSandboxWorkspace (src/sandbox/reap.js) now
+// logs via the pino LoggerPort instead of console — mock the logger module
+// so the suite's stderr stays free of real pino JSON (no assertions here
+// depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { runSimpleWorkflow } from "#src/workflows/simple.js";
 import { StateDb } from "#src/state/db.js";
 import { runWorkflow } from "#src/workflows/runner.js";
@@ -143,6 +159,65 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     expect(callbacks.postComment).toHaveBeenCalledOnce();
   });
 
+  it("stashes the enqueue ack's comment id so admission can retract it (#244)", async () => {
+    db.runs.createRun({
+      id: "blocker",
+      workflowName: "build",
+      triggerId: "acme/widgets#100",
+      currentPhase: "architect",
+      status: "running",
+      startedAt: new Date().toISOString(),
+    });
+
+    // A GitHub surface resolves the new comment id; Slack resolves void.
+    const callbacks = { ...makeCallbacks(), postComment: vi.fn(async () => 5060108290) };
+    await runSimpleWorkflow(
+      "explore",
+      makeRequest({ issueNumber: 215 }),
+      makeConfig(),
+      callbacks,
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1, maxQueueWaitMs: 1_800_000 },
+    );
+
+    const run = db.runs.getByTrigger("acme/widgets#215")!;
+    expect(run.status).toBe("queued");
+    expect(run.scratch?.queuedAck).toEqual({ commentId: 5060108290 });
+  });
+
+  it("records no ack handle when the surface returns no comment id (Slack)", async () => {
+    db.runs.createRun({
+      id: "blocker",
+      workflowName: "build",
+      triggerId: "acme/widgets#100",
+      currentPhase: "architect",
+      status: "running",
+      startedAt: new Date().toISOString(),
+    });
+
+    const callbacks = makeCallbacks(); // postComment resolves void
+    await runSimpleWorkflow(
+      "explore",
+      makeRequest({ issueNumber: 216 }),
+      makeConfig(),
+      callbacks,
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1, maxQueueWaitMs: 1_800_000 },
+    );
+
+    const run = db.runs.getByTrigger("acme/widgets#216")!;
+    expect(run.status).toBe("queued");
+    expect(run.scratch?.queuedAck).toBeUndefined();
+  });
+
   it("dedup: a duplicate trigger on a queued run returns queued without executing", async () => {
     // Create a queued run for the trigger
     db.runs.createRun({
@@ -172,5 +247,64 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     expect(mockRunWorkflow).not.toHaveBeenCalled();
     // Status stays queued, not changed
     expect(db.runs.getRun("queued-run-id")!.status).toBe("queued");
+  });
+
+  it("k8s backend admits freely at dispatch (fuse, not maxWorkflows)", async () => {
+    // One run already 'running' + maxWorkflows=1 would queue the next on docker/none.
+    // On the k8s backend the dispatch gate uses the sanity fuse, so it dispatches 'running'.
+    db.runs.createRun({
+      id: "running-k8s-0",
+      workflowName: "build",
+      triggerId: "acme/widgets#200",
+      currentPhase: "architect",
+      status: "running",
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await runSimpleWorkflow(
+      "explore",
+      makeRequest(),
+      { ...makeConfig(), sandbox: "kubernetes" as const },
+      makeCallbacks(),
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1, maxQueueWaitMs: 1_800_000 },
+    );
+
+    expect(result.queued).toBeFalsy(); // NOT capped by maxWorkflows on k8s
+    // Prove it actually admitted + dispatched (not a silent early return): the
+    // workflow ran, so runWorkflow was invoked and the result reflects it.
+    expect(mockRunWorkflow).toHaveBeenCalledOnce();
+    expect(result.success).toBe(true);
+  });
+
+  it("requeues the run (running -> queued) when runWorkflow reports backpressure", async () => {
+    mockRunWorkflow.mockResolvedValue({
+      success: false,
+      phases: [{ phase: "socratic", success: false, error: "exceeded quota" }],
+      backpressure: true,
+    });
+
+    const result = await runSimpleWorkflow(
+      "explore",
+      makeRequest(),
+      { ...makeConfig(), sandbox: "kubernetes" as const },
+      makeCallbacks(),
+      db,
+      undefined,
+      undefined,
+      "lastlight:bootstrap",
+      undefined,
+      { maxWorkflows: 1000, maxQueueWaitMs: 1_800_000 },
+    );
+
+    expect(result.queued).toBe(true);
+    expect(result.backpressure).toBe(true);
+    // The row was created 'running', then requeued back to 'queued' by requeueRunning.
+    const runs = db.runs.listActive();
+    expect(runs.find((r) => r.workflowName === "explore")!.status).toBe("queued");
   });
 });

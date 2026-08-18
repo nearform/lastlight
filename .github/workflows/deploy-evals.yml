@@ -48,18 +48,29 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # build:site is self-contained: it builds the evals dashboard (a standalone
-      # Vite SPA with no workspace deps) and runs scripts/build-site.ts via tsx
-      # over apps/evals/src — whose import graph (build-site -> report ->
-      # schema/grade) never reaches lastlight-core, so no workspace `dist/` is
-      # needed here. It assembles dist-site/ (SPA shell + baked /api/index +
-      # /data copy — from the vendored sample-results/ in CI, see the header note).
+      # build:site is NO LONGER self-contained, which is what the note here used
+      # to warn about in the conditional: `scripts/build-site.ts` runs via tsx
+      # over apps/evals/src, and that import graph (build-site -> report ->
+      # grade) now reaches `lastlight-core/evals` — `grade.ts` imports the core
+      # barrel as of #256. tsx resolves that to
+      # `apps/evals/node_modules/lastlight-core/dist/evals-api.js`, a symlink
+      # into apps/server, so the site build needs core's `dist/` on disk and
+      # died with ERR_MODULE_NOT_FOUND on every release from v0.23.0 to v0.23.3.
       #
-      # NOTE: if build:site ever imports the core barrel (lastlight-core/evals),
-      # add a `pnpm --filter ...lastlight-evals build` step BEFORE this to build
-      # dependencies first — the leading-dots `...pkg` form (dependencies), not
-      # the trailing `pkg...` (dependents), which is a no-op here since nothing
-      # depends on lastlight-evals.
+      # The TRAILING-dots `pkg...` form is "pkg AND its dependencies"
+      # (topologically ordered by pnpm). The note that used to live here said the
+      # opposite — that the LEADING-dots `...pkg` form selected dependencies —
+      # and it is wrong: `...pkg` selects DEPENDENTS, which is an exact no-op
+      # here because nothing depends on lastlight-evals. Following it produced a
+      # step that built only lastlight-evals itself and left the ERR_MODULE_NOT_FOUND
+      # in place. Verified with `pnpm --filter '<form>' list --depth -1`:
+      # `lastlight-evals...` selects evals + core + shared + workflow-engine +
+      # agentic-pi; `...lastlight-evals` selects evals alone.
+      - name: Build dependencies (lastlight-core's dist/ — build:site imports it)
+        run: pnpm --filter 'lastlight-evals...' build
+
+      # Assembles dist-site/ (SPA shell + baked /api/index + /data copy — from
+      # the vendored sample-results/ in CI, see the header note).
       - name: Build site
         run: pnpm --filter lastlight-evals run build:site
 

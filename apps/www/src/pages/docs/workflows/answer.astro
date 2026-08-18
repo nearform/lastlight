@@ -53,6 +53,21 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 		<li><strong>Slack:</strong> a message classified as a question (route <code>answer</code>)</li>
 	</ul>
 
+	<p>
+		On Slack the bar is deliberately high, because this workflow provisions a
+		sandbox while chat replies in-process in seconds — and chat is not
+		toolless: it already reads repos, issues and their comments, pull requests
+		and their diffs, file contents, commit history, and searches code. So a
+		Slack question only reaches <code>answer</code> when it needs one of the two
+		things chat can't do — <strong>the web</strong> (comparisons with other
+		tools, upstream docs, current external facts) or <strong>real exploration of
+		a checkout</strong> (tracing a behaviour across many files). "What does this
+		workflow do?" or "what changed in PR #273?" are answered by chat, even
+		though they name a repo. A newly-opened GitHub <em>issue</em> that asks a
+		question always runs this workflow — an issue has no chat surface to fall
+		back to.
+	</p>
+
 	<h2>Skill</h2>
 
 	<p>This workflow uses the <code>issue-answer</code> skill.</p>

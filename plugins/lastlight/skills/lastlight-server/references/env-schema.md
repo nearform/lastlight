@@ -22,7 +22,8 @@ LASTLIGHT_OVERLAY_DIR=/app/instance
 GITHUB_APP_ID=123456
 # PEM lives at instance/secrets/app.pem; the entrypoint symlinks it to /app/app.pem.
 GITHUB_APP_PRIVATE_KEY_PATH=./app.pem
-GITHUB_APP_INSTALLATION_ID=789012
+# Optional — installations are auto-discovered and resolved per repository owner.
+# GITHUB_APP_INSTALLATION_ID=789012
 
 # ── Webhook (required) — must match the GitHub App's webhook secret ──
 WEBHOOK_SECRET=<openssl rand -hex 32>
@@ -55,7 +56,9 @@ ADMIN_SECRET=<openssl rand -hex 32>
 # ── Slack (optional) ─────────────────────────────────────
 # SLACK_BOT_TOKEN=xoxb-...
 # SLACK_APP_TOKEN=xapp-...
-# SLACK_DELIVERY_CHANNEL=C0123456
+# SLACK_DELIVERY_CHANNEL=C0123456   # fallback channel for the weekly repo digest
+#   (a repo's own notifications.slack.channel and the overlay's
+#    slack.repoChannels map both take precedence)
 # SLACK_ALLOWED_USERS=U0123,U0456
 ```
 

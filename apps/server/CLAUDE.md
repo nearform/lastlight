@@ -45,10 +45,16 @@ layer: one on-disk store (`$STATE_DIR/auth.json`, override `LASTLIGHT_AUTH_FILE`
 `lastlight oauth login|list|status|test|logout` (host-local,
 `packages/cli/src/oauth-cli.ts`) drives the browser flow. **Two seams, different reach:**
 the in-process **chat** path (`chat-runner.ts`) passes the token as a per-call
-`apiKey`, so all three work; the **sandbox** path (`agent-executor.ts`) resolves
-creds from env only and injects `ANTHROPIC_OAUTH_TOKEN` / `COPILOT_GITHUB_TOKEN`
-— Codex has no env-token route, so it's **chat-only** (the executor warns if a
-Codex model is used for a sandbox phase).
+`apiKey`, so all three work; on the **sandbox** path it depends on the backend.
+The **in-process backends** (`gondolin` — the default — and `none`) run the
+model call host-side, so the orchestrator hands agentic-pi `authFile` and pi's
+AuthStorage resolves **every** OAuth provider from it, Codex included. The
+**container backends** (`docker` / `smol`) run it in-guest, where that host path
+is unreadable, so `agent-executor.ts` injects `ANTHROPIC_OAUTH_TOKEN` /
+`COPILOT_GITHUB_TOKEN` instead — and Codex has no in-guest env route, so it
+cannot authenticate *there* (the executor warns and points at a host-side
+backend). Codex is **not** chat-only on a default install; it is unusable only
+on the container backends.
 
 The cheap-helper path (`src/engine/llm.ts`, used by screener + classifier)
 bypasses agentic-pi and dispatches directly to the same three providers.
@@ -98,9 +104,26 @@ src/
     config.ts           Layered config load: config/default.yaml +
                         optional $LASTLIGHT_OVERLAY_DIR/config.yaml + env
                         overrides. Secrets stay env-only. Exposes
-                        getRuntimeConfig / getManagedRepos / getRoutes /
-                        getPublicConfig.
-    config-resolve.ts   Pure config layer resolution (default / overlay / env).
+                        getRuntimeConfig / getRoutes / getPublicConfig /
+                        getBotName / resolveGithubAuth /
+                        resolveKubernetesConfig, plus the single redaction
+                        rule (SENSITIVE_KEY_RE + redactPublic) every
+                        YAML-echoing surface imports.
+    config-resolve.ts   Pure config layer resolution (default / overlay / env),
+                        plus resolveWithExtraLayer — the seam the per-repo
+                        layer merges through. Re-exports mergeLayer from
+                        lastlight-shared rather than carrying a second copy.
+    repo-config.ts      The IMPURE half of the per-repo `.lastlight/` layer
+                        (issue #180): fetchRepoLayer / refreshRepoLayer /
+                        invalidateRepoLayer / getCachedRepoLayer, the
+                        <stateDir>/repo-config/<owner>/<repo>/ TTL+ETag cache
+                        (60s, sidecar meta.json + atomically-renamed files/),
+                        repoConfigPolicy(), repoConfigBaseFromRuntime().
+                        Re-exports the PURE half wholesale from
+                        packages/shared/src/repo-config-schema.ts (schema,
+                        bounds, validators, merger) — which lives there
+                        because the CLI validates `.lastlight/` offline and
+                        may never gain an edge to core.
   connectors/           Platform abstraction — every event source emits an
                         EventEnvelope so the engine never sees raw payloads.
     github-webhook.ts   GitHub App webhook → EventEnvelope.
@@ -108,7 +131,18 @@ src/
                         Socket Mode dev fallback) + mrkdwn formatter.
     messaging/          Base class for all messaging platforms
                         (slack now, discord later). Owns SessionManager — the
-                        per-thread conversation store.
+                        per-thread conversation store — and
+                        thread-transcript.ts, which records the turns
+                        SessionManager's other writer does NOT: a Slack thread
+                        is one conversation however each message was handled,
+                        but only chat-runner.ts wrote to messaging_messages, so
+                        a message the classifier routed to a WORKFLOW
+                        (answer/build/explore) left no trace and the next chat
+                        turn in that thread rehydrated nothing. The two writers
+                        are mutually exclusive per turn (the dispatcher skips
+                        the wrap for `chat`), so the double-write that moved
+                        persistence into chat-runner isn't reintroduced. See
+                        spec/11-chat.md → "The thread transcript".
   engine/
     router.ts           Deterministic, code-based routing of EventEnvelope
                         → { skill, context }. Classifies build intent via a
@@ -128,8 +162,78 @@ src/
                         executeDocker/executeSmol/executeInProcess twins).
       shared.ts         Backend-agnostic building blocks (RunResultAccumulator,
                         skill-bundle staging, server-artifact stage/harvest,
-                        finalizeFromRunResult, env splice).
-    dispatcher.ts       Routes classified events to workflow or chat handler.
+                        finalizeFromRunResult, githubAuthEnvFrom).
+    dispatcher.ts       Routes classified events to workflow or chat handler,
+                        and gates every PR-scoped dispatch on the snapshot
+                        below (run lock + decision, before any sandbox).
+    pr-state.ts         The PR state machine: `resolvePrState()` — ONE
+                        snapshot per dispatch of everything we know about a
+                        PR (live GitHub facts + facts derived from our own
+                        run history, keyed on the PR). The span of the run
+                        lock is `prScopedWorkflows()` in
+                        workflows/pr-scope.ts, derived from each workflow's
+                        own `pr_scoped: true` YAML key.
+                        Resolved at the dispatchWorkflow choke point and
+                        persisted on `context.prState`. Never throws: every
+                        read is best-effort and degrades to a value that
+                        cannot cause a skip.
+    pr-notes.ts         The PR journal — the agent-written half of that
+                        snapshot (`PrState.notes`). Pure: kinds, the parse of
+                        the `<kind>: <line>` grammar, the bounds (20 notes /
+                        240 chars / 4 KiB, newest kept), staleness marking,
+                        and the fenced render. Notes are HINTS: no decision
+                        function reads them, `renderContext` projects them to
+                        one string (`{{priorNotes}}`), and a note containing
+                        `class=` or a marker tag is rejected on ingest.
+                        Impure half lives in `fix-harvest.ts` (the drain).
+    fix-scratch.ts      The two files the harness owns inside a PR checkout
+                        — the fix loop's push gate
+                        (.git/lastlight-verify.sh) and the PR journal
+                        (.git/lastlight-notes) — and the one argument that
+                        places both. They live under `.git/`, which git never
+                        walks, so `git add -A` cannot commit them on ANY
+                        backend and nothing has to be registered anywhere
+                        (issue #256: the k8s backend never wrote the
+                        `.git/info/exclude` line the old placement relied on,
+                        and committed them into the PR).
+    fix-harvest.ts      The impure half of the two above: after every phase it
+                        parses the marker lines out of the output, DRAINS the
+                        journal, and READS the push gate onto
+                        `scratch.fixMarkers` — the gate is a read, not a drain,
+                        because it is the live gate the next loop iteration
+                        runs. The recorded script is the fix loop's main
+                        debugging artifact (09 §S1) and the admin run detail
+                        panel renders it beside the snapshot.
+    pr-escalation.ts    What a TERMINAL skip does to the PR: applies
+                        requires-human + one comment naming the case, the
+                        attempts spent and each attempt's class/cause, and
+                        the four exits (three retries + the hold) — and
+                        RECORDS A RUN ROW first, because escalatedAtSha is
+                        read back off the prior run's context and a skip
+                        otherwise writes none (without it the guard never
+                        binds and every later event re-escalates and
+                        re-comments). Called from BOTH dispatch gates. Also
+                        holds `recordIntervention` — the mirror-image row for
+                        a RETRY that produced no run, so an ask the gate then
+                        skipped for an unrelated reason isn't lost.
+    pr-decisions.ts     PURE functions over that snapshot — mayMerge,
+                        resolveFixDisposition, resolveMergeDisposition,
+                        resolveReviewTrigger, resolveDispatchDisposition,
+                        renderContext. Each returns
+                        `{ decision, reason, inputs }`, so the log line, the
+                        escalation comment and the admin panel are three
+                        renderings of one source. Table-testable with no
+                        GitHub mock and no sandbox.
+    review-check.ts     The `last-light/review` Check Run as a PROJECTION of
+                        run state: created at the dispatchWorkflow choke
+                        point (so a cron/comment/Slack/CLI review gets one
+                        too), persisted on `scratch.reviewCheck`, and
+                        COMPLETED FROM THE RUN'S TERMINAL TRANSITION via the
+                        run store's TerminalRunObserver — so simple.ts,
+                        resume.ts, the queued-run TTL expiry and the admin
+                        cancel all resolve it for free. It used to be
+                        completed inside a `.then()` on an in-memory promise
+                        and stranded `in_progress` on every deploy.
     event-shim.ts       Translates agentic-pi events → Claude-SDK envelope jsonl.
     llm.ts              One-shot LLM helper for screen/ + classifier —
                         direct fetch to Anthropic Messages or OpenAI Chat
@@ -207,10 +311,94 @@ src/
                         and groups by Slack thread.
   state/
     db.ts               SQLite tables: executions, workflow_runs,
-                        workflow_approvals, messaging_sessions,
+                        workflow_approvals, cron_runs, messaging_sessions,
                         messaging_messages, plus daily/hourly stat rollups.
-  cron/                 node-cron scheduler. Each tick dispatches a
+    cron-run-store.ts   The `cron_runs` ledger (issues #341/#327) — one row per
+                        cron FIRE, scheduled or manual, for `workflow:` and
+                        `handler:` crons alike, keyed on the CRON's name. A
+                        zero-discovery fire dispatches nothing, so it writes no
+                        `workflow_runs` and no `executions` row: this is the
+                        only record that it ran at all. Keyed on the cron
+                        rather than the workflow so a run dispatched by
+                        `/api/run` or a comment cannot skew a cron's health.
+    team-store.ts       The dashboard's per-repo visibility CACHE (issue #169):
+                        github_teams / _team_repos / _team_members /
+                        github_visibility_sync. Not a mirror of the org — rows
+                        exist only for the teams of somebody who actually logged
+                        in, so absence means "unknown", never "no access", and
+                        every read path fails OPEN. Filled by
+                        engine/github/team-visibility.ts.
+  cron/                 croner scheduler. Each tick dispatches a
                         cron-kind workflow via the same runner.
+    scheduler.ts        register/update/unregister/has + the tick → runner.
+    jobs.ts             Build the job list from workflows/cron-*.yaml +
+                        cron_overrides rows + the operator `crons:` block.
+                        A globally-OFF cron stays REGISTERED, marked
+                        `_cronGloballyEnabled: false`, so a repo opt-in can
+                        be honoured at tick time.
+    fanout.ts           One dispatch per repo (`context.repos`) — and the
+                        shared engine behind the per-PR dependency-merge
+                        fan-out. Narrows the repo list via repo-crons first.
+    repo-crons.ts       Per-repo cron participation (issue #180):
+                        resolveCronRepos / repoCronPrefs / cronVote /
+                        repoLayerMayVote / operatorCrons, plus the
+                        `_cronName` + `_cronGloballyEnabled` context keys the
+                        fan-out consumes and strips. Resolved at TICK time so
+                        a repo's `.lastlight/` edit lands on the next tick
+                        with no scheduler churn.
+    sandbox-sweep.ts    Hourly TTL/LRU workspace sweep (issue #106).
+    handlers.ts         The HOST-SIDE cron handler registry — what a cron
+                        YAML's `handler:` key may name. Built at boot (not a
+                        constant) because each handler needs collaborators that
+                        only exist then. A cron declares EXACTLY ONE of
+                        `workflow:` (dispatch an agent workflow) or `handler:`
+                        (run code in this process). `handler:` exists for
+                        periodic work no agent can do — the digest's facts are
+                        in the harness's own SQLite, unreachable from a sandbox,
+                        and it posts to Slack, for which there is no agent tool.
+                        A `registerDirect` job could do the same work but is
+                        invisible to `getCronWorkflows()`, so it gets no
+                        dashboard toggle, no schedule override, no per-repo
+                        participation and no "Run now"; `handler:` buys all
+                        four. An unresolvable name DROPS the cron with a boot
+                        warning (it cannot fail boot — the registry is
+                        conditional). `withLedger` wraps every registered
+                        handler in ONE `cron_runs` row per invocation, keyed by
+                        the cron's name — the same ledger, keyed the same way,
+                        that a workflow cron's fire writes via `runner.ts`. So
+                        `GET /crons` and the scheduler's failure alert read one
+                        table and never branch on the kind of cron. It wraps
+                        here, not in the scheduler, because admin "Run now"
+                        invokes the registry directly.
+    runner.ts           `makeCronRunner` — the fire path for `workflow:` crons,
+                        extracted from `index.ts` so it is testable. Records the
+                        same `cron_runs` row `withLedger` does, plus the counts
+                        a fan-out produces (repos eligible/scanned, discovered,
+                        dispatched, failures) and a `lastlight.cron.fire` span
+                        + counter. Writes the outcome rather than returning it:
+                        `WorkflowRunner` stays `Promise<void>`.
+    repo-digest.ts      The weekly per-repo Slack digest: what happened in the
+                        repo (GitHub) plus what Last Light did about it (the
+                        state DB), posted to the repo's channel. Facts are
+                        computed in code — `digest.narrative` spends ONE cheap
+                        `llm.ts` call on a summary sentence, and a failure there
+                        drops the sentence, never the digest. INERT until a
+                        channel resolves: no channel, no post, no GitHub
+                        request, no model call. Narrows its own repo list
+                        through `resolveCronRepos` (nothing upstream does that
+                        for a handler cron).
+    dependabot-discovery.ts / review-discovery.ts
+                        PR discoverers for the discovery crons (which fan out
+                        per discovered PR, so src/index.ts narrows their repo
+                        list through resolveCronRepos itself).
+                        dependabot-discovery.ts is also THE single source of
+                        truth for the label vocabulary — the dependency
+                        lifecycle + impact labels, plus HOLD_LABEL
+                        (`lastlight-ignore`) and its colour. It sits there
+                        rather than in config/ so the hold reads correctly
+                        beside the labels it is not; the packaged prompts
+                        hardcode the same strings and
+                        tests/cron/label-vocab.test.ts pins them together.
 
 workflows/              YAML workflow definitions consumed by the loader.
                         build.yaml, pr-fix.yaml, pr-review.yaml,
@@ -245,8 +433,10 @@ skills/                 Skill directories — each contains SKILL.md
                         catalogue and the agent reads each SKILL.md on
                         demand via its `read` tool. Chat threads use the same skills
                         in-process via a `read_skill` tool —
-                        catalogue built at boot from CHAT_SKILL_NAMES
-                        in src/engine/chat/chat-skills.ts.
+                        catalogue built from every layer-resolvable skill
+                        whose SKILL.md frontmatter sets `chat: true`
+                        (src/engine/chat/chat-skills.ts), so an overlay
+                        can add one or override a built-in.
 agent-context/          *.md files concatenated and prepended as AGENTS.md
                         for every agent session — the bot's "personality"
                         plus hard rules. Sandbox entrypoint cats these into
@@ -279,11 +469,52 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
 - **Workflow** — a YAML file listing phases. The runner knows nothing about
   "build" vs "triage" — it just executes phases in order (or as a DAG). See
   `src/workflows/CLAUDE.md`.
+- **PR state machine** (`src/engine/pr-state.ts` + `pr-decisions.ts`,
+  `docs/plans/dependency-pr-resilience/09-state-machine.md`) — what the harness
+  knows about a pull request is **resolved once per dispatch** into a `PrState`
+  snapshot at the `dispatchWorkflow` choke point, and every policy question is
+  then a pure function over it. It replaced reads spread across six sites, each
+  fetching an overlapping subset and each free to disagree. Three things it
+  buys: a real **PR-scoped run lock** across `pr-fix` / `dependabot-ci-fix` /
+  `dependabot-pr-merge` / `pr-review` (the old
+  `db.executions.isRunning(handler, triggerId)` guard never matched a row —
+  wrong key on both predicates — so two agents could clone and push the same
+  branch); identical context on the webhook and cron routes, because the cron
+  fan-out calls `dispatchWorkflow` directly and used to bypass every enrichment;
+  and a `{ decision, reason, inputs }` verdict per gate, rendered in the log, the
+  escalation comment and the admin panel from one source. The loser of the lock
+  is **dropped with a reason, not queued** — sound only because each dropped
+  case has a cron re-pickup. A skip that is **terminal** for the problem
+  (attempts or cost exhausted, or a diagnosis outside `fix.retryableClasses`)
+  is not dropped silently: `pr-escalation.ts` records a run row, labels the PR
+  `requires-human` and posts one comment. The row is the load-bearing part —
+  see its module header. **Getting un-stuck is a recorded fact, not an
+  inference from a commit** (`PrState.intervention`,
+  `docs/plans/stuck-pr-recovery/03-retry-intervention.md`): a maintainer can
+  push, comment `@<bot> retry [reason]`, remove `requires-human`, or run
+  `lastlight pr retry <owner/repo#N> [reason]`
+  (`POST /admin/api/prs/:owner/:repo/:number/retry`, the one surface with no
+  event of its own — so it crosses `applyPrDispatchGate` in the admin route and
+  dispatches itself), and all
+  four re-arm the attempt counter *and* the cost baseline through the one
+  `sameProblem` boundary. A retry keeps the agent's journal (`priorAttempts`)
+  and marks the seam; a push still wipes it, because the code changed.
+  Applying the **hold** label instead keeps the bot off entirely and beats
+  every one of them. `pr-review` crosses the same gate, through
+  `resolveReviewTrigger` — **the only implementation of `review.trigger`
+  anywhere**, so `review-discovery.ts` is a candidate finder that knows nothing
+  about modes, drafts or settled checks, an explicit `@bot review` is a decision
+  rather than an accident of which code paths the comment route crossed, and the
+  `last-light/review` check is a projection of run state (`review-check.ts`)
+  instead of a `.then()` on an in-memory promise. Contract:
+  `spec/05-router.md` → "The PR-scoped dispatch gate".
 - **Configuration & deployment overlay** (`src/config/config.ts`, `config/default.yaml`,
   issue #61) — non-secret config (managed repos, routes, models, variants,
-  approvals, disables) is loaded at startup from the packaged
+  approvals, disables, cron participation) is loaded at startup from the packaged
   `config/default.yaml`, then an optional `$LASTLIGHT_OVERLAY_DIR/config.yaml`
-  is layered on, then legacy env vars override. Maps deep-merge; arrays
+  is layered on, then legacy env vars override. **A fourth layer, the target
+  repo's own `.lastlight/`, is applied per dispatch — see "Per-repo config
+  layer" below.** Maps deep-merge; arrays
   (`managedRepos`, `disabled.*`) replace; secrets stay env-only. The same
   `LASTLIGHT_OVERLAY_DIR` root also overlays assets — `workflows/`,
   `workflows/prompts/`, `skills/`, `agent-context/` — resolved layer-aware by
@@ -293,13 +524,20 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   via `getManagedRepos()` (runtime config, not a baked constant). **Effective
   managed-repo list:** a non-empty configured `managedRepos` wins and restricts
   to exactly those repos; when it's **empty**, the list is instead sourced from
-  the **GitHub App installation** — the repos the App can access, fetched once at
-  boot (`GitHubClient.listInstallationRepos()`, wired in `src/index.ts`) into an
-  in-memory cache and kept live by `installation` / `installation_repositories`
-  webhooks (`src/connectors/github-webhook.ts`). So an org install that already
+  the **GitHub App installations** — the union of the repos every installation
+  can access, fetched once at boot
+  (`GitHubClient.listAllInstallationRepos()`, wired in `src/index.ts`) into an
+  in-memory cache **keyed by installation id** and kept live by `installation` /
+  `installation_repositories` webhooks (`src/connectors/github-webhook.ts`).
+  Keyed rather than flat because those events are per-account: applied to one
+  global set, a second org's `created` reset the list to just that org and its
+  `deleted` cleared it entirely. So an org install that already
   limits the App to a subset of repos need not maintain a second copy in config.
   The admin `/managed-repos` endpoint (Config → Managed repos pane) surfaces the
-  configured / installation / effective lists + source. Caveat: for a
+  configured / installation / effective lists + source, plus every
+  **installation** (account, id, repo count) and `uninstalledOwners` — any
+  `managedRepos` owner the App isn't installed on, which would otherwise surface
+  only as a failed mint mid-run. Caveat: for a
   `repository_selection: "all"` install, a newly-created org repo isn't picked up
   until the next boot fetch (no webhook fires); the `selected` case is fully
   covered. In the
@@ -317,6 +555,102 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
   config, not runtime behaviour: `lastlight server update|setup` checks core out
   at that tag instead of tracking `main`. Read host-side and in-container by
   `readCorePin()` (`src/config/core-pin.ts`); see "Redeploy a code change".
+- **Per-repo config layer** (`src/config/repo-config.ts` +
+  `packages/shared/src/repo-config-schema.ts`, issue #180) — a **managed repo**
+  may commit a `.lastlight/` directory that overrides a **bounded** subset of
+  config *for runs against that repo only*. Precedence becomes
+  `default → overlay → env → repo`. The directory mirrors the instance overlay's
+  shape exactly — `lastlight.yml`, `workflows/prompts/*.md`,
+  `skills/<name>/SKILL.md`, `agent-context/*.md` — so the unpacked tree is handed
+  to the same layer-aware asset loader with no second code path. **A repo may
+  never contribute workflow YAML** (phases, permission profiles and approval
+  gates stay the operator's; `populateCache()` skips `repo` layers structurally),
+  and its `agent-context/*.md` is **additive only** — a file whose basename an
+  operator-owned layer already provides is dropped, so a repo can't neuter
+  `security.md` / `rules.md`.
+  - **Trust rule.** The layer is ALWAYS read from the repo's **default branch**,
+    never a PR head and never the sandbox checkout — otherwise a PR could
+    reconfigure the agent reviewing it.
+  - **Failure rule.** Warn, drop the offending keys, run anyway. A repo's config
+    file can never fail a run. Every rejection is a structured
+    `RepoConfigWarning` surfaced on the run row / admin API / CLI. The one
+    "refusal" is a repo's own `disabled.workflows`, enforced at the
+    `dispatchWorkflow` choke point.
+  - **Operator bounds** — the `repoConfig:` block in config
+    (`enabled`, `allowKeys`, `allowedModels`, `allowAssets`). Default allow-list:
+    `models`, `variants`, `crons`, `disabled.workflows`, `disabled.crons`,
+    `approval` (add-only — a repo may raise a gate, never clear one), `fix`,
+    `dependencies`, `review` (one-way clamped — next bullet). Inert out
+    of the box: nothing changes until a repo actually commits `.lastlight/`.
+  - **Policy blocks** (`fix` / `dependencies` / `review`, issues #251/#252) —
+    budgets and blast-radius dials, so they generalise `approval`'s add-only
+    rule: **a repo may only ever be MORE conservative than the operator.** A
+    loosening leaf is *dropped* with a `policy-downgrade` warning, and dropping
+    IS the clamp (the base carries the operator's value, so the leaf resolves
+    back to it). Per-key directions live with the sanitizers in
+    `packages/shared/src/repo-config-schema.ts` — `min()` for the fix budgets,
+    subset-only for `retryableClasses`, the lower tier for
+    `autoMergeMaxImpact` and `review.trigger`
+    (`on-request < after-checks < eager`), union-only for
+    `review.generatedPaths`, add-only `true` for `requireSettledChecks` /
+    `postsCheck` / `skipDraft` / `auditComment`, free for `requestLabel`
+    alone. (`trigger` and `auditComment` were free until #256: the three
+    review modes are equally *safe* but not equally *expensive* — `eager`
+    buys a full agent review per push on the operator's budget — and the
+    audit comment is the record of a major this deployment auto-merged,
+    whose only silenceable party is the one being audited.) Three leaves are
+    **operator-only** and answer `key-not-allowed` instead:
+    `fix.escalateModelAfterAttempt` (spend),
+    `fix.gateTimeoutSeconds` (shared resource), and
+    `dependencies.minSettledChecks` — where a `max(repo, operator)` clamp would
+    weld the escape hatch shut for a repo with no CI at all. `fix` +
+    `dependencies` are now **live**: the PR dispatch gate (below) reads the
+    run's repo-clamped blocks — on every route, webhook included — and enforces
+    `fix.maxAttempts` / `fix.maxCostUsd` and
+    `dependencies.requireSettledChecks` / `minSettledChecks`, and the green
+    dependency cron reads the latter pair too. What the gate does **not**
+    enforce is `dependencies.autoMergeMaxImpact`: that ceiling reaches the merge
+    run only as prompt text and the impact tier is the agent's self-report, so
+    it is policy the agent is asked to honour rather than a code-enforced
+    ceiling (`spec/02-configuration.md` → "Where `dependencies` is enforced").
+    **`review` is live as well**: `resolveReviewTrigger` is the one
+    implementation of `review.trigger` on every route, and
+    `src/cron/review-discovery.ts` is back to being a pure candidate finder.
+    `review` is deliberately NOT seeded onto the template context — `build.yaml`
+    already emits `output_var: review` and a top-level object would shadow it.
+  - **Cron participation** — a `crons: { enable, disable }` block, valid at
+    EVERY layer. Operator `crons.disable` = off *by default* (the tick stays
+    registered); a repo's `crons.enable` opts in even when globally off,
+    `crons.disable` opts out, disable wins if both. The legacy `disabled.crons`
+    is unioned into `crons.disable`. **The operator's un-overridable kill switch
+    is removing `crons` from `repoConfig.allowKeys`** — `repoLayerMayVote()` then
+    short-circuits with zero fetches.
+  - **Fetch/cache** — through the App-authenticated client (private repos work),
+    cached under `<stateDir>/repo-config/<owner>/<repo>/` with a 60 s TTL +
+    ETag/tree-sha conditional requests, so a cron fan-out over N repos costs N
+    conditional requests and zero downloads. Caps: 200 files / 2 MiB; symlinks
+    rejected.
+  - **Concurrency** — resolved once per dispatch (`resolveRepoRunConfig`) and
+    carried explicitly on the run as `RunRepoConfig`, never installed into a
+    module global. Assets go through a **per-run `AssetResolver`**
+    (`createAssetResolver` in `packages/shared/src/workflow-loader.ts`); the
+    composed agent context travels as `ExecutorConfig.agentContext` and is used
+    verbatim by both delivery paths (workspace write, or the k8s
+    `AgentContextSink`).
+  - **Resume** reuses the run's persisted `context.repoConfig` record instead of
+    re-resolving, so an edit made while a run was paused can't retarget it
+    mid-flight.
+  - **Surfaces** — `GET /admin/api/repos/:owner/:repo/config` (merged config +
+    per-leaf provenance `default`/`overlay`/`env`/`repo`, the raw redacted repo
+    layer, warnings, assets, effective policy; `?refresh=1` bypasses the TTL)
+    powers the dashboard's per-repo **Config** tab; the CLI side is
+    `lastlight repo fork` / `repo config validate` / `repo config show`
+    (see `packages/cli/CLAUDE.md`). Full contract: `spec/02-configuration.md`.
+    The dashboard hand-mirrors `RepoMergedConfig` / `RepoConfigSources` in
+    `dashboard/src/api.ts` (no import edge to core); the copies drifted once and
+    hid the three policy blocks for a release, so
+    `tests/admin/dashboard-config-mirror.test.ts` now pins the mirror and the
+    tab's section list against the real type.
 - **Two execution modes**:
   - **Sandbox** — workflow phases run inside a Docker sandbox
     (`src/sandbox`) with a minted per-run GitHub token. Each phase invokes
@@ -339,18 +673,68 @@ dashboard/              React+Vite admin SPA, served from /admin at runtime.
 - **Permission profiles** (`src/engine/github/profiles.ts`) — each workflow maps to
   a `GitAccessProfile`: `read`, `issues-write`, `review-write`, `repo-write`.
   `runner.ts` picks one per workflow name and the agent-executor mints a
-  downscoped installation token for the sandbox. Only `repo-write` runs see
-  the App PEM; everything else uses a pre-minted scoped token, which
+  downscoped installation token for the sandbox (minting is gated on **boot
+  config**, `getRuntimeConfig().githubApp`, never live `process.env`). No profile
+  forwards the App PEM today; every run uses that pre-minted scoped token, which
   agentic-pi's built-in github tools (its `github` extension — the
-  `github_*` tools, gated per profile) read from the sandbox env. The
-  standalone `mcp-github-app` MCP server that used to expose these tools was
-  removed with the OpenCode→agentic-pi migration.
+  `github_*` tools, gated per profile) read from a **per-run** credential
+  channel: the container backends get it in the container env, and the
+  in-process backends (gondolin/none) get it via agentic-pi's `githubAuthEnv`
+  argument. It is **never** spliced into the harness's shared `process.env` —
+  concurrent in-process runs live in that one env, so a token there crossed
+  between runs and 403'd every `github_*` write (issue #215; see
+  `spec/09-sandbox.md` → "Invariant: per-run credentials never travel through
+  `process.env`"). The standalone `mcp-github-app` MCP server that used to
+  expose these tools was removed with the OpenCode→agentic-pi migration.
+  **`repo-write` is also the only profile that registers `github_publish`** —
+  how every code-writing phase now puts its work on the branch, in place of
+  `git add && git commit && git push`. The token authenticates a push but cannot
+  sign a commit, and one unsigned commit anywhere in a branch blocks a
+  `required_signatures` PR permanently, so the tool diffs the working tree
+  against the remote tip and hands the change set to GraphQL
+  `createCommitOnBranch`, which builds and signs the commit server-side —
+  expected to be under the App's `[bot]` identity, though that half is
+  **unverified** (the probes used a user PAT; `docs/plans/signed-commit-publish/00-findings.md`
+  §5) (issue #268; `spec/09-sandbox.md` → "Invariant: the published commit
+  is built by GitHub, not by git"). Local `git commit`s remain fine — they are
+  folded in — and there is no `git push` fallback.
 - **Approval gates** — phases can declare `approval_gate: post_architect`.
   When hit, the run persists with `status: paused`, a row in
   `workflow_approvals`, and the user can resolve it via GitHub comment
   (`@last-light approve` / `reject`), Slack slash command (`/approve`,
   `/reject`), or the dashboard. Resume logic is in `src/workflows/resume.ts`
   and is runtime-agnostic — it operates on `ExecutionResult` + DB rows.
+- **Feedback signals** (`src/engine/feedback/`, `src/state/feedback-store.ts`,
+  issue #255) — a 👍/👎 someone leaves on something the bot wrote, scored
+  against the workflow run that wrote it, so a prompt/skill change's effect on
+  quality is measurable rather than felt. Analytical only: nothing reads a
+  signal back into the agent's behaviour. Scores: 🎉🚀❤️ +2, 👍😄 +1, 👀 **0**
+  (recorded, not scored — it is the bot's own ack emoji, so counting it as
+  criticism would poison the dataset), 👎 -1, 😕 -2.
+  - **Attribution runs through an ANCHOR**, because a reaction names a *message*
+    and a signal needs a *run*. Anchors are written at the only moment the
+    association is free: when we post (Slack — `sendMessage`'s returned `ts`,
+    which every send site used to discard) or when a run finishes (GitHub
+    discovery of what it posted). Nothing recomputes it later; by then the only
+    evidence would be timestamps.
+  - **Slack is live and on**; `reaction_added` is a real event. Needs the
+    `reactions:read` bot scope + subscriptions (see Environment) and an app
+    re-consent.
+  - **GitHub must be POLLED and ships off** (`feedback.github`) — GitHub sends
+    no webhook for reactions at all. `src/cron/feedback-poll.ts` refreshes the
+    least-recently-polled anchors through one batched GraphQL `nodes(ids:)`
+    query per 100, measured at **one rate-limit point per request** with the
+    reactors included. The bound is on the data, not the schedule: individual
+    bot comments (never issues), retired after `feedback.windowDays`, capped at
+    `feedback.maxAnchorsPerTick` (÷100 = the tick's request count).
+  - A **retraction is a fact, not a delete** — removing a reaction stamps
+    `removed_at`; every score query filters `removed_at IS NULL`. And
+    `exported_at` is stamped only when a span really went out, so turning OTel
+    on later still gets the backlog (`drainFeedbackExport`, at boot).
+  - Surfaces: the dashboard's **Feedback** tab + a per-run badge,
+    `GET /admin/api/feedback/{signals,summary,daily}` and
+    `/admin/api/workflow-runs/:id/feedback`, and an OTel span on the run's own
+    trace (see the OpenTelemetry section).
 - **Sandbox HTTP egress allowlist** — both backends apply a default-deny
   HTTP egress policy. The host list lives in `src/sandbox/egress-allowlist.ts`
   (`GITHUB_HOSTS` + `PROVIDER_HOSTS` + `PACKAGE_REGISTRY_HOSTS`).
@@ -401,8 +785,11 @@ a Docker volume in production).
 ```
 data/
   lastlight.db              SQLite — executions, workflow_runs,
-                            workflow_approvals, messaging_sessions,
-                            messaging_messages, plus daily/hourly stat
+                            workflow_approvals, cron_runs (one row per cron
+                            fire, scheduled or manual, workflow and handler
+                            crons alike), messaging_sessions,
+                            messaging_messages, feedback_anchors,
+                            feedback_signals, plus daily/hourly stat
                             rollups.
   agent-sessions/           Shim destination (override with
                             `LASTLIGHT_SESSIONS_DIR`). Its `projects/` subdir is
@@ -416,6 +803,13 @@ data/
                             buildAssets.location=server):
                             <owner>/<repo>/<issueKey>/*.md — never committed
                             into the target repo. Store: src/state/build-assets.ts.
+  repo-config/              Per-repo `.lastlight/` layer cache (issue #180):
+                            <owner>/<repo>/meta.json (sidecar: default branch,
+                            tree sha, etag, warnings) + <owner>/<repo>/files/
+                            (the unpacked tree, written to files.tmp and
+                            renamed). Pure cache — safe to delete; refilled by
+                            the next conditional fetch. Holds untrusted bytes
+                            from managed repos, so nothing in it is executed.
   logs/                     Structured harness logs.
   proxy/                    Generated egress firewall configs (docker
                             backend): nginx-strict.conf, nginx-open.conf,
@@ -470,8 +864,21 @@ RUN_SANDBOX_IT=1 npx vitest run tests/sandbox/command-exec.integration.test.ts
 
 Required:
 
-- `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, `GITHUB_APP_INSTALLATION_ID`
+- `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`
 - `WEBHOOK_SECRET` — must match the GitHub App webhook secret
+- **`GITHUB_APP_INSTALLATION_ID` is OPTIONAL** (legacy seed). A GitHub App is
+  installed per **account**, each with its own installation id, and a token
+  minted against the wrong one is rejected (`422 … not accessible to the parent
+  installation`). So installations are **discovered** from the App JWT
+  (`GET /app/installations`, plus every webhook's `payload.installation`) and
+  resolved **per repo owner** by `InstallationDirectory`
+  (`src/engine/github/installations.ts`) — the one authority the per-run mint,
+  `GitHubClient` and the chat GitHub tools all go through. One instance
+  therefore serves every account the App is installed on. The env var carries no
+  account, so it's used only when that lookup itself fails (network, revoked
+  PEM), keeping an old single-installation deployment on its previous behaviour.
+  `GET /admin/api/managed-repos` lists the installations and any
+  `uninstalledOwners`.
 - **Bot identity** (optional; defaults to `last-light`) — `botName` is the
   GitHub App slug (no `[bot]` suffix) and the single source of truth for the
   bot's identity. Set it in the overlay `config.yaml` (`botName:
@@ -510,6 +917,17 @@ accepted as aliases for the `LASTLIGHT_*` forms below):
 Runtime:
 
 - `PORT` — webhook listener port (default 8644)
+- `LOG_LEVEL` — pino level for operational logs: `debug|info|warn|error|fatal`
+  (default `info`). Set `LOG_LEVEL=debug` to open up debug tracing.
+- `LOG_FORMAT` — `json|pretty` (default: auto — `pretty` when stderr is a TTY,
+  `json` otherwise, so k8s/prod gets JSON automatically without setting this).
+  **Log contract** (`src/logging/logger.ts`): operational logs are JSON lines
+  on **stderr** carrying a string `level`, plus `component`, `msg`, `err`,
+  `time`, and — inside an active OTel span — `trace_id`/`span_id`. The
+  cluster's Vector DaemonSet tails pod stderr and its `pod_level` transform
+  reads that JSON `level` straight into Loki's severity, instead of guessing
+  from plaintext. **stdout** is reserved for the sandbox's NDJSON event
+  protocol (agentic-pi's emitter) — never write operational logs there.
 - `LASTLIGHT_OVERLAY_DIR` — trusted deployment overlay root (docker-compose
   mounts `instance/` here as `/app/instance`). Layered over
   `config/default.yaml` for config + assets; secrets read from its `secrets/`
@@ -517,6 +935,15 @@ Runtime:
   a recreate, `lastlight server start agent`; see the `instance/` note above).
 - `STATE_DIR` — persistent state dir (default `./data`)
 - `DB_PATH` — override SQLite path
+- `LASTLIGHT_HOLD_LABEL` — the **hold** label a maintainer applies to an issue
+  or PR to stop Last Light acting on it at all (default `lastlight-ignore`;
+  overlay `hold.label`). Read by `getHoldLabel()` at exactly two choke points —
+  `resolveDispatchDisposition` and the router's subject-level ignore — so it
+  covers every workflow and every route. Distinct from `requires-human`, which
+  the bot *writes* as a notification and nothing reads. Renaming it changes what
+  the code gates on, but the packaged dependency prompts still create the
+  **default** name in their `github_ensure_labels` pass — so a rename wants a
+  forked prompt too, or the label created by hand.
 - `LASTLIGHT_HOME` — working directory for the host-local `lastlight server`
   lifecycle commands (start/stop/restart/update/status): a full repo checkout +
   `instance/` overlay + `docker-compose.override.yml` symlink (the docker build
@@ -595,6 +1022,20 @@ Sandbox (smolvm `smol` backend — experimental, opt-in):
   path → direct share). See `spec/09-sandbox.md`. Opt-in IT:
   `RUN_SMOL_IT=1 SMOLVM_IMAGE=<archive> npx vitest run tests/sandbox/smol.integration.test.ts`.
 
+Sandbox (`kubernetes` backend — in development, opt-in):
+
+- `LASTLIGHT_SANDBOX=kubernetes` runs each workflow phase as its own bare Pod
+  in a dedicated namespace — the harness itself is a Kubernetes client
+  (`@kubernetes/client-node`), a structural peer of the docker/smol backends
+  behind the same `Sandbox` port, driven by `KubernetesSandbox`
+  (`src/sandbox/k8s/kubernetes-sandbox.ts`). Not the default;
+  `config/default.yaml` stays `gondolin`. See `deploy/k8s/README.md` for the
+  cluster prerequisites and a ready-to-apply `kubectl apply -k` manifest set,
+  and `spec/09-sandbox.md` for the full contract (pod lifecycle, credentials,
+  egress via `CiliumNetworkPolicy`, per-PR workspace PVCs, quota-based
+  backpressure). Opt-in IT: `RUN_K8S_IT=1 npx vitest run
+  tests/sandbox/k8s/kubernetes.integration.test.ts`.
+
 Sandbox workspace provisioning (issue #107):
 
 - **Shallow clone** — read-only workflows (everything except the
@@ -611,13 +1052,28 @@ Sandbox workspace provisioning (issue #107):
   `origin/<base>` ref and deepens *both* refs (base + the depth-1 head) until
   they share a merge-base — depth 50 → 500 → full unshallow. Best-effort: on
   failure the plain clone stands and `post-review` demotes to its two-dot / body
-  fallback. Runs on both the fresh-clone and per-PR-reuse refresh paths.
+  fallback. Runs on **every** provisioning path — the fresh clone, the
+  per-PR-reuse refresh, *and* a later phase of the same run (the k8s init
+  container's `ensure_base` mirrors all three). That last one matters: the
+  same-run path preserves the checkout, and it used to return before any fetch,
+  so `origin/<base>` was frozen from the run's first phase and a fix phase
+  merged a base tens of minutes stale — leaving the PR `dirty`, which GitHub
+  cannot compute a merge ref for, so no `pull_request` workflow runs at all.
+  Refreshing there is safe because it writes remote-tracking refs only — never
+  HEAD, the index or the working tree. It also adds the base to
+  `remote.origin.fetch` (`git remote set-branches --add`), since `--depth`
+  implies `--single-branch` and the agent's own `git fetch origin <base>` would
+  otherwise move `FETCH_HEAD` and nothing else.
 - **Per-PR workspace reuse** — `pr-review` / `pr-fix` workspaces are keyed
   by (repo, PR) and reused across runs. A `<workDir>/.lastlight-run` marker
   records the owning run: same run → preserve the checkout for the next
   phase; a different run reusing the dir → `git fetch` + `reset --hard` +
-  `git clean -fdx -e node_modules` (deps stay warm). See the workflows
-  guide's "taskId scoping" section.
+  `git clean -fdx -e node_modules` (deps stay warm). The whole fix family
+  (`PR_FIX_SHAPED_WORKFLOWS`) shares ONE workspace per PR —
+  `${repo}-${prNumber}-fix`, not `…-${workflowName}` — because the PR-scoped
+  run lock admits only one of them at a time and routing between `pr-fix` and
+  `dependabot-ci-fix` genuinely varies by how the event arrived. See the
+  workflows guide's "taskId scoping" section.
 - **Per-issue build recreate (issue #153)** — `build` workspaces are keyed by
   (repo, issue) too, but a different-run marker → **delete the leftover
   checkout and re-clone from the default branch** (`recreateFromBase`), so a
@@ -656,8 +1112,11 @@ Sandbox workspace reaping (issue #106):
 
 OpenTelemetry (optional):
 
-- Disabled by default. Enable with `LASTLIGHT_OTEL_ENABLED=true`; standard `OTEL_EXPORTER_OTLP_*`, `OTEL_SERVICE_NAME`, and `OTEL_RESOURCE_ATTRIBUTES` env vars configure exporter endpoints/headers/resources.
+- Disabled by default. Enable with `LASTLIGHT_OTEL_ENABLED=true`; standard `OTEL_EXPORTER_OTLP_*`, `OTEL_SERVICE_NAME`, and `OTEL_RESOURCE_ATTRIBUTES` env vars configure exporter endpoints/headers/resources. The OTLP/HTTP encoding defaults to **`http/protobuf`** (the OTLP spec default — many backends, e.g. Arize Phoenix, accept protobuf only and 415 on JSON) and is overridable via `OTEL_EXPORTER_OTLP_PROTOCOL` (or the per-signal `OTEL_EXPORTER_OTLP_{TRACES,METRICS}_PROTOCOL`) to `http/json`; `resolveOtlpProtocol` in `src/telemetry/index.ts` picks the transport package. (`grpc` isn't bundled — it warns and falls back to protobuf.)
 - Last Light exports workflow/phase/agent/chat metadata by default. `LASTLIGHT_OTEL_INCLUDE_CONTENT=true` opts into sensitive prompt/message/tool-result content (truncated).
+- **Span tree + OpenInference (issue #224).** A run exports a nested span tree — `lastlight.workflow.run` (CHAIN) → `lastlight.workflow.phase` (CHAIN) → `lastlight.agent.execute` (AGENT) → a span per model turn (LLM) → a span per tool call (TOOL) — carrying OpenInference attributes (`openinference.span.kind`, `llm.model_name`/`llm.system`, `llm.token_count.*`, `llm.cost.total`, `tool.name`, `tool.is_error`). So an OpenInference-aware backend (e.g. Arize Phoenix) renders a proper agent tree with per-turn tokens + cost instead of a flat two-span shape. The OpenInference keys are set via `setSpanAttributes` (a direct `span.setAttribute` path) to bypass the `safeSpanAttributes` content scrubber, which would otherwise strip `token`/`prompt`/`content` keys; content values (`input.value`/`output.value`/tool args+results) stay gated behind `LASTLIGHT_OTEL_INCLUDE_CONTENT`. Constants live in `src/telemetry/openinference.ts`; the turn/tool tree is built by `AgentSpanTree` (`src/telemetry/pi-events.ts`) from the same pi event stream that still emits the flat `pi.*` span events as a fallback.
+- `LASTLIGHT_OTEL_METRICS_ENABLED=false` (default true; overlay `otel.metrics: false`) disables the OTLP **metrics** signal while keeping traces — for a traces-only backend that rejects metrics (Arize Phoenix 404s the metrics endpoint). The metric reader is then never started (`initTelemetry`), so `meter()` hands back a no-op and `recordExecutionMetrics`/… silently do nothing.
+- **Feedback signals on the trace (issue #255).** A 👍/👎 somebody leaves on the bot's output exports one more span, `lastlight.feedback.signal` (OpenInference `EVALUATOR`), carrying `feedback.{source,emoji,score,sentiment,anchor.kind,anchor.url}` plus `langfuse.score.user_feedback`. It is **parented on the original run's span**, rebuilt from `workflow_runs.trace_id`/`span_id` as a remote context (`src/telemetry/feedback.ts`) — because the reaction arrives long after that span closed, and starting a fresh span would produce a second, disconnected trace nobody can relate to the work. No recorded trace (telemetry was off during the run) → it exports as its own root span. Caveat: Langfuse does not yet map `langfuse.score.*` on OTLP ingest, so today those attributes ride along on a correctly-placed span rather than becoming a Score; Phoenix reads the `EVALUATOR` kind now. Metrics: `lastlight.feedback.signals` + `lastlight.feedback.score`.
 - `LASTLIGHT_OTEL_FORWARD_TO_SANDBOX=true` (default) enables sandbox telemetry. On the **docker** backend, sandboxes export OTLP to an in-network `otel-collector` compose service (static IP `172.30.0.30` on `sandbox-egress`, dual-homed onto `proxy-egress`), which re-exports to the real backend; the sandbox is given only that internal endpoint (`http://172.30.0.30:4318`), never the backend endpoint or `OTEL_EXPORTER_OTLP_HEADERS`. The collector config is generated from the harness OTEL_* env by `writeOtelCollectorConfig` (`src/sandbox/egress-firewall-config.ts`). This is why custom-port/plaintext collectors no longer need firewall changes — the backend hop runs on the collector's trusted outbound leg, not through `ssl_preread`. On **gondolin**/**none** (agentic-pi runs in-process), `OTEL_*` env is forwarded directly and `LASTLIGHT_OTEL_COLLECTOR_HOSTS` (+ parsed endpoint hosts) feed gondolin's egress allowlist.
 
 Web search (optional, opt-in per workflow phase):
@@ -684,6 +1143,26 @@ Admin dashboard:
   is only fully open when *no* login method is set. Clearing the password while
   OAuth is configured keeps auth on (OAuth-only).
 - `ADMIN_SECRET` — HMAC secret for session tokens
+- **GitHub App org permission `Members: read`** (setup step, issue #169) —
+  required for **per-repo dashboard visibility**: with it (plus the `team` /
+  `membership` / `organization` webhook subscriptions and
+  `teamVisibility.enabled: true` in the overlay), a GitHub-authenticated admin
+  can narrow to the managed repos their org teams own **plus the ones their own
+  account owns**, across workflow runs, sessions and the home-page panels.
+  (Ownership is unioned in because teams are an org concept — a personal repo
+  could never be team-granted, so a purely team-derived answer hid every one of
+  them. The test is `owner === login`, never "the owner isn't an org", which
+  would leak other people's personal repos into your filter.)
+  **Re-consent the App on each installation
+  after adding it.** Without it the feature stays dormant, harmlessly: the
+  resolver fails open and everyone keeps seeing everything, which is exactly
+  today's behaviour. This is UI declutter — `/workflow-runs`, `/sessions` and
+  `/stats` all keep returning global data; filtering is client-side. Nothing is
+  crawled up front: a user's teams are resolved on their first dashboard request
+  (`GET /admin/api/me/repos`) and cached in SQLite, so an org with thousands of
+  repos costs a handful of GraphQL calls per logged-in person rather than a
+  full-org walk. Budgets in `teamVisibility` bound one cache miss and every one
+  of them fails open. See `spec/02-configuration.md` and `spec/10-state.md`.
 
 Slack (optional):
 
@@ -697,13 +1176,19 @@ Slack (optional):
   server (the same Hono app as the GitHub webhook); webhook delivery is
   at-least-once (Slack retries), unlike Socket Mode which can drop messages.
 - `SLACK_APP_TOKEN` (xapp-…) — app-level token; required only for `socket` mode.
-- `SLACK_DELIVERY_CHANNEL` — channel id for cron reports
+- `SLACK_DELIVERY_CHANNEL` — **last-resort** channel for the weekly repo digest.
+  Consulted only after the repo's own `notifications.slack.channel`
+  (`.lastlight/lastlight.yml`) and the operator's `slack.repoChannels` map
+  (overlay `config.yaml`). If none of the three resolves, that repo gets no
+  digest — which is what keeps a fresh install quiet. Resolution lives in
+  `src/notify/repo-channel.ts`.
 - `SLACK_ALLOWED_USERS` — comma-separated user ids allowlist
 - `SLACK_OAUTH_CLIENT_ID`, `SLACK_OAUTH_CLIENT_SECRET`,
   `SLACK_OAUTH_REDIRECT_URI` — enables "Login with Slack" on the dashboard
   (OIDC via arctic, uses `openid.connect.userInfo`; requests the `email` scope
   so a Slack login matches a `users` row by email — issue #205)
 - `SLACK_ALLOWED_WORKSPACE` — restrict OAuth login to one team_id / domain
+- **Slack bot scope `reactions:read`** (setup step, issue #255) — required for **feedback signals**: with it (plus the `reaction_added` / `reaction_removed` event subscriptions, both in `deploy/slack/slack-manifest.json`) a 👍/👎 on a message the bot posted is scored against the workflow run that produced it. Without it Slack never delivers the event and the feature is dormant — silently, and harmlessly. **Re-consent the Slack app after adding it.**
 - **Slack bot scope `users:read.email`** (setup step, issue #205) — required
   for **Slack → user matching**: with it, `web.users.info` returns the user's
   `profile.email` so a Slack-initiated run/approval attributes to the same
@@ -782,7 +1267,14 @@ sudo -u lastlight -i lastlight server update
    rather than building them on the host — a release publishes
    `ghcr.io/nearform/lastlight-{agent,sandbox-base,sandbox,sandbox-qa}` via the
    `images` job of `.github/workflows/publish.yml` (on GitHub Release +
-   `workflow_dispatch`, amd64, public). `server update` pulls the tag `resolveImageTag` returns — the
+   `workflow_dispatch`, amd64, public). (The release also publishes a fifth
+   image, `lastlight-agent-qemu` — `agent` + QEMU for the `gondolin` backend
+   on a bare-metal/VM host — which the compose stack doesn't use, so it isn't
+   pulled here. `deploy/k8s/` is a separate deploy example, unrelated to that
+   image: it's the **kubernetes sandbox backend** (`sandbox.backend:
+   kubernetes`, see above), which runs the plain `agent`/`sandbox` images as
+   ordinary Pods — no QEMU/KVM, no privileged containers, no device plugin.)
+   `server update` pulls the tag `resolveImageTag` returns — the
    overlay's `deploy.version` pin (e.g. `v0.11.0`) when set, else `:latest` — and
    re-tags each to its **local** name (`lastlight-agent`,
    `lastlight-sandbox:latest`, …), which is what `docker-compose.yml` and the

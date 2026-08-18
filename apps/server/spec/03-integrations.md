@@ -54,17 +54,217 @@ session management, allowlist enforcement, and message chunking.
 | **Transport** | HTTP POST to `/webhooks/github` on the Hono app the GitHub connector exposes |
 | **Auth** | HMAC-SHA256 over the request body, header `X-Hub-Signature-256`. Timing-safe compare. Runs *before* JSON parse. (`src/connectors/github-webhook.ts:146–155`) |
 | **Allowlist** | Repo allowlist check via `isManagedRepo()`. Events from non-managed repos short-circuit. The effective list is the overlay's `managedRepos` when non-empty; when empty it falls back to the repos the **GitHub App installation** can access (discovered at boot, kept live by installation webhooks — see below). So an org install that limits the App to a subset need not duplicate the list in config. |
-| **Installation sync** | `installation` and `installation_repositories` events are intercepted at the top of the handler (before the ignored-action + repo filters, since they carry no `payload.repository`) and applied to the in-memory installation-repo cache: `created` seeds it, `deleted` clears it, `installation_repositories` added/removed patch it. They produce no envelope (return `installation-sync`, 200). See `src/managed-repos.ts`. |
+| **Installation sync** | `installation` and `installation_repositories` events are intercepted at the top of the handler (before the ignored-action + repo filters, since they carry no `payload.repository`) and applied to the in-memory installation-repo cache, **scoped to `payload.installation.id`**: `created` / `unsuspend` set that installation's set, `deleted` / `suspend` remove it, `installation_repositories` added/removed patch it. A **suspended** installation still exists and keeps its id but 403s every mint, so it is out of service exactly like an uninstall — the only difference is that the directory keeps it visible, flagged, instead of forgetting it. They produce no envelope (return `installation-sync`, 200). Every delivery — these included — also records its `payload.installation` in the installation directory (below). See `src/managed-repos.ts`. |
+| **Team-visibility sync** | `team`, `membership` and `organization` events are intercepted in the same place, and for the same reason: they are org-wide, carry no `payload.repository`, and several of their actions (`deleted`, `edited`) sit in `IGNORED_ACTIONS`. They **invalidate** the dashboard's per-repo visibility cache (issue #169) rather than re-derive it — `membership` and `organization` member changes drop that one login's answer, a `team` change drops the team and every member's answer with it. Deleting is the whole response because the cache is filled on demand per logged-in user; re-deriving here would put an unbounded org walk on the delivery path. They produce no envelope (return `team-visibility-sync`, 200). See `src/state/team-store.ts` and `10-state.md`. |
 | **Normalize** | `GitHubWebhookConnector.normalize()` (`line 157–260`). Runs *after* signature + allowlist. Returns `null` for ignored actions (does not produce an envelope). |
-| **Event types** | `issue.opened`, `issue.reopened`, `issue.closed`, `pr.opened`, `pr.synchronize`, `pr.reopened`, `pr.closed`, `pr.merged`, `pr.checks_failed`, `pr.checks_passed`, `comment.created`, `pr_review.submitted`, `pr_review_comment.created` |
-| **Re-run checks** | `check_run.rerequested` / `check_suite.rerequested` (the GitHub "Re-run" / "Re-run all checks" buttons) normalize to `pr.synchronize` for the PR in the event's `pull_requests[]`, re-triggering pr-review against the current head. Requires the App to subscribe to the **Check run** / **Check suite** events (App permission: Checks: read). |
-| **Failed checks** | `check_suite.completed` with a `failure` / `timed_out` conclusion normalizes to `pr.checks_failed`, but **only for dependency-update PRs** — the connector pre-filters on the head commit author (`dependabot[bot]` / `renovate[bot]`) or the suite's head branch (`dependabot/` / `renovate/`), the same deterministic gate as the green `pr.checks_passed` path, so a human's red PR fires nothing (the head commit also supplies the title + author signal). **Settle-aware:** the connector emits only once the head SHA's checks have *fully settled red* (`getChecksConclusion === "failing"` — nothing pending), so a repo with several check-reporting apps fires one event per SHA, not one per suite. The router then runs the (already dependency-gated) event through the intent classifier so a workflow that claims a check-failure intent via its `classification` block (e.g. `dependabot-ci-fix`) is picked up; unclaimed → ignored. Requires the **Check suite** subscription (Checks: read). |
-| **Passed checks** | `check_suite.completed` with a `success` conclusion normalizes to `pr.checks_passed`, but **only for dependency-update PRs** — the connector pre-filters on the head commit author (`dependabot[bot]` / `renovate[bot]`) or the suite's head branch (`dependabot/` / `renovate/`) so an ordinary green PR fires nothing. **Settle-aware:** it emits only when the head SHA has *fully settled green* (`getChecksConclusion === "passing"`); an earlier suite going green while siblings are still running sees `"pending"` and is dropped, so exactly one event fires per SHA — the last suite to settle. The router routes it deterministically (no classifier call) to the workflow claiming the `dependabot-pr-merge` intent; unclaimed → ignored. Same **Check suite** subscription (Checks: read). |
-| **Filtered out** | `IGNORED_ACTIONS` (line 27): `edited`, `labeled`, `unlabeled`, `assigned`, `closed` (except for the explicit close types above), `pinned`, `transferred`, and friends. Bot self-events are dropped unless the bot opened/synchronised a PR **or** it's a `check_suite.completed` (the failing-CI signal is always bot-sent); a PR **authored** by the bot is dropped from pr-review entirely (self-review guard). |
+| **Event types** | `issue.opened`, `issue.reopened`, `issue.closed`, `pr.opened`, `pr.synchronize`, `pr.reopened`, `pr.closed`, `pr.merged`, `pr.checks_failed`, `pr.checks_passed`, `pr.checks_settled`, `pr.labeled`, `pr.review_requested`, `comment.created`, `pr_review.submitted`, `pr_review_comment.created` |
+| **Review signals** | Three `pull_request` actions carry the `review.trigger` machinery. `ready_for_review` normalizes to **`pr.opened` semantics** — a draft becoming ready is the moment the PR first asks to be looked at, and it is the event that un-defers a review `review.skipDraft` held back. `labeled` normalizes to `pr.labeled` carrying `addedLabel`, so `review.requestLabel` works; every other label is hard-ignored by the router, so the widening costs a `normalize()` call rather than a dispatch. `review_requested` normalizes to `pr.review_requested` carrying `requested_reviewer.login` (or `team/<slug>`) — **opportunistic only**: GitHub App bot users are not selectable in the reviewer picker, so `on-request` mode must not depend on it, and the label + comment + Re-run paths are the real mechanism. All three inherit the self-review guard: a PR the bot authored is dropped. |
+| **Re-run checks** | `check_run.rerequested` / `check_suite.rerequested` (the GitHub "Re-run" / "Re-run all checks" buttons) normalize to `pr.synchronize` for the PR in the event's `pull_requests[]`, re-triggering pr-review against the current head. **Exception:** a re-run of *our own* `last-light/review` check normalizes to `pr.review_requested` instead — it is a human asking for a review, not "the code changed", and `pr.synchronize` is a PR-attention event that `after-checks` / `on-request` would defer, which would make the check's own button a no-op. Requires the App to subscribe to the **Check run** / **Check suite** events (App permission: Checks: read). |
+| **Failed checks** | A `check_suite.completed` whose head SHA has **settled red in aggregate** normalizes to `pr.checks_failed` for two populations: a **dependency-update PR** (head commit author `dependabot[bot]` / `renovate[bot]`, or a `dependabot/` / `renovate/` head branch — commit author *or* branch, so a squashed or proxied bot commit still matches), **and** a PR whose head commit **we** pushed (`head_commit.author.name === botLogin`, which is exactly what `git-auth.ts` stamps on the agent's own commits). The second is the CI feedback loop `pr-fix` never had: it could push a fix and never learn whether the build went green, because this event only ever fired for dependency PRs. It stays bounded — it cannot fire on a human PR the bot has not touched — but it is the one gate here that can raise run volume on non-dependency PRs. **Settle-aware:** the connector emits only once the head SHA's checks have *fully settled red* (`getChecksConclusion === "failing"` — nothing pending), so a repo with several check-reporting apps fires one event per SHA, not one per suite. **The delivering suite's own conclusion is not the discriminator** — see "Which event a settle becomes" below. The dependency discriminator is **carried on the envelope** as `isDependencyPr` rather than discarded, so the router routes on it deterministically (dependency → `dependabot-ci-fix`, otherwise → `pr-fix`) instead of paying a classifier call to re-guess it — see [Router](/spec/05-router). Requires the **Check suite** subscription (Checks: read); reading the *reason* it failed additionally wants **Actions: read** — see below. |
+| **Settled checks** | Under `review.trigger: after-checks` — and only then, since emitting is what costs event volume — a settled `check_suite.completed` on a PR that **neither** check-outcome route below claimed normalizes to `pr.checks_settled`, either colour — **including a red aggregate observed through a green suite**, which is the ordinary shape of a PR with one failing job whose sibling suite finishes last. This is the `after-checks` trigger. It is a separate event type rather than a broadening of `pr.checks_failed` because `normalize()` returns **one envelope per delivery** and `route()` returns one handler: a fan-out into both a fix and a review is not expressible, so **fix outranks review** by construction. The gap that leaves — a fix chain that ends without pushing, so no further `check_suite` ever fires — is released by the `check-prs-awaiting-review` sweep. |
+| **Passed checks** | A `check_suite.completed` whose head SHA has **settled green in aggregate** normalizes to `pr.checks_passed`, but **only for dependency-update PRs** — the connector pre-filters on the head commit author (`dependabot[bot]` / `renovate[bot]`) or the suite's head branch (`dependabot/` / `renovate/`) so an ordinary green PR fires nothing. **Settle-aware:** it emits only when the head SHA has *fully settled green* (`getChecksConclusion === "passing"`); an earlier suite going green while siblings are still running sees `"pending"` and is dropped, so exactly one event fires per SHA — the last suite to settle. Again the aggregate decides, not this suite's conclusion. The router routes it deterministically (no classifier call) to the workflow claiming the `dependabot-pr-merge` intent; unclaimed → ignored. Same **Check suite** subscription (Checks: read). |
+| **Filtered out** | `IGNORED_ACTIONS`: `edited`, `unlabeled`, `assigned`, `closed` (except for the explicit close types above), `pinned`, `transferred`, and friends. `labeled` left the set when `review.requestLabel` landed. Bot self-events are dropped unless the bot opened/synchronised a PR **or** it's a `check_suite.completed` (the failing-CI signal is always bot-sent); a PR **authored** by the bot is dropped from pr-review entirely (self-review guard). |
 | **Reply** | Posts a comment via `replyFn(owner, repo, issueNumber, msg)` (line 237). Returns `Promise<void>`; no useful return value. No-op if `replyFn` or issue context is missing. |
 
 If `WEBHOOK_SECRET` is empty (allowed but warned during boot), signature
 verification is disabled. Production deployments must set it.
+
+### Which event a settle becomes
+
+A `check_suite.completed` delivery carries a conclusion of its own, and it is
+**not** what picks the event. The suite's colour says only which
+check-reporting app happened to finish last; the decision reads the
+**aggregate** state of the head SHA. So one `completed` branch resolves all
+three outcomes, in this order:
+
+| Aggregate | Population | Event |
+|---|---|---|
+| `failing` | dependency PR, or a head **we** pushed | `pr.checks_failed` |
+| `passing` | dependency PR | `pr.checks_passed` |
+| `failing` or `passing` | anything left, under `after-checks` | `pr.checks_settled` |
+| `pending` / `none` | — | nothing (CI is still moving) |
+
+The order is **fix outranks review** (09 → S2): `normalize()` returns one
+envelope per delivery, so the precedence is the shape of the pipeline rather
+than a policy bolted on later. Deliveries with a `cancelled` / `neutral` /
+`skipped` / `stale` conclusion are dropped without an aggregate read at all —
+nothing happened, and the round trip would buy nothing.
+
+Reading the delivering suite's colour instead was a live deadlock
+(nearform/skillspro#1646). The red and green cases were separate branches, each
+with its own aggregate test, and the green one demanded `passing`. A PR with one
+failing job whose *sibling* suite finished green afterwards landed in the green
+branch, computed `failing`, and was dropped — while the failing suite, which the
+red branch would have taken, had completed while the sibling was still running
+and read `pending`. No event ever fired; under `review.postsCheck` the `queued`
+placeholder sat on the PR until it was merged hours later. Nothing about the PR
+was unusual: the outcome depended purely on the order CI settled in.
+
+### Fork PRs and the check payloads
+
+GitHub populates `check_suite.pull_requests[]` / `check_run.pull_requests[]`
+**only when the head branch lives on the base repo**. A PR opened from a fork
+carries an empty array, so every route keyed on it — the settle emit and both
+Re-run buttons — used to drop the delivery outright.
+
+That was invisible until `after-checks` became the packaged default. Under
+`eager` the review fires from `pr.opened`, a `pull_request` event that always
+carries the PR object, so forks never touched the check path at all. Under
+`after-checks` a fork PR defers on `pr.opened`, posts its `queued` placeholder,
+and then no settle event can ever conclude it — the check sits there for the
+life of the PR, and on a repo that made it required the PR is unmergeable
+(nearform/lastlight#282).
+
+So an empty array falls back to asking the **base** repo which open PR this
+commit heads (`listPullRequestsAssociatedWithCommit`). The base repo is the one
+the App is installed on, so this needs no access to the fork. Two filters make
+it a safe substitute for the payload's own array: `head.sha` must equal the
+commit (the endpoint also returns PRs that merely *contain* it), and the PR must
+be **open**. Results are sorted ascending so the rare commit heading two open
+PRs resolves deterministically.
+
+The lookup is resolved **after** the "does anyone consume this?" test, so a
+delivery no route wants still costs nothing, and a same-repo PR never reaches it
+at all.
+
+**The maintainer-approval gate comes for free.** GitHub withholds Actions runs on
+a fork PR from a first-time contributor until a maintainer approves them. No
+approval means no checks, which means the aggregate is `none` and never settles,
+which means no review. Gating on "CI settled" inherits GitHub's own gate exactly,
+with no permission logic on our side — and it is why reviewing fork PRs is safe
+to do by default: the same human decision that lets fork code run in Actions is
+the one that lets it reach the review sandbox.
+
+### Superseded check re-runs
+
+`checks.listForRef?filter=latest` de-dupes per check **suite**, not per check
+**name**. Re-running a failed job creates a new suite, so its green result comes
+back *alongside* the red attempt it replaced — and both keep coming back for the
+life of the SHA. Every aggregate read therefore collapses the list to the most
+recent run of each `(app, name)` before judging it, so a re-run that goes green
+actually clears the failure. Without that collapse `some(conclusion ===
+"failure")` pins the SHA at `failing` permanently and no re-run can ever move it
+— the other half of #1646, and the reason its aggregate could no longer reach a
+state any emit branch accepted.
+
+Latest-wins is also what gates the merge: branch protection satisfies a required
+check from its most recent run, so reading the SHA any other way puts the
+harness at odds with the gate it exists to feed. Two *different* apps posting the
+same check name are not collapsed (the key is `(app, name)`), and a run carrying
+no name is passed through untouched — de-duping is an identity claim, and
+keeping both can only ever report a SHA redder than it is.
+
+The same collapse applies to `getCiFailureReport`, so the fix agent is never
+handed a red job that has since been re-run green: discovery and the fix prompt
+have to agree on what "red" means.
+
+### Multi-installation GitHub Apps
+
+A GitHub App is installed **per account**, and each installation has its own id.
+A token is minted against exactly one of them
+(`POST /app/installations/{id}/access_tokens`), so a token minted against the
+wrong installation is rejected — GitHub answers `422 There is at least one
+repository that does not exist or is not accessible to the parent installation`,
+which reads like a repo problem and is not one.
+
+One instance therefore serves **every account its App is installed on**, and the
+account is resolved per call. `InstallationDirectory`
+(`src/engine/github/installations.ts`) is the single owner→installation
+authority. Two feeds:
+
+- **Webhook payloads.** Every delivery carries `payload.installation.id`
+  alongside the account login. Authoritative, free, recorded before any
+  filtering.
+- **`GET /app/installations`**, under an App JWT. Needed by the routes with no
+  webhook behind them — boot discovery, the cron fan-out, CLI/API triggers.
+  Concurrent misses share one request, and a negative is cached briefly, so a
+  fan-out over N repos costs one call rather than N.
+
+Three consumers resolve through it, and nothing else knows an installation id:
+
+| Consumer | Resolves from |
+|---|---|
+| The per-run scoped token mint (`prepareRun`, `src/engine/agent-executor.ts`) | `githubAccess.owner` |
+| `GitHubClient` — every harness-side comment, reaction, check run, `.lastlight/` fetch (`src/engine/github/github.ts`) | the `owner` argument every method already takes; one memoized Octokit per installation |
+| The read-only chat GitHub tools (`src/engine/github/github-tools.ts`) | each tool's `owner` param; the two `search` tools read it from the query's `repo:` / `org:` / `user:` qualifier, since an installation token can only search its own account |
+
+An owner with no usable installation — never installed, uninstalled, or
+suspended — fails the phase immediately, with that sentence: no sandbox, no API
+call. `GITHUB_APP_INSTALLATION_ID` is optional and
+carries no account, so it is used only when the JWT lookup itself fails
+(network, revoked PEM): a pre-existing single-installation deployment then
+degrades to exactly its old behaviour. `GET /admin/api/managed-repos` reports
+every installation plus `uninstalledOwners` — any `managedRepos` account with no
+installation — so the condition is visible before it becomes a failed run.
+
+Each installation carries an `htmlUrl` deep link to its GitHub settings page
+(where the repo grant, suspension and uninstall live), built server-side by
+`installationSettingsUrl()` because **the path shape depends on the account
+type** and guessing wrong 404s: an org install is
+`/organizations/<login>/settings/installations/<id>`, a personal one a
+viewer-scoped `/settings/installations/<id>`. It is `null` when the type isn't
+known yet — a record seeded from a webhook that carried no `account.type` — so a
+caller renders plain text rather than a link that may not resolve. The response
+also carries `appInstallUrl`, the App's own install page, derived from `botName`
+(which **is** the App slug), so an `uninstalledOwners` warning can offer the fix
+rather than just naming the problem.
+
+### App permission: `Actions: read` (optional, recommended)
+
+`Checks: read` gets the harness the check *runs* — names, conclusions, and annotations. It does **not** get it the GitHub Actions **job logs** behind them. That is a separate App permission, `Actions: read`, and it is **not** the same thing as `Workflows: write` (which only governs pushing files under `.github/workflows/`).
+
+`GitHubClient.getCiFailureReport` (`src/engine/github/github.ts`) attempts three Actions reads per failed check run — `downloadJobLogsForWorkflowRun`, `getJobForWorkflowRun` (for the failing step) and `getWorkflowRun` (for the workflow's `path`) — and falls back to check-run annotations when they are denied. Nothing hard-fails without the permission: it is deliberately optional so an existing installation is never broken by not re-consenting.
+
+What the permission changes is the *quality* of the evidence, and its absence is now stated rather than inferred. When no failed job could supply a real log, the rendered `{{ciSection}}` is prefixed with:
+
+```
+NOTE: GitHub Actions job logs are unavailable (the App lacks `Actions: read`).
+The excerpts below are check-run annotations only, which are usually truncated.
+Grant Actions: read for full CI output.
+```
+
+The notice is suppressed when none of the failed checks is a GitHub Actions job (a CircleCI-only repo has no Actions logs to be missing, so blaming the permission there would be wrong). The same permission backs agentic-pi's `github_list_workflow_runs` / `github_list_workflow_run_jobs` / `github_get_job_logs` tools, which return `{ ok: false, reason }` rather than throwing when it is absent.
+
+### App permission: `Commit statuses: read` (optional, recommended)
+
+The same shape again, one API over: `Checks: read` gets the harness **check runs**. It does *not* get it the **classic commit statuses** a repo's CI may post instead (CircleCI, Jenkins, anything using the legacy statuses API). GitHub exposes the two as separate permissions over separate endpoints, and neither implies the other.
+
+`GitHubClient.getChecksSummary` reads both, because the settle-aware verdict is meant to cover a repo whose CI reports *only* via statuses — exactly the population the live `check_suite` webhook never sees. The status leg is `repos.getCombinedStatusForRef`, which needs `Commit statuses: read`.
+
+**The additive half must not be able to fail the whole read** (issue #277). The two calls were a `Promise.all`, which rejects on the first rejection — so an App holding `checks` but not `statuses` 403'd on the status leg and discarded the check-runs result *it was permitted to read*, losing its entire CI signal rather than the legacy half of it. Nothing surfaced it: `statuses` is requested by no scoped-token profile, so the token still mints (no 422) and the 403 arrives at call time; the run then completes and records `success = true` while every CI gate reads blind. It is now a `Promise.allSettled` — a rejected check-runs leg still throws, a rejected status leg degrades to "no status contexts", and the ref is judged on check runs alone.
+
+That degradation is stated rather than inferred, and stated **once per owner per process**: the grant is per installation and the read runs on every `pr.synchronize` and every check settle, so a line per call buries the finding in tens of identical warnings a day.
+
+### App permission: organization `Members: read` (optional, opt-in)
+
+Required by, and only by, **per-repo dashboard visibility** (`teamVisibility`,
+issue #169). With it, `GitHubClient.listUserTeams` can run one
+`Organization.teams(userLogins:)` GraphQL query to learn which teams a
+logged-in admin belongs to, and `listTeamRepos` can read those teams' repo
+grants — so the dashboard shows that person their repos rather than the org's.
+
+Deliberately optional and **off in config**: an existing installation that never
+re-consents keeps today's behaviour exactly, because a denied query resolves to
+the fail-open sentinel and nothing is filtered. Turning `teamVisibility.enabled`
+on without the permission is harmless, just pointless. The matching webhook
+subscriptions (`team`, `membership`, `organization`) are what keep the cache
+current; without them the cache still expires on its TTL and
+`POST /admin/api/me/repos/resync` still works.
+
+### Harness-side writes (`GitHubClient`)
+
+The three settle-aware check queries — `getChecksConclusion`,
+`getChecksSummary`, `getBaseChecksState` — take an `excludeApp` option, and
+every **trigger-side** caller passes our own `botName`. Without it a
+`last-light/review` check that is `queued` (waiting for CI under
+`after-checks`) or `in_progress` pins the aggregate at `pending`: the settle
+event never fires, the review never runs, the check never concludes, and a
+repo that made it a *required* check has an unmergeable PR forever. See
+[Router](/spec/05-router#the-last-lightreview-check-is-a-projection-of-run-state).
+
+`src/engine/github/github.ts` is the harness's own Octokit client — App-authed, and deliberately *not* the surface agents use (they get agentic-pi's `github_*` tools inside the sandbox, gated per permission profile). Its write surface is small on purpose: comments (`postComment` / `updateComment` / `deleteComment`), reactions, review posting, the `last-light/review` check run — and one label write, `addLabels`.
+
+`addLabels` is the exception that proves the rule. Every other label mutation in the system happens *inside* a sandbox, driven from a prompt, because the label's value is an agent's judgement (`dependency-trivial`, the impact tiers, the triage vocabulary). The dispatch-time escalation is different in kind: it fires precisely when the gate has decided **not** to provision a sandbox, so there is no agent to ask — see [Router](/spec/05-router#escalation--the-skips-that-are-not-silent). GitHub's endpoint creates a label that does not exist yet, so there is no `ensureLabels` companion, and adding a label already present is a no-op — but idempotency at the API is *not* what makes the escalation comment once; the persisted escalation row is (see [State](/spec/10-state)). It needs no new App permission: writing labels is part of the `Issues: write` / `Pull requests: write` grants the App already holds.
 
 ## 2. Slack (HTTP Events API, default; Socket Mode dev fallback)
 
@@ -73,11 +273,14 @@ verification is disabled. Production deployments must set it.
 | **Transport** | `SLACK_MODE=webhook` (default): Slack POSTs events to `POST /webhooks/slack` on the shared Hono app (the same server as the GitHub webhook). At-least-once — Slack retries failed deliveries. `SLACK_MODE=socket` (dev fallback): a Bolt WebSocket to Slack's Socket Mode endpoint, no public URL, but at-most-once (can silently drop messages under bursts). Sending uses a `WebClient` in both modes. (`src/connectors/slack/connector.ts`) |
 | **Auth** | webhook: HMAC-SHA256 over `v0:{timestamp}:{body}` with `SLACK_SIGNING_SECRET`, header `X-Slack-Signature`, timing-safe compare + a 5-minute timestamp replay window (`verifySlackSignature`); the `url_verification` handshake is answered and retries are deduped by `event_id`. socket: `botToken` + `appToken` validated by Bolt. The user-level `SLACK_ALLOWED_USERS` allowlist is enforced in `MessagingConnector.handleIncomingMessage()` *before* envelope construction. |
 | **Normalize** | Both transports feed the same `onMessageEvent` / `onAppMention` handlers → `MessagingConnector.handleIncomingMessage()`. Slack-specific mention stripping via `stripBotMention()`. Session info (channel id, thread id, platform user id) goes into `envelope.raw`, not into top-level fields. |
-| **Event types** | `message` only. All Slack inbound traffic — DMs (`message.im`) and `app_mention` in channels — normalizes to this one type. |
+| **Event types** | `message` only. All Slack inbound traffic — DMs (`message.im`) and `app_mention` in channels — normalizes to this one type. `reaction_added` / `reaction_removed` are the one exception: they are handled **beside** the envelope pipeline, not through it (see Feedback below). |
 | **Filtered out** | Bot messages and non-text subtypes (edits, deletes); every inbound is logged (`[slack] inbound msg …`) *before* filtering so drops are diagnosable. Channel messages that aren't mentions or thread replies. |
 | **Reply** | `reply(msg)` calls `sendMessage(channelId, threadId, chunk)` per chunk; long messages are chunked to respect Slack's ~3000-char limit. Replies post into the originating thread when one exists. Markdown is converted to Slack mrkdwn (`src/connectors/slack/mrkdwn.ts`): GFM tables render as aligned monospace code blocks (per-column width cap + total-width budget, with a `*label*: value` fallback for wide 2-column tables), since Slack mrkdwn has no table syntax. Markdown **images** (`![alt](url)`) are auto-promoted to Block Kit `image` blocks (`markdownToSlackBlocks`) — the mrkdwn path can only downgrade them to links — with a plain-text fallback if Slack rejects the blocks (e.g. an unreachable URL). |
 | **Progress** | Workflow progress renders as a Block Kit checklist (a `header` + `context` meta + `divider` + sectioned steps with per-status emoji, via `renderProgressBlocks`) edited in place through `chat.update`, with the rendered markdown kept as the `text:` notification/accessibility fallback. The GitHub transport consumes the same `ProgressModel` as markdown — one content source, two renderings (`src/notify/`). |
 | **Interactivity** | Approval gates post Approve/Reject buttons (Block Kit `actions`, `renderApprovalBlocks`). Slack POSTs a click to `POST /webhooks/slack/interactions` (signature-verified like events; deduped by `trigger_id`); it routes into the same `approval-response` resolution as the `/approve` slash command / `@last-light approve` comment, and the prompt message is rewritten to a button-free resolved state. `onApprovalAction` is wired in `src/index.ts`; socket mode uses Bolt `action` listeners. |
+| **Feedback** | Emoji reactions on messages the bot posted become scored eval signals (issue #255). Requires the `reactions:read` bot scope + the `reaction_added` / `reaction_removed` subscriptions — **re-consent the app after adding them**, and until then Slack simply never delivers and the feature is dormant. `onReactionAction` is wired in `src/index.ts`; webhook mode routes through `dispatchSlackEvent`, socket mode registers Bolt `event` listeners, exactly as messages and mentions do. Attribution comes from an **anchor** recorded when we post: `SlackConnector.sendMessage` returns the message `ts` and every send site used to discard it, so each is now registered against the run (or chat session) that produced it. The alternative — resolving the thread at reaction time via `conversations.replies` — costs an API call per reaction, needs a `channels:history`-class scope we deliberately don't hold, and could only ever identify the *thread*, so a thread containing several runs could not say which one was being praised. The `SLACK_ALLOWED_USERS` allowlist is applied here too: a reaction handler is a second door into the same instance. (`src/engine/feedback/slack.ts`) |
+
+| **Transcript** | The connector builds the session and stops there — it records no conversation (that double-wrote every chat turn). The thread's transcript is written one layer up, by `ChatRunner` for chat turns and by `src/connectors/messaging/thread-transcript.ts` for every other messaging path, so a workflow-answered turn is still visible to the next chat turn in the same thread. See [Chat](/spec/11-chat#the-thread-transcript--chat-is-not-the-only-writer). |
 
 The chat skill running on top of Slack messages is *not* a connector
 concern — see [Chat](/spec/11-chat).
@@ -86,7 +289,7 @@ concern — see [Chat](/spec/11-chat).
 
 | | |
 |---|---|
-| **Transport** | HTTP POST from `src/cli/cli.ts` to the running harness. `POST /api/run` (generic workflow dispatch) or `POST /api/build` (build cycle on an issue URL). |
+| **Transport** | HTTP POST from `packages/cli/src/cli.ts` to the running harness. `POST /api/run` (generic workflow dispatch) or `POST /api/build` (build cycle on an issue URL). `lastlight pr retry` is the one trigger that goes to an **admin** route instead — `POST /admin/api/prs/:owner/:repo/:number/retry`, see below. |
 | **Auth** | `Authorization: Bearer <token>` header. The token is issued by `POST /admin/api/login` after the CLI submits `LASTLIGHT_TOKEN` (which the operator sets to match `ADMIN_PASSWORD`). HMAC-signed, 7-day TTL. Verified by `authMiddleware()` (`src/admin/auth.ts:35–65`). |
 | **Normalize** | None — the CLI does not produce an EventEnvelope. The `/api/run` handler unpacks `{ workflow, context }` and calls `dispatchWorkflow()` directly (`src/index.ts:495–518`). Workflows triggered this way see `_triggerType: "api"` in their context. |
 | **Event types** | n/a |
@@ -105,14 +308,151 @@ without the CLI.
 | **Auth** | None — cron jobs run with implicit process trust. |
 | **Normalize** | None — cron jobs dispatch workflows directly. `_triggerType: "cron"` is added to the workflow context (`src/cron/fanout.ts:42`). |
 | **Event types** | n/a |
-| **Job source** | `workflows/cron-*.yaml` files. `getJobs({ webhooksEnabled, db })` (`src/cron/jobs.ts`) loads them, applies DB overrides from `cron_overrides`, and filters those marked `condition: { unless: webhooksEnabled }` when webhooks are active. |
-| **Fan-out** | `dispatchCronWorkflow()` (`src/cron/fanout.ts:36–76`) fans out across a `repos` array in the context with a concurrency limit (default 3). Each per-repo dispatch is its own workflow run with its own taskId. A cron whose context sets `discover: <key>` instead fans out **per PR**: the runner (`src/index.ts`) resolves the key to a discoverer, finds the eligible dependency PRs in code (`src/cron/dependabot-discovery.ts`), and dispatches one bounded single-PR run each via `fanOutContexts`. |
-| **Reply** | Cron jobs don't reply per se. Output destined for humans flows through `SLACK_DELIVERY_CHANNEL` when configured. |
+| **Job source** | `workflows/cron-*.yaml` files. `getJobs({ webhooksEnabled, db, crons, handlers })` (`src/cron/jobs.ts`) loads them, applies DB overrides from `cron_overrides` **and** the operator's `crons.disable` list, and filters those marked `condition: { unless: webhooksEnabled }` when webhooks are active. A cron turned off by either lever stays **registered**, carrying `_cronGloballyEnabled: false` — see "Per-repo cron participation" below. |
+| **Two kinds of cron** | A definition declares **exactly one** of `workflow:` (dispatch an agent workflow — the normal case) or `handler:` (run host-side code from the registry in `src/cron/handlers.ts`). `handler:` exists for periodic work that is structurally un-agentable: the repo digest's facts live in the harness's own SQLite, which a sandboxed phase cannot reach, and it posts to Slack, which no agent has a tool for. Such a cron *could* use `registerDirect` (next row) — but a direct job is invisible to `getCronWorkflows()`, so it gets no dashboard toggle, no `cron_overrides` schedule, no per-repo participation and no "Run now". An unresolvable handler name **drops** the cron with a boot warning naming it (unlike an unknown `condition.unless`, which registers anyway); it cannot fail boot, because the registry is built from collaborators that may legitimately be absent. |
+| **Every cron fire is ledgered** | A cron fire — scheduled or manual, `workflow:` or `handler:` — writes one `cron_runs` row keyed on the **cron's** name. Without it a fire that dispatches nothing is invisible: a handler cron has no `workflow_runs` row at all, and a discovery cron that finds nothing dispatches none, which is the normal steady state for a backstop behind a webhook. `withLedger` (`src/cron/handlers.ts`) wraps the handler registry and `makeCronRunner` (`src/cron/runner.ts`) wraps the workflow path; both write the same table, so `GET /crons` and the scheduler's consecutive-failure alert read one ledger and never branch on the kind of cron. Keying on the cron rather than the workflow is what makes the failure count sound — the same workflow is reachable from `/api/run`, a comment and Slack, and those runs must not move a cron's health (issues #341/#327). The wrap lives in the registry rather than the scheduler because the admin "Run now" route invokes handlers directly, and a manual fire that skipped the ledger would leave exactly that gap. For a *weekly* cron the difference is noticing a revoked Slack token on Monday instead of next month. |
+| **Fan-out** | `dispatchCronWorkflow()` (`src/cron/fanout.ts`) fans out across a `repos` array in the context — **all at once, with no dispatch-side throttle**. Bounding concurrency is entirely the global admission cap's job (`concurrency.maxWorkflows`): each dispatch just creates a `workflow_runs` row, and an over-cap row is persisted `queued` and promoted as slots free. Each per-repo dispatch is its own workflow run with its own taskId. A cron whose context sets `discover: <key>` instead fans out **per PR**: the runner (`src/index.ts`) resolves the key to a discoverer, finds the eligible dependency PRs in code (`src/cron/dependabot-discovery.ts`), and dispatches one bounded single-PR run each via `fanOutContexts`. |
+| **Direct jobs** | Two crons run a plain function instead of a workflow (`registerDirect`, no sandbox): `sandbox-sweep` (issue #106) and — only when `feedback.github` is on — `feedback-poll` (issue #255). The latter exists because **GitHub delivers no webhook for reactions**, so a 👍 on a bot comment can only be discovered by asking. It refreshes reactions for the least-recently-polled anchors through one batched GraphQL `nodes(ids:)` query per 100 — measured at **one rate-limit point per request**, reactors included — which is what makes polling affordable: a fixed-size working set (anchors retire after `feedback.windowDays`) costs single-digit points a tick against a 5,000/hour budget. `feedback.maxAnchorsPerTick / 100` is the hard request bound. (`src/cron/feedback-poll.ts`) |
+| **Reply** | Cron jobs don't reply per se, and **a repo-scoped cron workflow has nowhere to reply to**: no issue and no thread, so `callbacks.postComment` is undefined and the agent's final output is recorded on the run only. A cron that wants to reach humans must either publish itself (`github_create_issue`, as `security-review` does) or be a `handler:` cron that posts directly — which is what `repo-digest` is. |
 
 The dual webhook/poll model is intentional: with webhooks enabled, the
 polling crons (`cron-triage`, `cron-review`) silently de-register; with
 webhooks disabled, they kick in to keep parity. The scheduled crons
-(`cron-health`, `cron-security`) run regardless.
+(`cron-health`, `cron-security`, `cron-digest`) run regardless.
+
+### The repo digest
+
+`cron-digest.yaml` (weekly, Monday 09:00) is the one cron that **posts to
+Slack**. It is a `handler:` cron — `runRepoDigest` in `src/cron/repo-digest.ts`
+— and its shape is deliberate:
+
+- **The facts are computed in code**, from `GET /repos/{o}/{r}/issues?state=all&since=`
+  (which returns issues and pull requests together, each PR carrying
+  `pull_request.merged_at`) plus the harness's own `workflow_runs` and
+  `executions`. So the numbers are arithmetic rather than a model's
+  self-report, and a repo costs 3–4 GitHub requests.
+- **`since` filters on `updated_at`**, so the response also contains items
+  merely touched inside the window. Every count is taken from the item's own
+  `created_at` / `closed_at` / `merged_at`, in `summarizeRepo`.
+- **The week's CONTENT is a second, separate read** —
+  `listRepoDigestDetail`, one GraphQL request carrying three aliased `search`
+  queries (merged PRs, issues opened, issues closed) with each item's
+  `bodyText`. It is `search` rather than the REST list because the REST list
+  ranks by `updated_at`: fine for a count, wrong for a *list*, where a PR merged
+  on Monday and untouched since would sort below any old issue commented on
+  Friday. This read is **allowed to fail** (`fetchDetailSafely`) — a failure
+  logs and drops the lists, and the digest posts the counts exactly as it did
+  before the lists existed. That exemption matters because a failed repo fails
+  the tick (below), and enrichment must not page anybody.
+- **One optional model call** (`digest.narrative`) turns the week's items into
+  two to four sentences of English. It is never asked to produce a number — the
+  digest prints those underneath it — and a failure drops the summary rather
+  than the digest. The prompt is composed by `buildSummaryPrompt` and budgeted
+  in **characters, not items**: a single pull-request body can run to 11 KB, so
+  `digest.detailItems` alone bounds nothing.
+- **`closingIssuesReferences` is a list of candidates, not of facts.** GitHub
+  reports every issue *linked* to a merged PR — by keyword or through the
+  Development sidebar — whether or not the merge closed it, and whether or not
+  it is closed at all. `attributeClosures` therefore accepts a link only when
+  the issue closed within `[merge − 5s, merge + 60s]`, because a merge closes
+  its issues in the same operation (observed: +1s to +2s). Without that guard a
+  digest tells three lies from one join: an issue closed by hand days earlier
+  vanishes from "Closed issues", reappears under a PR that did not close it,
+  and inflates the "closed by merged PRs" count. Cross-repo references are
+  dropped outright — a foreign `#12` rendered against this repo's URL points at
+  the wrong issue. The count of folded issues is taken from what was **actually
+  removed** from the list, never from the number of references.
+- **Bot pull requests are folded to a count.** A week of Dependabot bumps would
+  otherwise fill the merged list and push the human work under the `…and N
+  more` tail.
+- **Every number is a link, and none of them unfurl.** `ref` emits a markdown
+  link that `markdownToSlackMrkdwn` converts to Slack's `<url|#294>` form —
+  markdown rather than that form directly, because the converter runs over these
+  lines and would escape a pre-built one. Listed items render **GitHub's own
+  `url`**, so issues resolve to `/issues/N` and pull requests to `/pull/N`; only
+  the two lists with no URL of their own (the oldest unreviewed PR and the
+  escalated ones, both from `listOpenPullRequests`) are built as `/pull/N`. The
+  summary's own bare `#N` citations are linkified by `linkifyRefs` **only when
+  the number is in the digest's fact set**, so a hallucinated reference reads as
+  plain text instead of a confident link to somebody else's pull request. The
+  post passes `unfurl: false`, which sets **both** `unfurl_links` and
+  `unfurl_media` — without it Slack expands each citation into a preview card
+  and buries the summary they annotate. It is opt-out per message
+  rather than a connector-wide default: for a conversational reply one shared
+  link and one useful preview is the right behaviour, and only a message whose
+  links are a REFERENCE LIST wants them off.
+- **Untrusted text is escaped before it is composed.** Issue titles, PR titles
+  and the model's summary are all written by third parties and land in a channel
+  unedited. Slack's control sequences are plain text — an issue titled
+  `<!channel>` notifies everyone — so `escapeSlack` neutralizes `&`, `<` and `>`
+  in every one of them *before* any link markdown is added. That ordering is
+  what lets the two coexist: the only angle brackets reaching
+  `markdownToSlackMrkdwn` are the ones the renderer put there.
+- **The escalated-PR list is asked of GitHub** (open PRs labelled
+  `requires-human`), not inferred from run rows — `fanOut` returns only
+  `{dispatched, failures}` and a skip counts as a success, so an escalation is
+  invisible in the cron's own reporting.
+
+**It is inert until a channel resolves** (next section). No channel means no
+post, no GitHub request and no model call — which is what keeps a fresh install
+quiet.
+
+**A failed repo fails the tick.** Each repo is attempted inside its own
+`try`/`catch`, so one repo's bad day doesn't cost the others their digest — but
+the tick then **throws** once the loop is done if any repo failed. Swallowing
+them and returning normally would report success, and the failures that matter
+here are not per-repo accidents: a revoked bot token, or the bot removed from
+its channels, fails every repo at once, silently, once a week. Deliberately not
+conditioned on "posted nothing": a repo with no channel is *skipped*, not
+failed, so "considered 10, posted 0" stays the correct and quiet outcome for a
+deployment that has configured nothing.
+
+### Where a repo's Slack output goes
+
+`resolveRepoChannel` (`src/notify/repo-channel.ts`), most specific first:
+
+1. the repo's own `.lastlight/lastlight.yml` → `notifications.slack.channel`
+2. the operator's `slack.repoChannels["owner/repo"]` (overlay `config.yaml`)
+3. the global `slack.deliveryChannel` (`SLACK_DELIVERY_CHANNEL`)
+
+and a fourth outcome that is **not** a fallback: nothing, meaning that repo gets
+no digest.
+
+A repo naming its own channel is safe without a clamp because of two facts that
+are not about bounds: the repo layer is **always read from the default branch**,
+never a PR head, so a pull request cannot redirect the bot's output; and Slack
+will not deliver to a channel the bot has not been invited to. The operator's
+kill switch is the generic one — drop `notifications` from
+`repoConfig.allowKeys`.
+
+`channel: null` committed by a repo means "send me nothing" and beats the
+operator's map. That is why the resolver reads **provenance**
+(`sources.notifications["slack.channel"] === "repo"`) rather than the merged
+value: a merged `null` cannot say whether the repo chose it or simply said
+nothing.
+
+> **Removed:** `MessageDeliveryService` and `SlackConnector.sendToDeliveryChannel`.
+> They were registered at boot and **never called from anywhere** — no call site
+> in `src/`, none in git history — while four documents described
+> `SLACK_DELIVERY_CHANNEL` as "the channel cron reports go to". The digest makes
+> that sentence true; the dead wiring is gone rather than left as a second
+> answer to one question.
+
+**Per-repo cron participation (issue #180).** WHICH repos a tick fans out over is
+resolved at **tick** time, not at registration: a managed repo may opt out of (or
+into) a cron in its `.lastlight/lastlight.yml`, and that must take effect without
+re-registering croner jobs. `jobs.ts` therefore carries two control keys on every
+scheduled tick's context — `_cronName` (the only channel by which the tick learns
+which cron it is; several crons can share one workflow) and
+`_cronGloballyEnabled` — which `resolveCronRepos` (`src/cron/repo-crons.ts`)
+consumes and the fan-out strips before dispatch, so a dispatched run's context is
+byte-for-byte what it was before the feature existed. An empty resolved list is a
+legitimate no-op tick: no dispatch, no run, no failure. The discovery crons
+bypass `dispatchCronWorkflow` (they fan out per PR, not per repo), so
+`src/index.ts` narrows their repo list through the same `resolveCronRepos` before
+discovering anything. Cost: warm layers come from the in-memory cache, misses are
+fetched concurrently and conditionally, and one repo's failure degrades to its
+inherited behaviour. See [Configuration](/spec/02-configuration).
 
 Two of the scheduled crons are **dependency-PR discovery backstops** for the
 `pr.checks_passed` / `pr.checks_failed` webhooks — additive (no
@@ -120,7 +460,13 @@ Two of the scheduled crons are **dependency-PR discovery backstops** for the
 
 - `merge-green-dependency-prs` (`discover: green-dependency-prs`, daily 14:00) —
   finds green (`mergeable_state === "clean"`) dependency PRs and fans out
-  `dependabot-pr-merge`.
+  `dependabot-pr-merge`. With `dependencies.requireSettledChecks` on (the
+  default) it additionally asks the head SHA's checks: `clean` is GitHub's
+  *mergeability* verdict, not a CI verdict, and on a repo with **no required
+  status checks** a PR whose checks are failing still reports `clean` — so
+  without that second read the cron's notion of "green" and the webhook's
+  would differ, and the difference is a merged red PR. Uniquely in this
+  module that read fails **closed**: a dropped candidate costs one tick.
 - `fix-red-dependency-prs` (`discover: red-dependency-prs`, daily 15:00) — finds
   dependency PRs that can't merge on their own and that `dependabot-ci-fix` can
   push toward: a settled-red check conclusion (failing/timed-out via
@@ -133,16 +479,32 @@ Two of the scheduled crons are **dependency-PR discovery backstops** for the
   `unstable` is covered by the checks conclusion; `unknown` is left for a later
   tick.
 
-Both sweeps **skip any PR carrying the `requires-human` label** — the terminal
-flag the dependabot prompts apply when Last Light can't proceed (a functional
-merge, or a CI fix it couldn't complete) — so the nightly crons don't re-attempt
-what we already know we can't land. The **webhook path** now honors it too: the
-dispatcher applies a pre-sandbox idempotency guard on the two dependency check
-events (one PR read) that skips a PR carrying `requires-human`, **or** one whose
-current head SHA equals the SHA of the last successful assessment (a re-fired
-suite / cron overlap). A genuinely new push (new head SHA, no `requires-human`)
-still runs once, and an explicit human `@bot` comment is an intentional override
-that the guard does **not** gate.
+**Both discoverers are candidate finders, not policy.** They answer one
+question — does this PR *look* like it needs this workflow? — and nothing else.
+Whether we may act on it (the hold label, the escalation guard, the attempt
+counter, the cost cap, the per-SHA dedup, the fork guard, the run lock) is
+decided once, off the resolved PR snapshot, at the `dispatchWorkflow` choke point
+the webhook route crosses too: see the
+[dispatch gate](/spec/05-router#the-pr-scoped-dispatch-gate).
+
+That split is a correction, not a tidy-up. The `requires-human` filter used to
+live in the discoverers **and** in the dispatcher, and the two disagreed by
+construction: on the cron side the label was a one-way door with no code path
+that removed it, while the webhook path cleared it on success. Now there is one
+answer, and it is stateful rather than label-based — the state is "we escalated
+at head SHA X" (`PrState.escalatedAtSha`), so a maintainer's push re-arms the PR
+automatically. `requires-human` itself is read by **nothing**: it is a
+notification the bot writes, and the label a human applies to mean "stay off
+this" is the separate **hold** label (`hold.label`, default `lastlight-ignore`),
+answered at the same choke point above every other guard. See
+[Router](/spec/05-router#the-hold--the-first-gate).
+
+The same choke point is why the fan-out no longer bypasses enrichment. A cron
+dispatch calls `dispatchWorkflow` directly and never crosses the dispatcher, so
+every nightly `fix-red-dependency-prs` run used to carry `branch` + `reason` but
+an **empty** `{{ciSection}}`, the repo's default branch instead of the PR's real
+base, and no fork guard at all. One projection at one place makes the webhook
+and cron dispatches of a `pr-fix`-shaped workflow identical by construction.
 
 ## 5. Admin dashboard
 
@@ -153,7 +515,18 @@ that the guard does **not** gate.
 | **Normalize** | None — dashboard actions dispatch workflows directly. Workflows triggered this way see `_triggerType: "admin"`. |
 | **Event types** | n/a |
 | **Resume** | When an operator approves a paused workflow, `/admin/approvals/:id/respond` calls `config.resumeWorkflow(workflowRun, "admin")` — the same callback the GitHub `@last-light approve` comment and Slack `/approve` slash command use. (`src/admin/routes.ts:813–831`, callback wired at `src/index.ts:453–476`) |
-| **Cron management** | Schedule overrides and enable/disable land in `cron_overrides`; the scheduler applies them on next tick without a process restart. |
+| **Cron management** | Schedule overrides and enable/disable land in `cron_overrides`; the scheduler applies them on next tick without a process restart. **Disable re-registers rather than unregisters** — the job keeps ticking with `_cronGloballyEnabled: false` so a repo that opted into that cron from its `.lastlight/` is still honoured; usually the fan-out resolves to nobody and the tick costs nothing. "Run now" carries `_cronName` (so a repo's opt-out is respected however the tick was started) but deliberately *not* `_cronGloballyEnabled`, so the button still works on a globally-disabled cron. |
+| **Per-repo visibility** | `GET /admin/api/me/repos` → `{ repos, synced, reason, teams, syncedAt }` — the managed repos this session's GitHub login should see, resolved from their org team grants (issue #169) and cached in SQLite. `repos: null` is the fail-open sentinel meaning **no filter**, returned for a password/Slack session, `allowedOrg: "*"`, `teamVisibility.enabled: false`, an over-budget resolution, or any GitHub error. `POST /admin/api/me/repos/resync` forces a re-resolution **for the caller only** — there is deliberately no `?login=` override, because the response names the org teams a person belongs to (secret ones included) and an authenticated dashboard session is not the same standing as "entitled to enumerate org membership". The SPA applies the answer as `?repos=` on the run lists and as a local filter on sessions, with a header toggle to turn it off — **the list endpoints still return global data when the param is omitted**, so this is declutter, not access control. That toggle renders whenever `teamVisibility.enabled` is on, and carries the `resync` call in its unresolved state: the endpoint existed from the start but no UI ever invoked it, so a freshly-granted team was unreachable until the TTL lapsed. See [Configuration](/spec/02-configuration). |
+| **PR retry** | `POST /admin/api/prs/:owner/:repo/:number/retry`, body `{ "reason"?: string }` — the third of the three surfaces that re-arm a pull request the harness escalated (see [Router](/spec/05-router#un-sticking-an-escalated-pr--the-three-retry-surfaces)). It is the only surface with no event of its own, so it resolves a `PrState` with `intervention: { via: "api", by: <session actor>, note: reason }`, crosses `applyPrDispatchGate` **itself**, and dispatches on `run` — the route that resolves is the route that gates. The workflow retried is the one that last worked the PR (`latestForTrigger` over `PR_FIX_SHAPED_WORKFLOWS`), else the configured `github.pr_fix` route. |
+
+The retry endpoint's answers, in full: **200** on dispatch (`dispatched: true`)
+or on record-without-dispatch (`dispatched: false, recorded: true`); **409** when
+the hold label, the run lock or a degraded read refuses it (nothing recorded);
+**403** for a repo outside `managedRepos`; **400** for a non-positive PR number;
+**503** when `github` / `dispatchWorkflow` are not wired (chat-only, CLI-only);
+**401** unauthenticated, from the same `authMiddleware` as every other admin
+route. `lastlight pr retry <owner/repo#N> [reason]` is a thin client over it and
+renders exactly those three outcomes (see `packages/cli/CLAUDE.md`).
 
 ## Invariants
 
@@ -187,6 +560,7 @@ that the guard does **not** gate.
 | Registry (`startAll`/`stopAll`/`onEvent`) | `src/connectors/index.ts` |
 | GitHub webhook connector | `src/connectors/github-webhook.ts` |
 | Messaging base (allowlist, sessions, chunking) | `src/connectors/messaging/base.ts` |
+| Thread transcript (the non-chat writer) | `src/connectors/messaging/thread-transcript.ts` |
 | Slack connector | `src/connectors/slack/connector.ts` |
 | CLI client | `src/cli/cli.ts` |
 | API endpoints (`/api/run`, `/api/build`) | `src/index.ts:481–557` |
@@ -194,6 +568,7 @@ that the guard does **not** gate.
 | Cron job loader | `src/cron/jobs.ts` |
 | Cron fan-out | `src/cron/fanout.ts` |
 | Admin routes (including approval/cron mutations) | `src/admin/routes.ts` |
+| Per-repo dashboard visibility resolver (issue #169) | `src/engine/github/team-visibility.ts` |
 
 ## Rebuild notes
 

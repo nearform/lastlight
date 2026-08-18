@@ -1,0 +1,5 @@
+{
+  "name": "repo-config",
+  "defaultWorkflow": "answer",
+  "description": "Per-repository config layer (#180) — does a repo's committed .lastlight/ actually reach the agent? Cheap: one agent call per case, no clone, no judge."
+}

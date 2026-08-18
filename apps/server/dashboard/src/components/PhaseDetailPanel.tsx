@@ -136,12 +136,21 @@ export function PhaseDetailPanel({
     (p) => p.name === phaseName,
   );
 
-  // Find this phase's history entry — used for status colour when no execution row exists.
-  const historyEntry = run.phaseHistory.find((h) => h.phase === phaseName);
+  // Find this phase's history entry — used for status colour when no execution
+  // row exists. LAST match, not first: a generic-loop iteration writes one entry
+  // when its work finishes and a second when the loop's exit condition is met,
+  // so the newest is the current truth. The pipeline's history Map already
+  // resolves a repeated label last-wins; this keeps the two views in agreement.
+  const historyEntry = run.phaseHistory.filter((h) => h.phase === phaseName).at(-1);
 
   const statusLabel = execution
     ? execution.success === true
-      ? "succeeded"
+      ? // A generic-loop `until_bash` check records success = "did the check
+        // run"; the verdict is in stopReason. `condition_not_met` means the
+        // gate ran and said "not yet" — report that, not "succeeded".
+        execution.stopReason === "condition_not_met"
+        ? "not met"
+        : "succeeded"
       : execution.success === false
         ? // Cascade-skipped phases are stored success=0 with stopReason="skipped";
           // they never ran, so label them "skipped" rather than "failed".
@@ -164,7 +173,8 @@ export function PhaseDetailPanel({
     "badge-error": statusLabel === "failed",
     "badge-info": statusLabel === "active" || statusLabel === "running",
     "badge-warning": statusLabel === "paused",
-    "badge-ghost": statusLabel === "pending" || statusLabel === "skipped",
+    "badge-ghost":
+      statusLabel === "pending" || statusLabel === "skipped" || statusLabel === "not met",
   });
 
   // Second tab groups "what got loaded" for this run — agentic-pi extensions

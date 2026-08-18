@@ -1,11 +1,48 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
-import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, isTelemetryEnabled, safeMetricAttributes, shutdownTelemetry, withSpan } from "#src/telemetry/index.js";
+
+// src/telemetry/index.ts now logs unsupported-protocol / unsafe-env-var warnings
+// via the pino LoggerPort instead of console — mock the logger module so the
+// suite's stderr stays free of real pino JSON (no assertions here depend on
+// the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
+import { getDockerSandboxOtelEnv, getOtelEnvForSandbox, isTelemetryEnabled, resolveOtlpProtocol, safeMetricAttributes, shutdownTelemetry, withSpan } from "#src/telemetry/index.js";
 import { OTEL_COLLECTOR_SANDBOX_ENDPOINT } from "#src/sandbox/egress-firewall-config.js";
 
 describe("telemetry helpers", () => {
   afterEach(async () => {
     vi.unstubAllEnvs();
     await shutdownTelemetry();
+  });
+
+  it("defaults OTLP protocol to http/protobuf (Phoenix and most backends reject JSON)", () => {
+    expect(resolveOtlpProtocol(undefined)).toBe("http/protobuf");
+  });
+
+  it("honors OTEL_EXPORTER_OTLP_PROTOCOL=http/json (opt-in)", () => {
+    vi.stubEnv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json");
+    expect(resolveOtlpProtocol(undefined)).toBe("http/json");
+  });
+
+  it("lets a signal-specific protocol override the generic one", () => {
+    vi.stubEnv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json");
+    // signal arg (e.g. OTEL_EXPORTER_OTLP_TRACES_PROTOCOL) wins
+    expect(resolveOtlpProtocol("http/protobuf")).toBe("http/protobuf");
+  });
+
+  it("falls back to protobuf for grpc/unknown protocols", () => {
+    expect(resolveOtlpProtocol("grpc")).toBe("http/protobuf");
+    expect(resolveOtlpProtocol("nonsense")).toBe("http/protobuf");
   });
 
   it("is no-op safe when disabled", async () => {
@@ -75,5 +112,15 @@ describe("telemetry helpers", () => {
       "workflow.name": "build",
       success: true,
     });
+  });
+
+  it("keeps the sweep trigger as a dimension but still drops trigger.id", () => {
+    // `SweepTrigger` is a closed union of four, so it is bounded; `trigger.id`
+    // is per-run and stays out. Without `trigger` the `{trigger="cron"}`
+    // liveness query over the sweep metrics matches nothing.
+    expect(safeMetricAttributes({
+      trigger: "cron",
+      "trigger.id": "owner/repo#1",
+    })).toEqual({ trigger: "cron" });
   });
 });

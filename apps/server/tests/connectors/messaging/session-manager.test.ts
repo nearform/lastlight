@@ -1,5 +1,22 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
+
+// SessionManager's one-shot UNIQUE-constraint migration now logs via the pino
+// LoggerPort instead of console — mock the logger module so the suite's
+// stderr stays free of real pino JSON (no assertions here depend on the
+// logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { SessionManager } from "#src/connectors/messaging/session-manager.js";
 
 const KEY = {
@@ -45,6 +62,66 @@ describe("SessionManager", () => {
     `).all(KEY.platform, KEY.channelId, KEY.threadId, KEY.userId) as Array<{ id: string; active: number }>;
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.active).sort()).toEqual([0, 1]);
+  });
+
+  describe("getHistory", () => {
+    it("keeps the NEWEST messages when the limit bites, oldest-first", () => {
+      const s = manager.getOrCreateSession(KEY);
+      for (let i = 0; i < 10; i++) {
+        manager.addMessage(s.id, i % 2 === 0 ? "user" : "assistant", `m${i}`);
+      }
+
+      const history = manager.getHistory(s.id, 4);
+      // An `ASC … LIMIT` would return m0..m3 — the opening of the thread —
+      // leaving a long conversation permanently rehydrating its own preamble.
+      expect(history.map((h) => h.content)).toEqual(["m6", "m7", "m8", "m9"]);
+    });
+
+    it("orders same-millisecond writes by insertion, not arbitrarily", () => {
+      const s = manager.getOrCreateSession(KEY);
+      // The user + assistant rows of one turn are routinely written inside the
+      // same whole-millisecond ISO timestamp, so `id` is the tiebreak.
+      const now = new Date().toISOString();
+      const insert = db.prepare(`
+        INSERT INTO messaging_messages (session_id, role, content, timestamp)
+        VALUES (?, ?, ?, ?)
+      `);
+      insert.run(s.id, "user", "question", now);
+      insert.run(s.id, "assistant", "answer", now);
+
+      expect(manager.getHistory(s.id, 2).map((h) => h.content)).toEqual(["question", "answer"]);
+    });
+  });
+
+  describe("findActiveThreadSession", () => {
+    it("finds the thread's session without knowing which user opened it", () => {
+      const s = manager.getOrCreateSession(KEY);
+      const found = manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId);
+      expect(found?.id).toBe(s.id);
+    });
+
+    it("skips a stale session by default but finds it for a writer", () => {
+      const s = manager.getOrCreateSession(KEY);
+      // Age it past SESSION_TIMEOUT_MS — what a workflow that ran longer than
+      // 30 minutes between question and answer leaves behind.
+      db.prepare(`UPDATE messaging_sessions SET last_activity_at = ? WHERE id = ?`)
+        .run(new Date(Date.now() - 60 * 60 * 1000).toISOString(), s.id);
+
+      expect(manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId)).toBeNull();
+      expect(manager.hasActiveThread("slack", KEY.channelId, KEY.threadId)).toBe(false);
+      expect(
+        manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId, { includeStale: true })?.id,
+      ).toBe(s.id);
+    });
+
+    it("ignores other threads and deactivated sessions", () => {
+      const s = manager.getOrCreateSession(KEY);
+      expect(manager.findActiveThreadSession("slack", KEY.channelId, "other-thread")).toBeNull();
+      manager.deactivateSession(s.id);
+      expect(
+        manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId, { includeStale: true }),
+      ).toBeNull();
+    });
   });
 
   it("migrates a legacy schema with FK-referencing messages without dropping them", () => {

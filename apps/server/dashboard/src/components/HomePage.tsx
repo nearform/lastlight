@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ResponsiveContainer,
   BarChart,
@@ -8,6 +8,7 @@ import {
   XAxis,
   YAxis,
   Tooltip,
+  Legend,
   CartesianGrid,
 } from "recharts";
 import { Server, Bot, Box, Network } from "lucide-react";
@@ -15,7 +16,9 @@ import type { LucideIcon } from "lucide-react";
 import { api, type WorkflowRun, type ContainerStats, type ContainerKind, type HostStats } from "../api";
 import { useStatsSeries } from "../hooks/useDailyStats";
 import { useTheme } from "../hooks/useTheme";
+import { STATUS } from "../lib/status-colors";
 import { repoUrl, issueUrl, runRepoPath } from "../lib/githubLinks";
+import { useVisibleRepos, repoScopeParam } from "../hooks/useVisibleRepos";
 import { GhLink } from "./GhLink";
 import { ActorChip } from "./ActorChip";
 import clsx from "clsx";
@@ -26,9 +29,49 @@ type StatRange = "today" | "7d" | "30d";
 // internally for tooltip swatches and gradients. Use literal hex per theme so
 // the chart renders — CHART_DARK matches the daisyUI `lastlight` theme,
 // CHART_LIGHT matches `neaform`. Selected in-component via useTheme().
+/**
+ * Execution outcome, mapped onto the shared STATUS palette (issues #325, #329).
+ *
+ * The colours, and every measurement justifying them, live in
+ * `lib/status-colors.ts` — they are not this chart's to choose, because
+ * "good" has to mean the same green here as on the feedback page. What IS
+ * local to this chart is how the four are rendered: see the `<Bar>` stack for
+ * the hatch, the stack order and the gap.
+ */
+const OUTCOME = {
+  succeeded: STATUS.good,
+  skipped: STATUS.neutral,
+  deferred: STATUS.info,
+  failed: STATUS.bad,
+};
+
+/**
+ * Bottom-to-top stack order — `succeeded` is the bottom band, `failed` the
+ * top — and the single source of it.
+ *
+ * Declared as data rather than left implicit in the JSX because the tooltip
+ * must list the bands in the order the eye meets them going DOWN the bar,
+ * i.e. `failed` first and `succeeded` last. A tooltip is read top-down; a
+ * stack is built bottom-up; so the tooltip needs this array reversed.
+ *
+ * That reversal is the `-` in the `itemSorter` below, and it is load-bearing:
+ * recharts sorts the payload with lodash `sortBy` (ascending), so negating
+ * the index yields failed(-3) → deferred(-2) → skipped(-1) → succeeded(0).
+ * Dropping the `-` produces exactly the mirror image of the bar.
+ */
+const OUTCOME_STACK = ["succeeded", "skipped", "deferred", "failed"] as const;
+
+/**
+ * Drop zero bands from the tooltip (issue #325). Most hours have no failures
+ * and no deferrals, and four rows of which two say `0` buries the two that
+ * carry information — the reader has to *read* to find out nothing happened.
+ * Recharts renders nothing for a `null` name.
+ */
+function outcomeTooltipFormatter(value: unknown, name: unknown): [string, string] | null {
+  return Number(value) > 0 ? [String(value), String(name)] : null;
+}
+
 const CHART_DARK = {
-  success: "#86efac",
-  error: "#fca5a5",
   primary: "#7dd3fc",
   secondary: "#c4b5fd",
   accent: "#fcd34d",
@@ -40,8 +83,6 @@ const CHART_DARK = {
 };
 
 const CHART_LIGHT = {
-  success: "#07a06f",
-  error: "#dc2626",
   primary: "#0b3b63",
   secondary: "#7c3aed",
   accent: "#b45309",
@@ -116,14 +157,24 @@ function useLiveActivity() {
   const [queuedCount, setQueuedCount] = useState(0);
   const [liveWorkflows, setLiveWorkflows] = useState<WorkflowRun[]>([]);
   const [containerCount, setContainerCount] = useState(0);
+  const { allowed: allowedRepos } = useVisibleRepos();
+  // The per-repo scope goes to the SERVER (issue #169), so these panels ask for
+  // exactly the five rows they render. Narrowing client-side would mean either
+  // over-fetching or showing a panel that looks empty because the user's repos
+  // happened not to be in the global most-recent handful — and `total` would
+  // still be the global count, which is the number the header shows.
+  //
+  // Memoized on the already-stable `allowed`; a fresh array identity per render
+  // would make the effect below refetch on every render.
+  const repos = useMemo(() => repoScopeParam(allowedRepos), [allowedRepos]);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
         const [wf, queued, ct] = await Promise.all([
-          api.workflowRuns({ status: "running,paused", limit: 5 }),
-          api.workflowRuns({ status: "queued", limit: 1 }),
+          api.workflowRuns({ status: "running,paused", limit: 5, repos }),
+          api.workflowRuns({ status: "queued", limit: 1, repos }),
           api.containers(),
         ]);
         if (!cancelled) {
@@ -139,7 +190,7 @@ function useLiveActivity() {
     load();
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, []);
+  }, [repos]);
 
   return { workflowCount, queuedCount, liveWorkflows, containerCount };
 }
@@ -309,6 +360,10 @@ function ResourceUsageSection({
 
 function useRecentWorkflows() {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  const { allowed: allowedRepos } = useVisibleRepos();
+  // Memoized on the already-stable `allowed` — a fresh array identity per
+  // render would make the effect below refetch on every render.
+  const repos = useMemo(() => repoScopeParam(allowedRepos), [allowedRepos]);
 
   useEffect(() => {
     let cancelled = false;
@@ -316,7 +371,11 @@ function useRecentWorkflows() {
       try {
         // Only finished runs — queued/running/paused live in Live Activity,
         // not "Recent". Terminal statuses = succeeded, failed, cancelled.
-        const res = await api.workflowRuns({ status: "succeeded,failed,cancelled", limit: 3 });
+        const res = await api.workflowRuns({
+          status: "succeeded,failed,cancelled",
+          limit: 3,
+          repos,
+        });
         if (!cancelled) setRuns(res.workflowRuns);
       } catch {
         /* ignore */
@@ -325,7 +384,7 @@ function useRecentWorkflows() {
     load();
     const t = setInterval(load, 15000);
     return () => { cancelled = true; clearInterval(t); };
-  }, []);
+  }, [repos]);
 
   return runs;
 }
@@ -544,8 +603,15 @@ function StatsChartsSection() {
     // Daily bucket key is `YYYY-MM-DD` → render `MM-DD`.
     date: granularity === "hour" ? `${d.date.slice(11, 13)}:00` : d.date.slice(5),
     executions: d.executions,
-    successes: d.successes,
-    failures: d.failures,
+    succeeded: d.succeeded,
+    deferred: d.deferred,
+    failed: d.failed,
+    // `skipped` IS in the stack, as a hatch rather than a solid fill — the
+    // phase never ran, so texture carries it instead of hue. Keeping it in is
+    // what makes the bar total to the "Executions" stat card above: it is 31%
+    // of rows on a busy day, so dropping it would make the two disagree by a
+    // third and silently understate the volume.
+    skipped: d.skipped,
     inputTokens: d.inputTokens,
     outputTokens: d.outputTokens,
     cacheTokens: d.cacheReadTokens,
@@ -617,12 +683,82 @@ function StatsChartsSection() {
                   {/* Spacer right-axis so this chart's plot area matches the
                       Token chart, which has a real right axis. */}
                   <YAxis yAxisId="spacer" orientation="right" width={48} tick={false} axisLine={false} tickLine={false} />
+                  {/* Per-band counts plus the TOTAL. The total is the point:
+                      the four bands sum to the "Executions" stat card above,
+                      and showing it here is what lets a reader confirm that
+                      rather than take it on trust. It is also the only place
+                      `skipped` is quantified without squinting at a hatch. */}
                   <Tooltip
                     contentStyle={{ fontSize: 11, background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}` }}
                     cursor={{ fill: "rgba(255,255,255,0.04)" }}
+                    itemStyle={{ padding: 0 }}
+                    formatter={outcomeTooltipFormatter}
+                    itemSorter={(item) => -OUTCOME_STACK.indexOf(
+                      String(item.dataKey) as (typeof OUTCOME_STACK)[number],
+                    )}
+                    labelFormatter={(label, payload) => {
+                      const total = (payload ?? []).reduce((n, p) => n + (Number(p.value) || 0), 0);
+                      return `${String(label ?? "")} — ${total} execution${total === 1 ? "" : "s"}`;
+                    }}
                   />
-                  <Bar dataKey="successes" stackId="e" fill={CHART.success} name="success" />
-                  <Bar dataKey="failures" stackId="e" fill={CHART.error} name="failure" />
+                  <Legend
+                    verticalAlign="bottom"
+                    height={24}
+                    iconSize={8}
+                    wrapperStyle={{ fontSize: 11, color: CHART.axis }}
+                  />
+                  <defs>
+                    {/* `skipped` is the one band that is not an outcome — the
+                        phase never ran. It is drawn as a HATCH rather than a
+                        fill because hue could not carry it: against the green
+                        it measured ΔE 15.9, technically over the floor and
+                        still visibly similar. Texture is a different channel
+                        entirely, so it separates from all three solids at any
+                        severity of colour blindness, in print, and under
+                        forced-colors — and it reads as "placeholder", which is
+                        what a skip is. */}
+                    <pattern id="ll-skip-hatch" patternUnits="userSpaceOnUse" width={5} height={5}
+                             patternTransform="rotate(45)">
+                      {/* A tinted BODY under the lines, not an outline around
+                          them. An outline would be drawn half outside the rect
+                          — and since the solid bands' strokes are surface-
+                          coloured (their outer half invisible), a visible one
+                          renders this segment ~4px wider than the rest of the
+                          column at the same strokeWidth. The tint gives the
+                          band a definite edge from the inside, so every band
+                          keeps identical geometry. */}
+                      <rect width={5} height={5} fill={CHART.tooltipBg} />
+                      <rect width={5} height={5} fill={OUTCOME.skipped} opacity={0.18} />
+                      <line x1={0} y1={0} x2={0} y2={5} stroke={OUTCOME.skipped} strokeWidth={2.5} />
+                    </pattern>
+                  </defs>
+                  {/* Stack order, bottom to top, is SEMANTIC: nothing wrong →
+                      nothing happened → load → bad. It could not be before —
+                      while `deferred` was amber it had to be held apart from
+                      red (ΔE 2.8) by putting the neutral between them. Blue
+                      dissolved that constraint, and the semantic order is also
+                      the stronger one: the hatch now separates green from blue
+                      by texture, leaving deferred↔failed (ΔE 19.0) as the only
+                      solid-solid boundary, against 13.5 before.
+                      `stroke` is the 2px surface gap between segments. */}
+                  <Bar dataKey="succeeded" stackId="e" fill={OUTCOME.succeeded} name="succeeded"
+                       stroke={CHART.tooltipBg} strokeWidth={2} />
+                  {/* A cascade skip: the phase never ran, because an upstream
+                      one didn't succeed. Kept in the stack so the bar totals to
+                      the "Executions" headline — it is 31% of rows on a busy
+                      day, so hiding it would make the two disagree visibly.
+                      Same surface stroke as every other band; see the pattern
+                      above for why its definition is a tint, not a border. */}
+                  <Bar dataKey="skipped" stackId="e" fill="url(#ll-skip-hatch)" name="skipped"
+                       stroke={CHART.tooltipBg} strokeWidth={2} />
+                  {/* Capacity, not error: the k8s ResourceQuota rejected the
+                      pod and the run requeued. Costs $0 and self-heals — but it
+                      IS the signal that the sandbox namespace is saturated, so
+                      it earns its own band rather than being hidden. */}
+                  <Bar dataKey="deferred" stackId="e" fill={OUTCOME.deferred} name="deferred"
+                       stroke={CHART.tooltipBg} strokeWidth={2} />
+                  <Bar dataKey="failed" stackId="e" fill={OUTCOME.failed} name="failed"
+                       stroke={CHART.tooltipBg} strokeWidth={2} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -651,7 +787,7 @@ function StatsChartsSection() {
                   />
                   <Tooltip
                     contentStyle={{ fontSize: 11, background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}` }}
-                    formatter={(v: number) => formatTokens(v)}
+                    formatter={(v) => formatTokens(Number(v ?? 0))}
                     cursor={{ fill: "rgba(255,255,255,0.04)" }}
                   />
                   <Bar yAxisId="io" dataKey="inputTokens" stackId="t" fill={CHART.primary} name="input" />
@@ -672,7 +808,7 @@ function StatsChartsSection() {
                   <YAxis yAxisId="spacer" orientation="right" width={48} tick={false} axisLine={false} tickLine={false} />
                   <Tooltip
                     contentStyle={{ fontSize: 11, background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}` }}
-                    formatter={(v: number) => formatCost(v)}
+                    formatter={(v) => formatCost(Number(v ?? 0))}
                     cursor={{ fill: "rgba(255,255,255,0.04)" }}
                   />
                   <Bar dataKey="cost" fill={CHART.info} name="cost" />

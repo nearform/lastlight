@@ -20,6 +20,10 @@ export function migrate(db: Database.Database): void {
       trigger_type TEXT NOT NULL,
       trigger_id TEXT NOT NULL,
       skill TEXT NOT NULL,
+      -- The target repo as (owner, BARE repo) — see state/repo-ref.ts, the one
+      -- place that rule is expressed. The owner column arrives by ALTER below
+      -- on an upgraded DB; it is here too so a fresh DB reaches the same shape.
+      owner TEXT,
       repo TEXT,
       issue_number INTEGER,
       started_at TEXT NOT NULL,
@@ -37,6 +41,8 @@ export function migrate(db: Database.Database): void {
       id TEXT PRIMARY KEY,
       workflow_name TEXT NOT NULL,
       trigger_id TEXT NOT NULL,
+      -- Same (owner, BARE repo) pair as the executions ledger above.
+      owner TEXT,
       repo TEXT,
       issue_number INTEGER,
       current_phase TEXT NOT NULL,
@@ -63,6 +69,31 @@ export function migrate(db: Database.Database): void {
       updated_at TEXT NOT NULL,
       updated_by TEXT
     );
+
+    -- One row per cron FIRE — scheduled or manual, workflow or handler.
+    -- Distinct from the workflow_runs a fire may (or may not) dispatch: a
+    -- zero-discovery fire dispatches nothing, so this is the only record that
+    -- a backstop cron ran at all. Keyed on cron_name, never the workflow, so
+    -- a run dispatched by /api/run or a comment cannot skew a cron's health.
+    CREATE TABLE IF NOT EXISTS cron_runs (
+      id TEXT PRIMARY KEY,
+      cron_name TEXT NOT NULL,
+      workflow TEXT,
+      handler TEXT,
+      source TEXT NOT NULL,
+      actor TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      status TEXT NOT NULL DEFAULT 'running',
+      repos_eligible INTEGER,
+      repos_scanned INTEGER,
+      discovered INTEGER,
+      dispatched INTEGER,
+      failures INTEGER,
+      error TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cron_runs_name_started ON cron_runs(cron_name, started_at DESC);
 
     CREATE TABLE IF NOT EXISTS workflow_overrides (
       name TEXT PRIMARY KEY,
@@ -110,6 +141,158 @@ export function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_users_login ON users(login);
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
     CREATE INDEX IF NOT EXISTS idx_users_slack ON users(slack_user_id);
+
+    -- Feedback signals (issue #255) — a 👍/👎 on something the bot wrote, scored
+    -- against the run that wrote it. Two tables, because a reaction names a
+    -- MESSAGE and we need a run:
+    --
+    --   feedback_anchors  one row per reactable artefact the bot posted, and the
+    --                     run it came from. Written when we POST (Slack, where
+    --                     the ts is only ever known at send time) or when a run
+    --                     finishes (GitHub discovery).
+    --   feedback_signals  one row per (anchor, reactor, emoji).
+    --
+    -- Surface-agnostic from the start: \`source\` discriminates slack/github so a
+    -- single query averages across both, and the GitHub poller adds rows rather
+    -- than columns.
+    CREATE TABLE IF NOT EXISTS feedback_anchors (
+      id TEXT PRIMARY KEY,                    -- randomUUID
+      source TEXT NOT NULL,                   -- slack | github
+      kind TEXT NOT NULL,                     -- slack_message | issue_comment | review_comment | issue
+      -- Slack message ts, or the GitHub comment/issue id as a string. Kept TEXT
+      -- for both: a Slack ts ("1712000000.000100") is not a number, and a
+      -- GitHub id read back as a float would lose precision.
+      external_id TEXT NOT NULL,
+      -- GitHub GraphQL global id. The batched reactions query keys on this, so
+      -- the poller never has to re-resolve an id it already saw.
+      node_id TEXT,
+      -- Slack channel id. GitHub has no channel and stores the empty string
+      -- rather than NULL, because **SQLite treats NULLs as DISTINCT in a UNIQUE
+      -- constraint** — with NULL here, the UNIQUE below (and the ON CONFLICT
+      -- that targets it) is silently inoperative for every GitHub anchor, and
+      -- re-discovering the same comment forks a second row. A sentinel keeps
+      -- ONE uniqueness rule and ONE upsert path for both surfaces; the store
+      -- maps '' back to null at its boundary so callers still see
+      -- \`channel: string | null\`.
+      channel TEXT NOT NULL DEFAULT '',
+      owner TEXT,
+      repo TEXT,
+      issue_number INTEGER,
+      -- The attribution. Null is legal and deliberate: a bot comment we cannot
+      -- tie to a run is still worth recording — dropping it would silently lose
+      -- the reaction rather than the run.
+      workflow_run_id TEXT,
+      workflow_name TEXT,
+      -- The Slack THREAD's messaging session, for a chat turn — which has no
+      -- workflow run. Deliberately not called \`execution_id\`: it is
+      -- \`messaging_sessions.id\`, which is what an \`executions\` row for a chat
+      -- turn carries as its \`trigger_id\`, NOT an \`executions.id\`.
+      messaging_session_id TEXT,
+      created_at TEXT NOT NULL,               -- when the bot posted it
+      last_polled_at TEXT,                    -- github only; slack arrives live
+      UNIQUE(source, channel, external_id)
+    );
+    -- The reverse lookup a Slack reaction hits: (channel, ts) → anchor.
+    CREATE INDEX IF NOT EXISTS idx_feedback_anchors_lookup
+      ON feedback_anchors(source, channel, external_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_anchors_run
+      ON feedback_anchors(workflow_run_id);
+    -- The poller's rotation: least-recently-polled first, within the window.
+    CREATE INDEX IF NOT EXISTS idx_feedback_anchors_poll
+      ON feedback_anchors(source, created_at, last_polled_at);
+
+    CREATE TABLE IF NOT EXISTS feedback_signals (
+      id TEXT PRIMARY KEY,
+      anchor_id TEXT NOT NULL,
+      -- Denormalized from the anchor so every analytics query is one table.
+      -- These never change for a given anchor, so there is nothing to keep in
+      -- sync — the anchor's attribution is fixed the moment it is created.
+      source TEXT NOT NULL,
+      workflow_run_id TEXT,
+      workflow_name TEXT,
+      messaging_session_id TEXT,
+      owner TEXT,
+      repo TEXT,
+      issue_number INTEGER,
+      emoji TEXT NOT NULL,                    -- canonical name (see engine/feedback/reactions.ts)
+      score INTEGER NOT NULL,                 -- -2..+2; 0 means "recorded, not scored"
+      sentiment TEXT NOT NULL,
+      reactor TEXT,                           -- GitHub login / Slack user id
+      reacted_at TEXT,                        -- when they reacted, when known
+      observed_at TEXT NOT NULL,              -- when WE saw it
+      -- Set when the reaction is taken away. Retracting rather than deleting
+      -- keeps "somebody thumbed this and then thought better of it" visible,
+      -- which is itself a signal; every score query filters on IS NULL.
+      removed_at TEXT,
+      -- OTel export watermark. Null means not yet exported, so a restart can't
+      -- double-emit and signals recorded while telemetry was off can be
+      -- backfilled later.
+      exported_at TEXT,
+      UNIQUE(anchor_id, reactor, emoji)
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_anchor ON feedback_signals(anchor_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_run ON feedback_signals(workflow_run_id);
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_observed
+      ON feedback_signals(observed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_workflow
+      ON feedback_signals(workflow_name, observed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_feedback_signals_export ON feedback_signals(exported_at);
+
+    -- ── GitHub team-based dashboard visibility (issue #169) ────────────────
+    -- These four tables are a CACHE, not a mirror of the org. Nothing here is
+    -- enumerated up front: rows appear only for the teams a user who actually
+    -- logged in belongs to, resolved on demand (see engine/github/team-visibility.ts).
+    -- That is the whole scaling story — an org with thousands of repos and
+    -- hundreds of teams costs a handful of requests per logged-in person
+    -- instead of a full-org crawl. Safe to delete wholesale; it refills.
+
+    -- One row per team we have ever resolved repos for.
+    CREATE TABLE IF NOT EXISTS github_teams (
+      org TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      name TEXT,
+      -- When this team's repo grant was last enumerated.
+      repos_synced_at TEXT NOT NULL,
+      -- 1 when the enumeration hit the per-team page budget and stopped early,
+      -- so github_team_repos is a PREFIX of the real grant. A truncated team
+      -- forces its members to fail open — a partial list would hide repos the
+      -- person really can see, which is worse than not filtering at all.
+      truncated INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (org, slug)
+    );
+
+    -- A team's grant, already intersected with the managed-repo set. The repo
+    -- column holds the owner/repo full name.
+    CREATE TABLE IF NOT EXISTS github_team_repos (
+      org TEXT NOT NULL,
+      team_slug TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      PRIMARY KEY (org, team_slug, repo)
+    );
+
+    -- Membership we have LEARNED, not enumerated: one row per (team, login)
+    -- discovered while resolving that login. Absence means "unknown", never
+    -- "not a member" — which is why every read path fails open.
+    CREATE TABLE IF NOT EXISTS github_team_members (
+      org TEXT NOT NULL,
+      team_slug TEXT NOT NULL,
+      login TEXT NOT NULL,
+      PRIMARY KEY (org, team_slug, login)
+    );
+    -- reposForLogin joins membership → team_repos on this column.
+    CREATE INDEX IF NOT EXISTS idx_github_team_members_login
+      ON github_team_members(login);
+
+    -- Per-login freshness + outcome, so a resolution that failed or blew its
+    -- request budget is remembered for the TTL rather than retried on every
+    -- dashboard poll. status is one of: ok | empty | truncated | error | disabled.
+    CREATE TABLE IF NOT EXISTS github_visibility_sync (
+      login TEXT PRIMARY KEY,
+      synced_at TEXT NOT NULL,
+      status TEXT NOT NULL,
+      -- Free-text detail for the error/truncated cases (admin surface only).
+      detail TEXT
+    );
   `);
 
   // Actor logging (issue #205): who triggered a run and how. Additive on both
@@ -165,6 +348,113 @@ export function migrate(db: Database.Database): void {
     );
   } catch {
     // Column already exists — ignore
+  }
+
+  // ── One repo-identifier rule: (owner, BARE repo) — issue #279 ──────────────
+  //
+  // The column above fixed the SHAPE for new rows but left two populations
+  // behind, so the same column meant two things depending on who wrote it:
+  // rows predating it hold the qualified `owner/repo` in `repo` itself, and
+  // `executions` never got an `owner` column at all — the dispatcher wrote the
+  // qualified string there while the phase executor wrote the bare name, which
+  // is every workflow phase row.
+  //
+  // Six read sites each re-derived "may be bare or qualified" and disagreed
+  // about which source wins; #278 shipped a filter built on one reading, and a
+  // non-null non-match HIDES rows rather than showing them. So converge the
+  // data instead of teaching the seventh consumer the rule.
+  //
+  // Ordering matters: `workflow_runs` first, because the `executions` owner
+  // backfill reads `workflow_runs.owner` back out. Every statement is a no-op
+  // on a second run — after it, `instr(repo, '/') = 0` — so this is safe to
+  // re-run, which it is, on every boot.
+  try {
+    db.exec(
+      `UPDATE workflow_runs
+          SET owner = CASE WHEN owner IS NULL OR owner = ''
+                           THEN substr(repo, 1, instr(repo, '/') - 1)
+                           ELSE owner END,
+              repo  = substr(repo, instr(repo, '/') + 1)
+        WHERE repo IS NOT NULL AND instr(repo, '/') > 0`,
+    );
+    // A row from before the owner column whose `context.owner` was absent has
+    // one more witness: `trigger_id`, which is built as `owner/repo#N` (or
+    // `owner/repo::workflow`) from the same pair at dispatch. `resume.ts` and
+    // the approval-resume path already PREFER it over the columns, so reading
+    // it here is the existing precedence, not a new guess. Slack-originated
+    // ids (`slack:…`) carry no repo and are excluded.
+    db.exec(
+      `UPDATE workflow_runs
+          SET owner = substr(trigger_id, 1, instr(trigger_id, '/') - 1)
+        WHERE (owner IS NULL OR owner = '')
+          AND repo IS NOT NULL
+          AND trigger_id NOT LIKE 'slack:%'
+          AND instr(trigger_id, '/') > 0`,
+    );
+  } catch {
+    // Best-effort: a run row that won't split is better left alone than
+    // failing boot. The read path still tolerates both shapes.
+  }
+
+  try {
+    db.exec(`ALTER TABLE executions ADD COLUMN owner TEXT`);
+  } catch {
+    // Column already exists — ignore
+  }
+  try {
+    // 1. The account is already in the row, on the dispatcher-written rows that
+    //    stored the qualified string.
+    db.exec(
+      `UPDATE executions
+          SET owner = substr(repo, 1, instr(repo, '/') - 1)
+        WHERE (owner IS NULL OR owner = '')
+          AND repo IS NOT NULL AND instr(repo, '/') > 0`,
+    );
+    // 2. Otherwise it comes from the run that owns the execution. This is the
+    //    bulk: every phase row, written bare from `GitSandboxAccess`.
+    //    `build-cycle` rows are covered by (1) and chat rows carry no repo at
+    //    all, so there is nothing left needing a `trigger_id` parse.
+    db.exec(
+      `UPDATE executions
+          SET owner = (SELECT r.owner FROM workflow_runs r WHERE r.id = executions.workflow_run_id)
+        WHERE (owner IS NULL OR owner = '') AND workflow_run_id IS NOT NULL`,
+    );
+    // 3. Now de-qualify, once the account has been rescued off it.
+    db.exec(
+      `UPDATE executions
+          SET repo = substr(repo, instr(repo, '/') + 1)
+        WHERE repo IS NOT NULL AND instr(repo, '/') > 0`,
+    );
+  } catch {
+    // Same best-effort rule as above — the ledger is append-only history, and
+    // an un-normalized row degrades a dashboard filter, never a run.
+  }
+
+  // `feedback_anchors.channel` moved from nullable to a '' sentinel (issue
+  // #255) so its UNIQUE actually binds for GitHub — see the CREATE TABLE above.
+  // `CREATE TABLE IF NOT EXISTS` can't restate a column, so backfill any rows
+  // written by a build that predates the fix. Guarded like every ALTER here: on
+  // a table that already accumulated NULL-channel duplicates the UPDATE trips
+  // the constraint, and leaving those rows alone is strictly better than
+  // failing boot over a cache of reaction anchors.
+  try {
+    db.exec(`UPDATE feedback_anchors SET channel = '' WHERE channel IS NULL`);
+  } catch {
+    // Pre-existing duplicates — they age out via `retentionDays`.
+  }
+
+  // The run's OTel trace/span context (issue #255). A feedback signal can
+  // arrive days after the run finished and its span closed, so the only way to
+  // put the score on the trace it grades is to remember where that trace was.
+  // Captured by the observability adapter in `src/workflows/runner.ts` when the
+  // `lastlight.workflow.run` span opens; null whenever telemetry was disabled,
+  // in which case the signal exports as its own root span instead.
+  for (const col of ["trace_id TEXT", "span_id TEXT"]) {
+    try {
+      db.exec(`ALTER TABLE workflow_runs ADD COLUMN ${col}`);
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   // Gate flavor: 'approve' (explicit approve/reject) vs 'reply' (resolves

@@ -1,9 +1,41 @@
 import { randomUUID } from "crypto";
+import { existsSync } from "fs";
 import type { ExecutorConfig } from "../engine/github/profiles.js";
 import type { StateDb, WorkflowRun, TriggerActorType } from "../state/db.js";
-import { getBotName, getRuntimeConfig, type ModelConfig, type VariantConfig } from "../config/config.js";
+import type { DisabledConfig, NotificationsConfig } from "lastlight-shared/config-types";
+import {
+  defaultDependenciesConfig,
+  defaultFixConfig,
+  defaultReviewConfig,
+  getBotName,
+  getRuntimeConfig,
+  type DependenciesConfig,
+  type FixConfig,
+  type ModelConfig,
+  type RepoConfigPolicy,
+  type ReviewConfig,
+  type VariantConfig,
+} from "../config/config.js";
+import type { ConfigSource } from "../config/config-resolve.js";
+import type { GitHubClient } from "../engine/github/github.js";
+import {
+  fetchRepoLayer,
+  getCachedRepoLayer,
+  repoConfigBaseFromRuntime,
+  repoConfigPolicy,
+  resolveRepoConfig,
+  type RepoConfigBase,
+  type RepoConfigSources,
+  type RepoConfigWarning,
+  type RepoLayer,
+} from "../config/repo-config.js";
 import { reapSandboxWorkspace } from "../sandbox/reap.js";
+import { artifactStore } from "../sandbox/artifact-store.js";
 import { getWorkflow } from "./loader.js";
+import {
+  phaseSkipIfExpressions,
+  type AgentWorkflowDefinition,
+} from "lastlight-workflow-engine";
 import {
   runWorkflow,
   type ApprovalGateConfig,
@@ -11,6 +43,7 @@ import {
   type WorkflowResult,
 } from "./runner.js";
 import { PhaseRef } from "./phase-ref.js";
+import { K8S_SANITY_FUSE } from "./admission.js";
 import type { TemplateContext } from "./templates.js";
 import { slugify } from "./templates.js";
 import { wrapUntrusted } from "../engine/screen/screen.js";
@@ -23,6 +56,511 @@ import {
   PR_HEADREF_PREPOPULATE_WORKFLOWS,
   PR_FIX_SHAPED_WORKFLOWS,
 } from "./target-policy.js";
+import { logger } from "../logging/logger.js";
+
+const repoConfigLog = logger("repo-config");
+const simpleLog = logger("simple");
+const reapLog = logger("reap");
+const workflowLog = logger("workflow");
+
+// ---------------------------------------------------------------------------
+// Per-repository config layer (issue #180)
+// ---------------------------------------------------------------------------
+
+/**
+ * A managed repo's `.lastlight/` layer, already merged onto the boot config and
+ * frozen for the duration of ONE run.
+ *
+ * Resolved once at the dispatch choke point (`resolveRepoRunConfig`, driven from
+ * `dispatchWorkflow` in src/index.ts) and then carried explicitly through the
+ * run — never installed into a module global. Up to `concurrency.maxWorkflows`
+ * runs plus a cron fan-out across every managed repo are in flight at once, so a
+ * global would race and hand repo B's model override to repo A's run.
+ *
+ * `models` / `variants` / `approval` are the EFFECTIVE maps (base ⊕ repo), not
+ * the repo's deltas, so every consumer can use them as a drop-in replacement for
+ * the boot config's maps. The deltas are recoverable from {@link sources}.
+ */
+export interface RunRepoConfig {
+  /** `owner/repo` the layer was read from. */
+  repo: string;
+  /** The ref the layer was read from — always the repo's default branch. */
+  defaultBranch: string;
+  /** Git tree SHA of `.lastlight/` — the content identity of these values. */
+  treeSha: string;
+  /** ISO timestamp of the last successful download of the layer. */
+  fetchedAt: string;
+  /**
+   * Absolute host path of the unpacked layer, when the repo contributed assets
+   * AND the operator allows them. Undefined otherwise — the run then keeps the
+   * module-level (built-in + overlay) asset resolver untouched.
+   */
+  assetRoot?: string;
+  /** Asset paths the repo contributed, relative to {@link assetRoot}. */
+  assets: string[];
+  /** Effective per-task model map. */
+  models: ModelConfig;
+  /** Effective per-task reasoning-effort map. */
+  variants: VariantConfig;
+  /** Effective approval gates. Add-only: the repo can raise a gate, never clear one. */
+  approval: Record<string, boolean>;
+  /** Effective disables. `workflows` is enforced at dispatch (see below). */
+  disabled: DisabledConfig;
+  /**
+   * Effective fix/dependency/review policy (issues #251, #252). Clamped at
+   * resolve time so these are never looser than the operator's own values —
+   * a consumer can read them directly without re-checking the bounds.
+   */
+  fix: FixConfig;
+  dependencies: DependenciesConfig;
+  review: ReviewConfig;
+  /**
+   * Where this repo's outbound notifications go. Routing, not policy, so it is
+   * NOT clamped — read `sources.notifications["slack.channel"]` to tell a repo's
+   * deliberate answer (including an explicit `null`, "send me nothing") from the
+   * operator's default. See `resolveRepoChannel`.
+   */
+  notifications: NotificationsConfig;
+  /** Per-leaf provenance — which layer won each key (`default`/`overlay`/`env`/`repo`). */
+  sources: RepoConfigSources;
+  /** Everything the layer dropped, fetching + validating. Never thrown. */
+  warnings: RepoConfigWarning[];
+}
+
+/** Options for {@link resolveRepoRunConfig}. */
+export interface RepoRunConfigOptions {
+  /**
+   * GitHub client to fetch through. `null` means chat-only mode (no App, no
+   * PAT) — there is nothing to fetch through, so the layer is skipped entirely.
+   * Omitted means "let `fetchRepoLayer` resolve the harness client itself".
+   */
+  client?: GitHubClient | null;
+  /** Operator bounds. Defaults to the boot config's `repoConfig` block. */
+  policy?: RepoConfigPolicy;
+  /** Config the layer merges onto. Defaults to the boot runtime config. */
+  base?: RepoConfigBase;
+  /** Cache root override, forwarded to `fetchRepoLayer` (tests). */
+  cacheRoot?: string;
+}
+
+/** Result of {@link resolveRepoRunConfig}. */
+export interface RepoRunConfigResult {
+  /** Present only when a repo layer actually applies to this dispatch. */
+  repoConfig?: RunRepoConfig;
+  /**
+   * Set when the repo's own `disabled.workflows` refuses this workflow. The
+   * caller must abandon the dispatch — no `workflow_runs` row, no agent call.
+   */
+  refusal?: string;
+}
+
+/**
+ * The single repo a dispatch context names, or `undefined` for none/many.
+ *
+ * A repo layer is per-REPO, so it is only meaningful when the run acts on
+ * exactly one: a repo-less Slack explore has nothing to read, and a multi-repo
+ * context (a cron fan-out envelope that hasn't been split yet) would have to
+ * pick a winner — silently applying one repo's model override to a run that
+ * touches another is worse than applying none.
+ */
+export function soleRepoInContext(context: { repo?: unknown; repos?: unknown }): string | undefined {
+  const refs = new Set<string>();
+  if (typeof context.repo === "string" && context.repo) refs.add(context.repo);
+  if (Array.isArray(context.repos)) {
+    for (const r of context.repos) if (typeof r === "string" && r) refs.add(r);
+  }
+  return refs.size === 1 ? [...refs][0] : undefined;
+}
+
+/**
+ * Resolve a dispatch's per-repository config layer (issue #180).
+ *
+ * Called from the `dispatchWorkflow` choke point in `src/index.ts`, right beside
+ * the unmanaged-repo guard, so every trigger path — webhook, router, cron, the
+ * direct `/api/run` + `/api/build` triggers, approval resume — gets the same
+ * answer from one place.
+ *
+ * **Never throws and never fails a run.** Every degenerate case (feature off, no
+ * repo, several repos, chat-only mode, a GitHub outage, a malformed
+ * `lastlight.yml`) returns "no layer applies" or a layer with warnings attached,
+ * and the run proceeds on the un-overridden operator config. The one refusal it
+ * CAN return is the repo's own `disabled.workflows` — the repo opting itself out
+ * of a workflow, which is a deliberate answer rather than a failure.
+ */
+export async function resolveRepoRunConfig(
+  workflowName: string,
+  context: { repo?: unknown; repos?: unknown },
+  options: RepoRunConfigOptions = {},
+): Promise<RepoRunConfigResult> {
+  const policy = options.policy ?? repoConfigPolicy();
+  if (!policy.enabled) return {};
+  // Chat-only mode: no App and no PAT, so there is no client to read the
+  // default branch through. Skip rather than serve a possibly-stale disk cache.
+  if (options.client === null) return {};
+
+  const repo = soleRepoInContext(context);
+  if (!repo) return {};
+
+  const runtime = getRuntimeConfig();
+  const base = options.base ?? (runtime ? repoConfigBaseFromRuntime(runtime) : undefined);
+  // No boot config (unit tests, pre-boot paths) means no base to merge onto.
+  if (!base) return {};
+
+  let layer;
+  try {
+    layer = await fetchRepoLayer(repo, {
+      client: options.client ?? undefined,
+      policy,
+      cacheRoot: options.cacheRoot,
+    });
+  } catch (err: unknown) {
+    // `fetchRepoLayer` is documented never to reject; this is the belt to its
+    // braces. A repo config problem must never be the thing that fails a run.
+    repoConfigLog.warn("Layer resolution failed — running with the operator config", { repo, err });
+    return {};
+  }
+  if (!layer) return {};
+
+  const resolved = resolveRepoConfig(base, policy, layer);
+  for (const warning of resolved.warnings) {
+    repoConfigLog.warn(warning.message, { repo });
+  }
+
+  // The repo opting ITSELF out of a workflow. Enforced here, next to the
+  // unmanaged-repo guard, so every dispatch path honours it — including the
+  // direct CLI/API triggers that bypass the connector/router ingress filters.
+  if (resolved.merged.disabled.workflows.includes(workflowName)) {
+    return {
+      refusal:
+        `${repo} disables the "${workflowName}" workflow in .lastlight/lastlight.yml ` +
+        `(disabled.workflows, read from ${layer.defaultBranch}@${layer.treeSha.slice(0, 7)})`,
+    };
+  }
+
+  const hasAssets = policy.allowAssets && layer.assets.length > 0;
+  return {
+    repoConfig: {
+      repo,
+      defaultBranch: layer.defaultBranch,
+      treeSha: layer.treeSha,
+      fetchedAt: layer.fetchedAt,
+      assetRoot: hasAssets ? layer.root : undefined,
+      assets: hasAssets ? [...layer.assets] : [],
+      // The merge only ever ADDS keys on top of the boot config, so the
+      // `default` entry `ModelConfig` requires is still there — the resolver
+      // just types its output as a plain string map.
+      models: resolved.merged.models as ModelConfig,
+      variants: resolved.merged.variants,
+      approval: resolved.merged.approval,
+      disabled: resolved.merged.disabled,
+      fix: resolved.merged.fix,
+      dependencies: resolved.merged.dependencies,
+      review: resolved.merged.review,
+      notifications: resolved.merged.notifications,
+      sources: resolved.sources,
+      warnings: resolved.warnings,
+    },
+  };
+}
+
+/**
+ * The JSON projection of a {@link RunRepoConfig} persisted on
+ * `workflow_runs.context.repoConfig`, so a specific run stays explainable long
+ * after the TTL cache has moved on.
+ *
+ * `applied` holds ONLY the leaves the repo actually won (provenance `repo`) —
+ * the effective full maps are already on `context.models` / `context.variants`,
+ * and a diff of the two is exactly what the dashboard wants to render.
+ */
+export interface RepoConfigRunRecord {
+  repo: string;
+  defaultBranch: string;
+  treeSha: string;
+  fetchedAt: string;
+  applied: {
+    models?: Record<string, string>;
+    variants?: Record<string, string>;
+    approval?: Record<string, boolean>;
+    disabled?: Partial<Record<keyof DisabledConfig, string[]>>;
+    /**
+     * The clamped leaves the repo won in `fix:` / `dependencies:` / `review:`.
+     * Loosely typed on purpose: this is a persisted JSON projection, and the
+     * restore path re-applies it over whatever the operator's block says today.
+     */
+    fix?: Record<string, unknown>;
+    dependencies?: Record<string, unknown>;
+    review?: Record<string, unknown>;
+    /**
+     * Notification routing the repo won, keyed by the same DOTTED leaf
+     * `RepoConfigSources` uses (`"slack.channel"`) — this is the one block that
+     * nests, and flattening it here keeps the record a flat projection like
+     * every other entry. A `null` value is meaningful and preserved: it is the
+     * repo saying "send me nothing", which must survive a resume.
+     */
+    notifications?: Record<string, unknown>;
+  };
+  assets: string[];
+  warnings: RepoConfigWarning[];
+}
+
+/** Project a {@link RunRepoConfig} into its persisted form. */
+export function repoConfigRunRecord(cfg: RunRepoConfig): RepoConfigRunRecord {
+  const wonBy = <T>(
+    values: Record<string, T | undefined>,
+    sources: Record<string, ConfigSource>,
+  ): Record<string, T> | undefined => {
+    const out: Record<string, T> = {};
+    for (const [key, value] of Object.entries(values)) {
+      if (sources[key] === "repo" && value !== undefined) out[key] = value;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  };
+
+  const disabled: Partial<Record<keyof DisabledConfig, string[]>> = {};
+  for (const key of Object.keys(cfg.disabled) as Array<keyof DisabledConfig>) {
+    if (cfg.sources.disabled[key] === "repo") disabled[key] = cfg.disabled[key];
+  }
+
+  return {
+    repo: cfg.repo,
+    defaultBranch: cfg.defaultBranch,
+    treeSha: cfg.treeSha,
+    fetchedAt: cfg.fetchedAt,
+    applied: {
+      models: wonBy(cfg.models, cfg.sources.models),
+      variants: wonBy(cfg.variants, cfg.sources.variants),
+      approval: wonBy(cfg.approval, cfg.sources.approval),
+      disabled: Object.keys(disabled).length > 0 ? disabled : undefined,
+      fix: wonBy(cfg.fix as unknown as Record<string, unknown>, cfg.sources.fix),
+      dependencies: wonBy(cfg.dependencies as unknown as Record<string, unknown>, cfg.sources.dependencies),
+      review: wonBy(cfg.review as unknown as Record<string, unknown>, cfg.sources.review),
+      notifications: wonBy({ "slack.channel": cfg.notifications.slack.channel }, cfg.sources.notifications),
+    },
+    assets: cfg.assets,
+    warnings: cfg.warnings,
+  };
+}
+
+/** Result of {@link restoreRepoRunConfig}. */
+export interface RestoredRepoConfig {
+  /** The layer as the original dispatch resolved it, minus anything unrecoverable. */
+  repoConfig: RunRepoConfig;
+  /**
+   * Set when the repo's ASSET layer could not be restored (see
+   * {@link restoreRepoRunConfig}). The run still proceeds — on the operator's
+   * prompts/skills/agent-context — and the caller is expected to record this
+   * where the run is explained.
+   */
+  warning?: RepoConfigWarning;
+}
+
+/** Options for {@link restoreRepoRunConfig}. */
+export interface RestoreRepoRunConfigOptions {
+  /** Effective maps to re-apply the repo's leaves onto. Normally the run's own
+   *  persisted `context.models` / `context.variants`; the operator's boot maps
+   *  for a row written before those were stored. */
+  models?: ModelConfig;
+  variants?: VariantConfig;
+  approval?: Record<string, boolean>;
+  disabled?: DisabledConfig;
+  /**
+   * Operator policy blocks to re-apply the repo's clamped leaves onto. Default:
+   * the boot config's own blocks (the shipped defaults when config isn't
+   * loaded), which is what every production caller wants — unlike models and
+   * variants, these are not persisted on the run row in effective form.
+   */
+  fix?: FixConfig;
+  dependencies?: DependenciesConfig;
+  review?: ReviewConfig;
+  /** Layer lookup seam (tests). Defaults to the cache, then one conditional refetch. */
+  resolveLayer?: (repo: string) => Promise<RepoLayer | undefined>;
+}
+
+const EMPTY_DISABLED: DisabledConfig = {
+  workflows: [],
+  crons: [],
+  prompts: [],
+  skills: [],
+  agentContext: [],
+};
+
+/**
+ * The operator's `fix:` / `dependencies:` / `review:` blocks from boot config,
+ * or the shipped defaults when config isn't loaded (unit tests, pre-boot paths).
+ * Mirrors `repoConfigPolicy()`'s "never throw, always answer" contract.
+ */
+function operatorFix(): FixConfig {
+  return getRuntimeConfig()?.fix ?? defaultFixConfig();
+}
+function operatorDependencies(): DependenciesConfig {
+  return getRuntimeConfig()?.dependencies ?? defaultDependenciesConfig();
+}
+function operatorReview(): ReviewConfig {
+  return getRuntimeConfig()?.review ?? defaultReviewConfig();
+}
+
+/**
+ * The unpacked `.lastlight/` tree for `repo` **at the exact tree sha a run
+ * recorded**, or undefined.
+ *
+ * Content identity is the whole point: a repo's default branch moves, and the
+ * layer cache is a TTL/eviction cache, so "the layer for this repo" today is not
+ * necessarily the layer the run started under. Only an exact `treeSha` match
+ * (with the unpacked files still on disk) is accepted; anything else is a
+ * different config and the caller degrades rather than silently swapping it in.
+ * The refetch is the cheap conditional one — a 304 just re-hydrates from disk.
+ */
+async function repoLayerForTree(
+  repo: string,
+  treeSha: string,
+  resolveLayer?: (repo: string) => Promise<RepoLayer | undefined>,
+): Promise<RepoLayer | undefined> {
+  const usable = (layer?: RepoLayer): RepoLayer | undefined =>
+    layer && layer.treeSha === treeSha && existsSync(layer.root) ? layer : undefined;
+  try {
+    if (resolveLayer) return usable(await resolveLayer(repo));
+    return usable(getCachedRepoLayer(repo)) ?? usable(await fetchRepoLayer(repo));
+  } catch (err: unknown) {
+    // `fetchRepoLayer` is documented never to reject; belt to its braces. A
+    // resume must never die because a repo's config couldn't be re-read.
+    repoConfigLog.warn("Could not restore the cached layer", { repo, err });
+    return undefined;
+  }
+}
+
+/**
+ * Rebuild a {@link RunRepoConfig} from the {@link RepoConfigRunRecord} persisted
+ * on a run row — the inverse of {@link repoConfigRunRecord}, used when
+ * *continuing* a run rather than starting one (`resume.ts`).
+ *
+ * Why restore instead of re-resolving: a resume (boot orphan recovery, the
+ * dashboard's Retry, an admission promotion) is a continuation of a run that
+ * already executed phases under a specific config. Re-reading `.lastlight/` from
+ * the repo's default branch would let an edit made while the run was
+ * paused/queued/dead retarget it mid-flight — half the phases on one model, half
+ * on another. The record holds everything needed for a faithful continuation and
+ * needs no network.
+ *
+ * Two things are NOT in the record, by design:
+ *  - **The unpacked asset root.** It's a cache path with its own lifetime, so it
+ *    is recovered by content identity ({@link repoLayerForTree}) and dropped —
+ *    with a warning — when the tree the run used is gone. Prompts/skills/agent
+ *    context then come from the operator's layers: a degraded run, never a
+ *    crashed one, and never a *different* repo config.
+ *  - **Per-leaf provenance for the leaves the repo did NOT win.** `applied` only
+ *    records the repo's own leaves, so the restored `sources` marks those `repo`
+ *    and everything else `default`. Nothing on the resume path reads `sources`
+ *    (it exists to build a record, which a resume never re-derives), so the
+ *    approximation stays inside this type.
+ */
+export async function restoreRepoRunConfig(
+  record: RepoConfigRunRecord,
+  options: RestoreRepoRunConfigOptions = {},
+): Promise<RestoredRepoConfig> {
+  const applied = record.applied ?? {};
+  // Re-applying the repo's leaves is idempotent when `options.models` is the
+  // run's own persisted EFFECTIVE map (it already contains them); it matters for
+  // an older row that only has the operator's maps to offer.
+  const models = { ...(options.models ?? {}), ...(applied.models ?? {}) } as ModelConfig;
+  const variants: VariantConfig = { ...(options.variants ?? {}), ...(applied.variants ?? {}) };
+  // Approval is add-only for a repo layer (enforced at resolve time), so the
+  // repo's raised gates over the operator's CURRENT map reproduces the original
+  // effective map — and a gate the operator has since raised still applies.
+  const approval = { ...(options.approval ?? {}), ...(applied.approval ?? {}) };
+  const disabled: DisabledConfig = {
+    ...EMPTY_DISABLED,
+    ...(options.disabled ?? {}),
+    ...(applied.disabled ?? {}),
+  };
+  // Same reasoning as `approval` above: the repo's leaves are already CLAMPED
+  // (only ever more conservative), so re-applying them over the operator's
+  // current block reproduces the original effective policy — and a budget the
+  // operator has since tightened still binds the resumed run.
+  const fix: FixConfig = { ...(options.fix ?? operatorFix()), ...(applied.fix ?? {}) };
+  const dependencies: DependenciesConfig = {
+    ...(options.dependencies ?? operatorDependencies()),
+    ...(applied.dependencies ?? {}),
+  };
+  const review: ReviewConfig = { ...(options.review ?? operatorReview()), ...(applied.review ?? {}) };
+  // Routing, not policy, so there is nothing to re-clamp — the repo's channel
+  // (including an explicit null) is simply restored. `in`, not truthiness: a
+  // null the repo chose is a different answer from a key it never set.
+  const restoredChannel =
+    applied.notifications && "slack.channel" in applied.notifications
+      ? (applied.notifications["slack.channel"] as string | null)
+      : null;
+  const notifications: NotificationsConfig = { slack: { channel: restoredChannel } };
+
+  const sourcesOf = (values: Record<string, unknown>, won?: Record<string, unknown>): Record<string, ConfigSource> => {
+    const out: Record<string, ConfigSource> = {};
+    for (const key of Object.keys(values)) out[key] = won && key in won ? "repo" : "default";
+    return out;
+  };
+  const disabledSources = Object.fromEntries(
+    (Object.keys(EMPTY_DISABLED) as Array<keyof DisabledConfig>).map((key) => [
+      key,
+      applied.disabled && key in applied.disabled ? "repo" : "default",
+    ]),
+  ) as Record<keyof DisabledConfig, ConfigSource>;
+
+  let assetRoot: string | undefined;
+  let warning: RepoConfigWarning | undefined;
+  if (record.assets.length > 0) {
+    const layer = await repoLayerForTree(record.repo, record.treeSha, options.resolveLayer);
+    assetRoot = layer?.root;
+    if (!assetRoot) {
+      warning = {
+        code: "fetch-failed",
+        repo: record.repo,
+        path: ".lastlight",
+        message:
+          `The .lastlight/ assets this run started with (tree ${record.treeSha.slice(0, 7)}) are no longer ` +
+          `available — the default branch has moved on, or the cache was evicted. The rest of the run used ` +
+          `the operator's prompts, skills and agent context.`,
+      };
+      repoConfigLog.warn(warning.message, { repo: record.repo });
+    }
+  }
+
+  return {
+    repoConfig: {
+      repo: record.repo,
+      defaultBranch: record.defaultBranch,
+      treeSha: record.treeSha,
+      fetchedAt: record.fetchedAt,
+      assetRoot,
+      // The paths the repo contributed stay on the record even when the tree is
+      // gone — they describe what the run USED, which is the question anyone
+      // reading a resumed run's provenance is asking.
+      assets: record.assets,
+      models,
+      variants,
+      approval,
+      disabled,
+      fix,
+      dependencies,
+      review,
+      notifications,
+      sources: {
+        models: sourcesOf(models, applied.models),
+        variants: sourcesOf(variants, applied.variants),
+        disabled: disabledSources,
+        approval: sourcesOf(approval, applied.approval),
+        fix: sourcesOf(fix as unknown as Record<string, unknown>, applied.fix),
+        dependencies: sourcesOf(dependencies as unknown as Record<string, unknown>, applied.dependencies),
+        review: sourcesOf(review as unknown as Record<string, unknown>, applied.review),
+        notifications: {
+          "slack.channel":
+            applied.notifications && "slack.channel" in applied.notifications ? "repo" : "default",
+        },
+      },
+      // The original fetch/merge warnings, plus this restore's own if it dropped
+      // the asset layer — so a resumed run explains itself as fully as the first.
+      warnings: warning ? [...record.warnings, warning] : record.warnings,
+    },
+    warning,
+  };
+}
 
 /**
  * Lightweight invocation request for any agent workflow. The runner handles
@@ -76,6 +614,13 @@ export interface SimpleWorkflowRequest {
    * session.
    */
   prePopulateBranch?: string;
+  /**
+   * The target repo's own `.lastlight/` layer, already merged onto the boot
+   * config by {@link resolveRepoRunConfig} at the dispatch choke point (issue
+   * #180). Absent ⇒ no layer applies and the run behaves exactly as it did
+   * before the feature existed.
+   */
+  repoConfig?: RunRepoConfig;
 }
 
 // Per-target workspace provisioning policy lives in `./target-policy.js` (a
@@ -96,6 +641,17 @@ export function workflowScopedTaskId(
   workflowName: string,
   workflowId: string,
 ): string {
+  // The fix FAMILY shares one workspace per PR (09-state-machine.md → S4).
+  // The PR-scoped run lock means only one of `pr-fix` / `dependabot-ci-fix`
+  // can be in flight for a PR at a time, so two directories were pure waste —
+  // and routing genuinely varies (an `@bot fix this` comment on a red
+  // Dependabot PR is an LLM decision that can land on either workflow), so
+  // attempt 2 would otherwise re-clone and re-install from cold just because
+  // the event arrived differently. `dependabot-pr-merge` keeps its own key
+  // below: it has no checkout to share.
+  if (number !== undefined && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
+    return `${repo}-${number}-fix`;
+  }
   // Reusable / recreatable per-target workspaces are keyed by (repo, issue)
   // only — no run suffix — so a re-run lands on the same dir (reused for
   // pr-review/pr-fix, recreated-from-base for build; see the two sets above).
@@ -120,6 +676,16 @@ export function workflowScopedTaskId(
  * is owned by the backstop TTL/LRU sweep, so re-review fanout keeps its warm
  * `node_modules`. Failures are left for the sweep too (post-mortem debugging).
  * Best-effort — never throws into the already-succeeded run.
+ *
+ * Also GCs the run's `.lastlight/` artifact-store namespace (Plan 8), but
+ * ONLY when the workspace dir was actually removed above — this runs well
+ * after `post-review` (the run has already finished), and the reuse/recreate
+ * early-return above means a per-target run (pr-review, pr-fix, build) skips
+ * gc here too, exactly like it skips the workspace reap: those artifacts stay
+ * on disk as part of the same warm cache. For the local backend this is
+ * redundant with the `rmSync` above (both remove the same on-disk tree); the
+ * real payoff is a future S3 backend, where `gc` is the only thing that
+ * reaches the remote objects.
  */
 export function reapOnSuccess(workflowName: string, taskId: string, config: ExecutorConfig): void {
   const rt = getRuntimeConfig();
@@ -128,11 +694,16 @@ export function reapOnSuccess(workflowName: string, taskId: string, config: Exec
     return;
   }
   try {
-    reapSandboxWorkspace({
+    const { removed } = reapSandboxWorkspace({
       taskId,
       stateDir: config.stateDir ?? rt?.stateDir ?? "data",
       sandboxDir: config.sandboxDir ?? rt?.sandboxDir,
     });
+    if (removed) {
+      artifactStore.gc(taskId).catch((err: unknown) => {
+        reapLog.warn("Artifact gc failed", { taskId, err });
+      });
+    }
   } catch {
     /* best effort — a reap failure must not fail a successful run */
   }
@@ -215,6 +786,163 @@ export function artifactIssueDir(
   return relocate ? `../.lastlight/${issueKey}` : `.lastlight/${issueKey}`;
 }
 
+// ---------------------------------------------------------------------------
+// Per-attempt fix policy (issue #251 — 04-retry.md §4.4, 09-state-machine.md §S1)
+// ---------------------------------------------------------------------------
+//
+// Both knobs below read `attempt` / `flakyDeferrals` — facts about the PR that
+// `renderContext` puts on `request.extra` at the dispatch choke point. Absent
+// (every non-PR route, and every route that predates the snapshot) they are
+// inert, so nothing outside the fix family can observe them.
+
+/**
+ * Read a numeric leaf off the untyped dispatch `extra`. Anything else — absent,
+ * a string, a stale shape — reads as "no snapshot", which is the inert case.
+ */
+function numberFromExtra(
+  extra: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const v = extra?.[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** The `models` key both fix workflows' `fix` phase renders. */
+const FIX_MODEL_KEY = "pr-fix";
+/** The optional escalation model. Unset ⇒ today's behaviour, exactly. */
+const FIX_RETRY_MODEL_KEY = "pr-fix-retry";
+
+/**
+ * Substitute `models["pr-fix-retry"]` for `models["pr-fix"]` once this PR has
+ * spent more than `fix.escalateModelAfterAttempt` attempts.
+ *
+ * ## Why this keys on `priorAttempts`, not on `attempt`
+ *
+ * Locked decision 10 (03-retry-intervention.md). `attempt` is a BUDGET
+ * position: it re-arms to 1 whenever the problem becomes fresh, which is now
+ * true for a recorded retry as well as for a push. Keying the model on it meant
+ * a PR that had already failed three times on the escalated model was retried
+ * on the BASE model the moment a maintainer asked for another go — the exact
+ * opposite of what asking for another go means.
+ *
+ * `priorAttempts` is the journal, and locked decision 8 makes it the field that
+ * SURVIVES a retry. So its length is the thing that actually knows how many
+ * times this has been tried, and `attempt` goes back to being purely a budget.
+ * A push still wipes the journal, which is right: the code changed, so the
+ * earlier attempts are not evidence that this one needs a stronger model.
+ *
+ * The journal also carries a one-line SEAM per retry, so the count runs one
+ * ahead of the attempt count per intervention. That is the conservative
+ * direction — it escalates the model slightly sooner on a PR a human has
+ * already had to intervene on — and it keeps this a plain `length` read rather
+ * than a parse of the rendered lines.
+ *
+ * `resolveModelVariant` renders `model:` templates against `run.ctx` **only**,
+ * so `{{attempt}}` inside a `model:` template cannot work without an engine
+ * change. Rewriting the map here is the cheapest correct route: no engine
+ * change, no YAML change, and it composes with the per-repo `models` override
+ * (issue #180) for free because the map handed in is already the merged
+ * `base ⊕ repo` one.
+ *
+ * Done BEFORE the map is persisted on `context.models`, deliberately: the admin
+ * panel renders that map, so an operator can see which model an attempt actually
+ * used — and `resume.ts` reads a resumed run's models back off that same stored
+ * value rather than re-deriving one, so a restart mid-attempt does not silently
+ * demote the model. (A repo layer that pins its own `pr-fix` re-applies that
+ * leaf on restore, which is the one case where the escalation does not survive.)
+ *
+ * Returns the map **by identity** when nothing applies, so a deployment with no
+ * `pr-fix-retry` key cannot tell this function exists.
+ */
+export function escalateFixModel(
+  workflowName: string,
+  models: ModelConfig | undefined,
+  /** How many lines `PrState.priorAttempts` carries — see the note above. */
+  priorAttempts: number | undefined,
+  fix: FixConfig,
+): ModelConfig | undefined {
+  // Only the fix family reads `models["pr-fix"]`. Every PR-scoped dispatch
+  // carries a journal (the snapshot is resolved for `pr-review` and
+  // `dependabot-pr-merge` too), so without this guard a review run would record
+  // a rewritten map it never used.
+  if (!PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) return models;
+  if (!models) return models;
+  const retry = models[FIX_RETRY_MODEL_KEY];
+  if (!retry) return models;
+  // The config leaf is expressed in ATTEMPTS, and stays that way — an operator
+  // who wrote `escalateModelAfterAttempt: 1` meant "attempt 2 onwards". An
+  // empty journal is attempt 1, which is also what a dispatch with no snapshot
+  // at all reads as. `escalateModelAfterAttempt: 0` is legal and means
+  // "escalate from attempt 1".
+  const attempt = (priorAttempts ?? 0) + 1;
+  if (attempt <= fix.escalateModelAfterAttempt) return models;
+  if (models[FIX_MODEL_KEY] === retry) return models;
+  return { ...models, [FIX_MODEL_KEY]: retry };
+}
+
+/**
+ * The one `skip_if` row that `fix.maxFlakyDeferrals` makes conditional.
+ *
+ * Matched literally rather than by pattern: the promotion has to be greppable
+ * from the YAML, and a fuzzy match would also strip an overlay's own unrelated
+ * `flaky` guard.
+ *
+ * It reads the PARSED class off the marker harvest rather than substring-matching
+ * the diagnose phase's output, because the output form matched an agent's prose
+ * ("this is not `class=flaky`…"), matched a `{{priorAttempts}}` line replayed
+ * from an EARLIER attempt, and evaluated empty across a resume boundary — so the
+ * guard silently ran the full sandbox on exactly the verdicts it exists to stop.
+ * Keep this string byte-identical to the row in both fix workflow YAMLs.
+ */
+export const FLAKY_SKIP_IF_EXPRESSION = "scratch.fixMarkers.diagnosis.class == 'flaky'";
+
+/**
+ * Promote a third consecutive `flaky` diagnosis to `reproducible` by dropping
+ * the `flaky` row from the `fix` phase's `skip_if` for this run.
+ *
+ * §S1: `flaky` short-circuits the `fix` phase — by its own definition there is
+ * nothing to fix — but it is **bounded**. Without the cap, a daily
+ * `fix-red-dependency-prs` against a PR with one flaky test produces an
+ * unbounded series of free full runs; and if a job reports flaky three times
+ * running it is not flaky, it is an intermittent real failure — exactly the PR a
+ * human would want attempted. So `fix.maxFlakyDeferrals: 2` deferrals, and the
+ * THIRD consecutive `flaky` spends a normal attempt.
+ *
+ * `flakyDeferrals` counts PRIOR runs, so the off-by-one lands here: `0` and `1`
+ * still defer, `2` (the third such diagnosis) runs. Same predicate
+ * `renderContext` exposes to the prompts as `{{flakyPromoted}}`.
+ *
+ * **Why a list edit and not an expression.** `skip_if`'s grammar
+ * (`core/loop-eval.ts`) is `contains()` / `==` / `!=` against a dotted path, and
+ * the list is OR-ed: there is no negation and no conjunction, so
+ * "`class=flaky` AND NOT promoted" is not expressible — and the alternatives
+ * (a new operator, or template-rendering the expressions) are engine changes
+ * bought for one caller. The conjunction instead lands where its second term
+ * already lives: the promotion is a fact about the PR's history, known before
+ * the run starts, so the run's guard list is composed from it. The other two
+ * rows are unconditional and are never touched.
+ *
+ * The loaded definition is a process-global cache entry, so a promoted run gets
+ * a shallow copy; an unpromoted one gets the definition back by identity.
+ */
+export function promoteFlakyDiagnosis(
+  definition: AgentWorkflowDefinition,
+  flakyDeferrals: number | undefined,
+  fix: FixConfig,
+): AgentWorkflowDefinition {
+  if ((flakyDeferrals ?? 0) < fix.maxFlakyDeferrals) return definition;
+  let promoted = false;
+  const phases = definition.phases.map((phase) => {
+    const exprs = phaseSkipIfExpressions(phase);
+    if (!exprs.includes(FLAKY_SKIP_IF_EXPRESSION)) return phase;
+    promoted = true;
+    const kept = exprs.filter((e) => e !== FLAKY_SKIP_IF_EXPRESSION);
+    // An empty `skip_if` is a schema violation (min 1), so drop the field.
+    return { ...phase, skip_if: kept.length > 0 ? kept : undefined };
+  });
+  return promoted ? { ...definition, phases } : definition;
+}
+
 /**
  * Run a named agent workflow against a target.
  *
@@ -234,21 +962,64 @@ export async function runSimpleWorkflow(
   bootstrapLabel = "lastlight:bootstrap",
   variants?: VariantConfig,
   concurrency?: { maxWorkflows: number; maxQueueWaitMs: number },
-): Promise<WorkflowResult> {
+): Promise<WorkflowResult & { backpressure?: boolean }> {
   // Kill switch — if an admin has disabled this workflow in the dashboard,
   // skip every trigger source (cron, webhooks, mentions, Slack) without
   // creating a workflow_runs row. Returning success=true keeps callers
   // (router, cron tick, etc.) from treating this as an error.
   if (!db.isWorkflowEnabled(workflowName)) {
-    console.log(
-      `[workflow] skipped "${workflowName}" — disabled in admin dashboard`,
-    );
+    workflowLog.info("Skipped — disabled in admin dashboard", { workflowName });
     return { success: true, phases: [] };
   }
 
-  const definition = getWorkflow(workflowName);
+  // `let`: the fix family's `flaky` cap composes the run's `skip_if` list from
+  // the PR's deferral history below (see `promoteFlakyDiagnosis`). Everything
+  // else gets the loader's cached definition back by identity.
+  let definition = getWorkflow(workflowName);
   const { owner, repo, issueNumber, prNumber } = request;
   const notify = callbacks.postComment || (async () => {});
+
+  // ── Effective (base ⊕ repo) config for this run ────────────────────────────
+  //
+  // The repo layer was resolved once at dispatch (issue #180). From here down,
+  // ONLY the effective maps are used — they're already the merged result, so
+  // every downstream consumer (the `{{models.x}}` template chain seeded on
+  // `ctx` below, the runner's PhaseResolver, the approval gate) sees one
+  // consistent view without re-deriving the merge. No layer ⇒ these are the
+  // caller's own maps by identity, so behaviour is unchanged.
+  const repoConfig = request.repoConfig;
+  const effectiveVariants = repoConfig?.variants ?? variants;
+  const effectiveApproval = repoConfig?.approval ?? approvalConfig;
+  // The policy blocks have no caller-supplied counterpart (they aren't runner
+  // parameters — `runWorkflow.length` is frozen at 9), so the un-overridden case
+  // reads the operator's boot config directly. `review` gets no substitution
+  // here: nothing in a run consumes it (Phase 7 resolves the trigger mode at
+  // dispatch, before a run exists), and it must not reach the template context —
+  // see the note on `ctx` below.
+  const effectiveFix = repoConfig?.fix ?? operatorFix();
+  const effectiveDependencies = repoConfig?.dependencies ?? operatorDependencies();
+
+  // ── Per-attempt fix policy (04-retry.md §4.4, 09-state-machine.md §S1) ─────
+  //
+  // Two facts about the PR, both projected onto `request.extra` by
+  // `renderContext` at dispatch: how many attempts this problem has already
+  // cost, and how many consecutive `flaky` verdicts it has deferred on. They
+  // resolve against the run's EFFECTIVE `fix:` block, so a repo that clamped
+  // itself down is escalated and promoted on its own numbers.
+  const flakyDeferrals = numberFromExtra(request.extra, "flakyDeferrals");
+  // The JOURNAL's length, not `attempt` — locked decision 10. `attempt` re-arms
+  // on a retry and `priorAttempts` survives one, so this is the field that
+  // knows how many times the PR has actually been tried.
+  const priorAttempts = Array.isArray(request.extra?.priorAttempts)
+    ? request.extra.priorAttempts.length
+    : undefined;
+  const effectiveModels = escalateFixModel(
+    workflowName,
+    repoConfig?.models ?? models,
+    priorAttempts,
+    effectiveFix,
+  );
+  definition = promoteFlakyDiagnosis(definition, flakyDeferrals, effectiveFix);
 
   // Identify the trigger uniquely. Issue/PR-scoped workflows include the
   // number; repo-scoped workflows (e.g. health) just identify by repo+name;
@@ -329,7 +1100,13 @@ export async function runSimpleWorkflow(
       buildAssetIssueKey(workflowName, number, workflowId),
       !!effectivePrePopulateBranch,
     );
-    const overCap = concurrency !== undefined && db.runs.countRunning() >= concurrency.maxWorkflows;
+    // Concurrency authority differs by backend: docker/gondolin use the tuned
+    // app-level `maxWorkflows`; the k8s backend defers to the namespace
+    // ResourceQuota (spec/09-sandbox.md (Concurrency)) and keeps only an absurdly-high sanity fuse,
+    // so it admits freely here and requeues later if a pod-create is quota-rejected.
+    const admitCap =
+      config.sandbox === "kubernetes" ? K8S_SANITY_FUSE : concurrency?.maxWorkflows ?? Infinity;
+    const overCap = db.runs.countRunning() >= admitCap;
     const runStatus: "running" | "queued" = overCap ? "queued" : "running";
     db.runs.createRun({
       id: workflowId,
@@ -351,19 +1128,39 @@ export async function runSimpleWorkflow(
         taskId,
         issueDir,
         prePopulateBranch: effectivePrePopulateBranch,
-        models: models as Record<string, unknown> | undefined,
-        variants: variants as Record<string, unknown> | undefined,
+        models: effectiveModels as Record<string, unknown> | undefined,
+        variants: effectiveVariants as Record<string, unknown> | undefined,
+        // What the repo's own `.lastlight/` contributed to THIS run — the tree
+        // sha it came from, the leaves it actually won, and everything that was
+        // dropped. Persisted (rather than re-derived on read) because the layer
+        // is TTL-cached and mutable: by the time anyone asks why a run picked a
+        // model, the repo's default branch may have moved on.
+        repoConfig: repoConfig ? repoConfigRunRecord(repoConfig) : undefined,
         ...request.extra,
       },
       startedAt: new Date().toISOString(),
     });
-    console.log(`[simple] Created workflow run ${workflowId} (${workflowName}) status=${runStatus}`);
+    simpleLog.info("Created workflow run", { workflowId, workflowName, status: runStatus });
     if (overCap) {
-      await notify(
-        `\`${workflowName}\` is queued — the concurrency limit` +
-        ` (${concurrency!.maxWorkflows}) is reached.` +
+      // On k8s the cap is the runaway-loop sanity fuse (the ResourceQuota is the
+      // real authority), not a tuned concurrency limit — word it accurately.
+      const capReason =
+        config.sandbox === "kubernetes"
+          ? `the safety fuse (${admitCap}) is reached`
+          : `the concurrency limit (${admitCap}) is reached`;
+      const ackId = await notify(
+        `\`${workflowName}\` is queued — ${capReason}.` +
         ` It'll start automatically when a slot frees.`,
       );
+      // The ack is TRANSIENT: it promises the run will start, so it stops being
+      // true the moment the run leaves the queue. Stash the comment handle so
+      // the admission controller can retract it on admit / rewrite it on TTL
+      // expiry (issue #244) — otherwise a run that starts and then legitimately
+      // no-ops leaves this comment as the only trace, reading as "it queued and
+      // never came back". Only GitHub surfaces return an id; Slack resolves void.
+      if (typeof ackId === "number") {
+        db.runs.mergeScratch(workflowId, { queuedAck: { commentId: ackId } });
+      }
       return { success: true, queued: true, phases: [] };
     }
   }
@@ -382,8 +1179,7 @@ export async function runSimpleWorkflow(
   // stall the workflow.
   if (callbacks.onRunStart) {
     callbacks.onRunStart(workflowId).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[simple] onRunStart callback threw: ${msg}`);
+      simpleLog.warn("onRunStart callback threw", { err });
     });
   }
 
@@ -409,8 +1205,7 @@ export async function runSimpleWorkflow(
       runUrl: runDashboardUrl(callbacks.publicUrl, workflowId, workflowName),
     });
     await callbacks.reporter.start(model).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[simple] reporter.start threw: ${msg}`);
+      simpleLog.warn("reporter.start threw", { err });
     });
   }
 
@@ -496,10 +1291,27 @@ export async function runSimpleWorkflow(
     // the agent starts. Stored on the workflow_run row above; also lives
     // on ctx so the runner can read it without an extra DB lookup.
     prePopulateBranch: effectivePrePopulateBranch,
-    models: models as unknown as Record<string, unknown>,
+    // EFFECTIVE models — the repo layer is already folded in, so the existing
+    // `{{models.<phase>}}` chain in the engine's `resolveModelVariant` needs no
+    // knowledge of repo config at all.
+    models: effectiveModels as unknown as Record<string, unknown>,
     // Reasoning-effort overrides per phase. Empty/undefined entries skip
-    // the --variant flag (model uses its default effort).
-    variants: variants as unknown as Record<string, unknown> | undefined,
+    // the --variant flag (model uses its default effort). Effective, as above.
+    variants: effectiveVariants as unknown as Record<string, unknown> | undefined,
+    // EFFECTIVE policy blocks (issues #251, #252), so a prompt can render
+    // `{{fix.maxAttempts}}` / `{{dependencies.autoMergeMaxImpact}}` and state the
+    // budget it is actually running under rather than a number frozen in prose.
+    //
+    // `review` is deliberately NOT seeded here. `renderTemplate` resolves a
+    // dotted key against `ctx` FIRST and only falls back to `ctx.phaseOutputs`
+    // when the first segment is absent — and `build.yaml`'s reviewer loop emits
+    // `output_var: review`, which `prompts/pr.md` reads as `{{review.approved}}`
+    // / `{{review.cycles}}`. A top-level `review` object would shadow it and
+    // make every build PR claim unresolved reviewer issues. The review policy
+    // has no prompt consumer anyway: Phase 7 reads it in code, off
+    // `RunRepoConfig.review` / the runtime config.
+    fix: effectiveFix as unknown as Record<string, unknown>,
+    dependencies: effectiveDependencies as unknown as Record<string, unknown>,
     // Slack-initiated runs need the runner to pause/resume on the thread id,
     // not on owner/repo#N. Passing the override through here keeps the
     // runner's triggerId derivation in one place.
@@ -531,15 +1343,27 @@ export async function runSimpleWorkflow(
       runConfig,
       callbacks,
       db,
-      models,
-      approvalConfig,
+      effectiveModels,
+      effectiveApproval,
       workflowId,
-      variants,
+      effectiveVariants,
+      // 10th arg: the repo layer itself, for the per-run asset resolver. The
+      // merged config above is already effective; this carries the on-disk
+      // layer root the runner appends to the asset stack.
+      repoConfig,
     );
 
     if (result.success && !result.paused) {
       db.runs.finishRun(workflowId, "succeeded");
       reapOnSuccess(workflowName, taskId, config);
+    } else if (result.backpressure) {
+      // k8s ResourceQuota rejected a pod-create: requeue, don't fail. The
+      // AdmissionController promotes it again as capacity frees (spec/09-sandbox.md (Concurrency)).
+      db.runs.requeueRunning(workflowId);
+      await notify(
+        `\`${workflowName}\` is waiting for cluster capacity — it'll start automatically when a slot frees.`,
+      );
+      return { success: true, queued: true, backpressure: true, phases: result.phases };
     } else if (!result.success && !result.paused) {
       db.runs.finishRun(workflowId, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed",
@@ -562,15 +1386,16 @@ export async function runSimpleWorkflow(
 async function handleExistingRun(
   run: WorkflowRun,
   definition: ReturnType<typeof getWorkflow>,
-  notify: (msg: string) => Promise<void>,
+  notify: (msg: string) => Promise<number | void>,
   db: StateDb,
 ): Promise<WorkflowResult | null> {
   // Dedup: a duplicate trigger on an already-queued run must be a no-op.
   // Do NOT fall through to runWorkflow — that would execute it outside the cap.
   if (run.status === "queued") {
-    console.log(
-      `[simple] Duplicate trigger for queued run ${run.id} (${run.workflowName}) — returning queued dedup`,
-    );
+    simpleLog.info("Duplicate trigger for queued run — returning queued dedup", {
+      runId: run.id,
+      workflowName: run.workflowName,
+    });
     return { success: true, queued: true, phases: [] };
   }
 
@@ -600,9 +1425,11 @@ async function handleExistingRun(
       // No currentPhase manipulation is needed — for an approve gate the
       // gated phase is already `done` so the runner proceeds past it; for a
       // reply gate the loop node resumes from `scratch.iteration`.
-      console.log(
-        `[simple] ${pendingApproval.kind === "reply" ? "Reply" : "Approval"} received for gate ${pendingApproval.gate} — resuming ${run.workflowName}`,
-      );
+      simpleLog.info("Gate response received — resuming", {
+        kind: pendingApproval.kind === "reply" ? "reply" : "approval",
+        gate: pendingApproval.gate,
+        workflowName: run.workflowName,
+      });
       db.runs.setRunning(run.id);
       if (pendingApproval.kind !== "reply") {
         await notify(`**Approval received** — resuming \`${run.workflowName}\`.`);
@@ -623,8 +1450,10 @@ async function handleExistingRun(
   }
 
   // Normal resume — the runner's definition-driven resume takes over.
-  console.log(
-    `[simple] Resuming ${run.workflowName} for ${run.triggerId} (last phase: ${run.currentPhase})`,
-  );
+  simpleLog.info("Resuming", {
+    workflowName: run.workflowName,
+    triggerId: run.triggerId,
+    lastPhase: run.currentPhase,
+  });
   return null;
 }

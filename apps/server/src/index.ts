@@ -4,27 +4,46 @@ import { randomUUID } from "crypto";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { loadConfig, resolveModel, resolveVariant, resolveGithubAuth } from "./config/config.js";
-import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, MessageDeliveryService } from "./connectors/index.js";
-import { dispatch, type DispatchDeps } from "./engine/dispatcher.js";
+import { ConnectorRegistry, GitHubWebhookConnector, SlackConnector, SessionManager, recordThreadMessageForThread } from "./connectors/index.js";
+import {
+  dispatch,
+  applyPrDispatchGate,
+  prPolicyConfig,
+  type DispatchDeps,
+} from "./engine/dispatcher.js";
 import { MessageBatcher } from "./engine/chat/message-batcher.js";
 import { chatSystemSuffix, handleChatMessage, loadAgentContext } from "./engine/chat/chat.js";
 import { configureWorkflowAssets, validateAssets, getWorkflow } from "./workflows/loader.js";
 import { ChatRunner } from "./engine/chat/chat-runner.js";
 import { buildReadSkillTool, loadChatSkillCatalogue } from "./engine/chat/chat-skills.js";
 import { configureGitAuth } from "./engine/github/git-auth.js";
+import {
+  getInstallationDirectory,
+  initInstallationDirectory,
+} from "./engine/github/installations.js";
 import { StateDb, isTriggerActorType, type TriggerActorType } from "./state/db.js";
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
-import { dispatchCronWorkflow, fanOutContexts } from "./cron/fanout.js";
+import { makeCronRunner } from "./cron/runner.js";
 import { sweepSandboxes } from "./cron/sandbox-sweep.js";
+import { sweepK8sSandboxes } from "./sandbox/k8s/sweep.js";
 import {
   discoverGreenDependencyPrs,
   discoverRedDependencyPrs,
+  REQUIRES_HUMAN_LABEL,
   type DependencyPr,
-  type PrDiscoveryClient,
 } from "./cron/dependabot-discovery.js";
+import { buildCronHandlers } from "./cron/handlers.js";
+import type { KnownBlock } from "@slack/web-api";
+import { discoverPrsAwaitingReview } from "./cron/review-discovery.js";
 import { mountAdmin } from "./admin/index.js";
 import { cleanupOrphanedSandboxes } from "./sandbox/index.js";
+import { mountSkillBundle } from "./sandbox/k8s/skill-bundle-route.js";
+import { skillBundleRegistry } from "./sandbox/k8s/skill-bundle.js";
+import { mountAgentContext } from "./sandbox/k8s/agent-context-route.js";
+import { agentContextRegistry } from "./sandbox/k8s/agent-context-registry.js";
+import { mountArtifactUpload } from "./sandbox/k8s/artifact-upload-route.js";
+import { artifactStore } from "./sandbox/artifact-store.js";
 import { writeEgressFirewallConfigs, writeOtelCollectorConfig } from "./sandbox/egress-firewall-config.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/index.js";
 import { authMiddleware, authIsEnabled, actorFromContext } from "./admin/auth.js";
@@ -32,7 +51,26 @@ import { readPackageVersion } from "./admin/version.js";
 import { GitHubClient } from "./engine/github/github.js";
 import { setInstallationRepos, isManagedRepo, unmanagedReposInContext } from "./managed-repos.js";
 import { screenForInjection, flagPrefix } from "./engine/screen/screen.js";
-import { runSimpleWorkflow, PR_HEADREF_PREPOPULATE_WORKFLOWS, PR_FIX_SHAPED_WORKFLOWS, type SimpleWorkflowRequest } from "./workflows/simple.js";
+import {
+  runSimpleWorkflow,
+  resolveRepoRunConfig,
+  PR_HEADREF_PREPOPULATE_WORKFLOWS,
+  PR_FIX_SHAPED_WORKFLOWS,
+  type SimpleWorkflowRequest,
+} from "./workflows/simple.js";
+import { resolvePrState, prScopedWorkflows, type PrState } from "./engine/pr-state.js";
+import { renderContext, type ReviewTriggerOptions } from "./engine/pr-decisions.js";
+import {
+  REVIEW_WORKFLOW,
+  bindQueuedReviewCheck,
+  installReviewCheckObserver,
+  openAndBindReviewCheck,
+} from "./engine/review-check.js";
+import { runDashboardUrl } from "./notify/model.js";
+import { harvestFixMarkers } from "./engine/fix-harvest.js";
+import { handleSlackReaction, registerSlackAnchor } from "./engine/feedback/slack.js";
+import { feedbackAnchorObserver, pollFeedbackReactions } from "./cron/feedback-poll.js";
+import { drainFeedbackExport } from "./engine/feedback/ingest.js";
 import type { RunnerCallbacks } from "./workflows/runner.js";
 import { resumeOrphanedWorkflows, resumeSimpleRun, type ResumeOptions } from "./workflows/resume.js";
 import { createAdmissionController, type AdmissionController } from "./workflows/admission.js";
@@ -45,6 +83,25 @@ import {
   type ProgressReporter,
 } from "./notify/index.js";
 import type { EventEnvelope } from "./connectors/types.js";
+import { logger } from "./logging/logger.js";
+import { logPhaseEnd, logPhaseStart } from "./logging/phase-log.js";
+
+/**
+/**
+ * The `review.trigger` ROUTE this dispatch arrived on, off the context key the
+ * cron fan-out sets (`_reviewRoute`).
+ *
+ * The webhook path sets it in the dispatcher, where the event type is still in
+ * hand; everything reaching `dispatchWorkflow` cold is either the sweep (which
+ * says so) or a hand-triggered run, and `attention` is the conservative default
+ * — the one value `after-checks` refuses.
+ */
+function reviewRouteFromContext(
+  context: Record<string, unknown>,
+): NonNullable<ReviewTriggerOptions["route"]> {
+  const raw = context._reviewRoute;
+  return raw === "sweep" || raw === "checks-settled" || raw === "attention" ? raw : "attention";
+}
 
 /**
  * Pre-flight validation — checks that config is sane before starting any
@@ -52,16 +109,21 @@ import type { EventEnvelope } from "./connectors/types.js";
  * Docker's restart policy doesn't loop forever on a misconfigured container.
  */
 function validateConfig(config: ReturnType<typeof loadConfig>): void {
-  const fatal = (msg: string) => {
-    console.error(`\n[startup] FATAL: ${msg}`);
-    console.error("[startup] Fix your .env and restart.\n");
+  const log = logger("startup");
+  const fatal = (msg: string, fields?: Record<string, unknown>) => {
+    log.fatal(msg, fields);
+    log.fatal("Fix your .env and restart.");
     process.exit(78); // EX_CONFIG — sysexits.h convention
   };
 
   if (config.githubApp) {
-    const { appId, privateKeyPath, installationId } = config.githubApp;
-    if (!appId || !installationId) {
-      fatal("GITHUB_APP_ID and GITHUB_APP_INSTALLATION_ID are required when the GitHub App is configured.");
+    const { appId, privateKeyPath } = config.githubApp;
+    // No installation-id check: installations are DISCOVERED from the App JWT
+    // and resolved per repo owner, because an App installed on several accounts
+    // has one id per account. `GITHUB_APP_INSTALLATION_ID` is honoured as a
+    // legacy fallback when set, and is no longer required.
+    if (!appId) {
+      fatal("GITHUB_APP_ID is required when the GitHub App is configured.");
     }
     if (!existsSync(resolve(privateKeyPath))) {
       fatal(`GITHUB_APP_PRIVATE_KEY_PATH points to "${privateKeyPath}" which does not exist.`);
@@ -72,18 +134,19 @@ function validateConfig(config: ReturnType<typeof loadConfig>): void {
         fatal(`GITHUB_APP_PRIVATE_KEY_PATH ("${privateKeyPath}") does not look like a PEM file.`);
       }
     } catch (err: any) {
-      fatal(`Cannot read GITHUB_APP_PRIVATE_KEY_PATH ("${privateKeyPath}"): ${err.message}`);
+      fatal(`Cannot read GITHUB_APP_PRIVATE_KEY_PATH ("${privateKeyPath}")`, { err });
     }
   }
 
   if (!config.webhookSecret && config.githubApp) {
-    console.warn("[startup] WEBHOOK_SECRET is not set — webhook signature verification is disabled.");
+    log.warn("WEBHOOK_SECRET is not set — webhook signature verification is disabled.");
   }
 }
 
 async function main() {
-  console.log(`Last Light v${readPackageVersion() ?? "unknown"} — Agent SDK Harness`);
-  console.log("====================================");
+  const startupLog = logger("startup");
+  startupLog.info(`Last Light v${readPackageVersion() ?? "unknown"} — Agent SDK Harness`);
+  startupLog.info("====================================");
 
   // Load and validate config + overlay assets before starting anything. These
   // throw on a broken/empty overlay, a cron targeting a missing workflow, or a
@@ -97,24 +160,34 @@ async function main() {
       overlayRoot: config.overlayDir,
       disabled: config.disabled,
     });
-    validateAssets(config.routes);
+    validateAssets(config.routes, logger("workflows"));
   } catch (err: unknown) {
-    console.error(`\n[startup] FATAL: ${(err as Error).message}`);
-    console.error("[startup] Fix your config/overlay and restart.\n");
+    startupLog.fatal((err as Error).message, { err });
+    startupLog.fatal("Fix your config/overlay and restart.");
     process.exit(78); // EX_CONFIG — sysexits.h convention
   }
   validateConfig(config);
   const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { version?: string };
   await initTelemetry(config.otel, { packageVersion: packageJson.version });
   let telemetryShutdownStarted = false;
-  console.log(config.otel.enabled
-    ? `[otel] enabled service=${config.otel.serviceName} forwardToSandbox=${config.otel.forwardToSandbox} includeContent=${config.otel.includeContent}`
-    : "[otel] disabled");
+  const configLog = logger("config");
+  configLog.info(
+    config.otel.enabled ? "otel enabled" : "otel disabled",
+    config.otel.enabled
+      ? {
+          service: config.otel.serviceName,
+          forwardToSandbox: config.otel.forwardToSandbox,
+          includeContent: config.otel.includeContent,
+        }
+      : undefined,
+  );
 
-  console.log(`[config] Port: ${config.port}, Model: ${config.model}`);
+  configLog.info("Port and model", { port: config.port, model: config.model });
   const modelOverrides = Object.entries(config.models).filter(([k]) => k !== "default");
   if (modelOverrides.length > 0) {
-    console.log(`[config] Model overrides: ${modelOverrides.map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    configLog.info("Model overrides", {
+      overrides: Object.fromEntries(modelOverrides),
+    });
   }
 
   // Clean up any sandbox containers left over from a previous run
@@ -124,9 +197,8 @@ async function main() {
   for (const sub of ["sessions", "logs", "sandboxes"]) {
     mkdirSync(resolve(config.stateDir, sub), { recursive: true });
   }
-  console.log(`[state] State dir: ${config.stateDir}`);
-  console.log(`[state] Sessions dir: ${config.sessionsDir}`);
-  console.log(`[config] Sandbox backend: ${config.sandbox}`);
+  configLog.info("State dirs", { stateDir: config.stateDir, sessionsDir: config.sessionsDir });
+  configLog.info("Sandbox backend", { backend: config.sandbox });
 
   // Regenerate egress firewall configs (nginx ssl_preread + coredns) from
   // the allowlist source of truth. Only meaningful for the docker backend;
@@ -136,7 +208,7 @@ async function main() {
   // SNI allowlist no longer needs collector hosts — that hop happens on
   // the collector's trusted outbound leg, not through the firewall.
   const proxyDir = writeEgressFirewallConfigs(config.stateDir);
-  console.log(`[state] Egress firewall configs: ${proxyDir}`);
+  configLog.info("Egress firewall configs", { dir: proxyDir });
 
   // Generate the in-network OTEL collector config (docker backend). Derived
   // from the harness's OTEL_* backend env so the collector re-exports to the
@@ -147,12 +219,15 @@ async function main() {
   const collectorConfigPath = writeOtelCollectorConfig(config.stateDir, {
     active: config.otel.enabled && config.otel.forwardToSandbox,
   });
-  console.log(`[state] OTEL collector config: ${collectorConfigPath} (forwarding ${config.otel.enabled && config.otel.forwardToSandbox ? "active" : "disabled"})`);
+  configLog.info("OTEL collector config", {
+    path: collectorConfigPath,
+    forwarding: config.otel.enabled && config.otel.forwardToSandbox ? "active" : "disabled",
+  });
 
   // Initialize state database first — ChatRunner needs SessionManager
   // (DB-backed) at construction time.
   const db = new StateDb(config.dbPath);
-  console.log(`[state] Database: ${config.dbPath}`);
+  configLog.info("Database", { path: config.dbPath });
 
   // Session manager for messaging connectors (shared across Slack, Discord, etc.)
   const sessionManager = new SessionManager(db.database);
@@ -178,13 +253,22 @@ async function main() {
       : githubAuth?.kind === "token"
         ? { token: githubAuth.token }
         : undefined;
+  // Boot-stable — the persona doesn't change under us, so it stays out of the
+  // per-turn thunk below and off the filesystem on every chat message.
+  const agentContext = loadAgentContext();
   const chatRunner = new ChatRunner(
     {
       model: resolveModel(config.models, "chat"),
       thinking: resolveVariant(config.variants, "chat"),
-      systemPrompt:
-        loadAgentContext() +
-        chatSystemSuffix(githubAuth !== undefined) +
+      // A thunk, not a string: the suffix advertises the ENABLED workflow set,
+      // and the dashboard's per-workflow kill switch changes that without a
+      // restart. The persona and skill catalogue are boot-stable, so only the
+      // suffix is re-derived (and it caches on the loader's asset version).
+      systemPrompt: () =>
+        agentContext +
+        chatSystemSuffix(githubAuth !== undefined, {
+          isWorkflowEnabled: (name) => db.isWorkflowEnabled(name),
+        }) +
         chatSkills.catalogueXml,
       github: chatGithubAuth,
       extraTools: chatSkills.skills.length > 0
@@ -193,28 +277,23 @@ async function main() {
     },
     sessionManager,
   );
+  const chatLog = logger("chat");
   if (chatSkills.skills.length > 0) {
-    console.log(
-      `[chat] Loaded ${chatSkills.skills.length} skill(s): ${chatSkills.skills.map((s) => s.name).join(", ")}`,
-    );
+    chatLog.info("Loaded skills", { names: chatSkills.skills.map((s) => s.name) });
   } else {
-    console.warn("[chat] No skills loaded — frontmatter missing or no matching SKILL.md found");
+    chatLog.warn("No skills loaded — frontmatter missing or no matching SKILL.md found");
   }
 
-  // Configure git with GitHub App credentials — agents can git clone/push natively.
-  // Non-fatal: the token is refreshed before each agent execution anyway, so a
-  // transient failure here (DNS, rate limit) doesn't block startup.
+  // The App may be installed on several ACCOUNTS, each with its own installation
+  // id — and a token minted against the wrong one is rejected. The directory is
+  // the single owner→installation authority every mint and every App-authed
+  // Octokit resolves through, so it has to exist before either.
   if (config.githubApp) {
-    try {
-      await configureGitAuth({
-        appId: config.githubApp.appId,
-        privateKeyPath: config.githubApp.privateKeyPath,
-        installationId: config.githubApp.installationId,
-        botLogin: config.botLogin,
-      });
-    } catch (err: any) {
-      console.warn(`[git-auth] Initial token mint failed (will retry per-execution): ${err.message}`);
-    }
+    initInstallationDirectory({
+      appId: config.githubApp.appId,
+      privateKeyPath: config.githubApp.privateKeyPath,
+      fallbackInstallationId: config.githubApp.installationId,
+    });
   }
 
   // GitHub API client for harness-level operations (posting comments, fetching
@@ -226,21 +305,78 @@ async function main() {
       ? GitHubClient.withToken(config.githubToken)
       : null;
 
-  // Discover the repos the App installation can access and seed the managed-repo
-  // list. When the overlay's `managedRepos` is empty this becomes the effective
-  // allowlist (getManagedRepos falls back to it); a configured list still wins.
-  // Kept live afterwards by installation webhooks (github-webhook.ts). Non-fatal:
-  // on failure we fall back to whatever `managedRepos` config provides. Runs
-  // before the HTTP listener opens, so the list is warm before the first event.
+  // The `last-light/review` check is a PROJECTION OF RUN STATE (09 → S2): this
+  // is the one wiring that makes every terminal transition — `simple.ts`,
+  // `resume.ts`, the queued-run TTL expiry, the admin cancel — conclude an open
+  // check, instead of a `.then()` on an in-memory promise that a deploy,
+  // a crash or an admission-queued run silently outlives.
+  installReviewCheckObserver(db, {
+    github,
+    botLogin: config.botLogin,
+    botMention: `@${config.botName}`,
+  });
+
+  // Feedback signals recorded while telemetry was off carry no export watermark
+  // (issue #255), so enabling OTel later can still put them on the traces they
+  // grade instead of starting the backend from zero. Bounded per boot; a no-op
+  // when telemetry is disabled or there is no backlog.
+  if (config.feedback.enabled && config.feedback.otel) drainFeedbackExport(db);
+
+  // Discover the repos the App can access — across EVERY installation — and seed
+  // the managed-repo list. When the overlay's `managedRepos` is empty this
+  // becomes the effective allowlist (getManagedRepos falls back to the union); a
+  // configured list still wins. Kept live afterwards by installation webhooks
+  // (github-webhook.ts). Non-fatal: on failure we fall back to whatever
+  // `managedRepos` config provides. Runs before the HTTP listener opens, so the
+  // list is warm before the first event.
   if (github && config.githubApp) {
+    const githubLog = logger("github");
     try {
-      const repos = await github.listInstallationRepos();
-      setInstallationRepos(repos);
-      console.log(`[github] Discovered ${repos.length} installation repos`);
+      const grants = await github.listAllInstallationRepos();
+      for (const grant of grants) {
+        if (grant.error) {
+          githubLog.warn("Installation repo discovery failed for one account", {
+            account: grant.account,
+            installationId: grant.installationId,
+            error: grant.error,
+          });
+          continue;
+        }
+        setInstallationRepos(grant.installationId, grant.repos);
+      }
+      githubLog.info("Discovered App installations", {
+        installations: grants.length,
+        accounts: grants.map((g) => `${g.account}=${g.installationId}(${g.repos.length})`).join(","),
+      });
+      if (grants.length === 0) {
+        githubLog.warn(
+          "The GitHub App has no installations — install it on an account before it can act",
+        );
+      }
     } catch (err) {
-      console.warn(
-        `[github] Installation repo discovery failed: ${(err as Error).message}`,
-      );
+      githubLog.warn("Installation discovery failed", { err });
+    }
+  }
+
+  // Configure git with a GitHub App token — only meaningful when the operator
+  // opted into a global `~/.gitconfig` write (LASTLIGHT_WRITE_GLOBAL_GIT=1) and
+  // only defensible with a single installation, since a global credential can
+  // name exactly one. Every agent run mints its own owner-scoped token
+  // regardless, so this is non-fatal and skipped when ambiguous.
+  if (config.githubApp) {
+    const gitAuthLog = logger("git-auth");
+    try {
+      const soleInstallation = await getInstallationDirectory()?.soleInstallationId();
+      if (soleInstallation) {
+        await configureGitAuth({
+          appId: config.githubApp.appId,
+          privateKeyPath: config.githubApp.privateKeyPath,
+          installationId: soleInstallation,
+          botLogin: config.botLogin,
+        });
+      }
+    } catch (err: any) {
+      gitAuthLog.warn("Initial token mint failed (will retry per-execution)", { err });
     }
   }
 
@@ -263,6 +399,7 @@ async function main() {
     context: Record<string, unknown>,
     onRunStart?: (runId: string) => Promise<void>,
   ): Promise<{ success: boolean; error?: string; paused?: boolean; queued?: boolean }> => {
+    const log = logger("dispatch");
     // Slack-initiated workflows (explore, /explore) carry a
     // `slack:{team}:{channel}:{thread}` triggerId and don't require a
     // managed `repo` — their postComment goes back to the Slack thread.
@@ -273,7 +410,7 @@ async function main() {
     const repoStr = context.repo as string | undefined;
     if (!repoStr && !slackTriggerId) {
       const msg = `dispatchWorkflow(${workflowName}): missing 'repo' in context`;
-      console.error(`[dispatch] ${msg}`);
+      log.error(msg, { workflowName });
       return { success: false, error: msg };
     }
     const [owner, repo] = repoStr && repoStr.includes("/")
@@ -283,7 +420,7 @@ async function main() {
       : ["", ""];
     if (repoStr && (!owner || !repo)) {
       const msg = `dispatchWorkflow(${workflowName}): invalid repo format '${repoStr}'`;
-      console.error(`[dispatch] ${msg}`);
+      log.error(msg, { workflowName, repoStr });
       return { success: false, error: msg };
     }
 
@@ -296,14 +433,184 @@ async function main() {
     const unmanaged = unmanagedReposInContext(context);
     if (unmanaged.length > 0) {
       const msg = `dispatchWorkflow(${workflowName}): refusing unmanaged repo(s): ${unmanaged.join(", ")}`;
-      console.warn(`[dispatch] ${msg}`);
+      log.warn(msg, { workflowName, unmanaged });
       return { success: false, error: msg };
     }
+
+    // Per-repository config layer (issue #180). Resolved at the SAME choke
+    // point and for the same reason as the guard above: every trigger path
+    // funnels through here, so one call covers webhook, router, cron, `/api/*`
+    // and approval-resume alike. Never throws and never fails a run — a GitHub
+    // outage or a malformed `.lastlight/lastlight.yml` degrades to the
+    // un-overridden operator config with a warning. `github` is `null` in
+    // chat-only mode, which skips the layer entirely.
+    const { repoConfig, refusal } = await resolveRepoRunConfig(workflowName, context, { client: github });
+    if (refusal) {
+      // The repo opting itself out via `disabled.workflows`. Same refusal shape
+      // as the unmanaged-repo guard, so every caller already handles it.
+      const msg = `dispatchWorkflow(${workflowName}): refusing repo-disabled workflow: ${refusal}`;
+      log.warn(msg, { workflowName, refusal });
+      return { success: false, error: msg };
+    }
+
+    // ── The PR state machine (09-state-machine.md → S3) ────────────────────
+    //
+    // One resolved snapshot per dispatch, at the SAME choke point and for the
+    // same reason as the two guards above: webhook, cron, `/api/*` and resume
+    // all funnel through here.
+    //
+    // The webhook route already resolved it — the dispatcher needs
+    // `runInFlight` before it can decide to dispatch at all — and hands it
+    // down on `_prState`, so this costs nothing there. The cron fan-out and
+    // the direct API triggers arrive COLD and resolve here, which is what
+    // finally closes the gap where every nightly `fix-red-dependency-prs` run
+    // carried `branch` + `reason` but an EMPTY `{{ciSection}}`, the repo's
+    // default branch instead of the PR's real base, and no fork guard at all:
+    // the fan-out calls this function directly and never crosses `handlePrFix`.
+    const inheritedPrState =
+      context._prState && typeof context._prState === "object"
+        ? (context._prState as PrState)
+        : null;
+    let prState: PrState | null = inheritedPrState;
+    if (
+      !prState &&
+      prScopedWorkflows().has(workflowName) &&
+      owner &&
+      repo &&
+      typeof context.prNumber === "number"
+    ) {
+      prState = await resolvePrState(owner, repo, context.prNumber, {
+        github,
+        db,
+        botLogin: config.botLogin,
+        botName: config.botName,
+      });
+      // Only the routes that have NOT already decided are gated here. The
+      // dispatcher decides for itself so it can reply to a human whose request
+      // it dropped; deciding twice would double every skip and every log line.
+      // It is the SAME function, reading the SAME repo-clamped config (it is
+      // handed `resolveRepoPolicy`, which is this file's `resolveRepoRunConfig`),
+      // so the two routes cannot answer differently.
+      //
+      // A skip writes NO run row, which is exactly why every gate reachable
+      // from here is a LIVE precondition rather than a prior run's verdict —
+      // a stored verdict read through a path that records nothing freezes, and
+      // the PR is then dead with no label, no comment and no explanation
+      // (09 → D1). The one exception, an ESCALATING skip, records one itself.
+      const disposition = await applyPrDispatchGate(
+        {
+          workflowName,
+          state: prState,
+          policy: prPolicyConfig(repoConfig),
+          // The cron fan-out marks itself `sweep` — the RELEASE MECHANISM for
+          // every PR whose fix chain ended without pushing, and the only route
+          // that reaches an `after-checks` PR no further `check_suite` will ever
+          // fire for.
+          route: reviewRouteFromContext(context),
+          // A direct `/api/run` (the CLI, the dashboard) is an operator asking
+          // for a REVIEW by hand, and overrides mode, draft and dedup exactly as
+          // `@bot review` does. Deliberately narrowed to `pr-review`: the fix
+          // family's skips are budgets and live facts rather than policy, and
+          // the human override for those already exists on the comment path.
+          explicitRequest:
+            workflowName === REVIEW_WORKFLOW && context._triggerType === "api",
+          logPrefix: "[dispatch]",
+        },
+        { db, github, botLogin: config.botLogin, botMention: `@${config.botName}` },
+      );
+      if (disposition.decision === "skip") {
+        // Not an error: the harness correctly determined there is nothing to
+        // do — including a run-lock drop, which the daily crons re-pick up.
+        // Reporting it as a failure would paint a cron tick red and, on the
+        // fan-out, count against `failures`.
+        return { success: true };
+      }
+    }
+
+    // ── The `last-light/review` check (09 → S2) ─────────────────────────────
+    //
+    // Created at the one choke point every route crosses, rather than in the
+    // webhook branch of the dispatcher — a cron-, comment-, Slack- or
+    // CLI-triggered review used to get no check at all — and completed from the
+    // run's TERMINAL TRANSITION, so it can no longer strand `in_progress` across
+    // a deploy. Reaching this line means some gate already said "run".
+    //
+    // CREATION AND PERSISTENCE ARE ONE STEP, and that is the whole of this
+    // helper. The check used to be created here, unconditionally, and recorded
+    // on `scratch.reviewCheck` only inside `onRunStart` — but `runSimpleWorkflow`
+    // returns `{ queued: true }` BEFORE it invokes `onRunStart` when the run is
+    // over the concurrency cap (and again on a duplicate trigger for an
+    // already-queued run). The check was then created, never persisted, never
+    // observed by the terminal observer, and never concluded. The old accidental
+    // repair is gone too: while the run is `queued` it counts as active for the
+    // trigger, so the 30-minute sweep resolves `run-in-flight` → placement
+    // `none` and posts no superseding check. That is precisely the bug 09 → S2
+    // exists to fix, reintroduced through the one path that skips `onRunStart`.
+    //
+    // So: nothing is created until a run ROW exists to hang it on, and it is
+    // recorded in the same breath. `onRunStart` covers the ordinary path; the
+    // queued path binds after the fact, below, against the row `runSimpleWorkflow`
+    // did create before returning.
+    const wantsReviewCheck =
+      workflowName === REVIEW_WORKFLOW &&
+      (repoConfig?.review ?? config.review).postsCheck &&
+      !!prState?.headSha;
+    let reviewCheckBound = false;
+    const reviewCheckDeps = { github, botLogin: config.botLogin };
+    const reviewCheckDetailsUrl = (runId: string) =>
+      runDashboardUrl(config.publicUrl, runId, workflowName);
+    const bindReviewCheck = async (runId: string): Promise<void> => {
+      if (!wantsReviewCheck || reviewCheckBound) return;
+      reviewCheckBound = true;
+      await openAndBindReviewCheck(
+        db,
+        runId,
+        {
+          owner,
+          repo,
+          headSha: prState!.headSha,
+          detailsUrl: reviewCheckDetailsUrl(runId),
+        },
+        reviewCheckDeps,
+      );
+    };
+    /**
+     * The queued half. `runSimpleWorkflow` writes the `queued` row and returns
+     * before `onRunStart`, so the run id never reaches us — but the ROW exists,
+     * keyed by exactly the trigger id `simple.ts` derived from this same
+     * context.
+     */
+    const bindReviewCheckForQueuedRun = async (): Promise<void> => {
+      if (!wantsReviewCheck || reviewCheckBound) return;
+      const number =
+        typeof context.issueNumber === "number"
+          ? context.issueNumber
+          : typeof context.prNumber === "number"
+          ? context.prNumber
+          : undefined;
+      const triggerId = slackTriggerId ?? (number !== undefined ? `${owner}/${repo}#${number}` : undefined);
+      if (!triggerId) return;
+      reviewCheckBound = true;
+      await bindQueuedReviewCheck(
+        db,
+        {
+          triggerId,
+          workflowName,
+          owner,
+          repo,
+          headSha: prState!.headSha,
+          detailsUrl: reviewCheckDetailsUrl,
+        },
+        reviewCheckDeps,
+      );
+    };
 
     // Pluck the standard fields, leave the rest in `extra` for the workflow
     // template to consume.
     const {
       _triggerType,
+      _prState: _inheritedPrState,
+      _reviewRoute: _ignoredReviewRoute,
       repo: _r,
       issueNumber,
       prNumber,
@@ -352,17 +659,51 @@ async function main() {
     if (typeof channelId === "string") extra.channelId = channelId;
     if (typeof threadId === "string") extra.threadId = threadId;
 
+    // Project the snapshot into the template variables the prompts render, and
+    // persist the WHOLE thing on the run context rather than scattered leaves
+    // (§S3) — so the run detail panel can show the decisions that were actually
+    // taken, with the inputs that produced them, long after the live state has
+    // moved on. One projection at one choke point is what makes the webhook and
+    // cron dispatches of a `pr-fix`-shaped workflow carry identical context.
+    if (prState) {
+      Object.assign(
+        extra,
+        renderContext(
+          prState,
+          repoConfig?.fix ?? config.fix,
+          repoConfig?.dependencies ?? config.dependencies,
+        ),
+      );
+      extra.prState = prState;
+    }
+
     // For PR-scoped read workflows, resolve the PR head ref and ask the
     // sandbox to pre-clone the repo at that branch. The agent then enters
     // a workspace that's already a checkout of the PR's actual code —
     // saves a redundant clone_repo MCP call inside the session.
     //
-    // pr-fix (and other pr-fix-shaped workflows like dependabot-ci-fix) already
-    // plumb `branch` through context (set by handlePrFix) because the fix phase
-    // needs the branch name to push to; we honor that here as the pre-populate
-    // branch too so the workspace is pre-checked-out at the PR head.
+    // The snapshot's head ref is the authority for every PR-scoped workflow —
+    // one read, already taken. It replaces the second `getPullRequest` the
+    // block below used to issue for the read-only workflows, and it is the
+    // only source the cron fan-out ever had for `dependabot-ci-fix` (via the
+    // discoverer's `branch`, which stays as the fallback for a snapshot whose
+    // PR read failed).
     let prePopulateBranch: string | undefined =
       typeof ctxPrePopulateBranch === "string" ? ctxPrePopulateBranch : undefined;
+    if (
+      !prePopulateBranch &&
+      prState?.headRef &&
+      (PR_FIX_SHAPED_WORKFLOWS.has(workflowName) ||
+        PR_HEADREF_PREPOPULATE_WORKFLOWS.has(workflowName))
+    ) {
+      prePopulateBranch = prState.headRef;
+      log.info("Pre-populating workspace", {
+        workflowName,
+        repo: `${owner}/${repo}`,
+        branch: prePopulateBranch,
+        base: prState.baseRef || "?",
+      });
+    }
     if (!prePopulateBranch && typeof ctxBranch === "string" && ctxBranch && PR_FIX_SHAPED_WORKFLOWS.has(workflowName)) {
       prePopulateBranch = ctxBranch;
     }
@@ -389,16 +730,17 @@ async function main() {
         // baseline (the read-only pre-clone is shallow + single-branch at the
         // head ref, so `origin/<base>` isn't present until the agent fetches it).
         if (pr.base?.ref) extra.baseBranch = pr.base.ref;
-        console.log(
-          `[dispatch] ${workflowName}: pre-populating workspace at ${owner}/${repo}@${prePopulateBranch} ` +
-          `(base ${pr.base?.ref ?? "?"})`,
-        );
+        log.info("Pre-populating workspace", {
+          workflowName,
+          repo: `${owner}/${repo}`,
+          headRef: prePopulateBranch,
+          baseRef: pr.base?.ref ?? "?",
+        });
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[dispatch] ${workflowName}: could not resolve PR head ref (${msg}); ` +
-          `agent will need to clone via MCP`,
-        );
+        log.warn("Could not resolve PR head ref; agent will need to clone via MCP", {
+          workflowName,
+          err,
+        });
       }
     }
 
@@ -413,11 +755,11 @@ async function main() {
       try {
         extra.baseBranch = await github.getDefaultBranch(owner, repo);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(
-          `[dispatch] ${workflowName}: could not resolve default branch for ${owner}/${repo} ` +
-          `(${msg}); assuming main`,
-        );
+        log.warn("Could not resolve default branch; assuming main", {
+          workflowName,
+          repo: `${owner}/${repo}`,
+          err,
+        });
         extra.baseBranch = "main";
       }
     }
@@ -437,6 +779,7 @@ async function main() {
       triggerId: slackTriggerId,
       extra,
       prePopulateBranch,
+      repoConfig,
     };
 
     // For workflows where the architect/agent needs to see the full issue
@@ -490,25 +833,61 @@ async function main() {
           // exclusively (avoids double-rendering the body).
           request.issueBody = "";
           if (screen.flagged) {
-            console.warn(
-              `[dispatch] Screener flagged combined issue context for ${owner}/${repo}#${request.issueNumber}: ${screen.reason || "no reason"}`,
-            );
+            log.warn("Screener flagged combined issue context", {
+              repo: `${owner}/${repo}`,
+              issueNumber: request.issueNumber,
+              reason: screen.reason || "no reason",
+            });
           }
         }
       } catch (err: unknown) {
-        const m = err instanceof Error ? err.message : String(err);
-        console.warn(`[dispatch] Failed to fetch/screen issue context: ${m}`);
+        log.warn("Failed to fetch/screen issue context", { err });
         // Non-fatal — workflow proceeds with whatever context the envelope had.
       }
     }
 
+    // Set by `onRunStart` below, read by `onPhaseEnd` and the Slack poster.
+    // Undefined only for the window before the run row exists, during which
+    // neither can have fired.
+    let harvestRunId: string | undefined;
+
     const slackPost = slackTriggerId && slackConnector && typeof channelId === "string" && typeof threadId === "string"
       ? async (msg: string) => {
           try {
-            await slackConnector!.sendMessage(channelId, threadId, msg);
+            const ts = await slackConnector!.sendMessage(channelId, threadId, msg);
+            // This message IS the run's answer, so it is the one most worth a
+            // 👍/👎 (issue #255). Registering it here — with the run id — is
+            // what lets a reaction minutes later resolve to this exact run
+            // rather than merely to the thread.
+            if (typeof ts === "string" && config.feedback.enabled) {
+              registerSlackAnchor(db, {
+                channelId,
+                threadId,
+                messageId: ts,
+                workflowRunId: harvestRunId,
+                workflowName,
+              });
+            }
+            // This is the workflow's ANSWER — the substantive thing the thread
+            // will be asked follow-up questions about — so it belongs in the
+            // thread's conversation alongside the turns `ChatRunner` records.
+            // Addressed by thread because the runner never sees a messaging
+            // session id; a thread with no live session records nothing.
+            //
+            // INSIDE the try, after the await: this transport swallows a send
+            // failure, so recording outside it would write a message the user
+            // never saw and have the next chat turn rehydrate it as fact —
+            // the exact context drift the transcript exists to prevent.
+            recordThreadMessageForThread(
+              sessionManager,
+              "slack",
+              channelId,
+              threadId,
+              "assistant",
+              msg,
+            );
           } catch (err: unknown) {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[dispatch] Failed to post to Slack thread: ${m}`);
+            log.warn("Failed to post to Slack thread", { err });
           }
         }
       : undefined;
@@ -584,13 +963,25 @@ async function main() {
                   thread: threadId,
                   ts: saved.slackTs,
                   save: (ts) => persist({ slackTs: ts, slackChannel: channelId, slackThread: threadId }),
+                  // Every message the notifier posts is reactable: the status
+                  // checklist, the terminal summary, an approval prompt
+                  // (issue #255).
+                  onPost: config.feedback.enabled
+                    ? (ts) =>
+                        void registerSlackAnchor(db, {
+                          channelId,
+                          threadId,
+                          messageId: ts,
+                          workflowRunId: runId,
+                          workflowName,
+                        })
+                    : undefined,
                 }),
               );
             }
             if (transports.length > 0) notifier = new ProgressNotifier(transports);
           } catch (err: unknown) {
-            const m = err instanceof Error ? err.message : String(err);
-            console.warn(`[dispatch] notifier setup failed: ${m}`);
+            log.warn("Notifier setup failed", { err });
           }
         }
       : undefined;
@@ -602,15 +993,16 @@ async function main() {
         ?? (github && issueNumber
           ? async (msg) => {
               try {
-                await github.postComment(owner, repo, issueNumber as number, msg);
+                // Return the new comment id: a transient comment (the enqueue
+                // ack) needs a handle to retract itself with later (#244).
+                return await github.postComment(owner, repo, issueNumber as number, msg);
               } catch (err: unknown) {
-                const m = err instanceof Error ? err.message : String(err);
-                console.warn(`[dispatch] Failed to post comment: ${m}`);
+                log.warn("Failed to post comment", { err });
               }
             }
           : undefined),
       onPhaseStart: async (phase) => {
-        console.log(`[dispatch] ▶ ${workflowName}/${phase}`);
+        logPhaseStart(log, workflowName, phase);
         // Refresh the Slack thinking indicator so long-running phases
         // don't leave the thread looking dead. threadId doubles as both
         // the message anchor and the thread root for DM threads.
@@ -618,21 +1010,36 @@ async function main() {
           slackConnector.showTyping(channelId as string, threadId as string, threadId as string).catch(() => {});
         }
       },
-      onPhaseEnd: async (phase, result) =>
-        console.log(`[dispatch] ◀ ${workflowName}/${phase}: ${result.success ? "OK" : "FAILED"}`),
-      onRunStart: notifierOnRunStart
-        ? async (runId: string) => {
-            // Synchronous notifier setup must finish before simple.ts calls
-            // reporter.start() (the next statement after it invokes this), so
-            // run it first, then chain any caller-provided onRunStart.
-            notifierOnRunStart(runId);
-            if (onRunStart) await onRunStart(runId);
-          }
-        : onRunStart,
+      onPhaseEnd: async (phase, result) => {
+        logPhaseEnd(log, workflowName, phase, result);
+        // The marker harvest (09 → S1). This is the ONLY moment the two marker
+        // lines exist in memory — `{{phaseOutputs}}` is empty across a run
+        // boundary and the shared per-PR workspace is `reset --hard`-ed between
+        // runs, so a marker not persisted here is gone for good.
+        if (harvestRunId) harvestFixMarkers(db, harvestRunId, workflowName, phase, result.output);
+      },
+      onRunStart: async (runId: string) => {
+        // The run id is not knowable when this object is built — the row is
+        // created inside `runSimpleWorkflow` — and `onPhaseEnd` needs it to
+        // write the harvest. This callback fires synchronously before the first
+        // phase, so the assignment is always in place by the time it is read.
+        harvestRunId = runId;
+        // Synchronous notifier setup must finish before simple.ts calls
+        // reporter.start() (the next statement after it invokes this), so it
+        // runs FIRST — before the first `await` in this callback, which is now
+        // the check creation below.
+        if (notifierOnRunStart) notifierOnRunStart(runId);
+        // Create AND bind the review check the moment the row exists — this is
+        // what makes it a projection of run state rather than of an in-memory
+        // promise, and it is why every terminal path resolves it for free.
+        await bindReviewCheck(runId);
+        if (onRunStart) await onRunStart(runId);
+      },
     };
 
+    let result: Awaited<ReturnType<typeof runSimpleWorkflow>> | undefined;
     try {
-      const result = await runSimpleWorkflow(
+      result = await runSimpleWorkflow(
         workflowName,
         request,
         {
@@ -656,35 +1063,43 @@ async function main() {
       );
       const summary = result.phases.map((p) => `${p.phase}=${p.success ? "ok" : "fail"}`).join(", ");
       if (result.queued) {
-        console.log(`[dispatch] ${workflowName} queued (concurrency cap reached)`);
+        log.info("Queued (concurrency cap reached)", { workflowName });
+        // A queued run never reaches `onRunStart` — `runSimpleWorkflow` returns
+        // the moment it writes the `queued` row — so bind the check here instead
+        // of leaving the run's only PR-visible artifact unowned. The row is
+        // found the same way `simple.ts` found (or created) it: by trigger id.
+        // Admission promotes it through `resumeSimpleRun`, which takes no
+        // callbacks at all, so this is the ONLY point at which a queued review's
+        // check can be bound to its run.
+        await bindReviewCheckForQueuedRun();
       } else if (result.paused) {
-        console.log(`[dispatch] ${workflowName} paused (${summary})`);
+        log.info("Paused", { workflowName, summary });
       } else if (result.success) {
-        console.log(`[dispatch] ${workflowName} completed (${summary})`);
+        log.info("Completed", { workflowName, summary });
       } else {
-        console.warn(`[dispatch] ${workflowName} failed (${summary})`);
+        log.warn("Failed", { workflowName, summary });
       }
       return { success: result.success, paused: result.paused, queued: result.queued };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[dispatch] ${workflowName} threw: ${msg}`);
+      log.error("Threw", { workflowName, err });
       return { success: false, error: msg };
     } finally {
       // Event-driven admission: after each dispatch settles, pull the next
-      // queued run into a free slot (if any). Fire-and-forget — a slow
-      // admission must not stall the caller.
-      admissionController?.admitNext().catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[admission] admitNext error: ${msg}`);
-      });
+      // queued run into a free slot. Skip it when THIS dispatch just requeued
+      // on quota backpressure — re-promoting instantly would re-hit the full
+      // quota in a tight loop; the periodic sweep + real completions pace the
+      // retry.
+      if (!result?.backpressure) {
+        admissionController?.admitNext().catch((err: unknown) => {
+          logger("admission").warn("admitNext error", { err });
+        });
+      }
     }
   };
 
   // Set up connector registry
   const registry = new ConnectorRegistry();
-
-  // Message delivery service for cron output
-  const delivery = new MessageDeliveryService();
 
   // Shared HTTP server — always boots, independent of GitHub. `main()` owns the
   // Hono app + serve() lifecycle that the webhook connector used to own, so the
@@ -693,6 +1108,9 @@ async function main() {
   // (src/cli/cli.ts, cli-server.ts).
   const app = new Hono();
   app.get("/health", (c) => c.json({ status: "ok" }));
+  mountSkillBundle(app, skillBundleRegistry);
+  mountAgentContext(app, agentContextRegistry);
+  mountArtifactUpload(app, artifactStore);
 
   // GitHub webhook connector (optional — requires both webhook secret and GitHub
   // App). It registers /webhooks/github onto the shared app; it no longer owns
@@ -707,9 +1125,50 @@ async function main() {
       // Settle-aware gate: emit a dependency-PR checks event only once the head
       // SHA's checks have fully settled (green/red), so a multi-app repo fires
       // one event per SHA — the last suite to complete — not one per suite.
+      // `excludeApp` is the self-gating deadlock fix (07 §7.2): our own
+      // `last-light/review` check is on the same head SHA, so without it a
+      // queued/in-progress review pins this aggregate at `pending` and the
+      // settle event that would dispatch the review never fires.
       getChecksConclusion: github
-        ? (owner, repo, ref) => github.getChecksConclusion(owner, repo, ref)
+        ? (owner, repo, ref) =>
+            github.getChecksConclusion(owner, repo, ref, { excludeApp: config.botName })
         : undefined,
+      // The FORK-PR fallback. `check_suite` / `check_run` payloads carry
+      // `pull_requests[]` only for a same-repo PR, so without this every
+      // check-driven route is same-repo-only — and under the packaged
+      // `review.trigger: after-checks` a fork PR defers on `pr.opened`, posts
+      // the `queued` placeholder, and never receives the settle event that
+      // would conclude it. Asked of the BASE repo, which is the one the App is
+      // installed on, so it needs no access to the fork.
+      listOpenPrNumbersForHeadSha: github
+        ? (owner, repo, sha) => github.listOpenPrNumbersForHeadSha(owner, repo, sha)
+        : undefined,
+      // Only broaden `check_suite.completed` beyond dependency PRs when the
+      // operator's mode actually consumes a settle event. Deliberately the
+      // OPERATOR's value, not a repo's: emitting is what costs event volume,
+      // and a repo that opts itself into `after-checks` under an `eager`
+      // operator is covered by the 30-minute `check-prs-awaiting-review` sweep.
+      reviewTrigger: () => config.review.trigger,
+      // The harness client memoizes an Octokit per installation; drop it when
+      // the App is uninstalled so a re-install can't be served by a dead one.
+      onInstallationRemoved: (installationId) => github?.forgetInstallation(installationId),
+      // Team/org membership changed — forget the affected slice of the
+      // dashboard visibility cache (issue #169). Deleting rows is the whole
+      // response: the cache is filled on demand per logged-in user, so the next
+      // dashboard request re-resolves, and only for people who actually use it.
+      onTeamChanged: ({ org, teamSlug, login }) => {
+        try {
+          if (login) db.teams.invalidateLogin(login);
+          else if (teamSlug) db.teams.invalidateTeam(org, teamSlug);
+        } catch (err: unknown) {
+          logger("team-visibility").warn("Failed to invalidate team visibility cache", {
+            org,
+            teamSlug,
+            login,
+            err,
+          });
+        }
+      },
     });
     registry.register(githubConnector);
   }
@@ -731,31 +1190,124 @@ async function main() {
         // run/approval attributes to their GitHub login (issue #205).
         users: db.users,
         botIdentifier: "", // Will be resolved from Slack API on connect
+        // Every chat reply the bot posts becomes a reaction target (issue
+        // #255). The `ts` is only ever knowable here, in the send response —
+        // and the connector layer must not reach for the database itself, so
+        // the write is injected as a hook.
+        // `workflowName: "chat"` because a chat turn has no workflow run to
+        // borrow a name from, and a null there renders as "unattributed" — the
+        // label for a signal we could not place at all. Chat is placed
+        // precisely; it just isn't a workflow. Matches how the executions
+        // ledger already names this surface (`skill: "chat"`).
+        onBotMessage: config.feedback.enabled
+          ? ({ channelId, messageId, sessionId }) =>
+              void registerSlackAnchor(db, {
+                channelId,
+                messageId,
+                messagingSessionId: sessionId,
+                workflowName: "chat",
+              })
+          : undefined,
       },
       sessionManager
     );
     registry.register(slackConnector);
 
-    // Register Slack as a delivery target for cron reports
-    if (config.slack.deliveryChannel) {
-      delivery.register("slack", (msg) => slackConnector!.sendToDeliveryChannel(msg));
+    // Score emoji reactions on the bot's own messages (issue #255). Needs the
+    // `reactions:read` bot scope + the reaction_added/removed subscriptions;
+    // without them Slack never delivers and this is simply dormant.
+    if (config.feedback.enabled) {
+      slackConnector.onReactionAction((event) =>
+        void handleSlackReaction(
+          {
+            db,
+            botLogin: config.botLogin,
+            otel: config.feedback.otel,
+            allowedUsers: config.slack?.allowedUsers,
+          },
+          event,
+        ),
+      );
     }
+
   }
 
-  // Dependency-PR discoverers keyed by a cron context's `discover` value. Each
-  // returns the eligible PRs (in code, no LLM); the runner fans out one run per
-  // PR. Add a discoverer + a `cron-*.yaml` with the matching `discover:` key to
-  // introduce a new backstop sweep.
-  const DEP_PR_DISCOVERERS: Record<
+  // Host-side cron handlers — what a `cron-*.yaml` may name in `handler:`.
+  // Built here rather than imported as a constant because every handler needs
+  // collaborators that only exist once the server has booted.
+  //
+  // The digest is registered only when there is BOTH a GitHub client to read
+  // repos through and a Slack connector to post with. Missing either, the
+  // handler is absent and `getJobs` drops `cron-digest.yaml` with a warning
+  // naming it — which is the whole point: a cron that silently ticks into
+  // nothing is exactly the failure mode this feature replaced.
+  const cronHandlers = buildCronHandlers({
+    db,
+    digest:
+      github && slackConnector
+        ? {
+            db,
+            github,
+            configClient: github,
+            routing: config.slack
+              ? { repoChannels: config.slack.repoChannels, deliveryChannel: config.slack.deliveryChannel }
+              : undefined,
+            config: config.digest,
+            escalationLabel: REQUIRES_HUMAN_LABEL,
+            post: async (channel, text, blocks) => {
+              // No unfurls: a digest cites several PRs, and a preview card per
+              // citation buries the six lines of summary they annotate.
+              const ts = await slackConnector!.sendMessage(channel, null, text, blocks as KnownBlock[], {
+                unfurl: false,
+              });
+              // A digest is a thing the bot wrote, so a 👍/👎 on it is a real
+              // signal about whether it is worth sending (issue #255). The `ts`
+              // exists only in this response — a send site that drops it makes
+              // the reaction unattributable.
+              if (typeof ts === "string" && config.feedback.enabled) {
+                registerSlackAnchor(db, { channelId: channel, messageId: ts, workflowName: "repo-digest" });
+              }
+            },
+          }
+        : undefined,
+  });
+
+  // PR discoverers keyed by a cron context's `discover` value. Each returns the
+  // eligible PRs (in code, no LLM) and the runner fans out one bounded single-PR
+  // run each (with prNumber + head ref) — the shape the pr.* webhooks produce.
+  // Add a discoverer + a `cron-*.yaml` with the matching `discover:` key to
+  // introduce a new sweep. The harness `github` client (App auth) is passed to
+  // every discoverer, so a discoverer only needs the subset of it it uses.
+  const PR_DISCOVERERS: Record<
     string,
     (
       repos: string[],
-      gh: PrDiscoveryClient,
+      gh: GitHubClient,
       opts: { log?: (msg: string) => void },
     ) => Promise<DependencyPr[]>
   > = {
-    "green-dependency-prs": discoverGreenDependencyPrs,
-    "red-dependency-prs": discoverRedDependencyPrs,
+    // The green sweep's notion of "green" must match the webhook's: on a repo
+    // with no *required* checks, `mergeable_state: "clean"` is true for a PR
+    // whose CI is red. `requireSettledChecks` makes it ask the checks too.
+    "green-dependency-prs": (repos, gh, opts) =>
+      discoverGreenDependencyPrs(repos, gh, {
+        ...opts,
+        requireSettledChecks: config.dependencies.requireSettledChecks,
+        botName: config.botName,
+      }),
+    "red-dependency-prs": (repos, gh, opts) =>
+      discoverRedDependencyPrs(repos, gh, { ...opts, botName: config.botName }),
+    // The pr-review cron: find open PRs awaiting review and fan out one single-PR
+    // pr-review run each. Replaces the old `mode: scan` review run, which ran the
+    // whole listing/reviewing inside the sandbox with a static token it couldn't
+    // re-mint and no way to hand its chosen PR to post-review.
+    //
+    // A pure CANDIDATE FINDER (09 → S2): it filters nothing but "open, not ours".
+    // Draft, already-reviewed-at-this-SHA, run-in-flight and the trigger mode are
+    // all decided once by `resolveReviewTrigger` at the dispatch choke point,
+    // which the webhook route crosses too.
+    "prs-awaiting-review": (repos, gh, opts) =>
+      discoverPrsAwaitingReview(repos, gh, { ...opts, botLogin: config.botLogin }),
   };
 
   // Construct the cron scheduler before mounting admin so the dashboard can
@@ -763,49 +1315,12 @@ async function main() {
   // (after we know whether webhooks are enabled). The runner closes over
   // `dispatchWorkflow`, which is defined earlier in this file. Named (not inline)
   // so the admin `triggerCron` callback can reuse it to fire a cron on demand.
-  const cronRunner: WorkflowRunner = async (workflowName, context) => {
-    let dispatched: number;
-    let failures: number;
-    // A cron whose context sets `discover: <key>` fans out one bounded single-PR
-    // run per discovered PR (replaces the old `mode: scan` agent sweep, which
-    // buried the model in every open PR's lockfile churn until its context
-    // overflowed). Each discoverer finds the eligible dependency PRs in code, and
-    // we dispatch one run each — the same shape the pr.checks_passed /
-    // pr.checks_failed webhooks produce. Runs queue against the global cap.
-    const discoverKey = typeof context.discover === "string" ? context.discover : undefined;
-    const discoverer = discoverKey ? DEP_PR_DISCOVERERS[discoverKey] : undefined;
-    if (discoverer) {
-      const repos = Array.isArray(context.repos)
-        ? (context.repos as unknown[]).filter((r): r is string => typeof r === "string")
-        : [];
-      const prs = github
-        ? await discoverer(repos, github, { log: (m) => console.log(m) })
-        : [];
-      console.log(
-        `[cron] ${workflowName}: ${prs.length} ${discoverKey} across ${repos.length} repo(s)`,
-      );
-      const contexts = prs.map((pr) => ({
-        _triggerType: "cron",
-        repo: pr.repo,
-        prNumber: pr.prNumber,
-        title: pr.title,
-        // Present only for the red sweep — `dispatchWorkflow` pre-clones this
-        // head ref for dependabot-ci-fix's checkout (a PR_FIX_SHAPED_WORKFLOWS).
-        ...(pr.branch ? { branch: pr.branch } : {}),
-        // Also red-sweep only — why it was summoned (checks-failing | behind |
-        // dirty | blocked), threaded into the ci-fix prompt as `{{reason}}`.
-        ...(pr.reason ? { reason: pr.reason } : {}),
-      }));
-      ({ dispatched, failures } = await fanOutContexts(workflowName, contexts, dispatchWorkflow));
-    } else {
-      ({ dispatched, failures } = await dispatchCronWorkflow(workflowName, context, dispatchWorkflow));
-    }
-    if (failures > 0) {
-      console.warn(
-        `[cron] ${workflowName}: ${failures}/${dispatched} dispatches failed`,
-      );
-    }
-  };
+  const cronRunner: WorkflowRunner = makeCronRunner({
+    db,
+    github,
+    discoverers: PR_DISCOVERERS,
+    dispatch: dispatchWorkflow,
+  });
   const cron = new CronScheduler(db, cronRunner);
 
   // Options for the ledger-driven resume machinery (`resumeSimpleRun`). Shared
@@ -831,8 +1346,14 @@ async function main() {
     approvalConfig: config.approval,
     bootstrapLabel: config.bootstrapLabel,
     publicUrl: config.publicUrl,
+    // Boot-recovery's Slack transport. Records into the thread's conversation
+    // for the same reason the live `slackPost` above does — a run that finished
+    // after a restart still owes its thread a transcript.
     slackPoster: slackConnector
-      ? (channelId, threadId, msg) => slackConnector!.sendMessage(channelId, threadId, msg).then(() => {})
+      ? (channelId, threadId, msg) =>
+          slackConnector!.sendMessage(channelId, threadId, msg).then(() => {
+            recordThreadMessageForThread(sessionManager, "slack", channelId, threadId, "assistant", msg);
+          })
       : undefined,
   };
 
@@ -844,13 +1365,38 @@ async function main() {
     resumeOpts,
     maxWorkflows: config.concurrency.maxWorkflows,
     maxQueueWaitMs: config.concurrency.maxQueueWaitMs,
+    backpressureMode: config.sandbox === "kubernetes",
   });
 
   // Mount admin dashboard on the shared HTTP server (always available).
   {
+    const adminLog = logger("admin");
     mountAdmin(app, db, {
       cronScheduler: cron,
       triggerCron: cronRunner,
+      // "Run now" for a host-side cron. Resolved against the SAME registry the
+      // scheduler uses, so a manual fire is indistinguishable from a tick. An
+      // unknown name throws rather than silently no-opping — the route has
+      // already established the cron exists, so an absent handler here means
+      // the registry declined to build it (e.g. no Slack connector), and that
+      // is worth surfacing to whoever pressed the button.
+      runCronHandler: async (handler, context) => {
+        const fn = cronHandlers[handler];
+        if (!fn) throw new Error(`No host-side cron handler named "${handler}" is available on this instance`);
+        await fn(context);
+      },
+      // The three collaborators `POST /prs/:owner/:repo/:number/retry` needs to
+      // do what `lastlight pr retry` asks: resolve the PR, cross the same gate
+      // every other route crosses, and dispatch. `resolveRepoPolicy` is the very
+      // same closure `dispatchDeps` gets below — one resolution of a repo's
+      // clamped budgets, so the admin route can't read them looser than the repo
+      // set them.
+      github,
+      dispatchWorkflow,
+      resolveRepoPolicy: async (workflowName, context) => {
+        const { repoConfig } = await resolveRepoRunConfig(workflowName, context, { client: github });
+        return repoConfig;
+      },
       stateDir: config.stateDir,
       sessionsDir: config.sessionsDir,
       buildAssetsDir: config.buildAssetsDir,
@@ -870,29 +1416,33 @@ async function main() {
       githubAllowedOrg: process.env.GITHUB_ALLOWED_ORG,
       resumeWorkflow: async (workflowRun, sender) => {
         if (!github) {
-          console.warn(`[admin] Cannot resume workflow ${workflowRun.id}: GitHub App not configured`);
+          adminLog.warn("Cannot resume workflow: GitHub App not configured", { runId: workflowRun.id });
           return;
         }
         // Derive owner/repo for the resume dispatch. Prefer the triggerId
-        // (owner/repo#N) but fall back to the stored repo + context.owner so a
-        // run keyed on a non-GitHub triggerId (e.g. a Slack-thread override)
-        // still resumes from the dashboard/focused-approval flow.
+        // (owner/repo#N) but fall back to the row's own (owner, BARE repo) pair
+        // so a run keyed on a non-GitHub triggerId (e.g. a Slack-thread
+        // override) still resumes from the dashboard/focused-approval flow.
         let [owner, repo] = workflowRun.triggerId.includes("/")
           ? workflowRun.triggerId.replace(/#\d+$/, "").split("/")
           : ["", ""];
         if (!owner || !repo) {
           const ctxOwner = (workflowRun.context?.owner as string | undefined) || "";
-          const storedRepo = workflowRun.repo || "";
-          owner = ctxOwner || (storedRepo.includes("/") ? storedRepo.split("/")[0] : "");
-          repo = storedRepo.includes("/") ? storedRepo.split("/")[1] : storedRepo;
+          owner = workflowRun.owner || ctxOwner;
+          repo = workflowRun.repo || "";
         }
         const issueNumber = workflowRun.issueNumber;
         if (!owner || !repo || !issueNumber) {
-          console.warn(`[admin] Cannot resume workflow ${workflowRun.id}: missing owner/repo/issueNumber`);
+          adminLog.warn("Cannot resume workflow: missing owner/repo/issueNumber", { runId: workflowRun.id });
           return;
         }
         db.runs.setRunning(workflowRun.id);
-        console.log(`[admin] Resuming ${workflowRun.workflowName} for ${owner}/${repo}#${issueNumber} after dashboard approval by ${sender}`);
+        adminLog.info("Resuming after dashboard approval", {
+          workflowName: workflowRun.workflowName,
+          repo: `${owner}/${repo}`,
+          issueNumber,
+          sender,
+        });
         dispatchWorkflow(workflowRun.workflowName, {
           repo: `${owner}/${repo}`,
           issueNumber,
@@ -900,7 +1450,7 @@ async function main() {
           body: "",
           sender,
           _triggerType: "admin",
-        }).catch((err) => console.error(`[admin] Resume failed:`, err));
+        }).catch((err) => adminLog.error("Resume failed", { err }));
       },
       // Retry a FAILED or CANCELLED run, resuming from where it stopped with the
       // same context. Unlike `resumeWorkflow` (approval-gate resume, which
@@ -913,7 +1463,10 @@ async function main() {
       // phases and starts clean.
       retryWorkflow: async (workflowRun, sender) => {
         if (workflowRun.status !== "failed" && workflowRun.status !== "cancelled") {
-          console.warn(`[admin] Cannot retry ${workflowRun.id}: status is '${workflowRun.status}', not 'failed' or 'cancelled'`);
+          adminLog.warn("Cannot retry: not in a retryable status", {
+            runId: workflowRun.id,
+            status: workflowRun.status,
+          });
           return;
         }
         // Compare-and-set: flip failed/cancelled→running and clear the terminal
@@ -921,17 +1474,24 @@ async function main() {
         // dispatch.
         const changed = db.runs.restartRun(workflowRun.id);
         if (changed !== 1) {
-          console.warn(`[admin] Retry ${workflowRun.id}: run is no longer retryable (raced) — skipping dispatch`);
+          adminLog.warn("Retry: run is no longer retryable (raced) — skipping dispatch", {
+            runId: workflowRun.id,
+          });
           return;
         }
         const fresh = db.runs.getRun(workflowRun.id);
         if (!fresh) return;
-        console.log(`[admin] Retrying ${fresh.workflowName} run ${fresh.id} (was on phase=${workflowRun.currentPhase}) by ${sender}`);
+        adminLog.info("Retrying", {
+          workflowName: fresh.workflowName,
+          runId: fresh.id,
+          previousPhase: workflowRun.currentPhase,
+          sender,
+        });
         resumeSimpleRun(fresh, resumeOpts).catch((err) =>
-          console.error(`[admin] Retry ${fresh.id} failed:`, err));
+          adminLog.error("Retry failed", { runId: fresh.id, err }));
       },
     });
-    console.log(`[admin] Dashboard mounted at /admin`);
+    adminLog.info("Dashboard mounted at /admin");
   }
 
   // Protect API endpoints with auth when any login method is configured
@@ -946,9 +1506,10 @@ async function main() {
     githubOAuthClientSecret: process.env.GITHUB_OAUTH_CLIENT_SECRET,
     githubAllowedOrg: process.env.GITHUB_ALLOWED_ORG,
   });
+  const apiLog = logger("api");
   if (apiAuthEnabled) {
     app.use("/api/*", authMiddleware(apiAuthEnabled, adminSecret));
-    console.log(`[api] API endpoints protected with auth`);
+    apiLog.info("API endpoints protected with auth");
   }
 
   // API endpoint for CLI triggers
@@ -972,7 +1533,22 @@ async function main() {
       return c.json({ error: `Repo not managed: ${unmanaged.join(", ")}` }, 403);
     }
 
-    console.log(`[api] CLI triggered: workflow=${workflowName}`);
+    // Fail a context the dispatcher will reject BEFORE returning 202. The
+    // dispatch below is fire-and-forget, so without this the caller gets
+    // `{accepted: true}` and an execution id for a run that dies moments later
+    // in the harness log — indistinguishable, from the CLI, from success.
+    // Mirrors `dispatchWorkflow`'s own condition exactly, Slack exemption
+    // included: a `slack:`-prefixed triggerId legitimately carries no repo.
+    const hasSlackTrigger =
+      typeof context.triggerId === "string" && context.triggerId.startsWith("slack:");
+    if (typeof context.repo !== "string" && !hasSlackTrigger) {
+      return c.json(
+        { error: `Missing 'repo' in context for workflow '${workflowName}'` },
+        400,
+      );
+    }
+
+    apiLog.info("CLI triggered", { workflowName });
 
     // Run asynchronously — return immediately with a stable id the caller
     // can correlate with workflow_runs in the dashboard.
@@ -986,8 +1562,7 @@ async function main() {
       ...(apiActor ? { triggeredBy: apiActor } : {}),
       _triggerType: "api",
     }).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[api] workflow ${workflowName} failed: ${msg}`);
+      apiLog.error("Workflow failed", { workflowName, err });
     });
 
     return c.json({ accepted: true, executionId, workflow: workflowName }, 202);
@@ -1005,7 +1580,7 @@ async function main() {
       return c.json({ error: `Repo not managed: ${owner}/${repo}` }, 403);
     }
 
-    console.log(`[api] CLI build triggered: ${owner}/${repo}#${issueNumber}`);
+    apiLog.info("CLI build triggered", { repo: `${owner}/${repo}`, issueNumber });
 
     // If labels weren't supplied, fetch them so the orchestrator can detect
     // bootstrap tasks (lastlight:bootstrap label) and skip the BLOCKED gate.
@@ -1032,7 +1607,7 @@ async function main() {
       ...(actorFromContext(c) ? { triggeredBy: actorFromContext(c) } : {}),
       _triggerType: "api",
     }).catch((err) => {
-      console.error(`[api] Build failed:`, err);
+      apiLog.error("Build failed", { err });
     });
 
     return c.json({ accepted: true, owner, repo, issueNumber }, 202);
@@ -1060,8 +1635,17 @@ async function main() {
         { chatRunner, sessionsHomeDir: config.sessionsDir },
         { model: resolveModel(config.models, "chat"), maxTurns: 10 },
       ),
-    reviewPostsCheck: config.reviewPostsCheck,
     publicUrl: config.publicUrl,
+    // ONE config at the dispatch gate. The dispatcher decides for itself (it
+    // has to — it replies to the human whose request it dropped, and its
+    // dispatches are fire-and-forget), so the way to keep it from carrying a
+    // second, operator-only view of policy is to hand it the very same
+    // resolution `dispatchWorkflow` performs below. `fetchRepoLayer` memoises
+    // per repo for 60 s, so the pair costs one conditional request between them.
+    resolveRepoPolicy: async (workflowName, context) => {
+      const { repoConfig } = await resolveRepoRunConfig(workflowName, context, { client: github });
+      return repoConfig;
+    },
   };
 
   // Wire Slack approval buttons into the SAME approval-resolution path as the
@@ -1122,18 +1706,23 @@ async function main() {
     return c.json({ text: reply, thread: threadId ?? session.id, sessionId: session.id, outcome: outcome.kind });
   });
 
+  const eventLog = logger("event");
   const handleEnvelope = async (envelope: EventEnvelope) => {
-    console.log(`[event] ${envelope.source}:${envelope.type} from ${envelope.sender}${envelope.repo ? ` on ${envelope.repo}` : ""}`);
+    eventLog.info("Received", {
+      source: envelope.source,
+      type: envelope.type,
+      sender: envelope.sender,
+      repo: envelope.repo,
+    });
     try {
       const outcome = await dispatch(envelope, dispatchDeps);
       if (outcome.kind === "ignored") {
-        console.log(`[event] Ignored: ${outcome.reason}`);
+        eventLog.info("Ignored", { reason: outcome.reason });
       } else if (outcome.kind === "skipped") {
-        console.log(`[event] Skipped: ${outcome.reason}`);
+        eventLog.info("Skipped", { reason: outcome.reason });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[event] dispatch threw: ${msg}`);
+      eventLog.error("Dispatch threw", { err });
     }
   };
 
@@ -1165,15 +1754,15 @@ async function main() {
   // otherwise fire periodic no-op dispatch failures.
   const webhooksEnabled = !!(config.webhookSecret && config.githubApp);
   if (github) {
-    const jobs = getJobs({ webhooksEnabled, db });
+    const jobs = getJobs({ webhooksEnabled, db, handlers: cronHandlers });
     for (const job of jobs) {
       cron.register(job);
     }
     if (webhooksEnabled) {
-      console.log("[cron] Webhooks enabled — skipping issue/PR polling crons");
+      logger("cron").info("Webhooks enabled — skipping issue/PR polling crons");
     }
   } else {
-    console.log("[cron] No GitHub client — skipping all cron jobs (chat-only mode)");
+    logger("cron").info("No GitHub client — skipping all cron jobs (chat-only mode)");
   }
 
   // Sandbox-workspace reaping backstop (issue #106) — a DIRECT (non-sandboxed)
@@ -1181,12 +1770,28 @@ async function main() {
   // Reap-on-completion (workflows/simple.ts) handles the common case; this
   // sweeps failed/crashed leftovers and bounds the reusable per-PR cache. It
   // replaces the out-of-band host cron (scripts/cleanup-sandboxes.sh).
+  // The `kubernetes` backend reclaims idle cluster PVCs (Plan 5) AND sweeps the
+  // host-local artifact dirs its pods upload to (`<sandboxDir>/<taskId>`, since
+  // the artifact store is host-local on every backend) — both via
+  // `sweepK8sSandboxes`, which stands in for the host-dir sweep that's disabled
+  // on k8s. Every other backend keeps the original host-dir sweep.
   const sweepCfg = config.cleanup.sandbox;
   if (sweepCfg.enabled) {
     cron.registerDirect({
       name: "sandbox-sweep",
       schedule: sweepCfg.sweepSchedule,
       handler: async () => {
+        if (config.sandbox === "kubernetes") {
+          await sweepK8sSandboxes({
+            retentionHours: sweepCfg.retentionHours,
+            maxIdlePVCs: sweepCfg.maxDirs,
+            maxDirs: sweepCfg.maxDirs,
+            stateDir: config.stateDir,
+            sandboxDir: config.sandboxDir,
+            trigger: "cron",
+          });
+          return;
+        }
         sweepSandboxes({
           stateDir: config.stateDir,
           sandboxDir: config.sandboxDir,
@@ -1197,17 +1802,47 @@ async function main() {
     });
   }
 
+  // GitHub feedback signals (issue #255) — OFF by default (`feedback.github`).
+  // GitHub sends no webhook for reactions, so this is the only half of the
+  // feature that has a recurring cost, and it should be switched on knowingly.
+  // Two pieces: anchor discovery on each terminal run (one listing, attributed
+  // while we still hold the run), and a batched GraphQL refresh on a cron
+  // (100 anchors per request, one rate-limit point each).
+  if (config.feedback.enabled && config.feedback.github && github) {
+    const feedbackDeps = {
+      db,
+      github,
+      botLogin: config.botLogin,
+      otel: config.feedback.otel,
+      windowDays: config.feedback.windowDays,
+      maxAnchorsPerTick: config.feedback.maxAnchorsPerTick,
+      retentionDays: config.feedback.retentionDays,
+    };
+    db.runs.addTerminalObserver(feedbackAnchorObserver(feedbackDeps));
+    cron.registerDirect({
+      name: "feedback-poll",
+      schedule: config.feedback.pollSchedule,
+      handler: () => pollFeedbackReactions(feedbackDeps).then(() => {}),
+    });
+    logger("feedback").info("GitHub reaction polling enabled", {
+      schedule: config.feedback.pollSchedule,
+      windowDays: config.feedback.windowDays,
+      maxAnchorsPerTick: config.feedback.maxAnchorsPerTick,
+    });
+  }
+
   // Start everything
+  const mainLog = logger("main");
   await registry.startAll();
-  console.log("[main] All connectors started");
-  console.log("[main] Cron jobs registered");
+  mainLog.info("All connectors started");
+  mainLog.info("Cron jobs registered");
 
   // Open the shared HTTP listener. All routes (admin, /api/*, /health,
   // /webhooks/github, /webhooks/slack) are registered synchronously above, so
   // the port is ready the moment it opens. Always boots — chat-only, PAT, and
   // full GitHub App modes alike.
   const server = serve({ fetch: app.fetch, port: config.port, hostname: "0.0.0.0" });
-  console.log(`[http] Listening on port ${config.port}`);
+  logger("http").info("Listening", { port: config.port });
 
   // Chat runs in-process via pi-ai — no long-lived server to boot.
 
@@ -1217,18 +1852,18 @@ async function main() {
   // failed and re-dispatch each run so the runner can pick up after the last
   // completed phase. Skips 'paused' runs — those intentionally wait for a
   // human approval and are resumed via the dashboard / GitHub comment flow.
-  resumeOrphanedWorkflows(resumeOpts).catch((err) => console.error("[main] Resume sweep failed:", err));
+  resumeOrphanedWorkflows(resumeOpts).catch((err) => mainLog.error("Resume sweep failed", { err }));
 
   // Start the periodic admission sweeper. Also admits any queued runs that
   // were persisted before the harness restarted (e.g. a queued run survived
   // a crash; the sweeper picks it up on the first tick).
   admissionController.start();
 
-  console.log("[main] Ready to receive events");
+  mainLog.info("Ready to receive events");
 
   // Graceful shutdown
   const shutdown = async () => {
-    console.log("\n[main] Shutting down...");
+    mainLog.info("Shutting down");
     cron.stopAll();
     admissionController.stop();
     await registry.stopAll();
@@ -1248,7 +1883,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("[main] Fatal error:", err);
+  logger("main").fatal("Fatal error", { err });
   // Exit 78 (EX_CONFIG) to signal Docker restart policy that looping won't help.
   // Common causes: bad PEM, wrong App ID, missing env vars.
   const msg = err?.message || "";

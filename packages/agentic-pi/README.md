@@ -41,9 +41,38 @@ single line you parse.
 ### 3. GitHub repo operations as first-class native tools
 
 Pi explicitly does not support MCP. agentic-pi ships a native Pi extension
-exposing **31 GitHub tools** ported from lastlight's `mcp-github-app`:
-clone/push, issues, PRs, reviews, labels, search. Tool names are prefixed
-with `github_`.
+exposing **36 GitHub tools** ported from lastlight's `mcp-github-app`:
+clone/publish, issues, PRs, reviews, labels, CI reads, search. Tool names are
+prefixed with `github_`.
+
+**Reads are projected, not raw** (`extensions/github/projections.ts`). Octokit
+returns the REST payload verbatim, which is written for API clients rather than
+for a context window: a dozen `*_url` fields per object, a ~1 kB `user` object
+per actor, a complete repository object under a PR's `head` *and* `base`, and
+then the genuinely large text — a Renovate changelog body, a lockfile `patch`, a
+long review thread. Measured raw against real repos: `listPullRequests` 468 kB,
+`listIssues` 254 kB, `listCommits` 142 kB, one Renovate `getPullRequest` 76 kB.
+An agent re-sends every one of those on each subsequent step of its loop, so the
+cost is the payload times the turns that follow it.
+
+Three rules bound it, applied uniformly so an agent learns one shape:
+
+1. **Project** to the fields prompts branch on — URLs, nested actor/repo objects
+   and reaction counts are dropped. List entries carry no body; fetch one with
+   `github_get_issue` / `github_get_pull_request`.
+2. **Cap prose, and name the lift.** Bodies, review text and commit messages are
+   truncated at 4000 chars and a file's `patch` at 2000, with a notice that names
+   the flag returning it whole (`full_body`, `full_bodies`, `full_messages`,
+   `full_patch`) — so the escape hatch is found at the moment it matters instead
+   of costing system-prompt tokens on every run that doesn't need it.
+3. **Page, don't cut, the item count.** Every list returns
+   `{ items, page, per_page, has_more, next_page }`, so a long comment thread is
+   paged rather than silently truncated. Search adds the API's real
+   `total_count`.
+
+One default is worth calling out: `github_list_pull_request_files` **omits each
+file's `patch`** unless you pass `include_patch`. A lockfile patch alone runs to
+tens of thousands of lines, and it was 86% of a measured 7-file payload.
 
 Auth is opinionated: **GitHub App credentials preferred**, static
 `GITHUB_TOKEN` only as a low-trust fallback. JWT-minted installation tokens
@@ -52,16 +81,74 @@ via a github.com-scoped `http.extraheader` (Basic `x-access-token:<token>`)
 injected as `GIT_CONFIG_*` env on the git children we spawn — nothing on disk,
 and the token can carry any character GitHub returns.
 
+Publishing is opinionated too: `github_publish` replaces `git add`/`git
+commit`/`git push` in the `repo-write` profile. A commit built by `git` inside
+the sandbox is unsigned, and on a repository with GitHub's
+`required_signatures` branch-protection rule, one unsigned commit anywhere in
+a branch blocks the pull request permanently — no token fixes that, because
+the token authenticates the *push* while a signature is a property of the
+*commit object*. `github_publish` diffs the working tree against the branch's
+current remote tip (local commits the agent already made are folded in — the
+published commit is the working tree as it stands, or the part of it the caller
+scopes to; see `include`/`exclude` below) and hands the change set
+to GitHub's GraphQL `createCommitOnBranch` mutation, which builds and signs
+the commit server-side under the App's bot identity. No signing key is held
+anywhere.
+
+Five things worth knowing:
+
+- **The change set is scopeable.** By default it is the whole working tree
+  (minus anything `.gitignore`d, since it stages with `git add -A`). `include`
+  restricts it to the given pathspecs — everything else stays at its base state
+  and so produces no diff at all — and `exclude` subtracts from whatever is
+  left, so the two compose. A caller that writes artifacts into the checkout
+  alongside the change under review wants `include`; one that writes them into
+  an otherwise-publishable tree wants `exclude`.
+
+- **It refuses what it cannot express, atomically, before any remote write.**
+  `FileAddition` carries a path and base64 contents, not a file mode, so a
+  genuine mode change is rejected up front — a new executable file, a new
+  symlink, a submodule pointer, or flipping an existing file's mode either way
+  (including `100755` → `100644`, which GitHub would otherwise silently leave
+  unchanged rather than actually downgrade). A content-only edit to a file
+  that is already `100755` is fine — GitHub preserves the base tree's mode on
+  those. This runs before the branch is even created, when publishing to a
+  branch that doesn't exist on GitHub yet, and there's no fallback to
+  `git push` — that would produce exactly the unsigned commit this tool
+  exists to avoid.
+- **A tip that moved is refused at both ends, with no retry.** The mutation
+  pins `expectedHeadOid`, so a branch that moves between the read and the write
+  is rejected (`STALE_DATA`) instead of being clobbered. That covers only half
+  of it: a tip that had ALREADY moved before the read passes
+  `expectedHeadOid` happily, and the change set is computed as "working tree
+  vs. that tip", so every file the other party added would be recorded as a
+  deletion. So the tool also checks the tip is in the local checkout's history
+  (`git merge-base --is-ancestor`) and refuses before writing anything if it is
+  not, naming the recovery for each cause: `git reset --mixed` when the tip is a
+  commit an earlier publish landed, and commit-then-merge when somebody else
+  pushed (a bare `git merge` aborts on the uncommitted changes this refusal
+  always fires with). It never re-diffs
+  and retries on its own; a `STALE_DATA` failure names itself in the error and
+  re-running the tool call is the fix.
+- **There's a size ceiling.** GitHub caps the whole request at 45 MB — the sum
+  of every addition in one publish, not a per-file limit. Ordinary publishes
+  (source edits, a lockfile) are far under it.
+- **It asserts its own signature.** Every publish checks GitHub's response and
+  fails loudly if the commit came back unsigned — including the `signature:
+  null` GraphQL returns for a commit with no signature at all — or with a
+  signature that does not verify. The commit is already on the branch by then,
+  so a silent failure here would otherwise only surface later as a blocked PR.
+
 ### 4. Permission profiles as a registration-time gate
 
 `--profile <name>` picks one of four allowlists ported from lastlight:
 
 | Profile | Tool count | What it can do |
 | --- | --- | --- |
-| `read` | 18 | Repo/issue/PR reads + search. No mutations. |
-| `issues-write` | 24 | Read + issue/comment/label mutations. |
-| `review-write` | 26 | Read + issues + PR review/comment + create PR. |
-| `repo-write` | 31 | Everything: clone, push, branch, file edits, merge. |
+| `read` | 21 | Repo/issue/PR/CI reads + search. No mutations. |
+| `issues-write` | 28 | Read + issue/comment/label mutations. |
+| `review-write` | 30 | Read + issues + PR review/comment + create PR. |
+| `repo-write` | 36 | Everything: clone, publish, branch, file edits, merge. |
 
 Tools outside the active profile are **never registered** — the LLM cannot see
 them in the system prompt and cannot call them. This is a stronger guarantee
@@ -649,6 +736,11 @@ const result = await run({
     CI_BUILD_REF: process.env.GITHUB_SHA ?? "",
   },
 
+  // This run's GitHub credential, REPLACING process.env for the github_*
+  // tools. Pass it whenever runs can overlap in one process — see
+  // "Notes for in-process callers".
+  githubAuthEnv: { GITHUB_TOKEN: scopedTokenForThisRun },
+
   // Optional observability hooks. Both are pure callbacks — no I/O happens
   // unless you do something with the values.
   onEvent: (record) => myShim.writeJsonl(record),
@@ -703,9 +795,26 @@ console.log(result.records.length);      // full event log
 
 ### Notes for in-process callers
 
-- agentic-pi reuses the host process's env vars (`OPENAI_API_KEY`,
-  `GITHUB_APP_ID`, …). If your orchestrator runs multiple
-  workflows with different credentials, `process.env` is the seam to vary.
+- agentic-pi reads the host process's env vars (`OPENAI_API_KEY`,
+  `GITHUB_APP_ID`, …) for anything not passed explicitly.
+- **Do not vary GitHub credentials through `process.env` when runs can
+  overlap.** `process.env` is one global: a token written there for run A is
+  visible to run B, and the extension reads it *late* (after the model runtime
+  and registry are built), so B can capture A's token — wrong repo, and
+  read-only if A's profile was narrower, which surfaces as every `github_*`
+  write failing with `403 Resource not accessible by integration` while `git`
+  keeps working. Interleaved restores can also leave the host env permanently
+  wrong. Pass **`githubAuthEnv`** instead: it replaces `process.env` for that
+  run, so each concurrent run gets exactly the credential you handed it (and
+  the host's App PEM can't leak into a run given a downscoped token).
+
+  ```ts
+  await Promise.all([
+    run({ ...a, profile: "repo-write", githubAuthEnv: { GITHUB_TOKEN: tokenA } }),
+    run({ ...b, profile: "read",       githubAuthEnv: { GITHUB_TOKEN: tokenB } }),
+  ]);
+  ```
+
 - `cwd` is per-call; you can run multiple agents in parallel against
   different working directories from the same orchestrator process.
 - Sessions are created fresh each call. Pass `noSession: true` if you

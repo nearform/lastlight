@@ -1,4 +1,21 @@
 import { describe, it, expect, vi } from "vitest";
+
+// src/notify/notifier.ts now logs a transport failure via the pino LoggerPort
+// instead of console — mock the logger module so the suite's stderr stays
+// free of real pino JSON (the "survives one failing" test below deliberately
+// triggers this path; no assertions depend on the logged content).
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+    child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { ProgressNotifier } from "#src/notify/notifier.js";
 import type { NotifierTransport, ProgressModel } from "#src/notify/types.js";
 

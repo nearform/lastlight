@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentWorkflowDefinition } from "#src/workflows/schema.js";
 import type { TemplateContext } from "#src/workflows/templates.js";
 import type { RunnerCallbacks, ApprovalGateConfig } from "#src/workflows/runner.js";
-import type { StateDb } from "#src/state/db.js";
+import { StateDb } from "#src/state/db.js";
 import type { ProgressReporter, ProgressModel, ProgressStep, StepStatus } from "#src/notify/types.js";
 
 // Mock the executor so we don't make real agent calls. `executeCommand` backs
@@ -31,6 +31,7 @@ vi.mock("child_process", () => ({ execSync: vi.fn() }));
 import { executeAgent, executeCommand } from "#src/engine/agent-executor.js";
 import { loadPromptTemplate } from "#src/workflows/loader.js";
 import { runWorkflow, gitAccessProfileForWorkflow, gitSandboxAccessForWorkflow } from "#src/workflows/runner.js";
+import { QuotaExceededError } from "#src/sandbox/k8s/quota.js";
 
 const mockExecuteAgent = vi.mocked(executeAgent);
 const mockExecuteCommand = vi.mocked(executeCommand);
@@ -247,6 +248,124 @@ describe("runWorkflow — basic phase execution", () => {
     expect(names).toContain("architect");
     expect(names).toContain("executor");
     expect(names).not.toContain("pr");
+  });
+});
+
+describe("runWorkflow — backpressure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns backpressure:true when a phase hits error_quota", async () => {
+    mockExecuteAgent.mockResolvedValue({
+      success: false,
+      output: "",
+      turns: 0,
+      durationMs: 1,
+      error: "exceeded quota: pods",
+      stopReason: "error_quota",
+    });
+
+    const result = await runWorkflow(SIMPLE_WORKFLOW, BASE_CTX, {} as never, {});
+    expect(result.success).toBe(false);
+    expect(result.backpressure).toBe(true);
+  });
+
+  it("requeues (backpressure) when a quota rejection propagates as a THROW on a single-phase workflow", async () => {
+    // The k8s incident: issue-triage is ONE agent phase, so a quota-rejected
+    // pod-create fails the only phase and throws OUT of the engine (no cascade
+    // to skip like a multi-phase workflow), bypassing the post-await quota.hit
+    // check. The run must still requeue, not terminal-fail red.
+    // Production path: the pod-create quota rejection propagates as a THROWN
+    // QuotaExceededError (executeAgent rejects, not resolves), so noteStopReason's
+    // `.then` is skipped. The run must still be flagged as backpressure (via the
+    // port `.catch`) and requeue, not terminal-fail.
+    mockExecuteAgent.mockRejectedValue(new QuotaExceededError("pod create rejected by ResourceQuota"));
+
+    const result = await runWorkflow(SIMPLE_WORKFLOW, BASE_CTX, {} as never, {});
+    expect(result.success).toBe(false);
+    expect(result.backpressure).toBe(true);
+  });
+
+  it("does not set backpressure for a normal phase failure", async () => {
+    mockExecuteAgent.mockResolvedValue({
+      success: false,
+      output: "",
+      turns: 0,
+      durationMs: 1,
+      error: "agent crashed",
+      stopReason: "error_agent",
+    });
+
+    const result = await runWorkflow(SIMPLE_WORKFLOW, BASE_CTX, {} as never, {});
+    expect(result.success).toBe(false);
+    expect(result.backpressure).toBeFalsy();
+  });
+
+  it("detects error_quota from a bash/script phase via executeCommand", async () => {
+    const workflow: AgentWorkflowDefinition = {
+      kind: "agent",
+      name: "bash-quota",
+      phases: [
+        { name: "phase_0", type: "context" },
+        { name: "run_it", type: "bash", command: "echo hi" },
+      ],
+    };
+    mockExecuteCommand.mockResolvedValue({
+      success: false,
+      output: "",
+      turns: 0,
+      durationMs: 1,
+      error: "exceeded quota: pods",
+      stopReason: "error_quota",
+    });
+
+    const result = await runWorkflow(workflow, BASE_CTX, {} as never, {});
+    expect(result.backpressure).toBe(true);
+  });
+
+  it("leaves the run 'running' on backpressure so the caller can requeue it", async () => {
+    // Regression (the root cause #8/#11 missed): `failWorkflow` used to flip the
+    // run to `failed` before `simple.ts`/`resume.ts` reacted to `backpressure` —
+    // and `requeueRunning` is CAS-guarded on `status = 'running'`, so the requeue
+    // then no-oped and the run stayed terminally `failed`. A quota rejection must
+    // leave the row `running` so the backpressure requeue can win. Uses a REAL
+    // store (not makeMockDb) so the finishRun/requeue ordering is observable.
+    const db = new StateDb(":memory:");
+    try {
+      db.runs.createRun({
+        id: "run-quota",
+        workflowName: "simple",
+        triggerId: "acme/widget#42",
+        currentPhase: "architect",
+        status: "running",
+        startedAt: new Date().toISOString(),
+      });
+      mockExecuteAgent.mockResolvedValue({
+        success: false,
+        output: "",
+        turns: 0,
+        durationMs: 1,
+        error: "pods is forbidden: exceeded quota: sandbox-quota",
+        stopReason: "error_quota",
+      });
+
+      const result = await runWorkflow(
+        SIMPLE_WORKFLOW,
+        BASE_CTX,
+        {} as never,
+        {},
+        db,
+        undefined,
+        undefined,
+        "run-quota",
+      );
+
+      expect(result.backpressure).toBe(true);
+      expect(db.runs.getRun("run-quota")?.status).toBe("running");
+    } finally {
+      db.close();
+    }
   });
 });
 
@@ -492,6 +611,8 @@ describe("runWorkflow — requires_sandbox gate", () => {
       "gated:demo",
       expect.any(String),
       undefined,
+      // The (owner, BARE repo) pair, not a qualified string (issue #279).
+      expect.any(String),
       expect.any(String),
     );
   });
@@ -537,6 +658,8 @@ describe("runWorkflow — requires_sandbox gate", () => {
       "qa:browser",
       expect.any(String),
       undefined,
+      // The (owner, BARE repo) pair, not a qualified string (issue #279).
+      expect.any(String),
       expect.any(String),
     );
   });

@@ -1,0 +1,840 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+
+/** The dispatch gate, in the order the code evaluates it. Drives the ladder diagram. */
+const guards = [
+	{ name: 'the PR read failed',        exit: 'read-degraded',      kind: 'silent' },
+	{ name: 'hold label applied',        exit: 'on-hold',            kind: 'speaks' },
+	{ name: 'another run in flight',     exit: 'run-in-flight',      kind: 'speaks' },
+	{ name: 'the PR is from a fork',     exit: 'fork-pr',            kind: 'speaks' },
+	{ name: 'the base branch is red',    exit: 'upstream-broken',    kind: 'silent' },
+	{ name: 'we already escalated',      exit: 'escalated',          kind: 'silent' },
+	{ name: 'cost budget spent',         exit: 'budget-exhausted',   kind: 'escalate' },
+	{ name: 'attempt budget spent',      exit: 'attempts-exhausted', kind: 'escalate' },
+	{ name: 'last class not retryable',  exit: 'not-retryable',      kind: 'escalate' },
+	{ name: 'this head already assessed',exit: 'already-assessed',   kind: 'silent' },
+];
+
+const exitColour: Record<string, string> = {
+	silent: 'var(--diag-line)',
+	speaks: 'var(--gold)',
+	escalate: 'var(--orange)',
+};
+
+const rowH = 52;
+const boxH = 36;
+const ladderH = guards.length * rowH + 80;
+---
+<DocsLayout
+	slug="pr-state"
+	description="How Last Light models the state of a pull request — one resolved snapshot per dispatch, pure decisions over it, and the gate every fix, review and merge run crosses."
+>
+	<p>
+		A pull request is the unit of a release workflow. It is where CI, code
+		review, dependency updates and merge policy all meet — so the moment you put
+		automation on it, several actors are working the same pull request at once: a
+		fix run, a reviewer, a merge assessor, a nightly sweep, and a human
+		maintainer. They only compose if they all agree on <strong>one answer to
+		&ldquo;what is the state of this PR right now, and what have we already
+		tried?&rdquo;</strong>
+	</p>
+
+	<p>
+		When they don't agree, the failures are the ones teams actually report: two
+		bots cloning and pushing the same branch; the same &ldquo;I gave up&rdquo;
+		comment posted again on every push; a review of a tree that a fix run is
+		rewriting underneath it, stale before it lands; a dependency PR that quietly
+		stopped being worked on with nothing on it to say so — and no way for a
+		maintainer to tell <em>still working on it</em> from <em>gave up three days
+		ago</em>. You cannot automate a release workflow on top of state that every
+		reader derives for itself.
+	</p>
+
+	<p>
+		So Last Light resolves it <strong>once</strong>. Every route — a webhook, an
+		<code>@last-light</code> comment, a cron sweep, the API — passes through one
+		choke point that builds a single snapshot of the pull request, and every
+		policy question after that is a pure function over the snapshot. One answer
+		per PR, one reason per refusal, and that reason rendered identically in the
+		log line, in the comment on the PR and in the dashboard.
+	</p>
+
+	<figure class="docs-figure">
+		<img
+			src="/screenshots/pr-state.png"
+			alt="The PR state panel on a Last Light run detail page: head SHA f50ffd4232cc, attempt 2 of 3, checks passing, 3 settled checks, base checks passing, 0 of 2 flaky deferrals, $0.59 spent on this problem, prior diagnosis reproducible, a mayMerge decision of true with the reason 'checks-passing: 3 settled check(s), all green', the attempt-one marker line, the push gate box and a PR journal note"
+			loading="lazy"
+			width="2668"
+			height="946"
+		/>
+		<figcaption>
+			The recorded snapshot on a run's detail panel. Everything described on this
+			page, on one real pull request — including the decision the run was handed
+			and the sentence explaining it.
+		</figcaption>
+	</figure>
+
+	<div class="docs-callout note">
+		<div class="docs-callout-body">
+			<strong>There is no status column on a pull request.</strong> The state is
+			re-derived on every dispatch — live reads from GitHub, folded together with
+			the PR's own run history. That is why removing a label or pushing a commit
+			changes the answer immediately, with nothing to migrate and nothing to
+			clean up by hand.
+		</div>
+	</div>
+
+	<h2>One snapshot, resolved once</h2>
+
+	<p>
+		Before this existed, what the harness &ldquo;knew&rdquo; about a pull request
+		was read from <strong>six</strong> different places, each fetching an
+		overlapping subset and each free to disagree, over state scattered across
+		<strong>seven</strong> stores — labels, a check run, the run's context, the
+		run's scratch space, execution status, live GitHub reads, and a file in the
+		sandbox. Three shipped bugs came directly out of that, including a
+		concurrency guard that had <em>never once matched a row</em>, so nothing had
+		ever stopped two agents pushing to the same branch.
+	</p>
+
+	<p>
+		Now a single <code>PrState</code> is resolved at the one point every route
+		crosses, and rides down onto the run so nothing is fetched twice.
+	</p>
+
+	<div class="state-diagram">
+		<svg viewBox="0 0 800 220" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Six event routes converge on a single resolve step, then a single gate, which answers either run or skip with a reason">
+			<rect x="14" y="10" width="150" height="28" rx="6" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="89" y="28" text-anchor="middle" fill="var(--text)" font-size="10" font-family="Inter">GitHub webhook</text>
+			<rect x="14" y="44" width="150" height="28" rx="6" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="89" y="62" text-anchor="middle" fill="var(--text)" font-size="10" font-family="Inter">@last-light comment</text>
+			<rect x="14" y="78" width="150" height="28" rx="6" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="89" y="96" text-anchor="middle" fill="var(--text)" font-size="10" font-family="Inter">cron fan-out</text>
+			<rect x="14" y="112" width="150" height="28" rx="6" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="89" y="130" text-anchor="middle" fill="var(--text)" font-size="10" font-family="Inter">Slack</text>
+			<rect x="14" y="146" width="150" height="28" rx="6" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="89" y="164" text-anchor="middle" fill="var(--text)" font-size="10" font-family="Inter">/api/run</text>
+			<rect x="14" y="180" width="150" height="28" rx="6" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="89" y="198" text-anchor="middle" fill="var(--text)" font-size="10" font-family="Inter">admin retry</text>
+
+			<path d="M164 24 H186 M164 58 H186 M164 92 H186 M164 126 H186 M164 160 H186 M164 194 H186" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<path d="M186 24 V194" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<path d="M186 109 H214" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#a-arrow)"/>
+
+			<rect x="218" y="80" width="170" height="58" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="303" y="104" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">resolvePrState</text>
+			<text x="303" y="121" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">one snapshot per dispatch</text>
+
+			<path d="M388 109 H418" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#a-arrow)"/>
+
+			<rect x="422" y="80" width="200" height="58" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="522" y="104" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">resolveDispatchDisposition</text>
+			<text x="522" y="121" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">pure — no I/O</text>
+
+			<path d="M622 98 H654" stroke="var(--teal)" stroke-width="1.5" marker-end="url(#a-arrow-teal)"/>
+			<path d="M622 122 H654" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#a-arrow)"/>
+
+			<rect x="658" y="76" width="126" height="42" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="721" y="102" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">run</text>
+			<rect x="658" y="128" width="126" height="42" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="721" y="147" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">skip</text>
+			<text x="721" y="161" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">…with a reason</text>
+
+			<defs>
+				<marker id="a-arrow" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--diag-line)"/></marker>
+				<marker id="a-arrow-teal" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--teal)"/></marker>
+			</defs>
+		</svg>
+	</div>
+
+	<p>
+		The snapshot has two halves. The first is <strong>live from GitHub</strong> —
+		what is true about the pull request at this instant:
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Field</th><th>What it records</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>headSha</code>, <code>headAuthor</code>, <code>headIsOurs</code></td><td>The head commit and who wrote it. <code>headIsOurs</code> is what tells our own fix commit apart from a maintainer's push</td></tr>
+			<tr><td><code>headRef</code>, <code>baseRef</code></td><td>The PR's real base, not the repository's default branch</td></tr>
+			<tr><td><code>isDraft</code>, <code>isFork</code>, <code>headRepoFullName</code></td><td>Whether it can be reviewed, and whether there is a branch we could push to at all</td></tr>
+			<tr><td><code>labels</code>, <code>title</code>, <code>body</code></td><td>Read once, used by every guard and projected into the prompts</td></tr>
+			<tr><td><code>checksState</code>, <code>settledCheckCount</code></td><td><code>passing</code> / <code>failing</code> / <code>pending</code> / <code>none</code>, and how many checks actually settled. <em>None is not passing</em></td></tr>
+			<tr><td><code>baseChecksState</code></td><td>Whether the base branch is itself red — the live fact behind <code>upstream-broken</code></td></tr>
+			<tr><td><code>botReviewAtHead</code></td><td>Our own review at this exact commit, if any</td></tr>
+			<tr><td><code>ciReport</code></td><td>The failing jobs and their logs, fetched only when the checks are red</td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		The second half is <strong>derived from our own history</strong>, folded from
+		the previous runs on this pull request — not on this workflow:
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Field</th><th>What it records</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>attempt</code>, <code>priorAttempts</code></td><td>Which attempt this is, and one bounded line describing each earlier one</td></tr>
+			<tr><td><code>priorDiagnosisClass</code></td><td>What the previous attempt concluded — the only prior verdict any gate reads</td></tr>
+			<tr><td><code>flakyDeferrals</code></td><td>Consecutive <code>flaky</code> verdicts, so &ldquo;flaky&rdquo; cannot be free forever</td></tr>
+			<tr><td><code>notes</code></td><td>The PR journal — what the agent chose to remember, across every PR-scoped workflow</td></tr>
+			<tr><td><code>escalatedAtSha</code></td><td>The commit one of our runs gave up at. <strong>This</strong> is the escalation, not the label</td></tr>
+			<tr><td><code>forkNoticedAtSha</code></td><td>That we have already explained, once, that we cannot push to a fork</td></tr>
+			<tr><td><code>intervention</code></td><td>The last time a human said &ldquo;try again&rdquo; — when, at which commit, and how the ask arrived</td></tr>
+			<tr><td><code>costBaselineUsd</code>, <code>cumulativeCostUsd</code></td><td>Spend on the <em>current problem</em>, not over the PR's lifetime</td></tr>
+			<tr><td><code>assessedHeadShaByWorkflow</code></td><td>Which workflow has already handled which commit — the idempotency record</td></tr>
+			<tr><td><code>runInFlight</code></td><td>Whether another Last Light run already owns this PR</td></tr>
+			<tr><td><code>readErrors</code></td><td>Which GitHub reads failed while building the snapshot</td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		Resolving a snapshot <strong>never throws</strong>. Every read is
+		independently best-effort and degrades to a value that <em>cannot</em> cause a
+		skip, because a bad minute at GitHub should not silently stop the bot. There
+		is exactly one exception, and it is deliberate: if reading the pull request
+		<em>itself</em> fails, all of its degraded values are the permissive ones —
+		no labels, not a fork, no head SHA — so the snapshot would look perfectly
+		healthy while we know nothing at all. That one failure is treated as
+		&ldquo;come back later&rdquo; and outranks every other guard.
+	</p>
+
+	<h2>Every decision is a pure function over it</h2>
+
+	<p>
+		Once the snapshot exists, no policy question needs I/O. Each of these takes
+		the snapshot plus the run's already-resolved config and returns
+		<code>&#123; decision, reason, inputs &#125;</code> — never a bare enum.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Function</th><th>Answers</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>resolveDispatchDisposition</code></td><td>May this workflow run against this PR right now? The one gate every route crosses</td></tr>
+			<tr><td><code>resolveFixDisposition</code></td><td>…for a fix run (<a href="/docs/workflows/pr-fix">PR fix</a> or <a href="/docs/workflows/dependabot-ci-fix">Dependabot CI fix</a>)</td></tr>
+			<tr><td><code>resolveMergeDisposition</code></td><td>…for <a href="/docs/workflows/dependabot-pr-merge">Dependabot PR merge</a></td></tr>
+			<tr><td><code>resolveReviewTrigger</code></td><td>…for <a href="/docs/workflows/pr-review">PR review</a> — and it is the only implementation of <code>review.trigger</code> anywhere</td></tr>
+			<tr><td><code>mayMerge</code></td><td>May this PR be landed <em>at all</em>, by either mechanism? Gates the action, not the dispatch</td></tr>
+			<tr><td><code>renderContext</code></td><td>Projects the snapshot into the variables the prompts render</td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		The <strong>reason is produced by the decision</strong>, not reconstructed
+		afterwards by whoever is displaying it. That is the whole point of returning a
+		sentence beside the verdict: the log line, the comment posted on the pull
+		request and the dashboard panel are three renderings of one string, instead of
+		three prose variants that drift apart. Being pure also means the entire gate
+		is testable against literal fixtures — no GitHub mock, no sandbox.
+	</p>
+
+	<h2>The gate, in order</h2>
+
+	<p>
+		Every PR-scoped dispatch walks the same ladder and takes the first exit that
+		applies. The ordering is not cosmetic — several of these are deliberately
+		above others so that a PR is never labelled for a problem that is not the one
+		blocking it.
+	</p>
+
+	<div class="state-diagram">
+		<svg viewBox={`0 0 620 ${ladderH}`} fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A vertical ladder of ten guards, each with a labelled exit, falling through to run">
+			{guards.map((g, i) => (
+				<g>
+					<rect x="14" y={i * rowH + 8} width="242" height={boxH} rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+					<text x="135" y={i * rowH + 31} text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">{g.name}</text>
+					<path d={`M256 ${i * rowH + 26} H300`} stroke={exitColour[g.kind]} stroke-width="1.5"/>
+					<path d={`M298 ${i * rowH + 22} L305 ${i * rowH + 26} L298 ${i * rowH + 30} Z`} fill={exitColour[g.kind]}/>
+					<text x="312" y={i * rowH + 30} fill={exitColour[g.kind]} font-size="10" font-family="JetBrains Mono">{g.exit}</text>
+					<path d={`M135 ${i * rowH + 8 + boxH} V ${(i + 1) * rowH + 8}`} stroke="var(--diag-line)" stroke-width="1.5"/>
+				</g>
+			))}
+			<rect x="14" y={guards.length * rowH + 8} width="242" height={boxH} rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="135" y={guards.length * rowH + 31} text-anchor="middle" fill="var(--teal)" font-size="11" font-family="Inter">run</text>
+			<text x="312" y={guards.length * rowH + 30} fill="var(--diag-grey)" font-size="10" font-family="JetBrains Mono">attempt N of max</text>
+		</svg>
+	</div>
+
+	<p>
+		Colour is the <em>kind</em> of exit, and it is the part worth remembering:
+		<span class="key key-silent">grey</span> leaves nothing at all on the pull
+		request, <span class="key key-speaks">gold</span> says something exactly once,
+		and <span class="key key-escalate">orange</span> applies
+		<code>requires-human</code> and posts one comment.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Exit</th><th>Why</th><th>What lands on the PR</th><th>What clears it</th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>read-degraded</code></td><td>We could not read the PR, so every guard below would be reading defaults</td><td>Nothing</td><td>The next event, or a cron tick</td></tr>
+			<tr><td><code>on-hold</code></td><td>A maintainer applied the hold label</td><td>Nothing — except one reply if a human asked directly</td><td>Removing the label</td></tr>
+			<tr><td><code>run-in-flight</code></td><td>Another Last Light run already owns this PR</td><td>Nothing — except a reply to whoever asked</td><td>That run finishing; a cron picks it up</td></tr>
+			<tr><td><code>fork-pr</code></td><td>The head branch is not on this repository</td><td>One comment, once per PR</td><td>Nothing — it is a fact about the PR</td></tr>
+			<tr><td><code>upstream-broken</code></td><td>The base branch is red, so a fix here cannot make CI green</td><td>Nothing</td><td>The base going green</td></tr>
+			<tr><td><code>escalated</code></td><td>We already gave up at this commit</td><td>Nothing — it was said once already</td><td>Someone else's push, or a retry</td></tr>
+			<tr><td><code>budget-exhausted</code></td><td><code>fix.maxCostUsd</code> spent on this problem</td><td><code>requires-human</code> + one comment</td><td>A push or a retry</td></tr>
+			<tr><td><code>attempts-exhausted</code></td><td><code>fix.maxAttempts</code> spent</td><td><code>requires-human</code> + one comment</td><td>A push or a retry</td></tr>
+			<tr><td><code>not-retryable</code></td><td>The last diagnosis names a class no further attempt can help with</td><td><code>requires-human</code> + one comment</td><td>A push or a retry</td></tr>
+			<tr><td><code>already-assessed</code></td><td>A run has already handled this exact commit</td><td>Nothing</td><td>A new head commit</td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		Two orderings carry most of the design. <strong>The failed read sits above the
+		hold</strong>, because an unreadable PR reports no labels — so on that path we
+		do not know whether the hold is even there, and &ldquo;we could not read
+		it&rdquo; outranks every reading of it. And <strong>the three escalating exits
+		sit below every other guard</strong>, so a fork PR whose budget happens to be
+		spent is never labelled <code>requires-human</code> for a problem its author
+		could not fix anyway.
+	</p>
+
+	<p>
+		An explicit request from a maintainer — an <code>@last-light</code> comment, a
+		review request, the API — overrides exactly three of these:
+		<code>escalated</code>, <code>not-retryable</code> and
+		<code>already-assessed</code>. Asking directly is an intentional override of
+		<em>policy</em>. It does not override the <em>facts</em>: a fork PR, a red base
+		branch and a spent budget do not care how nicely you ask, and the hold beats it
+		outright.
+	</p>
+
+	<h3>Deciding and acting are separate</h3>
+
+	<p>
+		The functions above only decide. A second, shared step applies the verdict, and
+		it is what keeps a nightly sweep and a live webhook behaving identically: log
+		the decision, return silently for a hold, a lock drop or a degraded read,
+		record a retry ask that could not be served yet, and otherwise escalate. The
+		courtesies that need a human on the other end — the reply to a dropped request,
+		the fork notice, the API's status code — belong to the route that has one, not
+		to the decision.
+	</p>
+
+	<div class="docs-callout note">
+		<div class="docs-callout-body">
+			<strong>There is no backoff and no cooldown here.</strong> Nothing sleeps and
+			retries later on a timer. What paces the loop instead is the per-commit
+			dedup (a given head SHA is assessed once), the attempt and cost budgets, and
+			the cron schedules below. A guard that says &ldquo;come back later&rdquo;
+			means literally that: the next event, or the next sweep.
+		</div>
+	</div>
+
+	<h2>One run per pull request</h2>
+
+	<p>
+		Only one Last Light run may be in flight for a given PR at a time, across
+		<em>every</em> workflow that declares itself PR-scoped — packaged, that is PR
+		fix, Dependabot CI fix, Dependabot PR merge and PR review. The set is derived
+		from each workflow's own definition rather than a hardcoded list, so an
+		overlay that forks one of them keeps the guard.
+	</p>
+
+	<p>
+		This closes cases that were genuinely reachable before: an
+		<code>@last-light fix this</code> comment running concurrently with the nightly
+		sweep's own fix run — two agents, two clones of one branch, both pushing — and
+		auto-merge being enabled on a PR whose fix run was still writing its results.
+		A run paused on an approval gate still holds the lock, and the oldest run
+		wins.
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>The loser is dropped, not queued.</strong> That is only sound
+			because every dropped case is picked up again by a cron — which is why the
+			three sweeps below still run even when webhooks are configured. Turning
+			drop-on-conflict into queue-on-conflict is a prerequisite for retiring any
+			of them.
+		</div>
+	</div>
+
+	<h2>How a fix attempt is counted</h2>
+
+	<p>
+		<code>attempt</code> is scoped to a <strong>problem</strong>, not to a pull
+		request and not to a workflow. The two fix workflows share one counter, one
+		cost window and one workspace per PR, because &ldquo;how many times have we
+		tried to fix this?&rdquo; is a fact about the PR — which of the two ran is an
+		implementation detail of how the event arrived.
+	</p>
+
+	<div class="state-diagram">
+		<svg viewBox="0 0 800 380" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The fix attempt loop: eligible, diagnose, fix and gate, push, CI; with free verdicts returning without spending an attempt, escalating verdicts leading to an escalated state, and three re-arm paths back to eligible">
+			<path d="M420 60 V38 H62 V60" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#c-arrow)"/>
+			<text x="241" y="32" text-anchor="middle" fill="var(--diag-grey)" font-size="9" font-family="JetBrains Mono">a crashed run spends nothing</text>
+
+			<rect x="14" y="60" width="130" height="52" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="79" y="82" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Eligible</text>
+			<text x="79" y="98" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">attempt N of max</text>
+
+			<path d="M144 86 H176" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#c-arrow)"/>
+			<rect x="180" y="60" width="120" height="52" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="240" y="82" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Diagnose</text>
+			<text x="240" y="98" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">classify the failure</text>
+
+			<path d="M300 86 H336" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#c-arrow)"/>
+			<rect x="340" y="60" width="140" height="52" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+			<text x="410" y="82" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Fix + local gate</text>
+			<text x="410" y="98" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">reproducible · env-mismatch</text>
+
+			<path d="M480 86 H516" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#c-arrow)"/>
+			<rect x="520" y="60" width="110" height="52" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="575" y="82" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">Push</text>
+			<text x="575" y="98" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">green gate only</text>
+
+			<path d="M630 86 H666" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#c-arrow)"/>
+			<rect x="670" y="60" width="114" height="52" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="727" y="82" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">CI re-runs</text>
+			<text x="727" y="98" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">settles again</text>
+
+			<path d="M727 112 V140 H6" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="400" y="134" text-anchor="middle" fill="var(--diag-grey)" font-size="9" font-family="JetBrains Mono">still red → attempt N+1</text>
+
+			<path d="M240 112 V176" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#c-arrow)"/>
+			<rect x="140" y="180" width="230" height="48" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="255" y="200" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">flaky · upstream-broken</text>
+			<text x="255" y="216" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">no attempt spent — back to eligible</text>
+			<path d="M140 204 H6" stroke="var(--diag-line)" stroke-width="1.5"/>
+
+			<path d="M290 112 V152 H545 V176" stroke="var(--orange)" stroke-width="1.5" marker-end="url(#c-arrow-orange)"/>
+			<rect x="430" y="180" width="230" height="48" rx="8" fill="var(--bg-card)" stroke="var(--orange)" stroke-width="1.5"/>
+			<text x="545" y="200" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">infra-dependent</text>
+			<text x="545" y="216" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">or the budget is spent</text>
+
+			<path d="M545 228 V262" stroke="var(--orange)" stroke-width="1.5" marker-end="url(#c-arrow-orange)"/>
+			<rect x="430" y="266" width="230" height="52" rx="8" fill="var(--bg-card)" stroke="var(--orange)" stroke-width="1.5"/>
+			<text x="545" y="288" text-anchor="middle" fill="var(--orange)" font-size="11" font-family="Inter">Escalated</text>
+			<text x="545" y="304" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">requires-human + one comment</text>
+
+			<path d="M430 292 H6" stroke="var(--gold)" stroke-width="1.5" stroke-dasharray="4 3"/>
+			<text x="218" y="286" text-anchor="middle" fill="var(--gold)" font-size="9" font-family="JetBrains Mono">a push, a retry, or removing the label re-arms the window</text>
+
+			<path d="M6 292 V86 H10" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#c-arrow)"/>
+
+			<rect x="14" y="330" width="230" height="40" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3"/>
+			<text x="129" y="355" text-anchor="middle" fill="var(--diag-grey)" font-size="10" font-family="Inter">On hold — nothing runs at all</text>
+
+			<defs>
+				<marker id="c-arrow" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--diag-line)"/></marker>
+				<marker id="c-arrow-orange" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--orange)"/></marker>
+			</defs>
+		</svg>
+	</div>
+
+	<p>
+		A diagnosis lands in one of five classes, described in full on the
+		<a href="/docs/workflows/pr-fix">PR fix</a> page. What matters here is which of
+		them <em>cost</em> an attempt: <code>reproducible</code>,
+		<code>env-mismatch</code> and <code>infra-dependent</code> do;
+		<code>flaky</code> and <code>upstream-broken</code> do not, because they are
+		verdicts about something other than this PR's code. Repeated
+		<code>flaky</code> verdicts are bounded separately — after
+		<code>fix.maxFlakyDeferrals</code> in a row the job is not flaky, it is
+		intermittently really failing, and the next run attempts it normally.
+	</p>
+
+	<p>
+		<strong>An attempt is only counted when a diagnosis actually landed.</strong> A
+		run that died on a sandbox failure, a quota rejection or a model API error
+		costs nothing. This is the single most important robustness rule in the design:
+		without it, one bad hour would escalate every open dependency PR across every
+		managed repository to <code>requires-human</code>, and a human would have to
+		un-stick each one by hand.
+	</p>
+
+	<p>Whether the next event is the <em>same problem</em> is decided once, and it decides everything:</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>The head commit</th><th>Who authored it</th><th>Attempt</th></tr>
+		</thead>
+		<tbody>
+			<tr><td>unchanged</td><td>—</td><td><strong>+1</strong> — we made no progress</td></tr>
+			<tr><td>changed</td><td>us</td><td><strong>+1</strong> — our fix landed and CI is still red; same problem</td></tr>
+			<tr><td>changed</td><td><strong>anyone else</strong></td><td><strong>reset to 1</strong> — the world moved; fresh problem</td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		The third row is what makes a maintainer's push, a Dependabot rebase or a
+		Renovate recreate re-arm the loop with nothing to clean up. Resetting on
+		authorship <em>alone</em> would be wrong in the other direction — an attempt
+		that pushes nothing leaves the head unchanged, so it would reset forever.
+	</p>
+
+	<p>
+		The same boundary moves the <strong>cost</strong> window, deliberately: the
+		attempt counter and <code>fix.maxCostUsd</code> bound the same window, so a
+		push has to re-arm both or neither. Re-arming only the counter is how the bot
+		once came to post a fresh &ldquo;I gave up&rdquo; comment on every push — a
+		comment whose own closing line tells the maintainer that pushing is the remedy.
+		That makes <code>fix.maxCostUsd</code> a <strong>futility guard, not a spend
+		guard</strong>: it is scoped to a problem and re-armed by any human
+		intervention.
+	</p>
+
+	<h2>Escalation, and the four ways out</h2>
+
+	<p>
+		When a skip is <strong>terminal for the problem</strong> — the attempts are
+		spent, the cost ceiling is reached, or the last diagnosis names something no
+		further attempt can fix — staying silent is worse than saying so. Those three
+		exits apply <code>requires-human</code> and post <strong>one</strong> comment
+		naming which case it was, how many attempts were spent, and what each of them
+		found.
+	</p>
+
+	<p>
+		The label is a <strong>notification, and nothing reads it</strong>. The state
+		is the recorded fact that one of our runs escalated at a particular commit. So
+		the run row is written <em>first</em>, before the label, and the comment is
+		posted only behind a label that actually landed — a failed label write then
+		costs the PR its notification, never its guard. Being once-only is a property
+		of that record, not of scanning the PR for a comment we might have posted
+		before.
+	</p>
+
+	<p>
+		There are four ways to say &ldquo;go again&rdquo;, and they all do exactly the
+		same thing: re-arm the attempt counter <em>and</em> the cost window for a fresh
+		full budget.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Surface</th><th>How it is authorised</th><th>Notes</th></tr>
+		</thead>
+		<tbody>
+			<tr><td>Push a commit to the branch</td><td>GitHub write access</td><td>No label to remove. A commit <em>we</em> pushed doesn't count — it is someone else's change that says the situation moved</td></tr>
+			<tr><td><code>@last-light retry [reason]</code></td><td>The maintainer check that gates every <code>@last-light</code> command</td><td>Parsed before any classifier — a retry is an instruction, not something to guess at. The free text becomes a hint for the next attempt</td></tr>
+			<tr><td>Remove the <code>requires-human</code> label</td><td>GitHub already requires triage permission to change a label</td><td><strong>No webhook.</strong> It is inferred next time we look: we escalated at this head, the head hasn't moved, and our label is gone</td></tr>
+			<tr><td><code>lastlight pr retry owner/repo#42</code></td><td>An authenticated admin session</td><td>The only surface with no GitHub event behind it — so it is the only one that also <em>dispatches</em> straight away rather than waiting</td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		One asymmetry is deliberate: a <strong>retry keeps</strong> what earlier
+		attempts learned and marks the seam, where a <strong>push wipes</strong> it. A
+		push changed the code, so prior findings may be stale; a retry changed nothing
+		but patience, and throwing the journal away would send attempt 1 of the new
+		window straight back down attempt 1 of the old window's road.
+	</p>
+
+	<p>
+		Retries are <strong>unbounded</strong> — each one buys a full window, which
+		makes it a real spending decision, so who asked, when and why is recorded on
+		the run that follows. A retry also consumes the escalation record, which is
+		what bounds the mechanism: the next stop writes a fresh one.
+	</p>
+
+	<p>
+		A retry does <em>not</em> override the hold, the fork guard, the run lock, a red
+		base branch, or a degraded read. Those are facts about the pull request, or
+		instructions that outrank it; the budgets are policy, and policy is what a
+		maintainer may move.
+	</p>
+
+	<div class="docs-callout tip">
+		<div class="docs-callout-body">
+			<strong>To stop Last Light touching a PR at all, apply the hold label</strong>
+			— <code>lastlight-ignore</code> by default, configurable as
+			<code>hold.label</code>. It blocks every workflow on any issue or pull
+			request carrying it, outranks an explicit request (which earns one reply
+			naming the label), and lifts the moment you remove it with no record to
+			clear. It is the opposite of a retry, and it beats all four of them.
+		</div>
+	</div>
+
+	<h2>When a review runs</h2>
+
+	<p>
+		<code>review.trigger</code> has exactly one implementation, crossed by every
+		route — webhook, comment, label, sweep, Slack and CLI — so the mode means the
+		same thing everywhere. Discovery and policy are separate concerns now: the
+		cron finds candidates, the resolver decides.
+	</p>
+
+	<div class="state-diagram">
+		<svg viewBox="0 0 800 220" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A PR event or sweep enters the review resolver, which answers dispatch, defer or skip, each leaving a different check run behind">
+			<rect x="14" y="84" width="160" height="52" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="94" y="106" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">PR event or sweep</text>
+			<text x="94" y="122" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">every route</text>
+
+			<path d="M174 110 H206" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#d-arrow)"/>
+			<rect x="210" y="84" width="190" height="52" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="305" y="106" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">resolveReviewTrigger</text>
+			<text x="305" y="122" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">the only reader of review.trigger</text>
+
+			<path d="M400 100 H433 V43 H466" stroke="var(--teal)" stroke-width="1.5" marker-end="url(#d-arrow-teal)"/>
+			<path d="M400 110 H466" stroke="var(--gold)" stroke-width="1.5" marker-end="url(#d-arrow-gold)"/>
+			<path d="M400 120 H433 V177 H466" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#d-arrow)"/>
+
+			<rect x="470" y="20" width="150" height="46" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="545" y="48" text-anchor="middle" fill="var(--teal)" font-size="11" font-family="Inter">dispatch</text>
+			<text x="632" y="48" fill="var(--diag-grey)" font-size="9" font-family="JetBrains Mono">check: in_progress</text>
+
+			<rect x="470" y="87" width="150" height="46" rx="8" fill="var(--bg-card)" stroke="var(--gold)" stroke-width="1.5"/>
+			<text x="545" y="115" text-anchor="middle" fill="var(--gold)" font-size="11" font-family="Inter">defer</text>
+			<text x="632" y="115" fill="var(--diag-grey)" font-size="9" font-family="JetBrains Mono">check: queued / neutral</text>
+
+			<rect x="470" y="154" width="150" height="46" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="545" y="182" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">skip</text>
+			<text x="632" y="182" fill="var(--diag-grey)" font-size="9" font-family="JetBrains Mono">no check at all</text>
+
+			<defs>
+				<marker id="d-arrow" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--diag-line)"/></marker>
+				<marker id="d-arrow-teal" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--teal)"/></marker>
+				<marker id="d-arrow-gold" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--gold)"/></marker>
+			</defs>
+		</svg>
+	</div>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Decision</th><th>When</th><th><code>last-light/review</code></th></tr>
+		</thead>
+		<tbody>
+			<tr><td><code>dispatch</code></td><td>An explicit request or the request label; <code>eager</code> on PR attention; a settled check suite under <code>after-checks</code></td><td><code>in_progress</code>, completed from the run's terminal transition</td></tr>
+			<tr><td><code>defer</code></td><td><code>on-request</code> with nobody asking; <code>after-checks</code> still waiting for CI; or reached on PR attention rather than a settle</td><td><code>queued</code>, or <code>neutral</code> under <code>on-request</code> — and only on a PR-attention event</td></tr>
+			<tr><td><code>skip</code></td><td>A draft, a commit we already reviewed, a push that changed only generated files since the review we posted, or another run in flight</td><td><strong>Nothing</strong> — except the generated-only case, which repeats the standing verdict on the new head. A run that never dispatches must otherwise not create a check and immediately conclude it</td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		The check run only exists when <code>review.postsCheck</code> is on (off by
+		default). When it does, it is a <strong>projection of run state</strong>:
+		created at the same choke point that decided to run, and concluded from the
+		run's terminal transition — so a deploy mid-review, a resumed run, an expiry or
+		a crash all resolve it, instead of leaving it stranded <code>in_progress</code>
+		forever.
+	</p>
+
+	<p>
+		<strong>A push with nothing new to say does not earn a review.</strong>
+		&ldquo;We already reviewed this exact commit&rdquo; used to be the only
+		suppression there was — so a lock file re-derivation, being a new commit,
+		bought a second formal review saying the same thing. Now, when every path
+		changed since the review we <em>posted</em> matches
+		<a href="/docs/configuration"><code>review.generatedPaths</code></a>, the
+		resolver skips. It measures from the review we posted rather than the last
+		commit we ran against, so a run that declined to post can't suppress the
+		change it never reviewed; and an unreadable or truncated diff dispatches.
+		This is the one skip that still leaves a check, because it is the only one
+		that would otherwise strand a required check on a commit nobody reviewed.
+	</p>
+
+	<p>
+		Two more behaviours are worth knowing. <strong>An explicit
+		<code>@last-light review</code> always dispatches</strong>, overriding the
+		mode, the draft skip and the &ldquo;already reviewed this commit&rdquo; check —
+		the one thing it does not override is the run lock, because that is a physical
+		constraint rather than a policy. And <strong>fix outranks review</strong>: a
+		check suite that settles red on a fix-eligible PR becomes a fix, not a review,
+		because reviewing a tree that is about to be rewritten produces a review that
+		is stale before it lands.
+	</p>
+
+	<h2>When a dependency PR is merged</h2>
+
+	<p>
+		The two dependency workflows are one lane. A red PR goes to
+		<a href="/docs/workflows/dependabot-ci-fix">Dependabot CI fix</a>, which repairs
+		it and pushes; once CI is green, ownership passes to
+		<a href="/docs/workflows/dependabot-pr-merge">Dependabot PR merge</a>, which is
+		the single owner of the merge decision.
+	</p>
+
+	<div class="state-diagram">
+		<svg viewBox="0 0 800 260" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A red dependency PR is fixed and pushed until CI is green, then the merge workflow assesses it and either auto-merges or leaves it for a human; two daily crons feed both lanes">
+			<rect x="14" y="40" width="150" height="50" rx="8" fill="var(--bg-card)" stroke="var(--orange)" stroke-width="1.5"/>
+			<text x="89" y="62" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">CI settles red</text>
+			<text x="89" y="78" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">pr.checks_failed</text>
+
+			<path d="M164 65 H196" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#e-arrow)"/>
+			<rect x="200" y="40" width="160" height="50" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="280" y="62" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">dependabot-ci-fix</text>
+			<text x="280" y="78" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">diagnose → fix → push</text>
+
+			<path d="M360 65 H392" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#e-arrow)"/>
+			<rect x="396" y="40" width="150" height="50" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="471" y="62" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">CI re-runs</text>
+			<text x="471" y="78" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">still red → attempt N+1</text>
+
+			<path d="M471 90 V112 H89 V140" stroke="var(--teal)" stroke-width="1.5" marker-end="url(#e-arrow-teal)"/>
+			<text x="290" y="106" text-anchor="middle" fill="var(--teal)" font-size="9" font-family="JetBrains Mono">green</text>
+
+			<rect x="14" y="144" width="150" height="50" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="89" y="166" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">CI settles green</text>
+			<text x="89" y="182" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">pr.checks_passed</text>
+
+			<path d="M164 169 H196" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#e-arrow)"/>
+			<rect x="200" y="144" width="160" height="50" rx="8" fill="var(--bg-card)" stroke="var(--diag-line)" stroke-width="1.5"/>
+			<text x="280" y="166" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">dependabot-pr-merge</text>
+			<text x="280" y="182" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">assess the bump</text>
+
+			<path d="M360 169 H392" stroke="var(--diag-line)" stroke-width="1.5" marker-end="url(#e-arrow)"/>
+			<rect x="396" y="144" width="130" height="50" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="461" y="166" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Inter">mayMerge</text>
+			<text x="461" y="182" text-anchor="middle" fill="var(--diag-grey)" font-size="8" font-family="JetBrains Mono">settled + passing</text>
+
+			<path d="M526 160 H560" stroke="var(--teal)" stroke-width="1.5" marker-end="url(#e-arrow-teal)"/>
+			<path d="M526 180 H560" stroke="var(--gold)" stroke-width="1.5" marker-end="url(#e-arrow-gold)"/>
+
+			<rect x="564" y="126" width="220" height="42" rx="8" fill="var(--bg-card)" stroke="var(--teal)" stroke-width="1.5"/>
+			<text x="674" y="152" text-anchor="middle" fill="var(--teal)" font-size="11" font-family="Inter">auto-merge (squash)</text>
+			<rect x="564" y="176" width="220" height="42" rx="8" fill="var(--bg-card)" stroke="var(--gold)" stroke-width="1.5"/>
+			<text x="674" y="202" text-anchor="middle" fill="var(--gold)" font-size="11" font-family="Inter">leave it for a human</text>
+
+			<path d="M280 20 V36" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#e-arrow)"/>
+			<text x="292" y="17" fill="var(--diag-grey)" font-size="9" font-family="JetBrains Mono">fix-red-dependency-prs · daily 15:00</text>
+			<path d="M280 240 V198" stroke="var(--diag-line)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#e-arrow)"/>
+			<text x="292" y="244" fill="var(--diag-grey)" font-size="9" font-family="JetBrains Mono">merge-green-dependency-prs · daily 14:00</text>
+
+			<defs>
+				<marker id="e-arrow" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--diag-line)"/></marker>
+				<marker id="e-arrow-teal" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--teal)"/></marker>
+				<marker id="e-arrow-gold" markerWidth="7" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 L7 3 L0 6 z" fill="var(--gold)"/></marker>
+			</defs>
+		</svg>
+	</div>
+
+	<p>
+		<code>mayMerge</code> is the one predicate that decides whether a PR may be
+		landed <em>at all</em>: the head commit's checks must have settled
+		<code>passing</code>, and at least
+		<code>dependencies.minSettledChecks</code> of them must exist. It is
+		deliberately <strong>not</strong> a dispatch gate — the merge run still needs
+		to start in order to label and comment — so it is evaluated once and handed to
+		the run as a decided verdict with its reason attached, which the prompt reads
+		rather than re-deriving. The dispatch gate only refuses the cheap case: checks
+		still <code>pending</code> have nothing to decide yet.
+	</p>
+
+	<p>
+		One asymmetry between the fix and merge routes is load-bearing. On the fix
+		route, a commit <em>we</em> authored on top of an escalation is still the same
+		problem — otherwise the loop never terminates. On the merge route it is the
+		<strong>resolution</strong>: the whole hand-off ends with our fix commit at the
+		head. Carrying the fix route's rule across made that hand-off structurally
+		unreachable for any PR we had ever escalated — we fixed it, CI went green, and
+		the merge route skipped <em>because we were the one who fixed it</em>.
+	</p>
+
+	<h2>The crons are the re-pickup net</h2>
+
+	<p>
+		Because a dropped dispatch is never queued, something has to come back for it.
+		Three sweeps do, and unlike most cron backstops they run <strong>alongside
+		webhooks</strong>, not instead of them.
+	</p>
+
+	<table class="docs-table">
+		<thead>
+			<tr><th>Cron</th><th>Schedule</th><th>What it releases</th></tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td><code>check-prs-awaiting-review</code></td>
+				<td>every 30 min</td>
+				<td>The PRs whose fix chain ended <em>without pushing</em> — attempts exhausted, infra-dependent, a flaky deferral, a red base, a crash. No new commit exists, so no further check suite will ever fire for them, and they are exactly the PRs a human most wants reviewed. It also releases PRs whose checks will never settle at all, and picks up anything dropped by the run lock</td>
+			</tr>
+			<tr><td><code>merge-green-dependency-prs</code></td><td>daily, 14:00</td><td>Green dependency PRs that went green before boot or during a missed webhook delivery</td></tr>
+			<tr><td><code>fix-red-dependency-prs</code></td><td>daily, 15:00</td><td>Red dependency PRs — the route that reaches most exhausted PRs, which is why escalation is one shared code path rather than a webhook-only behaviour</td></tr>
+		</tbody>
+	</table>
+
+	<p>
+		The discoverers hold <strong>no policy</strong>. They find candidates — open
+		PRs in managed repositories — and every one of them then crosses the same gate
+		as a webhook, with the same snapshot and the same reasons. That is what makes a
+		nightly sweep and a live delivery produce byte-identical context, which they
+		did not before.
+	</p>
+
+	<h2>Where to see it</h2>
+
+	<p>
+		The whole snapshot is persisted on the run, so every decision is auditable
+		after the fact. The dashboard's run detail panel — shown at the top of this
+		page — renders it beside the phase timeline: the resolved facts, each
+		<code>&#123;decision, reason&#125;</code> pair, the per-attempt marker lines,
+		the push gate the agent wrote for itself, and the PR journal. From a terminal,
+		<code>lastlight pr retry owner/repo#42 [reason]</code> is the fourth re-arm
+		surface; see the <a href="/docs/cli">CLI reference</a>.
+	</p>
+
+	<p>
+		The normative contract — field by field, guard by guard — lives in the
+		specification, under
+		<a href="/spec/05-router">Router &amp; dispatch</a>.
+	</p>
+
+	<div class="docs-next">
+		<a href="/docs/slack" class="prev">
+			<span class="label">&larr; Prev</span>
+			<span class="title">Slack integration</span>
+		</a>
+		<a href="/docs/workflows/overview" class="next">
+			<span class="label">Next &rarr;</span>
+			<span class="title">Workflows overview</span>
+		</a>
+	</div>
+</DocsLayout>
+
+<style is:global>
+	.state-diagram {
+		margin: 1.5rem 0;
+		padding: 1.25rem;
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		overflow-x: auto;
+	}
+
+	/* These diagrams carry 8–11px labels, so scaling them down to a phone's width
+	   makes them illegible. Hold a floor and let the wrapper scroll instead. */
+	.state-diagram svg {
+		width: 100%;
+		min-width: 700px;
+		height: auto;
+		display: block;
+		margin: 0 auto;
+	}
+
+	.docs-figure {
+		margin: 1.5rem 0;
+	}
+
+	.docs-figure img {
+		display: block;
+		width: 100%;
+		height: auto;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+	}
+
+	.docs-figure figcaption {
+		margin-top: 0.6rem;
+		font-size: 0.82rem;
+		line-height: 1.55;
+		color: var(--text-muted);
+	}
+
+	/* Inline colour key for the gate ladder. */
+	.docs-article .key {
+		font-weight: 600;
+	}
+	.docs-article .key-silent { color: var(--text-muted); }
+	.docs-article .key-speaks { color: var(--gold); }
+	.docs-article .key-escalate { color: var(--orange); }
+</style>

@@ -1,4 +1,7 @@
 import type { Connector, EventEnvelope } from "./types.js";
+import { logger } from "../logging/logger.js";
+
+const log = logger("connectors");
 
 export type EventHandler = (envelope: EventEnvelope) => Promise<void>;
 
@@ -20,7 +23,7 @@ export class ConnectorRegistry {
     connector.on("event", (envelope: EventEnvelope) => {
       if (this.handler) {
         this.handler(envelope).catch((err) => {
-          console.error(`[${connector.name}] Event handler error:`, err);
+          log.error("Event handler error", { connector: connector.name, err });
         });
       }
     });
@@ -32,14 +35,14 @@ export class ConnectorRegistry {
 
   async startAll(): Promise<void> {
     for (const [name, connector] of this.connectors) {
-      console.log(`[registry] Starting connector: ${name}`);
+      log.info("Starting connector", { connector: name });
       await connector.start();
     }
   }
 
   async stopAll(): Promise<void> {
     for (const [name, connector] of this.connectors) {
-      console.log(`[registry] Stopping connector: ${name}`);
+      log.info("Stopping connector", { connector: name });
       await connector.stop();
     }
   }
@@ -47,5 +50,11 @@ export class ConnectorRegistry {
 
 export { type Connector, type EventEnvelope, type EventType } from "./types.js";
 export { GitHubWebhookConnector, type GitHubWebhookConfig } from "./github-webhook.js";
-export { MessagingConnector, SessionManager, MessageDeliveryService } from "./messaging/index.js";
+export {
+  MessagingConnector,
+  SessionManager,
+  withThreadTranscript,
+  recordThreadMessage,
+  recordThreadMessageForThread,
+} from "./messaging/index.js";
 export { SlackConnector, type SlackConnectorConfig } from "./slack/index.js";

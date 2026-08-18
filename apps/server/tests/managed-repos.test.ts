@@ -7,7 +7,9 @@ import {
   setInstallationRepos,
   addInstallationRepos,
   removeInstallationRepos,
+  removeInstallation,
   getInstallationRepos,
+  getInstallationRepoBreakdown,
   getInstallationReposRefreshedAt,
   getAccessibleManagedRepos,
   resetInstallationReposForTests,
@@ -32,7 +34,7 @@ describe('getManagedRepos / isManagedRepo', () => {
 
   it('a non-empty configured list wins and restricts to exactly those repos', () => {
     setRuntimeConfig(configWithRepos(['acme/one', 'acme/two']));
-    setInstallationRepos(['other/repo']); // must be ignored while config is set
+    setInstallationRepos('1', ['other/repo']); // must be ignored while config is set
     expect(getManagedRepos()).toEqual(['acme/one', 'acme/two']);
     expect(isManagedRepo('acme/one')).toBe(true);
     expect(isManagedRepo('acme/two')).toBe(true);
@@ -46,7 +48,7 @@ describe('getManagedRepos / isManagedRepo', () => {
 
   it('falls back to the discovered installation list when the configured list is empty', () => {
     setRuntimeConfig(configWithRepos([]));
-    setInstallationRepos(['acme/one', 'acme/two']);
+    setInstallationRepos('1', ['acme/one', 'acme/two']);
     expect(getManagedRepos().sort()).toEqual(['acme/one', 'acme/two']);
     expect(isManagedRepo('acme/one')).toBe(true);
     expect(isManagedRepo('nope/repo')).toBe(false);
@@ -81,7 +83,7 @@ describe('getAccessibleManagedRepos (cron fan-out filter)', () => {
     // e.g. cliftonc/lastlight-test-repo was transferred to nearform — the
     // cliftonc installation no longer lists it, so it must not be scanned.
     setRuntimeConfig(configWithRepos(['acme/live', 'acme/transferred']));
-    setInstallationRepos(['acme/live', 'acme/other']);
+    setInstallationRepos('1', ['acme/live', 'acme/other']);
     expect(getAccessibleManagedRepos()).toEqual(['acme/live']);
   });
 
@@ -94,7 +96,7 @@ describe('getAccessibleManagedRepos (cron fan-out filter)', () => {
 
   it('keeps every configured repo when all are accessible', () => {
     setRuntimeConfig(configWithRepos(['acme/one', 'acme/two']));
-    setInstallationRepos(['acme/one', 'acme/two', 'acme/three']);
+    setInstallationRepos('1', ['acme/one', 'acme/two', 'acme/three']);
     expect(getAccessibleManagedRepos()).toEqual(['acme/one', 'acme/two']);
   });
 });
@@ -107,26 +109,107 @@ describe('installation-repo cache', () => {
 
   it('add/remove mutate the discovered list and the effective managed list', () => {
     setRuntimeConfig(configWithRepos([])); // fall back to installation list
-    setInstallationRepos(['acme/one']);
-    addInstallationRepos(['acme/two', 'acme/three']);
+    setInstallationRepos('1', ['acme/one']);
+    addInstallationRepos('1', ['acme/two', 'acme/three']);
     expect(getInstallationRepos().sort()).toEqual(['acme/one', 'acme/three', 'acme/two']);
     expect(isManagedRepo('acme/two')).toBe(true);
 
-    removeInstallationRepos(['acme/one']);
+    removeInstallationRepos('1', ['acme/one']);
     expect(getInstallationRepos().sort()).toEqual(['acme/three', 'acme/two']);
     expect(isManagedRepo('acme/one')).toBe(false);
   });
 
   it('records a refresh timestamp on every mutation', () => {
     expect(getInstallationReposRefreshedAt()).toBeNull();
-    setInstallationRepos(['acme/one']);
+    setInstallationRepos('1', ['acme/one']);
     expect(getInstallationReposRefreshedAt()).not.toBeNull();
   });
 
-  it('add before any discovery seeds the list (create-if-null)', () => {
+  it('add before any discovery seeds that installation\'s set', () => {
     resetInstallationReposForTests();
-    addInstallationRepos(['acme/one']);
+    addInstallationRepos('1', ['acme/one']);
     expect(getInstallationRepos()).toEqual(['acme/one']);
+  });
+});
+
+/**
+ * A GitHub App installed on N accounts gets ONE `installation` event stream per
+ * account: `created` lists only the new account's repos, `deleted` means only
+ * that account went away. Against a single flat set — what this used to be —
+ * installing the App on a second org reset the managed list to just that org,
+ * and uninstalling from it cleared the list entirely. Keying by installation id
+ * is what makes each account's grant independent.
+ */
+describe('installation-repo cache — several installations', () => {
+  afterEach(() => {
+    resetRuntimeConfigForTests();
+    resetInstallationReposForTests();
+  });
+
+  it('unions every installation into the effective list', () => {
+    setRuntimeConfig(configWithRepos([]));
+    setInstallationRepos('121130978', ['cliftonc/drizby']);
+    setInstallationRepos('150854297', ['mirevue/mirevue', 'mirevue/mirevue-www']);
+
+    expect(getInstallationRepos().sort()).toEqual([
+      'cliftonc/drizby',
+      'mirevue/mirevue',
+      'mirevue/mirevue-www',
+    ]);
+    expect(isManagedRepo('cliftonc/drizby')).toBe(true);
+    expect(isManagedRepo('mirevue/mirevue')).toBe(true);
+  });
+
+  it('a fresh install on one account leaves the other account alone', () => {
+    setRuntimeConfig(configWithRepos([]));
+    setInstallationRepos('121130978', ['cliftonc/drizby']);
+
+    // `installation.created` for the second org.
+    setInstallationRepos('150854297', ['mirevue/mirevue']);
+
+    expect(isManagedRepo('cliftonc/drizby')).toBe(true);
+  });
+
+  it('uninstalling from one account leaves the other account alone', () => {
+    setRuntimeConfig(configWithRepos([]));
+    setInstallationRepos('121130978', ['cliftonc/drizby']);
+    setInstallationRepos('150854297', ['mirevue/mirevue']);
+
+    removeInstallation('150854297');
+
+    expect(getInstallationRepos()).toEqual(['cliftonc/drizby']);
+    expect(isManagedRepo('mirevue/mirevue')).toBe(false);
+  });
+
+  it('scopes an added/removed repo to its own installation', () => {
+    setRuntimeConfig(configWithRepos([]));
+    setInstallationRepos('121130978', ['cliftonc/drizby']);
+    setInstallationRepos('150854297', ['mirevue/mirevue']);
+
+    addInstallationRepos('150854297', ['mirevue/new']);
+    removeInstallationRepos('150854297', ['mirevue/mirevue']);
+
+    expect(getInstallationRepos().sort()).toEqual(['cliftonc/drizby', 'mirevue/new']);
+  });
+
+  it('reports a per-installation breakdown for the admin surface', () => {
+    setInstallationRepos('121130978', ['cliftonc/drizby']);
+    setInstallationRepos('150854297', ['mirevue/mirevue']);
+
+    expect(getInstallationRepoBreakdown()).toEqual([
+      { installationId: '121130978', repos: ['cliftonc/drizby'] },
+      { installationId: '150854297', repos: ['mirevue/mirevue'] },
+    ]);
+  });
+
+  it('keeps a configured repo in a second org reachable to the cron fan-out', () => {
+    // The drizby/mirevue shape: an explicit `managedRepos` spanning two accounts,
+    // narrowed by the union of both installations' grants.
+    setRuntimeConfig(configWithRepos(['cliftonc/drizby', 'mirevue/mirevue']));
+    setInstallationRepos('121130978', ['cliftonc/drizby']);
+    setInstallationRepos('150854297', ['mirevue/mirevue']);
+
+    expect(getAccessibleManagedRepos()).toEqual(['cliftonc/drizby', 'mirevue/mirevue']);
   });
 });
 
@@ -168,7 +251,7 @@ describe('unmanagedReposInContext (dispatch guard)', () => {
 
   it('honours the installation-list fallback when the configured list is empty', () => {
     setRuntimeConfig(configWithRepos([]));
-    setInstallationRepos(['acme/one']);
+    setInstallationRepos('1', ['acme/one']);
     expect(unmanagedReposInContext({ repo: 'acme/one' })).toEqual([]);
     expect(unmanagedReposInContext({ repo: 'nope/repo' })).toEqual(['nope/repo']);
   });
