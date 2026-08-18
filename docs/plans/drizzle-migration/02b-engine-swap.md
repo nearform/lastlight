@@ -1383,6 +1383,19 @@ need no transaction, making the plan's claim true after the fact.
   were errors). All fixed in passing; none changed an assertion. **Wiring
   `typecheck:test` into the gate is worth doing** — it is currently ungated.
 
+  Two pre-existing errors are knowingly left: `tsconfig.test.json` also sweeps
+  in `dashboard/src` under different module settings (the dashboard's own
+  `tsc -b` is green), and **`evals-contract.test.ts`'s frozen-surface fence has
+  silently stopped fencing** — it asserts
+  `RunnerCallbacks["postComment"]` is `(body: string) => Promise<void>`, but
+  issue #244 widened it to `Promise<number | void>` so the enqueue ack can be
+  retracted. Verified byte-identical on `main` for both the test and the type,
+  so this is **not** migration drift; it is a type-level assertion that has
+  never been compiled. It passes under `vitest run` because `expectTypeOf` is
+  compile-time only. Whoever wires the gate has to decide whether to widen the
+  fence or narrow the type — a call about the frozen public surface, not a
+  cleanup.
+
 ### 10. Still open / handed to later phases
 
 - The two literal **NUL bytes** in `feedback-store.ts` remain raw control
