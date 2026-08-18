@@ -141,10 +141,11 @@ export interface ChatRunnerConfig {
    * composed from the enabled workflow set, and an admin can disable a workflow
    * from the dashboard mid-process (the `workflow_overrides` table, enforced at
    * dispatch in `simple.ts`) — a boot-time string would keep naming a trigger
-   * that had since become a no-op. A plain string stays supported for callers
+   * that had since become a no-op. The thunk may be async — resolving the
+   * enabled set is a database read. A plain string stays supported for callers
    * with nothing dynamic to say.
    */
-  systemPrompt: string | (() => string);
+  systemPrompt: string | (() => string | Promise<string>);
   /** Optional GitHub App credentials. When set, read-only github tools are registered. */
   github?: ChatGitHubAuth;
   /**
@@ -294,11 +295,11 @@ export class ChatRunner {
     prompt: string,
   ): Promise<ChatRunnerTurnResult> {
     // Resolve (or mint) the stable agentSessionId pinned to this thread.
-    const session = this.sessionManager.getSession(messagingSessionId);
+    const session = await this.sessionManager.getSession(messagingSessionId);
     let agentSessionId = session?.agentSessionId || null;
     if (!agentSessionId) {
       agentSessionId = randomUUID();
-      this.sessionManager.setAgentSessionId(messagingSessionId, agentSessionId);
+      await this.sessionManager.setAgentSessionId(messagingSessionId, agentSessionId);
     }
 
     // Bail with a clear error if the chat model spec is unknown to pi-ai.
@@ -348,13 +349,15 @@ export class ChatRunner {
     // never persist (they only live for that turn's loop) — that's a
     // deliberate simplification: the agent gets a clean conversation
     // history and can re-tool if asked again.
-    const history = this.sessionManager.getHistory(messagingSessionId, 50);
+    const history = await this.sessionManager.getHistory(messagingSessionId, 50);
     const messages: Message[] = history.map((h) => textMessage(h.role, h.content, h.timestamp));
     messages.push(textMessage("user", prompt, new Date().toISOString()));
 
     const context: Context = {
       systemPrompt:
-        typeof this.cfg.systemPrompt === "function" ? this.cfg.systemPrompt() : this.cfg.systemPrompt,
+        typeof this.cfg.systemPrompt === "function"
+          ? await this.cfg.systemPrompt()
+          : this.cfg.systemPrompt,
       messages,
       tools: this.mergedTools,
     };
@@ -458,11 +461,11 @@ export class ChatRunner {
     // Persist this turn's user + final assistant text. We do NOT persist
     // tool calls or intermediate model responses — only the human-visible
     // turn boundaries — to keep the rehydrated context compact.
-    this.sessionManager.addMessage(messagingSessionId, "user", prompt);
+    await this.sessionManager.addMessage(messagingSessionId, "user", prompt);
     if (finalText) {
-      this.sessionManager.addMessage(messagingSessionId, "assistant", finalText);
+      await this.sessionManager.addMessage(messagingSessionId, "assistant", finalText);
     }
-    this.sessionManager.touchSession(messagingSessionId);
+    await this.sessionManager.touchSession(messagingSessionId);
 
     return {
       text: finalText,

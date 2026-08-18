@@ -96,9 +96,9 @@ function harness(opts: { ledgerSaysDiagnosed?: boolean } = {}) {
   const deps: PrStateDeps = { github: null, db, botLogin: BOT };
 
   /** Resolve the derived half for a new dispatch and persist the run row. */
-  function dispatch(over: Partial<PrState> = {}): { id: string; state: PrState } {
+  async function dispatch(over: Partial<PrState> = {}): Promise<{ id: string; state: PrState }> {
     const state = liveState(over);
-    applyDerivedState(state, deps);
+    await applyDerivedState(state, deps);
     const id = `run-${rows.length + 1}`;
     rows.push({
       id,
@@ -115,8 +115,8 @@ function harness(opts: { ledgerSaysDiagnosed?: boolean } = {}) {
   }
 
   /** Feed a phase's output through the real `onPhaseEnd` harvest. */
-  function finish(id: string, phase: string, output: string): void {
-    harvestFixMarkers(db, id, "dependabot-ci-fix", phase, output);
+  async function finish(id: string, phase: string, output: string): Promise<void> {
+    await harvestFixMarkers(db, id, "dependabot-ci-fix", phase, output);
   }
 
   /**
@@ -149,9 +149,9 @@ const fixOutcome = (outcome: string, gate: string) =>
   `CI_FIX_COMPLETE: pr=190 attempt=1 outcome=${outcome} tried=stuff gate=${gate}`;
 
 describe("applyDerivedState — the first dispatch", () => {
-  it("starts at attempt 1 with an empty history", () => {
+  it("starts at attempt 1 with an empty history", async () => {
     const h = harness();
-    const { state } = h.dispatch();
+    const { state } = await h.dispatch();
     expect(state.attempt).toBe(1);
     expect(state.priorAttempts).toEqual([]);
     expect(state.flakyDeferrals).toBe(0);
@@ -159,70 +159,70 @@ describe("applyDerivedState — the first dispatch", () => {
 });
 
 describe("applyDerivedState — the attempt counter", () => {
-  it("increments on a same-head retry and appends the prior attempt's line", () => {
+  it("increments on a same-head retry and appends the prior attempt's line", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
-    h.finish(first.id, "fix", fixOutcome("gave-up", "red"));
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(first.id, "fix", fixOutcome("gave-up", "red"));
 
-    const second = h.dispatch();
+    const second = await h.dispatch();
     expect(second.state.attempt).toBe(2);
     expect(second.state.priorAttempts).toEqual([
       "attempt 1: class=reproducible cause=the lockfile is stale | outcome=gave-up gate=red",
     ]);
   });
 
-  it("increments when WE authored the new head — our fix landed, CI is still red", () => {
+  it("increments when WE authored the new head — our fix landed, CI is still red", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
-    h.finish(first.id, "fix", fixOutcome("pushed", "green"));
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(first.id, "fix", fixOutcome("pushed", "green"));
 
-    const second = h.dispatch({ headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
+    const second = await h.dispatch({ headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
     expect(second.state.attempt).toBe(2);
     expect(second.state.priorAttempts).toHaveLength(1);
   });
 
-  it("resets to 1 — and clears the journal — when SOMEONE ELSE pushes", () => {
+  it("resets to 1 — and clears the journal — when SOMEONE ELSE pushes", async () => {
     // A maintainer's push, a Dependabot rebase, a Renovate recreate. The world
     // moved, so the counter, the journal and the deferral count all describe a
     // problem that no longer exists — and a prompt that says "attempt 1" while
     // recounting three of them is incoherent.
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
-    const second = h.dispatch();
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    const second = await h.dispatch();
     expect(second.state.attempt).toBe(2);
-    h.finish(second.id, "diagnose", diagnosis("flaky"));
+    await h.finish(second.id, "diagnose", diagnosis("flaky"));
 
-    const third = h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
+    const third = await h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
     expect(third.state.attempt).toBe(1);
     expect(third.state.priorAttempts).toEqual([]);
     expect(third.state.flakyDeferrals).toBe(0);
   });
 
-  it("a CRASHED run costs nothing — no marker, no increment, no line", () => {
+  it("a CRASHED run costs nothing — no marker, no increment, no line", async () => {
     // The single most important robustness rule in the design: without it, one
     // bad hour escalates every open dependency PR in every managed repo.
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", "the sandbox failed to provision");
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", "the sandbox failed to provision");
 
-    const second = h.dispatch();
+    const second = await h.dispatch();
     expect(second.state.attempt).toBe(1);
     expect(second.state.priorAttempts).toEqual([]);
   });
 
-  it("a run that never reached onPhaseEnd falls back to the ledger probe", () => {
+  it("a run that never reached onPhaseEnd falls back to the ledger probe", async () => {
     // Upgrade compatibility: a run row written before the harvest existed (or
     // one that died before its first phase ended) carries no `fixMarkers` key
     // at all, and must not be read as "spent nothing".
     const h = harness({ ledgerSaysDiagnosed: true });
-    h.dispatch();
-    expect(h.dispatch().state.attempt).toBe(2);
+    await h.dispatch();
+    expect((await h.dispatch()).state.attempt).toBe(2);
   });
 
-  it("a run that HARVESTED but parsed nothing still charges the attempt", () => {
+  it("a run that HARVESTED but parsed nothing still charges the attempt", async () => {
     // The counter that could never advance. `harvestFixMarkers` writes its
     // namespace unconditionally for the fix family, so a malformed marker leaves
     // a NON-null harvest carrying `diagnosis: null` — and reading that as "no
@@ -233,32 +233,32 @@ describe("applyDerivedState — the attempt counter", () => {
     // without a well-formed marker, because the phase carries
     // `requires_marker: "DIAGNOSIS_COMPLETE:"`.
     const h = harness({ ledgerSaysDiagnosed: true });
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", "DIAGNOSIS_COMPLETE without a colon, so nothing parses");
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", "DIAGNOSIS_COMPLETE without a colon, so nothing parses");
 
     // The harvest DID run — this is not the "no namespace" case.
-    expect(readHarvestedMarkers(h.db.runs.getRun(first.id))).not.toBeNull();
-    expect(readHarvestedMarkers(h.db.runs.getRun(first.id))?.diagnosis).toBeNull();
-    expect(h.dispatch().state.attempt).toBe(2);
+    expect(readHarvestedMarkers(await h.db.runs.getRun(first.id))).not.toBeNull();
+    expect(readHarvestedMarkers(await h.db.runs.getRun(first.id))?.diagnosis).toBeNull();
+    expect((await h.dispatch()).state.attempt).toBe(2);
   });
 
-  it("…but a genuinely crashed diagnose still costs nothing", () => {
+  it("…but a genuinely crashed diagnose still costs nothing", async () => {
     // Same shape on the harvest side, opposite answer, and the ledger is what
     // tells them apart: a run whose `diagnose` never finished has no succeeded
     // row. Failing closed here is only safe because of that.
     const h = harness({ ledgerSaysDiagnosed: false });
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", "the sandbox failed to provision");
-    expect(h.dispatch().state.attempt).toBe(1);
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", "the sandbox failed to provision");
+    expect((await h.dispatch()).state.attempt).toBe(1);
   });
 
-  it("a `flaky` verdict costs no attempt", () => {
+  it("a `flaky` verdict costs no attempt", async () => {
     // 09 → S1's class table. `fix.maxFlakyDeferrals` is the bound instead — and
     // that counter would be unreachable if `flaky` also spent an attempt.
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("flaky", "network timeout on install"));
-    const second = h.dispatch();
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("flaky", "network timeout on install"));
+    const second = await h.dispatch();
     expect(second.state.attempt).toBe(1);
     // The line is still recorded — attempt 2 should know it already deferred.
     expect(second.state.priorAttempts).toEqual([
@@ -266,120 +266,120 @@ describe("applyDerivedState — the attempt counter", () => {
     ]);
   });
 
-  it("an `upstream-broken` verdict costs no attempt", () => {
+  it("an `upstream-broken` verdict costs no attempt", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("upstream-broken", "base is red too"));
-    expect(h.dispatch().state.attempt).toBe(1);
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("upstream-broken", "base is red too"));
+    expect((await h.dispatch()).state.attempt).toBe(1);
   });
 
-  it("an `infra-dependent` verdict DOES cost an attempt", () => {
+  it("an `infra-dependent` verdict DOES cost an attempt", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("infra-dependent", "needs a live postgres"));
-    expect(h.dispatch().state.attempt).toBe(2);
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("infra-dependent", "needs a live postgres"));
+    expect((await h.dispatch()).state.attempt).toBe(2);
   });
 
-  it("an unrecognised class costs an attempt — fail closed", () => {
+  it("an unrecognised class costs an attempt — fail closed", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("probably-flaky"));
-    expect(h.dispatch().state.attempt).toBe(2);
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("probably-flaky"));
+    expect((await h.dispatch()).state.attempt).toBe(2);
   });
 });
 
 describe("applyDerivedState — flakyDeferrals", () => {
-  it("counts CONSECUTIVE flaky diagnoses", () => {
+  it("counts CONSECUTIVE flaky diagnoses", async () => {
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     expect(first.state.flakyDeferrals).toBe(0);
-    h.finish(first.id, "diagnose", diagnosis("flaky"));
+    await h.finish(first.id, "diagnose", diagnosis("flaky"));
 
-    const second = h.dispatch();
+    const second = await h.dispatch();
     expect(second.state.flakyDeferrals).toBe(1);
-    h.finish(second.id, "diagnose", diagnosis("flaky"));
+    await h.finish(second.id, "diagnose", diagnosis("flaky"));
 
-    const third = h.dispatch();
+    const third = await h.dispatch();
     // `fix.maxFlakyDeferrals: 2` — the next diagnosis is promoted.
     expect(third.state.flakyDeferrals).toBe(2);
   });
 
-  it("resets to 0 on any non-flaky class", () => {
+  it("resets to 0 on any non-flaky class", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("flaky"));
-    const second = h.dispatch();
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("flaky"));
+    const second = await h.dispatch();
     expect(second.state.flakyDeferrals).toBe(1);
 
-    h.finish(second.id, "diagnose", diagnosis("reproducible"));
-    expect(h.dispatch().state.flakyDeferrals).toBe(0);
+    await h.finish(second.id, "diagnose", diagnosis("reproducible"));
+    expect((await h.dispatch()).state.flakyDeferrals).toBe(0);
   });
 
-  it("a crash neither advances nor resets it — it says nothing about flakiness", () => {
+  it("a crash neither advances nor resets it — it says nothing about flakiness", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("flaky"));
-    const second = h.dispatch();
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("flaky"));
+    const second = await h.dispatch();
     expect(second.state.flakyDeferrals).toBe(1);
 
-    h.finish(second.id, "diagnose", "sandbox provisioning failed");
-    expect(h.dispatch().state.flakyDeferrals).toBe(1);
+    await h.finish(second.id, "diagnose", "sandbox provisioning failed");
+    expect((await h.dispatch()).state.flakyDeferrals).toBe(1);
   });
 });
 
 describe("applyDerivedState — priorDiagnosisClass", () => {
-  it("carries the LAST run's class, which is what the escalation gate reads", () => {
+  it("carries the LAST run's class, which is what the escalation gate reads", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("infra-dependent", "needs a live postgres"));
-    expect(h.dispatch().state.priorDiagnosisClass).toBe("infra-dependent");
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("infra-dependent", "needs a live postgres"));
+    expect((await h.dispatch()).state.priorDiagnosisClass).toBe("infra-dependent");
   });
 
-  it("is null after a run that diagnosed nothing — that is how the manual exit works", () => {
+  it("is null after a run that diagnosed nothing — that is how the manual exit works", async () => {
     // Deliberately NOT carried like `flakyDeferrals`. Our own escalation row
     // harvests no diagnosis, so a maintainer who removes `requires-human` by
     // hand gets a genuine retry instead of an instant re-escalation that puts
     // the label straight back.
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("infra-dependent"));
-    const second = h.dispatch();
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("infra-dependent"));
+    const second = await h.dispatch();
     expect(second.state.priorDiagnosisClass).toBe("infra-dependent");
 
-    h.finish(second.id, "diagnose", "the sandbox failed to provision");
-    expect(h.dispatch().state.priorDiagnosisClass).toBeNull();
+    await h.finish(second.id, "diagnose", "the sandbox failed to provision");
+    expect((await h.dispatch()).state.priorDiagnosisClass).toBeNull();
   });
 
-  it("is null on a fresh problem, with the rest of the history", () => {
+  it("is null on a fresh problem, with the rest of the history", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("infra-dependent"));
-    const pushed = h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("infra-dependent"));
+    const pushed = await h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
     expect(pushed.state.priorDiagnosisClass).toBeNull();
   });
 
-  it("never reports an unrecognised class", () => {
+  it("never reports an unrecognised class", async () => {
     // A hallucinated token must not be compared against `retryableClasses` —
     // `class=probably-flaky` is not evidence of anything.
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("probably-flaky"));
-    expect(h.dispatch().state.priorDiagnosisClass).toBeNull();
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("probably-flaky"));
+    expect((await h.dispatch()).state.priorDiagnosisClass).toBeNull();
   });
 });
 
 describe("applyDerivedState — the priorAttempts journal", () => {
-  it("accumulates one line per attempt, oldest first", () => {
+  it("accumulates one line per attempt, oldest first", async () => {
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("reproducible", "lockfile stale"));
-    h.finish(first.id, "fix", fixOutcome("pushed", "green"));
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("reproducible", "lockfile stale"));
+    await h.finish(first.id, "fix", fixOutcome("pushed", "green"));
 
-    const second = h.dispatch({ headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
-    h.finish(second.id, "diagnose", diagnosis("env-mismatch", "CI runs node 22"));
-    h.finish(second.id, "fix", fixOutcome("gave-up", "red"));
+    const second = await h.dispatch({ headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
+    await h.finish(second.id, "diagnose", diagnosis("env-mismatch", "CI runs node 22"));
+    await h.finish(second.id, "fix", fixOutcome("gave-up", "red"));
 
-    const third = h.dispatch({ headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
+    const third = await h.dispatch({ headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
     expect(third.state.attempt).toBe(3);
     expect(third.state.priorAttempts).toEqual([
       "attempt 1: class=reproducible cause=lockfile stale | outcome=pushed gate=green",
@@ -387,16 +387,16 @@ describe("applyDerivedState — the priorAttempts journal", () => {
     ]);
   });
 
-  it("stays bounded across a long series of free flaky deferrals", () => {
+  it("stays bounded across a long series of free flaky deferrals", async () => {
     // The unbounded case 09 → S1 names: `fix-red-dependency-prs` runs daily
     // against a PR with one flaky test, and none of those runs spends an
     // attempt — so only the journal's own bound stops the prompt growing.
     const h = harness();
     for (let i = 0; i < 12; i++) {
-      const run = h.dispatch();
-      h.finish(run.id, "diagnose", diagnosis("flaky", `blip ${i}`));
+      const run = await h.dispatch();
+      await h.finish(run.id, "diagnose", diagnosis("flaky", `blip ${i}`));
     }
-    const last = h.dispatch();
+    const last = await h.dispatch();
     expect(last.state.priorAttempts.length).toBeLessThanOrEqual(6);
     // Newest kept, oldest dropped.
     expect(last.state.priorAttempts[last.state.priorAttempts.length - 1]).toContain("blip 11");
@@ -420,52 +420,52 @@ describe("applyDerivedState — the priorAttempts journal", () => {
 describe("applyDerivedState — `requires-human` is read by nothing", () => {
   const LABELLED = { labels: [REQUIRES_HUMAN_LABEL] };
 
-  it("a maintainer's label on a PR we have never touched no longer holds anything", () => {
+  it("a maintainer's label on a PR we have never touched no longer holds anything", async () => {
     // THE behaviour change. It used to resolve `escalatedBy: "human"` — a
     // permanent hard override — and that was the only case the whole inference
     // existed for. A maintainer who wants this now applies the HOLD label, which
     // works on every PR rather than only on virgin ones.
     const h = harness();
-    const { state } = h.dispatch(LABELLED);
+    const { state } = await h.dispatch(LABELLED);
     expect(state.escalatedAtSha).toBeNull();
     expect(resolveFixDisposition(state, defaultFixConfig()).decision).toBe("run");
   });
 
-  it("a label the AGENT applied mid-run means nothing to the code either", () => {
+  it("a label the AGENT applied mid-run means nothing to the code either", async () => {
     // The packaged `dependabot-ci-fix` prompt tells the agent to apply
     // `requires-human` when it cannot land the PR. That run persists no
     // `escalatedAtSha` — its snapshot is written at dispatch, before the label
     // exists — so there is no record, and with no record there is no guard. The
     // budgets are what bound this PR now, which is what they were always for.
     const h = harness();
-    const first = h.dispatch();
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
-    h.finish(first.id, "fix", fixOutcome("gave-up", "red"));
+    const first = await h.dispatch();
+    await h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(first.id, "fix", fixOutcome("gave-up", "red"));
     expect(first.state.escalatedAtSha).toBeNull();
 
-    const next = h.dispatch(LABELLED);
+    const next = await h.dispatch(LABELLED);
     expect(next.state.escalatedAtSha).toBeNull();
     expect(resolveFixDisposition(next.state, defaultFixConfig()).decision).toBe("run");
   });
 
-  it("a recorded escalation binds while our notification is still on the PR", () => {
+  it("a recorded escalation binds while our notification is still on the PR", async () => {
     // `escalatePr`'s row is the only thing that ever bound, and it still does.
     // Asserted twice, because the record must be what carries the guard: the
     // same history re-resolved must produce the same verdict every time, and no
     // amount of re-reading the PR may turn it into something else.
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     h.rows[0].context = { prState: { ...first.state, escalatedAtSha: "aaaa111" } };
 
     for (let i = 0; i < 2; i++) {
-      const { state } = h.dispatch(LABELLED);
+      const { state } = await h.dispatch(LABELLED);
       expect(state.escalatedAtSha).toBe("aaaa111");
       expect(state.intervention).toBeNull();
       expect(resolveFixDisposition(state, defaultFixConfig()).reason).toMatch(/^escalated:/);
     }
   });
 
-  it("but the label coming OFF is a retry — the one thing `requires-human` still says", () => {
+  it("but the label coming OFF is a retry — the one thing `requires-human` still says", async () => {
     // 03-retry-intervention.md, surface 2. No webhook: "we escalated at this
     // head, the head has not moved, and our label is gone" can only be a human
     // having removed it — and it is trivially detectable ONLY because Phase 2
@@ -476,13 +476,13 @@ describe("applyDerivedState — `requires-human` is read by nothing", () => {
     // dispatch fell straight into `budget-exhausted`, re-labelled the PR and
     // posted a duplicate escalation comment. Now it re-arms.
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     h.rows[0].context = { prState: { ...first.state, attempt: 4, escalatedAtSha: "aaaa111" } };
 
-    const { state } = h.dispatch(LABELLED);
+    const { state } = await h.dispatch(LABELLED);
     expect(resolveFixDisposition(state, defaultFixConfig()).reason).toMatch(/^escalated:/);
 
-    const removed = h.dispatch();
+    const removed = await h.dispatch();
     expect(removed.state.intervention).toMatchObject({ via: "label", atSha: "aaaa111" });
     expect(removed.state.escalatedAtSha).toBeNull();
     expect(removed.state.attempt).toBe(1);
@@ -491,21 +491,21 @@ describe("applyDerivedState — `requires-human` is read by nothing", () => {
     // ONCE. The record is on the dispatched run's own snapshot, so the next
     // event reads the same intervention back and does not re-arm again — which
     // is what stops a permanently-unlabelled PR getting a fresh window per tick.
-    const next = h.dispatch();
+    const next = await h.dispatch();
     expect(next.state.intervention?.at).toBe(removed.state.intervention?.at);
     expect(next.state.priorAttempts).toEqual(removed.state.priorAttempts);
     expect(next.state.priorAttempts.filter((l) => l.includes("retried by request"))).toHaveLength(1);
   });
 
-  it("and it stops binding the moment anyone else pushes", () => {
+  it("and it stops binding the moment anyone else pushes", async () => {
     // The anti-latch property, unchanged: a new head from anyone but us is a
     // fresh problem, so the record stops binding with nobody having to remove
     // any label by hand.
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     h.rows[0].context = { prState: { ...first.state, escalatedAtSha: "aaaa111" } };
 
-    const pushed = h.dispatch({
+    const pushed = await h.dispatch({
       ...LABELLED,
       headSha: "cccc333",
       headAuthor: "octocat",
@@ -515,7 +515,7 @@ describe("applyDerivedState — `requires-human` is read by nothing", () => {
     expect(resolveFixDisposition(pushed.state, defaultFixConfig()).decision).toBe("run");
   });
 
-  it("a LEGACY row with no prState carries no escalation", () => {
+  it("a LEGACY row with no prState carries no escalation", async () => {
     // On upgrade, every PR already carrying the label has rows of exactly this
     // shape. They used to be inferred into `escalatedBy: "us"` with the row's
     // bare `headSha` standing in for a SHA nobody recorded; now they simply
@@ -523,80 +523,82 @@ describe("applyDerivedState — `requires-human` is read by nothing", () => {
     const h = harness();
     h.recordLegacyRun({ headSha: "aaaa111", owner: "cliftonc", repo: "lastlight" });
 
-    const { state } = h.dispatch(LABELLED);
+    const { state } = await h.dispatch(LABELLED);
     expect(state.escalatedAtSha).toBeNull();
     expect(resolveFixDisposition(state, defaultFixConfig()).decision).toBe("run");
   });
 
-  it("reads the record off the WIDEST prior row, not just the fix family's", () => {
+  it("reads the record off the WIDEST prior row, not just the fix family's", async () => {
     // `escalatePr` records under whichever workflow was dispatching, which may
     // be `dependabot-pr-merge` or `pr-review` — neither of which the fix-family
     // lookup would find.
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     h.rows[0].workflowName = "dependabot-pr-merge";
     h.rows[0].context = { prState: { ...first.state, escalatedAtSha: "eeee555" } };
-    expect(h.dispatch().state.escalatedAtSha).toBe("eeee555");
+    expect((await h.dispatch()).state.escalatedAtSha).toBe("eeee555");
   });
 });
 
 describe("harvestFixMarkers", () => {
-  it("merges across phases instead of clobbering — mergeScratch is shallow", () => {
+  it("merges across phases instead of clobbering — mergeScratch is shallow", async () => {
     const h = harness();
-    const { id } = h.dispatch();
-    h.finish(id, "diagnose", diagnosis("reproducible"));
-    h.finish(id, "fix", fixOutcome("pushed", "green"));
+    const { id } = await h.dispatch();
+    await h.finish(id, "diagnose", diagnosis("reproducible"));
+    await h.finish(id, "fix", fixOutcome("pushed", "green"));
 
-    const harvest = readHarvestedMarkers(h.db.runs.getRun(id));
+    const harvest = readHarvestedMarkers(await h.db.runs.getRun(id));
     expect(harvest?.diagnosis?.class).toBe("reproducible");
     expect(harvest?.fix?.outcome).toBe("pushed");
     expect(harvest?.phases).toEqual(["diagnose", "fix"]);
   });
 
-  it("does not clobber other scratch keys", () => {
+  it("does not clobber other scratch keys", async () => {
     const h = harness();
-    const { id } = h.dispatch();
-    h.db.runs.mergeScratch(id, { notifier: { githubCommentId: 42 } });
-    h.finish(id, "diagnose", diagnosis("reproducible"));
-    expect(h.db.runs.getRun(id)?.scratch?.notifier).toEqual({ githubCommentId: 42 });
+    const { id } = await h.dispatch();
+    await h.db.runs.mergeScratch(id, { notifier: { githubCommentId: 42 } });
+    await h.finish(id, "diagnose", diagnosis("reproducible"));
+    expect((await h.db.runs.getRun(id))?.scratch?.notifier).toEqual({ githubCommentId: 42 });
   });
 
-  it("harvests a generic_loop ITERATION label, and the last iteration wins", () => {
+  it("harvests a generic_loop ITERATION label, and the last iteration wins", async () => {
     // `phase` is a LABEL: the gate loop delivers `fix_iter_1` / `fix_iter_2`,
     // never `fix`. Keying on equality would harvest nothing at all.
     const h = harness();
-    const { id } = h.dispatch();
-    h.finish(id, "diagnose", diagnosis("reproducible"));
-    h.finish(id, "fix_iter_1", fixOutcome("no-change", "red"));
-    h.finish(id, "fix_iter_2", fixOutcome("pushed", "green"));
+    const { id } = await h.dispatch();
+    await h.finish(id, "diagnose", diagnosis("reproducible"));
+    await h.finish(id, "fix_iter_1", fixOutcome("no-change", "red"));
+    await h.finish(id, "fix_iter_2", fixOutcome("pushed", "green"));
 
-    const harvest = readHarvestedMarkers(h.db.runs.getRun(id));
+    const harvest = readHarvestedMarkers(await h.db.runs.getRun(id));
     expect(harvest?.fix?.outcome).toBe("pushed");
     expect(harvest?.fix?.gate).toBe("green");
     expect(harvest?.phases).toEqual(["diagnose", "fix"]);
   });
 
-  it("records the namespace even when a phase emitted no marker", () => {
+  it("records the namespace even when a phase emitted no marker", async () => {
     // Presence of the key — not of a marker — is what tells "the harvest ran
     // and found nothing" from "this row predates the harvest".
     const h = harness();
-    const { id } = h.dispatch();
-    h.finish(id, "diagnose", "I could not work out what happened.");
-    const harvest = readHarvestedMarkers(h.db.runs.getRun(id));
+    const { id } = await h.dispatch();
+    await h.finish(id, "diagnose", "I could not work out what happened.");
+    const harvest = readHarvestedMarkers(await h.db.runs.getRun(id));
     expect(harvest).not.toBeNull();
     expect(harvest?.diagnosis).toBeNull();
   });
 
-  it("ignores workflows outside the fix family", () => {
+  it("ignores workflows outside the fix family", async () => {
     const h = harness();
-    const { id } = h.dispatch();
-    harvestFixMarkers(h.db, id, "pr-review", "review", diagnosis("reproducible"));
-    expect(readHarvestedMarkers(h.db.runs.getRun(id))).toBeNull();
+    const { id } = await h.dispatch();
+    await harvestFixMarkers(h.db, id, "pr-review", "review", diagnosis("reproducible"));
+    expect(readHarvestedMarkers(await h.db.runs.getRun(id))).toBeNull();
   });
 
-  it("never throws when the run row is gone", () => {
+  it("never throws when the run row is gone", async () => {
     const h = harness();
-    expect(() => h.finish("run-does-not-exist", "diagnose", diagnosis("flaky"))).not.toThrow();
+    await expect(
+      h.finish("run-does-not-exist", "diagnose", diagnosis("flaky")),
+    ).resolves.not.toThrow();
   });
 });
 

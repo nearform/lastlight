@@ -1,7 +1,11 @@
-import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
+import { and, count, desc, eq, gte, inArray, isNotNull, isNull, like, sql, type SQL } from "drizzle-orm";
+import type { ExtensionStatusMap, SkillsStatus } from "lastlight-workflow-engine";
+import { nullsToUndefined, type StateClient } from "./client.js";
+import { changes, dayBucket, hourBucket, likeEscape, rows, run, sumTrue } from "./dialect.js";
 import type { TriggerActorType } from "./user-store.js";
 import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
+import { executions, messagingMessages, messagingSessions, workflowRuns } from "./schema/sqlite.js";
 
 export interface ExecutionRecord {
   id: string;
@@ -51,16 +55,17 @@ export interface ExecutionRecord {
   /** Result subtype, e.g. "success" or "error_max_turns". */
   stopReason?: string;
   /**
-   * JSON-serialized {@link ExtensionStatusMap} — which agentic-pi extensions
-   * (file-search / github / web-search) were active for this execution.
+   * Which agentic-pi extensions (file-search / github / web-search) were active
+   * for this execution. A real JSON column, so this travels as an OBJECT in
+   * both directions and nothing on either side stringifies it.
    */
-  extensionStatus?: string;
+  extensionStatus?: ExtensionStatusMap;
   /**
-   * JSON-serialized {@link SkillsStatus} — agentic-pi's skill-loading status
-   * for this execution (which skills were discovered/available). Null when
-   * the run reported no skills.
+   * agentic-pi's skill-loading status for this execution (which skills were
+   * discovered/available). A real JSON column, like {@link extensionStatus}.
+   * Absent when the run reported no skills.
    */
-  skillsStatus?: string;
+  skillsStatus?: SkillsStatus;
   /**
    * Workflow run that owns this execution. Scopes dedup: a fresh re-trigger
    * creates a new workflow_run_id, so `shouldRunPhase` won't find matching
@@ -76,8 +81,9 @@ export interface ExecutionRecord {
  * runner's resume path skips already-completed phases via {@link shouldRunPhase}.
  *
  * Carved out of the old `StateDb` god-class (issue #97). Constructed from the
- * single shared `Database` so it sits in the same connection / transaction
- * scope as the other stores.
+ * single shared Drizzle client so it sits in the same connection scope as the
+ * other stores. It is never a transaction participant — no method takes a
+ * `dbc` — because nothing else has to move atomically with a ledger append.
  */
 /**
  * `executions.repo`, composed into the qualified `owner/repo` a user-facing
@@ -91,58 +97,140 @@ export interface ExecutionRecord {
  * **NULL is the safe answer, and deliberate.** A consumer of this treats null
  * as "no repo, always visible"; returning a bare name instead would produce a
  * value that matches nothing in a qualified allow-list and would therefore
- * HIDE the row. Requires the alias to be `e` (executions).
+ * HIDE the row. It embeds the schema columns, which render fully qualified
+ * (`"executions"."owner"`), so any raw query using it must select from
+ * `executions` UNALIASED — the old `e` alias is gone.
  */
-const QUALIFIED_REPO_SQL = qualifiedRepoSql("e.owner", "e.repo", "null");
+const QUALIFIED_REPO_SQL = qualifiedRepoSql(executions.owner, executions.repo, "null");
 
 /**
- * The column list every read that returns an {@link ExecutionRecord} selects.
+ * The columns every BUILDER read that returns an {@link ExecutionRecord}
+ * selects.
  *
- * The table is snake_case and the record is camelCase, so `SELECT *` does not
- * produce an `ExecutionRecord` — it produces a row that *looks* like one for
- * the handful of single-word columns and silently leaves `issueNumber`,
- * `startedAt` and `workflowRunId` `undefined` (issue #285). Three reads did
- * exactly that, and the cast to `ExecutionRecord[]` made the compiler agree.
- * The Slack status report rendered `(started undefined)` and the admin cancel
- * loop filtered on a `workflowRunId` that never matched a row.
+ * Named explicitly rather than `.select()`-ing the whole row so `output_text`
+ * — which is not part of the record and can hold a full LLM response — never
+ * rides along on a list read.
  *
- * So the aliasing lives in ONE place rather than being re-typed per query, and
- * {@link mapExecutionRow} is its other half — a new column is added to both or
- * to neither. No table alias is used, so this works in any single-table query.
+ * Its raw-SQL twin is {@link EXECUTION_COLUMNS}, and {@link deserialize} /
+ * {@link mapExecutionRow} are their respective other halves. A new column is
+ * added to all four or to none.
  */
-const EXECUTION_COLUMNS = `
-  id,
-  trigger_type      AS triggerType,
-  trigger_id        AS triggerId,
-  triggered_by      AS triggeredBy,
-  trigger_actor_type AS triggerActorType,
-  skill,
-  owner,
-  repo,
-  issue_number      AS issueNumber,
-  started_at        AS startedAt,
-  finished_at       AS finishedAt,
-  success,
-  error,
-  turns,
-  duration_ms       AS durationMs,
-  session_id        AS sessionId,
-  cost_usd          AS costUsd,
-  input_tokens      AS inputTokens,
-  cache_creation_input_tokens AS cacheCreationInputTokens,
-  cache_read_input_tokens     AS cacheReadInputTokens,
-  output_tokens     AS outputTokens,
-  api_duration_ms   AS apiDurationMs,
-  stop_reason       AS stopReason,
-  extension_status  AS extensionStatus,
-  skills_status     AS skillsStatus,
-  workflow_run_id   AS workflowRunId
+const executionColumns = {
+  id: executions.id,
+  triggerType: executions.triggerType,
+  triggerId: executions.triggerId,
+  triggeredBy: executions.triggeredBy,
+  triggerActorType: executions.triggerActorType,
+  skill: executions.skill,
+  owner: executions.owner,
+  repo: executions.repo,
+  issueNumber: executions.issueNumber,
+  startedAt: executions.startedAt,
+  finishedAt: executions.finishedAt,
+  success: executions.success,
+  error: executions.error,
+  turns: executions.turns,
+  durationMs: executions.durationMs,
+  sessionId: executions.sessionId,
+  costUsd: executions.costUsd,
+  inputTokens: executions.inputTokens,
+  cacheCreationInputTokens: executions.cacheCreationInputTokens,
+  cacheReadInputTokens: executions.cacheReadInputTokens,
+  outputTokens: executions.outputTokens,
+  apiDurationMs: executions.apiDurationMs,
+  stopReason: executions.stopReason,
+  extensionStatus: executions.extensionStatus,
+  skillsStatus: executions.skillsStatus,
+  workflowRunId: executions.workflowRunId,
+};
+
+/** The row shape a builder read of {@link executionColumns} returns. */
+type ExecutionRow = Omit<typeof executions.$inferSelect, "outputText">;
+
+/**
+ * Turn a BUILDER row into an {@link ExecutionRecord}.
+ *
+ * The builder already did the hard parts — camelCase names, a real boolean for
+ * `success`, the two status columns parsed into objects — so this is down to
+ * turning nulls into absent optionals and narrowing the two free-text columns
+ * the schema types as plain `string`.
+ */
+function deserialize(row: ExecutionRow): ExecutionRecord {
+  const r = nullsToUndefined(row);
+  return {
+    ...r,
+    triggerType: r.triggerType as ExecutionRecord["triggerType"],
+    triggerActorType: r.triggerActorType as TriggerActorType | undefined,
+  };
+}
+
+/**
+ * The column list every RAW read that returns an {@link ExecutionRecord}
+ * selects — the `sql` twin of {@link executionColumns}.
+ *
+ * The table is snake_case and the record is camelCase, so an unaliased raw
+ * `SELECT *` does not produce an `ExecutionRecord` — it produces a row that
+ * *looks* like one for the handful of single-word columns and silently leaves
+ * `issueNumber`, `startedAt` and `workflowRunId` `undefined` (issue #285).
+ * Three reads did exactly that, and the cast to `ExecutionRecord[]` made the
+ * compiler agree.
+ *
+ * Every alias is DOUBLE-QUOTED: Postgres folds an unquoted `AS triggerId` to
+ * `triggerid`, which would resurrect issue #285 the moment the pg leg runs.
+ * The columns render fully qualified, so the query must not alias the table.
+ */
+const EXECUTION_COLUMNS: SQL = sql`
+  ${executions.id}                       AS "id",
+  ${executions.triggerType}              AS "triggerType",
+  ${executions.triggerId}                AS "triggerId",
+  ${executions.triggeredBy}              AS "triggeredBy",
+  ${executions.triggerActorType}         AS "triggerActorType",
+  ${executions.skill}                    AS "skill",
+  ${executions.owner}                    AS "owner",
+  ${executions.repo}                     AS "repo",
+  ${executions.issueNumber}              AS "issueNumber",
+  ${executions.startedAt}                AS "startedAt",
+  ${executions.finishedAt}               AS "finishedAt",
+  ${executions.success}                  AS "success",
+  ${executions.error}                    AS "error",
+  ${executions.turns}                    AS "turns",
+  ${executions.durationMs}               AS "durationMs",
+  ${executions.sessionId}                AS "sessionId",
+  ${executions.costUsd}                  AS "costUsd",
+  ${executions.inputTokens}              AS "inputTokens",
+  ${executions.cacheCreationInputTokens} AS "cacheCreationInputTokens",
+  ${executions.cacheReadInputTokens}     AS "cacheReadInputTokens",
+  ${executions.outputTokens}             AS "outputTokens",
+  ${executions.apiDurationMs}            AS "apiDurationMs",
+  ${executions.stopReason}               AS "stopReason",
+  ${executions.extensionStatus}          AS "extensionStatus",
+  ${executions.skillsStatus}             AS "skillsStatus",
+  ${executions.workflowRunId}            AS "workflowRunId"
 `;
 
 /**
+ * Parse one of the two JSON status columns off a RAW row.
+ *
+ * Raw rows bypass Drizzle's column mapping entirely, so a `{ mode: "json" }`
+ * column arrives as the TEXT it is stored as and has to be parsed here.
+ * Malformed JSON yields `undefined` rather than throwing — one bad row must
+ * not take out the whole executions list.
+ */
+function parseStatusJson<T>(value: unknown): T | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string") return value as T;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Turn a row selected with {@link EXECUTION_COLUMNS} into an
- * {@link ExecutionRecord}: SQLite NULLs become `undefined` (the record's
- * optional fields) and the `success` integer becomes a boolean.
+ * {@link ExecutionRecord}: NULLs become `undefined` (the record's optional
+ * fields), the raw `success` integer becomes a boolean, and the two JSON
+ * columns are parsed by hand — none of which a raw query does for you.
  */
 function mapExecutionRow(r: Record<string, unknown>): ExecutionRecord {
   const nul = <T>(v: unknown): T | undefined => (v === null || v === undefined ? undefined : (v as T));
@@ -170,8 +258,8 @@ function mapExecutionRow(r: Record<string, unknown>): ExecutionRecord {
     outputTokens: nul<number>(r.outputTokens),
     apiDurationMs: nul<number>(r.apiDurationMs),
     stopReason: nul<string>(r.stopReason),
-    extensionStatus: nul<string>(r.extensionStatus),
-    skillsStatus: nul<string>(r.skillsStatus),
+    extensionStatus: parseStatusJson<ExtensionStatusMap>(r.extensionStatus),
+    skillsStatus: parseStatusJson<SkillsStatus>(r.skillsStatus),
     workflowRunId: nul<string>(r.workflowRunId),
   };
 }
@@ -189,10 +277,10 @@ export interface ExecutionOutcomeCounts {
  * selects (issue #325).
  *
  * `executions.success` is not a health signal and must not be read as one.
- * Two paths write `success = 0` deliberately, having failed at nothing:
+ * Two paths write `success = false` deliberately, having failed at nothing:
  *
  *  - **`skipped`** — {@link ExecutionStore.recordSkippedPhase}. Stored
- *    `success = 0` so {@link ExecutionStore.shouldRunPhase} re-evaluates the
+ *    `success = false` so {@link ExecutionStore.shouldRunPhase} re-evaluates the
  *    node on resume. The phase never ran.
  *  - **`error_quota`** — the k8s `ResourceQuota` rejected the pod. The runner
  *    treats it as an ordinary phase failure precisely so the run REQUEUES
@@ -210,26 +298,56 @@ export interface ExecutionOutcomeCounts {
  *
  * `success IS NULL` (still in flight) matches no bucket on purpose: it counts
  * toward `COUNT(*)` and toward nothing else, so a stacked bar can legitimately
- * be shorter than the execution total.
+ * be shorter than the execution total. That is why every arm goes through
+ * {@link sumTrue} — a `CASE WHEN <predicate>` where NULL falls to the ELSE in
+ * both dialects — and why the three that test for failure compare against a
+ * BOUND `${false}` rather than a literal `0`, which Postgres rejects outright
+ * (`operator does not exist: boolean = integer`).
  *
  * Note `condition_not_met` — a generic-loop `until_bash` check that ran and
- * came back red — is stored `success = 1` and therefore lands in `succeeded`.
- * It really executed and really cost tokens; only its per-row rendering is
- * muted (`execMark`, `packages/cli/src/cli-format.ts`).
+ * came back red — is stored `success = true` and therefore lands in
+ * `succeeded`. It really executed and really cost tokens; only its per-row
+ * rendering is muted (`execMark`, `packages/cli/src/cli-format.ts`).
  */
-export const EXECUTION_OUTCOME_COLUMNS = `
-        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS succeeded,
-        SUM(CASE WHEN success = 0 AND stop_reason = 'skipped' THEN 1 ELSE 0 END) AS skipped,
-        SUM(CASE WHEN success = 0 AND stop_reason = 'error_quota' THEN 1 ELSE 0 END) AS deferred,
-        SUM(CASE WHEN success = 0
-                  AND (stop_reason IS NULL OR stop_reason NOT IN ('skipped', 'error_quota'))
-             THEN 1 ELSE 0 END) AS failed`;
+export const EXECUTION_OUTCOME_COLUMNS: SQL = sql`
+        ${sumTrue(executions.success)} AS "succeeded",
+        ${sumTrue(sql`${executions.success} = ${false} AND ${executions.stopReason} = 'skipped'`)} AS "skipped",
+        ${sumTrue(sql`${executions.success} = ${false} AND ${executions.stopReason} = 'error_quota'`)} AS "deferred",
+        ${sumTrue(sql`${executions.success} = ${false}
+                  AND (${executions.stopReason} IS NULL OR ${executions.stopReason} NOT IN ('skipped', 'error_quota'))`)} AS "failed"`;
 
 /** Zero-fill for a bucket with no executions in it. */
 const NO_OUTCOMES: ExecutionOutcomeCounts = { succeeded: 0, skipped: 0, deferred: 0, failed: 0 };
 
+/** One aggregated chat thread — the shape both thread reads return. */
+interface ChatThreadSummary {
+  triggerId: string;
+  agentSessionId: string | null;
+  platform: string | null;
+  firstStartedAt: string;
+  lastActivityAt: string;
+  turnCount: number;
+  totalCost: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  lastAssistantContent: string | null;
+  repo: string | null;
+}
+
+/** The per-bucket shape {@link ExecutionStore.dailyStats} / `hourlyStats` return. */
+type BucketStats = ExecutionOutcomeCounts & {
+  date: string;
+  executions: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUsd: number;
+};
+
 export class ExecutionStore {
-  constructor(private db: Database.Database) {}
+  constructor(private client: StateClient) {}
 
   /**
    * Append a started phase to the ledger.
@@ -240,24 +358,23 @@ export class ExecutionStore {
    * qualified value from anywhere else is normalized rather than stored as a
    * second shape.
    */
-  recordStart(record: Omit<ExecutionRecord, "finishedAt" | "success" | "error" | "turns" | "durationMs">): void {
+  async recordStart(
+    record: Omit<ExecutionRecord, "finishedAt" | "success" | "error" | "turns" | "durationMs">,
+  ): Promise<void> {
     const ref = normalizeRepoRef(record.owner, record.repo);
-    this.db.prepare(`
-      INSERT INTO executions (id, trigger_type, trigger_id, skill, owner, repo, issue_number, started_at, workflow_run_id, triggered_by, trigger_actor_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      record.id,
-      record.triggerType,
-      record.triggerId,
-      record.skill,
-      ref.owner ?? null,
-      ref.repo ?? null,
-      record.issueNumber,
-      record.startedAt,
-      record.workflowRunId ?? null,
-      record.triggeredBy ?? null,
-      record.triggerActorType ?? null,
-    );
+    await this.client.insert(executions).values({
+      id: record.id,
+      triggerType: record.triggerType,
+      triggerId: record.triggerId,
+      skill: record.skill,
+      owner: ref.owner ?? null,
+      repo: ref.repo ?? null,
+      issueNumber: record.issueNumber ?? null,
+      startedAt: record.startedAt,
+      workflowRunId: record.workflowRunId ?? null,
+      triggeredBy: record.triggeredBy ?? null,
+      triggerActorType: record.triggerActorType ?? null,
+    });
   }
 
   /**
@@ -265,8 +382,8 @@ export class ExecutionStore {
    * the stream-json `system/init` line. Lets the dashboard surface the live
    * session log for an in-flight phase, not just for completed ones.
    */
-  recordSessionId(id: string, sessionId: string): void {
-    this.db.prepare(`UPDATE executions SET session_id = ? WHERE id = ?`).run(sessionId, id);
+  async recordSessionId(id: string, sessionId: string): Promise<void> {
+    await this.client.update(executions).set({ sessionId }).where(eq(executions.id, id));
   }
 
   /**
@@ -276,16 +393,18 @@ export class ExecutionStore {
    * stores `lastOutputExecutionId` and resolves the text through
    * `getExecutionOutput` on read.
    */
-  recordOutputText(id: string, output: string): void {
-    this.db.prepare(`UPDATE executions SET output_text = ? WHERE id = ?`).run(output, id);
+  async recordOutputText(id: string, output: string): Promise<void> {
+    await this.client.update(executions).set({ outputText: output }).where(eq(executions.id, id));
   }
 
   /** Read the persisted output text for an execution, or null if none. */
-  getExecutionOutput(id: string): string | null {
-    const row = this.db
-      .prepare(`SELECT output_text FROM executions WHERE id = ?`)
-      .get(id) as { output_text: string | null } | undefined;
-    return row?.output_text ?? null;
+  async getExecutionOutput(id: string): Promise<string | null> {
+    const [row] = await this.client
+      .select({ outputText: executions.outputText })
+      .from(executions)
+      .where(eq(executions.id, id))
+      .limit(1);
+    return row?.outputText ?? null;
   }
 
   /**
@@ -294,20 +413,27 @@ export class ExecutionStore {
    * verdict from its persisted output (a dedup-`done` review must not be
    * assumed APPROVED — it may have requested changes).
    */
-  getPhaseOutput(skill: string, triggerId: string, workflowRunId?: string): string | null {
-    const [scopeClause, scopeParam] = workflowRunId
-      ? ["workflow_run_id = ?", workflowRunId]
-      : ["trigger_id = ?", triggerId];
-    const row = this.db.prepare(`
-      SELECT output_text FROM executions
-      WHERE skill = ? AND ${scopeClause} AND output_text IS NOT NULL
-      ORDER BY finished_at DESC
-      LIMIT 1
-    `).get(skill, scopeParam) as { output_text: string | null } | undefined;
-    return row?.output_text ?? null;
+  async getPhaseOutput(
+    skill: string,
+    triggerId: string,
+    workflowRunId?: string,
+  ): Promise<string | null> {
+    const [row] = await this.client
+      .select({ outputText: executions.outputText })
+      .from(executions)
+      .where(
+        and(
+          eq(executions.skill, skill),
+          this.scope(triggerId, workflowRunId),
+          isNotNull(executions.outputText),
+        ),
+      )
+      .orderBy(desc(executions.finishedAt))
+      .limit(1);
+    return row?.outputText ?? null;
   }
 
-  recordFinish(
+  async recordFinish(
     id: string,
     result: {
       success: boolean;
@@ -322,48 +448,41 @@ export class ExecutionStore {
       outputTokens?: number;
       apiDurationMs?: number;
       stopReason?: string;
-      /** JSON-serialized ExtensionStatusMap (extensions active this run). */
-      extensionStatus?: string;
-      /** JSON-serialized SkillsStatus (skills available this run). */
-      skillsStatus?: string;
+      /** Extensions active this run. An OBJECT — the column is real JSON. */
+      extensionStatus?: ExtensionStatusMap;
+      /** Skills available this run. An OBJECT — the column is real JSON. */
+      skillsStatus?: SkillsStatus;
     },
-  ): void {
-    this.db.prepare(`
-      UPDATE executions
-      SET finished_at = ?,
-          success = ?,
-          error = ?,
-          turns = ?,
-          duration_ms = ?,
-          session_id = COALESCE(?, session_id),
-          cost_usd = COALESCE(?, cost_usd),
-          input_tokens = COALESCE(?, input_tokens),
-          cache_creation_input_tokens = COALESCE(?, cache_creation_input_tokens),
-          cache_read_input_tokens = COALESCE(?, cache_read_input_tokens),
-          output_tokens = COALESCE(?, output_tokens),
-          api_duration_ms = COALESCE(?, api_duration_ms),
-          stop_reason = COALESCE(?, stop_reason),
-          extension_status = COALESCE(?, extension_status),
-          skills_status = COALESCE(?, skills_status)
-      WHERE id = ?
-    `).run(
-      new Date().toISOString(),
-      result.success ? 1 : 0,
-      result.error,
-      result.turns,
-      result.durationMs,
-      result.sessionId ?? null,
-      result.costUsd ?? null,
-      result.inputTokens ?? null,
-      result.cacheCreationInputTokens ?? null,
-      result.cacheReadInputTokens ?? null,
-      result.outputTokens ?? null,
-      result.apiDurationMs ?? null,
-      result.stopReason ?? null,
-      result.extensionStatus ?? null,
-      result.skillsStatus ?? null,
-      id,
-    );
+  ): Promise<void> {
+    // The ten optional columns were `COALESCE(?, col)` under raw SQL — "leave
+    // what's there when this finish reports nothing". Omitting the key from the
+    // SET entirely says the same thing, and says it without a round trip.
+    await this.client
+      .update(executions)
+      .set({
+        finishedAt: new Date().toISOString(),
+        success: result.success,
+        error: result.error ?? null,
+        turns: result.turns ?? null,
+        durationMs: result.durationMs ?? null,
+        ...(result.sessionId !== undefined ? { sessionId: result.sessionId } : {}),
+        ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}),
+        ...(result.inputTokens !== undefined ? { inputTokens: result.inputTokens } : {}),
+        ...(result.cacheCreationInputTokens !== undefined
+          ? { cacheCreationInputTokens: result.cacheCreationInputTokens }
+          : {}),
+        ...(result.cacheReadInputTokens !== undefined
+          ? { cacheReadInputTokens: result.cacheReadInputTokens }
+          : {}),
+        ...(result.outputTokens !== undefined ? { outputTokens: result.outputTokens } : {}),
+        ...(result.apiDurationMs !== undefined ? { apiDurationMs: result.apiDurationMs } : {}),
+        ...(result.stopReason !== undefined ? { stopReason: result.stopReason } : {}),
+        ...(result.extensionStatus !== undefined
+          ? { extensionStatus: result.extensionStatus }
+          : {}),
+        ...(result.skillsStatus !== undefined ? { skillsStatus: result.skillsStatus } : {}),
+      })
+      .where(eq(executions.id, id));
   }
 
   /**
@@ -371,36 +490,36 @@ export class ExecutionStore {
    * not satisfied (a failed/skipped upstream cascaded down a chain). The
    * executions ledger is the single source of truth the dashboard derives
    * phase status from, so skips are written here too — as a finished,
-   * non-successful row (`success = 0`, `stop_reason = 'skipped'`). Because it
-   * is not `success = 1`, `shouldRunPhase` re-evaluates it on resume (the node
-   * will simply be re-skipped if the upstream is still failed).
+   * non-successful row (`success = false`, `stop_reason = 'skipped'`). Because
+   * it is not `success = true`, `shouldRunPhase` re-evaluates it on resume (the
+   * node will simply be re-skipped if the upstream is still failed).
    */
-  recordSkippedPhase(
+  async recordSkippedPhase(
     skill: string,
     triggerId: string,
     workflowRunId?: string,
     repo?: string,
     owner?: string,
-  ): void {
+  ): Promise<void> {
     const now = new Date().toISOString();
     const m = triggerId.match(/#(\d+)$/);
     const issueNumber = m ? Number(m[1]) : null;
     const ref = normalizeRepoRef(owner, repo);
-    this.db.prepare(`
-      INSERT INTO executions
-        (id, trigger_type, trigger_id, skill, owner, repo, issue_number, started_at, finished_at, success, error, stop_reason, workflow_run_id)
-      VALUES (?, 'webhook', ?, ?, ?, ?, ?, ?, ?, 0, 'skipped: trigger rule not satisfied', 'skipped', ?)
-    `).run(
-      randomUUID(),
+    await this.client.insert(executions).values({
+      id: randomUUID(),
+      triggerType: "webhook",
       triggerId,
       skill,
-      ref.owner ?? null,
-      ref.repo ?? null,
+      owner: ref.owner ?? null,
+      repo: ref.repo ?? null,
       issueNumber,
-      now,
-      now,
-      workflowRunId ?? null,
-    );
+      startedAt: now,
+      finishedAt: now,
+      success: false,
+      error: "skipped: trigger rule not satisfied",
+      stopReason: "skipped",
+      workflowRunId: workflowRunId ?? null,
+    });
   }
 
   /**
@@ -413,25 +532,14 @@ export class ExecutionStore {
    * the on-disk jsonl when streaming messages) and with `messaging_messages`
    * for the most recent assistant text (preview snippet).
    */
-  listChatThreads(limit: number): {
-    triggerId: string;
-    agentSessionId: string | null;
-    platform: string | null;
-    firstStartedAt: string;
-    lastActivityAt: string;
-    turnCount: number;
-    totalCost: number;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    lastAssistantContent: string | null;
-    repo: string | null;
-  }[] {
-    const rows = this.db.prepare(`
+  async listChatThreads(limit: number): Promise<ChatThreadSummary[]> {
+    return rows<ChatThreadSummary>(
+      this.client,
+      sql`
       SELECT
-        e.trigger_id              AS triggerId,
-        ms.agent_session_id       AS agentSessionId,
-        ms.platform               AS platform,
+        ${executions.triggerId}             AS "triggerId",
+        ${messagingSessions.agentSessionId} AS "agentSessionId",
+        ${messagingSessions.platform}       AS "platform",
         -- The thread's repo, for the dashboard's per-repo visibility filter
         -- (issue #169), qualified to owner/repo — a bare name would match
         -- nothing in the allow-list and so HIDE the row. MAX() rather than a
@@ -439,100 +547,69 @@ export class ExecutionStore {
         -- repo, and one that does should name the whole thread. A thread that
         -- genuinely spans repos picks one — acceptable, since a repo-less
         -- thread stays visible either way.
-        MAX(${QUALIFIED_REPO_SQL}) AS repo,
-        MIN(e.started_at)         AS firstStartedAt,
-        MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
-        COUNT(*)                  AS turnCount,
-        SUM(COALESCE(e.cost_usd, 0))           AS totalCost,
-        SUM(COALESCE(e.input_tokens, 0))       AS inputTokens,
-        SUM(COALESCE(e.output_tokens, 0))      AS outputTokens,
-        SUM(COALESCE(e.cache_read_input_tokens, 0)) AS cacheReadTokens,
+        MAX(${QUALIFIED_REPO_SQL})          AS "repo",
+        MIN(${executions.startedAt})        AS "firstStartedAt",
+        MAX(COALESCE(${executions.finishedAt}, ${executions.startedAt})) AS "lastActivityAt",
+        COUNT(*)                            AS "turnCount",
+        SUM(COALESCE(${executions.costUsd}, 0))              AS "totalCost",
+        SUM(COALESCE(${executions.inputTokens}, 0))          AS "inputTokens",
+        SUM(COALESCE(${executions.outputTokens}, 0))         AS "outputTokens",
+        SUM(COALESCE(${executions.cacheReadInputTokens}, 0)) AS "cacheReadTokens",
         (
-          SELECT mm.content
-          FROM messaging_messages mm
-          WHERE mm.session_id = e.trigger_id AND mm.role = 'assistant'
-          ORDER BY mm.timestamp DESC
+          SELECT ${messagingMessages.content}
+          FROM ${messagingMessages}
+          WHERE ${messagingMessages.sessionId} = ${executions.triggerId}
+            AND ${messagingMessages.role} = 'assistant'
+          ORDER BY ${messagingMessages.timestamp} DESC
           LIMIT 1
-        ) AS lastAssistantContent
-      FROM executions e
-      LEFT JOIN messaging_sessions ms ON ms.id = e.trigger_id
-      WHERE e.skill = 'chat'
-      GROUP BY e.trigger_id
-      ORDER BY lastActivityAt DESC
-      LIMIT ?
-    `).all(limit) as Array<{
-      triggerId: string;
-      agentSessionId: string | null;
-      firstStartedAt: string;
-      lastActivityAt: string;
-      turnCount: number;
-      totalCost: number;
-      inputTokens: number;
-      outputTokens: number;
-      cacheReadTokens: number;
-      lastAssistantContent: string | null;
-      platform: string | null;
-      repo: string | null;
-    }>;
-    return rows;
+        ) AS "lastAssistantContent"
+      FROM ${executions}
+      LEFT JOIN ${messagingSessions} ON ${messagingSessions.id} = ${executions.triggerId}
+      WHERE ${executions.skill} = 'chat'
+      -- The two messaging_sessions columns are grouped rather than bare: the
+      -- join is on that table's primary key, so each trigger_id still collapses
+      -- to exactly one row, but Postgres rejects a bare non-aggregated column.
+      GROUP BY ${executions.triggerId}, ${messagingSessions.agentSessionId}, ${messagingSessions.platform}
+      ORDER BY "lastActivityAt" DESC
+      LIMIT ${limit}
+    `,
+    );
   }
 
   /** Look up a single chat thread by its messaging session id (= trigger_id). */
-  getChatThread(triggerId: string): {
-    triggerId: string;
-    agentSessionId: string | null;
-    platform: string | null;
-    firstStartedAt: string;
-    lastActivityAt: string;
-    turnCount: number;
-    totalCost: number;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    lastAssistantContent: string | null;
-    repo: string | null;
-  } | null {
-    const row = this.db.prepare(`
+  async getChatThread(triggerId: string): Promise<ChatThreadSummary | null> {
+    const results = await rows<ChatThreadSummary>(
+      this.client,
+      sql`
       SELECT
-        e.trigger_id              AS triggerId,
-        ms.agent_session_id       AS agentSessionId,
-        ms.platform               AS platform,
+        ${executions.triggerId}             AS "triggerId",
+        ${messagingSessions.agentSessionId} AS "agentSessionId",
+        ${messagingSessions.platform}       AS "platform",
         -- Same qualification rule as the list above; it read the raw column
         -- here and so disagreed with its own list view for one thread.
-        MAX(${QUALIFIED_REPO_SQL}) AS repo,
-        MIN(e.started_at)         AS firstStartedAt,
-        MAX(COALESCE(e.finished_at, e.started_at)) AS lastActivityAt,
-        COUNT(*)                  AS turnCount,
-        SUM(COALESCE(e.cost_usd, 0))           AS totalCost,
-        SUM(COALESCE(e.input_tokens, 0))       AS inputTokens,
-        SUM(COALESCE(e.output_tokens, 0))      AS outputTokens,
-        SUM(COALESCE(e.cache_read_input_tokens, 0)) AS cacheReadTokens,
+        MAX(${QUALIFIED_REPO_SQL})          AS "repo",
+        MIN(${executions.startedAt})        AS "firstStartedAt",
+        MAX(COALESCE(${executions.finishedAt}, ${executions.startedAt})) AS "lastActivityAt",
+        COUNT(*)                            AS "turnCount",
+        SUM(COALESCE(${executions.costUsd}, 0))              AS "totalCost",
+        SUM(COALESCE(${executions.inputTokens}, 0))          AS "inputTokens",
+        SUM(COALESCE(${executions.outputTokens}, 0))         AS "outputTokens",
+        SUM(COALESCE(${executions.cacheReadInputTokens}, 0)) AS "cacheReadTokens",
         (
-          SELECT mm.content
-          FROM messaging_messages mm
-          WHERE mm.session_id = e.trigger_id AND mm.role = 'assistant'
-          ORDER BY mm.timestamp DESC
+          SELECT ${messagingMessages.content}
+          FROM ${messagingMessages}
+          WHERE ${messagingMessages.sessionId} = ${executions.triggerId}
+            AND ${messagingMessages.role} = 'assistant'
+          ORDER BY ${messagingMessages.timestamp} DESC
           LIMIT 1
-        ) AS lastAssistantContent
-      FROM executions e
-      LEFT JOIN messaging_sessions ms ON ms.id = e.trigger_id
-      WHERE e.skill = 'chat' AND e.trigger_id = ?
-      GROUP BY e.trigger_id
-    `).get(triggerId) as {
-      triggerId: string;
-      agentSessionId: string | null;
-      platform: string | null;
-      firstStartedAt: string;
-      lastActivityAt: string;
-      turnCount: number;
-      totalCost: number;
-      inputTokens: number;
-      outputTokens: number;
-      cacheReadTokens: number;
-      lastAssistantContent: string | null;
-      repo: string | null;
-    } | undefined;
-    return row ?? null;
+        ) AS "lastAssistantContent"
+      FROM ${executions}
+      LEFT JOIN ${messagingSessions} ON ${messagingSessions.id} = ${executions.triggerId}
+      WHERE ${executions.skill} = 'chat' AND ${executions.triggerId} = ${triggerId}
+      GROUP BY ${executions.triggerId}, ${messagingSessions.agentSessionId}, ${messagingSessions.platform}
+    `,
+    );
+    return results[0] ?? null;
   }
 
   /**
@@ -544,26 +621,29 @@ export class ExecutionStore {
    * session list by the same allowed-repo set as everything else. Returns null
    * for a session we have no execution row for — those stay visible.
    */
-  repoForSessionId(sessionId: string): string | null {
-    const row = this.db
-      .prepare(
-        `SELECT ${QUALIFIED_REPO_SQL} AS repo
-           FROM executions e
-          WHERE e.session_id = ? AND e.repo IS NOT NULL
-          ORDER BY e.started_at DESC
-          LIMIT 1`,
-      )
-      .get(sessionId) as { repo: string | null } | undefined;
+  async repoForSessionId(sessionId: string): Promise<string | null> {
+    const [row] = await this.client
+      .select({ repo: sql<string | null>`${QUALIFIED_REPO_SQL}` })
+      .from(executions)
+      .where(and(eq(executions.sessionId, sessionId), isNotNull(executions.repo)))
+      .orderBy(desc(executions.startedAt))
+      .limit(1);
     return row?.repo ?? null;
   }
 
   /** Check if a skill is currently running for a given trigger */
-  isRunning(skill: string, triggerId: string): boolean {
-    const row = this.db.prepare(`
-      SELECT 1 FROM executions
-      WHERE skill = ? AND trigger_id = ? AND finished_at IS NULL
-      LIMIT 1
-    `).get(skill, triggerId);
+  async isRunning(skill: string, triggerId: string): Promise<boolean> {
+    const [row] = await this.client
+      .select({ id: executions.id })
+      .from(executions)
+      .where(
+        and(
+          eq(executions.skill, skill),
+          eq(executions.triggerId, triggerId),
+          isNull(executions.finishedAt),
+        ),
+      )
+      .limit(1);
     return !!row;
   }
 
@@ -582,15 +662,18 @@ export class ExecutionStore {
    * OAuth/subscription run) contribute 0 — the brake must never be tripped by
    * missing data.
    */
-  costForTriggerWorkflows(triggerId: string, workflowNames: string[]): number {
+  async costForTriggerWorkflows(triggerId: string, workflowNames: string[]): Promise<number> {
     if (workflowNames.length === 0) return 0;
-    const placeholders = workflowNames.map(() => "?").join(", ");
-    const row = this.db.prepare(`
-      SELECT COALESCE(SUM(e.cost_usd), 0) AS total
-      FROM executions e
-      JOIN workflow_runs r ON r.id = e.workflow_run_id
-      WHERE r.trigger_id = ? AND r.workflow_name IN (${placeholders})
-    `).get(triggerId, ...workflowNames) as { total: number } | undefined;
+    const [row] = await this.client
+      .select({ total: sql<number>`COALESCE(SUM(${executions.costUsd}), 0)` })
+      .from(executions)
+      .innerJoin(workflowRuns, eq(workflowRuns.id, executions.workflowRunId))
+      .where(
+        and(
+          eq(workflowRuns.triggerId, triggerId),
+          inArray(workflowRuns.workflowName, workflowNames),
+        ),
+      );
     return row?.total ?? 0;
   }
 
@@ -604,22 +687,34 @@ export class ExecutionStore {
    * `on_output.requires_marker: DIAGNOSIS_COMPLETE`, so a succeeded row for it
    * is equivalent to the marker having been emitted.
    */
-  phaseSucceededInRun(workflowRunId: string, phaseName: string): boolean {
-    const row = this.db.prepare(`
-      SELECT 1 FROM executions
-      WHERE workflow_run_id = ? AND skill LIKE ? AND success = 1
-      LIMIT 1
-    `).get(workflowRunId, `%:${phaseName}`);
+  async phaseSucceededInRun(workflowRunId: string, phaseName: string): Promise<boolean> {
+    const [row] = await this.client
+      .select({ id: executions.id })
+      .from(executions)
+      .where(
+        and(
+          eq(executions.workflowRunId, workflowRunId),
+          like(executions.skill, `%:${phaseName}`),
+          eq(executions.success, true),
+        ),
+      )
+      .limit(1);
     return !!row;
   }
 
   /** Check if a skill has already completed successfully for a given trigger */
-  isCompleted(skill: string, triggerId: string): boolean {
-    const row = this.db.prepare(`
-      SELECT 1 FROM executions
-      WHERE skill = ? AND trigger_id = ? AND success = 1
-      LIMIT 1
-    `).get(skill, triggerId);
+  async isCompleted(skill: string, triggerId: string): Promise<boolean> {
+    const [row] = await this.client
+      .select({ id: executions.id })
+      .from(executions)
+      .where(
+        and(
+          eq(executions.skill, skill),
+          eq(executions.triggerId, triggerId),
+          eq(executions.success, true),
+        ),
+      )
+      .limit(1);
     return !!row;
   }
 
@@ -631,23 +726,25 @@ export class ExecutionStore {
    * for the same trigger exists. Omit `workflowRunId` for legacy callers
    * (e.g. chat/status-report dedup) that want the old trigger-wide scope.
    */
-  shouldRunPhase(skill: string, triggerId: string, workflowRunId?: string): "run" | "running" | "done" {
-    const [scopeClause, scopeParam] = workflowRunId
-      ? ["workflow_run_id = ?", workflowRunId]
-      : ["trigger_id = ?", triggerId];
+  async shouldRunPhase(
+    skill: string,
+    triggerId: string,
+    workflowRunId?: string,
+  ): Promise<"run" | "running" | "done"> {
+    const scope = this.scope(triggerId, workflowRunId);
 
-    const running = this.db.prepare(`
-      SELECT 1 FROM executions
-      WHERE skill = ? AND ${scopeClause} AND finished_at IS NULL
-      LIMIT 1
-    `).get(skill, scopeParam);
+    const [running] = await this.client
+      .select({ id: executions.id })
+      .from(executions)
+      .where(and(eq(executions.skill, skill), scope, isNull(executions.finishedAt)))
+      .limit(1);
     if (running) return "running";
 
-    const done = this.db.prepare(`
-      SELECT 1 FROM executions
-      WHERE skill = ? AND ${scopeClause} AND success = 1
-      LIMIT 1
-    `).get(skill, scopeParam);
+    const [done] = await this.client
+      .select({ id: executions.id })
+      .from(executions)
+      .where(and(eq(executions.skill, skill), scope, eq(executions.success, true)))
+      .limit(1);
     if (done) return "done";
 
     return "run";
@@ -655,16 +752,26 @@ export class ExecutionStore {
 
   /** Mark all stale "running" executions for a skill/trigger as failed.
    *  Called when we detect no matching Docker container is alive. */
-  markStaleAsFailed(skill: string, triggerId: string, workflowRunId?: string): number {
-    const [scopeClause, scopeParam] = workflowRunId
-      ? ["workflow_run_id = ?", workflowRunId]
-      : ["trigger_id = ?", triggerId];
-    const result = this.db.prepare(`
-      UPDATE executions
-      SET finished_at = ?, success = 0, error = 'stale: container no longer running'
-      WHERE skill = ? AND ${scopeClause} AND finished_at IS NULL
-    `).run(new Date().toISOString(), skill, scopeParam);
-    return result.changes;
+  async markStaleAsFailed(
+    skill: string,
+    triggerId: string,
+    workflowRunId?: string,
+  ): Promise<number> {
+    const result = await this.client
+      .update(executions)
+      .set({
+        finishedAt: new Date().toISOString(),
+        success: false,
+        error: "stale: container no longer running",
+      })
+      .where(
+        and(
+          eq(executions.skill, skill),
+          this.scope(triggerId, workflowRunId),
+          isNull(executions.finishedAt),
+        ),
+      );
+    return changes(result);
   }
 
   /**
@@ -673,13 +780,12 @@ export class ExecutionStore {
    * were running when the harness crashed/restarted, so the runner's dedup
    * logic doesn't think they're still in flight.
    */
-  markAllStaleForTrigger(triggerId: string, reason: string): number {
-    const result = this.db.prepare(`
-      UPDATE executions
-      SET finished_at = ?, success = 0, error = ?
-      WHERE trigger_id = ? AND finished_at IS NULL
-    `).run(new Date().toISOString(), reason, triggerId);
-    return result.changes;
+  async markAllStaleForTrigger(triggerId: string, reason: string): Promise<number> {
+    const result = await this.client
+      .update(executions)
+      .set({ finishedAt: new Date().toISOString(), success: false, error: reason })
+      .where(and(eq(executions.triggerId, triggerId), isNull(executions.finishedAt)));
+    return changes(result);
   }
 
   /**
@@ -687,75 +793,103 @@ export class ExecutionStore {
    * Used when the agent SDK reported success but the orchestrator decided
    * the business outcome was a failure (e.g. guardrails BLOCKED, reviewer
    * REQUEST_CHANGES). Without this, runPhase would skip the phase on the
-   * next run because the DB still says success=1.
+   * next run because the DB still says success=true.
+   *
+   * Raw because of the "newest row wins" correlated subquery. Note the two
+   * shapes it needs: the SET column is written UNQUALIFIED (`SET
+   * "executions"."success" = …` is not legal SQL in either dialect), and the
+   * false is a BOUND param — libsql binds it as 0 and Postgres as a real
+   * boolean, where a literal `= 0` would throw `operator does not exist:
+   * boolean = integer`.
    */
-  markLatestAsFailed(skill: string, triggerId: string, reason: string, workflowRunId?: string): number {
-    const [scopeClause, scopeParam] = workflowRunId
-      ? ["workflow_run_id = ?", workflowRunId]
-      : ["trigger_id = ?", triggerId];
-    const result = this.db.prepare(`
-      UPDATE executions
-      SET success = 0, error = ?
-      WHERE id = (
-        SELECT id FROM executions
-        WHERE skill = ? AND ${scopeClause}
-        ORDER BY started_at DESC
+  async markLatestAsFailed(
+    skill: string,
+    triggerId: string,
+    reason: string,
+    workflowRunId?: string,
+  ): Promise<number> {
+    const scopeSql = workflowRunId
+      ? sql`${executions.workflowRunId} = ${workflowRunId}`
+      : sql`${executions.triggerId} = ${triggerId}`;
+    const result = await run(
+      this.client,
+      sql`
+      UPDATE ${executions}
+      SET ${sql.identifier(executions.success.name)} = ${false},
+          ${sql.identifier(executions.error.name)} = ${reason}
+      WHERE ${executions.id} = (
+        SELECT ${executions.id} FROM ${executions}
+        WHERE ${executions.skill} = ${skill} AND ${scopeSql}
+        ORDER BY ${executions.startedAt} DESC
         LIMIT 1
       )
-    `).run(reason, skill, scopeParam);
-    return result.changes;
+    `,
+    );
+    return changes(result);
   }
 
   /** Get recent executions for a skill */
-  recentExecutions(skill: string, limit = 10): ExecutionRecord[] {
-    const rows = this.db.prepare(`
-      SELECT ${EXECUTION_COLUMNS} FROM executions
-      WHERE skill = ?
-      ORDER BY started_at DESC
-      LIMIT ?
-    `).all(skill, limit) as Array<Record<string, unknown>>;
-    return rows.map(mapExecutionRow);
+  async recentExecutions(skill: string, limit = 10): Promise<ExecutionRecord[]> {
+    const results = await this.client
+      .select(executionColumns)
+      .from(executions)
+      .where(eq(executions.skill, skill))
+      .orderBy(desc(executions.startedAt))
+      .limit(limit);
+    return results.map(deserialize);
   }
 
-  /** Count consecutive failures for a skill (for cron failure tracking) */
-  consecutiveFailures(skill: string): number {
-    const rows = this.db.prepare(`
-      SELECT success FROM executions
-      WHERE skill = ? AND finished_at IS NOT NULL
-      ORDER BY started_at DESC
-      LIMIT 10
-    `).all(skill) as { success: number }[];
+  /**
+   * Count consecutive failures for a skill (for cron failure tracking).
+   *
+   * The compare is `=== false`, not `=== 0`: `success` is a boolean-mode
+   * column, so an integer compare is never true and this would report a
+   * permanent zero — silently disarming the cron failure alert.
+   */
+  async consecutiveFailures(skill: string): Promise<number> {
+    const results = await this.client
+      .select({ success: executions.success })
+      .from(executions)
+      .where(and(eq(executions.skill, skill), isNotNull(executions.finishedAt)))
+      .orderBy(desc(executions.startedAt))
+      .limit(10);
 
-    let count = 0;
-    for (const row of rows) {
-      if (row.success === 0) count++;
+    let streak = 0;
+    for (const row of results) {
+      if (row.success === false) streak++;
       else break;
     }
-    return count;
+    return streak;
   }
 
   /** Get all executions with pagination */
-  allExecutions(limit = 100, offset = 0): ExecutionRecord[] {
-    const rows = this.db.prepare(`
-      SELECT ${EXECUTION_COLUMNS} FROM executions
-      ORDER BY started_at DESC
-      LIMIT ? OFFSET ?
-    `).all(limit, offset) as Array<Record<string, unknown>>;
-    return rows.map(mapExecutionRow);
+  async allExecutions(limit = 100, offset = 0): Promise<ExecutionRecord[]> {
+    const results = await this.client
+      .select(executionColumns)
+      .from(executions)
+      .orderBy(desc(executions.startedAt))
+      .limit(limit)
+      .offset(offset);
+    return results.map(deserialize);
   }
 
   /**
    * Free-text search across the `executions` ledger — matches `error`, `skill`,
-   * or `repo` against a substring (case-insensitive via SQLite's LIKE). Used by
-   * the `/admin/api/log-search` endpoint and the `lastlight logs search` CLI to
-   * find failing/relevant phases without SSHing to the box. Parameterized; the
-   * pattern is escaped so user input can't smuggle LIKE wildcards.
+   * or `repo` against a substring. Used by the `/admin/api/log-search` endpoint
+   * and the `lastlight logs search` CLI to find failing/relevant phases without
+   * SSHing to the box. Parameterized; the pattern is escaped so user input
+   * can't smuggle LIKE wildcards.
+   *
+   * Raw, because `LIKE … ESCAPE '\'` has no query-builder spelling. Both sides
+   * are `lower()`ed rather than leaning on SQLite's case-insensitive LIKE,
+   * which Postgres does not share — the case-insensitivity is the feature here,
+   * not an accident of the dialect.
    *
    * Matches and returns the QUALIFIED repo, because that is what somebody types
    * (issue #279) — searching `nearform/lastlight` against the bare column found
    * no phase row at all.
    */
-  searchErrors(query: string, limit = 50): Array<{
+  async searchErrors(query: string, limit = 50): Promise<Array<{
     id: string;
     skill: string;
     repo?: string;
@@ -766,30 +900,32 @@ export class ExecutionStore {
     sessionId?: string;
     workflowRunId?: string;
     triggerId: string;
-  }> {
-    const escaped = query.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-    const pattern = `%${escaped}%`;
-    const qualifiedRepo = qualifiedRepoSql("e.owner", "e.repo", "bare");
-    const rows = this.db.prepare(`
+  }>> {
+    const pattern = `%${likeEscape(query).toLowerCase()}%`;
+    const qualifiedRepo = qualifiedRepoSql(executions.owner, executions.repo, "bare");
+    const results = await rows(
+      this.client,
+      sql`
       SELECT
-        e.id,
-        e.skill,
-        ${qualifiedRepo} AS repo,
-        e.error,
-        e.success,
-        e.started_at      AS startedAt,
-        e.finished_at     AS finishedAt,
-        e.session_id      AS sessionId,
-        e.workflow_run_id AS workflowRunId,
-        e.trigger_id      AS triggerId
-      FROM executions e
-      WHERE e.error LIKE ? ESCAPE '\\'
-         OR e.skill LIKE ? ESCAPE '\\'
-         OR ${qualifiedRepo} LIKE ? ESCAPE '\\'
-      ORDER BY e.started_at DESC
-      LIMIT ?
-    `).all(pattern, pattern, pattern, limit) as Array<Record<string, unknown>>;
-    return rows.map((r) => ({
+        ${executions.id}            AS "id",
+        ${executions.skill}         AS "skill",
+        ${qualifiedRepo}            AS "repo",
+        ${executions.error}         AS "error",
+        ${executions.success}       AS "success",
+        ${executions.startedAt}     AS "startedAt",
+        ${executions.finishedAt}    AS "finishedAt",
+        ${executions.sessionId}     AS "sessionId",
+        ${executions.workflowRunId} AS "workflowRunId",
+        ${executions.triggerId}     AS "triggerId"
+      FROM ${executions}
+      WHERE lower(${executions.error}) LIKE ${pattern} ESCAPE '\\'
+         OR lower(${executions.skill}) LIKE ${pattern} ESCAPE '\\'
+         OR lower(${qualifiedRepo}) LIKE ${pattern} ESCAPE '\\'
+      ORDER BY ${executions.startedAt} DESC
+      LIMIT ${limit}
+    `,
+    );
+    return results.map((r) => ({
       id: r.id as string,
       skill: r.skill as string,
       repo: (r.repo as string | null) ?? undefined,
@@ -811,50 +947,67 @@ export class ExecutionStore {
    * falls back to the legacy trigger-wide scope for rows written before the
    * workflow_run_id column existed.
    */
-  getExecutionsForWorkflowRun(workflowRunId: string, triggerId: string, workflowName?: string): ExecutionRecord[] {
+  async getExecutionsForWorkflowRun(
+    workflowRunId: string,
+    triggerId: string,
+    workflowName?: string,
+  ): Promise<ExecutionRecord[]> {
     const skillPattern = workflowName ? `${workflowName}:%` : "%:%";
-    const rows = this.db.prepare(`
+    const results = await rows(
+      this.client,
+      sql`
       SELECT ${EXECUTION_COLUMNS}
-      FROM executions
-      WHERE (workflow_run_id = ? OR (workflow_run_id IS NULL AND trigger_id = ?))
-        AND skill LIKE ?
-      ORDER BY started_at ASC
-    `).all(workflowRunId, triggerId, skillPattern) as Array<Record<string, unknown>>;
+      FROM ${executions}
+      WHERE (${executions.workflowRunId} = ${workflowRunId}
+             OR (${executions.workflowRunId} IS NULL AND ${executions.triggerId} = ${triggerId}))
+        AND ${executions.skill} LIKE ${skillPattern}
+      ORDER BY ${executions.startedAt} ASC
+    `,
+    );
 
-    return rows.map(mapExecutionRow);
+    return results.map(mapExecutionRow);
   }
 
   /** Get currently running executions (no finished_at) */
-  runningExecutions(): ExecutionRecord[] {
-    const rows = this.db.prepare(`
-      SELECT ${EXECUTION_COLUMNS} FROM executions
-      WHERE finished_at IS NULL
-      ORDER BY started_at DESC
-    `).all() as Array<Record<string, unknown>>;
-    return rows.map(mapExecutionRow);
+  async runningExecutions(): Promise<ExecutionRecord[]> {
+    const results = await this.client
+      .select(executionColumns)
+      .from(executions)
+      .where(isNull(executions.finishedAt))
+      .orderBy(desc(executions.startedAt));
+    return results.map(deserialize);
   }
 
   /** Aggregate execution stats */
-  executionStats(): {
+  async executionStats(): Promise<{
     total_executions: number;
     today_count: number;
     by_skill: Record<string, ExecutionOutcomeCounts & { count: number }>;
     by_trigger: Record<string, number>;
     running: number;
-  } {
+  }> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayIso = today.toISOString();
 
-    const total = (this.db.prepare(`SELECT COUNT(*) as c FROM executions`).get() as { c: number }).c;
-    const todayCount = (this.db.prepare(`SELECT COUNT(*) as c FROM executions WHERE started_at >= ?`).get(todayIso) as { c: number }).c;
-    const running = (this.db.prepare(`SELECT COUNT(*) as c FROM executions WHERE finished_at IS NULL`).get() as { c: number }).c;
+    const [totalRow] = await this.client.select({ c: count() }).from(executions);
+    const [todayRow] = await this.client
+      .select({ c: count() })
+      .from(executions)
+      .where(gte(executions.startedAt, todayIso));
+    const [runningRow] = await this.client
+      .select({ c: count() })
+      .from(executions)
+      .where(isNull(executions.finishedAt));
 
-    const skillRows = this.db.prepare(`
-      SELECT skill, COUNT(*) as count,
+    const skillRows = await rows<{ skill: string; count: number } & ExecutionOutcomeCounts>(
+      this.client,
+      sql`
+      SELECT ${executions.skill} AS "skill", COUNT(*) AS "count",
         ${EXECUTION_OUTCOME_COLUMNS}
-      FROM executions GROUP BY skill
-    `).all() as ({ skill: string; count: number } & ExecutionOutcomeCounts)[];
+      FROM ${executions} GROUP BY ${executions.skill}
+    `,
+    );
 
     const by_skill: Record<string, ExecutionOutcomeCounts & { count: number }> = {};
     for (const r of skillRows) {
@@ -867,16 +1020,26 @@ export class ExecutionStore {
       };
     }
 
-    const triggerRows = this.db.prepare(`
-      SELECT trigger_type, COUNT(*) as count FROM executions GROUP BY trigger_type
-    `).all() as { trigger_type: string; count: number }[];
+    const triggerRows = await rows<{ triggerType: string; count: number }>(
+      this.client,
+      sql`
+      SELECT ${executions.triggerType} AS "triggerType", COUNT(*) AS "count"
+      FROM ${executions} GROUP BY ${executions.triggerType}
+    `,
+    );
 
     const by_trigger: Record<string, number> = {};
     for (const r of triggerRows) {
-      by_trigger[r.trigger_type] = r.count;
+      by_trigger[r.triggerType] = r.count;
     }
 
-    return { total_executions: total, today_count: todayCount, by_skill, by_trigger, running };
+    return {
+      total_executions: totalRow?.c ?? 0,
+      today_count: todayRow?.c ?? 0,
+      by_skill,
+      by_trigger,
+      running: runningRow?.c ?? 0,
+    };
   }
 
   /**
@@ -887,32 +1050,33 @@ export class ExecutionStore {
    * phase, carry no cost — so this sums with a COALESCE and reports the phase
    * count separately rather than implying the two are the same denominator.
    */
-  repoCostSince(owner: string, repo: string, sinceIso: string): { costUsd: number; phases: number } {
-    const qualifiedRepo = qualifiedRepoSql("e.owner", "e.repo", "bare");
-    const row = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(e.cost_usd), 0) AS costUsd, COUNT(*) AS phases
-           FROM executions e
-          WHERE ${qualifiedRepo} = ?
-            AND e.started_at >= ?`,
-      )
-      .get(`${owner}/${repo}`, sinceIso) as { costUsd: number; phases: number } | undefined;
+  async repoCostSince(
+    owner: string,
+    repo: string,
+    sinceIso: string,
+  ): Promise<{ costUsd: number; phases: number }> {
+    const qualifiedRepo = qualifiedRepoSql(executions.owner, executions.repo, "bare");
+    const [row] = await this.client
+      .select({
+        costUsd: sql<number>`COALESCE(SUM(${executions.costUsd}), 0)`,
+        phases: count(),
+      })
+      .from(executions)
+      .where(
+        and(
+          sql`${qualifiedRepo} = ${`${owner}/${repo}`}`,
+          gte(executions.startedAt, sinceIso),
+        ),
+      );
     return { costUsd: row?.costUsd ?? 0, phases: row?.phases ?? 0 };
   }
 
   /** Daily aggregated stats for the last N days */
-  dailyStats(days: number): (ExecutionOutcomeCounts & {
-    date: string;
-    executions: number;
-    totalTokens: number;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    costUsd: number;
-  })[] {
+  async dailyStats(days: number): Promise<BucketStats[]> {
     // Build the inclusive UTC date window: [today - (days-1), today].
-    // SQLite's date(started_at) returns a UTC YYYY-MM-DD string, so we
-    // generate the same format here to align keys.
+    // dayBucket() takes the first 10 chars of the ISO-8601 timestamp, so it
+    // yields a UTC YYYY-MM-DD string in either dialect and we generate the same
+    // format here to align keys.
     const today = new Date();
     const startUtc = new Date(Date.UTC(
       today.getUTCFullYear(),
@@ -927,30 +1091,26 @@ export class ExecutionStore {
       dateKeys.push(d.toISOString().slice(0, 10));
     }
 
-    const rows = this.db.prepare(`
+    const bucket = dayBucket(executions.startedAt);
+    const results = await rows<BucketStats>(
+      this.client,
+      sql`
       SELECT
-        date(started_at) AS date,
-        COUNT(*) AS executions,
+        ${bucket} AS "date",
+        COUNT(*) AS "executions",
         ${EXECUTION_OUTCOME_COLUMNS},
-        COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(cache_read_input_tokens), 0) AS totalTokens,
-        COALESCE(SUM(input_tokens), 0) AS inputTokens,
-        COALESCE(SUM(output_tokens), 0) AS outputTokens,
-        COALESCE(SUM(cache_read_input_tokens), 0) AS cacheReadTokens,
-        COALESCE(SUM(cost_usd), 0) AS costUsd
-      FROM executions
-      WHERE date(started_at) >= ?
-      GROUP BY date(started_at)
-    `).all(dateKeys[0]) as (ExecutionOutcomeCounts & {
-      date: string;
-      executions: number;
-      totalTokens: number;
-      inputTokens: number;
-      outputTokens: number;
-      cacheReadTokens: number;
-      costUsd: number;
-    })[];
+        COALESCE(SUM(${executions.inputTokens}), 0) + COALESCE(SUM(${executions.outputTokens}), 0) + COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "totalTokens",
+        COALESCE(SUM(${executions.inputTokens}), 0) AS "inputTokens",
+        COALESCE(SUM(${executions.outputTokens}), 0) AS "outputTokens",
+        COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "cacheReadTokens",
+        COALESCE(SUM(${executions.costUsd}), 0) AS "costUsd"
+      FROM ${executions}
+      WHERE ${bucket} >= ${dateKeys[0]}
+      GROUP BY ${bucket}
+    `,
+    );
 
-    const byDate = new Map(rows.map((r) => [r.date, r]));
+    const byDate = new Map(results.map((r) => [r.date, r]));
     return dateKeys.map((date) => byDate.get(date) ?? {
       date,
       executions: 0,
@@ -964,15 +1124,7 @@ export class ExecutionStore {
   }
 
   /** Hourly aggregated stats for the last N hours (UTC). Bucket key is `YYYY-MM-DDTHH`. */
-  hourlyStats(hours: number): (ExecutionOutcomeCounts & {
-    date: string;
-    executions: number;
-    totalTokens: number;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    costUsd: number;
-  })[] {
+  async hourlyStats(hours: number): Promise<BucketStats[]> {
     const now = new Date();
     const startUtc = new Date(Date.UTC(
       now.getUTCFullYear(),
@@ -985,34 +1137,30 @@ export class ExecutionStore {
     for (let i = 0; i < hours; i++) {
       const d = new Date(startUtc);
       d.setUTCHours(startUtc.getUTCHours() + i);
-      // YYYY-MM-DDTHH (matches strftime('%Y-%m-%dT%H', …))
+      // YYYY-MM-DDTHH (matches hourBucket(), the first 13 ISO-8601 chars)
       hourKeys.push(d.toISOString().slice(0, 13));
     }
 
-    const rows = this.db.prepare(`
+    const bucket = hourBucket(executions.startedAt);
+    const results = await rows<BucketStats>(
+      this.client,
+      sql`
       SELECT
-        strftime('%Y-%m-%dT%H', started_at) AS date,
-        COUNT(*) AS executions,
+        ${bucket} AS "date",
+        COUNT(*) AS "executions",
         ${EXECUTION_OUTCOME_COLUMNS},
-        COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(cache_read_input_tokens), 0) AS totalTokens,
-        COALESCE(SUM(input_tokens), 0) AS inputTokens,
-        COALESCE(SUM(output_tokens), 0) AS outputTokens,
-        COALESCE(SUM(cache_read_input_tokens), 0) AS cacheReadTokens,
-        COALESCE(SUM(cost_usd), 0) AS costUsd
-      FROM executions
-      WHERE strftime('%Y-%m-%dT%H', started_at) >= ?
-      GROUP BY strftime('%Y-%m-%dT%H', started_at)
-    `).all(hourKeys[0]) as (ExecutionOutcomeCounts & {
-      date: string;
-      executions: number;
-      totalTokens: number;
-      inputTokens: number;
-      outputTokens: number;
-      cacheReadTokens: number;
-      costUsd: number;
-    })[];
+        COALESCE(SUM(${executions.inputTokens}), 0) + COALESCE(SUM(${executions.outputTokens}), 0) + COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "totalTokens",
+        COALESCE(SUM(${executions.inputTokens}), 0) AS "inputTokens",
+        COALESCE(SUM(${executions.outputTokens}), 0) AS "outputTokens",
+        COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "cacheReadTokens",
+        COALESCE(SUM(${executions.costUsd}), 0) AS "costUsd"
+      FROM ${executions}
+      WHERE ${bucket} >= ${hourKeys[0]}
+      GROUP BY ${bucket}
+    `,
+    );
 
-    const byHour = new Map(rows.map((r) => [r.date, r]));
+    const byHour = new Map(results.map((r) => [r.date, r]));
     return hourKeys.map((date) => byHour.get(date) ?? {
       date,
       executions: 0,
@@ -1023,5 +1171,16 @@ export class ExecutionStore {
       cacheReadTokens: 0,
       costUsd: 0,
     });
+  }
+
+  /**
+   * The run-vs-trigger scope shared by the five methods that accept an optional
+   * `workflowRunId`: prefer the run when the caller knows it, fall back to the
+   * trigger-wide scope for legacy callers and pre-`workflow_run_id` rows.
+   */
+  private scope(triggerId: string, workflowRunId?: string) {
+    return workflowRunId
+      ? eq(executions.workflowRunId, workflowRunId)
+      : eq(executions.triggerId, triggerId);
   }
 }

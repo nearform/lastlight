@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { StateDb, isTriggerActorType, TRIGGER_ACTOR_TYPES } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 
 describe("isTriggerActorType", () => {
   it("accepts every member of the union", () => {
@@ -21,17 +22,13 @@ describe("isTriggerActorType", () => {
 
 let db: StateDb;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
-});
-
-afterEach(() => {
-  db.close();
+beforeEach(async () => {
+  db = await makeTestDb();
 });
 
 describe("UserStore.getOrCreateUserByGithub", () => {
-  it("creates a user capturing id/login/name/email/avatar", () => {
-    const user = db.users.getOrCreateUserByGithub({
+  it("creates a user capturing id/login/name/email/avatar", async () => {
+    const user = await db.users.getOrCreateUserByGithub({
       githubId: 42,
       login: "octocat",
       name: "The Octocat",
@@ -48,14 +45,14 @@ describe("UserStore.getOrCreateUserByGithub", () => {
     expect(user.lastLoginAt).toBeTruthy();
   });
 
-  it("upserts on github_id — refreshes mutable fields and bumps last_login_at", () => {
-    const first = db.users.getOrCreateUserByGithub({
+  it("upserts on github_id — refreshes mutable fields and bumps last_login_at", async () => {
+    const first = await db.users.getOrCreateUserByGithub({
       githubId: 42,
       login: "octocat",
       name: "Old Name",
       email: "old@example.com",
     });
-    const second = db.users.getOrCreateUserByGithub({
+    const second = await db.users.getOrCreateUserByGithub({
       githubId: 42,
       login: "octocat-renamed",
       name: "New Name",
@@ -68,38 +65,38 @@ describe("UserStore.getOrCreateUserByGithub", () => {
     expect(second.email).toBe("new@example.com");
     expect(second.avatarUrl).toBe("https://a.png");
     // Only one row exists.
-    expect(db.users.findByGithubId(42)?.id).toBe(first.id);
+    expect((await db.users.findByGithubId(42))?.id).toBe(first.id);
   });
 
-  it("preserves existing name/email/avatar when a refresh omits them", () => {
-    db.users.getOrCreateUserByGithub({
+  it("preserves existing name/email/avatar when a refresh omits them", async () => {
+    await db.users.getOrCreateUserByGithub({
       githubId: 7,
       login: "a",
       name: "Ada",
       email: "ada@example.com",
       avatarUrl: "https://ada.png",
     });
-    const refreshed = db.users.getOrCreateUserByGithub({ githubId: 7, login: "a" });
+    const refreshed = await db.users.getOrCreateUserByGithub({ githubId: 7, login: "a" });
     expect(refreshed.name).toBe("Ada");
     expect(refreshed.email).toBe("ada@example.com");
     expect(refreshed.avatarUrl).toBe("https://ada.png");
   });
 
-  it("is findable by login and email", () => {
-    db.users.getOrCreateUserByGithub({ githubId: 42, login: "octocat", email: "octo@example.com" });
-    expect(db.users.findByLogin("octocat")?.githubId).toBe(42);
-    expect(db.users.findByEmail("octo@example.com")?.login).toBe("octocat");
+  it("is findable by login and email", async () => {
+    await db.users.getOrCreateUserByGithub({ githubId: 42, login: "octocat", email: "octo@example.com" });
+    expect((await db.users.findByLogin("octocat"))?.githubId).toBe(42);
+    expect((await db.users.findByEmail("octo@example.com"))?.login).toBe("octocat");
   });
 });
 
 describe("UserStore.upsertSlackUser", () => {
-  it("matches an existing GitHub row by email and links slack_user_id", () => {
-    const gh = db.users.getOrCreateUserByGithub({
+  it("matches an existing GitHub row by email and links slack_user_id", async () => {
+    const gh = await db.users.getOrCreateUserByGithub({
       githubId: 42,
       login: "octocat",
       email: "octo@example.com",
     });
-    const matched = db.users.upsertSlackUser({
+    const matched = await db.users.upsertSlackUser({
       slackUserId: "U123",
       name: "Octo",
       email: "octo@example.com",
@@ -107,11 +104,11 @@ describe("UserStore.upsertSlackUser", () => {
     expect(matched.id).toBe(gh.id);
     expect(matched.login).toBe("octocat"); // retains GitHub identity
     expect(matched.slackUserId).toBe("U123");
-    expect(db.users.findBySlackUserId("U123")?.login).toBe("octocat");
+    expect((await db.users.findBySlackUserId("U123"))?.login).toBe("octocat");
   });
 
-  it("creates a Slack-only row when no email matches", () => {
-    const slackOnly = db.users.upsertSlackUser({
+  it("creates a Slack-only row when no email matches", async () => {
+    const slackOnly = await db.users.upsertSlackUser({
       slackUserId: "U999",
       name: "Stranger",
       email: "nobody@example.com",
@@ -122,9 +119,9 @@ describe("UserStore.upsertSlackUser", () => {
     expect(slackOnly.name).toBe("Stranger");
   });
 
-  it("is idempotent on slack_user_id (fast path re-links, no duplicate row)", () => {
-    const first = db.users.upsertSlackUser({ slackUserId: "U1", name: "One" });
-    const second = db.users.upsertSlackUser({ slackUserId: "U1", email: "one@example.com" });
+  it("is idempotent on slack_user_id (fast path re-links, no duplicate row)", async () => {
+    const first = await db.users.upsertSlackUser({ slackUserId: "U1", name: "One" });
+    const second = await db.users.upsertSlackUser({ slackUserId: "U1", email: "one@example.com" });
     expect(second.id).toBe(first.id);
     expect(second.email).toBe("one@example.com");
     expect(second.name).toBe("One");
@@ -132,9 +129,9 @@ describe("UserStore.upsertSlackUser", () => {
 });
 
 describe("UserStore.linkSlackUser", () => {
-  it("links a slack id onto an existing user", () => {
-    const gh = db.users.getOrCreateUserByGithub({ githubId: 1, login: "a" });
-    db.users.linkSlackUser(gh.id, "U-link");
-    expect(db.users.findBySlackUserId("U-link")?.id).toBe(gh.id);
+  it("links a slack id onto an existing user", async () => {
+    const gh = await db.users.getOrCreateUserByGithub({ githubId: 1, login: "a" });
+    await db.users.linkSlackUser(gh.id, "U-link");
+    expect((await db.users.findBySlackUserId("U-link"))?.id).toBe(gh.id);
   });
 });

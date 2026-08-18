@@ -90,7 +90,7 @@ export abstract class MessagingConnector extends EventEmitter implements Connect
 
     // In channels, respond to @mentions or replies in threads the bot is already in
     if (!isDM && !isMention) {
-      if (!threadId || !this.sessionManager.hasActiveThread(this.name, channelId, threadId)) {
+      if (!threadId || !(await this.sessionManager.hasActiveThread(this.name, channelId, threadId))) {
         return;
       }
     }
@@ -114,7 +114,7 @@ export abstract class MessagingConnector extends EventEmitter implements Connect
     this.showTyping(channelId, messageId, replyThreadId).catch(() => {});
 
     // Get or create session
-    const session = this.sessionManager.getOrCreateSession({
+    const session = await this.sessionManager.getOrCreateSession({
       platform: this.name,
       channelId,
       threadId: replyThreadId,

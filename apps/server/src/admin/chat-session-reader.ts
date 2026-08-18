@@ -34,18 +34,18 @@ export class ChatSessionReader implements SessionSource {
   }
 
   /** All chat thread ids (= Slack threads) that have at least one chat execution. */
-  listSessionIds(): string[] {
+  async listSessionIds(): Promise<string[]> {
     // Soft cap at 500 — anything older than that almost certainly won't be
     // surfaced after the dashboard's per-tab filters anyway.
-    return this.db.executions.listChatThreads(500).map((t) => t.triggerId);
+    return (await this.db.executions.listChatThreads(500)).map((t) => t.triggerId);
   }
 
-  exists(id: string): boolean {
-    return this.db.executions.getChatThread(id) !== null;
+  async exists(id: string): Promise<boolean> {
+    return (await this.db.executions.getChatThread(id)) !== null;
   }
 
   async getSessionMeta(id: string): Promise<SessionMeta | null> {
-    const t = this.db.executions.getChatThread(id);
+    const t = await this.db.executions.getChatThread(id);
     if (!t) return null;
     const startedAt = new Date(t.firstStartedAt).getTime() / 1000;
     const lastMessageAt = new Date(t.lastActivityAt).getTime() / 1000;
@@ -71,7 +71,7 @@ export class ChatSessionReader implements SessionSource {
   }
 
   async read(id: string): Promise<Array<{ index: number; msg: JsonlMessage }>> {
-    const thread = this.db.executions.getChatThread(id);
+    const thread = await this.db.executions.getChatThread(id);
     if (!thread?.agentSessionId) return [];
     return this.sessionLog.readNormalizedSession("chat", thread.agentSessionId, {
       includeAgents: false,
@@ -85,8 +85,8 @@ export class ChatSessionReader implements SessionSource {
    * doesn't exist on disk (deleted, rotated, or written by a different
    * Agent SDK installation).
    */
-  getFilePath(id: string): string | null {
-    const thread = this.db.executions.getChatThread(id);
+  async getFilePath(id: string): Promise<string | null> {
+    const thread = await this.db.executions.getChatThread(id);
     if (!thread || !thread.agentSessionId) return null;
     return this.sessionLog.pathForProject(CHAT_PROJECT_SLUG, thread.agentSessionId, {
       requireExists: true,

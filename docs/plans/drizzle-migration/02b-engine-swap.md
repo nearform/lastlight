@@ -1187,38 +1187,211 @@ transactions too (where the mutex is equally harmless).
 
 ## Done criteria
 
-- [ ] `src/state/client.ts`, `src/state/dialect.ts`,
+- [x] `src/state/client.ts`, `src/state/dialect.ts`,
   `src/state/legacy-sqlite.ts` exist as specced; `src/state/migrate.ts`
   deleted; `SessionManager.migrate`/`rebuildWithoutTableUnique` deleted.
-- [ ] `StateDb.open(dbPath?)` / `StateDb.fromClient(client, dialect)` are the
+- [x] `StateDb.open(dbPath?)` / `StateDb.fromClient(client, dialect)` are the
   only construction paths; `get client()` / `get dialect()` replace
   `get database()`; `src/index.ts:142-146` updated.
-- [ ] All four stores (incl. `UserStore`) + SessionManager contain zero
+- [x] All four stores (incl. `UserStore`) + SessionManager contain zero
   `better-sqlite3` types, zero manual `JSON.parse`/`stringify` for json-mode
   columns, zero `=== 0`/`=== 1` boolean compares on mapped rows (UserStore's
   `is_blocked` / `email_is_placeholder` `=== 1` compares are gone).
-- [ ] The five named ops run in `client.transaction`; the trailing-`dbc`
+- [x] The five named ops run in `client.transaction`; the trailing-`dbc`
   participants are exactly the listed methods; rollback + double-responder
   tests green.
-- [ ] `/admin/api/executions` returns snake_case (pin test green);
+- [x] `/admin/api/executions` returns **camelCase** — the phase doc's own
+  correction, not snake_case (pin test green);
   `/workflow-runs*` responses byte-identical in shape to before;
   `pnpm --filter @lastlight/dashboard typecheck` green with **zero dashboard
   changes**.
-- [ ] `grep -rn better-sqlite3 src tests` empty; `better-sqlite3` +
+- [x] `grep -rn better-sqlite3 src tests` empty; `better-sqlite3` +
   `@types/better-sqlite3` removed from package.json; full suite green.
-- [ ] Prod-shape smoke passed (twice, idempotent; `__drizzle_migrations` =
-  1 row; `integrity_check` ok; dashboard shows history).
-- [ ] The named-op mutex is in place (locked decision 8) and the concurrency
+- [ ] **NOT DONE — Prod-shape smoke against a copy of the real database.** It
+  needs a host operation (pulling prod's `lastlight.db` out of the docker
+  volume), so it moves to Phase 5's cutover runbook as a **release gate**.
+  Everything it would exercise is covered mechanically against the frozen
+  legacy fixture (`tests/state/schema-equivalence.test.ts`: compat + migrator
+  no-op, rows intact, idempotent across two boots, `integrity_check` ok) —
+  but that fixture is a schema, not production's DATA, and `0001` is the first
+  migration that writes to it. Do not skip this.
+- [x] The named-op mutex is in place (locked decision 8) and the concurrency
   probe is green (exactly one winner, no SQLITE_BUSY leak).
-- [ ] The 02a ripple is complete per its own done criteria (70 async methods,
+- [x] The 02a ripple is complete per its own done criteria (127 async methods,
   signature flips, fire-and-forget table, floating-promise greps clean,
   evals barrel untouched, dashboard tsc green).
-- [ ] `simple.ts` awaits `onRunStart` (locked decision 10);
+- [x] `simple.ts` awaits `onRunStart` (locked decision 10);
   `getOrCreateSession` race guard + test in place (locked decision 11);
   `StateDb.open` normalizes path/URL forms and `close()` is async (locked
   decision 9).
-- [ ] README.md Phase 2 checkbox ticked; deviations recorded below.
+- [x] README.md Phase 2 checkbox ticked; deviations recorded below.
 
-## Deviations
+## Deviations (executed 2026-08-18)
 
-*(append what/why here during execution)*
+Phase 2 landed as specified. `better-sqlite3` is gone from `apps/server/src`,
+all seven stores + `SessionManager` run on `drizzle-orm/libsql` behind a fully
+async API, the five named ops are real transactions behind a connection-scoped
+serializer, and `migrate.ts` is deleted. What follows is what the plan got
+wrong, what it missed, and the judgement calls it left open.
+
+### 1. The plan's transaction guard idiom would have broken EVERY gate
+
+Transaction plumbing says to write
+`changes(await this.approvals.respond(…, tx)) !== 1`. But `ApprovalStore.respond`
+and `resolveReplyGate` already apply `changes()` internally and return a
+**number** — so `changes(1)` evaluates to `0` and that line makes every single
+gate resolution throw `not pending`. Approve, reject and reply would all have
+failed, on every route.
+
+Written as `const changed = await this.approvals.respond(…, tx); if (changed !== 1) throw`.
+The error messages are preserved verbatim (the concurrency probe matches
+`/not pending/`).
+
+### 2. Backfills the port silently dropped — the most dangerous find
+
+The old `migrate.ts` carried **three** data backfills. The port preserved one
+(`workflow_runs.owner` from `context.owner`, now in `legacy-sqlite.ts`) and lost
+two: the **issue-#279 repo normalization** (5 ordered statements) and the
+**`feedback_anchors.channel` sentinel**. Locked decision 14 says these become
+journaled one-shot migrations; that step was simply never written, and nothing
+in the phase doc's checklist would have caught it.
+
+Consequence on a real prod upgrade: legacy rows keep the qualified string in
+`repo` with a NULL `owner`, so `distinctRepos()` shows bare-vs-qualified
+duplicates again and the #278 visibility filter *hides* rows — exactly what #279
+fixed. `repoMatchClause`'s `OR repo = ?` compatibility arm masks part of it,
+which is why it stays invisible to most tests.
+
+Now `drizzle/sqlite/0001_backfill_repo_refs.sql` + its journal entry and a
+chained `meta/0001_snapshot.json` (a data-only migration changes no schema, so
+the snapshot is 0000's with a fresh id — without it the next
+`drizzle-kit generate` diffs against the wrong head). One gotcha worth
+recording: **a leading `--> statement-breakpoint` makes the header comment block
+its own statement**, and libsql rejects a comment-only statement with a bare
+`SqliteError: not an error`. Attach the header to the first real statement.
+
+### 3. `cron_runs` lost its recency tiebreak (a regression this migration introduced)
+
+The plan says to replace `rowid DESC` with "ordering by the TEXT `id`". That is
+a *deterministic* order but an **arbitrary** one — `id` was `randomUUID()` — and
+deterministic is not sufficient here. `recentFailures` walks newest-first and
+stops at the first `ok`, so a tie holding one `ok` and one `failed` returns a
+different count depending which way it sorted: the cron failure alert flickering
+on a healthy cron, or staying quiet on a broken one. Measured ~50% flaky in
+`cron-run-store.test.ts`, where fires land in the same millisecond.
+
+Fixed by minting ids in creation order (`creationOrderedId`: fixed-width ms
+stamp + per-process counter + uuid), which restores what `rowid` gave with no
+schema change and reads identically in both dialects. The test's fires are
+deliberately NOT spaced out, so the collision case is exercised rather than
+avoided; 5 consecutive green runs.
+
+### 4. `PhaseReporter` was left half-flipped
+
+`RunStore` / `ExecutionLedger` flipped to `Promise<T>` per locked decision 13,
+but `PhaseReporter.persistPhase` / `.failWorkflow` stayed `void` — and because
+`Promise<void>` is assignable to a `void`-returning signature, **it compiled**.
+Every phase-history append and every fail-flip was floating unawaited inside the
+engine, including the `failWorkflow`-before-`requeueRunning` ordering the plan
+itself calls load-bearing. Both flipped and all 19 call sites awaited.
+
+### 5. Three latent bugs the flip introduced, none visible to `tsc`
+
+`!promise` is always `false` and `if (promise)` is always true; TS2801 only
+fires on the bare form, never under `!` or in a `const` first. All three would
+have shipped green:
+
+- **`simple.ts` — `if (!db.isWorkflowEnabled(name))`.** The admin kill switch
+  would have been permanently dead for every workflow on every trigger source.
+- **`base.ts` — `if (!threadId || !this.sessionManager.hasActiveThread(…))`.**
+  The "am I already in this thread?" gate would have admitted every non-mention
+  channel message.
+- **`router.ts` — `const buildStarted = db.runs.hasRunForTrigger(…)`.**
+  Reporter-driven re-triage would have fired on issues already in a build.
+
+Plus **two always-true checks in `team-visibility.ts`** that would have disabled
+the stale-while-revalidate refresh entirely (every cached answer served forever,
+past TTL). The floating-promise audit also found **9 genuinely dropped writes**
+in `dispatcher.ts` / `chat-runner.ts` — including `resolveReplyGateAndResume`
+inside a `try` whose whole purpose is to catch its double-reply throw, which
+unawaited would have escaped the `try` AND let the duplicate dispatch proceed.
+
+**The audit greps are not optional.** The compiler found ~850 errors; it found
+none of these fourteen.
+
+### 6. `nullsToUndefined` needed a mapped return type
+
+As specced it was `(row: T) => T`, so nullable columns still *said* `| null`
+afterwards and could not be spread into the records' optionals. Two agents
+independently rolled local `Denulled<T>` / `NullsStripped<T>` workarounds and a
+third avoided the helper entirely. Fixed once in `client.ts` with a
+`NullsToUndefined<T>` mapped return type; the local copies were removed.
+
+### 7. `FeedbackStore` had three undeclared transactions
+
+The plan states it has none. It had three (`markPolled`, `reconcileAnchor`,
+`markExported`), each wrapping a per-id `UPDATE` loop — and `db.ts` constructs
+`FeedbackStore` with no serializer, so re-creating them would have left three
+unguarded transactions racing `TeamStore`'s four on one client. Collapsed to
+single set-based `inArray` statements, which are atomic as one statement and
+need no transaction, making the plan's claim true after the fact.
+
+### 8. Smaller corrections
+
+- **`markLatestAsFailed`'s prescribed SQL is invalid.** `SET ${executions.success}`
+  renders a *qualified* column (`"executions"."success"`), which neither dialect
+  accepts as an UPDATE target. Needs `sql.identifier(...)`; the bound `${false}`
+  is kept.
+- **`getHistory` must stay `DESC` + reverse.** The porting table says "builder
+  asc + limit", which would keep the FIRST 50 messages — a long thread would
+  rehydrate its opening and never see recent turns.
+- **The FK is enforced, and always was.** 00-architecture and 01 both assert
+  `PRAGMA foreign_keys` is "never turned on … declared-but-unenforced". Verified
+  empirically: better-sqlite3 **and** libsql each default it on and each reject
+  an orphan insert. The claim was wrong before this migration, not because of
+  it; the schema comment now says so.
+- **`TerminalRunObserver` stays synchronous**, against the ripple list. Nothing
+  in-tree forces the flip, and an async observer would break the "one observer
+  throwing does not stop the others" try/catch (a rejected promise escapes it).
+- **Raw-SQL aliases must be double-quoted.** Unquoted `AS triggerId` folds to
+  `triggerid` on Postgres, which would resurrect issue #285 on the Phase 4 leg.
+- **`admitNext` (L10) is serialized**, not cap-rechecked. The per-row CAS
+  protects rows, never the cap: two overlapping callers both observing a free
+  slot both fill it. It gets its own serializer instance — admission's invariant
+  is its own, not the connection's.
+- **L15** resolved by making the `systemPrompt` thunk async and resolving the
+  enabled set ONCE per turn via `getAllWorkflowOverrides()` (one query, not one
+  per workflow); `isWorkflowEnabled` stays synchronous as the plan intended.
+
+### 9. Scope taken on deliberately
+
+- **`tests/helpers/state-db.ts` (`makeTestDb`) was built here, not in Phase 3.**
+  Locked decision 15 assigns it to Phase 3, but locked decision 12 makes
+  `:memory:` fatal for any transacting suite, and several suites needed it
+  immediately. Phase 3 is correspondingly smaller: the seam exists and the
+  suites that had to move are moved.
+- **`tests/state/fixtures/legacy-schema.sql`** — the pre-Drizzle schema,
+  mechanically dumped from `sqlite_master` on the commit that deleted
+  `migrate.ts`. It is how the prod-shape proof survives better-sqlite3's
+  removal, and `schema-equivalence.test.ts` now runs the real boot path
+  (`applyLegacySqliteCompat` + migrator) over it.
+- **`tsconfig.test.json` was never wired into any script or CI**, so `tests/**`
+  had never been typechecked. Turning it on surfaced ~8 pre-existing type errors
+  unrelated to Drizzle (a `triggerType: "github"` that has not been a valid
+  member for a long time, a `createRun` arg the signature never accepted, stale
+  `PrState` fixtures, zero-arg `vi.fn` spies whose `mock.calls[0]` destructures
+  were errors). All fixed in passing; none changed an assertion. **Wiring
+  `typecheck:test` into the gate is worth doing** — it is currently ungated.
+
+### 10. Still open / handed to later phases
+
+- The two literal **NUL bytes** in `feedback-store.ts` remain raw control
+  characters (so `grep` treats the file as binary and silently returns nothing).
+  Left alone deliberately — converting them to `\0` is behaviour-neutral and
+  does not belong inside this migration.
+- `legacy-sqlite.ts`'s messaging rebuild carries `TODO(remove after v0.12)`,
+  which is already past due — a Phase 5 or follow-up call.
+- The **prod-shape smoke against a real DB copy** (02b Verification) is NOT done
+  — it needs a copy of the production database, which is a host operation.
+  Phase 5's cutover runbook is the natural place; it is a **release gate**, not
+  an optional step, and `0001` above is exactly why.

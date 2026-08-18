@@ -19,9 +19,11 @@
  * built on one reading and it compared `lastlight` against `{nearform/lastlight}`
  * — a non-null non-match, which **hides** rows rather than showing them.
  *
- * Pure, dependency-free, and deliberately in `state/` beside the stores that
- * enforce it.
+ * Deliberately in `state/` beside the stores that enforce it. The two JS
+ * helpers are pure; only the SQL projection reaches for the dialect seam.
  */
+import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { strposExpr } from "./dialect.js";
 
 /**
  * Split a possibly-qualified repo into the stored shape.
@@ -96,17 +98,20 @@ export function qualifyRepo(
  *   matches nothing in a qualified allow-list and so silently HIDES the row,
  *   which is exactly the #278 bug.
  *
- * Column names are interpolated, so pass literals — never user input.
+ * Takes the schema columns themselves and returns a composable `SQL` fragment
+ * rather than a string, so it carries no interpolation hazard and its one
+ * dialect-specific piece — sqlite `instr` vs Postgres `strpos` — goes through
+ * {@link strposExpr} instead of being baked in.
  */
 export function qualifiedRepoSql(
-  ownerCol: string,
-  repoCol: string,
+  ownerCol: SQLWrapper,
+  repoCol: SQLWrapper,
   unqualifiable: "bare" | "null",
-): string {
-  const fallback = unqualifiable === "bare" ? repoCol : "NULL";
-  return `CASE
+): SQL {
+  const fallback = unqualifiable === "bare" ? sql`${repoCol}` : sql`NULL`;
+  return sql`CASE
     WHEN ${repoCol} IS NULL OR ${repoCol} = '' THEN NULL
-    WHEN instr(${repoCol}, '/') > 0 THEN ${repoCol}
+    WHEN ${strposExpr(repoCol, "/")} > 0 THEN ${repoCol}
     WHEN ${ownerCol} IS NOT NULL AND ${ownerCol} <> '' THEN ${ownerCol} || '/' || ${repoCol}
     ELSE ${fallback}
   END`;

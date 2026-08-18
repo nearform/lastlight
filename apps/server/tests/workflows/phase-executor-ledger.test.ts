@@ -42,6 +42,6 @@ describe("runPhase — provisioning throw finishes the ledger row failed", () =>
       expect.objectContaining({ success: false, stopReason: "error_fatal" }),
     );
     // shouldRunPhase now says "run" (retryable), never "done".
-    expect(store.executions.shouldRunPhase("build:architect", "trigger-1", "run-1")).toBe("run");
+    expect(await store.executions.shouldRunPhase("build:architect", "trigger-1", "run-1")).toBe("run");
   });
 });

@@ -118,7 +118,7 @@ describe("openReviewCheck + recordReviewCheck", () => {
     const db = fakeDb();
     const run = makeRun();
     db.rows.set(run.id, run);
-    recordReviewCheck(db, run.id, ref!);
+    await recordReviewCheck(db, run.id, ref!);
     expect(readReviewCheck(db.rows.get(run.id))).toEqual(ref);
   });
 

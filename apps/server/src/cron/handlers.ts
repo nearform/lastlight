@@ -98,7 +98,7 @@ export function withLedger(db: StateDb, cronName: string, handler: CronHandler):
     // Keyed by the CRON's name, exactly as a workflow cron's row is — that is
     // what lets `GET /crons` and the scheduler's alert read ONE ledger and stop
     // branching on which kind of cron they are looking at.
-    const id = db.cronRuns.start({ cronName, handler: cronName, source, actor });
+    const id = await db.cronRuns.start({ cronName, handler: cronName, source, actor });
 
     try {
       await handler(context);
@@ -107,7 +107,7 @@ export function withLedger(db: StateDb, cronName: string, handler: CronHandler):
       // itself (`repo-digest.ts`), which a `Promise<void>` handler cannot report
       // back. Widening `CronHandler` to return counts is a follow-up for when a
       // second handler cron exists to justify it.
-      db.cronRuns.finish(id, { status: "ok" });
+      await db.cronRuns.finish(id, { status: "ok" });
       // Logged on SUCCESS too. Without this a healthy weekly digest completed
       // silently, which is the same gap issue #341 raised for workflow crons —
       // and the message names the cron, because a collapsed log view shows
@@ -121,7 +121,7 @@ export function withLedger(db: StateDb, cronName: string, handler: CronHandler):
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      db.cronRuns.finish(id, { status: "failed", error: message });
+      await db.cronRuns.finish(id, { status: "failed", error: message });
       log.error(`Cron fire complete: ${cronName}`, {
         cron: cronName,
         handler: cronName,

@@ -716,21 +716,42 @@ its prior output, it doesn't rehydrate the JSONL — it looks up
 
 ## Migrations
 
-`migrate()` runs on every `new StateDb()` call:
+The schema is declared once in `src/state/schema/sqlite.ts` (Drizzle) and
+applied by a **journaled migrator**. `StateDb.open()` runs three steps, in
+order:
 
-1. `CREATE TABLE IF NOT EXISTS …` for every table.
-2. `CREATE INDEX IF NOT EXISTS …` for every index.
-3. Additive `ALTER TABLE … ADD COLUMN …` in try/catch for fields
-   added since v0.0.1. Old rows have NULLs; new rows respect defaults.
+1. **`applyLegacySqliteCompat()`** (`src/state/legacy-sqlite.ts`) — a
+   sqlite-only, idempotent pre-step for deployments older than the current
+   column set. `CREATE TABLE IF NOT EXISTS` no-ops on a table that exists but
+   is missing columns a later release added by `ALTER`, so the baseline alone
+   cannot bring an old database up to date. Guarded by `PRAGMA table_info`
+   rather than try/catch, so a real failure is not swallowed. It also carries
+   the one-shot `messaging_sessions` rebuild that strips an overly strict
+   table-level UNIQUE — it blocked legitimate session recreation after a
+   timeout, and a partial unique index (`WHERE active = 1`) replaced it.
+2. **`0000_baseline.sql`** — the full current schema, hand-edited so every
+   statement carries `IF NOT EXISTS`. On the existing production database
+   every statement no-ops; the migrator then records it and all later
+   migrations proceed normally. Hand-editing a migration is an anti-pattern
+   except exactly here: a baseline over a journal-less legacy database.
+3. **`0001_backfill_repo_refs.sql`** and onward — ordinary generated
+   migrations, never hand-edited. `0001` is a DATA migration (the issue-#279
+   `(owner, BARE repo)` normalization and the `feedback_anchors.channel`
+   sentinel). Its statement ORDER is load-bearing: `workflow_runs` must be
+   normalized before `executions`, which reads `workflow_runs.owner` back out.
 
-Strategy: never drop, never narrow. Long-running deployments
+Applied migrations are recorded in `__drizzle_migrations`, so each runs
+**once**. They previously re-executed on every boot and were idempotent only
+by hand-maintained convention (issue #345).
+
+Strategy is unchanged: never drop, never narrow. Long-running deployments
 accumulate schema; SQLite handles it.
 
-`PRAGMA foreign_keys = ON` is set at connection time (better-sqlite3
-default behaviour depends on version — the harness sets it explicitly).
-A one-shot rebuild of `messaging_sessions` was needed once to remove
-an overly strict table-level UNIQUE constraint that blocked legitimate
-session recreation after timeouts.
+The one declared foreign key (`messaging_messages.session_id`) **is enforced**.
+Nothing sets `PRAGMA foreign_keys` explicitly — this document used to claim the
+harness did — but both drivers default it on and reject an orphan insert, so it
+has always bitten. The rebuild in step 1 toggles it off around its table swap
+precisely because of that.
 
 ## Invariants
 

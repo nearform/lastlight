@@ -184,20 +184,6 @@ export function rangeResponse(
   });
 }
 
-/**
- * Parse a JSON status column (`extension_status` / `skills_status`) into the
- * object the dashboard renders. Tolerates null / malformed JSON (returns
- * undefined) so a bad row never breaks the executions endpoint.
- */
-function parseJsonColumn(raw: string | undefined): unknown {
-  if (!raw) return undefined;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-}
-
 export interface AdminConfig {
   stateDir: string;
   sessionsDir: string;
@@ -348,7 +334,7 @@ function mountSessionRoutes(app: Hono, sessions: SessionSource, prefix: string):
   // Session list — enriched with live container status
   app.get(`${prefix}`, async (c) => {
     const limit = Number(c.req.query("limit") ?? 200);
-    const allIds = sessions.listSessionIds();
+    const allIds = await sessions.listSessionIds();
     const [metas, containers] = await Promise.all([
       Promise.all(allIds.slice(0, limit * 2).map((id) => sessions.getSessionMeta(id))),
       listRunningContainers(),
@@ -375,7 +361,7 @@ function mountSessionRoutes(app: Hono, sessions: SessionSource, prefix: string):
 
       const push = async () => {
         const [allIds, containers] = await Promise.all([
-          Promise.resolve(sessions.listSessionIds()),
+          sessions.listSessionIds(),
           listRunningContainers(),
         ]);
         const liveTaskIds = new Set(containers.map((c) => c.taskId).filter(Boolean));
@@ -410,7 +396,7 @@ function mountSessionRoutes(app: Hono, sessions: SessionSource, prefix: string):
   // Single session
   app.get(`${prefix}/:id`, async (c) => {
     const id = c.req.param("id");
-    if (sessions.exists(id)) {
+    if (await sessions.exists(id)) {
       const meta = await sessions.getSessionMeta(id);
       if (meta) return c.json({ session: meta });
     }
@@ -422,7 +408,7 @@ function mountSessionRoutes(app: Hono, sessions: SessionSource, prefix: string):
     const id = c.req.param("id");
     const sinceIndex = Number(c.req.query("since") ?? -1);
 
-    if (sessions.exists(id)) {
+    if (await sessions.exists(id)) {
       const all = await sessions.read(id);
       const next = all.filter((x) => x.index > sinceIndex);
       return c.json({
@@ -439,11 +425,11 @@ function mountSessionRoutes(app: Hono, sessions: SessionSource, prefix: string):
     const id = c.req.param("id");
     const sinceIndex = Number(c.req.query("since") ?? -1);
 
-    if (!sessions.exists(id)) {
+    if (!(await sessions.exists(id))) {
       return c.json({ error: "session not found" }, 404);
     }
 
-    const filePath = sessions.getFilePath(id);
+    const filePath = await sessions.getFilePath(id);
     if (!filePath) {
       return c.json({ error: "session file not found" }, 404);
     }
@@ -1116,7 +1102,7 @@ export function createAdminRoutes(
       const slackUserId = userInfo["https://slack.com/user_id"];
       if (slackUserId) {
         try {
-          const user = db.users.upsertSlackUser({
+          const user = await db.users.upsertSlackUser({
             slackUserId,
             name: userInfo.name ?? null,
             email: userInfo.email ?? null,
@@ -1269,7 +1255,7 @@ export function createAdminRoutes(
       }
       if (typeof userInfo.id === "number") {
         try {
-          db.users.getOrCreateUserByGithub({
+          await db.users.getOrCreateUserByGithub({
             githubId: userInfo.id,
             login,
             name: userInfo.name ?? null,
@@ -1306,7 +1292,7 @@ export function createAdminRoutes(
   // Stats — running count uses live Docker containers, not stale DB records
   app.get("/stats", async (c) => {
     const [stats, containers] = await Promise.all([
-      Promise.resolve(db.executions.executionStats()),
+      db.executions.executionStats(),
       listRunningContainers(),
     ]);
     stats.running = containers.length;
@@ -1314,17 +1300,17 @@ export function createAdminRoutes(
   });
 
   // Daily aggregated stats (last N days)
-  app.get("/stats/daily", (c) => {
+  app.get("/stats/daily", async (c) => {
     const daysParam = c.req.query("days");
     const days = Math.min(Math.max(1, parseInt(daysParam ?? "30", 10) || 30), 90);
-    return c.json({ daily: db.executions.dailyStats(days) });
+    return c.json({ daily: await db.executions.dailyStats(days) });
   });
 
   // Hourly aggregated stats (rolling last N hours, default 24)
-  app.get("/stats/hourly", (c) => {
+  app.get("/stats/hourly", async (c) => {
     const hoursParam = c.req.query("hours");
     const hours = Math.min(Math.max(1, parseInt(hoursParam ?? "24", 10) || 24), 168);
-    return c.json({ hourly: db.executions.hourlyStats(hours) });
+    return c.json({ hourly: await db.executions.hourlyStats(hours) });
   });
 
   // ── Feedback signals (issue #255) ─────────────────────────────────────────
@@ -1334,11 +1320,11 @@ export function createAdminRoutes(
   // people actually did.
 
   // The raw feed, newest first. Retracted signals are excluded unless asked for.
-  app.get("/feedback/signals", (c) => {
+  app.get("/feedback/signals", async (c) => {
     const limit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "50", 10) || 50, 1), 200);
     const offset = Math.max(parseInt(c.req.query("offset") ?? "0", 10) || 0, 0);
     const source = c.req.query("source");
-    const { signals, total } = db.feedback.list({
+    const { signals, total } = await db.feedback.list({
       limit,
       offset,
       workflowName: c.req.query("workflow") || undefined,
@@ -1352,23 +1338,23 @@ export function createAdminRoutes(
   // Per-workflow standing — the leaderboard. `averageScore` covers scored
   // signals only, so a run everybody merely glanced at (👀) isn't reported as
   // mediocre.
-  app.get("/feedback/summary", (c) => {
+  app.get("/feedback/summary", async (c) => {
     const days = Math.min(Math.max(1, parseInt(c.req.query("days") ?? "30", 10) || 30), 365);
-    return c.json({ summary: db.feedback.summaryByWorkflow(days), days });
+    return c.json({ summary: await db.feedback.summaryByWorkflow(days), days });
   });
 
   // Zero-filled daily series for the chart, optionally for one workflow.
-  app.get("/feedback/daily", (c) => {
+  app.get("/feedback/daily", async (c) => {
     const days = Math.min(Math.max(1, parseInt(c.req.query("days") ?? "30", 10) || 30), 90);
     const workflow = c.req.query("workflow") || undefined;
-    return c.json({ daily: db.feedback.dailyScores(days, workflow) });
+    return c.json({ daily: await db.feedback.dailyScores(days, workflow) });
   });
 
   // Everything said about one run — the run-detail badge.
-  app.get("/workflow-runs/:id/feedback", (c) => {
-    const run = db.runs.getRun(c.req.param("id"));
+  app.get("/workflow-runs/:id/feedback", async (c) => {
+    const run = await db.runs.getRun(c.req.param("id"));
     if (!run) return c.json({ error: "workflow run not found" }, 404);
-    return c.json({ signals: db.feedback.forRun(run.id) });
+    return c.json({ signals: await db.feedback.forRun(run.id) });
   });
 
   // Running Docker containers
@@ -1453,11 +1439,11 @@ export function createAdminRoutes(
         const taskId = match[1];
         // Mark any running executions with matching skill as failed. Phase
         // skill keys are `<workflowName>:<phaseName>` — match on the colon.
-        const skills = db.executions.runningExecutions()
+        const skills = (await db.executions.runningExecutions())
           .filter((e) => e.skill.includes(":") || e.skill === "pr-fix")
           .filter((e) => taskId.includes(e.triggerId?.replace(/[^a-z0-9]/gi, "") || "---"));
         for (const e of skills) {
-          db.executions.recordFinish(e.id, { success: false, error: "terminated via admin dashboard" });
+          await db.executions.recordFinish(e.id, { success: false, error: "terminated via admin dashboard" });
         }
       }
       return c.json({ killed: name });
@@ -1467,10 +1453,10 @@ export function createAdminRoutes(
   });
 
   // Execution records from DB
-  app.get("/executions", (c) => {
+  app.get("/executions", async (c) => {
     const limit = Number(c.req.query("limit") ?? 100);
     const offset = Number(c.req.query("offset") ?? 0);
-    const executions = db.executions.allExecutions(limit, offset);
+    const executions = await db.executions.allExecutions(limit, offset);
     return c.json({ executions });
   });
 
@@ -1491,7 +1477,7 @@ export function createAdminRoutes(
     const results: Array<Record<string, unknown>> = [];
 
     if (scope === "errors" || scope === "all") {
-      for (const r of db.executions.searchErrors(q, limit)) {
+      for (const r of await db.executions.searchErrors(q, limit)) {
         results.push({
           source: "error",
           executionId: r.id,
@@ -1509,7 +1495,7 @@ export function createAdminRoutes(
     if (scope === "messages" || scope === "all") {
       const needle = q.toLowerCase();
       const maxSessions = 200; // newest-first cap on transcripts scanned
-      const ids = sessions.listSessionIds().slice(0, maxSessions);
+      const ids = (await sessions.listSessionIds()).slice(0, maxSessions);
       outer: for (const id of ids) {
         let msgs: Array<{ index: number; msg: Record<string, unknown> }>;
         try {
@@ -1541,7 +1527,7 @@ export function createAdminRoutes(
   // status. Returns `total` so the dashboard can drive a "load more" pager.
   // `status=active` is shorthand for ('running','paused') — used by the
   // header's "live" filter on the workflows tab.
-  app.get("/workflow-runs", (c) => {
+  app.get("/workflow-runs", async (c) => {
     const rawLimit = c.req.query("limit");
     const rawOffset = c.req.query("offset");
     const since = c.req.query("since") || undefined;
@@ -1573,7 +1559,7 @@ export function createAdminRoutes(
       statuses = statusParam.split(",").filter(Boolean);
     }
 
-    const { runs, total } = db.runs.list({
+    const { runs, total } = await db.runs.list({
       limit,
       offset,
       sinceIso: since,
@@ -1586,19 +1572,19 @@ export function createAdminRoutes(
   });
 
   // Distinct workflow names — used to populate the dashboard's filter row.
-  app.get("/workflow-names", (c) => {
-    return c.json({ names: db.runs.distinctNames() });
+  app.get("/workflow-names", async (c) => {
+    return c.json({ names: await db.runs.distinctNames() });
   });
 
-  app.get("/workflow-runs/:id", (c) => {
+  app.get("/workflow-runs/:id", async (c) => {
     const id = c.req.param("id");
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     if (!run) return c.json({ error: "workflow run not found" }, 404);
     // Enrich the actor with the `users` identity (issue #205) so the run
     // detail panel can show a real name + avatar, not just the raw login.
     // Best-effort: absent (password/cron/system actors, or a login with no
     // row) → the panel falls back to the login string + actor-type badge.
-    const triggeredByUser = run.triggeredBy ? db.users.findByLogin(run.triggeredBy) : null;
+    const triggeredByUser = run.triggeredBy ? await db.users.findByLogin(run.triggeredBy) : null;
     return c.json({
       workflowRun: run,
       triggeredByUser: triggeredByUser
@@ -1614,11 +1600,11 @@ export function createAdminRoutes(
   // List the executions belonging to a workflow run, ordered by start time.
   // Used by the dashboard's pipeline-detail view to look up the session id
   // (and usage metrics) for any phase the user clicks.
-  app.get("/workflow-runs/:id/executions", (c) => {
+  app.get("/workflow-runs/:id/executions", async (c) => {
     const id = c.req.param("id");
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     if (!run) return c.json({ error: "workflow run not found" }, 404);
-    const rows = db.executions.getExecutionsForWorkflowRun(run.id, run.triggerId, run.workflowName);
+    const rows = await db.executions.getExecutionsForWorkflowRun(run.id, run.triggerId, run.workflowName);
     const prefix = `${run.workflowName}:`;
     const executions = rows.map((r) => ({
       id: r.id,
@@ -1639,8 +1625,11 @@ export function createAdminRoutes(
       outputTokens: r.outputTokens,
       apiDurationMs: r.apiDurationMs,
       stopReason: r.stopReason,
-      extensions: parseJsonColumn(r.extensionStatus),
-      skills: parseJsonColumn(r.skillsStatus),
+      // Already parsed objects on the way out of the store — passed through as
+      // they are. Re-parsing them would throw, and the old helper's `catch`
+      // swallowed that into `undefined`, silently emptying the panel.
+      extensions: r.extensionStatus,
+      skills: r.skillsStatus,
     }));
     return c.json({ executions });
   });
@@ -1649,17 +1638,17 @@ export function createAdminRoutes(
   // the pipeline's approval-gate nodes + the detail panel's read-only approval
   // history (status, who responded, when, and any comment). The global
   // /approvals endpoint only lists pending ones, so it can't show history.
-  app.get("/workflow-runs/:id/approvals", (c) => {
+  app.get("/workflow-runs/:id/approvals", async (c) => {
     const id = c.req.param("id");
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     if (!run) return c.json({ error: "workflow run not found" }, 404);
-    const approvals = db.approvals.listForWorkflow(run.id);
+    const approvals = await db.approvals.listForWorkflow(run.id);
     return c.json({ approvals });
   });
 
   app.post("/workflow-runs/:id/cancel", async (c) => {
     const id = c.req.param("id");
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     if (!run) return c.json({ error: "workflow run not found" }, 404);
     if (run.status !== "running" && run.status !== "paused" && run.status !== "queued") {
       return c.json({ error: `cannot cancel a run with status '${run.status}'` }, 400);
@@ -1668,7 +1657,7 @@ export function createAdminRoutes(
     // executions ledger (via the finish error below), never overwriting the
     // run's original `triggered_by`.
     const actor = actorFromContext(c) ?? "admin";
-    db.runs.cancelRun(id);
+    await db.runs.cancelRun(id);
     // Flipping the DB row alone only stops the runner before the NEXT phase.
     // Kill any sandbox container currently executing a phase of this run so
     // the in-flight phase stops too. Container names are
@@ -1698,9 +1687,9 @@ export function createAdminRoutes(
         // avoids clobbering a sibling run that happens to share the same
         // trigger — e.g. two webhook deliveries for the same PR that
         // raced before dedup closed.
-        for (const e of db.executions.runningExecutions()) {
+        for (const e of await db.executions.runningExecutions()) {
           if (e.workflowRunId === id) {
-            db.executions.recordFinish(e.id, { success: false, error: `cancelled via admin dashboard by ${actor}` });
+            await db.executions.recordFinish(e.id, { success: false, error: `cancelled via admin dashboard by ${actor}` });
           }
         }
       } catch (err) {
@@ -1779,7 +1768,7 @@ export function createAdminRoutes(
   // like cancel/respond.
   app.post("/workflow-runs/:id/retry", async (c) => {
     const id = c.req.param("id");
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     if (!run) return c.json({ error: "workflow run not found" }, 404);
     if (run.status !== "failed" && run.status !== "cancelled") {
       return c.json({ error: `cannot retry a run with status '${run.status}'` }, 400);
@@ -1801,9 +1790,9 @@ export function createAdminRoutes(
   // user-defined custom workflows. No hardcoded phase list, no fallback.
 
   // List all agent workflows for the dashboard's Workflows browser.
-  app.get("/workflows", (c) => {
+  app.get("/workflows", async (c) => {
     const defs = listAgentWorkflows();
-    const overrides = db.getAllWorkflowOverrides();
+    const overrides = await db.getAllWorkflowOverrides();
     const workflows = defs.map((def) => ({
       name: def.name,
       kind: def.kind,
@@ -1847,14 +1836,14 @@ export function createAdminRoutes(
 
   // Full structured definition: every phase field, used by the definition
   // browser to render phase details and the diagram.
-  app.get("/workflows/:name/full", (c) => {
+  app.get("/workflows/:name/full", async (c) => {
     const name = c.req.param("name");
     try {
       const def = getWorkflow(name);
       return c.json({
         workflow: def,
         triggers: getWorkflowTriggers(name),
-        enabled: db.isWorkflowEnabled(name),
+        enabled: await db.isWorkflowEnabled(name),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1874,9 +1863,9 @@ export function createAdminRoutes(
     } catch {
       return c.json({ error: `unknown workflow: ${name}` }, 404);
     }
-    const current = db.isWorkflowEnabled(name);
+    const current = await db.isWorkflowEnabled(name);
     const next = !current;
-    db.setWorkflowEnabled(name, next, "admin");
+    await db.setWorkflowEnabled(name, next, "admin");
     return c.json({ name, enabled: next });
   });
 
@@ -1998,18 +1987,20 @@ export function createAdminRoutes(
     return runOwner === owner && runRepo === repo && issueKey === key;
   }
 
-  function computeArtifactMetadata(owner: string, repo: string, key: string, doc: string): ArtifactMetadata {
-    const approvals = db.approvals.listByArtifact(doc);
+  async function computeArtifactMetadata(owner: string, repo: string, key: string, doc: string): Promise<ArtifactMetadata> {
+    const approvals = await db.approvals.listByArtifact(doc);
     if (approvals.length === 0) {
       // No approval references this artifact. Docs that aren't guarded by an
       // approval remain editable (status.md, executor-summary.md, etc.).
       return { editable: true, lock: null };
     }
 
-    const enriched = approvals.map((approval) => ({
-      approval,
-      run: db.runs.getRun(approval.workflowRunId),
-    }));
+    // Sequential on purpose: one run lookup per approval, in the store's order,
+    // rather than fanning N reads at the DB at once.
+    const enriched: { approval: WorkflowApproval; run: WorkflowRun | null }[] = [];
+    for (const approval of approvals) {
+      enriched.push({ approval, run: await db.runs.getRun(approval.workflowRunId) });
+    }
 
     const matching = enriched.filter(({ run }) => runMatchesArtifactTarget(run, owner, repo, key));
     const latestMatching = matching[0];
@@ -2051,7 +2042,7 @@ export function createAdminRoutes(
   app.get("/repos", async (c) => {
     const managed = new Set(getManagedRepos());
     const activity = new Map(
-      db.runs.distinctRepos().map((r) => [r.repo, r]),
+      (await db.runs.distinctRepos()).map((r) => [r.repo, r]),
     );
 
     // Fold in artifact-key counts (bounded scan — the tab is a browse view, not
@@ -2252,13 +2243,13 @@ export function createAdminRoutes(
     }
   });
 
-  app.get("/artifacts/:owner/:repo/:key/:doc/metadata", (c) => {
+  app.get("/artifacts/:owner/:repo/:key/:doc/metadata", async (c) => {
     if (!buildAssetStore) return c.json({ error: "build-assets store not configured" }, 404);
     const { owner, repo, key, doc } = c.req.param();
     try {
       // Validate the doc path upfront so traversal attempts surface as 400s.
       buildAssetStore.fileFor({ owner, repo, issueKey: key }, doc);
-      const metadata = computeArtifactMetadata(owner, repo, key, doc);
+      const metadata = await computeArtifactMetadata(owner, repo, key, doc);
       return c.json(metadata);
     } catch (err: unknown) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -2273,7 +2264,7 @@ export function createAdminRoutes(
     try {
       // Validate the doc path before hitting the approval gate.
       buildAssetStore.fileFor({ owner, repo, issueKey: key }, doc);
-      const metadata = computeArtifactMetadata(owner, repo, key, doc);
+      const metadata = await computeArtifactMetadata(owner, repo, key, doc);
       if (!metadata.editable) {
         return c.json({ error: "artifact_locked", lock: metadata.lock }, 403);
       }
@@ -2287,8 +2278,8 @@ export function createAdminRoutes(
 
   // ── Approval Gates ─────────────────────────────────────────────
 
-  app.get("/approvals", (c) => {
-    const approvals = db.approvals.listPending();
+  app.get("/approvals", async (c) => {
+    const approvals = await db.approvals.listPending();
     return c.json({ approvals });
   });
 
@@ -2296,10 +2287,10 @@ export function createAdminRoutes(
   // uses to open the right doc. `artifactRef` is null when the gate carries no
   // artifact. In server mode the ref points at the editable store doc; in repo
   // mode it carries a GitHub blob URL (the doc is committed on the branch).
-  app.get("/approvals/:id", (c) => {
-    const approval = db.approvals.getById(c.req.param("id"));
+  app.get("/approvals/:id", async (c) => {
+    const approval = await db.approvals.getById(c.req.param("id"));
     if (!approval) return c.json({ error: "approval not found" }, 404);
-    const run = db.runs.getRun(approval.workflowRunId);
+    const run = await db.runs.getRun(approval.workflowRunId);
 
     let artifactRef: {
       mode: BuildAssetsLocation;
@@ -2337,7 +2328,7 @@ export function createAdminRoutes(
   app.post("/approvals/:id/respond", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json<{ decision: "approved" | "rejected"; reason?: string }>();
-    const approval = db.approvals.getById(id);
+    const approval = await db.approvals.getById(id);
     if (!approval) return c.json({ error: "approval not found" }, 404);
     if (approval.status !== "pending") return c.json({ error: `already ${approval.status}` }, 400);
     // Actor logging (issue #205): attribute the approval to the authenticated
@@ -2345,7 +2336,7 @@ export function createAdminRoutes(
     const actor = actorFromContext(c) ?? "admin";
     if (body.decision === "rejected") {
       // One transaction: respond 'rejected' + fail the run.
-      db.runs.resolveGateAndFail(id, actor, body.reason);
+      await db.runs.resolveGateAndFail(id, actor, body.reason);
     } else {
       // Record the approval, then let resumeWorkflow flip the run back to
       // `running` — but only as part of an actual dispatch. resumeWorkflow
@@ -2360,11 +2351,11 @@ export function createAdminRoutes(
       // respond() is a compare-and-set on the still-pending row, so a racing
       // responder (the status check above is a TOCTOU read) changes 0 rows.
       // Only the winner resumes — the loser must not dispatch a second time.
-      const changed = db.approvals.respond(id, "approved", actor, body.reason);
+      const changed = await db.approvals.respond(id, "approved", actor, body.reason);
       if (changed !== 1) {
         return c.json({ error: "already resolved" }, 409);
       }
-      const workflowRun = db.runs.getRun(approval.workflowRunId);
+      const workflowRun = await db.runs.getRun(approval.workflowRunId);
       if (workflowRun && config.resumeWorkflow) {
         config.resumeWorkflow(workflowRun, actor).catch((err) => {
           log.error("Failed to resume workflow", { workflowRunId: workflowRun.id, err });
@@ -2435,8 +2426,8 @@ export function createAdminRoutes(
 
   // List every cron defined in workflows/cron-*.yaml, merged with the
   // override row (if any) and the live scheduler state.
-  app.get("/crons", (c) => {
-    const overrides = db.getAllCronOverrides();
+  app.get("/crons", async (c) => {
+    const overrides = await db.getAllCronOverrides();
     const liveByName = new Map(
       (config.cronScheduler?.list() ?? []).map((j) => [j.name, j]),
     );
@@ -2449,7 +2440,15 @@ export function createAdminRoutes(
     const mayVote = repoLayerMayVote(policy);
     // One query for the whole list rather than one per cron, under the
     // dashboard's 10s poll.
-    const latestCronRuns = db.cronRuns.latestByCron();
+    const latestCronRuns = await db.cronRuns.latestByCron();
+    // Same rule for the failure counts, hoisted out of the map below for the
+    // same reason: the store exposes no batch form of `recentFailures`, so this
+    // is a sequential walk rather than N reads fanned at the DB at once from
+    // inside the render loop.
+    const failuresByCron = new Map<string, number>();
+    for (const def of defs) {
+      failuresByCron.set(def.name, await db.cronRuns.recentFailures(def.name));
+    }
     const crons = defs.map((def) => {
       const override = overrides.get(def.name) ?? null;
       const enabled = override ? override.enabled : true;
@@ -2466,7 +2465,7 @@ export function createAdminRoutes(
       // dispatched children sorted first: an arbitrary run, not the tick. A
       // zero-discovery fire dispatched no children at all, so it showed nothing.
       const last = latestCronRuns.get(def.name) ?? null;
-      const recentFailures = db.cronRuns.recentFailures(def.name);
+      const recentFailures = failuresByCron.get(def.name) ?? 0;
       return {
         name: def.name,
         workflow: def.workflow ?? null,
@@ -2506,10 +2505,10 @@ export function createAdminRoutes(
     const name = c.req.param("name");
     const def = getCronWorkflows().find((d) => d.name === name);
     if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
-    const override = db.getCronOverride(name);
+    const override = await db.getCronOverride(name);
     const currentlyEnabled = override ? override.enabled : true;
     const nextEnabled = !currentlyEnabled;
-    db.setCronOverride(name, { enabled: nextEnabled, updatedBy: "admin" });
+    await db.setCronOverride(name, { enabled: nextEnabled, updatedBy: "admin" });
     // Off is "off BY DEFAULT", not "unregistered" (issue #180): a managed repo
     // may opt itself back into a globally-off cron from its `.lastlight/`, and
     // that is resolved at TICK time — so the tick has to keep running. It just
@@ -2554,8 +2553,8 @@ export function createAdminRoutes(
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ error: `invalid schedule: ${msg}` }, 400);
     }
-    db.setCronOverride(name, { schedule, updatedBy: "admin" });
-    const override = db.getCronOverride(name);
+    await db.setCronOverride(name, { schedule, updatedBy: "admin" });
+    const override = await db.getCronOverride(name);
     if (override?.enabled !== false) {
       config.cronScheduler.update({
         name,
@@ -2568,14 +2567,14 @@ export function createAdminRoutes(
   });
 
   // Drop the override row and re-register the cron at its YAML default.
-  app.delete("/crons/:name/override", (c) => {
+  app.delete("/crons/:name/override", async (c) => {
     if (!config.cronScheduler) {
       return c.json({ error: "cron scheduler not configured" }, 503);
     }
     const name = c.req.param("name");
     const def = getCronWorkflows().find((d) => d.name === name);
     if (!def) return c.json({ error: `cron not found: ${name}` }, 404);
-    db.clearCronOverride(name);
+    await db.clearCronOverride(name);
     const job = {
       name,
       schedule: def.schedule,
@@ -2720,7 +2719,7 @@ export function createAdminRoutes(
     // stuck (`dependabot-ci-fix` for a dependency PR, `pr-fix` otherwise)
     // without a second GitHub read to re-derive what the router already decided
     // once. A PR we have never fixed falls back to the configured `pr_fix` route.
-    const prior = db.runs.latestForTrigger([...PR_FIX_SHAPED_WORKFLOWS], prTriggerId(repo, prNumber));
+    const prior = await db.runs.latestForTrigger([...PR_FIX_SHAPED_WORKFLOWS], prTriggerId(repo, prNumber));
     const workflowName = prior?.workflowName ?? getRoutes().github?.pr_fix ?? "pr-fix";
 
     const state = await resolvePrState(owner, name, prNumber, {

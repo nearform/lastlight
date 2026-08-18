@@ -673,10 +673,10 @@ Extract from each leg and deep-equal after normalization:
    `feedback_signals.anchor_id`, the `feedback_*.messaging_session_id` pair,
    `github_team_*.（org, team_slug)`) is **logical only** — declare those as
    plain columns, NOT `.references(...)`, or the baseline stops matching prod.
-   Note also that `PRAGMA foreign_keys` is **never enabled at runtime** (the
-   sole pragma on the connection is `journal_mode = WAL`), so the one FK is
-   declared-but-unenforced today; Phase 2's `busy_timeout` addition must not
-   accidentally turn it on.
+   Note the one FK **is enforced** — corrected 2026-08-18 during Phase 2. The
+   code sets only `journal_mode = WAL`, which this doc read as "so the FK is
+   declared-but-unenforced"; in fact better-sqlite3 and libsql each default
+   `PRAGMA foreign_keys` ON and each reject an orphan insert.
 5. **Composite primary keys**: `PRAGMA table_info` reports `pk` as a 1-based
    position, not a boolean. The three `github_*` tables have multi-column PKs,
    so normalize to the ordered list of PK columns per table rather than a

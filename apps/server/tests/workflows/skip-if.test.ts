@@ -101,19 +101,19 @@ async function runWith(
   opts: RunOpts = {},
 ) {
   const store = new InMemoryStateStore(RUN_ID);
-  if (opts.scratch) store.runs.mergeScratch(RUN_ID, opts.scratch);
+  if (opts.scratch) await store.runs.mergeScratch(RUN_ID, opts.scratch);
   if (opts.resumed) {
     // A completed phase's ledger row is what makes the engine skip it — and a
     // dedup skip returns NO `outputVars`, so `{{phaseOutputs}}` is empty for the
     // rest of the run. That is the resume boundary the packaged guards have to
     // survive.
-    store.executions.recordStart({
+    await store.executions.recordStart({
       id: "exec-diagnose",
       skill: `${definition.name}:diagnose`,
       triggerId: "acme/widgets#7",
       workflowRunId: RUN_ID,
     } as never);
-    store.executions.recordFinish("exec-diagnose", { success: true } as never);
+    await store.executions.recordFinish("exec-diagnose", { success: true } as never);
   }
   const reporter = opts.harvest
     ? new HarvestingReporter(store, opts.harvest)
@@ -132,7 +132,7 @@ async function runWith(
     // Seeded from the row exactly as `runner.ts` seeds it at run start — which
     // is the ONLY read on the resume path, and is stale for everything the host
     // writes afterwards.
-    scratch: { ...(store.runs.getRun(RUN_ID)?.scratch ?? {}) },
+    scratch: { ...((await store.runs.getRun(RUN_ID))?.scratch ?? {}) },
     store,
     workflowId: RUN_ID,
     botName: "last-light",
@@ -165,7 +165,7 @@ describe("skip_if — a matched guard skips the phase without failing the run", 
     const { result, reporter, agent, store } = await runWith(defineWorkflow(NON_FIXABLE), DIAGNOSIS("flaky"));
 
     expect(result.success).toBe(true);
-    expect(store.runs.getRun(RUN_ID)?.status).toBe("succeeded");
+    expect((await store.runs.getRun(RUN_ID))?.status).toBe("succeeded");
     // The expensive phase never ran — that is the spend the guard exists to save.
     expect(agent.calls).toHaveLength(1);
     expect(result.phases.map((p) => p.phase)).toEqual(["diagnose", "fix"]);
@@ -195,7 +195,7 @@ describe("skip_if — an unmatched guard runs the phase normally", () => {
     const { result, agent, store } = await runWith(defineWorkflow(NON_FIXABLE), DIAGNOSIS(cls));
 
     expect(agent.calls).toHaveLength(2);
-    expect(store.runs.getRun(RUN_ID)?.status).toBe("succeeded");
+    expect((await store.runs.getRun(RUN_ID))?.status).toBe("succeeded");
     expect(result.phases.find((p) => p.phase === "fix")?.output).toBe("FIXED");
   });
 
@@ -250,7 +250,7 @@ describe("skip_if — reading the harvested class instead of the phase output", 
     );
     expect(agent.calls).toHaveLength(1);
     expect(result.success).toBe(true);
-    expect(store.runs.getRun(RUN_ID)?.status).toBe("succeeded");
+    expect((await store.runs.getRun(RUN_ID))?.status).toBe("succeeded");
   });
 
   it("sees a class the HOST wrote mid-run, not the pre-run snapshot", async () => {
@@ -261,7 +261,7 @@ describe("skip_if — reading the harvested class instead of the phase output", 
     const { store } = await runWith(defineWorkflow(HARVESTED), DIAGNOSIS("flaky"), {
       harvest: harvestClass,
     });
-    expect((store.runs.getRun(RUN_ID)?.scratch as any).fixMarkers.diagnosis.class).toBe("flaky");
+    expect((((await store.runs.getRun(RUN_ID))?.scratch) as any).fixMarkers.diagnosis.class).toBe("flaky");
   });
 
   it("RUNS the fix phase when prose mentions a stopping class the marker did not", async () => {

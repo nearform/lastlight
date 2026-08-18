@@ -8,6 +8,7 @@ import { mountAdmin } from "#src/admin/index.js";
 import { BuildAssetStore } from "#src/state/build-assets.js";
 import type { StateDb } from "#src/state/db.js";
 import type { SessionReader } from "#src/admin/sessions.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import {
   setRuntimeConfig,
   resetRuntimeConfigForTests,
@@ -23,6 +24,15 @@ vi.mock("#src/admin/docker.js", () => ({
   getHostStats: vi.fn(async () => null),
 }));
 
+/**
+ * `ReclaimResult.census` — what the reclaim OBSERVED, as opposed to what it
+ * removed. The cancel route never reads it, so a zeroed one keeps the mocks
+ * shaped like the real return type without inventing numbers.
+ */
+const { EMPTY_CENSUS } = vi.hoisted(() => ({
+  EMPTY_CENSUS: { pvcsFound: 0, pvcsLive: 0, pvcsStale: 0, pvcsCurrent: 0, deletedStale: 0, deletedOverCap: 0, deletedFailed: 0 },
+}));
+
 // Mock the k8s client + reclaim modules so the cancel-route tests never touch
 // a real cluster: `makeK8sApis` would throw off-cluster (no kubeconfig)
 // before the route even reaches `reclaimSandbox`.
@@ -30,7 +40,7 @@ vi.mock("#src/sandbox/k8s/client.js", () => ({
   makeK8sApis: vi.fn(() => ({}) as unknown),
 }));
 vi.mock("#src/sandbox/k8s/reclaim.js", () => ({
-  reclaimSandbox: vi.fn(async () => ({ podsDeleted: 0, pvcsDeleted: 0 })),
+  reclaimSandbox: vi.fn(async () => ({ podsDeleted: 0, pvcsDeleted: 0, census: EMPTY_CENSUS })),
 }));
 
 // The cancel route's workspace reap (src/sandbox/reap.js) — and now several
@@ -612,10 +622,8 @@ describe("OAuth identity capture (issue #205)", () => {
 
   let realDb: StateDb;
   beforeEach(async () => {
-    const { StateDb } = await import("#src/state/db.js");
-    realDb = new StateDb(":memory:");
+    realDb = await makeTestDb();
   });
-  afterEach(() => realDb.close());
 
   it("GitHub login creates a users row + carries the login in the token", async () => {
     const originalFetch = global.fetch;
@@ -645,7 +653,7 @@ describe("OAuth identity capture (issue #205)", () => {
     expect(location).toContain("/admin/?token=");
 
     // A users row was created with the profile fields + the /user/emails fallback.
-    const user = realDb.users.findByGithubId(4242);
+    const user = await realDb.users.findByGithubId(4242);
     expect(user?.login).toBe("octocat");
     expect(user?.name).toBe("The Octocat");
     expect(user?.avatarUrl).toBe("https://avatars/oct.png");
@@ -675,15 +683,15 @@ describe("OAuth identity capture (issue #205)", () => {
       }),
     );
     expect(res.status).toBe(302);
-    expect(realDb.users.findByGithubId(7)?.login).toBe("anyuser");
-    expect(realDb.users.findByGithubId(7)?.email).toBe("any@example.com"); // from /user, no fallback
+    expect((await realDb.users.findByGithubId(7))?.login).toBe("anyuser");
+    expect((await realDb.users.findByGithubId(7))?.email).toBe("any@example.com"); // from /user, no fallback
 
     global.fetch = originalFetch;
   });
 
   it("Slack login whose email matches a GitHub row links slack_user_id + carries that login", async () => {
     // Seed a GitHub identity first.
-    realDb.users.getOrCreateUserByGithub({ githubId: 99, login: "dev", email: "dev@corp.com" });
+    await realDb.users.getOrCreateUserByGithub({ githubId: 99, login: "dev", email: "dev@corp.com" });
 
     const originalFetch = global.fetch;
     global.fetch = mockSlackFetch({
@@ -711,7 +719,7 @@ describe("OAuth identity capture (issue #205)", () => {
     const location = res.headers.get("location") ?? "";
 
     // The Slack id linked onto the existing GitHub row (same person).
-    const linked = realDb.users.findBySlackUserId("U777");
+    const linked = await realDb.users.findBySlackUserId("U777");
     expect(linked?.login).toBe("dev");
     expect(linked?.githubId).toBe(99);
     // The token carries the matched GitHub login.
@@ -961,7 +969,7 @@ describe("POST /workflow-runs/:id/cancel", () => {
       vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
       const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
       vi.mocked(reclaimSandbox).mockClear();
-      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 1, pvcsDeleted: 1 });
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 1, pvcsDeleted: 1, census: EMPTY_CENSUS });
 
       const runId = "Run With!Odd.Chars";
       const { db } = makeCancelDb({
@@ -990,7 +998,7 @@ describe("POST /workflow-runs/:id/cancel", () => {
       vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
       const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
       vi.mocked(reclaimSandbox).mockClear();
-      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 1, pvcsDeleted: 0 });
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 1, pvcsDeleted: 0, census: EMPTY_CENSUS });
 
       // reclaimSandbox handles the cluster pod + PVC; the pod's uploaded
       // `.lastlight/` lands host-side under `<sandboxDir>/<taskId>` even on k8s,
@@ -1016,7 +1024,7 @@ describe("POST /workflow-runs/:id/cancel", () => {
       vi.mocked(dockerMod.listRunningContainers).mockResolvedValueOnce([]);
       const { reclaimSandbox } = await import("#src/sandbox/k8s/reclaim.js");
       vi.mocked(reclaimSandbox).mockClear();
-      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 0, pvcsDeleted: 0 });
+      vi.mocked(reclaimSandbox).mockResolvedValueOnce({ podsDeleted: 0, pvcsDeleted: 0, census: EMPTY_CENSUS });
 
       const { artifactStore } = await import("#src/sandbox/artifact-store.js");
       const gcSpy = vi.spyOn(artifactStore, "gc").mockRejectedValueOnce(new Error("disk gone"));
@@ -1749,7 +1757,7 @@ describe("GET /artifact-repos + paginated /artifacts", () => {
 
 describe("GET /repos", () => {
   it("returns the union of managed + active repos, annotated + sorted newest-first", async () => {
-    vi.mocked(mockDb.runs.distinctRepos).mockReturnValueOnce([
+    vi.mocked(mockDb.runs.distinctRepos).mockResolvedValueOnce([
       { repo: "acme/web", runCount: 1, lastRunAt: "2026-01-01T00:00:00.000Z" },
       { repo: "acme/api", runCount: 3, lastRunAt: "2026-03-01T00:00:00.000Z" },
     ]);
@@ -1780,7 +1788,7 @@ describe("GET /workflow-runs ?repo=", () => {
 
 describe("POST /crons/:name/trigger", () => {
   it("fires the runner with the cron's workflow + context and returns triggered", async () => {
-    const triggerCron = vi.fn(async () => {});
+    const triggerCron = vi.fn(async (_workflow: string, _context: Record<string, unknown>) => {});
     const app = createAdminRoutes(
       mockDb, mockSessions, mockSessions,
       makeConfig({ adminPassword: "", triggerCron }),
@@ -1799,7 +1807,7 @@ describe("POST /crons/:name/trigger", () => {
   });
 
   it("stamps _cronSource=manual and _cronActor on the fired context", async () => {
-    const triggerCron = vi.fn(async () => {});
+    const triggerCron = vi.fn(async (_workflow: string, _context: Record<string, unknown>) => {});
     const app = createAdminRoutes(
       mockDb, mockSessions, mockSessions,
       makeConfig({ adminPassword: "", triggerCron }),
@@ -1827,7 +1835,7 @@ describe("POST /crons/:name/trigger", () => {
     ] as unknown as ReturnType<typeof getCronWorkflows>);
 
     try {
-      const triggerCron = vi.fn(async () => {});
+      const triggerCron = vi.fn(async (_workflow: string, _context: Record<string, unknown>) => {});
       const app = createAdminRoutes(
         mockDb, mockSessions, mockSessions,
         makeConfig({ adminPassword: "", triggerCron }),
@@ -1846,7 +1854,7 @@ describe("POST /crons/:name/trigger", () => {
   });
 
   it("returns 404 for an unknown cron", async () => {
-    const triggerCron = vi.fn(async () => {});
+    const triggerCron = vi.fn(async (_workflow: string, _context: Record<string, unknown>) => {});
     const app = createAdminRoutes(
       mockDb, mockSessions, mockSessions,
       makeConfig({ adminPassword: "", triggerCron }),

@@ -85,7 +85,7 @@ vi.mock("#src/managed-repos.js", async (importOriginal) => {
 const { getJobs } = await import("#src/cron/jobs.js");
 const { CRON_NAME_KEY } = await import("#src/cron/repo-crons.js");
 const { makeCronRunner } = await import("#src/cron/runner.js");
-const { StateDb } = await import("#src/state/db.js");
+const { makeTestDb } = await import("../helpers/state-db.js");
 
 /**
  * Fire the REAL runner over the real collaborators and hand back the counts it
@@ -93,31 +93,31 @@ const { StateDb } = await import("#src/state/db.js");
  * of the feature: the runner writes the outcome, it does not return it.
  */
 async function discoveryTick(
-  job: { workflow: string; context: Record<string, unknown> },
+  // `workflow` is optional on `CronJob` (a `handler:` cron has none); every job
+  // these tests build is a workflow cron.
+  job: { workflow?: string; context: Record<string, unknown> },
   discoverer: (repos: string[]) => Promise<DependencyPr[]>,
   dispatch: CronDispatcher,
 ) {
-  const db = new StateDb(":memory:");
-  try {
-    const runner = makeCronRunner({
-      db,
-      github: {} as unknown as GitHubClient,
-      discoverers: { "green-dependency-prs": (repos) => discoverer(repos) },
-      dispatch,
-    });
-    await runner(job.workflow, job.context);
+  // `makeTestDb` registers its own afterEach cleanup, so there is no close here.
+  const db = await makeTestDb();
+  const runner = makeCronRunner({
+    db,
+    github: {} as unknown as GitHubClient,
+    discoverers: { "green-dependency-prs": (repos) => discoverer(repos) },
+    dispatch,
+  });
+  await runner(job.workflow!, job.context);
 
-    const cronName = job.context[CRON_NAME_KEY];
-    const row = typeof cronName === "string" ? db.cronRuns.latestByCron().get(cronName) : undefined;
-    return {
-      dispatched: row?.dispatched ?? 0,
-      failures: row?.failures ?? 0,
-      reposScanned: row?.reposScanned ?? null,
-      status: row?.status ?? null,
-    };
-  } finally {
-    db.close();
-  }
+  const cronName = job.context[CRON_NAME_KEY];
+  const row =
+    typeof cronName === "string" ? (await db.cronRuns.latestByCron()).get(cronName) : undefined;
+  return {
+    dispatched: row?.dispatched ?? 0,
+    failures: row?.failures ?? 0,
+    reposScanned: row?.reposScanned ?? null,
+    status: row?.status ?? null,
+  };
 }
 
 /** A discoverer that finds exactly one PR per repo it is given. */
@@ -139,7 +139,7 @@ beforeEach(() => {
 describe("discovery cron participation", () => {
   it("skips a repo that opted out — it is never even discovered against", async () => {
     repoLayers.set("acme/out", { config: { crons: { disable: ["dependabot-merge"] } }, cached: true });
-    const [job] = getJobs();
+    const [job] = await getJobs();
     const discoverer = fakeDiscoverer();
 
     const result = await discoveryTick(job, discoverer, okDispatch);
@@ -151,7 +151,7 @@ describe("discovery cron participation", () => {
   });
 
   it("fans out over every repo when nobody opted out", async () => {
-    const [job] = getJobs();
+    const [job] = await getJobs();
     const discoverer = fakeDiscoverer();
 
     await discoveryTick(job, discoverer, okDispatch);
@@ -163,7 +163,7 @@ describe("discovery cron participation", () => {
   it("runs only the opted-in repos when the cron is globally off", async () => {
     repoLayers.set("acme/in", { config: { crons: { enable: ["dependabot-merge"] } }, cached: true });
     const db = { getAllCronOverrides: () => new Map([["dependabot-merge", { enabled: false }]]) };
-    const [job] = getJobs({ db: db as unknown as import("#src/state/db.js").StateDb });
+    const [job] = await getJobs({ db: db as unknown as import("#src/state/db.js").StateDb });
     const discoverer = fakeDiscoverer();
 
     await discoveryTick(job, discoverer, okDispatch);
@@ -174,7 +174,7 @@ describe("discovery cron participation", () => {
 
   it("is a free no-op tick when a globally-off cron has no takers", async () => {
     const db = { getAllCronOverrides: () => new Map([["dependabot-merge", { enabled: false }]]) };
-    const [job] = getJobs({ db: db as unknown as import("#src/state/db.js").StateDb });
+    const [job] = await getJobs({ db: db as unknown as import("#src/state/db.js").StateDb });
     const discoverer = fakeDiscoverer();
 
     const result = await discoveryTick(job, discoverer, okDispatch);
@@ -191,7 +191,7 @@ describe("discovery cron participation", () => {
   it("does not block the tick on a repo whose layer can't be read", async () => {
     repoLayers.set("acme/in", { fail: "GitHub is down" });
     repoLayers.set("acme/out", { config: { crons: { disable: ["dependabot-merge"] } } });
-    const [job] = getJobs();
+    const [job] = await getJobs();
     const discoverer = fakeDiscoverer();
 
     await discoveryTick(job, discoverer, okDispatch);

@@ -86,7 +86,7 @@ describe("POST /internal/sandbox-artifacts", () => {
     const res = await app.request("/internal/sandbox-artifacts", {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
-      body,
+      body: new Uint8Array(body),
     });
 
     expect(res.status).toBe(204);

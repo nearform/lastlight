@@ -1,6 +1,9 @@
-import { describe, it, expect } from "vitest";
-import Database from "better-sqlite3";
-import { normalizeRepoRef, qualifyRepo, qualifiedRepoSql } from "../../src/state/repo-ref.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import { sql } from "drizzle-orm";
+import type { StateDb } from "#src/state/db.js";
+import { rows as selectRows, run as execSql } from "#src/state/dialect.js";
+import { normalizeRepoRef, qualifyRepo, qualifiedRepoSql } from "#src/state/repo-ref.js";
+import { makeTestDb } from "../helpers/state-db.js";
 
 describe("normalizeRepoRef", () => {
   it("leaves the stored shape alone", () => {
@@ -77,8 +80,10 @@ describe("qualifyRepo", () => {
 });
 
 describe("qualifiedRepoSql", () => {
-  // Exercised against real SQLite rather than string-matched, because the whole
-  // point of the helper is that the SQL and the JS agree.
+  // Exercised against a real database rather than string-matched, because the
+  // whole point of the helper is that the SQL and the JS agree. The fragment is
+  // composable `SQL` now, not a string, so it is evaluated through the same
+  // raw-query seam (`dialect.ts`) the stores use.
   const rows = [
     { id: "a", owner: "nearform", repo: "lastlight" }, // the stored shape
     { id: "b", owner: null, repo: "nearform/lastlight" }, // legacy qualified
@@ -87,20 +92,32 @@ describe("qualifiedRepoSql", () => {
     { id: "e", owner: "", repo: "orphan" }, // empty-string owner
   ];
 
-  function evaluate(unqualifiable: "bare" | "null"): Record<string, string | null> {
-    const db = new Database(":memory:");
-    db.exec(`CREATE TABLE t (id TEXT, owner TEXT, repo TEXT)`);
-    const ins = db.prepare(`INSERT INTO t (id, owner, repo) VALUES (?, ?, ?)`);
-    for (const r of rows) ins.run(r.id, r.owner, r.repo);
-    const out = db
-      .prepare(`SELECT id, ${qualifiedRepoSql("owner", "repo", unqualifiable)} AS repo FROM t`)
-      .all() as { id: string; repo: string | null }[];
-    db.close();
+  let db: StateDb;
+
+  beforeEach(async () => {
+    db = await makeTestDb();
+    await execSql(db.client, sql`CREATE TABLE t (id TEXT, owner TEXT, repo TEXT)`);
+    for (const r of rows) {
+      await execSql(
+        db.client,
+        sql`INSERT INTO t (id, owner, repo) VALUES (${r.id}, ${r.owner}, ${r.repo})`,
+      );
+    }
+  });
+
+  async function evaluate(
+    unqualifiable: "bare" | "null",
+  ): Promise<Record<string, string | null>> {
+    const expr = qualifiedRepoSql(sql.identifier("owner"), sql.identifier("repo"), unqualifiable);
+    const out = await selectRows<{ id: string; repo: string | null }>(
+      db.client,
+      sql`SELECT id, ${expr} AS repo FROM t`,
+    );
     return Object.fromEntries(out.map((r) => [r.id, r.repo]));
   }
 
-  it("agrees with qualifyRepo in `bare` mode", () => {
-    const got = evaluate("bare");
+  it("agrees with qualifyRepo in `bare` mode", async () => {
+    const got = await evaluate("bare");
     for (const r of rows) {
       expect(got[r.id]).toBe(qualifyRepo(r.owner, r.repo) ?? null);
     }
@@ -113,10 +130,10 @@ describe("qualifiedRepoSql", () => {
     });
   });
 
-  it("answers NULL for an un-qualifiable row in `null` mode", () => {
+  it("answers NULL for an un-qualifiable row in `null` mode", async () => {
     // NULL is "no repo, always visible". A bare name here would match nothing
     // in a qualified allow-list and so HIDE the row — the #278 bug.
-    expect(evaluate("null")).toEqual({
+    expect(await evaluate("null")).toEqual({
       a: "nearform/lastlight",
       b: "nearform/lastlight",
       c: null,

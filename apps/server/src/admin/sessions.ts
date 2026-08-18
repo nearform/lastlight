@@ -80,11 +80,11 @@ export type SessionReaderScope = SessionLogScope;
  * caring where the data lives.
  */
 export interface SessionSource {
-  listSessionIds(): string[];
-  exists(sessionId: string): boolean;
+  listSessionIds(): Promise<string[]>;
+  exists(sessionId: string): Promise<boolean>;
   getSessionMeta(sessionId: string): Promise<SessionMeta | null>;
   read(sessionId: string): Promise<Array<{ index: number; msg: JsonlMessage }>>;
-  getFilePath(sessionId: string): string | null;
+  getFilePath(sessionId: string): Promise<string | null>;
   normalizeRawLine(raw: Record<string, unknown>): JsonlMessage[];
 }
 
@@ -97,7 +97,7 @@ export interface SessionSource {
  * DB out of this module's type surface and makes the repo behaviour testable
  * with a closure instead of a migrated database.
  */
-export type RepoForSession = (sessionId: string) => string | null;
+export type RepoForSession = (sessionId: string) => Promise<string | null>;
 
 export class SessionReader implements SessionSource {
   private sessionLog: SessionLog;
@@ -120,7 +120,9 @@ export class SessionReader implements SessionSource {
     this.repoForSession = repoForSession;
   }
 
-  exists(sessionId: string): boolean {
+  // `async` on a synchronous body: this reader is filesystem-backed, but its
+  // DB-backed sibling is not, and both satisfy one SessionSource.
+  async exists(sessionId: string): Promise<boolean> {
     return this.sessionLog.findSession(this.scope, sessionId) !== null;
   }
 
@@ -140,7 +142,7 @@ export class SessionReader implements SessionSource {
    *  freshest sessions inside the window; the handler then refines ordering
    *  by parsed `started_at`. Mirrors the DB-backed chat reader, which
    *  already returns threads newest-first. */
-  listSessionIds(): string[] {
+  async listSessionIds(): Promise<string[]> {
     return this.sessionLog.listSessions(this.scope).map((e) => e.id);
   }
 
@@ -265,7 +267,7 @@ export class SessionReader implements SessionSource {
       last_assistant_content: lastAssistantContent,
       agentIds,
       // Best-effort: a session whose repo we can't resolve stays visible.
-      repo: this.repoForSession?.(sessionId) ?? null,
+      repo: (await this.repoForSession?.(sessionId)) ?? null,
     };
   }
 
@@ -282,7 +284,7 @@ export class SessionReader implements SessionSource {
   }
 
   /** Get the file path for a session (needed by the tailer) */
-  getFilePath(sessionId: string): string | null {
+  async getFilePath(sessionId: string): Promise<string | null> {
     return this.sessionLog.findSession(this.scope, sessionId)?.filePath ?? null;
   }
 

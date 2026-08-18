@@ -77,7 +77,6 @@
     "@slack/web-api": "^8.0.0",
     "agentic-pi": "workspace:*",
     "arctic": "^3.7.0",
-    "better-sqlite3": "^13.0.3",
     "croner": "^10.0.1",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.13.2",
@@ -92,7 +91,6 @@
   "devDependencies": {
     "@opentelemetry/context-async-hooks": "^2.10.0",
     "@opentelemetry/sdk-trace-base": "^2.10.0",
-    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^26.1.1",
     "concurrently": "^10.0.4",
     "dependency-cruiser": "^18.1.0",

@@ -1,5 +1,8 @@
-import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
+import { asc, eq, sql } from "drizzle-orm";
+import { nullsToUndefined, type StateClient } from "./client.js";
+import { isUniqueViolation } from "./dialect.js";
+import { users } from "./schema/sqlite.js";
 
 /**
  * Who acted on / triggered a workflow, coarsely. Persisted in the
@@ -50,17 +53,23 @@ export interface User {
   lastLoginAt?: string;
 }
 
+/** The row shape the builder returns for this table, before normalization. */
+type UserRow = typeof users.$inferSelect;
+
 /**
  * Owns every read/write against the `users` table. Mirrors the other per-table
  * stores ({@link ExecutionStore} / {@link ApprovalStore}): constructed from the
- * single shared `Database`, all reads flow through one `deserialize` helper.
+ * single shared client, all reads flow through one `deserialize` helper.
  *
  * Upserts key on the stable ids (`github_id` for GitHub logins, `slack_user_id`
  * for Slack) — never on `email`, which is non-unique. The GitHub `login` stays
  * the soft join key used everywhere else in the schema.
+ *
+ * Pure single-table CRUD: it opens no transaction and takes no `dbc`, so every
+ * method runs against the root client.
  */
 export class UserStore {
-  constructor(private db: Database.Database) {}
+  constructor(private client: StateClient) {}
 
   /**
    * Upsert a GitHub-authenticated user on their stable numeric id. On conflict,
@@ -70,54 +79,58 @@ export class UserStore {
    *
    * `email` is captured here as the future outbound-email hook (issue #205);
    * no sender exists yet.
+   *
+   * Lookup-then-insert is no longer atomic-by-physics, so a losing racer's
+   * insert trips the `github_id` UNIQUE: catch it, re-read, and hand back the
+   * winner. Only a same-`github_id` winner counts — a violation on `login`
+   * (some other identity already owns that handle) is a genuine conflict and
+   * still throws, exactly as it did before.
    */
-  getOrCreateUserByGithub(input: {
+  async getOrCreateUserByGithub(input: {
     githubId: number;
     login: string;
     name?: string | null;
     email?: string | null;
     avatarUrl?: string | null;
-  }): User {
+  }): Promise<User> {
     const now = new Date().toISOString();
-    const existing = this.findByGithubId(input.githubId);
+    const existing = await this.findByGithubId(input.githubId);
     if (existing) {
-      this.db
-        .prepare(
-          `UPDATE users
-             SET login = ?, name = ?, email = ?, avatar_url = ?,
-                 updated_at = ?, last_login_at = ?
-           WHERE github_id = ?`,
-        )
-        .run(
-          input.login,
-          input.name ?? existing.name ?? null,
-          input.email ?? existing.email ?? null,
-          input.avatarUrl ?? existing.avatarUrl ?? null,
-          now,
-          now,
-          input.githubId,
-        );
-      return this.findByGithubId(input.githubId)!;
+      await this.client
+        .update(users)
+        .set({
+          login: input.login,
+          name: input.name ?? existing.name ?? null,
+          email: input.email ?? existing.email ?? null,
+          avatarUrl: input.avatarUrl ?? existing.avatarUrl ?? null,
+          updatedAt: now,
+          lastLoginAt: now,
+        })
+        .where(eq(users.githubId, input.githubId));
+      return (await this.findByGithubId(input.githubId))!;
     }
     const id = randomUUID();
-    this.db
-      .prepare(
-        `INSERT INTO users
-           (id, github_id, login, name, email, avatar_url, created_at, updated_at, last_login_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
+    try {
+      // `is_blocked` / `email_is_placeholder` are deliberately absent — the DDL
+      // defaults are their only writer.
+      await this.client.insert(users).values({
         id,
-        input.githubId,
-        input.login,
-        input.name ?? null,
-        input.email ?? null,
-        input.avatarUrl ?? null,
-        now,
-        now,
-        now,
-      );
-    return this.getById(id)!;
+        githubId: input.githubId,
+        login: input.login,
+        name: input.name ?? null,
+        email: input.email ?? null,
+        avatarUrl: input.avatarUrl ?? null,
+        createdAt: now,
+        updatedAt: now,
+        lastLoginAt: now,
+      });
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      const winner = await this.findByGithubId(input.githubId);
+      if (winner) return winner;
+      throw err;
+    }
+    return (await this.getById(id))!;
   }
 
   /**
@@ -126,77 +139,100 @@ export class UserStore {
    * and links `slack_user_id` onto it; otherwise creates a Slack-only row
    * (no `login`, no `github_id`). Returns the stored row so the caller can
    * carry its `login` (if any) into the session token.
+   *
+   * As in {@link getOrCreateUserByGithub}, the final insert is guarded: a
+   * concurrent Slack login trips the `slack_user_id` UNIQUE and we return the
+   * row that won instead.
    */
-  upsertSlackUser(input: {
+  async upsertSlackUser(input: {
     slackUserId: string;
     name?: string | null;
     email?: string | null;
-  }): User {
+  }): Promise<User> {
     const now = new Date().toISOString();
-    // Fast path: already linked.
-    const linked = this.findBySlackUserId(input.slackUserId);
+    // Fast path: already linked. Incoming values win when present, which is
+    // what the old `COALESCE(?, name)` spelled.
+    const linked = await this.findBySlackUserId(input.slackUserId);
     if (linked) {
-      this.db
-        .prepare(
-          `UPDATE users
-             SET name = COALESCE(?, name), email = COALESCE(?, email),
-                 updated_at = ?, last_login_at = ?
-           WHERE slack_user_id = ?`,
-        )
-        .run(input.name ?? null, input.email ?? null, now, now, input.slackUserId);
-      return this.findBySlackUserId(input.slackUserId)!;
+      await this.client
+        .update(users)
+        .set({
+          name: input.name ?? linked.name ?? null,
+          email: input.email ?? linked.email ?? null,
+          updatedAt: now,
+          lastLoginAt: now,
+        })
+        .where(eq(users.slackUserId, input.slackUserId));
+      return (await this.findBySlackUserId(input.slackUserId))!;
     }
     // Match an existing (GitHub) row by email and link Slack onto it.
-    const byEmail = input.email ? this.findByEmail(input.email) : null;
+    const byEmail = input.email ? await this.findByEmail(input.email) : null;
     if (byEmail) {
-      this.linkSlackUser(byEmail.id, input.slackUserId);
-      this.db
-        .prepare(
-          `UPDATE users SET name = COALESCE(name, ?), updated_at = ?, last_login_at = ? WHERE id = ?`,
-        )
-        .run(input.name ?? null, now, now, byEmail.id);
-      return this.getById(byEmail.id)!;
+      await this.linkSlackUser(byEmail.id, input.slackUserId);
+      await this.client
+        .update(users)
+        .set({
+          // NOTE the argument order: `COALESCE(name, ?)`, not `COALESCE(?, name)`.
+          // Unlike the fast path above, here the EXISTING name wins and the Slack
+          // display name only fills a hole — a GitHub identity must not be renamed
+          // by whatever the person happens to call themselves in Slack. Kept as an
+          // explicit `sql` expression because expressing it as a conditional
+          // `set` key is exactly how the meaning gets inverted.
+          name: sql`COALESCE(${users.name}, ${input.name ?? null})`,
+          updatedAt: now,
+          lastLoginAt: now,
+        })
+        .where(eq(users.id, byEmail.id));
+      return (await this.getById(byEmail.id))!;
     }
     // No match — create a Slack-only row.
     const id = randomUUID();
-    this.db
-      .prepare(
-        `INSERT INTO users
-           (id, slack_user_id, name, email, created_at, updated_at, last_login_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(id, input.slackUserId, input.name ?? null, input.email ?? null, now, now, now);
-    return this.getById(id)!;
+    try {
+      await this.client.insert(users).values({
+        id,
+        slackUserId: input.slackUserId,
+        name: input.name ?? null,
+        email: input.email ?? null,
+        createdAt: now,
+        updatedAt: now,
+        lastLoginAt: now,
+      });
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      const winner = await this.findBySlackUserId(input.slackUserId);
+      if (winner) return winner;
+      throw err;
+    }
+    return (await this.getById(id))!;
   }
 
   /** Link a Slack user id onto an existing row (e.g. a GitHub login matched by email). */
-  linkSlackUser(userId: string, slackUserId: string): void {
+  async linkSlackUser(userId: string, slackUserId: string): Promise<void> {
     const now = new Date().toISOString();
-    this.db
-      .prepare(`UPDATE users SET slack_user_id = ?, updated_at = ? WHERE id = ?`)
-      .run(slackUserId, now, userId);
+    await this.client
+      .update(users)
+      .set({ slackUserId, updatedAt: now })
+      .where(eq(users.id, userId));
   }
 
-  getById(id: string): User | null {
-    const row = this.db.prepare(`SELECT * FROM users WHERE id = ?`).get(id) as
-      | Record<string, unknown>
-      | undefined;
-    return row ? this.deserialize(row) : null;
+  async getById(id: string): Promise<User | null> {
+    const [row] = await this.client.select().from(users).where(eq(users.id, id)).limit(1);
+    return row ? deserialize(row) : null;
   }
 
-  findByGithubId(githubId: number): User | null {
-    const row = this.db.prepare(`SELECT * FROM users WHERE github_id = ?`).get(githubId) as
-      | Record<string, unknown>
-      | undefined;
-    return row ? this.deserialize(row) : null;
+  async findByGithubId(githubId: number): Promise<User | null> {
+    const [row] = await this.client
+      .select()
+      .from(users)
+      .where(eq(users.githubId, githubId))
+      .limit(1);
+    return row ? deserialize(row) : null;
   }
 
   /** Look up by the GitHub login — the soft join key used across the schema. */
-  findByLogin(login: string): User | null {
-    const row = this.db.prepare(`SELECT * FROM users WHERE login = ?`).get(login) as
-      | Record<string, unknown>
-      | undefined;
-    return row ? this.deserialize(row) : null;
+  async findByLogin(login: string): Promise<User | null> {
+    const [row] = await this.client.select().from(users).where(eq(users.login, login)).limit(1);
+    return row ? deserialize(row) : null;
   }
 
   /**
@@ -204,34 +240,46 @@ export class UserStore {
    * this returns the earliest-created match deterministically. Used to link a
    * Slack login to an existing GitHub identity by email.
    */
-  findByEmail(email: string): User | null {
-    const row = this.db
-      .prepare(`SELECT * FROM users WHERE email = ? ORDER BY created_at ASC LIMIT 1`)
-      .get(email) as Record<string, unknown> | undefined;
-    return row ? this.deserialize(row) : null;
+  async findByEmail(email: string): Promise<User | null> {
+    const [row] = await this.client
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .orderBy(asc(users.createdAt))
+      .limit(1);
+    return row ? deserialize(row) : null;
   }
 
-  findBySlackUserId(slackUserId: string): User | null {
-    const row = this.db
-      .prepare(`SELECT * FROM users WHERE slack_user_id = ?`)
-      .get(slackUserId) as Record<string, unknown> | undefined;
-    return row ? this.deserialize(row) : null;
+  async findBySlackUserId(slackUserId: string): Promise<User | null> {
+    const [row] = await this.client
+      .select()
+      .from(users)
+      .where(eq(users.slackUserId, slackUserId))
+      .limit(1);
+    return row ? deserialize(row) : null;
   }
+}
 
-  private deserialize(row: Record<string, unknown>): User {
-    return {
-      id: row.id as string,
-      githubId: (row.github_id as number | null) ?? undefined,
-      login: (row.login as string | null) ?? undefined,
-      name: (row.name as string | null) ?? undefined,
-      email: (row.email as string | null) ?? undefined,
-      avatarUrl: (row.avatar_url as string | null) ?? undefined,
-      slackUserId: (row.slack_user_id as string | null) ?? undefined,
-      isBlocked: (row.is_blocked as number) === 1,
-      emailIsPlaceholder: (row.email_is_placeholder as number) === 1,
-      createdAt: row.created_at as string,
-      updatedAt: row.updated_at as string,
-      lastLoginAt: (row.last_login_at as string | null) ?? undefined,
-    };
-  }
+/**
+ * Builder rows are already camelCase, and `is_blocked` / `email_is_placeholder`
+ * are `{ mode: "boolean" }` columns, so they arrive as real booleans — there is
+ * nothing left to convert. The remaining job is turning the nullable columns
+ * into absent optionals.
+ */
+function deserialize(row: UserRow): User {
+  const r = nullsToUndefined(row);
+  return {
+    id: r.id,
+    githubId: r.githubId ?? undefined,
+    login: r.login ?? undefined,
+    name: r.name ?? undefined,
+    email: r.email ?? undefined,
+    avatarUrl: r.avatarUrl ?? undefined,
+    slackUserId: r.slackUserId ?? undefined,
+    isBlocked: r.isBlocked,
+    emailIsPlaceholder: r.emailIsPlaceholder,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+    lastLoginAt: r.lastLoginAt ?? undefined,
+  };
 }

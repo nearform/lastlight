@@ -182,7 +182,7 @@ export async function escalatePr(
   const runId = randomUUID();
   const recorded: PrState = { ...state, escalatedAtSha: state.headSha };
   try {
-    deps.db.runs.createRun({
+    await deps.db.runs.createRun({
       id: runId,
       workflowName,
       triggerId: prTriggerId(state.repo, state.prNumber),
@@ -203,7 +203,7 @@ export async function escalatePr(
       startedAt: new Date().toISOString(),
     });
     // `succeeded`, not `failed`: 09 → S1 reserves `failed` for malfunction.
-    deps.db.runs.finishRun(runId, "succeeded", {
+    await deps.db.runs.finishRun(runId, "succeeded", {
       terminalMarker: { phase: ESCALATION_PHASE, summary: decision.reason },
     });
   } catch (err: unknown) {
@@ -319,7 +319,7 @@ export async function noticeForkPr(
   const runId = randomUUID();
   const recorded: PrState = { ...state, forkNoticedAtSha: state.headSha };
   try {
-    deps.db.runs.createRun({
+    await deps.db.runs.createRun({
       id: runId,
       workflowName,
       triggerId: prTriggerId(state.repo, state.prNumber),
@@ -333,7 +333,7 @@ export async function noticeForkPr(
       context: { prState: recorded },
       startedAt: new Date().toISOString(),
     });
-    deps.db.runs.finishRun(runId, "succeeded", {
+    await deps.db.runs.finishRun(runId, "succeeded", {
       terminalMarker: { phase: FORK_NOTICE_PHASE, summary: "fork-pr: told the author once" },
     });
   } catch (err: unknown) {
@@ -563,13 +563,13 @@ export async function recordIntervention(
   // dispatches) resolves the SAME record rather than a new one — and this is
   // what stops a second row being written for it.
   const triggerId = prTriggerId(state.repo, state.prNumber);
-  const prior = deps.db.runs.latestForTrigger([...prScopedWorkflows()], triggerId);
+  const prior = await deps.db.runs.latestForTrigger([...prScopedWorkflows()], triggerId);
   const seen = priorIntervention(prior?.context);
   if (seen && interventionKey(seen) === interventionKey(intervention)) return null;
 
   const runId = randomUUID();
   try {
-    deps.db.runs.createRun({
+    await deps.db.runs.createRun({
       id: runId,
       workflowName,
       triggerId,
@@ -586,7 +586,7 @@ export async function recordIntervention(
       context: { prState: state, intervention },
       startedAt: new Date().toISOString(),
     });
-    deps.db.runs.finishRun(runId, "succeeded", {
+    await deps.db.runs.finishRun(runId, "succeeded", {
       terminalMarker: {
         phase: INTERVENTION_PHASE,
         summary: `retry requested via ${intervention.via}${intervention.by ? ` by ${intervention.by}` : ""}`,

@@ -37,20 +37,20 @@ function clamp(text: string): string {
  * swallow-and-log / promise chain), so this is a rule they each keep rather
  * than a wrapper they share.
  */
-export function recordThreadMessage(
+export async function recordThreadMessage(
   sessionManager: SessionManager,
   sessionId: string,
   role: "user" | "assistant",
   text: string,
-): void {
+): Promise<void> {
   const body = text?.trim();
   if (!body) return;
   try {
-    sessionManager.addMessage(sessionId, role, clamp(body));
+    await sessionManager.addMessage(sessionId, role, clamp(body));
     // The activity clock is what keeps the thread's session out of
     // `SESSION_TIMEOUT_MS` staleness. Without it a thread carried entirely by
     // workflow turns silently re-keys to a fresh session mid-conversation.
-    sessionManager.touchSession(sessionId);
+    await sessionManager.touchSession(sessionId);
   } catch (err) {
     log.warn("Failed to record thread message", { role, err });
   }
@@ -61,20 +61,20 @@ export function recordThreadMessage(
  * runner's `postComment`, which knows the channel + thread it is posting into
  * but never sees the messaging session.
  */
-export function recordThreadMessageForThread(
+export async function recordThreadMessageForThread(
   sessionManager: SessionManager,
   platform: string,
   channelId: string,
   threadId: string,
   role: "user" | "assistant",
   text: string,
-): void {
+): Promise<void> {
   let session;
   try {
     // `includeStale`: the run that produced this message may well have outlived
     // the session's inactivity window. Recording touches the session, which
     // revives it — so the thread continues rather than re-keying.
-    session = sessionManager.findActiveThreadSession(platform, channelId, threadId, {
+    session = await sessionManager.findActiveThreadSession(platform, channelId, threadId, {
       includeStale: true,
     });
   } catch (err) {
@@ -82,7 +82,7 @@ export function recordThreadMessageForThread(
     return;
   }
   if (!session) return;
-  recordThreadMessage(sessionManager, session.id, role, text);
+  await recordThreadMessage(sessionManager, session.id, role, text);
 }
 
 /**
@@ -116,7 +116,15 @@ export function withThreadTranscript(
   const sessionId = typeof raw?.sessionId === "string" ? raw.sessionId : undefined;
   if (!sessionId) return envelope;
 
-  recordThreadMessage(sessionManager, sessionId, "user", envelope.body);
+  // This wrapper is called INLINE at the dispatch site and must keep returning
+  // an envelope synchronously, so the inbound record cannot be awaited here.
+  // `recordThreadMessage` already swallows its own failures; the `.catch` is
+  // the belt-and-braces that keeps a rejected promise from escaping unlogged.
+  void recordThreadMessage(sessionManager, sessionId, "user", envelope.body).catch(
+    (err: unknown) => {
+      log.warn("Failed to record thread message", { role: "user", err });
+    },
+  );
 
   const reply = envelope.reply;
   return {
@@ -125,7 +133,7 @@ export function withThreadTranscript(
       // Send FIRST: the user-visible message is the point, the transcript is a
       // side effect. A throw here propagates as it always did.
       await reply(msg);
-      recordThreadMessage(sessionManager, sessionId, "assistant", msg);
+      await recordThreadMessage(sessionManager, sessionId, "assistant", msg);
     },
   };
 }

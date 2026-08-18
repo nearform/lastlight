@@ -35,7 +35,7 @@ describe("SessionReader.listSessionIds ordering", () => {
     fs.utimesSync(file, t, t);
   }
 
-  it("returns ids newest-first by mtime across project dirs", () => {
+  it("returns ids newest-first by mtime across project dirs", async () => {
     // An old session in the big generic dir, and a newer one in a
     // repo-suffixed dir — the exact shape that used to hide today's runs.
     writeSession("-home-agent-workspace", "old-session", 1_000_000);
@@ -43,10 +43,10 @@ describe("SessionReader.listSessionIds ordering", () => {
     writeSession("-home-agent-workspace", "mid-session", 5_000_000);
 
     const reader = new SessionReader(home, "sandbox");
-    expect(reader.listSessionIds()).toEqual(["new-session", "mid-session", "old-session"]);
+    expect(await reader.listSessionIds()).toEqual(["new-session", "mid-session", "old-session"]);
   });
 
-  it("keeps the newest session inside a limit*2 window (handler slice semantics)", () => {
+  it("keeps the newest session inside a limit*2 window (handler slice semantics)", async () => {
     // 60 old sessions in the generic dir + 1 fresh session in a repo dir.
     for (let i = 0; i < 60; i++) {
       writeSession("-home-agent-workspace", `old-${String(i).padStart(3, "0")}`, 1_000_000 + i);
@@ -55,7 +55,7 @@ describe("SessionReader.listSessionIds ordering", () => {
 
     const reader = new SessionReader(home, "sandbox");
     const limit = 25; // window = 50, smaller than the 61-session backlog
-    const windowed = reader.listSessionIds().slice(0, limit * 2);
+    const windowed = (await reader.listSessionIds()).slice(0, limit * 2);
     expect(windowed).toContain("todays-run");
     expect(windowed[0]).toBe("todays-run");
   });
@@ -77,12 +77,12 @@ describe("SessionReader.listSessionIds ordering", () => {
     expect(meta!.message_count).toBe(0);
   });
 
-  it("excludes the -app (chat) project dir under the sandbox scope", () => {
+  it("excludes the -app (chat) project dir under the sandbox scope", async () => {
     writeSession("-app", "chat-session", 9_000_000);
     writeSession("-home-agent-workspace", "sandbox-session", 1_000_000);
 
     const reader = new SessionReader(home, "sandbox");
-    const ids = reader.listSessionIds();
+    const ids = await reader.listSessionIds();
     expect(ids).toContain("sandbox-session");
     expect(ids).not.toContain("chat-session");
   });

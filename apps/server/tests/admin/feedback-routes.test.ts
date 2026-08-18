@@ -28,6 +28,7 @@ import {
   resetRuntimeConfigForTests,
   type LastLightConfig,
 } from "#src/config/config.js";
+import { makeTestDb } from "../helpers/state-db.js";
 
 let db: StateDb;
 let app: ReturnType<typeof createAdminRoutes>;
@@ -46,8 +47,8 @@ async function get(path: string): Promise<{ status: number; body: any }> {
   return { status: res.status, body: await res.json().catch(() => null) };
 }
 
-function seed(over: { workflowName?: string; runId?: string; emoji?: string; score?: number } = {}) {
-  const anchor = db.feedback.upsertAnchor({
+async function seed(over: { workflowName?: string; runId?: string; emoji?: string; score?: number } = {}) {
+  const anchor = await db.feedback.upsertAnchor({
     source: "github",
     kind: "issue_comment",
     externalId: `c-${Math.random()}`,
@@ -69,20 +70,19 @@ function seed(over: { workflowName?: string; runId?: string; emoji?: string; sco
   });
 }
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
+beforeEach(async () => {
+  db = await makeTestDb();
   setRuntimeConfig({ botName: "last-light" } as LastLightConfig);
   app = createAdminRoutes(db, {} as unknown as SessionReader, undefined as never, makeConfig());
 });
 afterEach(() => {
-  db.close();
   resetRuntimeConfigForTests();
 });
 
 describe("GET /feedback/signals", () => {
   it("returns the live feed with a total", async () => {
-    seed();
-    seed({ emoji: "-1", score: -1 });
+    await seed();
+    await seed({ emoji: "-1", score: -1 });
     const { status, body } = await get("/feedback/signals");
     expect(status).toBe(200);
     expect(body.total).toBe(2);
@@ -90,8 +90,8 @@ describe("GET /feedback/signals", () => {
   });
 
   it("filters by workflow and source", async () => {
-    seed({ workflowName: "pr-review" });
-    seed({ workflowName: "issue-triage" });
+    await seed({ workflowName: "pr-review" });
+    await seed({ workflowName: "issue-triage" });
     expect((await get("/feedback/signals?workflow=pr-review")).body.total).toBe(1);
     expect((await get("/feedback/signals?source=github")).body.total).toBe(2);
     expect((await get("/feedback/signals?source=slack")).body.total).toBe(0);
@@ -100,7 +100,7 @@ describe("GET /feedback/signals", () => {
   });
 
   it("clamps limit and offset, falling back to the default on a junk value", async () => {
-    for (let i = 0; i < 3; i++) seed();
+    for (let i = 0; i < 3; i++) await seed();
     expect((await get("/feedback/signals?limit=1")).body.signals).toHaveLength(1);
     expect((await get("/feedback/signals?limit=99999")).body.signals).toHaveLength(3);
     // `parseInt(x) || default` — the house idiom (see /stats/daily): 0 and
@@ -113,8 +113,8 @@ describe("GET /feedback/signals", () => {
   });
 
   it("hides retracted signals unless asked", async () => {
-    const signal = seed()!;
-    db.feedback.removeSignal(signal.anchorId, signal.reactor, signal.emoji);
+    const signal = (await seed())!;
+    await db.feedback.removeSignal(signal.anchorId, signal.reactor, signal.emoji);
     expect((await get("/feedback/signals")).body.total).toBe(0);
     expect((await get("/feedback/signals?includeRemoved=1")).body.total).toBe(1);
   });
@@ -122,9 +122,9 @@ describe("GET /feedback/signals", () => {
 
 describe("GET /feedback/summary", () => {
   it("groups by workflow and echoes the window", async () => {
-    seed({ workflowName: "pr-review" });
-    seed({ workflowName: "pr-review", emoji: "-1", score: -1 });
-    seed({ workflowName: "issue-triage" });
+    await seed({ workflowName: "pr-review" });
+    await seed({ workflowName: "pr-review", emoji: "-1", score: -1 });
+    await seed({ workflowName: "issue-triage" });
 
     const { body } = await get("/feedback/summary?days=7");
     expect(body.days).toBe(7);
@@ -142,14 +142,14 @@ describe("GET /feedback/summary", () => {
 
 describe("GET /feedback/daily", () => {
   it("returns a zero-filled series of the requested length", async () => {
-    seed();
+    await seed();
     const { body } = await get("/feedback/daily?days=5");
     expect(body.daily).toHaveLength(5);
     expect(body.daily.at(-1)).toMatchObject({ total: 1, positive: 1 });
   });
 
   it("filters by workflow", async () => {
-    seed({ workflowName: "pr-review" });
+    await seed({ workflowName: "pr-review" });
     const { body } = await get("/feedback/daily?days=2&workflow=issue-triage");
     expect(body.daily.every((d: any) => d.total === 0)).toBe(true);
   });
@@ -157,7 +157,7 @@ describe("GET /feedback/daily", () => {
 
 describe("GET /workflow-runs/:id/feedback", () => {
   it("returns everything said about one run", async () => {
-    db.runs.createRun({
+    await db.runs.createRun({
       id: "run-42",
       workflowName: "pr-review",
       triggerId: "nearform/lastlight#255",
@@ -165,7 +165,7 @@ describe("GET /workflow-runs/:id/feedback", () => {
       status: "succeeded",
       startedAt: new Date().toISOString(),
     });
-    seed({ runId: "run-42" });
+    await seed({ runId: "run-42" });
 
     const { status, body } = await get("/workflow-runs/run-42/feedback");
     expect(status).toBe(200);

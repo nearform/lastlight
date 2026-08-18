@@ -157,9 +157,9 @@ export class TeamVisibilityResolver {
     if (!config.enabled) return FAIL_OPEN("disabled");
     if (!this.github) return FAIL_OPEN("unavailable");
 
-    const sync = this.store.getSync(login);
+    const sync = await this.store.getSync(login);
     if (sync) {
-      const fresh = this.store.isFresh(login, config.ttlMinutes * 60_000);
+      const fresh = await this.store.isFresh(login, config.ttlMinutes * 60_000);
       if (!fresh) {
         // Stale-while-revalidate: hand back what we have, refresh behind the
         // request. Errors are swallowed — the cached answer already stands.
@@ -175,7 +175,7 @@ export class TeamVisibilityResolver {
     const config = this.readConfig();
     if (!config.enabled) return FAIL_OPEN("disabled");
     if (!this.github) return FAIL_OPEN("unavailable");
-    this.store.invalidateLogin(login);
+    await this.store.invalidateLogin(login);
     return this.resolve(login, config);
   }
 
@@ -205,11 +205,11 @@ export class TeamVisibilityResolver {
   }
 
   /** Project a stored status + the cached rows into a result. */
-  private fromCache(
+  private async fromCache(
     login: string,
     status: VisibilitySyncStatus,
     syncedAt: string | null,
-  ): VisibilityResult {
+  ): Promise<VisibilityResult> {
     // An INCOMPLETE team answer stays fail-open, and is deliberately NOT
     // rescued by the owned repos below. "Your own repos, plus an unknown
     // fraction of your teams'" is still a partial answer, and filtering to it
@@ -221,7 +221,7 @@ export class TeamVisibilityResolver {
         status === "truncated" ? "truncated" : status === "disabled" ? "disabled" : "error";
       return FAIL_OPEN(reason, syncedAt);
     }
-    const cached = this.store.reposForLogin(login);
+    const cached = await this.store.reposForLogin(login);
     // A team that has since been marked truncated, or rows that vanished under
     // us, must not narrow the view.
     if (cached.truncated) return FAIL_OPEN("truncated", syncedAt);
@@ -355,7 +355,7 @@ export class TeamVisibilityResolver {
             ? "ok"
             : "empty";
 
-    this.store.recordResolution({
+    await this.store.recordResolution({
       login,
       // A truncated/errored pass persists nothing to join against — its rows
       // would be a partial answer, and the status already forces fail-open.
@@ -381,7 +381,7 @@ export class TeamVisibilityResolver {
     if (overBudget) return FAIL_OPEN("budget");
     if (truncated) return FAIL_OPEN("truncated");
     if (status === "error") return FAIL_OPEN("error");
-    return this.fromCache(login, status, this.store.getSync(login)?.syncedAt ?? null);
+    return this.fromCache(login, status, (await this.store.getSync(login))?.syncedAt ?? null);
   }
 }
 

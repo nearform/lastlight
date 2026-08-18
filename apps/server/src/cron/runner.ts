@@ -116,7 +116,7 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
     const source = rawSource === "manual" ? "manual" : "schedule";
     const actor = typeof rawActor === "string" ? rawActor : null;
 
-    const id = db.cronRuns.start({ cronName, workflow: workflowName, source, actor });
+    const id = await db.cronRuns.start({ cronName, workflow: workflowName, source, actor });
 
     let counts: FireCounts = {
       reposEligible: null,
@@ -167,7 +167,7 @@ export function makeCronRunner(deps: CronRunnerDeps): WorkflowRunner {
       // In a `finally` so a crash mid-fire leaves a terminal row rather than a
       // stranded `running` one — silence is the thing this ledger exists to
       // remove.
-      db.cronRuns.finish(id, { status: outcome.status, ...counts, error: outcome.error });
+      await db.cronRuns.finish(id, { status: outcome.status, ...counts, error: outcome.error });
       recordCronFire({ "cron.name": cronName, "cron.status": outcome.status });
 
       const fields = {

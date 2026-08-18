@@ -80,7 +80,10 @@ describe("prScopedWorkflows", () => {
 
   const said = () =>
     warnSpy.mock.calls
-      .map(([msg, fields]: [string, unknown]) => `${msg} ${fields ? JSON.stringify(fields) : ""}`)
+      .map((call) => {
+        const [msg, fields] = call as [string, unknown];
+        return `${msg} ${fields ? JSON.stringify(fields) : ""}`;
+      })
       .join(" ");
 
   it("is derived from each workflow's own `pr_scoped` metadata", () => {

@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentWorkflowDefinition } from "#src/workflows/schema.js";
 import type { TemplateContext } from "#src/workflows/templates.js";
 import type { RunnerCallbacks, ApprovalGateConfig } from "#src/workflows/runner.js";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import type { ProgressReporter, ProgressModel, ProgressStep, StepStatus } from "#src/notify/types.js";
 
 // Mock the executor so we don't make real agent calls. `executeCommand` backs
@@ -331,9 +332,9 @@ describe("runWorkflow — backpressure", () => {
     // then no-oped and the run stayed terminally `failed`. A quota rejection must
     // leave the row `running` so the backpressure requeue can win. Uses a REAL
     // store (not makeMockDb) so the finishRun/requeue ordering is observable.
-    const db = new StateDb(":memory:");
-    try {
-      db.runs.createRun({
+    const db = await makeTestDb();
+    {
+      await db.runs.createRun({
         id: "run-quota",
         workflowName: "simple",
         triggerId: "acme/widget#42",
@@ -362,9 +363,7 @@ describe("runWorkflow — backpressure", () => {
       );
 
       expect(result.backpressure).toBe(true);
-      expect(db.runs.getRun("run-quota")?.status).toBe("running");
-    } finally {
-      db.close();
+      expect((await db.runs.getRun("run-quota"))?.status).toBe("running");
     }
   });
 });
@@ -801,7 +800,7 @@ describe("runWorkflow — approval gate", () => {
     // Ledger-driven resume: architect's execution row is success=1 ("done"),
     // so runPhase skips it and the gate isn't re-hit — executor + pr run.
     const db = makeMockDb("architect");
-    vi.mocked(db.executions.shouldRunPhase).mockImplementation((skill: string) =>
+    vi.mocked(db.executions.shouldRunPhase).mockImplementation(async (skill: string) =>
       skill === "gated:architect" ? "done" : "run",
     );
     const approvalConfig: ApprovalGateConfig = { post_architect: true };
@@ -1399,7 +1398,7 @@ describe("runWorkflow — definition-driven resume + YAML messages", () => {
     // completed phases via shouldRunPhase.
     const db = makeMockDb("plan");
     const done = new Set(["custom:discover", "custom:plan"]);
-    vi.mocked(db.executions.shouldRunPhase).mockImplementation((skill: string) =>
+    vi.mocked(db.executions.shouldRunPhase).mockImplementation(async (skill: string) =>
       done.has(skill) ? "done" : "run",
     );
     mockExecuteAgent

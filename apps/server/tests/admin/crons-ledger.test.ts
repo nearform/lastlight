@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { StateDb } from "#src/state/db.js";
-import type { SessionReader } from "#src/admin/session-reader.js";
+import type { SessionReader } from "#src/admin/sessions.js";
 import type { AdminConfig } from "#src/admin/routes.js";
+import { makeTestDb } from "../helpers/state-db.js";
 
 /**
  * `GET /crons` answers from ONE ledger (issues #341/#327).
@@ -41,7 +42,6 @@ vi.mock("#src/admin/docker.js", () => ({
 vi.mock("#src/sandbox/k8s/client.js", () => ({ makeK8sApis: vi.fn(() => ({}) as unknown) }));
 
 const { createAdminRoutes } = await import("#src/admin/routes.js");
-const { StateDb } = await import("#src/state/db.js");
 
 interface CronRow {
   name: string;
@@ -56,18 +56,14 @@ interface CronRow {
   dispatched: number | null;
 }
 
-let db: InstanceType<typeof StateDb>;
+let db: StateDb;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
-});
-
-afterEach(() => {
-  db.close();
+beforeEach(async () => {
+  db = await makeTestDb();
 });
 
 function makeApp() {
-  return createAdminRoutes(db as unknown as StateDb, {} as unknown as SessionReader, {} as unknown as SessionReader, {
+  return createAdminRoutes(db, {} as unknown as SessionReader, {} as unknown as SessionReader, {
     stateDir: "/tmp",
     sessionsDir: "/tmp/sessions",
     adminPassword: "",
@@ -85,13 +81,13 @@ async function listCrons(): Promise<CronRow[]> {
 
 describe("GET /crons — derived from the cron_runs ledger", () => {
   it("surfaces a workflow cron's fire, counts included", async () => {
-    const id = db.cronRuns.start({
+    const id = await db.cronRuns.start({
       cronName: "merge-green-dependency-prs",
       workflow: "dependabot-pr-merge",
       source: "schedule",
       actor: null,
     });
-    db.cronRuns.finish(id, {
+    await db.cronRuns.finish(id, {
       status: "ok",
       reposEligible: 19,
       reposScanned: 14,
@@ -113,13 +109,13 @@ describe("GET /crons — derived from the cron_runs ledger", () => {
   });
 
   it("still surfaces a HANDLER cron's tick — the #333 regression guard", async () => {
-    const id = db.cronRuns.start({
+    const id = await db.cronRuns.start({
       cronName: "repo-digest",
       handler: "repo-digest",
       source: "schedule",
       actor: null,
     });
-    db.cronRuns.finish(id, { status: "ok" });
+    await db.cronRuns.finish(id, { status: "ok" });
 
     const row = (await listCrons()).find((c) => c.name === "repo-digest")!;
 
@@ -133,13 +129,13 @@ describe("GET /crons — derived from the cron_runs ledger", () => {
   });
 
   it("reports a partial fire as partial, not as success", async () => {
-    const id = db.cronRuns.start({
+    const id = await db.cronRuns.start({
       cronName: "merge-green-dependency-prs",
       workflow: "dependabot-pr-merge",
       source: "schedule",
       actor: null,
     });
-    db.cronRuns.finish(id, { status: "partial", dispatched: 14, failures: 3 });
+    await db.cronRuns.finish(id, { status: "partial", dispatched: 14, failures: 3 });
 
     const row = (await listCrons()).find((c) => c.name === "merge-green-dependency-prs")!;
 
@@ -151,13 +147,13 @@ describe("GET /crons — derived from the cron_runs ledger", () => {
 
   it("counts consecutive failures per cron, not per workflow", async () => {
     for (let i = 0; i < 2; i++) {
-      const id = db.cronRuns.start({
+      const id = await db.cronRuns.start({
         cronName: "merge-green-dependency-prs",
         workflow: "dependabot-pr-merge",
         source: "schedule",
         actor: null,
       });
-      db.cronRuns.finish(id, { status: "failed", error: "boom" });
+      await db.cronRuns.finish(id, { status: "failed", error: "boom" });
     }
 
     const rows = await listCrons();

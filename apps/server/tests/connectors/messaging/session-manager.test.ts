@@ -1,10 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import Database from "better-sqlite3";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { migrate as drizzleMigrate } from "drizzle-orm/libsql/migrator";
+import { and, eq } from "drizzle-orm";
+import { fileURLToPath } from "url";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
-// SessionManager's one-shot UNIQUE-constraint migration now logs via the pino
-// LoggerPort instead of console — mock the logger module so the suite's
-// stderr stays free of real pino JSON (no assertions here depend on the
-// logged content).
+// The legacy compat pre-step logs via the pino LoggerPort — mock the logger
+// module so the suite's stderr stays free of real pino JSON (no assertions
+// here depend on the logged content).
 vi.mock("#src/logging/logger.js", () => {
   const noopLogger = {
     debug: vi.fn(),
@@ -18,6 +24,13 @@ vi.mock("#src/logging/logger.js", () => {
 });
 
 import { SessionManager } from "#src/connectors/messaging/session-manager.js";
+import { applyLegacySqliteCompat } from "#src/state/legacy-sqlite.js";
+import * as sqliteSchema from "#src/state/schema/sqlite.js";
+import { messagingMessages, messagingSessions } from "#src/state/schema/sqlite.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../../helpers/state-db.js";
+
+const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../../drizzle/sqlite", import.meta.url));
 
 const KEY = {
   platform: "slack",
@@ -26,213 +39,243 @@ const KEY = {
   userId: "U999",
 };
 
+/**
+ * Drizzle wraps driver errors in a `DrizzleQueryError` whose own message is
+ * only the failed SQL — the SQLite constraint text lives on `cause`. Flatten
+ * the chain so a test can still assert on WHICH constraint fired.
+ */
+async function constraintFailure(op: Promise<unknown>): Promise<string> {
+  try {
+    await op;
+  } catch (err) {
+    const chain: string[] = [];
+    for (let e: unknown = err, depth = 0; e != null && depth < 6; e = (e as { cause?: unknown }).cause, depth++) {
+      chain.push(String((e as Error).message));
+    }
+    return chain.join(" | ");
+  }
+  throw new Error("expected the statement to fail, but it succeeded");
+}
+
 describe("SessionManager", () => {
-  let db: Database.Database;
+  let db: StateDb;
   let manager: SessionManager;
 
-  beforeEach(() => {
-    db = new Database(":memory:");
-    manager = new SessionManager(db);
+  beforeEach(async () => {
+    db = await makeTestDb();
+    manager = new SessionManager(db.client);
   });
 
-  afterEach(() => {
-    db.close();
-  });
-
-  it("returns the same active session for the same key", () => {
-    const a = manager.getOrCreateSession(KEY);
-    const b = manager.getOrCreateSession(KEY);
+  it("returns the same active session for the same key", async () => {
+    const a = await manager.getOrCreateSession(KEY);
+    const b = await manager.getOrCreateSession(KEY);
     expect(b.id).toBe(a.id);
     expect(b.active).toBe(true);
   });
 
-  it("creates a new session after the old one is deactivated", () => {
-    const a = manager.getOrCreateSession(KEY);
-    manager.deactivateSession(a.id);
-    const b = manager.getOrCreateSession(KEY);
+  it("creates a new session after the old one is deactivated", async () => {
+    const a = await manager.getOrCreateSession(KEY);
+    await manager.deactivateSession(a.id);
+    const b = await manager.getOrCreateSession(KEY);
     expect(b.id).not.toBe(a.id);
     expect(b.active).toBe(true);
 
     // The old row should still exist (audit trail), just inactive — the
     // partial unique index only forbids two ACTIVE rows for the same key.
-    const rows = db.prepare(`
-      SELECT id, active FROM messaging_sessions
-      WHERE platform = ? AND channel_id = ? AND thread_id = ? AND user_id = ?
-      ORDER BY created_at
-    `).all(KEY.platform, KEY.channelId, KEY.threadId, KEY.userId) as Array<{ id: string; active: number }>;
+    const rows = await db.client
+      .select({ id: messagingSessions.id, active: messagingSessions.active })
+      .from(messagingSessions)
+      .where(
+        and(
+          eq(messagingSessions.platform, KEY.platform),
+          eq(messagingSessions.channelId, KEY.channelId),
+          eq(messagingSessions.threadId, KEY.threadId),
+          eq(messagingSessions.userId, KEY.userId),
+        ),
+      )
+      .orderBy(messagingSessions.createdAt);
     expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.active).sort()).toEqual([0, 1]);
+    expect(rows.map((r) => r.active).sort()).toEqual([false, true]);
   });
 
   describe("getHistory", () => {
-    it("keeps the NEWEST messages when the limit bites, oldest-first", () => {
-      const s = manager.getOrCreateSession(KEY);
+    it("keeps the NEWEST messages when the limit bites, oldest-first", async () => {
+      const s = await manager.getOrCreateSession(KEY);
       for (let i = 0; i < 10; i++) {
-        manager.addMessage(s.id, i % 2 === 0 ? "user" : "assistant", `m${i}`);
+        await manager.addMessage(s.id, i % 2 === 0 ? "user" : "assistant", `m${i}`);
       }
 
-      const history = manager.getHistory(s.id, 4);
+      const history = await manager.getHistory(s.id, 4);
       // An `ASC … LIMIT` would return m0..m3 — the opening of the thread —
       // leaving a long conversation permanently rehydrating its own preamble.
       expect(history.map((h) => h.content)).toEqual(["m6", "m7", "m8", "m9"]);
     });
 
-    it("orders same-millisecond writes by insertion, not arbitrarily", () => {
-      const s = manager.getOrCreateSession(KEY);
+    it("orders same-millisecond writes by insertion, not arbitrarily", async () => {
+      const s = await manager.getOrCreateSession(KEY);
       // The user + assistant rows of one turn are routinely written inside the
       // same whole-millisecond ISO timestamp, so `id` is the tiebreak.
       const now = new Date().toISOString();
-      const insert = db.prepare(`
-        INSERT INTO messaging_messages (session_id, role, content, timestamp)
-        VALUES (?, ?, ?, ?)
-      `);
-      insert.run(s.id, "user", "question", now);
-      insert.run(s.id, "assistant", "answer", now);
+      await db.client.insert(messagingMessages).values([
+        { sessionId: s.id, role: "user", content: "question", timestamp: now },
+        { sessionId: s.id, role: "assistant", content: "answer", timestamp: now },
+      ]);
 
-      expect(manager.getHistory(s.id, 2).map((h) => h.content)).toEqual(["question", "answer"]);
+      expect((await manager.getHistory(s.id, 2)).map((h) => h.content)).toEqual([
+        "question",
+        "answer",
+      ]);
     });
   });
 
   describe("findActiveThreadSession", () => {
-    it("finds the thread's session without knowing which user opened it", () => {
-      const s = manager.getOrCreateSession(KEY);
-      const found = manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId);
+    it("finds the thread's session without knowing which user opened it", async () => {
+      const s = await manager.getOrCreateSession(KEY);
+      const found = await manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId);
       expect(found?.id).toBe(s.id);
     });
 
-    it("skips a stale session by default but finds it for a writer", () => {
-      const s = manager.getOrCreateSession(KEY);
+    it("skips a stale session by default but finds it for a writer", async () => {
+      const s = await manager.getOrCreateSession(KEY);
       // Age it past SESSION_TIMEOUT_MS — what a workflow that ran longer than
       // 30 minutes between question and answer leaves behind.
-      db.prepare(`UPDATE messaging_sessions SET last_activity_at = ? WHERE id = ?`)
-        .run(new Date(Date.now() - 60 * 60 * 1000).toISOString(), s.id);
+      await db.client
+        .update(messagingSessions)
+        .set({ lastActivityAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() })
+        .where(eq(messagingSessions.id, s.id));
 
-      expect(manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId)).toBeNull();
-      expect(manager.hasActiveThread("slack", KEY.channelId, KEY.threadId)).toBe(false);
+      expect(await manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId)).toBeNull();
+      expect(await manager.hasActiveThread("slack", KEY.channelId, KEY.threadId)).toBe(false);
       expect(
-        manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId, { includeStale: true })?.id,
+        (
+          await manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId, {
+            includeStale: true,
+          })
+        )?.id,
       ).toBe(s.id);
     });
 
-    it("ignores other threads and deactivated sessions", () => {
-      const s = manager.getOrCreateSession(KEY);
-      expect(manager.findActiveThreadSession("slack", KEY.channelId, "other-thread")).toBeNull();
-      manager.deactivateSession(s.id);
+    it("ignores other threads and deactivated sessions", async () => {
+      const s = await manager.getOrCreateSession(KEY);
+      expect(await manager.findActiveThreadSession("slack", KEY.channelId, "other-thread")).toBeNull();
+      await manager.deactivateSession(s.id);
       expect(
-        manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId, { includeStale: true }),
+        await manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId, {
+          includeStale: true,
+        }),
       ).toBeNull();
     });
   });
 
-  it("migrates a legacy schema with FK-referencing messages without dropping them", () => {
-    // Reproduces the production crash: a DB carrying messaging_messages
-    // rows that point at messaging_sessions via FK fails DROP TABLE
-    // unless FK enforcement is deferred.
-    const legacy = new Database(":memory:");
-    legacy.pragma("foreign_keys = ON");
-    legacy.exec(`
-      CREATE TABLE messaging_sessions (
-        id TEXT PRIMARY KEY,
-        platform TEXT NOT NULL,
-        channel_id TEXT NOT NULL,
-        thread_id TEXT,
-        user_id TEXT NOT NULL,
-        agent_session_id TEXT,
-        created_at TEXT NOT NULL,
-        last_activity_at TEXT NOT NULL,
-        message_count INTEGER DEFAULT 0,
-        active INTEGER DEFAULT 1,
-        UNIQUE(platform, channel_id, thread_id, user_id)
-      );
-      CREATE TABLE messaging_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL REFERENCES messaging_sessions(id),
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        timestamp TEXT NOT NULL,
-        platform_message_id TEXT
-      );
-      INSERT INTO messaging_sessions
-        (id, platform, channel_id, thread_id, user_id, created_at, last_activity_at, active)
-      VALUES ('sess-1', 'slack', 'C123', 't1', 'U1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1);
-      INSERT INTO messaging_messages (session_id, role, content, timestamp)
-      VALUES ('sess-1', 'user', 'hi', '2026-01-01T00:00:01Z'),
-             ('sess-1', 'assistant', 'hi back', '2026-01-01T00:00:02Z');
-    `);
-
-    // Migration should succeed without losing the FK-referenced rows.
-    new SessionManager(legacy);
-    const survivingMessages = legacy.prepare(`SELECT COUNT(*) AS n FROM messaging_messages WHERE session_id = 'sess-1'`).get() as { n: number };
-    expect(survivingMessages.n).toBe(2);
-    const survivingSession = legacy.prepare(`SELECT id FROM messaging_sessions WHERE id = 'sess-1'`).get();
-    expect(survivingSession).toBeDefined();
-
-    // And the FK is still enforced post-migration.
-    expect(() => legacy.prepare(`
-      INSERT INTO messaging_messages (session_id, role, content, timestamp)
-      VALUES (?, ?, ?, ?)
-    `).run("does-not-exist", "user", "x", "2026-01-01T00:00:03Z"))
-      .toThrow(/FOREIGN KEY/);
-
-    legacy.close();
-  });
-
-  it("migrates a legacy table that has the old unconditional UNIQUE constraint", () => {
-    // Spin up a DB pre-loaded with the old schema, then run the manager
-    // (which runs migrate()) and verify a fresh insert no longer collides.
-    const legacy = new Database(":memory:");
-    legacy.exec(`
-      CREATE TABLE messaging_sessions (
-        id TEXT PRIMARY KEY,
-        platform TEXT NOT NULL,
-        channel_id TEXT NOT NULL,
-        thread_id TEXT,
-        user_id TEXT NOT NULL,
-        agent_session_id TEXT,
-        created_at TEXT NOT NULL,
-        last_activity_at TEXT NOT NULL,
-        message_count INTEGER DEFAULT 0,
-        active INTEGER DEFAULT 1,
-        UNIQUE(platform, channel_id, thread_id, user_id)
-      );
-      INSERT INTO messaging_sessions
-        (id, platform, channel_id, thread_id, user_id, created_at, last_activity_at, active)
-      VALUES
-        ('old-1', 'slack', 'C123', 'thread-1', 'U999', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0);
-    `);
-
-    // Sanity check: the legacy schema *would* reject a second insert.
-    expect(() => legacy.prepare(`
-      INSERT INTO messaging_sessions
-        (id, platform, channel_id, thread_id, user_id, created_at, last_activity_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run("dup", "slack", "C123", "thread-1", "U999", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"))
-      .toThrow(/UNIQUE/);
-
-    // Run the migration via a fresh SessionManager on the same DB.
-    const migrated = new SessionManager(legacy);
-
-    // The old row survives the migration.
-    const oldRow = legacy.prepare(`SELECT id FROM messaging_sessions WHERE id = 'old-1'`).get();
-    expect(oldRow).toBeDefined();
-
-    // And get-or-create now succeeds — old (active=0) row no longer blocks insert.
-    const fresh = migrated.getOrCreateSession(KEY);
-    expect(fresh.id).not.toBe("old-1");
-    expect(fresh.active).toBe(true);
-
-    legacy.close();
-  });
-
-  it("partial unique index still prevents two active rows for the same key", () => {
-    const a = manager.getOrCreateSession(KEY);
+  it("partial unique index still prevents two active rows for the same key", async () => {
+    const a = await manager.getOrCreateSession(KEY);
     expect(a.active).toBe(true);
     // Directly insert a second active row — should fail the partial index.
-    expect(() => db.prepare(`
-      INSERT INTO messaging_sessions
-        (id, platform, channel_id, thread_id, user_id, created_at, last_activity_at, active)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-    `).run("dup", KEY.platform, KEY.channelId, KEY.threadId, KEY.userId, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"))
-      .toThrow(/UNIQUE/);
+    const failure = await constraintFailure(
+      db.client.insert(messagingSessions).values({
+        id: "dup",
+        platform: KEY.platform,
+        channelId: KEY.channelId,
+        threadId: KEY.threadId,
+        userId: KEY.userId,
+        createdAt: "2026-01-01T00:00:00Z",
+        lastActivityAt: "2026-01-01T00:00:00Z",
+        active: true,
+      }),
+    );
+    expect(failure).toMatch(/UNIQUE/);
+  });
+});
+
+/**
+ * The one legacy-database concern that is genuinely SessionManager's.
+ *
+ * The rebuild itself — stripping the old unconditional
+ * `UNIQUE(platform, channel_id, thread_id, user_id)`, preserving the rows and
+ * the FK-referencing messages, freeing the key the deactivated row occupied —
+ * moved out to `applyLegacySqliteCompat()` and is covered end-to-end by
+ * `tests/state/schema-equivalence.test.ts`. What that test cannot say is that
+ * `getOrCreateSession` (the method the constraint actually broke) works over
+ * the rebuilt database, and that the messages FK survives the table swap. This
+ * boots the real path — raw client → compat pre-step → migrator — and asserts
+ * exactly those two things.
+ */
+describe("SessionManager over a legacy database booted through the real path", () => {
+  const dirs: string[] = [];
+
+  afterAll(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("serves get-or-create after the rebuild, with the messages FK intact", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lastlight-legacy-session-"));
+    dirs.push(dir);
+    const raw = createClient({ url: `file:${join(dir, "legacy.db")}` });
+    try {
+      await raw.executeMultiple(`
+        CREATE TABLE messaging_sessions (
+          id TEXT PRIMARY KEY,
+          platform TEXT NOT NULL,
+          channel_id TEXT NOT NULL,
+          thread_id TEXT,
+          user_id TEXT NOT NULL,
+          agent_session_id TEXT,
+          created_at TEXT NOT NULL,
+          last_activity_at TEXT NOT NULL,
+          message_count INTEGER DEFAULT 0,
+          active INTEGER DEFAULT 1,
+          UNIQUE(platform, channel_id, thread_id, user_id)
+        );
+        CREATE TABLE messaging_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES messaging_sessions(id),
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          timestamp TEXT NOT NULL,
+          platform_message_id TEXT
+        );
+        INSERT INTO messaging_sessions
+          (id, platform, channel_id, thread_id, user_id, created_at, last_activity_at, active)
+        VALUES ('old-1', 'slack', 'C123', 'thread-1', 'U999',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0);
+        INSERT INTO messaging_messages (session_id, role, content, timestamp)
+        VALUES ('old-1', 'user', 'hi', '2026-01-01T00:00:01Z'),
+               ('old-1', 'assistant', 'hi back', '2026-01-01T00:00:02Z');
+      `);
+
+      // Sanity check: the legacy schema *would* reject a second insert, even
+      // though the row already there is deactivated. That is the bug.
+      await expect(
+        raw.execute({
+          sql: `INSERT INTO messaging_sessions
+                  (id, platform, channel_id, thread_id, user_id, created_at, last_activity_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          args: ["dup", "slack", "C123", "thread-1", "U999", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+        }),
+      ).rejects.toThrow(/UNIQUE/);
+
+      // The real boot path.
+      await applyLegacySqliteCompat(raw);
+      const client = drizzle(raw, { schema: sqliteSchema });
+      await drizzleMigrate(client, { migrationsFolder: MIGRATIONS_FOLDER });
+
+      // Get-or-create now succeeds — the old (active=0) row no longer blocks
+      // the insert, which is the whole point of the rebuild.
+      const manager = new SessionManager(client);
+      const fresh = await manager.getOrCreateSession(KEY);
+      expect(fresh.id).not.toBe("old-1");
+      expect(fresh.active).toBe(true);
+
+      // And the messages FK still bites after the table swap.
+      await expect(
+        raw.execute({
+          sql: `INSERT INTO messaging_messages (session_id, role, content, timestamp)
+                VALUES (?, ?, ?, ?)`,
+          args: ["does-not-exist", "user", "x", "2026-01-01T00:00:03Z"],
+        }),
+      ).rejects.toThrow(/FOREIGN KEY/);
+    } finally {
+      raw.close();
+    }
   });
 });

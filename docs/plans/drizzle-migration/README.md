@@ -96,12 +96,24 @@ each must leave the repo green before the next starts.
   runtime path touched. **Deviations:** the fan-out was skipped (done
   serially), and three doc errors were found and corrected — see the phase
   doc's Deviations section, especially §1, which changed the deliverable.
-- [ ] **Phase 2** — [02b-engine-swap.md](02b-engine-swap.md) — async API flip
+- [x] **Phase 2** — [02b-engine-swap.md](02b-engine-swap.md) — async API flip
   **+** libsql/Drizzle engine swap, executed as ONE phase (locked decision 7).
   [02a-async-api.md](02a-async-api.md) is its reference appendix (consumer
   inventory, landmines, signature flips, fire-and-forget table, test tables) —
   not a standalone phase; its sync-twin scaffolding is struck. *(risk: HIGH —
-  the crux)*
+  the crux)*. *Completed 2026-08-18.* `better-sqlite3` is gone from the repo;
+  all 7 stores + `SessionManager` are async on drizzle/libsql, the 5 named ops
+  are real transactions behind a connection-scoped serializer, and
+  `lastlight-workflow-engine`'s ports flipped to `Promise<T>` (locked decision
+  13). **206 files / 3,127 tests**, dashboard tsc green with zero dashboard
+  edits, evals barrel untouched. **Deviations — read §1, §2 and §5 before
+  Phase 3:** the plan's transaction guard idiom would have broken every
+  approval gate; two `migrate.ts` DATA backfills were silently lost and are now
+  `0001_backfill_repo_refs.sql`; and 14 promise-truthiness / floating-write
+  bugs got through the compiler (incl. the admin kill switch reading as
+  permanently on). **One done-criterion is deliberately NOT met** — the
+  prod-shape smoke needs a copy of the real DB and becomes a Phase 5 release
+  gate.
 - [ ] **Phase 3** — [03-test-suite-factory.md](03-test-suite-factory.md) —
   shared state test-suite factory *(risk: low)*
 - [ ] **Phase 4** — [04-postgres-pglite.md](04-postgres-pglite.md) — Postgres

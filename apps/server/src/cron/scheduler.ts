@@ -97,7 +97,7 @@ export class CronScheduler {
         // It also sidesteps the population problem #327 measured: quota
         // deferrals and DAG-cascade skips are `success = 0` on purpose (251 in
         // one day against zero real failures) and cannot appear here at all.
-        const failures = this.db.cronRuns.recentFailures(job.name);
+        const failures = await this.db.cronRuns.recentFailures(job.name);
         if (failures >= MAX_CONSECUTIVE_FAILURES) {
           log.error("ALERT: job has failed consecutively", { job: job.name, failures });
           // TODO: send alert (Slack webhook, email, etc.)

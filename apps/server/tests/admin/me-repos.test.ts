@@ -21,8 +21,9 @@ vi.mock("#src/admin/docker.js", () => ({
 }));
 
 import { createAdminRoutes, type AdminConfig } from "#src/admin/routes.js";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
 import type { SessionSource } from "#src/admin/sessions.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { createToken } from "#src/admin/auth.js";
 import { resetRuntimeConfigForTests } from "#src/config/config.js";
 
@@ -56,12 +57,11 @@ async function get(path: string, token?: string) {
   return { status: res.status, body: await res.json().catch(() => null) };
 }
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
+beforeEach(async () => {
+  db = await makeTestDb();
 });
 
 afterEach(() => {
-  db.close();
   resetRuntimeConfigForTests();
 });
 
@@ -104,8 +104,8 @@ describe("GET /me/repos", () => {
 });
 
 describe("GET /workflow-runs?repos= — the visibility scope as a query filter", () => {
-  function seedRun(id: string, owner: string, repo: string) {
-    db.runs.createRun({
+  async function seedRun(id: string, owner: string, repo: string) {
+    await db.runs.createRun({
       id,
       workflowName: "pr-review",
       triggerId: `${owner}/${repo}#1`,
@@ -115,15 +115,14 @@ describe("GET /workflow-runs?repos= — the visibility scope as a query filter",
       currentPhase: "review",
       status: "running",
       startedAt: "2026-08-06T10:00:00.000Z",
-      updatedAt: "2026-08-06T10:00:00.000Z",
     });
   }
 
   it("scopes to the named repos, with a matching total", async () => {
     build({ adminPassword: "" });
-    seedRun("r1", "nearform", "lastlight");
-    seedRun("r2", "nearform", "www");
-    seedRun("r3", "nearform", "unrelated");
+    await seedRun("r1", "nearform", "lastlight");
+    await seedRun("r2", "nearform", "www");
+    await seedRun("r3", "nearform", "unrelated");
 
     const { body } = await get("/workflow-runs?repos=nearform/lastlight,nearform/www");
     expect(body.total).toBe(2);
@@ -132,8 +131,8 @@ describe("GET /workflow-runs?repos= — the visibility scope as a query filter",
 
   it("returns global data when the param is omitted — it is a filter, not a gate", async () => {
     build({ adminPassword: "" });
-    seedRun("r1", "nearform", "lastlight");
-    seedRun("r2", "nearform", "unrelated");
+    await seedRun("r1", "nearform", "lastlight");
+    await seedRun("r2", "nearform", "unrelated");
 
     const { body } = await get("/workflow-runs");
     expect(body.total).toBe(2);
@@ -141,7 +140,7 @@ describe("GET /workflow-runs?repos= — the visibility scope as a query filter",
 
   it("ignores an empty/blank param rather than matching nothing", async () => {
     build({ adminPassword: "" });
-    seedRun("r1", "nearform", "lastlight");
+    await seedRun("r1", "nearform", "lastlight");
 
     const { body } = await get("/workflow-runs?repos=");
     expect(body.total).toBe(1);

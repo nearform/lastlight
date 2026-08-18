@@ -11,7 +11,8 @@ const logSpy = vi.hoisted(() => ({
 }));
 vi.mock("#src/logging/logger.js", () => ({ logger: () => logSpy }));
 
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { CronScheduler } from "#src/cron/scheduler.js";
 
 /**
@@ -37,10 +38,15 @@ const untilCalled = async (spy: { mock: { calls: unknown[] } }, ms = 3000): Prom
 };
 
 /** Record `count` finished, failed fires of `cronName`. */
-function seedFailures(db: StateDb, cronName: string, count: number): void {
+async function seedFailures(db: StateDb, cronName: string, count: number): Promise<void> {
   for (let i = 0; i < count; i++) {
-    const id = db.cronRuns.start({ cronName, workflow: "repo-health", source: "schedule", actor: null });
-    db.cronRuns.finish(id, { status: "failed", error: "boom" });
+    const id = await db.cronRuns.start({
+      cronName,
+      workflow: "repo-health",
+      source: "schedule",
+      actor: null,
+    });
+    await db.cronRuns.finish(id, { status: "failed", error: "boom" });
   }
 }
 
@@ -64,67 +70,59 @@ const alertCalls = () =>
 
 describe("CronScheduler — the consecutive-failure alert", () => {
   it("fires once the cron's own fires have failed MAX_CONSECUTIVE_FAILURES times", async () => {
-    const db = new StateDb(":memory:");
+    const db = await makeTestDb();
     logSpy.error.mockClear();
-    try {
+    {
       // Two prior failures + the failing tick itself = 3, the threshold.
-      seedFailures(db, "weekly-health-report", 3);
+      await seedFailures(db, "weekly-health-report", 3);
       await tickUntilAlert(db, "weekly-health-report");
 
       expect(alertCalls().length).toBeGreaterThan(0);
-    } finally {
-      db.close();
     }
   });
 
   it("stays quiet below the threshold", async () => {
-    const db = new StateDb(":memory:");
+    const db = await makeTestDb();
     logSpy.error.mockClear();
-    try {
-      seedFailures(db, "weekly-health-report", 2);
+    {
+      await seedFailures(db, "weekly-health-report", 2);
       await tickUntilAlert(db, "weekly-health-report");
 
       expect(alertCalls()).toHaveLength(0);
-    } finally {
-      db.close();
     }
   });
 
   it("counts the CRON's fires, not the workflow's runs", async () => {
-    const db = new StateDb(":memory:");
+    const db = await makeTestDb();
     logSpy.error.mockClear();
-    try {
+    {
       // The same workflow is reachable from /api/run, a GitHub comment and
       // Slack. Keyed on the workflow, those failures would inflate this cron's
       // health; keyed on the cron, they are invisible to it (issue #341).
-      seedFailures(db, "some-other-cron-on-the-same-workflow", 5);
+      await seedFailures(db, "some-other-cron-on-the-same-workflow", 5);
       await tickUntilAlert(db, "weekly-health-report");
 
       expect(alertCalls()).toHaveLength(0);
-      expect(db.cronRuns.recentFailures("weekly-health-report")).toBe(0);
-    } finally {
-      db.close();
+      expect(await db.cronRuns.recentFailures("weekly-health-report")).toBe(0);
     }
   });
 
   it("resets after a successful fire", async () => {
-    const db = new StateDb(":memory:");
+    const db = await makeTestDb();
     logSpy.error.mockClear();
-    try {
-      seedFailures(db, "weekly-health-report", 5);
-      const ok = db.cronRuns.start({
+    {
+      await seedFailures(db, "weekly-health-report", 5);
+      const ok = await db.cronRuns.start({
         cronName: "weekly-health-report",
         workflow: "repo-health",
         source: "schedule",
         actor: null,
       });
-      db.cronRuns.finish(ok, { status: "ok" });
+      await db.cronRuns.finish(ok, { status: "ok" });
 
       await tickUntilAlert(db, "weekly-health-report");
 
       expect(alertCalls()).toHaveLength(0);
-    } finally {
-      db.close();
     }
   });
 });

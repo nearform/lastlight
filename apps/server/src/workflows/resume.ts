@@ -137,7 +137,7 @@ function makeCallbacks(
       // gate or was picked back up after a harness restart completes its
       // `diagnose`/`fix` phases HERE — harvesting only in `index.ts` would lose
       // every marker on exactly the runs whose attempt counter matters most.
-      harvestFixMarkers(db, runId, workflowName, phase, result.output);
+      await harvestFixMarkers(db, runId, workflowName, phase, result.output);
     },
   };
 }
@@ -209,7 +209,7 @@ async function resumedRunConfig(run: WorkflowRun, opts: ResumeOptions): Promise<
       // only fires when the asset layer was DROPPED, and the runner's
       // `assetWarnings` only when it was applied.
       try {
-        opts.db.runs.mergeScratch(run.id, { repoConfig: { restoreWarnings: [warning] } });
+        await opts.db.runs.mergeScratch(run.id, { repoConfig: { restoreWarnings: [warning] } });
       } catch (err: unknown) {
         log.warn("Could not record the repo-config restore warning", { runId: run.id, err });
       }
@@ -270,7 +270,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     definition = getWorkflow(run.workflowName);
   } catch (err) {
     log.warn("Skipping — workflow definition not found", { runId: run.id, workflowName: run.workflowName, err });
-    opts.db.runs.finishRun(run.id, "failed", { error: `harness restarted; workflow definition not found` });
+    await opts.db.runs.finishRun(run.id, "failed", { error: `harness restarted; workflow definition not found` });
     return;
   }
 
@@ -351,7 +351,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
         onPhaseStart: async (phase) => logPhaseStart(log, run.workflowName, phase),
         onPhaseEnd: async (phase, result) => {
           logPhaseEnd(log, run.workflowName, phase, result);
-          harvestFixMarkers(opts.db, run.id, run.workflowName, phase, result.output);
+          await harvestFixMarkers(opts.db, run.id, run.workflowName, phase, result.output);
         },
       };
     }
@@ -371,9 +371,16 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     try {
       const saved = ((run.scratch?.notifier) ?? {}) as NotifierState;
       const github = opts.github;
+      // Fire-and-forget from the transport's synchronous `save` hook — see the
+      // twin in index.ts. A lost handle only costs a fresh status comment.
       const persist = (patch: Partial<NotifierState>) => {
-        const cur = ((opts.db.runs.getRun(run.id)?.scratch?.notifier) ?? {}) as NotifierState;
-        opts.db.runs.mergeScratch(run.id, { notifier: { ...cur, ...patch } });
+        void (async () => {
+          const cur = (((await opts.db.runs.getRun(run.id))?.scratch?.notifier) ??
+            {}) as NotifierState;
+          await opts.db.runs.mergeScratch(run.id, { notifier: { ...cur, ...patch } });
+        })().catch((err: unknown) => {
+          log.warn("Failed to persist notifier handle", { runId: run.id, err });
+        });
       };
       const transport = new GitHubTransport({
         github,
@@ -435,21 +442,21 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
     );
 
     if (result.success) {
-      opts.db.runs.finishRun(run.id, "succeeded");
+      await opts.db.runs.finishRun(run.id, "succeeded");
     } else if (result.backpressure) {
       // Same backpressure requeue as the fresh-dispatch path: a promoted run
       // that re-hits the quota goes back to `queued` for the next admission tick.
-      opts.db.runs.requeueRunning(run.id);
+      await opts.db.runs.requeueRunning(run.id);
       log.info("Requeued — cluster at capacity", { workflowName: run.workflowName, runId: run.id });
     } else if (!result.paused) {
-      opts.db.runs.finishRun(run.id, "failed", {
+      await opts.db.runs.finishRun(run.id, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed during resume",
       });
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error("Resume threw", { workflowName: run.workflowName, runId: run.id, err });
-    opts.db.runs.finishRun(run.id, "failed", { error: `resume threw: ${msg}` });
+    await opts.db.runs.finishRun(run.id, "failed", { error: `resume threw: ${msg}` });
   }
 }
 
@@ -475,7 +482,7 @@ export async function resumeSimpleRun(run: WorkflowRun, opts: ResumeOptions): Pr
 const MAX_RESTART_RESUMES = 3;
 
 export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void> {
-  const active = opts.db.runs.listActive();
+  const active = await opts.db.runs.listActive();
 
   // Queued orphans: a run that was still `queued` (waiting on the concurrency
   // cap) when the harness died carries a stale `started_at`, so the admission
@@ -487,7 +494,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
   if (queued.length > 0) {
     let requeued = 0;
     for (const run of queued) {
-      requeued += opts.db.runs.requeue(run.id);
+      requeued += await opts.db.runs.requeue(run.id);
     }
     log.info("Refreshed queue clock for queued orphan(s) — admission will promote them", { requeued });
   }
@@ -503,7 +510,7 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
 
   for (const run of orphans) {
     // Clear any "still running" execution rows so dedup works on resume.
-    const cleared = opts.db.executions.markAllStaleForTrigger(
+    const cleared = await opts.db.executions.markAllStaleForTrigger(
       run.triggerId,
       "stale: harness restarted",
     );
@@ -515,11 +522,11 @@ export async function resumeOrphanedWorkflows(opts: ResumeOptions): Promise<void
     // resumed it more than MAX_RESTART_RESUMES times, mark it failed and
     // move on. This is what stops an OOM-on-restart loop from churning
     // forever.
-    const attempts = opts.db.runs.incrementRestartCount(run.id);
+    const attempts = await opts.db.runs.incrementRestartCount(run.id);
     if (attempts > MAX_RESTART_RESUMES) {
       const msg = `harness restarted ${attempts - 1}x while this run was active — giving up after ${MAX_RESTART_RESUMES} resume attempts`;
       log.warn(msg, { workflowName: run.workflowName, runId: run.id });
-      opts.db.runs.finishRun(run.id, "failed", { error: msg });
+      await opts.db.runs.finishRun(run.id, "failed", { error: msg });
       continue;
     }
 

@@ -967,7 +967,7 @@ export async function runSimpleWorkflow(
   // skip every trigger source (cron, webhooks, mentions, Slack) without
   // creating a workflow_runs row. Returning success=true keeps callers
   // (router, cron tick, etc.) from treating this as an error.
-  if (!db.isWorkflowEnabled(workflowName)) {
+  if (!(await db.isWorkflowEnabled(workflowName))) {
     workflowLog.info("Skipped — disabled in admin dashboard", { workflowName });
     return { success: true, phases: [] };
   }
@@ -1060,7 +1060,7 @@ export async function runSimpleWorkflow(
   let workflowId: string;
   let taskId: string;
   let issueDir: string;
-  const existingRun = db.runs.getByTrigger(triggerId);
+  const existingRun = await db.runs.getByTrigger(triggerId);
   if (existingRun && existingRun.workflowName === workflowName) {
     workflowId = existingRun.id;
     const stored = (existingRun.context || {}) as Record<string, unknown>;
@@ -1106,9 +1106,9 @@ export async function runSimpleWorkflow(
     // so it admits freely here and requeues later if a pod-create is quota-rejected.
     const admitCap =
       config.sandbox === "kubernetes" ? K8S_SANITY_FUSE : concurrency?.maxWorkflows ?? Infinity;
-    const overCap = db.runs.countRunning() >= admitCap;
+    const overCap = (await db.runs.countRunning()) >= admitCap;
     const runStatus: "running" | "queued" = overCap ? "queued" : "running";
-    db.runs.createRun({
+    await db.runs.createRun({
       id: workflowId,
       workflowName,
       triggerId,
@@ -1159,7 +1159,7 @@ export async function runSimpleWorkflow(
       // no-ops leaves this comment as the only trace, reading as "it queued and
       // never came back". Only GitHub surfaces return an id; Slack resolves void.
       if (typeof ackId === "number") {
-        db.runs.mergeScratch(workflowId, { queuedAck: { commentId: ackId } });
+        await db.runs.mergeScratch(workflowId, { queuedAck: { commentId: ackId } });
       }
       return { success: true, queued: true, phases: [] };
     }
@@ -1175,12 +1175,22 @@ export async function runSimpleWorkflow(
   const buildAssetsRelocated = issueDir.startsWith("../");
 
   // Surface the run id to the dispatch layer as soon as it's known (either
-  // fresh or reused). Fire-and-forget so a slow/broken downstream hook can't
-  // stall the workflow.
+  // fresh or reused), and WAIT for it.
+  //
+  // This used to be fire-and-forget, which was safe only because the hook's
+  // setup — creating the progress notifier, seeding the checklist, recording
+  // the review check — was synchronous and therefore complete before the first
+  // `reporter.*` call could observe it. That setup now does real I/O, so
+  // letting it run in the background reintroduces the race it was written to
+  // avoid: a reporter call landing before the notifier it is supposed to
+  // update exists. A failure still only logs — a broken downstream hook must
+  // not fail the run — but it can no longer overlap the run it precedes.
   if (callbacks.onRunStart) {
-    callbacks.onRunStart(workflowId).catch((err: unknown) => {
+    try {
+      await callbacks.onRunStart(workflowId);
+    } catch (err: unknown) {
       simpleLog.warn("onRunStart callback threw", { err });
-    });
+    }
   }
 
   // ── Seed the in-place progress checklist ───────────────────────────────────
@@ -1354,18 +1364,18 @@ export async function runSimpleWorkflow(
     );
 
     if (result.success && !result.paused) {
-      db.runs.finishRun(workflowId, "succeeded");
+      await db.runs.finishRun(workflowId, "succeeded");
       reapOnSuccess(workflowName, taskId, config);
     } else if (result.backpressure) {
       // k8s ResourceQuota rejected a pod-create: requeue, don't fail. The
       // AdmissionController promotes it again as capacity frees (spec/09-sandbox.md (Concurrency)).
-      db.runs.requeueRunning(workflowId);
+      await db.runs.requeueRunning(workflowId);
       await notify(
         `\`${workflowName}\` is waiting for cluster capacity — it'll start automatically when a slot frees.`,
       );
       return { success: true, queued: true, backpressure: true, phases: result.phases };
     } else if (!result.success && !result.paused) {
-      db.runs.finishRun(workflowId, "failed", {
+      await db.runs.finishRun(workflowId, "failed", {
         error: result.phases.find((p) => !p.success)?.error || "workflow failed",
       });
     }
@@ -1373,7 +1383,7 @@ export async function runSimpleWorkflow(
     return result;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    db.runs.finishRun(workflowId, "failed", { error: msg });
+    await db.runs.finishRun(workflowId, "failed", { error: msg });
     throw err;
   }
 }
@@ -1418,7 +1428,7 @@ async function handleExistingRun(
 
   // Paused awaiting approval — see if a human has responded.
   if (run.status === "paused" && run.currentPhase === "waiting_approval") {
-    const pendingApproval = db.approvals.getPendingForWorkflow(run.id);
+    const pendingApproval = await db.approvals.getPendingForWorkflow(run.id);
     if (pendingApproval?.status === "approved") {
       // Resume is ledger-driven: the runner re-runs from the top and every
       // completed phase skips via `shouldRunPhase` (the executions ledger).
@@ -1430,14 +1440,14 @@ async function handleExistingRun(
         gate: pendingApproval.gate,
         workflowName: run.workflowName,
       });
-      db.runs.setRunning(run.id);
+      await db.runs.setRunning(run.id);
       if (pendingApproval.kind !== "reply") {
         await notify(`**Approval received** — resuming \`${run.workflowName}\`.`);
       }
       return null; // fall through to runWorkflow
     } else if (pendingApproval?.status === "rejected") {
       const reason = pendingApproval.response || "no reason given";
-      db.runs.finishRun(run.id, "failed", { error: `Rejected: ${reason}` });
+      await db.runs.finishRun(run.id, "failed", { error: `Rejected: ${reason}` });
       await notify(`Workflow \`${run.workflowName}\` was rejected. Reason: ${reason}`);
       return {
         success: false,

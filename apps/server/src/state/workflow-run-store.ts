@@ -1,6 +1,14 @@
-import type Database from "better-sqlite3";
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { ApprovalStore } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
+import {
+  nullsToUndefined,
+  type OpSerializer,
+  type StateClient,
+  type StateDbc,
+} from "./client.js";
+import { changes } from "./dialect.js";
+import { executions, workflowRuns } from "./schema/sqlite.js";
 import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
 import { logger } from "../logging/logger.js";
 
@@ -23,7 +31,7 @@ const log = logger("runs");
  * actually moving. Everything terminal shares the last bucket and stays purely
  * chronological among itself, which is what the day/week ranges want.
  */
-const ACTIVE_FIRST = `CASE status
+const ACTIVE_FIRST = sql`CASE ${workflowRuns.status}
              WHEN 'running' THEN 0
              WHEN 'paused'  THEN 1
              WHEN 'queued'  THEN 2
@@ -108,6 +116,23 @@ export interface PhaseMarker {
   summary?: string;
 }
 
+/** The row shape the builder returns for this table, before normalization. */
+type RunRow = typeof workflowRuns.$inferSelect;
+
+/**
+ * What {@link WorkflowRunStore.deserialize} accepts.
+ *
+ * A full row, or `list()`'s deliberately narrower projection — which omits the
+ * two multi-MB JSON blobs (and trace/span, which no list consumer reads) and
+ * adds the two roll-ups from its `executions` join. Everything the narrow
+ * projection drops is therefore optional here.
+ */
+type RunRowLike = Pick<
+  RunRow,
+  "id" | "workflowName" | "triggerId" | "currentPhase" | "phaseHistory" | "status" | "startedAt" | "updatedAt"
+> &
+  Partial<RunRow> & { totalCostUsd?: number; totalTokens?: number };
+
 /**
  * Aggregate root for a workflow run's lifecycle. Owns the `workflow_runs`
  * table (including the `phase_history` JSON column) and the named, atomic
@@ -117,20 +142,26 @@ export interface PhaseMarker {
  * Carved out of the old `StateDb` god-class (issue #97). The deepening: every
  * multi-step mutation that previously lived as an un-guarded read-modify-write
  * chain in `index.ts` / `admin/routes.ts` / `phase-executor.ts` is now a
- * single named operation wrapped in ONE `better-sqlite3` transaction — a throw
- * partway through rolls the whole thing back, so a run can never be left
- * marked `running` with its gate unresolved (the hazard the issue calls out).
+ * single named operation wrapped in ONE transaction — a throw partway through
+ * rolls the whole thing back, so a run can never be left marked `running` with
+ * its gate unresolved (the hazard the issue calls out).
  *
  * Constructed with an injected {@link ApprovalStore}: an approval has no life
  * independent of its run, so the cross-table ops call the approval store's
- * single-table writes from inside this store's transaction. Both stores MUST
- * be built from the same `Database` — better-sqlite3 transactions are
- * per-connection.
+ * single-table writes from inside this store's transaction, passing the
+ * transaction handle as their trailing `dbc` argument. Both stores MUST be
+ * built from the same client — a transaction is per-connection.
+ *
+ * Every op that opens a transaction runs through the injected
+ * {@link OpSerializer}, the ONE connection-scoped mutex shared with
+ * `TeamStore`: overlapping libsql interactive transactions fail in ways
+ * `busy_timeout` cannot help with (it is connection-scoped, and the client
+ * swaps connections after each transaction).
  *
  * The long-running re-dispatch (`dispatchWorkflow`, which spawns a Docker
- * sandbox for minutes) is deliberately NOT part of any transaction here —
- * better-sqlite3 transactions are synchronous. The atomic boundary is the DB
- * mutations only; the caller dispatches after the transaction commits.
+ * sandbox for minutes) is deliberately NOT part of any transaction here. The
+ * atomic boundary is the DB mutations only; the caller dispatches after the
+ * op returns.
  */
 /**
  * Notified once a run reaches a TERMINAL status, whichever path took it there.
@@ -178,25 +209,31 @@ export type TerminalRunObserver = (
  * and because dropping a row from a filter is the failure mode that hides
  * things silently.
  */
-function repoMatchClause(repo: string): { sql: string; values: string[] } {
+function repoMatchClause(repo: string): SQL {
   const slash = repo.indexOf("/");
   if (slash > 0) {
-    return {
-      sql: "((owner = ? AND repo = ?) OR repo = ?)",
-      values: [repo.slice(0, slash), repo.slice(slash + 1), repo],
-    };
+    return or(
+      and(
+        eq(workflowRuns.owner, repo.slice(0, slash)),
+        eq(workflowRuns.repo, repo.slice(slash + 1)),
+      ),
+      eq(workflowRuns.repo, repo),
+    ) as SQL;
   }
-  return { sql: "repo = ?", values: [repo] };
+  return eq(workflowRuns.repo, repo);
 }
 
 export class WorkflowRunStore {
-  private db: Database.Database;
   private approvals: ApprovalStore;
+  private serialize: OpSerializer;
   private terminalObservers: TerminalRunObserver[] = [];
 
-  constructor(db: Database.Database, deps: { approvals: ApprovalStore }) {
-    this.db = db;
+  constructor(
+    private client: StateClient,
+    deps: { approvals: ApprovalStore; serialize: OpSerializer },
+  ) {
     this.approvals = deps.approvals;
+    this.serialize = deps.serialize;
   }
 
   /** Add a {@link TerminalRunObserver}. Wired at boot; order is registration order. */
@@ -210,11 +247,14 @@ export class WorkflowRunStore {
    * time we get here, no projection of it may undo that, and one projection
    * failing must not cost the others their notification.
    */
-  private notifyTerminal(id: string, status: "succeeded" | "failed" | "cancelled"): void {
+  private async notifyTerminal(
+    id: string,
+    status: "succeeded" | "failed" | "cancelled",
+  ): Promise<void> {
     if (this.terminalObservers.length === 0) return;
     let run: WorkflowRun | null = null;
     try {
-      run = this.getRun(id);
+      run = await this.getRun(id);
     } catch (err: unknown) {
       log.warn("Could not read a terminal run for its observers", { runId: id, err });
       return;
@@ -229,6 +269,29 @@ export class WorkflowRunStore {
     }
   }
 
+  /**
+   * Read a run's `context` object for an app-side read-modify-write.
+   *
+   * The three context mutations in this store — the error annotation in
+   * {@link expireQueued} and {@link flipFinished}, the error clear in
+   * {@link restartRun} — used to be `json_patch` / `json_remove` SQL, which
+   * Postgres has no equivalent for. `context` is a json-mode column, so the
+   * builder hands the object over and takes one back and the merge is plain JS.
+   * A missing row (or a NULL column) reads as `{}`, exactly what the
+   * `COALESCE(context, '{}')` those statements opened with produced.
+   */
+  private async readContext(
+    id: string,
+    dbc: StateDbc = this.client,
+  ): Promise<Record<string, unknown>> {
+    const [row] = await dbc
+      .select({ context: workflowRuns.context })
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, id))
+      .limit(1);
+    return { ...(row?.context ?? {}) };
+  }
+
   // ── Plain single-mutation operations ───────────────────────────
 
   /**
@@ -239,28 +302,28 @@ export class WorkflowRunStore {
    * passing `"owner/repo"` is split rather than stored as a third shape. See
    * `state/repo-ref.ts`.
    */
-  createRun(run: Omit<WorkflowRun, "phaseHistory" | "updatedAt">): void {
+  async createRun(run: Omit<WorkflowRun, "phaseHistory" | "updatedAt">): Promise<void> {
     const now = new Date().toISOString();
     const ref = normalizeRepoRef(run.owner, run.repo);
-    this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, phase_history, status, context, scratch, started_at, updated_at, triggered_by, trigger_actor_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      run.id,
-      run.workflowName,
-      run.triggerId,
-      ref.owner ?? null,
-      ref.repo ?? null,
-      run.issueNumber ?? null,
-      run.currentPhase,
-      run.status,
-      run.context ? JSON.stringify(run.context) : null,
-      run.scratch ? JSON.stringify(run.scratch) : null,
-      run.startedAt,
-      now,
-      run.triggeredBy ?? null,
-      run.triggerActorType ?? null,
-    );
+    // `context` / `scratch` / `phase_history` are json-mode columns: hand them
+    // the OBJECT. Pre-stringifying would double-encode, silently.
+    await this.client.insert(workflowRuns).values({
+      id: run.id,
+      workflowName: run.workflowName,
+      triggerId: run.triggerId,
+      owner: ref.owner ?? null,
+      repo: ref.repo ?? null,
+      issueNumber: run.issueNumber ?? null,
+      currentPhase: run.currentPhase,
+      phaseHistory: [],
+      status: run.status,
+      context: run.context ?? null,
+      scratch: run.scratch ?? null,
+      startedAt: run.startedAt,
+      updatedAt: now,
+      triggeredBy: run.triggeredBy ?? null,
+      triggerActorType: run.triggerActorType ?? null,
+    });
   }
 
   /**
@@ -269,23 +332,27 @@ export class WorkflowRunStore {
    * other keys.
    *
    * Throws if `patch` is not JSON-serializable (e.g. it contains a BigInt) —
-   * which is exactly how the atomic ops prove their rollback: a poison patch
-   * makes `JSON.stringify` throw mid-transaction.
+   * which is exactly how the atomic ops prove their rollback: Drizzle
+   * serializes the json-mode column when it executes the UPDATE, so a poison
+   * patch throws from the statement itself, before it has mutated anything.
    */
-  mergeScratch(id: string, patch: Record<string, unknown>): void {
+  async mergeScratch(
+    id: string,
+    patch: Record<string, unknown>,
+    dbc: StateDbc = this.client,
+  ): Promise<void> {
     const now = new Date().toISOString();
-    const row = this.db
-      .prepare(`SELECT scratch FROM workflow_runs WHERE id = ?`)
-      .get(id) as { scratch: string | null } | undefined;
+    const [row] = await dbc
+      .select({ scratch: workflowRuns.scratch })
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, id))
+      .limit(1);
     if (!row) return;
-    const current = row.scratch ? (JSON.parse(row.scratch) as Record<string, unknown>) : {};
-    const merged = { ...current, ...patch };
-    // Stringify BEFORE the UPDATE so a non-serializable patch throws without
-    // having mutated the row — keeps the op all-or-nothing even outside a txn.
-    const serialized = JSON.stringify(merged);
-    this.db
-      .prepare(`UPDATE workflow_runs SET scratch = ?, updated_at = ? WHERE id = ?`)
-      .run(serialized, now, id);
+    const merged = { ...(row.scratch ?? {}), ...patch };
+    await dbc
+      .update(workflowRuns)
+      .set({ scratch: merged, updatedAt: now })
+      .where(eq(workflowRuns.id, id));
   }
 
   /**
@@ -299,10 +366,11 @@ export class WorkflowRunStore {
    * repeated — a resume re-opens a span under a new trace, and the newest trace
    * is the right one for a signal arriving now.
    */
-  setTraceContext(id: string, traceId: string, spanId: string): void {
-    this.db
-      .prepare(`UPDATE workflow_runs SET trace_id = ?, span_id = ? WHERE id = ?`)
-      .run(traceId, spanId, id);
+  async setTraceContext(id: string, traceId: string, spanId: string): Promise<void> {
+    await this.client
+      .update(workflowRuns)
+      .set({ traceId, spanId })
+      .where(eq(workflowRuns.id, id));
   }
 
   /**
@@ -312,31 +380,49 @@ export class WorkflowRunStore {
    * routes every write through here so that future change touches one method
    * instead of ~10 call sites).
    */
-  appendPhase(id: string, phase: string, entry: PhaseHistoryEntry): void {
+  async appendPhase(
+    id: string,
+    phase: string,
+    entry: PhaseHistoryEntry,
+    dbc: StateDbc = this.client,
+  ): Promise<void> {
     const now = new Date().toISOString();
-    const row = this.db.prepare(`SELECT phase_history FROM workflow_runs WHERE id = ?`).get(id) as { phase_history: string } | undefined;
+    const [row] = await dbc
+      .select({ phaseHistory: workflowRuns.phaseHistory })
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, id))
+      .limit(1);
     if (!row) return;
-    const history: PhaseHistoryEntry[] = JSON.parse(row.phase_history);
-    history.push(entry);
-    this.db.prepare(`
-      UPDATE workflow_runs SET current_phase = ?, phase_history = ?, updated_at = ? WHERE id = ?
-    `).run(phase, JSON.stringify(history), now, id);
+    const history: PhaseHistoryEntry[] = [...row.phaseHistory, entry];
+    await dbc
+      .update(workflowRuns)
+      .set({ currentPhase: phase, phaseHistory: history, updatedAt: now })
+      .where(eq(workflowRuns.id, id));
   }
 
   /** Get a single workflow run by ID */
-  getRun(id: string): WorkflowRun | null {
-    const row = this.db.prepare(`SELECT * FROM workflow_runs WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
+  async getRun(id: string, dbc: StateDbc = this.client): Promise<WorkflowRun | null> {
+    const [row] = await dbc
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.id, id))
+      .limit(1);
     return row ? this.deserialize(row) : null;
   }
 
   /** Find the most recent active (running, paused, or queued) workflow run for a trigger */
-  getByTrigger(triggerId: string): WorkflowRun | null {
-    const row = this.db.prepare(`
-      SELECT * FROM workflow_runs
-      WHERE trigger_id = ? AND status IN ('queued', 'running', 'paused')
-      ORDER BY started_at DESC
-      LIMIT 1
-    `).get(triggerId) as Record<string, unknown> | undefined;
+  async getByTrigger(triggerId: string): Promise<WorkflowRun | null> {
+    const [row] = await this.client
+      .select()
+      .from(workflowRuns)
+      .where(
+        and(
+          eq(workflowRuns.triggerId, triggerId),
+          inArray(workflowRuns.status, ["queued", "running", "paused"]),
+        ),
+      )
+      .orderBy(desc(workflowRuns.startedAt))
+      .limit(1);
     return row ? this.deserialize(row) : null;
   }
 
@@ -346,12 +432,14 @@ export class WorkflowRunStore {
    * already succeeded/failed/cancelled — the signal the router uses to gate
    * reporter-driven re-triage to the pre-build window.
    */
-  hasRunForTrigger(triggerId: string, workflowName: string): boolean {
-    const row = this.db.prepare(`
-      SELECT 1 FROM workflow_runs
-      WHERE trigger_id = ? AND workflow_name = ?
-      LIMIT 1
-    `).get(triggerId, workflowName);
+  async hasRunForTrigger(triggerId: string, workflowName: string): Promise<boolean> {
+    const [row] = await this.client
+      .select({ id: workflowRuns.id })
+      .from(workflowRuns)
+      .where(
+        and(eq(workflowRuns.triggerId, triggerId), eq(workflowRuns.workflowName, workflowName)),
+      )
+      .limit(1);
     return !!row;
   }
 
@@ -361,13 +449,22 @@ export class WorkflowRunStore {
    * dependency-workflow dedup guard reads the winner's stored `context.headSha`
    * to skip re-assessing a PR at a head SHA it already handled.
    */
-  latestSucceededForTrigger(workflowName: string, triggerId: string): WorkflowRun | null {
-    const row = this.db.prepare(`
-      SELECT * FROM workflow_runs
-      WHERE trigger_id = ? AND workflow_name = ? AND status = 'succeeded'
-      ORDER BY started_at DESC
-      LIMIT 1
-    `).get(triggerId, workflowName) as Record<string, unknown> | undefined;
+  async latestSucceededForTrigger(
+    workflowName: string,
+    triggerId: string,
+  ): Promise<WorkflowRun | null> {
+    const [row] = await this.client
+      .select()
+      .from(workflowRuns)
+      .where(
+        and(
+          eq(workflowRuns.triggerId, triggerId),
+          eq(workflowRuns.workflowName, workflowName),
+          eq(workflowRuns.status, "succeeded"),
+        ),
+      )
+      .orderBy(desc(workflowRuns.startedAt))
+      .limit(1);
     return row ? this.deserialize(row) : null;
   }
 
@@ -391,15 +488,22 @@ export class WorkflowRunStore {
    *    would make a crash look like "no prior attempt" and re-arm the loop
    *    from zero.
    */
-  latestForTrigger(workflowNames: string[], triggerId: string): WorkflowRun | null {
+  async latestForTrigger(
+    workflowNames: string[],
+    triggerId: string,
+  ): Promise<WorkflowRun | null> {
     if (workflowNames.length === 0) return null;
-    const placeholders = workflowNames.map(() => "?").join(", ");
-    const row = this.db.prepare(`
-      SELECT * FROM workflow_runs
-      WHERE trigger_id = ? AND workflow_name IN (${placeholders})
-      ORDER BY started_at DESC
-      LIMIT 1
-    `).get(triggerId, ...workflowNames) as Record<string, unknown> | undefined;
+    const [row] = await this.client
+      .select()
+      .from(workflowRuns)
+      .where(
+        and(
+          eq(workflowRuns.triggerId, triggerId),
+          inArray(workflowRuns.workflowName, workflowNames),
+        ),
+      )
+      .orderBy(desc(workflowRuns.startedAt))
+      .limit(1);
     return row ? this.deserialize(row) : null;
   }
 
@@ -415,16 +519,23 @@ export class WorkflowRunStore {
    * would have two agents fetch/reset/push the same branch through the same
    * directory.
    */
-  activeForTrigger(workflowNames: string[], triggerId: string): WorkflowRun | null {
+  async activeForTrigger(
+    workflowNames: string[],
+    triggerId: string,
+  ): Promise<WorkflowRun | null> {
     if (workflowNames.length === 0) return null;
-    const placeholders = workflowNames.map(() => "?").join(", ");
-    const row = this.db.prepare(`
-      SELECT * FROM workflow_runs
-      WHERE trigger_id = ? AND workflow_name IN (${placeholders})
-        AND status IN ('queued', 'running', 'paused')
-      ORDER BY started_at ASC
-      LIMIT 1
-    `).get(triggerId, ...workflowNames) as Record<string, unknown> | undefined;
+    const [row] = await this.client
+      .select()
+      .from(workflowRuns)
+      .where(
+        and(
+          eq(workflowRuns.triggerId, triggerId),
+          inArray(workflowRuns.workflowName, workflowNames),
+          inArray(workflowRuns.status, ["queued", "running", "paused"]),
+        ),
+      )
+      .orderBy(asc(workflowRuns.startedAt))
+      .limit(1);
     return row ? this.deserialize(row) : null;
   }
 
@@ -437,31 +548,35 @@ export class WorkflowRunStore {
    * having succeeded at a SHA says nothing about whether `dependabot-pr-merge`
    * has assessed it. One small indexed lookup per name — the set is four.
    */
-  latestSucceededForTriggers(
+  async latestSucceededForTriggers(
     workflowNames: string[],
     triggerId: string,
-  ): Record<string, WorkflowRun> {
+  ): Promise<Record<string, WorkflowRun>> {
     const out: Record<string, WorkflowRun> = {};
     for (const name of workflowNames) {
-      const run = this.latestSucceededForTrigger(name, triggerId);
+      const run = await this.latestSucceededForTrigger(name, triggerId);
       if (run) out[name] = run;
     }
     return out;
   }
 
   /** List all active (queued, running, or paused) workflow runs */
-  listActive(): WorkflowRun[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM workflow_runs WHERE status IN ('queued', 'running', 'paused') ORDER BY started_at DESC
-    `).all() as Record<string, unknown>[];
+  async listActive(): Promise<WorkflowRun[]> {
+    const rows = await this.client
+      .select()
+      .from(workflowRuns)
+      .where(inArray(workflowRuns.status, ["queued", "running", "paused"]))
+      .orderBy(desc(workflowRuns.startedAt));
     return rows.map((r) => this.deserialize(r));
   }
 
   /** List recent workflow runs, ordered by start time descending */
-  listRecent(limit = 20): WorkflowRun[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM workflow_runs ORDER BY started_at DESC LIMIT ?
-    `).all(limit) as Record<string, unknown>[];
+  async listRecent(limit = 20): Promise<WorkflowRun[]> {
+    const rows = await this.client
+      .select()
+      .from(workflowRuns)
+      .orderBy(desc(workflowRuns.startedAt))
+      .limit(limit);
     return rows.map((r) => this.deserialize(r));
   }
 
@@ -475,94 +590,97 @@ export class WorkflowRunStore {
    *   `succeeded`, `failed`, `cancelled`). Used for the dashboard's "live"
    *   filter, which maps to ['running','paused'].
    */
-  list(opts: {
-    limit?: number;
-    offset?: number;
-    sinceIso?: string;
-    workflowName?: string;
-    repo?: string;
-    /**
-     * Restrict to a SET of repos — the dashboard's per-repo visibility scope
-     * (issue #169), where a user's GitHub teams resolve to several repos at
-     * once. Plural sibling of `repo`, matched with the same both-shapes rule;
-     * an empty array means "no rows", which the caller must avoid by not
-     * passing it. Ignored when `repo` is also set (the single-repo Repos tab
-     * is the narrower ask).
-     */
-    repos?: string[];
-    statuses?: string[];
-  } = {}): { runs: WorkflowRun[]; total: number } {
+  async list(
+    opts: {
+      limit?: number;
+      offset?: number;
+      sinceIso?: string;
+      workflowName?: string;
+      repo?: string;
+      /**
+       * Restrict to a SET of repos — the dashboard's per-repo visibility scope
+       * (issue #169), where a user's GitHub teams resolve to several repos at
+       * once. Plural sibling of `repo`, matched with the same both-shapes rule;
+       * an empty array means "no rows", which the caller must avoid by not
+       * passing it. Ignored when `repo` is also set (the single-repo Repos tab
+       * is the narrower ask).
+       */
+      repos?: string[];
+      statuses?: string[];
+    } = {},
+  ): Promise<{ runs: WorkflowRun[]; total: number }> {
     const limit = opts.limit ?? 20;
     const offset = opts.offset ?? 0;
 
-    const where: string[] = [];
-    const params: unknown[] = [];
-    if (opts.sinceIso) {
-      where.push("started_at >= ?");
-      params.push(opts.sinceIso);
-    }
-    if (opts.workflowName) {
-      where.push("workflow_name = ?");
-      params.push(opts.workflowName);
-    }
+    const where: SQL[] = [];
+    if (opts.sinceIso) where.push(gte(workflowRuns.startedAt, opts.sinceIso));
+    if (opts.workflowName) where.push(eq(workflowRuns.workflowName, opts.workflowName));
     if (opts.repo) {
-      const { sql, values } = repoMatchClause(opts.repo);
-      where.push(sql);
-      params.push(...values);
+      where.push(repoMatchClause(opts.repo));
     } else if (opts.repos && opts.repos.length > 0) {
       // OR the per-repo clauses. Not an `IN (...)`, because the column doesn't
       // hold the value being matched — see `repoMatchClause`.
-      const parts = opts.repos.map((r) => repoMatchClause(r));
-      where.push(`(${parts.map((p) => p.sql).join(" OR ")})`);
-      for (const p of parts) params.push(...p.values);
+      where.push(or(...opts.repos.map((r) => repoMatchClause(r))) as SQL);
     }
     if (opts.statuses && opts.statuses.length > 0) {
-      where.push(`status IN (${opts.statuses.map(() => "?").join(",")})`);
-      params.push(...opts.statuses);
+      where.push(inArray(workflowRuns.status, opts.statuses));
     }
-    const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const whereClause = where.length > 0 ? and(...where) : undefined;
 
-    const total = (
-      this.db
-        .prepare(`SELECT COUNT(*) as c FROM workflow_runs ${whereClause}`)
-        .get(...params) as { c: number }
-    ).c;
+    const [counted] = await this.client
+      .select({ c: count() })
+      .from(workflowRuns)
+      .where(whereClause);
+    const total = counted?.c ?? 0;
+
+    // A per-run token/cost roll-up, LEFT JOINed (indexed by
+    // `idx_executions_workflow_run`). `agg` only exposes `workflow_run_id` +
+    // the two sums, so nothing here collides with `workflow_runs`.
+    const agg = this.client
+      .select({
+        workflowRunId: executions.workflowRunId,
+        totalCostUsd: sql<number>`SUM(COALESCE(${executions.costUsd}, 0))`.as("total_cost_usd"),
+        totalTokens: sql<number>`SUM(COALESCE(${executions.inputTokens}, 0)
+                      + COALESCE(${executions.outputTokens}, 0)
+                      + COALESCE(${executions.cacheReadInputTokens}, 0))`.as("total_tokens"),
+      })
+      .from(executions)
+      .where(isNotNull(executions.workflowRunId))
+      .groupBy(executions.workflowRunId)
+      .as("agg");
 
     // Explicit column list — the heavy JSON blobs (`context`, `scratch`)
     // can each be many MB on long-running build runs and
     // the dashboard list view doesn't read them. Returning them turned a
     // 20-row page into a 14MB payload. The single-row endpoint
-    // (`getRun`) still uses `SELECT *` so the detail panel keeps
-    // the full row when the user picks one.
-    // LEFT JOIN a per-run token/cost roll-up (indexed by
-    // `idx_executions_workflow_run`). `agg` only exposes `workflow_run_id` +
-    // the two sums, so the outer unqualified column names (and `whereClause`)
-    // still bind unambiguously to `workflow_runs`.
-    const rows = this.db
-      .prepare(
-        `SELECT
-           id, workflow_name, trigger_id, owner, repo, issue_number,
-           current_phase, phase_history, status,
-           restart_count, started_at, updated_at, finished_at,
-           triggered_by, trigger_actor_type,
-           COALESCE(agg.total_cost_usd, 0) AS total_cost_usd,
-           COALESCE(agg.total_tokens, 0)   AS total_tokens
-         FROM workflow_runs
-         LEFT JOIN (
-           SELECT workflow_run_id,
-                  SUM(COALESCE(cost_usd, 0)) AS total_cost_usd,
-                  SUM(COALESCE(input_tokens, 0)
-                      + COALESCE(output_tokens, 0)
-                      + COALESCE(cache_read_input_tokens, 0)) AS total_tokens
-             FROM executions
-            WHERE workflow_run_id IS NOT NULL
-            GROUP BY workflow_run_id
-         ) agg ON agg.workflow_run_id = workflow_runs.id
-         ${whereClause}
-         ORDER BY ${ACTIVE_FIRST}, started_at DESC
-         LIMIT ? OFFSET ?`,
-      )
-      .all(...params, limit, offset) as Record<string, unknown>[];
+    // (`getRun`) still selects the whole row so the detail panel keeps
+    // it when the user picks one.
+    const rows = await this.client
+      .select({
+        id: workflowRuns.id,
+        workflowName: workflowRuns.workflowName,
+        triggerId: workflowRuns.triggerId,
+        owner: workflowRuns.owner,
+        repo: workflowRuns.repo,
+        issueNumber: workflowRuns.issueNumber,
+        currentPhase: workflowRuns.currentPhase,
+        phaseHistory: workflowRuns.phaseHistory,
+        status: workflowRuns.status,
+        restartCount: workflowRuns.restartCount,
+        startedAt: workflowRuns.startedAt,
+        updatedAt: workflowRuns.updatedAt,
+        finishedAt: workflowRuns.finishedAt,
+        triggeredBy: workflowRuns.triggeredBy,
+        triggerActorType: workflowRuns.triggerActorType,
+        totalCostUsd: sql<number>`COALESCE(${agg.totalCostUsd}, 0)`,
+        totalTokens: sql<number>`COALESCE(${agg.totalTokens}, 0)`,
+      })
+      .from(workflowRuns)
+      .leftJoin(agg, eq(agg.workflowRunId, workflowRuns.id))
+      .where(whereClause)
+      .orderBy(ACTIVE_FIRST, desc(workflowRuns.startedAt))
+      .limit(limit)
+      .offset(offset);
 
     return {
       runs: rows.map((r) => this.deserialize(r)),
@@ -575,11 +693,12 @@ export class WorkflowRunStore {
    * since those are not holding a sandbox slot. Used by the concurrency cap
    * (issue #172) to decide whether to queue a fresh run.
    */
-  countRunning(): number {
-    const row = this.db
-      .prepare(`SELECT COUNT(*) AS c FROM workflow_runs WHERE status = 'running'`)
-      .get() as { c: number };
-    return row.c;
+  async countRunning(): Promise<number> {
+    const [row] = await this.client
+      .select({ c: count() })
+      .from(workflowRuns)
+      .where(eq(workflowRuns.status, "running"));
+    return row?.c ?? 0;
   }
 
   /**
@@ -587,10 +706,12 @@ export class WorkflowRunStore {
    * Used by the admission controller to pick the next run to promote and to
    * perform TTL expiry.
    */
-  listQueued(): WorkflowRun[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM workflow_runs WHERE status = 'queued' ORDER BY started_at ASC`)
-      .all() as Record<string, unknown>[];
+  async listQueued(): Promise<WorkflowRun[]> {
+    const rows = await this.client
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.status, "queued"))
+      .orderBy(asc(workflowRuns.startedAt));
     return rows.map((r) => this.deserialize(r));
   }
 
@@ -603,16 +724,13 @@ export class WorkflowRunStore {
    * Does NOT touch started_at or restart_count — those stay at their enqueue
    * values so TTL sweep can detect staleness and dashboards show enqueue time.
    */
-  admitRun(id: string): number {
+  async admitRun(id: string): Promise<number> {
     const now = new Date().toISOString();
-    const info = this.db
-      .prepare(
-        `UPDATE workflow_runs
-         SET status = 'running', updated_at = ?
-         WHERE id = ? AND status = 'queued'`,
-      )
-      .run(now, id);
-    return info.changes;
+    const result = await this.client
+      .update(workflowRuns)
+      .set({ status: "running", updatedAt: now })
+      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued")));
+    return changes(result);
   }
 
   /**
@@ -620,32 +738,37 @@ export class WorkflowRunStore {
    * context.error. Returns the number of rows changed (1 on success, 0 if the
    * run was no longer queued). Used by the TTL sweep in the admission
    * controller to drop stale queued runs.
+   *
+   * The context annotation is an app-side read-modify-write (see
+   * {@link readContext}), but the write still carries the whole compare-and-set
+   * in its own `WHERE`, so the rows-affected count keeps its exact meaning. The
+   * read cannot go stale underneath it either: nothing else writes the context
+   * of a run that is still `queued`, and a run that stopped being queued loses
+   * the CAS.
    */
-  expireQueued(id: string, reason: string): number {
+  async expireQueued(id: string, reason: string): Promise<number> {
     const now = new Date().toISOString();
-    const info = this.db
-      .prepare(
-        `UPDATE workflow_runs
-         SET status = 'cancelled',
-             finished_at = ?,
-             updated_at = ?,
-             context = json_patch(COALESCE(context, '{}'), json_object('error', ?))
-         WHERE id = ? AND status = 'queued'`,
-      )
-      .run(now, now, reason, id);
+    const context = { ...(await this.readContext(id)), error: reason };
+    const changed = changes(
+      await this.client
+        .update(workflowRuns)
+        .set({ status: "cancelled", finishedAt: now, updatedAt: now, context })
+        .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued"))),
+    );
     // A queued run that expires never ran a phase, but it may already own a
     // `last-light/review` check — the whole point of hanging the projection off
     // the terminal transition is that this path resolves it for free.
-    if (info.changes === 1) this.notifyTerminal(id, "cancelled");
-    return info.changes;
+    if (changed === 1) await this.notifyTerminal(id, "cancelled");
+    return changed;
   }
 
   /** Distinct workflow_name values, sorted alphabetically. */
-  distinctNames(): string[] {
-    const rows = this.db
-      .prepare(`SELECT DISTINCT workflow_name FROM workflow_runs ORDER BY workflow_name ASC`)
-      .all() as { workflow_name: string }[];
-    return rows.map((r) => r.workflow_name);
+  async distinctNames(): Promise<string[]> {
+    const rows = await this.client
+      .selectDistinct({ workflowName: workflowRuns.workflowName })
+      .from(workflowRuns)
+      .orderBy(asc(workflowRuns.workflowName));
+    return rows.map((r) => r.workflowName);
   }
 
   /**
@@ -663,17 +786,15 @@ export class WorkflowRunStore {
    * correctly: two rows for the same repo that disagree about shape collapse
    * into one bucket here rather than after the fact.
    */
-  distinctRepos(): { repo: string; runCount: number; lastRunAt: string }[] {
-    const qualified = qualifiedRepoSql("owner", "repo", "bare");
-    return this.db
-      .prepare(
-        `SELECT ${qualified} AS repo, COUNT(*) AS runCount, MAX(started_at) AS lastRunAt
-           FROM workflow_runs
-          WHERE repo IS NOT NULL AND repo != ''
-          GROUP BY ${qualified}
-          ORDER BY lastRunAt DESC`,
-      )
-      .all() as { repo: string; runCount: number; lastRunAt: string }[];
+  async distinctRepos(): Promise<{ repo: string; runCount: number; lastRunAt: string }[]> {
+    const qualified = qualifiedRepoSql(workflowRuns.owner, workflowRuns.repo, "bare");
+    const lastRunAt = sql<string>`MAX(${workflowRuns.startedAt})`;
+    return this.client
+      .select({ repo: sql<string>`${qualified}`, runCount: count(), lastRunAt })
+      .from(workflowRuns)
+      .where(and(isNotNull(workflowRuns.repo), ne(workflowRuns.repo, "")))
+      .groupBy(qualified)
+      .orderBy(desc(lastRunAt));
   }
 
   /**
@@ -686,88 +807,106 @@ export class WorkflowRunStore {
    * written before the owner/repo backfill carry `owner/repo` in the repo
    * column, and a bare-name filter silently misses every one of them.
    */
-  summarizeRepoActivity(
+  async summarizeRepoActivity(
     owner: string,
     repo: string,
     sinceIso: string,
-  ): { workflowName: string; status: string; count: number }[] {
-    const qualified = qualifiedRepoSql("owner", "repo", "bare");
-    return this.db
-      .prepare(
-        `SELECT workflow_name AS workflowName, status, COUNT(*) AS count
-           FROM workflow_runs
-          WHERE ${qualified} = ?
-            AND started_at >= ?
-          GROUP BY workflow_name, status`,
-      )
-      .all(`${owner}/${repo}`, sinceIso) as { workflowName: string; status: string; count: number }[];
+  ): Promise<{ workflowName: string; status: string; count: number }[]> {
+    const qualified = qualifiedRepoSql(workflowRuns.owner, workflowRuns.repo, "bare");
+    return this.client
+      .select({
+        workflowName: workflowRuns.workflowName,
+        status: workflowRuns.status,
+        count: count(),
+      })
+      .from(workflowRuns)
+      .where(and(eq(qualified, `${owner}/${repo}`), gte(workflowRuns.startedAt, sinceIso)))
+      .groupBy(workflowRuns.workflowName, workflowRuns.status);
   }
 
   /**
-   * Mark a workflow run as finished. Plain status flip when called with just
-   * `{ error }`; when a `terminalMarker` is supplied (the runner's
-   * `on_success.set_phase`), the phase-history append and the status flip
-   * happen in ONE transaction so the dashboard never sees the terminal phase
-   * without the finished status, or vice versa.
+   * Mark a workflow run as finished. Plain status flip when called with
+   * neither an `error` nor a `terminalMarker`; with either, the work spans two
+   * statements — the phase-history append and/or the `context.error`
+   * read-modify-write, plus the status flip — so it runs in ONE transaction
+   * and the dashboard never sees the terminal phase without the finished
+   * status, or vice versa.
    */
-  finishRun(
+  async finishRun(
     id: string,
     status: "succeeded" | "failed" | "cancelled",
     opts: { error?: string; terminalMarker?: PhaseMarker } = {},
-  ): void {
-    const apply = () => {
+  ): Promise<void> {
+    const apply = async (dbc: StateDbc): Promise<void> => {
       if (opts.terminalMarker) {
-        this.appendPhase(id, opts.terminalMarker.phase, {
-          phase: opts.terminalMarker.phase,
-          timestamp: new Date().toISOString(),
-          success: true,
-          summary: opts.terminalMarker.summary,
-        });
+        await this.appendPhase(
+          id,
+          opts.terminalMarker.phase,
+          {
+            phase: opts.terminalMarker.phase,
+            timestamp: new Date().toISOString(),
+            success: true,
+            summary: opts.terminalMarker.summary,
+          },
+          dbc,
+        );
       }
-      this.flipFinished(id, status, opts.error);
+      await this.flipFinished(id, status, opts.error, dbc);
     };
-    if (opts.terminalMarker) {
-      this.db.transaction(apply)();
+    if (opts.terminalMarker || opts.error !== undefined) {
+      await this.serialize(() => this.client.transaction(async (tx) => apply(tx)));
     } else {
-      apply();
+      await apply(this.client);
     }
     // AFTER the transaction commits — the observer reads the row back.
-    this.notifyTerminal(id, status);
+    await this.notifyTerminal(id, status);
   }
 
-  private flipFinished(id: string, status: "succeeded" | "failed" | "cancelled", error?: string): void {
+  private async flipFinished(
+    id: string,
+    status: "succeeded" | "failed" | "cancelled",
+    error?: string,
+    dbc: StateDbc = this.client,
+  ): Promise<void> {
     const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE workflow_runs SET status = ?, finished_at = ?, updated_at = ?, context = CASE
-        WHEN ? IS NOT NULL THEN json_patch(COALESCE(context, '{}'), json_object('error', ?))
-        ELSE context
-      END WHERE id = ?
-    `).run(status, now, now, error ?? null, error ?? null, id);
+    const patch: Partial<typeof workflowRuns.$inferInsert> = {
+      status,
+      finishedAt: now,
+      updatedAt: now,
+    };
+    // Only annotate the context when there is an error to record — the SQL this
+    // replaces expressed that as `CASE WHEN ? IS NOT NULL`, leaving the column
+    // untouched otherwise.
+    if (error !== undefined) patch.context = { ...(await this.readContext(id, dbc)), error };
+    await dbc.update(workflowRuns).set(patch).where(eq(workflowRuns.id, id));
   }
 
   /** Cancel a workflow run */
-  cancelRun(id: string): void {
+  async cancelRun(id: string): Promise<void> {
     const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE workflow_runs SET status = 'cancelled', updated_at = ?, finished_at = ? WHERE id = ?
-    `).run(now, now, id);
-    this.notifyTerminal(id, "cancelled");
+    await this.client
+      .update(workflowRuns)
+      .set({ status: "cancelled", updatedAt: now, finishedAt: now })
+      .where(eq(workflowRuns.id, id));
+    await this.notifyTerminal(id, "cancelled");
   }
 
   /** Pause a workflow run (waiting for approval) */
-  setPaused(id: string): void {
+  async setPaused(id: string, dbc: StateDbc = this.client): Promise<void> {
     const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE workflow_runs SET status = 'paused', updated_at = ? WHERE id = ?
-    `).run(now, id);
+    await dbc
+      .update(workflowRuns)
+      .set({ status: "paused", updatedAt: now })
+      .where(eq(workflowRuns.id, id));
   }
 
   /** Resume a paused workflow run (set back to running) */
-  setRunning(id: string): void {
+  async setRunning(id: string, dbc: StateDbc = this.client): Promise<void> {
     const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE workflow_runs SET status = 'running', updated_at = ? WHERE id = ?
-    `).run(now, id);
+    await dbc
+      .update(workflowRuns)
+      .set({ status: "running", updatedAt: now })
+      .where(eq(workflowRuns.id, id));
   }
 
   /**
@@ -786,19 +925,28 @@ export class WorkflowRunStore {
    * `WHERE status IN ('failed','cancelled')` and returns the changed-row count
    * so the caller can make retry a compare-and-set: a second concurrent retry
    * click sees 0 rows changed and does NOT dispatch again.
+   *
+   * Clearing the error is an app-side read-modify-write now (see
+   * {@link readContext}); the CAS still rides on this one UPDATE, and a run in a
+   * terminal status has no other writer to race the read against.
    */
-  restartRun(id: string): number {
+  async restartRun(id: string): Promise<number> {
     const now = new Date().toISOString();
-    const info = this.db.prepare(`
-      UPDATE workflow_runs
-      SET status = 'running',
-          finished_at = NULL,
-          updated_at = ?,
-          restart_count = COALESCE(restart_count, 0) + 1,
-          context = json_remove(COALESCE(context, '{}'), '$.error')
-      WHERE id = ? AND status IN ('failed', 'cancelled')
-    `).run(now, id);
-    return info.changes;
+    const context = await this.readContext(id);
+    delete context.error;
+    const result = await this.client
+      .update(workflowRuns)
+      .set({
+        status: "running",
+        finishedAt: null,
+        updatedAt: now,
+        restartCount: sql`COALESCE(${workflowRuns.restartCount}, 0) + 1`,
+        context,
+      })
+      .where(
+        and(eq(workflowRuns.id, id), inArray(workflowRuns.status, ["failed", "cancelled"])),
+      );
+    return changes(result);
   }
 
   /**
@@ -809,14 +957,13 @@ export class WorkflowRunStore {
    * `maxQueueWaitMs` window so the AdmissionController admits it normally as
    * slots free. CAS-guarded on `status = 'queued'`; returns rows changed.
    */
-  requeue(id: string): number {
+  async requeue(id: string): Promise<number> {
     const now = new Date().toISOString();
-    const info = this.db.prepare(`
-      UPDATE workflow_runs
-      SET started_at = ?, updated_at = ?
-      WHERE id = ? AND status = 'queued'
-    `).run(now, now, id);
-    return info.changes;
+    const result = await this.client
+      .update(workflowRuns)
+      .set({ startedAt: now, updatedAt: now })
+      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "queued")));
+    return changes(result);
   }
 
   /**
@@ -829,14 +976,13 @@ export class WorkflowRunStore {
    * CAS-guarded on `status = 'running'`; returns rows changed (0 = safe no-op,
    * e.g. the run already finished or was cancelled between phases).
    */
-  requeueRunning(id: string): number {
+  async requeueRunning(id: string): Promise<number> {
     const now = new Date().toISOString();
-    const info = this.db.prepare(`
-      UPDATE workflow_runs
-      SET status = 'queued', started_at = ?, updated_at = ?
-      WHERE id = ? AND status = 'running'
-    `).run(now, now, id);
-    return info.changes;
+    const result = await this.client
+      .update(workflowRuns)
+      .set({ status: "queued", startedAt: now, updatedAt: now })
+      .where(and(eq(workflowRuns.id, id), eq(workflowRuns.status, "running")));
+    return changes(result);
   }
 
   /**
@@ -845,57 +991,52 @@ export class WorkflowRunStore {
    * crashes the host (agent OOM, etc.) eventually self-terminates instead
    * of being re-dispatched on every boot.
    */
-  incrementRestartCount(id: string): number {
+  async incrementRestartCount(id: string): Promise<number> {
     const now = new Date().toISOString();
-    this.db.prepare(`
-      UPDATE workflow_runs
-      SET restart_count = COALESCE(restart_count, 0) + 1, updated_at = ?
-      WHERE id = ?
-    `).run(now, id);
-    const row = this.db.prepare(`SELECT restart_count FROM workflow_runs WHERE id = ?`)
-      .get(id) as { restart_count: number } | undefined;
-    return row?.restart_count ?? 0;
+    // RETURNING collapses the old update-then-select pair into one statement —
+    // and one round trip — while keeping the read of the value this call wrote.
+    const [row] = await this.client
+      .update(workflowRuns)
+      .set({
+        restartCount: sql`COALESCE(${workflowRuns.restartCount}, 0) + 1`,
+        updatedAt: now,
+      })
+      .where(eq(workflowRuns.id, id))
+      .returning({ restartCount: workflowRuns.restartCount });
+    return row?.restartCount ?? 0;
   }
 
-  private deserialize(row: Record<string, unknown>): WorkflowRun {
+  private deserialize(row: RunRowLike): WorkflowRun {
+    // Builder rows are camelCase, the json-mode columns arrive as real objects
+    // and arrays, and `nullsToUndefined` turns the nullable columns into the
+    // absent optionals `WorkflowRun` declares.
+    const r = nullsToUndefined(row);
     // The compatibility shim for the (owner, BARE repo) invariant (issue #279).
     // The backfill converges stored rows and `createRun` keeps new ones honest,
     // so this only ever fires for a row written by an older process before the
     // migration ran — but it fires at the ONE boundary every consumer crosses,
     // which is what lets `admission.ts` and `feedback-poll.ts` hand
     // `(run.owner, run.repo)` straight to Octokit with no split of their own.
-    const ref = normalizeRepoRef(row.owner as string | null, row.repo as string | null);
+    const ref = normalizeRepoRef(r.owner, r.repo);
     return {
-      id: row.id as string,
-      workflowName: row.workflow_name as string,
-      triggerId: row.trigger_id as string,
+      ...r,
       owner: ref.owner,
       repo: ref.repo,
-      issueNumber: row.issue_number as number | undefined,
-      triggeredBy: (row.triggered_by as string | null) ?? undefined,
-      triggerActorType: (row.trigger_actor_type as TriggerActorType | null) ?? undefined,
-      currentPhase: row.current_phase as string,
-      phaseHistory: JSON.parse(row.phase_history as string) as PhaseHistoryEntry[],
-      status: row.status as WorkflowRun["status"],
-      context: row.context ? JSON.parse(row.context as string) as Record<string, unknown> : undefined,
-      scratch: row.scratch ? JSON.parse(row.scratch as string) as Record<string, unknown> : undefined,
-      restartCount: typeof row.restart_count === "number" ? row.restart_count : 0,
-      startedAt: row.started_at as string,
-      updatedAt: row.updated_at as string,
-      finishedAt: row.finished_at as string | undefined,
-      traceId: (row.trace_id as string | null) ?? undefined,
-      spanId: (row.span_id as string | null) ?? undefined,
-      // Present only on `list()` rows (the executions JOIN); undefined on getRun.
-      totalCostUsd: typeof row.total_cost_usd === "number" ? row.total_cost_usd : undefined,
-      totalTokens: typeof row.total_tokens === "number" ? row.total_tokens : undefined,
+      status: r.status as WorkflowRun["status"],
+      triggerActorType: r.triggerActorType as TriggerActorType | undefined,
+      restartCount: r.restartCount ?? 0,
+      // `totalCostUsd` / `totalTokens` are present only on `list()` rows (the
+      // executions JOIN) and absent everywhere else — the spread carries both.
     };
   }
 
   // ── Named atomic lifecycle operations ──────────────────────────
   //
-  // Each wraps ONE better-sqlite3 transaction. The long-running re-dispatch
+  // Each wraps ONE transaction, taken through the connection-scoped
+  // {@link OpSerializer} so two of them (or one of TeamStore's) cannot
+  // interleave on the shared client. The long-running re-dispatch
   // (`dispatchWorkflow`) stays OUT of these — the caller dispatches after the
-  // transaction commits.
+  // op returns.
 
   /**
    * Resolve a socratic reply gate and resume the run, atomically: the reply
@@ -925,23 +1066,30 @@ export class WorkflowRunStore {
    * ApprovalStore participates in the same transaction); ordering is invisible
    * outside the transaction.
    */
-  pauseForApproval(
+  async pauseForApproval(
     runId: string,
     approval: Parameters<ApprovalStore["create"]>[0],
     marker: PhaseMarker,
     scratchPatch?: Record<string, unknown>,
-  ): void {
-    this.db.transaction(() => {
-      this.appendPhase(runId, marker.phase, {
-        phase: marker.phase,
-        timestamp: new Date().toISOString(),
-        success: true,
-        summary: marker.summary,
-      });
-      if (scratchPatch) this.mergeScratch(runId, scratchPatch);
-      this.approvals.create(approval);
-      this.setPaused(runId);
-    })();
+  ): Promise<void> {
+    await this.serialize(() =>
+      this.client.transaction(async (tx) => {
+        await this.appendPhase(
+          runId,
+          marker.phase,
+          {
+            phase: marker.phase,
+            timestamp: new Date().toISOString(),
+            success: true,
+            summary: marker.summary,
+          },
+          tx,
+        );
+        if (scratchPatch) await this.mergeScratch(runId, scratchPatch, tx);
+        await this.approvals.create(approval, tx);
+        await this.setPaused(runId, tx);
+      }),
+    );
   }
 
   /**
@@ -954,17 +1102,22 @@ export class WorkflowRunStore {
    * will follow before responding, so it records the approval and lets
    * `resumeWorkflow` flip the run only as part of an actual dispatch.
    */
-  resolveGateAndResume(approvalId: string, responder: string): WorkflowRun | null {
-    return this.db.transaction(() => {
-      const approval = this.approvals.getById(approvalId);
-      if (!approval) throw new Error(`approval ${approvalId} not found`);
-      const changed = this.approvals.respond(approvalId, "approved", responder);
-      if (changed !== 1) {
-        throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
-      }
-      this.setRunning(approval.workflowRunId);
-      return this.getRun(approval.workflowRunId);
-    })();
+  async resolveGateAndResume(
+    approvalId: string,
+    responder: string,
+  ): Promise<WorkflowRun | null> {
+    return this.serialize(() =>
+      this.client.transaction(async (tx) => {
+        const approval = await this.approvals.getById(approvalId, tx);
+        if (!approval) throw new Error(`approval ${approvalId} not found`);
+        const changed = await this.approvals.respond(approvalId, "approved", responder, undefined, tx);
+        if (changed !== 1) {
+          throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
+        }
+        await this.setRunning(approval.workflowRunId, tx);
+        return this.getRun(approval.workflowRunId, tx);
+      }),
+    );
   }
 
   /**
@@ -972,34 +1125,47 @@ export class WorkflowRunStore {
    * (with reason) and flip the run to `failed` in one transaction. Returns the
    * run (or null if the approval's run was already gone).
    */
-  resolveGateAndFail(approvalId: string, responder: string, reason?: string): WorkflowRun | null {
-    return this.db.transaction(() => {
-      const approval = this.approvals.getById(approvalId);
-      if (!approval) throw new Error(`approval ${approvalId} not found`);
-      const changed = this.approvals.respond(approvalId, "rejected", responder, reason);
-      if (changed !== 1) {
-        throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
-      }
-      this.flipFinished(approval.workflowRunId, "failed", `Rejected: ${reason || "no reason given"}`);
-      return this.getRun(approval.workflowRunId);
-    })();
+  async resolveGateAndFail(
+    approvalId: string,
+    responder: string,
+    reason?: string,
+  ): Promise<WorkflowRun | null> {
+    return this.serialize(() =>
+      this.client.transaction(async (tx) => {
+        const approval = await this.approvals.getById(approvalId, tx);
+        if (!approval) throw new Error(`approval ${approvalId} not found`);
+        const changed = await this.approvals.respond(approvalId, "rejected", responder, reason, tx);
+        if (changed !== 1) {
+          throw new Error(`approval ${approvalId} is not pending (already resolved?)`);
+        }
+        await this.flipFinished(
+          approval.workflowRunId,
+          "failed",
+          `Rejected: ${reason || "no reason given"}`,
+          tx,
+        );
+        return this.getRun(approval.workflowRunId, tx);
+      }),
+    );
   }
 
-  resolveReplyGateAndResume(
+  async resolveReplyGateAndResume(
     runId: string,
     approvalId: string,
     replyText: string,
     responder: string,
     scratchPatch: Record<string, unknown>,
-  ): WorkflowRun | null {
-    return this.db.transaction(() => {
-      const changed = this.approvals.resolveReplyGate(approvalId, replyText, responder);
-      if (changed !== 1) {
-        throw new Error(`reply gate ${approvalId} is not pending (already resolved?)`);
-      }
-      this.mergeScratch(runId, scratchPatch);
-      this.setRunning(runId);
-      return this.getRun(runId);
-    })();
+  ): Promise<WorkflowRun | null> {
+    return this.serialize(() =>
+      this.client.transaction(async (tx) => {
+        const changed = await this.approvals.resolveReplyGate(approvalId, replyText, responder, tx);
+        if (changed !== 1) {
+          throw new Error(`reply gate ${approvalId} is not pending (already resolved?)`);
+        }
+        await this.mergeScratch(runId, scratchPatch, tx);
+        await this.setRunning(runId, tx);
+        return this.getRun(runId, tx);
+      }),
+    );
   }
 }

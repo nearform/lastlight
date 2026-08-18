@@ -46,7 +46,7 @@ export interface SlackFeedbackDeps extends FeedbackIngestDeps {
 }
 
 /** Register a message the bot just posted as a reaction target. */
-export function registerSlackAnchor(
+export async function registerSlackAnchor(
   db: StateDb,
   input: {
     channelId: string;
@@ -56,9 +56,9 @@ export function registerSlackAnchor(
     workflowName?: string;
     messagingSessionId?: string;
   },
-): FeedbackAnchor | null {
+): Promise<FeedbackAnchor | null> {
   try {
-    return db.feedback.upsertAnchor({
+    return await db.feedback.upsertAnchor({
       source: "slack",
       kind: "slack_message",
       externalId: input.messageId,
@@ -84,7 +84,10 @@ export function registerSlackAnchor(
  * in a channel are on other people's messages, and the anchor lookup is a
  * single indexed read, so this is the cheap common case rather than an error.
  */
-export function handleSlackReaction(deps: SlackFeedbackDeps, event: SlackReactionEvent): boolean {
+export async function handleSlackReaction(
+  deps: SlackFeedbackDeps,
+  event: SlackReactionEvent,
+): Promise<boolean> {
   const channel = event.item?.channel;
   const ts = event.item?.ts;
   if (!channel || !ts || !event.reaction) return false;
@@ -95,7 +98,7 @@ export function handleSlackReaction(deps: SlackFeedbackDeps, event: SlackReactio
     return false;
   }
 
-  const anchor = deps.db.feedback.findAnchor("slack", channel, ts);
+  const anchor = await deps.db.feedback.findAnchor("slack", channel, ts);
   if (!anchor) {
     log.debug("Reaction on a message we have no anchor for", { channel, ts });
     return false;
@@ -109,8 +112,8 @@ export function handleSlackReaction(deps: SlackFeedbackDeps, event: SlackReactio
     reactedAt: slackTsToIso(event.event_ts),
   };
   return event.type === "reaction_removed"
-    ? retractReaction(deps, common)
-    : ingestReaction(deps, common) !== null;
+    ? await retractReaction(deps, common)
+    : (await ingestReaction(deps, common)) !== null;
 }
 
 /**

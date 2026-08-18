@@ -1,22 +1,19 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { randomUUID } from "crypto";
 
 let db: StateDb;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
-});
-
-afterEach(() => {
-  db.close();
+beforeEach(async () => {
+  db = await makeTestDb();
 });
 
 describe("workflow_runs CRUD", () => {
-  it("creates a workflow run and retrieves it by ID", () => {
+  it("creates a workflow run and retrieves it by ID", async () => {
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#1",
@@ -29,7 +26,7 @@ describe("workflow_runs CRUD", () => {
       finishedAt: undefined,
     });
 
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     expect(run).not.toBeNull();
     expect(run!.id).toBe(id);
     expect(run!.workflowName).toBe("build");
@@ -42,14 +39,14 @@ describe("workflow_runs CRUD", () => {
     expect(run!.context).toEqual({ branch: "lastlight/1-test" });
   });
 
-  it("returns null for a non-existent ID", () => {
-    expect(db.runs.getRun("no-such-id")).toBeNull();
+  it("returns null for a non-existent ID", async () => {
+    expect(await db.runs.getRun("no-such-id")).toBeNull();
   });
 
-  it("updates phase and appends to phase_history", () => {
+  it("updates phase and appends to phase_history", async () => {
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#2",
@@ -59,18 +56,18 @@ describe("workflow_runs CRUD", () => {
     });
 
     const entry = { phase: "guardrails", timestamp: new Date().toISOString(), success: true, summary: "READY" };
-    db.runs.appendPhase(id, "guardrails", entry);
+    await db.runs.appendPhase(id, "guardrails", entry);
 
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     expect(run!.currentPhase).toBe("guardrails");
     expect(run!.phaseHistory).toHaveLength(1);
     expect(run!.phaseHistory[0]).toEqual(entry);
   });
 
-  it("appends multiple phase history entries", () => {
+  it("appends multiple phase history entries", async () => {
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#3",
@@ -79,20 +76,20 @@ describe("workflow_runs CRUD", () => {
       startedAt: now,
     });
 
-    db.runs.appendPhase(id, "guardrails", { phase: "guardrails", timestamp: now, success: true });
-    db.runs.appendPhase(id, "architect", { phase: "architect", timestamp: now, success: true });
-    db.runs.appendPhase(id, "executor", { phase: "executor", timestamp: now, success: true });
+    await db.runs.appendPhase(id, "guardrails", { phase: "guardrails", timestamp: now, success: true });
+    await db.runs.appendPhase(id, "architect", { phase: "architect", timestamp: now, success: true });
+    await db.runs.appendPhase(id, "executor", { phase: "executor", timestamp: now, success: true });
 
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     expect(run!.currentPhase).toBe("executor");
     expect(run!.phaseHistory).toHaveLength(3);
     expect(run!.phaseHistory.map((e) => e.phase)).toEqual(["guardrails", "architect", "executor"]);
   });
 
-  it("finishes a workflow run with succeeded status", () => {
+  it("finishes a workflow run with succeeded status", async () => {
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#4",
@@ -101,16 +98,16 @@ describe("workflow_runs CRUD", () => {
       startedAt: now,
     });
 
-    db.runs.finishRun(id, "succeeded");
-    const run = db.runs.getRun(id);
+    await db.runs.finishRun(id, "succeeded");
+    const run = await db.runs.getRun(id);
     expect(run!.status).toBe("succeeded");
     expect(run!.finishedAt).toBeTruthy();
   });
 
-  it("finishes a workflow run with failed status", () => {
+  it("finishes a workflow run with failed status", async () => {
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#5",
@@ -119,17 +116,17 @@ describe("workflow_runs CRUD", () => {
       startedAt: now,
     });
 
-    db.runs.finishRun(id, "failed", { error: "some error" });
-    const run = db.runs.getRun(id);
+    await db.runs.finishRun(id, "failed", { error: "some error" });
+    const run = await db.runs.getRun(id);
     expect(run!.status).toBe("failed");
     expect(run!.finishedAt).toBeTruthy();
   });
 });
 
 describe("node_statuses store removed (issue #94)", () => {
-  it("no longer exposes updateNodeStatus and getWorkflowRun has no nodeStatuses", () => {
+  it("no longer exposes updateNodeStatus and getWorkflowRun has no nodeStatuses", async () => {
     const id = randomUUID();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#77",
@@ -138,29 +135,29 @@ describe("node_statuses store removed (issue #94)", () => {
       startedAt: new Date().toISOString(),
     });
     expect((db as unknown as Record<string, unknown>).updateNodeStatus).toBeUndefined();
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     expect(run).not.toBeNull();
     expect((run as unknown as Record<string, unknown>).nodeStatuses).toBeUndefined();
   });
 });
 
 describe("recordSkippedPhase — skips land in the executions ledger", () => {
-  it("writes a finished, non-successful skip row that shouldRunPhase re-evaluates", () => {
+  it("writes a finished, non-successful skip row that shouldRunPhase re-evaluates", async () => {
     const skill = "build:merge";
     const triggerId = "owner/repo#88";
-    db.executions.recordSkippedPhase(skill, triggerId, "wf-skip-1", "repo");
+    await db.executions.recordSkippedPhase(skill, triggerId, "wf-skip-1", "repo");
 
-    // Not "done" (success != 1) and not "running" (finished_at set) — so a
+    // Not "done" (success is false) and not "running" (finished_at set) — so a
     // resume re-evaluates the node (it'll simply be re-skipped if still gated).
-    expect(db.executions.shouldRunPhase(skill, triggerId, "wf-skip-1")).toBe("run");
+    expect(await db.executions.shouldRunPhase(skill, triggerId, "wf-skip-1")).toBe("run");
   });
 });
 
 describe("getWorkflowRunByTrigger", () => {
-  it("returns the active run for a trigger", () => {
+  it("returns the active run for a trigger", async () => {
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#10",
@@ -169,15 +166,15 @@ describe("getWorkflowRunByTrigger", () => {
       startedAt: now,
     });
 
-    const run = db.runs.getByTrigger("owner/repo#10");
+    const run = await db.runs.getByTrigger("owner/repo#10");
     expect(run).not.toBeNull();
     expect(run!.id).toBe(id);
   });
 
-  it("ignores failed or succeeded runs", () => {
+  it("ignores failed or succeeded runs", async () => {
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#11",
@@ -185,20 +182,20 @@ describe("getWorkflowRunByTrigger", () => {
       status: "running",
       startedAt: now,
     });
-    db.runs.finishRun(id, "failed");
+    await db.runs.finishRun(id, "failed");
 
-    expect(db.runs.getByTrigger("owner/repo#11")).toBeNull();
+    expect(await db.runs.getByTrigger("owner/repo#11")).toBeNull();
   });
 
-  it("returns null when no run exists for trigger", () => {
-    expect(db.runs.getByTrigger("owner/repo#999")).toBeNull();
+  it("returns null when no run exists for trigger", async () => {
+    expect(await db.runs.getByTrigger("owner/repo#999")).toBeNull();
   });
 
   it("returns the most recent active run when multiple exist", async () => {
     const id1 = randomUUID();
     const id2 = randomUUID();
 
-    db.runs.createRun({
+    await db.runs.createRun({
       id: id1,
       workflowName: "build",
       triggerId: "owner/repo#12",
@@ -206,7 +203,7 @@ describe("getWorkflowRunByTrigger", () => {
       status: "running",
       startedAt: new Date(Date.now() - 1000).toISOString(),
     });
-    db.runs.createRun({
+    await db.runs.createRun({
       id: id2,
       workflowName: "build",
       triggerId: "owner/repo#12",
@@ -215,33 +212,33 @@ describe("getWorkflowRunByTrigger", () => {
       startedAt: new Date().toISOString(),
     });
 
-    const run = db.runs.getByTrigger("owner/repo#12");
+    const run = await db.runs.getByTrigger("owner/repo#12");
     expect(run!.id).toBe(id2);
   });
 });
 
 describe("activeWorkflowRuns", () => {
-  it("returns only running and paused runs", () => {
+  it("returns only running and paused runs", async () => {
     const now = new Date().toISOString();
 
     const runningId = randomUUID();
-    db.runs.createRun({ id: runningId, workflowName: "build", triggerId: "t1", currentPhase: "guardrails", status: "running", startedAt: now });
+    await db.runs.createRun({ id: runningId, workflowName: "build", triggerId: "t1", currentPhase: "guardrails", status: "running", startedAt: now });
 
     const failedId = randomUUID();
-    db.runs.createRun({ id: failedId, workflowName: "build", triggerId: "t2", currentPhase: "executor", status: "running", startedAt: now });
-    db.runs.finishRun(failedId, "failed");
+    await db.runs.createRun({ id: failedId, workflowName: "build", triggerId: "t2", currentPhase: "executor", status: "running", startedAt: now });
+    await db.runs.finishRun(failedId, "failed");
 
-    const active = db.runs.listActive();
+    const active = await db.runs.listActive();
     expect(active.map((r) => r.id)).toContain(runningId);
     expect(active.map((r) => r.id)).not.toContain(failedId);
   });
 });
 
 describe("recentWorkflowRuns", () => {
-  it("respects limit and orders by started_at DESC", () => {
+  it("respects limit and orders by started_at DESC", async () => {
     const now = Date.now();
     for (let i = 0; i < 5; i++) {
-      db.runs.createRun({
+      await db.runs.createRun({
         id: randomUUID(),
         workflowName: "build",
         triggerId: `t${i}`,
@@ -251,7 +248,7 @@ describe("recentWorkflowRuns", () => {
       });
     }
 
-    const runs = db.runs.listRecent(3);
+    const runs = await db.runs.listRecent(3);
     expect(runs).toHaveLength(3);
     // Most recent first
     expect(runs[0]!.startedAt >= runs[1]!.startedAt).toBe(true);
@@ -260,37 +257,37 @@ describe("recentWorkflowRuns", () => {
 });
 
 describe("cancelWorkflowRun", () => {
-  it("sets status to cancelled", () => {
+  it("sets status to cancelled", async () => {
     const id = randomUUID();
     const now = new Date().toISOString();
-    db.runs.createRun({ id, workflowName: "build", triggerId: "t-cancel", currentPhase: "executor", status: "running", startedAt: now });
-    db.runs.cancelRun(id);
+    await db.runs.createRun({ id, workflowName: "build", triggerId: "t-cancel", currentPhase: "executor", status: "running", startedAt: now });
+    await db.runs.cancelRun(id);
 
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     expect(run!.status).toBe("cancelled");
     expect(run!.finishedAt).toBeTruthy();
   });
 });
 
 describe("pauseWorkflowRun", () => {
-  it("sets status to paused", () => {
+  it("sets status to paused", async () => {
     const id = randomUUID();
-    db.runs.createRun({ id, workflowName: "build", triggerId: "t-pause", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
-    db.runs.setPaused(id);
+    await db.runs.createRun({ id, workflowName: "build", triggerId: "t-pause", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
+    await db.runs.setPaused(id);
 
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     expect(run!.status).toBe("paused");
   });
 });
 
 describe("workflow_approvals CRUD", () => {
-  it("creates an approval and retrieves it by ID", () => {
+  it("creates an approval and retrieves it by ID", async () => {
     const id = randomUUID();
     const workflowRunId = randomUUID();
-    db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#20", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
+    await db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#20", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
 
     const now = new Date().toISOString();
-    db.approvals.create({
+    await db.approvals.create({
       id,
       workflowRunId,
       gate: "post_architect",
@@ -299,7 +296,7 @@ describe("workflow_approvals CRUD", () => {
       createdAt: now,
     });
 
-    const approval = db.approvals.getById(id);
+    const approval = await db.approvals.getById(id);
     expect(approval).not.toBeNull();
     expect(approval!.id).toBe(id);
     expect(approval!.workflowRunId).toBe(workflowRunId);
@@ -310,108 +307,134 @@ describe("workflow_approvals CRUD", () => {
     expect(approval!.createdAt).toBe(now);
   });
 
-  it("returns null for a non-existent approval", () => {
-    expect(db.approvals.getById("no-such-id")).toBeNull();
+  it("returns null for a non-existent approval", async () => {
+    expect(await db.approvals.getById("no-such-id")).toBeNull();
   });
 
-  it("getPendingApprovalForWorkflow returns pending approval", () => {
+  it("getPendingApprovalForWorkflow returns pending approval", async () => {
     const workflowRunId = randomUUID();
-    db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#21", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
+    await db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#21", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
 
     const approvalId = randomUUID();
-    db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
+    await db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
 
-    const approval = db.approvals.getPendingForWorkflow(workflowRunId);
+    const approval = await db.approvals.getPendingForWorkflow(workflowRunId);
     expect(approval).not.toBeNull();
     expect(approval!.id).toBe(approvalId);
     expect(approval!.status).toBe("pending");
   });
 
-  it("getPendingApprovalForWorkflow returns null when no pending approval", () => {
-    expect(db.approvals.getPendingForWorkflow("no-such-workflow")).toBeNull();
+  it("getPendingApprovalForWorkflow returns null when no pending approval", async () => {
+    expect(await db.approvals.getPendingForWorkflow("no-such-workflow")).toBeNull();
   });
 
-  it("getPendingApprovalByTrigger returns pending approval by trigger ID", () => {
+  it("getPendingApprovalByTrigger returns pending approval by trigger ID", async () => {
     const workflowRunId = randomUUID();
     const triggerId = "owner/repo#22";
-    db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId, currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
+    await db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId, currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
 
     const approvalId = randomUUID();
-    db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
+    await db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
 
-    const approval = db.approvals.getPendingByTrigger(triggerId);
+    const approval = await db.approvals.getPendingByTrigger(triggerId);
     expect(approval).not.toBeNull();
     expect(approval!.id).toBe(approvalId);
   });
 
-  it("getPendingApprovalByTrigger returns null when trigger has no pending approval", () => {
-    expect(db.approvals.getPendingByTrigger("owner/repo#9999")).toBeNull();
+  it("getPendingApprovalByTrigger returns null when trigger has no pending approval", async () => {
+    expect(await db.approvals.getPendingByTrigger("owner/repo#9999")).toBeNull();
   });
 
-  it("listPendingApprovals returns all pending approvals", () => {
+  it("listPendingApprovals returns all pending approvals", async () => {
     for (let i = 0; i < 3; i++) {
       const workflowRunId = randomUUID();
-      db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: `owner/repo#${30 + i}`, currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
-      db.approvals.create({ id: randomUUID(), workflowRunId, gate: "post_architect", summary: `Summary ${i}`, createdAt: new Date().toISOString() });
+      await db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: `owner/repo#${30 + i}`, currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
+      await db.approvals.create({ id: randomUUID(), workflowRunId, gate: "post_architect", summary: `Summary ${i}`, createdAt: new Date().toISOString() });
     }
 
-    const pending = db.approvals.listPending();
+    const pending = await db.approvals.listPending();
     expect(pending.length).toBeGreaterThanOrEqual(3);
     expect(pending.every((a) => a.status === "pending")).toBe(true);
   });
 
-  it("respondToApproval sets status and respondedBy", () => {
+  it("respondToApproval sets status and respondedBy", async () => {
     const workflowRunId = randomUUID();
-    db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#23", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
+    await db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#23", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
 
     const approvalId = randomUUID();
-    db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
+    await db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
 
-    db.approvals.respond(approvalId, "approved", "bob");
+    await db.approvals.respond(approvalId, "approved", "bob");
 
-    const approval = db.approvals.getById(approvalId);
+    const approval = await db.approvals.getById(approvalId);
     expect(approval!.status).toBe("approved");
     expect(approval!.respondedBy).toBe("bob");
     expect(approval!.respondedAt).toBeTruthy();
     expect(approval!.response).toBeUndefined();
   });
 
-  it("respondToApproval stores rejection reason", () => {
+  it("respondToApproval stores rejection reason", async () => {
     const workflowRunId = randomUUID();
-    db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#24", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
+    await db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#24", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
 
     const approvalId = randomUUID();
-    db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
+    await db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
 
-    db.approvals.respond(approvalId, "rejected", "carol", "Plan is incomplete");
+    await db.approvals.respond(approvalId, "rejected", "carol", "Plan is incomplete");
 
-    const approval = db.approvals.getById(approvalId);
+    const approval = await db.approvals.getById(approvalId);
     expect(approval!.status).toBe("rejected");
     expect(approval!.respondedBy).toBe("carol");
     expect(approval!.response).toBe("Plan is incomplete");
   });
 
-  it("getPendingApprovalForWorkflow ignores responded approvals", () => {
+  it("getPendingApprovalForWorkflow ignores responded approvals", async () => {
     const workflowRunId = randomUUID();
-    db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#25", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
+    await db.runs.createRun({ id: workflowRunId, workflowName: "build", triggerId: "owner/repo#25", currentPhase: "architect", status: "running", startedAt: new Date().toISOString() });
 
     const approvalId = randomUUID();
-    db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
-    db.approvals.respond(approvalId, "approved", "dave");
+    await db.approvals.create({ id: approvalId, workflowRunId, gate: "post_architect", summary: "Test", createdAt: new Date().toISOString() });
+    await db.approvals.respond(approvalId, "approved", "dave");
 
-    expect(db.approvals.getPendingForWorkflow(workflowRunId)).toBeNull();
+    expect(await db.approvals.getPendingForWorkflow(workflowRunId)).toBeNull();
+  });
+});
+
+describe("consecutiveFailures — the cron failure alert's only input", () => {
+  // The single most dangerous line in the sqlite→drizzle port: `success` is a
+  // boolean-mode column now, so the old `=== 0` compare is never true and this
+  // would report a permanent zero, disarming the alert with nothing red
+  // anywhere. Cheap to pin, silent to lose.
+  async function finished(id: string, skill: string, success: boolean, startedAt: string) {
+    await db.executions.recordStart({
+      id,
+      triggerType: "cron",
+      triggerId: "owner/repo::health",
+      skill,
+      startedAt,
+    });
+    await db.executions.recordFinish(id, { success });
+  }
+
+  it("counts the failure streak and resets on a success at the head", async () => {
+    await finished("cf-1", "cron-health", true, "2026-08-18T10:00:00.000Z");
+    await finished("cf-2", "cron-health", false, "2026-08-18T10:01:00.000Z");
+    await finished("cf-3", "cron-health", false, "2026-08-18T10:02:00.000Z");
+
+    expect(await db.executions.consecutiveFailures("cron-health")).toBe(2);
+
+    await finished("cf-4", "cron-health", true, "2026-08-18T10:03:00.000Z");
+    expect(await db.executions.consecutiveFailures("cron-health")).toBe(0);
   });
 });
 
 describe("dailyStats", () => {
-  // The shared db path resolves to a file (path.resolve(':memory:')), so rows
-  // accumulate across tests. Wipe executions before each test in this suite.
-  beforeEach(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (db as any).db.exec("DELETE FROM executions");
-  });
+  // Each test gets its own temp-file database from `makeTestDb()`, so rows no
+  // longer accumulate across tests and nothing has to be wiped up front. (The
+  // old suite shared one file, because `path.resolve(':memory:')` resolved to
+  // one, and had to DELETE FROM executions here.)
 
-  function insertExecution(opts: {
+  async function insertExecution(opts: {
     id: string;
     startedAt: string;
     success?: boolean;
@@ -420,7 +443,7 @@ describe("dailyStats", () => {
     cacheReadTokens?: number;
     costUsd?: number;
   }) {
-    db.executions.recordStart({
+    await db.executions.recordStart({
       id: opts.id,
       triggerType: "webhook",
       triggerId: "owner/repo#1",
@@ -430,7 +453,7 @@ describe("dailyStats", () => {
       startedAt: opts.startedAt,
     });
     if (opts.success !== undefined) {
-      db.executions.recordFinish(opts.id, {
+      await db.executions.recordFinish(opts.id, {
         success: opts.success,
         inputTokens: opts.inputTokens,
         outputTokens: opts.outputTokens,
@@ -450,21 +473,21 @@ describe("dailyStats", () => {
     return { iso: d.toISOString(), key: d.toISOString().slice(0, 10) };
   }
 
-  it("returns days rows of zeros when no executions exist", () => {
-    const rows = db.executions.dailyStats(30);
+  it("returns days rows of zeros when no executions exist", async () => {
+    const rows = await db.executions.dailyStats(30);
     expect(rows).toHaveLength(30);
     expect(rows.every((r) => r.executions === 0)).toBe(true);
     expect(rows.every((r) => r.totalTokens === 0 && r.costUsd === 0)).toBe(true);
   });
 
-  it("aggregates executions by date", () => {
+  it("aggregates executions by date", async () => {
     const day1 = daysAgo(5);
     const day2 = daysAgo(4);
-    insertExecution({ id: randomUUID(), startedAt: day1.iso, success: true });
-    insertExecution({ id: randomUUID(), startedAt: day1.iso, success: false });
-    insertExecution({ id: randomUUID(), startedAt: day2.iso, success: true });
+    await insertExecution({ id: randomUUID(), startedAt: day1.iso, success: true });
+    await insertExecution({ id: randomUUID(), startedAt: day1.iso, success: false });
+    await insertExecution({ id: randomUUID(), startedAt: day2.iso, success: true });
 
-    const rows = db.executions.dailyStats(30);
+    const rows = await db.executions.dailyStats(30);
     expect(rows).toHaveLength(30);
 
     const d1 = rows.find((r) => r.date === day1.key);
@@ -479,12 +502,12 @@ describe("dailyStats", () => {
     expect(d2!.failed).toBe(0);
   });
 
-  it("sums token and cost data correctly", () => {
+  it("sums token and cost data correctly", async () => {
     const day = daysAgo(3);
-    insertExecution({ id: randomUUID(), startedAt: day.iso, success: true, inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, costUsd: 0.01 });
-    insertExecution({ id: randomUUID(), startedAt: day.iso, success: true, inputTokens: 200, outputTokens: 80, cacheReadTokens: 0, costUsd: 0.02 });
+    await insertExecution({ id: randomUUID(), startedAt: day.iso, success: true, inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, costUsd: 0.01 });
+    await insertExecution({ id: randomUUID(), startedAt: day.iso, success: true, inputTokens: 200, outputTokens: 80, cacheReadTokens: 0, costUsd: 0.02 });
 
-    const rows = db.executions.dailyStats(30);
+    const rows = await db.executions.dailyStats(30);
     const d = rows.find((r) => r.date === day.key);
     expect(d).toBeDefined();
     expect(d!.inputTokens).toBe(300);
@@ -494,43 +517,43 @@ describe("dailyStats", () => {
     expect(d!.costUsd).toBeCloseTo(0.03);
   });
 
-  it("handles NULL token/cost columns gracefully", () => {
+  it("handles NULL token/cost columns gracefully", async () => {
     const day = daysAgo(2);
     // recordStart only — no recordFinish, so tokens/cost are NULL
-    db.executions.recordStart({ id: randomUUID(), triggerType: "webhook", triggerId: "t1", skill: "build", repo: "r", issueNumber: 1, startedAt: day.iso });
+    await db.executions.recordStart({ id: randomUUID(), triggerType: "webhook", triggerId: "t1", skill: "build", repo: "r", issueNumber: 1, startedAt: day.iso });
 
-    const rows = db.executions.dailyStats(30);
+    const rows = await db.executions.dailyStats(30);
     const d = rows.find((r) => r.date === day.key);
     expect(d).toBeDefined();
     expect(d!.totalTokens).toBe(0);
     expect(d!.costUsd).toBe(0);
   });
 
-  it("respects the days limit and excludes older executions", () => {
+  it("respects the days limit and excludes older executions", async () => {
     // Very old execution — 60 days ago
     const old = new Date();
     old.setDate(old.getDate() - 60);
-    insertExecution({ id: randomUUID(), startedAt: old.toISOString(), success: true });
+    await insertExecution({ id: randomUUID(), startedAt: old.toISOString(), success: true });
 
     // Recent execution — today
-    insertExecution({ id: randomUUID(), startedAt: new Date().toISOString(), success: true });
+    await insertExecution({ id: randomUUID(), startedAt: new Date().toISOString(), success: true });
 
-    const rows = db.executions.dailyStats(30);
+    const rows = await db.executions.dailyStats(30);
     // 30 daily rows (filled with zeros), with exactly one having an execution
     expect(rows).toHaveLength(30);
     const withExec = rows.filter((r) => r.executions > 0);
     expect(withExec).toHaveLength(1);
   });
 
-  it("orders results by date ascending", () => {
+  it("orders results by date ascending", async () => {
     const d1 = "2026-04-08T10:00:00.000Z";
     const d2 = "2026-04-09T10:00:00.000Z";
     const d3 = "2026-04-10T10:00:00.000Z";
-    insertExecution({ id: randomUUID(), startedAt: d3, success: true });
-    insertExecution({ id: randomUUID(), startedAt: d1, success: true });
-    insertExecution({ id: randomUUID(), startedAt: d2, success: true });
+    await insertExecution({ id: randomUUID(), startedAt: d3, success: true });
+    await insertExecution({ id: randomUUID(), startedAt: d1, success: true });
+    await insertExecution({ id: randomUUID(), startedAt: d2, success: true });
 
-    const rows = db.executions.dailyStats(30);
+    const rows = await db.executions.dailyStats(30);
     expect(rows).toHaveLength(30);
     const dates = rows.map((r) => r.date);
     const sorted = [...dates].sort();
@@ -539,10 +562,10 @@ describe("dailyStats", () => {
 });
 
 describe("context JSON round-trip", () => {
-  it("stores and retrieves complex context objects", () => {
+  it("stores and retrieves complex context objects", async () => {
     const id = randomUUID();
     const context = { branch: "lastlight/42-my-feature", taskId: "repo-42", models: { architect: "claude-opus-4-6" } };
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#42",
@@ -552,13 +575,13 @@ describe("context JSON round-trip", () => {
       startedAt: new Date().toISOString(),
     });
 
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     expect(run!.context).toEqual(context);
   });
 
-  it("handles runs without context", () => {
+  it("handles runs without context", async () => {
     const id = randomUUID();
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: "build",
       triggerId: "owner/repo#43",
@@ -567,7 +590,7 @@ describe("context JSON round-trip", () => {
       startedAt: new Date().toISOString(),
     });
 
-    const run = db.runs.getRun(id);
+    const run = await db.runs.getRun(id);
     expect(run!.context).toBeUndefined();
   });
 });

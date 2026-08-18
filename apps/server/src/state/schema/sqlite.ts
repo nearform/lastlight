@@ -446,8 +446,13 @@ export const messagingMessages = sqliteTable(
     // The only AUTOINCREMENT in the schema; inserts never supply an id.
     id: integer("id").primaryKey({ autoIncrement: true }),
     // The ONLY declared foreign key in the entire 15-table schema (no ON
-    // DELETE). Note `PRAGMA foreign_keys` is never enabled at runtime, so it
-    // is declared-but-unenforced.
+    // DELETE), and it is LIVE. Nothing sets `PRAGMA foreign_keys` explicitly,
+    // which used to be read as "so it is declared-but-unenforced" — that was
+    // wrong: better-sqlite3 and libsql BOTH default it on (verified on
+    // @libsql/client 0.17 and better-sqlite3 13 — an orphan insert is rejected
+    // by each). So it has always bitten in production, and it still does. The
+    // legacy messaging rebuild toggles it off around the table swap precisely
+    // because it is enforced (see `state/legacy-sqlite.ts`).
     sessionId: text("session_id")
       .notNull()
       .references(() => messagingSessions.id),

@@ -56,7 +56,8 @@ const def = (name: string, unless?: string): CronDef => ({
   ...(unless ? { condition: { unless } } : {}),
 });
 
-const names = (opts: Parameters<typeof getJobs>[0]) => getJobs(opts).map((j) => j.name);
+const names = async (opts: Parameters<typeof getJobs>[0]) =>
+  (await getJobs(opts)).map((j) => j.name);
 
 beforeEach(() => {
   cronDefs.mockReset();
@@ -64,38 +65,38 @@ beforeEach(() => {
 });
 
 describe("getJobs — condition.unless predicate map", () => {
-  it("still filters `unless: webhooksEnabled` when webhooks are on", () => {
+  it("still filters `unless: webhooksEnabled` when webhooks are on", async () => {
     cronDefs.mockReturnValue([def("legacy", "webhooksEnabled"), def("always")]);
-    expect(names({ webhooksEnabled: true, crons: { enable: [], disable: [] } })).toEqual(["always"]);
+    expect(await names({ webhooksEnabled: true, crons: { enable: [], disable: [] } })).toEqual(["always"]);
   });
 
-  it("registers it when webhooks are off", () => {
+  it("registers it when webhooks are off", async () => {
     cronDefs.mockReturnValue([def("legacy", "webhooksEnabled"), def("always")]);
-    expect(names({ webhooksEnabled: false, crons: { enable: [], disable: [] } })).toEqual([
+    expect(await names({ webhooksEnabled: false, crons: { enable: [], disable: [] } })).toEqual([
       "legacy",
       "always",
     ]);
   });
 
-  it("REGISTERS a cron whose condition it does not recognise, and says so", () => {
+  it("REGISTERS a cron whose condition it does not recognise, and says so", async () => {
     // Registration is the safe direction. A silently dropped cron produces no
     // ticks, no rows and no error — which is the failure the literal comparison
     // already had; a spurious tick is a cheap no-op.
     cronDefs.mockReturnValue([def("typo", "webhooksEnbaled")]);
-    expect(names({ webhooksEnabled: true, crons: { enable: [], disable: [] } })).toEqual(["typo"]);
+    expect(await names({ webhooksEnabled: true, crons: { enable: [], disable: [] } })).toEqual(["typo"]);
     expect(warnSpy).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ unless: "webhooksEnbaled" }),
     );
   });
 
-  it("a cron with NO condition is registered whatever the context says", () => {
+  it("a cron with NO condition is registered whatever the context says", async () => {
     // This is what `check-prs-awaiting-review` became: it must run *with*
     // webhooks enabled, because it is the release mechanism for every PR whose
     // fix chain ended without pushing, and the re-pickup that makes the PR-
     // scoped lock's drop-on-conflict safe (09 → S2/S5).
     cronDefs.mockReturnValue([def("check-prs-awaiting-review")]);
-    expect(names({ webhooksEnabled: true, crons: { enable: [], disable: [] } })).toEqual([
+    expect(await names({ webhooksEnabled: true, crons: { enable: [], disable: [] } })).toEqual([
       "check-prs-awaiting-review",
     ]);
   });

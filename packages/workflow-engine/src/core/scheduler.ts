@@ -103,7 +103,7 @@ export async function runWorkflowCore(
     // Honour a cancel that landed during the previous phase's execution, and
     // re-read the run row's scratch while we are here.
     if (db && workflowId) {
-      const latest = db.runs.getRun(workflowId);
+      const latest = await db.runs.getRun(workflowId);
       if (latest?.status === "cancelled") {
         log.info("workflow cancelled — stopping", { workflow: definition.name });
         return { success: false, phases };
@@ -132,7 +132,7 @@ export async function runWorkflowCore(
     for (const node of toSkip) {
       node.status = "skipped";
       phases.push({ phase: node.name, success: true, output: "Skipped (trigger rule not satisfied)" });
-      db?.executions.recordSkippedPhase(
+      await db?.executions.recordSkippedPhase(
         `${definition.name}:${node.name}`,
         triggerId,
         workflowId,
@@ -188,7 +188,7 @@ export async function runWorkflowCore(
           success: true,
           output: `Skipped (${reason})`,
         });
-        db?.executions.recordSkippedPhase(
+        await db?.executions.recordSkippedPhase(
           `${definition.name}:${node.name}`,
           triggerId,
           workflowId,
@@ -227,7 +227,7 @@ export async function runWorkflowCore(
       // that *succeeded* — mis-reporting which phase actually failed. Mirrors
       // post-review's fail() handler.
       if (db && workflowId) {
-        db.runs.appendPhase(workflowId, node.name, {
+        await db.runs.appendPhase(workflowId, node.name, {
           phase: node.name,
           timestamp: new Date().toISOString(),
           success: false,
@@ -277,11 +277,11 @@ export async function runWorkflowCore(
       const terminalMarker = terminalPhase?.on_success?.set_phase
         ? { phase: terminalPhase.on_success.set_phase, summary: prNumber ? `PR #${prNumber}` : undefined }
         : undefined;
-      db.runs.finishRun(workflowId, "succeeded", terminalMarker ? { terminalMarker } : {});
+      await db.runs.finishRun(workflowId, "succeeded", terminalMarker ? { terminalMarker } : {});
     }
   } else {
     const firstFailure = phases.find((p) => !p.success);
-    reporter.failWorkflow(firstFailure?.error || "workflow failed");
+    await reporter.failWorkflow(firstFailure?.error || "workflow failed");
   }
 
   // Single final update: render the workflow's `final_message` against the

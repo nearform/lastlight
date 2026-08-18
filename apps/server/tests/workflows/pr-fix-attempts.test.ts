@@ -28,7 +28,8 @@ vi.mock("#src/admin/docker.js", () => ({
 
 import { executeAgent, executeCommand } from "#src/engine/agent-executor.js";
 import { harvestFixMarkers } from "#src/engine/fix-harvest.js";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { getWorkflow } from "#src/workflows/loader.js";
 import {
   escalateFixModel,
@@ -254,8 +255,8 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
   let runId = "";
   let prNumber = 0;
 
-  beforeEach(() => {
-    db = new StateDb(":memory:");
+  beforeEach(async () => {
+    db = await makeTestDb();
     runId = "";
     prNumber += 1;
     // Phase 1 is `diagnose`; every later agent call is the `fix` phase (its
@@ -264,7 +265,6 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
   });
 
   afterEach(() => {
-    db.close();
     vi.clearAllMocks();
   });
 
@@ -297,7 +297,7 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
         // so a test that omitted this would drive a workflow whose guard can
         // never match — and would have gone green while asserting nothing.
         onPhaseEnd: async (phase, phaseResult) => {
-          harvestFixMarkers(db, runId, "pr-fix", phase, phaseResult.output ?? "");
+          await harvestFixMarkers(db, runId, "pr-fix", phase, phaseResult.output ?? "");
         },
       },
       db,
@@ -306,7 +306,7 @@ describe("pr-fix — the per-attempt policy reaches a real run", () => {
       "lastlight:bootstrap",
       {},
     );
-    return { result, run: db.runs.getRun(runId) };
+    return { result, run: await db.runs.getRun(runId) };
   }
 
   /** Did the expensive `fix` phase actually run? */

@@ -226,11 +226,11 @@ async function main() {
 
   // Initialize state database first — ChatRunner needs SessionManager
   // (DB-backed) at construction time.
-  const db = new StateDb(config.dbPath);
+  const db = await StateDb.open(config.dbPath);
   configLog.info("Database", { path: config.dbPath });
 
   // Session manager for messaging connectors (shared across Slack, Discord, etc.)
-  const sessionManager = new SessionManager(db.database);
+  const sessionManager = new SessionManager(db.client, db.dialect);
 
   // In-process chat runner backs the messaging chat skill. One pi-ai
   // conversation per Slack/Discord thread; locked down to read-only
@@ -264,12 +264,22 @@ async function main() {
       // and the dashboard's per-workflow kill switch changes that without a
       // restart. The persona and skill catalogue are boot-stable, so only the
       // suffix is re-derived (and it caches on the loader's asset version).
-      systemPrompt: () =>
-        agentContext +
-        chatSystemSuffix(githubAuth !== undefined, {
-          isWorkflowEnabled: (name) => db.isWorkflowEnabled(name),
-        }) +
-        chatSkills.catalogueXml,
+      // The kill-switch predicate `chatSystemSuffix` takes stays SYNCHRONOUS
+      // (it is applied inside `.filter()` callbacks), so the enabled set is
+      // resolved ONCE per turn here and closed over — one read rather than one
+      // per workflow.
+      systemPrompt: async () => {
+        const overrides = await db.getAllWorkflowOverrides();
+        return (
+          agentContext +
+          chatSystemSuffix(githubAuth !== undefined, {
+            // Same rule as `db.isWorkflowEnabled`: enabled unless an explicit
+            // row says otherwise.
+            isWorkflowEnabled: (name) => overrides.get(name)?.enabled ?? true,
+          }) +
+          chatSkills.catalogueXml
+        );
+      },
       github: chatGithubAuth,
       extraTools: chatSkills.skills.length > 0
         ? { tools: [readSkill.tool], execute: readSkill.execute }
@@ -320,7 +330,7 @@ async function main() {
   // (issue #255), so enabling OTel later can still put them on the traces they
   // grade instead of starting the backend from zero. Bounded per boot; a no-op
   // when telemetry is disabled or there is no backlog.
-  if (config.feedback.enabled && config.feedback.otel) drainFeedbackExport(db);
+  if (config.feedback.enabled && config.feedback.otel) await drainFeedbackExport(db);
 
   // Discover the repos the App can access — across EVERY installation — and seed
   // the managed-repo list. When the overlay's `managedRepos` is empty this
@@ -860,7 +870,7 @@ async function main() {
             // what lets a reaction minutes later resolve to this exact run
             // rather than merely to the thread.
             if (typeof ts === "string" && config.feedback.enabled) {
-              registerSlackAnchor(db, {
+              await registerSlackAnchor(db, {
                 channelId,
                 threadId,
                 messageId: ts,
@@ -878,7 +888,7 @@ async function main() {
             // failure, so recording outside it would write a message the user
             // never saw and have the next chat turn rehydrate it as fact —
             // the exact context drift the transcript exists to prevent.
-            recordThreadMessageForThread(
+            await recordThreadMessageForThread(
               sessionManager,
               "slack",
               channelId,
@@ -898,10 +908,11 @@ async function main() {
     // the runner a ProgressNotifier instead of letting it post a comment per
     // phase. The notifier is created inside onRunStart because it needs the
     // workflow-run id (only known once simple.ts creates the row) to persist
-    // its in-place update handles to scratch.notifier. better-sqlite3 is
-    // synchronous and simple.ts invokes onRunStart synchronously before the
-    // first reporter call, so the notifier is ready in time; the proxy guards
-    // the brief window before assignment.
+    // its in-place update handles to scratch.notifier. It is ready in time
+    // because **simple.ts AWAITS onRunStart** before dispatching — the
+    // guarantee used to come from the driver being synchronous, which it no
+    // longer is, so the ordering is now explicit rather than incidental. The
+    // proxy still guards the brief window before assignment.
     // Which in-place surface(s) can the checklist edit? Knowable synchronously
     // (transport existence needs only github/issue or slack/channel/thread —
     // the run id is needed solely for persistence + resume handles).
@@ -935,12 +946,22 @@ async function main() {
       : undefined;
 
     const notifierOnRunStart = statusChecklist
-      ? (runId: string): void => {
+      ? async (runId: string): Promise<void> => {
           try {
-            const saved = ((db.runs.getRun(runId)?.scratch?.notifier) ?? {}) as NotifierState;
-            const persist = (patch: Partial<NotifierState>) => {
-              const cur = ((db.runs.getRun(runId)?.scratch?.notifier) ?? {}) as NotifierState;
-              db.runs.mergeScratch(runId, { notifier: { ...cur, ...patch } });
+            const saved = (((await db.runs.getRun(runId))?.scratch?.notifier) ?? {}) as NotifierState;
+            // Read-modify-write of the notifier handles. The transports' `save`
+            // hooks stay SYNCHRONOUS on purpose — they fire from inside
+            // `publish()`, mid-post — so this is invoked fire-and-forget there.
+            // Losing a handle is cosmetic: a fresh status comment after a
+            // restart, never a lost run.
+            const persist = async (patch: Partial<NotifierState>) => {
+              const cur = (((await db.runs.getRun(runId))?.scratch?.notifier) ?? {}) as NotifierState;
+              await db.runs.mergeScratch(runId, { notifier: { ...cur, ...patch } });
+            };
+            const persistHandle = (patch: Partial<NotifierState>) => {
+              void persist(patch).catch((err: unknown) => {
+                log.warn("Failed to persist notifier handle", { runId, err });
+              });
             };
             const transports: NotifierTransport[] = [];
             if (ghChecklist && github && typeof issueNumber === "number") {
@@ -951,7 +972,7 @@ async function main() {
                   repo,
                   issueNumber,
                   commentId: saved.githubCommentId,
-                  save: (id) => persist({ githubCommentId: id }),
+                  save: (id) => persistHandle({ githubCommentId: id }),
                 }),
               );
             }
@@ -962,19 +983,25 @@ async function main() {
                   channel: channelId,
                   thread: threadId,
                   ts: saved.slackTs,
-                  save: (ts) => persist({ slackTs: ts, slackChannel: channelId, slackThread: threadId }),
+                  save: (ts) =>
+                    persistHandle({ slackTs: ts, slackChannel: channelId, slackThread: threadId }),
                   // Every message the notifier posts is reactable: the status
                   // checklist, the terminal summary, an approval prompt
                   // (issue #255).
                   onPost: config.feedback.enabled
-                    ? (ts) =>
+                    ? (ts) => {
+                        // Synchronous hook (nothing awaits it), so the anchor
+                        // write is fired and its failure logged here.
                         void registerSlackAnchor(db, {
                           channelId,
                           threadId,
                           messageId: ts,
                           workflowRunId: runId,
                           workflowName,
-                        })
+                        }).catch((err: unknown) => {
+                          log.warn("Failed to register a Slack feedback anchor", { runId, err });
+                        });
+                      }
                     : undefined,
                 }),
               );
@@ -1016,7 +1043,7 @@ async function main() {
         // lines exist in memory — `{{phaseOutputs}}` is empty across a run
         // boundary and the shared per-PR workspace is `reset --hard`-ed between
         // runs, so a marker not persisted here is gone for good.
-        if (harvestRunId) harvestFixMarkers(db, harvestRunId, workflowName, phase, result.output);
+        if (harvestRunId) await harvestFixMarkers(db, harvestRunId, workflowName, phase, result.output);
       },
       onRunStart: async (runId: string) => {
         // The run id is not knowable when this object is built — the row is
@@ -1024,11 +1051,10 @@ async function main() {
         // write the harvest. This callback fires synchronously before the first
         // phase, so the assignment is always in place by the time it is read.
         harvestRunId = runId;
-        // Synchronous notifier setup must finish before simple.ts calls
-        // reporter.start() (the next statement after it invokes this), so it
-        // runs FIRST — before the first `await` in this callback, which is now
-        // the check creation below.
-        if (notifierOnRunStart) notifierOnRunStart(runId);
+        // Notifier setup must finish before simple.ts calls reporter.start()
+        // (the next statement after it invokes this), so it runs FIRST — and is
+        // awaited, since its scratch read is no longer synchronous.
+        if (notifierOnRunStart) await notifierOnRunStart(runId);
         // Create AND bind the review check the moment the row exists — this is
         // what makes it a projection of run state rather than of an in-memory
         // promise, and it is why every terminal path resolves it for free.
@@ -1157,16 +1183,21 @@ async function main() {
       // response: the cache is filled on demand per logged-in user, so the next
       // dashboard request re-resolves, and only for people who actually use it.
       onTeamChanged: ({ org, teamSlug, login }) => {
-        try {
-          if (login) db.teams.invalidateLogin(login);
-          else if (teamSlug) db.teams.invalidateTeam(org, teamSlug);
-        } catch (err: unknown) {
+        // The hook's contract is synchronous — the webhook connector never
+        // awaits it — so the invalidation is fired and its failure logged here
+        // rather than propagated. The cache refills on demand either way.
+        const warn = (err: unknown) =>
           logger("team-visibility").warn("Failed to invalidate team visibility cache", {
             org,
             teamSlug,
             login,
             err,
           });
+        try {
+          if (login) void db.teams.invalidateLogin(login).catch(warn);
+          else if (teamSlug) void db.teams.invalidateTeam(org, teamSlug).catch(warn);
+        } catch (err: unknown) {
+          warn(err);
         }
       },
     });
@@ -1200,13 +1231,18 @@ async function main() {
         // precisely; it just isn't a workflow. Matches how the executions
         // ledger already names this surface (`skill: "chat"`).
         onBotMessage: config.feedback.enabled
-          ? ({ channelId, messageId, sessionId }) =>
+          ? ({ channelId, messageId, sessionId }) => {
+              // Synchronous hook (the connector never awaits it), so the anchor
+              // write is fired and its failure logged here.
               void registerSlackAnchor(db, {
                 channelId,
                 messageId,
                 messagingSessionId: sessionId,
                 workflowName: "chat",
-              })
+              }).catch((err: unknown) => {
+                logger("feedback").warn("Failed to register a Slack feedback anchor", { err });
+              });
+            }
           : undefined,
       },
       sessionManager
@@ -1217,7 +1253,9 @@ async function main() {
     // `reactions:read` bot scope + the reaction_added/removed subscriptions;
     // without them Slack never delivers and this is simply dormant.
     if (config.feedback.enabled) {
-      slackConnector.onReactionAction((event) =>
+      slackConnector.onReactionAction((event) => {
+        // The connector's handler slot is synchronous and nothing awaits it, so
+        // the ingest is fired here and a failure logged rather than propagated.
         void handleSlackReaction(
           {
             db,
@@ -1226,8 +1264,10 @@ async function main() {
             allowedUsers: config.slack?.allowedUsers,
           },
           event,
-        ),
-      );
+        ).catch((err: unknown) => {
+          logger("feedback").warn("Failed to handle a Slack reaction", { err });
+        });
+      });
     }
 
   }
@@ -1265,7 +1305,7 @@ async function main() {
               // exists only in this response — a send site that drops it makes
               // the reaction unattributable.
               if (typeof ts === "string" && config.feedback.enabled) {
-                registerSlackAnchor(db, { channelId: channel, messageId: ts, workflowName: "repo-digest" });
+                await registerSlackAnchor(db, { channelId: channel, messageId: ts, workflowName: "repo-digest" });
               }
             },
           }
@@ -1351,9 +1391,9 @@ async function main() {
     // after a restart still owes its thread a transcript.
     slackPoster: slackConnector
       ? (channelId, threadId, msg) =>
-          slackConnector!.sendMessage(channelId, threadId, msg).then(() => {
-            recordThreadMessageForThread(sessionManager, "slack", channelId, threadId, "assistant", msg);
-          })
+          slackConnector!.sendMessage(channelId, threadId, msg).then(() =>
+            recordThreadMessageForThread(sessionManager, "slack", channelId, threadId, "assistant", msg),
+          )
       : undefined,
   };
 
@@ -1436,7 +1476,7 @@ async function main() {
           adminLog.warn("Cannot resume workflow: missing owner/repo/issueNumber", { runId: workflowRun.id });
           return;
         }
-        db.runs.setRunning(workflowRun.id);
+        await db.runs.setRunning(workflowRun.id);
         adminLog.info("Resuming after dashboard approval", {
           workflowName: workflowRun.workflowName,
           repo: `${owner}/${repo}`,
@@ -1472,14 +1512,14 @@ async function main() {
         // Compare-and-set: flip failed/cancelled→running and clear the terminal
         // markers. If a racing retry already flipped it, changes===0 and we don't
         // dispatch.
-        const changed = db.runs.restartRun(workflowRun.id);
+        const changed = await db.runs.restartRun(workflowRun.id);
         if (changed !== 1) {
           adminLog.warn("Retry: run is no longer retryable (raced) — skipping dispatch", {
             runId: workflowRun.id,
           });
           return;
         }
-        const fresh = db.runs.getRun(workflowRun.id);
+        const fresh = await db.runs.getRun(workflowRun.id);
         if (!fresh) return;
         adminLog.info("Retrying", {
           workflowName: fresh.workflowName,
@@ -1677,7 +1717,7 @@ async function main() {
     const user = typeof body.user === "string" && body.user ? body.user : "cli";
     const threadId = typeof body.thread === "string" && body.thread ? body.thread : null;
 
-    const session = sessionManager.getOrCreateSession({
+    const session = await sessionManager.getOrCreateSession({
       platform: "cli", channelId: user, threadId, userId: user,
     });
 
@@ -1754,7 +1794,7 @@ async function main() {
   // otherwise fire periodic no-op dispatch failures.
   const webhooksEnabled = !!(config.webhookSecret && config.githubApp);
   if (github) {
-    const jobs = getJobs({ webhooksEnabled, db, handlers: cronHandlers });
+    const jobs = await getJobs({ webhooksEnabled, db, handlers: cronHandlers });
     for (const job of jobs) {
       cron.register(job);
     }
@@ -1874,7 +1914,7 @@ async function main() {
       telemetryShutdownStarted = true;
       await shutdownTelemetry();
     }
-    db.close();
+    await db.close();
     process.exit(0);
   };
 

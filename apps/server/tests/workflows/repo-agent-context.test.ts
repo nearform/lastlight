@@ -22,7 +22,8 @@ vi.mock("#src/admin/docker.js", () => ({
 }));
 
 import { executeAgent } from "#src/engine/agent-executor.js";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { configureWorkflowAssets, clearWorkflowCache } from "#src/workflows/loader.js";
 import { runSimpleWorkflow, type RunRepoConfig } from "#src/workflows/simple.js";
 import {
@@ -120,7 +121,7 @@ describe("per-repo agent context reaches the phase config", () => {
   let repo: string;
   let db: StateDb;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     builtIn = tmp();
     overlay = tmp();
     repo = tmp();
@@ -130,7 +131,7 @@ describe("per-repo agent context reaches the phase config", () => {
     writeAgentContext(overlay, "security.md", "OPERATOR SECURITY RULES");
     configureWorkflowAssets({ builtInRoot: builtIn, overlayRoot: overlay });
     clearWorkflowCache();
-    db = new StateDb(":memory:");
+    db = await makeTestDb();
     mockExecuteAgent.mockResolvedValue({
       success: true,
       output: "done",
@@ -141,7 +142,6 @@ describe("per-repo agent context reaches the phase config", () => {
   });
 
   afterEach(() => {
-    db.close();
     configureWorkflowAssets();
     clearWorkflowCache();
     vi.clearAllMocks();
@@ -196,7 +196,7 @@ describe("per-repo agent context reaches the phase config", () => {
     expect(agentContext).toContain("REPO CONVENTIONS");
 
     // The drop is reported on the run, not swallowed.
-    const scratch = db.runs.getRun(seen[0]!)?.scratch?.repoConfig as
+    const scratch = (await db.runs.getRun(seen[0]!))?.scratch?.repoConfig as
       | { assetWarnings?: Array<{ kind: string; name: string; layer: string }> }
       | undefined;
     expect(scratch?.assetWarnings).toHaveLength(1);

@@ -23,7 +23,8 @@ vi.mock("#src/admin/docker.js", () => ({
 }));
 
 import { executeAgent } from "#src/engine/agent-executor.js";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { configureWorkflowAssets, clearWorkflowCache } from "#src/workflows/loader.js";
 import { resumeSimpleRun, type ResumeOptions } from "#src/workflows/resume.js";
 import { fetchRepoLayer, resetRepoConfigForTests } from "#src/config/repo-config.js";
@@ -93,7 +94,7 @@ describe("resumeSimpleRun — the run's own config, not today's", () => {
   let builtIn: string;
   let db: StateDb;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     builtIn = tmp();
     mkdirSync(join(builtIn, "workflows", "prompts"), { recursive: true });
     writeFileSync(join(builtIn, "workflows", "pr-review.yaml"), REVIEW_YAML);
@@ -101,7 +102,7 @@ describe("resumeSimpleRun — the run's own config, not today's", () => {
     configureWorkflowAssets({ builtInRoot: builtIn });
     clearWorkflowCache();
     resetRepoConfigForTests();
-    db = new StateDb(":memory:");
+    db = await makeTestDb();
     mockExecuteAgent.mockResolvedValue({
       success: true,
       output: "done",
@@ -112,7 +113,6 @@ describe("resumeSimpleRun — the run's own config, not today's", () => {
   });
 
   afterEach(() => {
-    db.close();
     configureWorkflowAssets();
     clearWorkflowCache();
     resetRepoConfigForTests();
@@ -120,8 +120,8 @@ describe("resumeSimpleRun — the run's own config, not today's", () => {
   });
 
   /** Create the `workflow_runs` row a crashed/paused run would have left. */
-  function orphan(context: Record<string, unknown>): void {
-    db.runs.createRun({
+  async function orphan(context: Record<string, unknown>): Promise<void> {
+    await db.runs.createRun({
       id: "run-1",
       workflowName: "pr-review",
       triggerId: "acme/widgets#7",
@@ -150,16 +150,16 @@ describe("resumeSimpleRun — the run's own config, not today's", () => {
   }
 
   it("re-runs on the run's persisted effective model, not the operator default", async () => {
-    orphan({
+    await orphan({
       models: { default: "anthropic/operator-default", "pr-review": "openai/gpt-5-repo" },
       repoConfig: record(),
     });
 
-    await resumeSimpleRun(db.runs.getRun("run-1")!, resumeOpts());
+    await resumeSimpleRun((await db.runs.getRun("run-1"))!, resumeOpts());
 
     expect(mockExecuteAgent).toHaveBeenCalledOnce();
     expect(mockExecuteAgent.mock.calls[0]![1].model).toBe("openai/gpt-5-repo");
-    expect(db.runs.getRun("run-1")?.status).toBe("succeeded");
+    expect((await db.runs.getRun("run-1"))?.status).toBe("succeeded");
   });
 
   it("restores the repo's asset layer when its tree is still cached", async () => {
@@ -175,34 +175,34 @@ describe("resumeSimpleRun — the run's own config, not today's", () => {
     });
     expect(layer?.treeSha).toBe("sha-1");
 
-    orphan({
+    await orphan({
       models: { default: "anthropic/operator-default", "pr-review": "openai/gpt-5-repo" },
       repoConfig: record({
         assets: ["workflows/prompts/review.md", "agent-context/conventions.md"],
       }),
     });
 
-    await resumeSimpleRun(db.runs.getRun("run-1")!, resumeOpts());
+    await resumeSimpleRun((await db.runs.getRun("run-1"))!, resumeOpts());
 
     // The prompt AND the agent context come from the repo layer the run started
     // with — a resumed phase is the same phase, rendered the same way.
     expect(mockExecuteAgent.mock.calls[0]![0]).toBe("REPO REVIEW PROMPT");
     expect(mockExecuteAgent.mock.calls[0]![1].agentContext).toContain("REPO CONVENTIONS");
-    expect(db.runs.getRun("run-1")?.scratch?.repoConfig).toBeUndefined();
+    expect((await db.runs.getRun("run-1"))?.scratch?.repoConfig).toBeUndefined();
   });
 
   it("degrades to the operator's assets — with a recorded warning — when the cached tree is gone", async () => {
     // Nothing primed: the unpacked tree the run used has been evicted (TTL
     // sweep, a fresh host, a restarted harness with no sidecar).
-    orphan({
+    await orphan({
       models: { default: "anthropic/operator-default", "pr-review": "openai/gpt-5-repo" },
       repoConfig: record({ treeSha: "evicted-sha", assets: ["workflows/prompts/review.md"] }),
     });
 
-    await resumeSimpleRun(db.runs.getRun("run-1")!, resumeOpts());
+    await resumeSimpleRun((await db.runs.getRun("run-1"))!, resumeOpts());
 
     // Degraded, not crashed: the run completed on the operator's prompt…
-    const run = db.runs.getRun("run-1");
+    const run = await db.runs.getRun("run-1");
     expect(run?.status).toBe("succeeded");
     expect(mockExecuteAgent.mock.calls[0]![0]).toBe("BUILT-IN REVIEW PROMPT");
     // …the config leaves the repo DID win are still honoured…
@@ -217,9 +217,9 @@ describe("resumeSimpleRun — the run's own config, not today's", () => {
   });
 
   it("falls back to the operator's maps for a row that predates the persisted ones", async () => {
-    orphan({});
+    await orphan({});
 
-    await resumeSimpleRun(db.runs.getRun("run-1")!, resumeOpts());
+    await resumeSimpleRun((await db.runs.getRun("run-1"))!, resumeOpts());
 
     expect(mockExecuteAgent.mock.calls[0]![1].model).toBe("anthropic/operator-default");
     expect(mockExecuteAgent.mock.calls[0]![1].agentContext).toBeUndefined();

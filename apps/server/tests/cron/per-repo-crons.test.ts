@@ -89,8 +89,13 @@ function db(overrides: Record<string, { enabled: boolean; schedule?: string }> =
 }
 
 /** Run one tick the way the scheduler does: runner(job.workflow, job.context). */
-async function tick(job: { workflow: string; context: Record<string, unknown> }, dispatch: CronDispatcher) {
-  return dispatchCronWorkflow(job.workflow, job.context, dispatch);
+async function tick(
+  // A `CronJob` — `workflow` is optional on the type because a `handler:` cron
+  // has none, but every job these tests build is a workflow cron.
+  job: { workflow?: string; context: Record<string, unknown> },
+  dispatch: CronDispatcher,
+) {
+  return dispatchCronWorkflow(job.workflow!, job.context, dispatch);
 }
 
 beforeEach(() => {
@@ -105,34 +110,34 @@ beforeEach(() => {
 });
 
 describe("getJobs — global cron enablement", () => {
-  it("registers an enabled cron with the repos context, as before", () => {
-    const jobs = getJobs({ crons: { enable: [], disable: [] } });
+  it("registers an enabled cron with the repos context, as before", async () => {
+    const jobs = await getJobs({ crons: { enable: [], disable: [] } });
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.schedule).toBe("0 9 * * 1");
     expect(jobs[0]!.context).toMatchObject({ repos: ["acme/a", "acme/b"], mode: "report" });
   });
 
-  it("still registers a tick for a cron disabled by crons.disable, marked globally off", () => {
-    const jobs = getJobs({ crons: { enable: [], disable: ["repo-health"] } });
+  it("still registers a tick for a cron disabled by crons.disable, marked globally off", async () => {
+    const jobs = await getJobs({ crons: { enable: [], disable: ["repo-health"] } });
     // Registered (not `continue`d) so a repo can still opt in at tick time.
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.context._cronGloballyEnabled).toBe(false);
     expect(jobs[0]!.context._cronName).toBe("repo-health");
   });
 
-  it("still registers a tick for a cron disabled by a cron_overrides row", () => {
-    const jobs = getJobs({ db: db({ "repo-health": { enabled: false } }), crons: { enable: [], disable: [] } });
+  it("still registers a tick for a cron disabled by a cron_overrides row", async () => {
+    const jobs = await getJobs({ db: db({ "repo-health": { enabled: false } }), crons: { enable: [], disable: [] } });
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.context._cronGloballyEnabled).toBe(false);
   });
 
-  it("keeps the cron_overrides schedule override", () => {
-    const jobs = getJobs({ db: db({ "repo-health": { enabled: true, schedule: "*/5 * * * *" } }) });
+  it("keeps the cron_overrides schedule override", async () => {
+    const jobs = await getJobs({ db: db({ "repo-health": { enabled: true, schedule: "*/5 * * * *" } }) });
     expect(jobs[0]!.schedule).toBe("*/5 * * * *");
     expect(jobs[0]!.context._cronGloballyEnabled).toBe(true);
   });
 
-  it("keeps the webhooksEnabled condition filter", () => {
+  it("keeps the webhooksEnabled condition filter", async () => {
     cronDefs.mockReturnValueOnce([
       {
         name: "issue-poll",
@@ -142,16 +147,16 @@ describe("getJobs — global cron enablement", () => {
         condition: { unless: "webhooksEnabled" },
       } as never,
     ]);
-    expect(getJobs({ webhooksEnabled: true })).toHaveLength(0);
+    expect(await getJobs({ webhooksEnabled: true })).toHaveLength(0);
   });
 
-  it("operator crons.enable is a no-op re-affirmation, never an error", () => {
-    const jobs = getJobs({ crons: { enable: ["repo-health"], disable: [] } });
+  it("operator crons.enable is a no-op re-affirmation, never an error", async () => {
+    const jobs = await getJobs({ crons: { enable: ["repo-health"], disable: [] } });
     expect(jobs[0]!.context._cronGloballyEnabled).toBe(true);
   });
 
-  it("disable wins over enable at the operator layer too", () => {
-    const jobs = getJobs({ crons: { enable: ["repo-health"], disable: ["repo-health"] } });
+  it("disable wins over enable at the operator layer too", async () => {
+    const jobs = await getJobs({ crons: { enable: ["repo-health"], disable: ["repo-health"] } });
     expect(jobs[0]!.context._cronGloballyEnabled).toBe(false);
   });
 });
@@ -159,7 +164,7 @@ describe("getJobs — global cron enablement", () => {
 describe("cron tick fan-out — per-repo participation", () => {
   it("a repo with no .lastlight/ behaves exactly as today", async () => {
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs({ crons: { enable: [], disable: [] } });
+    const [job] = await getJobs({ crons: { enable: [], disable: [] } });
     const res = await tick(job!, dispatch);
     expect(res).toEqual({ dispatched: 2, failures: 0 });
     const dispatched = dispatch.mock.calls.map((c) => (c[1] as Record<string, unknown>).repo);
@@ -168,7 +173,7 @@ describe("cron tick fan-out — per-repo participation", () => {
 
   it("strips the cron control keys from the dispatched context", async () => {
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs();
+    const [job] = await getJobs();
     await tick(job!, dispatch);
     const ctx = dispatch.mock.calls[0]![1] as Record<string, unknown>;
     expect(ctx._cronName).toBeUndefined();
@@ -180,7 +185,7 @@ describe("cron tick fan-out — per-repo participation", () => {
   it("drops a repo that disabled the cron in its own crons.disable", async () => {
     repoLayers.set("acme/a", { cached: true, config: { crons: { disable: ["repo-health"] } } });
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs();
+    const [job] = await getJobs();
     const res = await tick(job!, dispatch);
     expect(res).toEqual({ dispatched: 1, failures: 0 });
     expect((dispatch.mock.calls[0]![1] as Record<string, unknown>).repo).toBe("acme/b");
@@ -190,7 +195,7 @@ describe("cron tick fan-out — per-repo participation", () => {
     repoLayers.set("acme/a", { cached: true, config: { crons: { disable: ["repo-health"] } } });
     repoLayers.set("acme/b", { cached: true, config: { crons: { enable: ["repo-health"] } } });
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs({ crons: { enable: [], disable: ["repo-health"] } });
+    const [job] = await getJobs({ crons: { enable: [], disable: ["repo-health"] } });
     const res = await tick(job!, dispatch);
     expect(res).toEqual({ dispatched: 1, failures: 0 });
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -204,7 +209,7 @@ describe("cron tick fan-out — per-repo participation", () => {
     });
     repoLayers.set("acme/b", { cached: true, config: { crons: { enable: ["repo-health"] } } });
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs({ crons: { enable: [], disable: ["repo-health"] } });
+    const [job] = await getJobs({ crons: { enable: [], disable: ["repo-health"] } });
     await tick(job!, dispatch);
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect((dispatch.mock.calls[0]![1] as Record<string, unknown>).repo).toBe("acme/b");
@@ -212,7 +217,7 @@ describe("cron tick fan-out — per-repo participation", () => {
 
   it("an empty resolved repo list is a clean no-op tick", async () => {
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs({ crons: { enable: [], disable: ["repo-health"] } });
+    const [job] = await getJobs({ crons: { enable: [], disable: ["repo-health"] } });
     const res = await tick(job!, dispatch);
     expect(dispatch).not.toHaveBeenCalled();
     expect(res).toEqual({ dispatched: 0, failures: 0 });
@@ -222,7 +227,7 @@ describe("cron tick fan-out — per-repo participation", () => {
     repoLayers.set("acme/a", { fail: "GitHub 503" });
     repoLayers.set("acme/b", { cached: true, config: { crons: { disable: ["repo-health"] } } });
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs();
+    const [job] = await getJobs();
     const res = await tick(job!, dispatch);
     // a falls back to its inherited (global) behaviour; b's opt-out still holds.
     expect(res).toEqual({ dispatched: 1, failures: 0 });
@@ -232,7 +237,7 @@ describe("cron tick fan-out — per-repo participation", () => {
   it("honours a repo's legacy disabled.crons list as well", async () => {
     repoLayers.set("acme/a", { cached: true, config: { disabled: { crons: ["repo-health"] } } });
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs();
+    const [job] = await getJobs();
     const res = await tick(job!, dispatch);
     expect(res).toEqual({ dispatched: 1, failures: 0 });
     expect((dispatch.mock.calls[0]![1] as Record<string, unknown>).repo).toBe("acme/b");
@@ -242,7 +247,7 @@ describe("cron tick fan-out — per-repo participation", () => {
     repoLayers.set("acme/a", { cached: true, config: {} });
     repoLayers.set("acme/b", { cached: true, config: {} });
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    await tick(getJobs()[0]!, dispatch);
+    await tick((await getJobs())[0]!, dispatch);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -250,7 +255,7 @@ describe("cron tick fan-out — per-repo participation", () => {
     policy.allowKeys = ["models", "variants", "approval"];
     repoLayers.set("acme/a", { cached: true, config: { crons: { enable: ["repo-health"] } } });
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const [job] = getJobs({ crons: { enable: [], disable: ["repo-health"] } });
+    const [job] = await getJobs({ crons: { enable: [], disable: ["repo-health"] } });
     const res = await tick(job!, dispatch);
     expect(res).toEqual({ dispatched: 0, failures: 0 });
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -260,7 +265,7 @@ describe("cron tick fan-out — per-repo participation", () => {
     policy.enabled = false;
     repoLayers.set("acme/a", { cached: true, config: { crons: { disable: ["repo-health"] } } });
     const dispatch = vi.fn<CronDispatcher>().mockResolvedValue({ success: true });
-    const res = await tick(getJobs()[0]!, dispatch);
+    const res = await tick((await getJobs())[0]!, dispatch);
     expect(res).toEqual({ dispatched: 2, failures: 0 });
   });
 

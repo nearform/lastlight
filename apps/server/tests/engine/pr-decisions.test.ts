@@ -586,7 +586,7 @@ describe("resolveMergeDisposition", () => {
         headSha: "099bca81bbbbbbbb",
         headIsOurs: true,
       }),
-      deps,
+      fix,
     );
     expect(d.decision).toBe("skip");
     expect(d.reason).toMatch(/^escalated:/);

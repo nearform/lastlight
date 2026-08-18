@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("#src/logging/logger.js", () => {
   const noopLogger = {
@@ -19,15 +19,12 @@ import {
   type VisibilityResult,
 } from "#src/engine/github/team-visibility.js";
 import type { TeamVisibilityConfig } from "#src/config/config.js";
+import { makeTestDb } from "../helpers/state-db.js";
 
 let db: StateDb;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
-});
-
-afterEach(() => {
-  db.close();
+beforeEach(async () => {
+  db = await makeTestDb();
 });
 
 const CONFIG: TeamVisibilityConfig = {
@@ -343,7 +340,7 @@ describe("TeamVisibilityResolver — staleness", () => {
     });
     const r = resolver(github, ["nearform/lastlight"]);
     await r.visibleRepos("alice");
-    db.teams.invalidateLogin("alice");
+    await db.teams.invalidateLogin("alice");
     await r.visibleRepos("alice");
     expect(calls.listUserTeams).toBe(2);
   });

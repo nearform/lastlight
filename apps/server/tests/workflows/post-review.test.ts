@@ -144,8 +144,8 @@ function makeReporter() {
     message: vi.fn(async () => {}),
     approvalNote: vi.fn(async () => {}),
     postNote: vi.fn(async () => {}),
-    persistPhase: vi.fn(() => {}),
-    failWorkflow: vi.fn((e?: string) => { failed.push(e ?? ""); }),
+    persistPhase: vi.fn(async () => {}),
+    failWorkflow: vi.fn(async (e?: string) => { failed.push(e ?? ""); }),
     footer: vi.fn(async () => {}),
     noteTerminal: vi.fn(async () => {}),
   };
