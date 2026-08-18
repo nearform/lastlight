@@ -26,8 +26,43 @@ hand-maintained subset that silently diverges.
   `executeMultiple` and exercise `legacy-sqlite.ts`; the concurrency probe
   test exists in `tests/state/concurrency.test.ts`; the `getOrCreateSession`
   race-guard test exists in the session-manager tests).
-- `npx vitest run` green at the phase start. Record the total test count
-  before touching anything — it is the invariant.
+- `pnpm --filter lastlight-core test` green at the phase start. Record the
+  total test count before touching anything — it is the invariant.
+
+> ### Scale correction — 2026-08-18
+>
+> This doc was written against a 2-file test surface (`tests/state/db.test.ts`
+> + `tests/state/workflow-run-store.test.ts`). Actual surface:
+>
+> - **208 test files** in `apps/server/tests`, of which **37 open a real
+>   SQLite database** — 33 via `new StateDb(":memory:")`, 6 via raw
+>   `new Database(":memory:")` + `migrate(db)`. **44 construction sites** in
+>   total.
+> - They span `tests/state/` (11), `tests/admin/` (6), `tests/cron/` (6),
+>   `tests/connectors/` (4), `tests/workflows/` (8), `tests/engine/` (2).
+>   Several files hold many sites — `tests/cron/handler-crons.test.ts` alone
+>   has 8, `tests/cron/scheduler-failure-alert.test.ts` has 4.
+> - **Three files hand-write their own `CREATE TABLE`** for the messaging
+>   tables rather than calling a migration
+>   (`tests/connectors/messaging/session-manager.test.ts:134,147,185`,
+>   `tests/admin/session-repo.test.ts:17,22`) — these break the moment
+>   `SessionManager` stops owning its DDL, and are easy to miss because they
+>   never touch `StateDb`.
+> - **Baseline on the merged branch: 203 passed / 5 skipped files, 3,115
+>   passed / 20 skipped tests.** That is the invariant this phase must
+>   preserve (+1 for the added message-append test).
+>
+> **Locked decision 15 supersedes this doc's per-file `mkdtemp` sketch**: add
+> `apps/server/tests/helpers/state-db.ts` exporting `makeTestDb()` (per-test
+> `mkdtemp` + `StateDb.open()` + registered cleanup) and convert **all 44
+> sites**, transacting or not. There is no shared test-helper module in the
+> repo today — `find apps/server/tests -name '*.ts' ! -name '*.test.ts'`
+> returns nothing — so this is the first one; put it where the next fixture
+> would also go.
+>
+> Note also `packages/workflow-engine/src/test-support/fakes.ts`'s
+> `InMemoryStateStore` (a second, non-SQLite implementation of the port, used
+> by 3 test files) must flip async in lockstep — locked decision 13.
 
 > The line numbers and describe titles below were captured against the
 > pre-Phase-2a files. Phases 2a/2b will have edited every one of these files
@@ -61,6 +96,11 @@ wrapping the existing describe blocks with their current titles preserved
   `workflow_approvals CRUD`, `dailyStats`, `context JSON round-trip`,
   `recordSkippedPhase`, `node_statuses store removed (issue #94)`
   (from `tests/state/db.test.ts`);
+- the `UserStore` blocks — get-or-create-by-github (upsert refresh),
+  slack upsert + email link, find-by-{id,login,email,slack}, non-unique
+  email determinism, boolean `is_blocked`/`email_is_placeholder` round-trip
+  (from `tests/state/user-store.test.ts`, issue #205 — reachable via
+  `db.users`, so dialect-neutral and it belongs in the parameterized set);
 - `pauseForApproval`, `finishRun with a terminal marker`,
   `resolveGateAndResume`, `resolveGateAndFail`,
   `resolveReplyGateAndResume`, `hasRunForTrigger`, and the Phase 2b
@@ -195,6 +235,7 @@ the `getOrCreateSession` race test, the executions-wire pin test, and a
 | tests/state/concurrency.test.ts › probe (1, from Phase 2) | overlapping ops, single winner | factory (file deleted after move) |
 | session-manager tests › getOrCreateSession race (1, from Phase 2) | concurrent create, one session | session factory |
 | workflow-run-store.test.ts › hasRunForTrigger (4) | per-workflow trigger memory | factory |
+| user-store.test.ts › all blocks (issue #205) | user identity upserts + finders + boolean round-trip | factory (reachable via `db.users`) |
 | session-manager.test.ts › same-key identity (1) | get-or-create | session factory |
 | session-manager.test.ts › new session after deactivation (1) | active-session uniqueness + audit trail | session factory |
 | session-manager.test.ts › partial unique index (1) | two-active-rows rejection | session factory |
@@ -233,9 +274,10 @@ own layers against a sqlite `StateDb` and are out of scope — do not move them.
   have `makeDb` register the dir and `rmSync` it in the factory's
   `afterEach` alongside `db.close()`.)
 
-- **`tests/state/workflow-run-store.test.ts`** is **deleted** — its bodies
-  live in the factory and run via the runner above. (Two runners both calling
-  `runStateDbSuite` would double-run the suite.)
+- **`tests/state/workflow-run-store.test.ts`** and
+  **`tests/state/user-store.test.ts`** (issue #205) are **deleted** — their
+  bodies live in the factory and run via the runner above. (Two runners both
+  calling `runStateDbSuite` would double-run the suite.)
 - **`tests/connectors/messaging/session-manager.test.ts`** becomes the thin
   sqlite runner for `runSessionManagerSuite`: its `makeCtx` opens a fresh
   in-memory client through the same construction path Phase 2b gave
@@ -271,18 +313,20 @@ factory). The hatch exists for Phase 4 discoveries, sparingly.
 ## Verification
 
 ```bash
-npm run build && npx vitest run
+pnpm --filter lastlight-core build && pnpm --filter lastlight-core test
 ```
 
 - All green. Total test count = pre-phase count **+1** (the added
-  message-append test) — no other delta. Compare `vitest run` summary lines
+  message-append test) — no other delta. Compare the test-run summary lines
   before/after and paste both into the Deviations section.
-- `git diff --stat` touches only `tests/` — **zero `src/` changes**.
+- `git diff --stat` touches only `apps/server/tests/` — **zero `src/`
+  changes**.
 - Grep-audit that no assertion got weakened in the move: the factory still
   contains the strings `not pending`, `approval insert failed`,
   `rejects` (rollback + guard tests), and the `phaseHistory).toEqual([])`
   post-rollback assertions.
-- Run the state files twice in a row (`npx vitest run tests/state
+- Run the state files twice in a row
+  (`pnpm --filter lastlight-core exec vitest run tests/state
   tests/connectors/messaging`) to confirm no cross-test leakage from the
   lifecycle change.
 
@@ -309,14 +353,15 @@ npm run build && npx vitest run
 - [ ] `tests/connectors/messaging/session-manager-suite.ts` exports
       `runSessionManagerSuite(makeCtx, opts)` with the `SessionSuiteCtx` shape.
 - [ ] Rollback fake, poison-scratch rollback, compare-and-set stale guards,
-      concurrency probe, stats bucketing, and upsert/override coverage all
-      live in the parameterized factory.
+      concurrency probe, stats bucketing, upsert/override coverage, **and the
+      `UserStore` blocks (issue #205)** all live in the parameterized factory.
 - [ ] Fixed-ISO timestamp rule applied to every stats/bucketing assertion;
       rotted `2026-04-*` literals replaced.
-- [ ] Thin runners in place; `workflow-run-store.test.ts` deleted;
-      `session-manager.legacy.test.ts` holds the two sqlite-only tests.
+- [ ] Thin runners in place; `workflow-run-store.test.ts` and
+      `user-store.test.ts` deleted; `session-manager.legacy.test.ts` holds the
+      two sqlite-only tests.
 - [ ] Zero `opts.dialect` skips introduced.
-- [ ] `npm run build && npx vitest run` green; count = before + 1; no `src/`
-      diff.
+- [ ] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+      green; count = before + 1; no `src/` diff.
 - [ ] README checkbox ticked; deviations (incl. before/after test counts)
       appended to this doc.

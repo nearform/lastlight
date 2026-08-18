@@ -330,25 +330,64 @@ Slack**. It is a `handler:` cron — `runRepoDigest` in `src/cron/repo-digest.ts
   (which returns issues and pull requests together, each PR carrying
   `pull_request.merged_at`) plus the harness's own `workflow_runs` and
   `executions`. So the numbers are arithmetic rather than a model's
-  self-report, and a repo costs 2–3 GitHub requests.
+  self-report, and a repo costs 3–4 GitHub requests.
 - **`since` filters on `updated_at`**, so the response also contains items
   merely touched inside the window. Every count is taken from the item's own
   `created_at` / `closed_at` / `merged_at`, in `summarizeRepo`.
-- **One optional model call** (`digest.narrative`) turns those facts into a
-  sentence of English. It is never asked to produce a number, and a failure
-  drops the sentence rather than the digest.
-- **Every PR number is a link, and none of them unfurl.** `prRef` emits a
-  markdown link that `markdownToSlackMrkdwn` converts to Slack's `<url|#294>`
-  form — markdown
-  rather than that form directly, because the converter runs over these lines
-  and would escape a pre-built one. Both numbers a digest prints are open pull
-  requests (`listOpenPullRequests`), so the target is always `/pull/N`. The
+- **The week's CONTENT is a second, separate read** —
+  `listRepoDigestDetail`, one GraphQL request carrying three aliased `search`
+  queries (merged PRs, issues opened, issues closed) with each item's
+  `bodyText`. It is `search` rather than the REST list because the REST list
+  ranks by `updated_at`: fine for a count, wrong for a *list*, where a PR merged
+  on Monday and untouched since would sort below any old issue commented on
+  Friday. This read is **allowed to fail** (`fetchDetailSafely`) — a failure
+  logs and drops the lists, and the digest posts the counts exactly as it did
+  before the lists existed. That exemption matters because a failed repo fails
+  the tick (below), and enrichment must not page anybody.
+- **One optional model call** (`digest.narrative`) turns the week's items into
+  two to four sentences of English. It is never asked to produce a number — the
+  digest prints those underneath it — and a failure drops the summary rather
+  than the digest. The prompt is composed by `buildSummaryPrompt` and budgeted
+  in **characters, not items**: a single pull-request body can run to 11 KB, so
+  `digest.detailItems` alone bounds nothing.
+- **`closingIssuesReferences` is a list of candidates, not of facts.** GitHub
+  reports every issue *linked* to a merged PR — by keyword or through the
+  Development sidebar — whether or not the merge closed it, and whether or not
+  it is closed at all. `attributeClosures` therefore accepts a link only when
+  the issue closed within `[merge − 5s, merge + 60s]`, because a merge closes
+  its issues in the same operation (observed: +1s to +2s). Without that guard a
+  digest tells three lies from one join: an issue closed by hand days earlier
+  vanishes from "Closed issues", reappears under a PR that did not close it,
+  and inflates the "closed by merged PRs" count. Cross-repo references are
+  dropped outright — a foreign `#12` rendered against this repo's URL points at
+  the wrong issue. The count of folded issues is taken from what was **actually
+  removed** from the list, never from the number of references.
+- **Bot pull requests are folded to a count.** A week of Dependabot bumps would
+  otherwise fill the merged list and push the human work under the `…and N
+  more` tail.
+- **Every number is a link, and none of them unfurl.** `ref` emits a markdown
+  link that `markdownToSlackMrkdwn` converts to Slack's `<url|#294>` form —
+  markdown rather than that form directly, because the converter runs over these
+  lines and would escape a pre-built one. Listed items render **GitHub's own
+  `url`**, so issues resolve to `/issues/N` and pull requests to `/pull/N`; only
+  the two lists with no URL of their own (the oldest unreviewed PR and the
+  escalated ones, both from `listOpenPullRequests`) are built as `/pull/N`. The
+  summary's own bare `#N` citations are linkified by `linkifyRefs` **only when
+  the number is in the digest's fact set**, so a hallucinated reference reads as
+  plain text instead of a confident link to somebody else's pull request. The
   post passes `unfurl: false`, which sets **both** `unfurl_links` and
   `unfurl_media` — without it Slack expands each citation into a preview card
-  and buries the six lines of summary they annotate. It is opt-out per message
+  and buries the summary they annotate. It is opt-out per message
   rather than a connector-wide default: for a conversational reply one shared
   link and one useful preview is the right behaviour, and only a message whose
   links are a REFERENCE LIST wants them off.
+- **Untrusted text is escaped before it is composed.** Issue titles, PR titles
+  and the model's summary are all written by third parties and land in a channel
+  unedited. Slack's control sequences are plain text — an issue titled
+  `<!channel>` notifies everyone — so `escapeSlack` neutralizes `&`, `<` and `>`
+  in every one of them *before* any link markdown is added. That ordering is
+  what lets the two coexist: the only angle brackets reaching
+  `markdownToSlackMrkdwn` are the ones the renderer put there.
 - **The escalated-PR list is asked of GitHub** (open PRs labelled
   `requires-human`), not inferred from run rows — `fanOut` returns only
   `{dispatched, failures}` and a skip counts as a success, so an escalation is

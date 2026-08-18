@@ -414,10 +414,16 @@ slack:
 #
 # The facts are computed in code, from the GitHub API and the harness's own
 # SQLite, so the numbers are right. `narrative` adds ONE cheap model call that
-# turns those facts into a sentence of plain English; it is never asked to
-# produce a number, and a failure there drops the sentence rather than the
-# digest.
+# turns the week's merged PRs and issues into a few sentences of plain English;
+# it is never asked to produce a number, and a failure there drops the summary
+# rather than the digest.
+#
+# The content lists (which PRs merged, which issues opened and closed) come from
+# a second, GraphQL request that is likewise allowed to fail: if it does, the
+# digest posts the counts alone, exactly as it did before the lists existed.
 digest:
   windowDays: 7        # how far back a digest looks
-  narrative: true      # false = bullets only, zero model spend
-  maxItems: 5          # cap on each enumerated list (unreviewed PRs, escalations)
+  narrative: true      # false = counts + lists only, zero model spend
+  maxItems: 5          # cap on the escalation list
+  listItems: 8         # cap on each content list (merged PRs, issues opened/closed); max 25
+  detailItems: 25      # how many items' text the summariser reads; max 60 — it sizes a prompt

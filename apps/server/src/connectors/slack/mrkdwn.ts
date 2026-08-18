@@ -215,9 +215,9 @@ export function markdownToSlackMrkdwn(text: string): string {
 const imageRegex = (): RegExp => /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 
 /** Slack section text limit is 3000; batch under it with headroom. */
-const MAX_SECTION_CHARS = 2900;
+export const MAX_SECTION_CHARS = 2900;
 /** Slack caps a message at 50 blocks. */
-const MAX_MESSAGE_BLOCKS = 50;
+export const MAX_MESSAGE_BLOCKS = 50;
 
 /** True if the text contains at least one markdown image. */
 export function hasMarkdownImage(text: string): boolean {

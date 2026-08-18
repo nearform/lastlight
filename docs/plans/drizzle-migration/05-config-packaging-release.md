@@ -25,7 +25,7 @@ After this phase:
 ## Preconditions
 
 - Phases 1, 2 (combined), 3, 4 all ticked in [README.md](README.md).
-- `src/state/db.ts` exposes async `StateDb.open(pathOrUrl)` that: accepts
+- `apps/server/src/state/db.ts` exposes async `StateDb.open(pathOrUrl)` that: accepts
   `:memory:`, `file:` URLs, AND bare filesystem paths (normalizing per
   locked decision 9), resolves `migrationsFolder` via
   `new URL("../../drizzle/sqlite", import.meta.url)`, and **throws** an
@@ -35,8 +35,8 @@ After this phase:
   the prod cutover runbook below runs promptly after the merge so `main`
   doesn't sit in the "carries the engine, prod not yet backed up/cut over"
   window any longer than necessary.
-- `better-sqlite3` is gone from `package.json` (Phase 2b).
-- Repo green: `npm run build && npx vitest run`.
+- `better-sqlite3` is gone from `apps/server/package.json` (Phase 2b).
+- Repo green: `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`.
 
 ## 1. Config slot — `database.url`
 
@@ -151,14 +151,43 @@ Add under "Agent Settings" next to `STATE_DIR`:
 
 ## 2. Dockerfile
 
-Current state (`Dockerfile:10-16`): the apt line installs
-`python3 make g++` solely for better-sqlite3's node-gyp build, per the
-comment on line 11. **`drizzle/` is not copied by any existing COPY** — the
+> **Corrected 2026-08-18.** The Dockerfile is now a **two-stage pnpm build**
+> and it installs the toolchain **TWICE** — the original text described a
+> single install and would have left half the fix undone:
+>
+> - **Build stage, `apps/server/Dockerfile:22-25`** — `python3 make g++` for
+>   "native modules (better-sqlite3) compiled during install". This is the one
+>   that actually compiles, at the `pnpm install --frozen-lockfile --filter
+>   lastlight-core...` on `:44`.
+> - **Runtime stage, `:68-74`** — installs `python3 make g++` *again*,
+>   alongside git/ripgrep/docker-CLI/gosu. This one is already redundant today:
+>   the compiled `.node` binary is copied wholesale from the build stage at
+>   `:90` (`COPY --from=build /app /app`), and both stages are `node:22-slim`
+>   so the ABI matches. It is ~200 MB of dead toolchain in the shipped image.
+>
+> **Remove it from both.** Dropping only the runtime one leaves the (slow)
+> build-stage compile in place; dropping only the build one breaks the build
+> while better-sqlite3 is still a dependency. They come out in the same commit
+> as `pnpm remove better-sqlite3` (Phase 2's dependency-removal step).
+>
+> Unrelated but worth not breaking: the **sandbox** images
+> (`sandbox.Dockerfile:41-44`, `sandbox-base.Dockerfile:28`) also install
+> `python3 make g++` — for ssh2's `cpu-features` via gondolin, **not** for
+> better-sqlite3. Sandbox containers never open the state DB. **Leave them
+> alone.**
+>
+> Also note `:63` — `pnpm --filter lastlight-core deploy --prod /app` is what
+> shapes the runtime `node_modules`. `drizzle/` is not a dependency, so
+> `pnpm deploy` will not carry it; the explicit COPY below is genuinely
+> required.
+
+Current state: the apt lines install `python3 make g++` for better-sqlite3's
+node-gyp build. **`drizzle/` is not copied by any existing COPY** — the
 COPY set is `package*.json`, `dashboard/package.json`, `tsconfig.json`,
 `src/`, `dashboard/`, `deploy/`, `config/`, `skills/`, `agent-context/`,
 `workflows/`, `CLAUDE.md`. Without a new COPY the migrator dies at boot.
 
-1. Drop the toolchain — replace lines 10-16 with:
+1. Drop the toolchain — from **both stages** (`:22-25` and `:68-74`):
 
    ```dockerfile
    # System deps: git, ripgrep, docker CLI (for the docker-sandbox fallback
@@ -213,8 +242,8 @@ the `lastlight` user on the real image.
 
 ## 3. npm packaging
 
-`package.json` `files` is currently `["dist", "config", "workflows",
-"skills", "agent-context", "deploy", "sandbox.Dockerfile",
+`apps/server/package.json` `files` is currently `["dist", "config",
+"workflows", "skills", "agent-context", "deploy", "sandbox.Dockerfile",
 "docker-compose.yml", ".claude-plugin", "plugins"]` — **`drizzle` is
 absent** (verified). Add it:
 
@@ -232,38 +261,40 @@ them; if not, add now):
 
 ### Path trace (why `../../` is right — do not "fix" it to `../../../`)
 
-`tsconfig.json` has `rootDir: src`, `outDir: dist`, so `src/state/db.ts`
-compiles to `dist/state/db.js`. From `dist/state/db.js`,
+`apps/server/tsconfig.json` has `rootDir: src`, `outDir: dist`, so
+`src/state/db.ts` compiles to `dist/state/db.js`. From `dist/state/db.js`,
 `new URL("../../drizzle/sqlite", import.meta.url)` climbs `dist/state` →
 `dist` → package root → `drizzle/sqlite`:
 
 | Context | db.js location | resolves to |
 |---|---|---|
-| dev (tsx) | `<repo>/src/state/db.ts` | `<repo>/drizzle/sqlite` ✓ |
+| dev (tsx) | `apps/server/src/state/db.ts` | `apps/server/drizzle/sqlite` ✓ |
 | built repo / docker | `/app/dist/state/db.js` | `/app/drizzle/sqlite` ✓ |
-| npm install | `node_modules/lastlight/dist/state/db.js` | `node_modules/lastlight/drizzle/sqlite` ✓ |
+| npm install | `node_modules/lastlight-core/dist/state/db.js` | `node_modules/lastlight-core/drizzle/sqlite` ✓ |
 
 Two parent hops, all three contexts. `../../../` would escape the package.
 
 ### Verify
 
 ```bash
-npm pack --dry-run 2>&1 | grep drizzle
+# from apps/server/ (the lastlight-core package root)
+pnpm --filter lastlight-core exec npm pack --dry-run 2>&1 | grep drizzle
 # expect drizzle/sqlite/0000_baseline.sql, drizzle/sqlite/meta/*, drizzle/pg/*
 
 # Packed-tarball smoke — the migrator must find migrationsFolder from dist/:
-SCRATCH=$(mktemp -d) && npm pack --pack-destination "$SCRATCH"
+SCRATCH=$(mktemp -d)
+( cd apps/server && npm pack --pack-destination "$SCRATCH" )
 cd "$SCRATCH" && mkdir smoke && cd smoke && npm init -y >/dev/null \
-  && npm i ../lastlight-*.tgz
+  && npm i ../lastlight-core-*.tgz
 node --input-type=module -e "
-  const { StateDb } = await import('lastlight/dist/state/db.js');
+  const { StateDb } = await import('lastlight-core/dist/state/db.js');
   const db = await StateDb.open(':memory:');
   console.log('packed-tarball migrate OK');"
 ```
 
 If that import path isn't the public shape after 2b, use whatever the evals
-harness would (`lastlight/dist/*` is an exported subpath) — the assertion is
-solely "migrations resolve from the installed package".
+harness would (`lastlight-core/dist/*` is an exported subpath) — the
+assertion is solely "migrations resolve from the installed package".
 
 ## 4. Docs
 
@@ -271,12 +302,13 @@ solely "migrations resolve from the installed package".
 
 - **Frontmatter / Purpose / split rule / JSONL sections** — unchanged.
 - **"SQLite tables" intro** — schema source of truth is now
-  `src/state/schema/sqlite.ts` (with `src/state/schema/pg.ts` as the
-  name-parity Postgres mirror); the shown DDL stays as illustration but cite
-  the generated baseline `drizzle/sqlite/0000_baseline.sql`. Seven tables:
-  the two messaging tables are now schema-owned — `session-manager.ts` no
-  longer self-migrates. Delete the "`ALTER TABLE ADD COLUMN` wrapped in
-  try/catch" sentence.
+  `apps/server/src/state/schema/sqlite.ts` (with
+  `apps/server/src/state/schema/pg.ts` as the name-parity Postgres mirror);
+  the shown DDL stays as illustration but cite the generated baseline
+  `apps/server/drizzle/sqlite/0000_baseline.sql`. Eight tables (incl. the
+  issue-#205 `users` identity table): the two messaging tables are now
+  schema-owned — `session-manager.ts` no longer self-migrates. Delete the
+  "`ALTER TABLE ADD COLUMN` wrapped in try/catch" sentence.
 - **Migrations section** — full rewrite: idempotent hand-edited baseline
   (no-op on existing DBs) + `__drizzle_migrations` journal; the
   `legacy-sqlite.ts` pre-step (PRAGMA `table_info`-guarded column adds for
@@ -285,8 +317,9 @@ solely "migrations resolve from the installed package".
   release (v0.11) and is removed after v0.12, so messaging-era deployments
   older than that must pass through a v0.11/v0.12 release first); boot
   pragmas `journal_mode=WAL` +
-  `busy_timeout=5000`; future migrations via `npm run db:generate:sqlite` /
-  `db:generate:pg`. **Delete the stale claim** that
+  `busy_timeout=5000`; future migrations via
+  `pnpm --filter lastlight-core run db:generate:sqlite` / `db:generate:pg`.
+  **Delete the stale claim** that
   `PRAGMA foreign_keys = ON` is set at connect (it never was — the sole
   legacy pragma was WAL).
 - **New: dialect posture** — sqlite/libsql is the production store; the PG
@@ -306,19 +339,20 @@ solely "migrations resolve from the installed package".
   shared Drizzle client with a dialect seam (not "a shared `BaseDb`
   interface"); keep "migrate additively", adding "…and journal it".
 
-### `CLAUDE.md`
+### `apps/server/CLAUDE.md`
 
-- Repo-layout entry for `state/db.ts` (~line 178): describe the Drizzle
-  layer — `schema/` (sqlite + pg mirrors), async `StateDb.open`, stores —
-  and add a top-level `drizzle/` line (generated migrations, shipped in npm
-  + docker artifacts).
-- Environment: extend the `DB_PATH` bullet (~line 517) with `DATABASE_URL`
-  and the resolution order from §1.
+- Repo-layout entry for `state/db.ts`: describe the Drizzle layer —
+  `schema/` (sqlite + pg mirrors), async `StateDb.open`, the four stores
+  (incl. `UserStore`) — and add a top-level `drizzle/` line (generated
+  migrations, shipped in npm + docker artifacts).
+- Environment: extend the `DB_PATH` bullet with `DATABASE_URL` and the
+  resolution order from §1.
 - Add the schema-change workflow (Commands or a short "State schema" note):
-  **schema change = edit BOTH `src/state/schema/sqlite.ts` AND
-  `src/state/schema/pg.ts`, regenerate BOTH dialects
-  (`npm run db:generate:sqlite && npm run db:generate:pg`), and the parity
-  test enforces the two stay in sync.**
+  **schema change = edit BOTH `apps/server/src/state/schema/sqlite.ts` AND
+  `apps/server/src/state/schema/pg.ts`, regenerate BOTH dialects
+  (`pnpm --filter lastlight-core run db:generate:sqlite &&
+  pnpm --filter lastlight-core run db:generate:pg`), and the parity test
+  enforces the two stay in sync.**
 
 ### docs-sync
 
@@ -370,22 +404,44 @@ writes must be discarded.
 ## 6. Release (npm — required)
 
 The workflow-execution path changed, so per the npm-release-policy the
-`lastlight/evals` barrel consumers need a release. **Minor bump**: verify
-the current version first (`node -p "require('./package.json').version"` —
-`0.10.1` at last verification → `0.11.0`; if it has drifted again, bump
-minor from whatever it is and substitute the real numbers below — the
-legacy-rebuild `TODO(remove after v0.12)` markers in `legacy-sqlite.ts`
-assume the migration ships as v0.11; re-anchor them too if not).
+`lastlight/evals` barrel consumers need a release. **Minor bump.**
+
+> **Corrected 2026-08-18 — this is now a FIVE-package release, not one.**
+> The original text bumped `lastlight-core` alone. Locked decision 13 changes
+> `packages/workflow-engine`, and the workspace graph is
+> `lastlight-workflow-engine ← lastlight-shared ← {lastlight (cli),
+> lastlight-core} ← lastlight-evals`. A graph-aware bump therefore cascades
+> through **every** published package except `agentic-pi` (which has no
+> workspace deps and is on its own release stream).
+>
+> Follow [`docs/RELEASING.md`](../../RELEASING.md) for the bump order — it is
+> the canonical runbook and it already encodes the graph. Do not hand-roll the
+> order from this doc.
+>
+> **Version anchor**: current version at reconciliation time is **`0.25.9`**,
+> so the migration ships as **`v0.26.0`** (not the `v0.11.0` the examples below
+> still say — substitute throughout). That also **re-anchors the
+> `TODO(remove after v0.12)` markers** the plan specifies for
+> `legacy-sqlite.ts`'s messaging rebuild: they become
+> **`TODO(remove after v0.27)`**. Getting this wrong either deletes the shim
+> while deployments still need it, or keeps dead code forever.
+>
+> Verify before bumping:
+> `node -p "require('./apps/server/package.json').version"`.
 
 Transcribed from CLAUDE.md "Cutting a release" — on a clean, up-to-date
 `main`:
 
 ```bash
-npm version minor --no-git-tag-version      # package.json + package-lock.json
-# THIRD file, manual, lockstep: plugins/lastlight/.claude-plugin/plugin.json
+# bump lastlight-core's version (a bare `pnpm --filter … version` bumps
+# NOTHING — use `exec npm version`); updates apps/server/package.json.
+pnpm --filter lastlight-core exec npm version minor --no-git-tag-version
+# THIRD file, manual, lockstep:
+#   apps/server/plugins/lastlight/.claude-plugin/plugin.json
 #   → set "version" to the same X.Y.Z
-npm run build
-git add package.json package-lock.json plugins/lastlight/.claude-plugin/plugin.json
+pnpm --filter lastlight-core build
+git add apps/server/package.json pnpm-lock.yaml \
+  apps/server/plugins/lastlight/.claude-plugin/plugin.json
 git commit -m "chore(release): v0.11.0"
 git tag -a v0.11.0 -m "v0.11.0"             # annotated — lightweight tags rejected
 git push origin main --follow-tags
@@ -399,14 +455,15 @@ npm view lastlight@0.11.0 version --prefer-online   # no `v` prefix on npm
 
 ## Verification
 
-- `npm run build && npx vitest run` green; `cd dashboard && npx tsc -b`.
+- `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+  green; `pnpm --filter @lastlight/dashboard typecheck`.
 - Config: new tests pass; boot with `DATABASE_URL=file:/tmp/x.db` uses it;
   boot with nothing behaves exactly as before; dashboard `/config` shows
   `database.url` with correct provenance.
 - Docker: image builds with the trimmed apt line; throwaway-container smoke
   from §2 passes (libsql loads, migrator runs as UID 10001).
-- Packaging: `npm pack --dry-run | grep drizzle` non-empty; packed-tarball
-  smoke prints `packed-tarball migrate OK`.
+- Packaging: `(cd apps/server && npm pack --dry-run) | grep drizzle`
+  non-empty; packed-tarball smoke prints `packed-tarball migrate OK`.
 - Docs: spec/10-state.md contains no `BaseDb` / `foreign_keys=ON` /
   `migrate.ts` claims; docs-sync run clean.
 - Prod: runbook executed; `__drizzle_migrations` has the baseline row;
@@ -440,9 +497,11 @@ npm view lastlight@0.11.0 version --prefer-online   # no `v` prefix on npm
       `src/index.ts` construction site; config tests cover precedence.
 - [ ] `config/default.yaml` ships `database.url: null`; `.env.example`
       documents `DATABASE_URL`.
-- [ ] Dockerfile: `python3 make g++` removed, `COPY drizzle/ drizzle/`
+- [ ] Dockerfile: `python3 make g++` removed from **BOTH** the build stage
+      (≈22-25) and the runtime stage (≈68-74); sandbox Dockerfiles left
+      untouched; `COPY drizzle/ drizzle/`
       added; throwaway-container smoke passed.
-- [ ] `package.json` `files` includes `"drizzle"`; pack dry-run +
+- [ ] `apps/server/package.json` `files` includes `"drizzle"`; pack dry-run +
       packed-tarball migrator smoke passed.
 - [ ] `spec/10-state.md` rewritten per outline; `CLAUDE.md` updated
       (state layer, DATABASE_URL, both-dialects regen workflow); docs-sync
