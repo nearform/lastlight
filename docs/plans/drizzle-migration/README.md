@@ -12,6 +12,43 @@ plus this README alone.
 
 ## ▶ Start here — resuming in a new session
 
+> ## ✅ Phases 1–5 are DONE and SHIPPED
+>
+> The Drizzle/libsql state layer merged as **PR #351**, released as
+> **v0.26.0**, and has been running on **drizby prod since 2026-08-18**.
+> The `drizzle-migration` branch is finished; **work from `main`**, and ignore
+> every instruction below about branches, merging `main` in, or `main` staying
+> on better-sqlite3 — all of that is spent.
+>
+> **The only phase left is [Phase 6](06-prod-postgres.md)** — the production
+> Postgres runtime, deliberately deferred out of #351. It is *additive*: today
+> `StateDb.open()` throws on a `postgres://` URL and no PG driver is a runtime
+> dependency, and the sqlite path stays the default afterwards. Start there:
+>
+> ```bash
+> cd ~/work/lastlight && git checkout main && git pull --ff-only
+> pnpm install --frozen-lockfile
+> pnpm turbo run typecheck test build     # green before you start
+> ```
+>
+> Then read **[06-prod-postgres.md](06-prod-postgres.md)** end-to-end. You do
+> **not** need the Phase 1–5 docs to execute it, but you do need three facts
+> they establish, and §"What Phases 1–5 left you" below is the short version.
+>
+> A kickoff prompt that needs no other context:
+>
+> > Execute Phase 6 of the Drizzle migration from
+> > `docs/plans/drizzle-migration/06-prod-postgres.md`, working on a branch off
+> > `main`. Phases 1–5 already shipped in v0.26.0. Follow the locked decisions
+> > in that directory's README — do not relitigate them.
+>
+> The rest of this directory is now a **record of how the migration was done**,
+> not a to-do list. It is worth keeping: the deviations sections are where the
+> plan was wrong, and Phase 6 inherits several of those corrections.
+
+<details>
+<summary>Historical — the Phase 1–5 session ritual (no longer applicable)</summary>
+
 **The work happens on the `drizzle-migration` branch, not `main`.** `main`
 carries this plan (so it is readable from anywhere) and stays deployable on
 better-sqlite3 until Phase 5. Landing as ONE PR.
@@ -30,24 +67,7 @@ Then read, in order: **this README** (locked decisions + the drift ledger
 above) → **[00-architecture.md](00-architecture.md)** → **your phase doc**.
 Check "Status / todo list" below for the next unticked phase.
 
-**Phase 5's code half is DONE** (commit `180d03e`) — the `database.url` config
-slot, the Dockerfile toolchain removal, `drizzle/` in `files`, and the
-spec/CLAUDE.md/www doc sweep, all verified against the real image and a real
-packed tarball. **What remains is only the outward-facing tail**, in this order:
-
-1. **Merge the branch to `main`** (squash — locked decision 6) and verify green
-   there.
-2. **Release v0.26.0** across all five published packages — follow
-   [`docs/RELEASING.md`](../../RELEASING.md) for the graph-aware bump order, not
-   the sketch in 05's §6. Version anchor is `0.25.9`.
-3. **Cut prod over** per 05's §5 runbook. Re-run the prod-shape smoke (05 §0)
-   first if drizby has moved on since 2026-08-18.
-
-Read [05-config-packaging-release.md](05-config-packaging-release.md) — its
-**Deviations** section records what the doc's own §§2–4 got wrong (the
-Dockerfile COPY is unnecessary; the wire contract is camelCase, not snake_case).
-Its deviations-carrying predecessors matter too — Phase 4's §1 and §2 in
-particular, since the state layer's shape changed again.
+</details>
 
 A kickoff prompt that needs no other context:
 
@@ -56,7 +76,43 @@ A kickoff prompt that needs no other context:
 > execute the next unticked phase from its own doc. Follow the locked
 > decisions — do not relitigate them. Land nothing on `main`.
 
-**Invariants to hold**
+## What Phases 1–5 left you (read this before Phase 6)
+
+The state layer on `main` no longer resembles what the older phase docs
+describe. These are the facts Phase 6 will trip over:
+
+| | |
+|---|---|
+| Driver | `@libsql/client` + `drizzle-orm/libsql`. **`better-sqlite3` is gone from the repo**, and `src/state/migrate.ts` is **deleted** — a doc sending you there for the table inventory means `src/state/schema/sqlite.ts` |
+| Construction | `await StateDb.open(pathOrUrl)` / `StateDb.fromClient(client, dialect)`. No public constructor, no `db.database`; `db.client` is the Drizzle instance and **every store method returns a Promise** |
+| Config | `config.database.url` resolves env > overlay > default and feeds `StateDb.open(config.database.url ?? config.dbPath)` in `src/index.ts`. `DATABASE_URL` is live; `postgres://` **throws** — that throw is precisely what Phase 6 replaces |
+| Schemas | **Two**: `schema/sqlite.ts` + `schema/pg.ts`. A change to one must be mirrored and **both** dialects regenerated (`db:generate:sqlite` + `db:generate:pg`) or `tests/state/schema-parity.test.ts` fails. Nothing under `src/` may import `schema/pg.ts` |
+| Migrations | Journaled in `__drizzle_migrations`; **two** exist (`0000_baseline`, `0001_backfill_repo_refs` — a DATA migration whose statement ORDER is load-bearing). Generated only: **never** point `drizzle-kit push` at a real database (prod carries two orphan tables it would DROP) |
+| Tables | Each store holds a `private readonly t: StateTables` from `tablesOf(client)`. **A Drizzle client built without `{ schema }` throws on first use** — relevant to Phase 6, which builds a new one |
+| Testing | `makeTestDb()` (`tests/helpers/state-db.ts`), a per-test temp FILE. **`:memory:` is fatal for anything that transacts**: libsql opens a fresh, empty connection after each transaction |
+| Green baseline | **207 test files, 3,446 tests** on `main` at v0.26.0 |
+| New gate | `typecheck` also runs `lint:promises` (`apps/server/scripts/lint-floating-promises.mjs`) |
+
+Three hard-won rules that still apply:
+
+1. **`tsc` cannot see a dropped promise.** `!promise` is always `false`, and
+   TS2801 fires only on the bare `if (promise)` form. The migration shipped 14
+   such bugs through a clean compiler and 3 more reached review. Now enforced
+   by `lint:promises` — keep it passing rather than reaching for a grep.
+2. **A "deterministic" tiebreak is not automatically the RIGHT one** — see the
+   `cron_runs` regression in 02b's Deviations §3.
+3. **`asStateClient()` is not a portability seam — it is a silenced type
+   error.** The query-builder *surface* is identical across drivers so the cast
+   compiles and composes; **per-column value mapping is not, and does not go
+   through `dialect.ts`**. Phase 4 removed the cast from the stores via
+   `tablesOf`, but **Phase 6 reintroduces it in `pg-client.ts`** — so it is the
+   one piece of this reasoning that must be re-checked against a real driver
+   rather than PGlite. §1's `int8`-as-string note is exactly this class of bug.
+
+<details>
+<summary>Historical — Phase 1–5 invariants and the Phase 1–2 change list</summary>
+
+**Invariants held during Phases 1–5**
 
 | Invariant | Value |
 |---|---|
@@ -144,6 +200,8 @@ mappings. Recipe and findings: **§0 of
 that prod carries **two orphan tables the schema does not declare**
 (`rate_limits`, `system_status`), which is a standing reason never to point
 `drizzle-kit push` at it.
+
+</details>
 
 ---
 
@@ -238,18 +296,25 @@ each must leave the repo green before the next starts.
   different placeholder in each, so the pattern must be an inlined literal —
   a `strpos()` port would have failed identically), one to `open()`'s
   postgres-URL guard missing its `/i` flag.
-- [ ] **Phase 5** — [05-config-packaging-release.md](05-config-packaging-release.md)
+- [x] **Phase 5** — [05-config-packaging-release.md](05-config-packaging-release.md)
   — config slot, Dockerfile, docs-sync, prod cutover runbook, npm release
-  *(risk: low-medium)*. **Code half completed 2026-08-18** (`180d03e`):
-  `database.url` slot with env>overlay>default>dbPath precedence; `python3 make
-  g++` gone from both Dockerfile stages; `drizzle/` in `files`, which ships it
-  to the npm tarball AND the image (no COPY needed — see Deviations §1); spec +
-  CLAUDE.md + www doc sweep. Verified on the real artifacts: image builds with
-  no compiler present, migrates as UID 10001, honours `DATABASE_URL`; packed
-  tarball resolves `migrationsFolder` from an npm install. **202 files / 3,361
-  tests.** *Remaining: the merge to `main`, the five-package v0.26.0 release,
-  and the prod cutover — all deliberately left for a human to drive.*
-- [ ] **Phase 6 — DEFERRED, not in this PR** —
+  *(risk: low-medium)*. *Completed 2026-08-18.* `database.url` slot
+  (env>overlay>default>dbPath); `python3 make g++` gone from both Dockerfile
+  stages; `drizzle/` in `files`, which ships it to the npm tarball AND the image
+  (no COPY needed — Deviations §1); spec + CLAUDE.md + www doc sweep. Merged as
+  **PR #351**, released as **v0.26.0** (five packages + the plugin manifest),
+  and **cut over on drizby**: 2 journal rows, row counts unchanged, only
+  `__drizzle_migrations` added, zero errors, image 1.94 GB → 1.61 GB. Reads
+  verified against production rows and writes verified by a real run through
+  `finishRun`'s transaction. **Deviations — §1 and §9 matter beyond this
+  phase:** the Dockerfile `COPY drizzle/` the doc specifies is unnecessary
+  because `pnpm deploy` packs per `files`, which makes npm and docker **one
+  ship, not two**; and §5's cutover runbook was wrong in three places
+  (stale hand-run deploy, "exactly one" journal row, and expecting migrator
+  output that a no-op never produces). Also §3: the wire contract is camelCase,
+  not the snake_case §4 specifies.
+- [ ] **Phase 6 — THE ONLY PHASE LEFT** (was deferred out of PR #351; it is now
+  simply the next piece of work, on a branch off `main`) —
   [06-prod-postgres.md](06-prod-postgres.md) — **activate the
   production Postgres runtime**: driver-selectable PG pool (node-postgres default
   **or** Neon serverless via `drizzle-orm/neon-serverless`) + `pg` /
@@ -291,10 +356,10 @@ Architecture reference (read before any phase):
    Dockerfile; reads the existing `lastlight.db` via `file:` URL.
 3. **PG scope**: working `pgTable` schema + dialect-ported SQL, state test suite
    green on PGlite in CI. **No prod PG deployment, no sqlite→pg data migration.**
-   *(2026-08-18: Phase 6 would lift the first half, but it is **deferred out of
-   this PR** — see decision 6. Through Phase 5, `StateDb.open()` throws on a
-   `postgres://` URL and `pg` stays out of runtime deps. The "no sqlite→pg data
-   migration" half holds permanently for now.)*
+   *(2026-08-18: this held through Phase 5, which shipped in **v0.26.0** —
+   `StateDb.open()` throws on a `postgres://` URL and `pg` is not a runtime
+   dep. **Phase 6 lifts the first half**; the "no sqlite→pg data migration"
+   half still holds, and 06 §8 keeps it explicitly out of scope.)*
 4. **Real JSON columns on Postgres** — `jsonb` (paired with sqlite
    `text({mode:'json'})`), not text-blob JSON.
 5. Pin the latest **stable** drizzle-orm / drizzle-kit (the finius reference

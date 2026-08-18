@@ -1,7 +1,8 @@
 # Phase 6 — Production Postgres runtime (operator-selectable DB)
 
-Risk: **medium**. Phases 1–5 build the whole dual-dialect machinery but
-**reserve** the Postgres runtime: `pg` stays out of runtime deps and
+Risk: **medium**. Phases 1–5 shipped in **v0.26.0** and built the whole
+dual-dialect machinery, but deliberately **reserved** the Postgres runtime:
+`pg` stays out of runtime deps and
 `StateDb.open()` *throws* on a `postgres://` URL — Postgres is proven only
 against **PGlite (WASM) in CI**. This phase **activates** that reserved slot so
 an operator can set `DATABASE_URL=postgres://…` (or `database.url` in the
@@ -57,6 +58,11 @@ After this phase:
 
 ## Preconditions
 
+- **All satisfied as of 2026-08-18** — Phases 1–5 shipped in **v0.26.0** (PR
+  #351) and drizby prod has been running the Drizzle engine since. Re-verify
+  green before starting (`pnpm turbo run typecheck test build`; the baseline on
+  `main` at v0.26.0 is **207 test files / 3,446 tests**), then treat the rest of
+  this list as context rather than as gates.
 - Phases 1–5 all ticked in [README.md](README.md); `main` carries the merged
   Drizzle engine and is green
   (`pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`).

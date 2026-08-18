@@ -428,6 +428,23 @@ separate lastlight-www site, which mirrors the spec.
 
 ## 5. Prod cutover runbook (verbatim-usable)
 
+> **✅ EXECUTED on drizby 2026-08-18 (v0.25.9 → v0.26.0).** Kept because it is
+> reusable for nearform and for the Phase 6 cutover — but **three of its steps
+> below are wrong as written**; the corrections are in Deviations §9, and the
+> short version is:
+>
+> - **Step 2 is stale.** Deploys are driven by the overlay's auto-deploy Action
+>   now (bump `deploy.version`, push), not a hand-run `lastlight server update`.
+>   See [`docs/RELEASING.md`](../../RELEASING.md) → "Rolling a release out".
+> - **`__drizzle_migrations` has TWO rows, not "exactly one".** The check below
+>   predates `0001_backfill_repo_refs.sql` and would read a correct cutover as a
+>   failure.
+> - **The migrator logs nothing on a no-op.** Step 3 tells you to expect a
+>   "legacy pre-step log + migrator applying/recording the baseline"; on a
+>   database that is already at the baseline shape you get neither, only the
+>   `Database` line. Absence of migrator output is the success case, not a
+>   missing step.
+
 Prod data lives in the docker volume **`lastlight_agent-data`** — NOT
 `/home/lastlight/lastlight/data`.
 
@@ -572,11 +589,11 @@ npm view lastlight@0.11.0 version --prefer-online   # no `v` prefix on npm
 - [x] `spec/10-state.md` rewritten per outline; `CLAUDE.md` updated
       (state layer, DATABASE_URL, both-dialects regen workflow); docs-sync
       skill run before commit.
-- [ ] Prod cutover executed per runbook, checks green, backup retained.
-- [ ] v0.26.0 released: three files in
+- [x] Prod cutover executed per runbook, checks green, backup retained.
+- [x] v0.26.0 released: **five** packages + the plugin manifest in
       lockstep, annotated tag, GitHub release, publish.yml green,
       `npm view` confirms.
-- [ ] Phase 5 checkbox ticked in README.md; deviations recorded below.
+- [x] Phase 5 checkbox ticked in README.md; deviations recorded below.
 
 ## Deviations
 
@@ -683,3 +700,88 @@ It does not — the real array has neither, so the Claude Code plugin is **not**
 in the npm tarball, contradicting the root `CLAUDE.md` ("Shipped in the npm
 package (files: .claude-plugin + plugins)"). Out of scope and untouched, but
 somebody should decide which of the two is meant to be true.
+
+### 8. The release + cutover as executed (2026-08-18)
+
+*Added when the outward-facing tail was finished; §§1–4 above were recorded
+earlier the same day.*
+
+**Release — `v0.26.0`, five packages.** `lastlight-workflow-engine` and
+`lastlight-shared` → **0.4.0**, `lastlight-core` and `lastlight` (cli) →
+**0.26.0**, `lastlight-evals` → **0.10.0**, plus the root
+`plugins/lastlight/.claude-plugin/plugin.json` in lockstep with the CLI.
+`agentic-pi` was untouched since `v0.25.9`, so its second tag was **not**
+needed — check that before assuming a release needs one. `publish.yml` ran
+`checks → images → npm` green; all five packages confirmed on npm and all four
+`ghcr.io/nearform/lastlight-*:v0.26.0` images confirmed present **before** the
+prod pin was touched. §6's version anchor was right (`0.25.9` → `0.26.0`), but
+note the release notes had to cover **two** merged PRs, not one: #347 (sandbox
+dependency services) was also unreleased.
+
+**Backup — taken cold, not live.** §5 uses `VACUUM INTO` against a running
+agent, which is sound. With no runs in flight there was no reason to rely on
+that, so: `lastlight server stop agent` → `PRAGMA wal_checkpoint(TRUNCATE)`
+(returned `0|0|0`, folding 2.1 MB of WAL) → `VACUUM INTO` → verify → restart on
+the *old* version so prod wasn't down while the images built. Result:
+`/root/lastlight-pre-drizzle-20260818-1523.db`, 36 MB from 43 MB,
+`integrity_check ok`, 2,242 executions / 1,633 runs / 18 tables — all identical
+to live. Streamed to `~/lastlight-prod-snapshots/` with sha256 matched at both
+ends, per [[lastlight-prod-db-snapshot]]'s rule that snapshots live outside any
+repo.
+
+**Cutover result.** Deploy Action green in 59 s. Everything the plan predicted
+held exactly:
+
+| Check | Result |
+|---|---|
+| `__drizzle_migrations` | **2 rows** (baseline + backfill) |
+| Row counts | 2,242 / 1,633 — unchanged |
+| Tables | 19 = the prior 18 **+ `__drizzle_migrations`**, nothing else |
+| `rate_limits` / `system_status` orphans | both survived untouched |
+| Boot log | **zero errors, zero warnings**; 8 crons registered, 3 App installations |
+| Running artifact | `GIT_SHA` = the release commit; checkout `v0.26.0` |
+| `drizzle/` in the image | present at `/app/drizzle/sqlite` — §2's packaging claim, proven in prod |
+| Compiler toolchain | absent; image **1.94 GB → 1.61 GB** |
+
+**Reads and writes were verified separately, and the distinction mattered.**
+Reads: the real store methods run against production rows inside the container
+(`allExecutions` → camelCase with `success` a genuine boolean and no
+snake_case leak; `context` parsed as an object, largest **60,790 bytes**;
+`phaseHistory` a real array; `executionStats` 2,242/8; `dailyStats` 7 buckets).
+Writes needed real traffic — the crons fire at `:00`/`:30` and the deploy
+landed at `15:37`, so for twenty minutes prod had *proven reads and unproven
+writes*, which is a state worth naming rather than glossing. A
+maintainer-triggered `answer` run then closed it: succeeded in 2m07s, 17 turns,
+`$0.1298`, with `phase_history` written as proper JSON and `finished_at`
+stamped — i.e. **`finishRun`'s transaction, the connection-scoped serializer's
+whole reason for existing, executed against production.** The 16:00
+`check-prs-awaiting-review` fire then wrote a `cron_runs` row byte-identical to
+its pre-deploy history (`repos_eligible=11, scanned=0, discovered=0,
+dispatched=0, ok`) — baselined against the previous five fires rather than
+assumed normal, since `0/0` reads like a failure until you check.
+
+**Two API mistakes worth recording**, because both produced alarming output
+against production and neither was a defect: `recentExecutions(5)` returns zero
+rows because its signature is `(skill, limit)`, and `getAllCronOverrides()`
+returns a **`Map`**, so `.length` is `undefined`. Check the signature before
+believing a scary number.
+
+### 9. §5's runbook was wrong in three places
+
+Corrected inline at the top of §5. Recorded here too because each would have
+cost real time during an incident:
+
+1. **Step 2 (`sudo -u lastlight -i lastlight server update`) is stale.** Both
+   overlay repos now run an auto-deploy Action; the rollout is a
+   `deploy.version` bump and a push, which also pins the host's global CLI to
+   the tag. The hand-run form is the fallback for a host without the Action.
+2. **"exactly one row" in `__drizzle_migrations` is wrong** — there are two,
+   and have been since Phase 2 added `0001_backfill_repo_refs.sql`. A cutover
+   verified against this line would look failed while being correct.
+3. **"expect: legacy pre-step log + migrator applying/recording the
+   baseline" does not happen** on an already-baseline-shaped database. The
+   boot log shows only the `Database` line. Silence is the success case;
+   the runbook invites you to go hunting for output that cannot exist.
+
+Also stale but harmless: the rollback paragraph names `v0.10.1` as "the
+previous release tag". For this cutover it was `v0.25.9`.
