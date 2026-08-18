@@ -168,3 +168,50 @@ describe("the repo-normalization backfill (issue #279)", () => {
     db.close();
   });
 });
+
+/**
+ * `migrate()` is gone; the pre-Drizzle ALTER-era columns (and the one data
+ * backfill that shipped with `workflow_runs.owner`) now live in
+ * `applyLegacySqliteCompat`, which runs against the raw libsql handle before
+ * the migrator. Same assertion, new home — moved here from
+ * `tests/state/workflow-run-store.test.ts` in Phase 3, since it drives the
+ * sqlite-only compat pre-step rather than any store.
+ *
+ * `:memory:` is safe HERE only because nothing in this test transacts —
+ * the compat step's messaging rebuild is skipped when the table is absent.
+ */
+describe("the boot compat step's owner backfill", () => {
+  const PRE_OWNER_DDL = `
+    CREATE TABLE workflow_runs (
+      id TEXT PRIMARY KEY,
+      workflow_name TEXT NOT NULL,
+      trigger_id TEXT NOT NULL,
+      repo TEXT,
+      issue_number INTEGER,
+      current_phase TEXT NOT NULL,
+      phase_history TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'running',
+      context TEXT,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+  `;
+
+  it("backfills owner from context.owner for pre-migration rows", async () => {
+    // Simulate an old DB: a row whose owner lives only in the context JSON.
+    const raw = createClient({ url: ":memory:" });
+    await raw.executeMultiple(PRE_OWNER_DDL);
+    await raw.execute({
+      sql: `INSERT INTO workflow_runs (id, workflow_name, trigger_id, repo, current_phase, status, context, started_at, updated_at)
+         VALUES ('r1', 'build', 'nearform/lastlight#1', 'lastlight', 'phase_0', 'succeeded', ?, '2026-01-01', '2026-01-01')`,
+      args: [JSON.stringify({ owner: "nearform" })],
+    });
+
+    // The boot compat step adds the column and backfills from context.owner.
+    await applyLegacySqliteCompat(raw);
+    const res = await raw.execute(`SELECT owner FROM workflow_runs WHERE id = 'r1'`);
+    expect(res.rows[0].owner).toBe("nearform");
+    raw.close();
+  });
+});

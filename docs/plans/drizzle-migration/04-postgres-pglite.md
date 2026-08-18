@@ -16,6 +16,46 @@ PGlite-backed `StateDb`. No production PG deployment, no data migration
 (locked decision 3). PG stays out of runtime deps: the only PG entry point
 is `StateDb.fromClient()` from tests.
 
+## ⚠ Before you start: the cast is not enough
+
+> **Added 2026-08-18 by Phase 3**, which surfaced this while porting the state
+> tests' direct-row peeks. Verified against `drizzle-orm@0.45.2` source, not
+> inferred. Read it before writing `pg.ts` — it changes what this phase has to
+> build.
+>
+> [00-architecture.md](00-architecture.md) says store code is "written once,
+> typed against the sqlite Drizzle instance" and the PG instance is "adapted
+> through one documented `asStateClient()` cast". The **query-builder surface**
+> really is structurally identical across drivers, so `select` / `insert` /
+> `update` / `delete` / `transaction` all compose. But **per-column value
+> mapping is not**, and it is the one divergence `dialect.ts` does not cover —
+> so a store holding a `sqliteTable` object while running on a PG client
+> mis-maps its own values:
+>
+> | | sqlite column | pg column | using the sqlite object on a PG client |
+> |---|---|---|---|
+> | **boolean** | `SQLiteBoolean.mapToDriverValue(v) => v ? 1 : 0` | `PgBoolean` — **no** `mapToDriverValue` (identity) | a write sends `1` into a `boolean` column → PG rejects it. Reads survive by luck: `Number(true) === 1` |
+> | **json** | `SQLiteTextJson.mapFromDriverValue = JSON.parse` | `PgJsonb.mapFromDriverValue` already parses; the driver returns an **object** | every read does `JSON.parse(object)` → throws |
+>
+> Booleans break on WRITE, JSON breaks on READ. Affected columns are exactly the
+> ones locked decisions 4 and the boolean-mode list name: `executions.success`,
+> `cron_overrides.enabled`, `workflow_overrides.enabled`,
+> `messaging_sessions.active`, and `phase_history` / `context` / `scratch` /
+> `extension_status` / `skills_status`.
+>
+> **Every store imports its tables directly** — `import { cronRuns } from
+> "./schema/sqlite.js"` — so the hole is under all seven of them, not just the
+> two test peeks that exposed it. This phase therefore has one more deliverable
+> than the file table below lists: **the table objects must be resolved per
+> dialect**, e.g. the `StateClient` carries its own schema and stores read their
+> tables off it, so the sqlite leg gets `sqliteSchema` and the PG leg gets
+> `pgSchema` from the same code. A cast cannot do this; it only silences the
+> type error that would otherwise have caught it.
+>
+> Do this FIRST. Every raw-SQL port below is downstream of it, and the failure
+> mode on the JSON half is a thrown `JSON.parse`, not a wrong answer — loud, but
+> only once the leg runs at all.
+
 ## Preconditions
 
 - [ ] Phases 1, 2 (combined), 3 checked off in [README.md](README.md).

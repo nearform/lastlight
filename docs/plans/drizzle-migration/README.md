@@ -41,7 +41,7 @@ A kickoff prompt that needs no other context:
 
 | Invariant | Value |
 |---|---|
-| Green baseline | **206 test files, 3,127 tests passing** (was 203 / 3,115 at Phase 0) |
+| Green baseline | **199 test files, 3,128 tests passing** (206 / 3,127 after Phase 2; Phase 3 folded nine files into the factory and added one test) |
 | Branch sync | merge `main` in; never rebase |
 | `main` | docs only until Phase 5; stays on better-sqlite3 |
 | Scope | Phases 1–5. **Phase 6 is deferred out of this PR** |
@@ -84,12 +84,25 @@ will trip over:
    as well as `apps/server/src`** — the first pass missed the engine entirely.
 2. **A "deterministic" tiebreak is not automatically the RIGHT one.** See the
    `cron_runs` regression in 02b's Deviations §3.
+3. **`asStateClient()` is not a portability seam — it is a silenced type
+   error.** Found in Phase 3 and verified against `drizzle-orm@0.45.2` source.
+   The query-builder *surface* is identical across drivers, so the cast
+   compiles and composes; **per-column value mapping is not, and does not go
+   through `dialect.ts`**. A `sqliteTable` object used on a PG client sends
+   `1` into a `boolean` (sqlite's `mapToDriverValue`; `PgBoolean` has none) and
+   runs `JSON.parse` over an already-parsed jsonb object. Booleans break on
+   WRITE, JSON breaks on READ. Every store imports `./schema/sqlite.js`
+   directly, so this sits under all seven — **Phase 4 must resolve table
+   objects per dialect before anything else**, and its doc now opens with a
+   warning block saying so.
 
-**Where the risk is:** Phases 1–2 are done. Phase 3 is now mostly a *move*
-(the fixture it was going to build already exists). **Phase 4 is the next real
-risk** — the PG leg is where every raw-SQL port either holds or doesn't, and
-several Phase-2 ports were written specifically to survive it. Phase 5 is
-packaging plus the **mandatory prod-shape smoke that Phase 2 could not do**.
+**Where the risk is:** Phases 1–3 are done. **Phase 4 is the next real risk** —
+the PG leg is where every raw-SQL port either holds or doesn't, and several
+Phase-2 ports were written specifically to survive it. Phase 3 made that leg
+worth running (the whole state suite is now dialect-parameterized, not a
+subset) and also found that **Phase 4 has one more deliverable than its doc
+lists** — see the drift note immediately below. Phase 5 is packaging plus the
+**mandatory prod-shape smoke that Phase 2 could not do**.
 
 ---
 
@@ -153,8 +166,19 @@ each must leave the repo green before the next starts.
   permanently on). **One done-criterion is deliberately NOT met** — the
   prod-shape smoke needs a copy of the real DB and becomes a Phase 5 release
   gate.
-- [ ] **Phase 3** — [03-test-suite-factory.md](03-test-suite-factory.md) —
-  shared state test-suite factory *(risk: low)*
+- [x] **Phase 3** — [03-test-suite-factory.md](03-test-suite-factory.md) —
+  shared state test-suite factory *(risk: low)*. *Completed 2026-08-18.*
+  `tests/state/store-suite.ts` exports `runStateDbSuite(makeDb, { dialect })`
+  over nine per-store modules in `tests/state/suites/`;
+  `tests/connectors/messaging/session-manager-suite.ts` is the second factory.
+  **199 files / 3,128 tests** — the specified `+1` and nothing else; zero `src/`
+  diff; zero dialect skips. **Deviations — read §1 and §8 before Phase 4:** the
+  factory was widened from the doc's 4 source files to **11** (the seven the
+  stale inventory table missed are the only guards for `rowid`, `strposExpr`,
+  `sumTrue`/`sumFalse`, the feedback upserts and `INSERT OR IGNORE` — without
+  them the PG leg could go green proving none of them); and moving the direct-row
+  peeks proved **`asStateClient()` alone cannot carry Phase 4** — see the new
+  drift note below.
 - [ ] **Phase 4** — [04-postgres-pglite.md](04-postgres-pglite.md) — Postgres
   schema (jsonb), schema-parity test, PGlite test leg *(risk: medium)*
 - [ ] **Phase 5** — [05-config-packaging-release.md](05-config-packaging-release.md)

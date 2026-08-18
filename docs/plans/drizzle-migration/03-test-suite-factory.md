@@ -377,20 +377,183 @@ pnpm --filter lastlight-core build && pnpm --filter lastlight-core test
 
 ## Done criteria
 
-- [ ] `tests/state/store-suite.ts` exports `runStateDbSuite(makeDb, opts)`;
+- [x] `tests/state/store-suite.ts` exports `runStateDbSuite(makeDb, opts)`;
       all mutable state function-scoped; fresh-DB-per-test lifecycle.
-- [ ] `tests/connectors/messaging/session-manager-suite.ts` exports
+- [x] `tests/connectors/messaging/session-manager-suite.ts` exports
       `runSessionManagerSuite(makeCtx, opts)` with the `SessionSuiteCtx` shape.
-- [ ] Rollback fake, poison-scratch rollback, compare-and-set stale guards,
+- [x] Rollback fake, poison-scratch rollback, compare-and-set stale guards,
       concurrency probe, stats bucketing, upsert/override coverage, **and the
       `UserStore` blocks (issue #205)** all live in the parameterized factory.
-- [ ] Fixed-ISO timestamp rule applied to every stats/bucketing assertion;
+- [x] Fixed-ISO timestamp rule applied to every stats/bucketing assertion;
       rotted `2026-04-*` literals replaced.
-- [ ] Thin runners in place; `workflow-run-store.test.ts` and
+- [x] Thin runners in place; `workflow-run-store.test.ts` and
       `user-store.test.ts` deleted; `session-manager.legacy.test.ts` holds the
       two sqlite-only tests.
-- [ ] Zero `opts.dialect` skips introduced.
-- [ ] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+- [x] Zero `opts.dialect` skips introduced.
+- [x] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
       green; count = before + 1; no `src/` diff.
-- [ ] README checkbox ticked; deviations (incl. before/after test counts)
+- [x] README checkbox ticked; deviations (incl. before/after test counts)
       appended to this doc.
+
+---
+
+## Deviations (executed 2026-08-18)
+
+**Test counts, before → after.** The invariant the phase had to preserve:
+
+```
+before   Test Files  206 passed | 5 skipped (211)
+              Tests  3127 passed | 20 skipped (3147)
+
+after    Test Files  199 passed | 5 skipped (204)
+              Tests  3128 passed | 20 skipped (3148)
+```
+
+`3127 → 3128` is exactly the specified `+1` (the added message-append test) and
+nothing else. **The file count necessarily fell 206 → 199** — the doc pinned
+files as well as tests, but nine `*.test.ts` collapsed into the factory and two
+new leftover files appeared, so `206 − 9 + 2 = 199`. Tests are the invariant that
+mattered; files could not have held.
+
+Workspace gate green: `pnpm turbo run typecheck test build` — 21/21 tasks.
+`git diff` touches **zero** `src/` and zero `packages/`.
+
+### 1. Factory scope widened from 4 source files to 11 *(the material change)*
+
+The inventory table above names only `db.test.ts`, `workflow-run-store.test.ts`,
+`user-store.test.ts` and `concurrency.test.ts`. That table was written against a
+3-store codebase and the 2026-08-18 reconciliation corrected the status block
+around it without extending it. Seven more pure-state suites now exist, all
+reachable through `db.*` via `makeTestDb()`, and they are the **only** tests that
+exercise the ports [00-architecture.md](00-architecture.md) flags as the highest
+Postgres risk:
+
+| Also moved into the factory | The port it is the only guard for |
+|---|---|
+| `cron-run-store.test.ts` | `rowid` tiebreak + the unaliased derived table — **hard PG parse errors** |
+| `repo-ref.test.ts` › `qualifiedRepoSql` | `strposExpr` / `instr` — *"the single widest-reaching fragment in the codebase"*, ~13 call sites |
+| `execution-outcome.test.ts`, `execution-store-reads.test.ts` | `EXECUTION_OUTCOME_COLUMNS` (`sumTrue`/`sumFalse`), the camelCase row mapping |
+| `feedback-store.test.ts` | `dailyScores` bucketing, `reactor IS ?`, the `ON CONFLICT` upserts, the `''` channel sentinel |
+| `team-store.test.ts` | `INSERT OR IGNORE`, `COALESCE(t.truncated, 0)` over a `LEFT JOIN` |
+| `approval-store.test.ts` | the artifact-scoped read (completes the approval lifecycle already in the set) |
+
+Left out of the doc's four, the PGlite leg could have gone green while proving
+nothing about any of them. Confirmed with the user before executing.
+
+### 2. Structure: a barrel + per-store sub-modules, not one `store-suite.ts`
+
+~3,100 lines in one module would not be reviewable. `tests/state/store-suite.ts`
+keeps the exported contract the doc and 04's preconditions specify —
+`runStateDbSuite(makeDb, { dialect })` — and delegates to nine modules under
+`tests/state/suites/`, one per store. None is named `*.test.ts`, so vitest
+collects none of them.
+
+**Lifecycle differs from the sketch.** Rather than a shared `beforeEach` on the
+barrel handing a `db` down, each sub-suite wraps its blocks in one `describe` and
+owns `let db; beforeEach(async () => { db = await makeDb(); })` inside it. Test
+bodies then keep the bare `db` they already used (the diff reads as a move), and
+nothing depends on hook-registration order *between* the barrel and its
+sub-suites — which `sequence.hooks` could otherwise change out from under us.
+Each test still gets exactly one pristine database. All state stays
+function-scoped, as the doc requires.
+
+### 3. Three blocks are NOT dialect-parameterizable and stayed behind
+
+The doc anticipated only the two legacy-rebuild tests. Three more had to be
+placed:
+
+- **`isTriggerActorType` (3 tests)** shared `user-store.test.ts` but is a pure
+  predicate that never opens a database → new
+  `tests/state/trigger-actor-type.test.ts`.
+- **`normalizeRepoRef` + `qualifyRepo` (11 tests)** are the pure half of
+  `repo-ref.ts` → stayed in `tests/state/repo-ref.test.ts`, which now holds only
+  them.
+- **"the boot compat step's owner backfill" (1 test)** lived in
+  `workflow-run-store.test.ts` but drives `applyLegacySqliteCompat` over a raw
+  libsql handle → moved to `tests/state/repo-normalization.test.ts`, which is
+  already the home of the sqlite-only compat-pre-step tests.
+
+### 4. `vi.mock` cannot live in a suite module
+
+`vi.mock` is hoisted per test **file**; an imported module's call does nothing.
+Two of the moved files (`workflow-run-store.test.ts`, `feedback-store.test.ts`)
+carried a logger mock, so the runner `tests/state/db.test.ts` now owns one for
+the whole suite. No assertion anywhere depends on logged content — it only keeps
+the run's stderr free of real pino JSON from the throwing-observer test. A
+future PGlite runner needs the same three lines. Same for
+`session-manager.legacy.test.ts`, which needed its own copy after the split.
+
+### 5. The session-manager runner does not reuse `makeTestDb`
+
+The doc's `SessionSuiteCtx` shape was right, and `SessionManager`'s constructor
+really is `(client: StateClient, dialect: Dialect = "sqlite")`. But the suite
+calls `ctx.close()` in `afterEach`, and `makeTestDb` registers its **own**
+cleanup — so reusing it would double-close. The runner therefore builds the
+client itself through the real boot path (raw `:memory:` client →
+`applyLegacySqliteCompat` → `drizzleMigrate` → `new SessionManager(client,
+"sqlite")`), which is also the exact shape Phase 4's PGlite `makeCtx` will take.
+`:memory:` is correct here per locked decision 12 — `SessionManager` never opens
+a transaction.
+
+### 6. The `getOrCreateSession` race-guard test does not exist
+
+The status block at the top of this doc lists it as a Phase-2 deliverable
+("the `getOrCreateSession` race-guard test exists in the session-manager
+tests") and the inventory table gives it a row. **There is no such test in
+`session-manager.test.ts`** — nothing was lost in the move, it was never
+written. So **locked decision 11 (catch `isUniqueViolation` on the insert and
+re-read) is currently unpinned.** Not added here: this phase's contract is a
+move plus one named test, and inventing a concurrency test for an unproven code
+path belongs with someone looking at that code. Flagged for Phase 5.
+
+### 7. Assertion changes — all four are the sanctioned ports
+
+Nothing was weakened. The only edits to test bodies:
+
+- **`dailyStats` › "orders results by date ascending"**: the hardcoded
+  `2026-04-08..10` literals were ~130 days stale, so the assertion had degraded
+  to *"the zero-filled rows are sorted"* — which no bucketing bug could break.
+  Replaced with `daysAgo(3..1)` and **strengthened**: it now also asserts the
+  three rows land in their own buckets in ascending order, having been inserted
+  out of order.
+- **`daysAgo`** now slices its key off the very ISO string it inserts
+  (`const iso = d.toISOString(); return { iso, key: iso.slice(0, 10) }`) instead
+  of calling `toISOString()` twice — the fixed-timestamp rule, byte-identical
+  keys on both dialects.
+- **The partial-unique-index test** matches `isUniqueViolation` via
+  `.rejects.toSatisfy(...)` instead of `/UNIQUE/`. This deleted the local
+  `constraintFailure()` cause-chain flattener, which existed only to reach that
+  string.
+- **`feedback-suite`'s `rowCount()`** peek narrowed from `select()` to
+  `select({ id: feedbackAnchors.id })`. It only ever used `.length`, and `id` is
+  `text` in both dialects, so nothing in it depends on how a boolean or JSON
+  column maps back.
+
+### 8. ⚠ Found while moving: `asStateClient()` alone will not carry Phase 4
+
+Two direct-row peeks survive in the parameterized set (`feedback-suite`'s
+`rowCount`, `session-manager-suite`'s audit-trail and duplicate-insert probes).
+Per this doc they use the Drizzle query builder on `db.client` with the schema
+objects — which is the documented dialect-neutral idiom. Writing them surfaced
+that the idiom **does not actually hold**, and the same hole sits under every
+store, because the stores `import { … } from "./schema/sqlite.js"` directly.
+
+[00-architecture.md](00-architecture.md) claims the `asStateClient()` cast is
+sound because "the query-builder surface the stores use is structurally
+identical across drivers". Structure is identical; **per-column value mapping is
+not**, and it is not routed through `dialect.ts`. Verified against
+`drizzle-orm@0.45.2` source, not inferred:
+
+| | sqlite column | pg column | consequence of using the sqlite object on a PG client |
+|---|---|---|---|
+| **boolean** | `SQLiteBoolean.mapToDriverValue(v) => v ? 1 : 0` | `PgBoolean` — **no** `mapToDriverValue` (identity) | writes send `1` to a `boolean` column → PG errors. Reads happen to survive: `Number(true) === 1` is `true` |
+| **json** | `SQLiteTextJson.mapFromDriverValue = JSON.parse` | `PgJsonb.mapFromDriverValue` already parses; the driver hands back an **object** | `JSON.parse(object)` on every read → throws. Writes are compatible (both stringify) |
+
+So booleans break on write, JSON breaks on read — hitting
+`executions.success`, `cron_overrides.enabled`, `workflow_overrides.enabled`,
+`messaging_sessions.active`, and `phase_history` / `context` / `scratch` /
+`extension_status` / `skills_status`. **Phase 4 must resolve the table objects
+per dialect** (the client carries its schema; stores take it from there) rather
+than importing `schema/sqlite.js` — a one-line cast cannot do it. Recorded as a
+warning block at the top of
+[04-postgres-pglite.md](04-postgres-pglite.md#-before-you-start-the-cast-is-not-enough).
