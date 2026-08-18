@@ -364,7 +364,7 @@ export function drainPrNotes(repoDir: string, provenance: NoteProvenance): PrNot
  * Never throws: a failed harvest must not fail the phase that produced the
  * output it was reading.
  */
-export function harvestFixMarkers(
+export async function harvestFixMarkers(
   db: StateDb,
   runId: string,
   workflowName: string,
@@ -372,13 +372,13 @@ export function harvestFixMarkers(
   output: string,
   /** Test seam: the checkout to drain the journal from, bypassing the run row. */
   overrides: { repoDir?: string | null } = {},
-): void {
+): Promise<void> {
   // Only the fix family carries the MARKERS, and only it reads them back. The
   // JOURNAL is wider — see the gate below — so this is no longer an early
   // return for the whole function.
   const wantsMarkers = PR_FIX_SHAPED_WORKFLOWS.has(workflowName);
   try {
-    const run = db.runs.getRun(runId);
+    const run = await db.runs.getRun(runId);
     // Which runs may write a note? Every PR-SCOPED one — `pr-review` reading
     // what `dependabot-ci-fix` learned is the point of keying on the PR
     // (10-pr-memory.md). Rather than import a second workflow-name set (which
@@ -431,7 +431,7 @@ export function harvestFixMarkers(
       notes,
       verifyScript,
     };
-    db.runs.mergeScratch(runId, { [FIX_HARVEST_SCRATCH_KEY]: next });
+    await db.runs.mergeScratch(runId, { [FIX_HARVEST_SCRATCH_KEY]: next });
   } catch (err: unknown) {
     log.warn("Harvest failed", { workflowName, phase, runId, err });
   }

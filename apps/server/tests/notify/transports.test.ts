@@ -86,14 +86,23 @@ describe("SlackTransport", () => {
   });
 
   it("renders Block Kit from the model while keeping text as the fallback", async () => {
-    const sendMessage = vi.fn(async () => "111.222");
+    // Declared with the real arity so the destructure below is typed — the
+    // transport calls `sendMessage(channel, thread, text, blocks)`.
+    const sendMessage = vi.fn(
+      async (
+        _channel: string,
+        _thread: string | undefined,
+        _text: string,
+        _blocks?: unknown[],
+      ) => "111.222",
+    );
     const updateMessage = vi.fn(async () => {});
     const slack = { sendMessage, updateMessage } as unknown as SlackConnector;
 
     const t = new SlackTransport({ slack, channel: "C", thread: "T" });
     await t.publish("checklist markdown", MODEL);
 
-    const [, , text, blocks] = sendMessage.mock.calls[0];
+    const [, , text, blocks] = sendMessage.mock.calls[0]!;
     expect(text).toBe("checklist markdown"); // text fallback preserved
     expect(Array.isArray(blocks)).toBe(true);
     expect((blocks as unknown[]).length).toBeGreaterThan(0);

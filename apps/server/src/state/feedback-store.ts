@@ -1,12 +1,15 @@
-import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { FeedbackSentiment, FeedbackSource } from "../engine/feedback/reactions.js";
+import type { StateClient } from "./client.js";
+import { changes, dayBucket } from "./dialect.js";
+import { feedbackAnchors, feedbackSignals } from "./schema/sqlite.js";
 
 /**
  * The feedback ledger (issue #255) — 👍/👎 on the bot's own output, scored
  * against the workflow run that produced it.
  *
- * Two tables with one job each (schema + rationale in `migrate.ts`):
+ * Two tables with one job each (schema + rationale in `schema/sqlite.ts`):
  *
  * - **anchors** are the reactable artefacts we posted, each carrying the run it
  *   came from. They are how a reaction — which names a *message* — finds a run.
@@ -114,19 +117,34 @@ export interface FeedbackListOptions {
   includeRemoved?: boolean;
 }
 
-/** Columns shared by every signal read, aliased snake → camel. */
-const SIGNAL_COLUMNS = `
-  id, anchor_id AS anchorId, source, workflow_run_id AS workflowRunId,
-  workflow_name AS workflowName, messaging_session_id AS messagingSessionId, owner, repo,
-  issue_number AS issueNumber, emoji, score, sentiment, reactor,
-  reacted_at AS reactedAt, observed_at AS observedAt, removed_at AS removedAt,
-  exported_at AS exportedAt
-`;
+/** The row shapes the builder returns for these tables, before normalization. */
+type AnchorRow = typeof feedbackAnchors.$inferSelect;
+type SignalRow = typeof feedbackSignals.$inferSelect;
+
+/**
+ * `score` is a real integer (−2..+2), NOT a boolean, so these three tallies are
+ * arithmetic in both dialects and need no boolean port. `SUM` is a bigint in
+ * Postgres, hence `mapWith(Number)`.
+ */
+const positiveCount = sql`SUM(CASE WHEN ${feedbackSignals.score} > 0 THEN 1 ELSE 0 END)`.mapWith(
+  Number,
+);
+const negativeCount = sql`SUM(CASE WHEN ${feedbackSignals.score} < 0 THEN 1 ELSE 0 END)`.mapWith(
+  Number,
+);
+const neutralCount = sql`SUM(CASE WHEN ${feedbackSignals.score} = 0 THEN 1 ELSE 0 END)`.mapWith(
+  Number,
+);
+/** Mean over SCORED signals only — the `!= 0` arm is what excludes 👀. */
+const scoredAverage =
+  sql`COALESCE(AVG(CASE WHEN ${feedbackSignals.score} != 0 THEN ${feedbackSignals.score} END), 0)`.mapWith(
+    Number,
+  );
 
 export class FeedbackStore {
-  constructor(private db: Database.Database) {}
+  constructor(private client: StateClient) {}
 
-  // ── Anchors ────────────────────────────────────────────────────
+  // ── Anchors ──────────────────────────────────────────────────────────────
 
   /**
    * Register (or re-register) a reactable artefact. Idempotent on
@@ -135,63 +153,72 @@ export class FeedbackStore {
    * attribution in place rather than forking a second anchor — which would
    * split one comment's reactions across two rows.
    */
-  upsertAnchor(input: FeedbackAnchorInput): FeedbackAnchor {
+  async upsertAnchor(input: FeedbackAnchorInput): Promise<FeedbackAnchor> {
     const now = new Date().toISOString();
     const id = randomUUID();
-    this.db
-      .prepare(
-        `INSERT INTO feedback_anchors
-           (id, source, kind, external_id, node_id, channel, owner, repo, issue_number,
-            workflow_run_id, workflow_name, messaging_session_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(source, channel, external_id) DO UPDATE SET
-           node_id = COALESCE(excluded.node_id, feedback_anchors.node_id),
-           workflow_run_id = COALESCE(excluded.workflow_run_id, feedback_anchors.workflow_run_id),
-           workflow_name = COALESCE(excluded.workflow_name, feedback_anchors.workflow_name),
-           messaging_session_id = COALESCE(excluded.messaging_session_id, feedback_anchors.messaging_session_id),
-           owner = COALESCE(excluded.owner, feedback_anchors.owner),
-           repo = COALESCE(excluded.repo, feedback_anchors.repo),
-           issue_number = COALESCE(excluded.issue_number, feedback_anchors.issue_number)`,
-      )
-      .run(
+    await this.client
+      .insert(feedbackAnchors)
+      .values({
         id,
-        input.source,
-        input.kind,
-        input.externalId,
-        input.nodeId ?? null,
-        channelKey(input.channel),
-        input.owner ?? null,
-        input.repo ?? null,
-        input.issueNumber ?? null,
-        input.workflowRunId ?? null,
-        input.workflowName ?? null,
-        input.messagingSessionId ?? null,
-        input.createdAt ?? now,
-      );
+        source: input.source,
+        kind: input.kind,
+        externalId: input.externalId,
+        nodeId: input.nodeId ?? null,
+        channel: channelKey(input.channel),
+        owner: input.owner ?? null,
+        repo: input.repo ?? null,
+        issueNumber: input.issueNumber ?? null,
+        workflowRunId: input.workflowRunId ?? null,
+        workflowName: input.workflowName ?? null,
+        messagingSessionId: input.messagingSessionId ?? null,
+        createdAt: input.createdAt ?? now,
+      })
+      .onConflictDoUpdate({
+        target: [feedbackAnchors.source, feedbackAnchors.channel, feedbackAnchors.externalId],
+        // Every arm is COALESCE(excluded, existing): a later sighting may learn
+        // an attribution the first one lacked, but must never blank one it did
+        // not carry.
+        set: {
+          nodeId: sql`coalesce(excluded.node_id, ${feedbackAnchors.nodeId})`,
+          workflowRunId: sql`coalesce(excluded.workflow_run_id, ${feedbackAnchors.workflowRunId})`,
+          workflowName: sql`coalesce(excluded.workflow_name, ${feedbackAnchors.workflowName})`,
+          messagingSessionId: sql`coalesce(excluded.messaging_session_id, ${feedbackAnchors.messagingSessionId})`,
+          owner: sql`coalesce(excluded.owner, ${feedbackAnchors.owner})`,
+          repo: sql`coalesce(excluded.repo, ${feedbackAnchors.repo})`,
+          issueNumber: sql`coalesce(excluded.issue_number, ${feedbackAnchors.issueNumber})`,
+        },
+      });
     // Read back rather than trusting `id`: on the conflict branch the existing
     // row keeps its own id, and callers need the one the signals will point at.
-    return this.findAnchor(input.source, input.channel ?? null, input.externalId)!;
+    return (await this.findAnchor(input.source, input.channel ?? null, input.externalId))!;
   }
 
   /** The reverse lookup a reaction hits. */
-  findAnchor(
+  async findAnchor(
     source: FeedbackSource,
     channel: string | null,
     externalId: string,
-  ): FeedbackAnchor | null {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM feedback_anchors
-          WHERE source = ? AND external_id = ? AND channel = ?`,
+  ): Promise<FeedbackAnchor | null> {
+    const [row] = await this.client
+      .select()
+      .from(feedbackAnchors)
+      .where(
+        and(
+          eq(feedbackAnchors.source, source),
+          eq(feedbackAnchors.externalId, externalId),
+          eq(feedbackAnchors.channel, channelKey(channel)),
+        ),
       )
-      .get(source, externalId, channelKey(channel)) as Record<string, unknown> | undefined;
+      .limit(1);
     return row ? this.deserializeAnchor(row) : null;
   }
 
-  getAnchor(id: string): FeedbackAnchor | null {
-    const row = this.db
-      .prepare(`SELECT * FROM feedback_anchors WHERE id = ?`)
-      .get(id) as Record<string, unknown> | undefined;
+  async getAnchor(id: string): Promise<FeedbackAnchor | null> {
+    const [row] = await this.client
+      .select()
+      .from(feedbackAnchors)
+      .where(eq(feedbackAnchors.id, id))
+      .limit(1);
     return row ? this.deserializeAnchor(row) : null;
   }
 
@@ -201,67 +228,86 @@ export class FeedbackStore {
    * cron is what keeps the API spend a property of the data (a fixed-size
    * working set) instead of of the schedule.
    */
-  anchorsToPoll(opts: { windowDays: number; limit: number; now?: Date }): FeedbackAnchor[] {
+  async anchorsToPoll(opts: {
+    windowDays: number;
+    limit: number;
+    now?: Date;
+  }): Promise<FeedbackAnchor[]> {
     const now = opts.now ?? new Date();
     const cutoff = new Date(now.getTime() - opts.windowDays * 86_400_000).toISOString();
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM feedback_anchors
-          WHERE source = 'github' AND node_id IS NOT NULL AND created_at >= ?
-          ORDER BY last_polled_at IS NOT NULL, last_polled_at ASC
-          LIMIT ?`,
+    const rows = await this.client
+      .select()
+      .from(feedbackAnchors)
+      .where(
+        and(
+          eq(feedbackAnchors.source, "github"),
+          isNotNull(feedbackAnchors.nodeId),
+          gte(feedbackAnchors.createdAt, cutoff),
+        ),
       )
-      .all(cutoff, opts.limit) as Record<string, unknown>[];
+      // A boolean used as a sort key: never-polled anchors first. Portable in
+      // both dialects — false sorts before true, matching SQLite's 0 < 1 — and
+      // spelled out rather than left to NULLS FIRST/LAST, which is not.
+      .orderBy(sql`${feedbackAnchors.lastPolledAt} IS NOT NULL`, asc(feedbackAnchors.lastPolledAt))
+      .limit(opts.limit);
     return rows.map((r) => this.deserializeAnchor(r));
   }
 
-  markPolled(anchorIds: string[], at = new Date().toISOString()): void {
+  async markPolled(anchorIds: string[], at = new Date().toISOString()): Promise<void> {
     if (anchorIds.length === 0) return;
-    const stmt = this.db.prepare(`UPDATE feedback_anchors SET last_polled_at = ? WHERE id = ?`);
-    const tx = this.db.transaction((ids: string[]) => {
-      for (const id of ids) stmt.run(at, id);
-    });
-    tx(anchorIds);
+    await this.client
+      .update(feedbackAnchors)
+      .set({ lastPolledAt: at })
+      .where(inArray(feedbackAnchors.id, anchorIds));
   }
 
   /** Drop anchors past the retention horizon. Signals are kept — they are the data. */
-  pruneAnchors(retentionDays: number, now = new Date()): number {
+  async pruneAnchors(retentionDays: number, now = new Date()): Promise<number> {
     const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString();
-    const res = this.db
-      .prepare(`DELETE FROM feedback_anchors WHERE created_at < ?`)
-      .run(cutoff);
-    return res.changes;
+    const res = await this.client
+      .delete(feedbackAnchors)
+      .where(lt(feedbackAnchors.createdAt, cutoff));
+    return changes(res);
   }
 
-  // ── Signals ────────────────────────────────────────────────────
+  // ── Signals ──────────────────────────────────────────────────────────────
 
   /**
    * Record one reaction. Returns the signal when it is NEW (or a revival of a
    * retracted one), and null when it was already known — so the caller can emit
    * telemetry exactly once without tracking state itself.
    */
-  recordSignal(input: RecordSignalInput): FeedbackSignal | null {
+  async recordSignal(input: RecordSignalInput): Promise<FeedbackSignal | null> {
     const { anchor } = input;
     const now = new Date().toISOString();
-    const existing = this.db
-      .prepare(
-        `SELECT ${SIGNAL_COLUMNS} FROM feedback_signals
-          WHERE anchor_id = ? AND reactor IS ? AND emoji = ?`,
+    const reactor = input.reactor ?? null;
+    const [row] = await this.client
+      .select()
+      .from(feedbackSignals)
+      .where(
+        and(
+          eq(feedbackSignals.anchorId, anchor.id),
+          matchReactor(reactor),
+          eq(feedbackSignals.emoji, input.emoji),
+        ),
       )
-      .get(anchor.id, input.reactor ?? null, input.emoji) as FeedbackSignal | undefined;
+      .limit(1);
 
-    if (existing) {
+    if (row) {
+      const existing = deserializeSignal(row);
       // Already live — nothing happened.
       if (!existing.removedAt) return null;
       // Reacted, un-reacted, reacted again. Revive the row and let it export
       // again: the person changed their mind twice and both are real events.
-      this.db
-        .prepare(
-          `UPDATE feedback_signals
-              SET removed_at = NULL, observed_at = ?, reacted_at = ?, exported_at = NULL
-            WHERE id = ?`,
-        )
-        .run(now, input.reactedAt ?? now, existing.id);
+      await this.client
+        .update(feedbackSignals)
+        .set({
+          removedAt: null,
+          observedAt: now,
+          reactedAt: input.reactedAt ?? now,
+          exportedAt: null,
+        })
+        .where(eq(feedbackSignals.id, existing.id));
       return { ...existing, removedAt: null, observedAt: now, exportedAt: null };
     }
 
@@ -278,48 +324,51 @@ export class FeedbackStore {
       emoji: input.emoji,
       score: input.score,
       sentiment: input.sentiment,
-      reactor: input.reactor ?? null,
+      reactor,
       reactedAt: input.reactedAt ?? now,
       observedAt: now,
       removedAt: null,
       exportedAt: null,
     };
-    this.db
-      .prepare(
-        `INSERT INTO feedback_signals
-           (id, anchor_id, source, workflow_run_id, workflow_name, messaging_session_id, owner, repo,
-            issue_number, emoji, score, sentiment, reactor, reacted_at, observed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        signal.id,
-        signal.anchorId,
-        signal.source,
-        signal.workflowRunId,
-        signal.workflowName,
-        signal.messagingSessionId,
-        signal.owner,
-        signal.repo,
-        signal.issueNumber,
-        signal.emoji,
-        signal.score,
-        signal.sentiment,
-        signal.reactor,
-        signal.reactedAt,
-        signal.observedAt,
-      );
+    await this.client.insert(feedbackSignals).values({
+      id: signal.id,
+      anchorId: signal.anchorId,
+      source: signal.source,
+      workflowRunId: signal.workflowRunId,
+      workflowName: signal.workflowName,
+      messagingSessionId: signal.messagingSessionId,
+      owner: signal.owner,
+      repo: signal.repo,
+      issueNumber: signal.issueNumber,
+      emoji: signal.emoji,
+      score: signal.score,
+      sentiment: signal.sentiment,
+      reactor: signal.reactor,
+      reactedAt: signal.reactedAt,
+      observedAt: signal.observedAt,
+    });
     return signal;
   }
 
   /** Retract one reaction. Returns true when a live row was actually retracted. */
-  removeSignal(anchorId: string, reactor: string | null, emoji: string, at?: string): boolean {
-    const res = this.db
-      .prepare(
-        `UPDATE feedback_signals SET removed_at = ?
-          WHERE anchor_id = ? AND reactor IS ? AND emoji = ? AND removed_at IS NULL`,
-      )
-      .run(at ?? new Date().toISOString(), anchorId, reactor, emoji);
-    return res.changes > 0;
+  async removeSignal(
+    anchorId: string,
+    reactor: string | null,
+    emoji: string,
+    at?: string,
+  ): Promise<boolean> {
+    const res = await this.client
+      .update(feedbackSignals)
+      .set({ removedAt: at ?? new Date().toISOString() })
+      .where(
+        and(
+          eq(feedbackSignals.anchorId, anchorId),
+          matchReactor(reactor),
+          eq(feedbackSignals.emoji, emoji),
+          isNull(feedbackSignals.removedAt),
+        ),
+      );
+    return changes(res) > 0;
   }
 
   /**
@@ -328,71 +377,74 @@ export class FeedbackStore {
    * batches has no event to announce it, so absence from the fresh read is the
    * only evidence there is.
    */
-  reconcileAnchor(anchorId: string, keep: Array<{ reactor: string | null; emoji: string }>): number {
-    const live = this.db
-      .prepare(
-        `SELECT id, reactor, emoji FROM feedback_signals
-          WHERE anchor_id = ? AND removed_at IS NULL`,
-      )
-      .all(anchorId) as Array<{ id: string; reactor: string | null; emoji: string }>;
+  async reconcileAnchor(
+    anchorId: string,
+    keep: Array<{ reactor: string | null; emoji: string }>,
+  ): Promise<number> {
+    const live = await this.client
+      .select({
+        id: feedbackSignals.id,
+        reactor: feedbackSignals.reactor,
+        emoji: feedbackSignals.emoji,
+      })
+      .from(feedbackSignals)
+      .where(and(eq(feedbackSignals.anchorId, anchorId), isNull(feedbackSignals.removedAt)));
     const keepKeys = new Set(keep.map((k) => `${k.reactor ?? ""} ${k.emoji}`));
     const stale = live.filter((s) => !keepKeys.has(`${s.reactor ?? ""} ${s.emoji}`));
     if (stale.length === 0) return 0;
     const now = new Date().toISOString();
-    const stmt = this.db.prepare(`UPDATE feedback_signals SET removed_at = ? WHERE id = ?`);
-    const tx = this.db.transaction((rows: typeof stale) => {
-      for (const r of rows) stmt.run(now, r.id);
-    });
-    tx(stale);
+    await this.client
+      .update(feedbackSignals)
+      .set({ removedAt: now })
+      .where(
+        inArray(
+          feedbackSignals.id,
+          stale.map((r) => r.id),
+        ),
+      );
     return stale.length;
   }
 
-  // ── Reads ──────────────────────────────────────────────────────
+  // ── Reads ────────────────────────────────────────────────────────────────
 
-  list(opts: FeedbackListOptions = {}): { signals: FeedbackSignal[]; total: number } {
-    const where: string[] = [];
-    const params: unknown[] = [];
-    if (!opts.includeRemoved) where.push("removed_at IS NULL");
-    if (opts.workflowName) {
-      where.push("workflow_name = ?");
-      params.push(opts.workflowName);
-    }
-    if (opts.repo) {
-      where.push("repo = ?");
-      params.push(opts.repo);
-    }
-    if (opts.source) {
-      where.push("source = ?");
-      params.push(opts.source);
-    }
-    if (opts.sinceIso) {
-      where.push("observed_at >= ?");
-      params.push(opts.sinceIso);
-    }
-    const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const total = (
-      this.db
-        .prepare(`SELECT COUNT(*) AS n FROM feedback_signals ${clause}`)
-        .get(...params) as { n: number }
-    ).n;
-    const signals = this.db
-      .prepare(
-        `SELECT ${SIGNAL_COLUMNS} FROM feedback_signals ${clause}
-          ORDER BY observed_at DESC LIMIT ? OFFSET ?`,
-      )
-      .all(...params, opts.limit ?? 50, opts.offset ?? 0) as FeedbackSignal[];
-    return { signals, total };
+  async list(
+    opts: FeedbackListOptions = {},
+  ): Promise<{ signals: FeedbackSignal[]; total: number }> {
+    const filters = [
+      opts.includeRemoved ? undefined : isNull(feedbackSignals.removedAt),
+      opts.workflowName ? eq(feedbackSignals.workflowName, opts.workflowName) : undefined,
+      opts.repo ? eq(feedbackSignals.repo, opts.repo) : undefined,
+      opts.source ? eq(feedbackSignals.source, opts.source) : undefined,
+      opts.sinceIso ? gte(feedbackSignals.observedAt, opts.sinceIso) : undefined,
+    ].filter((f) => f !== undefined);
+    const where = filters.length ? and(...filters) : undefined;
+    const [counted] = await this.client
+      .select({ n: count() })
+      .from(feedbackSignals)
+      .where(where);
+    const rows = await this.client
+      .select()
+      .from(feedbackSignals)
+      .where(where)
+      .orderBy(desc(feedbackSignals.observedAt))
+      .limit(opts.limit ?? 50)
+      .offset(opts.offset ?? 0);
+    return { signals: rows.map(deserializeSignal), total: counted?.n ?? 0 };
   }
 
   /** Every live signal on one run — powers the run-detail badge. */
-  forRun(workflowRunId: string): FeedbackSignal[] {
-    return this.db
-      .prepare(
-        `SELECT ${SIGNAL_COLUMNS} FROM feedback_signals
-          WHERE workflow_run_id = ? AND removed_at IS NULL
-          ORDER BY observed_at ASC`,
+  async forRun(workflowRunId: string): Promise<FeedbackSignal[]> {
+    const rows = await this.client
+      .select()
+      .from(feedbackSignals)
+      .where(
+        and(
+          eq(feedbackSignals.workflowRunId, workflowRunId),
+          isNull(feedbackSignals.removedAt),
+        ),
       )
-      .all(workflowRunId) as FeedbackSignal[];
+      .orderBy(asc(feedbackSignals.observedAt));
+    return rows.map(deserializeSignal);
   }
 
   /**
@@ -403,23 +455,21 @@ export class FeedbackStore {
    * the mean would make a well-received workflow look mediocre purely because
    * people also glanced at it.
    */
-  summaryByWorkflow(days: number, now = new Date()): FeedbackSummaryRow[] {
+  async summaryByWorkflow(days: number, now = new Date()): Promise<FeedbackSummaryRow[]> {
     const since = new Date(now.getTime() - days * 86_400_000).toISOString();
-    const rows = this.db
-      .prepare(
-        `SELECT
-           workflow_name AS workflowName,
-           COUNT(*) AS total,
-           SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS positive,
-           SUM(CASE WHEN score < 0 THEN 1 ELSE 0 END) AS negative,
-           SUM(CASE WHEN score = 0 THEN 1 ELSE 0 END) AS neutral,
-           COALESCE(AVG(CASE WHEN score != 0 THEN score END), 0) AS averageScore
-         FROM feedback_signals
-         WHERE removed_at IS NULL AND observed_at >= ?
-         GROUP BY workflow_name
-         ORDER BY total DESC`,
-      )
-      .all(since) as FeedbackSummaryRow[];
+    const rows = await this.client
+      .select({
+        workflowName: feedbackSignals.workflowName,
+        total: count(),
+        positive: positiveCount,
+        negative: negativeCount,
+        neutral: neutralCount,
+        averageScore: scoredAverage,
+      })
+      .from(feedbackSignals)
+      .where(and(isNull(feedbackSignals.removedAt), gte(feedbackSignals.observedAt, since)))
+      .groupBy(feedbackSignals.workflowName)
+      .orderBy(desc(count()));
     return rows.map((r) => ({ ...r, averageScore: round2(r.averageScore) }));
   }
 
@@ -428,7 +478,11 @@ export class FeedbackStore {
    * gaps as gaps rather than closing over them. Same UTC key generation as
    * `ExecutionStore.dailyStats`.
    */
-  dailyScores(days: number, workflowName?: string, now = new Date()): FeedbackDailyRow[] {
+  async dailyScores(
+    days: number,
+    workflowName?: string,
+    now = new Date(),
+  ): Promise<FeedbackDailyRow[]> {
     const startUtc = new Date(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)),
     );
@@ -439,38 +493,38 @@ export class FeedbackStore {
       dateKeys.push(d.toISOString().slice(0, 10));
     }
 
-    const params: unknown[] = [dateKeys[0]];
-    let filter = "";
-    if (workflowName) {
-      filter = " AND workflow_name = ?";
-      params.push(workflowName);
-    }
-    const rows = this.db
-      .prepare(
-        `SELECT
-           date(observed_at) AS date,
-           COUNT(*) AS total,
-           SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS positive,
-           SUM(CASE WHEN score < 0 THEN 1 ELSE 0 END) AS negative,
-           COALESCE(AVG(CASE WHEN score != 0 THEN score END), 0) AS averageScore
-         FROM feedback_signals
-         WHERE removed_at IS NULL AND date(observed_at) >= ?${filter}
-         GROUP BY date(observed_at)`,
+    // `dayBucket` is the portable spelling of sqlite's `date(observed_at)`:
+    // timestamps are ISO text in both dialects, so it yields the same
+    // `YYYY-MM-DD` keys the JS side above generates.
+    const bucket = dayBucket(feedbackSignals.observedAt);
+    const rows = await this.client
+      .select({
+        date: dayBucket(feedbackSignals.observedAt).mapWith(String),
+        total: count(),
+        positive: positiveCount,
+        negative: negativeCount,
+        averageScore: scoredAverage,
+      })
+      .from(feedbackSignals)
+      .where(
+        and(
+          isNull(feedbackSignals.removedAt),
+          gte(bucket, dateKeys[0]),
+          workflowName ? eq(feedbackSignals.workflowName, workflowName) : undefined,
+        ),
       )
-      .all(...params) as FeedbackDailyRow[];
+      .groupBy(dayBucket(feedbackSignals.observedAt));
 
     const byDate = new Map(rows.map((r) => [r.date, r]));
-    return dateKeys.map(
-      (date) => {
-        const row = byDate.get(date);
-        return row
-          ? { ...row, averageScore: round2(row.averageScore) }
-          : { date, total: 0, positive: 0, negative: 0, averageScore: 0 };
-      },
-    );
+    return dateKeys.map((date) => {
+      const row = byDate.get(date);
+      return row
+        ? { ...row, averageScore: round2(row.averageScore) }
+        : { date, total: 0, positive: 0, negative: 0, averageScore: 0 };
+    });
   }
 
-  // ── OTel export watermark ──────────────────────────────────────
+  // ── OTel export watermark ────────────────────────────────────────────────
 
   /**
    * Signals not yet exported to OTel, oldest first.
@@ -482,45 +536,63 @@ export class FeedbackStore {
    * this problem (a retraction can't reach `exportSignal`), so the gap was
    * only ever reachable through the backfill.
    */
-  pendingExport(limit = 200): FeedbackSignal[] {
-    return this.db
-      .prepare(
-        `SELECT ${SIGNAL_COLUMNS} FROM feedback_signals
-          WHERE exported_at IS NULL AND removed_at IS NULL
-          ORDER BY observed_at ASC LIMIT ?`,
-      )
-      .all(limit) as FeedbackSignal[];
+  async pendingExport(limit = 200): Promise<FeedbackSignal[]> {
+    const rows = await this.client
+      .select()
+      .from(feedbackSignals)
+      .where(and(isNull(feedbackSignals.exportedAt), isNull(feedbackSignals.removedAt)))
+      .orderBy(asc(feedbackSignals.observedAt))
+      .limit(limit);
+    return rows.map(deserializeSignal);
   }
 
-  markExported(ids: string[], at = new Date().toISOString()): void {
+  async markExported(ids: string[], at = new Date().toISOString()): Promise<void> {
     if (ids.length === 0) return;
-    const stmt = this.db.prepare(`UPDATE feedback_signals SET exported_at = ? WHERE id = ?`);
-    const tx = this.db.transaction((rows: string[]) => {
-      for (const id of rows) stmt.run(at, id);
-    });
-    tx(ids);
+    await this.client
+      .update(feedbackSignals)
+      .set({ exportedAt: at })
+      .where(inArray(feedbackSignals.id, ids));
   }
 
-  // ── Deserialization ────────────────────────────────────────────
+  // ── Deserialization ──────────────────────────────────────────────────────
 
-  private deserializeAnchor(row: Record<string, unknown>): FeedbackAnchor {
+  private deserializeAnchor(row: AnchorRow): FeedbackAnchor {
     return {
-      id: row.id as string,
+      ...row,
       source: row.source as FeedbackSource,
       kind: row.kind as FeedbackAnchorKind,
-      externalId: row.external_id as string,
-      nodeId: (row.node_id as string | null) ?? null,
-      channel: (row.channel as string | null) || null,
-      owner: (row.owner as string | null) ?? null,
-      repo: (row.repo as string | null) ?? null,
-      issueNumber: (row.issue_number as number | null) ?? null,
-      workflowRunId: (row.workflow_run_id as string | null) ?? null,
-      workflowName: (row.workflow_name as string | null) ?? null,
-      messagingSessionId: (row.messaging_session_id as string | null) ?? null,
-      createdAt: row.created_at as string,
-      lastPolledAt: (row.last_polled_at as string | null) ?? null,
+      // Back across the sentinel boundary: '' is the stored form of "no
+      // channel", but the type callers see is `string | null`.
+      channel: row.channel || null,
     };
   }
+}
+
+/**
+ * The null-safe half of the `(anchor, reactor, emoji)` idempotency predicate,
+ * the old `reactor IS ?`.
+ *
+ * `reactor` is nullable and a plain `=` never matches NULL, so getting this
+ * wrong does not throw — it silently FORKS a row per re-delivery instead of
+ * matching the existing one, and double-reactions accumulate unnoticed.
+ */
+function matchReactor(reactor: string | null) {
+  return reactor == null
+    ? isNull(feedbackSignals.reactor)
+    : eq(feedbackSignals.reactor, reactor);
+}
+
+/**
+ * Builder rows are already camelCase and the nullable columns are declared
+ * `| null` on {@link FeedbackSignal} (not optional), so this is down to
+ * re-attaching the two string-union types the TEXT columns erase.
+ */
+function deserializeSignal(row: SignalRow): FeedbackSignal {
+  return {
+    ...row,
+    source: row.source as FeedbackSource,
+    sentiment: row.sentiment as FeedbackSentiment,
+  };
 }
 
 function round2(n: number): number {

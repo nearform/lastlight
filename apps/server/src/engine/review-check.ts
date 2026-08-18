@@ -86,8 +86,12 @@ export function readReviewCheck(run: WorkflowRun): PersistedReviewCheck | null {
 }
 
 /** Persist the ref so the terminal transition can find it. */
-export function recordReviewCheck(db: StateDb, runId: string, ref: PersistedReviewCheck): void {
-  db.runs.mergeScratch(runId, { [REVIEW_CHECK_SCRATCH_KEY]: ref });
+export async function recordReviewCheck(
+  db: StateDb,
+  runId: string,
+  ref: PersistedReviewCheck,
+): Promise<void> {
+  await db.runs.mergeScratch(runId, { [REVIEW_CHECK_SCRATCH_KEY]: ref });
 }
 
 /** Everything {@link openReviewCheck} / {@link postPlaceholderReviewCheck} need. */
@@ -162,7 +166,7 @@ export async function openAndBindReviewCheck(
 ): Promise<PersistedReviewCheck | null> {
   const ref = await openReviewCheck(args, deps);
   if (!ref) return null;
-  db.runs.mergeScratch(runId, { [REVIEW_CHECK_SCRATCH_KEY]: ref });
+  await db.runs.mergeScratch(runId, { [REVIEW_CHECK_SCRATCH_KEY]: ref });
   if (args.detailsUrl) linkReviewCheck(ref, args.detailsUrl, deps).catch(() => {});
   return ref;
 }
@@ -198,7 +202,7 @@ export async function bindQueuedReviewCheck(
   args: QueuedReviewCheckArgs,
   deps: ReviewCheckDeps,
 ): Promise<PersistedReviewCheck | null> {
-  const run = db.runs.getByTrigger(args.triggerId);
+  const run = await db.runs.getByTrigger(args.triggerId);
   if (!run || run.workflowName !== args.workflowName || run.status !== "queued") return null;
   if (readReviewCheck(run)) return null;
   return openAndBindReviewCheck(
@@ -388,7 +392,7 @@ export async function concludeReviewCheck(
   if (!ref || !deps.github) return;
   // Clear before the network call: a failed update must not leave a ref that
   // re-fires on the next terminal transition of the same row.
-  db.runs.mergeScratch(run.id, { [REVIEW_CHECK_SCRATCH_KEY]: null });
+  await db.runs.mergeScratch(run.id, { [REVIEW_CHECK_SCRATCH_KEY]: null });
 
   const github = deps.github;
   let conclusion: "success" | "failure" | "neutral" | "cancelled" = "neutral";

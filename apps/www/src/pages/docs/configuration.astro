@@ -255,6 +255,12 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td>Override the SQLite database path.</td>
 			</tr>
 			<tr>
+				<td><code>DATABASE_URL</code></td>
+				<td>No</td>
+				<td><em>unset</em></td>
+				<td>The state database as a libsql-style URL (<code>file:/app/data/lastlight.db</code>, <code>:memory:</code>). Wins over <code>DB_PATH</code>; also settable as <code>database.url</code> in <code>config.yaml</code>. Unset means <code>file:</code> + the <code>DB_PATH</code> path above — the historical behaviour, so existing deployments need change nothing. A <code>postgres://</code> URL is recognized but throws at boot: the schema and test suite run on Postgres, the runtime does not yet.</td>
+			</tr>
+			<tr>
 				<td><code>WORKFLOW_DIR</code></td>
 				<td>No</td>
 				<td><code>./workflows</code></td>

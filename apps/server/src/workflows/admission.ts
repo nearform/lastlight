@@ -11,9 +11,10 @@
  *  2. **Periodic sweep**: `setInterval(sweep, sweepIntervalMs)` (default 15 s)
  *     also performs TTL expiry of stale queued runs before admitting.
  *
- * Concurrency safety: `admitRun` is a CAS (`WHERE status = 'queued'`), so
- * only the first caller wins a given row — the event-driven and periodic
- * paths can race safely.
+ * Concurrency safety, two layers: `admitRun` is a CAS (`WHERE status =
+ * 'queued'`), so only the first caller wins a given ROW; and `admitNext` is
+ * serialized, so two overlapping callers cannot both observe a free slot and
+ * both fill it. The CAS alone protects rows, not the CAP — see `admitNext`.
  *
  * Admission reuses `resumeSimpleRun` (from resume.ts): a queued run's stored
  * `context` is identical in shape to what resumeSimpleRun reconstructs from,
@@ -29,6 +30,7 @@
  * rewrites it in place to the drop notice.
  */
 
+import { makeOpSerializer } from "../state/client.js";
 import type { StateDb } from "../state/db.js";
 import type { WorkflowRun } from "../state/workflow-run-store.js";
 import { resumeSimpleRun, type ResumeOptions } from "./resume.js";
@@ -76,22 +78,46 @@ export function createAdmissionController(deps: AdmissionDeps): AdmissionControl
   const sweepIntervalMs = deps.sweepIntervalMs ?? 15_000;
   let timer: ReturnType<typeof setInterval> | undefined;
 
-  async function admitNext(): Promise<void> {
+  /**
+   * Admission runs one loop at a time.
+   *
+   * The body below re-reads the running count on each iteration, which under
+   * the old synchronous driver was enough: nothing could interleave between
+   * the count and the CAS. It can now — `admitNext()` is called both by the
+   * event path and by the 15s sweep, and both await inside the loop. The
+   * per-row CAS still guarantees a queued run is admitted at most once, but it
+   * says nothing about the CAP: two loops that both observe `cap - 1` running
+   * will both admit, and the concurrency limit is quietly exceeded by the
+   * number of overlapping callers.
+   *
+   * So serialize the whole loop. This is admission's own invariant rather than
+   * the database's, hence its own serializer instance and not the connection
+   * chain the transacting stores share. A queued caller is not dropped — it
+   * runs after the current loop finishes and re-reads the count, which is
+   * exactly the behaviour a freed slot needs.
+   */
+  const serializeAdmit = makeOpSerializer();
+
+  function admitNext(): Promise<void> {
+    return serializeAdmit(admitNextLocked);
+  }
+
+  async function admitNextLocked(): Promise<void> {
     // Re-read the running count and queued list on each iteration so we don't
     // race against concurrent admits or ongoing resumes changing the count.
     for (;;) {
-      if (db.runs.countRunning() >= cap) break;
-      const queued = db.runs.listQueued();
+      if ((await db.runs.countRunning()) >= cap) break;
+      const queued = await db.runs.listQueued();
       if (queued.length === 0) break;
       const next = queued[0];
-      const changes = db.runs.admitRun(next.id);
+      const changes = await db.runs.admitRun(next.id);
       if (changes !== 1) {
         // CAS lost — another admitter won this row; re-check from scratch.
         continue;
       }
       // Won the CAS: reload the row (now `running`) and dispatch in the
       // background. Do NOT await — this is a long-running sandbox dispatch.
-      const admitted = db.runs.getRun(next.id);
+      const admitted = await db.runs.getRun(next.id);
       if (admitted) {
         // The enqueue ack ("it'll start automatically when a slot frees") has
         // now been honoured, so retract it before the run posts anything of its
@@ -144,13 +170,13 @@ async function expireStaleRuns(
   maxQueueWaitMs: number,
   resumeOpts: ResumeOptions,
 ): Promise<void> {
-  const queued = db.runs.listQueued();
+  const queued = await db.runs.listQueued();
   const now = Date.now();
   for (const run of queued) {
     const enqueuedAt = Date.parse(run.startedAt);
     if (now - enqueuedAt > maxQueueWaitMs) {
       const reason = "dropped from queue after waiting too long";
-      const changed = db.runs.expireQueued(run.id, reason);
+      const changed = await db.runs.expireQueued(run.id, reason);
       if (changed === 1) {
         postExpiryAck(run, reason, resumeOpts).catch((err: unknown) => {
           log.warn("Failed to post expiry ack", { runId: run.id, err });

@@ -13,7 +13,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import type { GitHubClient } from "#src/engine/github/github.js";
 import {
   applyDerivedState,
@@ -73,6 +74,8 @@ function liveState(over: Partial<PrState> = {}): PrState {
     settledCheckCount: 3,
     baseChecksState: "passing",
     botReviewAtHead: null,
+    lastBotReview: null,
+    pathsSinceLastBotReview: null,
     ciReport: null,
     attempt: 1,
     flakyDeferrals: 0,
@@ -112,8 +115,8 @@ function fakeGithub(over: { addLabels?: () => Promise<void> } = {}) {
 }
 
 let db: StateDb;
-beforeEach(() => {
-  db = new StateDb(":memory:");
+beforeEach(async () => {
+  db = await makeTestDb();
 });
 
 /**
@@ -122,15 +125,15 @@ beforeEach(() => {
  * `scratch.fixMarkers`. `startedAt` is pinned in the past so the escalation
  * row (stamped `now`) is unambiguously the most recent.
  */
-function recordFixRun(opts: {
+async function recordFixRun(opts: {
   n: number;
   attempt: number;
   headSha: string;
   diagnosisClass?: string;
   cause?: string;
-}): void {
+}): Promise<void> {
   const id = `run-${opts.n}`;
-  db.runs.createRun({
+  await db.runs.createRun({
     id,
     workflowName: WORKFLOW,
     triggerId: TRIGGER,
@@ -143,7 +146,7 @@ function recordFixRun(opts: {
     startedAt: `2020-01-01T00:00:0${opts.n}.000Z`,
   });
   if (opts.diagnosisClass) {
-    db.runs.mergeScratch(id, {
+    await db.runs.mergeScratch(id, {
       fixMarkers: {
         diagnosis: {
           class: opts.diagnosisClass,
@@ -169,13 +172,13 @@ function recordFixRun(opts: {
  * the dispatcher does it: `sameProblem` reads the record, so an intervention
  * applied after the snapshot was derived would re-arm nothing.
  */
-function snapshot(
+async function snapshot(
   github: { labels: Set<string> },
   over: Partial<PrState> = {},
   intervention?: InterventionRequest,
-): PrState {
+): Promise<PrState> {
   const state = liveState({ labels: [...github.labels], ...over });
-  applyDerivedState(state, { github: null, db, botLogin: BOT, ...(intervention ? { intervention } : {}) });
+  await applyDerivedState(state, { github: null, db, botLogin: BOT, ...(intervention ? { intervention } : {}) });
   return state;
 }
 
@@ -243,7 +246,7 @@ describe("escalatePr — the three escalating skips", () => {
     const state = liveState({ attempt: 4 });
     const { outcome } = await dispatchOnce(github, state);
 
-    const row = db.runs.getRun(outcome!.runId)!;
+    const row = (await db.runs.getRun(outcome!.runId))!;
     expect(row.status).toBe("succeeded");
     expect(row.workflowName).toBe(WORKFLOW);
     expect(row.triggerId).toBe(TRIGGER);
@@ -271,7 +274,7 @@ describe("escalatePr — the skips that must stay silent", () => {
     expect(outcome).toBeNull();
     expect(github.addLabels).not.toHaveBeenCalled();
     expect(github.postComment).not.toHaveBeenCalled();
-    expect(db.runs.latestForTrigger([WORKFLOW], TRIGGER)).toBeNull();
+    expect(await db.runs.latestForTrigger([WORKFLOW], TRIGGER)).toBeNull();
   });
 
   it("a fork PR applies nothing — there is nothing wrong with the change", async () => {
@@ -285,7 +288,7 @@ describe("escalatePr — the skips that must stay silent", () => {
     expect(decision.escalation).toBeUndefined();
     expect(outcome).toBeNull();
     expect(github.addLabels).not.toHaveBeenCalled();
-    expect(db.runs.latestForTrigger([WORKFLOW], TRIGGER)).toBeNull();
+    expect(await db.runs.latestForTrigger([WORKFLOW], TRIGGER)).toBeNull();
   });
 
   it("a `flaky` verdict is a deferral, not an escalation", async () => {
@@ -309,21 +312,21 @@ describe("escalatePr — the skips that must stay silent", () => {
     const { outcome } = await dispatchOnce(github, liveState({ headSha: "", attempt: 4 }));
     expect(outcome).toBeNull();
     expect(github.addLabels).not.toHaveBeenCalled();
-    expect(db.runs.latestForTrigger([WORKFLOW], TRIGGER)).toBeNull();
+    expect(await db.runs.latestForTrigger([WORKFLOW], TRIGGER)).toBeNull();
   });
 });
 
 describe("escalatePr — once, and only once", () => {
   it("a second dispatch at the same head applies nothing and skips as our own escalation", async () => {
     const github = fakeGithub();
-    recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
+    await recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
 
-    const first = await dispatchOnce(github, snapshot(github));
+    const first = await dispatchOnce(github, await snapshot(github));
     expect(first.decision.escalation).toBe("attempts-exhausted");
     expect(github.labels.has(REQUIRES_HUMAN_LABEL)).toBe(true);
 
     // Same head, next event — a re-fired check suite, or the daily cron.
-    const second = snapshot(github);
+    const second = await snapshot(github);
     expect(second.escalatedAtSha).toBe("aaaa111bbbb222");
     const out = await dispatchOnce(github, second);
     expect(out.decision.reason).toMatch(/^escalated: we escalated this PR at aaaa111/);
@@ -338,10 +341,10 @@ describe("escalatePr — once, and only once", () => {
 
   it("a commit WE authored on top of the escalation is not intervention", async () => {
     const github = fakeGithub();
-    recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
-    await dispatchOnce(github, snapshot(github));
+    await recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
+    await dispatchOnce(github, await snapshot(github));
 
-    const ours = snapshot(github, { headSha: "cccc333", headAuthor: BOT, headIsOurs: true });
+    const ours = await snapshot(github, { headSha: "cccc333", headAuthor: BOT, headIsOurs: true });
     const out = await dispatchOnce(github, ours);
     expect(out.decision.reason).toMatch(/^escalated:/);
     expect(github.postComment).toHaveBeenCalledTimes(1);
@@ -366,15 +369,15 @@ describe("escalatePr — once, and only once", () => {
         if (fail) throw new Error("403 from GitHub");
       },
     });
-    recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
+    await recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
 
-    const first = await dispatchOnce(github, snapshot(github));
+    const first = await dispatchOnce(github, await snapshot(github));
     expect(first.outcome).toMatchObject({ labelled: false, commented: false });
     expect(github.postComment).not.toHaveBeenCalled();
     expect(github.labels.has(REQUIRES_HUMAN_LABEL)).toBe(false);
 
     fail = false;
-    const rearmed = snapshot(github);
+    const rearmed = await snapshot(github);
     expect(rearmed.intervention).toMatchObject({ via: "label", atSha: "aaaa111bbbb222" });
     expect(rearmed.escalatedAtSha).toBeNull();
     expect(rearmed.attempt).toBe(1);
@@ -385,7 +388,7 @@ describe("escalatePr — once, and only once", () => {
     // …and once recorded, it is not re-detected at the same head. The extra
     // window is ONE window, not one per event.
     //
-    // The clock is pinned for the same reason `spend()` takes an explicit `at`:
+    // The clock is pinned for the same reason `await spend()` takes an explicit `at`:
     // both the escalation row and the retry record are stamped `now` by the code
     // under test, they land inside the same millisecond here, and
     // `latestForTrigger` orders on `started_at` — so which row the next resolve
@@ -397,7 +400,7 @@ describe("escalatePr — once, and only once", () => {
     } finally {
       vi.useRealTimers();
     }
-    const third = snapshot(github);
+    const third = await snapshot(github);
     expect(third.intervention?.at).toBe(rearmed.intervention?.at);
     expect(third.attempt).toBe(1);
 
@@ -436,11 +439,11 @@ describe("escalatePr — the anti-latch property", () => {
     // all — `escalatedAtSha` was never persisted, so the label alone read as a
     // human's permanent override and the PR stayed dead for its whole life.
     const github = fakeGithub();
-    recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
-    await dispatchOnce(github, snapshot(github));
+    await recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
+    await dispatchOnce(github, await snapshot(github));
     expect(github.labels.has(REQUIRES_HUMAN_LABEL)).toBe(true);
 
-    const pushed = snapshot(github, {
+    const pushed = await snapshot(github, {
       headSha: "dddd444eeee555",
       headAuthor: "octocat",
       headIsOurs: false,
@@ -468,16 +471,16 @@ describe("escalatePr — the anti-latch property", () => {
     const github = fakeGithub();
     github.labels.add(REQUIRES_HUMAN_LABEL);
 
-    const first = snapshot(github);
+    const first = await snapshot(github);
     expect(first.escalatedAtSha).toBeNull();
     const out = await dispatchOnce(github, first);
     expect(out.decision.decision).toBe("run");
     expect(out.outcome).toBeNull();
 
-    const afterPush = snapshot(github, { headSha: "ffff666", headAuthor: "octocat" });
+    const afterPush = await snapshot(github, { headSha: "ffff666", headAuthor: "octocat" });
     expect(resolveFixDisposition(afterPush, fix).decision).toBe("run");
     expect(github.addLabels).not.toHaveBeenCalled();
-    expect(db.runs.latestForTrigger([WORKFLOW], TRIGGER)).toBeNull();
+    expect(await db.runs.latestForTrigger([WORKFLOW], TRIGGER)).toBeNull();
   });
 });
 
@@ -493,7 +496,7 @@ describe("renderEscalationComment", () => {
 
   const VOCAB = { holdLabel: HOLD_LABEL, botMention: "@last-light" };
 
-  it("names the case, the attempt count and every attempt's class + cause", () => {
+  it("names the case, the attempt count and every attempt's class + cause", async () => {
     // 04-retry.md §4.3's contract for the one comment.
     const body = renderEscalationComment(
       "attempts-exhausted",
@@ -510,7 +513,7 @@ describe("renderEscalationComment", () => {
     expect(body).toContain("$1.25 of $5.00");
   });
 
-  it("says so plainly when no attempt ever produced a diagnosis", () => {
+  it("says so plainly when no attempt ever produced a diagnosis", async () => {
     const body = renderEscalationComment(
       "budget-exhausted",
       "budget-exhausted: …",
@@ -541,7 +544,7 @@ describe("renderEscalationComment", () => {
       ["not-retryable", "not-retryable: …"],
     ];
 
-    it.each(cases)("%s lists all four, and promises no override", (kase, reason) => {
+    it.each(cases)("%s lists all four, and promises no override", async (kase, reason) => {
       const body = renderEscalationComment(kase, reason, state, fix, VOCAB);
 
       // 1. The push, still the zero-thinking option.
@@ -565,7 +568,7 @@ describe("renderEscalationComment", () => {
       expect(body).not.toMatch(/comment to override/i);
     });
 
-    it("speaks the deployment's OWN names, not the packaged ones", () => {
+    it("speaks the deployment's OWN names, not the packaged ones", async () => {
       // Both are operator-configurable (`hold.label`, `botName`). A comment
       // naming a label nobody applies, or a handle nobody answers to, is worse
       // than no instructions at all.
@@ -606,7 +609,7 @@ describe("noticeForkPr", () => {
   /** One dispatch of the fork PR, applying whatever the decision entails. */
   async function forkDispatch(github: ReturnType<typeof fakeGithub>, over: Partial<PrState> = {}) {
     const state = liveState({ ...FORK, ...over });
-    applyDerivedState(state, { github: null, db, botLogin: BOT });
+    await applyDerivedState(state, { github: null, db, botLogin: BOT });
     const decision = resolveFixDisposition(state, fix, { dedupOnHeadSha: true });
     const outcome = decision.forkPr ? await noticeForkPr(WORKFLOW, state, { db, github }) : null;
     return { state, decision, outcome };
@@ -656,7 +659,7 @@ describe("noticeForkPr", () => {
     // answering it with "I can't apply fixes to this PR" explains a decision
     // that was not taken.
     const github = fakeGithub();
-    db.runs.createRun({
+    await db.runs.createRun({
       id: "run-live",
       workflowName: "pr-fix",
       triggerId: TRIGGER,
@@ -715,9 +718,9 @@ describe("noticeForkPr", () => {
  */
 describe("the cost window resets with the problem", () => {
   /** A finished fix run costing `usd`, dispatched at `headSha`. */
-  function spend(n: number, headSha: string, usd: number, state: PrState): void {
+  async function spend(n: number, headSha: string, usd: number, state: PrState): Promise<void> {
     const id = `cost-run-${n}`;
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: WORKFLOW,
       triggerId: TRIGGER,
@@ -732,7 +735,7 @@ describe("the cost window resets with the problem", () => {
     // The cost is summed off `executions` JOINed to the run row, so the
     // execution has to carry `workflowRunId` — that join is what scopes spend
     // to the fix family on this PR.
-    db.executions.recordStart({
+    await db.executions.recordStart({
       id: `exec-${n}`,
       skill: WORKFLOW,
       triggerType: "webhook",
@@ -742,7 +745,7 @@ describe("the cost window resets with the problem", () => {
       startedAt: `2020-01-0${n}T00:00:00.000Z`,
       workflowRunId: id,
     });
-    db.executions.recordFinish(`exec-${n}`, { success: true, costUsd: usd });
+    await db.executions.recordFinish(`exec-${n}`, { success: true, costUsd: usd });
     void headSha;
   }
 
@@ -751,12 +754,12 @@ describe("the cost window resets with the problem", () => {
     const budget = { ...fix, maxCostUsd: 1.0 };
 
     // Two attempts blow the budget on the original head.
-    const first = snapshot(github);
-    spend(1, first.headSha, 0.8, first);
-    const second = snapshot(github);
-    spend(2, second.headSha, 0.5, second);
+    const first = await snapshot(github);
+    await spend(1, first.headSha, 0.8, first);
+    const second = await snapshot(github);
+    await spend(2, second.headSha, 0.5, second);
 
-    const exhausted = snapshot(github);
+    const exhausted = await snapshot(github);
     expect(exhausted.cumulativeCostUsd).toBeCloseTo(1.3);
     const stop = resolveFixDisposition(exhausted, budget);
     expect(stop.escalation).toBe("budget-exhausted");
@@ -765,7 +768,7 @@ describe("the cost window resets with the problem", () => {
 
     // A maintainer pushes. That is a fresh problem — so the budget re-arms
     // exactly as the attempt counter does, and nothing is posted again.
-    const afterPush = snapshot(github, { headSha: "ffff666", headAuthor: "octocat" });
+    const afterPush = await snapshot(github, { headSha: "ffff666", headAuthor: "octocat" });
     expect(afterPush.attempt).toBe(1);
     expect(afterPush.cumulativeCostUsd).toBe(0);
     expect(afterPush.costBaselineUsd).toBeCloseTo(1.3);
@@ -778,16 +781,16 @@ describe("the cost window resets with the problem", () => {
 
   it("keeps counting while the problem is the same, including across our own pushes", async () => {
     const github = fakeGithub();
-    const first = snapshot(github);
-    spend(1, first.headSha, 0.4, first);
+    const first = await snapshot(github);
+    await spend(1, first.headSha, 0.4, first);
 
     // OUR push: the fix landed and CI is still red — same problem, so the spend
     // carries. (`headIsOurs` is what `sameProblem` reads.)
-    const ours = snapshot(github, { headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
+    const ours = await snapshot(github, { headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
     expect(ours.cumulativeCostUsd).toBeCloseTo(0.4);
-    spend(2, ours.headSha, 0.4, ours);
+    await spend(2, ours.headSha, 0.4, ours);
 
-    const third = snapshot(github, { headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
+    const third = await snapshot(github, { headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
     expect(third.cumulativeCostUsd).toBeCloseTo(0.8);
     expect(third.costBaselineUsd).toBe(0);
   });
@@ -799,9 +802,9 @@ describe("the cost window resets with the problem", () => {
     const github = fakeGithub();
     const legacy = liveState();
     delete (legacy as Partial<PrState>).costBaselineUsd;
-    spend(1, legacy.headSha, 0.9, legacy);
+    await spend(1, legacy.headSha, 0.9, legacy);
 
-    expect(snapshot(github).cumulativeCostUsd).toBeCloseTo(0.9);
+    expect((await snapshot(github)).cumulativeCostUsd).toBeCloseTo(0.9);
   });
 });
 
@@ -833,9 +836,9 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
    * `latestForTrigger` orders on `started_at`: a run that has to read as
    * happening AFTER an escalation must say so.
    */
-  function spend(n: number, usd: number, state: PrState, at = `2020-01-0${n}T00:00:00.000Z`): void {
+  async function spend(n: number, usd: number, state: PrState, at = `2020-01-0${n}T00:00:00.000Z`): Promise<void> {
     const id = `retry-run-${n}`;
-    db.runs.createRun({
+    await db.runs.createRun({
       id,
       workflowName: WORKFLOW,
       triggerId: TRIGGER,
@@ -847,7 +850,7 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
       context: { prState: state },
       startedAt: at,
     });
-    db.executions.recordStart({
+    await db.executions.recordStart({
       id: `retry-exec-${n}`,
       skill: WORKFLOW,
       triggerType: "webhook",
@@ -857,8 +860,8 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
       startedAt: at,
       workflowRunId: id,
     });
-    db.executions.recordFinish(`retry-exec-${n}`, { success: true, costUsd: usd });
-    db.runs.mergeScratch(id, {
+    await db.executions.recordFinish(`retry-exec-${n}`, { success: true, costUsd: usd });
+    await db.runs.mergeScratch(id, {
       fixMarkers: {
         diagnosis: {
           class: "reproducible",
@@ -882,12 +885,12 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
     const github = fakeGithub();
     const budget = { ...fix, maxCostUsd: 1.0 };
 
-    const first = snapshot(github);
-    spend(1, 0.8, first);
-    const second = snapshot(github);
-    spend(2, 0.5, second);
+    const first = await snapshot(github);
+    await spend(1, 0.8, first);
+    const second = await snapshot(github);
+    await spend(2, 0.5, second);
 
-    const exhausted = snapshot(github);
+    const exhausted = await snapshot(github);
     expect(exhausted.cumulativeCostUsd).toBeCloseTo(1.3);
     expect(exhausted.attempt).toBe(3);
     await escalatePr(WORKFLOW, exhausted, resolveFixDisposition(exhausted, budget), budget, {
@@ -898,7 +901,7 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
 
     // `@last-light retry the arm64 runner was flaky`. Nothing about the pull
     // request has changed — same head, same code, same everything.
-    const retried = snapshot(github, {}, COMMENT);
+    const retried = await snapshot(github, {}, COMMENT);
     expect(retried.attempt).toBe(1);
     expect(retried.cumulativeCostUsd).toBe(0);
     expect(retried.costBaselineUsd).toBeCloseTo(1.3);
@@ -915,19 +918,19 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
     expect(github.postComment).toHaveBeenCalledTimes(1);
   });
 
-  it("KEEPS the journal and marks the seam — where a push wipes it", () => {
+  it("KEEPS the journal and marks the seam — where a push wipes it", async () => {
     // Locked decision 8, the one asymmetry. A push changed the code, so prior
     // findings may be stale; a retry changed nothing but patience, and
     // discarding the journal sends attempt 1 of the new window straight down
     // attempt 1 of the old window's road.
     const github = fakeGithub();
-    const first = snapshot(github);
-    spend(1, 0.1, first);
-    const second = snapshot(github);
+    const first = await snapshot(github);
+    await spend(1, 0.1, first);
+    const second = await snapshot(github);
     expect(second.priorAttempts).toHaveLength(1);
-    spend(2, 0.1, second);
+    await spend(2, 0.1, second);
 
-    const retried = snapshot(github, {}, COMMENT);
+    const retried = await snapshot(github, {}, COMMENT);
     expect(retried.priorAttempts).toEqual([
       "attempt 1: class=reproducible cause=the lockfile is stale",
       "attempt 2: class=reproducible cause=the lockfile is stale",
@@ -935,26 +938,26 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
     ]);
 
     // The same history, re-armed by a PUSH instead: journal gone.
-    const pushed = snapshot(github, { headSha: "ffff666", headAuthor: "octocat" });
+    const pushed = await snapshot(github, { headSha: "ffff666", headAuthor: "octocat" });
     expect(pushed.priorAttempts).toEqual([]);
   });
 
-  it("renders the seam without a quote when nobody gave a reason", () => {
+  it("renders the seam without a quote when nobody gave a reason", async () => {
     const github = fakeGithub();
-    const first = snapshot(github);
-    spend(1, 0.1, first);
-    const retried = snapshot(github, {}, { via: "label" });
+    const first = await snapshot(github);
+    await spend(1, 0.1, first);
+    const retried = await snapshot(github, {}, { via: "label" });
     expect(retried.priorAttempts.at(-1)).toBe("— retried by request —");
   });
 
-  it("lands the maintainer's reason in the PR journal, as a hint", () => {
+  it("lands the maintainer's reason in the PR journal, as a hint", async () => {
     // The one channel free text is allowed to reach a prompt through: bounded,
     // fenced, and read by no decision function.
     const github = fakeGithub();
-    const first = snapshot(github);
-    spend(1, 0.1, first);
+    const first = await snapshot(github);
+    await spend(1, 0.1, first);
 
-    const retried = snapshot(github, {}, COMMENT);
+    const retried = await snapshot(github, {}, COMMENT);
     expect(retried.notes.at(-1)).toMatchObject({
       kind: "finding",
       workflow: "retry",
@@ -966,27 +969,27 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
     expect(retried.notes.every((n) => !n.stale)).toBe(true);
   });
 
-  it("refuses a reason that could forge a marker the parser reads", () => {
+  it("refuses a reason that could forge a marker the parser reads", async () => {
     // `pr-notes.ts`'s reject list, applied at the one place the record is built
     // — so no surface can route around it. The retry still happens; only the
     // free text is dropped.
     const github = fakeGithub();
-    const first = snapshot(github);
-    spend(1, 0.1, first);
+    const first = await snapshot(github);
+    await spend(1, 0.1, first);
 
-    const retried = snapshot(github, {}, { via: "comment", by: "mallory", note: "class=flaky" });
+    const retried = await snapshot(github, {}, { via: "comment", by: "mallory", note: "class=flaky" });
     expect(retried.intervention).toMatchObject({ via: "comment", by: "mallory" });
     expect(retried.intervention?.note).toBeUndefined();
     expect(retried.priorAttempts.at(-1)).toBe("— retried by request —");
     expect(retried.notes.some((n) => n.text.includes("class="))).toBe(false);
   });
 
-  it("resets `flakyDeferrals` on a retry, exactly as a push does", () => {
+  it("resets `flakyDeferrals` on a retry, exactly as a push does", async () => {
     // A human intervening is a statement that the flaky-versus-real inference
     // should start over, and they have better evidence than the counter does.
     const github = fakeGithub();
-    const first = snapshot(github, { flakyDeferrals: 0 });
-    db.runs.createRun({
+    const first = await snapshot(github, { flakyDeferrals: 0 });
+    await db.runs.createRun({
       id: "flaky-run",
       workflowName: WORKFLOW,
       triggerId: TRIGGER,
@@ -998,7 +1001,7 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
       context: { prState: { ...first, flakyDeferrals: 2 } },
       startedAt: "2020-01-01T00:00:00.000Z",
     });
-    db.runs.mergeScratch("flaky-run", {
+    await db.runs.mergeScratch("flaky-run", {
       fixMarkers: {
         diagnosis: { class: "flaky", cause: "x", rawClass: "flaky", pr: PR, attempt: 1, ciVsLocal: "", unreproducible: [] },
         fix: null,
@@ -1007,9 +1010,9 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
       },
     });
 
-    expect(snapshot(github).flakyDeferrals).toBe(3);
-    expect(snapshot(github, {}, COMMENT).flakyDeferrals).toBe(0);
-    expect(snapshot(github, { headSha: "ffff666", headAuthor: "octocat" }).flakyDeferrals).toBe(0);
+    expect((await snapshot(github)).flakyDeferrals).toBe(3);
+    expect((await snapshot(github, {}, COMMENT)).flakyDeferrals).toBe(0);
+    expect((await snapshot(github, { headSha: "ffff666", headAuthor: "octocat" })).flakyDeferrals).toBe(0);
   });
 
   it("is UNBOUNDED — a second retry after a second escalation re-arms again", async () => {
@@ -1020,20 +1023,20 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
     const github = fakeGithub();
     const budget = { ...fix, maxCostUsd: 1.0 };
 
-    const first = snapshot(github);
-    spend(1, 1.5, first);
+    const first = await snapshot(github);
+    await spend(1, 1.5, first);
 
-    const exhausted = snapshot(github);
+    const exhausted = await snapshot(github);
     await escalatePr(WORKFLOW, exhausted, resolveFixDisposition(exhausted, budget), budget, { db, github });
     expect(github.postComment).toHaveBeenCalledTimes(1);
 
     // Retry #1 — and record it the way a dispatched run would.
-    const retry1 = snapshot(github, {}, COMMENT);
+    const retry1 = await snapshot(github, {}, COMMENT);
     expect(resolveFixDisposition(retry1, budget).decision).toBe("run");
-    spend(2, 1.5, retry1, "2030-01-01T00:00:00.000Z");
+    await spend(2, 1.5, retry1, "2030-01-01T00:00:00.000Z");
 
     // Which blows the fresh window, so we escalate again at the same head.
-    const exhausted2 = snapshot(github);
+    const exhausted2 = await snapshot(github);
     expect(exhausted2.cumulativeCostUsd).toBeCloseTo(1.5);
     const stop2 = resolveFixDisposition(exhausted2, budget);
     expect(stop2.escalation).toBe("budget-exhausted");
@@ -1041,7 +1044,7 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
     expect(github.postComment).toHaveBeenCalledTimes(2);
 
     // Retry #2, at the same head. Full window again.
-    const retry2 = snapshot(github, {}, { via: "comment", by: "bob" });
+    const retry2 = await snapshot(github, {}, { via: "comment", by: "bob" });
     expect(retry2.attempt).toBe(1);
     expect(retry2.cumulativeCostUsd).toBe(0);
     expect(resolveFixDisposition(retry2, budget).decision).toBe("run");
@@ -1057,10 +1060,10 @@ describe("a retry re-arms the problem, exactly as a push does", () => {
     const exhausted = liveState({ attempt: 4 });
     await escalatePr(WORKFLOW, exhausted, resolveFixDisposition(exhausted, fix), fix, { db, github });
 
-    const before = snapshot(github);
+    const before = await snapshot(github);
     expect(before.assessedHeadShaByWorkflow[WORKFLOW]).toBe(before.headSha);
 
-    const retried = snapshot(github, {}, { via: "api", by: "ops" });
+    const retried = await snapshot(github, {}, { via: "api", by: "ops" });
     expect(retried.assessedHeadShaByWorkflow[WORKFLOW]).toBeUndefined();
     expect(resolveFixDisposition(retried, fix, { dedupOnHeadSha: true }).decision).toBe("run");
   });
@@ -1109,8 +1112,8 @@ describe("a retry never produces a second escalation comment", () => {
     const github = fakeGithub();
     const budget = { ...fix, maxCostUsd: 1.0 };
 
-    recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
-    const exhausted = snapshot(github, { cumulativeCostUsd: 5.4 });
+    await recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
+    const exhausted = await snapshot(github, { cumulativeCostUsd: 5.4 });
     await escalatePr(WORKFLOW, exhausted, resolveFixDisposition(exhausted, budget), budget, { db, github });
     expect(github.labels.has(REQUIRES_HUMAN_LABEL)).toBe(true);
     expect(github.postComment).toHaveBeenCalledTimes(1);
@@ -1118,7 +1121,7 @@ describe("a retry never produces a second escalation comment", () => {
     // A maintainer takes the label off. No webhook: the next event simply reads
     // "we escalated at this head, the head has not moved, our label is gone".
     github.labels.delete(REQUIRES_HUMAN_LABEL);
-    const rearmed = snapshot(github);
+    const rearmed = await snapshot(github);
     expect(rearmed.intervention).toMatchObject({ via: "label", atSha: "aaaa111bbbb222" });
     expect(rearmed.escalatedAtSha).toBeNull();
     expect(rearmed.attempt).toBe(1);
@@ -1148,13 +1151,13 @@ describe("recordIntervention", () => {
     const github = fakeGithub();
     // `upstream-broken`: the base branch is red at the exact moment somebody
     // asks. The retry is real; the dispatch is not going to happen.
-    const asked = snapshot(github, { baseChecksState: "failing", attempt: 4 }, { via: "comment", by: "alice" });
+    const asked = await snapshot(github, { baseChecksState: "failing", attempt: 4 }, { via: "comment", by: "alice" });
     expect(resolveFixDisposition(asked, fix).reason).toMatch(/^upstream-broken:/);
 
     const outcome = await recordIntervention(WORKFLOW, asked, { db, github });
     expect(outcome).toMatchObject({ via: "comment", at: asked.intervention!.at });
 
-    const row = db.runs.getRun(outcome!.runId)!;
+    const row = (await db.runs.getRun(outcome!.runId))!;
     expect(row.status).toBe("succeeded");
     expect(row.phaseHistory.map((p) => p.phase)).toEqual(["retry-requested"]);
     expect((row.context as any).prState.intervention).toMatchObject({ via: "comment", by: "alice" });
@@ -1167,7 +1170,7 @@ describe("recordIntervention", () => {
     // (`applyPrDispatchGate`), and the row this test just wrote is `succeeded`
     // at the current head — so it repopulated `assessedHeadShaByWorkflow` and
     // the `already-assessed` skip ate the very ask the row exists to preserve.
-    const later = snapshot(github);
+    const later = await snapshot(github);
     expect(later.intervention?.at).toBe(asked.intervention!.at);
     expect(later.attempt).toBe(1);
     expect(later.assessedHeadShaByWorkflow[WORKFLOW]).toBeUndefined();
@@ -1189,7 +1192,7 @@ describe("recordIntervention", () => {
     // enough to make the next tick answer `already-assessed`, so the ask was
     // swallowed by the row written to preserve it.
     const github = fakeGithub();
-    recordFixRun({ n: 3, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
+    await recordFixRun({ n: 3, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
 
     // Both rows below are stamped `now` by the code under test, and
     // `latestForTrigger` orders on `started_at` — so the ticks have to be an
@@ -1198,14 +1201,14 @@ describe("recordIntervention", () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
-      const exhausted = snapshot(github, { attempt: 4 });
+      const exhausted = await snapshot(github, { attempt: 4 });
       await escalatePr(WORKFLOW, exhausted, resolveFixDisposition(exhausted, fix), fix, { db, github });
       expect(github.postComment).toHaveBeenCalledTimes(1);
 
       // The ask arrives while the base is red, so the gate skips it for a reason
       // that has nothing to do with the retry.
       vi.setSystemTime(new Date("2030-01-01T01:00:00.000Z"));
-      const asked = snapshot(github, { baseChecksState: "failing" }, { via: "api", by: "ops" });
+      const asked = await snapshot(github, { baseChecksState: "failing" }, { via: "api", by: "ops" });
       expect(asked.attempt).toBe(1);
       expect(resolveFixDisposition(asked, fix, { dedupOnHeadSha: true }).reason).toMatch(
         /^upstream-broken:/,
@@ -1217,7 +1220,7 @@ describe("recordIntervention", () => {
     }
 
     // Next tick, base green, nothing else changed.
-    const later = snapshot(github);
+    const later = await snapshot(github);
     expect(later.attempt).toBe(1);
     expect(later.escalatedAtSha).toBeNull();
     expect(later.assessedHeadShaByWorkflow[WORKFLOW]).toBeUndefined();
@@ -1241,19 +1244,19 @@ describe("recordIntervention", () => {
     // detected once and then only ever carried forward.
     const github = fakeGithub();
     const budget = { ...fix, maxCostUsd: 1.0 };
-    recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
+    await recordFixRun({ n: 1, attempt: 3, headSha: "aaaa111bbbb222", diagnosisClass: "reproducible" });
 
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2030-01-01T00:00:00.000Z"));
-      const exhausted = snapshot(github, { cumulativeCostUsd: 5.4 });
+      const exhausted = await snapshot(github, { cumulativeCostUsd: 5.4 });
       await escalatePr(WORKFLOW, exhausted, resolveFixDisposition(exhausted, budget), budget, { db, github });
       expect(github.labels.has(REQUIRES_HUMAN_LABEL)).toBe(true);
 
       // A maintainer takes the label off — and the base happens to be red.
       vi.setSystemTime(new Date("2030-01-01T01:00:00.000Z"));
       github.labels.delete(REQUIRES_HUMAN_LABEL);
-      const asked = snapshot(github, { baseChecksState: "failing" });
+      const asked = await snapshot(github, { baseChecksState: "failing" });
       expect(asked.intervention).toMatchObject({ via: "label", atSha: "aaaa111bbbb222" });
       expect(resolveFixDisposition(asked, budget, { dedupOnHeadSha: true }).reason).toMatch(
         /^upstream-broken:/,
@@ -1264,7 +1267,7 @@ describe("recordIntervention", () => {
       vi.useRealTimers();
     }
 
-    const later = snapshot(github);
+    const later = await snapshot(github);
     expect(later.intervention?.via).toBe("label");
     expect(later.cumulativeCostUsd).toBe(0);
     expect(later.assessedHeadShaByWorkflow[WORKFLOW]).toBeUndefined();
@@ -1280,7 +1283,7 @@ describe("recordIntervention", () => {
     // reads that claim. What clears it is that the claiming row never saw the
     // ask — the same predicate, applied per workflow.
     const github = fakeGithub();
-    db.runs.createRun({
+    await db.runs.createRun({
       id: "sibling",
       workflowName: "pr-fix",
       triggerId: TRIGGER,
@@ -1293,11 +1296,11 @@ describe("recordIntervention", () => {
       startedAt: "2020-01-01T00:00:01.000Z",
     });
 
-    const asked = snapshot(github, { baseChecksState: "failing", attempt: 4 }, { via: "comment", by: "alice" });
+    const asked = await snapshot(github, { baseChecksState: "failing", attempt: 4 }, { via: "comment", by: "alice" });
     expect(asked.assessedHeadShaByWorkflow["pr-fix"]).toBeUndefined();
     await recordIntervention(WORKFLOW, asked, { db, github });
 
-    const later = snapshot(github);
+    const later = await snapshot(github);
     expect(later.assessedHeadShaByWorkflow["pr-fix"]).toBeUndefined();
     expect(resolveFixDisposition(later, fix, { dedupOnHeadSha: true }).decision).toBe("run");
   });
@@ -1307,15 +1310,15 @@ describe("recordIntervention", () => {
     // that SAW it has assessed the head; after that the head is genuinely
     // assessed again and a redelivered webhook must not buy a second run.
     const github = fakeGithub();
-    const asked = snapshot(github, { baseChecksState: "failing", attempt: 4 }, { via: "api", by: "ops" });
+    const asked = await snapshot(github, { baseChecksState: "failing", attempt: 4 }, { via: "api", by: "ops" });
     await recordIntervention(WORKFLOW, asked, { db, github });
 
-    const later = snapshot(github);
+    const later = await snapshot(github);
     expect(resolveFixDisposition(later, fix, { dedupOnHeadSha: true }).decision).toBe("run");
 
     // …which dispatches. The run carries the intervention forward on its own
     // snapshot, exactly as `dispatchWorkflow` persists it.
-    db.runs.createRun({
+    await db.runs.createRun({
       id: "served",
       workflowName: WORKFLOW,
       triggerId: TRIGGER,
@@ -1328,7 +1331,7 @@ describe("recordIntervention", () => {
       startedAt: "2030-01-01T00:00:00.000Z",
     });
 
-    const after = snapshot(github);
+    const after = await snapshot(github);
     expect(after.assessedHeadShaByWorkflow[WORKFLOW]).toBe(after.headSha);
     expect(resolveFixDisposition(after, fix, { dedupOnHeadSha: true }).reason).toMatch(
       /^already-assessed:/,
@@ -1337,21 +1340,21 @@ describe("recordIntervention", () => {
 
   it("is idempotent — the same record never earns a second row", async () => {
     const github = fakeGithub();
-    const asked = snapshot(github, { baseChecksState: "failing" }, { via: "api", by: "ops" });
+    const asked = await snapshot(github, { baseChecksState: "failing" }, { via: "api", by: "ops" });
 
     const first = await recordIntervention(WORKFLOW, asked, { db, github });
     expect(first).not.toBeNull();
     // The next event resolves the SAME record off the row above — so this is
     // exactly what a redelivered webhook, or a route that both records and
     // dispatches, presents.
-    const second = await recordIntervention(WORKFLOW, snapshot(github), { db, github });
+    const second = await recordIntervention(WORKFLOW, await snapshot(github), { db, github });
     expect(second).toBeNull();
   });
 
   it("says nothing at all when there is no record, or no head SHA", async () => {
     const github = fakeGithub();
-    expect(await recordIntervention(WORKFLOW, snapshot(github), { db, github })).toBeNull();
-    const headless = snapshot(github, { headSha: "" }, { via: "comment" });
+    expect(await recordIntervention(WORKFLOW, await snapshot(github), { db, github })).toBeNull();
+    const headless = await snapshot(github, { headSha: "" }, { via: "comment" });
     expect(headless.intervention).toBeNull();
     expect(await recordIntervention(WORKFLOW, headless, { db, github })).toBeNull();
   });

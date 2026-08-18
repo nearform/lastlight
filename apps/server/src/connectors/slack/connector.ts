@@ -619,7 +619,7 @@ export class SlackConnector extends MessagingConnector {
     try {
       const result = await this.web.users.info({ user: userId });
       const username = result.user?.name || result.user?.real_name || userId;
-      const resolved = this.matchActorLogin(userId, result) ?? username;
+      const resolved = (await this.matchActorLogin(userId, result)) ?? username;
       this.userCache.set(userId, resolved);
       return resolved;
     } catch {
@@ -632,23 +632,23 @@ export class SlackConnector extends MessagingConnector {
    * to fall back to the Slack username. Best-effort: any store error is
    * swallowed so identity matching can never fail a message.
    */
-  private matchActorLogin(
+  private async matchActorLogin(
     userId: string,
     info: Awaited<ReturnType<WebClient["users"]["info"]>>,
-  ): string | null {
+  ): Promise<string | null> {
     const users = this.slackConfig.users;
     if (!users) return null;
     try {
       // Fast path: already linked to a GitHub identity.
-      const linked = users.findBySlackUserId(userId);
+      const linked = await users.findBySlackUserId(userId);
       if (linked?.login) return linked.login;
 
       // `email` requires the `users:read.email` bot scope; absent otherwise.
       const email = info.user?.profile?.email;
       if (!email) return null;
-      const byEmail = users.findByEmail(email);
+      const byEmail = await users.findByEmail(email);
       if (byEmail) {
-        if (byEmail.slackUserId !== userId) users.linkSlackUser(byEmail.id, userId);
+        if (byEmail.slackUserId !== userId) await users.linkSlackUser(byEmail.id, userId);
         return byEmail.login ?? null;
       }
     } catch (err: unknown) {

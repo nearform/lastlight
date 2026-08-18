@@ -6,6 +6,40 @@
 > state suite running green against real Postgres (PGlite, WASM) in the
 > ordinary `pnpm --filter lastlight-core test`.
 
+## ▶ Start here — resuming in a new session
+
+```bash
+cd ~/work/lastlight
+git checkout drizzle-migration
+git merge main --no-edit          # MERGE, never rebase — locked decision 6
+pnpm install --frozen-lockfile
+pnpm turbo run typecheck test build     # must be green BEFORE you start
+```
+
+**Green baseline entering Phase 4: 199 test files, 3,128 tests passing**
+(`pnpm --filter lastlight-core test`). Phases 1–3 are done and ticked; this is
+the next unticked phase.
+
+Read [README.md](README.md) → [00-architecture.md](00-architecture.md) → this
+doc, then **the ⚠ block immediately below §Goal before writing any code** — it
+adds a deliverable this doc's file table does not list, and everything else is
+downstream of it.
+
+**Expect the test count to roughly double, and that is correct.** The PG leg
+re-runs the entire Phase-3 factory, so ~193 of the 3,128 existing tests get a
+second dialect: `runStateDbSuite` is 184 tests and `runSessionManagerSuite` is
+9. Plus the parity test, the cross-dialect bucket-key test and the `open()`
+throw. Landing figure should be roughly **3,128 → ~3,330**, in 3 new files. A
+much smaller delta means a leg silently didn't run.
+
+Order of work (each step is a compiler/test chase that gates the next):
+
+1. **Per-dialect table resolution** (the ⚠ block) — nothing else can pass first.
+2. `schema/pg.ts` + generate `drizzle/pg/0000_init.sql` (§1, §2).
+3. `schema-parity.test.ts` (§3) — structural drift guard, cheap and fast.
+4. The two PG runners (§4) — where the real dialect bugs surface.
+5. The `open()` URL guard (§5) and the dependency boundary (§6).
+
 ## Goal
 
 Add `src/state/schema/pg.ts` mirroring `src/state/schema/sqlite.ts` 1:1 by
@@ -16,44 +50,145 @@ PGlite-backed `StateDb`. No production PG deployment, no data migration
 (locked decision 3). PG stays out of runtime deps: the only PG entry point
 is `StateDb.fromClient()` from tests.
 
+## ⚠ Before you start: the cast is not enough
+
+> **Added 2026-08-18 by Phase 3**, which surfaced this while porting the state
+> tests' direct-row peeks. Verified against `drizzle-orm@0.45.2` source, not
+> inferred. Read it before writing `pg.ts` — it changes what this phase has to
+> build.
+>
+> [00-architecture.md](00-architecture.md) says store code is "written once,
+> typed against the sqlite Drizzle instance" and the PG instance is "adapted
+> through one documented `asStateClient()` cast". The **query-builder surface**
+> really is structurally identical across drivers, so `select` / `insert` /
+> `update` / `delete` / `transaction` all compose. But **per-column value
+> mapping is not**, and it is the one divergence `dialect.ts` does not cover —
+> so a store holding a `sqliteTable` object while running on a PG client
+> mis-maps its own values:
+>
+> | | sqlite column | pg column | using the sqlite object on a PG client |
+> |---|---|---|---|
+> | **boolean** | `SQLiteBoolean.mapToDriverValue(v) => v ? 1 : 0` | `PgBoolean` — **no** `mapToDriverValue` (identity) | a write sends `1` into a `boolean` column → PG rejects it. Reads survive by luck: `Number(true) === 1` |
+> | **json** | `SQLiteTextJson.mapFromDriverValue = JSON.parse` | `PgJsonb.mapFromDriverValue` already parses; the driver returns an **object** | every read does `JSON.parse(object)` → throws |
+>
+> Booleans break on WRITE, JSON breaks on READ. Affected columns are exactly the
+> ones locked decisions 4 and the boolean-mode list name: `executions.success`,
+> `cron_overrides.enabled`, `workflow_overrides.enabled`,
+> `messaging_sessions.active`, and `phase_history` / `context` / `scratch` /
+> `extension_status` / `skills_status`.
+>
+> **Every store imports its tables directly** — `import { cronRuns } from
+> "./schema/sqlite.js"` — so the hole is under all seven of them, not just the
+> two test peeks that exposed it. This phase therefore has one more deliverable
+> than the file table below lists: **the table objects must be resolved per
+> dialect**, e.g. the `StateClient` carries its own schema and stores read their
+> tables off it, so the sqlite leg gets `sqliteSchema` and the PG leg gets
+> `pgSchema` from the same code. A cast cannot do this; it only silences the
+> type error that would otherwise have caught it.
+>
+> Do this FIRST. Every raw-SQL port below is downstream of it, and the failure
+> mode on the JSON half is a thrown `JSON.parse`, not a wrong answer — loud, but
+> only once the leg runs at all.
+
 ## Preconditions
 
-- [ ] Phases 1, 2 (combined), 3 checked off in [README.md](README.md).
-- `apps/server/src/state/schema/sqlite.ts` exists with all **15** tables + 25 named indexes
-  (Phase 1, incl. `users`).
-- Stores are async, Drizzle-backed, and route all raw SQL / rows-affected
+- [x] Phases 1, 2 (combined), 3 checked off in [README.md](README.md).
+- [x] `apps/server/src/state/schema/sqlite.ts` exists with all **15** tables + 25
+  named indexes (Phase 1, incl. `users`).
+- [x] Stores are async, Drizzle-backed, and route all raw SQL / rows-affected
   reads through `dialect.ts`'s `rows()` / `changes()` (Phase 2b).
-- `tests/state/store-suite.ts` exports `runStateDbSuite(makeDb, { dialect })`
-  and the sqlite leg runs it green (Phase 3). The `makeDb` contract is
-  **a pristine `StateDb` per call** (the sqlite leg hands out a per-test
-  temp-FILE DB — locked decision 12; a fresh in-memory PGlite per call
-  satisfies the same contract, and PGlite has no analogue of libsql's
-  `:memory:` connection-swap hazard).
-- `client.ts` exports `asStateClient()` (the documented pg-handle cast) and
-  the `Dialect` type (Phase 2b).
+- [x] `client.ts` exports `asStateClient()` (the documented pg-handle cast) and
+  the `Dialect` type — verified present at `src/state/client.ts:38` and `:20`.
+  `StateDb.fromClient(client, dialect)` is at `src/state/db.ts:183`.
+
+> ### What Phase 3 actually shipped — this doc predates it
+>
+> **There are TWO factories, and this doc only wires one.** Both must get a PG
+> leg or the phase is half-done:
+>
+> | Factory | Export | Tests | Why separate |
+> |---|---|---|---|
+> | `tests/state/store-suite.ts` | `runStateDbSuite(makeDb, { dialect })` | 184 | delegates to nine per-store modules in `tests/state/suites/` |
+> | `tests/connectors/messaging/session-manager-suite.ts` | `runSessionManagerSuite(makeCtx, { dialect })` | 9 | `SessionManager` is **not reachable through `StateDb`** — it is built from a `StateClient` + dialect, so it takes its own `SessionSuiteCtx` (`{ manager, client, close() }`), not a `makeDb` |
+>
+> Four more contract details the sketches in §3/§4 get wrong:
+>
+> 1. **`makeDb` must register its own teardown.** `runStateDbSuite` calls
+>    `makeDb()` in each sub-suite's `beforeEach` and **never closes** what it
+>    gets — the sqlite leg's `makeTestDb()` registers a module-level `afterEach`
+>    instead (`tests/helpers/state-db.ts`). A PG `makeDb` that does not do the
+>    same leaks a PGlite instance per test. `runSessionManagerSuite` is the
+>    opposite: it **does** call `ctx.close()` in `afterEach`, so its `makeCtx`
+>    must NOT also self-register.
+> 2. **`runStateDbSuite` already wraps itself** in
+>    `describe(\`state stores [${dialect}]\`)`. Do not add another `describe`
+>    around the call — §4's sketch does; drop it.
+> 3. **Tests import through the `#src/*` alias**, not relative `../../src/`
+>    paths (`tsconfig.json:9`, `vitest.config.ts:10`). Every §3/§4 snippet below
+>    uses the relative form; translate as you copy.
+> 4. **The runner file owns the logger `vi.mock`.** `vi.mock` is hoisted per test
+>    FILE and does nothing from an imported module, so
+>    `tests/state/db.test.ts` carries it for the whole suite. Copy those lines
+>    into each PG runner or the run's stderr fills with real pino JSON from the
+>    throwing-observer test.
 
 ## Files
 
 | File | Action |
 |---|---|
+| `apps/server/src/state/client.ts` + all 7 stores | **edit FIRST** — resolve table objects per dialect instead of importing `./schema/sqlite.js` (see the ⚠ block above). Not optional, and not listed in the original plan |
 | `apps/server/src/state/schema/pg.ts` | create — pgTable mirror |
 | `apps/server/drizzle-pg.config.ts` | create — `apps/server/` package root, drizzle-kit config, PG dialect |
 | `apps/server/drizzle/pg/0000_init.sql` (+ `meta/`) | generate — never hand-edit |
 | `apps/server/package.json` | `@electric-sql/pglite` devDep + `db:generate:pg` script |
 | `apps/server/tests/state/schema-parity.test.ts` | create — structural drift guard |
-| `apps/server/tests/state/db.pg.test.ts` | create — PGlite behavioral leg |
+| `apps/server/tests/state/db.pg.test.ts` | create — PGlite leg of `runStateDbSuite` |
+| `apps/server/tests/connectors/messaging/session-manager.pg.test.ts` | create — PGlite leg of `runSessionManagerSuite` (**absent from the original plan**) |
 | `apps/server/src/state/db.ts` | small edit — `open()` rejects `postgres://` URLs |
 
 ## 1. `src/state/schema/pg.ts`
 
-Source of truth for the table inventory is the same one Phase 1 used:
-`apps/server/src/state/migrate.ts` (6 state tables incl. `users`, all
-historically-ALTERed columns included) +
-`apps/server/src/connectors/messaging/session-manager.ts` ≈21-69 (the 2
-messaging tables + partial unique index). **Do not re-derive from those
-files — mirror `schema/sqlite.ts` exactly**: same export names, same column
-property names, same column *names* (snake_case strings), same index names.
-Only the column builder types change, per this mapping:
+> ### ⚠ Five things Phase 1/2 changed that this doc predates
+>
+> 1. **`executions` has 27 columns, not 26** — it carries `owner` (issue #279).
+>    The Phase-1 doc's snippet omitted it; do not inherit that omission.
+> 2. **`workflow_runs` has 19 columns** including **`trace_id` and `span_id`**
+>    (issue #255). The column tables in 01 and the snippets here both miss them.
+> 3. **drizzle-kit renders every `UNIQUE` as a standalone `CREATE UNIQUE INDEX`,
+>    not an inline constraint.** The sqlite baseline therefore carries five
+>    named `*_unique` indexes (3 on `users`, 1 each on the two feedback tables).
+>    The pg schema will produce the same five, so the parity test must expect
+>    them on BOTH sides — and should compare *enforced unique key-tuples*, the
+>    way `schema-equivalence.test.ts` already does, rather than index names.
+> 4. **`drizzle/pg/` is fresh-DB only — do NOT mirror `0001_backfill_repo_refs.sql`.**
+>    It is a sqlite-only DATA repair (it uses `instr`) for a population Postgres
+>    has never had. Mirroring it would be a no-op at best.
+> 5. **`dialect.ts` already exists with the helpers**, including `strposExpr`
+>    (currently sqlite `instr`) and `sumTrue`/`sumFalse`. `strposExpr` is the one
+>    that genuinely needs a PG branch (`strpos`); it fans out to ~13 call sites
+>    via `qualifiedRepoSql`, so it is the single widest-reaching port.
+>
+> **And one PG-specific trap already hit in Phase 2:** Postgres `SUM()` over an
+> integer returns `bigint`, which node-postgres/PGlite hand back as a **string**.
+> `feedback-store.ts` already guards this with `.mapWith(Number)` on its
+> aggregates; every other aggregate that is currently only exercised on sqlite
+> (`executionStats`, `dailyStats`, `hourlyStats`, the `list()` cost roll-up) will
+> need the same, and the failure is a silently-stringified count, not an error.
+> Likewise: **unquoted raw-SQL aliases fold to lowercase on PG** (`AS triggerId`
+> → `triggerid`), which is why the Phase-2 raw queries double-quote every alias.
+
+
+> **⚠ Corrected after Phase 2.** Both files this paragraph named are gone:
+> `src/state/migrate.ts` is **deleted**, and `session-manager.ts` no longer owns
+> any DDL. **`src/state/schema/sqlite.ts` is now the only source of truth** —
+> which the paragraph already told you to mirror, so follow that half and ignore
+> the citations. (The frozen pre-Drizzle DDL survives at
+> `tests/state/fixtures/legacy-schema.sql`, but it is a fossil for the
+> prod-shape proof — do not mirror it.)
+
+**Mirror `schema/sqlite.ts` exactly**: same export names, same column property
+names, same column *names* (snake_case strings), same index names. Only the
+column builder types change, per this mapping:
 
 | sqlite builder (Phase 1) | pg builder (this phase) |
 |---|---|
@@ -248,8 +383,8 @@ point of this phase.
 import { describe, expect, it } from "vitest";
 import { getTableConfig as sqliteTableConfig } from "drizzle-orm/sqlite-core";
 import { getTableConfig as pgTableConfig } from "drizzle-orm/pg-core";
-import * as sqliteSchema from "../../src/state/schema/sqlite.js";
-import * as pgSchema from "../../src/state/schema/pg.js";
+import * as sqliteSchema from "#src/state/schema/sqlite.js";
+import * as pgSchema from "#src/state/schema/pg.js";
 
 const TABLES = [
   "executions", "workflowRuns", "cronOverrides", "cronRuns",
@@ -292,21 +427,43 @@ Compare, per table (sorted so ordering never matters):
 Explicitly assert what is NOT compared in a comment block at the top of the
 file, so a future agent doesn't "fix" it.
 
-## 4. `tests/state/db.pg.test.ts`
+## 4. The two PG runners
 
-The behavioral proof — the *same* Phase-3 suite, PG dialect:
+The behavioral proof — the *same* Phase-3 suites, PG dialect. **Two files**,
+because Phase 3 shipped two factories (see the Preconditions box).
+
+### 4a. `tests/state/db.pg.test.ts`
 
 ```ts
-import { describe } from "vitest";
+import { afterEach, vi } from "vitest";
+
+// Same three-line mock the sqlite runner carries — vi.mock is hoisted per
+// FILE, so an imported suite module cannot do this for us.
+vi.mock("#src/logging/logger.js", () => {
+  const noopLogger = {
+    debug: vi.fn(), info: vi.fn(), warn: vi.fn(),
+    error: vi.fn(), fatal: vi.fn(), child: () => noopLogger,
+  };
+  return { logger: () => noopLogger };
+});
+
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { fileURLToPath } from "node:url";
-import { asStateClient } from "../../src/state/client.js";
-import { StateDb } from "../../src/state/db.js";
+import { asStateClient } from "#src/state/client.js";
+import { StateDb } from "#src/state/db.js";
 import { runStateDbSuite } from "./store-suite.js";
 
 const MIGRATIONS = fileURLToPath(new URL("../../drizzle/pg", import.meta.url));
+
+// `runStateDbSuite` never closes what `makeDb` hands it — the sqlite leg's
+// makeTestDb() registers its own cleanup, and so must this. Mirrors the shape
+// of tests/helpers/state-db.ts.
+const open: PGlite[] = [];
+afterEach(async () => {
+  for (const p of open.splice(0)) await p.close();
+});
 
 async function makePgStateDb(): Promise<StateDb> {
   // int8 (OID 20) → number: PG returns COUNT(*)/SUM as int8. PGlite ≥0.5
@@ -316,18 +473,41 @@ async function makePgStateDb(): Promise<StateDb> {
   // documents the fromClient() contract (any FUTURE real PG client must
   // normalize int8 itself) and pins us against a PGlite default change.
   const pglite = new PGlite({ parsers: { 20: (v: string) => Number(v) } });
+  open.push(pglite);
   const db = drizzle(pglite);
   await migrate(db, { migrationsFolder: MIGRATIONS });
   return StateDb.fromClient(asStateClient(db), "postgres");
 }
 
-describe("StateDb on PGlite (postgres dialect)", () => {
-  runStateDbSuite(makePgStateDb, { dialect: "postgres" });
-});
+// No wrapping describe: runStateDbSuite already opens
+// `describe("state stores [postgres]")` itself.
+runStateDbSuite(makePgStateDb, { dialect: "postgres" });
 ```
 
-(Adapt the exact `makeDb` signature to what Phase 3 shipped — if the suite
-expects a teardown, close the PGlite handle there: `await pglite.close()`.)
+### 4b. `tests/connectors/messaging/session-manager.pg.test.ts`
+
+Mirrors `session-manager.test.ts` (the sqlite runner), swapping the raw libsql
+client for PGlite. Note the inverted teardown rule: this factory **does** call
+`ctx.close()` in its own `afterEach`, so `makeCtx` must not self-register.
+
+```ts
+async function makeCtx(): Promise<SessionSuiteCtx> {
+  const pglite = new PGlite({ parsers: { 20: (v: string) => Number(v) } });
+  const client = asStateClient(drizzle(pglite));
+  await migrate(client, { migrationsFolder: MIGRATIONS });
+  return {
+    manager: new SessionManager(client, "postgres"),
+    client,
+    close: async () => pglite.close(),
+  };
+}
+
+runSessionManagerSuite(makeCtx, { dialect: "postgres" });
+```
+
+There is no PG analogue of `session-manager.legacy.test.ts` and there must not
+be — it drives `applyLegacySqliteCompat` over a raw libsql handle and is
+correctly sqlite-only.
 
 **Lifecycle — fresh PGlite per test (recommended).** The `makeDb` contract
 from Phase 3 is a pristine DB per call (the sqlite leg hands out a temp-file
@@ -475,24 +655,84 @@ not sqlite" message, revert.
 
 ## Done criteria
 
-- [ ] `apps/server/src/state/schema/pg.ts` mirrors `sqlite.ts` — 15 tables
+- [x] `apps/server/src/state/schema/pg.ts` mirrors `sqlite.ts` — 15 tables
       (incl. `users`), identical export/property/column/index names; jsonb +
       boolean + identity + doublePrecision mappings applied; identical
       `$type<T>` params.
-- [ ] `apps/server/drizzle-pg.config.ts` + `db:generate:pg` script added;
+- [x] `apps/server/drizzle-pg.config.ts` + `db:generate:pg` script added;
       `apps/server/drizzle/pg/0000_init.sql` + `meta/` committed, purely
       generated.
-- [ ] `apps/server/tests/state/schema-parity.test.ts` green; compares names /
+- [x] `apps/server/tests/state/schema-parity.test.ts` green; compares names /
       nullability / PKs / index name+unique+partial / FKs; excludes types;
       failure messages name the missing column and side; 15 tables covered.
-- [ ] `apps/server/tests/state/db.pg.test.ts` green: fresh PGlite per test → pg
-      migrator → `StateDb.fromClient(..., "postgres")` → full
-      `runStateDbSuite`, plus the cross-dialect stats bucket-key test.
-- [ ] `StateDb.open("postgres://…")` throws the "PG runtime not enabled"
+- [x] **Table objects resolve per dialect** — no store imports
+      `./schema/sqlite.js` for its tables any more, so the sqlite leg gets
+      `sqliteSchema` and the PG leg `pgSchema` from one code path (the ⚠ block
+      after §Goal). Do this before anything else.
+- [x] `apps/server/tests/state/db.pg.test.ts` green: fresh PGlite per test →
+      pg migrator → `StateDb.fromClient(..., "postgres")` → full
+      `runStateDbSuite` (184 tests), with a registered `afterEach` closing every
+      PGlite it handed out, plus the cross-dialect stats bucket-key test.
+- [x] `apps/server/tests/connectors/messaging/session-manager.pg.test.ts` green:
+      the **second** factory, `runSessionManagerSuite` (9 tests), on PGlite.
+      Easy to forget — it is absent from this doc's original file table.
+- [x] `StateDb.open("postgres://…")` throws the "PG runtime not enabled"
       error; covered by a test.
-- [ ] `@electric-sql/pglite` in devDependencies only; no runtime module
+- [x] `@electric-sql/pglite` in devDependencies only; no runtime module
       imports `schema/pg.ts` or any PG driver.
-- [ ] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+- [x] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
       green — both dialect legs in the one run (that IS the CI wiring; no
-      pipeline change).
-- [ ] README checkbox ticked; deviations recorded below.
+      pipeline change). Count goes **3,128 → ~3,330** across 3 new files; a much
+      smaller delta means a leg silently did not run.
+- [x] README checkbox ticked; deviations recorded below.
+
+## Deviations (recorded 2026-08-18)
+
+**Landing figure: 3,128 → 3,357 tests, 199 → 202 files** — the predicted shape exactly (184 PG store + 9 PG session + 32 parity + 1 cross-dialect + 3 `open()` throw), so neither leg silently skipped.
+
+### 1. The ⚠ deliverable shipped as `tablesOf(client)`, not a constructor parameter
+
+The doc says "e.g. the `StateClient` carries its own schema and stores read their tables off it". It already does: `drizzle(client, { schema })` stores the namespace object on `db._.fullSchema`, and it is **typed** (`BaseSQLiteDatabase`'s `_.fullSchema: TFullSchema`), so `StateClient = LibSQLDatabase<typeof sqliteSchema>` makes it come back as `typeof sqliteSchema` with no cast. `client.ts` therefore adds only `type StateTables` + `tablesOf(client)`, and **no constructor signature changed anywhere** — the PG leg differs solely in passing `pgSchema` to `drizzle()`. It also keeps `schema/pg.ts` out of the runtime import graph, which an injected-schema parameter would have made harder (something under `src/` would have to name the module).
+
+A client built without `{ schema }` would silently hand every store `undefined` tables, so `tablesOf` validates and throws naming the fix. Both PG runners pass `{ schema: pgSchema }` — **§4a's sketch (`drizzle(pglite)`) would now throw**; use the runners as written, not the sketch.
+
+**The per-store pattern is one destructure line per method**, not a rename of every reference:
+
+```ts
+private readonly t: StateTables;
+constructor(private client: StateClient) { this.t = tablesOf(client); }
+
+async respond(...) {
+  const { workflowApprovals } = this.t;   // ← the whole edit
+  …unchanged body…
+}
+```
+
+~600 table references across 9 files, and not one method body was touched — the diff is 87 destructure lines plus the module-level lifts below. That was deliberate: a mechanical identifier rewrite over `executions` (247 occurrences, also a store property name, a table-name string and a word in prose) is exactly the kind of edit that lands a silent wrong-table bug. Module-level constants that closed over a table became functions of `StateTables`: `approvalColumns`, `executionColumns`, `executionColumnsSql`, `executionOutcomeColumns` (was the exported `EXECUTION_OUTCOME_COLUMNS`; nothing outside the file imported it), `qualifiedRepoOrNull` (was `QUALIFIED_REPO_SQL`), `ACTIVE_FIRST`, `repoMatchClause`; row types became `StateTables["x"]["$inferSelect"]`.
+
+### 2. `strposExpr` is gone — the "single widest-reaching port" evaporated
+
+§1's note 5 calls `strposExpr` "the one that genuinely needs a PG branch (`strpos`) … the single widest-reaching port". It needed no branch at all: its only caller is `qualifiedRepoSql`, and every one of those 13 call sites asks the same question — `instr(repo,'/') > 0`, i.e. *does this contain a slash*. `LIKE '%/%'` answers that identically in both dialects, so `dialect.ts` now exports `containsExpr(haystack, needle)` returning a boolean predicate and the seam is **removed** rather than plumbed. (`0001_backfill_repo_refs.sql` keeps `instr` — it is sqlite-only by construction.)
+
+**The pattern must be an INLINED literal, not a bound parameter, and that is load-bearing.** Postgres matches a `GROUP BY` expression to its `SELECT` twin *structurally*, and the same bound parameter occurring twice is two different placeholders (`$1` and `$3`) — so `distinctRepos`, which selects and groups by the same `qualifiedRepoSql` fragment, died with `column "workflow_runs.repo" must appear in the GROUP BY clause`. SQLite is lax here and never noticed. This was 3 of the 4 PG-leg failures, and **the same failure would have hit a `strpos()` port**: the root cause is the parameter, not the function. `containsExpr` asserts its needle against a plain-literal charset rather than trusting callers, since the failure mode of a hostile needle would be injection.
+
+### 3. `StateDb.open()`'s postgres guard was case-sensitive
+
+`/^postgres(ql)?:\/\//` without `/i` — so `POSTGRES://host/db` fell through to the libsql client and surfaced as an opaque `ConnectionFailed` instead of the "PG runtime not enabled" message. The doc's §5 snippet has the `i` flag; the shipped Phase-2 code did not. Fixed, and the throw test is `it.each` over three spellings including the uppercase one.
+
+### 4. Two Phase-3 shared suites were still peeking with sqlite table objects
+
+`tests/connectors/messaging/session-manager-suite.ts` and `tests/state/suites/feedback-suite.ts` import tables from `schema/sqlite.js` for their direct-row peeks — the very hazard the ⚠ block describes, sitting inside the suites that were about to be pointed at Postgres. The session one reads `messaging_sessions.active` (a real boolean on PG) and inserts rows through the table object, so it would have failed loudly; the feedback one only reads a `text` id, so it would have passed while being wrong. Both now resolve tables via `tablesOf(client)`.
+
+### 5. The parity test compares two things §3 does not list, and skips one it does
+
+- **Added `unique` (column-level) and `hasDefault` per column.** Neither core reports a column-level `.unique()` under `uniqueConstraints` — that list holds only the table-level `unique().on(...)` form — so as specified, the three `UNIQUE` columns on `users` (`github_id`, `login`, `slack_user_id`) would have been compared **by nothing at all**. Verified against the live configs, not assumed.
+- **Unique constraints are compared by COLUMNS, not name.** §1's note 3 predicts five `*_unique` indexes on both sides; that is not what happens. drizzle-kit renders the sqlite ones as `CREATE UNIQUE INDEX` but the **Postgres** ones as inline `CONSTRAINT … UNIQUE(...)`, and the two cores auto-name them independently, so a name comparison would report false drift.
+- The table list is derived with `is(v, Table)` per §3's "better" note, not hardcoded. Confirmed failing correctly: a throwaway column on `pg.ts` produces `workflowRuns: columns in pg but not sqlite: expected [ 'throwaway' ] to deeply equal []`.
+
+### 6. Smaller notes
+
+- The migration is `0000_init.sql` only because `drizzle-kit generate --name init` was passed once; the `db:generate:pg` script stays generic (an unnamed run picks a random slug like `0000_free_thena`). Re-running it is a no-op, as required.
+- **No dialect leak from the "expected leaks" list actually bit** apart from GROUP BY strictness. `changes()`, `rows()`, `LIKE`/case-sensitivity, identity insert, int8-as-string and NULL ordering all held on the first PG run — Phase 2's ports were written for this and they survived it. The int8 parser is kept as a pin regardless, and `asStateClient()`'s doc comment now records the obligation (the cast cannot enforce it).
+- `sumTrue`/`sumFalse` and `consecutiveFailures`' `success === false` are now proven on a real boolean column rather than argued about: the executions suite runs unmodified on both legs, and the cross-dialect bucket test deep-equals the succeeded/failed tallies with a still-running (NULL) row present.
+- Pre-existing `typecheck:test` failures outside this phase's scope (`dashboard/src/hooks/useVisibleRepos.ts`, `tests/workflows/evals-contract.test.ts`) are unchanged — see the note recorded in commit `63ff0e9`. Neither is gated by CI today.

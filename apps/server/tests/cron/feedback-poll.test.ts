@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("#src/logging/logger.js", () => {
   const noopLogger = {
@@ -21,14 +21,13 @@ import {
   pollFeedbackReactions,
   type FeedbackGitHubClient,
 } from "#src/cron/feedback-poll.js";
+import { feedbackAnchors, workflowRuns } from "#src/state/schema/sqlite.js";
+import { makeTestDb } from "../helpers/state-db.js";
 
 let db: StateDb;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
-});
-afterEach(() => {
-  db.close();
+beforeEach(async () => {
+  db = await makeTestDb();
 });
 
 const BOT = "last-light[bot]";
@@ -87,7 +86,7 @@ function seedAnchor(over: { externalId?: string; nodeId?: string; owner?: string
     issueNumber: 255,
     workflowRunId: "run-1",
     workflowName: "pr-review",
-    executionId: null,
+    messagingSessionId: null,
     ...(over.createdAt ? { createdAt: over.createdAt } : {}),
   });
 }
@@ -109,7 +108,7 @@ describe("discoverRunAnchors", () => {
     const gh = fakeGh({ listBotComments: vi.fn(async () => [comment(), comment({ externalId: "222", nodeId: "IC_222" })]) });
     expect(await discoverRunAnchors({ db, github: gh, botLogin: BOT }, makeRun())).toBe(2);
 
-    const anchor = db.feedback.findAnchor("github", null, "111");
+    const anchor = await db.feedback.findAnchor("github", null, "111");
     expect(anchor).toMatchObject({
       workflowRunId: "run-1",
       workflowName: "pr-review",
@@ -120,7 +119,7 @@ describe("discoverRunAnchors", () => {
   });
 
   it("scopes the listing to the run's own window", async () => {
-    const listBotComments = vi.fn(async () => []);
+    const listBotComments = vi.fn<FeedbackGitHubClient["listBotComments"]>(async () => []);
     await discoverRunAnchors({ db, github: fakeGh({ listBotComments }), botLogin: BOT }, makeRun());
     expect(listBotComments).toHaveBeenCalledWith("nearform", "lastlight", 255, {
       botLogin: BOT,
@@ -138,27 +137,33 @@ describe("discoverRunAnchors", () => {
     //
     // Raw SQL because `createRun` normalizes; the row is then read back through
     // the store, which is the path the observer actually takes.
-    db.database
-      .prepare(
-        `INSERT INTO workflow_runs (id, workflow_name, trigger_id, owner, repo, issue_number, current_phase, status, started_at, updated_at)
-         VALUES ('run-legacy', 'pr-review', 'nearform/lastlight#255', NULL, 'nearform/lastlight', 255, 'done', 'succeeded', ?, ?)`,
-      )
-      .run("2026-08-01T10:00:00.000Z", "2026-08-01T10:20:00.000Z");
-    const stored = db.runs.getRun("run-legacy")!;
+    await db.client.insert(workflowRuns).values({
+      id: "run-legacy",
+      workflowName: "pr-review",
+      triggerId: "nearform/lastlight#255",
+      owner: null,
+      repo: "nearform/lastlight",
+      issueNumber: 255,
+      currentPhase: "done",
+      status: "succeeded",
+      startedAt: "2026-08-01T10:00:00.000Z",
+      updatedAt: "2026-08-01T10:20:00.000Z",
+    });
+    const stored = (await db.runs.getRun("run-legacy"))!;
 
     const listBotComments = vi.fn(async () => [comment()]);
     await discoverRunAnchors({ db, github: fakeGh({ listBotComments }), botLogin: BOT }, stored);
 
     expect(listBotComments.mock.calls[0]!.slice(0, 3)).toEqual(["nearform", "lastlight", 255]);
     // …and the anchor it writes carries the same pair, so `anchorUrl` resolves.
-    const anchors = db.database
-      .prepare(`SELECT owner, repo FROM feedback_anchors`)
-      .all() as { owner: string; repo: string }[];
+    const anchors = await db.client
+      .select({ owner: feedbackAnchors.owner, repo: feedbackAnchors.repo })
+      .from(feedbackAnchors);
     expect(anchors).toEqual([{ owner: "nearform", repo: "lastlight" }]);
   });
 
   it("asks for review comments only on a PR", async () => {
-    const listBotComments = vi.fn(async () => []);
+    const listBotComments = vi.fn<FeedbackGitHubClient["listBotComments"]>(async () => []);
     const issueRun = makeRun({ workflowName: "issue-triage", context: {} });
     await discoverRunAnchors({ db, github: fakeGh({ listBotComments }), botLogin: BOT }, issueRun);
     expect(listBotComments.mock.calls[0]![3]).toMatchObject({ isPr: false });
@@ -192,7 +197,7 @@ describe("discoverRunAnchors", () => {
 
 describe("pollFeedbackReactions", () => {
   it("turns a batched read into scored signals", async () => {
-    seedAnchor();
+    await seedAnchor();
     const gh = fakeGh({
       fetchReactions: vi.fn(async () =>
         new Map([["IC_111", [
@@ -205,7 +210,7 @@ describe("pollFeedbackReactions", () => {
     const result = await pollFeedbackReactions(pollDeps(gh));
     expect(result).toMatchObject({ anchorsPolled: 1, requests: 1, added: 2, retracted: 0 });
 
-    const { signals } = db.feedback.list();
+    const { signals } = await db.feedback.list();
     expect(signals.map((s) => [s.reactor, s.emoji, s.score]).sort()).toEqual([
       ["alice", "+1", 1],
       ["bob", "confused", -2],
@@ -213,8 +218,8 @@ describe("pollFeedbackReactions", () => {
   });
 
   it("batches 100 anchors per request — 250 anchors is exactly 3 calls", async () => {
-    for (let i = 0; i < 250; i++) seedAnchor({ externalId: `c${i}`, nodeId: `IC_${i}` });
-    const fetchReactions = vi.fn(async () => new Map<string, ReactionRead[]>());
+    for (let i = 0; i < 250; i++) await seedAnchor({ externalId: `c${i}`, nodeId: `IC_${i}` });
+    const fetchReactions = vi.fn<FeedbackGitHubClient["fetchReactions"]>(async () => new Map<string, ReactionRead[]>());
     const result = await pollFeedbackReactions(pollDeps(fakeGh({ fetchReactions })));
 
     expect(fetchReactions).toHaveBeenCalledTimes(3);
@@ -223,8 +228,8 @@ describe("pollFeedbackReactions", () => {
   });
 
   it("respects maxAnchorsPerTick — the whole point of the budget", async () => {
-    for (let i = 0; i < 250; i++) seedAnchor({ externalId: `c${i}`, nodeId: `IC_${i}` });
-    const fetchReactions = vi.fn(async () => new Map<string, ReactionRead[]>());
+    for (let i = 0; i < 250; i++) await seedAnchor({ externalId: `c${i}`, nodeId: `IC_${i}` });
+    const fetchReactions = vi.fn<FeedbackGitHubClient["fetchReactions"]>(async () => new Map<string, ReactionRead[]>());
     const result = await pollFeedbackReactions(
       pollDeps(fakeGh({ fetchReactions }), { maxAnchorsPerTick: 100 }),
     );
@@ -233,9 +238,9 @@ describe("pollFeedbackReactions", () => {
   });
 
   it("groups by owner — one installation's budget is not another's", async () => {
-    seedAnchor({ externalId: "a", nodeId: "IC_a", owner: "nearform" });
-    seedAnchor({ externalId: "b", nodeId: "IC_b", owner: "cliftonc" });
-    const fetchReactions = vi.fn(async () => new Map<string, ReactionRead[]>());
+    await seedAnchor({ externalId: "a", nodeId: "IC_a", owner: "nearform" });
+    await seedAnchor({ externalId: "b", nodeId: "IC_b", owner: "cliftonc" });
+    const fetchReactions = vi.fn<FeedbackGitHubClient["fetchReactions"]>(async () => new Map<string, ReactionRead[]>());
     await pollFeedbackReactions(pollDeps(fakeGh({ fetchReactions })));
 
     expect(fetchReactions).toHaveBeenCalledTimes(2);
@@ -243,25 +248,25 @@ describe("pollFeedbackReactions", () => {
   });
 
   it("leaves anchors outside the window alone", async () => {
-    seedAnchor({ externalId: "old", nodeId: "IC_old", createdAt: "2020-01-01T00:00:00.000Z" });
-    const fetchReactions = vi.fn(async () => new Map<string, ReactionRead[]>());
+    await seedAnchor({ externalId: "old", nodeId: "IC_old", createdAt: "2020-01-01T00:00:00.000Z" });
+    const fetchReactions = vi.fn<FeedbackGitHubClient["fetchReactions"]>(async () => new Map<string, ReactionRead[]>());
     const result = await pollFeedbackReactions(pollDeps(fakeGh({ fetchReactions })));
     expect(fetchReactions).not.toHaveBeenCalled();
     expect(result.anchorsPolled).toBe(0);
   });
 
   it("is idempotent across ticks — the same reaction is added once", async () => {
-    seedAnchor();
+    await seedAnchor();
     const gh = fakeGh({
       fetchReactions: vi.fn(async () => new Map([["IC_111", [{ content: "THUMBS_UP", reactor: "alice" }]]])),
     });
     expect((await pollFeedbackReactions(pollDeps(gh))).added).toBe(1);
     expect((await pollFeedbackReactions(pollDeps(gh))).added).toBe(0);
-    expect(db.feedback.list().total).toBe(1);
+    expect((await db.feedback.list()).total).toBe(1);
   });
 
   it("retracts a reaction that has vanished — absence is the only evidence", async () => {
-    seedAnchor();
+    await seedAnchor();
     const present = fakeGh({
       fetchReactions: vi.fn(async () => new Map([["IC_111", [{ content: "THUMBS_UP", reactor: "alice" }]]])),
     });
@@ -270,11 +275,11 @@ describe("pollFeedbackReactions", () => {
     const gone = fakeGh({ fetchReactions: vi.fn(async () => new Map([["IC_111", []]])) });
     const result = await pollFeedbackReactions(pollDeps(gone));
     expect(result.retracted).toBe(1);
-    expect(db.feedback.list().total).toBe(0);
+    expect((await db.feedback.list()).total).toBe(0);
   });
 
   it("does NOT retract when GitHub omits the node entirely (a deleted comment)", async () => {
-    seedAnchor();
+    await seedAnchor();
     const present = fakeGh({
       fetchReactions: vi.fn(async () => new Map([["IC_111", [{ content: "THUMBS_UP", reactor: "alice" }]]])),
     });
@@ -283,11 +288,11 @@ describe("pollFeedbackReactions", () => {
     // Empty map = node absent, which means "comment gone", not "reaction removed".
     const missing = fakeGh({ fetchReactions: vi.fn(async () => new Map<string, ReactionRead[]>()) });
     expect((await pollFeedbackReactions(pollDeps(missing))).retracted).toBe(0);
-    expect(db.feedback.list().total).toBe(1);
+    expect((await db.feedback.list()).total).toBe(1);
   });
 
   it("skips the bot's own reactions", async () => {
-    seedAnchor();
+    await seedAnchor();
     const gh = fakeGh({
       fetchReactions: vi.fn(async () =>
         // GraphQL reports our own login WITHOUT the [bot] suffix.
@@ -295,11 +300,11 @@ describe("pollFeedbackReactions", () => {
       ),
     });
     expect((await pollFeedbackReactions(pollDeps(gh))).added).toBe(0);
-    expect(db.feedback.list().total).toBe(0);
+    expect((await db.feedback.list()).total).toBe(0);
   });
 
   it("keeps a failed batch at the front of the queue instead of rotating it", async () => {
-    const anchor = seedAnchor();
+    const anchor = await seedAnchor();
     const gh = fakeGh({
       fetchReactions: vi.fn(async () => {
         throw new Error("rate limited");
@@ -308,11 +313,11 @@ describe("pollFeedbackReactions", () => {
     const result = await pollFeedbackReactions(pollDeps(gh));
     expect(result.requests).toBe(0);
     expect(result.anchorsPolled).toBe(0);
-    expect(db.feedback.getAnchor(anchor.id)?.lastPolledAt).toBeNull();
+    expect((await db.feedback.getAnchor(anchor.id))?.lastPolledAt).toBeNull();
   });
 
   it("prunes anchors past the retention horizon", async () => {
-    seedAnchor({ externalId: "ancient", nodeId: "IC_ancient", createdAt: "2020-01-01T00:00:00.000Z" });
+    await seedAnchor({ externalId: "ancient", nodeId: "IC_ancient", createdAt: "2020-01-01T00:00:00.000Z" });
     const result = await pollFeedbackReactions(pollDeps(fakeGh()));
     expect(result.pruned).toBe(1);
   });

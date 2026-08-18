@@ -30,7 +30,8 @@ vi.mock("#src/admin/docker.js", () => ({
 }));
 
 import { executeAgent } from "#src/engine/agent-executor.js";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { configureWorkflowAssets, clearWorkflowCache } from "#src/workflows/loader.js";
 import { runWorkflow } from "#src/workflows/runner.js";
 import {
@@ -235,18 +236,17 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
   let builtIn: string;
   let db: StateDb;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     builtIn = tmp();
     writeWorkflow(builtIn, "pr-review", REVIEW_YAML);
     writePrompt(builtIn, "review.md", "BUILT-IN REVIEW PROMPT");
     configureWorkflowAssets({ builtInRoot: builtIn });
     clearWorkflowCache();
-    db = new StateDb(":memory:");
+    db = await makeTestDb();
     mockExecuteAgent.mockResolvedValue(agentOk());
   });
 
   afterEach(() => {
-    db.close();
     configureWorkflowAssets();
     clearWorkflowCache();
     vi.clearAllMocks();
@@ -321,7 +321,7 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
       {},
     );
 
-    const run = db.runs.getRun(runId());
+    const run = await db.runs.getRun(runId());
     const stored = run?.context?.repoConfig as ReturnType<typeof repoConfigRunRecord>;
     expect(stored.repo).toBe("acme/widgets");
     expect(stored.treeSha).toBe("abc1234def");
@@ -385,7 +385,7 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
 
     expect(mockExecuteAgent.mock.calls[0]![0]).toBe("attempts=1 impact=medium trigger=[]");
 
-    const stored = db.runs.getRun(runId())?.context?.repoConfig as ReturnType<typeof repoConfigRunRecord>;
+    const stored = (await db.runs.getRun(runId()))?.context?.repoConfig as ReturnType<typeof repoConfigRunRecord>;
     // Only the leaf the repo actually won is recorded…
     expect(stored.applied.fix).toEqual({ maxAttempts: 1 });
     // …and a block it won nothing in contributes nothing at all.
@@ -442,7 +442,7 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
     );
 
     expect(result.paused).toBe(true);
-    const run = db.runs.getByTrigger("acme/widgets#7");
+    const run = await db.runs.getByTrigger("acme/widgets#7");
     expect(run?.status).toBe("paused");
   });
 
@@ -505,7 +505,7 @@ describe("per-repo config — effective config reaches a run (issue #180)", () =
     const [prompt, cfg] = mockExecuteAgent.mock.calls[0]!;
     expect(prompt).toBe("BUILT-IN REVIEW PROMPT");
     expect(cfg.model).toBe("anthropic/operator-review");
-    const run = db.runs.getRun(runId());
+    const run = await db.runs.getRun(runId());
     expect(run).not.toBeNull();
     expect(run?.context?.repoConfig).toBeUndefined();
     expect(run?.scratch?.repoConfig).toBeUndefined();
@@ -518,7 +518,7 @@ describe("per-repo config — concurrent runs stay pinned to their own repo", ()
   let repoB: string;
   let db: StateDb;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     builtIn = tmp();
     repoA = tmp();
     repoB = tmp();
@@ -528,11 +528,10 @@ describe("per-repo config — concurrent runs stay pinned to their own repo", ()
     writePrompt(repoB, "review.md", "REPO B REVIEW PROMPT");
     configureWorkflowAssets({ builtInRoot: builtIn });
     clearWorkflowCache();
-    db = new StateDb(":memory:");
+    db = await makeTestDb();
   });
 
   afterEach(() => {
-    db.close();
     configureWorkflowAssets();
     clearWorkflowCache();
     vi.clearAllMocks();

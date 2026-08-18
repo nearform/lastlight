@@ -44,6 +44,7 @@ vi.mock("#src/logging/logger.js", () => {
 
 const { getJobs } = await import("#src/cron/jobs.js");
 const { CronWorkflowSchema } = await import("lastlight-workflow-engine");
+const { makeTestDb } = await import("../helpers/state-db.js");
 
 const NO_CRONS = { enable: [], disable: [] };
 
@@ -74,18 +75,18 @@ describe("CronWorkflowSchema — exactly one of workflow/handler", () => {
 });
 
 describe("getJobs — resolving a handler", () => {
-  it("attaches the resolved handler to the job", () => {
+  it("attaches the resolved handler to the job", async () => {
     const handler = vi.fn(async () => {});
     cronDefs.mockReturnValue([{ name: "repo-digest", handler: "repo-digest", schedule: "0 9 * * 1" }]);
 
-    const jobs = getJobs({ crons: NO_CRONS, handlers: { "repo-digest": handler } });
+    const jobs = await getJobs({ crons: NO_CRONS, handlers: { "repo-digest": handler } });
 
     expect(jobs).toHaveLength(1);
     expect(jobs[0].handler).toBe(handler);
     expect(jobs[0].workflow).toBeUndefined();
   });
 
-  it("DROPS a cron whose handler is unavailable, and says which one", () => {
+  it("DROPS a cron whose handler is unavailable, and says which one", async () => {
     // The opposite direction to `condition.unless`, where registering is safe
     // because there is still a workflow to run. Here there is nothing to run,
     // so a registered tick would only throw — the boot warning is the signal.
@@ -94,7 +95,7 @@ describe("getJobs — resolving a handler", () => {
       { name: "health", workflow: "repo-health", schedule: "0 9 * * 1" },
     ]);
 
-    const jobs = getJobs({ crons: NO_CRONS, handlers: {} });
+    const jobs = await getJobs({ crons: NO_CRONS, handlers: {} });
 
     expect(jobs.map((j) => j.name)).toEqual(["health"]);
     expect(warnSpy).toHaveBeenCalledWith(
@@ -103,12 +104,12 @@ describe("getJobs — resolving a handler", () => {
     );
   });
 
-  it("still honours the operator's crons.disable for a handler cron", () => {
+  it("still honours the operator's crons.disable for a handler cron", async () => {
     // Off-by-default, not unregistered — a repo may still opt back in, which is
     // why the job survives with the control key rather than disappearing.
     cronDefs.mockReturnValue([{ name: "repo-digest", handler: "repo-digest", schedule: "0 9 * * 1" }]);
 
-    const jobs = getJobs({
+    const jobs = await getJobs({
       crons: { enable: [], disable: ["repo-digest"] },
       handlers: { "repo-digest": vi.fn(async () => {}) },
     });
@@ -117,9 +118,9 @@ describe("getJobs — resolving a handler", () => {
     expect(jobs[0].context._cronGloballyEnabled).toBe(false);
   });
 
-  it("gives a handler cron the same repo list and control keys a workflow cron gets", () => {
+  it("gives a handler cron the same repo list and control keys a workflow cron gets", async () => {
     cronDefs.mockReturnValue([{ name: "repo-digest", handler: "repo-digest", schedule: "0 9 * * 1" }]);
-    const jobs = getJobs({ crons: NO_CRONS, handlers: { "repo-digest": vi.fn(async () => {}) } });
+    const jobs = await getJobs({ crons: NO_CRONS, handlers: { "repo-digest": vi.fn(async () => {}) } });
 
     expect(jobs[0].context).toMatchObject({
       repos: ["acme/a"],
@@ -141,103 +142,73 @@ describe("withLedger — a handler cron is countable", () => {
    */
   it("records a row per invocation, keyed by the CRON name", async () => {
     const { withLedger } = await import("#src/cron/handlers.js");
-    const { StateDb } = await import("#src/state/db.js");
-    const db = new StateDb(":memory:");
-    try {
-      const wrapped = withLedger(db, "repo-digest", async () => {});
-      await wrapped({ repos: ["acme/a"] });
+    const db = await makeTestDb();
+    const wrapped = withLedger(db, "repo-digest", async () => {});
+    await wrapped({ repos: ["acme/a"] });
 
-      const row = db.cronRuns.latestByCron().get("repo-digest")!;
-      expect(row).toMatchObject({ handler: "repo-digest", status: "ok" });
-      expect(row.finishedAt).toBeTruthy();
-      // A handler cron dispatches nothing and narrows repos inside itself, so
-      // these stay null by design (design §3).
-      expect(row.workflow).toBeNull();
-      expect(row.dispatched).toBeNull();
-      expect(row.reposScanned).toBeNull();
-    } finally {
-      db.close();
-    }
+    const row = (await db.cronRuns.latestByCron()).get("repo-digest")!;
+    expect(row).toMatchObject({ handler: "repo-digest", status: "ok" });
+    expect(row.finishedAt).toBeTruthy();
+    // A handler cron dispatches nothing and narrows repos inside itself, so
+    // these stay null by design (design §3).
+    expect(row.workflow).toBeNull();
+    expect(row.dispatched).toBeNull();
+    expect(row.reposScanned).toBeNull();
   });
 
   it("records the failure AND re-throws — the row is a record, not a swallow", async () => {
     const { withLedger } = await import("#src/cron/handlers.js");
-    const { StateDb } = await import("#src/state/db.js");
-    const db = new StateDb(":memory:");
-    try {
-      const wrapped = withLedger(db, "repo-digest", async () => {
-        throw new Error("invalid_auth");
-      });
+    const db = await makeTestDb();
+    const wrapped = withLedger(db, "repo-digest", async () => {
+      throw new Error("invalid_auth");
+    });
 
-      await expect(wrapped({})).rejects.toThrow("invalid_auth");
+    await expect(wrapped({})).rejects.toThrow("invalid_auth");
 
-      const row = db.cronRuns.latestByCron().get("repo-digest")!;
-      expect(row).toMatchObject({ status: "failed", error: "invalid_auth" });
-    } finally {
-      db.close();
-    }
+    const row = (await db.cronRuns.latestByCron()).get("repo-digest")!;
+    expect(row).toMatchObject({ status: "failed", error: "invalid_auth" });
   });
 
   it("makes the alerting input — recentFailures — actually count", async () => {
     const { withLedger } = await import("#src/cron/handlers.js");
-    const { StateDb } = await import("#src/state/db.js");
-    const db = new StateDb(":memory:");
-    try {
-      const wrapped = withLedger(db, "repo-digest", async () => {
-        throw new Error("not_in_channel");
-      });
-      for (let i = 0; i < 3; i++) await wrapped({}).catch(() => {});
+    const db = await makeTestDb();
+    const wrapped = withLedger(db, "repo-digest", async () => {
+      throw new Error("not_in_channel");
+    });
+    for (let i = 0; i < 3; i++) await wrapped({}).catch(() => {});
 
-      expect(db.cronRuns.recentFailures("repo-digest")).toBe(3);
-    } finally {
-      db.close();
-    }
+    expect(await db.cronRuns.recentFailures("repo-digest")).toBe(3);
   });
 
   it("attributes a manual 'Run now' to the person who pressed it", async () => {
     const { withLedger } = await import("#src/cron/handlers.js");
-    const { StateDb } = await import("#src/state/db.js");
-    const db = new StateDb(":memory:");
-    try {
-      await withLedger(db, "repo-digest", async () => {})({
-        sender: "cliftonc",
-        _cronSource: "manual",
-        _cronActor: "cliftonc",
-      });
-      const row = db.cronRuns.latestByCron().get("repo-digest")!;
-      expect(row.source).toBe("manual");
-      expect(row.actor).toBe("cliftonc");
-    } finally {
-      db.close();
-    }
+    const db = await makeTestDb();
+    await withLedger(db, "repo-digest", async () => {})({
+      sender: "cliftonc",
+      _cronSource: "manual",
+      _cronActor: "cliftonc",
+    });
+    const row = (await db.cronRuns.latestByCron()).get("repo-digest")!;
+    expect(row.source).toBe("manual");
+    expect(row.actor).toBe("cliftonc");
   });
 
   it("defaults a scheduled tick to source=schedule with no actor", async () => {
     const { withLedger } = await import("#src/cron/handlers.js");
-    const { StateDb } = await import("#src/state/db.js");
-    const db = new StateDb(":memory:");
-    try {
-      await withLedger(db, "repo-digest", async () => {})({ repos: ["acme/a"] });
-      const row = db.cronRuns.latestByCron().get("repo-digest")!;
-      expect(row.source).toBe("schedule");
-      expect(row.actor).toBeNull();
-    } finally {
-      db.close();
-    }
+    const db = await makeTestDb();
+    await withLedger(db, "repo-digest", async () => {})({ repos: ["acme/a"] });
+    const row = (await db.cronRuns.latestByCron()).get("repo-digest")!;
+    expect(row.source).toBe("schedule");
+    expect(row.actor).toBeNull();
   });
 
   it("writes nothing to the executions ledger", async () => {
     const { withLedger } = await import("#src/cron/handlers.js");
-    const { StateDb } = await import("#src/state/db.js");
-    const db = new StateDb(":memory:");
-    try {
-      await withLedger(db, "repo-digest", async () => {})({});
-      // The move is a REPLACEMENT, not a dual write — an executions row here
-      // would pollute the agent-phase views that table feeds.
-      expect(db.executions.recentExecutions("repo-digest", 10)).toHaveLength(0);
-    } finally {
-      db.close();
-    }
+    const db = await makeTestDb();
+    await withLedger(db, "repo-digest", async () => {})({});
+    // The move is a REPLACEMENT, not a dual write — an executions row here
+    // would pollute the agent-phase views that table feeds.
+    expect(await db.executions.recentExecutions("repo-digest", 10)).toHaveLength(0);
   });
 });
 
@@ -254,8 +225,7 @@ describe("CronScheduler — running a handler job", () => {
 
   it("invokes the handler, with the job's context, instead of the workflow runner", async () => {
     const { CronScheduler } = await import("#src/cron/scheduler.js");
-    const { StateDb } = await import("#src/state/db.js");
-    const db = new StateDb(":memory:");
+    const db = await makeTestDb();
     const runner = vi.fn(async () => {});
     const handler = vi.fn(async () => {});
     const scheduler = new CronScheduler(db, runner);
@@ -273,14 +243,12 @@ describe("CronScheduler — running a handler job", () => {
       expect(runner).not.toHaveBeenCalled();
     } finally {
       scheduler.stopAll();
-      db.close();
     }
   });
 
   it("counts a throwing handler's failures under the CRON name", async () => {
     const { CronScheduler } = await import("#src/cron/scheduler.js");
-    const { StateDb } = await import("#src/state/db.js");
-    const db = new StateDb(":memory:");
+    const db = await makeTestDb();
     // The gap: this used to be gated on `job.workflow`, so a handler cron
     // failing every tick produced one log line, no count, and a dashboard
     // reporting zero failures beside it. Counting now happens at fire grain off
@@ -298,7 +266,6 @@ describe("CronScheduler — running a handler job", () => {
       expect(recentFailures).toHaveBeenCalledWith("repo-digest");
     } finally {
       scheduler.stopAll();
-      db.close();
     }
   });
 });

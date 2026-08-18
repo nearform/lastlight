@@ -1,6 +1,8 @@
-import type Database from "better-sqlite3";
 import { randomUUID } from "crypto";
+import { and, desc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { ConversationKey, ConversationSession, ConversationMessage } from "./types.js";
+import { tablesOf, type Dialect, type StateClient, type StateTables } from "../../state/client.js";
+import { changes, isUniqueViolation } from "../../state/dialect.js";
 import { logger } from "../../logging/logger.js";
 
 const log = logger("messaging");
@@ -8,167 +10,120 @@ const log = logger("messaging");
 /** Inactivity timeout before a session is considered stale (30 minutes) */
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
+/** The row shape the builder returns for `messaging_sessions`. */
+type SessionRow = StateTables["messagingSessions"]["$inferSelect"];
+
 /**
- * SQLite-backed session manager for messaging conversations.
+ * Session manager for messaging conversations, over the shared state client.
  * Shared across all messaging platform connectors.
+ *
+ * Owns no DDL: both tables, their indexes and the partial unique index
+ * (`WHERE active = 1` — "one active session per key") are declared in
+ * `state/schema/sqlite.ts` and created by the migrations.
  */
 export class SessionManager {
-  private db: Database.Database;
-
-  constructor(db: Database.Database) {
-    this.db = db;
-    this.migrate();
-  }
-
-  private migrate() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS messaging_sessions (
-        id TEXT PRIMARY KEY,
-        platform TEXT NOT NULL,
-        channel_id TEXT NOT NULL,
-        thread_id TEXT,
-        user_id TEXT NOT NULL,
-        agent_session_id TEXT,
-        created_at TEXT NOT NULL,
-        last_activity_at TEXT NOT NULL,
-        message_count INTEGER DEFAULT 0,
-        active INTEGER DEFAULT 1
-      );
-
-      CREATE TABLE IF NOT EXISTS messaging_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL REFERENCES messaging_sessions(id),
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        timestamp TEXT NOT NULL,
-        platform_message_id TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_msg_sessions_lookup
-        ON messaging_sessions(platform, channel_id, thread_id, user_id);
-      CREATE INDEX IF NOT EXISTS idx_msg_messages_session
-        ON messaging_messages(session_id, timestamp);
-    `);
-
-    // Older versions of this code put an unconditional
-    // `UNIQUE(platform, channel_id, thread_id, user_id)` on the table.
-    // That collides with the get-or-create flow: a stale (active=0) row
-    // for a returning user/thread would block the INSERT of a fresh
-    // session. Replace it with a partial unique index that only enforces
-    // the "one active session per key" invariant — the actually-desired
-    // semantic. Inactive rows from past sessions are allowed to pile up
-    // (deleted later by clearStale).
-    const tableSql = (this.db
-      .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='messaging_sessions'`)
-      .get() as { sql?: string } | undefined)?.sql ?? "";
-    if (tableSql.includes("UNIQUE(platform")) {
-      this.rebuildWithoutTableUnique();
-    }
-
-    this.db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_msg_sessions_unique_active
-        ON messaging_sessions(platform, channel_id, thread_id, user_id)
-        WHERE active = 1
-    `);
-  }
-
   /**
-   * One-shot migration: copy `messaging_sessions` rows into a table
-   * without the table-level UNIQUE constraint. `messaging_messages.session_id`
-   * has a foreign key to this table, so `DROP TABLE messaging_sessions`
-   * trips FK enforcement.
-   *
-   * Follows SQLite's official table-rebuild recipe
-   * (https://www.sqlite.org/lang_altertable.html#otheralter): toggle
-   * `foreign_keys` OFF *outside* a transaction, do the rebuild, run
-   * `foreign_key_check` to confirm no orphans, COMMIT, re-enable.
-   * `defer_foreign_keys` isn't enough — it pushes the check to COMMIT but
-   * still fails when the schema flux at rename-time is observed.
-   *
-   * `foreign_key_check` after the rebuild is belt-and-suspenders: if the
-   * copy somehow missed rows the messages reference, fail the migration
-   * loudly rather than commit a half-broken schema.
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
    */
-  private rebuildWithoutTableUnique() {
-    log.info("Migrating messaging_sessions: dropping unconditional UNIQUE constraint");
-    const fkOriginal = this.db.pragma("foreign_keys", { simple: true });
-    this.db.pragma("foreign_keys = OFF");
-    try {
-      this.db.exec("BEGIN");
-      try {
-        this.db.exec(`
-          CREATE TABLE messaging_sessions__new (
-            id TEXT PRIMARY KEY,
-            platform TEXT NOT NULL,
-            channel_id TEXT NOT NULL,
-            thread_id TEXT,
-            user_id TEXT NOT NULL,
-            agent_session_id TEXT,
-            created_at TEXT NOT NULL,
-            last_activity_at TEXT NOT NULL,
-            message_count INTEGER DEFAULT 0,
-            active INTEGER DEFAULT 1
-          );
-          INSERT INTO messaging_sessions__new
-            SELECT id, platform, channel_id, thread_id, user_id, agent_session_id,
-                   created_at, last_activity_at, message_count, active
-            FROM messaging_sessions;
-          DROP TABLE messaging_sessions;
-          ALTER TABLE messaging_sessions__new RENAME TO messaging_sessions;
-          CREATE INDEX IF NOT EXISTS idx_msg_sessions_lookup
-            ON messaging_sessions(platform, channel_id, thread_id, user_id);
-        `);
-        const violations = this.db.pragma("foreign_key_check") as unknown[];
-        if (violations.length > 0) {
-          throw new Error(
-            `FK check failed after migration — ${violations.length} dangling reference(s): ` +
-            JSON.stringify(violations),
-          );
-        }
-        this.db.exec("COMMIT");
-      } catch (err) {
-        this.db.exec("ROLLBACK");
-        throw err;
-      }
-    } finally {
-      if (fkOriginal) this.db.pragma("foreign_keys = ON");
-    }
+  private readonly t: StateTables;
+
+  constructor(private client: StateClient, private dialect: Dialect = "sqlite") {
+    this.t = tablesOf(client);
   }
 
   /** Look up an existing session by id (used to read its agent_session_id). */
-  getSession(id: string): ConversationSession | null {
-    const row = this.db.prepare(`SELECT * FROM messaging_sessions WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
+  async getSession(id: string): Promise<ConversationSession | null> {
+    const { messagingSessions } = this.t;
+    const [row] = await this.client
+      .select()
+      .from(messagingSessions)
+      .where(eq(messagingSessions.id, id))
+      .limit(1);
     return row ? this.rowToSession(row) : null;
   }
 
   /** Get an existing active session or create a new one */
-  getOrCreateSession(key: ConversationKey): ConversationSession {
+  async getOrCreateSession(key: ConversationKey): Promise<ConversationSession> {
+    const { messagingSessions } = this.t;
     const now = new Date().toISOString();
     const cutoff = new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();
 
-    // Look for an active, non-stale session
-    const existing = this.db.prepare(`
-      SELECT * FROM messaging_sessions
-      WHERE platform = ? AND channel_id = ? AND thread_id IS ? AND user_id = ?
-        AND active = 1 AND last_activity_at >= ?
-    `).get(key.platform, key.channelId, key.threadId, key.userId, cutoff) as any;
+    // The identity predicate for a session. `thread_id IS ?` in the old SQL:
+    // SQLite's `IS` matches NULL to NULL, `=` never does — so a threadless
+    // (DM) session must be matched with IS NULL or every message silently
+    // forks a fresh session instead of continuing the existing one. Computed
+    // once and used by both the lookup and the deactivate below.
+    const threadMatches =
+      key.threadId == null
+        ? isNull(messagingSessions.threadId)
+        : eq(messagingSessions.threadId, key.threadId);
 
-    if (existing) {
-      return this.rowToSession(existing);
-    }
+    const keyMatches = and(
+      eq(messagingSessions.platform, key.platform),
+      eq(messagingSessions.channelId, key.channelId),
+      threadMatches,
+      eq(messagingSessions.userId, key.userId),
+    );
+
+    // Look for an active, non-stale session
+    const findActive = async (): Promise<ConversationSession | null> => {
+      const [row] = await this.client
+        .select()
+        .from(messagingSessions)
+        .where(
+          and(
+            keyMatches,
+            eq(messagingSessions.active, true),
+            gte(messagingSessions.lastActivityAt, cutoff),
+          ),
+        )
+        .limit(1);
+      return row ? this.rowToSession(row) : null;
+    };
+
+    const existing = await findActive();
+    if (existing) return existing;
 
     // Deactivate any stale sessions for this key
-    this.db.prepare(`
-      UPDATE messaging_sessions SET active = 0
-      WHERE platform = ? AND channel_id = ? AND thread_id IS ? AND user_id = ? AND active = 1
-    `).run(key.platform, key.channelId, key.threadId, key.userId);
+    await this.client
+      .update(messagingSessions)
+      .set({ active: false })
+      .where(and(keyMatches, eq(messagingSessions.active, true)));
 
-    // Create new session
+    // Create new session.
+    //
+    // Lookup-then-insert used to be atomic by physics — the whole method ran
+    // inside one synchronous driver call, so nothing could interleave. It no
+    // longer is: two messages arriving together on the same key can both miss
+    // the lookup and both try to insert. The partial unique index
+    // (`WHERE active = 1`) is what makes the loser fail rather than fork a
+    // second live session, so the loser re-reads and adopts the winner.
     const id = randomUUID();
-    this.db.prepare(`
-      INSERT INTO messaging_sessions (id, platform, channel_id, thread_id, user_id, created_at, last_activity_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, key.platform, key.channelId, key.threadId, key.userId, now, now);
+    try {
+      await this.client.insert(messagingSessions).values({
+        id,
+        platform: key.platform,
+        channelId: key.channelId,
+        threadId: key.threadId,
+        userId: key.userId,
+        createdAt: now,
+        lastActivityAt: now,
+      });
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      const winner = await findActive();
+      // No winner means the violation came from something other than the
+      // concurrent-create race we can recover from — surface it.
+      if (!winner) throw err;
+      log.debug("Lost the race to create a messaging session; adopting the winner", {
+        platform: key.platform,
+        channelId: key.channelId,
+        sessionId: winner.id,
+      });
+      return winner;
+    }
 
     return {
       id,
@@ -190,32 +145,51 @@ export class SessionManager {
    * the SDK as `resume`, so the whole Slack thread maps to one continuous
    * Agent SDK session jsonl instead of a fresh file per message.
    */
-  setAgentSessionId(id: string, agentSessionId: string | null): void {
-    this.db.prepare(`
-      UPDATE messaging_sessions SET agent_session_id = ? WHERE id = ?
-    `).run(agentSessionId, id);
+  async setAgentSessionId(id: string, agentSessionId: string | null): Promise<void> {
+    const { messagingSessions } = this.t;
+    await this.client
+      .update(messagingSessions)
+      .set({ agentSessionId })
+      .where(eq(messagingSessions.id, id));
   }
 
   /** Update last activity timestamp and increment message count */
-  touchSession(id: string): void {
-    this.db.prepare(`
-      UPDATE messaging_sessions
-      SET last_activity_at = ?, message_count = message_count + 1
-      WHERE id = ?
-    `).run(new Date().toISOString(), id);
+  async touchSession(id: string): Promise<void> {
+    const { messagingSessions } = this.t;
+    await this.client
+      .update(messagingSessions)
+      .set({
+        lastActivityAt: new Date().toISOString(),
+        messageCount: sql`${messagingSessions.messageCount} + 1`,
+      })
+      .where(eq(messagingSessions.id, id));
   }
 
   /** Deactivate a session (e.g., user sends /new or /reset) */
-  deactivateSession(id: string): void {
-    this.db.prepare(`UPDATE messaging_sessions SET active = 0 WHERE id = ?`).run(id);
+  async deactivateSession(id: string): Promise<void> {
+    const { messagingSessions } = this.t;
+    await this.client
+      .update(messagingSessions)
+      .set({ active: false })
+      .where(eq(messagingSessions.id, id));
   }
 
   /** Store a message in the conversation history */
-  addMessage(sessionId: string, role: "user" | "assistant", content: string, platformMessageId?: string): void {
-    this.db.prepare(`
-      INSERT INTO messaging_messages (session_id, role, content, timestamp, platform_message_id)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(sessionId, role, content, new Date().toISOString(), platformMessageId || null);
+  async addMessage(
+    sessionId: string,
+    role: "user" | "assistant",
+    content: string,
+    platformMessageId?: string,
+  ): Promise<void> {
+    const { messagingMessages } = this.t;
+    // `id` is AUTOINCREMENT — never supplied.
+    await this.client.insert(messagingMessages).values({
+      sessionId,
+      role,
+      content,
+      timestamp: new Date().toISOString(),
+      platformMessageId: platformMessageId || null,
+    });
   }
 
   /**
@@ -230,21 +204,22 @@ export class SessionManager {
    * user + assistant rows of one turn are routinely written inside the same
    * millisecond.
    */
-  getHistory(sessionId: string, limit = 50): ConversationMessage[] {
-    const rows = (this.db.prepare(`
-      SELECT * FROM messaging_messages
-      WHERE session_id = ?
-      ORDER BY timestamp DESC, id DESC
-      LIMIT ?
-    `).all(sessionId, limit) as any[]).reverse();
+  async getHistory(sessionId: string, limit = 50): Promise<ConversationMessage[]> {
+    const { messagingMessages } = this.t;
+    const rows = await this.client
+      .select()
+      .from(messagingMessages)
+      .where(eq(messagingMessages.sessionId, sessionId))
+      .orderBy(desc(messagingMessages.timestamp), desc(messagingMessages.id))
+      .limit(limit);
 
-    return rows.map((r) => ({
+    return rows.reverse().map((r) => ({
       id: r.id,
-      sessionId: r.session_id,
-      role: r.role,
+      sessionId: r.sessionId,
+      role: r.role as ConversationMessage["role"],
       content: r.content,
       timestamp: r.timestamp,
-      platformMessageId: r.platform_message_id,
+      platformMessageId: r.platformMessageId,
     }));
   }
 
@@ -265,59 +240,77 @@ export class SessionManager {
    * the session (every write touches it), so the user's next message continues
    * this conversation instead of starting a fresh one.
    */
-  findActiveThreadSession(
+  async findActiveThreadSession(
     platform: string,
     channelId: string,
     threadId: string,
     opts: { includeStale?: boolean } = {},
-  ): ConversationSession | null {
+  ): Promise<ConversationSession | null> {
+    const { messagingSessions } = this.t;
     const cutoff = opts.includeStale
       ? new Date(0).toISOString()
       : new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();
-    const row = this.db.prepare(`
-      SELECT * FROM messaging_sessions
-      WHERE platform = ? AND channel_id = ? AND thread_id = ?
-        AND active = 1 AND last_activity_at >= ?
-      ORDER BY last_activity_at DESC
-      LIMIT 1
-    `).get(platform, channelId, threadId, cutoff) as Record<string, unknown> | undefined;
+    const [row] = await this.client
+      .select()
+      .from(messagingSessions)
+      .where(
+        and(
+          eq(messagingSessions.platform, platform),
+          eq(messagingSessions.channelId, channelId),
+          eq(messagingSessions.threadId, threadId),
+          eq(messagingSessions.active, true),
+          gte(messagingSessions.lastActivityAt, cutoff),
+        ),
+      )
+      .orderBy(desc(messagingSessions.lastActivityAt))
+      .limit(1);
     return row ? this.rowToSession(row) : null;
   }
 
   /** Check if the bot is already participating in a thread (any user, any active non-stale session) */
-  hasActiveThread(platform: string, channelId: string, threadId: string): boolean {
-    return !!this.findActiveThreadSession(platform, channelId, threadId);
+  async hasActiveThread(platform: string, channelId: string, threadId: string): Promise<boolean> {
+    return !!(await this.findActiveThreadSession(platform, channelId, threadId));
   }
 
   /** Clean up old inactive sessions (call from cron) */
-  cleanupStaleSessions(maxAgeDays = 7): number {
+  async cleanupStaleSessions(maxAgeDays = 7): Promise<number> {
+    const { messagingMessages, messagingSessions } = this.t;
     const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
+    const staleSessions = and(
+      eq(messagingSessions.active, false),
+      lt(messagingSessions.lastActivityAt, cutoff),
+    );
 
     // Delete messages for old sessions first
-    this.db.prepare(`
-      DELETE FROM messaging_messages WHERE session_id IN (
-        SELECT id FROM messaging_sessions WHERE active = 0 AND last_activity_at < ?
-      )
-    `).run(cutoff);
+    await this.client.delete(messagingMessages).where(
+      inArray(
+        messagingMessages.sessionId,
+        this.client.select({ id: messagingSessions.id }).from(messagingSessions).where(staleSessions),
+      ),
+    );
 
-    const result = this.db.prepare(`
-      DELETE FROM messaging_sessions WHERE active = 0 AND last_activity_at < ?
-    `).run(cutoff);
+    const result = await this.client.delete(messagingSessions).where(staleSessions);
 
-    return result.changes;
+    return changes(result);
   }
 
-  private rowToSession(row: any): ConversationSession {
+  /**
+   * Builder rows are already camelCase and `active` is already a boolean, so
+   * this is down to the two DEFAULT-without-NOT-NULL columns: a NULL
+   * `message_count` reads as 0 and a NULL `active` as inactive, exactly as the
+   * old `row.message_count` / `!!row.active` did.
+   */
+  private rowToSession(row: SessionRow): ConversationSession {
     return {
       id: row.id,
       platform: row.platform,
-      channelId: row.channel_id,
-      threadId: row.thread_id,
-      userId: row.user_id,
-      agentSessionId: row.agent_session_id,
-      createdAt: row.created_at,
-      lastActivityAt: row.last_activity_at,
-      messageCount: row.message_count,
+      channelId: row.channelId,
+      threadId: row.threadId,
+      userId: row.userId,
+      agentSessionId: row.agentSessionId,
+      createdAt: row.createdAt,
+      lastActivityAt: row.lastActivityAt,
+      messageCount: row.messageCount ?? 0,
       active: !!row.active,
     };
   }

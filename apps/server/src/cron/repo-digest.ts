@@ -201,7 +201,7 @@ async function digestOneRepo(
     until: now.toISOString(),
     windowDays: deps.config.windowDays,
     repoFacts: summarizeRepo(activity, openPrs, since, now, deps.config.maxItems, deps.escalationLabel),
-    botFacts: summarizeBot(deps, owner, repo, sinceIso),
+    botFacts: await summarizeBot(deps, owner, repo, sinceIso),
   };
   if (detail) facts.repoFacts = { ...facts.repoFacts, ...summarizeContent(detail, target, deps.config) };
 
@@ -425,9 +425,14 @@ function noteFor(issue: ClosedIssueDetail): string | undefined {
 }
 
 /** The bot half — pure state-DB reads, no network. */
-function summarizeBot(deps: RepoDigestDeps, owner: string, repo: string, sinceIso: string): BotFacts {
-  const rows = deps.db.runs.summarizeRepoActivity(owner, repo, sinceIso);
-  const cost = deps.db.executions.repoCostSince(owner, repo, sinceIso);
+async function summarizeBot(
+  deps: RepoDigestDeps,
+  owner: string,
+  repo: string,
+  sinceIso: string,
+): Promise<BotFacts> {
+  const rows = await deps.db.runs.summarizeRepoActivity(owner, repo, sinceIso);
+  const cost = await deps.db.executions.repoCostSince(owner, repo, sinceIso);
 
   const byWorkflow: Record<string, number> = {};
   let runs = 0;

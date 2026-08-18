@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // The runner logs one structured completion line per fire. Mocked so the
 // suite's stderr stays free of real pino JSON — and CAPTURED, so tests can
@@ -13,28 +13,25 @@ const logSpy = vi.hoisted(() => ({
 }));
 vi.mock("#src/logging/logger.js", () => ({ logger: () => logSpy }));
 
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { makeCronRunner, completionMessage, type CronDiscoverer } from "#src/cron/runner.js";
 import type { GitHubClient } from "#src/engine/github/github.js";
 
 const fakeGh = {} as unknown as GitHubClient;
 
 /** Every repo participates — the default when no `.lastlight/` opts out. */
-const allParticipate = async ({ repos }: { repos: string[] }) => ({
-  repos,
+const allParticipate = async ({ repos }: { repos: readonly string[] }) => ({
+  repos: [...repos],
   optedIn: [] as string[],
   optedOut: [] as string[],
 });
 
 let db: StateDb;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
+beforeEach(async () => {
+  db = await makeTestDb();
   for (const fn of Object.values(logSpy)) fn.mockClear();
-});
-
-afterEach(() => {
-  db.close();
 });
 
 describe("makeCronRunner — discovery crons", () => {
@@ -57,7 +54,7 @@ describe("makeCronRunner — discovery crons", () => {
       _cronName: "merge-green-dependency-prs",
     });
 
-    const row = db.cronRuns.latestByCron().get("merge-green-dependency-prs")!;
+    const row = (await db.cronRuns.latestByCron()).get("merge-green-dependency-prs")!;
     // The whole point of the feature: a zero-discovery fire is a RECORDED
     // green event, not silence.
     expect(row.status).toBe("ok");
@@ -93,7 +90,7 @@ describe("makeCronRunner — discovery crons", () => {
       _cronName: "c-partial",
     });
 
-    const row = db.cronRuns.latestByCron().get("c-partial")!;
+    const row = (await db.cronRuns.latestByCron()).get("c-partial")!;
     expect(row.status).toBe("partial");
     expect(row.discovered).toBe(2);
     expect(row.dispatched).toBe(2);
@@ -122,7 +119,7 @@ describe("makeCronRunner — discovery crons", () => {
       }),
     ).rejects.toThrow("gh down");
 
-    const row = db.cronRuns.latestByCron().get("c-throw")!;
+    const row = (await db.cronRuns.latestByCron()).get("c-throw")!;
     expect(row.status).toBe("failed");
     expect(row.error).toContain("gh down");
     // A crash mid-fire must leave a terminal row, not a stranded `running`.
@@ -147,7 +144,7 @@ describe("makeCronRunner — discovery crons", () => {
       _cronName: "c-narrow",
     });
 
-    const row = db.cronRuns.latestByCron().get("c-narrow")!;
+    const row = (await db.cronRuns.latestByCron()).get("c-narrow")!;
     expect(row.reposEligible).toBe(3);
     expect(row.reposScanned).toBe(1);
   });
@@ -168,7 +165,7 @@ describe("makeCronRunner — discovery crons", () => {
       _cronName: "c-nogh",
     });
 
-    const row = db.cronRuns.latestByCron().get("c-nogh")!;
+    const row = (await db.cronRuns.latestByCron()).get("c-nogh")!;
     expect(row.status).toBe("ok");
     expect(row.discovered).toBe(0);
     expect(discoverer).not.toHaveBeenCalled();
@@ -193,7 +190,7 @@ describe("makeCronRunner — non-discovery crons", () => {
       _cronActor: "robinbowes",
     });
 
-    const row = db.cronRuns.latestByCron().get("weekly-health-report")!;
+    const row = (await db.cronRuns.latestByCron()).get("weekly-health-report")!;
     expect(row.status).toBe("ok");
     // Null, not 0 — this cron discovers nothing, which is different from
     // discovering nothing.
@@ -237,7 +234,7 @@ describe("makeCronRunner — non-discovery crons", () => {
 
     await runner("repo-health", { repos: ["o/a"], _cronName: "c-default" });
 
-    const row = db.cronRuns.latestByCron().get("c-default")!;
+    const row = (await db.cronRuns.latestByCron()).get("c-default")!;
     expect(row.source).toBe("schedule");
     expect(row.actor).toBeNull();
   });
@@ -260,7 +257,7 @@ describe("makeCronRunner — a fire with no cron name", () => {
     await runner("repo-health", { repos: ["o/a"] });
 
     expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(db.cronRuns.latestByCron().size).toBe(0);
+    expect((await db.cronRuns.latestByCron()).size).toBe(0);
   });
 });
 
@@ -429,7 +426,7 @@ describe("the removed Discovered PRs line", () => {
       _cronName: "c-leak",
     });
 
-    const row = db.cronRuns.latestByCron().get("c-leak")!;
+    const row = (await db.cronRuns.latestByCron()).get("c-leak")!;
     expect(row.status).toBe("ok");
     expect("discoverKey" in row).toBe(false);
   });

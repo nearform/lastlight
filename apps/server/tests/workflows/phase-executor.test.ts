@@ -118,10 +118,10 @@ function makeReporter(): PhaseReporter & { steps: RecordedStep[]; notes: string[
     postNote: vi.fn(async (text) => {
       notes.push(text);
     }),
-    persistPhase: vi.fn((phase) => {
+    persistPhase: vi.fn(async (phase: string) => {
       persisted.push(phase);
     }),
-    failWorkflow: vi.fn((err) => {
+    failWorkflow: vi.fn(async (err?: string) => {
       failed.push(err ?? "");
     }),
     footer: vi.fn(async () => {}),
@@ -309,7 +309,7 @@ describe("PhaseExecutor — standard agent phase", () => {
 
   it("aborts (running-skip) when the dedup ledger reports the phase running and the container is alive", async () => {
     const db = makeMockDb();
-    vi.mocked(db.executions.shouldRunPhase).mockReturnValue("running");
+    vi.mocked(db.executions.shouldRunPhase).mockResolvedValue("running");
     vi.mocked(listRunningContainers).mockResolvedValueOnce([{ taskId: "widget-42" }] as never);
     const exec = makeExecutor(makeRun(def, db), makeReporter(), makeResolver());
 
@@ -322,7 +322,7 @@ describe("PhaseExecutor — standard agent phase", () => {
 
   it("treats a done dedup row as already-completed (skips the agent)", async () => {
     const db = makeMockDb();
-    vi.mocked(db.executions.shouldRunPhase).mockReturnValue("done");
+    vi.mocked(db.executions.shouldRunPhase).mockResolvedValue("done");
     const reporter = makeReporter();
     const exec = makeExecutor(makeRun(def, db), reporter, makeResolver());
 
@@ -548,10 +548,10 @@ describe("PhaseExecutor — reviewer loop", () => {
     const db = makeMockDb();
     // Resume state: the initial review already ran and requested changes; the
     // fix for cycle 1 has NOT run yet; we paused at cycle 1's gate.
-    vi.mocked(db.executions.shouldRunPhase).mockImplementation((skill: string) =>
+    vi.mocked(db.executions.shouldRunPhase).mockImplementation(async (skill: string) =>
       skill === "full:reviewer" ? "done" : "run",
     );
-    vi.mocked(db.executions.getPhaseOutput).mockImplementation((skill: string) =>
+    vi.mocked(db.executions.getPhaseOutput).mockImplementation(async (skill: string) =>
       skill === "full:reviewer" ? "VERDICT: REQUEST_CHANGES\nfix the bug" : null,
     );
     // fix succeeds, then the re-review approves.

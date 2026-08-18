@@ -281,7 +281,15 @@ function runScopedObservability(db: StateDb, workflowId: string): ObservabilityP
           captured = true;
           try {
             const ctx = (span as unknown as Span).spanContext();
-            if (ctx?.traceId && ctx.spanId) db.runs.setTraceContext(workflowId, ctx.traceId, ctx.spanId);
+            // Not awaited: this fires from inside the span body, and blocking
+            // every run's first span on a DB write to record telemetry
+            // bookkeeping would be the tail wagging the dog. The write is
+            // best-effort by design — see the doc comment above.
+            if (ctx?.traceId && ctx.spanId) {
+              void db.runs.setTraceContext(workflowId, ctx.traceId, ctx.spanId).catch((err: unknown) => {
+                logger("runner").debug("Could not record run trace context", { workflowId, err });
+              });
+            }
           } catch (err: unknown) {
             logger("runner").debug("Could not record run trace context", { workflowId, err });
           }
@@ -330,7 +338,7 @@ export async function runWorkflow(
   // iteration at the right index and templates can read {{scratch.*}}.
   const scratch: Record<string, unknown> = ctx.scratch
     ? { ...(ctx.scratch as Record<string, unknown>) }
-    : (db && workflowId ? { ...(db.runs.getRun(workflowId)?.scratch ?? {}) } : {});
+    : (db && workflowId ? { ...((await db.runs.getRun(workflowId))?.scratch ?? {}) } : {});
   ctx.scratch = scratch;
 
   const prePopulateBranch = typeof ctx.prePopulateBranch === "string"
@@ -464,7 +472,7 @@ export async function runWorkflow(
   };
 
   /** Persist a phase transition to the DB workflow run. */
-  const persistPhase = (phase: string, summary?: string) => {
+  const persistPhase = async (phase: string, summary?: string): Promise<void> => {
     if (db && workflowId) {
       const entry: PhaseHistoryEntry = {
         phase,
@@ -472,7 +480,7 @@ export async function runWorkflow(
         success: true,
         summary,
       };
-      db.runs.appendPhase(workflowId, phase, entry);
+      await db.runs.appendPhase(workflowId, phase, entry);
     }
   };
 
@@ -489,12 +497,12 @@ export async function runWorkflow(
   const quota = { hit: false };
 
   /** Mark the workflow run as failed. */
-  const failWorkflow = (errorMsg?: string) => {
+  const failWorkflow = async (errorMsg?: string): Promise<void> => {
     // Backpressure, not a failure: leave the run `running` so the caller
     // (`simple.ts`/`resume.ts`) can requeue it for the next admission probe.
     if (quota.hit) return;
     if (db && workflowId) {
-      db.runs.finishRun(workflowId, "failed", { error: errorMsg });
+      await db.runs.finishRun(workflowId, "failed", { error: errorMsg });
     }
   };
 
@@ -629,7 +637,7 @@ export async function runWorkflow(
     // creation). Record them beside it, on scratch, on every exit path —
     // including a failed run, where "the repo's prompt override was ignored" is
     // exactly the thing someone will want to see.
-    recordAssetWarnings(assets, repoConfig, db, workflowId);
+    await recordAssetWarnings(assets, repoConfig, db, workflowId);
   }
 }
 
@@ -642,19 +650,19 @@ export async function runWorkflow(
  * Best-effort and silent when there's nothing to say — this is reporting, and a
  * reporting failure must never surface as a run failure.
  */
-function recordAssetWarnings(
+async function recordAssetWarnings(
   assets: AssetResolver | undefined,
   repoConfig: RunRepoConfig | undefined,
   db?: StateDb,
   workflowId?: string,
-): void {
+): Promise<void> {
   const warnings = assets?.warnings ?? [];
   if (!warnings.length || !db || !workflowId) return;
   try {
     for (const w of warnings) {
       repoConfigLog.warn(w.message, { repo: repoConfig?.repo ?? "?" });
     }
-    db.runs.mergeScratch(workflowId, { repoConfig: { assetWarnings: [...warnings] } });
+    await db.runs.mergeScratch(workflowId, { repoConfig: { assetWarnings: [...warnings] } });
   } catch (err: unknown) {
     repoConfigLog.warn("Could not record asset warnings", { runId: workflowId, err });
   }

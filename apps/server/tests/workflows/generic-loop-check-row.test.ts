@@ -144,15 +144,15 @@ class PersistingReporter extends RecordingReporter {
   constructor(private readonly store: InMemoryStateStore) {
     super();
   }
-  override persistPhase(phase: string, summary?: string): void {
-    super.persistPhase(phase, summary);
+  override async persistPhase(phase: string, summary?: string): Promise<void> {
+    await super.persistPhase(phase, summary);
     const entry: PhaseHistoryEntry = {
       phase,
       timestamp: new Date().toISOString(),
       success: true,
       summary,
     };
-    this.store.runs.appendPhase(RUN_ID, phase, entry);
+    await this.store.runs.appendPhase(RUN_ID, phase, entry);
   }
 }
 
@@ -186,7 +186,7 @@ async function runLoop(definition: AgentWorkflowDefinition, opts: RunOpts = {}) 
     taskId: "task-1",
     triggerId: TRIGGER,
     githubAccess: { owner: "acme", repo: "widgets", profile: "repo-write" } as GitSandboxAccess,
-    scratch: { ...(store.runs.getRun(RUN_ID)?.scratch ?? {}) },
+    scratch: { ...((await store.runs.getRun(RUN_ID))?.scratch ?? {}) },
     store,
     workflowId: RUN_ID,
     botName: "last-light",
@@ -446,8 +446,8 @@ describe("generic loop — a multi-iteration loop records each iteration and eac
     // key, so it can neither mark the iteration done nor be mistaken for it —
     // which is why `runUntilBash` may safely bypass `shouldRunPhase` and
     // re-evaluate the condition every time it is asked.
-    expect(store.executions.shouldRunPhase(`${WF}:fix_iter_1`, TRIGGER, RUN_ID)).toBe("done");
-    expect(store.executions.shouldRunPhase(`${WF}:fix`, TRIGGER, RUN_ID)).toBe("run");
+    expect(await store.executions.shouldRunPhase(`${WF}:fix_iter_1`, TRIGGER, RUN_ID)).toBe("done");
+    expect(await store.executions.shouldRunPhase(`${WF}:fix`, TRIGGER, RUN_ID)).toBe("run");
     expect(rowKeys(store)).not.toContain(`${WF}:fix`);
   });
 });
@@ -580,7 +580,7 @@ describe("generic loop — an interactive loop records the round before it pause
     });
 
     expect(result.paused).toBe(true);
-    expect(store.runs.getRun(RUN_ID)!.status).toBe("paused");
+    expect((await store.runs.getRun(RUN_ID))!.status).toBe("paused");
     // Order is load-bearing: `pauseForApproval` moves `current_phase` to
     // `waiting_approval`, which is what `simple.ts` matches on to resume. The
     // round's own entry has to land first, and now does — a paused round used

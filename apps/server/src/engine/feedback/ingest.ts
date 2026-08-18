@@ -42,7 +42,10 @@ export interface ReactionInput {
  * Record a reaction. Returns the signal when it was NEW (so the caller can log
  * it), and null when it was scored away, self-authored, or already known.
  */
-export function ingestReaction(deps: FeedbackIngestDeps, input: ReactionInput): FeedbackSignal | null {
+export async function ingestReaction(
+  deps: FeedbackIngestDeps,
+  input: ReactionInput,
+): Promise<FeedbackSignal | null> {
   try {
     if (isSelfReactor(input.reactor, deps.botLogin)) return null;
     const scored = scoreReaction(input.emoji, input.source);
@@ -54,7 +57,7 @@ export function ingestReaction(deps: FeedbackIngestDeps, input: ReactionInput): 
       return null;
     }
 
-    const signal = deps.db.feedback.recordSignal({
+    const signal = await deps.db.feedback.recordSignal({
       anchor: input.anchor,
       emoji: scored.emoji,
       score: scored.score,
@@ -75,7 +78,7 @@ export function ingestReaction(deps: FeedbackIngestDeps, input: ReactionInput): 
       repo: signal.repo ?? undefined,
     });
 
-    if (deps.otel !== false) exportSignal(deps.db, signal, input.anchor);
+    if (deps.otel !== false) await exportSignal(deps.db, signal, input.anchor);
     return signal;
   } catch (err: unknown) {
     log.warn("Failed to ingest a reaction", { source: input.source, err });
@@ -84,10 +87,13 @@ export function ingestReaction(deps: FeedbackIngestDeps, input: ReactionInput): 
 }
 
 /** Retract a reaction that has been taken away. Returns true when one was live. */
-export function retractReaction(deps: FeedbackIngestDeps, input: ReactionInput): boolean {
+export async function retractReaction(
+  deps: FeedbackIngestDeps,
+  input: ReactionInput,
+): Promise<boolean> {
   try {
     const emoji = canonicalReaction(input.emoji, input.source);
-    const removed = deps.db.feedback.removeSignal(
+    const removed = await deps.db.feedback.removeSignal(
       input.anchor.id,
       input.reactor ?? null,
       emoji,
@@ -119,15 +125,19 @@ export function retractReaction(deps: FeedbackIngestDeps, input: ReactionInput):
  * backend forever. Leaving them unmarked is what makes {@link drainFeedbackExport}
  * able to catch up.
  */
-export function exportSignal(db: StateDb, signal: FeedbackSignal, anchor: FeedbackAnchor): void {
+export async function exportSignal(
+  db: StateDb,
+  signal: FeedbackSignal,
+  anchor: FeedbackAnchor,
+): Promise<void> {
   if (!isTelemetryEnabled()) return;
   let parent: { traceId: string; spanId: string } | undefined;
   if (signal.workflowRunId) {
-    const run = db.runs.getRun(signal.workflowRunId);
+    const run = await db.runs.getRun(signal.workflowRunId);
     if (run?.traceId && run.spanId) parent = { traceId: run.traceId, spanId: run.spanId };
   }
   recordFeedbackSignal({ signal, anchor, anchorUrl: anchorUrl(anchor), parent });
-  db.feedback.markExported([signal.id]);
+  await db.feedback.markExported([signal.id]);
 }
 
 /**
@@ -139,20 +149,20 @@ export function exportSignal(db: StateDb, signal: FeedbackSignal, anchor: Feedba
  * to, instead of a backend that starts from zero. Bounded per boot so a long
  * backlog drains over a few restarts rather than stalling startup.
  */
-export function drainFeedbackExport(db: StateDb, limit = 500): number {
+export async function drainFeedbackExport(db: StateDb, limit = 500): Promise<number> {
   if (!isTelemetryEnabled()) return 0;
   let exported = 0;
   try {
-    for (const signal of db.feedback.pendingExport(limit)) {
-      const anchor = db.feedback.getAnchor(signal.anchorId);
+    for (const signal of await db.feedback.pendingExport(limit)) {
+      const anchor = await db.feedback.getAnchor(signal.anchorId);
       // The anchor was pruned past `retentionDays` while the signal outlived it
       // (signals are kept forever). Mark it done rather than re-reading it on
       // every boot for a span we can no longer describe.
       if (!anchor) {
-        db.feedback.markExported([signal.id]);
+        await db.feedback.markExported([signal.id]);
         continue;
       }
-      exportSignal(db, signal, anchor);
+      await exportSignal(db, signal, anchor);
       exported += 1;
     }
     if (exported > 0) log.info("Exported backlogged feedback signals", { exported });

@@ -13,6 +13,9 @@ import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { generateKeyPairSync } from "crypto";
+// Type-only, so it is erased before the `vi.mock` hoist matters — the runtime
+// bindings below still come from the awaited dynamic import.
+import type { InstallationDirectory } from "#src/engine/github/installations.js";
 
 const appClientSpy = vi.fn();
 
@@ -35,7 +38,7 @@ vi.mock("#src/engine/github/github-app-client.js", async (importActual) => {
 });
 
 const { GitHubClient, NoInstallationError } = await import("#src/engine/github/github.js");
-const { InstallationDirectory, initInstallationDirectory, resetInstallationDirectoryForTests } =
+const { initInstallationDirectory, resetInstallationDirectoryForTests } =
   await import("#src/engine/github/installations.js");
 
 function writePem(): string {

@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
-import Database from "better-sqlite3";
-import { normalizeRepoRef, qualifyRepo, qualifiedRepoSql } from "../../src/state/repo-ref.js";
+import { normalizeRepoRef, qualifyRepo } from "#src/state/repo-ref.js";
 
+/**
+ * The PURE half of `repo-ref.ts`. Its SQL half, `qualifiedRepoSql`, needs a
+ * real database and is dialect-sensitive (`instr` has no Postgres equivalent),
+ * so it lives in the parameterized suite at `suites/repo-ref-suite.ts`.
+ */
 describe("normalizeRepoRef", () => {
   it("leaves the stored shape alone", () => {
     expect(normalizeRepoRef("nearform", "lastlight")).toEqual({
@@ -73,55 +77,5 @@ describe("qualifyRepo", () => {
   it("round-trips with normalizeRepoRef", () => {
     const { owner, repo } = normalizeRepoRef(undefined, "nearform/lastlight");
     expect(qualifyRepo(owner, repo)).toBe("nearform/lastlight");
-  });
-});
-
-describe("qualifiedRepoSql", () => {
-  // Exercised against real SQLite rather than string-matched, because the whole
-  // point of the helper is that the SQL and the JS agree.
-  const rows = [
-    { id: "a", owner: "nearform", repo: "lastlight" }, // the stored shape
-    { id: "b", owner: null, repo: "nearform/lastlight" }, // legacy qualified
-    { id: "c", owner: null, repo: "orphan" }, // un-backfillable
-    { id: "d", owner: "nearform", repo: null }, // no repo
-    { id: "e", owner: "", repo: "orphan" }, // empty-string owner
-  ];
-
-  function evaluate(unqualifiable: "bare" | "null"): Record<string, string | null> {
-    const db = new Database(":memory:");
-    db.exec(`CREATE TABLE t (id TEXT, owner TEXT, repo TEXT)`);
-    const ins = db.prepare(`INSERT INTO t (id, owner, repo) VALUES (?, ?, ?)`);
-    for (const r of rows) ins.run(r.id, r.owner, r.repo);
-    const out = db
-      .prepare(`SELECT id, ${qualifiedRepoSql("owner", "repo", unqualifiable)} AS repo FROM t`)
-      .all() as { id: string; repo: string | null }[];
-    db.close();
-    return Object.fromEntries(out.map((r) => [r.id, r.repo]));
-  }
-
-  it("agrees with qualifyRepo in `bare` mode", () => {
-    const got = evaluate("bare");
-    for (const r of rows) {
-      expect(got[r.id]).toBe(qualifyRepo(r.owner, r.repo) ?? null);
-    }
-    expect(got).toEqual({
-      a: "nearform/lastlight",
-      b: "nearform/lastlight",
-      c: "orphan",
-      d: null,
-      e: "orphan",
-    });
-  });
-
-  it("answers NULL for an un-qualifiable row in `null` mode", () => {
-    // NULL is "no repo, always visible". A bare name here would match nothing
-    // in a qualified allow-list and so HIDE the row — the #278 bug.
-    expect(evaluate("null")).toEqual({
-      a: "nearform/lastlight",
-      b: "nearform/lastlight",
-      c: null,
-      d: null,
-      e: null,
-    });
   });
 });

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { LocalArtifactBackend } from "#src/sandbox/artifact-backend.js";
+import { LocalArtifactBackend, type ArtifactBackend } from "#src/sandbox/artifact-backend.js";
 
 const root = mkdtempSync(join(tmpdir(), "ll-artifacts-"));
 const backend = new LocalArtifactBackend(() => root);
@@ -33,6 +33,8 @@ describe("LocalArtifactBackend", () => {
   });
 
   it("does not implement presign (proxy-only backend)", () => {
-    expect(backend.presign).toBeUndefined();
+    // Read through the PORT: `presign` is the optional member of
+    // `ArtifactBackend`, and the concrete class simply omits it.
+    expect((backend as ArtifactBackend).presign).toBeUndefined();
   });
 });

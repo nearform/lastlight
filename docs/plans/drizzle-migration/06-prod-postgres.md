@@ -45,6 +45,11 @@ After this phase:
   exercising the node-postgres driver, connection pool, real
   transactions, int8 handling, and unique-violation detection end-to-end.
 - Credentials in `database.url` are redacted from the dashboard `/config` view.
+- **`lastlight server setup` offers the choice** (§7a) — SQLite by default,
+  external Postgres on request, with the URL written to the gitignored
+  `secrets/.env` and never to the version-controlled overlay `config.yaml`.
+  Without this the runtime is selectable only by an operator who reads the
+  docs; the wizard is how most instances get installed.
 - Docs describe Postgres as a supported production runtime; a minor npm release
   + GHCR image rebuild ships it.
 - **Backward compatible**: absent `DATABASE_URL`/`database.url`, behavior is
@@ -77,6 +82,8 @@ After this phase:
 | `apps/server/src/state/db.ts` | edit — replace the Phase-4 `postgres://` throw with a real branch; resolve the driver; `close()` drains the pool |
 | `apps/server/src/state/dialect.ts` | verify (edit only if needed) — `changes()`/`isUniqueViolation()` on node-postgres **and** neon-serverless (both surface `.rowCount` / SQLSTATE `23505`) |
 | `apps/server/src/config/config.ts` | edit — redact credentials in `database.url` from `publicConfig`; resolve `database.driver` |
+| `packages/cli/src/setup.ts` | edit — the `collectDatabase()` wizard step (§7a); the URL rides `buildEnvContent()`, **never** `buildOverlayConfig()` |
+| `packages/cli/CLAUDE.md`, `apps/server/plugins/lastlight/skills/lastlight-server/SKILL.md` | edit — both enumerate the wizard's prompts (§7a) |
 | `apps/server/tests/state/db.pg-server.test.ts` | create — real-Postgres integration leg (opt-in, node-postgres) |
 | `apps/server/package.json` | `pg` **and** `@neondatabase/serverless` under **dependencies**; `@testcontainers/postgresql` under devDependencies |
 | `.github/workflows/ci.yml` (or equiv) | add real-PG job/service |
@@ -338,6 +345,104 @@ The `database.url` slot itself needs no wiring change (Phase 5). Additions:
   Neon's `neon-http` per-request model buys us nothing and its transaction loss
   would break the atomic ops — §1).
 
+## 7a. `lastlight server setup` — offer the choice in the wizard
+
+Phases 1–5 deliberately add **no CLI surface**: with `postgres://` throwing at
+boot there is no choice to present. This phase creates one, and an operator who
+only ever meets Last Light through `lastlight server setup` would otherwise
+never learn it exists — the wizard is the install path in
+`packages/cli/CLAUDE.md` and the `lastlight-server` skill.
+
+**One prompt, defaulting to today's behaviour.** Slot it into
+`packages/cli/src/setup.ts` after `collectManagedRepos()` and before
+`collectModelAndKey()` — infrastructure questions before model questions,
+matching the existing order.
+
+```ts
+async function collectDatabase(): Promise<{ url?: string; driver?: PgDriver }> {
+  p.log.step(gold("State database"));
+  const choice = await p.select({
+    message: "Where should Last Light keep its state?",
+    options: [
+      { value: "sqlite", label: "SQLite (recommended)",
+        hint: "a file in the agent-data volume; nothing to run" },
+      { value: "postgres", label: "External Postgres",
+        hint: "you supply a server — managed, self-hosted, or Neon" },
+    ],
+    initialValue: "sqlite",
+  });
+  if (choice !== "postgres") return {};                     // ← the whole slot stays absent
+  const url = required(await p.text({
+    message: "DATABASE_URL",
+    placeholder: "postgres://user:pass@host:5432/lastlight",
+    validate: (v) => /^postgres(ql)?:\/\//i.test(v ?? "") ? undefined
+      : "Must be a postgres:// URL. Leave the DB choice on SQLite to use a file.",
+  }));
+  return { url, driver: resolvePgDriver(url) };             // reported, not asked
+}
+```
+
+Four rules, each of which is a bug if broken:
+
+1. **The Postgres URL goes in `instance/secrets/.env`, NEVER in
+   `instance/config.yaml`.** `database.url` is a YAML-resolvable slot, so
+   writing it to the overlay is the obvious move and it is **wrong**: the
+   wizard offers to create a **GitHub repo from `instance/`** at the end of
+   setup, and `buildOverlayConfig()`'s output is the file that gets committed.
+   A `postgres://user:pass@host/db` there is a credential pushed to a git
+   remote. `.env` lives under the overlay's gitignored `secrets/`, which is
+   where every other credential the wizard collects already goes. So this is
+   the one config slot the wizard fills through `buildEnvContent()` rather than
+   `buildOverlayConfig()` — say so in a comment at both functions, because the
+   asymmetry looks like an oversight.
+2. **SQLite writes nothing at all** — no `DATABASE_URL` line, no
+   `database:` block. The slot resolves to `file:` + `dbPath` by absence
+   (Phase 5 §1), and an emitted `DATABASE_URL=file:./data/lastlight.db` would
+   pin a path that `STATE_DIR` is supposed to move. Existing `.env` files
+   written by older wizards must keep working untouched; this is guaranteed by
+   writing nothing.
+3. **`--yes` (non-interactive) takes SQLite** without prompting, like the
+   other `opts.yes` branches (`packages/cli/src/setup.ts`, the build/launch
+   confirm). CI and scripted installs must not acquire a new required answer.
+4. **Do not ask for the driver.** `resolvePgDriver` (§1a) reads it off the
+   host, so the wizard *reports* it (`p.log.info("Driver: neon (detected from
+   *.neon.tech)")`) and writes `DATABASE_DRIVER` only when the operator's URL
+   forces the non-obvious answer. A second prompt buys nothing an operator can
+   answer better than the heuristic can, and `.env` remains hand-editable for
+   the exotic case.
+
+**Connectivity check before the wizard moves on.** The wizard already validates
+what it can (the PEM resolves, the domain parses). A wrong `DATABASE_URL` is
+strictly worse than those, because it surfaces as a **container that boots and
+dies** several minutes later at the "Build and launch" step, long after the
+context is gone. Open a connection, run `select 1`, close it — and on failure
+offer *retry / re-enter / continue anyway* rather than aborting, since a
+firewall rule the operator is about to add is a legitimate reason to proceed.
+The CLI cannot `import "pg"` for this: `packages/cli` has no edge to
+`lastlight-core` and must not grow one (a dep-cruiser gate, root `CLAUDE.md`).
+Options, in order of preference:
+
+- Skip the live check and lean on the `p.text` regex + a printed reminder. Cheap,
+  honest, and one release later than ideal.
+- Have `lastlight server setup` run the probe **inside the agent image it is
+  about to launch** (`docker run --rm --entrypoint node lastlight-agent …`),
+  which is where `pg` legitimately lives. No new CLI dependency, exercises the
+  real driver and the real network path from the real container.
+
+The second is preferable and is *not* free — cost it before committing to it.
+
+**Also update**, in the same commit:
+
+- `packages/cli/CLAUDE.md` — the `server setup` command entry gains the
+  database step.
+- `apps/server/plugins/lastlight/skills/lastlight-server/SKILL.md` — the
+  install skill walks an agent through the same wizard and enumerates its
+  prompts; a new prompt it doesn't know about makes it narrate the wrong
+  sequence.
+- `packages/cli/tests/` — a unit test that `buildEnvContent()` emits
+  `DATABASE_URL` for the postgres answer and **nothing** for the sqlite answer,
+  and that `buildOverlayConfig()` never contains `postgres://` for either.
+
 ## 8. Data migration (sqlite → postgres) — OUT OF SCOPE (optional follow-on)
 
 "Users choose their DB" is satisfied for **fresh deployments** by §§1–7 (start
@@ -408,8 +513,15 @@ pool (no leaked connections).
   `neon-serverless` type-checks and passes simple reads, then loses every
   transaction: the five atomic ops silently stop being atomic. Pin the WebSocket
   driver (§1) and let the concurrency-probe test catch a regression.
-- **Credential leak** — the redaction (§6) is the only thing between a
-  `postgres://user:pass@…` URL and the dashboard `/config` view. Test it.
+- **Credential leak, two paths.** (a) The redaction (§6) is the only thing
+  between a `postgres://user:pass@…` URL and the dashboard `/config` view —
+  test it. (b) **The overlay repo is the worse one**, and §6 does nothing for
+  it: `database.url` is a YAML slot, so an operator (or the setup wizard, if
+  §7a's rule 1 is broken) can put a credentialed URL in `instance/config.yaml`,
+  which is a **git repo with a GitHub remote**. Redaction happens at render
+  time and cannot un-commit anything. The wizard must write to `.env`, and the
+  `default.yaml` comment (§7) should say plainly: *put a `postgres://` URL in
+  `DATABASE_URL`, not in `config.yaml` — the overlay is version-controlled.*
 - **Pool exhaustion / leaked connections** — ensure `close()` calls
   `pool.end()`; assert clean vitest exit on the integration leg.
 - **CI Docker availability** — the real-PG leg must **skip cleanly** (not fail)
@@ -433,6 +545,11 @@ pool (no leaked connections).
 - [ ] `tests/state/db.pg-server.test.ts` runs the full `runStateDbSuite` +
       concurrency-probe against real Postgres, opt-in, green in CI.
 - [ ] `database.url` credentials redacted from `publicConfig`; test covers it.
+- [ ] `lastlight server setup` offers SQLite (default) vs external Postgres;
+      the postgres answer writes `DATABASE_URL` to `instance/secrets/.env` and
+      the sqlite answer writes **nothing**; `--yes` takes SQLite silently;
+      `buildOverlayConfig()` never emits a `postgres://` URL (tested);
+      `packages/cli/CLAUDE.md` + the `lastlight-server` skill list the new step.
 - [ ] Docs (`spec/10-state.md`, `CLAUDE.md`, default.yaml, .env.example) describe
       the production PG runtime + single-writer constraint; docs-sync run clean.
 - [ ] Backward-compat: no-DATABASE_URL boot identical to sqlite; verified.

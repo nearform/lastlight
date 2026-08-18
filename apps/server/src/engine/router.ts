@@ -530,7 +530,7 @@ export async function routeEvent(
       // resume the conversation naturally.
       if (deps.db && envelope.issueNumber) {
         const triggerId = `${envelope.repo}#${envelope.issueNumber}`;
-        const pendingReply = deps.db.approvals.getPendingReplyGateByTrigger(triggerId);
+        const pendingReply = await deps.db.approvals.getPendingReplyGateByTrigger(triggerId);
         if (pendingReply) {
           return {
             action: "handler",
@@ -560,7 +560,7 @@ export async function routeEvent(
         !bot.mention.test(envelope.body)
       ) {
         const triggerId = `${envelope.repo}#${envelope.issueNumber}`;
-        const buildStarted = deps.db.runs.hasRunForTrigger(triggerId, "build");
+        const buildStarted = await deps.db.runs.hasRunForTrigger(triggerId, "build");
         if (!buildStarted) {
           const isAuthor =
             !!envelope.issueAuthor && envelope.sender === envelope.issueAuthor;
@@ -904,7 +904,7 @@ export async function routeEvent(
       // the next reply — this must sit above all slash-command handling
       // so replies don't get mis-parsed as commands.
       if (deps.db && slackTriggerId) {
-        const pendingReply = deps.db.approvals.getPendingReplyGateByTrigger(slackTriggerId);
+        const pendingReply = await deps.db.approvals.getPendingReplyGateByTrigger(slackTriggerId);
         if (pendingReply) {
           return {
             action: "handler",

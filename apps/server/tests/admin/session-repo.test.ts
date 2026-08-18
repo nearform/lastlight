@@ -2,35 +2,25 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { StateDb } from "#src/state/db.js";
+import { eq } from "drizzle-orm";
+import type { StateDb } from "#src/state/db.js";
+import { executions } from "#src/state/schema/sqlite.js";
 import { SessionReader } from "#src/admin/sessions.js";
 import { ChatSessionReader } from "#src/admin/chat-session-reader.js";
+import { makeTestDb } from "../helpers/state-db.js";
 
 let db: StateDb;
 let dir: string;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
-  // `messaging_sessions` is owned by SessionManager, not `migrate()`, and
-  // `getChatThread` LEFT JOINs it. Create the shape the join needs.
-  db.database.exec(`
-    CREATE TABLE IF NOT EXISTS messaging_sessions (
-      id TEXT PRIMARY KEY,
-      agent_session_id TEXT,
-      platform TEXT
-    );
-    CREATE TABLE IF NOT EXISTS messaging_messages (
-      session_id TEXT,
-      role TEXT,
-      content TEXT,
-      timestamp TEXT
-    );
-  `);
+beforeEach(async () => {
+  // `messaging_sessions` / `messaging_messages` are in the Drizzle baseline now
+  // (SessionManager owns no DDL), so the migrated db already has the shape
+  // `getChatThread`'s LEFT JOIN needs.
+  db = await makeTestDb();
   dir = mkdtempSync(join(tmpdir(), "lastlight-session-repo-"));
 });
 
 afterEach(() => {
-  db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -49,21 +39,21 @@ function writeSandboxSession(sessionId: string): void {
 }
 
 describe("ExecutionStore.repoForSessionId", () => {
-  it("resolves a session id to the repo its execution ran against", () => {
-    db.executions.recordStart({
+  it("resolves a session id to the repo its execution ran against", async () => {
+    await db.executions.recordStart({
       id: "e1",
-      triggerType: "github",
+      triggerType: "webhook",
       triggerId: "t1",
       skill: "pr-review",
       repo: "nearform/lastlight",
       issueNumber: 7,
       startedAt: "2026-08-06T10:00:00.000Z",
     });
-    db.executions.recordSessionId("e1", "sess-1");
-    expect(db.executions.repoForSessionId("sess-1")).toBe("nearform/lastlight");
+    await db.executions.recordSessionId("e1", "sess-1");
+    expect(await db.executions.repoForSessionId("sess-1")).toBe("nearform/lastlight");
   });
 
-  it("qualifies a BARE repo name from the row's own owner column", () => {
+  it("qualifies a BARE repo name from the row's own owner column", async () => {
     // The regression this exists for: `runSimpleWorkflow` carries `owner` and
     // `repo` separately, so EVERY phase execution of a workflow run stores the
     // bare name. Returning `lastlight` here would match nothing in an
@@ -74,7 +64,7 @@ describe("ExecutionStore.repoForSessionId", () => {
     // ledger row carries its own `owner`, so this answers without the join —
     // which is what makes it work for a `build-cycle` or chat row too, neither
     // of which has a `workflow_run_id` to join through.
-    db.executions.recordStart({
+    await db.executions.recordStart({
       id: "e1",
       triggerType: "webhook",
       triggerId: "nearform/lastlight#7",
@@ -85,14 +75,14 @@ describe("ExecutionStore.repoForSessionId", () => {
       startedAt: "2026-08-06T10:00:00.000Z",
       workflowRunId: "run-1",
     });
-    db.executions.recordSessionId("e1", "sess-1");
-    expect(db.executions.repoForSessionId("sess-1")).toBe("nearform/lastlight");
+    await db.executions.recordSessionId("e1", "sess-1");
+    expect(await db.executions.repoForSessionId("sess-1")).toBe("nearform/lastlight");
   });
 
-  it("splits a qualified repo handed to recordStart rather than storing a second shape", () => {
+  it("splits a qualified repo handed to recordStart rather than storing a second shape", async () => {
     // The write choke point enforces (owner, BARE repo) — issue #279. The
     // dispatcher used to write the qualified string here.
-    db.executions.recordStart({
+    await db.executions.recordStart({
       id: "e1",
       triggerType: "webhook",
       triggerId: "3",
@@ -101,19 +91,20 @@ describe("ExecutionStore.repoForSessionId", () => {
       issueNumber: 3,
       startedAt: "2026-08-06T10:00:00.000Z",
     });
-    db.executions.recordSessionId("e1", "sess-1");
+    await db.executions.recordSessionId("e1", "sess-1");
 
-    const row = db.database
-      .prepare(`SELECT owner, repo FROM executions WHERE id = 'e1'`)
-      .get() as { owner: string; repo: string };
+    const [row] = await db.client
+      .select({ owner: executions.owner, repo: executions.repo })
+      .from(executions)
+      .where(eq(executions.id, "e1"));
     expect(row).toEqual({ owner: "nearform", repo: "lastlight" });
-    expect(db.executions.repoForSessionId("sess-1")).toBe("nearform/lastlight");
+    expect(await db.executions.repoForSessionId("sess-1")).toBe("nearform/lastlight");
   });
 
-  it("returns null — not a bare name — when there is no owner to qualify with", () => {
+  it("returns null — not a bare name — when there is no owner to qualify with", async () => {
     // Null reads as "no repo, always visible". A bare name would read as a
     // repo that is in nobody's allow-list.
-    db.executions.recordStart({
+    await db.executions.recordStart({
       id: "e1",
       triggerType: "webhook",
       triggerId: "t1",
@@ -122,33 +113,33 @@ describe("ExecutionStore.repoForSessionId", () => {
       issueNumber: 7,
       startedAt: "2026-08-06T10:00:00.000Z",
     });
-    db.executions.recordSessionId("e1", "sess-1");
-    expect(db.executions.repoForSessionId("sess-1")).toBeNull();
+    await db.executions.recordSessionId("e1", "sess-1");
+    expect(await db.executions.repoForSessionId("sess-1")).toBeNull();
   });
 
-  it("returns null for a session with no execution row", () => {
-    expect(db.executions.repoForSessionId("unknown")).toBeNull();
+  it("returns null for a session with no execution row", async () => {
+    expect(await db.executions.repoForSessionId("unknown")).toBeNull();
   });
 
-  it("returns null when the execution carries no repo (a cron/Slack run)", () => {
-    db.executions.recordStart({
+  it("returns null when the execution carries no repo (a cron/Slack run)", async () => {
+    await db.executions.recordStart({
       id: "e1",
-      triggerType: "slack",
+      triggerType: "chat",
       triggerId: "t1",
       skill: "chat",
       repo: null as unknown as string,
       issueNumber: null as unknown as number,
       startedAt: "2026-08-06T10:00:00.000Z",
     });
-    db.executions.recordSessionId("e1", "sess-1");
-    expect(db.executions.repoForSessionId("sess-1")).toBeNull();
+    await db.executions.recordSessionId("e1", "sess-1");
+    expect(await db.executions.repoForSessionId("sess-1")).toBeNull();
   });
 });
 
 describe("SessionReader repo resolution", () => {
   it("carries the repo from the executions join onto SessionMeta", async () => {
     writeSandboxSession("sess-1");
-    const reader = new SessionReader(dir, "sandbox", () => "nearform/lastlight");
+    const reader = new SessionReader(dir, "sandbox", async () => "nearform/lastlight");
     const meta = await reader.getSessionMeta("sess-1");
     expect(meta?.repo).toBe("nearform/lastlight");
   });
@@ -164,9 +155,9 @@ describe("SessionReader repo resolution", () => {
 
 describe("ChatSessionReader repo resolution", () => {
   it("sources the repo straight from executions.repo", async () => {
-    db.executions.recordStart({
+    await db.executions.recordStart({
       id: "e1",
-      triggerType: "slack",
+      triggerType: "chat",
       triggerId: "thread-1",
       skill: "chat",
       repo: "nearform/lastlight",
@@ -179,9 +170,9 @@ describe("ChatSessionReader repo resolution", () => {
   });
 
   it("leaves a repo-less thread null so it is never filtered out", async () => {
-    db.executions.recordStart({
+    await db.executions.recordStart({
       id: "e1",
-      triggerType: "slack",
+      triggerType: "chat",
       triggerId: "thread-1",
       skill: "chat",
       repo: null as unknown as string,

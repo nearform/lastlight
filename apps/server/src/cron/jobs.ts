@@ -72,7 +72,7 @@ function conditionAllows(unless: string | undefined, ctx: CronConditionContext):
  * effect without dynamically re-registering croner jobs; a tick whose repo list
  * comes back empty is a cheap no-op — no dispatch, no run, no error.
  */
-export function getJobs(opts?: {
+export async function getJobs(opts?: {
   webhooksEnabled?: boolean;
   db?: StateDb;
   /** Operator cron block. Defaults to runtime config — injectable for tests. */
@@ -83,7 +83,7 @@ export function getJobs(opts?: {
    * function of its inputs and the tests need no harness.
    */
   handlers?: CronHandlerRegistry;
-}): CronJob[] {
+}): Promise<CronJob[]> {
   const jobs: CronJob[] = [];
 
   let cronDefs = getCronWorkflows();
@@ -92,7 +92,7 @@ export function getJobs(opts?: {
   const conditionCtx: CronConditionContext = { webhooksEnabled: !!opts?.webhooksEnabled };
   cronDefs = cronDefs.filter((def) => conditionAllows(def.condition?.unless, conditionCtx));
 
-  const overrides = opts?.db?.getAllCronOverrides() ?? new Map();
+  const overrides = (await opts?.db?.getAllCronOverrides()) ?? new Map();
   // Already includes the legacy `disabled.crons` names (unioned by the config
   // normaliser). Those are additionally dropped by the asset loader before we
   // ever see them here, so this is belt-and-braces for anything that reaches us.

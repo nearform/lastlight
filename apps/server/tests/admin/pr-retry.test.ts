@@ -17,8 +17,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createAdminRoutes, type AdminConfig } from "#src/admin/routes.js";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
 import type { SessionReader } from "#src/admin/sessions.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import type { GitHubClient } from "#src/engine/github/github.js";
 import { createToken } from "#src/admin/auth.js";
 import { prTriggerId, type PrState } from "#src/engine/pr-state.js";
@@ -103,8 +104,8 @@ function makeApp(over: Partial<AdminConfig> = {}) {
 }
 
 /** Every run row on this PR, newest first — the ledger the next dispatch folds from. */
-function rowsForPr() {
-  return db.runs.listRecent(50).filter((r) => r.triggerId === TRIGGER);
+async function rowsForPr() {
+  return (await db.runs.listRecent(50)).filter((r) => r.triggerId === TRIGGER);
 }
 
 async function retry(
@@ -127,7 +128,7 @@ async function retry(
  * carrying `escalatedAtSha` — which is what makes the budget gate refuse, and
  * therefore what a retry has to move.
  */
-function recordEscalation(workflowName = "dependabot-ci-fix"): void {
+async function recordEscalation(workflowName = "dependabot-ci-fix"): Promise<void> {
   const spent: PrState = {
     repo: REPO,
     prNumber: PR,
@@ -146,6 +147,8 @@ function recordEscalation(workflowName = "dependabot-ci-fix"): void {
     settledCheckCount: 3,
     baseChecksState: "passing",
     botReviewAtHead: null,
+    lastBotReview: null,
+    pathsSinceLastBotReview: null,
     ciReport: null,
     attempt: 4,
     flakyDeferrals: 0,
@@ -161,7 +164,7 @@ function recordEscalation(workflowName = "dependabot-ci-fix"): void {
     runInFlight: null,
     readErrors: [],
   };
-  db.runs.createRun({
+  await db.runs.createRun({
     id: "run-escalated",
     workflowName,
     triggerId: TRIGGER,
@@ -175,8 +178,8 @@ function recordEscalation(workflowName = "dependabot-ci-fix"): void {
   });
 }
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
+beforeEach(async () => {
+  db = await makeTestDb();
   setRuntimeConfig(runtimeConfig());
 });
 
@@ -184,7 +187,7 @@ afterEach(() => resetRuntimeConfigForTests());
 
 describe("POST /prs/:owner/:repo/:number/retry", () => {
   it("records the ask as an `api` intervention and re-dispatches the stuck workflow", async () => {
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub();
     const { app, dispatchWorkflow } = makeApp({ github });
 
@@ -222,7 +225,7 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
   });
 
   it("attributes the retry to the authenticated session", async () => {
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub();
     const { app } = makeApp({ github, adminPassword: "pw" });
 
@@ -235,7 +238,7 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
   });
 
   it("carries the free-text reason through as the record's `note`", async () => {
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub();
     const { app, dispatchWorkflow } = makeApp({ github });
 
@@ -249,7 +252,7 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
   it("sanitizes the reason rather than trusting it — a marker token is refused", async () => {
     // The note is replayed into a later prompt (the journal's seam line, and a
     // `PrNote`), so it may never carry a token the marker parser reads.
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub();
     const { app } = makeApp({ github });
 
@@ -264,12 +267,12 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
     // lock deliberately records NOTHING: a row written under a live run would
     // displace that run's own snapshot as the history the next dispatch folds
     // from. One record per head, not one per ask.
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub();
     // Model the dispatch honestly: a real one creates a running row, and that
     // row is what the second ask loses the lock to.
     const dispatchWorkflow = vi.fn(async (workflowName: string) => {
-      db.runs.createRun({
+      await db.runs.createRun({
         id: "run-retry",
         workflowName,
         triggerId: TRIGGER,
@@ -296,14 +299,14 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
     expect(dispatchWorkflow).toHaveBeenCalledTimes(1);
     // Exactly one retry row across both asks — the escalation, the dispatched
     // run, and nothing else.
-    expect(rowsForPr().filter((r) => r.currentPhase === "retry-requested")).toHaveLength(0);
+    expect((await rowsForPr()).filter((r) => r.currentPhase === "retry-requested")).toHaveLength(0);
   });
 
   it("records — but does not dispatch — when the gate skips for an unrelated reason", async () => {
     // `upstream-broken`: the base branch is red at the exact moment somebody
     // asks. The ask is real and the dispatch is not going to happen, so the
     // standalone row is what stops it evaporating.
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub({ baseChecks: "failing" });
     const { app, dispatchWorkflow } = makeApp({ github });
 
@@ -314,7 +317,7 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
     expect(json.reason).toMatch(/^upstream-broken:/);
     expect(dispatchWorkflow).not.toHaveBeenCalled();
 
-    const row = rowsForPr().find((r) => r.currentPhase === "retry-requested");
+    const row = (await rowsForPr()).find((r) => r.currentPhase === "retry-requested");
     expect(row).toBeDefined();
     expect((row!.context as any).prState.intervention).toMatchObject({
       via: "api",
@@ -327,7 +330,7 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
     // Locked decision 4 — the hold beats an explicit ask outright, and is the
     // one case where "a maintainer asked and was not obeyed" is intentional,
     // which is why the reply is not optional.
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub();
     github.labels.add(HOLD_LABEL);
     const { app, dispatchWorkflow } = makeApp({ github });
@@ -341,11 +344,11 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
     expect(dispatchWorkflow).not.toHaveBeenCalled();
     // Nothing persisted — the next event must find the PR exactly as held as it
     // was before the ask.
-    expect(rowsForPr().map((r) => r.currentPhase)).toEqual(["escalated"]);
+    expect((await rowsForPr()).map((r) => r.currentPhase)).toEqual(["escalated"]);
   });
 
   it("refuses when the PR could not be read", async () => {
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub({ prThrows: true });
     const { app, dispatchWorkflow } = makeApp({ github });
 
@@ -371,7 +374,7 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
   });
 
   it("refuses an unauthenticated caller", async () => {
-    recordEscalation();
+    await recordEscalation();
     const github = fakeGithub();
     const { app, dispatchWorkflow } = makeApp({ github, adminPassword: "pw" });
 
@@ -383,7 +386,7 @@ describe("POST /prs/:owner/:repo/:number/retry", () => {
   });
 
   it("reports 503 rather than acting on a snapshot made of defaults", async () => {
-    recordEscalation();
+    await recordEscalation();
     const { app } = makeApp({ github: null });
     const { res, json } = await retry(app);
     expect(res.status).toBe(503);

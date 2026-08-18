@@ -310,9 +310,33 @@ src/
                         for sandbox runs; ChatSessionReader is DB-backed
                         and groups by Slack thread.
   state/
-    db.ts               SQLite tables: executions, workflow_runs,
-                        workflow_approvals, cron_runs, messaging_sessions,
-                        messaging_messages, plus daily/hourly stat rollups.
+    db.ts               `StateDb` — the ASYNC factory (`await StateDb.open(url)`
+                        / `StateDb.fromClient(client, dialect)`; no public
+                        constructor) that wires the seven stores together and
+                        is the single import surface for their types. Every
+                        store method returns a Promise.
+    schema/sqlite.ts    Drizzle schema — the source of truth for all fifteen
+                        tables (executions, workflow_runs, workflow_approvals,
+                        cron_runs, cron_overrides, workflow_overrides, users,
+                        messaging_*, feedback_*, github_team*).
+    schema/pg.ts        The name-parity pgTable mirror. NOTHING under src/ may
+                        import it — it exists for drizzle-kit and the PGlite
+                        test leg. A schema change means editing BOTH files and
+                        regenerating BOTH dialects; the parity test enforces it.
+    client.ts           The Drizzle client type, `tablesOf(client)` (each store
+                        destructures its tables from this rather than importing
+                        a schema — importing `schema/sqlite.ts` into a store
+                        would break value mapping on Postgres), and the
+                        CONNECTION-scoped op serializer the nine transaction
+                        sites share.
+    dialect.ts          The portability seam — everything that genuinely
+                        differs between sqlite and Postgres: rows() / changes()
+                        / isUniqueViolation() / likeEscape() / dayBucket() /
+                        hourBucket() / containsExpr() / sumTrue() / sumFalse().
+                        Reaching around it is a portability bug.
+    legacy-sqlite.ts    Idempotent pre-migrator compat step for deployments
+                        older than the baseline (PRAGMA-guarded column adds +
+                        the one-shot messaging table rebuild).
     cron-run-store.ts   The `cron_runs` ledger (issues #341/#327) — one row per
                         cron FIRE, scheduled or manual, for `workflow:` and
                         `handler:` crons alike, keyed on the CRON's name. A
@@ -458,6 +482,15 @@ plugins/                Claude Code plugin (distinct from the internal
                         into ~/.claude/skills. Shipped in the npm package
                         (files: .claude-plugin + plugins).
 
+drizzle/                Generated migrations, per dialect (sqlite/, pg/) plus
+                        each one's meta/ journal. Never hand-edited (the
+                        `0000_baseline.sql` idempotency edit is the documented
+                        one-off) and never applied with `drizzle-kit push`.
+                        Regenerate with `db:generate:sqlite` / `db:generate:pg`.
+                        Shipped in BOTH the npm tarball and the docker image
+                        via the package.json `files` field — `pnpm deploy`
+                        reads it, so removing "drizzle" from `files` is a
+                        boot-time crash in the image as well as on npm.
 deploy/                 Docker entrypoints, Caddyfile, systemd helpers.
 dashboard/              React+Vite admin SPA, served from /admin at runtime.
 ```
@@ -844,6 +877,14 @@ pnpm --filter lastlight-core start            # compiled JS
 pnpm --filter lastlight-core test                       # full server suite (docker ITs skip unless opted in)
 pnpm --filter @lastlight/dashboard typecheck            # dashboard typecheck
 
+# State schema change — BOTH dialects, always. Edit src/state/schema/sqlite.ts
+# AND src/state/schema/pg.ts, then regenerate both; tests/state/schema-parity
+# fails if they drift, and the whole state suite runs a second time against
+# real Postgres (PGlite) so a portability break fails loudly rather than at
+# some future deployment.
+pnpm --filter lastlight-core run db:generate:sqlite
+pnpm --filter lastlight-core run db:generate:pg
+
 # Sandbox integration tests — actually start a docker sandbox and run a no-AI
 # workflow (type: bash / type: script phases). Opt-in + self-gating: needs
 # docker + the lean image built, else skips instantly.
@@ -934,7 +975,14 @@ Runtime:
   subdir. Read at startup — restart to apply (but *removing* an `.env` var needs
   a recreate, `lastlight server start agent`; see the `instance/` note above).
 - `STATE_DIR` — persistent state dir (default `./data`)
-- `DB_PATH` — override SQLite path
+- `DB_PATH` — override the SQLite path
+- `DATABASE_URL` — the state DB as a libsql-style URL
+  (`file:/app/data/lastlight.db`, `:memory:`). Effective value, first hit wins:
+  this env var → overlay `config.yaml` `database.url` → `config/default.yaml`
+  (ships `null`) → `file:` + the `DB_PATH` / `$STATE_DIR/lastlight.db` path
+  above. Setting none of them is the pre-Drizzle behaviour, so existing
+  deployments change nothing. `postgres://` is recognized and **throws at
+  boot** — the Postgres runtime is test-only (PGlite) for now.
 - `LASTLIGHT_HOLD_LABEL` — the **hold** label a maintainer applies to an issue
   or PR to stop Last Light acting on it at all (default `lastlight-ignore`;
   overlay `hold.label`). Read by `getHoldLabel()` at exactly two choke points —

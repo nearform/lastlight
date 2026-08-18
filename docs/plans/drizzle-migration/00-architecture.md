@@ -48,9 +48,12 @@ Read together with [README.md](README.md) (locked decisions + hard constraints).
   PKs (`github_teams`, `github_team_repos`, `github_team_members`) and
   `messaging_messages.id AUTOINCREMENT`. `executions.cost_usd` is the schema's
   only REAL column. **Exactly one declared FK exists**
-  (`messaging_messages.session_id → messaging_sessions.id`, no ON DELETE), and
-  `PRAGMA foreign_keys` is **never turned on** — the sole runtime pragma is
-  `journal_mode = WAL`.
+  (`messaging_messages.session_id → messaging_sessions.id`, no ON DELETE). The
+  sole pragma the code sets is `journal_mode = WAL` — but note that **does NOT
+  mean the FK is unenforced**, as this doc and 01 both used to claim: verified
+  2026-08-18, better-sqlite3 13 and @libsql/client 0.17 each default
+  `PRAGMA foreign_keys` ON and each reject an orphan insert. The one FK has
+  always bitten in production.
 
 ## Target file layout
 

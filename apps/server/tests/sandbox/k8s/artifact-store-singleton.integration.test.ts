@@ -96,7 +96,7 @@ describe("artifactStore singleton (in-process round-trip)", () => {
     const res = await app.request("/internal/sandbox-artifacts", {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
-      body,
+      body: new Uint8Array(body),
     });
 
     expect(res.status).toBe(204);

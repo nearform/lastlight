@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("#src/logging/logger.js", () => {
   const noopLogger = {
@@ -36,16 +36,16 @@ import {
   type SlackReactionEvent,
 } from "#src/engine/feedback/slack.js";
 import { drainFeedbackExport } from "#src/engine/feedback/ingest.js";
+import { feedbackAnchors } from "#src/state/schema/sqlite.js";
+import { eq } from "drizzle-orm";
+import { makeTestDb } from "../helpers/state-db.js";
 
 let db: StateDb;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
+beforeEach(async () => {
+  db = await makeTestDb();
   emitted.calls = [];
   telemetry.enabled = true;
-});
-afterEach(() => {
-  db.close();
 });
 
 const CHANNEL = "C0FEED";
@@ -77,19 +77,19 @@ function reaction(over: Partial<SlackReactionEvent> = {}): SlackReactionEvent {
 const deps = () => ({ db, botLogin: "last-light[bot]" });
 
 describe("registerSlackAnchor", () => {
-  it("makes a posted message findable by (channel, ts)", () => {
-    const anchor = anchorFor();
+  it("makes a posted message findable by (channel, ts)", async () => {
+    const anchor = await anchorFor();
     expect(anchor).not.toBeNull();
-    expect(db.feedback.findAnchor("slack", CHANNEL, TS)?.workflowRunId).toBe("run-1");
+    expect((await db.feedback.findAnchor("slack", CHANNEL, TS))?.workflowRunId).toBe("run-1");
   });
 });
 
 describe("handleSlackReaction", () => {
-  it("scores a 👍 against the run that posted the message", () => {
-    anchorFor();
-    expect(handleSlackReaction(deps(), reaction())).toBe(true);
+  it("scores a 👍 against the run that posted the message", async () => {
+    await anchorFor();
+    expect(await handleSlackReaction(deps(), reaction())).toBe(true);
 
-    const { signals } = db.feedback.list();
+    const { signals } = await db.feedback.list();
     expect(signals).toHaveLength(1);
     expect(signals[0]).toMatchObject({
       source: "slack",
@@ -102,181 +102,181 @@ describe("handleSlackReaction", () => {
     });
   });
 
-  it("dates the signal from the reaction's own Slack timestamp", () => {
-    anchorFor();
-    handleSlackReaction(deps(), reaction());
+  it("dates the signal from the reaction's own Slack timestamp", async () => {
+    await anchorFor();
+    await handleSlackReaction(deps(), reaction());
     // 1754472700 epoch seconds — a Slack ts is an id that sorts by time, not a date.
-    expect(db.feedback.list().signals[0]!.reactedAt).toBe(
+    expect((await db.feedback.list()).signals[0]!.reactedAt).toBe(
       new Date(1754472700 * 1000).toISOString(),
     );
   });
 
-  it("folds skin tones and aliases before scoring", () => {
-    anchorFor();
-    handleSlackReaction(deps(), reaction({ reaction: "thumbsup::skin-tone-4" }));
-    expect(db.feedback.list().signals[0]).toMatchObject({ emoji: "+1", score: 1 });
+  it("folds skin tones and aliases before scoring", async () => {
+    await anchorFor();
+    await handleSlackReaction(deps(), reaction({ reaction: "thumbsup::skin-tone-4" }));
+    expect((await db.feedback.list()).signals[0]).toMatchObject({ emoji: "+1", score: 1 });
   });
 
-  it("records 👀 without scoring it", () => {
-    anchorFor();
-    handleSlackReaction(deps(), reaction({ reaction: "eyes" }));
-    expect(db.feedback.list().signals[0]).toMatchObject({ score: 0, sentiment: "neutral" });
+  it("records 👀 without scoring it", async () => {
+    await anchorFor();
+    await handleSlackReaction(deps(), reaction({ reaction: "eyes" }));
+    expect((await db.feedback.list()).signals[0]).toMatchObject({ score: 0, sentiment: "neutral" });
   });
 
-  it("drops a reaction on a message we never posted", () => {
+  it("drops a reaction on a message we never posted", async () => {
     // No anchor registered — the overwhelmingly common case in a busy channel.
-    expect(handleSlackReaction(deps(), reaction())).toBe(false);
-    expect(db.feedback.list().total).toBe(0);
+    expect(await handleSlackReaction(deps(), reaction())).toBe(false);
+    expect((await db.feedback.list()).total).toBe(0);
     expect(emitted.calls).toHaveLength(0);
   });
 
-  it("drops an emoji outside the vocabulary", () => {
-    anchorFor();
-    expect(handleSlackReaction(deps(), reaction({ reaction: "pizza" }))).toBe(false);
-    expect(db.feedback.list().total).toBe(0);
+  it("drops an emoji outside the vocabulary", async () => {
+    await anchorFor();
+    expect(await handleSlackReaction(deps(), reaction({ reaction: "pizza" }))).toBe(false);
+    expect((await db.feedback.list()).total).toBe(0);
   });
 
-  it("ignores reactions on non-message items", () => {
-    anchorFor();
+  it("ignores reactions on non-message items", async () => {
+    await anchorFor();
     const onFile = reaction({ item: { type: "file", channel: CHANNEL, ts: TS } });
-    expect(handleSlackReaction(deps(), onFile)).toBe(false);
+    expect(await handleSlackReaction(deps(), onFile)).toBe(false);
   });
 
-  it("honours the SLACK_ALLOWED_USERS allowlist", () => {
-    anchorFor();
+  it("honours the SLACK_ALLOWED_USERS allowlist", async () => {
+    await anchorFor();
     const gated = { ...deps(), allowedUsers: ["U_SOMEONE_ELSE"] };
-    expect(handleSlackReaction(gated, reaction())).toBe(false);
-    expect(db.feedback.list().total).toBe(0);
+    expect(await handleSlackReaction(gated, reaction())).toBe(false);
+    expect((await db.feedback.list()).total).toBe(0);
 
     const permitted = { ...deps(), allowedUsers: ["U_HUMAN"] };
-    expect(handleSlackReaction(permitted, reaction())).toBe(true);
+    expect(await handleSlackReaction(permitted, reaction())).toBe(true);
   });
 
-  it("retracts on reaction_removed, keeping the row", () => {
-    anchorFor();
-    handleSlackReaction(deps(), reaction());
-    expect(handleSlackReaction(deps(), reaction({ type: "reaction_removed" }))).toBe(true);
+  it("retracts on reaction_removed, keeping the row", async () => {
+    await anchorFor();
+    await handleSlackReaction(deps(), reaction());
+    expect(await handleSlackReaction(deps(), reaction({ type: "reaction_removed" }))).toBe(true);
 
-    expect(db.feedback.list().total).toBe(0);
-    expect(db.feedback.list({ includeRemoved: true }).total).toBe(1);
+    expect((await db.feedback.list()).total).toBe(0);
+    expect((await db.feedback.list({ includeRemoved: true })).total).toBe(1);
   });
 
-  it("is idempotent under Slack's at-least-once redelivery", () => {
-    anchorFor();
-    expect(handleSlackReaction(deps(), reaction())).toBe(true);
-    expect(handleSlackReaction(deps(), reaction())).toBe(false);
-    expect(db.feedback.list().total).toBe(1);
+  it("is idempotent under Slack's at-least-once redelivery", async () => {
+    await anchorFor();
+    expect(await handleSlackReaction(deps(), reaction())).toBe(true);
+    expect(await handleSlackReaction(deps(), reaction())).toBe(false);
+    expect((await db.feedback.list()).total).toBe(1);
     // And the duplicate must not double-count in the telemetry backend.
     expect(emitted.calls).toHaveLength(1);
   });
 
-  it("exports each new signal to OTel exactly once and marks the watermark", () => {
-    anchorFor();
-    handleSlackReaction(deps(), reaction());
+  it("exports each new signal to OTel exactly once and marks the watermark", async () => {
+    await anchorFor();
+    await handleSlackReaction(deps(), reaction());
     expect(emitted.calls).toHaveLength(1);
-    expect(db.feedback.pendingExport()).toEqual([]);
+    expect(await db.feedback.pendingExport()).toEqual([]);
   });
 
-  it("skips the OTel export when feedback.otel is off, but still records", () => {
-    anchorFor();
-    handleSlackReaction({ ...deps(), otel: false }, reaction());
+  it("skips the OTel export when feedback.otel is off, but still records", async () => {
+    await anchorFor();
+    await handleSlackReaction({ ...deps(), otel: false }, reaction());
     expect(emitted.calls).toHaveLength(0);
-    expect(db.feedback.list().total).toBe(1);
+    expect((await db.feedback.list()).total).toBe(1);
   });
 
-  it("leaves the watermark UNSET when telemetry is off, so the signal can be exported later", () => {
+  it("leaves the watermark UNSET when telemetry is off, so the signal can be exported later", async () => {
     // Marking it exported here would silently discard it: switching OTel on
     // tomorrow would find an empty backlog and every pre-OTel signal would be
     // missing from the backend forever.
     telemetry.enabled = false;
-    anchorFor();
-    handleSlackReaction(deps(), reaction());
+    await anchorFor();
+    await handleSlackReaction(deps(), reaction());
     expect(emitted.calls).toHaveLength(0);
-    expect(db.feedback.pendingExport()).toHaveLength(1);
+    expect(await db.feedback.pendingExport()).toHaveLength(1);
   });
 });
 
 describe("drainFeedbackExport", () => {
-  it("exports the backlog once telemetry is switched on", () => {
+  it("exports the backlog once telemetry is switched on", async () => {
     telemetry.enabled = false;
-    anchorFor();
-    handleSlackReaction(deps(), reaction());
+    await anchorFor();
+    await handleSlackReaction(deps(), reaction());
     expect(emitted.calls).toHaveLength(0);
 
     telemetry.enabled = true;
-    expect(drainFeedbackExport(db)).toBe(1);
+    expect(await drainFeedbackExport(db)).toBe(1);
     expect(emitted.calls).toHaveLength(1);
-    expect(db.feedback.pendingExport()).toEqual([]);
+    expect(await db.feedback.pendingExport()).toEqual([]);
     // Idempotent: a second boot has nothing left to do.
-    expect(drainFeedbackExport(db)).toBe(0);
+    expect(await drainFeedbackExport(db)).toBe(0);
   });
 
-  it("does not backfill a reaction the person withdrew before OTel was enabled", () => {
+  it("does not backfill a reaction the person withdrew before OTel was enabled", async () => {
     // The one route this was reachable through: the live path can't export a
     // retraction, so only the drain could have put a withdrawn +1 on a trace.
     telemetry.enabled = false;
-    const anchor = anchorFor()!;
-    handleSlackReaction(deps(), reaction());
-    handleSlackReaction(deps(), reaction({ type: "reaction_removed" }));
+    const anchor = (await anchorFor())!;
+    await handleSlackReaction(deps(), reaction());
+    await handleSlackReaction(deps(), reaction({ type: "reaction_removed" }));
 
     telemetry.enabled = true;
-    expect(drainFeedbackExport(db)).toBe(0);
+    expect(await drainFeedbackExport(db)).toBe(0);
     expect(emitted.calls).toHaveLength(0);
     expect(anchor).not.toBeNull();
   });
 
-  it("does nothing while telemetry is still off", () => {
+  it("does nothing while telemetry is still off", async () => {
     telemetry.enabled = false;
-    anchorFor();
-    handleSlackReaction(deps(), reaction());
-    expect(drainFeedbackExport(db)).toBe(0);
-    expect(db.feedback.pendingExport()).toHaveLength(1);
+    await anchorFor();
+    await handleSlackReaction(deps(), reaction());
+    expect(await drainFeedbackExport(db)).toBe(0);
+    expect(await db.feedback.pendingExport()).toHaveLength(1);
   });
 
-  it("retires a signal whose anchor has been pruned rather than re-reading it every boot", () => {
+  it("retires a signal whose anchor has been pruned rather than re-reading it every boot", async () => {
     telemetry.enabled = false;
-    const anchor = anchorFor()!;
-    handleSlackReaction(deps(), reaction());
-    db.database.prepare("DELETE FROM feedback_anchors WHERE id = ?").run(anchor.id);
+    const anchor = (await anchorFor())!;
+    await handleSlackReaction(deps(), reaction());
+    await db.client.delete(feedbackAnchors).where(eq(feedbackAnchors.id, anchor.id));
 
     telemetry.enabled = true;
-    expect(drainFeedbackExport(db)).toBe(0);
+    expect(await drainFeedbackExport(db)).toBe(0);
     expect(emitted.calls).toHaveLength(0);
-    expect(db.feedback.pendingExport()).toEqual([]);
+    expect(await db.feedback.pendingExport()).toEqual([]);
   });
 
-  it("ignores a malformed payload rather than throwing into the webhook", () => {
-    expect(handleSlackReaction(deps(), { type: "reaction_added" })).toBe(false);
-    expect(handleSlackReaction(deps(), reaction({ item: undefined }))).toBe(false);
+  it("ignores a malformed payload rather than throwing into the webhook", async () => {
+    expect(await handleSlackReaction(deps(), { type: "reaction_added" })).toBe(false);
+    expect(await handleSlackReaction(deps(), reaction({ item: undefined }))).toBe(false);
   });
 });
 
 describe("chat-turn attribution", () => {
-  it("attributes a reaction on a chat reply to its messaging session", () => {
+  it("attributes a reaction on a chat reply to its messaging session", async () => {
     // How `src/index.ts` registers a chat reply: no run, but a named surface.
-    registerSlackAnchor(db, {
+    await registerSlackAnchor(db, {
       channelId: CHANNEL,
       messageId: TS,
       messagingSessionId: "session-7",
       workflowName: "chat",
     });
-    handleSlackReaction(deps(), reaction());
-    expect(db.feedback.list().signals[0]).toMatchObject({
+    await handleSlackReaction(deps(), reaction());
+    expect((await db.feedback.list()).signals[0]).toMatchObject({
       messagingSessionId: "session-7",
       workflowRunId: null,
       workflowName: "chat",
     });
   });
 
-  it("gives chat its own row in the leaderboard rather than lumping it into 'unattributed'", () => {
-    registerSlackAnchor(db, {
+  it("gives chat its own row in the leaderboard rather than lumping it into 'unattributed'", async () => {
+    await registerSlackAnchor(db, {
       channelId: CHANNEL,
       messageId: TS,
       messagingSessionId: "session-7",
       workflowName: "chat",
     });
-    handleSlackReaction(deps(), reaction());
-    expect(db.feedback.summaryByWorkflow(30)).toEqual([
+    await handleSlackReaction(deps(), reaction());
+    expect(await db.feedback.summaryByWorkflow(30)).toEqual([
       { workflowName: "chat", total: 1, positive: 1, negative: 0, neutral: 0, averageScore: 1 },
     ]);
   });

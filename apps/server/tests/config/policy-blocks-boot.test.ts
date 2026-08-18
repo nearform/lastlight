@@ -59,7 +59,10 @@ describe("loadConfig — the fix policy block", () => {
 
   const said = () =>
     warnSpy.mock.calls
-      .map(([msg, fields]: [string, unknown]) => `${msg} ${fields ? JSON.stringify(fields) : ""}`)
+      .map((call) => {
+        const [msg, fields] = call as [string, unknown];
+        return `${msg} ${fields ? JSON.stringify(fields) : ""}`;
+      })
       .join(" ");
 
   describe("whole-number budgets", () => {

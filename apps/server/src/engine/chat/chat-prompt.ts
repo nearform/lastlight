@@ -117,10 +117,17 @@ function renderBullet(e: ChatEntry): string {
 
 export interface ChatPromptOptions {
   /**
-   * Runtime kill-switch predicate — pass `db.isWorkflowEnabled`. A workflow an
-   * admin disabled in the dashboard is dropped from both rendered lists, so the
-   * agent never names a trigger that would no-op at dispatch. Defaults to
-   * treating everything as enabled (the shape tests and the evals barrel use).
+   * Runtime kill-switch predicate. A workflow an admin disabled in the
+   * dashboard is dropped from both rendered lists, so the agent never names a
+   * trigger that would no-op at dispatch. Defaults to treating everything as
+   * enabled (the shape tests and the evals barrel use).
+   *
+   * **Deliberately synchronous, and it can no longer be `db.isWorkflowEnabled`
+   * itself.** It is applied inside `.filter()` callbacks, three hops down a
+   * string-composition expression; making it async would turn this whole
+   * module async for the sake of a kill-switch lookup. The caller resolves the
+   * enabled set ONCE per turn — one `getAllWorkflowOverrides()` rather than one
+   * query per workflow — and closes over it here.
    */
   isWorkflowEnabled?: (workflowName: string) => boolean;
 }

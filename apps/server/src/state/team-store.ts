@@ -1,4 +1,11 @@
-import type Database from "better-sqlite3";
+import { and, asc, eq, max, sql } from "drizzle-orm";
+import {
+  nullsToUndefined,
+  tablesOf,
+  type OpSerializer,
+  type StateClient,
+  type StateTables,
+} from "./client.js";
 
 /**
  * Outcome of the last visibility resolution for one login.
@@ -55,11 +62,30 @@ export interface CachedVisibility {
  * fails open rather than hiding repos.
  *
  * Mirrors the other per-table stores ({@link ExecutionStore} /
- * {@link UserStore}): constructed from the single shared `Database`, every
- * multi-row write wrapped in one transaction.
+ * {@link UserStore}): constructed from the single shared Drizzle client, every
+ * multi-row write wrapped in one transaction. Those four transactions run
+ * through the **connection-scoped** `serialize` mutex, the same instance
+ * {@link WorkflowRunStore} uses — a store-scoped chain would leave a team
+ * resolution free to overlap a run transaction on this one libsql client, which
+ * is exactly the interleaving libsql handles badly.
  */
 export class TeamStore {
-  constructor(private db: Database.Database) {}
+  private serialize: OpSerializer;
+
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
+  constructor(
+    private client: StateClient,
+    deps: { serialize: OpSerializer },
+  ) {
+    this.serialize = deps.serialize;
+    this.t = tablesOf(client);
+  }
 
   /**
    * Replace everything known about ONE login in a single transaction: the teams
@@ -70,65 +96,83 @@ export class TeamStore {
    * Only touches membership rows for `login` — other logins' rows in the same
    * teams are left alone, since this pass learned nothing about them.
    */
-  recordResolution(input: {
+  async recordResolution(input: {
     login: string;
     teams: ResolvedTeam[];
     status: VisibilitySyncStatus;
     detail?: string;
     at?: string;
-  }): void {
+  }): Promise<void> {
+    const { githubTeamMembers, githubTeamRepos, githubTeams, githubVisibilitySync } = this.t;
     const now = input.at ?? new Date().toISOString();
-    const apply = this.db.transaction(() => {
-      this.db.prepare(`DELETE FROM github_team_members WHERE login = ?`).run(input.login);
-      for (const team of input.teams) {
-        this.db
-          .prepare(
-            `INSERT INTO github_teams (org, slug, name, repos_synced_at, truncated)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(org, slug) DO UPDATE SET
-               name = excluded.name,
-               repos_synced_at = excluded.repos_synced_at,
-               truncated = excluded.truncated`,
-          )
-          .run(team.org, team.slug, team.name ?? null, now, team.truncated ? 1 : 0);
-        this.db
-          .prepare(`DELETE FROM github_team_repos WHERE org = ? AND team_slug = ?`)
-          .run(team.org, team.slug);
-        const insertRepo = this.db.prepare(
-          `INSERT OR IGNORE INTO github_team_repos (org, team_slug, repo) VALUES (?, ?, ?)`,
-        );
-        for (const repo of team.repos) insertRepo.run(team.org, team.slug, repo);
-        this.db
-          .prepare(
-            `INSERT OR IGNORE INTO github_team_members (org, team_slug, login) VALUES (?, ?, ?)`,
-          )
-          .run(team.org, team.slug, input.login);
-      }
-      this.db
-        .prepare(
-          `INSERT INTO github_visibility_sync (login, synced_at, status, detail)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(login) DO UPDATE SET
-             synced_at = excluded.synced_at,
-             status = excluded.status,
-             detail = excluded.detail`,
-        )
-        .run(input.login, now, input.status, input.detail ?? null);
-    });
-    apply();
+    await this.serialize(() =>
+      this.client.transaction(async (tx) => {
+        await tx.delete(githubTeamMembers).where(eq(githubTeamMembers.login, input.login));
+        for (const team of input.teams) {
+          await tx
+            .insert(githubTeams)
+            .values({
+              org: team.org,
+              slug: team.slug,
+              name: team.name ?? null,
+              reposSyncedAt: now,
+              truncated: team.truncated,
+            })
+            .onConflictDoUpdate({
+              target: [githubTeams.org, githubTeams.slug],
+              set: { name: team.name ?? null, reposSyncedAt: now, truncated: team.truncated },
+            });
+          await tx
+            .delete(githubTeamRepos)
+            .where(
+              and(eq(githubTeamRepos.org, team.org), eq(githubTeamRepos.teamSlug, team.slug)),
+            );
+          // `repo` here is the QUALIFIED owner/repo full name — unlike every
+          // other repo column in the schema — so it is stored exactly as the
+          // resolver produced it, with no bare-repo normalization.
+          for (const repo of team.repos) {
+            await tx
+              .insert(githubTeamRepos)
+              .values({ org: team.org, teamSlug: team.slug, repo })
+              .onConflictDoNothing();
+          }
+          await tx
+            .insert(githubTeamMembers)
+            .values({ org: team.org, teamSlug: team.slug, login: input.login })
+            .onConflictDoNothing();
+        }
+        await tx
+          .insert(githubVisibilitySync)
+          .values({
+            login: input.login,
+            syncedAt: now,
+            status: input.status,
+            detail: input.detail ?? null,
+          })
+          .onConflictDoUpdate({
+            target: githubVisibilitySync.login,
+            set: { syncedAt: now, status: input.status, detail: input.detail ?? null },
+          });
+      }),
+    );
   }
 
   /** The freshness/outcome row for a login, or null if never resolved. */
-  getSync(login: string): VisibilitySync | null {
-    const row = this.db
-      .prepare(`SELECT login, synced_at, status, detail FROM github_visibility_sync WHERE login = ?`)
-      .get(login) as Record<string, unknown> | undefined;
+  async getSync(login: string): Promise<VisibilitySync | null> {
+    const { githubVisibilitySync } = this.t;
+    const [row] = await this.client
+      .select()
+      .from(githubVisibilitySync)
+      .where(eq(githubVisibilitySync.login, login))
+      .limit(1);
     if (!row) return null;
+    const r = nullsToUndefined(row);
     return {
-      login: row.login as string,
-      syncedAt: row.synced_at as string,
-      status: row.status as VisibilitySyncStatus,
-      detail: (row.detail as string | null) ?? undefined,
+      ...r,
+      status: r.status as VisibilitySyncStatus,
+      // `nullsToUndefined` strips it at runtime; the cast keeps the declared
+      // optional honest, since its signature can't narrow `string | null`.
+      detail: r.detail ?? undefined,
     };
   }
 
@@ -137,8 +181,8 @@ export class TeamStore {
    * never fresh; a `synced_at` we can't parse is treated as stale rather than
    * trusted forever.
    */
-  isFresh(login: string, ttlMs: number, now = Date.now()): boolean {
-    const sync = this.getSync(login);
+  async isFresh(login: string, ttlMs: number, now = Date.now()): Promise<boolean> {
+    const sync = await this.getSync(login);
     if (!sync) return false;
     const at = Date.parse(sync.syncedAt);
     if (Number.isNaN(at)) return false;
@@ -151,40 +195,56 @@ export class TeamStore {
    * stored, which was already intersected at write time (a repo unmanaged since
    * then must not reappear just because a team still grants it).
    */
-  reposForLogin(login: string): CachedVisibility {
-    const rows = this.db
-      .prepare(
-        `SELECT DISTINCT tr.repo AS repo
-           FROM github_team_members m
-           JOIN github_team_repos tr
-             ON tr.org = m.org AND tr.team_slug = m.team_slug
-          WHERE m.login = ?
-          ORDER BY tr.repo`,
+  async reposForLogin(login: string): Promise<CachedVisibility> {
+    const { githubTeamMembers, githubTeamRepos, githubTeams } = this.t;
+    const rows = await this.client
+      .selectDistinct({ repo: githubTeamRepos.repo })
+      .from(githubTeamMembers)
+      .innerJoin(
+        githubTeamRepos,
+        and(
+          eq(githubTeamRepos.org, githubTeamMembers.org),
+          eq(githubTeamRepos.teamSlug, githubTeamMembers.teamSlug),
+        ),
       )
-      .all(login) as Array<{ repo: string }>;
-    const teams = this.db
-      .prepare(
-        `SELECT m.org AS org, m.team_slug AS slug, COALESCE(t.truncated, 0) AS truncated
-           FROM github_team_members m
-           LEFT JOIN github_teams t ON t.org = m.org AND t.slug = m.team_slug
-          WHERE m.login = ?
-          ORDER BY m.org, m.team_slug`,
+      .where(eq(githubTeamMembers.login, login))
+      .orderBy(asc(githubTeamRepos.repo));
+    const teams = await this.client
+      .select({
+        org: githubTeamMembers.org,
+        slug: githubTeamMembers.teamSlug,
+        // The COALESCE is load-bearing, not defensive: `truncated` is NOT NULL,
+        // so the only NULL here comes from the LEFT JOIN missing its team row —
+        // a membership we learned about before (or without) the team itself.
+        // Bound `false`, never a literal 0: Postgres rejects `boolean = integer`.
+        truncated: sql`coalesce(${githubTeams.truncated}, ${false})`.mapWith(Boolean),
+      })
+      .from(githubTeamMembers)
+      .leftJoin(
+        githubTeams,
+        and(
+          eq(githubTeams.org, githubTeamMembers.org),
+          eq(githubTeams.slug, githubTeamMembers.teamSlug),
+        ),
       )
-      .all(login) as Array<{ org: string; slug: string; truncated: number }>;
+      .where(eq(githubTeamMembers.login, login))
+      .orderBy(asc(githubTeamMembers.org), asc(githubTeamMembers.teamSlug));
     return {
       repos: rows.map((r) => r.repo),
-      truncated: teams.some((t) => t.truncated === 1),
+      truncated: teams.some((t) => t.truncated === true),
       teams: teams.map((t) => ({ org: t.org, slug: t.slug })),
     };
   }
 
   /** Forget one login's answer — it will be re-resolved on the next request. */
-  invalidateLogin(login: string): void {
-    const apply = this.db.transaction(() => {
-      this.db.prepare(`DELETE FROM github_team_members WHERE login = ?`).run(login);
-      this.db.prepare(`DELETE FROM github_visibility_sync WHERE login = ?`).run(login);
-    });
-    apply();
+  async invalidateLogin(login: string): Promise<void> {
+    const { githubTeamMembers, githubVisibilitySync } = this.t;
+    await this.serialize(() =>
+      this.client.transaction(async (tx) => {
+        await tx.delete(githubTeamMembers).where(eq(githubTeamMembers.login, login));
+        await tx.delete(githubVisibilitySync).where(eq(githubVisibilitySync.login, login));
+      }),
+    );
   }
 
   /**
@@ -195,46 +255,55 @@ export class TeamStore {
    * Returns the logins whose answers were dropped, so the caller can log the
    * blast radius of an org-side change.
    */
-  invalidateTeam(org: string, slug: string): string[] {
-    const members = this.db
-      .prepare(`SELECT login FROM github_team_members WHERE org = ? AND team_slug = ?`)
-      .all(org, slug) as Array<{ login: string }>;
+  async invalidateTeam(org: string, slug: string): Promise<string[]> {
+    const { githubTeamMembers, githubTeamRepos, githubTeams, githubVisibilitySync } = this.t;
+    // Deliberately OUTSIDE the transaction, as it always has been.
+    const members = await this.client
+      .select({ login: githubTeamMembers.login })
+      .from(githubTeamMembers)
+      .where(and(eq(githubTeamMembers.org, org), eq(githubTeamMembers.teamSlug, slug)));
     const logins = members.map((m) => m.login);
-    const apply = this.db.transaction(() => {
-      this.db.prepare(`DELETE FROM github_team_repos WHERE org = ? AND team_slug = ?`).run(org, slug);
-      this.db.prepare(`DELETE FROM github_teams WHERE org = ? AND slug = ?`).run(org, slug);
-      // Drop each affected member ENTIRELY, not just their row in this team.
-      // Leaving their other memberships behind would keep a partial repo set in
-      // the cache — and a partial set is the one answer this feature must never
-      // produce. They re-resolve on their next request regardless, since their
-      // freshness row goes with them, so this costs nothing extra.
-      const forgetMembership = this.db.prepare(`DELETE FROM github_team_members WHERE login = ?`);
-      const forgetSync = this.db.prepare(`DELETE FROM github_visibility_sync WHERE login = ?`);
-      for (const login of logins) {
-        forgetMembership.run(login);
-        forgetSync.run(login);
-      }
-    });
-    apply();
+    await this.serialize(() =>
+      this.client.transaction(async (tx) => {
+        await tx
+          .delete(githubTeamRepos)
+          .where(and(eq(githubTeamRepos.org, org), eq(githubTeamRepos.teamSlug, slug)));
+        await tx
+          .delete(githubTeams)
+          .where(and(eq(githubTeams.org, org), eq(githubTeams.slug, slug)));
+        // Drop each affected member ENTIRELY, not just their row in this team.
+        // Leaving their other memberships behind would keep a partial repo set in
+        // the cache — and a partial set is the one answer this feature must never
+        // produce. They re-resolve on their next request regardless, since their
+        // freshness row goes with them, so this costs nothing extra.
+        for (const login of logins) {
+          await tx.delete(githubTeamMembers).where(eq(githubTeamMembers.login, login));
+          await tx.delete(githubVisibilitySync).where(eq(githubVisibilitySync.login, login));
+        }
+      }),
+    );
     return logins;
   }
 
   /** Drop the whole cache (admin re-sync, or an `organization` event we can't scope). */
-  invalidateAll(): void {
-    const apply = this.db.transaction(() => {
-      this.db.exec(`DELETE FROM github_team_repos`);
-      this.db.exec(`DELETE FROM github_team_members`);
-      this.db.exec(`DELETE FROM github_teams`);
-      this.db.exec(`DELETE FROM github_visibility_sync`);
-    });
-    apply();
+  async invalidateAll(): Promise<void> {
+    const { githubTeamMembers, githubTeamRepos, githubTeams, githubVisibilitySync } = this.t;
+    await this.serialize(() =>
+      this.client.transaction(async (tx) => {
+        await tx.delete(githubTeamRepos);
+        await tx.delete(githubTeamMembers);
+        await tx.delete(githubTeams);
+        await tx.delete(githubVisibilitySync);
+      }),
+    );
   }
 
   /** Most recent successful resolution across all logins — powers the coarse `synced` flag. */
-  lastSyncedAt(): string | null {
-    const row = this.db
-      .prepare(`SELECT MAX(synced_at) AS at FROM github_visibility_sync`)
-      .get() as { at: string | null } | undefined;
+  async lastSyncedAt(): Promise<string | null> {
+    const { githubVisibilitySync } = this.t;
+    const [row] = await this.client
+      .select({ at: max(githubVisibilitySync.syncedAt) })
+      .from(githubVisibilitySync);
     return row?.at ?? null;
   }
 }

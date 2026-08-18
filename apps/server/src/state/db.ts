@@ -1,6 +1,18 @@
-import Database from "better-sqlite3";
-import { resolve } from "path";
-import { migrate } from "./migrate.js";
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { migrate } from "drizzle-orm/libsql/migrator";
+import { eq } from "drizzle-orm";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import * as sqliteSchema from "./schema/sqlite.js";
+import { applyLegacySqliteCompat } from "./legacy-sqlite.js";
+import {
+  makeOpSerializer,
+  tablesOf,
+  type Dialect,
+  type StateClient,
+  type StateTables,
+} from "./client.js";
 import { ExecutionStore } from "./execution-store.js";
 import { CronRunStore } from "./cron-run-store.js";
 import { ApprovalStore } from "./approval-store.js";
@@ -44,6 +56,12 @@ export { CronRunStore } from "./cron-run-store.js";
 
 const DEFAULT_DB_PATH = "lastlight.db";
 
+/**
+ * The generated migrations live at the `apps/server/` package root, so this
+ * must resolve from BOTH `src/state/` (tsx dev) and `dist/state/` (compiled).
+ */
+const MIGRATIONS_DIR = fileURLToPath(new URL("../../drizzle/sqlite", import.meta.url));
+
 export interface CronOverride {
   name: string;
   enabled: boolean;
@@ -70,17 +88,18 @@ export interface WorkflowOverride {
  * Lightweight SQLite state for operational tracking.
  * NOT for conversation history — only execution logs and rate limits.
  *
- * Construction root for the three per-table stores (issue #97): it opens the
- * single `Database` connection, runs {@link migrate}, and builds
- * {@link ExecutionStore} / {@link ApprovalStore} / {@link WorkflowRunStore} on
- * top of it (all sharing the one connection so better-sqlite3 transactions
- * span every store). Callers reach the stores via `db.runs` / `db.approvals` /
- * `db.executions`. StateDb itself retains only the cross-cutting cron-override
- * and workflow kill-switch concerns.
+ * Construction root for the seven per-table stores (issue #97): it opens the
+ * single Drizzle client, runs the compat pre-step + migrations, and builds the
+ * stores on top of it (all sharing the one client so transactions span every
+ * store). Callers reach the stores via `db.runs` / `db.approvals` /
+ * `db.executions` / …. StateDb itself retains only the cross-cutting
+ * cron-override and workflow kill-switch concerns.
+ *
+ * Construction is async — the driver is — so it is a static factory rather
+ * than a constructor: {@link StateDb.open} for production, {@link
+ * StateDb.fromClient} to adopt an existing Drizzle instance.
  */
 export class StateDb {
-  private db: Database.Database;
-
   /** Owns the `executions` ledger. */
   readonly executions: ExecutionStore;
   /** Owns the `workflow_approvals` table. */
@@ -104,45 +123,119 @@ export class StateDb {
    */
   readonly cronRuns: CronRunStore;
 
-  constructor(dbPath?: string) {
-    // ":memory:" stays a real per-connection in-memory DB (used by tests for
-    // isolation) — only filesystem paths go through resolve(). Previously
-    // resolve(":memory:") produced a shared on-disk file named ":memory:",
-    // which let parallel test files contend on one DB and deadlock once the
-    // stores started holding write transactions.
-    const target = dbPath === ":memory:" ? ":memory:" : resolve(dbPath || DEFAULT_DB_PATH);
-    this.db = new Database(target);
-    this.db.pragma("journal_mode = WAL");
-    migrate(this.db);
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
 
-    this.executions = new ExecutionStore(this.db);
-    this.approvals = new ApprovalStore(this.db);
-    this.runs = new WorkflowRunStore(this.db, { approvals: this.approvals });
-    this.users = new UserStore(this.db);
-    this.teams = new TeamStore(this.db);
-    this.feedback = new FeedbackStore(this.db);
-    this.cronRuns = new CronRunStore(this.db);
+  private constructor(
+    private readonly _client: StateClient,
+    private readonly _dialect: Dialect,
+    private readonly closer?: () => void,
+  ) {
+    this.t = tablesOf(_client);
+
+    // ONE serializer per CONNECTION, handed to every store that opens a
+    // transaction. A per-store chain would leave WorkflowRunStore's five named
+    // ops racing TeamStore's four on this same client — see makeOpSerializer.
+    const serialize = makeOpSerializer();
+
+    this.executions = new ExecutionStore(_client);
+    this.approvals = new ApprovalStore(_client);
+    this.runs = new WorkflowRunStore(_client, { approvals: this.approvals, serialize });
+    this.users = new UserStore(_client);
+    this.teams = new TeamStore(_client, { serialize });
+    this.feedback = new FeedbackStore(_client);
+    this.cronRuns = new CronRunStore(_client);
+  }
+
+  /**
+   * Production entry: open (or create) the SQLite database, apply the legacy
+   * compat pre-step, then run migrations.
+   *
+   * Normalizes every accepted form HERE so no caller ever builds a `file:` URL:
+   * `:memory:` passes through, `file:` URLs pass through, and anything else is
+   * treated as a filesystem path.
+   *
+   * **`:memory:` is only safe for a caller that never opens a transaction.**
+   * The libsql client lazily opens a NEW connection after every
+   * `client.transaction()`, and for `:memory:` a new connection is a new, EMPTY
+   * database — so the first committed transaction silently discards the schema
+   * and every subsequent query fails with `no such table`. Verified on
+   * @libsql/client 0.17. Nothing in production uses `:memory:`; a test that
+   * touches `WorkflowRunStore`'s named ops or any `TeamStore` write must use a
+   * temp FILE instead.
+   */
+  static async open(pathOrUrl?: string): Promise<StateDb> {
+    const input = pathOrUrl || DEFAULT_DB_PATH;
+    // Case-insensitive: URL schemes are, and `POSTGRES://…` reaching the libsql
+    // client produces an opaque ConnectionFailed instead of this message.
+    if (/^postgres(ql)?:\/\//i.test(input)) {
+      throw new Error(
+        `PG runtime not enabled: StateDb.open() cannot open "${input}". ` +
+          `The Postgres dialect is test-only for now — construct it with StateDb.fromClient().`,
+      );
+    }
+    const url =
+      input === ":memory:" || input.startsWith("file:") ? input : `file:${resolve(input)}`;
+    const raw = createClient({ url });
+    await raw.execute("PRAGMA journal_mode = WAL");
+    // Best-effort only: this pragma is connection-scoped and the libsql client
+    // opens a fresh connection after every transaction, so it covers just the
+    // pre-first-transaction window. The op serializer is the real defense.
+    await raw.execute("PRAGMA busy_timeout = 5000");
+    await applyLegacySqliteCompat(raw);
+    const client = drizzle(raw, { schema: sqliteSchema });
+    await migrate(client, { migrationsFolder: MIGRATIONS_DIR });
+    return new StateDb(client, "sqlite", () => raw.close());
+  }
+
+  /**
+   * Test / Phase-4 entry: adopt an existing Drizzle instance. Runs no
+   * migrations — the caller owns the schema.
+   */
+  static fromClient(
+    client: StateClient,
+    dialect: Dialect,
+    opts?: { close?: () => void },
+  ): StateDb {
+    return new StateDb(client, dialect, opts?.close);
+  }
+
+  get client(): StateClient {
+    return this._client;
+  }
+
+  get dialect(): Dialect {
+    return this._dialect;
   }
 
   // ── Cron overrides ─────────────────────────────────────────────
 
   /** Get the override row for a single cron, or null if none. */
-  getCronOverride(name: string): CronOverride | null {
-    const row = this.db
-      .prepare(`SELECT name, enabled, schedule, updated_at, updated_by FROM cron_overrides WHERE name = ?`)
-      .get(name) as Record<string, unknown> | undefined;
-    return row ? this.deserializeCronOverride(row) : null;
+  async getCronOverride(name: string): Promise<CronOverride | null> {
+    const { cronOverrides } = this.t;
+    const [row] = await this._client
+      .select()
+      .from(cronOverrides)
+      .where(eq(cronOverrides.name, name))
+      .limit(1);
+    return row ? { ...row, schedule: row.schedule ?? null, updatedBy: row.updatedBy ?? null } : null;
   }
 
   /** All override rows keyed by cron name. */
-  getAllCronOverrides(): Map<string, CronOverride> {
-    const rows = this.db
-      .prepare(`SELECT name, enabled, schedule, updated_at, updated_by FROM cron_overrides`)
-      .all() as Record<string, unknown>[];
+  async getAllCronOverrides(): Promise<Map<string, CronOverride>> {
+    const { cronOverrides } = this.t;
+    const rows = await this._client.select().from(cronOverrides);
     const map = new Map<string, CronOverride>();
     for (const row of rows) {
-      const o = this.deserializeCronOverride(row);
-      map.set(o.name, o);
+      map.set(row.name, {
+        ...row,
+        schedule: row.schedule ?? null,
+        updatedBy: row.updatedBy ?? null,
+      });
     }
     return map;
   }
@@ -152,40 +245,34 @@ export class StateDb {
    * fields preserve the existing value (or default to enabled=1, schedule=null
    * on insert).
    */
-  setCronOverride(
+  async setCronOverride(
     name: string,
     patch: { enabled?: boolean; schedule?: string | null; updatedBy?: string },
-  ): void {
+  ): Promise<void> {
+    const { cronOverrides } = this.t;
     const now = new Date().toISOString();
-    const existing = this.getCronOverride(name);
+    const existing = await this.getCronOverride(name);
     const enabled = patch.enabled ?? existing?.enabled ?? true;
-    const schedule = patch.schedule === undefined ? existing?.schedule ?? null : patch.schedule;
-    this.db
-      .prepare(
-        `INSERT INTO cron_overrides (name, enabled, schedule, updated_at, updated_by)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(name) DO UPDATE SET
-           enabled = excluded.enabled,
-           schedule = excluded.schedule,
-           updated_at = excluded.updated_at,
-           updated_by = excluded.updated_by`,
-      )
-      .run(name, enabled ? 1 : 0, schedule, now, patch.updatedBy ?? null);
+    const schedule = patch.schedule === undefined ? (existing?.schedule ?? null) : patch.schedule;
+    const values = { name, enabled, schedule, updatedAt: now, updatedBy: patch.updatedBy ?? null };
+    await this._client
+      .insert(cronOverrides)
+      .values(values)
+      .onConflictDoUpdate({
+        target: cronOverrides.name,
+        set: {
+          enabled: values.enabled,
+          schedule: values.schedule,
+          updatedAt: values.updatedAt,
+          updatedBy: values.updatedBy,
+        },
+      });
   }
 
   /** Remove the override entirely (revert to YAML defaults). */
-  clearCronOverride(name: string): void {
-    this.db.prepare(`DELETE FROM cron_overrides WHERE name = ?`).run(name);
-  }
-
-  private deserializeCronOverride(row: Record<string, unknown>): CronOverride {
-    return {
-      name: row.name as string,
-      enabled: (row.enabled as number) === 1,
-      schedule: (row.schedule as string | null) ?? null,
-      updatedAt: row.updated_at as string,
-      updatedBy: (row.updated_by as string | null) ?? null,
-    };
+  async clearCronOverride(name: string): Promise<void> {
+    const { cronOverrides } = this.t;
+    await this._client.delete(cronOverrides).where(eq(cronOverrides.name, name));
   }
 
   // ── Workflow overrides (kill switch) ───────────────────────────
@@ -194,62 +281,51 @@ export class StateDb {
    * Cheap check used by every dispatch path. Returns true unless an explicit
    * `workflow_overrides` row says otherwise.
    */
-  isWorkflowEnabled(name: string): boolean {
-    const row = this.db
-      .prepare(`SELECT enabled FROM workflow_overrides WHERE name = ?`)
-      .get(name) as { enabled: number } | undefined;
-    if (!row) return true;
-    return row.enabled === 1;
+  async isWorkflowEnabled(name: string): Promise<boolean> {
+    const { workflowOverrides } = this.t;
+    const [row] = await this._client
+      .select({ enabled: workflowOverrides.enabled })
+      .from(workflowOverrides)
+      .where(eq(workflowOverrides.name, name))
+      .limit(1);
+    return row ? row.enabled : true;
   }
 
-  getWorkflowOverride(name: string): WorkflowOverride | null {
-    const row = this.db
-      .prepare(`SELECT name, enabled, updated_at, updated_by FROM workflow_overrides WHERE name = ?`)
-      .get(name) as Record<string, unknown> | undefined;
-    return row ? this.deserializeWorkflowOverride(row) : null;
+  async getWorkflowOverride(name: string): Promise<WorkflowOverride | null> {
+    const { workflowOverrides } = this.t;
+    const [row] = await this._client
+      .select()
+      .from(workflowOverrides)
+      .where(eq(workflowOverrides.name, name))
+      .limit(1);
+    return row ? { ...row, updatedBy: row.updatedBy ?? null } : null;
   }
 
-  getAllWorkflowOverrides(): Map<string, WorkflowOverride> {
-    const rows = this.db
-      .prepare(`SELECT name, enabled, updated_at, updated_by FROM workflow_overrides`)
-      .all() as Record<string, unknown>[];
+  async getAllWorkflowOverrides(): Promise<Map<string, WorkflowOverride>> {
+    const { workflowOverrides } = this.t;
+    const rows = await this._client.select().from(workflowOverrides);
     const map = new Map<string, WorkflowOverride>();
-    for (const row of rows) {
-      const o = this.deserializeWorkflowOverride(row);
-      map.set(o.name, o);
-    }
+    for (const row of rows) map.set(row.name, { ...row, updatedBy: row.updatedBy ?? null });
     return map;
   }
 
-  setWorkflowEnabled(name: string, enabled: boolean, updatedBy?: string): void {
+  async setWorkflowEnabled(name: string, enabled: boolean, updatedBy?: string): Promise<void> {
+    const { workflowOverrides } = this.t;
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        `INSERT INTO workflow_overrides (name, enabled, updated_at, updated_by)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(name) DO UPDATE SET
-           enabled = excluded.enabled,
-           updated_at = excluded.updated_at,
-           updated_by = excluded.updated_by`,
-      )
-      .run(name, enabled ? 1 : 0, now, updatedBy ?? null);
+    await this._client
+      .insert(workflowOverrides)
+      .values({ name, enabled, updatedAt: now, updatedBy: updatedBy ?? null })
+      .onConflictDoUpdate({
+        target: workflowOverrides.name,
+        set: { enabled, updatedAt: now, updatedBy: updatedBy ?? null },
+      });
   }
 
-  private deserializeWorkflowOverride(row: Record<string, unknown>): WorkflowOverride {
-    return {
-      name: row.name as string,
-      enabled: (row.enabled as number) === 1,
-      updatedAt: row.updated_at as string,
-      updatedBy: (row.updated_by as string | null) ?? null,
-    };
-  }
-
-  /** Expose the underlying Database instance (for SessionManager, etc.) */
-  get database(): Database.Database {
-    return this.db;
-  }
-
-  close(): void {
-    this.db.close();
+  /**
+   * Async by contract: libsql's `close()` is synchronous today, but a Postgres
+   * pool's is not, and every caller already awaits this.
+   */
+  async close(): Promise<void> {
+    this.closer?.();
   }
 }

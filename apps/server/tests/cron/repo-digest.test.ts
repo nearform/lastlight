@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("#src/logging/logger.js", () => {
   const noopLogger = {
@@ -20,7 +20,8 @@ vi.mock("#src/workflows/simple.js", () => ({
   resolveRepoRunConfig: (...args: unknown[]) => resolveRepoRunConfig(...(args as [])),
 }));
 
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import type {
   RepoActivityItem,
   RepoDigestDetail,
@@ -44,13 +45,10 @@ import { CRON_NAME_KEY } from "#src/cron/repo-crons.js";
 
 let db: StateDb;
 
-beforeEach(() => {
-  db = new StateDb(":memory:");
+beforeEach(async () => {
+  db = await makeTestDb();
   resolveRepoRunConfig.mockReset();
   resolveRepoRunConfig.mockResolvedValue({});
-});
-afterEach(() => {
-  db.close();
 });
 
 const NOW = new Date("2026-08-09T12:00:00.000Z");
@@ -229,7 +227,9 @@ describe("repo digest — channel resolution", () => {
 describe("repo digest — the tick", () => {
   it("posts one digest per participating repo", async () => {
     const post = vi.fn(async () => {});
-    const d = deps({ post, github: fakeGh({ listOpenPullRequests: vi.fn(async () => [openPr()]) }) });
+    const d = deps({ post, github: fakeGh({
+        listOpenPullRequests: vi.fn(async () => [openPr()]) as unknown as DigestGitHubClient["listOpenPullRequests"],
+      }) });
 
     await runRepoDigest(d, { repos: ["acme/widgets", "acme/gadgets"] });
 
@@ -399,8 +399,8 @@ describe("repo digest — the tick", () => {
 // ---------------------------------------------------------------------------
 
 describe("repo digest — the bot half", () => {
-  const makeRun = (id: string, owner: string, repo: string, status: string, startedAt = NOW.toISOString()) => {
-    db.runs.createRun({
+  const makeRun = async (id: string, owner: string, repo: string, status: string, startedAt = NOW.toISOString()) => {
+    await db.runs.createRun({
       id,
       workflowName: "pr-review",
       triggerId: `${owner}/${repo}#1`,
@@ -412,12 +412,12 @@ describe("repo digest — the bot half", () => {
     });
   };
 
-  it("counts this repo's runs and ignores another repo's", () => {
-    makeRun("a", "acme", "widgets", "succeeded");
-    makeRun("b", "acme", "widgets", "failed");
-    makeRun("c", "other", "thing", "succeeded");
+  it("counts this repo's runs and ignores another repo's", async () => {
+    await makeRun("a", "acme", "widgets", "succeeded");
+    await makeRun("b", "acme", "widgets", "failed");
+    await makeRun("c", "other", "thing", "succeeded");
 
-    const rows = db.runs.summarizeRepoActivity("acme", "widgets", "2000-01-01T00:00:00.000Z");
+    const rows = await db.runs.summarizeRepoActivity("acme", "widgets", "2000-01-01T00:00:00.000Z");
     expect(rows).toEqual(
       expect.arrayContaining([
         { workflowName: "pr-review", status: "succeeded", count: 1 },
@@ -427,23 +427,23 @@ describe("repo digest — the bot half", () => {
     expect(rows).toHaveLength(2);
   });
 
-  it("excludes a run that started before the window", () => {
-    makeRun("old", "acme", "widgets", "succeeded", "2026-01-01T00:00:00.000Z");
-    makeRun("new", "acme", "widgets", "succeeded", NOW.toISOString());
-    const rows = db.runs.summarizeRepoActivity("acme", "widgets", WEEK_AGO.toISOString());
+  it("excludes a run that started before the window", async () => {
+    await makeRun("old", "acme", "widgets", "succeeded", "2026-01-01T00:00:00.000Z");
+    await makeRun("new", "acme", "widgets", "succeeded", NOW.toISOString());
+    const rows = await db.runs.summarizeRepoActivity("acme", "widgets", WEEK_AGO.toISOString());
     expect(rows).toEqual([{ workflowName: "pr-review", status: "succeeded", count: 1 }]);
   });
 
-  it("matches a legacy row whose repo column is still qualified", () => {
+  it("matches a legacy row whose repo column is still qualified", async () => {
     // Rows written before the owner/repo backfill carry "owner/repo" in the
     // repo column. A bare-name filter would silently miss every one of them.
-    makeRun("legacy", "", "acme/widgets", "succeeded");
-    const rows = db.runs.summarizeRepoActivity("acme", "widgets", "2000-01-01T00:00:00.000Z");
+    await makeRun("legacy", "", "acme/widgets", "succeeded");
+    const rows = await db.runs.summarizeRepoActivity("acme", "widgets", "2000-01-01T00:00:00.000Z");
     expect(rows).toEqual([{ workflowName: "pr-review", status: "succeeded", count: 1 }]);
   });
 
-  it("reports zero cost rather than NaN when no execution carries one", () => {
-    expect(db.executions.repoCostSince("acme", "widgets", "2000-01-01T00:00:00.000Z")).toEqual({
+  it("reports zero cost rather than NaN when no execution carries one", async () => {
+    expect(await db.executions.repoCostSince("acme", "widgets", "2000-01-01T00:00:00.000Z")).toEqual({
       costUsd: 0,
       phases: 0,
     });

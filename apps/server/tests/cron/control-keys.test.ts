@@ -164,10 +164,10 @@ beforeEach(() => {
 afterEach(() => resetRuntimeConfigForTests());
 
 describe("getJobs — control keys are not spoofable from cron YAML", () => {
-  it("ignores `_cronName` and `_cronGloballyEnabled` declared in the YAML context", () => {
+  it("ignores `_cronName` and `_cronGloballyEnabled` declared in the YAML context", async () => {
     cronDef.context = { mode: "report", [CRON_NAME_KEY]: "some-other-cron", [CRON_GLOBALLY_ENABLED_KEY]: true };
 
-    const [job] = getJobs({ webhooksEnabled: false, db: fakeDb({ "repo-health": { enabled: false } }) });
+    const [job] = await getJobs({ webhooksEnabled: false, db: fakeDb({ "repo-health": { enabled: false } }) });
 
     expect(job.context[CRON_NAME_KEY]).toBe("repo-health");
     expect(job.context[CRON_GLOBALLY_ENABLED_KEY]).toBe(false);
@@ -175,10 +175,10 @@ describe("getJobs — control keys are not spoofable from cron YAML", () => {
     expect(job.context.mode).toBe("report");
   });
 
-  it("still lets a cron YAML pin its own context.repos (deliberate, must not regress)", () => {
+  it("still lets a cron YAML pin its own context.repos (deliberate, must not regress)", async () => {
     cronDef.context = { mode: "report", repos: ["acme/pinned"] };
 
-    const [job] = getJobs({ webhooksEnabled: false, db: fakeDb() });
+    const [job] = await getJobs({ webhooksEnabled: false, db: fakeDb() });
 
     expect(job.context.repos).toEqual(["acme/pinned"]);
   });
@@ -189,7 +189,7 @@ describe("getJobs — control keys are not spoofable from cron YAML", () => {
     repoLayers.set("acme/out", { config: { crons: { disable: ["repo-health"] } } });
     cronDef.context = { mode: "report", [CRON_NAME_KEY]: "unrelated-cron" };
 
-    const [job] = getJobs({ webhooksEnabled: false, db: fakeDb() });
+    const [job] = await getJobs({ webhooksEnabled: false, db: fakeDb() });
 
     expect(await tick(job.context)).toEqual(["acme/in"]);
   });
@@ -197,7 +197,7 @@ describe("getJobs — control keys are not spoofable from cron YAML", () => {
   it("a spoofed `_cronGloballyEnabled` cannot resurrect a disabled cron", async () => {
     cronDef.context = { mode: "report", [CRON_GLOBALLY_ENABLED_KEY]: true };
 
-    const [job] = getJobs({ webhooksEnabled: false, db: fakeDb({ "repo-health": { enabled: false } }) });
+    const [job] = await getJobs({ webhooksEnabled: false, db: fakeDb({ "repo-health": { enabled: false } }) });
 
     // Globally off and nobody opted in — a no-op tick, not a fan-out to everyone.
     expect(await tick(job.context)).toEqual([]);
@@ -230,7 +230,7 @@ describe("admin cron routes — control keys are not spoofable from cron YAML", 
           captured.push(ctx);
           return { success: true };
         },
-      } as Partial<AdminConfig>,
+      } as unknown as Partial<AdminConfig>,
       fakeDb(),
     );
 
@@ -252,7 +252,7 @@ describe("admin cron routes — control keys are not spoofable from cron YAML", 
           captured.push(ctx);
           return { success: true };
         },
-      } as Partial<AdminConfig>,
+      } as unknown as Partial<AdminConfig>,
       fakeDb({ "repo-health": { enabled: false } }),
     );
 

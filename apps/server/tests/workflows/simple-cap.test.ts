@@ -43,13 +43,14 @@ vi.mock("#src/logging/logger.js", () => {
 });
 
 import { runSimpleWorkflow } from "#src/workflows/simple.js";
-import { StateDb } from "#src/state/db.js";
+import type { StateDb } from "#src/state/db.js";
+import { makeTestDb } from "../helpers/state-db.js";
 import { runWorkflow } from "#src/workflows/runner.js";
 
 const mockRunWorkflow = vi.mocked(runWorkflow);
 
-function makeDb(): StateDb {
-  return new StateDb(":memory:");
+function makeDb(): Promise<StateDb> {
+  return makeTestDb();
 }
 
 function makeRequest(overrides: Record<string, unknown> = {}) {
@@ -86,8 +87,8 @@ function makeCallbacks() {
 describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
   let db: StateDb;
 
-  beforeEach(() => {
-    db = makeDb();
+  beforeEach(async () => {
+    db = await makeDb();
     mockRunWorkflow.mockResolvedValue({
       success: true,
       phases: [{ phase: "socratic", success: true, output: "ok" }],
@@ -95,7 +96,6 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
   });
 
   afterEach(() => {
-    db.close();
     vi.clearAllMocks();
   });
 
@@ -122,7 +122,7 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
   it("queues the run (creates queued row, does NOT call onRunStart) when at cap", async () => {
     // Fill up the cap with running runs
     for (let i = 0; i < 2; i++) {
-      db.runs.createRun({
+      await db.runs.createRun({
         id: `running-${i}`,
         workflowName: "build",
         triggerId: `acme/widgets#${100 + i}`,
@@ -152,7 +152,7 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     expect(callbacks.onRunStart).not.toHaveBeenCalled();
     expect(mockRunWorkflow).not.toHaveBeenCalled();
     // Row should be in queued status
-    const run = db.runs.getByTrigger("acme/widgets#99");
+    const run = await db.runs.getByTrigger("acme/widgets#99");
     expect(run).not.toBeNull();
     expect(run!.status).toBe("queued");
     // Enqueue ack posted
@@ -160,7 +160,7 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
   });
 
   it("stashes the enqueue ack's comment id so admission can retract it (#244)", async () => {
-    db.runs.createRun({
+    await db.runs.createRun({
       id: "blocker",
       workflowName: "build",
       triggerId: "acme/widgets#100",
@@ -184,13 +184,13 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
       { maxWorkflows: 1, maxQueueWaitMs: 1_800_000 },
     );
 
-    const run = db.runs.getByTrigger("acme/widgets#215")!;
+    const run = (await db.runs.getByTrigger("acme/widgets#215"))!;
     expect(run.status).toBe("queued");
     expect(run.scratch?.queuedAck).toEqual({ commentId: 5060108290 });
   });
 
   it("records no ack handle when the surface returns no comment id (Slack)", async () => {
-    db.runs.createRun({
+    await db.runs.createRun({
       id: "blocker",
       workflowName: "build",
       triggerId: "acme/widgets#100",
@@ -213,14 +213,14 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
       { maxWorkflows: 1, maxQueueWaitMs: 1_800_000 },
     );
 
-    const run = db.runs.getByTrigger("acme/widgets#216")!;
+    const run = (await db.runs.getByTrigger("acme/widgets#216"))!;
     expect(run.status).toBe("queued");
     expect(run.scratch?.queuedAck).toBeUndefined();
   });
 
   it("dedup: a duplicate trigger on a queued run returns queued without executing", async () => {
     // Create a queued run for the trigger
-    db.runs.createRun({
+    await db.runs.createRun({
       id: "queued-run-id",
       workflowName: "explore",
       triggerId: "acme/widgets#55",
@@ -246,13 +246,13 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     expect(result.queued).toBe(true);
     expect(mockRunWorkflow).not.toHaveBeenCalled();
     // Status stays queued, not changed
-    expect(db.runs.getRun("queued-run-id")!.status).toBe("queued");
+    expect((await db.runs.getRun("queued-run-id"))!.status).toBe("queued");
   });
 
   it("k8s backend admits freely at dispatch (fuse, not maxWorkflows)", async () => {
     // One run already 'running' + maxWorkflows=1 would queue the next on docker/none.
     // On the k8s backend the dispatch gate uses the sanity fuse, so it dispatches 'running'.
-    db.runs.createRun({
+    await db.runs.createRun({
       id: "running-k8s-0",
       workflowName: "build",
       triggerId: "acme/widgets#200",
@@ -284,7 +284,7 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
   it("requeues the run (running -> queued) when runWorkflow reports backpressure", async () => {
     mockRunWorkflow.mockResolvedValue({
       success: false,
-      phases: [{ phase: "socratic", success: false, error: "exceeded quota" }],
+      phases: [{ phase: "socratic", success: false, output: "", error: "exceeded quota" }],
       backpressure: true,
     });
 
@@ -304,7 +304,7 @@ describe("runSimpleWorkflow — concurrency cap (issue #172)", () => {
     expect(result.queued).toBe(true);
     expect(result.backpressure).toBe(true);
     // The row was created 'running', then requeued back to 'queued' by requeueRunning.
-    const runs = db.runs.listActive();
+    const runs = await db.runs.listActive();
     expect(runs.find((r) => r.workflowName === "explore")!.status).toBe("queued");
   });
 });

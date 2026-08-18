@@ -649,7 +649,7 @@ export async function resolvePrState(
     }
   }
 
-  applyDerivedState(state, deps);
+  await applyDerivedState(state, deps);
   return state;
 }
 
@@ -660,17 +660,17 @@ export async function resolvePrState(
  * can hand it a literal live half plus a fake store and assert the attempt
  * table without touching GitHub.
  */
-export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
+export async function applyDerivedState(state: PrState, deps: PrStateDeps): Promise<void> {
   const family = [...PR_FIX_SHAPED_WORKFLOWS];
   const prScoped = [...prScopedWorkflows()];
   const triggerId = prTriggerId(state.repo, state.prNumber);
 
-  const inFlight = deps.db.runs.activeForTrigger(prScoped, triggerId);
+  const inFlight = await deps.db.runs.activeForTrigger(prScoped, triggerId);
   state.runInFlight = inFlight ? { workflow: inFlight.workflowName, runId: inFlight.id } : null;
 
-  const lifetimeCostUsd = deps.db.executions.costForTriggerWorkflows(triggerId, family);
+  const lifetimeCostUsd = await deps.db.executions.costForTriggerWorkflows(triggerId, family);
 
-  const succeeded = deps.db.runs.latestSucceededForTriggers(prScoped, triggerId);
+  const succeeded = await deps.db.runs.latestSucceededForTriggers(prScoped, triggerId);
   state.assessedHeadShaByWorkflow = {};
   for (const [name, run] of Object.entries(succeeded)) {
     // A `retry-requested` row is not evidence of assessment — it is the record
@@ -691,7 +691,7 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
     if (typeof sha === "string" && sha) state.assessedHeadShaByWorkflow[name] = sha;
   }
 
-  const prior = deps.db.runs.latestForTrigger(family, triggerId);
+  const prior = await deps.db.runs.latestForTrigger(family, triggerId);
   const priorState = priorPrState(prior?.context);
   // The prior run's HARVEST — what its agent actually concluded, read back off
   // the same row. `context.prState` is written at dispatch, before any phase
@@ -706,7 +706,7 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
   // dispatching — which may be `dependabot-pr-merge` or `pr-review`, neither of
   // which the fix family would find. Falls back to the fix-family row when there
   // is no wider one.
-  const priorAny = deps.db.runs.latestForTrigger(prScoped, triggerId) ?? prior;
+  const priorAny = (await deps.db.runs.latestForTrigger(prScoped, triggerId)) ?? prior;
   const priorAnyState = priorPrState(priorAny?.context);
 
   applyEscalationRecord(state, priorState, priorAnyState);
@@ -751,7 +751,7 @@ export function applyDerivedState(state: PrState, deps: PrStateDeps): void {
     state,
     priorState,
     priorMarkers,
-    prior ? didSpendAttempt(prior, deps) : false,
+    prior ? await didSpendAttempt(prior, deps) : false,
     retried,
   );
   state.attempt = history.attempt;
@@ -1271,10 +1271,12 @@ function nextAttempt(
  *   grant a free attempt forever; the cost cap is the backstop, and the
  *   alternative is an unbounded retry loop.
  */
-function didSpendAttempt(prior: WorkflowRun, deps: PrStateDeps): boolean {
+async function didSpendAttempt(prior: WorkflowRun, deps: PrStateDeps): Promise<boolean> {
   try {
     const diagnosis = readHarvestedMarkers(prior)?.diagnosis ?? null;
-    if (!diagnosis) return deps.db.executions.phaseSucceededInRun(prior.id, "diagnose");
+    // `return await`, not a bare `return`: the read has to settle INSIDE the
+    // try so a rejection still fails closed on the catch below.
+    if (!diagnosis) return await deps.db.executions.phaseSucceededInRun(prior.id, "diagnose");
     return !(diagnosis.class && ATTEMPT_FREE_CLASSES.has(diagnosis.class));
   } catch {
     return true;

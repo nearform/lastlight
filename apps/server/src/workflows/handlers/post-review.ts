@@ -100,7 +100,7 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
 
     const succeed = async (summary: string): Promise<PhaseOutcome> => {
       const result: PhaseResult = { phase: phaseName, success: true, output: summary };
-      this.reporter.persistPhase(phaseName, summary);
+      await this.reporter.persistPhase(phaseName, summary);
       await this.reporter.onEnd(phaseName, result);
       await this.reporter.step(phaseName, "done", phase.messages?.on_success);
       return { results: [result], status: "succeeded" };
@@ -114,14 +114,14 @@ export class GitHubPostReviewHandler implements PhaseTypeHandler {
       // and `persistPhase` only writes success entries, so without this a failed
       // post-review would show as "pending" despite the run being marked failed.
       if (this.run.store && this.run.workflowId) {
-        this.run.store.runs.appendPhase(this.run.workflowId, phaseName, {
+        await this.run.store.runs.appendPhase(this.run.workflowId, phaseName, {
           phase: phaseName,
           timestamp: new Date().toISOString(),
           success: false,
           summary: error,
         });
       }
-      this.reporter.failWorkflow(error);
+      await this.reporter.failWorkflow(error);
       log.error(error);
       return { results: [result], status: "failed" };
     };

@@ -1,7 +1,8 @@
 /**
  * The workflow engine's injected ports — the concrete couplings the app layer
  * supplies so the engine stays domain-agnostic (no imports of `../engine`,
- * `../state`, `../notify`, `../admin`, `../config`, GitHub, or better-sqlite3).
+ * `../state`, `../notify`, `../admin`, `../config`, GitHub, or a database
+ * driver).
  *
  * The app's existing concrete types already satisfy these structurally, so
  * introducing each port is a type-only change: the default adapters (built in
@@ -11,7 +12,9 @@
 import type {
   ExecutorConfig,
   ExecutionResult,
+  ExtensionStatusMap,
   GitSandboxAccess,
+  SkillsStatus,
   CommandSpec,
 } from "../core/types.js";
 import type { PhaseDefinition } from "../core/schema.js";
@@ -173,8 +176,13 @@ export interface ExecutionFinish {
   outputTokens?: number;
   apiDurationMs?: number;
   stopReason?: string;
-  extensionStatus?: string;
-  skillsStatus?: string;
+  /**
+   * Handed over as OBJECTS, not JSON text: the embedder's columns are real
+   * JSON columns, so it owns the serialization. Stringifying here would
+   * double-encode and fail silently on read.
+   */
+  extensionStatus?: ExtensionStatusMap;
+  skillsStatus?: SkillsStatus;
 }
 
 export interface FinishOpts {
@@ -183,27 +191,37 @@ export interface FinishOpts {
 }
 
 export interface RunStore {
-  getRun(id: string): WorkflowRunView | null;
-  appendPhase(id: string, phase: string, entry: PhaseHistoryEntry): void;
-  finishRun(id: string, status: "succeeded" | "failed" | "cancelled", opts?: FinishOpts): void;
-  mergeScratch(id: string, patch: Record<string, unknown>): void;
-  pauseForApproval(runId: string, approval: NewApproval, marker: PhaseMarker, scratchPatch?: Record<string, unknown>): void;
+  getRun(id: string): Promise<WorkflowRunView | null>;
+  appendPhase(id: string, phase: string, entry: PhaseHistoryEntry): Promise<void>;
+  finishRun(id: string, status: "succeeded" | "failed" | "cancelled", opts?: FinishOpts): Promise<void>;
+  mergeScratch(id: string, patch: Record<string, unknown>): Promise<void>;
+  pauseForApproval(runId: string, approval: NewApproval, marker: PhaseMarker, scratchPatch?: Record<string, unknown>): Promise<void>;
 }
 
 export interface ExecutionLedger {
-  shouldRunPhase(dedupKey: string, triggerId: string, workflowRunId?: string): "run" | "running" | "done";
-  markStaleAsFailed(dedupKey: string, triggerId: string, workflowRunId?: string): number;
-  markLatestAsFailed(dedupKey: string, triggerId: string, reason: string, workflowRunId?: string): number;
-  recordStart(row: NewExecution): void;
-  recordFinish(id: string, result: ExecutionFinish): void;
-  recordSessionId(id: string, sessionId: string): void;
-  recordOutputText(id: string, text: string): void;
+  shouldRunPhase(dedupKey: string, triggerId: string, workflowRunId?: string): Promise<"run" | "running" | "done">;
+  markStaleAsFailed(dedupKey: string, triggerId: string, workflowRunId?: string): Promise<number>;
+  markLatestAsFailed(dedupKey: string, triggerId: string, reason: string, workflowRunId?: string): Promise<number>;
+  recordStart(row: NewExecution): Promise<void>;
+  recordFinish(id: string, result: ExecutionFinish): Promise<void>;
+  recordSessionId(id: string, sessionId: string): Promise<void>;
+  recordOutputText(id: string, text: string): Promise<void>;
   /** `repo` is the BARE name and `owner` its account — see {@link NewExecution}. */
-  recordSkippedPhase(dedupKey: string, triggerId: string, workflowRunId?: string, repo?: string, owner?: string): void;
-  getPhaseOutput(dedupKey: string, triggerId: string, workflowRunId?: string): string | null;
-  getExecutionOutput(id: string): string | null;
+  recordSkippedPhase(dedupKey: string, triggerId: string, workflowRunId?: string, repo?: string, owner?: string): Promise<void>;
+  getPhaseOutput(dedupKey: string, triggerId: string, workflowRunId?: string): Promise<string | null>;
+  getExecutionOutput(id: string): Promise<string | null>;
 }
 
+/**
+ * The state store the engine drives.
+ *
+ * Every method is `Promise`-returning. This package is published but consumed
+ * only inside this repo, so when lastlight-core's state layer moved to an async
+ * driver we took the clean break rather than carrying an
+ * `Awaitable<T> = T | Promise<T>` compatibility shim — which would have made
+ * every engine call site defensively awaitable forever to serve no real
+ * external consumer.
+ */
 export interface WorkflowStateStore {
   runs: RunStore;
   executions: ExecutionLedger;
@@ -301,9 +319,9 @@ export interface PhaseReporter {
   /** Post a pre-rendered standalone message. */
   postNote(text: string): Promise<void>;
   /** Persist a phase-history entry on the workflow run. */
-  persistPhase(phase: string, summary?: string): void;
+  persistPhase(phase: string, summary?: string): Promise<void>;
   /** Mark the workflow run failed. */
-  failWorkflow(errorMsg?: string): void;
+  failWorkflow(errorMsg?: string): Promise<void>;
   /** Set (or clear) the trailing footer of the single status surface. */
   footer(markdown: string): Promise<void>;
   /** Post the run's completion message (terminal-ping surfaces only). */

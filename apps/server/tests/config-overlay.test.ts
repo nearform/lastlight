@@ -18,6 +18,7 @@ describe("loadConfig overlay", () => {
     vi.stubEnv("OPENCODE_MODELS", "");
     vi.stubEnv("LASTLIGHT_OVERLAY_DIR", "");
     vi.stubEnv("OTEL_EXPORTER_OTLP_HEADERS", "");
+    vi.stubEnv("DATABASE_URL", "");
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -105,6 +106,43 @@ describe("loadConfig overlay", () => {
     expect(cfg.approval).toEqual({ post_reviewer: true });
     const sources = cfg.publicConfig.sources as Record<string, any>;
     expect(sources.approval).toBe("env");
+  });
+
+  // `database.url` is the state-DB slot the Drizzle migration added. It rides
+  // the generic resolver, so these four cases are the whole contract: env beats
+  // overlay beats default, and null/absent means "fall back to dbPath".
+  describe("database.url", () => {
+    it("is undefined by default — config/default.yaml ships `url: null`", () => {
+      const cfg = loadConfig();
+      expect(cfg.database.url).toBeUndefined();
+      // The fallback the construction site in index.ts applies.
+      expect(cfg.database.url ?? cfg.dbPath).toBe(cfg.dbPath);
+    });
+
+    it("reads the overlay value", () => {
+      const overlay = tmp();
+      writeFileSync(join(overlay, "config.yaml"), `managedRepos:\n  - acme/repo\ndatabase:\n  url: file:/overlay/ll.db\n`);
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+      expect(loadConfig().database.url).toBe("file:/overlay/ll.db");
+    });
+
+    it("lets DATABASE_URL beat the overlay and tags provenance as env", () => {
+      const overlay = tmp();
+      writeFileSync(join(overlay, "config.yaml"), `managedRepos:\n  - acme/repo\ndatabase:\n  url: file:/overlay/ll.db\n`);
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+      vi.stubEnv("DATABASE_URL", "file:/env/ll.db");
+      const cfg = loadConfig();
+      expect(cfg.database.url).toBe("file:/env/ll.db");
+      const sources = cfg.publicConfig.sources as Record<string, any>;
+      expect(sources.database.url).toBe("env");
+    });
+
+    it("treats an explicit overlay `url: null` as absent", () => {
+      const overlay = tmp();
+      writeFileSync(join(overlay, "config.yaml"), `managedRepos:\n  - acme/repo\ndatabase:\n  url: null\n`);
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+      expect(loadConfig().database.url).toBeUndefined();
+    });
   });
 
   it("redacts secret-looking keys an operator mistakenly put in config.yaml", () => {

@@ -1,4 +1,12 @@
-import type Database from "better-sqlite3";
+import { and, asc, desc, eq } from "drizzle-orm";
+import {
+  nullsToUndefined,
+  tablesOf,
+  type StateClient,
+  type StateDbc,
+  type StateTables,
+} from "./client.js";
+import { changes } from "./dialect.js";
 
 export interface WorkflowApproval {
   id: string;
@@ -24,6 +32,9 @@ export interface WorkflowApproval {
   createdAt: string;
 }
 
+/** The row shape the builder returns for this table, before normalization. */
+type ApprovalRow = StateTables["workflowApprovals"]["$inferSelect"];
+
 /**
  * Owns the `workflow_approvals` table — the human-in-the-loop gates a workflow
  * run can pause on. Carved out of the old `StateDb` god-class (issue #97).
@@ -33,33 +44,42 @@ export interface WorkflowApproval {
  * status flip (resolve-and-resume, resolve-and-fail, pause-for-approval) live
  * on {@link WorkflowRunStore}, the aggregate root, which is injected with an
  * instance of this store and calls these methods inside a single transaction.
+ * That is what the trailing `dbc` parameter on `create` / `respond` /
+ * `resolveReplyGate` / `getById` is for: they run against the enclosing
+ * transaction when the aggregate passes one, and against the root client
+ * otherwise.
  */
 export class ApprovalStore {
-  constructor(private db: Database.Database) {}
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
+  constructor(private client: StateClient) {
+    this.t = tablesOf(client);
+  }
 
   /** Create a new pending approval request */
-  create(
+  async create(
     approval: Omit<WorkflowApproval, "status" | "respondedBy" | "response" | "respondedAt" | "kind"> & {
       kind?: WorkflowApproval["kind"];
     },
-  ): void {
-    this.db
-      .prepare(
-        `
-      INSERT INTO workflow_approvals (id, workflow_run_id, gate, summary, status, kind, artifact, requested_by, created_at)
-      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-    `,
-      )
-      .run(
-        approval.id,
-        approval.workflowRunId,
-        approval.gate,
-        approval.summary,
-        approval.kind ?? "approve",
-        approval.artifact ?? null,
-        approval.requestedBy ?? null,
-        approval.createdAt,
-      );
+    dbc: StateDbc = this.client,
+  ): Promise<void> {
+    const { workflowApprovals } = this.t;
+    await dbc.insert(workflowApprovals).values({
+      id: approval.id,
+      workflowRunId: approval.workflowRunId,
+      gate: approval.gate,
+      summary: approval.summary,
+      status: "pending",
+      kind: approval.kind ?? "approve",
+      artifact: approval.artifact ?? null,
+      requestedBy: approval.requestedBy ?? null,
+      createdAt: approval.createdAt,
+    });
   }
 
   /**
@@ -74,19 +94,25 @@ export class ApprovalStore {
    * same thread, the second sees 0 rows and the transaction aborts before a
    * duplicate resume.
    */
-  resolveReplyGate(id: string, replyText: string, responder: string): number {
+  async resolveReplyGate(
+    id: string,
+    replyText: string,
+    responder: string,
+    dbc: StateDbc = this.client,
+  ): Promise<number> {
+    const { workflowApprovals } = this.t;
     const now = new Date().toISOString();
-    const result = this.db
-      .prepare(
-        `UPDATE workflow_approvals
-           SET status = 'approved',
-               responded_by = ?,
-               response = ?,
-               responded_at = ?
-         WHERE id = ? AND kind = 'reply' AND status = 'pending'`,
-      )
-      .run(responder, replyText, now, id);
-    return result.changes;
+    const result = await dbc
+      .update(workflowApprovals)
+      .set({ status: "approved", respondedBy: responder, response: replyText, respondedAt: now })
+      .where(
+        and(
+          eq(workflowApprovals.id, id),
+          eq(workflowApprovals.kind, "reply"),
+          eq(workflowApprovals.status, "pending"),
+        ),
+      );
+    return changes(result);
   }
 
   /**
@@ -94,43 +120,62 @@ export class ApprovalStore {
    * the router to short-circuit free-form replies on a paused socratic
    * explore loop without re-running classifier logic.
    */
-  getPendingReplyGateByTrigger(triggerId: string): WorkflowApproval | null {
-    const row = this.db
-      .prepare(
-        `SELECT wa.* FROM workflow_approvals wa
-         JOIN workflow_runs wr ON wa.workflow_run_id = wr.id
-         WHERE wr.trigger_id = ? AND wa.status = 'pending' AND wa.kind = 'reply'
-         ORDER BY wa.created_at DESC
-         LIMIT 1`,
+  async getPendingReplyGateByTrigger(triggerId: string): Promise<WorkflowApproval | null> {
+    const { workflowApprovals, workflowRuns } = this.t;
+    const [row] = await this.client
+      .select(approvalColumns(this.t))
+      .from(workflowApprovals)
+      .innerJoin(workflowRuns, eq(workflowApprovals.workflowRunId, workflowRuns.id))
+      .where(
+        and(
+          eq(workflowRuns.triggerId, triggerId),
+          eq(workflowApprovals.status, "pending"),
+          eq(workflowApprovals.kind, "reply"),
+        ),
       )
-      .get(triggerId) as Record<string, unknown> | undefined;
-    return row ? this.deserialize(row) : null;
+      .orderBy(desc(workflowApprovals.createdAt))
+      .limit(1);
+    return row ? deserialize(row) : null;
   }
 
   /** Get a single approval by ID */
-  getById(id: string): WorkflowApproval | null {
-    const row = this.db.prepare(`SELECT * FROM workflow_approvals WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
-    return row ? this.deserialize(row) : null;
+  async getById(id: string, dbc: StateDbc = this.client): Promise<WorkflowApproval | null> {
+    const { workflowApprovals } = this.t;
+    const [row] = await dbc
+      .select()
+      .from(workflowApprovals)
+      .where(eq(workflowApprovals.id, id))
+      .limit(1);
+    return row ? deserialize(row) : null;
   }
 
   /** Find the pending approval for a workflow run */
-  getPendingForWorkflow(workflowRunId: string): WorkflowApproval | null {
-    const row = this.db.prepare(`
-      SELECT * FROM workflow_approvals WHERE workflow_run_id = ? AND status = 'pending' LIMIT 1
-    `).get(workflowRunId) as Record<string, unknown> | undefined;
-    return row ? this.deserialize(row) : null;
+  async getPendingForWorkflow(workflowRunId: string): Promise<WorkflowApproval | null> {
+    const { workflowApprovals } = this.t;
+    const [row] = await this.client
+      .select()
+      .from(workflowApprovals)
+      .where(
+        and(
+          eq(workflowApprovals.workflowRunId, workflowRunId),
+          eq(workflowApprovals.status, "pending"),
+        ),
+      )
+      .limit(1);
+    return row ? deserialize(row) : null;
   }
 
   /** Find the pending approval by trigger ID (join with workflow_runs) */
-  getPendingByTrigger(triggerId: string): WorkflowApproval | null {
-    const row = this.db.prepare(`
-      SELECT wa.* FROM workflow_approvals wa
-      JOIN workflow_runs wr ON wa.workflow_run_id = wr.id
-      WHERE wr.trigger_id = ? AND wa.status = 'pending'
-      ORDER BY wa.created_at DESC
-      LIMIT 1
-    `).get(triggerId) as Record<string, unknown> | undefined;
-    return row ? this.deserialize(row) : null;
+  async getPendingByTrigger(triggerId: string): Promise<WorkflowApproval | null> {
+    const { workflowApprovals, workflowRuns } = this.t;
+    const [row] = await this.client
+      .select(approvalColumns(this.t))
+      .from(workflowApprovals)
+      .innerJoin(workflowRuns, eq(workflowApprovals.workflowRunId, workflowRuns.id))
+      .where(and(eq(workflowRuns.triggerId, triggerId), eq(workflowApprovals.status, "pending")))
+      .orderBy(desc(workflowApprovals.createdAt))
+      .limit(1);
+    return row ? deserialize(row) : null;
   }
 
   /**
@@ -139,29 +184,36 @@ export class ApprovalStore {
    * (who approved/rejected a gate, when, and any comment). Unlike
    * {@link getPendingForWorkflow} this does not filter on status.
    */
-  listForWorkflow(workflowRunId: string): WorkflowApproval[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM workflow_approvals WHERE workflow_run_id = ? ORDER BY created_at ASC
-    `).all(workflowRunId) as Record<string, unknown>[];
-    return rows.map((r) => this.deserialize(r));
+  async listForWorkflow(workflowRunId: string): Promise<WorkflowApproval[]> {
+    const { workflowApprovals } = this.t;
+    const rows = await this.client
+      .select()
+      .from(workflowApprovals)
+      .where(eq(workflowApprovals.workflowRunId, workflowRunId))
+      .orderBy(asc(workflowApprovals.createdAt));
+    return rows.map(deserialize);
   }
 
   /** List all approvals carrying a specific artifact name, newest first */
-  listByArtifact(artifact: string): WorkflowApproval[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM workflow_approvals
-      WHERE artifact = ?
-      ORDER BY created_at DESC
-    `).all(artifact) as Record<string, unknown>[];
-    return rows.map((r) => this.deserialize(r));
+  async listByArtifact(artifact: string): Promise<WorkflowApproval[]> {
+    const { workflowApprovals } = this.t;
+    const rows = await this.client
+      .select()
+      .from(workflowApprovals)
+      .where(eq(workflowApprovals.artifact, artifact))
+      .orderBy(desc(workflowApprovals.createdAt));
+    return rows.map(deserialize);
   }
 
   /** List all pending approvals */
-  listPending(): WorkflowApproval[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM workflow_approvals WHERE status = 'pending' ORDER BY created_at DESC
-    `).all() as Record<string, unknown>[];
-    return rows.map((r) => this.deserialize(r));
+  async listPending(): Promise<WorkflowApproval[]> {
+    const { workflowApprovals } = this.t;
+    const rows = await this.client
+      .select()
+      .from(workflowApprovals)
+      .where(eq(workflowApprovals.status, "pending"))
+      .orderBy(desc(workflowApprovals.createdAt));
+    return rows.map(deserialize);
   }
 
   /**
@@ -172,30 +224,54 @@ export class ApprovalStore {
    * first pending row update succeeds and the loser must not resume/fail the
    * workflow a second time.
    */
-  respond(id: string, status: 'approved' | 'rejected', respondedBy: string, response?: string): number {
+  async respond(
+    id: string,
+    status: 'approved' | 'rejected',
+    respondedBy: string,
+    response?: string,
+    dbc: StateDbc = this.client,
+  ): Promise<number> {
+    const { workflowApprovals } = this.t;
     const now = new Date().toISOString();
-    const result = this.db.prepare(`
-      UPDATE workflow_approvals
-        SET status = ?, responded_by = ?, response = ?, responded_at = ?
-      WHERE id = ? AND status = 'pending'
-    `).run(status, respondedBy, response ?? null, now, id);
-    return result.changes;
+    const result = await dbc
+      .update(workflowApprovals)
+      .set({ status, respondedBy, response: response ?? null, respondedAt: now })
+      .where(and(eq(workflowApprovals.id, id), eq(workflowApprovals.status, "pending")));
+    return changes(result);
   }
+}
 
-  private deserialize(row: Record<string, unknown>): WorkflowApproval {
-    return {
-      id: row.id as string,
-      workflowRunId: row.workflow_run_id as string,
-      gate: row.gate as string,
-      summary: row.summary as string,
-      status: row.status as WorkflowApproval['status'],
-      kind: ((row.kind as string | undefined) || "approve") as WorkflowApproval["kind"],
-      artifact: row.artifact as string | undefined || undefined,
-      requestedBy: row.requested_by as string | undefined || undefined,
-      respondedBy: row.responded_by as string | undefined || undefined,
-      response: row.response as string | undefined || undefined,
-      respondedAt: row.responded_at as string | undefined || undefined,
-      createdAt: row.created_at as string,
-    };
-  }
+/**
+ * Explicit column map for the two joined reads. A bare `.select()` across a
+ * join returns `{ workflow_approvals: {...}, workflow_runs: {...} }`; naming
+ * the columns keeps those two methods returning a flat approval row like every
+ * other read here.
+ */
+const approvalColumns = ({ workflowApprovals }: StateTables) => ({
+  id: workflowApprovals.id,
+  workflowRunId: workflowApprovals.workflowRunId,
+  gate: workflowApprovals.gate,
+  summary: workflowApprovals.summary,
+  status: workflowApprovals.status,
+  requestedBy: workflowApprovals.requestedBy,
+  respondedBy: workflowApprovals.respondedBy,
+  response: workflowApprovals.response,
+  respondedAt: workflowApprovals.respondedAt,
+  createdAt: workflowApprovals.createdAt,
+  kind: workflowApprovals.kind,
+  artifact: workflowApprovals.artifact,
+});
+
+/**
+ * Builder rows are already camelCase, so this is down to two jobs: turn the
+ * nullable columns into absent optionals, and keep the `kind` fallback for
+ * rows written before that column existed.
+ */
+function deserialize(row: ApprovalRow): WorkflowApproval {
+  const r = nullsToUndefined(row);
+  return {
+    ...r,
+    status: r.status as WorkflowApproval["status"],
+    kind: (r.kind || "approve") as WorkflowApproval["kind"],
+  };
 }

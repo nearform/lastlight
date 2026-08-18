@@ -295,7 +295,7 @@ async function runPhaseLedger(
   const log = deps.logger ?? noopLogger;
   return observability.withSpan("lastlight.workflow.phase", attrs, async (span) => {
     if (db) {
-      const status = db.executions.shouldRunPhase(dedupKey, triggerId, workflowRunId);
+      const status = await db.executions.shouldRunPhase(dedupKey, triggerId, workflowRunId);
 
       if (status === "running") {
         const alive = await isContainerAlive(liveness, taskId);
@@ -305,7 +305,7 @@ async function runPhaseLedger(
           return { skipped: true, reason: "running" };
         }
         log.warn("phase container is dead", { phase: phaseName });
-        db.executions.markStaleAsFailed(dedupKey, triggerId, workflowRunId);
+        await db.executions.markStaleAsFailed(dedupKey, triggerId, workflowRunId);
       } else if (status === "done") {
         log.debug("phase already completed", { phase: phaseName });
         span?.addEvent("lastlight.workflow.phase.skipped", { reason: "done" });
@@ -313,7 +313,7 @@ async function runPhaseLedger(
       }
 
       const executionId = randomUUID();
-      db.executions.recordStart({
+      await db.executions.recordStart({
         id: executionId,
         triggerType: "webhook",
         triggerId,
@@ -327,14 +327,18 @@ async function runPhaseLedger(
 
       try {
         const result = await run((sessionId) => {
-          try {
-            db.executions.recordSessionId(executionId, sessionId);
-          } catch (err) {
+          // Deliberate fire-and-forget: this callback is invoked mid-stream
+          // from a synchronous context that threads through the whole executor
+          // stack, so it cannot be awaited. Best-effort by design — the id is
+          // re-recorded when the phase finishes. Note the handler had to move
+          // from `catch` to `.catch`: the write is a promise now, so a
+          // surrounding try/catch would no longer see its rejection.
+          void db.executions.recordSessionId(executionId, sessionId).catch((err: unknown) => {
             log.warn("failed to persist session id mid-run", { phase: phaseName, err });
-          }
+          });
         });
 
-        db.executions.recordFinish(executionId, {
+        await db.executions.recordFinish(executionId, {
           success: result.success,
           error: result.error,
           turns: result.turns,
@@ -347,8 +351,8 @@ async function runPhaseLedger(
           outputTokens: result.outputTokens,
           apiDurationMs: result.apiDurationMs,
           stopReason: result.stopReason,
-          extensionStatus: result.extensions ? JSON.stringify(result.extensions) : undefined,
-          skillsStatus: result.skills ? JSON.stringify(result.skills) : undefined,
+          extensionStatus: result.extensions,
+          skillsStatus: result.skills,
         });
         span?.setAttributes({ success: result.success, stop_reason: result.stopReason ?? "unknown" });
         observability.recordExecutionMetrics("phase", { ...attrs, success: result.success, stop_reason: result.stopReason, durationMs: result.durationMs, costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens });
@@ -361,7 +365,7 @@ async function runPhaseLedger(
         // CLI/dashboard instead of `✗`). The success path already finished the
         // row and returned, so this only fires on a genuine throw — no
         // double-finish.
-        db.executions.recordFinish(executionId, {
+        await db.executions.recordFinish(executionId, {
           success: false,
           error: err instanceof Error ? err.message : String(err),
           stopReason: "error_fatal",
@@ -520,7 +524,7 @@ export class PhaseExecutor {
     await this.reporter.onStart(phase.name);
     const result: PhaseResult = { phase: phase.name, success: true, output: "Context assembled" };
     // Persist a phase_history entry so the dashboard marks context phases done.
-    this.reporter.persistPhase(phase.name, "Context assembled");
+    await this.reporter.persistPhase(phase.name, "Context assembled");
     await this.reporter.onEnd(phase.name, result);
     return { results: [result], status: "succeeded" };
   }
@@ -585,7 +589,7 @@ export class PhaseExecutor {
         return { results: [], status: "failed", aborted: true };
       }
       const result: PhaseResult = { phase: phaseName, success: true, output: "Already completed" };
-      this.reporter.persistPhase(phaseName, "Already completed (deduplicated)");
+      await this.reporter.persistPhase(phaseName, "Already completed (deduplicated)");
       await this.reporter.onEnd(phaseName, result);
       await this.reporter.step(phaseName, "done", phase.messages?.on_skipped_done);
       return { results: [result], status: "succeeded" };
@@ -602,7 +606,7 @@ export class PhaseExecutor {
       if (!isTerminated(pr.result.error)) {
         await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
       }
-      this.reporter.failWorkflow(pr.result.error);
+      await this.reporter.failWorkflow(pr.result.error);
       return { results: [result], status: "failed", outputVars };
     }
 
@@ -627,7 +631,7 @@ export class PhaseExecutor {
       if (marker && !(pr.result.output ?? "").includes(marker)) {
         const error = `phase produced no outcome — missing completion marker "${marker}"`;
         await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
-        this.reporter.failWorkflow(error);
+        await this.reporter.failWorkflow(error);
         const failResult: PhaseResult = {
           phase: phaseName,
           success: false,
@@ -653,7 +657,7 @@ export class PhaseExecutor {
       return { results: [result], status: "succeeded", paused: true, outputVars };
     }
 
-    this.reporter.persistPhase(phaseName);
+    await this.reporter.persistPhase(phaseName);
     // Make THIS phase's own output available to its on_success message. The
     // scheduler only merges `outputVars` into the shared outputs map after
     // execute() returns, so without this a phase referencing its own output
@@ -690,7 +694,7 @@ export class PhaseExecutor {
         return { results: [], status: "failed", aborted: true };
       }
       const result: PhaseResult = { phase: phaseName, success: true, output: "Already completed" };
-      this.reporter.persistPhase(phaseName, "Already completed (deduplicated)");
+      await this.reporter.persistPhase(phaseName, "Already completed (deduplicated)");
       await this.reporter.onEnd(phaseName, result);
       await this.reporter.step(phaseName, "done", phase.messages?.on_skipped_done);
       return { results: [result], status: "succeeded" };
@@ -707,7 +711,7 @@ export class PhaseExecutor {
       if (!isTerminated(pr.result.error)) {
         await this.reporter.step(phaseName, "failed", phase.messages?.on_failure);
       }
-      this.reporter.failWorkflow(pr.result.error);
+      await this.reporter.failWorkflow(pr.result.error);
       return { results: [result], status: "failed", outputVars };
     }
 
@@ -725,7 +729,7 @@ export class PhaseExecutor {
       return { results: [result], status: "succeeded", paused: true, outputVars };
     }
 
-    this.reporter.persistPhase(phaseName);
+    await this.reporter.persistPhase(phaseName);
     await this.reporter.step(phaseName, "done", phase.messages?.on_success, {
       phaseOutputs: { ...outputs, ...outputVars },
     });
@@ -824,7 +828,7 @@ export class PhaseExecutor {
     const executionId = db ? randomUUID() : undefined;
     if (db && executionId) {
       try {
-        db.executions.recordStart({
+        await db.executions.recordStart({
           id: executionId,
           triggerType: "webhook",
           triggerId,
@@ -863,7 +867,7 @@ export class PhaseExecutor {
 
     if (db && executionId) {
       try {
-        db.executions.recordFinish(executionId, {
+        await db.executions.recordFinish(executionId, {
           success: error === undefined,
           error,
           turns: 0,
@@ -876,7 +880,7 @@ export class PhaseExecutor {
         // Nothing renders `output_text` today (it backs the scratch
         // `lastOutputExecutionId` indirection); it is queryable on the row, and
         // it is the column any future surface would read.
-        db.executions.recordOutputText(
+        await db.executions.recordOutputText(
           executionId,
           `$ ${command}\n\n${output.length > MAX_UNTIL_OUTPUT_BYTES ? output.slice(-MAX_UNTIL_OUTPUT_BYTES) : output}`,
         );
@@ -918,13 +922,13 @@ export class PhaseExecutor {
       return "continue";
     }
     if (rule.action === "fail") {
-      this.run.store?.executions.markLatestAsFailed(
+      await this.run.store?.executions.markLatestAsFailed(
         `${this.run.definition.name}:${phase.name}`,
         this.run.triggerId,
         rule.message || "BLOCKED",
         this.run.workflowId,
       );
-      this.reporter.failWorkflow(rule.message || "BLOCKED");
+      await this.reporter.failWorkflow(rule.message || "BLOCKED");
       const blockedTemplate = rule.message || phase.messages?.on_blocked;
       if (blockedTemplate) await this.reporter.step(phase.name, "blocked", blockedTemplate);
       return "fail";
@@ -952,7 +956,7 @@ export class PhaseExecutor {
     const { store: db, workflowId, ctx } = this.run;
     if (!db || !workflowId) return;
     const approvalId = randomUUID();
-    db.runs.pauseForApproval(
+    await db.runs.pauseForApproval(
       workflowId,
       {
         id: approvalId,
@@ -1040,7 +1044,7 @@ export class PhaseExecutor {
           await this.reporter.message(phase.messages?.on_skipped_done);
           return { results, status: "failed", aborted: true };
         }
-        const prevOutput = db?.executions.getPhaseOutput(`${wf}:${reviewLabel}`, triggerId, workflowId) ?? "";
+        const prevOutput = (await db?.executions.getPhaseOutput(`${wf}:${reviewLabel}`, triggerId, workflowId)) ?? "";
         verdict = parseReviewerVerdict(prevOutput).verdict;
         results.push({ phase: reviewLabel, success: true, output: "Already completed" });
       } else {
@@ -1088,18 +1092,18 @@ export class PhaseExecutor {
           ? reviewerOutput
           : `VERDICT: ${verdict}\n${reviewerOutput}`;
         const execId = "executionId" in rr ? rr.executionId : undefined;
-        if (execId && db) db.executions.recordOutputText(execId, persistText);
+        if (execId && db) await db.executions.recordOutputText(execId, persistText);
       }
 
       const isApproved = verdict === "APPROVED";
 
       if (isApproved) {
         approved = true;
-        if (reviewRan) this.reporter.persistPhase(reviewLabel, "APPROVED");
+        if (reviewRan) await this.reporter.persistPhase(reviewLabel, "APPROVED");
         await this.reporter.step(reviewLabel, "done", loop.messages?.on_approved, { cycle: fixCycles + 1 });
       } else if (fixCycles < MAX_CYCLES) {
         fixCycles++;
-        if (reviewRan) this.reporter.persistPhase(reviewLabel, "REQUEST_CHANGES");
+        if (reviewRan) await this.reporter.persistPhase(reviewLabel, "REQUEST_CHANGES");
 
         // Approval gate before the fix loop. Pause only on a *fresh* gate hit:
         // not when the fix for this cycle has already run (gate was approved in
@@ -1107,7 +1111,8 @@ export class PhaseExecutor {
         // exactly this cycle's gate.
         if (this.resolver.gateEnabled(loop.approval_gate) && db && workflowId) {
           const fixLabel = PhaseRef.fix(phaseName, fixCycles).format();
-          const fixAlreadyDone = db.executions.shouldRunPhase(`${wf}:${fixLabel}`, triggerId, workflowId) === "done";
+          const fixAlreadyDone =
+            (await db.executions.shouldRunPhase(`${wf}:${fixLabel}`, triggerId, workflowId)) === "done";
           const resumingThisGate = pausedAtCycle === fixCycles;
           if (!fixAlreadyDone && !resumingThisGate) {
             scratch[loopKey] = { ...slot, pausedAtCycle: fixCycles };
@@ -1173,11 +1178,11 @@ export class PhaseExecutor {
             }
             break;
           }
-          this.reporter.persistPhase(fixLabel);
+          await this.reporter.persistPhase(fixLabel);
           await this.reporter.step(fixLabel, "done");
         }
       } else {
-        this.reporter.persistPhase(reviewLabel, "REQUEST_CHANGES — max cycles reached");
+        await this.reporter.persistPhase(reviewLabel, "REQUEST_CHANGES — max cycles reached");
         await this.reporter.step(reviewLabel, "blocked", loop.messages?.on_max_cycles, {
           cycle: fixCycles,
           maxCycles: MAX_CYCLES,
@@ -1225,9 +1230,11 @@ export class PhaseExecutor {
     let iteration = resumeFromIter;
     let complete = false;
     let previousOutput =
-      (scratchSlot.lastOutputExecutionId && db
-        ? db.executions.getExecutionOutput(scratchSlot.lastOutputExecutionId as string) ?? ""
-        : (scratchSlot.lastOutput as string | undefined) ?? "");
+      scratchSlot.lastOutputExecutionId && db
+        ? ((await db.executions.getExecutionOutput(
+            scratchSlot.lastOutputExecutionId as string,
+          )) ?? "")
+        : ((scratchSlot.lastOutput as string | undefined) ?? "");
     // The LAST iteration's raw output — what the phase signs off with, and so
     // what the `on_output.requires_marker` postcondition is checked against
     // below. `previousOutput` can't stand in: it's the accumulated, truncated
@@ -1305,10 +1312,10 @@ export class PhaseExecutor {
           const slot: Record<string, unknown> = { ...scratchSlot, iteration, ready: true };
           if (iterExecutionId) slot.lastOutputExecutionId = iterExecutionId;
           delete slot.lastOutput;
-          db.runs.mergeScratch(workflowId, { [scratchKey]: slot });
+          await db.runs.mergeScratch(workflowId, { [scratchKey]: slot });
           scratch[scratchKey] = slot;
         }
-        this.reporter.persistPhase(iterLabel, `iteration ${iteration} — soft outcome, advancing`);
+        await this.reporter.persistPhase(iterLabel, `iteration ${iteration} — soft outcome, advancing`);
         await this.reporter.step(phaseName, "done");
         break;
       }
@@ -1320,7 +1327,7 @@ export class PhaseExecutor {
         if (!isTerminated(ir.result.error)) {
           await this.reporter.step(phaseName, "failed", phase.messages?.on_failure, { iteration });
         }
-        this.reporter.failWorkflow(ir.result.error);
+        await this.reporter.failWorkflow(ir.result.error);
         const outputVars = phase.output_var
           ? { [phase.output_var]: { completed: false, iterations: iteration } }
           : undefined;
@@ -1357,8 +1364,8 @@ export class PhaseExecutor {
       // one reader that took the FIRST match and now takes the last, so the
       // summary it shows and the summary the pipeline shows agree.
       const iterExecutionId = "executionId" in ir ? ir.executionId : undefined;
-      if (iterExecutionId && db) db.executions.recordOutputText(iterExecutionId, iterOutput);
-      this.reporter.persistPhase(iterLabel, `iteration ${iteration} — work complete`);
+      if (iterExecutionId && db) await db.executions.recordOutputText(iterExecutionId, iterOutput);
+      await this.reporter.persistPhase(iterLabel, `iteration ${iteration} — work complete`);
 
       let conditionMet = false;
       if (loop.until) {
@@ -1382,10 +1389,10 @@ export class PhaseExecutor {
           const slot: Record<string, unknown> = { ...scratchSlot, iteration, ready: true };
           if (iterExecutionId) slot.lastOutputExecutionId = iterExecutionId;
           delete slot.lastOutput;
-          db.runs.mergeScratch(workflowId, { [scratchKey]: slot });
+          await db.runs.mergeScratch(workflowId, { [scratchKey]: slot });
           scratch[scratchKey] = slot;
         }
-        this.reporter.persistPhase(iterLabel, `iteration ${iteration} — condition met`);
+        await this.reporter.persistPhase(iterLabel, `iteration ${iteration} — condition met`);
         await this.reporter.step(phaseName, "done", phase.messages?.on_success, {
           iteration,
           maxIterations: MAX_ITER,
@@ -1415,7 +1422,7 @@ export class PhaseExecutor {
         const approvalId = randomUUID();
         // One transaction: persist the iteration scratch, create the pending
         // gate, append the waiting_approval marker, and pause the run.
-        db.runs.pauseForApproval(
+        await db.runs.pauseForApproval(
           workflowId,
           {
             id: approvalId,
@@ -1483,7 +1490,7 @@ export class PhaseExecutor {
         iteration,
         maxIterations: MAX_ITER,
       });
-      this.reporter.failWorkflow(error);
+      await this.reporter.failWorkflow(error);
       results.push({ phase: phaseName, success: false, output: lastIterOutput, error });
       return { results, status: "failed", outputVars };
     }

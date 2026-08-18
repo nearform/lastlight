@@ -110,7 +110,7 @@ function signal(over: Partial<FeedbackSignal> = {}): FeedbackSignal {
     source: "github",
     workflowRunId: "run-1",
     workflowName: "pr-review",
-    executionId: null,
+    messagingSessionId: null,
     owner: "nearform",
     repo: "lastlight",
     issueNumber: 255,

@@ -19,9 +19,12 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
 FROM node:22-slim AS build
 
-# python3/make/g++ for native modules (better-sqlite3) compiled during install.
+# No compiler toolchain: the state layer moved from better-sqlite3 (node-gyp)
+# to @libsql/client, which ships prebuilt bindings for linux glibc. If a
+# transitive dep ever node-gyps on install, the fix is to find that dep — not
+# to put python3/make/g++ back.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ ca-certificates \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # pnpm via corepack — the version comes from the root `packageManager` field.
@@ -60,16 +63,23 @@ RUN pnpm --filter agentic-pi build \
 
 # Shape the runtime tree at /app (prod deps only, files per `files` field —
 # pnpm deploy bundles the workspace deps' built dist into /app/node_modules).
+#
+# `drizzle/` (the generated migrations) rides that `files` field too — it is not
+# a dependency, so nothing else puts it in the image, and `dist/state/db.js`
+# resolves its migrationsFolder as `new URL("../../drizzle/sqlite", …)` =
+# /app/drizzle/sqlite. Dropping "drizzle" from `files` is therefore a boot-time
+# crash here as well as a broken npm tarball.
 RUN pnpm --filter lastlight-core deploy --prod /app
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
 FROM node:22-slim
 
 # System deps: git, ripgrep, docker CLI (for the docker-sandbox fallback
-# only), gosu, python3/make/g++ (for native modules like better-sqlite3).
+# only), gosu. No compiler toolchain here either — nothing is compiled in this
+# stage at all (the runtime tree arrives prebuilt from the build stage below),
+# so the python3/make/g++ that used to sit here was ~200 MB of dead weight.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ripgrep curl jq ca-certificates gosu \
-    python3 make g++ \
     && curl -fsSL https://get.docker.com | sh \
     && rm -rf /var/lib/apt/lists/*
 

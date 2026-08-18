@@ -95,7 +95,7 @@ export async function discoverRunAnchors(
       // A comment posted before the run started is not this run's output —
       // `since` filters on `updated_at`, so an EDITED old comment still shows up.
       if (candidate.createdAt < run.startedAt) continue;
-      deps.db.feedback.upsertAnchor({
+      await deps.db.feedback.upsertAnchor({
         source: "github",
         kind: candidate.kind,
         externalId: candidate.externalId,
@@ -145,7 +145,7 @@ function isPullRequestRun(run: WorkflowRun): boolean {
 export async function pollFeedbackReactions(deps: FeedbackPollDeps): Promise<PollResult> {
   const result: PollResult = { anchorsPolled: 0, requests: 0, added: 0, retracted: 0, pruned: 0 };
 
-  const anchors = deps.db.feedback.anchorsToPoll({
+  const anchors = await deps.db.feedback.anchorsToPoll({
     windowDays: deps.windowDays,
     limit: deps.maxAnchorsPerTick,
   });
@@ -184,7 +184,7 @@ export async function pollFeedbackReactions(deps: FeedbackPollDeps): Promise<Pol
           if (isSelfReactor(reaction.reactor, deps.botLogin)) continue;
           const emoji = canonicalReaction(reaction.content, "github");
           live.push({ reactor: reaction.reactor, emoji });
-          if (ingestReaction(deps, {
+          if (await ingestReaction(deps, {
             anchor,
             source: "github",
             emoji: reaction.content,
@@ -195,15 +195,15 @@ export async function pollFeedbackReactions(deps: FeedbackPollDeps): Promise<Pol
         }
         // Absence from a fresh read is the ONLY evidence a reaction was
         // removed — there is no event for it.
-        result.retracted += deps.db.feedback.reconcileAnchor(anchor.id, live);
+        result.retracted += await deps.db.feedback.reconcileAnchor(anchor.id, live);
       }
 
-      deps.db.feedback.markPolled(batch.map((a) => a.id));
+      await deps.db.feedback.markPolled(batch.map((a) => a.id));
       result.anchorsPolled += batch.length;
     }
   }
 
-  result.pruned = deps.db.feedback.pruneAnchors(deps.retentionDays);
+  result.pruned = await deps.db.feedback.pruneAnchors(deps.retentionDays);
 
   if (result.added || result.retracted) {
     log.info("Feedback poll", { ...result });

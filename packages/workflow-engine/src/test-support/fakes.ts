@@ -133,7 +133,7 @@ const ledgerKey = (dedupKey: string, triggerId: string, workflowRunId?: string) 
 
 /**
  * Map-backed {@link WorkflowStateStore} — the resume/dedup ledger + run store,
- * with no better-sqlite3. Reproduces the production resume caveat: a phase whose
+ * with no database at all. Reproduces the production resume caveat: a phase whose
  * ledger row is already `success=1` returns `"done"` from
  * {@link ExecutionLedger.shouldRunPhase}, so the engine skips it (and it
  * contributes nothing to the in-memory `outputs` map).
@@ -182,23 +182,23 @@ export class InMemoryStateStore implements WorkflowStateStore {
   }
 
   readonly runs: RunStore = {
-    getRun: (id) => {
+    getRun: async (id) => {
       const row = this.runsById.get(id);
       return row ? ({ status: row.status, scratch: row.scratch } satisfies WorkflowRunView) : null;
     },
-    appendPhase: (id, _phase, entry) => {
+    appendPhase: async (id, _phase, entry) => {
       this.ensureRun(id).history.push(entry);
     },
-    finishRun: (id, status, opts) => {
+    finishRun: async (id, status, opts) => {
       const row = this.ensureRun(id);
       if (opts?.terminalMarker) row.history.push({ ...opts.terminalMarker, timestamp: new Date().toISOString(), success: true } as PhaseHistoryEntry);
       row.status = status;
     },
-    mergeScratch: (id, patch) => {
+    mergeScratch: async (id, patch) => {
       const row = this.ensureRun(id);
       row.scratch = { ...row.scratch, ...patch };
     },
-    pauseForApproval: (runId, approval: NewApproval, marker: PhaseMarker, scratchPatch) => {
+    pauseForApproval: async (runId, approval: NewApproval, marker: PhaseMarker, scratchPatch) => {
       const row = this.ensureRun(runId);
       row.history.push({ phase: marker.phase, summary: marker.summary, timestamp: new Date().toISOString(), success: true });
       if (scratchPatch) row.scratch = { ...row.scratch, ...scratchPatch };
@@ -208,13 +208,13 @@ export class InMemoryStateStore implements WorkflowStateStore {
   };
 
   readonly executions: ExecutionLedger = {
-    shouldRunPhase: (dedupKey, triggerId, workflowRunId) => {
+    shouldRunPhase: async (dedupKey, triggerId, workflowRunId) => {
       const row = this.ledger.get(ledgerKey(dedupKey, triggerId, workflowRunId));
       if (!row) return "run";
       if (!row.finished) return "running";
       return row.success ? "done" : "run";
     },
-    markStaleAsFailed: (dedupKey, triggerId, workflowRunId) => {
+    markStaleAsFailed: async (dedupKey, triggerId, workflowRunId) => {
       const row = this.ledger.get(ledgerKey(dedupKey, triggerId, workflowRunId));
       if (row && !row.finished) {
         row.finished = true;
@@ -223,7 +223,7 @@ export class InMemoryStateStore implements WorkflowStateStore {
       }
       return 0;
     },
-    markLatestAsFailed: (dedupKey, triggerId, _reason, workflowRunId) => {
+    markLatestAsFailed: async (dedupKey, triggerId, _reason, workflowRunId) => {
       const row = this.ledger.get(ledgerKey(dedupKey, triggerId, workflowRunId));
       if (row) {
         row.finished = true;
@@ -232,7 +232,7 @@ export class InMemoryStateStore implements WorkflowStateStore {
       }
       return 0;
     },
-    recordStart: (rec: NewExecution) => {
+    recordStart: async (rec: NewExecution) => {
       const row: LedgerRow = {
         id: rec.id,
         dedupKey: rec.skill,
@@ -247,7 +247,7 @@ export class InMemoryStateStore implements WorkflowStateStore {
       this.byExecId.set(rec.id, row);
       this.rows.push(row);
     },
-    recordFinish: (id, result: ExecutionFinish) => {
+    recordFinish: async (id, result: ExecutionFinish) => {
       const row = this.byExecId.get(id);
       if (row) {
         row.finished = true;
@@ -257,12 +257,12 @@ export class InMemoryStateStore implements WorkflowStateStore {
         row.error = result.error;
       }
     },
-    recordSessionId: () => {},
-    recordOutputText: (id, text) => {
+    recordSessionId: async () => {},
+    recordOutputText: async (id, text) => {
       const row = this.byExecId.get(id);
       if (row) row.output = text;
     },
-    recordSkippedPhase: (dedupKey, triggerId, workflowRunId, repo, owner) => {
+    recordSkippedPhase: async (dedupKey, triggerId, workflowRunId, repo, owner) => {
       const row: LedgerRow = {
         id: `skipped:${dedupKey}`,
         dedupKey,
@@ -278,9 +278,9 @@ export class InMemoryStateStore implements WorkflowStateStore {
       this.ledger.set(ledgerKey(dedupKey, triggerId, workflowRunId), row);
       this.rows.push(row);
     },
-    getPhaseOutput: (dedupKey, triggerId, workflowRunId) =>
+    getPhaseOutput: async (dedupKey, triggerId, workflowRunId) =>
       this.ledger.get(ledgerKey(dedupKey, triggerId, workflowRunId))?.output ?? null,
-    getExecutionOutput: (id) => this.byExecId.get(id)?.output ?? null,
+    getExecutionOutput: async (id) => this.byExecId.get(id)?.output ?? null,
   };
 }
 
@@ -316,10 +316,10 @@ export class RecordingReporter implements PhaseReporter {
   async postNote(text: string): Promise<void> {
     this.notes.push(text);
   }
-  persistPhase(phase: string, summary?: string): void {
+  async persistPhase(phase: string, summary?: string): Promise<void> {
     this.persisted.push({ phase, summary });
   }
-  failWorkflow(errorMsg?: string): void {
+  async failWorkflow(errorMsg?: string): Promise<void> {
     this.failures.push(errorMsg ?? "");
   }
   async footer(markdown: string): Promise<void> {

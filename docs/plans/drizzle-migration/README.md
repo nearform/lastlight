@@ -30,6 +30,25 @@ Then read, in order: **this README** (locked decisions + the drift ledger
 above) → **[00-architecture.md](00-architecture.md)** → **your phase doc**.
 Check "Status / todo list" below for the next unticked phase.
 
+**Phase 5's code half is DONE** (commit `180d03e`) — the `database.url` config
+slot, the Dockerfile toolchain removal, `drizzle/` in `files`, and the
+spec/CLAUDE.md/www doc sweep, all verified against the real image and a real
+packed tarball. **What remains is only the outward-facing tail**, in this order:
+
+1. **Merge the branch to `main`** (squash — locked decision 6) and verify green
+   there.
+2. **Release v0.26.0** across all five published packages — follow
+   [`docs/RELEASING.md`](../../RELEASING.md) for the graph-aware bump order, not
+   the sketch in 05's §6. Version anchor is `0.25.9`.
+3. **Cut prod over** per 05's §5 runbook. Re-run the prod-shape smoke (05 §0)
+   first if drizby has moved on since 2026-08-18.
+
+Read [05-config-packaging-release.md](05-config-packaging-release.md) — its
+**Deviations** section records what the doc's own §§2–4 got wrong (the
+Dockerfile COPY is unnecessary; the wire contract is camelCase, not snake_case).
+Its deviations-carrying predecessors matter too — Phase 4's §1 and §2 in
+particular, since the state layer's shape changed again.
+
 A kickoff prompt that needs no other context:
 
 > Continue the Drizzle migration on the `drizzle-migration` branch. Read
@@ -41,16 +60,90 @@ A kickoff prompt that needs no other context:
 
 | Invariant | Value |
 |---|---|
-| Green baseline (as of Phase 0) | **203 test files, 3,115 tests passing** |
+| Green baseline | **202 test files, 3,361 tests passing** (206 / 3,127 after Phase 2; Phase 3 folded nine files into the factory to 199 / 3,128; Phase 4 added the second dialect leg for 3,357; Phase 5 added 4 config tests) |
 | Branch sync | merge `main` in; never rebase |
 | `main` | docs only until Phase 5; stays on better-sqlite3 |
 | Scope | Phases 1–5. **Phase 6 is deferred out of this PR** |
-| Freeze | `apps/server/src/state/**` + `migrate.ts` on `main`, incl. the agent's own PRs |
+| Freeze | `apps/server/src/state/**` on `main`, incl. the agent's own PRs (`migrate.ts` no longer exists) |
 
-**Where the risk is:** Phase 1 is low-risk but contains the `owner` cid-order
-trap (see 01's ⚠ block — it produces a *passing* test that fails against
-production). Phase 2 is the crux: ~5,000 lines across two packages. Phases 3–5
-are consolidation.
+### What Phases 1–2 already changed (read before any later phase)
+
+The branch no longer resembles `main`'s state layer. The facts a later phase
+will trip over:
+
+- **`better-sqlite3` is gone** from the repo — no dependency, no imports. The
+  driver is `@libsql/client` + `drizzle-orm/libsql`.
+- **`src/state/migrate.ts` is DELETED.** Any doc telling you to read it for the
+  table inventory means **`src/state/schema/sqlite.ts`** instead. Its content is
+  frozen at `tests/state/fixtures/legacy-schema.sql` for the prod-shape proof.
+- **Construction is `await StateDb.open(path)` / `StateDb.fromClient(client,
+  dialect)`.** `new StateDb(...)` and `db.database` no longer exist; `db.client`
+  is the Drizzle instance. Every store method returns a Promise.
+- **`:memory:` is fatal for anything that transacts** — libsql opens a fresh
+  (empty) connection after each transaction. Tests use `makeTestDb()` from
+  **`tests/helpers/state-db.ts`**, which already exists and to which all 44
+  construction sites are already converted (this was Phase 3's locked-decision-15
+  deliverable, pulled forward — see 03's status block).
+- **Two migrations exist**: `0000_baseline.sql` and `0001_backfill_repo_refs.sql`
+  (a DATA migration whose statement ORDER is load-bearing). The equivalence test
+  pins the count.
+- **`lastlight-workflow-engine`'s ports are async** (`RunStore`,
+  `ExecutionLedger`, `PhaseReporter`), so the release bumps cascade across all
+  five published packages.
+- **`dialect.ts` already carries** `rows`/`run`/`changes`/`isUniqueViolation`/
+  `likeEscape`/`dayBucket`/`hourBucket`/`containsExpr`/`sumTrue`/`sumFalse`, and
+  `repo-ref.ts`'s `qualifiedRepoSql` now takes schema COLUMNS and returns `SQL`.
+  *(Phase 4 replaced `strposExpr` with `containsExpr`, a boolean `LIKE`
+  predicate — no dialect branch, and its pattern is an inlined literal because
+  a bound parameter cannot be matched across `SELECT`/`GROUP BY` on Postgres.)*
+- **Phase 4 added a second schema**, `src/state/schema/pg.ts`, plus
+  `drizzle/pg/`, `drizzle-pg.config.ts` and `db:generate:pg`. **Any change to
+  `schema/sqlite.ts` from here on must be mirrored there and the PG migration
+  regenerated** — `tests/state/schema-parity.test.ts` fails otherwise. Nothing
+  under `src/` may import `schema/pg.ts`; it exists for drizzle-kit and the
+  PGlite test leg only.
+
+**Two rules the phases learned the hard way** — apply them in Phases 3–5 too:
+
+1. **`tsc` cannot see a dropped promise.** `!promise` is always `false` and
+   TS2801 only fires on the bare `if (promise)` form. Phase 2's compiler pass was
+   clean while fourteen real bugs sat in the tree, including a permanently-on
+   admin kill switch. Run the floating-promise greps (02a) over **`packages/`
+   as well as `apps/server/src`** — the first pass missed the engine entirely.
+2. **A "deterministic" tiebreak is not automatically the RIGHT one.** See the
+   `cron_runs` regression in 02b's Deviations §3.
+3. **`asStateClient()` is not a portability seam — it is a silenced type
+   error.** Found in Phase 3 and verified against `drizzle-orm@0.45.2` source.
+   The query-builder *surface* is identical across drivers, so the cast
+   compiles and composes; **per-column value mapping is not, and does not go
+   through `dialect.ts`**. A `sqliteTable` object used on a PG client sends
+   `1` into a `boolean` (sqlite's `mapToDriverValue`; `PgBoolean` has none) and
+   runs `JSON.parse` over an already-parsed jsonb object. Booleans break on
+   WRITE, JSON breaks on READ.
+   *(**Closed by Phase 4**: no store imports `./schema/sqlite.js` any more.
+   `client.ts`'s `tablesOf(client)` reads the schema back off
+   `drizzle(client, { schema })` — typed, so no second cast — and each store
+   holds a `private readonly t: StateTables` that every method destructures
+   from. **The consequence for any later phase: a Drizzle client built without
+   `{ schema }` now throws on first use**, and a test that peeks at rows
+   directly must resolve its tables through `tablesOf`, never an import.)*
+
+**Where the risk is:** Phases 1–4 are done, and **the dual-dialect question is
+now settled empirically** — the entire state suite plus the `SessionManager`
+suite run green against real Postgres (PGlite) in the ordinary test command.
+Phase 2's raw-SQL ports held: only four tests failed on the first PG run, and
+none of the "expected dialect leaks" list bit apart from `GROUP BY` strictness.
+**All that remains is Phase 5** — packaging, the config slot, docs-sync and the
+release. Its inherited release gate, the **prod-shape smoke Phase 2 could not
+run**, was discharged on 2026-08-18 against a real snapshot of drizby prod
+(41 MB, 2,238 executions): migrations no-op'd in 96 ms, every row count held,
+nothing was dropped, the second open was idempotent, and real `context` /
+`success` / `extension_status` values round-tripped through the new column
+mappings. Recipe and findings: **§0 of
+[05-config-packaging-release.md](05-config-packaging-release.md)** — including
+that prod carries **two orphan tables the schema does not declare**
+(`rate_limits`, `system_status`), which is a standing reason never to point
+`drizzle-kit push` at it.
 
 ---
 
@@ -86,29 +179,85 @@ each must leave the repo green before the next starts.
   rather than merely stale — see the drift ledger above, and the struck
   sections in 02b (`executionToWire`, the dispatcher "bug fix"). Locked
   decisions 13–16 were added as a result. No source file was touched.
-- [ ] **Phase 1** — [01-schema-baseline.md](01-schema-baseline.md) — deps,
+- [x] **Phase 1** — [01-schema-baseline.md](01-schema-baseline.md) — deps,
   Drizzle sqlite schema, idempotent baseline migration, schema-equivalence test
-  *(risk: low)*
-- [ ] **Phase 2** — [02b-engine-swap.md](02b-engine-swap.md) — async API flip
+  *(risk: low)*. *Completed 2026-08-18.* `drizzle-orm@0.45.2` /
+  `drizzle-kit@0.31.10` / `@libsql/client@0.17.4` (all stable, as predicted);
+  15 tables + 25 named indexes; `0000_baseline.sql` hand-edited to full
+  `IF NOT EXISTS`; 4-test equivalence proof green. **204 files / 3,119 tests**
+  (baseline + 4). `apps/server/src/` delta is `state/schema/` alone — no
+  runtime path touched. **Deviations:** the fan-out was skipped (done
+  serially), and three doc errors were found and corrected — see the phase
+  doc's Deviations section, especially §1, which changed the deliverable.
+- [x] **Phase 2** — [02b-engine-swap.md](02b-engine-swap.md) — async API flip
   **+** libsql/Drizzle engine swap, executed as ONE phase (locked decision 7).
   [02a-async-api.md](02a-async-api.md) is its reference appendix (consumer
   inventory, landmines, signature flips, fire-and-forget table, test tables) —
   not a standalone phase; its sync-twin scaffolding is struck. *(risk: HIGH —
-  the crux)*
-- [ ] **Phase 3** — [03-test-suite-factory.md](03-test-suite-factory.md) —
-  shared state test-suite factory *(risk: low)*
-- [ ] **Phase 4** — [04-postgres-pglite.md](04-postgres-pglite.md) — Postgres
-  schema (jsonb), schema-parity test, PGlite test leg *(risk: medium)*
+  the crux)*. *Completed 2026-08-18.* `better-sqlite3` is gone from the repo;
+  all 7 stores + `SessionManager` are async on drizzle/libsql, the 5 named ops
+  are real transactions behind a connection-scoped serializer, and
+  `lastlight-workflow-engine`'s ports flipped to `Promise<T>` (locked decision
+  13). **206 files / 3,127 tests**, dashboard tsc green with zero dashboard
+  edits, evals barrel untouched. **Deviations — read §1, §2 and §5 before
+  Phase 3:** the plan's transaction guard idiom would have broken every
+  approval gate; two `migrate.ts` DATA backfills were silently lost and are now
+  `0001_backfill_repo_refs.sql`; and 14 promise-truthiness / floating-write
+  bugs got through the compiler (incl. the admin kill switch reading as
+  permanently on). **One done-criterion is deliberately NOT met** — the
+  prod-shape smoke needs a copy of the real DB and becomes a Phase 5 release
+  gate.
+- [x] **Phase 3** — [03-test-suite-factory.md](03-test-suite-factory.md) —
+  shared state test-suite factory *(risk: low)*. *Completed 2026-08-18.*
+  `tests/state/store-suite.ts` exports `runStateDbSuite(makeDb, { dialect })`
+  over nine per-store modules in `tests/state/suites/`;
+  `tests/connectors/messaging/session-manager-suite.ts` is the second factory.
+  **199 files / 3,128 tests** — the specified `+1` and nothing else; zero `src/`
+  diff; zero dialect skips. **Deviations — read §1 and §8 before Phase 4:** the
+  factory was widened from the doc's 4 source files to **11** (the seven the
+  stale inventory table missed are the only guards for `rowid`, `strposExpr`,
+  `sumTrue`/`sumFalse`, the feedback upserts and `INSERT OR IGNORE` — without
+  them the PG leg could go green proving none of them); and moving the direct-row
+  peeks proved **`asStateClient()` alone cannot carry Phase 4** — see the new
+  drift note below.
+- [x] **Phase 4** — [04-postgres-pglite.md](04-postgres-pglite.md) — Postgres
+  schema (jsonb), schema-parity test, PGlite test leg *(risk: medium)*.
+  *Completed 2026-08-18.* `schema/pg.ts` mirrors all 15 tables;
+  `drizzle/pg/0000_init.sql` generated; **both** factories have a PG leg
+  (`db.pg.test.ts` + `session-manager.pg.test.ts`), so the whole state suite
+  runs twice. **3,357 tests / 202 files** — the predicted delta exactly, so
+  neither leg silently skipped. `@electric-sql/pglite` is a devDep and nothing
+  under `src/` imports `schema/pg.ts` or a PG driver. **Deviations — read §1
+  and §2 before Phase 5:** the ⚠ deliverable shipped as `tablesOf(client)`
+  reading drizzle's own `_.fullSchema`, so **no constructor signature changed**
+  and the per-store diff is one destructure line per method rather than ~600
+  renamed identifiers; and `strposExpr` was **deleted** rather than branched —
+  every caller only asked "contains a slash", which `LIKE` answers in both
+  dialects. Only **four** tests failed on the first PG run: three to Postgres
+  matching `GROUP BY` to `SELECT` structurally (a bound parameter is a
+  different placeholder in each, so the pattern must be an inlined literal —
+  a `strpos()` port would have failed identically), one to `open()`'s
+  postgres-URL guard missing its `/i` flag.
 - [ ] **Phase 5** — [05-config-packaging-release.md](05-config-packaging-release.md)
   — config slot, Dockerfile, docs-sync, prod cutover runbook, npm release
-  *(risk: low-medium)*
+  *(risk: low-medium)*. **Code half completed 2026-08-18** (`180d03e`):
+  `database.url` slot with env>overlay>default>dbPath precedence; `python3 make
+  g++` gone from both Dockerfile stages; `drizzle/` in `files`, which ships it
+  to the npm tarball AND the image (no COPY needed — see Deviations §1); spec +
+  CLAUDE.md + www doc sweep. Verified on the real artifacts: image builds with
+  no compiler present, migrates as UID 10001, honours `DATABASE_URL`; packed
+  tarball resolves `migrationsFolder` from an npm install. **202 files / 3,361
+  tests.** *Remaining: the merge to `main`, the five-package v0.26.0 release,
+  and the prod cutover — all deliberately left for a human to drive.*
 - [ ] **Phase 6 — DEFERRED, not in this PR** —
   [06-prod-postgres.md](06-prod-postgres.md) — **activate the
   production Postgres runtime**: driver-selectable PG pool (node-postgres default
   **or** Neon serverless via `drizzle-orm/neon-serverless`) + `pg` /
   `@neondatabase/serverless` runtime deps (lazy per-driver), `open()` builds a
   real PG client instead of throwing, full state suite green against a real
-  Postgres server, `database.driver` slot, credential redaction, deploy docs +
+  Postgres server, `database.driver` slot, credential redaction, **a
+  `lastlight server setup` prompt** (§7a — SQLite default, Postgres URL to
+  `secrets/.env` and never to the version-controlled overlay), deploy docs +
   release. Amends locked decision 3 (test-only → operator-selectable). *(risk:
   medium)*
 
@@ -324,3 +473,25 @@ outright (`operator does not exist: boolean = integer`):
 - `qualifiedRepoSql` (`apps/server/src/state/repo-ref.ts:101`).
 
 Neither appears in 02b's porting table. Both must go through `dialect.ts`.
+
+## Found in Phase 1 (carry into Phase 2)
+
+**Drizzle expresses UNIQUE as a standalone index, not an inline constraint.**
+drizzle-kit renders both column-level `.unique()` and table-level
+`unique().on(...)` as `CREATE UNIQUE INDEX <table>_<cols>_unique`, where the
+legacy DDL used inline `UNIQUE` (a NULL-sql `sqlite_autoindex_*`). 01's step-4
+note claimed these cancel out on both legs — they do not; the baseline carries
+**five** such indexes the legacy schema lacks (3 on `users`, 1 each on
+`feedback_anchors` / `feedback_signals`). Same rules enforced, different
+spelling; safe over prod because the existing constraint already forbids a
+violating row. Two consequences downstream:
+
+1. The equivalence test compares **enforced unique key-tuples**
+   (`PRAGMA index_list` + `index_info`), not index names — reuse that helper in
+   Phase 4's schema-parity test rather than diffing index names, which would
+   report a false match/mismatch for the same reason.
+2. **Phase 2's `ON CONFLICT` upserts** (`feedback-store`, the two override
+   tables) target these constraints. Drizzle's `.onConflictDoUpdate({ target })`
+   takes the *columns*, so it resolves against either spelling — but do not
+   hand-write a `ON CONFLICT ON CONSTRAINT <name>` form, which would bind to
+   whichever spelling the DB happens to carry.

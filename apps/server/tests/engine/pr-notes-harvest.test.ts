@@ -72,10 +72,13 @@ function liveState(over: Partial<PrState> = {}): PrState {
     settledCheckCount: 3,
     baseChecksState: "passing",
     botReviewAtHead: null,
+    lastBotReview: null,
+    pathsSinceLastBotReview: null,
     ciReport: null,
     attempt: 1,
     flakyDeferrals: 0,
     escalatedAtSha: null,
+    intervention: null,
     forkNoticedAtSha: null,
     priorAttempts: [],
     notes: [],
@@ -116,12 +119,12 @@ function harness() {
 
   const deps: PrStateDeps = { github: null, db, botLogin: BOT };
 
-  function dispatch(
+  async function dispatch(
     over: Partial<PrState> = {},
     workflowName = "dependabot-ci-fix",
-  ): { id: string; state: PrState } {
+  ): Promise<{ id: string; state: PrState }> {
     const state = liveState(over);
-    applyDerivedState(state, deps);
+    await applyDerivedState(state, deps);
     const id = `run-${rows.length + 1}`;
     rows.push({
       id,
@@ -139,9 +142,9 @@ function harness() {
   }
 
   /** Feed a phase's output + the journal through the real `onPhaseEnd` harvest. */
-  function finish(id: string, phase: string, output = "", workflowName?: string): void {
+  async function finish(id: string, phase: string, output = "", workflowName?: string): Promise<void> {
     const row = rows.find((r) => r.id === id);
-    harvestFixMarkers(db, id, workflowName ?? row?.workflowName ?? "dependabot-ci-fix", phase, output, {
+    await harvestFixMarkers(db, id, workflowName ?? row?.workflowName ?? "dependabot-ci-fix", phase, output, {
       repoDir,
     });
   }
@@ -157,7 +160,7 @@ const diagnosis = (cls: string) =>
 // ---------------------------------------------------------------------------
 
 describe("drainPrNotes", () => {
-  it("reads the journal and REMOVES it — an outbox, not an accumulator", () => {
+  it("reads the journal and REMOVES it — an outbox, not an accumulator", async () => {
     agentWrites("ruled-out: not the lockfile");
     const notes = drainPrNotes(repoDir, {
       at: "2026-07-31T00:00:00.000Z",
@@ -171,13 +174,13 @@ describe("drainPrNotes", () => {
     expect(existsSync(join(repoDir, PR_NOTES_FILE_NAME))).toBe(false);
   });
 
-  it("is a silent no-op when there is no journal (the common case)", () => {
+  it("is a silent no-op when there is no journal (the common case)", async () => {
     expect(drainPrNotes(repoDir, {
       at: "", runId: "r", workflow: "w", phase: "p",
     })).toEqual([]);
   });
 
-  it("reads only the TAIL of a runaway file", () => {
+  it("reads only the TAIL of a runaway file", async () => {
     // The author is a language model in a sandbox; "it will be a few lines" is
     // a hope, not a bound. The tail is the right end to keep — notes are
     // appended, so the newest are last.
@@ -196,7 +199,7 @@ describe("drainPrNotes", () => {
 // ---------------------------------------------------------------------------
 
 describe("prNotesRepoDir", () => {
-  it("resolves `<sandboxes>/<taskId>/<repo>` — the checkout, not the workspace root", () => {
+  it("resolves `<sandboxes>/<taskId>/<repo>` — the checkout, not the workspace root", async () => {
     const dir = prNotesRepoDir(
       { context: { taskId: "owner-repo-190-fix", repo: "repo" } },
       { stateDir: "/state" },
@@ -212,7 +215,7 @@ describe("prNotesRepoDir", () => {
   // life) yielded `""` → `null` → the push gate and the journal were never
   // read on ANY real run. The rest of this file missed it by hand-building a
   // context with a `repo` key, so this row-shaped case is the regression.
-  it("reads the repo off the run ROW — a production context carries no `repo`", () => {
+  it("reads the repo off the run ROW — a production context carries no `repo`", async () => {
     expect(
       prNotesRepoDir(
         { repo: "drizzle-cube-nextjs", context: { taskId: "drizzle-cube-nextjs-132-fix" } },
@@ -221,7 +224,7 @@ describe("prNotesRepoDir", () => {
     ).toBe("/state/sandboxes/drizzle-cube-nextjs-132-fix/drizzle-cube-nextjs");
   });
 
-  it("prefers the row's bare column when a context also carries one", () => {
+  it("prefers the row's bare column when a context also carries one", async () => {
     expect(
       prNotesRepoDir(
         { repo: "lastlight", context: { taskId: "t", repo: "stale/name" } },
@@ -233,7 +236,7 @@ describe("prNotesRepoDir", () => {
   // The fallback exists for callers that synthesize a run with no row (tests,
   // the evals harness). Those hand-written contexts are the one place a
   // QUALIFIED value shows up, and the workspace dir is keyed on the bare name.
-  it("de-qualifies an `owner/repo` context fallback", () => {
+  it("de-qualifies an `owner/repo` context fallback", async () => {
     expect(
       prNotesRepoDir(
         { context: { taskId: "owner-repo-190-fix", repo: "cliftonc/lastlight" } },
@@ -242,7 +245,7 @@ describe("prNotesRepoDir", () => {
     ).toBe("/state/sandboxes/owner-repo-190-fix/lastlight");
   });
 
-  it("honours an explicit sandboxDir, exactly as the reaper does", () => {
+  it("honours an explicit sandboxDir, exactly as the reaper does", async () => {
     expect(
       prNotesRepoDir(
         { context: { taskId: "t", repo: "r" } },
@@ -251,7 +254,7 @@ describe("prNotesRepoDir", () => {
     ).toBe("/mnt/boxes/t/r");
   });
 
-  it("refuses a taskId that escapes the sandboxes root", () => {
+  it("refuses a taskId that escapes the sandboxes root", async () => {
     expect(
       prNotesRepoDir(
         { context: { taskId: "../../../etc", repo: "passwd" } },
@@ -260,7 +263,7 @@ describe("prNotesRepoDir", () => {
     ).toBeNull();
   });
 
-  it("returns null for a run with no workspace to name", () => {
+  it("returns null for a run with no workspace to name", async () => {
     expect(prNotesRepoDir(null)).toBeNull();
     expect(prNotesRepoDir({ context: {} })).toBeNull();
     expect(prNotesRepoDir({ context: { taskId: "t" } })).toBeNull();
@@ -303,7 +306,7 @@ describe("harvestFixMarkers — resolving the checkout off a production run row"
     resetRuntimeConfigForTests();
   });
 
-  it("reads the push gate and drains the journal with no repoDir override", () => {
+  it("reads the push gate and drains the journal with no repoDir override", async () => {
     const rows: WorkflowRun[] = [
       {
         id: "run-1",
@@ -334,7 +337,7 @@ describe("harvestFixMarkers — resolving the checkout off a production run row"
     writeFileSync(join(checkout, VERIFY_SCRIPT_NAME), "#!/usr/bin/env bash\nset -euo pipefail\nnpm ci\n");
     writeFileSync(join(checkout, PR_NOTES_FILE_NAME), "ruled-out: not the lockfile\n");
 
-    harvestFixMarkers(
+    await harvestFixMarkers(
       db,
       "run-1",
       "dependabot-ci-fix",
@@ -357,13 +360,13 @@ describe("harvestFixMarkers — resolving the checkout off a production run row"
 // ---------------------------------------------------------------------------
 
 describe("the journal across runs", () => {
-  it("a note written in attempt 1 reaches attempt 2's snapshot", () => {
+  it("a note written in attempt 1 reaches attempt 2's snapshot", async () => {
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     agentWrites("ruled-out: regenerating the lockfile changes nothing");
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(first.id, "diagnose", diagnosis("reproducible"));
 
-    const second = h.dispatch();
+    const second = await h.dispatch();
     expect(second.state.notes.map((n) => n.text)).toEqual([
       "regenerating the lockfile changes nothing",
     ]);
@@ -375,14 +378,14 @@ describe("the journal across runs", () => {
     });
   });
 
-  it("accumulates across phases of one run without duplicating", () => {
+  it("accumulates across phases of one run without duplicating", async () => {
     const h = harness();
-    const run = h.dispatch();
+    const run = await h.dispatch();
     agentWrites("ruled-out: not the lockfile");
-    h.finish(run.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(run.id, "diagnose", diagnosis("reproducible"));
     // The drain removed the file; the fix phase writes its own.
     agentWrites("constraint: the e2e job needs postgres");
-    h.finish(run.id, "fix_iter_1");
+    await h.finish(run.id, "fix_iter_1");
 
     expect(readHarvestedMarkers(h.rows[0])?.notes.map((n) => n.text)).toEqual([
       "not the lockfile",
@@ -392,100 +395,100 @@ describe("the journal across runs", () => {
     expect(readHarvestedMarkers(h.rows[0])?.diagnosis?.class).toBe("reproducible");
   });
 
-  it("accumulates across attempts and stays capped at MAX_PR_NOTES", () => {
+  it("accumulates across attempts and stays capped at MAX_PR_NOTES", async () => {
     const h = harness();
     for (let attempt = 0; attempt < 4; attempt++) {
-      const run = h.dispatch();
+      const run = await h.dispatch();
       agentWrites(...Array.from({ length: 8 }, (_, i) => `finding: attempt ${attempt} note ${i}`));
-      h.finish(run.id, "diagnose", diagnosis("reproducible"));
+      await h.finish(run.id, "diagnose", diagnosis("reproducible"));
     }
-    const next = h.dispatch();
+    const next = await h.dispatch();
     expect(next.state.notes).toHaveLength(MAX_PR_NOTES);
     // Newest kept: the last attempt's notes all survived, attempt 0's did not.
     expect(next.state.notes.at(-1)?.text).toBe("attempt 3 note 7");
     expect(next.state.notes.some((n) => n.text.startsWith("attempt 0"))).toBe(false);
   });
 
-  it("marks notes STALE — never deletes them — when someone else pushes", () => {
+  it("marks notes STALE — never deletes them — when someone else pushes", async () => {
     // The same boundary that resets `attempt` to 1 (09 → S1's third row). A
     // claim about the old head is not evidence about the new one, but deleting
     // it silently would be indistinguishable from never having written it.
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     agentWrites("finding: the failure is on the node 20 leg");
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(first.id, "diagnose", diagnosis("reproducible"));
 
-    const second = h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
+    const second = await h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
     expect(second.state.attempt).toBe(1);
     expect(second.state.priorAttempts).toEqual([]);
     expect(second.state.notes).toHaveLength(1);
     expect(second.state.notes[0].stale).toBe(true);
   });
 
-  it("does NOT mark stale when WE authored the new head — same problem", () => {
+  it("does NOT mark stale when WE authored the new head — same problem", async () => {
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     agentWrites("ruled-out: not the lockfile");
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(first.id, "diagnose", diagnosis("reproducible"));
 
-    const second = h.dispatch({ headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
+    const second = await h.dispatch({ headSha: "bbbb222", headAuthor: BOT, headIsOurs: true });
     expect(second.state.notes[0].stale).toBeUndefined();
   });
 
-  it("staleness survives a later same-problem dispatch", () => {
+  it("staleness survives a later same-problem dispatch", async () => {
     const h = harness();
-    const first = h.dispatch();
+    const first = await h.dispatch();
     agentWrites("finding: a guess about the old head");
-    h.finish(first.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(first.id, "diagnose", diagnosis("reproducible"));
 
-    const second = h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
+    const second = await h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
     expect(second.state.notes[0].stale).toBe(true);
-    h.finish(second.id, "diagnose", diagnosis("reproducible"));
+    await h.finish(second.id, "diagnose", diagnosis("reproducible"));
 
-    const third = h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
+    const third = await h.dispatch({ headSha: "cccc333", headAuthor: "octocat", headIsOurs: false });
     expect(third.state.notes[0].stale).toBe(true);
   });
 
-  it("is keyed on the PR, so pr-review carries and reads the fix family's notes", () => {
+  it("is keyed on the PR, so pr-review carries and reads the fix family's notes", async () => {
     // 10-pr-memory.md: "`pr-review` reading what `dependabot-ci-fix` learned is
     // a feature." The chain runs through the latest PR-SCOPED run, not the
     // latest fix run.
     const h = harness();
-    const fix = h.dispatch();
+    const fix = await h.dispatch();
     agentWrites("constraint: the e2e job needs a deployed backend");
-    h.finish(fix.id, "diagnose", diagnosis("infra-dependent"));
+    await h.finish(fix.id, "diagnose", diagnosis("infra-dependent"));
 
-    const review = h.dispatch({}, "pr-review");
+    const review = await h.dispatch({}, "pr-review");
     expect(review.state.notes.map((n) => n.text)).toEqual([
       "the e2e job needs a deployed backend",
     ]);
 
     // A review that writes its own note carries both forward to the next fix.
     agentWrites("finding: the diff also touches the release workflow");
-    h.finish(review.id, "review", "", "pr-review");
-    const nextFix = h.dispatch();
+    await h.finish(review.id, "review", "", "pr-review");
+    const nextFix = await h.dispatch();
     expect(nextFix.state.notes.map((n) => n.text)).toEqual([
       "the e2e job needs a deployed backend",
       "the diff also touches the release workflow",
     ]);
   });
 
-  it("does not stamp an empty harvest namespace on a review that wrote nothing", () => {
+  it("does not stamp an empty harvest namespace on a review that wrote nothing", async () => {
     const h = harness();
-    const review = h.dispatch({}, "pr-review");
-    h.finish(review.id, "review", "some review text", "pr-review");
+    const review = await h.dispatch({}, "pr-review");
+    await h.finish(review.id, "review", "some review text", "pr-review");
     expect(h.rows[0].scratch?.fixMarkers).toBeUndefined();
   });
 
-  it("never lets a journal failure fail the phase", () => {
+  it("never lets a journal failure fail the phase", async () => {
     const h = harness();
-    const run = h.dispatch();
+    const run = await h.dispatch();
     // A repoDir that does not exist — a k8s pod, a reaped workspace, a race.
-    expect(() =>
+    await expect(
       harvestFixMarkers(h.db, run.id, "dependabot-ci-fix", "diagnose", diagnosis("flaky"), {
         repoDir: join(workspace, "gone"),
       }),
-    ).not.toThrow();
+    ).resolves.not.toThrow();
     // ...and the markers still harvested.
     expect(readHarvestedMarkers(h.rows[0])?.diagnosis?.class).toBe("flaky");
   });
@@ -545,7 +548,7 @@ describe("notes inform, never authorise", () => {
     }
   });
 
-  it("reaches the prompt as ONE fenced string and nothing else", () => {
+  it("reaches the prompt as ONE fenced string and nothing else", async () => {
     // `renderContext` is the journal's only consumer. It projects to a string,
     // so there is no boolean, flag or per-kind list a YAML `skip_if` / `until`
     // expression could ever branch on.
@@ -559,7 +562,7 @@ describe("notes inform, never authorise", () => {
     expect(ctx.priorNotes).toContain("can never stand in for");
   });
 
-  it("exposes the journal path to the prompts as a populated variable", () => {
+  it("exposes the journal path to the prompts as a populated variable", async () => {
     expect(renderContext(liveState()).notesFile).toBe(PR_NOTES_FILE_NAME);
   });
 });
@@ -581,57 +584,57 @@ function agentWritesGate(body: string): void {
  * the start of the next attempt and the evidence went with it.
  */
 describe("the recorded push gate", () => {
-  it("records the script the agent actually wrote", () => {
+  it("records the script the agent actually wrote", async () => {
     const h = harness();
-    const run = h.dispatch();
+    const run = await h.dispatch();
     agentWritesGate("#!/bin/sh\nnpm ci && npm test\n");
-    h.finish(run.id, "fix_iter_1");
+    await h.finish(run.id, "fix_iter_1");
 
     expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toBe("#!/bin/sh\nnpm ci && npm test\n");
   });
 
-  it("READS it — the drain would disarm the loop it is reporting on", () => {
+  it("READS it — the drain would disarm the loop it is reporting on", async () => {
     // Unlike the journal, this file is the live gate the NEXT iteration runs.
     // Removing it at the end of every phase would turn iteration 2 into
     // `gate=skipped`, which is treated as red.
     const h = harness();
-    const run = h.dispatch();
+    const run = await h.dispatch();
     agentWritesGate("#!/bin/sh\nnpm test\n");
-    h.finish(run.id, "fix_iter_1");
+    await h.finish(run.id, "fix_iter_1");
 
     expect(existsSync(join(repoDir, VERIFY_SCRIPT_NAME))).toBe(true);
   });
 
-  it("keeps the last gate it saw when a later phase can't reach the workspace", () => {
+  it("keeps the last gate it saw when a later phase can't reach the workspace", async () => {
     // The reset happens once per ATTEMPT, not per phase, so a phase that
     // records nothing must not blank the gate an earlier phase recorded — on
     // kubernetes that is every phase (no host access to the PVC).
     const h = harness();
-    const run = h.dispatch();
+    const run = await h.dispatch();
     agentWritesGate("#!/bin/sh\npnpm build\n");
-    h.finish(run.id, "fix_iter_1");
+    await h.finish(run.id, "fix_iter_1");
     rmSync(join(repoDir, VERIFY_SCRIPT_NAME));
-    h.finish(run.id, "fix_iter_2");
+    await h.finish(run.id, "fix_iter_2");
 
     expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toContain("pnpm build");
   });
 
-  it("supersedes it when a later phase rewrote the gate", () => {
+  it("supersedes it when a later phase rewrote the gate", async () => {
     const h = harness();
-    const run = h.dispatch();
+    const run = await h.dispatch();
     agentWritesGate("#!/bin/sh\nexit 0\n");
-    h.finish(run.id, "fix_iter_1");
+    await h.finish(run.id, "fix_iter_1");
     agentWritesGate("#!/bin/sh\nnpm test -- --run\n");
-    h.finish(run.id, "fix_iter_2");
+    await h.finish(run.id, "fix_iter_2");
 
     expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toBe("#!/bin/sh\nnpm test -- --run\n");
   });
 
-  it("bounds a runaway script instead of pulling it into the harness", () => {
+  it("bounds a runaway script instead of pulling it into the harness", async () => {
     const h = harness();
-    const run = h.dispatch();
+    const run = await h.dispatch();
     agentWritesGate(`#!/bin/sh\n${"echo x\n".repeat(20_000)}`);
-    h.finish(run.id, "fix_iter_1");
+    await h.finish(run.id, "fix_iter_1");
 
     const recorded = readHarvestedMarkers(h.rows[0])?.verifyScript ?? "";
     expect(recorded.length).toBeLessThan(10 * 1024);
@@ -640,22 +643,22 @@ describe("the recorded push gate", () => {
     expect(recorded.startsWith("#!/bin/sh")).toBe(true);
   });
 
-  it("is null on a run that wrote no gate", () => {
+  it("is null on a run that wrote no gate", async () => {
     const h = harness();
-    const run = h.dispatch();
-    h.finish(run.id, "diagnose", diagnosis("reproducible"));
+    const run = await h.dispatch();
+    await h.finish(run.id, "diagnose", diagnosis("reproducible"));
 
     expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toBeNull();
   });
 
-  it("is not recorded for a PR-scoped run outside the fix family", () => {
+  it("is not recorded for a PR-scoped run outside the fix family", async () => {
     // `pr-review` shares the PR and the journal, but it writes no gate — a
     // script in its workspace would be a leftover, not evidence about it.
     const h = harness();
-    const run = h.dispatch({}, "pr-review");
+    const run = await h.dispatch({}, "pr-review");
     agentWritesGate("#!/bin/sh\nnpm test\n");
     agentWrites("finding: the diff looks fine");
-    h.finish(run.id, "review");
+    await h.finish(run.id, "review");
 
     expect(readHarvestedMarkers(h.rows[0])?.verifyScript).toBeNull();
   });
