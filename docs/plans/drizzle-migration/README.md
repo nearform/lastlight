@@ -121,11 +121,17 @@ now settled empirically** — the entire state suite plus the `SessionManager`
 suite run green against real Postgres (PGlite) in the ordinary test command.
 Phase 2's raw-SQL ports held: only four tests failed on the first PG run, and
 none of the "expected dialect leaks" list bit apart from `GROUP BY` strictness.
-**All that remains is Phase 5** — packaging, the config slot, docs-sync, the
-release, and the **mandatory prod-shape smoke that Phase 2 could not do**. That
-smoke is now the single largest un-discharged risk in the whole migration: it
-is the only thing standing between `0001_backfill_repo_refs.sql` and real
-production rows.
+**All that remains is Phase 5** — packaging, the config slot, docs-sync and the
+release. Its inherited release gate, the **prod-shape smoke Phase 2 could not
+run**, was discharged on 2026-08-18 against a real snapshot of drizby prod
+(41 MB, 2,238 executions): migrations no-op'd in 96 ms, every row count held,
+nothing was dropped, the second open was idempotent, and real `context` /
+`success` / `extension_status` values round-tripped through the new column
+mappings. Recipe and findings: **§0 of
+[05-config-packaging-release.md](05-config-packaging-release.md)** — including
+that prod carries **two orphan tables the schema does not declare**
+(`rate_limits`, `system_status`), which is a standing reason never to point
+`drizzle-kit push` at it.
 
 ---
 

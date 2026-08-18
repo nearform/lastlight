@@ -50,12 +50,53 @@ After this phase:
 >    production data**. Run it against a copy, twice (it must be idempotent),
 >    and check `__drizzle_migrations` has exactly 2 rows and
 >    `PRAGMA integrity_check` says `ok` — the steps are in 02b's Verification.
+>
+>    **✅ RUN AND PASSED 2026-08-18** against a snapshot of drizby prod
+>    (v0.25.9, 41 MB, 2,238 executions / 1,629 runs) — see **§0** below. Re-run
+>    before the actual cutover if prod has moved on, but the shape of the
+>    answer is now known rather than assumed.
 > 2. **`spec/10-state.md` is already updated** (Phase 2 rewrote its Migrations
 >    section for the journaled model). The docs-sync sweep here still owns
 >    `CLAUDE.md` and any other surface, but do not redo that section.
 >
 > Also note the release bumps cascade across **all five** published packages —
 > `lastlight-workflow-engine`'s ports changed shape (locked decision 13).
+
+## 0. Prod-shape smoke — already discharged
+
+**Run 2026-08-18 against a real snapshot of drizby prod (v0.25.9).** This is the release gate the ⚠ block above inherits from Phase 2, and it is the one thing standing between `0001_backfill_repo_refs.sql` and real production rows. It passed. Re-run it before the actual cutover if prod has moved on — the recipe below is the reusable part.
+
+### Taking the snapshot
+
+The DB lives in the `lastlight_agent-data` docker volume, not in the repo checkout, and **there is no `sqlite3` binary in the agent container** — but `better-sqlite3` is (prod still runs the pre-Drizzle release), and its `.backup()` is the SQLite online-backup API, which is safe against a live writer. A plain `cp` is not: prod had 1.2 MB of uncheckpointed WAL at the time, and a checkpoint landing mid-copy yields a torn file.
+
+1. In the agent container, `new Database(path, { readonly: true }).backup("/tmp/prod-snapshot.db")` — writes to the container's `/tmp`, so nothing is added to the persistent volume.
+2. Stream it out with `docker exec … cat` redirected to a local file, so no copy is left on the host disk either.
+3. `sha256sum` both ends to prove the transfer, then delete the container-side temp file.
+
+Keep the snapshot **outside the repo** — it holds real repo names, agent output text, Slack ids and user logins. `~/lastlight-prod-snapshots/` is where the 2026-08-18 one is.
+
+### Result
+
+Run `StateDb.open()` over a *copy*, never the snapshot itself, then a second time for idempotency.
+
+| Check | Result |
+|---|---|
+| `PRAGMA integrity_check` | `ok` |
+| First open (legacy pre-step + `0000_baseline` + `0001_backfill`) | **96 ms** over 41 MB |
+| Second open | **11 ms**, journal still 2 rows — idempotent |
+| `__drizzle_migrations` | exactly **2** rows |
+| Row counts, all 17 prod tables | **unchanged** |
+| Tables added | `__drizzle_migrations` only |
+| Indexes dropped | **none** |
+| Indexes added | exactly the **five** `*_unique` Phase 1 predicted (3 on `users`, 1 each on the two feedback tables) |
+
+Real prod rows then read back through the new column mappings: 40 runs' `context` parsed as objects (largest **60 KB**), `phase_history` non-empty, `success` came back a real **boolean** (419 true / 81 false over 500 rows), `extension_status` parsed on 458 rows, and `executionStats` / `dailyStats` / `listChatThreads` / `getAllCronOverrides` all returned sane values.
+
+### Two findings the plan did not have
+
+1. **Prod has 17 tables, not 15.** `rate_limits` (13 rows) and `system_status` (1 row) are orphans from an older `migrate.ts`; nothing in `src/`, `tests/` or `packages/` references either. They are harmless — the migrator only ever `CREATE TABLE IF NOT EXISTS` and never drops — and the smoke confirms both survive untouched. **But they are a live reason never to point `drizzle-kit push` at production**, which would generate a DROP for both. Generated-migrations-only is the rule; this is the concrete cost of breaking it.
+2. **`0001_backfill_repo_refs.sql` is a NO-OP on drizby.** Every `workflow_runs` row is already `(owner, bare repo)`, and `executions` is already normalized (1,168 bare-with-owner, 893 chat rows with no repo, 177 with neither). Expected rather than surprising: the old `migrate.ts` ran these same statements on **every boot**, so prod converged long ago, and journaling them (locked decision 14) changes *when* they run, not *what* they do. That lowers the risk for this host but says nothing about one that has been offline across the relevant releases — so keep the gate.
 
 ## 1. Config slot — `database.url`
 
