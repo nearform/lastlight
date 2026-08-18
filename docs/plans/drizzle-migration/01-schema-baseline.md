@@ -744,18 +744,114 @@ Dashboard typecheck not needed (no admin routes touched).
 
 ## Done criteria
 
-- [ ] `drizzle-orm` + `@libsql/client` in dependencies, `drizzle-kit` in
+- [x] `drizzle-orm` + `@libsql/client` in dependencies, `drizzle-kit` in
       devDependencies — all latest stable, no RC pins.
-- [ ] `db:generate:sqlite` script in package.json.
-- [ ] `apps/server/src/state/schema/sqlite.ts` defines all 15 tables, 25
+- [x] `db:generate:sqlite` script in package.json.
+- [x] `apps/server/src/state/schema/sqlite.ts` defines all 15 tables, 25
       named indexes (incl. the partial unique + both DESC indexes), with the
       JSON/boolean mode decisions recorded above.
-- [ ] `apps/server/drizzle/sqlite/0000_baseline.sql` exists, fully
+- [x] `apps/server/drizzle/sqlite/0000_baseline.sql` exists, fully
       `IF NOT EXISTS`-idempotent, with the required header comment; `meta/`
       committed.
-- [ ] `apps/server/tests/state/schema-equivalence.test.ts` green: legacy vs
+- [x] `apps/server/tests/state/schema-equivalence.test.ts` green: legacy vs
       drizzle schema equal after normalization; migrator-twice no-op;
       migrator succeeds on a legacy-seeded file DB with data intact.
-- [ ] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+- [x] `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
       green; no runtime code path changed.
-- [ ] README.md Phase 1 checkbox ticked; deviations (if any) appended below.
+- [x] README.md Phase 1 checkbox ticked; deviations (if any) appended below.
+
+## Deviations (executed 2026-08-18)
+
+All done-criteria met. Versions resolved exactly as predicted:
+`drizzle-orm@^0.45.2`, `drizzle-kit@^0.31.10`, `@libsql/client@^0.17.4` — all
+latest stable, no RC. Final state: **204 test files / 3,119 tests** (baseline
+203 / 3,115 plus this phase's 4). `git status` on `apps/server/src/` shows
+`state/schema/` and nothing else.
+
+### 1. `unique()` does NOT become an inline constraint — the step-4 note was wrong
+
+**The one finding that changed the deliverable.** Step 4 and the `users`
+"Equivalence-test note" both assert that a Drizzle `.unique()` and a legacy
+column-level `UNIQUE` "both emit the same inline autoindex with NULL sql", so
+they cancel out on both legs and "no methodology change is needed".
+
+They do not cancel out. drizzle-kit renders **both** column-level `.unique()`
+and table-level `unique().on(...)` as standalone `CREATE UNIQUE INDEX`
+statements with real, non-NULL sql. The legacy DDL used inline `UNIQUE`
+constraints, which SQLite implements as `sqlite_autoindex_*` with NULL sql. So
+the drizzle leg carries **five named indexes the legacy leg does not**:
+`users_github_id_unique`, `users_login_unique`, `users_slack_user_id_unique`,
+`feedback_anchors_source_channel_external_id_unique`,
+`feedback_signals_anchor_id_reactor_emoji_unique`.
+
+Semantically identical, structurally different. Keeping `.unique()` is not
+optional — dropping it would leave a fresh Drizzle DB with no uniqueness on
+`users`' three keys and no constraint for the feedback stores' `ON CONFLICT`
+upserts to target in Phase 2.
+
+So the test gained a **`uniqueKeyTuples()`** extractor (`PRAGMA index_list` +
+`index_info`) that compares *what the database enforces* — the unique column
+tuples, however spelled — instead of trusting index names to line up. The five
+names are an explicit allowlist with the rationale inline. This is a stronger
+assertion than the doc specified, not a weaker one.
+
+**Consequence for the production cutover, and it is benign:** the baseline
+creates five redundant unique indexes over a prod DB that already has the
+equivalent inline constraints. Safe by construction — the existing constraint
+guarantees no violating row, so the index build cannot fail. The
+production-shaped test pins exactly this: the *set* of enforced rules is
+unchanged, and precisely those five tuples become doubly-indexed. Nothing else
+in the baseline touches a prod-shaped DB.
+
+### 2. Two tables in this doc were short some columns
+
+Both found by reading `migrate.ts` rather than the doc's tables:
+
+- **`executions` has 27 columns, not 26.** The full snippet omits **`owner`**
+  (`migrate.ts:26`, CREATE-body cid 4) — the very column the ⚠ block is about.
+  Copying that snippet verbatim would have dropped it from the schema and
+  emitted a `DROP COLUMN`-shaped diff against prod's most-read table.
+- **`workflow_runs` has 19 columns**, as its headline says, but the property
+  table lists only 17 — missing **`trace_id`** and **`span_id`**
+  (`migrate.ts:452-458`, the issue-#255 OTel context, ALTER-added after
+  `restart_count`). Without them a feedback signal could not be parented on its
+  run's trace.
+
+Also: the `workflow_runs` property table places `owner` at the tail, which
+contradicts the ⚠ block eight sections above it. The ⚠ block is correct and was
+followed — `owner` is declared **mid-table at cid 3** (fresh order). The table's
+tail placement describes the *upgraded prod* shape, which is exactly the
+divergence the ⚠ block exists to explain.
+
+### 3. Index tally arithmetic
+
+**25 named indexes is right** (asserted in the test), but the tally sentence's
+own addends sum to 26: `messaging_sessions` has **2** named indexes
+(`idx_msg_sessions_lookup` + the partial `idx_msg_sessions_unique_active`), not
+the 3 stated. The baseline emits **30** index statements — those 25 plus the
+five from §1.
+
+### 4. Execution strategy — no fan-out
+
+The 4-agent transcription fan-out was not used; all 15 tables were transcribed
+serially. The doc had already done the fan-out's actual work (it carries the
+per-column builder spec for every table), so the agents' only remaining job was
+re-reading the DDL — which is where §1 and §2 were found, and which had to be
+done once, carefully, against the whole file rather than four disjoint slices.
+Reconciling four fragments of one file would have added coordination cost
+without adding verification. Recorded because locked decision 16's fan-out for
+**Phase 2** is a different proposition — seven independent store files, not one
+shared schema file — and this is not a precedent against it.
+
+### 5. Minor
+
+- Line references in this doc have drifted (`users` is at `migrate.ts:127-140`,
+  not ≈96-112; `feedback_anchors` at 158-202; the `github_*` block at 250-295).
+  Shapes were as described.
+- `ExtensionStatusMap` / `SkillsStatus` are imported from the package entry
+  `lastlight-workflow-engine` rather than its internal `core/types.js` path
+  (`index.ts` re-exports `core/types.js` wholesale, and `profiles.ts` already
+  re-exports them from there). Type-only, so no runtime coupling either way.
+- `drizzle-kit` emitted the `sql`-expression DESC keys and the partial
+  `uniqueIndex(...).where(...)` correctly on 0.31.10 — no hand-edit needed for
+  either, and both are pinned by a dedicated test case.

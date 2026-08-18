@@ -86,9 +86,16 @@ each must leave the repo green before the next starts.
   rather than merely stale — see the drift ledger above, and the struck
   sections in 02b (`executionToWire`, the dispatcher "bug fix"). Locked
   decisions 13–16 were added as a result. No source file was touched.
-- [ ] **Phase 1** — [01-schema-baseline.md](01-schema-baseline.md) — deps,
+- [x] **Phase 1** — [01-schema-baseline.md](01-schema-baseline.md) — deps,
   Drizzle sqlite schema, idempotent baseline migration, schema-equivalence test
-  *(risk: low)*
+  *(risk: low)*. *Completed 2026-08-18.* `drizzle-orm@0.45.2` /
+  `drizzle-kit@0.31.10` / `@libsql/client@0.17.4` (all stable, as predicted);
+  15 tables + 25 named indexes; `0000_baseline.sql` hand-edited to full
+  `IF NOT EXISTS`; 4-test equivalence proof green. **204 files / 3,119 tests**
+  (baseline + 4). `apps/server/src/` delta is `state/schema/` alone — no
+  runtime path touched. **Deviations:** the fan-out was skipped (done
+  serially), and three doc errors were found and corrected — see the phase
+  doc's Deviations section, especially §1, which changed the deliverable.
 - [ ] **Phase 2** — [02b-engine-swap.md](02b-engine-swap.md) — async API flip
   **+** libsql/Drizzle engine swap, executed as ONE phase (locked decision 7).
   [02a-async-api.md](02a-async-api.md) is its reference appendix (consumer
@@ -324,3 +331,25 @@ outright (`operator does not exist: boolean = integer`):
 - `qualifiedRepoSql` (`apps/server/src/state/repo-ref.ts:101`).
 
 Neither appears in 02b's porting table. Both must go through `dialect.ts`.
+
+## Found in Phase 1 (carry into Phase 2)
+
+**Drizzle expresses UNIQUE as a standalone index, not an inline constraint.**
+drizzle-kit renders both column-level `.unique()` and table-level
+`unique().on(...)` as `CREATE UNIQUE INDEX <table>_<cols>_unique`, where the
+legacy DDL used inline `UNIQUE` (a NULL-sql `sqlite_autoindex_*`). 01's step-4
+note claimed these cancel out on both legs — they do not; the baseline carries
+**five** such indexes the legacy schema lacks (3 on `users`, 1 each on
+`feedback_anchors` / `feedback_signals`). Same rules enforced, different
+spelling; safe over prod because the existing constraint already forbids a
+violating row. Two consequences downstream:
+
+1. The equivalence test compares **enforced unique key-tuples**
+   (`PRAGMA index_list` + `index_info`), not index names — reuse that helper in
+   Phase 4's schema-parity test rather than diffing index names, which would
+   report a false match/mismatch for the same reason.
+2. **Phase 2's `ON CONFLICT` upserts** (`feedback-store`, the two override
+   tables) target these constraints. Drizzle's `.onConflictDoUpdate({ target })`
+   takes the *columns*, so it resolves against either spelling — but do not
+   hand-write a `ON CONFLICT ON CONSTRAINT <name>` form, which would bind to
+   whichever spelling the DB happens to carry.
