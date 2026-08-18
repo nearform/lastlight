@@ -17,8 +17,8 @@ hand-maintained subset that silently diverges.
 
 ## Preconditions
 
-- [ ] Phase 1 done (Drizzle sqlite schema + baseline migration exist).
-- [ ] Phase 2 done (the combined async-API + engine-swap phase: store API is
+- [x] Phase 1 done (Drizzle sqlite schema + baseline migration exist).
+- [x] Phase 2 done (the combined async-API + engine-swap phase: store API is
   async; engine is libsql + Drizzle; the state tests construct via
   `await StateDb.open(<per-test temp file>)` — file-backed per locked
   decision 12, since they exercise transactions; `SessionManager` takes
@@ -29,7 +29,39 @@ hand-maintained subset that silently diverges.
 - `pnpm --filter lastlight-core test` green at the phase start. Record the
   total test count before touching anything — it is the invariant.
 
-> ### Scale correction — 2026-08-18
+> ### ✅ STATUS after Phase 2 — half of this phase is already done
+>
+> **`tests/helpers/state-db.ts` exists and all 44 construction sites are
+> already converted to `makeTestDb()`.** Locked decision 15's deliverable was
+> pulled forward into Phase 2 because locked decision 12 made `:memory:` fatal
+> for every transacting suite the moment the engine swapped — the tests could
+> not go green without it. So do NOT re-do it, and do not re-plan around
+> `new StateDb(":memory:")`: there are none left.
+>
+> Also already done, so ignore the corresponding text below:
+>
+> - The three files that hand-wrote their own messaging `CREATE TABLE` are
+>   rebuilt (`SessionManager` no longer owns DDL).
+> - The `dailyStats` `beforeEach` `DELETE FROM executions` hack is **deleted** —
+>   `makeTestDb()` gives every test its own file.
+> - `InMemoryStateStore` in `packages/workflow-engine/src/test-support/fakes.ts`
+>   is already async.
+> - Of the two legacy-rebuild tests, **one was deleted** (superseded verbatim by
+>   `tests/state/schema-equivalence.test.ts`) and one rebuilt on the real boot
+>   path. There is one, not two, and the sqlite-only split below should reflect
+>   that.
+> - `tests/state/concurrency.test.ts` holds **4 tests**, not 1 (single-winner
+>   race, a run-op-vs-team-op race, chain-survives-rejection, and a sustained
+>   contention loop). All are dialect-neutral and belong in the factory.
+>
+> **What is actually left in Phase 3:** extract the two suite factories, move
+> the test bodies verbatim, delete the now-redundant runners, and add the one
+> new message-append test. It is a move, not a build.
+>
+> **Baseline to preserve: 206 files / 3,127 tests** (+1 for the message-append
+> test = 3,128). The 203 / 3,115 figure below is the Phase-0 number.
+>
+> ### Scale correction — 2026-08-18 (historical — see the status block above)
 >
 > This doc was written against a 2-file test surface (`tests/state/db.test.ts`
 > + `tests/state/workflow-run-store.test.ts`). Actual surface:
@@ -112,8 +144,11 @@ module scope — two invocations in one process must not collide):
 ```ts
 let db: StateDb;
 beforeEach(async () => { db = await makeDb(); });
-afterEach(async () => { await db.close(); });
 ```
+
+**No `afterEach` close when `makeDb` is `makeTestDb`** — the helper registers
+its own cleanup, and closing twice is a double-free. A PGlite `makeDb` (Phase 4)
+should register its own teardown the same way, so the factory stays agnostic.
 
 Fresh DB per test, closed after. This makes the old
 `dailyStats`-suite `beforeEach` hack (`DELETE FROM executions`, needed because
@@ -255,24 +290,18 @@ own layers against a sqlite `StateDb` and are out of scope — do not move them.
 - **`tests/state/db.test.ts`** becomes the single sqlite runner (~10 lines):
 
   ```ts
-  import { mkdtempSync } from "node:fs";
-  import { tmpdir } from "node:os";
-  import { join } from "node:path";
   import { runStateDbSuite } from "./store-suite.js";
-  import { StateDb } from "#src/state/db.js";
+  import { makeTestDb } from "../helpers/state-db.js";
 
-  // File-backed per test (locked decision 12): the suite exercises the five
-  // named atomic ops, and the libsql client opens a NEW connection after
-  // every transaction — a fresh `:memory:` connection is an empty database.
-  runStateDbSuite(
-    () => StateDb.open(join(mkdtempSync(join(tmpdir(), "ll-state-")), "state.db")),
-    { dialect: "sqlite" },
-  );
+  // makeTestDb is file-backed per test and registers its own cleanup —
+  // locked decision 12: the suite exercises the five named atomic ops, and
+  // the libsql client opens a NEW connection after every transaction, so a
+  // fresh `:memory:` connection would be an empty database.
+  runStateDbSuite(makeTestDb, { dialect: "sqlite" });
   ```
 
-  (Leaving the mkdtemp dirs to the OS tmp reaper is fine; if it bothers you,
-  have `makeDb` register the dir and `rmSync` it in the factory's
-  `afterEach` alongside `db.close()`.)
+  (The earlier sketch here inlined `mkdtempSync` + `StateDb.open`; that is what
+  `tests/helpers/state-db.ts` now is. Use the helper.)
 
 - **`tests/state/workflow-run-store.test.ts`** and
   **`tests/state/user-store.test.ts`** (issue #205) are **deleted** — their

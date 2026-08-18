@@ -41,16 +41,55 @@ A kickoff prompt that needs no other context:
 
 | Invariant | Value |
 |---|---|
-| Green baseline (as of Phase 0) | **203 test files, 3,115 tests passing** |
+| Green baseline | **206 test files, 3,127 tests passing** (was 203 / 3,115 at Phase 0) |
 | Branch sync | merge `main` in; never rebase |
 | `main` | docs only until Phase 5; stays on better-sqlite3 |
 | Scope | Phases 1–5. **Phase 6 is deferred out of this PR** |
-| Freeze | `apps/server/src/state/**` + `migrate.ts` on `main`, incl. the agent's own PRs |
+| Freeze | `apps/server/src/state/**` on `main`, incl. the agent's own PRs (`migrate.ts` no longer exists) |
 
-**Where the risk is:** Phase 1 is low-risk but contains the `owner` cid-order
-trap (see 01's ⚠ block — it produces a *passing* test that fails against
-production). Phase 2 is the crux: ~5,000 lines across two packages. Phases 3–5
-are consolidation.
+### What Phases 1–2 already changed (read before any later phase)
+
+The branch no longer resembles `main`'s state layer. The facts a later phase
+will trip over:
+
+- **`better-sqlite3` is gone** from the repo — no dependency, no imports. The
+  driver is `@libsql/client` + `drizzle-orm/libsql`.
+- **`src/state/migrate.ts` is DELETED.** Any doc telling you to read it for the
+  table inventory means **`src/state/schema/sqlite.ts`** instead. Its content is
+  frozen at `tests/state/fixtures/legacy-schema.sql` for the prod-shape proof.
+- **Construction is `await StateDb.open(path)` / `StateDb.fromClient(client,
+  dialect)`.** `new StateDb(...)` and `db.database` no longer exist; `db.client`
+  is the Drizzle instance. Every store method returns a Promise.
+- **`:memory:` is fatal for anything that transacts** — libsql opens a fresh
+  (empty) connection after each transaction. Tests use `makeTestDb()` from
+  **`tests/helpers/state-db.ts`**, which already exists and to which all 44
+  construction sites are already converted (this was Phase 3's locked-decision-15
+  deliverable, pulled forward — see 03's status block).
+- **Two migrations exist**: `0000_baseline.sql` and `0001_backfill_repo_refs.sql`
+  (a DATA migration whose statement ORDER is load-bearing). The equivalence test
+  pins the count.
+- **`lastlight-workflow-engine`'s ports are async** (`RunStore`,
+  `ExecutionLedger`, `PhaseReporter`), so the release bumps cascade across all
+  five published packages.
+- **`dialect.ts` already carries** `rows`/`run`/`changes`/`isUniqueViolation`/
+  `likeEscape`/`dayBucket`/`hourBucket`/`strposExpr`/`sumTrue`/`sumFalse`, and
+  `repo-ref.ts`'s `qualifiedRepoSql` now takes schema COLUMNS and returns `SQL`.
+
+**Two rules the phases learned the hard way** — apply them in Phases 3–5 too:
+
+1. **`tsc` cannot see a dropped promise.** `!promise` is always `false` and
+   TS2801 only fires on the bare `if (promise)` form. Phase 2's compiler pass was
+   clean while fourteen real bugs sat in the tree, including a permanently-on
+   admin kill switch. Run the floating-promise greps (02a) over **`packages/`
+   as well as `apps/server/src`** — the first pass missed the engine entirely.
+2. **A "deterministic" tiebreak is not automatically the RIGHT one.** See the
+   `cron_runs` regression in 02b's Deviations §3.
+
+**Where the risk is:** Phases 1–2 are done. Phase 3 is now mostly a *move*
+(the fixture it was going to build already exists). **Phase 4 is the next real
+risk** — the PG leg is where every raw-SQL port either holds or doesn't, and
+several Phase-2 ports were written specifically to survive it. Phase 5 is
+packaging plus the **mandatory prod-shape smoke that Phase 2 could not do**.
 
 ---
 

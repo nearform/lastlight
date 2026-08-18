@@ -46,14 +46,47 @@ is `StateDb.fromClient()` from tests.
 
 ## 1. `src/state/schema/pg.ts`
 
-Source of truth for the table inventory is the same one Phase 1 used:
-`apps/server/src/state/migrate.ts` (6 state tables incl. `users`, all
-historically-ALTERed columns included) +
-`apps/server/src/connectors/messaging/session-manager.ts` ≈21-69 (the 2
-messaging tables + partial unique index). **Do not re-derive from those
-files — mirror `schema/sqlite.ts` exactly**: same export names, same column
-property names, same column *names* (snake_case strings), same index names.
-Only the column builder types change, per this mapping:
+> ### ⚠ Five things Phase 1/2 changed that this doc predates
+>
+> 1. **`executions` has 27 columns, not 26** — it carries `owner` (issue #279).
+>    The Phase-1 doc's snippet omitted it; do not inherit that omission.
+> 2. **`workflow_runs` has 19 columns** including **`trace_id` and `span_id`**
+>    (issue #255). The column tables in 01 and the snippets here both miss them.
+> 3. **drizzle-kit renders every `UNIQUE` as a standalone `CREATE UNIQUE INDEX`,
+>    not an inline constraint.** The sqlite baseline therefore carries five
+>    named `*_unique` indexes (3 on `users`, 1 each on the two feedback tables).
+>    The pg schema will produce the same five, so the parity test must expect
+>    them on BOTH sides — and should compare *enforced unique key-tuples*, the
+>    way `schema-equivalence.test.ts` already does, rather than index names.
+> 4. **`drizzle/pg/` is fresh-DB only — do NOT mirror `0001_backfill_repo_refs.sql`.**
+>    It is a sqlite-only DATA repair (it uses `instr`) for a population Postgres
+>    has never had. Mirroring it would be a no-op at best.
+> 5. **`dialect.ts` already exists with the helpers**, including `strposExpr`
+>    (currently sqlite `instr`) and `sumTrue`/`sumFalse`. `strposExpr` is the one
+>    that genuinely needs a PG branch (`strpos`); it fans out to ~13 call sites
+>    via `qualifiedRepoSql`, so it is the single widest-reaching port.
+>
+> **And one PG-specific trap already hit in Phase 2:** Postgres `SUM()` over an
+> integer returns `bigint`, which node-postgres/PGlite hand back as a **string**.
+> `feedback-store.ts` already guards this with `.mapWith(Number)` on its
+> aggregates; every other aggregate that is currently only exercised on sqlite
+> (`executionStats`, `dailyStats`, `hourlyStats`, the `list()` cost roll-up) will
+> need the same, and the failure is a silently-stringified count, not an error.
+> Likewise: **unquoted raw-SQL aliases fold to lowercase on PG** (`AS triggerId`
+> → `triggerid`), which is why the Phase-2 raw queries double-quote every alias.
+
+
+> **⚠ Corrected after Phase 2.** Both files this paragraph named are gone:
+> `src/state/migrate.ts` is **deleted**, and `session-manager.ts` no longer owns
+> any DDL. **`src/state/schema/sqlite.ts` is now the only source of truth** —
+> which the paragraph already told you to mirror, so follow that half and ignore
+> the citations. (The frozen pre-Drizzle DDL survives at
+> `tests/state/fixtures/legacy-schema.sql`, but it is a fossil for the
+> prod-shape proof — do not mirror it.)
+
+**Mirror `schema/sqlite.ts` exactly**: same export names, same column property
+names, same column *names* (snake_case strings), same index names. Only the
+column builder types change, per this mapping:
 
 | sqlite builder (Phase 1) | pg builder (this phase) |
 |---|---|

@@ -35,8 +35,27 @@ After this phase:
   the prod cutover runbook below runs promptly after the merge so `main`
   doesn't sit in the "carries the engine, prod not yet backed up/cut over"
   window any longer than necessary.
-- `better-sqlite3` is gone from `apps/server/package.json` (Phase 2b).
-- Repo green: `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`.
+- `better-sqlite3` is gone from `apps/server/package.json` (Phase 2b) — done,
+  though the Dockerfile's `python3 make g++` lines are NOT (see §Dockerfile).
+- Repo green: `pnpm --filter lastlight-core build && pnpm --filter lastlight-core test`
+  (**206 files / 3,127 tests** as of Phase 2, before Phase 3's +1).
+
+> ### ⚠ Inherited from Phase 2 — two items land here
+>
+> 1. **The prod-shape smoke is a RELEASE GATE, not optional.** 02b's
+>    Verification specified it and Phase 2 could not run it: it needs a copy of
+>    the real `lastlight.db` out of the prod docker volume, which is a host
+>    operation. It matters more than it did when it was written, because
+>    `0001_backfill_repo_refs.sql` is the **first migration that writes to
+>    production data**. Run it against a copy, twice (it must be idempotent),
+>    and check `__drizzle_migrations` has exactly 2 rows and
+>    `PRAGMA integrity_check` says `ok` — the steps are in 02b's Verification.
+> 2. **`spec/10-state.md` is already updated** (Phase 2 rewrote its Migrations
+>    section for the journaled model). The docs-sync sweep here still owns
+>    `CLAUDE.md` and any other surface, but do not redo that section.
+>
+> Also note the release bumps cascade across **all five** published packages —
+> `lastlight-workflow-engine`'s ports changed shape (locked decision 13).
 
 ## 1. Config slot — `database.url`
 
@@ -166,9 +185,15 @@ Add under "Agent Settings" next to `STATE_DIR`:
 >   so the ABI matches. It is ~200 MB of dead toolchain in the shipped image.
 >
 > **Remove it from both.** Dropping only the runtime one leaves the (slow)
-> build-stage compile in place; dropping only the build one breaks the build
-> while better-sqlite3 is still a dependency. They come out in the same commit
-> as `pnpm remove better-sqlite3` (Phase 2's dependency-removal step).
+> build-stage compile in place. ~~They come out in the same commit as
+> `pnpm remove better-sqlite3` (Phase 2's dependency-removal step).~~
+> **Corrected:** Phase 2 removed the dependency but did **not** touch the
+> Dockerfile (that was deliberate — 02b's risk watch-item defers the image proof
+> to here). So the apt lines are still present and are now pure dead weight;
+> removing them is **this phase's job alone**, and nothing gates on it until the
+> image is built. That also means the libsql prebuilt-binary claim behind locked
+> decision 2 is still **unproven on `node:22-slim`** — the smoke build below is
+> the first time it is tested.
 >
 > Unrelated but worth not breaking: the **sandbox** images
 > (`sandbox.Dockerfile:41-44`, `sandbox-base.Dockerfile:28`) also install
