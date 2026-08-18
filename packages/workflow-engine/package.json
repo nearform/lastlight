@@ -1,6 +1,6 @@
 {
   "name": "lastlight-workflow-engine",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nearform/lastlight.git",
