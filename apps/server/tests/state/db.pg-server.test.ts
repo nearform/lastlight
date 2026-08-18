@@ -53,6 +53,7 @@ import { rows, run } from "#src/state/dialect.js";
 import { fileURLToPath } from "node:url";
 import { StateDb } from "#src/state/db.js";
 import { makePgClient } from "#src/state/pg-client.js";
+import type { StateClient } from "#src/state/client.js";
 import { runStateDbSuite } from "./store-suite.js";
 
 const MIGRATIONS = fileURLToPath(new URL("../../drizzle/pg", import.meta.url));
@@ -63,58 +64,73 @@ const BASE_URL =
   process.env.DATABASE_URL?.trim() ||
   "postgres://postgres:postgres@localhost:5432/postgres";
 
-/** `postgres://…/db` + a per-test `search_path`, without touching the factory's API. */
-function urlWithSchema(schema: string): string {
-  const sep = BASE_URL.includes("?") ? "&" : "?";
-  return `${BASE_URL}${sep}options=${encodeURIComponent(`-c search_path=${schema}`)}`;
+/** `BASE_URL` with its database name swapped — everything else (auth, params) kept. */
+function urlForDatabase(name: string): string {
+  return BASE_URL.replace(/\/[^/?]*(\?|$)/, `/${name}$1`);
 }
 
 /**
- * One server, one SCHEMA per test.
+ * One fresh DATABASE per test, cloned from a migrated TEMPLATE.
  *
- * `runStateDbSuite` demands a pristine database per call. A container (or
- * database) per test would cost minutes; a schema costs one `CREATE SCHEMA` and
- * one migrator pass. The migrator's own journal has to move with it
- * (`migrationsSchema`) — sharing the default `drizzle.__drizzle_migrations`
- * would make the second test's migration a no-op and leave it with no tables.
+ * **Not a fresh schema**, which is the obvious cheaper move and is what the
+ * phase doc suggested. It does not work: drizzle-kit hardcodes `public` into
+ * the one foreign key in the schema —
+ * `REFERENCES "public"."messaging_sessions"("id")` — so tables created under a
+ * `search_path`-redirected schema get an FK pointing at a table in `public`
+ * instead of at their own. On a database where `public` happens to be
+ * populated (a laptop that ran a smoke test earlier) that SILENTLY SUCCEEDS
+ * and wires every test's FK to the wrong table; on a clean one it fails 185
+ * tests with `relation "public.messaging_sessions" does not exist`. The second
+ * is how CI found it.
+ *
+ * `CREATE DATABASE … TEMPLATE` is a file-level copy, so it costs about what a
+ * migrator pass did while giving a genuinely pristine database — its own
+ * sequences, its own `__drizzle_migrations`, its own `public`.
  */
-let schemaSeq = 0;
+let dbSeq = 0;
+const TEMPLATE_DB = `ll_tpl_${process.pid}`;
+const createdDbs: string[] = [];
 const openHandles: Array<{ close(): Promise<void> }> = [];
+/** Long-lived connection to the SERVER (not to any test database) for DDL. */
+let admin: { client: StateClient; close(): Promise<void> } | undefined;
 
-async function makePgServerDb(): Promise<StateDb> {
-  const schema = `ll_test_${process.pid}_${++schemaSeq}`;
-  // The bootstrap connection is deliberately its own short-lived pool: it must
-  // NOT inherit the search_path of a schema that does not exist yet.
-  const bootstrap = await makePgClient(BASE_URL, "pg", { poolMax: 1 });
-  try {
-    await run(bootstrap.client, sql.raw(`CREATE SCHEMA IF NOT EXISTS "${schema}"`));
-  } finally {
-    await bootstrap.close();
-  }
-  const handle = await makePgClient(urlWithSchema(schema), "pg", { poolMax: 4 });
-  openHandles.push(handle);
-  await migrate(handle.client as never, {
-    migrationsFolder: MIGRATIONS,
-    migrationsSchema: schema,
-  });
-  return StateDb.fromClient(handle.client, "postgres", { close: handle.close });
+async function adminExec(statement: string): Promise<void> {
+  await run(admin!.client, sql.raw(statement));
 }
 
-afterEach(async () => {
-  // The suite never closes what `makeDb` hands it, so the pools are ours to
-  // drain — and a leaked pool keeps vitest's process alive after the run.
-  for (const handle of openHandles.splice(0)) await handle.close();
+beforeAll(async () => {
+  if (!enabled) return;
+  admin = await makePgClient(BASE_URL, "pg", { poolMax: 1 });
+  // Migrate ONCE into the template; every test copies it.
+  await adminExec(`DROP DATABASE IF EXISTS "${TEMPLATE_DB}" WITH (FORCE)`);
+  await adminExec(`CREATE DATABASE "${TEMPLATE_DB}"`);
+  const seed = await makePgClient(urlForDatabase(TEMPLATE_DB), "pg", { poolMax: 1 });
+  try {
+    await migrate(seed.client as never, { migrationsFolder: MIGRATIONS });
+  } finally {
+    // MUST be closed: CREATE DATABASE … TEMPLATE refuses while any other
+    // session is connected to the template.
+    await seed.close();
+  }
 });
+
+async function makePgServerDb(): Promise<StateDb> {
+  const name = `ll_t_${process.pid}_${++dbSeq}`;
+  await adminExec(`CREATE DATABASE "${name}" TEMPLATE "${TEMPLATE_DB}"`);
+  createdDbs.push(name);
+  const handle = await makePgClient(urlForDatabase(name), "pg", { poolMax: 4 });
+  openHandles.push(handle);
+  return StateDb.fromClient(handle.client, "postgres", { close: handle.close });
+}
 
 /**
  * Teardown is BEST-EFFORT, and that is deliberate.
  *
- * Dropping a schema (or a database) can fail for reasons that have nothing to
- * do with whether the suite passed — a socket the pool has not finished
- * closing, another session still attached. A throw here fails the whole run
- * with 187 green tests and no "Failed Tests" section to explain it, which is a
- * worse outcome than a leftover schema on a throwaway CI server. Leftovers are
- * namespaced by pid and swept by the next run's LIKE anyway.
+ * Dropping a database can fail for reasons that have nothing to do with
+ * whether the suite passed — a socket the pool has not finished closing. A
+ * throw here fails the whole run with 187 green tests and no "Failed Tests"
+ * section to explain it, which is worse than a leftover database on a
+ * throwaway CI server. Leftovers are pid-namespaced and swept by the next run.
  */
 async function bestEffort(label: string, fn: () => Promise<void>): Promise<void> {
   try {
@@ -124,24 +140,36 @@ async function bestEffort(label: string, fn: () => Promise<void>): Promise<void>
   }
 }
 
+afterEach(async () => {
+  // The suite never closes what `makeDb` hands it, so the pools are ours to
+  // drain — and a leaked pool keeps vitest's process alive after the run.
+  for (const handle of openHandles.splice(0)) await handle.close();
+  for (const name of createdDbs.splice(0)) {
+    // Deliberately NOT `WITH (FORCE)` here. The pools above are already
+    // drained, so a plain DROP succeeds — whereas FORCE sends SIGTERM to any
+    // backend that has not quite finished closing, and node-postgres surfaces
+    // that as an UNHANDLED error ("terminating connection due to administrator
+    // command") that vitest reports as a run-level failure. Anything a plain
+    // drop cannot take is left for afterAll's sweep, which can force safely
+    // because nothing is running by then.
+    await bestEffort(`dropping ${name}`, () => adminExec(`DROP DATABASE IF EXISTS "${name}"`));
+  }
+});
+
 afterAll(async () => {
-  if (!enabled) return;
-  await bestEffort("schema cleanup", async () => {
-    const admin = await makePgClient(BASE_URL, "pg", { poolMax: 1 });
-    try {
-      // Every run's leftovers, not just this pid's — a run killed mid-flight
-      // never reaches this hook, and nothing else would ever collect them.
-      const leftovers = await rows<{ nspname: string }>(
-        admin.client,
-        sql`SELECT nspname FROM pg_namespace WHERE nspname LIKE 'll\_test\_%'`,
-      );
-      for (const row of leftovers) {
-        await run(admin.client, sql.raw(`DROP SCHEMA IF EXISTS "${row.nspname}" CASCADE`));
-      }
-    } finally {
-      await admin.close();
+  if (!enabled || !admin) return;
+  await bestEffort("template + leftover cleanup", async () => {
+    // Every run's leftovers, not just this pid's: a run killed mid-flight never
+    // reaches this hook, and nothing else would ever collect them.
+    const leftovers = await rows<{ datname: string }>(
+      admin!.client,
+      sql`SELECT datname FROM pg_database WHERE datname LIKE 'll\_t\_%' OR datname LIKE 'll\_tpl\_%'`,
+    );
+    for (const row of leftovers) {
+      await adminExec(`DROP DATABASE IF EXISTS "${row.datname}" WITH (FORCE)`);
     }
   });
+  await admin.close();
 });
 
 describe.skipIf(!enabled)("real Postgres (node-postgres)", () => {
@@ -194,10 +222,10 @@ describe.skipIf(!enabled)("real Postgres (node-postgres)", () => {
     let url: string;
 
     beforeAll(async () => {
-      url = BASE_URL.replace(/\/[^/?]*(\?|$)/, `/${dbName}$1`);
+      url = urlForDatabase(dbName);
       const admin = await makePgClient(BASE_URL, "pg", { poolMax: 1 });
       try {
-        // CREATE DATABASE cannot run inside a transaction block; `execute` is a
+        // CREATE DATABASE cannot run inside a transaction block; `run` issues a
         // bare statement, so this is fine.
         await run(admin.client, sql.raw(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`));
         await run(admin.client, sql.raw(`CREATE DATABASE "${dbName}"`));
