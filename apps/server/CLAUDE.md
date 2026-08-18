@@ -920,7 +920,24 @@ RUN_SANDBOX_IT=1 npx vitest run tests/sandbox/command-exec.integration.test.ts
 # Local dev with a real sandbox backend (gondolin by default; docker/none opt-in)
 ./scripts/dev-local.sh                 # sets up $STATE_DIR + secrets,
                                         # then starts the harness in watch mode
+
+# Develop against the Postgres runtime instead of the SQLite file. The compose
+# `postgres` profile is inert unless named, and binds 127.0.0.1:55432 — a high
+# port (no clash with a local 5432) on loopback (the credentials are dev-grade).
+pnpm --filter lastlight-core dev:db:up        # start postgres:16
+pnpm --filter lastlight-core dev:db:migrate   # copy data/lastlight.db into it
+LASTLIGHT_DEV_DB=postgres pnpm --filter lastlight-core dev    # or dev:postgres
+pnpm --filter lastlight-core dev:db:psql      # psql shell
+pnpm --filter lastlight-core dev:db:down      # stop it (volume survives)
 ```
+
+`dev-local.sh` fills in `DATABASE_URL` for the container and refuses to start if
+nothing is listening on the port. Put `LASTLIGHT_DEV_DB=postgres` in
+`apps/server/.env` to make it the default for `pnpm dev`; an explicit
+`DATABASE_URL` beats both, and `LASTLIGHT_DEV_DB=sqlite` goes back to the file.
+**The caller's `LASTLIGHT_SANDBOX` / `LASTLIGHT_DEV_DB` / `DATABASE_URL` now beat
+`.env`** — `set -a; source .env` had them backwards, so the script's own
+documented `LASTLIGHT_SANDBOX=none` override silently did nothing.
 
 ## Environment
 

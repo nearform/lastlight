@@ -106,6 +106,43 @@ npm run dev:dashboard</code></pre>
 		</div>
 	</div>
 
+	<h3>Developing against Postgres</h3>
+
+	<p>
+		Dev uses SQLite by default, like production. To develop against the
+		Postgres runtime instead, the compose file ships an opt-in
+		<code>postgres</code> profile — a <code>postgres:16</code> container bound
+		to <strong>127.0.0.1:55432</strong> (a high port so it cannot collide with
+		a Postgres you already run, and loopback-only because the default
+		credentials are dev credentials):
+	</p>
+
+	<pre><code>npm run dev:db:up          # start it
+npm run dev:db:migrate     # copy ./data/lastlight.db into it (one way, verified)
+LASTLIGHT_DEV_DB=postgres npm run dev
+
+# or persist the choice in apps/server/.env:
+#   LASTLIGHT_DEV_DB=postgres
+npm run dev:db:psql        # a psql shell in the container
+npm run dev:db:down        # stop it (the volume survives)</code></pre>
+
+	<p>
+		<code>dev-local.sh</code> fills in the URL for you and refuses to start if
+		nothing is listening on the port — otherwise the failure surfaces as a
+		wrapped migrator error several lines deep. An explicit
+		<code>DATABASE_URL</code> always wins, and
+		<code>LASTLIGHT_DEV_DB=sqlite</code> goes back to the file.
+	</p>
+
+	<p>
+		The same profile is a reasonable way for a self-hoster to run Postgres
+		beside the stack (<code>docker compose --profile postgres up -d postgres</code>,
+		then <code>DATABASE_URL=postgres://…@postgres:5432/lastlight</code> in
+		<code>instance/secrets/.env</code>) — but set <code>POSTGRES_PASSWORD</code>
+		if you do. It is inert unless the profile is named, so a normal
+		<code>docker compose up</code> never starts it.
+	</p>
+
 	<h2>6. Trigger and debug via the CLI</h2>
 
 	<p>
