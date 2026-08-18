@@ -226,8 +226,12 @@ async function main() {
 
   // Initialize state database first — ChatRunner needs SessionManager
   // (DB-backed) at construction time.
-  const db = await StateDb.open(config.dbPath);
-  configLog.info("Database", { path: config.dbPath });
+  // open() normalizes both forms (plan locked decision 9): a DATABASE_URL like
+  // "file:/app/data/lastlight.db" passes through untouched; the bare dbPath
+  // fallback gets resolved + `file:`-prefixed inside open(). Do NOT prefix here.
+  const dbTarget = config.database.url ?? config.dbPath;
+  const db = await StateDb.open(dbTarget);
+  configLog.info("Database", { path: dbTarget });
 
   // Session manager for messaging connectors (shared across Slack, Discord, etc.)
   const sessionManager = new SessionManager(db.client, db.dialect);

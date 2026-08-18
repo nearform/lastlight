@@ -22,11 +22,17 @@ into the resume state read by every dashboard query.
 
 ## SQLite tables
 
-`src/state/migrate.ts` defines eight tables (the per-table stores in
-`src/state/*-store.ts` operate on them; `src/state/db.ts` wires the
-stores together). All rows are append-only unless marked mutable.
-Migrations are additive — `CREATE TABLE IF NOT EXISTS` plus
-`ALTER TABLE ADD COLUMN` blocks wrapped in try/catch.
+The schema is **declared in Drizzle**, not in DDL: `src/state/schema/sqlite.ts`
+is the source of truth for fifteen tables, with `src/state/schema/pg.ts` as its
+name-parity Postgres mirror (see "Dialect posture" below). The per-table stores
+in `src/state/*-store.ts` operate on them; `src/state/db.ts` wires the stores
+together. All rows are append-only unless marked mutable. Migrations are
+additive and **journaled** — see "Migrations".
+
+The DDL blocks below are illustration, kept because they read better than the
+TypeScript. The authoritative rendering is the generated baseline,
+`apps/server/drizzle/sqlite/0000_baseline.sql`; when the two disagree, the
+generated file is right.
 
 ### `executions`
 
@@ -274,7 +280,8 @@ and disagreed about which source wins; #278 shipped a filter built on one
 reading, compared `lastlight` against `{nearform/lastlight}`, and a non-null
 non-match **hides** rows rather than showing them.
 
-An idempotent backfill in `migrate()` converges both tables — `workflow_runs`
+A one-shot backfill (`drizzle/sqlite/0001_backfill_repo_refs.sql`) converges both
+tables — `workflow_runs`
 first, since the `executions` owner is recovered by joining it. Two arms of
 compatibility survive, both documented as legacy rather than as the rule: the
 `OR repo = ?` branch of `repoMatchClause`, and `normalizeRepoRef` on read-back.
@@ -402,8 +409,13 @@ deferrals — 251 in one day against zero real failures on a live instance — w
 are deliberately `success = 0` and must stay so. A cron-fire row is written by
 exactly one writer and cannot contain either.
 
-Both reads (`latestByCron`, `recentFailures`) tie-break on `rowid`, so ordering
-does not depend on `started_at` being distinct.
+Both reads (`latestByCron`, `recentFailures`) tie-break on `id`, so ordering does
+not depend on `started_at` being distinct. The tiebreak used to be `rowid`
+(insertion order), which Postgres has no equivalent for; `id` is a UUID, so the
+order within a same-timestamp tie is arbitrary but **stable**, which is all
+either read needs — and a tiebreak that is merely deterministic is not enough
+here, because dropping it entirely makes `recentFailures` report 0 for an
+always-failing cron.
 
 ### `workflow_overrides`
 
@@ -747,6 +759,105 @@ by hand-maintained convention (issue #345).
 Strategy is unchanged: never drop, never narrow. Long-running deployments
 accumulate schema; SQLite handles it.
 
+**Adding a migration** means editing **both** schema files and regenerating
+**both** dialects:
+
+```bash
+# edit src/state/schema/sqlite.ts AND src/state/schema/pg.ts
+pnpm --filter lastlight-core run db:generate:sqlite
+pnpm --filter lastlight-core run db:generate:pg
+```
+
+`tests/state/schema-parity.test.ts` fails if the two drift. Generated
+migrations only — **never** point `drizzle-kit push` at a real database: it
+diffs against the declared schema and emits DROPs for anything it doesn't know
+about, and production carries two orphan tables from an older migrator
+(`rate_limits`, `system_status`) that nothing in the tree declares or reads.
+
+## Dialect posture
+
+The state layer is written once and runs on two dialects, but only one of them
+is a production store:
+
+- **SQLite via libsql** (`@libsql/client` + `drizzle-orm/libsql`) is the
+  production engine. `StateDb.open()` builds it.
+- **Postgres** exists as a working `pgTable` mirror plus a PGlite test leg: the
+  entire state suite and the `SessionManager` suite run a second time against
+  real Postgres (`tests/state/db.pg.test.ts`,
+  `tests/connectors/messaging/session-manager.pg.test.ts`). That is behavioural
+  proof that the SQL is portable, not a deployment. `StateDb.open()` **throws**
+  on a `postgres://` URL, and no Postgres driver is a runtime dependency.
+
+Two drift guards keep it honest: the parity test above pins names, nullability,
+PKs and index structure (deliberately **not** column types — jsonb-vs-text and
+boolean-vs-integer divergence is the point), and the duplicated test leg proves
+behaviour. Nothing under `src/` may import `schema/pg.ts`; it exists for
+drizzle-kit and the test leg only.
+
+What actually differs is funnelled through **`src/state/dialect.ts`** — raw-SQL
+execution (`rows`), rows-affected (`changes`), unique-violation detection
+(`isUniqueViolation`), `LIKE` escaping, the `substr`-based day/hour buckets, and
+the boolean rollup helpers. A store that reaches around that seam is a
+portability bug. Timestamps stay ISO-8601 `text` in both dialects (lexicographic
+ordering, dialect-neutral bucketing, zero data migration); JSON columns are
+`text({mode:'json'})` on sqlite and real `jsonb` on Postgres, with the same
+`$type<T>` on both so the store-facing type is identical.
+
+## Async API
+
+Every store method returns a `Promise`. `StateDb` is built by an **async
+factory** — there is no public constructor:
+
+```ts
+const db = await StateDb.open(urlOrPath);          // production
+const db = StateDb.fromClient(client, "postgres"); // tests, DI
+```
+
+`open()` normalizes what it is given (locked plan decision 9): `:memory:` passes
+through, a `file:` URL passes through, `postgres(ql)://` throws, and anything
+else is treated as a filesystem path (resolved, then `file:`-prefixed). Callers
+never build `file:` URLs themselves. It then sets the boot pragmas
+(`journal_mode=WAL`, `busy_timeout=5000`), runs the legacy pre-step, and applies
+the migrations. `close()` is async too.
+
+**Where the URL comes from**, first hit wins: the `DATABASE_URL` env var → the
+overlay's `database.url` → `config/default.yaml`'s `database.url` (ships
+`null`) → `file:` + `config.dbPath`, i.e. `DB_PATH` or
+`$STATE_DIR/lastlight.db`. The last case is the pre-Drizzle behaviour, so an
+existing deployment that sets none of them changes nothing.
+
+Two consequences worth stating, because they are not local to this page:
+
+- **`lastlight-workflow-engine`'s ports are async.** `RunStore`,
+  `ExecutionLedger` and `PhaseReporter` declare `Promise<T>`; `StateDb`
+  satisfies them structurally, fenced by
+  `tests/workflows/state-store-contract.test.ts`.
+- **`:memory:` is unsafe for anything that transacts.** The libsql local client
+  hands its single connection to each `client.transaction()` and lazily opens a
+  *new* one for the next query — against `:memory:` that new connection is a
+  fresh, empty database, so the whole store silently vanishes after the first
+  commit. Tests use `makeTestDb()` (`tests/helpers/state-db.ts`), a per-test
+  temp file. Same root cause: `busy_timeout` is connection-scoped and does not
+  survive a transaction, so the connection-scoped op serializer in
+  `src/state/client.ts` — not the pragma — is the load-bearing concurrency
+  defense for the nine transaction sites.
+
+## Wire contract
+
+`/admin/api/executions` (and the other execution list routes) serve
+**camelCase**, matching `dashboard/src/api.ts` exactly: `triggerType`,
+`triggerId`, `startedAt`, `durationMs`, and `success?: boolean` — a real
+boolean, `null`/absent while the row is still running. Drizzle's mapped rows
+already have that shape; nothing re-serializes them. `ExecutionStore` holds one
+aliased column list and one row mapper (issue #285) and every record-returning
+read goes through both. `tests/admin/executions-wire.test.ts` pins it, including
+that no `trigger_id`-style key leaks.
+
+The one place the boolean change bites: a `success === 0` comparison silently
+becomes `false` under boolean column mode. `consecutiveFailures()` reads
+`=== false`; an inversion there turns every cron-failure alert off, which is why
+it carries its own test.
+
 The one declared foreign key (`messaging_messages.session_id`) **is enforced**.
 Nothing sets `PRAGMA foreign_keys` explicitly — this document used to claim the
 harness did — but both drivers default it on and reject an orphan insert, so it
@@ -795,8 +906,12 @@ precisely because of that.
 
 | Piece | File |
 |---|---|
-| `BaseDb` interface, store wiring, shared import surface | `src/state/db.ts` |
-| Schema migrations (`CREATE TABLE`/`INDEX`/`ALTER`) | `src/state/migrate.ts` |
+| `StateDb` — async `open()` / `fromClient()` factory, store wiring, shared import surface | `src/state/db.ts` |
+| The Drizzle client, `tablesOf()`, and the connection-scoped op serializer | `src/state/client.ts` |
+| The portability seam (`rows` / `changes` / `isUniqueViolation` / buckets) | `src/state/dialect.ts` |
+| Schema declaration — sqlite source of truth + Postgres name-parity mirror | `src/state/schema/sqlite.ts`, `src/state/schema/pg.ts` |
+| Generated migrations (journaled; shipped in the npm tarball and the image) | `drizzle/sqlite/`, `drizzle/pg/` |
+| Pre-migrator compat step for pre-baseline deployments | `src/state/legacy-sqlite.ts` |
 | `WorkflowRunStore` — `workflow_runs` + atomic lifecycle ops | `src/state/workflow-run-store.ts` |
 | `ExecutionStore` — `executions` table + ops | `src/state/execution-store.ts` |
 | `ApprovalStore` — `workflow_approvals` | `src/state/approval-store.ts` |
@@ -831,15 +946,21 @@ precisely because of that.
 - **Make `session_id` the join.** It's the only stable id the agent
   runtime hands you; everything else (taskId, workflow_run_id) is
   harness state.
-- **Migrate additively.** Drops, narrowings, renames are all
+- **Migrate additively, and journal it.** Drops, narrowings, renames are all
   high-risk on a running system. Adding a column with a NULL default
-  is safe.
+  is safe. Record each migration as applied so it runs once — boot-time DDL
+  that re-executes forever is idempotent only by hand-maintained convention,
+  and that convention cannot express a data backfill.
 - **Plan for `restart_count` from day one.** Crash loops are a
   certainty. Cap them at the schema level so a stuck workflow can't
   consume the database.
 - **Split the store per table.** The intended pattern (issue #97) is one
   store class per table — `WorkflowRunStore`, `ExecutionStore`,
-  `ApprovalStore` — over a shared `BaseDb` interface, with migrations in
-  their own module (`migrate.ts`) and `db.ts` kept as the single import
+  `ApprovalStore` — over **one shared query client with a dialect seam**, with
+  the schema declared in its own module and `db.ts` kept as the single import
   surface that wires them together. The accessor sprawl that grows on a
   monolithic db file is the thing this avoids.
+- **If a second database might ever matter, make the store API async on day
+  one.** Sync-over-a-sync-driver is the decision that is expensive to undo: the
+  flip rippled through every store, every consumer, the workflow engine's
+  published ports and ten test files. The dialect seam was the cheap part.

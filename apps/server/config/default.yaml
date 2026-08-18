@@ -60,6 +60,14 @@ sandbox:
 buildAssets:
   location: repo
 
+# State database. `url` is a libsql-style URL ("file:/app/data/lastlight.db",
+# ":memory:"). null/absent → `file:` + the DB_PATH / $STATE_DIR/lastlight.db
+# resolution, i.e. exactly the pre-Drizzle behaviour. `postgres://` is
+# recognized but throws at boot — the Postgres runtime is test-only (PGlite)
+# for now. Env override: DATABASE_URL.
+database:
+  url: null
+
 # Global concurrency limiter (issue #172). Caps how many sandboxed workflow
 # runs execute at once; excess triggers are persisted as `queued` in
 # workflow_runs and admitted when a slot frees. Resumes/orphan restarts bypass

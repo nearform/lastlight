@@ -15,6 +15,7 @@
   },
   "files": [
     "dist",
+    "drizzle",
     "config",
     "workflows",
     "skills",

@@ -133,7 +133,7 @@ const ledgerKey = (dedupKey: string, triggerId: string, workflowRunId?: string) 
 
 /**
  * Map-backed {@link WorkflowStateStore} — the resume/dedup ledger + run store,
- * with no better-sqlite3. Reproduces the production resume caveat: a phase whose
+ * with no database at all. Reproduces the production resume caveat: a phase whose
  * ledger row is already `success=1` returns `"done"` from
  * {@link ExecutionLedger.shouldRunPhase}, so the engine skips it (and it
  * contributes nothing to the in-memory `outputs` map).

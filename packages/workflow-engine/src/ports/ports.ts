@@ -1,7 +1,8 @@
 /**
  * The workflow engine's injected ports — the concrete couplings the app layer
  * supplies so the engine stays domain-agnostic (no imports of `../engine`,
- * `../state`, `../notify`, `../admin`, `../config`, GitHub, or better-sqlite3).
+ * `../state`, `../notify`, `../admin`, `../config`, GitHub, or a database
+ * driver).
  *
  * The app's existing concrete types already satisfy these structurally, so
  * introducing each port is a type-only change: the default adapters (built in

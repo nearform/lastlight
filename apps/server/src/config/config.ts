@@ -169,6 +169,13 @@ export interface LastLightConfig {
   botName: string;
   botLogin: string;
   dbPath: string;
+  /**
+   * State DB URL, libsql-style (`file:/app/data/lastlight.db`, `:memory:`).
+   * Absent → the caller falls back to {@link dbPath}, which `StateDb.open()`
+   * resolves and `file:`-prefixes itself. `postgres://` is recognized by
+   * `open()` and throws — the slot is reserved, the runtime is not live.
+   */
+  database: { url?: string };
   overlayDir?: string;
   builtInRoot: string;
   stateDir: string;
@@ -572,6 +579,10 @@ function clonePublic(obj: Record<string, unknown> | null): Record<string, unknow
  */
 export const SENSITIVE_KEY_RE =
   /secret|token|password|passwd|credential|private[-_]?key|signing[-_]?key|api[-_]?key|key[-_]?path|\bpem\b/i;
+// TRIPWIRE: `url` does not match, so `database.url` is echoed verbatim by the
+// dashboard's /config view. Harmless while the only supported form is a `file:`
+// URL — but the day the Postgres runtime lands (plan Phase 6), a
+// `postgres://user:pass@host/db` here becomes a credential leak. Redact it then.
 
 /**
  * Recursively redact secret-looking keys from a public (non-secret) config tree.
@@ -737,6 +748,7 @@ export function loadConfig(): LastLightConfig {
     sandboxDir: join(stateDir, "sandboxes"),
     sessionsDir: resolve(process.env.LASTLIGHT_SESSIONS_DIR || join(stateDir, "agent-sessions")),
     dbPath: process.env.DB_PATH || join(stateDir, "lastlight.db"),
+    database: { url: fileCfg.database.url },
     builtInRoot,
     overlayDir,
     model,
@@ -798,6 +810,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   sandbox: { backend: SandboxBackend; maxTurns: number };
   kubernetes?: Partial<KubernetesConfig>;
   buildAssets: BuildAssetsLocation;
+  database: { url?: string };
   deploy: { version: string | null };
   approval: Record<string, boolean>;
   bootstrapLabel: string;
@@ -829,6 +842,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const sandboxRaw = isPlainObject(raw.sandbox) ? raw.sandbox : {};
   const kubernetesRaw = isPlainObject(sandboxRaw.kubernetes) ? sandboxRaw.kubernetes : undefined;
   const buildAssetsRaw = isPlainObject(raw.buildAssets) ? raw.buildAssets : {};
+  const databaseRaw = isPlainObject(raw.database) ? raw.database : {};
   const deployRaw = isPlainObject(raw.deploy) ? raw.deploy : {};
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {};
   const holdRaw = isPlainObject(raw.hold) ? raw.hold : {};
@@ -856,7 +870,11 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   const maxTurns = typeof sandboxRaw.maxTurns === "number" ? sandboxRaw.maxTurns : 200;
   const kubernetes = kubernetesRaw ? normalizeKubernetesFileConfig(kubernetesRaw) : undefined;
   const buildAssets = buildAssetsLocation(buildAssetsRaw.location, "buildAssets.location");
-  const deployVersion = typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
+  // yaml `url: null`, `url: ""` and an absent key all land on undefined — the
+  // caller then falls back to dbPath.
+  const databaseUrl =
+    typeof databaseRaw.url === "string" && databaseRaw.url.trim() ? databaseRaw.url.trim() : undefined;
+  const deployVersion =typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
   const bootstrapLabel = typeof bootstrapRaw.label === "string" ? bootstrapRaw.label : "lastlight:bootstrap";
   // Lenient like every other leaf here, and with one extra rule: an EMPTY
   // string falls back to the packaged default rather than disabling the hold.
@@ -1075,6 +1093,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     sandbox: { backend, maxTurns },
     kubernetes,
     buildAssets,
+    database: { url: databaseUrl },
     deploy: { version: deployVersion },
     approval,
     bootstrapLabel,
@@ -1366,6 +1385,11 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
   } else if (buildAssetsLoc) {
     log.warn("Unknown LASTLIGHT_BUILD_ASSETS value — using the file/default location", { value: buildAssetsLoc });
   }
+
+  // State DB URL. Rides the generic resolver, so it also reads as `env` in the
+  // dashboard's /config provenance tree.
+  const databaseUrl = (env.DATABASE_URL || "").trim();
+  if (databaseUrl) layer.database = { url: databaseUrl };
 
   // Core-version pin override (CI can set this instead of editing config.yaml).
   const coreVersion = (env.LASTLIGHT_CORE_VERSION || "").trim();

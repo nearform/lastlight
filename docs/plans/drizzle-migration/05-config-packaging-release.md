@@ -558,22 +558,128 @@ npm view lastlight@0.11.0 version --prefer-online   # no `v` prefix on npm
 
 ## Done criteria
 
-- [ ] `database: { url?: string }` in `LastLightConfig`; DATABASE_URL →
+- [x] `database: { url?: string }` in `LastLightConfig`; DATABASE_URL →
       overlay → default → `file:` + dbPath resolution implemented at the
       `src/index.ts` construction site; config tests cover precedence.
-- [ ] `config/default.yaml` ships `database.url: null`; `.env.example`
+- [x] `config/default.yaml` ships `database.url: null`; `.env.example`
       documents `DATABASE_URL`.
-- [ ] Dockerfile: `python3 make g++` removed from **BOTH** the build stage
+- [x] Dockerfile: `python3 make g++` removed from **BOTH** the build stage
       (≈22-25) and the runtime stage (≈68-74); sandbox Dockerfiles left
-      untouched; `COPY drizzle/ drizzle/`
-      added; throwaway-container smoke passed.
-- [ ] `apps/server/package.json` `files` includes `"drizzle"`; pack dry-run +
+      untouched; ~~`COPY drizzle/ drizzle/` added~~ **not needed — see
+      Deviations §1**; throwaway-container smoke passed.
+- [x] `apps/server/package.json` `files` includes `"drizzle"`; pack dry-run +
       packed-tarball migrator smoke passed.
-- [ ] `spec/10-state.md` rewritten per outline; `CLAUDE.md` updated
+- [x] `spec/10-state.md` rewritten per outline; `CLAUDE.md` updated
       (state layer, DATABASE_URL, both-dialects regen workflow); docs-sync
       skill run before commit.
 - [ ] Prod cutover executed per runbook, checks green, backup retained.
-- [ ] v0.11.0 released (or the drifted-forward equivalent): three files in
+- [ ] v0.26.0 released: three files in
       lockstep, annotated tag, GitHub release, publish.yml green,
       `npm view` confirms.
 - [ ] Phase 5 checkbox ticked in README.md; deviations recorded below.
+
+## Deviations
+
+*Recorded 2026-08-18, at the end of the code half of the phase (§§1–4). The
+merge to `main`, the prod cutover (§5) and the release (§6) are deliberately
+NOT done — they are outward-facing and await sign-off.*
+
+### 1. ⚠ The Dockerfile `COPY drizzle/` is unnecessary — `files` ships it to BOTH artifacts
+
+§2's step 2 says `drizzle/` "is not a dependency, so `pnpm deploy` will not
+carry it; the explicit COPY below is genuinely required." **That is wrong, and
+verified so empirically**: `pnpm deploy --prod` packs per the package's `files`
+field (which is exactly what the Dockerfile's own comment at the `pnpm deploy`
+line already said), so §3's `"drizzle"` addition puts it in `/app/drizzle`
+without any COPY. Confirmed by running `pnpm --filter lastlight-core deploy
+--prod` into a scratch dir and finding all eight generated files, and again in
+the built image (`ls /app/drizzle/sqlite` → baseline + backfill + `meta`).
+
+Two consequences the plan's framing missed:
+
+- **The "three ships" watch-item is really two.** npm `files` and the docker
+  image are the SAME ship. Only the `migrationsFolder` URL resolution is
+  independent. That makes the trap *less* likely, not more — but it also means
+  a well-meaning tidy-up that trims `files` is now a boot-time crash in
+  production, not just a broken npm tarball. A comment at the `pnpm deploy`
+  line in the Dockerfile and an entry in `apps/server/CLAUDE.md`'s repo-layout
+  block say so.
+- The doc's insertion point (`after COPY --chown … config/ config/`, line 55)
+  **does not exist** — that was the pre-monorepo single-stage Dockerfile. The
+  current file is a two-stage pnpm workspace build whose runtime tree arrives
+  as one `COPY --from=build /app /app`.
+
+### 2. amd64 is proven structurally, not by a local build
+
+The `python3 make g++` removal was verified by building and booting the image —
+but on **arm64** (this is an Apple Silicon host). A `--platform linux/amd64`
+build **segfaults at `pnpm install`** (exit 139, 0.09 s in, before any
+dependency resolves): that is QEMU user-emulation dying, not a missing
+toolchain, which would surface as a node-gyp error much later. So the amd64
+claim rests on two other legs, both solid:
+
+- `@libsql/linux-x64-gnu@0.5.29` is a **lockfile-pinned prebuilt optional
+  dependency**, and `node:22-slim` is Debian/glibc — so there is a binary to
+  resolve and nothing to compile.
+- The arm64 image builds, boots and runs the migrator with **no compiler
+  present at all** (`command -v gcc g++ make python3` → nothing), which is the
+  actual property under test; the arch only changes which prebuilt is picked.
+
+`publish.yml` builds amd64 on native runners, so the release build is the
+authoritative check. **If that build fails, the dep to find is a transitive
+node-gyp'er — do not put `python3` back.**
+
+### 3. §4's wire-contract bullet is the inverted text README already corrected
+
+§4 tells you to document `/admin/api/executions` as serving **snake_case**
+(`trigger_id`, `started_at`, `success` as 1/0/null). That is the exact claim
+the README's "Hard constraints" section corrects at length: the wire format is
+**camelCase with `success?: boolean`**, `dashboard/src/api.ts` types it that
+way, and `tests/admin/executions-wire.test.ts` pins it. Written camelCase.
+Following §4 literally would have documented a contract the code does not have
+and the dashboard could not consume.
+
+### 4. Three spec corrections §4 did not list
+
+Beyond the outlined sections, `spec/10-state.md` carried three claims that went
+stale during Phases 2–4 and would have shipped wrong:
+
+- **"eight tables"** in the intro — it is fifteen, and has been since well
+  before this migration (same class of drift as the README's Phase 0 ledger).
+- **`cron_runs` "tie-break on `rowid`"** — Phase 4 changed both reads to `id`,
+  because Postgres has no `rowid`. Left as-is this would have documented a
+  column that does not exist on one of the two dialects.
+- **"An idempotent backfill in `migrate()`"** in the repo-identifier section —
+  `migrate()` is deleted; it is `0001_backfill_repo_refs.sql` now.
+
+The "Current implementation" table also needed **six** new rows rather than the
+two the doc anticipated (`client.ts`, `dialect.ts`, both schema files,
+`drizzle/`, `legacy-sqlite.ts`), because Phases 2–4 added more seam than the
+plan's file layout predicted.
+
+### 5. docs-sync widened the sweep past `spec/10-state.md`
+
+The skill's map routes a **new env var** and a **new `config/default.yaml` key**
+to `spec/02-configuration.md` and the www site, which §4 never mentions. Both
+updated: the typed-config block, the "State and paths" env table plus a
+"Which one wins" precedence note, and a `DATABASE_URL` row in
+`apps/www/src/pages/docs/configuration.astro`. `astro check` is clean (0
+errors over 75 files). Nothing on the homepage or the comparison pages makes a
+claim this phase invalidates — the state engine is not a user-facing count.
+
+### 6. Phase-2 leftovers found while sweeping
+
+Three **live source comments** outside `apps/server` still named
+`better-sqlite3` as the dependency-boundary fence they enforce — a package that
+no longer exists anywhere in the repo (`packages/workflow-engine/src/ports/ports.ts`,
+`.../test-support/fakes.ts`, `packages/shared/src/index.ts`). Reworded. The
+historical design docs under `docs/` mention it too and are deliberately left
+alone: they record decisions made at the time.
+
+### 7. `package.json` `files` did not match the value §3 quotes
+
+§3 states the current `files` array as ending `…, ".claude-plugin", "plugins"`.
+It does not — the real array has neither, so the Claude Code plugin is **not**
+in the npm tarball, contradicting the root `CLAUDE.md` ("Shipped in the npm
+package (files: .claude-plugin + plugins)"). Out of scope and untouched, but
+somebody should decide which of the two is meant to be true.
