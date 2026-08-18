@@ -55,7 +55,8 @@
     "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src",
     "db:generate:sqlite": "drizzle-kit generate --config drizzle-sqlite.config.ts",
     "db:generate:pg": "drizzle-kit generate --config drizzle-pg.config.ts",
-    "typecheck": "tsc --noEmit && pnpm run lint:boundaries"
+    "lint:promises": "node scripts/lint-floating-promises.mjs . ../../packages/workflow-engine ../../packages/shared",
+    "typecheck": "tsc --noEmit && pnpm run lint:boundaries && pnpm run lint:promises"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.84.1",
