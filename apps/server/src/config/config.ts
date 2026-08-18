@@ -9,6 +9,13 @@ import {
   DEFAULT_REPO_CONFIG_ALLOW_KEYS,
   type RepoConfigPolicy,
 } from "lastlight-shared/repo-config-schema";
+import {
+  isPgDriver,
+  isPostgresUrl,
+  redactDbUrl,
+  PG_DRIVERS,
+  type PgDriver,
+} from "lastlight-shared/database-url";
 import type { SandboxBackend, BuildAssetsLocation, OtelConfig } from "lastlight-workflow-engine";
 import { logger } from "../logging/logger.js";
 
@@ -170,12 +177,18 @@ export interface LastLightConfig {
   botLogin: string;
   dbPath: string;
   /**
-   * State DB URL, libsql-style (`file:/app/data/lastlight.db`, `:memory:`).
-   * Absent → the caller falls back to {@link dbPath}, which `StateDb.open()`
-   * resolves and `file:`-prefixes itself. `postgres://` is recognized by
-   * `open()` and throws — the slot is reserved, the runtime is not live.
+   * State DB URL, libsql-style (`file:/app/data/lastlight.db`, `:memory:`) or
+   * `postgres://…` for the production Postgres runtime. Absent → the caller
+   * falls back to {@link dbPath}, which `StateDb.open()` resolves and
+   * `file:`-prefixes itself.
+   *
+   * `driver` and `poolMax` apply to the `postgres://` form only. A credentialed
+   * URL belongs in `DATABASE_URL` (the gitignored `secrets/.env`), NEVER in the
+   * overlay `config.yaml` — that file is version-controlled and pushed to a
+   * GitHub remote, and redaction happens at render time, which cannot un-commit
+   * anything.
    */
-  database: { url?: string };
+  database: { url?: string; driver?: PgDriver; poolMax?: number };
   overlayDir?: string;
   builtInRoot: string;
   stateDir: string;
@@ -585,15 +598,20 @@ function clonePublic(obj: Record<string, unknown> | null): Record<string, unknow
  */
 export const SENSITIVE_KEY_RE =
   /secret|token|password|passwd|credential|private[-_]?key|signing[-_]?key|api[-_]?key|key[-_]?path|\bpem\b/i;
-// TRIPWIRE: `url` does not match, so `database.url` is echoed verbatim by the
-// dashboard's /config view. Harmless while the only supported form is a `file:`
-// URL — but the day the Postgres runtime lands (plan Phase 6), a
-// `postgres://user:pass@host/db` here becomes a credential leak. Redact it then.
+// `url` deliberately does NOT match — `database.url` is masked by VALUE below
+// instead, so `file:/app/data/lastlight.db` stays legible in the provenance
+// view while `postgres://user:pass@host/db` does not. A key rule could not
+// tell those apart without also blanking `publicUrl`, `avatarUrl` and friends.
 
 /**
  * Recursively redact secret-looking keys from a public (non-secret) config tree.
  * Exported alongside {@link SENSITIVE_KEY_RE} for the admin routes — same rule,
  * same walk, one definition.
+ *
+ * Two rules, and the second is why this is not purely key-driven: **any string
+ * that is a `postgres://` URL is masked wherever it appears**. Credentials live
+ * in its userinfo, the config slot holding it is called `url`, and a leaf-value
+ * rule cannot be defeated by someone nesting or renaming the slot later.
  */
 export function redactPublic<T>(value: T): T {
   if (Array.isArray(value)) return value.map((v) => redactPublic(v)) as unknown as T;
@@ -604,6 +622,7 @@ export function redactPublic<T>(value: T): T {
     }
     return out as unknown as T;
   }
+  if (typeof value === "string" && isPostgresUrl(value)) return redactDbUrl(value) as unknown as T;
   return value;
 }
 
@@ -754,7 +773,7 @@ export function loadConfig(): LastLightConfig {
     sandboxDir: join(stateDir, "sandboxes"),
     sessionsDir: resolve(process.env.LASTLIGHT_SESSIONS_DIR || join(stateDir, "agent-sessions")),
     dbPath: process.env.DB_PATH || join(stateDir, "lastlight.db"),
-    database: { url: fileCfg.database.url },
+    database: { ...fileCfg.database },
     builtInRoot,
     overlayDir,
     model,
@@ -816,7 +835,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   sandbox: { backend: SandboxBackend; maxTurns: number };
   kubernetes?: Partial<KubernetesConfig>;
   buildAssets: BuildAssetsLocation;
-  database: { url?: string };
+  database: { url?: string; driver?: PgDriver; poolMax?: number };
   deploy: { version: string | null };
   approval: Record<string, boolean>;
   bootstrapLabel: string;
@@ -880,6 +899,15 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
   // caller then falls back to dbPath.
   const databaseUrl =
     typeof databaseRaw.url === "string" && databaseRaw.url.trim() ? databaseRaw.url.trim() : undefined;
+  // Postgres-only knobs. `driver` unset means "auto-detect from the URL host"
+  // (`resolvePgDriver`), which is the answer for every ordinary deployment —
+  // it exists for the two cases the host cannot express: Neon behind a custom
+  // domain, and node-postgres forced against Neon's TCP endpoint.
+  const databaseDriver = isPgDriver(databaseRaw.driver) ? databaseRaw.driver : undefined;
+  const databasePoolMax =
+    typeof databaseRaw.poolMax === "number" && databaseRaw.poolMax > 0
+      ? Math.floor(databaseRaw.poolMax)
+      : undefined;
   const deployVersion =typeof deployRaw.version === "string" && deployRaw.version.trim() ? deployRaw.version.trim() : null;
   const bootstrapLabel = typeof bootstrapRaw.label === "string" ? bootstrapRaw.label : "lastlight:bootstrap";
   // Lenient like every other leaf here, and with one extra rule: an EMPTY
@@ -1106,7 +1134,7 @@ function normalizeFileConfig(raw: Record<string, unknown>): {
     sandbox: { backend, maxTurns },
     kubernetes,
     buildAssets,
-    database: { url: databaseUrl },
+    database: { url: databaseUrl, driver: databaseDriver, poolMax: databasePoolMax },
     deploy: { version: deployVersion },
     approval,
     bootstrapLabel,
@@ -1404,10 +1432,25 @@ function buildEnvConfigLayer(env: NodeJS.ProcessEnv): Record<string, unknown> {
     log.warn("Unknown LASTLIGHT_BUILD_ASSETS value — using the file/default location", { value: buildAssetsLoc });
   }
 
-  // State DB URL. Rides the generic resolver, so it also reads as `env` in the
-  // dashboard's /config provenance tree.
+  // State DB slots. They ride the generic resolver, so they also read as `env`
+  // in the dashboard's /config provenance tree. The URL is the one env value
+  // here that can carry a credential — `redactPublic` masks it by VALUE, so it
+  // is safe in that tree; see SENSITIVE_KEY_RE.
+  const database: Record<string, unknown> = {};
   const databaseUrl = (env.DATABASE_URL || "").trim();
-  if (databaseUrl) layer.database = { url: databaseUrl };
+  if (databaseUrl) database.url = databaseUrl;
+  const databaseDriver = (env.DATABASE_DRIVER || "").trim().toLowerCase();
+  if (isPgDriver(databaseDriver)) {
+    database.driver = databaseDriver;
+  } else if (databaseDriver) {
+    log.warn("Unknown DATABASE_DRIVER value — falling back to the URL heuristic", {
+      value: databaseDriver,
+      expected: PG_DRIVERS.join(" | "),
+    });
+  }
+  const databasePoolMax = parseInt((env.DATABASE_POOL_MAX || "").trim(), 10);
+  if (Number.isFinite(databasePoolMax) && databasePoolMax > 0) database.poolMax = databasePoolMax;
+  if (Object.keys(database).length) layer.database = database;
 
   // Core-version pin override (CI can set this instead of editing config.yaml).
   const coreVersion = (env.LASTLIGHT_CORE_VERSION || "").trim();

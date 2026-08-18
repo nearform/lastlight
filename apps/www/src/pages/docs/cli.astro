@@ -179,13 +179,26 @@ lastlight server start [service]      # docker compose up -d
 lastlight server stop  [service]      # stop one service, or the whole stack (down)
 lastlight server restart [service]    # restart a service (default: agent)
 lastlight server update               # pull core + overlay, build, recreate, restart sidecars, health-check
-lastlight server status               # compose state + core/overlay version drift + forked-asset overrides</code></pre>
+lastlight server status               # compose state + core/overlay version drift + forked-asset overrides
+lastlight server db check             # can the agent reach its state database?
+lastlight server db migrate           # copy the SQLite state into Postgres — one way, verified</code></pre>
 	<p>
 		<code>server update</code> is the CLI equivalent of the production
 		<code>deploy.sh</code>; it accepts <code>--no-core</code>,
 		<code>--no-overlay</code>, <code>--no-build</code>, and <code>--yes</code>.
 		The dashboard shows an "update available" banner when the running instance
 		is behind the latest core or overlay.
+	</p>
+	<p>
+		<code>server db</code> runs <em>inside</em> the agent container (the
+		database drivers live there, not in the CLI). <code>migrate</code> moves an
+		existing SQLite deployment onto Postgres: it stops the agent, copies every
+		table in foreign-key order, and verifies the row counts against the source.
+		<code>--dry-run</code> reports the per-table counts without writing;
+		<code>--truncate</code> re-runs into a target that already has rows. With no
+		<code>--to</code> it uses the container's own <code>DATABASE_URL</code>, so
+		the credential never reaches your shell history. It is one-way: Postgres
+		&rarr; SQLite is not supported.
 	</p>
 
 	<h2>Forking built-in assets</h2>

@@ -314,7 +314,28 @@ src/
                         / `StateDb.fromClient(client, dialect)`; no public
                         constructor) that wires the seven stores together and
                         is the single import surface for their types. Every
-                        store method returns a Promise.
+                        store method returns a Promise. `open()` picks the
+                        engine off the URL: libsql for `file:`/`:memory:`/a
+                        path, Postgres for `postgres://`.
+    pg-client.ts        The production Postgres client factory — node-postgres
+                        or Neon serverless behind one `PgClientHandle`, each
+                        driver DYNAMICALLY imported inside its own builder so a
+                        SQLite deployment loads neither. Registers the int8
+                        (OID 20) parser, without which every COUNT/SUM arrives
+                        as a string. The one module under src/ that may import
+                        schema/pg.ts (it must — `tablesOf` reads the schema off
+                        the client); tests/state/driver-isolation.test.ts pins
+                        both rules.
+    data-migrate.ts     One-way sqlite → postgres row copy, FK-ordered and
+                        batched, reading through the sqlite schema and writing
+                        through the pg one (the JS value in between is
+                        dialect-neutral). Refuses a non-empty target, verifies
+                        row counts, and fails if a new table isn't in
+                        TABLE_ORDER. Driven by state-cli.ts.
+    state-cli.ts        The `lastlight-state` bin (`check` / `migrate`) that
+                        ships in the agent image — what `lastlight server db`
+                        runs inside the container, since the CLI may never gain
+                        an edge to core.
     schema/sqlite.ts    Drizzle schema — the source of truth for all fifteen
                         tables (executions, workflow_runs, workflow_approvals,
                         cron_runs, cron_overrides, workflow_overrides, users,
@@ -976,13 +997,29 @@ Runtime:
   a recreate, `lastlight server start agent`; see the `instance/` note above).
 - `STATE_DIR` — persistent state dir (default `./data`)
 - `DB_PATH` — override the SQLite path
-- `DATABASE_URL` — the state DB as a libsql-style URL
-  (`file:/app/data/lastlight.db`, `:memory:`). Effective value, first hit wins:
-  this env var → overlay `config.yaml` `database.url` → `config/default.yaml`
-  (ships `null`) → `file:` + the `DB_PATH` / `$STATE_DIR/lastlight.db` path
-  above. Setting none of them is the pre-Drizzle behaviour, so existing
-  deployments change nothing. `postgres://` is recognized and **throws at
-  boot** — the Postgres runtime is test-only (PGlite) for now.
+- `DATABASE_URL` — the state DB, as a libsql-style URL
+  (`file:/app/data/lastlight.db`, `:memory:`) **or** a `postgres://` URL for an
+  external/managed Postgres. Effective value, first hit wins: this env var →
+  overlay `config.yaml` `database.url` → `config/default.yaml` (ships `null`) →
+  `file:` + the `DB_PATH` / `$STATE_DIR/lastlight.db` path above. Setting none
+  of them is the pre-Drizzle behaviour, so existing deployments change nothing,
+  and SQLite remains the default and the recommendation (nothing to run).
+  **A `postgres://` URL belongs in this env var (`instance/secrets/.env`), NOT
+  in the overlay `config.yaml`** — that file is version-controlled and pushed
+  to a GitHub remote, and the dashboard's masking happens at render time, which
+  cannot un-commit anything. Credentials are redacted from the `/config` view
+  and the boot log by value (`redactDbUrl`), never by key: `SENSITIVE_KEY_RE`
+  must not match `url`, and a `file:` URL should stay legible.
+  `lastlight server setup` offers the choice (SQLite by default).
+- `DATABASE_DRIVER` — `pg` (default, node-postgres TCP pool) | `neon`
+  (`@neondatabase/serverless`, a WebSocket pool). Unset auto-detects from the
+  host (`*.neon.tech` → `neon`); set it only for Neon behind a custom domain,
+  or to force node-postgres against Neon's TCP endpoint. Equivalent config:
+  `database.driver`. `DATABASE_POOL_MAX` (`database.poolMax`, default 10)
+  bounds the pool. Postgres is a **storage** choice, not multi-instance HA —
+  one instance still, since the named atomic ops use an in-process mutex.
+  Moving an existing SQLite database across: `lastlight server db migrate`
+  (see `spec/10-state.md` → "Moving an existing database to Postgres").
 - `LASTLIGHT_HOLD_LABEL` — the **hold** label a maintainer applies to an issue
   or PR to stop Last Light acting on it at all (default `lastlight-ignore`;
   overlay `hold.label`). Read by `getHoldLabel()` at exactly two choke points —

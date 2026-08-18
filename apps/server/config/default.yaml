@@ -60,13 +60,29 @@ sandbox:
 buildAssets:
   location: repo
 
-# State database. `url` is a libsql-style URL ("file:/app/data/lastlight.db",
-# ":memory:"). null/absent → `file:` + the DB_PATH / $STATE_DIR/lastlight.db
-# resolution, i.e. exactly the pre-Drizzle behaviour. `postgres://` is
-# recognized but throws at boot — the Postgres runtime is test-only (PGlite)
-# for now. Env override: DATABASE_URL.
+# State database. `url` is either a libsql-style URL
+# ("file:/app/data/lastlight.db", ":memory:") or a "postgres://…" URL for an
+# external/managed Postgres. null/absent → `file:` + the DB_PATH /
+# $STATE_DIR/lastlight.db resolution, i.e. exactly the pre-Drizzle behaviour,
+# and the recommended default: SQLite needs nothing running.
+#
+# ⚠ PUT A postgres:// URL IN `DATABASE_URL` (secrets/.env), NOT HERE. This file
+# and your overlay's config.yaml are VERSION-CONTROLLED and pushed to a GitHub
+# remote; the dashboard masks the credential at render time, which cannot
+# un-commit anything.
+#
+# `driver` picks how the postgres:// dialect is carried: "pg" (node-postgres, a
+# standard TCP pool — self-hosted, RDS, Cloud SQL, Supabase) or "neon" (Neon's
+# serverless WebSocket pool). Absent → auto-detected from the host, so only a
+# Neon database behind a custom domain needs it. `poolMax` bounds the pool
+# (default 10). Last Light is a single-writer process — Postgres here is a
+# storage choice, not multi-instance HA.
+#
+# Env overrides: DATABASE_URL, DATABASE_DRIVER, DATABASE_POOL_MAX.
 database:
   url: null
+  driver: null
+  poolMax: null
 
 # Global concurrency limiter (issue #172). Caps how many sandboxed workflow
 # runs execute at once; excess triggers are persisted as `queued` in

@@ -53,6 +53,18 @@ Ask for each of these (don't guess). Group the questions; explain what each is f
   `https://<domain>/webhook`.
 - **Managed repos** — one or more `owner/repo` the bot is allowed to act on. The
   bot ignores any repo not listed.
+- **State database** — **SQLite (recommended, the default)** or an external
+  Postgres. SQLite is a file in the agent-data volume with nothing to run;
+  answering it writes no config at all, which is deliberate (the slot resolving
+  by absence is what lets `STATE_DIR` move the file). Choose Postgres only if
+  the user already has a server — then they supply a `postgres://user:pass@host:port/db`
+  URL, which the wizard writes to the gitignored `instance/secrets/.env` and
+  **never** to `instance/config.yaml` (that file becomes a GitHub repo at the
+  end of setup). The driver is detected from the host, not asked
+  (`*.neon.tech` → Neon's serverless driver, else node-postgres). The wizard
+  only TCP-probes the host; run `lastlight server db check` after the build for
+  the full credential check. An existing SQLite deployment can move across
+  later with `lastlight server db migrate` — no need to decide now.
 - **Model** — a `provider/model` string (default `anthropic/claude-sonnet-4-6`),
   plus the **matching** provider's API key. Last Light is multi-provider: the
   `provider/` prefix picks the provider and the model id follows, e.g.

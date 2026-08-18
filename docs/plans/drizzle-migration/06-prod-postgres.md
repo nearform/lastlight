@@ -535,29 +535,199 @@ pool (no leaked connections).
 
 ## Done criteria
 
-- [ ] `src/state/pg-client.ts` — `makePgClient(url, driver)` dispatches to the
+- [x] `src/state/pg-client.ts` — `makePgClient(url, driver)` dispatches to the
       node-postgres or neon-serverless builder (each with per-builder dynamic
       driver imports + int8 parser + drizzle wrap); `resolvePgDriver(url, cfg?)`
       host heuristic, unit-tested.
-- [ ] `StateDb.open("postgres://…")` resolves the driver, builds the client, runs
+- [x] `StateDb.open("postgres://…")` resolves the driver, builds the client, runs
       the matching `drizzle/pg` migrator, returns a working `StateDb`; `close()`
       drains the pool. The Phase-4 throw is gone.
-- [ ] `pg` **and** `@neondatabase/serverless` in `apps/server/package.json`
-      `dependencies`; `@testcontainers/postgresql` in devDependencies; grep guard
-      confirms neither driver is in the sqlite (or the other driver's) runtime graph.
-- [ ] `database.driver` (`pg` | `neon`, env `DATABASE_DRIVER`) resolves
+- [x] `pg` **and** `@neondatabase/serverless` in `apps/server/package.json`
+      `dependencies`; ~~`@testcontainers/postgresql` in devDependencies~~ (not
+      needed — Deviations §3); grep guard confirms neither driver is in the
+      sqlite (or the other driver's) runtime graph — now an executable test.
+- [x] `database.driver` (`pg` | `neon`, env `DATABASE_DRIVER`) resolves
       env > overlay > default, unset → URL auto-detect; documented in
-      default.yaml / .env.example.
-- [ ] `tests/state/db.pg-server.test.ts` runs the full `runStateDbSuite` +
+      default.yaml / .env.example. Plus `database.poolMax` / `DATABASE_POOL_MAX`.
+- [x] `tests/state/db.pg-server.test.ts` runs the full `runStateDbSuite` +
       concurrency-probe against real Postgres, opt-in, green in CI.
-- [ ] `database.url` credentials redacted from `publicConfig`; test covers it.
-- [ ] `lastlight server setup` offers SQLite (default) vs external Postgres;
+- [x] `database.url` credentials redacted from `publicConfig`; test covers it.
+      Also from the boot log, which the doc missed (Deviations §5).
+- [x] `lastlight server setup` offers SQLite (default) vs external Postgres;
       the postgres answer writes `DATABASE_URL` to `instance/secrets/.env` and
-      the sqlite answer writes **nothing**; `--yes` takes SQLite silently;
+      the sqlite answer writes **nothing**; ~~`--yes` takes SQLite silently~~
+      (structurally moot — Deviations §6);
       `buildOverlayConfig()` never emits a `postgres://` URL (tested);
       `packages/cli/CLAUDE.md` + the `lastlight-server` skill list the new step.
-- [ ] Docs (`spec/10-state.md`, `CLAUDE.md`, default.yaml, .env.example) describe
-      the production PG runtime + single-writer constraint; docs-sync run clean.
-- [ ] Backward-compat: no-DATABASE_URL boot identical to sqlite; verified.
+- [x] Docs (`spec/10-state.md`, `spec/02-configuration.md`, `CLAUDE.md`,
+      default.yaml, .env.example) describe the production PG runtime +
+      single-writer constraint; docs-sync run clean (site: `docs/configuration`,
+      `docs/cli`, `docs/production`).
+- [x] Backward-compat: no-DATABASE_URL boot identical to sqlite; verified.
+- [x] **(Added to scope)** sqlite → postgres data migration —
+      `src/state/data-migrate.ts` + the `lastlight-state` bin + `lastlight
+      server db check|migrate`. See Deviations §9.
 - [ ] Minor npm release + GHCR rebuild shipped (publish.yml green).
-- [ ] README.md Phase 6 checkbox ticked; deviations recorded below.
+- [x] README.md Phase 6 checkbox ticked; deviations recorded below.
+
+## Deviations
+
+*Executed 2026-08-18 on branch `phase6-prod-postgres`, off `main` at v0.26.0.
+Baseline before: 207 test files. After: **211 files**, plus one opt-in file that
+skips without `PG_INTEGRATION=1` (so 6 skipped, was 5). Full workspace gate
+(`pnpm turbo run typecheck test build`) green.*
+
+### 1. §1's `makePgClient` snippet would have thrown on first use ⚠
+
+The snippet is `drizzle(pool)` with no `{ schema }`. That is precisely the trap
+the README's own "Tables" row warns about: `tablesOf(client)` reads the schema
+back off `db._.fullSchema`, so a client built without it throws
+"StateClient was constructed without its schema" on the first query.
+
+So **`pg-client.ts` imports `schema/pg.ts`** — and that breaks the Phase-4
+invariant "nothing under `src/` may import `schema/pg.ts`", which the phase doc
+did not anticipate. The invariant is not dropped, it is **narrowed**: exactly
+one module may, it is the module that builds Postgres clients, and it is itself
+only reachable through the dynamic import on `open()`'s postgres branch — so a
+SQLite deployment still never loads it. `tests/state/driver-isolation.test.ts`
+now pins both halves (no static driver import anywhere under `src/`; exactly one
+importer of `schema/pg.ts`), which replaces the doc's manual Verification grep
+with something CI runs.
+
+### 2. `resolvePgDriver` and the redaction live in `lastlight-shared`
+
+§1a puts `resolvePgDriver` "beside `makePgClient`". It cannot live there: §7a's
+wizard needs it too, and `packages/cli` may never gain an edge to
+`lastlight-core`. New module `packages/shared/src/database-url.ts` —
+`isPostgresUrl` / `isPgDriver` / `resolvePgDriver` / `redactDbUrl` /
+`parsePgEndpoint` — for the same reason `repo-config-schema.ts` lives there.
+It imports no driver, so it adds nothing to the CLI's dependency graph.
+
+`redactDbUrl` is hand-parsed rather than `new URL()`-based, because `new URL()`
+throws on an unencoded `@` in a password — exactly the case where getting
+redaction right matters most. It fails **closed**: anything whose authority
+boundary is ambiguous is masked wholesale.
+
+### 3. No `@testcontainers/postgresql`
+
+The Files table asks for it as a devDependency. The leg reads `PG_TEST_URL` /
+`DATABASE_URL` and CI uses a `services: postgres:16` block (which §5 itself
+recommends over the testcontainers path), so the dependency buys nothing —
+locally you point it at any server, `docker run` included. One fewer devDep and
+no Docker-in-Docker.
+
+### 4. Per-test isolation needs the MIGRATOR's journal to move too
+
+§4 says "a fresh SCHEMA (`CREATE SCHEMA t_<n>; SET search_path`)". True but
+insufficient: the drizzle pg migrator records applied migrations in
+`drizzle.__drizzle_migrations`, which is NOT inside the test schema. Shared, the
+second test's `migrate()` sees the journal already full, no-ops, and hands back
+a schema with **no tables** — a failure that looks like a query bug. The leg
+passes `migrationsSchema: schema` so the journal moves with the tables. The
+search_path rides the connection string (`?options=-c search_path=…`), so
+`makePgClient`'s production signature needed no test-only parameter.
+
+### 5. The credential leaked to the boot log as well, and the fix is by VALUE
+
+§6 only names `publicConfig`. `src/index.ts` also had
+`configLog.info("Database", { path: dbTarget })` — the raw URL, into a
+structured log that outlives the process. Fixed with the same `redactDbUrl`.
+
+And the redaction rule is a **leaf-value** rule inside `redactPublic()` (any
+string that is a `postgres://` URL is masked, wherever it appears), not the
+"add `database.url` to the sensitive matcher" option §6 offers. Two reasons: a
+key rule cannot distinguish `database.url` from `publicUrl`/`avatarUrl` without
+a path-aware walk, and a `file:` URL should stay legible — §6 wanted that
+anyway. As a value rule it also cannot be defeated by someone nesting or
+renaming the slot later.
+
+### 6. §7a rule 3 (`--yes` → SQLite) is structurally moot
+
+`runSetup()` takes no options and hard-exits unless stdin is a TTY, so there is
+no non-interactive path to acquire a new required answer. Nothing to do; noted
+so a future reader does not go looking for the branch.
+
+### 7. The connectivity check: §7a's preferred option is not available here
+
+§7a prefers probing inside the agent image (`docker run --rm --entrypoint node
+lastlight-agent …`) and asks for it to be costed. **The cost is that it cannot
+work at that point in the wizard**: `writeConfig()` runs before
+`dockerBuildAndLaunch()`, so on a first install the image does not exist yet.
+
+Shipped instead: a bare **TCP connect** to the parsed host/port (`node:net`, no
+new dependency, no `pg` edge), with the honest caveat printed — credentials and
+the database name are not checked — plus `lastlight server db check`, which IS
+the full probe and DOES run inside the image, available the moment the build
+finishes. On failure the wizard offers to keep the URL anyway, per §7a.
+
+### 8. `DATABASE_DRIVER` is never written automatically
+
+§7a rule 4 says write it "only when the operator's URL forces the non-obvious
+answer". No such case is detectable at wizard time: the heuristic already
+handles `*.neon.tech`, and the one case needing an explicit driver — Neon behind
+a custom domain — is by definition indistinguishable from the host. So the
+wizard reports the detected driver and emits a **commented** `# DATABASE_DRIVER=neon`
+line explaining when to uncomment it. Pinned by a test that the line is present
+and inactive.
+
+### 9. §8 (the data migration) was pulled INTO scope
+
+Requested during execution, so "OUT OF SCOPE" above is superseded. Shipped as
+`src/state/data-migrate.ts` (`migrateStateData` / `copyStateData`), the
+`lastlight-state` bin (`src/state/state-cli.ts`, added to `package.json` `bin`),
+and `lastlight server db check|migrate` in the CLI. Design notes worth keeping:
+
+- It is a **read-and-insert loop through the two Drizzle schemas**, exactly as
+  §8 predicted: identical `$type<T>` on both dialects makes the JS value in the
+  middle dialect-neutral. Booleans, jsonb and floats need no special-casing.
+- The CLI wrapper runs it **inside the agent container** — the same reasoning as
+  §7a's connectivity check, and here the image always exists.
+  `STATE_CLI_PATH = /app/dist/state/state-cli.js`, **not**
+  `/app/apps/server/dist/…`: the Dockerfile's `pnpm deploy` flattens the package
+  into `/app` (matching `CMD ["node", "dist/index.js"]`).
+- With no `--to`, the target is the container's own `DATABASE_URL`, so the
+  credential never reaches the host's process list or shell history. That is the
+  documented path.
+- Four guards, each a data-loss bug if dropped: both ends migrated first, FK
+  order (`messaging_sessions` → `messaging_messages`, the only declared FK), an
+  empty-target precondition with a `--truncate` escape hatch, and a
+  **coverage check against the schema's own exports** so a sixteenth table added
+  later fails loudly instead of being silently skipped.
+- `StateMigrationError.wrote` distinguishes a refusal *before* the first insert
+  from a failure *after* it. Telling an operator to `--truncate` a database this
+  run never touched is how they delete the wrong one.
+- `describeError` unwraps the cause chain, because Drizzle's own message is just
+  the SQL: without it, a wrong password reads as "Failed query: select 1".
+
+### 10. What the real production migration found
+
+Verified against a copy of the drizby snapshot (43 MB, **4,666 rows across all
+fifteen tables**): **0.7 s**, row counts verified per table, and every row of
+`executions` (2,238) and `workflow_runs` (1,629) **field-for-field identical**
+after normalising object key order. The harness then booted against the result
+(redacted boot log, `dialect: postgres`, zero errors) and a `finishRun`
+transaction wrote through it.
+
+Three differences are inherent and immaterial, and are documented rather than
+"fixed":
+
+1. **jsonb normalises object key order** (`{phase,timestamp,success}` becomes
+   `{phase,success,timestamp}`). Semantically identical; only a naive
+   `JSON.stringify` comparison sees it.
+2. **`SUM()` over floats accumulates in a different order** — `dailyStats()`'s
+   `costUsd` differs in the last ULP (`74.045826` vs `74.04582599999999`). The
+   per-row `cost_usd` values are byte-identical; this is float addition order,
+   not data loss.
+3. **`messaging_messages.id` is reassigned** by design — `GENERATED ALWAYS AS
+   IDENTITY` rejects an explicit value, nothing references the id, and reading
+   in id order preserves the message sequence.
+
+### 11. Not done
+
+- **The release.** Version bumps + the GitHub Release that fires `publish.yml`
+  are deliberately left for a human call, per the npm-release-policy.
+- **The Neon manual smoke.** §4 lists it as a nice-to-have against a real Neon
+  dev branch. The driver is wired, unit-tested on the host heuristic and
+  isolated from the node-postgres path, but **no query has run over
+  `@neondatabase/serverless`** — treat Neon as untested-in-anger until someone
+  points a dev branch at it.

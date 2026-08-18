@@ -46,6 +46,8 @@ const BOOLEAN_FLAGS = new Set([
   "version", "v",
   // `server` lifecycle flags
   "no-core", "no-overlay", "no-build", "no-prune", "yes", "local",
+  // `server db migrate` — count without writing / wipe the target first
+  "dry-run", "truncate",
   // `setup` mode selectors (skip the interactive client/server prompt)
   "client", "server",
   // `fork` / `repo fork` — overwrite existing assets
@@ -326,6 +328,10 @@ ${chalk.bold("Server")} (host-local — run on the server; manages the docker st
                                      [--no-core] [--no-overlay] [--no-build] [--no-prune] [--local] [--yes]
                                      ${chalk.dim("(pulls prebuilt images from GHCR by default; --local builds from source; prunes old image versions unless --no-prune)")}
   lastlight server status            Compose state + core/overlay version drift
+  lastlight server db check          Can the agent reach its state database? ${chalk.dim("[--url <url>]")}
+  lastlight server db migrate        Copy the SQLite state into Postgres — one way, verified
+                                     ${chalk.dim("[--to <postgres url>, default: the container's DATABASE_URL]")}
+                                     ${chalk.dim("[--from <path>] [--driver pg|neon] [--batch n] [--dry-run] [--truncate]")}
   ${chalk.dim("Working dir resolves from --home, then LASTLIGHT_HOME, then ~/.lastlight, then ~/lastlight.")}`,
 
   fork: `
@@ -1021,7 +1027,7 @@ async function cmdServer(): Promise<void> {
   // ── host-local lifecycle (run on the server, not over HTTP) ──────────────
   // setup | start | stop | restart | update | status operate on the working
   // directory (checkout + overlay) via git + docker compose. See cli-server.ts.
-  if (sub === "setup" || sub === "build" || sub === "start" || sub === "stop" || sub === "restart" || sub === "update" || sub === "status") {
+  if (sub === "setup" || sub === "build" || sub === "start" || sub === "stop" || sub === "restart" || sub === "update" || sub === "status" || sub === "db") {
     const home = typeof flags.home === "string" ? flags.home : undefined;
     const yes = flags.yes === true;
     const service = positionals[2];
@@ -1045,6 +1051,20 @@ async function cmdServer(): Promise<void> {
         if (JSON_OUT) out("", res);
         return;
       }
+      // `db check | migrate` — the state-database tools, run inside the agent
+      // image (the CLI has no edge to lastlight-core, which is where the
+      // drivers and schemas live).
+      case "db": return srv.serverDb(service, {
+        home, yes,
+        url: typeof flags.url === "string" ? flags.url : undefined,
+        to: typeof flags.to === "string" ? flags.to : undefined,
+        from: typeof flags.from === "string" ? flags.from : undefined,
+        driver: typeof flags.driver === "string" ? flags.driver : undefined,
+        batch: typeof flags.batch === "string" ? flags.batch : undefined,
+        dryRun: flags["dry-run"] === true,
+        truncate: flags.truncate === true,
+        json: JSON_OUT,
+      });
     }
   }
 
@@ -1052,6 +1072,7 @@ async function cmdServer(): Promise<void> {
     "Usage:\n" +
       "  lastlight server list|logs [service|container] [--tail n] [--since dur] [--follow]\n" +
       "  lastlight server setup|build|start|stop|restart|update|status [service] [--home dir]\n" +
+      "  lastlight server db check [--url <url>] | db migrate [--to <url>] [--dry-run] [--truncate]\n" +
       "    update flags: --no-core --no-overlay --no-build --no-prune --local --yes\n" +
       "    (update pulls prebuilt images from GHCR by default; --local builds from source)",
   );

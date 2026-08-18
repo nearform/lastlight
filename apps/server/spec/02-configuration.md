@@ -27,7 +27,11 @@ interface LastLightConfig {
                                           // Derives the @mention handle, botLogin, and git author.
   botLogin: string;                       // "<botName>[bot]" unless BOT_LOGIN overrides
   dbPath: string;
-  database: { url?: string };             // libsql-style state DB URL; absent = file: + dbPath
+  database: {                             // state DB. url: libsql-style (file:/:memory:) OR postgres://
+    url?: string;                         //   absent = file: + dbPath
+    driver?: "pg" | "neon";               //   postgres only; absent = auto-detect from the host
+    poolMax?: number;                     //   postgres only; default 10
+  };
   overlayDir?: string;                    // resolved $LASTLIGHT_OVERLAY_DIR, if set
   builtInRoot: string;                    // packaged asset root (parent of config/default.yaml)
   stateDir: string;
@@ -645,7 +649,9 @@ file/default location.
 |---|---|---|
 | `STATE_DIR` | root for all persistent state | `./data` |
 | `DB_PATH` | SQLite file | `$STATE_DIR/lastlight.db` |
-| `DATABASE_URL` | state DB as a libsql-style URL (`file:…`, `:memory:`) — wins over `DB_PATH`; also settable as `database.url` in YAML | unset |
+| `DATABASE_URL` | state DB — a libsql-style URL (`file:…`, `:memory:`) or `postgres://…`; wins over `DB_PATH`; also settable as `database.url` in YAML | unset |
+| `DATABASE_DRIVER` | how a `postgres://` URL is carried: `pg` (node-postgres TCP pool) or `neon` (`@neondatabase/serverless` WebSocket pool). Unset auto-detects from the host (`*.neon.tech` → `neon`) | unset |
+| `DATABASE_POOL_MAX` | Postgres pool ceiling (`database.poolMax`) | `10` |
 | `LASTLIGHT_SESSIONS_DIR` | JSONL session envelopes (dashboard reads here) | `$STATE_DIR/agent-sessions` |
 | `BUILD_ASSETS_DIR` | server-mode build-asset store root | `$STATE_DIR/build-assets` |
 | `LASTLIGHT_OVERLAY_DIR` | deployment overlay root — `config.yaml` + asset overrides (`workflows/`, `workflows/prompts/`, `skills/`, `agent-context/`) + `secrets/`. Boot fails loudly if it's set but missing or unpopulated. | unset (no overlay) |
@@ -656,10 +662,21 @@ file/default location.
 `database.url` (ships `null`) → `file:` + `dbPath` (i.e. `DB_PATH` or
 `$STATE_DIR/lastlight.db`). `database.url` rides the ordinary config resolver,
 so the dashboard's `/config` provenance tree shows where the effective value
-came from. A `postgres://` URL is recognized and **throws at boot** — the slot
-is reserved, the Postgres runtime is test-only for now (see
+came from. A `postgres://` URL selects the **Postgres runtime** — an
+external/managed server, pooled, with its own generated migrations (see
 [State](/spec/10-state#dialect-posture)). Setting none of these is the
-pre-Drizzle behaviour, so existing deployments are unaffected.
+pre-Drizzle behaviour, so existing deployments are unaffected, and SQLite
+remains the default.
+
+**Put a `postgres://` URL in `DATABASE_URL`, not in `config.yaml`.** It is a
+valid YAML slot, which is exactly the trap: the overlay is a git repo with a
+GitHub remote, so a credentialed URL there is a password pushed to a remote,
+and the dashboard's masking happens at render time and cannot un-commit
+anything. `lastlight server setup` writes this one slot to
+`instance/secrets/.env` for that reason. Credentials in a `postgres://` value
+are masked by VALUE wherever they appear in the `/config` provenance tree and
+in the boot log — never by key, since `url` must keep matching `publicUrl` and
+`avatarUrl`, and a `file:` URL should stay legible.
 
 There is **no** `WORKFLOW_DIR` env var and no `workflowDir` config field: assets
 resolve layer-wise (built-in root ⊕ overlay root, plus a per-run repo layer), not

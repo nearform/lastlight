@@ -258,7 +258,19 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td><code>DATABASE_URL</code></td>
 				<td>No</td>
 				<td><em>unset</em></td>
-				<td>The state database as a libsql-style URL (<code>file:/app/data/lastlight.db</code>, <code>:memory:</code>). Wins over <code>DB_PATH</code>; also settable as <code>database.url</code> in <code>config.yaml</code>. Unset means <code>file:</code> + the <code>DB_PATH</code> path above — the historical behaviour, so existing deployments need change nothing. A <code>postgres://</code> URL is recognized but throws at boot: the schema and test suite run on Postgres, the runtime does not yet.</td>
+				<td>The state database — a libsql-style URL (<code>file:/app/data/lastlight.db</code>, <code>:memory:</code>) or a <code>postgres://user:pass@host:5432/db</code> URL for an external/managed Postgres. Wins over <code>DB_PATH</code>; also settable as <code>database.url</code> in <code>config.yaml</code>. Unset means <code>file:</code> + the <code>DB_PATH</code> path above — the historical behaviour, so existing deployments need change nothing, and SQLite stays the default. <strong>Put a <code>postgres://</code> URL here, not in <code>config.yaml</code></strong>: the overlay is version-controlled and pushed to a GitHub remote, and redaction happens at render time, which cannot un-commit anything.</td>
+			</tr>
+			<tr>
+				<td><code>DATABASE_DRIVER</code></td>
+				<td>No</td>
+				<td><em>auto</em></td>
+				<td>How a <code>postgres://</code> URL is carried: <code>pg</code> (node-postgres, a TCP pool — self-hosted, RDS, Cloud SQL, Supabase) or <code>neon</code> (<code>@neondatabase/serverless</code>, a WebSocket pool). Unset auto-detects from the host (<code>*.neon.tech</code> &rarr; <code>neon</code>); set it explicitly only for Neon behind a custom domain.</td>
+			</tr>
+			<tr>
+				<td><code>DATABASE_POOL_MAX</code></td>
+				<td>No</td>
+				<td><code>10</code></td>
+				<td>Postgres connection-pool ceiling (<code>database.poolMax</code>). Last Light runs a single instance — Postgres is a storage choice, not multi-instance HA.</td>
 			</tr>
 			<tr>
 				<td><code>WORKFLOW_DIR</code></td>

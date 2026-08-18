@@ -19,6 +19,8 @@ describe("loadConfig overlay", () => {
     vi.stubEnv("LASTLIGHT_OVERLAY_DIR", "");
     vi.stubEnv("OTEL_EXPORTER_OTLP_HEADERS", "");
     vi.stubEnv("DATABASE_URL", "");
+    vi.stubEnv("DATABASE_DRIVER", "");
+    vi.stubEnv("DATABASE_POOL_MAX", "");
   });
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -142,6 +144,84 @@ describe("loadConfig overlay", () => {
       writeFileSync(join(overlay, "config.yaml"), `managedRepos:\n  - acme/repo\ndatabase:\n  url: null\n`);
       vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
       expect(loadConfig().database.url).toBeUndefined();
+    });
+  });
+
+  // The Postgres runtime's two extra knobs (Phase 6). Both are absent by
+  // default — `driver` unset means "auto-detect from the URL host", which is
+  // resolved in `StateDb.open()`, not here.
+  describe("database.driver / database.poolMax", () => {
+    it("are undefined by default", () => {
+      const cfg = loadConfig();
+      expect(cfg.database.driver).toBeUndefined();
+      expect(cfg.database.poolMax).toBeUndefined();
+    });
+
+    it("reads them from the overlay and lets env win", () => {
+      const overlay = tmp();
+      writeFileSync(
+        join(overlay, "config.yaml"),
+        `managedRepos:\n  - acme/repo\ndatabase:\n  driver: neon\n  poolMax: 4\n`,
+      );
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+      expect(loadConfig().database).toMatchObject({ driver: "neon", poolMax: 4 });
+
+      vi.stubEnv("DATABASE_DRIVER", "pg");
+      vi.stubEnv("DATABASE_POOL_MAX", "25");
+      expect(loadConfig().database).toMatchObject({ driver: "pg", poolMax: 25 });
+    });
+
+    it("ignores a nonsense driver rather than failing boot", () => {
+      const overlay = tmp();
+      writeFileSync(
+        join(overlay, "config.yaml"),
+        `managedRepos:\n  - acme/repo\ndatabase:\n  driver: mysql\n  poolMax: 0\n`,
+      );
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+      expect(loadConfig().database.driver).toBeUndefined();
+      expect(loadConfig().database.poolMax).toBeUndefined();
+      vi.stubEnv("DATABASE_DRIVER", "neon-http");
+      expect(loadConfig().database.driver).toBeUndefined();
+    });
+  });
+
+  /**
+   * A `postgres://user:pass@…` URL in `database.url` is a credential, and the
+   * dashboard's /config view echoes every non-secret leaf. `SENSITIVE_KEY_RE`
+   * does not match `url` (it must not — `publicUrl`/`avatarUrl` are not
+   * secrets), so this is masked by VALUE. The `file:` case is the other half of
+   * the contract: it stays legible, which is why a blanket key rule was wrong.
+   */
+  describe("database.url credential redaction", () => {
+    it("masks a postgres:// URL in every public bundle, keeping host and db", () => {
+      const overlay = tmp();
+      writeFileSync(
+        join(overlay, "config.yaml"),
+        `managedRepos:\n  - acme/repo\ndatabase:\n  url: postgres://lastlight:hunter2@db.internal:5432/lastlight\n`,
+      );
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+      const cfg = loadConfig();
+
+      // The live value is untouched — redaction is a RENDERING concern.
+      expect(cfg.database.url).toBe("postgres://lastlight:hunter2@db.internal:5432/lastlight");
+
+      const serialized = JSON.stringify(cfg.publicConfig);
+      expect(serialized).not.toContain("hunter2");
+      const masked = "postgres://***:***@db.internal:5432/lastlight";
+      expect((cfg.publicConfig.overlay as any).database.url).toBe(masked);
+      expect((cfg.publicConfig.merged as any).database.url).toBe(masked);
+    });
+
+    it("leaves a file: URL visible", () => {
+      const overlay = tmp();
+      writeFileSync(
+        join(overlay, "config.yaml"),
+        `managedRepos:\n  - acme/repo\ndatabase:\n  url: file:/app/data/lastlight.db\n`,
+      );
+      vi.stubEnv("LASTLIGHT_OVERLAY_DIR", overlay);
+      expect((loadConfig().publicConfig.merged as any).database.url).toBe(
+        "file:/app/data/lastlight.db",
+      );
     });
   });
 
