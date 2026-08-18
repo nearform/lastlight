@@ -30,6 +30,10 @@ Then read, in order: **this README** (locked decisions + the drift ledger
 above) → **[00-architecture.md](00-architecture.md)** → **your phase doc**.
 Check "Status / todo list" below for the next unticked phase.
 
+**Next up is Phase 4**, whose doc opens with its own "▶ Start here" block and a
+⚠ block naming a deliverable the original plan missed — read both before
+writing any code: [04-postgres-pglite.md](04-postgres-pglite.md).
+
 A kickoff prompt that needs no other context:
 
 > Continue the Drizzle migration on the `drizzle-migration` branch. Read
