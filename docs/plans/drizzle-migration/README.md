@@ -255,7 +255,9 @@ each must leave the repo green before the next starts.
   **or** Neon serverless via `drizzle-orm/neon-serverless`) + `pg` /
   `@neondatabase/serverless` runtime deps (lazy per-driver), `open()` builds a
   real PG client instead of throwing, full state suite green against a real
-  Postgres server, `database.driver` slot, credential redaction, deploy docs +
+  Postgres server, `database.driver` slot, credential redaction, **a
+  `lastlight server setup` prompt** (§7a — SQLite default, Postgres URL to
+  `secrets/.env` and never to the version-controlled overlay), deploy docs +
   release. Amends locked decision 3 (test-only → operator-selectable). *(risk:
   medium)*
 
