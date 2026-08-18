@@ -5,9 +5,14 @@ import { eq } from "drizzle-orm";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import * as sqliteSchema from "./schema/sqlite.js";
-import { cronOverrides, workflowOverrides } from "./schema/sqlite.js";
 import { applyLegacySqliteCompat } from "./legacy-sqlite.js";
-import { makeOpSerializer, type Dialect, type StateClient } from "./client.js";
+import {
+  makeOpSerializer,
+  tablesOf,
+  type Dialect,
+  type StateClient,
+  type StateTables,
+} from "./client.js";
 import { ExecutionStore } from "./execution-store.js";
 import { CronRunStore } from "./cron-run-store.js";
 import { ApprovalStore } from "./approval-store.js";
@@ -118,11 +123,20 @@ export class StateDb {
    */
   readonly cronRuns: CronRunStore;
 
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
   private constructor(
     private readonly _client: StateClient,
     private readonly _dialect: Dialect,
     private readonly closer?: () => void,
   ) {
+    this.t = tablesOf(_client);
+
     // ONE serializer per CONNECTION, handed to every store that opens a
     // transaction. A per-store chain would leave WorkflowRunStore's five named
     // ops racing TeamStore's four on this same client — see makeOpSerializer.
@@ -156,7 +170,9 @@ export class StateDb {
    */
   static async open(pathOrUrl?: string): Promise<StateDb> {
     const input = pathOrUrl || DEFAULT_DB_PATH;
-    if (/^postgres(ql)?:\/\//.test(input)) {
+    // Case-insensitive: URL schemes are, and `POSTGRES://…` reaching the libsql
+    // client produces an opaque ConnectionFailed instead of this message.
+    if (/^postgres(ql)?:\/\//i.test(input)) {
       throw new Error(
         `PG runtime not enabled: StateDb.open() cannot open "${input}". ` +
           `The Postgres dialect is test-only for now — construct it with StateDb.fromClient().`,
@@ -200,6 +216,7 @@ export class StateDb {
 
   /** Get the override row for a single cron, or null if none. */
   async getCronOverride(name: string): Promise<CronOverride | null> {
+    const { cronOverrides } = this.t;
     const [row] = await this._client
       .select()
       .from(cronOverrides)
@@ -210,6 +227,7 @@ export class StateDb {
 
   /** All override rows keyed by cron name. */
   async getAllCronOverrides(): Promise<Map<string, CronOverride>> {
+    const { cronOverrides } = this.t;
     const rows = await this._client.select().from(cronOverrides);
     const map = new Map<string, CronOverride>();
     for (const row of rows) {
@@ -231,6 +249,7 @@ export class StateDb {
     name: string,
     patch: { enabled?: boolean; schedule?: string | null; updatedBy?: string },
   ): Promise<void> {
+    const { cronOverrides } = this.t;
     const now = new Date().toISOString();
     const existing = await this.getCronOverride(name);
     const enabled = patch.enabled ?? existing?.enabled ?? true;
@@ -252,6 +271,7 @@ export class StateDb {
 
   /** Remove the override entirely (revert to YAML defaults). */
   async clearCronOverride(name: string): Promise<void> {
+    const { cronOverrides } = this.t;
     await this._client.delete(cronOverrides).where(eq(cronOverrides.name, name));
   }
 
@@ -262,6 +282,7 @@ export class StateDb {
    * `workflow_overrides` row says otherwise.
    */
   async isWorkflowEnabled(name: string): Promise<boolean> {
+    const { workflowOverrides } = this.t;
     const [row] = await this._client
       .select({ enabled: workflowOverrides.enabled })
       .from(workflowOverrides)
@@ -271,6 +292,7 @@ export class StateDb {
   }
 
   async getWorkflowOverride(name: string): Promise<WorkflowOverride | null> {
+    const { workflowOverrides } = this.t;
     const [row] = await this._client
       .select()
       .from(workflowOverrides)
@@ -280,6 +302,7 @@ export class StateDb {
   }
 
   async getAllWorkflowOverrides(): Promise<Map<string, WorkflowOverride>> {
+    const { workflowOverrides } = this.t;
     const rows = await this._client.select().from(workflowOverrides);
     const map = new Map<string, WorkflowOverride>();
     for (const row of rows) map.set(row.name, { ...row, updatedBy: row.updatedBy ?? null });
@@ -287,6 +310,7 @@ export class StateDb {
   }
 
   async setWorkflowEnabled(name: string, enabled: boolean, updatedBy?: string): Promise<void> {
+    const { workflowOverrides } = this.t;
     const now = new Date().toISOString();
     await this._client
       .insert(workflowOverrides)

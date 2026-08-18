@@ -183,7 +183,7 @@ importers:
         version: 10.0.1
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/better-sqlite3@7.6.13)(better-sqlite3@13.0.3)
+        version: 0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/better-sqlite3@7.6.13)(better-sqlite3@13.0.3)
       hono:
         specifier: ^4.13.2
         version: 4.13.2
@@ -209,6 +209,9 @@ importers:
         specifier: ^4.3.6
         version: 4.4.3
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.5
+        version: 0.5.5
       '@opentelemetry/context-async-hooks':
         specifier: ^2.10.0
         version: 2.10.0(@opentelemetry/api@1.9.1)
@@ -1103,6 +1106,9 @@ packages:
   '@earendil-works/pi-tui@0.84.1':
     resolution: {integrity: sha512-udeXFbgEhJ6JiB0uguwNVNkDy2FENfmtQwPcY+/iJ8GWeq18wkal1tKqa5YyeH0IqtX1vG0cGh8zfSYzyzVuLA==}
     engines: {node: '>=22.19.0'}
+
+  '@electric-sql/pglite@0.5.5':
+    resolution: {integrity: sha512-QeZ+oB7QaU4EJj2awrB8hwFZ5TXxLRBQ9Gfq0dQauYDdWsRtuWRCERgtri35vRfL07KQHlVlc/4Qxvn7a5AXeA==}
 
   '@emmetio/abbreviation@2.3.3':
     resolution: {integrity: sha512-mgv58UrU3rh4YgbE/TzgLQwJ3pFsHHhCLqY20aJq+9comytTXUDNGG/SMtSeMJdkpxgXSXunBGLD8Boka3JyVA==}
@@ -8663,6 +8669,8 @@ snapshots:
       get-east-asian-width: 1.6.0
       marked: 18.0.5
 
+  '@electric-sql/pglite@0.5.5': {}
+
   '@emmetio/abbreviation@2.3.3':
     dependencies:
       '@emmetio/scanner': 1.0.4
@@ -12280,8 +12288,9 @@ snapshots:
       esbuild: 0.25.12
       tsx: 4.23.1
 
-  drizzle-orm@0.45.2(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/better-sqlite3@7.6.13)(better-sqlite3@13.0.3):
+  drizzle-orm@0.45.2(@electric-sql/pglite@0.5.5)(@libsql/client@0.17.4)(@opentelemetry/api@1.9.1)(@types/better-sqlite3@7.6.13)(better-sqlite3@13.0.3):
     optionalDependencies:
+      '@electric-sql/pglite': 0.5.5
       '@libsql/client': 0.17.4
       '@opentelemetry/api': 1.9.1
       '@types/better-sqlite3': 7.6.13

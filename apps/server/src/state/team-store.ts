@@ -1,11 +1,11 @@
 import { and, asc, eq, max, sql } from "drizzle-orm";
-import { nullsToUndefined, type OpSerializer, type StateClient } from "./client.js";
 import {
-  githubTeamMembers,
-  githubTeamRepos,
-  githubTeams,
-  githubVisibilitySync,
-} from "./schema/sqlite.js";
+  nullsToUndefined,
+  tablesOf,
+  type OpSerializer,
+  type StateClient,
+  type StateTables,
+} from "./client.js";
 
 /**
  * Outcome of the last visibility resolution for one login.
@@ -72,11 +72,19 @@ export interface CachedVisibility {
 export class TeamStore {
   private serialize: OpSerializer;
 
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
   constructor(
     private client: StateClient,
     deps: { serialize: OpSerializer },
   ) {
     this.serialize = deps.serialize;
+    this.t = tablesOf(client);
   }
 
   /**
@@ -95,6 +103,7 @@ export class TeamStore {
     detail?: string;
     at?: string;
   }): Promise<void> {
+    const { githubTeamMembers, githubTeamRepos, githubTeams, githubVisibilitySync } = this.t;
     const now = input.at ?? new Date().toISOString();
     await this.serialize(() =>
       this.client.transaction(async (tx) => {
@@ -150,6 +159,7 @@ export class TeamStore {
 
   /** The freshness/outcome row for a login, or null if never resolved. */
   async getSync(login: string): Promise<VisibilitySync | null> {
+    const { githubVisibilitySync } = this.t;
     const [row] = await this.client
       .select()
       .from(githubVisibilitySync)
@@ -186,6 +196,7 @@ export class TeamStore {
    * then must not reappear just because a team still grants it).
    */
   async reposForLogin(login: string): Promise<CachedVisibility> {
+    const { githubTeamMembers, githubTeamRepos, githubTeams } = this.t;
     const rows = await this.client
       .selectDistinct({ repo: githubTeamRepos.repo })
       .from(githubTeamMembers)
@@ -227,6 +238,7 @@ export class TeamStore {
 
   /** Forget one login's answer — it will be re-resolved on the next request. */
   async invalidateLogin(login: string): Promise<void> {
+    const { githubTeamMembers, githubVisibilitySync } = this.t;
     await this.serialize(() =>
       this.client.transaction(async (tx) => {
         await tx.delete(githubTeamMembers).where(eq(githubTeamMembers.login, login));
@@ -244,6 +256,7 @@ export class TeamStore {
    * blast radius of an org-side change.
    */
   async invalidateTeam(org: string, slug: string): Promise<string[]> {
+    const { githubTeamMembers, githubTeamRepos, githubTeams, githubVisibilitySync } = this.t;
     // Deliberately OUTSIDE the transaction, as it always has been.
     const members = await this.client
       .select({ login: githubTeamMembers.login })
@@ -274,6 +287,7 @@ export class TeamStore {
 
   /** Drop the whole cache (admin re-sync, or an `organization` event we can't scope). */
   async invalidateAll(): Promise<void> {
+    const { githubTeamMembers, githubTeamRepos, githubTeams, githubVisibilitySync } = this.t;
     await this.serialize(() =>
       this.client.transaction(async (tx) => {
         await tx.delete(githubTeamRepos);
@@ -286,6 +300,7 @@ export class TeamStore {
 
   /** Most recent successful resolution across all logins — powers the coarse `synced` flag. */
   async lastSyncedAt(): Promise<string | null> {
+    const { githubVisibilitySync } = this.t;
     const [row] = await this.client
       .select({ at: max(githubVisibilitySync.syncedAt) })
       .from(githubVisibilitySync);

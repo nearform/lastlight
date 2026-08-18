@@ -23,7 +23,7 @@
  * helpers are pure; only the SQL projection reaches for the dialect seam.
  */
 import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
-import { strposExpr } from "./dialect.js";
+import { containsExpr } from "./dialect.js";
 
 /**
  * Split a possibly-qualified repo into the stored shape.
@@ -100,8 +100,9 @@ export function qualifyRepo(
  *
  * Takes the schema columns themselves and returns a composable `SQL` fragment
  * rather than a string, so it carries no interpolation hazard and its one
- * dialect-specific piece — sqlite `instr` vs Postgres `strpos` — goes through
- * {@link strposExpr} instead of being baked in.
+ * dialect-sensitive piece — the "is this already qualified" test, which sqlite
+ * wrote as `instr(repo,'/') > 0` and Postgres cannot parse at all — goes
+ * through {@link containsExpr} instead of being baked in.
  */
 export function qualifiedRepoSql(
   ownerCol: SQLWrapper,
@@ -111,7 +112,7 @@ export function qualifiedRepoSql(
   const fallback = unqualifiable === "bare" ? sql`${repoCol}` : sql`NULL`;
   return sql`CASE
     WHEN ${repoCol} IS NULL OR ${repoCol} = '' THEN NULL
-    WHEN ${strposExpr(repoCol, "/")} > 0 THEN ${repoCol}
+    WHEN ${containsExpr(repoCol, "/")} THEN ${repoCol}
     WHEN ${ownerCol} IS NOT NULL AND ${ownerCol} <> '' THEN ${ownerCol} || '/' || ${repoCol}
     ELSE ${fallback}
   END`;

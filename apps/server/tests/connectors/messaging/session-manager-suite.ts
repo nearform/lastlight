@@ -11,10 +11,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
-import type { StateClient } from "#src/state/client.js";
+import { tablesOf, type StateClient } from "#src/state/client.js";
 import { isUniqueViolation } from "#src/state/dialect.js";
 import type { SessionManager } from "#src/connectors/messaging/session-manager.js";
-import { messagingMessages, messagingSessions } from "#src/state/schema/sqlite.js";
 import type { Dialect } from "../../state/store-suite.js";
 
 export interface SessionSuiteCtx {
@@ -43,11 +42,16 @@ export function runSessionManagerSuite(
     let ctx: SessionSuiteCtx;
     let manager: SessionManager;
     let client: StateClient;
+    // The direct-row peeks below must address the tables of the dialect under
+    // test, not the sqlite ones — a sqliteTable driven by a PG client writes
+    // `1` into a boolean column and JSON.parses an already-parsed jsonb.
+    let t: ReturnType<typeof tablesOf>;
 
     beforeEach(async () => {
       ctx = await makeCtx();
       manager = ctx.manager;
       client = ctx.client;
+      t = tablesOf(client);
     });
 
     afterEach(async () => {
@@ -71,17 +75,17 @@ export function runSessionManagerSuite(
       // The old row should still exist (audit trail), just inactive — the
       // partial unique index only forbids two ACTIVE rows for the same key.
       const rows = await client
-        .select({ id: messagingSessions.id, active: messagingSessions.active })
-        .from(messagingSessions)
+        .select({ id: t.messagingSessions.id, active: t.messagingSessions.active })
+        .from(t.messagingSessions)
         .where(
           and(
-            eq(messagingSessions.platform, KEY.platform),
-            eq(messagingSessions.channelId, KEY.channelId),
-            eq(messagingSessions.threadId, KEY.threadId),
-            eq(messagingSessions.userId, KEY.userId),
+            eq(t.messagingSessions.platform, KEY.platform),
+            eq(t.messagingSessions.channelId, KEY.channelId),
+            eq(t.messagingSessions.threadId, KEY.threadId),
+            eq(t.messagingSessions.userId, KEY.userId),
           ),
         )
-        .orderBy(messagingSessions.createdAt);
+        .orderBy(t.messagingSessions.createdAt);
       expect(rows).toHaveLength(2);
       expect(rows.map((r) => r.active).sort()).toEqual([false, true]);
     });
@@ -118,7 +122,7 @@ export function runSessionManagerSuite(
         // The user + assistant rows of one turn are routinely written inside the
         // same whole-millisecond ISO timestamp, so `id` is the tiebreak.
         const now = new Date().toISOString();
-        await client.insert(messagingMessages).values([
+        await client.insert(t.messagingMessages).values([
           { sessionId: s.id, role: "user", content: "question", timestamp: now },
           { sessionId: s.id, role: "assistant", content: "answer", timestamp: now },
         ]);
@@ -142,9 +146,9 @@ export function runSessionManagerSuite(
         // Age it past SESSION_TIMEOUT_MS — what a workflow that ran longer than
         // 30 minutes between question and answer leaves behind.
         await client
-          .update(messagingSessions)
+          .update(t.messagingSessions)
           .set({ lastActivityAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() })
-          .where(eq(messagingSessions.id, s.id));
+          .where(eq(t.messagingSessions.id, s.id));
 
         expect(await manager.findActiveThreadSession("slack", KEY.channelId, KEY.threadId)).toBeNull();
         expect(await manager.hasActiveThread("slack", KEY.channelId, KEY.threadId)).toBe(false);
@@ -177,7 +181,7 @@ export function runSessionManagerSuite(
       // sqlite says "UNIQUE constraint failed", Postgres says "duplicate key …
       // 23505", and the helper walks the DrizzleQueryError cause chain for both.
       await expect(
-        client.insert(messagingSessions).values({
+        client.insert(t.messagingSessions).values({
           id: "dup",
           platform: KEY.platform,
           channelId: KEY.channelId,

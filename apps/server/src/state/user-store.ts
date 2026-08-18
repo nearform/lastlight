@@ -1,8 +1,7 @@
 import { randomUUID } from "crypto";
 import { asc, eq, sql } from "drizzle-orm";
-import { nullsToUndefined, type StateClient } from "./client.js";
+import { nullsToUndefined, tablesOf, type StateClient, type StateTables } from "./client.js";
 import { isUniqueViolation } from "./dialect.js";
-import { users } from "./schema/sqlite.js";
 
 /**
  * Who acted on / triggered a workflow, coarsely. Persisted in the
@@ -54,7 +53,7 @@ export interface User {
 }
 
 /** The row shape the builder returns for this table, before normalization. */
-type UserRow = typeof users.$inferSelect;
+type UserRow = StateTables["users"]["$inferSelect"];
 
 /**
  * Owns every read/write against the `users` table. Mirrors the other per-table
@@ -69,7 +68,16 @@ type UserRow = typeof users.$inferSelect;
  * method runs against the root client.
  */
 export class UserStore {
-  constructor(private client: StateClient) {}
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
+  constructor(private client: StateClient) {
+    this.t = tablesOf(client);
+  }
 
   /**
    * Upsert a GitHub-authenticated user on their stable numeric id. On conflict,
@@ -93,6 +101,7 @@ export class UserStore {
     email?: string | null;
     avatarUrl?: string | null;
   }): Promise<User> {
+    const { users } = this.t;
     const now = new Date().toISOString();
     const existing = await this.findByGithubId(input.githubId);
     if (existing) {
@@ -149,6 +158,7 @@ export class UserStore {
     name?: string | null;
     email?: string | null;
   }): Promise<User> {
+    const { users } = this.t;
     const now = new Date().toISOString();
     // Fast path: already linked. Incoming values win when present, which is
     // what the old `COALESCE(?, name)` spelled.
@@ -208,6 +218,7 @@ export class UserStore {
 
   /** Link a Slack user id onto an existing row (e.g. a GitHub login matched by email). */
   async linkSlackUser(userId: string, slackUserId: string): Promise<void> {
+    const { users } = this.t;
     const now = new Date().toISOString();
     await this.client
       .update(users)
@@ -216,11 +227,13 @@ export class UserStore {
   }
 
   async getById(id: string): Promise<User | null> {
+    const { users } = this.t;
     const [row] = await this.client.select().from(users).where(eq(users.id, id)).limit(1);
     return row ? deserialize(row) : null;
   }
 
   async findByGithubId(githubId: number): Promise<User | null> {
+    const { users } = this.t;
     const [row] = await this.client
       .select()
       .from(users)
@@ -231,6 +244,7 @@ export class UserStore {
 
   /** Look up by the GitHub login — the soft join key used across the schema. */
   async findByLogin(login: string): Promise<User | null> {
+    const { users } = this.t;
     const [row] = await this.client.select().from(users).where(eq(users.login, login)).limit(1);
     return row ? deserialize(row) : null;
   }
@@ -241,6 +255,7 @@ export class UserStore {
    * Slack login to an existing GitHub identity by email.
    */
   async findByEmail(email: string): Promise<User | null> {
+    const { users } = this.t;
     const [row] = await this.client
       .select()
       .from(users)
@@ -251,6 +266,7 @@ export class UserStore {
   }
 
   async findBySlackUserId(slackUserId: string): Promise<User | null> {
+    const { users } = this.t;
     const [row] = await this.client
       .select()
       .from(users)

@@ -30,9 +30,12 @@ Then read, in order: **this README** (locked decisions + the drift ledger
 above) → **[00-architecture.md](00-architecture.md)** → **your phase doc**.
 Check "Status / todo list" below for the next unticked phase.
 
-**Next up is Phase 4**, whose doc opens with its own "▶ Start here" block and a
-⚠ block naming a deliverable the original plan missed — read both before
-writing any code: [04-postgres-pglite.md](04-postgres-pglite.md).
+**Next up is Phase 5** — packaging, the config slot, docs-sync, the npm release
+and the **mandatory prod-shape smoke Phase 2 could not do**:
+[05-config-packaging-release.md](05-config-packaging-release.md). It is the
+phase that merges the branch to `main`, so read its deviations-carrying
+predecessors first — Phase 4's §1 and §2 in particular, since the state layer's
+shape changed again.
 
 A kickoff prompt that needs no other context:
 
@@ -45,7 +48,7 @@ A kickoff prompt that needs no other context:
 
 | Invariant | Value |
 |---|---|
-| Green baseline | **199 test files, 3,128 tests passing** (206 / 3,127 after Phase 2; Phase 3 folded nine files into the factory and added one test) |
+| Green baseline | **202 test files, 3,357 tests passing** (206 / 3,127 after Phase 2; Phase 3 folded nine files into the factory to 199 / 3,128; Phase 4 added the second dialect leg) |
 | Branch sync | merge `main` in; never rebase |
 | `main` | docs only until Phase 5; stays on better-sqlite3 |
 | Scope | Phases 1–5. **Phase 6 is deferred out of this PR** |
@@ -76,8 +79,17 @@ will trip over:
   `ExecutionLedger`, `PhaseReporter`), so the release bumps cascade across all
   five published packages.
 - **`dialect.ts` already carries** `rows`/`run`/`changes`/`isUniqueViolation`/
-  `likeEscape`/`dayBucket`/`hourBucket`/`strposExpr`/`sumTrue`/`sumFalse`, and
+  `likeEscape`/`dayBucket`/`hourBucket`/`containsExpr`/`sumTrue`/`sumFalse`, and
   `repo-ref.ts`'s `qualifiedRepoSql` now takes schema COLUMNS and returns `SQL`.
+  *(Phase 4 replaced `strposExpr` with `containsExpr`, a boolean `LIKE`
+  predicate — no dialect branch, and its pattern is an inlined literal because
+  a bound parameter cannot be matched across `SELECT`/`GROUP BY` on Postgres.)*
+- **Phase 4 added a second schema**, `src/state/schema/pg.ts`, plus
+  `drizzle/pg/`, `drizzle-pg.config.ts` and `db:generate:pg`. **Any change to
+  `schema/sqlite.ts` from here on must be mirrored there and the PG migration
+  regenerated** — `tests/state/schema-parity.test.ts` fails otherwise. Nothing
+  under `src/` may import `schema/pg.ts`; it exists for drizzle-kit and the
+  PGlite test leg only.
 
 **Two rules the phases learned the hard way** — apply them in Phases 3–5 too:
 
@@ -95,18 +107,25 @@ will trip over:
    through `dialect.ts`**. A `sqliteTable` object used on a PG client sends
    `1` into a `boolean` (sqlite's `mapToDriverValue`; `PgBoolean` has none) and
    runs `JSON.parse` over an already-parsed jsonb object. Booleans break on
-   WRITE, JSON breaks on READ. Every store imports `./schema/sqlite.js`
-   directly, so this sits under all seven — **Phase 4 must resolve table
-   objects per dialect before anything else**, and its doc now opens with a
-   warning block saying so.
+   WRITE, JSON breaks on READ.
+   *(**Closed by Phase 4**: no store imports `./schema/sqlite.js` any more.
+   `client.ts`'s `tablesOf(client)` reads the schema back off
+   `drizzle(client, { schema })` — typed, so no second cast — and each store
+   holds a `private readonly t: StateTables` that every method destructures
+   from. **The consequence for any later phase: a Drizzle client built without
+   `{ schema }` now throws on first use**, and a test that peeks at rows
+   directly must resolve its tables through `tablesOf`, never an import.)*
 
-**Where the risk is:** Phases 1–3 are done. **Phase 4 is the next real risk** —
-the PG leg is where every raw-SQL port either holds or doesn't, and several
-Phase-2 ports were written specifically to survive it. Phase 3 made that leg
-worth running (the whole state suite is now dialect-parameterized, not a
-subset) and also found that **Phase 4 has one more deliverable than its doc
-lists** — see the drift note immediately below. Phase 5 is packaging plus the
-**mandatory prod-shape smoke that Phase 2 could not do**.
+**Where the risk is:** Phases 1–4 are done, and **the dual-dialect question is
+now settled empirically** — the entire state suite plus the `SessionManager`
+suite run green against real Postgres (PGlite) in the ordinary test command.
+Phase 2's raw-SQL ports held: only four tests failed on the first PG run, and
+none of the "expected dialect leaks" list bit apart from `GROUP BY` strictness.
+**All that remains is Phase 5** — packaging, the config slot, docs-sync, the
+release, and the **mandatory prod-shape smoke that Phase 2 could not do**. That
+smoke is now the single largest un-discharged risk in the whole migration: it
+is the only thing standing between `0001_backfill_repo_refs.sql` and real
+production rows.
 
 ---
 
@@ -183,8 +202,24 @@ each must leave the repo green before the next starts.
   them the PG leg could go green proving none of them); and moving the direct-row
   peeks proved **`asStateClient()` alone cannot carry Phase 4** — see the new
   drift note below.
-- [ ] **Phase 4** — [04-postgres-pglite.md](04-postgres-pglite.md) — Postgres
-  schema (jsonb), schema-parity test, PGlite test leg *(risk: medium)*
+- [x] **Phase 4** — [04-postgres-pglite.md](04-postgres-pglite.md) — Postgres
+  schema (jsonb), schema-parity test, PGlite test leg *(risk: medium)*.
+  *Completed 2026-08-18.* `schema/pg.ts` mirrors all 15 tables;
+  `drizzle/pg/0000_init.sql` generated; **both** factories have a PG leg
+  (`db.pg.test.ts` + `session-manager.pg.test.ts`), so the whole state suite
+  runs twice. **3,357 tests / 202 files** — the predicted delta exactly, so
+  neither leg silently skipped. `@electric-sql/pglite` is a devDep and nothing
+  under `src/` imports `schema/pg.ts` or a PG driver. **Deviations — read §1
+  and §2 before Phase 5:** the ⚠ deliverable shipped as `tablesOf(client)`
+  reading drizzle's own `_.fullSchema`, so **no constructor signature changed**
+  and the per-store diff is one destructure line per method rather than ~600
+  renamed identifiers; and `strposExpr` was **deleted** rather than branched —
+  every caller only asked "contains a slash", which `LIKE` answers in both
+  dialects. Only **four** tests failed on the first PG run: three to Postgres
+  matching `GROUP BY` to `SELECT` structurally (a bound parameter is a
+  different placeholder in each, so the pattern must be an inlined literal —
+  a `strpos()` port would have failed identically), one to `open()`'s
+  postgres-URL guard missing its `/i` flag.
 - [ ] **Phase 5** — [05-config-packaging-release.md](05-config-packaging-release.md)
   — config slot, Dockerfile, docs-sync, prod cutover runbook, npm release
   *(risk: low-medium)*

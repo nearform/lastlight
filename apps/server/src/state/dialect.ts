@@ -94,16 +94,40 @@ export function hourBucket(col: SQLWrapper): SQL {
 }
 
 /**
- * Position of `needle` within `haystack`, 1-based, 0 when absent.
+ * "Does `haystack` contain the literal `needle`" — a BOOLEAN predicate.
  *
- * sqlite spells this `instr(h, n)`; Postgres has no `instr` at all and spells
- * it `strpos(h, n)`. This is the single widest-reaching fragment in the
- * codebase — `repo-ref.ts`'s qualified-repo split fans out to 13 call sites
- * across the execution and run stores.
+ * This replaces what was `strposExpr()`, a 1-based position: sqlite spells that
+ * `instr(h, n)`, Postgres has no `instr` at all and spells it `strpos(h, n)`,
+ * so it looked like the widest-reaching dialect branch in the codebase
+ * (`repo-ref.ts`'s qualified-repo split fans out to 13 call sites across the
+ * execution and run stores). But every one of those call sites only ever asked
+ * `> 0`, and `LIKE` answers that identically in both dialects — so the seam
+ * disappears instead of being plumbed. `ESCAPE` keeps a needle containing `%`
+ * or `_` literal; SQLite's case-insensitive ASCII LIKE is immaterial for the
+ * one caller (a `/`).
  */
-export function strposExpr(haystack: SQLWrapper, needle: SQLWrapper | string): SQL {
-  const n = typeof needle === "string" ? sql`${needle}` : needle;
-  return sql`instr(${haystack}, ${n})`;
+export function containsExpr(haystack: SQLWrapper, needle: string): SQL {
+  // The pattern is INLINED as a SQL literal rather than bound as a parameter,
+  // and that is load-bearing rather than a shortcut. Postgres matches a GROUP BY
+  // expression to its SELECT twin STRUCTURALLY, and two occurrences of the same
+  // bound parameter are two different placeholders ($1 and $3) — so
+  // `distinctRepos`, which selects and groups by the same `qualifiedRepoSql`
+  // fragment, failed with "column workflow_runs.repo must appear in the GROUP BY
+  // clause". (SQLite is lax about this and never noticed.) Inlining makes the
+  // two spellings textually identical.
+  //
+  // Safe only because every needle is a code-owned literal, so the charset guard
+  // below is the actual contract — assert it rather than trusting callers, since
+  // the failure mode of a hostile needle here would be injection.
+  if (!/^[A-Za-z0-9/.:@-]+$/.test(needle)) {
+    throw new Error(
+      `containsExpr: needle must be a plain code literal (got ${JSON.stringify(needle)}). ` +
+        "For user input, bind a parameter and accept that it cannot appear in a GROUP BY.",
+    );
+  }
+  // No ESCAPE clause: the charset above excludes `%`, `_` and `\` outright, so
+  // there is nothing for `likeEscape` to escape.
+  return sql`${haystack} LIKE ${sql.raw(`'%${needle}%'`)}`;
 }
 
 /**

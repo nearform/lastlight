@@ -1,7 +1,12 @@
 import { and, asc, desc, eq } from "drizzle-orm";
-import { nullsToUndefined, type StateClient, type StateDbc } from "./client.js";
+import {
+  nullsToUndefined,
+  tablesOf,
+  type StateClient,
+  type StateDbc,
+  type StateTables,
+} from "./client.js";
 import { changes } from "./dialect.js";
-import { workflowApprovals, workflowRuns } from "./schema/sqlite.js";
 
 export interface WorkflowApproval {
   id: string;
@@ -28,7 +33,7 @@ export interface WorkflowApproval {
 }
 
 /** The row shape the builder returns for this table, before normalization. */
-type ApprovalRow = typeof workflowApprovals.$inferSelect;
+type ApprovalRow = StateTables["workflowApprovals"]["$inferSelect"];
 
 /**
  * Owns the `workflow_approvals` table — the human-in-the-loop gates a workflow
@@ -45,7 +50,16 @@ type ApprovalRow = typeof workflowApprovals.$inferSelect;
  * otherwise.
  */
 export class ApprovalStore {
-  constructor(private client: StateClient) {}
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
+  constructor(private client: StateClient) {
+    this.t = tablesOf(client);
+  }
 
   /** Create a new pending approval request */
   async create(
@@ -54,6 +68,7 @@ export class ApprovalStore {
     },
     dbc: StateDbc = this.client,
   ): Promise<void> {
+    const { workflowApprovals } = this.t;
     await dbc.insert(workflowApprovals).values({
       id: approval.id,
       workflowRunId: approval.workflowRunId,
@@ -85,6 +100,7 @@ export class ApprovalStore {
     responder: string,
     dbc: StateDbc = this.client,
   ): Promise<number> {
+    const { workflowApprovals } = this.t;
     const now = new Date().toISOString();
     const result = await dbc
       .update(workflowApprovals)
@@ -105,8 +121,9 @@ export class ApprovalStore {
    * explore loop without re-running classifier logic.
    */
   async getPendingReplyGateByTrigger(triggerId: string): Promise<WorkflowApproval | null> {
+    const { workflowApprovals, workflowRuns } = this.t;
     const [row] = await this.client
-      .select(approvalColumns)
+      .select(approvalColumns(this.t))
       .from(workflowApprovals)
       .innerJoin(workflowRuns, eq(workflowApprovals.workflowRunId, workflowRuns.id))
       .where(
@@ -123,6 +140,7 @@ export class ApprovalStore {
 
   /** Get a single approval by ID */
   async getById(id: string, dbc: StateDbc = this.client): Promise<WorkflowApproval | null> {
+    const { workflowApprovals } = this.t;
     const [row] = await dbc
       .select()
       .from(workflowApprovals)
@@ -133,6 +151,7 @@ export class ApprovalStore {
 
   /** Find the pending approval for a workflow run */
   async getPendingForWorkflow(workflowRunId: string): Promise<WorkflowApproval | null> {
+    const { workflowApprovals } = this.t;
     const [row] = await this.client
       .select()
       .from(workflowApprovals)
@@ -148,8 +167,9 @@ export class ApprovalStore {
 
   /** Find the pending approval by trigger ID (join with workflow_runs) */
   async getPendingByTrigger(triggerId: string): Promise<WorkflowApproval | null> {
+    const { workflowApprovals, workflowRuns } = this.t;
     const [row] = await this.client
-      .select(approvalColumns)
+      .select(approvalColumns(this.t))
       .from(workflowApprovals)
       .innerJoin(workflowRuns, eq(workflowApprovals.workflowRunId, workflowRuns.id))
       .where(and(eq(workflowRuns.triggerId, triggerId), eq(workflowApprovals.status, "pending")))
@@ -165,6 +185,7 @@ export class ApprovalStore {
    * {@link getPendingForWorkflow} this does not filter on status.
    */
   async listForWorkflow(workflowRunId: string): Promise<WorkflowApproval[]> {
+    const { workflowApprovals } = this.t;
     const rows = await this.client
       .select()
       .from(workflowApprovals)
@@ -175,6 +196,7 @@ export class ApprovalStore {
 
   /** List all approvals carrying a specific artifact name, newest first */
   async listByArtifact(artifact: string): Promise<WorkflowApproval[]> {
+    const { workflowApprovals } = this.t;
     const rows = await this.client
       .select()
       .from(workflowApprovals)
@@ -185,6 +207,7 @@ export class ApprovalStore {
 
   /** List all pending approvals */
   async listPending(): Promise<WorkflowApproval[]> {
+    const { workflowApprovals } = this.t;
     const rows = await this.client
       .select()
       .from(workflowApprovals)
@@ -208,6 +231,7 @@ export class ApprovalStore {
     response?: string,
     dbc: StateDbc = this.client,
   ): Promise<number> {
+    const { workflowApprovals } = this.t;
     const now = new Date().toISOString();
     const result = await dbc
       .update(workflowApprovals)
@@ -223,7 +247,7 @@ export class ApprovalStore {
  * the columns keeps those two methods returning a flat approval row like every
  * other read here.
  */
-const approvalColumns = {
+const approvalColumns = ({ workflowApprovals }: StateTables) => ({
   id: workflowApprovals.id,
   workflowRunId: workflowApprovals.workflowRunId,
   gate: workflowApprovals.gate,
@@ -236,7 +260,7 @@ const approvalColumns = {
   createdAt: workflowApprovals.createdAt,
   kind: workflowApprovals.kind,
   artifact: workflowApprovals.artifact,
-};
+});
 
 /**
  * Builder rows are already camelCase, so this is down to two jobs: turn the

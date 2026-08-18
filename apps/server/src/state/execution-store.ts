@@ -1,11 +1,10 @@
 import { randomUUID } from "crypto";
 import { and, count, desc, eq, gte, inArray, isNotNull, isNull, like, sql, type SQL } from "drizzle-orm";
 import type { ExtensionStatusMap, SkillsStatus } from "lastlight-workflow-engine";
-import { nullsToUndefined, type StateClient } from "./client.js";
+import { nullsToUndefined, tablesOf, type StateClient, type StateTables } from "./client.js";
 import { changes, dayBucket, hourBucket, likeEscape, rows, run, sumTrue } from "./dialect.js";
 import type { TriggerActorType } from "./user-store.js";
 import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
-import { executions, messagingMessages, messagingSessions, workflowRuns } from "./schema/sqlite.js";
 
 export interface ExecutionRecord {
   id: string;
@@ -101,7 +100,8 @@ export interface ExecutionRecord {
  * (`"executions"."owner"`), so any raw query using it must select from
  * `executions` UNALIASED — the old `e` alias is gone.
  */
-const QUALIFIED_REPO_SQL = qualifiedRepoSql(executions.owner, executions.repo, "null");
+const qualifiedRepoOrNull = ({ executions }: StateTables): SQL =>
+  qualifiedRepoSql(executions.owner, executions.repo, "null");
 
 /**
  * The columns every BUILDER read that returns an {@link ExecutionRecord}
@@ -111,11 +111,11 @@ const QUALIFIED_REPO_SQL = qualifiedRepoSql(executions.owner, executions.repo, "
  * — which is not part of the record and can hold a full LLM response — never
  * rides along on a list read.
  *
- * Its raw-SQL twin is {@link EXECUTION_COLUMNS}, and {@link deserialize} /
+ * Its raw-SQL twin is {@link executionColumnsSql}, and {@link deserialize} /
  * {@link mapExecutionRow} are their respective other halves. A new column is
  * added to all four or to none.
  */
-const executionColumns = {
+const executionColumns = ({ executions }: StateTables) => ({
   id: executions.id,
   triggerType: executions.triggerType,
   triggerId: executions.triggerId,
@@ -142,10 +142,10 @@ const executionColumns = {
   extensionStatus: executions.extensionStatus,
   skillsStatus: executions.skillsStatus,
   workflowRunId: executions.workflowRunId,
-};
+});
 
 /** The row shape a builder read of {@link executionColumns} returns. */
-type ExecutionRow = Omit<typeof executions.$inferSelect, "outputText">;
+type ExecutionRow = Omit<StateTables["executions"]["$inferSelect"], "outputText">;
 
 /**
  * Turn a BUILDER row into an {@link ExecutionRecord}.
@@ -179,7 +179,7 @@ function deserialize(row: ExecutionRow): ExecutionRecord {
  * `triggerid`, which would resurrect issue #285 the moment the pg leg runs.
  * The columns render fully qualified, so the query must not alias the table.
  */
-const EXECUTION_COLUMNS: SQL = sql`
+const executionColumnsSql = ({ executions }: StateTables): SQL => sql`
   ${executions.id}                       AS "id",
   ${executions.triggerType}              AS "triggerType",
   ${executions.triggerId}                AS "triggerId",
@@ -227,7 +227,7 @@ function parseStatusJson<T>(value: unknown): T | undefined {
 }
 
 /**
- * Turn a row selected with {@link EXECUTION_COLUMNS} into an
+ * Turn a row selected with {@link executionColumnsSql} into an
  * {@link ExecutionRecord}: NULLs become `undefined` (the record's optional
  * fields), the raw `success` integer becomes a boolean, and the two JSON
  * columns are parsed by hand — none of which a raw query does for you.
@@ -309,7 +309,7 @@ export interface ExecutionOutcomeCounts {
  * `succeeded`. It really executed and really cost tokens; only its per-row
  * rendering is muted (`execMark`, `packages/cli/src/cli-format.ts`).
  */
-export const EXECUTION_OUTCOME_COLUMNS: SQL = sql`
+export const executionOutcomeColumns = ({ executions }: StateTables): SQL => sql`
         ${sumTrue(executions.success)} AS "succeeded",
         ${sumTrue(sql`${executions.success} = ${false} AND ${executions.stopReason} = 'skipped'`)} AS "skipped",
         ${sumTrue(sql`${executions.success} = ${false} AND ${executions.stopReason} = 'error_quota'`)} AS "deferred",
@@ -347,7 +347,16 @@ type BucketStats = ExecutionOutcomeCounts & {
 };
 
 export class ExecutionStore {
-  constructor(private client: StateClient) {}
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
+  constructor(private client: StateClient) {
+    this.t = tablesOf(client);
+  }
 
   /**
    * Append a started phase to the ledger.
@@ -361,6 +370,7 @@ export class ExecutionStore {
   async recordStart(
     record: Omit<ExecutionRecord, "finishedAt" | "success" | "error" | "turns" | "durationMs">,
   ): Promise<void> {
+    const { executions } = this.t;
     const ref = normalizeRepoRef(record.owner, record.repo);
     await this.client.insert(executions).values({
       id: record.id,
@@ -383,6 +393,7 @@ export class ExecutionStore {
    * session log for an in-flight phase, not just for completed ones.
    */
   async recordSessionId(id: string, sessionId: string): Promise<void> {
+    const { executions } = this.t;
     await this.client.update(executions).set({ sessionId }).where(eq(executions.id, id));
   }
 
@@ -394,11 +405,13 @@ export class ExecutionStore {
    * `getExecutionOutput` on read.
    */
   async recordOutputText(id: string, output: string): Promise<void> {
+    const { executions } = this.t;
     await this.client.update(executions).set({ outputText: output }).where(eq(executions.id, id));
   }
 
   /** Read the persisted output text for an execution, or null if none. */
   async getExecutionOutput(id: string): Promise<string | null> {
+    const { executions } = this.t;
     const [row] = await this.client
       .select({ outputText: executions.outputText })
       .from(executions)
@@ -418,6 +431,7 @@ export class ExecutionStore {
     triggerId: string,
     workflowRunId?: string,
   ): Promise<string | null> {
+    const { executions } = this.t;
     const [row] = await this.client
       .select({ outputText: executions.outputText })
       .from(executions)
@@ -454,6 +468,7 @@ export class ExecutionStore {
       skillsStatus?: SkillsStatus;
     },
   ): Promise<void> {
+    const { executions } = this.t;
     // The ten optional columns were `COALESCE(?, col)` under raw SQL — "leave
     // what's there when this finish reports nothing". Omitting the key from the
     // SET entirely says the same thing, and says it without a round trip.
@@ -501,6 +516,7 @@ export class ExecutionStore {
     repo?: string,
     owner?: string,
   ): Promise<void> {
+    const { executions } = this.t;
     const now = new Date().toISOString();
     const m = triggerId.match(/#(\d+)$/);
     const issueNumber = m ? Number(m[1]) : null;
@@ -533,6 +549,7 @@ export class ExecutionStore {
    * for the most recent assistant text (preview snippet).
    */
   async listChatThreads(limit: number): Promise<ChatThreadSummary[]> {
+    const { executions, messagingMessages, messagingSessions } = this.t;
     return rows<ChatThreadSummary>(
       this.client,
       sql`
@@ -547,7 +564,7 @@ export class ExecutionStore {
         -- repo, and one that does should name the whole thread. A thread that
         -- genuinely spans repos picks one — acceptable, since a repo-less
         -- thread stays visible either way.
-        MAX(${QUALIFIED_REPO_SQL})          AS "repo",
+        MAX(${qualifiedRepoOrNull(this.t)})  AS "repo",
         MIN(${executions.startedAt})        AS "firstStartedAt",
         MAX(COALESCE(${executions.finishedAt}, ${executions.startedAt})) AS "lastActivityAt",
         COUNT(*)                            AS "turnCount",
@@ -578,6 +595,7 @@ export class ExecutionStore {
 
   /** Look up a single chat thread by its messaging session id (= trigger_id). */
   async getChatThread(triggerId: string): Promise<ChatThreadSummary | null> {
+    const { executions, messagingMessages, messagingSessions } = this.t;
     const results = await rows<ChatThreadSummary>(
       this.client,
       sql`
@@ -587,7 +605,7 @@ export class ExecutionStore {
         ${messagingSessions.platform}       AS "platform",
         -- Same qualification rule as the list above; it read the raw column
         -- here and so disagreed with its own list view for one thread.
-        MAX(${QUALIFIED_REPO_SQL})          AS "repo",
+        MAX(${qualifiedRepoOrNull(this.t)})  AS "repo",
         MIN(${executions.startedAt})        AS "firstStartedAt",
         MAX(COALESCE(${executions.finishedAt}, ${executions.startedAt})) AS "lastActivityAt",
         COUNT(*)                            AS "turnCount",
@@ -622,8 +640,9 @@ export class ExecutionStore {
    * for a session we have no execution row for — those stay visible.
    */
   async repoForSessionId(sessionId: string): Promise<string | null> {
+    const { executions } = this.t;
     const [row] = await this.client
-      .select({ repo: sql<string | null>`${QUALIFIED_REPO_SQL}` })
+      .select({ repo: sql<string | null>`${qualifiedRepoOrNull(this.t)}` })
       .from(executions)
       .where(and(eq(executions.sessionId, sessionId), isNotNull(executions.repo)))
       .orderBy(desc(executions.startedAt))
@@ -633,6 +652,7 @@ export class ExecutionStore {
 
   /** Check if a skill is currently running for a given trigger */
   async isRunning(skill: string, triggerId: string): Promise<boolean> {
+    const { executions } = this.t;
     const [row] = await this.client
       .select({ id: executions.id })
       .from(executions)
@@ -664,6 +684,7 @@ export class ExecutionStore {
    */
   async costForTriggerWorkflows(triggerId: string, workflowNames: string[]): Promise<number> {
     if (workflowNames.length === 0) return 0;
+    const { executions, workflowRuns } = this.t;
     const [row] = await this.client
       .select({ total: sql<number>`COALESCE(SUM(${executions.costUsd}), 0)` })
       .from(executions)
@@ -688,6 +709,7 @@ export class ExecutionStore {
    * is equivalent to the marker having been emitted.
    */
   async phaseSucceededInRun(workflowRunId: string, phaseName: string): Promise<boolean> {
+    const { executions } = this.t;
     const [row] = await this.client
       .select({ id: executions.id })
       .from(executions)
@@ -704,6 +726,7 @@ export class ExecutionStore {
 
   /** Check if a skill has already completed successfully for a given trigger */
   async isCompleted(skill: string, triggerId: string): Promise<boolean> {
+    const { executions } = this.t;
     const [row] = await this.client
       .select({ id: executions.id })
       .from(executions)
@@ -731,6 +754,7 @@ export class ExecutionStore {
     triggerId: string,
     workflowRunId?: string,
   ): Promise<"run" | "running" | "done"> {
+    const { executions } = this.t;
     const scope = this.scope(triggerId, workflowRunId);
 
     const [running] = await this.client
@@ -757,6 +781,7 @@ export class ExecutionStore {
     triggerId: string,
     workflowRunId?: string,
   ): Promise<number> {
+    const { executions } = this.t;
     const result = await this.client
       .update(executions)
       .set({
@@ -781,6 +806,7 @@ export class ExecutionStore {
    * logic doesn't think they're still in flight.
    */
   async markAllStaleForTrigger(triggerId: string, reason: string): Promise<number> {
+    const { executions } = this.t;
     const result = await this.client
       .update(executions)
       .set({ finishedAt: new Date().toISOString(), success: false, error: reason })
@@ -808,6 +834,7 @@ export class ExecutionStore {
     reason: string,
     workflowRunId?: string,
   ): Promise<number> {
+    const { executions } = this.t;
     const scopeSql = workflowRunId
       ? sql`${executions.workflowRunId} = ${workflowRunId}`
       : sql`${executions.triggerId} = ${triggerId}`;
@@ -830,8 +857,9 @@ export class ExecutionStore {
 
   /** Get recent executions for a skill */
   async recentExecutions(skill: string, limit = 10): Promise<ExecutionRecord[]> {
+    const { executions } = this.t;
     const results = await this.client
-      .select(executionColumns)
+      .select(executionColumns(this.t))
       .from(executions)
       .where(eq(executions.skill, skill))
       .orderBy(desc(executions.startedAt))
@@ -847,6 +875,7 @@ export class ExecutionStore {
    * permanent zero — silently disarming the cron failure alert.
    */
   async consecutiveFailures(skill: string): Promise<number> {
+    const { executions } = this.t;
     const results = await this.client
       .select({ success: executions.success })
       .from(executions)
@@ -864,8 +893,9 @@ export class ExecutionStore {
 
   /** Get all executions with pagination */
   async allExecutions(limit = 100, offset = 0): Promise<ExecutionRecord[]> {
+    const { executions } = this.t;
     const results = await this.client
-      .select(executionColumns)
+      .select(executionColumns(this.t))
       .from(executions)
       .orderBy(desc(executions.startedAt))
       .limit(limit)
@@ -901,6 +931,7 @@ export class ExecutionStore {
     workflowRunId?: string;
     triggerId: string;
   }>> {
+    const { executions } = this.t;
     const pattern = `%${likeEscape(query).toLowerCase()}%`;
     const qualifiedRepo = qualifiedRepoSql(executions.owner, executions.repo, "bare");
     const results = await rows(
@@ -952,11 +983,12 @@ export class ExecutionStore {
     triggerId: string,
     workflowName?: string,
   ): Promise<ExecutionRecord[]> {
+    const { executions } = this.t;
     const skillPattern = workflowName ? `${workflowName}:%` : "%:%";
     const results = await rows(
       this.client,
       sql`
-      SELECT ${EXECUTION_COLUMNS}
+      SELECT ${executionColumnsSql(this.t)}
       FROM ${executions}
       WHERE (${executions.workflowRunId} = ${workflowRunId}
              OR (${executions.workflowRunId} IS NULL AND ${executions.triggerId} = ${triggerId}))
@@ -970,8 +1002,9 @@ export class ExecutionStore {
 
   /** Get currently running executions (no finished_at) */
   async runningExecutions(): Promise<ExecutionRecord[]> {
+    const { executions } = this.t;
     const results = await this.client
-      .select(executionColumns)
+      .select(executionColumns(this.t))
       .from(executions)
       .where(isNull(executions.finishedAt))
       .orderBy(desc(executions.startedAt));
@@ -986,6 +1019,7 @@ export class ExecutionStore {
     by_trigger: Record<string, number>;
     running: number;
   }> {
+    const { executions } = this.t;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayIso = today.toISOString();
@@ -1004,7 +1038,7 @@ export class ExecutionStore {
       this.client,
       sql`
       SELECT ${executions.skill} AS "skill", COUNT(*) AS "count",
-        ${EXECUTION_OUTCOME_COLUMNS}
+        ${executionOutcomeColumns(this.t)}
       FROM ${executions} GROUP BY ${executions.skill}
     `,
     );
@@ -1055,6 +1089,7 @@ export class ExecutionStore {
     repo: string,
     sinceIso: string,
   ): Promise<{ costUsd: number; phases: number }> {
+    const { executions } = this.t;
     const qualifiedRepo = qualifiedRepoSql(executions.owner, executions.repo, "bare");
     const [row] = await this.client
       .select({
@@ -1073,6 +1108,7 @@ export class ExecutionStore {
 
   /** Daily aggregated stats for the last N days */
   async dailyStats(days: number): Promise<BucketStats[]> {
+    const { executions } = this.t;
     // Build the inclusive UTC date window: [today - (days-1), today].
     // dayBucket() takes the first 10 chars of the ISO-8601 timestamp, so it
     // yields a UTC YYYY-MM-DD string in either dialect and we generate the same
@@ -1098,7 +1134,7 @@ export class ExecutionStore {
       SELECT
         ${bucket} AS "date",
         COUNT(*) AS "executions",
-        ${EXECUTION_OUTCOME_COLUMNS},
+        ${executionOutcomeColumns(this.t)},
         COALESCE(SUM(${executions.inputTokens}), 0) + COALESCE(SUM(${executions.outputTokens}), 0) + COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "totalTokens",
         COALESCE(SUM(${executions.inputTokens}), 0) AS "inputTokens",
         COALESCE(SUM(${executions.outputTokens}), 0) AS "outputTokens",
@@ -1125,6 +1161,7 @@ export class ExecutionStore {
 
   /** Hourly aggregated stats for the last N hours (UTC). Bucket key is `YYYY-MM-DDTHH`. */
   async hourlyStats(hours: number): Promise<BucketStats[]> {
+    const { executions } = this.t;
     const now = new Date();
     const startUtc = new Date(Date.UTC(
       now.getUTCFullYear(),
@@ -1148,7 +1185,7 @@ export class ExecutionStore {
       SELECT
         ${bucket} AS "date",
         COUNT(*) AS "executions",
-        ${EXECUTION_OUTCOME_COLUMNS},
+        ${executionOutcomeColumns(this.t)},
         COALESCE(SUM(${executions.inputTokens}), 0) + COALESCE(SUM(${executions.outputTokens}), 0) + COALESCE(SUM(${executions.cacheReadInputTokens}), 0) AS "totalTokens",
         COALESCE(SUM(${executions.inputTokens}), 0) AS "inputTokens",
         COALESCE(SUM(${executions.outputTokens}), 0) AS "outputTokens",
@@ -1179,6 +1216,7 @@ export class ExecutionStore {
    * trigger-wide scope for legacy callers and pre-`workflow_run_id` rows.
    */
   private scope(triggerId: string, workflowRunId?: string) {
+    const { executions } = this.t;
     return workflowRunId
       ? eq(executions.workflowRunId, workflowRunId)
       : eq(executions.triggerId, triggerId);

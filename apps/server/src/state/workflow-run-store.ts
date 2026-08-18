@@ -3,12 +3,13 @@ import type { ApprovalStore } from "./approval-store.js";
 import type { TriggerActorType } from "./user-store.js";
 import {
   nullsToUndefined,
+  tablesOf,
   type OpSerializer,
   type StateClient,
   type StateDbc,
+  type StateTables,
 } from "./client.js";
 import { changes } from "./dialect.js";
-import { executions, workflowRuns } from "./schema/sqlite.js";
 import { normalizeRepoRef, qualifiedRepoSql } from "./repo-ref.js";
 import { logger } from "../logging/logger.js";
 
@@ -31,7 +32,7 @@ const log = logger("runs");
  * actually moving. Everything terminal shares the last bucket and stays purely
  * chronological among itself, which is what the day/week ranges want.
  */
-const ACTIVE_FIRST = sql`CASE ${workflowRuns.status}
+const ACTIVE_FIRST = ({ workflowRuns }: StateTables) => sql`CASE ${workflowRuns.status}
              WHEN 'running' THEN 0
              WHEN 'paused'  THEN 1
              WHEN 'queued'  THEN 2
@@ -117,7 +118,7 @@ export interface PhaseMarker {
 }
 
 /** The row shape the builder returns for this table, before normalization. */
-type RunRow = typeof workflowRuns.$inferSelect;
+type RunRow = StateTables["workflowRuns"]["$inferSelect"];
 
 /**
  * What {@link WorkflowRunStore.deserialize} accepts.
@@ -209,7 +210,7 @@ export type TerminalRunObserver = (
  * and because dropping a row from a filter is the failure mode that hides
  * things silently.
  */
-function repoMatchClause(repo: string): SQL {
+function repoMatchClause({ workflowRuns }: StateTables, repo: string): SQL {
   const slash = repo.indexOf("/");
   if (slash > 0) {
     return or(
@@ -228,12 +229,20 @@ export class WorkflowRunStore {
   private serialize: OpSerializer;
   private terminalObservers: TerminalRunObserver[] = [];
 
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
   constructor(
     private client: StateClient,
     deps: { approvals: ApprovalStore; serialize: OpSerializer },
   ) {
     this.approvals = deps.approvals;
     this.serialize = deps.serialize;
+    this.t = tablesOf(client);
   }
 
   /** Add a {@link TerminalRunObserver}. Wired at boot; order is registration order. */
@@ -284,6 +293,7 @@ export class WorkflowRunStore {
     id: string,
     dbc: StateDbc = this.client,
   ): Promise<Record<string, unknown>> {
+    const { workflowRuns } = this.t;
     const [row] = await dbc
       .select({ context: workflowRuns.context })
       .from(workflowRuns)
@@ -303,6 +313,7 @@ export class WorkflowRunStore {
    * `state/repo-ref.ts`.
    */
   async createRun(run: Omit<WorkflowRun, "phaseHistory" | "updatedAt">): Promise<void> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const ref = normalizeRepoRef(run.owner, run.repo);
     // `context` / `scratch` / `phase_history` are json-mode columns: hand them
@@ -341,6 +352,7 @@ export class WorkflowRunStore {
     patch: Record<string, unknown>,
     dbc: StateDbc = this.client,
   ): Promise<void> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const [row] = await dbc
       .select({ scratch: workflowRuns.scratch })
@@ -367,6 +379,7 @@ export class WorkflowRunStore {
    * is the right one for a signal arriving now.
    */
   async setTraceContext(id: string, traceId: string, spanId: string): Promise<void> {
+    const { workflowRuns } = this.t;
     await this.client
       .update(workflowRuns)
       .set({ traceId, spanId })
@@ -386,6 +399,7 @@ export class WorkflowRunStore {
     entry: PhaseHistoryEntry,
     dbc: StateDbc = this.client,
   ): Promise<void> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const [row] = await dbc
       .select({ phaseHistory: workflowRuns.phaseHistory })
@@ -402,6 +416,7 @@ export class WorkflowRunStore {
 
   /** Get a single workflow run by ID */
   async getRun(id: string, dbc: StateDbc = this.client): Promise<WorkflowRun | null> {
+    const { workflowRuns } = this.t;
     const [row] = await dbc
       .select()
       .from(workflowRuns)
@@ -412,6 +427,7 @@ export class WorkflowRunStore {
 
   /** Find the most recent active (running, paused, or queued) workflow run for a trigger */
   async getByTrigger(triggerId: string): Promise<WorkflowRun | null> {
+    const { workflowRuns } = this.t;
     const [row] = await this.client
       .select()
       .from(workflowRuns)
@@ -433,6 +449,7 @@ export class WorkflowRunStore {
    * reporter-driven re-triage to the pre-build window.
    */
   async hasRunForTrigger(triggerId: string, workflowName: string): Promise<boolean> {
+    const { workflowRuns } = this.t;
     const [row] = await this.client
       .select({ id: workflowRuns.id })
       .from(workflowRuns)
@@ -453,6 +470,7 @@ export class WorkflowRunStore {
     workflowName: string,
     triggerId: string,
   ): Promise<WorkflowRun | null> {
+    const { workflowRuns } = this.t;
     const [row] = await this.client
       .select()
       .from(workflowRuns)
@@ -492,6 +510,7 @@ export class WorkflowRunStore {
     workflowNames: string[],
     triggerId: string,
   ): Promise<WorkflowRun | null> {
+    const { workflowRuns } = this.t;
     if (workflowNames.length === 0) return null;
     const [row] = await this.client
       .select()
@@ -523,6 +542,7 @@ export class WorkflowRunStore {
     workflowNames: string[],
     triggerId: string,
   ): Promise<WorkflowRun | null> {
+    const { workflowRuns } = this.t;
     if (workflowNames.length === 0) return null;
     const [row] = await this.client
       .select()
@@ -562,6 +582,7 @@ export class WorkflowRunStore {
 
   /** List all active (queued, running, or paused) workflow runs */
   async listActive(): Promise<WorkflowRun[]> {
+    const { workflowRuns } = this.t;
     const rows = await this.client
       .select()
       .from(workflowRuns)
@@ -572,6 +593,7 @@ export class WorkflowRunStore {
 
   /** List recent workflow runs, ordered by start time descending */
   async listRecent(limit = 20): Promise<WorkflowRun[]> {
+    const { workflowRuns } = this.t;
     const rows = await this.client
       .select()
       .from(workflowRuns)
@@ -609,6 +631,7 @@ export class WorkflowRunStore {
       statuses?: string[];
     } = {},
   ): Promise<{ runs: WorkflowRun[]; total: number }> {
+    const { workflowRuns, executions } = this.t;
     const limit = opts.limit ?? 20;
     const offset = opts.offset ?? 0;
 
@@ -616,11 +639,11 @@ export class WorkflowRunStore {
     if (opts.sinceIso) where.push(gte(workflowRuns.startedAt, opts.sinceIso));
     if (opts.workflowName) where.push(eq(workflowRuns.workflowName, opts.workflowName));
     if (opts.repo) {
-      where.push(repoMatchClause(opts.repo));
+      where.push(repoMatchClause(this.t, opts.repo));
     } else if (opts.repos && opts.repos.length > 0) {
       // OR the per-repo clauses. Not an `IN (...)`, because the column doesn't
       // hold the value being matched — see `repoMatchClause`.
-      where.push(or(...opts.repos.map((r) => repoMatchClause(r))) as SQL);
+      where.push(or(...opts.repos.map((r) => repoMatchClause(this.t, r))) as SQL);
     }
     if (opts.statuses && opts.statuses.length > 0) {
       where.push(inArray(workflowRuns.status, opts.statuses));
@@ -678,7 +701,7 @@ export class WorkflowRunStore {
       .from(workflowRuns)
       .leftJoin(agg, eq(agg.workflowRunId, workflowRuns.id))
       .where(whereClause)
-      .orderBy(ACTIVE_FIRST, desc(workflowRuns.startedAt))
+      .orderBy(ACTIVE_FIRST(this.t), desc(workflowRuns.startedAt))
       .limit(limit)
       .offset(offset);
 
@@ -694,6 +717,7 @@ export class WorkflowRunStore {
    * (issue #172) to decide whether to queue a fresh run.
    */
   async countRunning(): Promise<number> {
+    const { workflowRuns } = this.t;
     const [row] = await this.client
       .select({ c: count() })
       .from(workflowRuns)
@@ -707,6 +731,7 @@ export class WorkflowRunStore {
    * perform TTL expiry.
    */
   async listQueued(): Promise<WorkflowRun[]> {
+    const { workflowRuns } = this.t;
     const rows = await this.client
       .select()
       .from(workflowRuns)
@@ -725,6 +750,7 @@ export class WorkflowRunStore {
    * values so TTL sweep can detect staleness and dashboards show enqueue time.
    */
   async admitRun(id: string): Promise<number> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const result = await this.client
       .update(workflowRuns)
@@ -747,6 +773,7 @@ export class WorkflowRunStore {
    * the CAS.
    */
   async expireQueued(id: string, reason: string): Promise<number> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const context = { ...(await this.readContext(id)), error: reason };
     const changed = changes(
@@ -764,6 +791,7 @@ export class WorkflowRunStore {
 
   /** Distinct workflow_name values, sorted alphabetically. */
   async distinctNames(): Promise<string[]> {
+    const { workflowRuns } = this.t;
     const rows = await this.client
       .selectDistinct({ workflowName: workflowRuns.workflowName })
       .from(workflowRuns)
@@ -787,6 +815,7 @@ export class WorkflowRunStore {
    * into one bucket here rather than after the fact.
    */
   async distinctRepos(): Promise<{ repo: string; runCount: number; lastRunAt: string }[]> {
+    const { workflowRuns } = this.t;
     const qualified = qualifiedRepoSql(workflowRuns.owner, workflowRuns.repo, "bare");
     const lastRunAt = sql<string>`MAX(${workflowRuns.startedAt})`;
     return this.client
@@ -812,6 +841,7 @@ export class WorkflowRunStore {
     repo: string,
     sinceIso: string,
   ): Promise<{ workflowName: string; status: string; count: number }[]> {
+    const { workflowRuns } = this.t;
     const qualified = qualifiedRepoSql(workflowRuns.owner, workflowRuns.repo, "bare");
     return this.client
       .select({
@@ -868,8 +898,9 @@ export class WorkflowRunStore {
     error?: string,
     dbc: StateDbc = this.client,
   ): Promise<void> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
-    const patch: Partial<typeof workflowRuns.$inferInsert> = {
+    const patch: Partial<StateTables["workflowRuns"]["$inferInsert"]> = {
       status,
       finishedAt: now,
       updatedAt: now,
@@ -883,6 +914,7 @@ export class WorkflowRunStore {
 
   /** Cancel a workflow run */
   async cancelRun(id: string): Promise<void> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     await this.client
       .update(workflowRuns)
@@ -893,6 +925,7 @@ export class WorkflowRunStore {
 
   /** Pause a workflow run (waiting for approval) */
   async setPaused(id: string, dbc: StateDbc = this.client): Promise<void> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     await dbc
       .update(workflowRuns)
@@ -902,6 +935,7 @@ export class WorkflowRunStore {
 
   /** Resume a paused workflow run (set back to running) */
   async setRunning(id: string, dbc: StateDbc = this.client): Promise<void> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     await dbc
       .update(workflowRuns)
@@ -931,6 +965,7 @@ export class WorkflowRunStore {
    * terminal status has no other writer to race the read against.
    */
   async restartRun(id: string): Promise<number> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const context = await this.readContext(id);
     delete context.error;
@@ -958,6 +993,7 @@ export class WorkflowRunStore {
    * slots free. CAS-guarded on `status = 'queued'`; returns rows changed.
    */
   async requeue(id: string): Promise<number> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const result = await this.client
       .update(workflowRuns)
@@ -977,6 +1013,7 @@ export class WorkflowRunStore {
    * e.g. the run already finished or was cancelled between phases).
    */
   async requeueRunning(id: string): Promise<number> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     const result = await this.client
       .update(workflowRuns)
@@ -992,6 +1029,7 @@ export class WorkflowRunStore {
    * of being re-dispatched on every boot.
    */
   async incrementRestartCount(id: string): Promise<number> {
+    const { workflowRuns } = this.t;
     const now = new Date().toISOString();
     // RETURNING collapses the old update-then-select pair into one statement —
     // and one round trip — while keeping the read of the value this call wrote.

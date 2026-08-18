@@ -8,8 +8,8 @@
  * live in an imported module.
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { tablesOf } from "#src/state/client.js";
 import type { StateDb } from "#src/state/db.js";
-import { feedbackAnchors } from "#src/state/schema/sqlite.js";
 import type { FeedbackAnchor, FeedbackAnchorInput } from "#src/state/feedback-store.js";
 import type { MakeDb, SuiteOpts } from "../store-suite.js";
 
@@ -56,10 +56,14 @@ export function runFeedbackSuite(makeDb: MakeDb, _opts: SuiteOpts): void {
     }
 
     // A direct row peek through the query builder rather than raw dialect SQL.
-    // Only the id column is selected: it is `text` in both dialects, so nothing
-    // here depends on how a boolean or a JSON column is mapped back.
-    const rowCount = async () =>
-      (await db.client.select({ id: feedbackAnchors.id }).from(feedbackAnchors)).length;
+    // The table object is resolved from the client under test, not imported
+    // from `schema/sqlite.js` — a sqliteTable driven by a PG client mis-maps its
+    // own values. (Only the id column is read here, which is `text` in both
+    // dialects, but the peek must still address the right table object.)
+    const rowCount = async () => {
+      const { feedbackAnchors } = tablesOf(db.client);
+      return (await db.client.select({ id: feedbackAnchors.id }).from(feedbackAnchors)).length;
+    };
 
     const thumbsUp = { emoji: "+1", score: 1, sentiment: "good" as const };
     const thumbsDown = { emoji: "-1", score: -1, sentiment: "bad" as const };

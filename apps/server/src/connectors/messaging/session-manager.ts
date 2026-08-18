@@ -1,9 +1,8 @@
 import { randomUUID } from "crypto";
 import { and, desc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { ConversationKey, ConversationSession, ConversationMessage } from "./types.js";
-import type { Dialect, StateClient } from "../../state/client.js";
+import { tablesOf, type Dialect, type StateClient, type StateTables } from "../../state/client.js";
 import { changes, isUniqueViolation } from "../../state/dialect.js";
-import { messagingMessages, messagingSessions } from "../../state/schema/sqlite.js";
 import { logger } from "../../logging/logger.js";
 
 const log = logger("messaging");
@@ -12,7 +11,7 @@ const log = logger("messaging");
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** The row shape the builder returns for `messaging_sessions`. */
-type SessionRow = typeof messagingSessions.$inferSelect;
+type SessionRow = StateTables["messagingSessions"]["$inferSelect"];
 
 /**
  * Session manager for messaging conversations, over the shared state client.
@@ -23,10 +22,20 @@ type SessionRow = typeof messagingSessions.$inferSelect;
  * `state/schema/sqlite.ts` and created by the migrations.
  */
 export class SessionManager {
-  constructor(private client: StateClient, private dialect: Dialect = "sqlite") {}
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
+  constructor(private client: StateClient, private dialect: Dialect = "sqlite") {
+    this.t = tablesOf(client);
+  }
 
   /** Look up an existing session by id (used to read its agent_session_id). */
   async getSession(id: string): Promise<ConversationSession | null> {
+    const { messagingSessions } = this.t;
     const [row] = await this.client
       .select()
       .from(messagingSessions)
@@ -37,6 +46,7 @@ export class SessionManager {
 
   /** Get an existing active session or create a new one */
   async getOrCreateSession(key: ConversationKey): Promise<ConversationSession> {
+    const { messagingSessions } = this.t;
     const now = new Date().toISOString();
     const cutoff = new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();
 
@@ -136,6 +146,7 @@ export class SessionManager {
    * Agent SDK session jsonl instead of a fresh file per message.
    */
   async setAgentSessionId(id: string, agentSessionId: string | null): Promise<void> {
+    const { messagingSessions } = this.t;
     await this.client
       .update(messagingSessions)
       .set({ agentSessionId })
@@ -144,6 +155,7 @@ export class SessionManager {
 
   /** Update last activity timestamp and increment message count */
   async touchSession(id: string): Promise<void> {
+    const { messagingSessions } = this.t;
     await this.client
       .update(messagingSessions)
       .set({
@@ -155,6 +167,7 @@ export class SessionManager {
 
   /** Deactivate a session (e.g., user sends /new or /reset) */
   async deactivateSession(id: string): Promise<void> {
+    const { messagingSessions } = this.t;
     await this.client
       .update(messagingSessions)
       .set({ active: false })
@@ -168,6 +181,7 @@ export class SessionManager {
     content: string,
     platformMessageId?: string,
   ): Promise<void> {
+    const { messagingMessages } = this.t;
     // `id` is AUTOINCREMENT — never supplied.
     await this.client.insert(messagingMessages).values({
       sessionId,
@@ -191,6 +205,7 @@ export class SessionManager {
    * millisecond.
    */
   async getHistory(sessionId: string, limit = 50): Promise<ConversationMessage[]> {
+    const { messagingMessages } = this.t;
     const rows = await this.client
       .select()
       .from(messagingMessages)
@@ -231,6 +246,7 @@ export class SessionManager {
     threadId: string,
     opts: { includeStale?: boolean } = {},
   ): Promise<ConversationSession | null> {
+    const { messagingSessions } = this.t;
     const cutoff = opts.includeStale
       ? new Date(0).toISOString()
       : new Date(Date.now() - SESSION_TIMEOUT_MS).toISOString();
@@ -258,6 +274,7 @@ export class SessionManager {
 
   /** Clean up old inactive sessions (call from cron) */
   async cleanupStaleSessions(maxAgeDays = 7): Promise<number> {
+    const { messagingMessages, messagingSessions } = this.t;
     const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
     const staleSessions = and(
       eq(messagingSessions.active, false),

@@ -1,8 +1,7 @@
 import { randomUUID } from "crypto";
 import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
-import type { StateClient } from "./client.js";
+import { tablesOf, type StateClient, type StateTables } from "./client.js";
 import { rows } from "./dialect.js";
-import { cronRuns } from "./schema/sqlite.js";
 
 /**
  * A lexicographically-sortable row id: a fixed-width millisecond stamp, a
@@ -99,10 +98,20 @@ export interface CronRunFinish {
  *    and vice versa (issue #327).
  */
 export class CronRunStore {
-  constructor(private client: StateClient) {}
+  /**
+   * Table objects for THIS client's dialect. Every method destructures what it
+   * needs off this instead of importing from `schema/sqlite.js` — see
+   * `client.ts` → {@link tablesOf} for why the cast alone cannot do it.
+   */
+  private readonly t: StateTables;
+
+  constructor(private client: StateClient) {
+    this.t = tablesOf(client);
+  }
 
   /** Insert a `running` row and return its id. */
   async start(meta: CronRunStart): Promise<string> {
+    const { cronRuns } = this.t;
     const id = creationOrderedId();
     await this.client.insert(cronRuns).values({
       id,
@@ -119,6 +128,7 @@ export class CronRunStore {
 
   /** Stamp `finished_at` and the terminal fields. */
   async finish(id: string, result: CronRunFinish): Promise<void> {
+    const { cronRuns } = this.t;
     await this.client
       .update(cronRuns)
       .set({
@@ -148,6 +158,7 @@ export class CronRunStore {
    * raw snake_case column names.
    */
   async latestByCron(): Promise<Map<string, CronRunRecord>> {
+    const { cronRuns } = this.t;
     const ranked = await rows<Record<string, unknown>>(
       this.client,
       sql`SELECT * FROM (
@@ -184,6 +195,7 @@ export class CronRunStore {
    * order, not just a stable one.
    */
   async recentFailures(cronName: string): Promise<number> {
+    const { cronRuns } = this.t;
     const recent = await this.client
       .select({ status: cronRuns.status })
       .from(cronRuns)

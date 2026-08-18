@@ -9,6 +9,16 @@
  * genuinely divergent surfaces — raw SQL execution and rows-affected shape —
  * are funneled through `rows()` / `run()` / `changes()` in `dialect.ts`.
  *
+ * **The cast alone is NOT enough, and this is the one thing to remember here.**
+ * The query-builder surface is portable but PER-COLUMN VALUE MAPPING is not: a
+ * `sqliteTable` object driven by a PG client sends `1` into a `boolean` column
+ * (sqlite's `mapToDriverValue`; `PgBoolean` has none) and runs `JSON.parse`
+ * over an already-parsed jsonb object. Booleans break on WRITE, JSON on READ,
+ * and `dialect.ts` cannot see either. So no store may import its tables from
+ * `./schema/sqlite.js` — they resolve them per dialect through
+ * {@link tablesOf}, which hands back `schema/sqlite.ts`'s objects on the sqlite
+ * leg and `schema/pg.ts`'s on the Postgres one, from the same code.
+ *
  * Backend selection is construction-time injection (`StateDb.open` /
  * `StateDb.fromClient`), never a module-load env global, so both dialects can
  * be constructed in one test process.
@@ -34,9 +44,54 @@ export type StateDbc = StateClient | StateTx;
 /**
  * The ONE documented cast that lets a non-libsql Drizzle instance (PGlite in
  * Phase 4 tests) drive the sqlite-typed stores. Do not add a second cast site.
+ *
+ * Two obligations the cast cannot enforce, both on the caller:
+ *
+ * 1. **Build the instance with its own schema** — `drizzle(pglite, { schema:
+ *    pgSchema })`. {@link tablesOf} reads the tables back off it, and throws
+ *    loudly rather than silently mis-mapping if the schema was omitted.
+ * 2. **Normalize int8.** Postgres returns `COUNT(*)` / `SUM(...)` as int8,
+ *    which node-postgres hands back as a STRING. PGlite ≥0.5 parses it to a
+ *    number by default; a real PG client must be configured to
+ *    (`types.setTypeParser(20, Number)`), or every aggregate silently arrives
+ *    stringified.
  */
 export function asStateClient(db: unknown): StateClient {
   return db as StateClient;
+}
+
+/**
+ * The dialect-resolved table objects. Typed as the sqlite schema because that
+ * is the production path and the two schemas mirror each other export-for-export
+ * and property-for-property (`tests/state/schema-parity.test.ts` is the guard).
+ */
+export type StateTables = typeof sqliteSchema;
+
+/**
+ * The table objects belonging to a client — `schema/sqlite.ts`'s on a libsql
+ * client, `schema/pg.ts`'s on a Postgres one.
+ *
+ * Drizzle already carries the schema it was constructed with (`db._.fullSchema`
+ * is the object handed to `drizzle(client, { schema })`, and is typed for us),
+ * so this needs no extra constructor parameter and no second cast — the PG leg
+ * just passes `pgSchema` where production passes `sqliteSchema`. That also
+ * keeps `schema/pg.ts` out of the runtime import graph entirely: nothing under
+ * `src/` names it.
+ *
+ * A client built WITHOUT `{ schema }` would leave this empty and every store
+ * would then dereference `undefined`, so validate once, here, where the message
+ * can say what to fix.
+ */
+export function tablesOf(client: StateClient): StateTables {
+  const tables = (client as { _?: { fullSchema?: StateTables } })._?.fullSchema;
+  if (!tables?.executions) {
+    throw new Error(
+      "StateClient was constructed without its schema — call " +
+        "drizzle(client, { schema }) with schema/sqlite.js or schema/pg.js. " +
+        "Stores resolve their table objects from it (per-dialect value mapping).",
+    );
+  }
+  return tables;
 }
 
 /**
