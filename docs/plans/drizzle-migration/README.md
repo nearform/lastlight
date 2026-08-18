@@ -30,12 +30,24 @@ Then read, in order: **this README** (locked decisions + the drift ledger
 above) → **[00-architecture.md](00-architecture.md)** → **your phase doc**.
 Check "Status / todo list" below for the next unticked phase.
 
-**Next up is Phase 5** — packaging, the config slot, docs-sync, the npm release
-and the **mandatory prod-shape smoke Phase 2 could not do**:
-[05-config-packaging-release.md](05-config-packaging-release.md). It is the
-phase that merges the branch to `main`, so read its deviations-carrying
-predecessors first — Phase 4's §1 and §2 in particular, since the state layer's
-shape changed again.
+**Phase 5's code half is DONE** (commit `180d03e`) — the `database.url` config
+slot, the Dockerfile toolchain removal, `drizzle/` in `files`, and the
+spec/CLAUDE.md/www doc sweep, all verified against the real image and a real
+packed tarball. **What remains is only the outward-facing tail**, in this order:
+
+1. **Merge the branch to `main`** (squash — locked decision 6) and verify green
+   there.
+2. **Release v0.26.0** across all five published packages — follow
+   [`docs/RELEASING.md`](../../RELEASING.md) for the graph-aware bump order, not
+   the sketch in 05's §6. Version anchor is `0.25.9`.
+3. **Cut prod over** per 05's §5 runbook. Re-run the prod-shape smoke (05 §0)
+   first if drizby has moved on since 2026-08-18.
+
+Read [05-config-packaging-release.md](05-config-packaging-release.md) — its
+**Deviations** section records what the doc's own §§2–4 got wrong (the
+Dockerfile COPY is unnecessary; the wire contract is camelCase, not snake_case).
+Its deviations-carrying predecessors matter too — Phase 4's §1 and §2 in
+particular, since the state layer's shape changed again.
 
 A kickoff prompt that needs no other context:
 
@@ -48,7 +60,7 @@ A kickoff prompt that needs no other context:
 
 | Invariant | Value |
 |---|---|
-| Green baseline | **202 test files, 3,357 tests passing** (206 / 3,127 after Phase 2; Phase 3 folded nine files into the factory to 199 / 3,128; Phase 4 added the second dialect leg) |
+| Green baseline | **202 test files, 3,361 tests passing** (206 / 3,127 after Phase 2; Phase 3 folded nine files into the factory to 199 / 3,128; Phase 4 added the second dialect leg for 3,357; Phase 5 added 4 config tests) |
 | Branch sync | merge `main` in; never rebase |
 | `main` | docs only until Phase 5; stays on better-sqlite3 |
 | Scope | Phases 1–5. **Phase 6 is deferred out of this PR** |
@@ -228,7 +240,15 @@ each must leave the repo green before the next starts.
   postgres-URL guard missing its `/i` flag.
 - [ ] **Phase 5** — [05-config-packaging-release.md](05-config-packaging-release.md)
   — config slot, Dockerfile, docs-sync, prod cutover runbook, npm release
-  *(risk: low-medium)*
+  *(risk: low-medium)*. **Code half completed 2026-08-18** (`180d03e`):
+  `database.url` slot with env>overlay>default>dbPath precedence; `python3 make
+  g++` gone from both Dockerfile stages; `drizzle/` in `files`, which ships it
+  to the npm tarball AND the image (no COPY needed — see Deviations §1); spec +
+  CLAUDE.md + www doc sweep. Verified on the real artifacts: image builds with
+  no compiler present, migrates as UID 10001, honours `DATABASE_URL`; packed
+  tarball resolves `migrationsFolder` from an npm install. **202 files / 3,361
+  tests.** *Remaining: the merge to `main`, the five-package v0.26.0 release,
+  and the prod cutover — all deliberately left for a human to drive.*
 - [ ] **Phase 6 — DEFERRED, not in this PR** —
   [06-prod-postgres.md](06-prod-postgres.md) — **activate the
   production Postgres runtime**: driver-selectable PG pool (node-postgres default
