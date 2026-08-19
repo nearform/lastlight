@@ -60,8 +60,11 @@ the sandbox runs. See [`docs/RELEASING.md`](docs/RELEASING.md).
 `lastlight-core`} ← `lastlight-evals`. `agentic-pi` is a second leaf (no
 workspace deps) consumed by `lastlight-core` + `lastlight-evals` (and the private
 dashboard) via `workspace:*`. Invariants: **no edge from
-`shared`/`workflow-engine` back to `core`** (dep-cruiser gate, runs in
-`typecheck`); **the cli never gains an edge to `core`**. Turbo `^build` orders
+`shared`/`workflow-engine` back to `core`** (`scripts/lint-import-boundaries.mjs`,
+runs in `typecheck`); **the cli never gains an edge to `core`**. That script
+replaced dependency-cruiser when the workspace moved to TypeScript 7 — dep-cruiser
+refuses to parse TS >= 7 and *exits 0 anyway*, so the gate went green while seeing
+nothing. Turbo `^build` orders
 builds; there are no TS project references. Those invariants are why some logic
 lives in `shared` rather than where you'd first look — e.g. the per-repository
 `.lastlight/` config schema + bounds + merge

@@ -6,7 +6,7 @@
     "url": "git+https://github.com/nearform/lastlight.git",
     "directory": "packages/workflow-engine"
   },
-  "description": "Port-driven workflow engine extracted from Last Light — DAG scheduler, phase executor, DSL/schema, template + loop constructs.",
+  "description": "Port-driven workflow engine extracted from Last Light \u2014 DAG scheduler, phase executor, DSL/schema, template + loop constructs.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -31,14 +31,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && pnpm run lint:boundaries",
-    "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src"
+    "lint:boundaries": "node ../../scripts/lint-import-boundaries.mjs engine"
   },
   "dependencies": {
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "dependency-cruiser": "^18.2.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   }
 }

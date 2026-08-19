@@ -1,7 +1,7 @@
 {
   "name": "lastlight-core",
   "version": "0.26.0",
-  "description": "GitHub repository maintenance agent — Agent SDK harness",
+  "description": "GitHub repository maintenance agent \u2014 Agent SDK harness",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -60,7 +60,7 @@
     "dev:db:psql": "docker compose -f docker-compose.yml --project-directory ../.. --profile postgres exec postgres psql -U lastlight -d lastlight",
     "dev:db:migrate": "tsx src/state/state-cli.ts migrate --from data/lastlight.db --to postgres://lastlight:lastlight@127.0.0.1:55432/lastlight",
     "test:watch": "vitest",
-    "lint:boundaries": "depcruise --config .dependency-cruiser.cjs src",
+    "lint:boundaries": "node ../../scripts/lint-import-boundaries.mjs server",
     "db:generate:sqlite": "drizzle-kit generate --config drizzle-sqlite.config.ts",
     "db:generate:pg": "drizzle-kit generate --config drizzle-pg.config.ts",
     "lint:promises": "node scripts/lint-floating-promises.mjs . ../../packages/workflow-engine ../../packages/shared",
@@ -108,10 +108,9 @@
     "@types/node": "^26.2.0",
     "@types/pg": "^8.23.1",
     "concurrently": "^10.0.5",
-    "dependency-cruiser": "^18.2.0",
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.23.12",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
 }
