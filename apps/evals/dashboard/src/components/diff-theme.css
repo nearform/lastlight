@@ -1,6 +1,7 @@
 /**
  * Dark theme for react-diff-view, matched to the `lastlight` daisyUI palette
- * (the dashboard is dark-only — see tailwind.config.js). The library is fully
+ * (the dashboard is dark-only — see the `@plugin "daisyui/theme"` blocks in
+ * index.css). The library is fully
  * CSS-variable themeable, so we only override its custom properties + a couple
  * of structural bits; no fork needed. Scoped under `.ll-diff` so it can't leak.
  */
