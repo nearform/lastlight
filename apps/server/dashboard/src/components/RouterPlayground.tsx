@@ -658,14 +658,14 @@ function WhyPanel({ result }: { result: RouteTestResponse }) {
           The classifier didn’t really run — this fell back to <span className="font-mono">chat</span>.
           Either the LLM call errored (missing/invalid provider key), or the model returned empty output
           (a reasoning model can exhaust the classifier’s small token budget on hidden reasoning).
-          <div className="mt-1 font-mono break-words opacity-80">{explanation.reason}</div>
+          <div className="mt-1 font-mono wrap-break-word opacity-80">{explanation.reason}</div>
         </div>
       )}
       <div className="flex items-center gap-2">
         <span className="badge badge-xs badge-ghost">{explanation.routingKind}</span>
         <span className={`font-semibold ${actionTone}`}>{route.action}</span>
       </div>
-      <div className="text-base-content/80 font-mono text-2xs break-words">{explanation.branchLabel}</div>
+      <div className="text-base-content/80 font-mono text-2xs wrap-break-word">{explanation.branchLabel}</div>
       {route.action === "handler" && (
         <div>
           <span className="text-base-content/50">handler: </span>

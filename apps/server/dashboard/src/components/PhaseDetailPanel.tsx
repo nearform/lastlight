@@ -112,7 +112,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-2xs font-semibold uppercase tracking-wider text-base-content/40">
         {label}
       </span>
-      <span className="text-xs text-base-content/80 font-mono break-words">{children}</span>
+      <span className="text-xs text-base-content/80 font-mono wrap-break-word">{children}</span>
     </div>
   );
 }
@@ -309,7 +309,7 @@ export function PhaseDetailPanel({
                   <div className="text-2xs font-semibold uppercase tracking-wider text-error/80 mb-1">
                     Error
                   </div>
-                  <div className="text-2xs text-error/80 font-mono break-words border border-error/30 bg-error/5 rounded px-2 py-1">
+                  <div className="text-2xs text-error/80 font-mono wrap-break-word border border-error/30 bg-error/5 rounded px-2 py-1">
                     {execution.error}
                   </div>
                 </div>
@@ -453,7 +453,7 @@ function ApprovalDetail({
           <div className="text-2xs font-semibold uppercase tracking-wider text-base-content/40 mb-1">
             {approval.kind === "reply" ? "Reply" : "Comment"}
           </div>
-          <div className="text-xs text-base-content/80 whitespace-pre-wrap break-words border border-base-300/40 bg-base-200/30 rounded px-2 py-1.5">
+          <div className="text-xs text-base-content/80 whitespace-pre-wrap wrap-break-word border border-base-300/40 bg-base-200/30 rounded px-2 py-1.5">
             {approval.response}
           </div>
         </div>

@@ -1,7 +1,15 @@
 /*
  * Prism theme aligned with the daisyUI "lastlight" palette. Token colours
- * resolve through daisyUI CSS variables (`--p`, `--s`, `--a`, `--in`, …) so
- * any future theme tweak in tailwind.config.js flows through automatically.
+ * resolve through daisyUI CSS variables (`--color-primary`, `--color-accent`,
+ * `--color-info`, …) so any future theme tweak in the `@plugin "daisyui/theme"`
+ * blocks in index.css flows through automatically.
+ *
+ * These are daisyUI v5 names. In v4 they were raw oklch COMPONENTS (`--p`,
+ * `--bc`) that had to be wrapped — `oklch(var(--bc) / 0.45)`. v5 holds whole
+ * colours instead, so the wrapper is gone and alpha is applied with
+ * color-mix(). v5 does not define the old names at all: leave an `oklch(var(--bc))`
+ * behind and it resolves to an invalid colour that browsers discard silently,
+ * which reads as "the syntax highlighter lost all its colours".
  *
  * `template-block` is a custom token registered in CodeBlock.tsx for the
  * mustache-style `{{ ... }}` placeholders that appear in our prompt
@@ -10,7 +18,7 @@
 
 code[class*="language-"],
 pre[class*="language-"] {
-  color: oklch(var(--bc));
+  color: var(--color-base-content);
   background: none;
   font-family: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Monaco,
     Consolas, monospace;
@@ -24,15 +32,15 @@ pre[class*="language-"] {
 }
 
 pre[class*="language-"] {
-  background: oklch(var(--b3) / 0.6);
+  background: color-mix(in oklab, var(--color-base-300) 60%, transparent);
   border-radius: 0.375rem;
   overflow: auto;
   padding: 0.75rem;
 }
 
 :not(pre) > code[class*="language-"] {
-  background: oklch(var(--b3));
-  color: oklch(var(--a));
+  background: var(--color-base-300);
+  color: var(--color-accent);
   padding: 0.1em 0.3em;
   border-radius: 0.25em;
   white-space: normal;
@@ -43,12 +51,12 @@ pre[class*="language-"] {
 .token.comment,
 .token.prolog,
 .token.cdata {
-  color: oklch(var(--bc) / 0.45);
+  color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
   font-style: italic;
 }
 
 .token.punctuation {
-  color: oklch(var(--bc) / 0.65);
+  color: color-mix(in oklab, var(--color-base-content) 65%, transparent);
 }
 
 .token.namespace {
@@ -60,7 +68,7 @@ pre[class*="language-"] {
 .token.constant,
 .token.symbol,
 .token.deleted {
-  color: oklch(var(--wa));
+  color: var(--color-warning);
 }
 
 .token.selector,
@@ -69,7 +77,7 @@ pre[class*="language-"] {
 .token.char,
 .token.builtin,
 .token.inserted {
-  color: oklch(var(--su));
+  color: var(--color-success);
 }
 
 .token.operator,
@@ -77,30 +85,30 @@ pre[class*="language-"] {
 .token.url,
 .language-css .token.string,
 .style .token.string {
-  color: oklch(var(--in));
+  color: var(--color-info);
 }
 
 .token.atrule,
 .token.attr-value,
 .token.keyword {
-  color: oklch(var(--p));
+  color: var(--color-primary);
 }
 
 .token.function,
 .token.class-name {
-  color: oklch(var(--s));
+  color: var(--color-secondary);
 }
 
 .token.regex,
 .token.important,
 .token.variable {
-  color: oklch(var(--a));
+  color: var(--color-accent);
 }
 
 .token.important,
 .token.bold {
   font-weight: 600;
-  color: oklch(var(--bc));
+  color: var(--color-base-content);
 }
 
 .token.italic {
@@ -115,18 +123,18 @@ pre[class*="language-"] {
 
 .token.title,
 .token.title .token.punctuation {
-  color: oklch(var(--p));
+  color: var(--color-primary);
   font-weight: 700;
 }
 
 .token.list.punctuation {
-  color: oklch(var(--p));
+  color: var(--color-primary);
 }
 
 .token.url-reference,
 .token.url .token.url,
 .token.url .token.content {
-  color: oklch(var(--in));
+  color: var(--color-info);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -134,37 +142,37 @@ pre[class*="language-"] {
 .token.code-snippet,
 .language-markdown .token.code,
 .language-markdown .token.code .token.code-block {
-  color: oklch(var(--a));
-  background: oklch(var(--b3) / 0.6);
+  color: var(--color-accent);
+  background: color-mix(in oklab, var(--color-base-300) 60%, transparent);
   border-radius: 0.25em;
   padding: 0.05em 0.3em;
 }
 
 .token.blockquote.punctuation {
-  color: oklch(var(--bc) / 0.5);
+  color: color-mix(in oklab, var(--color-base-content) 50%, transparent);
 }
 
 /* ── YAML-specific ─────────────────────────────────────────────────── */
 
 .language-yaml .token.key {
-  color: oklch(var(--p));
+  color: var(--color-primary);
 }
 
 .language-yaml .token.anchor,
 .language-yaml .token.alias {
-  color: oklch(var(--s));
+  color: var(--color-secondary);
 }
 
 .language-yaml .token.tag {
-  color: oklch(var(--a));
+  color: var(--color-accent);
 }
 
 /* ── Template variables ({{ … }}) ──────────────────────────────────── */
 
 .token.template-block {
-  color: oklch(var(--a));
-  background: oklch(var(--a) / 0.12);
-  border: 1px solid oklch(var(--a) / 0.3);
+  color: var(--color-accent);
+  background: color-mix(in oklab, var(--color-accent) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--color-accent) 30%, transparent);
   border-radius: 0.25em;
   padding: 0 0.2em;
   font-weight: 500;
@@ -174,5 +182,5 @@ pre[class*="language-"] {
 .token.bold .token.template-block,
 .token.italic .token.template-block,
 .token.title .token.template-block {
-  color: oklch(var(--a));
+  color: var(--color-accent);
 }
