@@ -20,9 +20,26 @@
  * `x.then(ok, err)`, `x.finally(fn)`, and any promise that is assigned,
  * returned or passed on. Deliberate fire-and-forget is spelled `.catch(…)` or
  * `void` — both of which say so in the source.
+ *
+ * TypeScript 7 note: the classic `import ts from "typescript"` compiler API is
+ * gone — the package's main entry now exports only `version`, and the compiler
+ * lives behind `typescript/unstable/*`. That surface is explicitly UNSTABLE, so
+ * if this script breaks on a TS 7.x bump, it is this import boundary that moved
+ * and not the rule. The shape is LSP-like rather than `createProgram`: open a
+ * snapshot over the tsconfig, and read `project.program` / `project.checker`
+ * off it.
  */
-import ts from "typescript";
-import { resolve, relative } from "node:path";
+import { API } from "typescript/unstable/sync";
+import {
+  isAwaitExpression,
+  isBinaryExpression,
+  isCallExpression,
+  isExpressionStatement,
+  isPropertyAccessExpression,
+  isVoidExpression,
+} from "typescript/unstable/ast/is";
+import { existsSync } from "node:fs";
+import { join, resolve, relative } from "node:path";
 
 // Pre-existing, deliberately unfixed. `stream.writeSSE` inside Hono's
 // `streamSSE` handler: awaiting it would respect backpressure and is probably
@@ -40,57 +57,76 @@ if (projectDirs.length === 0) {
   process.exit(2);
 }
 
-const isThenable = (t) =>
-  t.getProperties?.().some((p) => p.getName() === "then") ||
-  (t.isUnionOrIntersection?.() && t.types.some(isThenable));
+/**
+ * A union is thenable if ANY constituent is: `Promise<T> | undefined` is still
+ * a promise you can drop. The checker's own property list on a union is the
+ * INTERSECTION of its constituents, so it reports no `then` there — hence the
+ * explicit recursion, same as the pre-TS7 version did.
+ */
+const isThenable = (checker, t) => {
+  if (!t) return false;
+  if (checker.getPropertiesOfType(t).some((p) => p.name === "then")) return true;
+  const parts = t.getTypes?.();
+  return Array.isArray(parts) && parts.some((p) => isThenable(checker, p));
+};
 
 /** A rejection with somewhere to go is not floating. */
 const isHandled = (e) => {
-  if (!ts.isCallExpression(e)) return false;
+  if (!isCallExpression(e)) return false;
   const callee = e.expression;
-  if (!ts.isPropertyAccessExpression(callee)) return false;
+  if (!isPropertyAccessExpression(callee)) return false;
   const name = callee.name.getText();
   return name === "catch" || name === "finally" || (name === "then" && e.arguments.length >= 2);
 };
 
+const api = new API({ cwd: process.cwd() });
 let total = 0;
+
 for (const dir of projectDirs) {
   const root = resolve(dir);
-  const configPath = ts.findConfigFile(root, ts.sys.fileExists, "tsconfig.json");
-  if (!configPath) {
+  const configPath = join(root, "tsconfig.json");
+  if (!existsSync(configPath)) {
     console.error(`no tsconfig.json under ${dir}`);
     process.exit(2);
   }
-  const parsed = ts.parseJsonConfigFileContent(
-    ts.readConfigFile(configPath, ts.sys.readFile).config,
-    ts.sys,
-    root,
-  );
-  const program = ts.createProgram(parsed.fileNames, parsed.options);
-  const checker = program.getTypeChecker();
 
-  for (const sf of program.getSourceFiles()) {
-    if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
-    if (!sf.fileName.startsWith(root)) continue;
+  const snapshot = api.updateSnapshot({ openProjects: [configPath] });
+  const project = snapshot.getProject(configPath);
+  if (!project) {
+    console.error(`could not load project ${configPath}`);
+    process.exit(2);
+  }
+  const { program, checker } = project;
+
+  for (const fileName of program.getSourceFileNames()) {
+    if (fileName.endsWith(".d.ts") || fileName.includes("node_modules")) continue;
+    if (!fileName.startsWith(root)) continue;
+    const sf = program.getSourceFile(fileName);
+    if (!sf) continue;
+
     const visit = (node) => {
-      if (ts.isExpressionStatement(node)) {
+      if (isExpressionStatement(node)) {
         const e = node.expression;
         const skip =
-          ts.isVoidExpression(e) || ts.isAwaitExpression(e) || ts.isBinaryExpression(e) || isHandled(e);
-        if (!skip && isThenable(checker.getTypeAtLocation(e))) {
+          isVoidExpression(e) || isAwaitExpression(e) || isBinaryExpression(e) || isHandled(e);
+        if (!skip && isThenable(checker, checker.getTypeAtLocation(e))) {
           const { line } = sf.getLineAndCharacterOfPosition(node.getStart());
-          const where = `${relative(root, sf.fileName)}:${line + 1}`;
+          const where = `${relative(root, fileName)}:${line + 1}`;
           if (!ALLOWED.has(where)) {
             console.error(`${dir}/${where}  ${node.getText().split("\n")[0].slice(0, 90)}`);
             total++;
           }
         }
       }
-      ts.forEachChild(node, visit);
+      node.forEachChild(visit);
     };
     visit(sf);
   }
+
+  snapshot.dispose();
 }
+
+api.close();
 
 if (total > 0) {
   console.error(
