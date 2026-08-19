@@ -20,5 +20,6 @@ export * from "./overlay-assets.js";
 export * from "./core-pin.js";
 export * from "./workflow-loader.js";
 export * from "./config-types.js";
+export * from "./database-url.js";
 export * from "./repo-config-schema.js";
 export * from "./sandbox-services.js";

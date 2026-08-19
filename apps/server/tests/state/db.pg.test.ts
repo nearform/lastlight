@@ -152,18 +152,31 @@ describe("cross-dialect stats bucketing", () => {
 });
 
 /**
- * Through Phase 5 Postgres is TEST-ONLY: the only entry point is
- * `StateDb.fromClient()` above. `open()` refusing a `postgres://` URL is what
- * keeps a PG driver out of the runtime dependency graph and turns a
- * misconfigured `DATABASE_URL` into a loud boot failure instead of a
- * half-working server. Phase 6 replaces the throw with a real node-postgres
- * branch — until then, this is the contract.
+ * Phase 6 replaced the Phase-4 "PG runtime not enabled" throw with a real
+ * node-postgres branch. There is no Postgres server in the default suite, so
+ * what is provable here is that the branch is *taken*: each spelling reaches a
+ * driver that tries to connect (and is refused by a closed port) rather than
+ * bouncing off a guard or being handed to the libsql client, which would report
+ * an opaque `ConnectionFailed` for a URL it never understood.
+ *
+ * The behavioural proof lives in `db.pg-server.test.ts` (opt-in, real server).
  */
 describe("StateDb.open with a postgres URL", () => {
-  it.each(["postgres://user:pw@host:5432/db", "postgresql://host/db", "POSTGRES://host/db"])(
-    "refuses %s",
-    async (url) => {
-      await expect(StateDb.open(url)).rejects.toThrow(/PG runtime not enabled/);
-    },
-  );
+  it.each([
+    "postgres://user:pw@127.0.0.1:1/db",
+    "postgresql://127.0.0.1:1/db",
+    // Case-insensitive: URL schemes are, and this spelling used to slip past
+    // the guard's missing /i flag and reach the libsql client.
+    "POSTGRES://127.0.0.1:1/db",
+  ])("takes the postgres branch for %s", async (url) => {
+    // Port 1 is closed, so node-postgres refuses immediately — no DNS, no wait.
+    // The failure surfaces as the pg MIGRATOR's first statement, which is a
+    // stronger signal than a bare connection error: it can only be reached
+    // through `drizzle-orm/node-postgres/migrator` over the `drizzle/pg`
+    // folder, so both the driver and the right migration set are wired up.
+    await expect(StateDb.open(url)).rejects.toThrow(
+      /CREATE SCHEMA IF NOT EXISTS "drizzle"|ECONNREFUSED/i,
+    );
+    await expect(StateDb.open(url)).rejects.not.toThrow(/PG runtime not enabled/i);
+  });
 });

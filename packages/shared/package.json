@@ -51,6 +51,10 @@
       "types": "./dist/sandbox-services.d.ts",
       "import": "./dist/sandbox-services.js"
     },
+    "./database-url": {
+      "types": "./dist/database-url.d.ts",
+      "import": "./dist/database-url.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

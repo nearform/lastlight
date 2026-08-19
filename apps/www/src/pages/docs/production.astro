@@ -196,6 +196,53 @@ curl -X POST https://lastlight.example.com/webhooks/github -d '&#123;&#125;'</co
 
 	<p>Back this volume up if you care about the audit trail.</p>
 
+	<h3>Using Postgres instead of SQLite</h3>
+
+	<p>
+		SQLite is the default and needs nothing running. If you would rather keep
+		state on an external or managed Postgres — RDS, Cloud SQL, Supabase, a
+		self-hosted server, or <a href="https://neon.tech">Neon</a> — set
+		<code>DATABASE_URL</code> to a <code>postgres://</code> URL in
+		<code>instance/secrets/.env</code> and restart. The schema, migrations and
+		the entire state test suite run on both dialects, and the driver is picked
+		from the host: <code>*.neon.tech</code> uses Neon's serverless WebSocket
+		pool, everything else uses node-postgres. Override with
+		<code>DATABASE_DRIVER=pg|neon</code>.
+	</p>
+
+	<p>
+		Put the URL in <code>.env</code>, <strong>not</strong> in
+		<code>instance/config.yaml</code>. It is a valid config slot there, which is
+		exactly the trap — the overlay is a git repo with a GitHub remote, and a
+		credential committed to it cannot be un-committed by the dashboard's
+		render-time masking. <code>lastlight server setup</code> offers the choice
+		and writes it to the right file for you.
+	</p>
+
+	<p>
+		To move an <em>existing</em> deployment across, copy the data first:
+	</p>
+
+	<pre><code>lastlight server db check --url postgres://user:pass@host:5432/lastlight
+lastlight server db migrate --to postgres://user:pass@host:5432/lastlight --dry-run
+lastlight server db migrate --to postgres://user:pass@host:5432/lastlight</code></pre>
+
+	<p>
+		It stops the agent, copies every table in foreign-key order and verifies the
+		row counts against the source. Then set <code>DATABASE_URL</code> and run
+		<code>lastlight server start agent</code> (a recreate — a restart cannot
+		pick up a new <code>env_file</code> value). Keep the SQLite file until you
+		are satisfied; the copy is one-way, and Postgres &rarr; SQLite is not
+		supported.
+	</p>
+
+	<p>
+		Postgres here is a <strong>storage</strong> choice, not a step towards
+		running several instances: the atomic operations behind the approval and
+		run-lock lifecycle rely on an in-process lock, so Last Light is still one
+		writer.
+	</p>
+
 	<h2>Updating</h2>
 
 	<p>Updating <strong>lastlight itself</strong> (source, built-in assets) is a rebuild:</p>

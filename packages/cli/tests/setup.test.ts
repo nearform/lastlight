@@ -269,6 +269,76 @@ describe("buildOverlayConfig", () => {
     const yaml = buildOverlayConfig(cfg([]));
     expect(yaml).toMatch(/managedRepos:\n\s+\[\]/);
   });
+
+  /**
+   * The overlay is a git repo the wizard offers to push to GitHub a few steps
+   * later, so nothing secret may reach it. `database.url` is the tempting
+   * exception — it IS a valid YAML slot — and putting it here would push a
+   * database password to a remote, which no amount of render-time redaction
+   * can undo. It rides `buildEnvContent()` instead.
+   */
+  it("never emits a postgres:// URL, even when one was collected", () => {
+    const withPg: SetupConfig = {
+      ...cfg(["acme/one"]),
+      DATABASE_URL: "postgres://lastlight:hunter2@db.internal:5432/lastlight",
+    };
+    const yaml = buildOverlayConfig(withPg);
+    expect(yaml).not.toContain("postgres://");
+    expect(yaml).not.toContain("hunter2");
+    expect(yaml).not.toContain("database");
+  });
+});
+
+// ── The state-database choice (Phase 6) ────────────────────────────────────
+
+describe("buildEnvContent — state database", () => {
+  const base: SetupConfig = {
+    GITHUB_APP_ID: "1",
+    GITHUB_APP_INSTALLATION_ID: "2",
+    WEBHOOK_SECRET: "w",
+    ADMIN_SECRET: "a",
+    DOMAIN: "d.example.com",
+    LASTLIGHT_MODEL: "anthropic/claude-sonnet-4-6",
+    providerApiKey: { envKey: "ANTHROPIC_API_KEY", value: "sk-ant-x" },
+    useCaddy: true,
+    pemSourcePath: "/tmp/app.pem",
+    managedRepos: [],
+  };
+
+  /**
+   * SQLite writing NOTHING is the contract, not an omission. The slot resolves
+   * to `file:` + the `DB_PATH` / `$STATE_DIR` path by absence, so an emitted
+   * `DATABASE_URL=file:./data/lastlight.db` would pin a path `STATE_DIR` is
+   * meant to be able to move — and every `.env` written by an older wizard
+   * keeps working precisely because nothing is written here.
+   */
+  it("writes no DATABASE_URL at all for the SQLite answer", () => {
+    const content = buildEnvContent(base);
+    expect(content).not.toContain("DATABASE_URL");
+    expect(content).not.toContain("DATABASE_DRIVER=");
+  });
+
+  it("writes DATABASE_URL for the Postgres answer", () => {
+    const content = buildEnvContent({
+      ...base,
+      DATABASE_URL: "postgres://lastlight:hunter2@db.internal:5432/lastlight",
+    });
+    expect(content).toContain(
+      "DATABASE_URL=postgres://lastlight:hunter2@db.internal:5432/lastlight",
+    );
+  });
+
+  it("leaves DATABASE_DRIVER commented out — the host heuristic answers it", () => {
+    const content = buildEnvContent({
+      ...base,
+      DATABASE_URL: "postgres://u:p@ep-x.eu-central-1.aws.neon.tech/lastlight",
+    });
+    // Present as guidance for the one case the host cannot express (Neon
+    // behind a custom domain), but never active: a wrong explicit driver beats
+    // a right heuristic, and `neon-http` in particular loses transactions.
+    expect(content).toContain("# DATABASE_DRIVER=neon");
+    expect(content).not.toMatch(/^DATABASE_DRIVER=/m);
+  });
 });
 
 describe("CADDY_DISABLED_OVERRIDE", () => {

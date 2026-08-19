@@ -12,7 +12,14 @@ plus this README alone.
 
 ## ▶ Start here — resuming in a new session
 
-> ## ✅ Phases 1–5 are DONE and SHIPPED
+> ## ✅ ALL PHASES (1–6) ARE DONE
+>
+> **Phase 6 landed on 2026-08-18** — the production Postgres runtime plus the
+> sqlite→postgres data migration. The whole plan is now a record of how the
+> migration was done, not a to-do list; the only outstanding item is the npm
+> release + GHCR rebuild that ships Phase 6 (see 06's Deviations §11).
+>
+> ## ✅ Phases 1–5 were shipped earlier
 >
 > The Drizzle/libsql state layer merged as **PR #351**, released as
 > **v0.26.0**, and has been running on **drizby prod since 2026-08-18**.
@@ -20,27 +27,21 @@ plus this README alone.
 > every instruction below about branches, merging `main` in, or `main` staying
 > on better-sqlite3 — all of that is spent.
 >
-> **The only phase left is [Phase 6](06-prod-postgres.md)** — the production
-> Postgres runtime, deliberately deferred out of #351. It is *additive*: today
-> `StateDb.open()` throws on a `postgres://` URL and no PG driver is a runtime
-> dependency, and the sqlite path stays the default afterwards. Start there:
+> [Phase 6](06-prod-postgres.md) was the production Postgres runtime,
+> deliberately deferred out of #351 and executed on its own branch off `main`.
+> It was *additive*: the sqlite path is still the default, and a deployment that
+> sets no `DATABASE_URL` behaves exactly as before.
 >
-> ```bash
-> cd ~/work/lastlight && git checkout main && git pull --ff-only
-> pnpm install --frozen-lockfile
-> pnpm turbo run typecheck test build     # green before you start
-> ```
+> **Read [06-prod-postgres.md](06-prod-postgres.md)'s Deviations section** if
+> you are touching the state layer: it records where this doc was wrong (the
+> `makePgClient` snippet that would have thrown, the boot-log credential leak,
+> the in-image probe that cannot run at wizard time) and what the real
+> production data migration found (jsonb key order, float `SUM` accumulation
+> order, the reassigned `messaging_messages.id`).
 >
-> Then read **[06-prod-postgres.md](06-prod-postgres.md)** end-to-end. You do
-> **not** need the Phase 1–5 docs to execute it, but you do need three facts
-> they establish, and §"What Phases 1–5 left you" below is the short version.
->
-> A kickoff prompt that needs no other context:
->
-> > Execute Phase 6 of the Drizzle migration from
-> > `docs/plans/drizzle-migration/06-prod-postgres.md`, working on a branch off
-> > `main`. Phases 1–5 already shipped in v0.26.0. Follow the locked decisions
-> > in that directory's README — do not relitigate them.
+> The behavioural contract now lives in **`apps/server/spec/10-state.md`**
+> ("Dialect posture" + "Moving an existing database to Postgres"), which is the
+> page to trust over anything in this directory.
 >
 > The rest of this directory is now a **record of how the migration was done**,
 > not a to-do list. It is worth keeping: the deviations sections are where the
@@ -313,8 +314,7 @@ each must leave the repo green before the next starts.
   (stale hand-run deploy, "exactly one" journal row, and expecting migrator
   output that a no-op never produces). Also §3: the wire contract is camelCase,
   not the snake_case §4 specifies.
-- [ ] **Phase 6 — THE ONLY PHASE LEFT** (was deferred out of PR #351; it is now
-  simply the next piece of work, on a branch off `main`) —
+- [x] **Phase 6** (was deferred out of PR #351) —
   [06-prod-postgres.md](06-prod-postgres.md) — **activate the
   production Postgres runtime**: driver-selectable PG pool (node-postgres default
   **or** Neon serverless via `drizzle-orm/neon-serverless`) + `pg` /
@@ -324,7 +324,26 @@ each must leave the repo green before the next starts.
   `lastlight server setup` prompt** (§7a — SQLite default, Postgres URL to
   `secrets/.env` and never to the version-controlled overlay), deploy docs +
   release. Amends locked decision 3 (test-only → operator-selectable). *(risk:
-  medium)*
+  medium)*. *Completed 2026-08-18.* `StateDb.open("postgres://…")` builds a real
+  pooled client (node-postgres or Neon serverless, both lazily imported per
+  driver) and runs `drizzle/pg`; the whole state suite runs a **third** time
+  against a real Postgres server (opt-in `PG_INTEGRATION=1`, its own CI job);
+  `database.driver`/`poolMax` slots; credentials masked by VALUE in
+  `publicConfig` **and** the boot log. **Scope was widened by request to include
+  §8, the sqlite→postgres DATA migration** — `src/state/data-migrate.ts` + the
+  `lastlight-state` bin + `lastlight server db check|migrate`, verified against a
+  4,666-row copy of drizby prod (0.7 s, every row of the two biggest tables
+  field-for-field identical). **211 test files** (was 207). **Deviations — §1,
+  §5 and §7 matter beyond this phase:** the doc's `makePgClient` snippet omits
+  `{ schema }` and would have thrown on first use, so `pg-client.ts` is now the
+  ONE module under `src/` that may import `schema/pg.ts` (narrowed, not dropped,
+  and pinned by a new isolation test); the credential also leaked to the boot
+  log, and the redaction is a leaf-VALUE rule rather than a key rule so `file:`
+  URLs stay legible; and §7a's preferred in-image connectivity probe cannot run
+  at wizard time (the image is built *after* `writeConfig`), so setup does a bare
+  TCP probe and `lastlight server db check` is the full one. **Not done:** the
+  release, and the Neon driver has never actually run a query — treat it as
+  untested-in-anger.
 
 Architecture reference (read before any phase):
 [00-architecture.md](00-architecture.md).

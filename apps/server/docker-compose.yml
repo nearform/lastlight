@@ -245,6 +245,52 @@ services:
     networks:
       - internal
 
+  # ── Optional Postgres for the state database ──────────────────────────
+  #
+  # INERT by default: it sits behind the `postgres` profile, so a normal
+  # `docker compose up -d` never starts it and the default SQLite path is
+  # untouched. There is deliberately NO `depends_on` from `agent` — a
+  # depends_on pointing at a profile-gated service breaks the default stack.
+  #
+  #   docker compose --profile postgres up -d postgres
+  #
+  # Then point the harness at it with DATABASE_URL, whose host differs by
+  # where the harness runs:
+  #   in this stack   postgres://lastlight:lastlight@postgres:5432/lastlight
+  #   local dev       postgres://lastlight:lastlight@127.0.0.1:55432/lastlight
+  # For local dev, `pnpm --filter lastlight-core dev:db:up` runs the line
+  # above and `LASTLIGHT_DEV_DB=postgres` sets the URL (see scripts/dev-local.sh).
+  #
+  # ⚠ The default credentials are DEV credentials. The port is bound to
+  # loopback so nothing off-box can reach it, but a self-hoster running this
+  # for real should set POSTGRES_PASSWORD (and put the same value in the
+  # DATABASE_URL in instance/secrets/.env, never in config.yaml).
+  postgres:
+    image: postgres:16
+    profiles:
+      - postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lastlight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lastlight}
+      POSTGRES_DB: ${POSTGRES_DB:-lastlight}
+    ports:
+      # A high, loopback-only host port: high so it cannot collide with a
+      # Postgres the developer already runs on 5432, loopback so a dev
+      # database with dev credentials is never exposed to the network.
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lastlight}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+    memswap_limit: 1g
+    networks:
+      - internal
+
 volumes:
   agent-data:       # contains: lastlight.db, agent-sessions/, sandboxes/, secrets/, logs/, proxy/
   # Shared package-manager download cache (npm/pnpm/yarn), mounted at /cache in
@@ -256,6 +302,10 @@ volumes:
   pkg-cache:
   caddy-data:
   caddy-config:
+  # Only ever populated when the `postgres` profile is up. Declared
+  # unconditionally because compose requires every referenced volume to exist,
+  # profile or not — an empty declaration costs nothing.
+  postgres-data:
 
 networks:
   internal:

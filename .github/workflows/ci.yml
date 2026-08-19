@@ -56,3 +56,54 @@ jobs:
 
       - name: Typecheck, test, build
         run: pnpm turbo run typecheck test build
+
+  # The state suite a second time, over a REAL Postgres server — the one thing
+  # the default job cannot cover. Its PGlite leg proves the dialect but parses
+  # int8 itself, runs on a single connection, and never produces a
+  # node-postgres error shape, so the driver, the pool and `changes()` /
+  # `isUniqueViolation()` are only exercised here. Its own job so it never slows
+  # the default gate; the test file skips itself without `PG_INTEGRATION=1`.
+  pg-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # vitest transpiles `apps/server`'s own sources on the fly, but its
+      # WORKSPACE DEPS are resolved through their package `exports` maps, which
+      # point at `dist/`. The `check` job gets those built for free (every turbo
+      # task there declares `dependsOn: ["^build"]`); this job runs vitest
+      # directly, so without this step the suite dies on
+      # `Cannot find package 'lastlight-shared/database-url'` before a single
+      # test runs. Not reproducible locally, where dist/ is always already built.
+      - name: Build workspace dependencies
+        run: pnpm turbo run build --filter=lastlight-shared --filter=lastlight-workflow-engine
+
+      - name: State suite against real Postgres
+        env:
+          PG_INTEGRATION: "1"
+          PG_TEST_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: pnpm --filter lastlight-core exec vitest run tests/state/db.pg-server.test.ts

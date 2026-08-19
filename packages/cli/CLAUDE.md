@@ -111,7 +111,10 @@ from `--home` → `LASTLIGHT_HOME` → `~/.lastlight` `serverHome` → `~/lastli
 lastlight server setup                 # scaffold/adopt the working dir (clone core; clone OR
                                         # create the instance/ overlay — fresh overlay offers a
                                         # private `gh repo create`, via lastlight-shared's
-                                        # overlay-bootstrap)
+                                        # overlay-bootstrap). Prompts, in order: GitHub tier →
+                                        # App/PAT → domain → managed repos → STATE DATABASE
+                                        # (SQLite default | external Postgres) → model+key →
+                                        # admin password → Slack
 lastlight server build                 # build the docker images FROM SOURCE (agent + sandbox-base
                                         # + sandbox + sandbox-qa) without starting anything — the
                                         # local-build escape hatch (server update pulls prebuilt)
@@ -128,7 +131,38 @@ lastlight server update                # the canonical deploy: pull core+overlay
                                         # --no-prune --local --yes]
 lastlight server status                # compose ps + core/overlay version drift +
                                         # forked-asset overrides (shadows default / added)
+lastlight server db check              # can the agent reach its state database? [--url <url>]
+lastlight server db migrate            # copy the SQLite state into Postgres — one way, verified
+                                        # [--to <postgres url>; default: the container's own
+                                        #  DATABASE_URL, so no credential on the command line]
+                                        # [--from <path> --driver pg|neon --batch n
+                                        #  --dry-run --truncate --yes]
 ```
+
+`server db` is the only pair here that does **not** run on the host: both shell
+out to `docker compose run --rm --no-deps --entrypoint node agent
+/app/dist/state/state-cli.js …`, so the work happens inside the agent image.
+That is forced rather than chosen — `pg`, `@libsql/client` and the two Drizzle
+schemas live in `lastlight-core`, and the CLI may never gain an edge to it — but
+it is also the right answer: the probe then runs from the network the harness
+will actually run on. `--no-deps` matters (compose would otherwise start the
+egress sidecars as a side effect of a data migration), and so does
+`--entrypoint node` (the image's normal entrypoint boots the harness, which
+would open the database the command is about to copy). `migrate` refuses to run
+while the agent is up, because a concurrent writer produces a target that is
+quietly short of rows. Contract + the value-mapping details:
+`apps/server/spec/10-state.md` → "Moving an existing database to Postgres".
+
+**`server setup` refuses to nest the working directory inside another git
+repository** (`guardNestedHome`). The prompt resolves its answer against the
+current directory, so running setup from inside the lastlight checkout and
+answering `lastlight` cloned the whole core repo to `packages/cli/lastlight` —
+~50 MB of nested repo that the outer repo then staged on the next `git add -A`,
+with setup reporting success throughout. Nesting inside the **core** checkout is
+a hard refusal; any other enclosing repo asks for confirmation (defaulting to
+no), because a home directory that is itself a dotfiles repo makes `~/lastlight`
+"nested" while being exactly right. `--yes` refuses either way — CI has nobody
+to ask.
 
 `server update` (`cli-server.ts`) is the single source of truth for a deploy:
 pull the `instance/` overlay first (so a freshly-bumped `deploy.version` core pin

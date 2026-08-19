@@ -20,12 +20,14 @@ import {
   unlinkSync,
 } from "node:fs";
 import { resolve, join } from "node:path";
+import { Socket } from "node:net";
 import { execSync } from "node:child_process";
 import * as p from "@clack/prompts";
 import chalk from "chalk";
 import { OVERLAY_GITIGNORE, detectGh, bootstrapOverlayRepo } from "lastlight-shared";
 import { serverUpdate } from "./cli-server.js";
 import { PROVIDERS, providerByPrefix, OAUTH_PROVIDERS, oauthProviderById, type ProviderSpec } from "lastlight-shared";
+import { isPostgresUrl, parsePgEndpoint, resolvePgDriver } from "lastlight-shared/database-url";
 
 // ── Brand colors ───────────────────────────────────────────────────────────
 
@@ -74,6 +76,23 @@ export interface SetupConfig {
   pemSourcePath?: string;
   /** Repositories the bot manages — written to instance/config.yaml (the overlay). */
   managedRepos: string[];
+  /**
+   * State-database URL, set ONLY when the operator chose external Postgres.
+   *
+   * The one config slot the wizard fills through `buildEnvContent()` rather
+   * than `buildOverlayConfig()`, and the asymmetry is deliberate rather than an
+   * oversight: `database.url` IS a YAML-resolvable slot, so writing it to the
+   * overlay is the obvious move — and it is wrong, because setup offers to
+   * create a **GitHub repo from `instance/`** at the end, and
+   * `buildOverlayConfig()`'s output is the file that gets committed. A
+   * `postgres://user:pass@host/db` there is a credential pushed to a git
+   * remote, and redaction happens at render time, which cannot un-commit
+   * anything. `.env` lives under the overlay's gitignored `secrets/`, where
+   * every other credential the wizard collects already goes.
+   *
+   * Undefined = SQLite, which writes nothing at all.
+   */
+  DATABASE_URL?: string;
 }
 
 // ── Validation helpers (exported for unit tests) ────────────────────────────
@@ -181,6 +200,23 @@ export function buildEnvContent(config: SetupConfig): string {
   if (config.providerApiKey) {
     lines.push(`${config.providerApiKey.envKey}=${config.providerApiKey.value}`);
   }
+  // State database. SQLite (the default) emits NOTHING — see SetupConfig's
+  // DATABASE_URL doc for why the absence is the contract, and why this slot is
+  // the one the wizard writes here instead of into the overlay config.yaml.
+  if (config.DATABASE_URL) {
+    lines.push(
+      "",
+      "# ── State database (external Postgres) ─────────────────────",
+      "# Belongs HERE, not in instance/config.yaml — that file is version-",
+      "# controlled and pushed to a GitHub remote.",
+      `DATABASE_URL=${config.DATABASE_URL}`,
+      "# Driver is auto-detected from the host (*.neon.tech → neon, else pg).",
+      "# Uncomment only for Neon behind a custom domain, or to force",
+      "# node-postgres against Neon's TCP endpoint:",
+      "# DATABASE_DRIVER=neon",
+    );
+  }
+
   lines.push(
     "",
     "# ── Admin Dashboard ────────────────────────────────────────",
@@ -210,7 +246,15 @@ export function buildEnvContent(config: SetupConfig): string {
   return lines.join("\n");
 }
 
-/** Build the overlay config.yaml (instance/config.yaml) — merged over config/default.yaml. */
+/**
+ * Build the overlay config.yaml (instance/config.yaml) — merged over
+ * config/default.yaml.
+ *
+ * **Nothing secret may be emitted here.** Setup offers to `gh repo create` from
+ * `instance/` a few steps later, so whatever this returns is a file with a
+ * GitHub remote. `database.url` is a real YAML slot and therefore the tempting
+ * exception — it rides `buildEnvContent()` instead (see `SetupConfig.DATABASE_URL`).
+ */
 export function buildOverlayConfig(config: SetupConfig): string {
   const lines = [
     "# Last Light — private deployment overlay config",
@@ -546,6 +590,151 @@ async function collectManagedRepos(): Promise<string[]> {
     p.log.success(`Managing ${repos.length} repo${repos.length === 1 ? "" : "s"}: ${dim(repos.join(", "))}`);
   }
   return repos;
+}
+
+/**
+ * Where the deployment keeps its state.
+ *
+ * SQLite is the default and writes NOTHING — no `DATABASE_URL` line and no
+ * `database:` block. That absence is the contract: the slot resolves to `file:`
+ * + the `DB_PATH` / `$STATE_DIR` path at boot, so an emitted
+ * `DATABASE_URL=file:./data/lastlight.db` would silently PIN a path that
+ * `STATE_DIR` is supposed to be able to move. It is also what keeps every
+ * `.env` written by an older wizard working untouched.
+ */
+async function collectDatabase(): Promise<{ url?: string }> {
+  p.log.step(gold("State database"));
+
+  const choice = required(
+    await p.select({
+      message: "Where should Last Light keep its state?",
+      initialValue: "sqlite",
+      options: [
+        {
+          value: "sqlite",
+          label: `SQLite ${dim("(recommended)")}`,
+          hint: "a file in the agent-data volume — nothing to run",
+        },
+        {
+          value: "postgres",
+          label: "External Postgres",
+          hint: "you supply the server — managed, self-hosted, or Neon",
+        },
+      ],
+    }),
+  ) as string;
+
+  if (choice !== "postgres") {
+    p.log.success(`State: ${teal("SQLite")} ${dim("(data/lastlight.db in the agent volume)")}`);
+    return {};
+  }
+
+  // Loop until the operator has a URL they are happy with. Returning `{}` at
+  // any point falls back to SQLite, which writes nothing — so "I got this
+  // wrong, let me out" always has an answer that leaves no half-configuration
+  // behind.
+  let url = "";
+  for (;;) {
+    url = required(
+      await p.text({
+        message: "DATABASE_URL",
+        placeholder: "postgres://user:pass@host:5432/lastlight",
+        initialValue: url,
+        validate: (v) =>
+          isPostgresUrl(v ?? "")
+            ? undefined
+            : "Must be a postgres:// URL. Choose SQLite to use a file instead.",
+      }),
+    ) as string;
+
+    // Reported, never asked: `resolvePgDriver` reads it off the host, and a
+    // second prompt buys nothing an operator can answer better than the host can.
+    const driver = resolvePgDriver(url);
+    p.log.info(
+      driver === "neon"
+        ? `Driver: ${teal("neon")} ${dim("(detected from the *.neon.tech host — serverless WebSocket pool)")}`
+        : `Driver: ${teal("pg")} ${dim("(node-postgres; set DATABASE_DRIVER=neon by hand for Neon behind a custom domain)")}`,
+    );
+
+    const outcome = await confirmReachable(url);
+    if (outcome === "keep") return { url };
+    if (outcome === "sqlite") {
+      p.log.success(`State: ${teal("SQLite")} ${dim("(data/lastlight.db in the agent volume)")}`);
+      return {};
+    }
+    // "edit" loops with the current value pre-filled; "retry" re-probes it.
+  }
+}
+
+/**
+ * Dial the host:port before moving on.
+ *
+ * A wrong `DATABASE_URL` is strictly worse than the other things this wizard
+ * validates, because it surfaces as a container that boots and dies at the
+ * "Build and launch" step several minutes later, long after the context is
+ * gone. A bare TCP connect catches the common mistakes — typo'd host, wrong
+ * port, closed firewall — and is all the CLI can honestly do: `packages/cli`
+ * must never import `pg` (a dep-cruiser gate), and running the real probe
+ * inside the agent image is not available here because the image has not been
+ * built yet on a first install. `lastlight server db check` is the full probe,
+ * and it exists precisely because this one stops at the transport.
+ *
+ * A failure OFFERS to continue rather than aborting — a firewall rule the
+ * operator is about to add is a legitimate reason to proceed — but "continue"
+ * has to be CHOSEN. Returning "keep" by default would write a URL the operator
+ * just declined into `secrets/.env`, and they would meet it again as a
+ * container that will not boot.
+ */
+type ReachOutcome = "keep" | "retry" | "edit" | "sqlite";
+
+async function confirmReachable(url: string): Promise<ReachOutcome> {
+  const endpoint = parsePgEndpoint(url);
+  if (!endpoint) return "keep";
+  const spinner = p.spinner();
+  spinner.start(`Reaching ${endpoint.host}:${endpoint.port}`);
+  const reachable = await tcpProbe(endpoint.host, endpoint.port);
+  if (reachable) {
+    spinner.stop(`${endpoint.host}:${endpoint.port} is reachable`);
+    p.log.info(
+      dim("Credentials and the database name aren't checked here — run ") +
+        teal("lastlight server db check") +
+        dim(" after the build for the full probe."),
+    );
+    return "keep";
+  }
+  spinner.stop(`Could not reach ${endpoint.host}:${endpoint.port}`);
+  return required(
+    await p.select({
+      message: "What now?",
+      initialValue: "edit",
+      options: [
+        { value: "edit", label: "Enter a different URL" },
+        { value: "retry", label: "Try again", hint: "the server may still be starting" },
+        {
+          value: "keep",
+          label: "Use it anyway",
+          hint: "correct if you're about to open a firewall rule",
+        },
+        { value: "sqlite", label: "Use SQLite instead", hint: "writes no database config at all" },
+      ],
+    }),
+  ) as ReachOutcome;
+}
+
+/** Resolves true if a TCP connection opens within the timeout. Never throws. */
+function tcpProbe(host: string, port: number, timeoutMs = 4000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new Socket();
+    const done = (ok: boolean) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+    socket.connect(port, host);
+  });
 }
 
 /**
@@ -919,6 +1108,8 @@ export async function runSetup(): Promise<void> {
   const { domain, useCaddy } = await collectDomain();
 // Managed repos are meaningful for App + PAT; chat-only has no repos to manage.
   const managedRepos = mode === "chat" ? [] : await collectManagedRepos();
+  // Infrastructure questions before model questions, matching the order above.
+  const { url: databaseUrl } = await collectDatabase();
   const { model, providerApiKey } = await collectModelAndKey();
   const adminPassword = await collectAdminPassword();
   const { botToken, appToken, deliveryChannel, allowedUsers } = await collectSlack();
@@ -941,6 +1132,7 @@ export async function runSetup(): Promise<void> {
     useCaddy,
     pemSourcePath,
     managedRepos,
+    DATABASE_URL: databaseUrl,
   };
 
   writeConfig(config);

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import * as sqliteSchema from "./schema/sqlite.js";
 import { applyLegacySqliteCompat } from "./legacy-sqlite.js";
+import { isPostgresUrl, type PgDriver } from "lastlight-shared/database-url";
 import {
   makeOpSerializer,
   tablesOf,
@@ -57,10 +58,22 @@ export { CronRunStore } from "./cron-run-store.js";
 const DEFAULT_DB_PATH = "lastlight.db";
 
 /**
- * The generated migrations live at the `apps/server/` package root, so this
- * must resolve from BOTH `src/state/` (tsx dev) and `dist/state/` (compiled).
+ * The generated migrations live at the `apps/server/` package root, so these
+ * must resolve from BOTH `src/state/` (tsx dev) and `dist/state/` (compiled) —
+ * and from the installed npm package, where `drizzle/` ships via `files`.
  */
 const MIGRATIONS_DIR = fileURLToPath(new URL("../../drizzle/sqlite", import.meta.url));
+const PG_MIGRATIONS_DIR = fileURLToPath(new URL("../../drizzle/pg", import.meta.url));
+
+/**
+ * Postgres-only knobs for {@link StateDb.open}. Both are ignored on the sqlite
+ * path, and both are absent by default: `driver` unset falls back to the
+ * host heuristic in `resolvePgDriver`, `poolMax` to `DEFAULT_POOL_MAX`.
+ */
+export interface StateDbOpenOptions {
+  driver?: PgDriver;
+  poolMax?: number;
+}
 
 export interface CronOverride {
   name: string;
@@ -133,7 +146,7 @@ export class StateDb {
   private constructor(
     private readonly _client: StateClient,
     private readonly _dialect: Dialect,
-    private readonly closer?: () => void,
+    private readonly closer?: () => void | Promise<void>,
   ) {
     this.t = tablesOf(_client);
 
@@ -168,16 +181,11 @@ export class StateDb {
    * touches `WorkflowRunStore`'s named ops or any `TeamStore` write must use a
    * temp FILE instead.
    */
-  static async open(pathOrUrl?: string): Promise<StateDb> {
+  static async open(pathOrUrl?: string, opts?: StateDbOpenOptions): Promise<StateDb> {
     const input = pathOrUrl || DEFAULT_DB_PATH;
     // Case-insensitive: URL schemes are, and `POSTGRES://…` reaching the libsql
-    // client produces an opaque ConnectionFailed instead of this message.
-    if (/^postgres(ql)?:\/\//i.test(input)) {
-      throw new Error(
-        `PG runtime not enabled: StateDb.open() cannot open "${input}". ` +
-          `The Postgres dialect is test-only for now — construct it with StateDb.fromClient().`,
-      );
-    }
+    // client produces an opaque ConnectionFailed instead of the pg branch.
+    if (isPostgresUrl(input)) return StateDb.openPostgres(input, opts);
     const url =
       input === ":memory:" || input.startsWith("file:") ? input : `file:${resolve(input)}`;
     const raw = createClient({ url });
@@ -190,6 +198,35 @@ export class StateDb {
     const client = drizzle(raw, { schema: sqliteSchema });
     await migrate(client, { migrationsFolder: MIGRATIONS_DIR });
     return new StateDb(client, "sqlite", () => raw.close());
+  }
+
+  /**
+   * The Postgres half of {@link StateDb.open}.
+   *
+   * Every driver-bearing module here is loaded through a dynamic `import()`,
+   * which is the ONLY thing keeping `pg` and `@neondatabase/serverless` out of
+   * a SQLite deployment's runtime graph — a top-level import of any of them
+   * (including the migrator) re-couples every install to a driver it may never
+   * use.
+   */
+  private static async openPostgres(url: string, opts?: StateDbOpenOptions): Promise<StateDb> {
+    const { makePgClient, resolvePgDriver } = await import("./pg-client.js");
+    const driver = resolvePgDriver(url, opts?.driver);
+    // Per-driver migrator, both fed the same generated `drizzle/pg` baseline.
+    const { migrate } =
+      driver === "neon"
+        ? await import("drizzle-orm/neon-serverless/migrator")
+        : await import("drizzle-orm/node-postgres/migrator");
+    const handle = await makePgClient(url, driver, { poolMax: opts?.poolMax });
+    try {
+      await migrate(handle.client as never, { migrationsFolder: PG_MIGRATIONS_DIR });
+    } catch (err) {
+      // A failed migration leaves a live pool behind, and the process may well
+      // be about to retry or exit cleanly — neither should leak connections.
+      await handle.close().catch(() => {});
+      throw err;
+    }
+    return new StateDb(handle.client, "postgres", handle.close);
   }
 
   /**
@@ -322,10 +359,11 @@ export class StateDb {
   }
 
   /**
-   * Async by contract: libsql's `close()` is synchronous today, but a Postgres
-   * pool's is not, and every caller already awaits this.
+   * Async by contract: libsql's `close()` is synchronous, but a Postgres pool's
+   * is not — `pool.end()` is what drains the connections, and not awaiting it
+   * leaves sockets open (a vitest run that never exits, a deploy that hangs).
    */
   async close(): Promise<void> {
-    this.closer?.();
+    await this.closer?.();
   }
 }

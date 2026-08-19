@@ -22,6 +22,7 @@ import {
   initInstallationDirectory,
 } from "./engine/github/installations.js";
 import { StateDb, isTriggerActorType, type TriggerActorType } from "./state/db.js";
+import { redactDbUrl } from "lastlight-shared/database-url";
 import { CronScheduler, type WorkflowRunner } from "./cron/scheduler.js";
 import { getJobs } from "./cron/jobs.js";
 import { makeCronRunner } from "./cron/runner.js";
@@ -230,8 +231,13 @@ async function main() {
   // "file:/app/data/lastlight.db" passes through untouched; the bare dbPath
   // fallback gets resolved + `file:`-prefixed inside open(). Do NOT prefix here.
   const dbTarget = config.database.url ?? config.dbPath;
-  const db = await StateDb.open(dbTarget);
-  configLog.info("Database", { path: dbTarget });
+  const db = await StateDb.open(dbTarget, {
+    driver: config.database.driver,
+    poolMax: config.database.poolMax,
+  });
+  // NEVER log dbTarget raw: on the Postgres runtime it carries the userinfo,
+  // and operational logs go to a sink that outlives the process.
+  configLog.info("Database", { path: redactDbUrl(dbTarget), dialect: db.dialect });
 
   // Session manager for messaging connectors (shared across Slack, Discord, etc.)
   const sessionManager = new SessionManager(db.client, db.dialect);

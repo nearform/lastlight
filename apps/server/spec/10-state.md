@@ -776,23 +776,65 @@ about, and production carries two orphan tables from an older migrator
 
 ## Dialect posture
 
-The state layer is written once and runs on two dialects, but only one of them
-is a production store:
+The state layer is written once and runs on two dialects. **Both are supported
+production stores**; SQLite remains the default and the one that needs nothing
+running.
 
-- **SQLite via libsql** (`@libsql/client` + `drizzle-orm/libsql`) is the
-  production engine. `StateDb.open()` builds it.
-- **Postgres** exists as a working `pgTable` mirror plus a PGlite test leg: the
-  entire state suite and the `SessionManager` suite run a second time against
-  real Postgres (`tests/state/db.pg.test.ts`,
-  `tests/connectors/messaging/session-manager.pg.test.ts`). That is behavioural
-  proof that the SQL is portable, not a deployment. `StateDb.open()` **throws**
-  on a `postgres://` URL, and no Postgres driver is a runtime dependency.
+- **SQLite via libsql** (`@libsql/client` + `drizzle-orm/libsql`) — the default.
+  `StateDb.open()` builds it for `:memory:`, a `file:` URL or a bare path.
+- **Postgres** — an external or managed server, selected by a `postgres://`
+  URL in `DATABASE_URL` / `database.url`. `StateDb.open()` builds a real pooled
+  client and runs the `drizzle/pg` migrator against it.
 
-Two drift guards keep it honest: the parity test above pins names, nullability,
-PKs and index structure (deliberately **not** column types — jsonb-vs-text and
-boolean-vs-integer divergence is the point), and the duplicated test leg proves
-behaviour. Nothing under `src/` may import `schema/pg.ts`; it exists for
-drizzle-kit and the test leg only.
+**The driver is a second, narrow choice** (`database.driver`, env
+`DATABASE_DRIVER`), because the same `postgres://` dialect can be carried two
+ways:
+
+| driver | package | for |
+|---|---|---|
+| `pg` (default) | `pg` — a TCP pool | self-hosted, RDS, Cloud SQL, Supabase's pooler |
+| `neon` | `@neondatabase/serverless` — a WebSocket pool | Neon serverless Postgres |
+
+Unset, it is auto-detected from the host (`*.neon.tech` → `neon`, else `pg`);
+an explicit value always wins, which is the only way to express Neon behind a
+custom domain. `drizzle-orm/neon-http` is deliberately **not** an option: it
+cannot run interactive transactions, so the nine transaction sites would
+type-check, pass a smoke test, and silently stop being atomic.
+
+**Postgres here is a storage choice, not multi-instance HA.** Last Light runs
+one instance and the named atomic ops rely on a connection-scoped in-process
+mutex (`makeOpSerializer`), which no second process would share.
+
+Both drivers are runtime dependencies, but each is loaded through a **dynamic
+import inside its own builder** in `src/state/pg-client.ts` — which is itself
+only reached from `open()`'s postgres branch. So a SQLite deployment loads
+neither, and a node-postgres deployment never loads the Neon driver.
+`tests/state/driver-isolation.test.ts` fails if a static import appears.
+
+Three drift guards keep the two dialects honest:
+
+1. The **parity test** pins names, nullability, PKs and index structure across
+   the two schemas (deliberately **not** column types — jsonb-vs-text and
+   boolean-vs-integer divergence is the point).
+2. The **PGlite leg** runs the entire state suite and the `SessionManager`
+   suite a second time against real Postgres compiled to WASM
+   (`tests/state/db.pg.test.ts`,
+   `tests/connectors/messaging/session-manager.pg.test.ts`), hermetically, in
+   the default test command.
+3. The **real-server leg** (`tests/state/db.pg-server.test.ts`, opt-in via
+   `PG_INTEGRATION=1`, its own CI job) runs it a third time over node-postgres
+   and a connection pool. This exists because PGlite proves the *dialect* but
+   not the *driver*: it parses int8 to a number itself, so it cannot catch a
+   missing `setTypeParser(20, …)` — without which every `COUNT(*)`/`SUM()`
+   arrives as a **string** and the stats rollups concatenate instead of adding.
+   It is also single-connection, so the pool and the real `.rowCount` /
+   SQLSTATE-`23505` error shapes are only exercised there.
+
+`schema/pg.ts` is imported by exactly one module under `src/` —
+`state/pg-client.ts`, which needs it to build the client (`tablesOf()` reads
+the schema back off the Drizzle instance, and one built with the *sqlite*
+schema would send `1` into a `boolean` and `JSON.parse` an already-parsed jsonb
+value). Nothing else may name it; the isolation test pins that too.
 
 What actually differs is funnelled through **`src/state/dialect.ts`** — raw-SQL
 execution (`rows`), rows-affected (`changes`), unique-violation detection
@@ -814,17 +856,83 @@ const db = StateDb.fromClient(client, "postgres"); // tests, DI
 ```
 
 `open()` normalizes what it is given (locked plan decision 9): `:memory:` passes
-through, a `file:` URL passes through, `postgres(ql)://` throws, and anything
-else is treated as a filesystem path (resolved, then `file:`-prefixed). Callers
-never build `file:` URLs themselves. It then sets the boot pragmas
-(`journal_mode=WAL`, `busy_timeout=5000`), runs the legacy pre-step, and applies
-the migrations. `close()` is async too.
+through, a `file:` URL passes through, `postgres(ql)://` takes the Postgres
+branch, and anything else is treated as a filesystem path (resolved, then
+`file:`-prefixed). Callers never build `file:` URLs themselves. On the sqlite
+path it then sets the boot pragmas (`journal_mode=WAL`, `busy_timeout=5000`),
+runs the legacy pre-step, and applies `drizzle/sqlite`; on the Postgres path it
+resolves the driver, builds a pool and applies `drizzle/pg`. `close()` is async
+too, and on Postgres it is load-bearing — it drains the pool.
 
 **Where the URL comes from**, first hit wins: the `DATABASE_URL` env var → the
 overlay's `database.url` → `config/default.yaml`'s `database.url` (ships
 `null`) → `file:` + `config.dbPath`, i.e. `DB_PATH` or
 `$STATE_DIR/lastlight.db`. The last case is the pre-Drizzle behaviour, so an
 existing deployment that sets none of them changes nothing.
+
+**A `postgres://` URL belongs in `DATABASE_URL` (the gitignored
+`instance/secrets/.env`), never in the overlay `config.yaml`.** `database.url`
+is a real YAML slot, so putting it there is the obvious move and it is wrong:
+the overlay is a git repo with a GitHub remote, and the dashboard's masking
+happens at render time, which cannot un-commit anything. `lastlight server
+setup` therefore writes this one slot through `buildEnvContent()` — the only
+config value it treats as a secret.
+
+**Credential redaction.** `redactPublic()` masks the userinfo of any string
+that is a `postgres://` URL, wherever it appears in the public config bundle,
+and the boot log passes `dbTarget` through the same `redactDbUrl()`. The rule
+is by VALUE rather than by key because `SENSITIVE_KEY_RE` must not match `url`
+(that would blank `publicUrl`, `avatarUrl` and friends) — and because a `file:`
+URL should stay legible in the provenance view, which is the whole point of it.
+
+## Moving an existing database to Postgres
+
+`src/state/data-migrate.ts` + the `lastlight-state` entry point copy a live
+SQLite database into a Postgres one, one way:
+
+```bash
+lastlight server db check                  # can the agent reach the server?
+lastlight server db migrate --dry-run      # per-table row counts, writes nothing
+lastlight server db migrate                # copy, then verify counts
+```
+
+The CLI runs these **inside the agent image** (`docker compose run --rm
+--no-deps --entrypoint node agent /app/dist/state/state-cli.js …`), because
+`packages/cli` may never gain an edge to `lastlight-core`, where the drivers
+and schemas live. With no `--to`, the container's own `DATABASE_URL` is the
+target, so the credential never reaches the host's process list.
+
+It is a read-and-insert loop through the two Drizzle schemas, not a
+dump/restore, and that is the design: both schemas carry the same `$type<T>` on
+every column, so the JS value in the middle is dialect-neutral. A text
+transport would have to know that `success` is `0/1` here and `false` there,
+and that `context` is a string here and a document there.
+
+Four properties, each of which is a data-loss bug if dropped:
+
+- **Both ends are migrated first** — each side is opened through
+  `StateDb.open()`, so a source that is behind on migrations is brought current
+  before anything is read. Opening it is a WRITE, so the agent must be stopped
+  (the CLI checks, and offers to stop it).
+- **FK order** — `messaging_sessions` before `messaging_messages`, the only
+  declared foreign key in the schema. `TABLE_ORDER` encodes it.
+- **The target must be empty** unless `--truncate` — copying into a populated
+  database half-succeeds on PK collisions and leaves an interleaved mess.
+- **Coverage is checked against the schema's own exports** on every run, so a
+  sixteenth table added later fails loudly instead of being silently skipped.
+
+`messaging_messages.id` is the one value that does not survive: it is
+`AUTOINCREMENT` on SQLite and `GENERATED ALWAYS AS IDENTITY` on Postgres, which
+rejects an explicit value. Nothing references it, and rows are read in id
+order, so the message sequence is preserved. Two other differences are inherent
+and immaterial: Postgres normalizes **jsonb key order**, and `SUM()` over
+floats accumulates in a different order (a last-ULP difference in
+`dailyStats().costUsd`; the per-row `cost_usd` values are identical).
+
+Verified against a 43 MB copy of drizby production (4,666 rows across all
+fifteen tables): 0.7 s, every row of `executions` and `workflow_runs`
+field-for-field identical modulo jsonb key order, and the harness boots and
+writes against the result.
 
 Two consequences worth stating, because they are not local to this page:
 
