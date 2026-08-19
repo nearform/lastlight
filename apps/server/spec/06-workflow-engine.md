@@ -11,7 +11,8 @@ in what order, with what inputs, and how to recover when the process
 dies. It is workflow-agnostic — the runner doesn't know `build.yaml`
 from `issue-triage.yaml`. It loads a definition, executes phases, calls
 out to the [Sandbox](/spec/09-sandbox) for each agent session, persists
-state to SQLite, and handles every gate and loop the YAML can declare.
+state to the [state database](/spec/10-state), and handles every gate and loop
+the YAML can declare.
 
 Every behaviour in Last Light — build, triage, review, explore, health,
 security, answer, verify, qa-test, demo — is a YAML file consumed by this
@@ -563,7 +564,7 @@ What lives there:
 - **Pointers to large outputs** — `scratch.<key>.lastOutputExecutionId`
   points at an `executions` row whose `output_text` holds the actual
   text. Inlining 50 KB of LLM output into the scratch JSON every
-  iteration would balloon SQLite for no good reason.
+  iteration would balloon the state database for no good reason.
 - **Free-form workflow state** — reply-gate-merged user responses,
   intermediate flags.
 
@@ -959,8 +960,8 @@ advance.
   where it is (current phase, scratch, restart count) — not the
   conversation buffer or the sandbox process. Those are reconstructed
   from disk + DB on resume.
-- **A single state store, not two.** Both SQLite (resume substrate)
-  and the JSONL event logs (event stream) are needed — see
+- **A single state store, not two.** Both the relational DB (resume
+  substrate) and the JSONL event logs (event stream) are needed — see
   [State](/spec/10-state) — but the runner only talks to the resume
   store. Mixing them creates ordering bugs.
 - **Approval gates as data, not code.** Whether a gate fires depends

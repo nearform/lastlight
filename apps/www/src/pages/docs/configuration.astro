@@ -252,7 +252,7 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 				<td><code>DB_PATH</code></td>
 				<td>No</td>
 				<td><code>$STATE_DIR/lastlight.db</code></td>
-				<td>Override the SQLite database path.</td>
+				<td>Override the SQLite database path. Unused when <code>DATABASE_URL</code> names a <code>postgres://</code> server.</td>
 			</tr>
 			<tr>
 				<td><code>DATABASE_URL</code></td>
@@ -873,7 +873,7 @@ dependencies:
 	<p>
 		Nothing is crawled up front. A person's teams are resolved the first time they
 		load the dashboard — one GraphQL query per org plus a page or two per team —
-		and cached in SQLite, so the cost tracks <em>their</em> team count, not the
+		and cached in the state database, so the cost tracks <em>their</em> team count, not the
 		org's repo count. The webhooks above invalidate the cache when membership or a
 		team's repo grant changes; <code>POST /admin/api/me/repos/resync</code> is the
 		manual fallback. Operator-only — a target repo cannot set these.

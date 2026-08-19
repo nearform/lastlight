@@ -648,7 +648,7 @@ file/default location.
 | Var | Purpose | Default |
 |---|---|---|
 | `STATE_DIR` | root for all persistent state | `./data` |
-| `DB_PATH` | SQLite file | `$STATE_DIR/lastlight.db` |
+| `DB_PATH` | SQLite file (unused when `DATABASE_URL` names a `postgres://` server) | `$STATE_DIR/lastlight.db` |
 | `DATABASE_URL` | state DB — a libsql-style URL (`file:…`, `:memory:`) or `postgres://…`; wins over `DB_PATH`; also settable as `database.url` in YAML | unset |
 | `DATABASE_DRIVER` | how a `postgres://` URL is carried: `pg` (node-postgres TCP pool) or `neon` (`@neondatabase/serverless` WebSocket pool). Unset auto-detects from the host (`*.neon.tech` → `neon`) | unset |
 | `DATABASE_POOL_MAX` | Postgres pool ceiling (`database.poolMax`) | `10` |
@@ -1015,7 +1015,7 @@ has to be blanked out — and the map is never spliced into the harness's shared
 
 ```
 $STATE_DIR/
-├── lastlight.db           SQLite — see §10
+├── lastlight.db           SQLite state DB (absent on the Postgres runtime) — see §10
 ├── logs/                  structured harness logs
 ├── sandboxes/             cloned repos, one dir per taskId
 ├── secrets/

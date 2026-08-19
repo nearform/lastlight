@@ -112,6 +112,31 @@ const ogImageURL = new URL(ogImage, Astro.site);
 		--text-muted: #7D8694;
 		--text-bright: #ECEFF4;
 
+		/* Text ON a solid accent fill (teal chips, badges, step numbers).
+		   NOT --text-bright: that token flips to near-black in the light
+		   theme, which is correct on a page background and unreadable on a
+		   dark teal chip. This one is white in BOTH themes — the light theme
+		   DARKENS the accents rather than lightening them, so both are dark
+		   enough to carry it (5.0:1 on --teal, 7.4:1 on --teal-dark in dark;
+		   6.9 / 9.7 in light). These chips are 0.65rem, so they need the
+		   small-text 4.5:1 bar, which --text-bright missed at 4.3 even in
+		   the dark theme it was written for. */
+		--on-accent: #FFFFFF;
+
+		/* Ink ON a solid GOLD fill (the primary button). Dark in BOTH themes
+		   — gold is a light colour in the dark theme and only a medium one in
+		   the light theme, so it never carries light text. This is the same
+		   value --bg happens to have here, which is why the dark theme is
+		   unchanged; the light theme is where --bg flipped to near-white and
+		   dropped the button to 3.4:1. */
+		--on-gold: #0C1117;
+
+		/* Gold as TEXT on a light-ish surface (inline code, the active nav
+		   link). The brand gold is legible on the dark theme's surfaces but
+		   not on the light theme's, so this token darkens there while --gold
+		   itself stays the fill/stroke colour. */
+		--gold-ink: #F0B429;
+
 		/* Diagram accents (strokes + label text) */
 		--diag-grey: #4A5568;       /* muted label text inside diagram boxes */
 		--diag-line: #2D3748;       /* diagram arrows / neutral borders */
@@ -138,7 +163,8 @@ const ogImageURL = new URL(ogImage, Astro.site);
 		/* Brand accents — darkened for AA contrast on white while keeping
 		   Last Light's warm identity. */
 		--gold: #B7791F;
-		--gold-dark: #A86A1A;
+		--gold-dark: #AE7018;   /* not darker still: it is the primary button's
+		                           HOVER fill, and --on-gold needs 4.5:1 on it */
 		--orange: #C2410C;
 		--teal: #0F6674;
 		--teal-dark: #0B4F5C;
@@ -155,6 +181,10 @@ const ogImageURL = new URL(ogImage, Astro.site);
 		--text: #1B2330;
 		--text-muted: #566274;
 		--text-bright: #000E38;
+
+		/* --on-accent + --on-gold are theme-invariant; see :root. Only the
+		   gold INK needs darkening: #B7791F is 3.2:1 on --navy here. */
+		--gold-ink: #8A5410;
 
 		/* Diagram accents */
 		--diag-grey: #64748B;
@@ -214,7 +244,7 @@ const ogImageURL = new URL(ogImage, Astro.site);
 		background: var(--navy);
 		padding: 0.15em 0.4em;
 		border-radius: 4px;
-		color: var(--gold);
+		color: var(--gold-ink);
 	}
 
 	pre {
@@ -232,6 +262,30 @@ const ogImageURL = new URL(ogImage, Astro.site);
 		font-size: 0.82rem;
 		color: var(--text);
 		line-height: 1.7;
+	}
+
+	/* Shiki-highlighted blocks — the fenced code in the markdown content
+	   collections, i.e. every /spec/* page. `defaultColor: false` (see
+	   astro.config.mjs) makes Shiki emit --shiki-light / --shiki-dark per
+	   token rather than a baked-in colour, so the highlighting follows the
+	   theme; these two rules are what read those properties back.
+	   Specificity (0,2,2) is deliberate — it has to beat the layouts'
+	   `.spec-article pre code` / `.docs-article pre code`, which set a single
+	   flat --text ink and would otherwise flatten the syntax colours.
+
+	   The block's SURFACE is left to `.spec-article pre`'s own var(--navy),
+	   NOT Shiki's theme background, so a markdown code block and a
+	   hand-written <pre> on /docs are visually the same object. */
+	html[data-theme="light"] .astro-code,
+	html[data-theme="light"] .astro-code code,
+	html[data-theme="light"] .astro-code span {
+		color: var(--shiki-light);
+	}
+
+	html[data-theme="dark"] .astro-code,
+	html[data-theme="dark"] .astro-code code,
+	html[data-theme="dark"] .astro-code span {
+		color: var(--shiki-dark);
 	}
 
 	/* Nav */

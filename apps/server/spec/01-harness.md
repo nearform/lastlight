@@ -20,10 +20,10 @@ only thing that exists, every other layer is just a function it calls.
 | Direction | Boundary | What flows |
 |---|---|---|
 | In | Environment | All [Configuration](/spec/02-configuration) — env vars, secrets paths, model/variant overrides |
-| In | Disk | `STATE_DIR/lastlight.db`, `STATE_DIR/secrets/app.pem`, prior workflow_runs rows |
+| In | Disk | `STATE_DIR/lastlight.db` (or, on the Postgres runtime, the server named by `DATABASE_URL`), `STATE_DIR/secrets/app.pem`, prior workflow_runs rows |
 | In | Network | GitHub webhooks (HTTPS), Slack events (HTTP webhook by default; Socket Mode WebSocket as a dev fallback), admin dashboard HTTP, CLI POSTs |
 | In | OS | `SIGINT`, `SIGTERM` |
-| Out | Disk | Updated SQLite rows, JSONL event logs, regenerated egress firewall configs |
+| Out | Disk | Updated state rows, JSONL event logs, regenerated egress firewall configs |
 | Out | Network | GitHub API calls, Slack replies, dashboard HTML/JSON |
 | Out | OS | Exit codes — `0` (clean), `1` (runtime error), `78` (`EX_CONFIG`, do not restart) |
 
@@ -42,8 +42,10 @@ differ.
 3. **State directory** — `mkdir -p` `logs/`, `sandboxes/`, `agent-sessions/`,
    then regenerate the egress firewall configs (`nginx-*.conf`,
    `Corefile.*`) for the docker backend. (`78–89`.)
-4. **Database** — open SQLite, run migrations, build the `StateDb`
-   instance. Every later step needs this. (`94`.)
+4. **Database** — `await StateDb.open(url)`: pick the engine off the URL
+   (libsql for a path / `file:` / `:memory:`, a pooled Postgres client for
+   `postgres://`), run that dialect's journaled migrations, build the
+   `StateDb` instance. Every later step needs this. (`94`.)
 5. **Session manager** — wraps the DB for messaging connectors. (`98`.)
 6. **Chat runner** — load the curated chat skill catalogue
    (`loadChatSkillCatalogue` → XML `<available_skills>` block + a

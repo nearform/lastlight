@@ -55,6 +55,7 @@ printf 'managedRepos:\n  - your-org/repo-one\n' &gt; instance/config.yaml</code>
 			<li><strong>Webhook secret</strong> — must match your GitHub App's webhook settings</li>
 			<li><strong>Domain</strong> — your public hostname for automatic TLS (or <code>localhost</code> for dev)</li>
 			<li><strong>Model API key</strong> — <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, or <code>OPENROUTER_API_KEY</code> matching your <code>LASTLIGHT_MODEL</code> (Last Light runs on any model the <a href="https://github.com/earendil-works/pi" target="_blank" rel="noopener">pi coding agent</a> supports — Claude, GPT, Gemini, Llama, and more; default <code>anthropic/claude-sonnet-4-6</code>; one OpenRouter key reaches most of them)</li>
+			<li><strong>State database</strong> (optional) — leave it unset for <strong>SQLite</strong>, a file in the agent's data volume with nothing to run. Set <code>DATABASE_URL</code> to a <code>postgres://</code> URL to use an external or managed <strong>Postgres</strong> instead (see below)</li>
 			<li><strong>Sandbox backend</strong> (optional) — <code>LASTLIGHT_SANDBOX</code> selects <code>gondolin</code> (default — QEMU micro-VM), <code>docker</code>, or <code>none</code></li>
 			<li><strong>Model overrides</strong> (optional) — <code>LASTLIGHT_MODELS</code> as JSON to route architect/executor/reviewer phases to different <code>provider/model</code> strings</li>
 			<li><strong>Reasoning effort</strong> (optional) — <code>LASTLIGHT_THINKING</code> as the default (<code>off</code> / <code>minimal</code> / <code>low</code> / <code>medium</code> / <code>high</code> / <code>xhigh</code>), or <code>LASTLIGHT_THINKINGS</code> JSON for per-phase overrides</li>
@@ -63,6 +64,26 @@ printf 'managedRepos:\n  - your-org/repo-one\n' &gt; instance/config.yaml</code>
 			<li><strong>Slack chat</strong> (optional) — <code>SLACK_BOT_TOKEN</code> and <code>SLACK_APP_TOKEN</code> for the in-process chat skill (Socket Mode)</li>
 			<li><strong>Slack OAuth login</strong> (optional) — <code>SLACK_OAUTH_CLIENT_ID</code>, <code>SLACK_OAUTH_CLIENT_SECRET</code>, <code>SLACK_OAUTH_REDIRECT_URI</code>, and optionally <code>SLACK_ALLOWED_WORKSPACE</code> to restrict login to one team</li>
 		</ul>
+		<div class="db-choice">
+			<h4>Choose where state lives: SQLite or Postgres</h4>
+			<p>Last Light keeps its workflow runs, executions, approvals, cron history and chat sessions in a relational database, and you pick which one at deploy time. Everything else about the deployment is identical either way — same compose stack, same overlay, same workflows.</p>
+			<div class="db-options">
+				<div class="db-option recommended">
+					<span class="badge">Default</span>
+					<h5>SQLite</h5>
+					<p>Nothing to install, nothing to run. One file — <code>lastlight.db</code> — inside the agent's data volume, backed up with the volume. Set <strong>nothing</strong>: the absence of <code>DATABASE_URL</code> <em>is</em> the configuration.</p>
+				</div>
+				<div class="db-option">
+					<h5>Postgres</h5>
+					<p>A server you supply — self-hosted, RDS, Cloud SQL, Supabase, or serverless <a href="https://neon.tech" target="_blank" rel="noopener">Neon</a>. One line in <code>instance/secrets/.env</code>:</p>
+					<pre><code>DATABASE_URL=postgres://user:pass@host:5432/lastlight</code></pre>
+					<p>The driver is detected from the host — <code>*.neon.tech</code> uses Neon's serverless WebSocket pool, everything else node-postgres. Force it with <code>DATABASE_DRIVER=pg|neon</code>.</p>
+				</div>
+			</div>
+			<p class="db-note"><strong>Put the URL in <code>.env</code>, never in <code>instance/config.yaml</code>.</strong> It is a valid slot there, which is exactly the trap — the overlay is a git repo with a remote, and a committed credential cannot be un-committed by render-time masking. <code>npx lastlight setup</code> asks the question and writes it to the right file for you.</p>
+			<p class="db-note">Already running on SQLite and want to move? <code>lastlight server db migrate</code> copies every table across in foreign-key order and verifies the row counts — see <a href="/docs/production#using-postgres-instead-of-sqlite">Production deploy</a>. Postgres here is a <strong>storage</strong> choice, not a route to multiple instances: Last Light is still one writer.</p>
+		</div>
+
 		<p class="step-detail">See the <a href="/docs/configuration">Configuration reference</a> for every variable the harness reads, with defaults and descriptions.</p>
 		</div>
 
@@ -292,7 +313,7 @@ docker compose up -d agent</code></pre>
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
 		background: var(--teal);
-		color: var(--text-bright);
+		color: var(--on-accent);
 		padding: 0.2rem 0.55rem;
 		border-radius: 4px;
 		font-weight: 600;
@@ -335,6 +356,80 @@ docker compose up -d agent</code></pre>
 		height: 7px;
 		border-radius: 50%;
 		background: var(--teal);
+	}
+
+	/* State-database choice (SQLite vs Postgres) */
+	.db-choice {
+		background: var(--bg-card);
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		padding: 1.25rem 1.5rem;
+		margin-top: 1.5rem;
+	}
+
+	.db-choice h4 {
+		font-size: 0.95rem;
+		color: var(--teal);
+		margin-bottom: 0.5rem;
+	}
+
+	.db-choice p {
+		font-size: 0.88rem;
+		color: var(--text-muted);
+		line-height: 1.7;
+	}
+
+	.db-options {
+		display: grid;
+		grid-template-columns: repeat(2, 1fr);
+		gap: 1rem;
+		margin: 1rem 0;
+	}
+
+	.db-option {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 1rem 1.1rem;
+		position: relative;
+	}
+
+	.db-option.recommended {
+		border-color: var(--teal-dark);
+	}
+
+	.db-option .badge {
+		position: absolute;
+		top: -0.55rem;
+		right: 0.9rem;
+		background: var(--teal);
+		color: var(--on-accent);
+		font-size: 0.65rem;
+		font-weight: 600;
+		padding: 0.15rem 0.55rem;
+		border-radius: 4px;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+
+	.db-option h5 {
+		font-size: 0.9rem;
+		margin-bottom: 0.35rem;
+		color: var(--text-bright);
+	}
+
+	.db-option p {
+		font-size: 0.84rem;
+		line-height: 1.6;
+		margin: 0.4rem 0 0;
+	}
+
+	.db-option pre {
+		margin: 0.6rem 0 0;
+	}
+
+	.db-note {
+		margin-top: 0.75rem;
 	}
 
 	/* Existing proxy note */
@@ -393,7 +488,7 @@ docker compose up -d agent</code></pre>
 		top: -0.5rem;
 		right: 1rem;
 		background: var(--teal);
-		color: var(--text-bright);
+		color: var(--on-accent);
 		font-size: 0.7rem;
 		font-weight: 600;
 		padding: 0.15rem 0.6rem;
@@ -457,5 +552,6 @@ docker compose up -d agent</code></pre>
 	@media (max-width: 640px) {
 		.backends-grid { grid-template-columns: 1fr; }
 		.tips-grid { grid-template-columns: 1fr; }
+		.db-options { grid-template-columns: 1fr; }
 	}
 </style>

@@ -1,16 +1,20 @@
 ---
 title: "State"
 order: 10
-description: "The SQLite tables for resume substrate and the per-session JSONL event log for agent transcripts. The split rule: what goes where, why, and how the dashboard reads both."
+description: "The relational tables for resume substrate — SQLite by default, Postgres (including Neon) on opt-in — and the per-session JSONL event log for agent transcripts. The split rule: what goes where, why, and how the dashboard reads both."
 ---
 
 ## Purpose
 
 State is split deliberately between two stores:
 
-- **SQLite** (`$STATE_DIR/lastlight.db`) — the resume substrate.
-  Indexed, mutable, small. Tracks what's running, what's paused, what
-  to do next.
+- **A relational database** — the resume substrate. Indexed, mutable,
+  small. Tracks what's running, what's paused, what to do next.
+  **SQLite** (`$STATE_DIR/lastlight.db`) is the default and needs
+  nothing running; a `postgres://` URL in `DATABASE_URL` selects
+  **Postgres** instead — self-hosted, managed (RDS / Cloud SQL /
+  Supabase) or serverless (**Neon**). Both are supported production
+  stores; see "Dialect posture" below.
 - **JSONL** (per-session files under
   `$STATE_DIR/agent-sessions/projects/`) — the event log. Append-only,
   large, streamable. Captures every event the agent emitted, in order.
@@ -20,7 +24,7 @@ The split rule is load-bearing: unbounded text never lands in
 `executions.output_text` (a row the runner points at), never inlined
 into the resume state read by every dashboard query.
 
-## SQLite tables
+## State tables
 
 The schema is **declared in Drizzle**, not in DDL: `src/state/schema/sqlite.ts`
 is the source of truth for fifteen tables, with `src/state/schema/pg.ts` as its
@@ -30,9 +34,12 @@ together. All rows are append-only unless marked mutable. Migrations are
 additive and **journaled** — see "Migrations".
 
 The DDL blocks below are illustration, kept because they read better than the
-TypeScript. The authoritative rendering is the generated baseline,
-`apps/server/drizzle/sqlite/0000_baseline.sql`; when the two disagree, the
-generated file is right.
+TypeScript, and are written in the **SQLite** dialect because that is the
+default deployment. The authoritative rendering is the generated baseline,
+`apps/server/drizzle/sqlite/0000_baseline.sql` (and its `drizzle/pg/` mirror);
+when the two disagree, the generated file is right. Table and column names are
+identical on both dialects — only the column *types* differ (jsonb-vs-text,
+boolean-vs-integer), which is the point of the parity test.
 
 ### `executions`
 
@@ -712,7 +719,7 @@ the same session id appends to the existing file. No file rotation.
 
 | Store | What goes here | Why |
 |---|---|---|
-| **SQLite** | Execution lifecycles, costs, phase history, approvals, scratch keys + pointers, schedule overrides, messaging session metadata | Indexed, fast list queries, small rows. The dashboard's list-view query is `ORDER BY <active-first>, started_at DESC LIMIT 20` polled every 5 s — it must return cheaply. The leading key is a `CASE` over `status` (running < paused < queued < terminal) so in-flight runs cannot be paginated off page 1 by a cron fan-out that enqueues a batch newer than the work actually executing — the Live filter hides queued rows, so a date-only sort rendered an empty tab mid-run. |
+| **Relational DB** (SQLite or Postgres) | Execution lifecycles, costs, phase history, approvals, scratch keys + pointers, schedule overrides, messaging session metadata | Indexed, fast list queries, small rows. The dashboard's list-view query is `ORDER BY <active-first>, started_at DESC LIMIT 20` polled every 5 s — it must return cheaply. The leading key is a `CASE` over `status` (running < paused < queued < terminal) so in-flight runs cannot be paginated off page 1 by a cron fan-out that enqueues a batch newer than the work actually executing — the Live filter hides queued rows, so a date-only sort rendered an empty tab mid-run. |
 | **JSONL** | Every agent event in order — assistant messages, tool calls, tool results, usage snapshots, errors | Append-only event stream, unbounded length, one file per session. Lets the dashboard render the full conversation without paging through SQLite blobs. |
 | **Build-assets files** (server mode only) | The per-phase handoff docs (`architect-plan.md`, `status.md`, `executor-summary.md`, …) — plus binary screenshot evidence (`*.png`) from the browser-QA phase — when `buildAssets.location = server` | Files under `$STATE_DIR/build-assets/<owner>/<repo>/<issueKey>/` so they're git-free (never committed into the target repo), editable, and servable by the admin Artifacts endpoints. Markdown is served `text/plain`; images via `readBuffer` + a MIME-typed response and rendered in the dashboard's image viewer. Image artifacts are **also** served by an unauthenticated, image-only route (`GET /admin/api/public/artifacts/<owner>/<repo>/<key>/<doc>`, registered on the parent app before the auth-gated `/admin/api` sub-app in `mountAdmin`) so browser-QA screenshots embed inline in a GitHub comment via `{{artifactBaseUrl}}`; non-image docs 404 there, keeping the text handoff docs behind auth. (Public-by-URL — acceptable for public repos; revisit before private.) In the default `repo` mode they live on the target repo's branch instead, not here. Store: `src/state/build-assets.ts`. |
 
@@ -757,7 +764,7 @@ Applied migrations are recorded in `__drizzle_migrations`, so each runs
 by hand-maintained convention (issue #345).
 
 Strategy is unchanged: never drop, never narrow. Long-running deployments
-accumulate schema; SQLite handles it.
+accumulate schema; both dialects handle it.
 
 **Adding a migration** means editing **both** schema files and regenerating
 **both** dialects:
@@ -785,6 +792,24 @@ running.
 - **Postgres** — an external or managed server, selected by a `postgres://`
   URL in `DATABASE_URL` / `database.url`. `StateDb.open()` builds a real pooled
   client and runs the `drizzle/pg` migrator against it.
+
+**The choice is made at deploy time and is one line of config.**
+`lastlight server setup` asks it directly ("Where should Last Light keep its
+state?"), defaulting to SQLite; picking Postgres prompts for the URL, TCP-probes
+the host, reports the driver it detected, and writes the value to
+`instance/secrets/.env`. Nothing else in the deployment changes: the compose
+stack, the overlay, the sandbox backends and every workflow are identical either
+way. Choosing SQLite writes **nothing at all** — no `DATABASE_URL` line and no
+`database:` block — because that absence is what lets the slot resolve to
+`file:` + `$STATE_DIR`, which `STATE_DIR` is supposed to be free to move.
+
+Pick SQLite unless you have a reason not to: it needs no server, and the whole
+database is one file inside the volume you already back up. Pick Postgres when
+the state has to outlive the host (a managed server or Neon survives the VM
+being rebuilt), when something else needs to read it, or when your operational
+tooling already assumes Postgres. It is not a performance decision at Last
+Light's write volume, and it is **not** a step towards running more than one
+instance — see the note below.
 
 **The driver is a second, narrow choice** (`database.driver`, env
 `DATABASE_DRIVER`), because the same `postgres://` dialect can be carried two

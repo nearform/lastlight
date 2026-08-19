@@ -10,7 +10,8 @@ a normalization layer turns each into a canonical `EventEnvelope`; a
 deterministic router decides which YAML workflow to run; the workflow
 engine executes phases, each one calling out to an agent runtime
 (`agentic-pi` for sandboxed phases, `pi-ai` in-process for chat). Every
-phase writes to SQLite plus a per-session JSONL event log that the admin
+phase writes to a relational state database — SQLite by default, Postgres
+(including Neon) on opt-in — plus a per-session JSONL event log that the admin
 dashboard reads.
 
 The rest of this spec breaks the system down one layer at a time. Start
@@ -78,7 +79,7 @@ The terms used across this spec, in dependency order.
   at the process edge rather than per tool call. See
   [Sandbox](/spec/09-sandbox).
 - **Session** — the agent runtime's per-execution conversation,
-  identified by an `agentSessionId`. The same id appears in the SQLite
+  identified by an `agentSessionId`. The same id appears in the
   `executions` row and in the JSONL filename of the session's event log,
   making the two views joinable.
 - **Agent context** (`AGENTS.md`) — the persona + rules layer concatenated

@@ -33,7 +33,7 @@ reference once you know the shape.
 | 07 | `07-phases-and-prompts.md` | Phase types, template engine, prompt catalogue |
 | 08 | `08-skills.md` | `SKILL.md` format and the `agent-context/` persona layer |
 | 09 | `09-sandbox.md` | Where work happens: agentic-pi runtime, gondolin/docker backends, egress firewall, GitHub MCP tools, web search, LLM provider routing, GitHub App token downscoping |
-| 10 | `10-state.md` | SQLite tables + JSONL event log + the split rule |
+| 10 | `10-state.md` | State tables (SQLite by default, Postgres/Neon on opt-in) + JSONL event log + the split rule |
 | 11 | `11-chat.md` | pi-ai in-process chat runtime (the non-sandboxed path) |
 
 ## Page contract

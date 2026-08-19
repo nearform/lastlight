@@ -70,6 +70,40 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 		</div>
 	</div>
 
+	<h2>A state database — SQLite or Postgres</h2>
+	<p>
+		Last Light keeps its own state — workflow runs, executions, approvals, cron
+		history, chat sessions — in a relational database. You choose which at deploy
+		time, and it is the only piece of infrastructure the harness needs beyond the
+		host itself. <code>lastlight server setup</code> asks the question directly and
+		writes the answer for you.
+	</p>
+
+	<ul>
+		<li><strong>SQLite</strong> (default, recommended) — <strong>nothing to install and nothing to run</strong>. The database is a single file, <code>lastlight.db</code>, inside the agent's data volume. This is what production has run on since day one; if you have no reason to prefer otherwise, take it.</li>
+		<li><strong>Postgres</strong> — an external or managed server you supply: self-hosted, RDS, Cloud SQL, Supabase, or serverless <a href="https://neon.tech" target="_blank" rel="noopener">Neon</a>. Set <code>DATABASE_URL</code> to a <code>postgres://</code> URL and the harness runs its Postgres migrations against it at boot. The driver is picked from the host — <code>*.neon.tech</code> uses Neon's serverless WebSocket pool, everything else uses node-postgres — and you can force it with <code>DATABASE_DRIVER=pg|neon</code>.</li>
+	</ul>
+
+	<p>
+		Nothing else in the deployment changes between the two: the same compose stack,
+		the same overlay, the same workflows. Pick Postgres when the state should
+		outlive the host, when something else needs to read it, or when your tooling
+		already assumes Postgres — not for throughput, which is not the constraint at
+		this write volume. You can also start on SQLite and move later:
+		<code>lastlight server db migrate</code> copies an existing database across,
+		verified, in one command.
+	</p>
+
+	<div class="docs-callout warn">
+		<div class="docs-callout-body">
+			<strong>Postgres is a storage choice, not multi-instance HA.</strong> Last
+			Light still runs as a single instance either way — the atomic operations
+			behind the run lock and approval lifecycle use an in-process mutex, which a
+			second process would not share. Full contract:
+			<a href="/spec/10-state#dialect-posture">State &rarr; Dialect posture</a>.
+		</div>
+	</div>
+
 	<h2>Optional: a Slack workspace</h2>
 	<p>
 		Slack integration is optional but recommended — it's how you chat with the bot

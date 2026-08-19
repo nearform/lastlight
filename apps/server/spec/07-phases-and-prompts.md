@@ -451,7 +451,7 @@ filesystem + `read` tool path.
 - **Don't move the handoff folder into the DB.** The convention of
   committing `architect-plan.md` etc. to the branch is what lets the
   reviewer see exactly what the executor agreed to do. Reading those
-  from SQLite would still work, but it would lose the audit trail and
+  from the state database would still work, but it would lose the audit trail and
   the human-readable history on the PR.
 - **Verdict markers are an interface contract.** Prompts produce them;
   the runner parses them. Both sides should agree before either side

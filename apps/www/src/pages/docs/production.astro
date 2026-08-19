@@ -186,7 +186,7 @@ curl -X POST https://lastlight.example.com/webhooks/github -d '&#123;&#125;'</co
 	</p>
 
 	<ul>
-		<li><code>lastlight.db</code> — SQLite: executions, workflow runs, approvals, messaging sessions, rate limits, system status.</li>
+		<li><code>lastlight.db</code> — the SQLite state database: executions, workflow runs, approvals, cron history, users, messaging sessions, feedback signals. <em>Absent when you run on Postgres</em> — the same tables live on your server instead (next section).</li>
 		<li><code>agent-sessions/projects/</code> — JSONL session files (Claude-SDK-style envelope written by <code>event-shim.ts</code> — the full audit trail for every run, read by the dashboard). Override the location with <code>LASTLIGHT_SESSIONS_DIR</code>.</li>
 		<li><code>sandboxes/</code> — cloned repos, one per task (gondolin or docker).</li>
 		<li><code>sandbox-data/</code> — shared volume mounted into docker-mode sandboxes.</li>
@@ -199,15 +199,34 @@ curl -X POST https://lastlight.example.com/webhooks/github -d '&#123;&#125;'</co
 	<h3>Using Postgres instead of SQLite</h3>
 
 	<p>
-		SQLite is the default and needs nothing running. If you would rather keep
-		state on an external or managed Postgres — RDS, Cloud SQL, Supabase, a
-		self-hosted server, or <a href="https://neon.tech">Neon</a> — set
-		<code>DATABASE_URL</code> to a <code>postgres://</code> URL in
-		<code>instance/secrets/.env</code> and restart. The schema, migrations and
-		the entire state test suite run on both dialects, and the driver is picked
-		from the host: <code>*.neon.tech</code> uses Neon's serverless WebSocket
-		pool, everything else uses node-postgres. Override with
-		<code>DATABASE_DRIVER=pg|neon</code>.
+		<strong>Both are supported production stores</strong>, and the choice is one
+		line of config — <code>lastlight server setup</code> asks it directly and
+		defaults to SQLite. Nothing else in the deployment differs: the same compose
+		stack, the same overlay, the same workflows, the same sandbox backends. The
+		schema, migrations and the entire state test suite run on both dialects, and
+		a third CI leg runs them over a real Postgres server and connection pool.
+	</p>
+
+	<ul>
+		<li><strong>SQLite</strong> (default) — needs nothing running. Set no <code>DATABASE_URL</code> at all; the absence <em>is</em> the configuration, and the slot resolves to a file under <code>$STATE_DIR</code>.</li>
+		<li><strong>Postgres</strong> — an external or managed server you supply: self-hosted, RDS, Cloud SQL, Supabase, or serverless <a href="https://neon.tech" target="_blank" rel="noopener">Neon</a>. Set <code>DATABASE_URL</code> to a <code>postgres://</code> URL in <code>instance/secrets/.env</code> and run <code>lastlight server start agent</code>. The harness applies its Postgres migrations at boot.</li>
+	</ul>
+
+	<p>
+		The <strong>driver</strong> is picked from the host: <code>*.neon.tech</code>
+		uses Neon's serverless WebSocket pool, everything else uses node-postgres.
+		Override with <code>DATABASE_DRIVER=pg|neon</code> — the case for setting it
+		by hand is Neon behind a custom domain, or forcing node-postgres against
+		Neon's TCP endpoint. <code>DATABASE_POOL_MAX</code> (default 10) bounds the
+		pool.
+	</p>
+
+	<p>
+		Choose Postgres when the state should outlive the host, when something else
+		needs to read it, or when your operational tooling already assumes Postgres.
+		It is not a throughput decision at Last Light's write volume, and it is not a
+		route to running more than one instance (see the note at the end of this
+		section).
 	</p>
 
 	<p>
@@ -220,20 +239,35 @@ curl -X POST https://lastlight.example.com/webhooks/github -d '&#123;&#125;'</co
 	</p>
 
 	<p>
-		To move an <em>existing</em> deployment across, copy the data first:
+		To move an <em>existing</em> deployment across, add the URL to
+		<code>instance/secrets/.env</code> first and then copy the data — with
+		<code>DATABASE_URL</code> already in place, none of these commands needs the
+		credential on the command line, so it never reaches your shell history or the
+		host's process list:
 	</p>
 
-	<pre><code>lastlight server db check --url postgres://user:pass@host:5432/lastlight
-lastlight server db migrate --to postgres://user:pass@host:5432/lastlight --dry-run
-lastlight server db migrate --to postgres://user:pass@host:5432/lastlight</code></pre>
+	<pre><code># 1. DATABASE_URL=postgres://… is now in instance/secrets/.env
+lastlight server db check              # can the agent reach it? (full probe, from inside the image)
+lastlight server db migrate --dry-run  # per-table row counts, writes nothing
+lastlight server db migrate            # copy, then verify the counts
+lastlight server start agent           # recreate, so the new env_file value is picked up</code></pre>
 
 	<p>
-		It stops the agent, copies every table in foreign-key order and verifies the
-		row counts against the source. Then set <code>DATABASE_URL</code> and run
-		<code>lastlight server start agent</code> (a recreate — a restart cannot
-		pick up a new <code>env_file</code> value). Keep the SQLite file until you
-		are satisfied; the copy is one-way, and Postgres &rarr; SQLite is not
-		supported.
+		The migration stops the agent first (it asks), copies every table in
+		foreign-key order and verifies the row counts against the source. It refuses
+		a target that already has rows unless you pass <code>--truncate</code>. Pass
+		<code>--to &lt;url&gt;</code> only if the target is <em>not</em> the
+		<code>DATABASE_URL</code> the container already has. The last step is
+		<code>start</code>, not <code>restart</code>: a restart cannot pick up a new
+		<code>env_file</code> value.
+	</p>
+
+	<p>
+		Keep the SQLite file until you are satisfied — the copy is one-way, and
+		Postgres &rarr; SQLite is not supported. Both commands run
+		<em>inside the agent image</em> (<code>docker compose run --rm --no-deps</code>),
+		because that is where the drivers and schemas live, which also means the probe
+		runs from the network the harness itself will use.
 	</p>
 
 	<p>

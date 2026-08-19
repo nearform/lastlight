@@ -51,7 +51,7 @@ const description = "Inside the software factory: EventEnvelope, the YAML workfl
 	<!-- The YAML workflow engine -->
 	<section class="content-section">
 		<h2>The YAML workflow engine</h2>
-		<p class="section-intro">The workflow engine is the factory floor. Every behavior — triage, review, build, health, chat — is a YAML workflow, a production line the engine runs. The harness is workflow-agnostic: it reads a file, executes phases in order (or as a DAG), and writes the results to SQLite and the session JSONLs. Adding a new line to the factory means dropping a new YAML file into <code>workflows/</code>, not editing TypeScript.</p>
+		<p class="section-intro">The workflow engine is the factory floor. Every behavior — triage, review, build, health, chat — is a YAML workflow, a production line the engine runs. The harness is workflow-agnostic: it reads a file, executes phases in order (or as a DAG), and writes the results to the state database and the session JSONLs. Adding a new line to the factory means dropping a new YAML file into <code>workflows/</code>, not editing TypeScript.</p>
 
 		<div class="code-block">
 			<div class="code-header"><a href="https://github.com/nearform/lastlight/blob/main/apps/server/workflows/build.yaml" target="_blank" rel="noopener" style="color: var(--text-muted);">workflows/build.yaml</a> (excerpt)</div>
@@ -97,7 +97,7 @@ phases:
 			</div>
 			<div class="principle-card">
 				<div class="principle-header"><h3>Two execution modes</h3></div>
-				<p><strong>Sandbox</strong> — YAML workflow phases run via <code>agentic-pi run</code> in their own sandbox (gondolin micro-VM by default, Docker container when <code>LASTLIGHT_SANDBOX=docker</code>) with a fresh worktree and scoped token. <strong>In-process</strong> — the Slack chat skill runs an in-process <code>@earendil-works/pi-ai</code> conversation per Slack thread; history is rehydrated from SQLite on every turn, so one thread = one growing, coherent conversation.</p>
+				<p><strong>Sandbox</strong> — YAML workflow phases run via <code>agentic-pi run</code> in their own sandbox (gondolin micro-VM by default, Docker container when <code>LASTLIGHT_SANDBOX=docker</code>) with a fresh worktree and scoped token. <strong>In-process</strong> — the Slack chat skill runs an in-process <code>@earendil-works/pi-ai</code> conversation per Slack thread; history is rehydrated from the state database on every turn, so one thread = one growing, coherent conversation.</p>
 			</div>
 		</div>
 	</section>
@@ -393,7 +393,7 @@ phases:
 					<h3>Slack message</h3>
 					<span class="event-trigger">socket mode</span>
 				</div>
-				<p>A DM or @mention in a channel runs the in-process <code>chat</code> skill — no sandbox spawn, so replies are low-latency. The pi-ai conversation is rehydrated from the <code>messaging_messages</code> SQLite table per Slack thread, so a thread grows into one coherent conversation over hours or days. Every turn is persisted and visible in the dashboard's Chat Sessions tab.</p>
+				<p>A DM or @mention in a channel runs the in-process <code>chat</code> skill — no sandbox spawn, so replies are low-latency. The pi-ai conversation is rehydrated from the <code>messaging_messages</code> table per Slack thread, so a thread grows into one coherent conversation over hours or days. Every turn is persisted and visible in the dashboard's Chat Sessions tab.</p>
 				<p class="event-skill">Skill: in-process <code>chat</code> (<code>src/engine/chat-runner.ts</code>)</p>
 			</div>
 		</div>
@@ -774,7 +774,7 @@ is recorded), but the rubric below is the same.
 		height: 28px;
 		border-radius: 50%;
 		background: var(--teal-dark);
-		color: var(--text-bright);
+		color: var(--on-accent);
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -829,7 +829,10 @@ is recorded), but the rubric below is the same.
 	.role-badge {
 		font-family: var(--mono);
 		font-size: 0.7rem;
-		background: var(--teal-dark);
+		/* A TINT, like .role-badge-exec below — not a solid fill. This used
+		   to paint the teal accent onto the teal-dark accent, i.e. dark teal
+		   text on darker teal: 1.4:1, unreadable in BOTH themes. */
+		background: var(--fill-teal);
 		color: var(--teal);
 		padding: 0.2em 0.6em;
 		border-radius: 4px;
@@ -927,7 +930,7 @@ is recorded), but the rubric below is the same.
 		border-radius: 50%;
 		background: var(--navy);
 		border: 1.5px solid var(--border);
-		color: var(--text-muted);
+		color: var(--text);
 		display: flex;
 		align-items: center;
 		justify-content: center;

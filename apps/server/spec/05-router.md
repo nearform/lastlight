@@ -1167,8 +1167,9 @@ unchanged.
   authorization belongs in connectors. Move it out and the router gets
   cluttered.
 - **Reply-gate lookup is a single indexed DB query.** It runs on every
-  comment and every Slack message, so cost it. SQLite handles it
-  trivially; a re-implementation on a remote DB should cache the active
+  comment and every Slack message, so cost it. A local SQLite file handles
+  it trivially; on the Postgres runtime it is one round trip on an indexed
+  column, and a re-implementation on a *remote* DB should cache the active
   set of `triggerId`s in memory.
 - **Resolve PR state once, then decide.** The version of this system that
   read the PR at each site that needed it had six such sites, each

@@ -86,8 +86,18 @@ const description = "Frequently asked questions about Last Light — the self-ho
 				<summary>What's the difference between Sandbox Sessions and Chat Sessions?</summary>
 				<div class="faq-answer">
 					<p><strong>Sandbox sessions</strong> are agent runs that executed inside a sandbox — triage, PR review, build, health report, anything driven by a YAML workflow. Each phase runs <code>agentic-pi run</code> in a gondolin micro-VM (or Docker container when <code>LASTLIGHT_SANDBOX=docker</code>); events are streamed into a Claude-SDK-style JSONL envelope on disk and listed on the dashboard's <em>Sandbox Sessions</em> tab.</p>
-					<p><strong>Chat sessions</strong> are conversations from Slack threads. They run an in-process <code>@earendil-works/pi-ai</code> chat loop inside the harness — one pi-ai conversation per Slack thread, history rehydrated from the <code>messaging_messages</code> SQLite table on every turn, so context holds for hours or days. Every turn is persisted (<code>executions</code> table) and one thread becomes one growing, coherent JSONL. They live on the dashboard's <em>Chat Sessions</em> tab.</p>
+					<p><strong>Chat sessions</strong> are conversations from Slack threads. They run an in-process <code>@earendil-works/pi-ai</code> chat loop inside the harness — one pi-ai conversation per Slack thread, history rehydrated from the <code>messaging_messages</code> table on every turn, so context holds for hours or days. Every turn is persisted (<code>executions</code> table) and one thread becomes one growing, coherent JSONL. They live on the dashboard's <em>Chat Sessions</em> tab.</p>
 					<p>In short: sandbox sessions are one-shot workflow runs; chat sessions are multi-turn conversations glued to a Slack thread.</p>
+				</div>
+			</details>
+
+			<details class="faq-item">
+				<summary>Do I need to run a database?</summary>
+				<div class="faq-answer">
+					<p>Not unless you want to. Last Light keeps its own state — workflow runs, executions, approvals, cron history, users, chat sessions — in a relational database, and you pick which one when you deploy.</p>
+					<p><strong>SQLite</strong> is the default and needs nothing running: the whole database is one file in the agent's data volume. Set no <code>DATABASE_URL</code> and that is what you get.</p>
+					<p><strong>Postgres</strong> is the alternative — an external or managed server you supply: self-hosted, RDS, Cloud SQL, Supabase, or serverless <a href="https://neon.tech" target="_blank" rel="noopener">Neon</a>. Put a <code>postgres://</code> URL in <code>DATABASE_URL</code> (in <code>instance/secrets/.env</code>, never in the version-controlled <code>config.yaml</code>) and the harness runs its Postgres migrations at boot. The driver is detected from the host, so Neon gets its serverless WebSocket pool automatically.</p>
+					<p>Both are supported production stores and the whole state test suite runs on both dialects. Nothing else about the deployment changes between them, and you can start on SQLite and move later — <code>lastlight server db migrate</code> copies an existing database across and verifies the row counts. Postgres is a <em>storage</em> choice, not a route to multiple instances: Last Light is still one writer either way. See <a href="/docs/production#using-postgres-instead-of-sqlite">Production deploy</a>.</p>
 				</div>
 			</details>
 
