@@ -1482,6 +1482,10 @@ See **[`docs/RELEASING.md`](../../docs/RELEASING.md)** — the canonical runbook
 - `src/workflows/CLAUDE.md` — runner internals: phase types, linear vs DAG,
   loop iteration naming (`reviewer_fix_1`, `reviewer_recheck_1`), approval gates,
   resume semantics, taskId scoping, template rendering.
+- `src/state/CLAUDE.md` — **read this before touching the schema.** The
+  migration procedure (edit both schema files → generate both dialects → never
+  hand-edit, never `push`), how the four drift guards divide the work, and the
+  dual-dialect rules that a change can break silently.
 
 ## Agent skills
 

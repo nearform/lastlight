@@ -110,6 +110,9 @@ Node is pinned to 22 (`.nvmrc`, `engines.node >= 22.12`). Per-package commands
   architecture, env, deployment) for `lastlight-core`.
 - [`apps/server/src/workflows/CLAUDE.md`](apps/server/src/workflows/CLAUDE.md) —
   the workflow runner internals.
+- [`apps/server/src/state/CLAUDE.md`](apps/server/src/state/CLAUDE.md) — the
+  state layer: how to change the schema and migrate it on **both** dialects
+  (SQLite + Postgres). Read before touching `src/state/schema/`.
 - [`apps/server/spec/`](apps/server/spec/) — the rebuild-grade specification.
 - [`apps/evals/CLAUDE.md`](apps/evals/CLAUDE.md) — the eval harness guide.
 - [`packages/cli/CLAUDE.md`](packages/cli/CLAUDE.md) — the `lastlight` CLI
