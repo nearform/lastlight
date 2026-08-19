@@ -78,11 +78,11 @@ export function CodeBlock({ code, language = "text", maxHeight }: Props) {
     >
       {hasAnsi ? (
         <code
-          className="!bg-transparent !text-inherit !p-3 block whitespace-pre-wrap"
+          className="bg-transparent! text-inherit! p-3! block whitespace-pre-wrap"
           dangerouslySetInnerHTML={{ __html: ansiHtml }}
         />
       ) : (
-        <code ref={ref} className={`language-${lang} !bg-transparent !text-inherit !p-3 block`}>
+        <code ref={ref} className={`language-${lang} bg-transparent! text-inherit! p-3! block`}>
           {code}
         </code>
       )}

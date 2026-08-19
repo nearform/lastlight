@@ -489,7 +489,7 @@ function LiveActivitySection({
                   <ActorChip
                     login={run.triggeredBy}
                     actorType={run.triggerActorType}
-                    className="shrink-0 max-w-[8rem]"
+                    className="shrink-0 max-w-32"
                   />
                 )}
                 <span className="text-base-content/50 shrink-0">{run.currentPhase}</span>
@@ -552,7 +552,7 @@ function RecentWorkflowsSection({
                     <ActorChip
                       login={run.triggeredBy}
                       actorType={run.triggerActorType}
-                      className="shrink-0 max-w-[8rem]"
+                      className="shrink-0 max-w-32"
                     />
                   )}
                   {run.totalTokens ? (

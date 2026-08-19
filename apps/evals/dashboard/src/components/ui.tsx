@@ -37,7 +37,7 @@ export function Bar({
           style={{ width: `${pct.toFixed(1)}%`, backgroundColor: fill }}
         />
       </span>
-      <span className={clsx("min-w-[3rem] text-right font-mono text-xs", best ? "font-semibold text-success" : "text-base-content")}>
+      <span className={clsx("min-w-12 text-right font-mono text-xs", best ? "font-semibold text-success" : "text-base-content")}>
         {value}
         {best && <span className="ml-0.5 text-2xs text-accent">★</span>}
       </span>

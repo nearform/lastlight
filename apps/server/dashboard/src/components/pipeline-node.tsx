@@ -105,7 +105,7 @@ export function statusSurface(status: PhaseStatus): string {
 // dragging), so render them invisible and non-interactive. Edges still attach
 // to their positions; React Flow doesn't need them visible.
 export const handleClass =
-  "!opacity-0 !bg-transparent !border-none !w-1 !h-1 !min-w-0 !min-h-0 !pointer-events-none";
+  "opacity-0! bg-transparent! border-none! w-1! h-1! min-w-0! min-h-0! pointer-events-none!";
 
 /**
  * "Return" arc drawn under a looping phase (definition view) — a curved arrow

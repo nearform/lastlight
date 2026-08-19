@@ -534,7 +534,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return (
     <>
       <dt className="text-base-content/50">{label}</dt>
-      <dd className="break-words whitespace-pre-wrap min-w-0">{children}</dd>
+      <dd className="wrap-break-word whitespace-pre-wrap min-w-0">{children}</dd>
     </>
   );
 }

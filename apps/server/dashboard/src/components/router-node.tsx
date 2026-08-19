@@ -93,8 +93,8 @@ function iconFor(variant: RouterVariant) {
 /** Idle (un-triggered) surface per column — the resting visual hierarchy. */
 function idleSurface(data: RouterNodeData): string {
   if (data.column === "router") return "border-primary/45 bg-primary/5";
-  if (data.variant === "workflow") return "border-success/25 bg-success/[0.04]";
-  if (data.variant === "in-process") return "border-warning/30 bg-warning/[0.05]";
+  if (data.variant === "workflow") return "border-success/25 bg-success/4";
+  if (data.variant === "in-process") return "border-warning/30 bg-warning/5";
   return "border-base-300 bg-base-100"; // inputs + event types
 }
 
@@ -116,7 +116,7 @@ export function RouterFlowNode({ data }: NodeProps<Node<RouterNodeData>>) {
         ? "border-base-content/40 bg-base-200 ring-1 ring-base-content/15 shadow"
         : idleSurface(data),
     data.dimmed && !data.matched && "opacity-30",
-    isTerminal && "!bg-base-100",
+    isTerminal && "bg-base-100!",
   );
 
   return (

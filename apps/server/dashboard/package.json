@@ -25,16 +25,16 @@
     "recharts": "^3.10.1"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/dompurify": "^3.2.0",
     "@types/prismjs": "^1.26.5",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
-    "@vitejs/plugin-react": "^6.0.3",
-    "autoprefixer": "^10.5.4",
-    "daisyui": "^4.12.14",
+    "@vitejs/plugin-react": "^6.0.5",
+    "daisyui": "^5.7.19",
     "postcss": "^8.5.26",
-    "tailwindcss": "^3.4.15",
-    "typescript": "^5.6.3",
-    "vite": "^8.1.4"
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1"
   }
 }

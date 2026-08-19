@@ -23,7 +23,7 @@ function RawBlock({ title, text }: { title: string; text?: string }) {
       <summary className="cursor-pointer px-4 py-2 font-mono text-2xs text-base-content/60 hover:text-base-content">
         {title}
       </summary>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words bg-base-200/40 px-4 py-3 font-mono text-2xs leading-5 text-base-content/80">
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap wrap-break-word bg-base-200/40 px-4 py-3 font-mono text-2xs leading-5 text-base-content/80">
         {text}
       </pre>
     </details>

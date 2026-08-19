@@ -1,6 +1,133 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* daisyUI v5 is a CSS plugin — the v4 `plugins: [require("daisyui")]` +
+   `daisyui: { themes: [...] }` config block moved here wholesale. `themes:
+   false` drops daisyUI's own light/dark so only our two ship.
+   Mirrors ~/work/lastlight/apps/server/dashboard so the eval dashboard shares
+   the Last Light look (toggled via src/hooks/useTheme.tsx). */
+@plugin "daisyui" {
+  themes: false;
+}
+
+@plugin "daisyui/theme" {
+  name: "lastlight";
+  default: true;
+  prefersdark: true;
+  color-scheme: dark;
+  --color-primary: #7dd3fc;
+  --color-primary-content: #0c1420;
+  --color-secondary: #c4b5fd;
+  --color-secondary-content: #1a1230;
+  --color-accent: #fcd34d;
+  --color-accent-content: #1a1200;
+  --color-neutral: #1f2530;
+  --color-neutral-content: #d6dde8;
+  --color-base-100: #0d1117;
+  --color-base-200: #161b22;
+  --color-base-300: #21262d;
+  --color-base-content: #e6edf3;
+  --color-info: #67e8f9;
+  --color-info-content: #061a20;
+  --color-success: #86efac;
+  --color-success-content: #062015;
+  --color-warning: #fcd34d;
+  --color-warning-content: #1a1200;
+  --color-error: #fca5a5;
+  --color-error-content: #1a0505;
+
+  /* daisyUI v5 design tokens — components (badge, table, btn, card…) read
+     radius/border/size from the theme, so a colours-only theme renders them
+     square and border-less. These are daisyUI's own defaults. */
+  --radius-selector: 0.5rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+
+}
+
+/* Nearform brand light theme. Greens are deepened vs the raw brand palette
+   (bright mint #00e6a4 / #07a06f) because this dashboard uses accent/success/
+   primary heavily as *text* and thin bar fills — the bright tints fail contrast
+   on white. These values clear ~5:1 on base-100 while their /10–/40 tints stay
+   legibly light. */
+@plugin "daisyui/theme" {
+  name: "neaform";
+  color-scheme: light;
+  --color-primary: #067049; /* nf green, deepened */
+  --color-primary-content: #ffffff;
+  --color-secondary: #000e38; /* nf deep navy */
+  --color-secondary-content: #e7ecf5;
+  --color-accent: #047857; /* nf highlight green, deepened */
+  --color-accent-content: #ffffff;
+  --color-neutral: #000e38;
+  --color-neutral-content: #e7ecf5;
+  --color-base-100: #ffffff; /* card / main surface */
+  --color-base-200: #f4f6f8; /* page bg (nf-bg) */
+  --color-base-300: #e2e6ea; /* borders (nf-border) */
+  --color-base-content: #1b2330; /* text (nf-text) */
+  --color-info: #0b3b63;
+  --color-info-content: #ffffff;
+  --color-success: #067049;
+  --color-success-content: #ffffff;
+  --color-warning: #b45309;
+  --color-warning-content: #ffffff;
+  --color-error: #dc2626;
+  --color-error-content: #ffffff;
+
+  /* daisyUI v5 design tokens — components (badge, table, btn, card…) read
+     radius/border/size from the theme, so a colours-only theme renders them
+     square and border-less. These are daisyUI's own defaults. */
+  --radius-selector: 0.5rem;
+  --radius-field: 0.25rem;
+  --radius-box: 0.5rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+
+}
+
+@theme {
+  --font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-mono:
+    JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.625rem;
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
 
 html,
 body,
@@ -29,16 +156,18 @@ body {
    (text-base-content/40–60). On the near-black dark bg those read fine, but on
    the neaform white bg the same low alphas wash out. Scope a bump to the light
    theme only, lifting the faint tiers while preserving the /40 < /50 < /60
-   hierarchy. daisyUI exposes base-content as `oklch(var(--bc) / <alpha>)`, so
-   we override with matching oklch(); the `[data-theme]` prefix out-specifies
-   the generated utility, so no !important is needed. */
-[data-theme="neaform"] .text-base-content\/25 { color: oklch(var(--bc) / 0.5); }
-[data-theme="neaform"] .text-base-content\/30 { color: oklch(var(--bc) / 0.55); }
-[data-theme="neaform"] .text-base-content\/40 { color: oklch(var(--bc) / 0.62); }
-[data-theme="neaform"] .text-base-content\/45 { color: oklch(var(--bc) / 0.66); }
-[data-theme="neaform"] .text-base-content\/50 { color: oklch(var(--bc) / 0.7); }
-[data-theme="neaform"] .text-base-content\/55 { color: oklch(var(--bc) / 0.73); }
-[data-theme="neaform"] .text-base-content\/60 { color: oklch(var(--bc) / 0.78); }
+   hierarchy. daisyUI v5 exposes base-content as the whole colour in
+   `--color-base-content` (v4's raw-oklch-components `--bc` is gone), so the
+   alpha is applied with color-mix() rather than by re-wrapping in oklch();
+   the `[data-theme]` prefix out-specifies the generated utility, so no
+   !important is needed. */
+[data-theme="neaform"] .text-base-content\/25 { color: color-mix(in oklab, var(--color-base-content) 50%, transparent); }
+[data-theme="neaform"] .text-base-content\/30 { color: color-mix(in oklab, var(--color-base-content) 55%, transparent); }
+[data-theme="neaform"] .text-base-content\/40 { color: color-mix(in oklab, var(--color-base-content) 62%, transparent); }
+[data-theme="neaform"] .text-base-content\/45 { color: color-mix(in oklab, var(--color-base-content) 66%, transparent); }
+[data-theme="neaform"] .text-base-content\/50 { color: color-mix(in oklab, var(--color-base-content) 70%, transparent); }
+[data-theme="neaform"] .text-base-content\/55 { color: color-mix(in oklab, var(--color-base-content) 73%, transparent); }
+[data-theme="neaform"] .text-base-content\/60 { color: color-mix(in oklab, var(--color-base-content) 78%, transparent); }
 
 /* Inline code. `.ll-prose code` is text-accent on a bg-base-300 chip — the
    bright mint green + grey chip reads fine on the dark theme but is muddy and
@@ -70,12 +199,12 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: theme("colors.base-300");
+  background: var(--color-base-300);
   border-radius: 5px;
-  border: 2px solid theme("colors.base-100");
+  border: 2px solid var(--color-base-100);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: theme("colors.neutral");
+  background: var(--color-neutral);
 }
 
 /* Pulsing "live" badge — runs still being written. */

@@ -201,7 +201,7 @@ export function LogsPage() {
 
         <input
           type="text"
-          className="input input-sm input-bordered flex-1 min-w-[10rem]"
+          className="input input-sm input-bordered flex-1 min-w-40"
           placeholder="Filter lines…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
