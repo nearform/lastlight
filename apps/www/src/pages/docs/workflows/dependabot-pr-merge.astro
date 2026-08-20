@@ -153,7 +153,13 @@ import DocsLayout from '../../../layouts/DocsLayout.astro';
 			Auto-merge needs "Allow auto-merge" enabled on the repository. If it isn't
 			available, the workflow labels the PR <code>requires-human</code> and — once
 			only — comments that the update looks safe and asks a maintainer to merge.
-			Separately, the merge gate needs at least
+			<strong>A repository that requires an approving review gets the same
+			treatment.</strong> Last Light never reviews a Dependabot or Renovate PR —
+			they're filtered out as bot-authored before any review runs — so it can't
+			clear that requirement itself. Rather than arm auto-merge behind a rule that
+			waits on a person indefinitely, it keeps <code>dependency-trivial</code>,
+			adds <code>requires-human</code> and comments once asking a maintainer to
+			approve or merge. Separately, the merge gate needs at least
 			<code>dependencies.minSettledChecks</code> settled, passing checks, so a
 			repository with no CI at all gets nothing merged automatically.
 		</div>

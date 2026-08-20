@@ -244,8 +244,9 @@ vocabulary (Renovate's `rebase` label, a maintainer's `blocked`, a release label
 all must survive untouched).
 - **TRIVIAL** → add `dependency-trivial`; remove `dependency-functional` if
   present. Also remove `requires-human` for now — the default trivial path lands
-  automatically. (STEP 3 re-adds `requires-human` in the ONE case where a trivial
-  PR still can't land without a maintainer: auto-merge disabled on the repo.)
+  automatically. (STEP 3 re-adds `requires-human` in the two cases where a trivial
+  PR still can't land without a maintainer: auto-merge disabled on the repo, or a
+  required approving review this harness cannot supply.)
 - **FUNCTIONAL** → add `dependency-functional` and `requires-human`; remove
   `dependency-trivial` if present.
 - **Impact, for a major only** → add exactly ONE of `dependency-major-low` /
@@ -352,6 +353,25 @@ STEP 3 — Act on the classification.
   a rebase problem, so do NOT nudge a rebase. Call `github_enable_auto_merge`
   (squash) so GitHub lands it once the remaining requirement clears, and stop.
   Do NOT direct-merge.
+
+  Then, for `blocked` ONLY, establish WHETHER the outstanding requirement is a
+  review — because that is the one kind nothing here can ever clear. `unstable`
+  and `unknown` resolve themselves once GitHub finishes; a branch rule demanding
+  an approval waits on a person indefinitely, and auto-merge armed behind it is
+  silence, not progress. Call `github_list_pull_request_reviews`: if NO review is
+  currently `APPROVED` (a review dismissed by a later push reads `DISMISSED` and
+  does not count), the block is the review requirement, and this trivial PR
+  cannot land without a maintainer. Treat that exactly like the
+  auto-merge-disabled case above — keep `dependency-trivial` (the bump IS safe),
+  add `requires-human` via `github_add_labels`, and post ONE brief comment saying
+  the update looks safe and auto-merge is armed, but the repo requires an
+  approving review, so a maintainer should approve or merge it. Same anti-repeat
+  discipline as everything else: skip the comment when `requires-human` was
+  already in the dispatch labels above, or when you can see you have already left
+  an equivalent one — this branch re-runs on every check-pass and every daily
+  cron, and the label is the durable signal. If a current `APPROVED` review IS
+  present, the block is something else (a required check that hasn't reported, an
+  unresolved conversation): leave it to auto-merge and stay silent.
 
 STEP 3b — The audit comment, for an auto-merged MAJOR only.
 {{#if dependencies.auditComment}}
