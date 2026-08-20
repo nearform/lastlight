@@ -280,6 +280,62 @@ describe("dependabot-pr-merge — verification integrity (#264)", () => {
   });
 });
 
+describe("dependabot-pr-merge — a required review is an escalation, not a wait", () => {
+  const prompt = loadPromptTemplate("prompts/dependabot-pr-merge.md");
+
+  it("escalates a trivial PR blocked on a missing approving review", () => {
+    // The silent-failure case: the workflow assesses the bump TRIVIAL, arms
+    // auto-merge, and stops — behind a branch rule that waits on a person. A
+    // dependency PR is filtered out of `pr-review` at the connector as
+    // bot-authored, so nothing here ever posts the review that would clear it,
+    // and the PR sits labelled-and-armed forever with no signal to a maintainer.
+    expect(prompt).toContain("github_list_pull_request_reviews");
+    expect(prompt).toMatch(/if NO review is\s*currently `APPROVED`/);
+    expect(prompt).toMatch(/requires an\s*\n?\s*approving review, so a maintainer should approve or merge it/);
+  });
+
+  it("scopes the escalation to `blocked` alone", () => {
+    // `unstable` and `unknown` resolve themselves once GitHub finishes. Only a
+    // review requirement waits indefinitely, so only it earns a comment —
+    // otherwise every not-yet-computed PR gets a maintainer ping.
+    expect(prompt).toMatch(/for `blocked` ONLY/);
+    expect(prompt).toMatch(/`unstable`\s*\n?\s*and `unknown` resolve themselves/);
+  });
+
+  it("stays silent when an approving review is already present", () => {
+    // Then the block is something else (a required check that hasn't reported,
+    // an unresolved conversation) and auto-merge will clear it unaided.
+    expect(prompt).toMatch(/If a current `APPROVED` review IS\s*\n?\s*present/);
+  });
+
+  it("keeps the escalation inside the anti-repeat discipline", () => {
+    // This branch re-runs on every check-pass AND the daily cron, so an
+    // ungated comment floods the PR — the exact noise the on_start/on_success
+    // acks were removed for. The label is the durable signal.
+    // Anchored on THIS branch's wording, not the auto-merge-disabled one above
+    // — they share the rule, so a laxer pattern passes with the escalation gone.
+    expect(prompt).toMatch(
+      /an equivalent one — this branch re-runs on every check-pass and every daily\s*cron/,
+    );
+  });
+
+  it("names the reviewless route that makes this unclearable", () => {
+    // Without the `pr-review` filter this would just be a slow wait: some other
+    // run would eventually post the review. It never will, and the reason the
+    // escalation exists at all is that structural fact.
+    expect(prompt).toMatch(/the one kind nothing here can ever clear/);
+  });
+
+  it("keeps the bump's verdict — the PR is safe, it just can't land", () => {
+    // `requires-human` here means "I stopped and a human should look", not
+    // "this bump is suspect": `dependency-trivial` must survive, and STEP 2b's
+    // TRIVIAL rule has to admit the second case rather than claiming there is
+    // exactly one.
+    expect(prompt).toMatch(/keep `dependency-trivial` \(the bump IS safe\)/);
+    expect(prompt).toMatch(/in the two cases where a trivial\s*\n?\s*PR still can't land without a maintainer/);
+  });
+});
+
 describe("dependency-impact skill", () => {
   const skill = readFileSync(
     fileURLToPath(new URL("../../skills/dependency-impact/SKILL.md", import.meta.url)),
