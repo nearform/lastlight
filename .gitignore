@@ -14,6 +14,12 @@ instance/
 
 # Runtime state
 sessions/
+# ...but `sessions/` is unanchored, so it also swallowed the archived agent logs
+# inside apps/evals/sample-results/ — the vendored runs the evals site falls back
+# to in CI. The dashboard's session viewer then 404'd on every deployed run (same
+# class of bug as `data/` below). Un-ignore the directory explicitly; the files
+# inside it match no other pattern once it's back.
+!apps/evals/sample-results/**/sessions/
 logs/
 memories/
 *.db

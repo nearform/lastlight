@@ -1,0 +1,343 @@
+diff --git a/.lastlight/issue-201/architect-plan.md b/.lastlight/issue-201/architect-plan.md
+new file mode 100644
+index 0000000..6e4605f
+--- /dev/null
++++ b/.lastlight/issue-201/architect-plan.md
+@@ -0,0 +1,94 @@
++# Architect Plan — Issue #201: Date-Range Off-by-One Bug
++
++## Problem Statement
++
++The `inclusiveDayCount(start, end)` function in `src/date-range.ts:14` has a documented off-by-one bug: it fails to count the inclusive end day. The function computes the millisecond difference between start and end, divides by milliseconds per day, and returns the result without adding 1. This causes it to undercount by 1 day for any inclusive range.
++
++**Example:**
++- `inclusiveDayCount(2026-01-01, 2026-01-01)` returns 0 but should return 1 (same day = 1 day)
++- `inclusiveDayCount(2026-01-01, 2026-01-03)` returns 2 but should return 3 (Jan 1, 2, 3 = 3 days)
++
++The `eachDay()` function works correctly because its loop uses `<=` to include both start and end.
++
++## Summary of Changes
++
++1. **Fix `inclusiveDayCount`** in `src/date-range.ts`: Change the formula from `Math.round(ms / MS_PER_DAY)` to `Math.floor(ms / MS_PER_DAY) + 1` to account for the inclusive end.
++2. **Add test coverage** in `test/date-range.test.ts`: Add a `test()` case for `inclusiveDayCount` to verify the fix and prevent regression.
++
++## Files to Modify
++
++### `src/date-range.ts` (1 change)
++
++- **Line 14** in the `inclusiveDayCount` function body
++- **Old text:** `return Math.round(ms / MS_PER_DAY);`
++- **New text:** `return Math.floor(ms / MS_PER_DAY) + 1;`
++- **Rationale:** Use `Math.floor` (not `Math.round`) because we're dealing with whole-day intervals starting at 00:00:00Z. The `+ 1` accounts for the inclusive end day.
++
++### `test/date-range.test.ts` (1 addition)
++
++- **Location:** After the existing `eachDay` test (line 13)
++- **Add a new test case** for `inclusiveDayCount`:
++  ```typescript
++  test("inclusiveDayCount includes the end day", () => {
++    assert.equal(inclusiveDayCount(d("2026-01-01"), d("2026-01-01")), 1); // same day = 1
++    assert.equal(inclusiveDayCount(d("2026-01-01"), d("2026-01-02")), 2); // 2 consecutive days
++    assert.equal(inclusiveDayCount(d("2026-01-01"), d("2026-01-03")), 3); // 3 days
++  });
++  ```
++- **Rationale:** Ensures the function correctly counts inclusive ranges and prevents future regressions.
++- **Also need to import** `inclusiveDayCount` from the source module (add to line 3).
++
++## Commands
++
++**All commands from guardrails-report.md:**
++
++```bash
++npm test      # Run tests: node --test --experimental-strip-types
++npm run lint  # Run house-rule linter: node scripts/lint.mjs
++npm run check # Run both lint + test (used in CI)
++```
++
++Run these after making changes to verify the fix.
++
++## Implementation Approach
++
++1. **Fix the off-by-one bug** in `inclusiveDayCount` by adding `+ 1` to the return statement and switching to `Math.floor` for precision.
++2. **Add test case** for `inclusiveDayCount` with three assertions covering edge cases:
++   - Same day (1 day)
++   - Two consecutive days (2 days)
++   - Three-day span (3 days)
++3. **Update import** in the test file to include `inclusiveDayCount`.
++4. **Run `npm test`** to verify the new test passes and existing tests still pass.
++5. **Run `npm run lint`** to ensure no linting violations.
++
++## Risks and Edge Cases
++
++### Handled Cases
++- **Same-day ranges** (e.g., 2026-01-01 to 2026-01-01): Returns 1 ✓
++- **Multi-day ranges**: Returns correct count inclusive of both endpoints ✓
++- **All dates at 00:00:00Z**: The test fixtures use ISO midnight, so `Math.floor` precisely counts whole days ✓
++
++### No Unsafe Silences
++- The function does not silently drop or miscalculate any input: all date pairs now return the correct day count.
++- If an end date is before a start date, the result will be negative or zero—this is not a silent failure, it's a clear signal of invalid input (not the responsibility of this fix to validate).
++
++## Test Strategy
++
++1. **New test in `test/date-range.test.ts`** validates three cases:
++   - Same-day range → 1 day
++   - Two-day range → 2 days
++   - Three-day range → 3 days
++2. **Existing test** (`eachDay still lists every inclusive day`) continues to pass, verifying backward compatibility.
++3. **Run full suite** with `npm test` to confirm no regressions.
++
++## Estimated Complexity
++
++**Simple**
++
++The fix is a one-line change (`+ 1` and switching to `Math.floor`), plus a straightforward test case. No architectural changes, no dependencies, no edge case validation needed.
++
++---
++
++**Branch:** `lastlight/codefix__date-range-off-by-one`  
++**Issue:** #201  
++**Status:** Ready for implementation (executor phase)
+diff --git a/.lastlight/issue-201/executor-summary.md b/.lastlight/issue-201/executor-summary.md
+new file mode 100644
+index 0000000..28454d7
+--- /dev/null
++++ b/.lastlight/issue-201/executor-summary.md
+@@ -0,0 +1,57 @@
++# Executor Summary — Issue #201: Date-Range Off-by-One Bug
++
++## What Was Done
++
++Fixed the off-by-one bug in `inclusiveDayCount()` and added comprehensive test coverage.
++
++### Files Changed
++
++1. **src/date-range.ts**
++   - Line 14: Changed return statement from `Math.round(ms / MS_PER_DAY)` to `Math.floor(ms / MS_PER_DAY) + 1`
++   - Removed bug comment
++   - Now correctly counts inclusive day ranges
++
++2. **test/date-range.test.ts**
++   - Added import of `inclusiveDayCount` (line 3)
++   - Added new test case `inclusiveDayCount includes the end day` (lines 16–19)
++   - Test verifies three cases:
++     - Same day (2026-01-01 to 2026-01-01) → 1
++     - Two consecutive days (2026-01-01 to 2026-01-02) → 2
++     - Three-day span (2026-01-01 to 2026-01-03) → 3
++
++## Test / Lint / Typecheck Results
++
++### npm test
++```
++✔ eachDay still lists every inclusive day (1.23075ms)
++✔ inclusiveDayCount includes the end day (0.064125ms)
++ℹ tests 2
++ℹ suites 0
++ℹ pass 2
++ℹ fail 0
++```
++
++### npm run lint
++```
++lint ok
++```
++
++### npm run check (lint + test)
++All checks pass successfully.
++
++## Deviations from Plan
++
++None. Implementation followed the architect's plan exactly:
++- Used `Math.floor` for precise day counting (not `Math.round`)
++- Added `+ 1` to account for inclusive end day
++- Added test with three assertions covering edge cases
++- All tests pass on first run after fix
++
++## Known Issues
++
++None. The fix is complete and verified.
++
++---
++
++**Status:** Ready for merge  
++**Scope-risk:** Low (one-line fix, no dependencies, no architectural changes)
+diff --git a/.lastlight/issue-201/guardrails-report.md b/.lastlight/issue-201/guardrails-report.md
+new file mode 100644
+index 0000000..45d8bc7
+--- /dev/null
++++ b/.lastlight/issue-201/guardrails-report.md
+@@ -0,0 +1,51 @@
++# Guardrails Check Report — Issue #201
++
++**Date:** 2026-06-30  
++**Status:** READY
++
++## Test Framework
++
++**Status:** ✅ PASS
++
++- **Runner:** Node.js built-in `test` module with `--experimental-strip-types` for TypeScript support
++- **Command:** `npm test`
++- **Test Files:** `test/date-range.test.ts` exists and contains passing tests
++- **Verification:** Ran `npm test` — all tests pass (1 test, 1 pass, 0 fail)
++
++## Linting
++
++**Status:** ✅ PASS
++
++- **Tool:** Custom house-rule checks via `scripts/lint.mjs`
++- **Command:** `npm run lint`
++- **Verification:** Ran `npm run lint` — lint ok
++
++## Type Checking
++
++**Status:** ✅ PASS (with minor caveat)
++
++- **Tool:** TypeScript configured in `tsconfig.json`
++- **Config:** `strict: true`, targeting ES2022, configured for ESNext modules
++- **Note:** Running `tsc --noEmit` directly reports missing `@types/node` for `node:test` and `node:assert/strict`, but this does not block actual test execution since Node's native test runner bypasses TypeScript compilation. The test suite runs successfully via `npm test`.
++
++## CI Pipeline
++
++**Status:** ✅ PASS (Informational)
++
++- **File:** `.github/workflows/ci.yml`
++- **Steps:** 
++  - Checkout code
++  - Setup Node.js 22
++  - Run `npm run lint`
++  - Run `npm test`
++- **Triggers:** On push and pull_request
++
++## Summary
++
++All critical guardrails are in place. The project:
++- Has a working test suite with existing tests
++- Has linting configured and passing
++- Has TypeScript configured
++- Has CI/CD set up
++
++**No blockers.** The executor can proceed to the architect phase.
+diff --git a/.lastlight/issue-201/reviewer-verdict.md b/.lastlight/issue-201/reviewer-verdict.md
+new file mode 100644
+index 0000000..1428e0a
+--- /dev/null
++++ b/.lastlight/issue-201/reviewer-verdict.md
+@@ -0,0 +1,49 @@
++# Reviewer Verdict — Issue #201
++
++VERDICT: APPROVED
++
++## Summary
++
++The fix correctly resolves the off-by-one bug in `inclusiveDayCount()` by changing from `Math.round(ms / MS_PER_DAY)` to `Math.floor(ms / MS_PER_DAY) + 1`, accounting for the inclusive end day. Test coverage is adequate, exercising the three key cases (same day, two consecutive days, three-day span), and the entire lint + test suite passes without issues.
++
++## Issues
++
++### Critical
++None
++
++### Important
++None
++
++### Suggestions
++None
++
++### Nits
++None
++
++## Test Results
++
++```
++> daterange@1.0.0 check
++> npm run lint && npm test
++
++> daterange@1.0.0 lint
++> node scripts/lint.mjs
++
++lint ok
++
++> daterange@1.0.0 test
++> node --test --experimental-strip-types
++
++✔ eachDay still lists every inclusive day (1.214666ms)
++✔ inclusiveDayCount includes the end day (0.060583ms)
++ℹ tests 2
++ℹ suites 0
++ℹ pass 2
++ℹ fail 0
++ℹ cancelled 0
++ℹ skipped 0
++ℹ todo 0
++ℹ duration_ms 52.255791
++```
++
++All tests pass. No regressions.
+diff --git a/.lastlight/issue-201/status.md b/.lastlight/issue-201/status.md
+new file mode 100644
+index 0000000..62b2c9d
+--- /dev/null
++++ b/.lastlight/issue-201/status.md
+@@ -0,0 +1,7 @@
++# Issue #201 Status
++
++current_phase: complete
++architect_status: COMPLETE
++executor_status: COMPLETE
++reviewer_status: APPROVED
++pr_number: 1
+diff --git a/package-lock.json b/package-lock.json
+new file mode 100644
+index 0000000..58af66f
+--- /dev/null
++++ b/package-lock.json
+@@ -0,0 +1,12 @@
++{
++  "name": "daterange",
++  "version": "1.0.0",
++  "lockfileVersion": 3,
++  "requires": true,
++  "packages": {
++    "": {
++      "name": "daterange",
++      "version": "1.0.0"
++    }
++  }
++}
+diff --git a/src/date-range.ts b/src/date-range.ts
+index 9a44f17..0c87aba 100644
+--- a/src/date-range.ts
++++ b/src/date-range.ts
+@@ -11,8 +11,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  */
+ export function inclusiveDayCount(start: Date, end: Date): number {
+   const ms = end.getTime() - start.getTime();
+-  // BUG: drops the inclusive end day — should add 1.
+-  return Math.round(ms / MS_PER_DAY);
++  return Math.floor(ms / MS_PER_DAY) + 1;
+ }
+ 
+ /** All YYYY-MM-DD dates in the inclusive range, in order. */
+diff --git a/test/date-range.test.ts b/test/date-range.test.ts
+index 4777543..faa4460 100644
+--- a/test/date-range.test.ts
++++ b/test/date-range.test.ts
+@@ -1,7 +1,7 @@
+ import { test } from "node:test";
+ import assert from "node:assert/strict";
+ 
+-import { eachDay } from "../src/date-range.ts";
++import { eachDay, inclusiveDayCount } from "../src/date-range.ts";
+ 
+ const d = (s: string): Date => new Date(`${s}T00:00:00Z`);
+ 
+@@ -12,3 +12,9 @@ const d = (s: string): Date => new Date(`${s}T00:00:00Z`);
+ test("eachDay still lists every inclusive day", () => {
+   assert.deepEqual(eachDay(d("2026-01-01"), d("2026-01-03")), ["2026-01-01", "2026-01-02", "2026-01-03"]);
+ });
++
++test("inclusiveDayCount includes the end day", () => {
++  assert.equal(inclusiveDayCount(d("2026-01-01"), d("2026-01-01")), 1); // same day = 1
++  assert.equal(inclusiveDayCount(d("2026-01-01"), d("2026-01-02")), 2); // 2 consecutive days
++  assert.equal(inclusiveDayCount(d("2026-01-01"), d("2026-01-03")), 3); // 3 days
++});
