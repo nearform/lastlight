@@ -35,14 +35,24 @@ Release. The order becomes WP8 → WP0 → WP1 → WP3 → WP4, with WP2 paralle
 
 Weight check, since the CLI is described as the *lean* global bin:
 
-| | Unpacked |
-|---|---|
-| `lastlight` CLI today | 0.56 MB |
-| `ts-morph@28` + `@ts-morph/common@0.29` | ~14.3 MB |
-| `@ast-grep/napi@0.45.1` | 0.36 MB + platform binaries |
+| | Estimated | **Measured (WP1)** |
+|---|---|---|
+| `lastlight` CLI today | 0.56 MB | 0.56 MB |
+| `ts-morph@28` + `@ts-morph/common@0.29` | ~14.3 MB | 13.4 MB |
+| `@ast-grep/napi@0.45.1` | 0.36 MB + platform binaries | 0.4 MB **+ 6.8 MB** (darwin-arm64; 7.9 MB linux-x64) |
+| **Total** | **~15 MB** | **~21 MB** |
 
-~15 MB total. Accepted. `ts-morph@28`'s dependency list confirms it carries
-**no `typescript`**, so locked decision 5 holds.
+> **Corrected 2026-08-21, on landing WP1.** The estimate wrote *"+ platform
+> binaries"* without sizing them, and they are a third of the total. Actual is
+> **~40% above** the number this decision was taken on. The decision **stands** —
+> same order of magnitude, and the alternative is a `code-facts` the eval harness
+> cannot reach at all — but the corrected figure is recorded here because "~15 MB"
+> was load-bearing in accepting it, and a later reader re-deriving the tradeoff
+> should re-derive it from the true number.
+
+`ts-morph@28`'s dependency list confirms it carries **no `typescript`**, so
+locked decision 5 holds — and WP1 pins it with a fixture carrying a decoy
+`node_modules/typescript@0.0.0-decoy` that is provably never loaded.
 
 ### D2 — Two tiers: pure-JS in the CLI, binary-backed probed at runtime
 

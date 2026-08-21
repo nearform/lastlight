@@ -15,6 +15,8 @@
  *
  *   node scripts/lint-import-boundaries.mjs server
  *   node scripts/lint-import-boundaries.mjs engine
+ *   node scripts/lint-import-boundaries.mjs code-facts
+ *   node scripts/lint-import-boundaries.mjs cli
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -60,6 +62,51 @@ const RULE_SETS = {
           spec.startsWith(".") &&
           !resolve(dirname(file), spec).startsWith(join(repoRoot, "packages/workflow-engine/src")),
         message: "the workflow engine must not reach outside its own src/ tree",
+      },
+    ],
+  },
+  "code-facts": {
+    root: join(repoRoot, "packages/code-facts/src"),
+    rules: [
+      {
+        // A LEAF, like agentic-pi: no workspace edges in either direction, so
+        // vendoring it into the sandbox image (WP2) never drags the workspace
+        // along. That is also why `log.ts` re-declares LoggerPort rather than
+        // importing the engine's.
+        name: "code-facts-leaf",
+        test: (spec) => /^lastlight(-|$)/.test(spec) || spec.startsWith("agentic-pi"),
+        message:
+          "code-facts is a leaf package — it must not depend on any other workspace package",
+      },
+      {
+        // ts-morph vendors its own compiler and has NO `typescript` dependency.
+        // Resolving `typescript` — from anywhere, but especially from the repo
+        // under review — breaks on every TS-7 target, which is now most of them.
+        name: "code-facts-no-typescript",
+        test: (spec) => spec === "typescript" || spec.startsWith("typescript/"),
+        message:
+          "never resolve `typescript` — ts-morph vendors its own compiler, and TS 7 has no programmatic API",
+      },
+      {
+        name: "code-facts-self-contained",
+        test: (spec, file) =>
+          spec.startsWith(".") &&
+          !resolve(dirname(file), spec).startsWith(join(repoRoot, "packages/code-facts/src")),
+        message: "code-facts must not reach outside its own src/ tree",
+      },
+    ],
+  },
+  cli: {
+    root: join(repoRoot, "packages/cli/src"),
+    rules: [
+      {
+        // The invariant the whole `lastlight-shared` package exists to serve:
+        // the CLI is the lean global bin, and an edge to core would drag the
+        // harness, both Drizzle schemas and every driver into a `npm i -g`.
+        name: "cli-never-imports-core",
+        test: (spec) => spec === "lastlight-core" || spec.startsWith("lastlight-core/"),
+        message:
+          "the CLI must never gain an edge to lastlight-core — put the shared logic in lastlight-shared",
       },
     ],
   },

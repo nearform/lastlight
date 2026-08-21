@@ -5,8 +5,8 @@ name: Publish release
 # chained jobs (`images` needs `checks`, `npm` needs `images`).
 #
 # npm publishing is AUTOMATED here again (reversing migration decision 15): the
-# `npm` job publishes FIVE of the workspace's public packages (workflow-engine →
-# shared → core → cli → evals) via npm OIDC TRUSTED PUBLISHING — no NPM_TOKEN
+# `npm` job publishes SIX of the workspace's public packages (workflow-engine →
+# shared → code-facts → core → cli → evals) via npm OIDC TRUSTED PUBLISHING — no NPM_TOKEN
 # secret, provenance attestations on. It needs `id-token: write` (set on the job)
 # and a trusted-publisher entry configured on npmjs.com for EACH package (repo
 # nearform/lastlight, workflow publish.yml). `agentic-pi` is DELIBERATELY NOT
@@ -219,7 +219,15 @@ jobs:
           # NOTE: agentic-pi is intentionally absent — it publishes via its own
           # `agentic-pi-npm.yml` stream (trusted-publisher scoped to that
           # workflow). See the header comment.
-          for pkg in lastlight-workflow-engine lastlight-shared lastlight-core lastlight lastlight-evals; do
+          # `lastlight-code-facts` must precede `lastlight`: the CLI ships the
+          # deterministic analysis layer (review-evidence-pipeline §D1), so it
+          # carries a `workspace:*` edge that `pnpm pack` rewrites to a concrete
+          # version — which has to exist on npm before the CLI that pins it.
+          # FIRST PUBLISH NEEDS A TRUSTED-PUBLISHER ENTRY on npmjs.com for
+          # `lastlight-code-facts` (repo nearform/lastlight, workflow
+          # publish.yml), like every other package in this list; without it this
+          # step 404s on that one package.
+          for pkg in lastlight-workflow-engine lastlight-shared lastlight-code-facts lastlight-core lastlight lastlight-evals; do
             echo "::group::publish $pkg"
             ver="$(pnpm --filter "$pkg" exec -- node -p "require('./package.json').version" | tail -1)"
             # Skip versions already on npm so a release that bumps only a SUBSET of

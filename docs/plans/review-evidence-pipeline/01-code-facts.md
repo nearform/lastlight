@@ -172,6 +172,29 @@ and — where cheaply derivable — ordering/units conventions from the declarat
 This is the memo's "change-contract reviewer" made mechanical, and it is
 directly the `getUser() -> User | null` → `throws NotFound` class of regression.
 
+> **Found on landing WP1 — the phantom-delta trap.** Run naively against a real
+> commit (WP0's own, `3b880cce`), `contracts` reported **227 deltas of which 1
+> was real**. Three independent causes, each individually plausible:
+>
+> 1. **Asymmetric `tsconfig` between the two programs** — 65 phantom "removed
+>    exports" that were never removed.
+> 2. **The base worktree has no `node_modules`**, so every external type
+>    degraded to `any` and each one read as a signature change. Fixed by
+>    mirroring via symlink — nothing *requires* an install, and the
+>    no-`node_modules` guarantee still holds.
+> 3. **Unstable type text** — `import("<absolute path>")` prefixes and
+>    non-deterministic union member order, both now canonicalised.
+>
+> Result: **227 → 19**, of which the one `changed` entry is `renderContext`
+> gaining `review?` — the actual WP0 change, with 3 consumers outside the diff.
+>
+> This is not cosmetic. Locked decision 3 rests on IRIS's finding that a
+> half-mechanism seed measures **−3, worse than no seed at all**; 226 phantom
+> obligations would have been 226 seeds pointing at nothing, consuming the
+> `maxObligations` budget and crowding out the real one. **Every extractor needs
+> a "run it on a real commit and read the output" step before it is believed** —
+> the unit tests all passed throughout.
+
 ### `constants` — references **minus** literals
 
 The subtraction is the insight. For each changed constant/config value:

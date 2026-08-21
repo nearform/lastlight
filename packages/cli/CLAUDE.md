@@ -10,9 +10,10 @@ distinct roles live here:
 2. **Host-local server lifecycle** (`lastlight server …`) — runs *on the deploy
    host*, wrapping `docker compose`. Never goes over HTTP.
 
-**Dependency invariant:** the CLI depends only on `lastlight-shared` +
-`lastlight-workflow-engine` (`workspace:*`) — it **never** gains an edge to
-`lastlight-core`. See the root `CLAUDE.md` dependency graph.
+**Dependency invariant:** the CLI depends only on `lastlight-shared`,
+`lastlight-workflow-engine` and `lastlight-code-facts` (`workspace:*`) — it
+**never** gains an edge to `lastlight-core`. See the root `CLAUDE.md` dependency
+graph.
 
 ## Files (`packages/cli/src/`)
 
@@ -32,6 +33,12 @@ repo-cli.ts       `lastlight repo` — a managed repo's own `.lastlight/` config
 oauth-cli.ts      `lastlight oauth login|list|status|test|logout` (subscription logins).
 skills-install.ts `lastlight skills install` — install the Claude Code skills/plugin.
 ```
+
+`lastlight facts` has no file here on purpose: it delegates to
+`lastlight-code-facts` (which also installs its own `lastlight-facts` bin). The
+`import()` in `cmdFacts` is **dynamic and must stay dynamic** — ts-morph is ~14 MB
+of vendored compiler, and a static import would put it on `lastlight login`'s
+startup path.
 
 `packages/cli/tests/cli-server.test.ts` unit-tests the pure retention logic
 (`tagsToPrune`) behind `server update`'s image prune.
@@ -276,6 +283,30 @@ lastlight oauth status                 # store path + token expiry
 lastlight oauth test <provider>        # force a refresh to verify the login
 lastlight oauth logout [provider]      # remove one (or all) [--auth-file f] [--state-dir d]
 ```
+
+## Deterministic PR analysis (`lastlight facts`)
+
+Delegates to [`packages/code-facts`](../code-facts/CLAUDE.md) — changed symbols
+and their impact cone, contract deltas, the constants-minus-literals
+subtraction, dependency deltas, scanner patterns and changed-line coverage.
+
+```bash
+lastlight facts all --repo . --base main --head HEAD --out facts.json
+lastlight facts constants --repo . --base main         # one extractor
+lastlight facts toolchain                              # pins vs what resolved
+lastlight-facts …                                      # the same code, own bin
+```
+
+Exit codes are the contract: `0` trustworthy, `2` could not run, `3` degraded
+(the document's `degraded[]` says why). `--never-fail` writes a
+`coverage: "none"` envelope and returns 0 instead — that is the flag a **workflow
+phase** uses, because a failed run records no assessed SHA and gets re-dispatched
+every thirty minutes, forever.
+
+**Why the CLI carries it at all:** the eval harness runs `--sandbox none`, on the
+host, so an image-only toolchain would be unmeasurable. That is also why it is a
+published package — the CLI's `workspace:*` edge becomes a concrete version at
+pack time. It adds ~22 MB to a global install.
 
 ## Commands (dev)
 

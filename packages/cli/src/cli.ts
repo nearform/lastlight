@@ -369,6 +369,15 @@ ${chalk.bold("Skills")} (host-local — install the Last Light Claude Code skill
   lastlight skills list              List bundled skills + where they're installed
   lastlight skills uninstall         Remove the installed skills [--scope user|project]`,
 
+  facts: `
+${chalk.bold("Facts")} (host-local — deterministic program analysis of a diff)
+  lastlight facts <extractor> --repo <dir> --base <ref> [--head <ref>] [--out <file>]
+  ${chalk.dim("extractors: facts · contracts · constants · deps · patterns · coverage · all · toolchain")}
+  ${chalk.dim("Also installed as the `lastlight-facts` bin, which is what a review phase spawns.")}
+  ${chalk.dim("Exit 0 = trustworthy · 2 = could not run · 3 = degraded (see the document's degraded[]).")}
+  ${chalk.dim("--never-fail writes a coverage:\"none\" envelope and returns 0 — for workflow phases.")}
+  ${chalk.dim("Full flag list: `lastlight-facts` with no arguments.")}`,
+
   oauth: `
 ${chalk.bold("OAuth")} (host-local — subscription logins for the model provider)
   lastlight oauth list               List OAuth providers + which are logged in
@@ -413,6 +422,9 @@ ${chalk.bold("Overlay / host-local")}   ${chalk.dim("→ lastlight <cmd> help")}
 
 ${chalk.bold("Repo")} (your code repo's own .lastlight/ layer)   ${chalk.dim("→ lastlight repo help")}
   repo fork · repo config validate · repo config show
+
+${chalk.bold("Analysis")} (host-local — deterministic facts about a diff)   ${chalk.dim("→ lastlight facts help")}
+  lastlight facts <all|facts|contracts|constants|deps|patterns|coverage> --repo <dir> --base <ref>
 
 ${chalk.bold("Other")}
   lastlight setup                               First-run wizard — client (login) or server (stack)
@@ -1320,6 +1332,36 @@ async function cmdOAuth(): Promise<void> {
   });
 }
 
+// ── facts (host-local) ───────────────────────────────────────────────────────
+
+/**
+ * `lastlight facts <extractor>` — deterministic program analysis of a diff.
+ *
+ * `code-facts` ships INSIDE this CLI rather than only in the sandbox image
+ * (review-evidence-pipeline §D1). The reason is measurement, not convenience:
+ * the eval harness defaults to `--sandbox none` — in-process, on the host —
+ * rejects `docker`/`smol`, and needs `/dev/kvm` for `gondolin`, so no eval
+ * configuration on a Mac can see `/opt/lastlight/`. An image-only toolchain
+ * would be a pipeline nobody could measure.
+ *
+ * The import is DYNAMIC and must stay that way: `ts-morph` is ~14 MB of
+ * vendored compiler, and putting it on the startup path would make
+ * `lastlight login` pay for it.
+ *
+ * It is also installed as the `lastlight-facts` bin (from the
+ * `lastlight-code-facts` package), which is the name a workflow phase resolves
+ * via `LASTLIGHT_FACTS_BIN` → `PATH` → `/opt/lastlight/bin`.
+ */
+async function cmdFacts(): Promise<void> {
+  const { runCli } = await import("lastlight-code-facts");
+  // The one place `console.*` is correct — this is the terminal surface.
+  const code = runCli(process.argv.slice(3), {
+    out: (s) => console.log(s),
+    err: (s) => console.error(chalk.red(s)),
+  });
+  process.exit(code);
+}
+
 // ── dispatch ─────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1373,6 +1415,7 @@ async function main() {
     case "pr": return cmdPr();
     case "repo": return cmdRepo();
     case "skills": return cmdSkills();
+    case "facts": return cmdFacts();
     case "oauth":
     case "auth": return cmdOAuth();
     case "server": return cmdServer();

@@ -1,0 +1,100 @@
+# The default Opengrep ruleset for the PR-review path.
+#
+# LOCAL AND OURS, DELIBERATELY. Locked decision 7 puts Opengrep in the engine
+# slot precisely because Semgrep's registry rules moved to a licence that
+# plausibly excludes a review product — so pointing this at `--config auto`
+# would reintroduce the problem the engine choice was made to avoid. Override
+# with `--rules <path>` (or `LASTLIGHT_OPENGREP_RULES`) to run a ruleset a
+# deployment owns.
+#
+# These are EVIDENCE, NOT FINDINGS. Every hit is a seed for the survey phase and
+# is never posted directly. So the bar for including a rule here is "does it
+# name a place worth asking a question about", not "is it always a defect" —
+# precision is not the guardrail (locked decision 2), and a static-analyser hit
+# rewritten prettily by an LLM and posted is the anti-pattern this whole design
+# is arranged to avoid.
+#
+# The set is deliberately small. It grows when a per-family attribution run
+# shows the `security` family converting, not before.
+
+rules:
+  - id: lastlight-eval-on-dynamic-input
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Dynamic code execution. Ask what reaches this expression, and whether any
+      of it crosses a trust boundary.
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: new Function($X)
+      - pattern-not: eval("...")
+      - pattern-not: new Function("...")
+
+  - id: lastlight-shell-from-template
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A shell command built from a template literal. Name the interpolated
+      value and where it comes from.
+    pattern-either:
+      - pattern: $CP.exec(`...`, ...)
+      - pattern: $CP.execSync(`...`, ...)
+      - pattern: exec(`...`, ...)
+      - pattern: execSync(`...`, ...)
+
+  - id: lastlight-sql-from-template
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      A SQL string built by interpolation. Ask whether the interpolated value is
+      ever attacker-controlled and whether a parameterised form exists.
+    pattern-either:
+      - pattern: $DB.query(`...`, ...)
+      - pattern: $DB.raw(`...`, ...)
+      - pattern: $DB.execute(`...`, ...)
+
+  - id: lastlight-math-random-for-secret
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Math.random() feeding something named like a token, secret, key or id.
+      Ask whether this value is ever security-relevant.
+    patterns:
+      - pattern-inside: |
+          $NAME = ...
+      - pattern: Math.random()
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: (?i).*(token|secret|key|nonce|salt|password|session|otp).*
+
+  - id: lastlight-jwt-verification-weakened
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      JWT verification appears weakened or skipped. Ask which side enforces
+      expiry and signature, and quote the line that does it.
+    pattern-either:
+      - pattern: $JWT.decode($TOKEN, ...)
+      - pattern: $JWT.verify($TOKEN, $SECRET, {..., algorithms: ["none"], ...})
+      - pattern: $JWT.verify($TOKEN, $SECRET, {..., ignoreExpiration: true, ...})
+
+  - id: lastlight-cookie-protection-disabled
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      A cookie flag that protects the session is set to false. Ask what else
+      enforces the property this flag was carrying.
+    pattern-either:
+      - pattern: "{..., httpOnly: false, ...}"
+      - pattern: "{..., secure: false, ...}"
+
+  - id: lastlight-tls-verification-disabled
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      TLS certificate verification is disabled. Ask whether this reaches
+      production configuration.
+    pattern-either:
+      - pattern: "{..., rejectUnauthorized: false, ...}"
+      - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"

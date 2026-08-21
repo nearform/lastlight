@@ -229,6 +229,21 @@ Each of these has already cost someone a debugging session.
   exit 2 writes `coverage: "none"` and returns 0, survey phases carry
   `on_soft_failure: { retries: 1, then: complete }`, and the adjudicate gate has
   a floor. "Fail loud" means loud *in the artifact*. See §D12.
+- **`--never-fail` does not survive a hard crash, and §D12 depends on it.**
+  Measured on landing WP1: an *ordinary* failure (not a git repo) exits **0** and
+  writes the `coverage: "none"` envelope, exactly as designed. But `--never-fail`
+  is an **in-process try/catch**, so an OOM — reachable today by raising
+  `--max-files` on a large monorepo, and by any segfault in the `@ast-grep/napi`
+  native binary — kills V8 before the catch runs: **exit 134, no envelope**. That
+  is precisely the shape §D12 exists to prevent: the phase fails, the run fails,
+  `assessedHeadShaByWorkflow` is not written (SUCCEEDED runs only), and
+  `cron-review.yaml` re-dispatches every 30 minutes forever at 2–3× the cost of
+  the $1.30/hour incident. **So [WP3](03-seed-and-survey.md)'s phase must do the
+  catching in the SHELL** — `lastlight-facts all … || <write a fallback
+  envelope>` — rather than trusting the flag. A wrapper inside the crashing
+  process cannot be the guarantee. The default 6000-file ceiling degrades
+  gracefully and is what keeps this off the normal path; do not raise it without
+  the shell-level catch in place.
 - **Evals:** `bootstrapAssets()` must run before any `getWorkflow`/`runWorkflow`,
   and `drainSessions()` before `collectMetrics()` — otherwise cost silently
   reports 0.
@@ -255,6 +270,15 @@ Never done by a sub-agent unprompted:
    same reasoning as gold edits.
 7. **Any external claim about review quality** before WP9 has run. The eight-case
    set is a development instrument, not evidence of generality.
+8. **Adding `lastlight-code-facts` as a trusted publisher on npmjs.com**, before
+   the first Release that includes it. WP1 shipped it **published** rather than
+   `private: true` as the WP specified: `pnpm pack` rewrites `workspace:*` to a
+   concrete version, so a published `lastlight` CLI cannot depend on an
+   unpublished package. It is wired into `publish.yml` ahead of `lastlight`, but
+   OIDC trusted publishing needs a **one-time human entry per package** — without
+   it that single package 404s and takes the Release with it. This is the first
+   new published package since the monorepo consolidation, so nothing else in the
+   pipeline has ever exercised the path.
 
 ## Definition of done, per work package
 

@@ -431,12 +431,40 @@ importers:
       cli-table3:
         specifier: ^0.6.5
         version: 0.6.5
+      lastlight-code-facts:
+        specifier: workspace:*
+        version: link:../code-facts
       lastlight-shared:
         specifier: workspace:*
         version: link:../shared
       lastlight-workflow-engine:
         specifier: workspace:*
         version: link:../workflow-engine
+    devDependencies:
+      '@types/node':
+        specifier: ^26.2.0
+        version: 26.2.0
+      tsx:
+        specifier: ^4.23.12
+        version: 4.23.12
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@26.2.0)(vite@8.2.1(@types/node@26.2.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12)(yaml@2.9.0))
+
+  packages/code-facts:
+    dependencies:
+      '@ast-grep/napi':
+        specifier: ^0.45.1
+        version: 0.45.1
+      ts-morph:
+        specifier: ^28.0.0
+        version: 28.0.0
+      zod:
+        specifier: ^4.3.6
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^26.2.0
@@ -503,6 +531,64 @@ packages:
     peerDependenciesMeta:
       zod:
         optional: true
+
+  '@ast-grep/napi-darwin-arm64@0.45.1':
+    resolution: {integrity: sha512-CthYcA0H3z5A2EHKH4rhSuFzpYUtxqUMnohmejxtMS6wiAgriKhOCopxN8XKclspYMtQyX2GC/PbvcU3dIbQHw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@ast-grep/napi-darwin-x64@0.45.1':
+    resolution: {integrity: sha512-PhlXMDEEH5fMjXjYcrbeNgGqrojj4zN8C7eMQC6M4pVkuW74uPhrblD4KUbNunp5I2LkWCdKOs36jhBaZe1iPw==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@ast-grep/napi-linux-arm64-gnu@0.45.1':
+    resolution: {integrity: sha512-XScjs95/SrsV6kLl9MnF2qbqwKU79bcBA3JHi6xUu+hf0uZ0lc6MsZ595cEy5yw9PYRhgqwrT3wta9p4qU4jpg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@ast-grep/napi-linux-arm64-musl@0.45.1':
+    resolution: {integrity: sha512-qjH5CN5KIUdJW2dHfp8W57QsP6H0mA6E/rboKEzAxw6Ant1q2ZKqE3bLHUZMDoZXOBGdCODSZm0bTDcctiP49g==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@ast-grep/napi-linux-x64-gnu@0.45.1':
+    resolution: {integrity: sha512-nPP0y5EnehCgmYqvVDKSvH4vHbEFdAi8L+Kq2Sz94vK32yv4eOWf9vWhgoPscWpw76GWuwhpDvME8SZARnS3DQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
+  '@ast-grep/napi-linux-x64-musl@0.45.1':
+    resolution: {integrity: sha512-sg50LKH7TskWd/boWVFp9gwKc3Jd8sg0f8P6T2VQemX/EOj+OFaMJ2+y7Ok17WI/dODkrZgAPUwq7RAvMzLtqg==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
+  '@ast-grep/napi-win32-arm64-msvc@0.45.1':
+    resolution: {integrity: sha512-wnTmD34OD9bUpdBVTb58P0y+YPb/2C2g07zj96LSk5R4pdcEMrCFsrWZlaNwtEV4q7L9BfLgrxq3MBGI8c6doA==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@ast-grep/napi-win32-ia32-msvc@0.45.1':
+    resolution: {integrity: sha512-gRyJwRPY1mWRtnJ6AMncV2pNU+B2indjLCb9z/+aZrUN5u/gOxYryEzvRatyC9rVUMeQGJD+k0htpsqIwgXVbA==}
+    engines: {node: '>= 10'}
+    cpu: [ia32]
+    os: [win32]
+
+  '@ast-grep/napi-win32-x64-msvc@0.45.1':
+    resolution: {integrity: sha512-mzfMmCO7tSNks+NGkGkSnDBKxBjHoOLAMJt2IbAkMYATxHC0RqfBoN7Qtd02VGhHWEfwWLPv/wU6MrvweZ3jdQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [win32]
+
+  '@ast-grep/napi@0.45.1':
+    resolution: {integrity: sha512-4cmGQEHoP9GLHEhGvd1vgSzO3Y6KF7FczDk4+q/VfXV9/9sNxNVgNHC8t3BglhIADDcoHrCMc9aw4lHG+M240A==}
+    engines: {node: '>= 10'}
 
   '@astrojs/check@0.9.10':
     resolution: {integrity: sha512-zgx/UQMozdjOa3bOxjgeCFdtpE3c9rRX6xHwa+2QXvy8z8Akifu2AtubHyv/zzC2znO8dl8fFWL4K+Ba9kS8HQ==}
@@ -3583,6 +3669,9 @@ packages:
     peerDependencies:
       react: ^18 || ^19
 
+  '@ts-morph/common@0.29.0':
+    resolution: {integrity: sha512-35oUmphHbJvQ/+UTwFNme/t2p3FoKiGJ5auTjjpNTop2dyREspirjMy82PLSC1pnDJ8ah1GU98hwpVt64YXQsg==}
+
   '@turbo/darwin-64@2.10.10':
     resolution: {integrity: sha512-gFDD+wRP5hWxBRghGyEbjpbLOY7aIU/wvsnKdMM7odQcp/wHMrnI83p0FyxxMRZnFH9ZD+S59MvcpOC5b+nrCA==}
     cpu: [x64]
@@ -4350,6 +4439,9 @@ packages:
       '@codemirror/state': ^6.0.0
       '@codemirror/view': ^6.0.0
       '@lezer/highlight': ^1.0.0
+
+  code-block-writer@13.0.3:
+    resolution: {integrity: sha512-Oofo0pq3IKnsFtuHqSF7TqBfr71aeyZDVJ0HpmqB7FBM2qEigL0iPONSCZSO9pE9dZTAxANe5XHG9Uy0YMv8cg==}
 
   codemirror@6.0.2:
     resolution: {integrity: sha512-VhydHotNW5w1UGK0Qj96BwSk/Zqbp9WbnyK2W/eVMv4QyF41INRGpjUhFJY7/uDNuudSc33a/PKr4iDqRduvHw==}
@@ -6475,6 +6567,9 @@ packages:
   ts-algebra@2.0.0:
     resolution: {integrity: sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==}
 
+  ts-morph@28.0.0:
+    resolution: {integrity: sha512-Wp3tnZ2bzwxyTZMtgWVzXDfm7lB1Drz+y9DmmYH/L702PQhPyVrp3pkou3yIz4qjS14GY9kcpmLiOOMvl8oG1g==}
+
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
@@ -7083,6 +7178,45 @@ snapshots:
       json-schema-to-ts: 3.1.1
     optionalDependencies:
       zod: 4.4.3
+
+  '@ast-grep/napi-darwin-arm64@0.45.1':
+    optional: true
+
+  '@ast-grep/napi-darwin-x64@0.45.1':
+    optional: true
+
+  '@ast-grep/napi-linux-arm64-gnu@0.45.1':
+    optional: true
+
+  '@ast-grep/napi-linux-arm64-musl@0.45.1':
+    optional: true
+
+  '@ast-grep/napi-linux-x64-gnu@0.45.1':
+    optional: true
+
+  '@ast-grep/napi-linux-x64-musl@0.45.1':
+    optional: true
+
+  '@ast-grep/napi-win32-arm64-msvc@0.45.1':
+    optional: true
+
+  '@ast-grep/napi-win32-ia32-msvc@0.45.1':
+    optional: true
+
+  '@ast-grep/napi-win32-x64-msvc@0.45.1':
+    optional: true
+
+  '@ast-grep/napi@0.45.1':
+    optionalDependencies:
+      '@ast-grep/napi-darwin-arm64': 0.45.1
+      '@ast-grep/napi-darwin-x64': 0.45.1
+      '@ast-grep/napi-linux-arm64-gnu': 0.45.1
+      '@ast-grep/napi-linux-arm64-musl': 0.45.1
+      '@ast-grep/napi-linux-x64-gnu': 0.45.1
+      '@ast-grep/napi-linux-x64-musl': 0.45.1
+      '@ast-grep/napi-win32-arm64-msvc': 0.45.1
+      '@ast-grep/napi-win32-ia32-msvc': 0.45.1
+      '@ast-grep/napi-win32-x64-msvc': 0.45.1
 
   '@astrojs/check@0.9.10(prettier@3.9.6)(typescript@7.0.2)':
     dependencies:
@@ -10328,6 +10462,12 @@ snapshots:
       '@tanstack/query-core': 5.101.4
       react: 19.2.8
 
+  '@ts-morph/common@0.29.0':
+    dependencies:
+      minimatch: 10.2.5
+      path-browserify: 1.0.1
+      tinyglobby: 0.2.17
+
   '@turbo/darwin-64@2.10.10':
     optional: true
 
@@ -11098,6 +11238,8 @@ snapshots:
       '@codemirror/state': 6.7.1
       '@codemirror/view': 6.43.9
       '@lezer/highlight': 1.2.3
+
+  code-block-writer@13.0.3: {}
 
   codemirror@6.0.2:
     dependencies:
@@ -13571,6 +13713,11 @@ snapshots:
   trough@2.2.0: {}
 
   ts-algebra@2.0.0: {}
+
+  ts-morph@28.0.0:
+    dependencies:
+      '@ts-morph/common': 0.29.0
+      code-block-writer: 13.0.3
 
   tslib@2.8.1: {}
 
