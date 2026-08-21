@@ -68,6 +68,53 @@ implementation.
 **The first model spend in this plan is the WP3 gate.** Everything before it is
 offline.
 
+## How to actually run a gate — do not use the global CLI
+
+**Established 2026-08-21, while wiring up [WP8](08-evals.md).** Every gate in
+this plan measures **unpublished** engine code, and the obvious way to run the
+eval silently measures the *published* one instead.
+
+`~/work/nearform-evals` runs the globally-installed `lastlight-evals@0.10.0`,
+which bundles `lastlight-core@0.26.0` from npm. Its own investigation notes
+record that the old `LASTLIGHT_CORE_DIR=~/work/lastlight` workaround is *"no
+longer needed"* — true for measuring the shipped baseline, and **exactly wrong
+for measuring this plan**. `LASTLIGHT_CORE_DIR` repoints only the **asset**
+roots (`workflows/`, `skills/`, `prompts/`, `config/`); `bootstrap.ts` says so
+explicitly, and *"the imported runner CODE still comes from
+`node_modules/lastlight-core`"*. New phases, new context fields (`prBody`), a
+changed `renderContext` — all engine code — would simply not exist in the run,
+and the arm would report that the new pipeline did nothing.
+
+So **run the harness from the monorepo**, where `apps/evals/node_modules/
+lastlight-core` is a workspace symlink to `apps/server` and both the assets and
+the code are the working tree:
+
+```bash
+# 1. Core is consumed as BUILT dist (`"./evals" → ./dist/evals-api.js`), so a
+#    stale dist measures stale code. Build first, every time.
+pnpm --filter lastlight-core build
+
+# 2. Run from apps/evals, pointing at the nearform-evals datasets + overlay, and
+#    write the scorecard beside the baseline so diff-runs.ts can reach both.
+cd apps/evals
+set -a; . ~/work/nearform-evals/.env; set +a       # ANTHROPIC_API_KEY et al
+LASTLIGHT_EVALS_OUT=~/work/nearform-evals/eval-results \
+npx tsx src/run.ts run pr-review \
+  --datasets ~/work/nearform-evals/evals/datasets \
+  --overlay  ~/work/nearform-evals/overlays/baseline \
+  --model anthropic/claude-sonnet-4-6
+```
+
+`--overlay` wires the asset overlay *and* the dataset overlay from one flag;
+`LASTLIGHT_EVALS_OUT` overrides the cwd-relative `eval-results/` default. Use
+`EVAL_INSTANCE=<exact-id>` for the cheap single-case iteration unit (~$1–2.5)
+and a full arm only for a gate (~$6–19).
+
+**The confirming check, before trusting any arm:** the scorecard's `meta.gitSha`
+is the monorepo working-tree SHA. If a gate's scorecard carries `8049410` — the
+`nearform-evals` SHA the baseline runs carry — it was produced by the global CLI
+against published core, and it measures nothing this plan built.
+
 ## Reaching production
 
 A sandbox-image change **cannot** reach prod via an overlay push. Per
