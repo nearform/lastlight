@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join } from "node:path";
 
 import type { InstanceResult } from "./schema.js";
+import type { CoreProvenance } from "./bootstrap.js";
 import { fLabel } from "./grade.js";
 import {
   boundaryMetrics,
@@ -57,6 +58,11 @@ export interface RunMeta {
   runs: number;
   /** Short git SHA of the code/workflows under test, when in a repo. */
   gitSha?: string;
+  /** Which `lastlight-core` produced this run — a working tree or the published
+   * package. Stamped because `gitSha` is the CWD's repo (often the evals
+   * workspace, not the monorepo), so it does not answer this on its own. See
+   * {@link CoreProvenance}. */
+  core?: CoreProvenance;
   /** Display labels keyed by model id (so the dashboard reads them off disk). */
   labels?: Record<string, string>;
   /** While the run is in flight: the dashboard polls + shows a "live" badge.

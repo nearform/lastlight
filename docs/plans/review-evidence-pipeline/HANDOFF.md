@@ -85,35 +85,61 @@ explicitly, and *"the imported runner CODE still comes from
 changed `renderContext` — all engine code — would simply not exist in the run,
 and the arm would report that the new pipeline did nothing.
 
-So **run the harness from the monorepo**, where `apps/evals/node_modules/
-lastlight-core` is a workspace symlink to `apps/server` and both the assets and
-the code are the working tree:
+**Version was not a discriminator, so we made it one.** Both cores reported
+`0.26.0` — same string, different files. `lastlight-core` in the working tree is
+therefore bumped to **`0.27.0-dev`** for the duration of this plan, so the
+harness banner distinguishes them at the point of use:
+
+```
+lastlight-evals 0.10.0 (lastlight-core 0.27.0-dev)   ← working tree
+lastlight-evals 0.10.0 (lastlight-core 0.26.0)       ← published
+```
+
+Roll it into the real version when the Release is cut.
+
+So run the **workspace** harness, whose `node_modules/lastlight-core` is a
+symlink to `apps/server` — but keep the cwd at `~/work/nearform-evals`, so
+`.env`, `./evals/datasets` and `./eval-results` still resolve exactly as they did
+for the baseline. Only the build behind the CLI changes:
 
 ```bash
 # 1. Core is consumed as BUILT dist (`"./evals" → ./dist/evals-api.js`), so a
-#    stale dist measures stale code. Build first, every time.
+#    stale dist measures stale code. Build first, EVERY time — this is the trap
+#    that survives every entry point below.
 pnpm --filter lastlight-core build
 
-# 2. Run from apps/evals, pointing at the nearform-evals datasets + overlay, and
-#    write the scorecard beside the baseline so diff-runs.ts can reach both.
-cd apps/evals
-set -a; . ~/work/nearform-evals/.env; set +a       # ANTHROPIC_API_KEY et al
-LASTLIGHT_EVALS_OUT=~/work/nearform-evals/eval-results \
-npx tsx src/run.ts run pr-review \
-  --datasets ~/work/nearform-evals/evals/datasets \
-  --overlay  ~/work/nearform-evals/overlays/baseline \
-  --model anthropic/claude-sonnet-4-6
+# 2. Run from the evals workspace, with the monorepo's entry point.
+cd ~/work/nearform-evals
+npx tsx ~/work/lastlight/apps/evals/src/run.ts run pr-review \
+  --overlay overlays/baseline --model anthropic/claude-sonnet-4-6
 ```
 
-`--overlay` wires the asset overlay *and* the dataset overlay from one flag;
-`LASTLIGHT_EVALS_OUT` overrides the cwd-relative `eval-results/` default. Use
-`EVAL_INSTANCE=<exact-id>` for the cheap single-case iteration unit (~$1–2.5)
+`tsx` runs the harness from source, so only core needs building. For the built
+bin instead, `pnpm --filter lastlight-evals build` then
+`node ~/work/lastlight/apps/evals/dist/run.js …`.
+
+Use `EVAL_INSTANCE=<exact-id>` for the cheap single-case iteration unit (~$1–2.5)
 and a full arm only for a gate (~$6–19).
 
-**The confirming check, before trusting any arm:** the scorecard's `meta.gitSha`
-is the monorepo working-tree SHA. If a gate's scorecard carries `8049410` — the
-`nearform-evals` SHA the baseline runs carry — it was produced by the global CLI
-against published core, and it measures nothing this plan built.
+**If you prefer the global `lastlight-evals` command**, link it — do not install
+it. `npm i <dir>` and a packed tarball both have to resolve
+`lastlight-core: workspace:*`: npm does not understand the `workspace:`
+protocol, and `pnpm pack` rewrites it to a real version, which fetches core from
+npm and reintroduces the bug this section exists to prevent. A link symlinks
+rather than copies, so the workspace `node_modules` (and its core symlink) are
+preserved. Remember to unlink afterwards — a globally-linked working tree that
+outlives the measurement is its own silent trap.
+
+**Two checks, one live and one after the fact.** The run logs `core → <version>
+(working tree | published package) <path>` before it does anything. And every
+scorecard now stamps `meta.core` with the same triple, so the question *"which
+core produced this run?"* stays answerable weeks later — once `0.27.0` is
+actually published, the version alone stops discriminating, and
+`core.published: false` is what still says so. Same principle as §D3's toolchain
+stamp: provenance is recorded, not remembered.
+
+Note `meta.gitSha` does **not** answer this — it is the SHA of the *cwd's* repo,
+which for these runs is `~/work/nearform-evals`, not the monorepo.
 
 ## Reaching production
 

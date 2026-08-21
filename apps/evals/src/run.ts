@@ -42,7 +42,7 @@ import {
   type MartianSidecar,
 } from "./report.js";
 import type { SweBenchInstance, InstanceResult, TrialSession } from "./schema.js";
-import { bootstrapAssets } from "./bootstrap.js";
+import { bootstrapAssets, describeCore } from "./bootstrap.js";
 import { discoverTiers, loadInstances, workflowFor, type Tier } from "./discovery.js";
 import { builtinDatasetsRoot, tierResultsDir, makeRunId, gitShortSha, resultsRoot, dashboardDistRoot } from "./paths.js";
 import { startServer, type RunningServer } from "./serve.js";
@@ -276,6 +276,16 @@ async function runEval(): Promise<number> {
   const overlayDir: string | undefined = overlays[0];
   if (overlayDir && overlayDir === autoOverlay) p.log.info(`overlay → ${chalk.cyan("./instance")} ${chalk.dim("(auto-detected)")}`);
   const { builtInRoot } = bootstrapAssets({ overlayDir });
+
+  // Say WHICH core is about to run, at the top, every time. A published core and
+  // a working tree can report the same version, so an arm measuring unreleased
+  // engine work would otherwise look identical to one that never loaded it —
+  // and every gate in the review-evidence-pipeline plan is a delta against a
+  // stored baseline, where that reads as a real negative result.
+  const core = describeCore(builtInRoot);
+  p.log.info(
+    `core → ${chalk.cyan(core.version)} ${core.published ? chalk.yellow("(published package)") : chalk.green("(working tree)")} ${chalk.dim(core.root)}`,
+  );
 
   // A user/overlay can ship its own model registry too: explicit --models-file
   // wins, else an overlay's `evals/models.json` if present, else the built-in.
@@ -653,6 +663,7 @@ async function runEval(): Promise<number> {
     runs,
     gitSha,
     labels,
+    core: describeCore(builtInRoot),
   });
 
   // pr-review: load each tier's Martian leaderboard sidecar ONCE. Lets every
