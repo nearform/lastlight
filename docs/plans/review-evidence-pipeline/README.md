@@ -155,6 +155,7 @@ do — is [HANDOFF.md](HANDOFF.md).
 | 7 | [07-review-memory.md](07-review-memory.md) | Review-memory tables, the `record` phase, the mining cron | 6 |
 | 8 | [08-evals.md](08-evals.md) | Micro-recall, SNR, utility metrics; the measurement protocol | — |
 | 9 | [09-external-validation.md](09-external-validation.md) | **Mandatory** external-validation round before any general claim | 6 |
+| 10 | [11-eval-sandbox.md](11-eval-sandbox.md) | Run the evals **inside the production sandbox image** — removes §D3's "third deviation" and makes the `security` family measurable at all | — |
 
 WP5 and WP8 are independent of the chain. **WP8 goes first** — it is the
 instrument every other gate is read on, it costs no model spend, and its first
