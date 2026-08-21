@@ -14,6 +14,15 @@ import { join } from "node:path";
 
 import type { InstanceResult } from "./schema.js";
 import { fLabel } from "./grade.js";
+import {
+  boundaryMetrics,
+  DETECTION_FLOOR_MICRO_RECALL,
+  familyFunnels,
+  microReview,
+  type BoundaryMetrics,
+  type FamilyFunnel,
+  type MicroReview,
+} from "./review-metrics.js";
 
 /** A case still running / queued (live runs only — surfaced in the dashboard). */
 export interface PendingCase {
@@ -164,6 +173,23 @@ export interface ModelSummary {
   avgFbeta: number;
   /** The β the graded cases used (F1 by default). Undefined when nothing graded. */
   reviewBeta?: number;
+  /**
+   * Micro-aggregated review metrics — **the headline for recall-first work**.
+   *
+   * The `avg*` fields above are means of per-case ratios, which weight a 1-gold
+   * case the same as a 6-gold one and hand a free 1.00 to a case with no gold at
+   * all. `micro` sums the counts first and divides once. Both are reported: the
+   * Martian leaderboard comparison needs the F1 mean, and steering this work
+   * needs micro-recall + SNR. Absent when nothing graded.
+   */
+  micro?: MicroReview;
+  /** Internal recall vs. posted vs. inline — the attention boundary WP6
+   * introduces. Absent for an arm that emits no evidence packet. */
+  boundaries?: BoundaryMetrics;
+  /** Per-family funnel (obligations → hypotheses → posted → matched), so a
+   * measurement says WHICH kind of reasoning improved. Absent for an arm that
+   * emits no evidence packet. */
+  families?: FamilyFunnel[];
   avgInputTokens: number;
   avgCachedTokens: number;
   avgOutputTokens: number;
@@ -247,6 +273,11 @@ export function aggregateTrials(trials: InstanceResult[]): InstanceResult {
       falsePositives: rep.review!.falsePositives,
       falseNegatives: rep.review!.falseNegatives,
       trace: rep.review!.trace,
+      // Pipeline telemetry comes from the SAME representative trial as the
+      // FP/FN lists and the trace, so the mechanism counts and the findings they
+      // explain always describe one run. Averaging them would produce a funnel
+      // no single trial ever had.
+      pipeline: rep.review!.pipeline,
     };
     out.reviewTrials = rev.length;
   }
@@ -281,6 +312,9 @@ export function summarizeModels(results: InstanceResult[]): ModelSummary[] {
       avgRecall: avg(review.map((r) => r.review!.recall)),
       avgFbeta: avg(review.map((r) => r.review!.fbeta)),
       reviewBeta: review[0]?.review!.beta,
+      micro: review.length ? microReview(list) : undefined,
+      boundaries: boundaryMetrics(list),
+      families: familyFunnels(list),
       avgInputTokens: avg(list.map((r) => r.inputTokens)),
       avgCachedTokens: avg(list.map((r) => r.cachedTokens)),
       avgOutputTokens: avg(list.map((r) => r.outputTokens)),
@@ -373,16 +407,18 @@ export function computeMartianRanking(
 }
 
 export function renderTable(card: Scorecard, labels: Record<string, string> = {}): string {
-  // Show the pr-review columns (prec/rec/F-beta) only when some run graded a
-  // review — otherwise keep the table lean for triage/code-fix. The F-beta column
-  // is labelled by the β the run used (F1 by default).
+  // Show the pr-review columns only when some run graded a review — otherwise
+  // keep the table lean for triage/code-fix. The F-beta column is labelled by the
+  // β the run used (F1 by default). `μrec` is micro-recall — matched ÷ gold over
+  // the whole arm — and it sits LEFT of the per-case means because it is the
+  // headline; `SNR` is the over-generation guardrail that replaces precision.
   const hasReview = card.models.some((m) => m.reviewTotal > 0);
   const fCol = fLabel(card.models.find((m) => m.reviewBeta !== undefined)?.reviewBeta ?? 1);
   const header = [
     "model",
     "code-fix",
     "behavioral",
-    ...(hasReview ? ["prec", "rec", fCol] : []),
+    ...(hasReview ? ["μrec", "SNR", "prec", "rec", fCol] : []),
     "in tok",
     "cached",
     "out tok",
@@ -396,6 +432,8 @@ export function renderTable(card: Scorecard, labels: Record<string, string> = {}
     m.behavioralTotal ? `${m.behavioralOk}/${m.behavioralTotal}` : "—",
     ...(hasReview
       ? [
+          fmtRatio(m.micro?.microRecall),
+          fmtRatio(m.micro?.snr),
           m.reviewTotal ? m.avgPrecision.toFixed(2) : "—",
           m.reviewTotal ? m.avgRecall.toFixed(2) : "—",
           m.reviewTotal ? m.avgFbeta.toFixed(2) : "—",
@@ -408,7 +446,48 @@ export function renderTable(card: Scorecard, labels: Record<string, string> = {}
     fmtMs(m.p50DurationMs),
     String(m.errors),
   ]);
-  return table([header, ...rows]);
+  const out = [table([header, ...rows])];
+  if (hasReview) out.push(renderReviewNotes(card));
+  return out.filter(Boolean).join("\n");
+}
+
+/**
+ * The footnotes that stop a pr-review table being misread:
+ *
+ *  - the **empty-gold canary** (AC2). A case with no gold findings scores 1.00
+ *    for posting nothing, so it inflates every per-case mean while contributing
+ *    nothing to recall. Naming it is the difference between a precision canary
+ *    and a free point nobody noticed.
+ *  - the **detection floor**. On a 25-finding gold set, one extra hit is p=0.50 —
+ *    a coin flip. A reader who does not know that will read any movement as
+ *    progress.
+ *  - **not-measured families**, which must never be read as "did not convert".
+ */
+function renderReviewNotes(card: Scorecard): string {
+  const notes: string[] = [];
+
+  const canaries = [...new Set(card.models.flatMap((m) => m.micro?.emptyGoldCases ?? []))].sort();
+  if (canaries.length) {
+    notes.push(
+      `  ⚠ empty-gold case${canaries.length > 1 ? "s" : ""} (precision canary — scores 1.00 for posting nothing, ` +
+        `inflates prec/rec/F but NOT μrec): ${canaries.join(", ")}`,
+    );
+  }
+
+  const gold = card.models.find((m) => m.micro)?.micro?.gold ?? 0;
+  if (gold > 0 && gold < 100) {
+    notes.push(
+      `  ⚠ ${gold} gold findings: paired-McNemar detection floor ≈ ${DETECTION_FLOOR_MICRO_RECALL.toFixed(2)} μrec. ` +
+        `Below it, a μrec change is not distinguishable from chance — gate on mechanism metrics, not on this number.`,
+    );
+  }
+
+  const unmeasured = [...new Set(card.models.flatMap((m) => (m.families ?? []).filter((f) => f.notMeasured).map((f) => f.family)))];
+  if (unmeasured.length) {
+    notes.push(`  ⚠ families NOT MEASURED on this arm (a missing analyser, not a null result): ${unmeasured.join(", ")}`);
+  }
+
+  return notes.join("\n");
 }
 
 /**
@@ -599,6 +678,11 @@ export function buildIndex(resultsRoot: string, generatedAt: string): DashboardI
 
 function avg(xs: number[]): number {
   return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+}
+/** A metric that is legitimately UNDEFINED (no gold, no noise, nothing posted)
+ * renders as an em dash — never as 0, which would read as a measured failure. */
+export function fmtRatio(x: number | null | undefined): string {
+  return x === null || x === undefined || !Number.isFinite(x) ? "—" : x.toFixed(3);
 }
 /** Compact token count: <1000 verbatim, else "k" (one decimal under 10k).
  * Tolerates undefined/NaN (e.g. a scorecard.json predating cached-token

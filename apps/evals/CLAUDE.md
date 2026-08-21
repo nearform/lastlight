@@ -159,7 +159,9 @@ The release commit is conventionally just the two version-file lines
 | `src/judge.ts` | One-shot LLM client for `gradeReview` (pr-review only) — direct provider `fetch`, temp 0. `EVAL_JUDGE_MODEL` overrides `defaultJudgeModel()`. |
 | `scripts/import-martian.ts` | Import Martian's Code Review Bench offline set (50 PRs) into the `pr-review` tier (`gh`+`git`: resolves base/head, pins SHAs). |
 | `scripts/mine-failures.ts` | Read-only TRAIN-only failure-signature miner — clusters `review.falseNegatives`/`falsePositives` into ranked recall/precision signatures (the evidence bundle) for the `lastlight-evals-loop` skill's diagnose step. |
-| `scripts/diff-runs.ts` | Read-only two-scorecard F1 diff (per-case + arm delta) + train/held-out keep/revert verdict (opt-in `--symmetric` non-regressive gate; split-partitioned `REGRESSED(...)` line) — the measurement step of the `lastlight-evals-loop` skill. |
+| `scripts/diff-runs.ts` | Read-only two-scorecard F1 diff (per-case + arm delta) + train/held-out keep/revert verdict (opt-in `--symmetric` non-regressive gate; split-partitioned `REGRESSED(...)` line) — the measurement step of the `lastlight-evals-loop` skill. Also prints the MICRO section (micro-recall / SNR / paired McNemar) and refuses a verdict when the two runs graded different case sets. |
+| `scripts/rescore.ts` | Read-only (unless `--write`) offline re-score: back-fills micro-recall / SNR / the attention boundaries onto an EXISTING scorecard with no model spend, and refuses to write if a published number changed. |
+| `src/review-metrics.ts` | The recall-first metrics — micro-aggregation, SNR, the detection floor + exact McNemar, the attention boundaries, per-family attribution. Pure arithmetic over stored fields, which is what makes the back-fill possible. |
 | `src/report.ts` | Scorecard roll-up + JSON/JSONL artifacts + `buildIndex` (filesystem → the SPA's `/api/index`). |
 | `src/serve.ts` | Tiny dependency-free server: `/api/index` (fs scan), `/data/*` (raw artifacts), the SPA + fallback. |
 | `dashboard/` | The JSON-driven dashboard SPA (Vite + React + Tailwind/daisyUI + TanStack Query); ships prebuilt as `dashboard/dist`. |
@@ -401,6 +403,42 @@ the user-facing version):
   it read, extracted findings, the gold set, the finding↔gold pairing, raw
   replies). It rides in `InstanceResult.review.trace` → the dashboard's **judge**
   button (`JudgeModal`) renders it, so a score is inspectable, not a black box.
+#### Micro-recall + SNR (the recall-first headline)
+
+The per-case F1 mean is the right metric for the Martian leaderboard and the
+**wrong** one for steering recall work, so `src/review-metrics.ts` adds a second
+set of numbers alongside it (never instead of it). Both ride on `ModelSummary`.
+
+- **Micro-recall** = matched ÷ gold, summed over cases — not the mean of per-case
+  recalls. The mean weights a 1-gold case like a 6-gold one, and hands a free
+  1.00 to a case with **no gold at all**, which one of the eight `skillspro`
+  cases is. `renderTable` names every empty-gold case under the table as a
+  precision canary for exactly that reason.
+- **SNR** = matched ÷ (posted − matched) — true positives per false positive. It
+  replaces precision as the guardrail when the pipeline is deliberately tuned to
+  over-produce: it is the number that degrades when a recall intervention goes
+  wrong, and that degradation is invisible in F1. **Do not redefine it silently**
+  — every rung of the ablation ladder is read against it.
+- **The detection floor.** On a 25-finding gold set, one extra hit is McNemar
+  p = 0.50 — a coin flip; the floor is ≈ 0.24–0.28 micro-recall, at or above the
+  published frontier. `diff-runs.ts` prints the exact paired p beside every Δ so
+  nobody reads noise as progress, and `DETECTION_FLOOR_MICRO_RECALL` carries the
+  full table. **Gate on mechanism metrics** (obligations, discharge rate, the
+  per-family funnel — n in the hundreds), report micro-recall.
+- **Three boundaries, not one.** Once an arm emits an evidence packet, recall is
+  measured over everything *generated* (internal recall), precision/SNR over
+  everything *posted*, and attention cost over what went *inline*. An
+  intervention that finds more and shows less then reads as exactly that instead
+  of as a regression. All of it degrades to posted-only for an arm that emits no
+  packet (the shipped baseline) — `undefined`, never zeros.
+- **A missing analyser is not a null result.** A family whose scanner was absent
+  is reported `notMeasured`, never "did not convert".
+
+All of it is arithmetic over `posted`/`gold`/`matched`/`trace`, so
+`scripts/rescore.ts` back-fills these onto runs measured before they existed —
+with no re-run and no spend. It refuses to write if re-scoring changes a
+published number, because the comparator for every gate is an old run.
+
 - **Caveat to preserve in docs.** Martian's gold set is **incomplete** (their own
   methodology: it caps at human performance, so a real-but-unlisted finding scores
   as a false positive → understates precision). That's *why* the default is F1,

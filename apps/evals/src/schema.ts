@@ -105,7 +105,41 @@ export interface GoldComment {
   line?: number;
   severity: "low" | "medium" | "high" | "critical";
   description: string;
+  /**
+   * Bug taxonomy for this gold finding — the class of reasoning needed to catch
+   * it. Curated per dataset, never inferred.
+   *
+   * Without it a recall improvement cannot be **attributed to a mechanism**:
+   * "recall went from 1/25 to 4/25" says nothing about whether the cross-file
+   * machinery worked, whereas "all three new hits are `cross-file`" does. Purely
+   * additive metadata — it never affects grading, only how results are grouped.
+   */
+  class?: GoldClass;
 }
+
+/** The bug-taxonomy classes a {@link GoldComment} may be tagged with. Roughly
+ * ordered by the analysis depth needed to find one. */
+export const GOLD_CLASSES = [
+  /** Wrong inside a single function, visible in the hunk. */
+  "local",
+  /** Needs the caller/callee of a changed function, same file. */
+  "cross-function",
+  /** Needs a consumer in a file the diff does not touch. */
+  "cross-file",
+  /** Depends on lifecycle, caching, ordering or invalidation over time. */
+  "stateful",
+  /** Races, re-entrancy, parallel execution. */
+  "concurrency",
+  /** Migration, serialization, schema or data-shape correctness. */
+  "data",
+  /** Authn/authz, injection, secrets, attacker-controlled input. */
+  "security",
+  /** Complexity, allocation, N+1, unbounded work. */
+  "performance",
+  /** The change does not do what the issue/PR body asked. */
+  "specification",
+] as const;
+export type GoldClass = (typeof GOLD_CLASSES)[number];
 
 /** Assertions on the GitHub mutations the workflow performed (recorded by the
  * fake server). Every field is optional — only the ones present are checked. */
@@ -270,6 +304,107 @@ export interface TrialSession {
   phases: PhaseSession[];
 }
 
+/**
+ * The posted review scored against the gold set via LLM judge. `posted` =
+ * distinct findings the agent raised, `gold` = golden comments, `matched` =
+ * findings that matched a gold comment. `fbeta` is the F-beta at `beta` — β=1
+ * (F1) by default, matching Martian's leaderboard; `EVAL_F_BETA` reweights
+ * (β=0.5 → precision 2×).
+ *
+ * These per-case counts are what the arm-level micro metrics
+ * (`./review-metrics.ts`) aggregate, which is why an existing scorecard can be
+ * re-scored offline with no model spend.
+ */
+export interface ReviewGradeResult {
+  precision: number;
+  recall: number;
+  fbeta: number;
+  beta: number;
+  posted: number;
+  gold: number;
+  matched: number;
+  /** Findings the agent raised that matched no gold comment. */
+  falsePositives: { description: string; file?: string }[];
+  /** Gold comments the agent missed. */
+  falseNegatives: { description: string; file?: string; severity: string }[];
+  /** The judge's inspectable working (dashboard "judge" button): what it read,
+   * the findings it distilled, the gold set, the finding↔gold pairing, and its
+   * raw replies. Absent when the judge never ran. */
+  trace?: {
+    judgeModel: string;
+    reviewText: string;
+    findings: { description: string; file?: string; matchedGold: number | null }[];
+    gold: { description: string; severity: string; matchedFinding: number | null }[];
+    rawExtract?: string;
+    rawMatch?: string;
+    /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
+    usedDiff?: boolean;
+  };
+  /** What the analysis pipeline did to produce this review, when the arm runs
+   * one. Absent for the shipped two-phase reviewer — every metric that reads it
+   * degrades to posted-only rather than reporting zeros. */
+  pipeline?: ReviewPipelineStats;
+}
+
+/**
+ * The evidence-pipeline telemetry one case emitted — the mechanism metrics that
+ * WP3's and WP4's gates are actually read on.
+ *
+ * This matters because micro-recall on 25 gold findings **cannot** detect an
+ * improvement short of frontier performance (see `DETECTION_FLOOR_MICRO_RECALL`
+ * in `./review-metrics.ts`), whereas obligations generated, discharge rate and
+ * the per-family funnel have an n in the hundreds. Every field is optional: an
+ * arm reports what it has, and a consumer must distinguish "absent" from "zero".
+ */
+export interface ReviewPipelineStats {
+  /** Obligations the seeder emitted, and how many it dropped (with reasons) —
+   * a silently truncated list is the failure locked decision 6 exists to
+   * prevent. */
+  obligations?: number;
+  obligationsDropped?: { reason: string; count: number }[];
+  /** Hypotheses the survey phases produced across all families. */
+  hypotheses?: number;
+  /** Hypotheses that reached a recorded disposition. The conservation gate
+   * (§D11) requires every hypothesis to appear in `findings.json` exactly once,
+   * so `hypotheses - discharged` should be 0 — and when it is not, that is a
+   * measurement, not a crash. */
+  discharged?: number;
+  /** Findings by destination tier (`inline` / `body` / `internal`). */
+  tiers?: Partial<Record<"inline" | "body" | "internal", number>>;
+  /** Gold findings matched by ANYTHING generated, posted or not — the numerator
+   * of internal recall. */
+  internalMatched?: number;
+  /** Inline-only counts, for the attention boundary. */
+  inlinePosted?: number;
+  inlineMatched?: number;
+  /** Per-family funnel, keyed by obligation family. */
+  byFamily?: Record<string, ReviewFamilyStats>;
+  /** The oracle's own hit rate. If probes rarely settle anything, WP4 is not
+   * paying for itself. */
+  probes?: { attempted: number; succeeded: number; reproduced: number; refuted: number };
+  /** The facts envelope's own verdict on whether analysis could run at all.
+   * `"none"` is a recorded fact, not a failed phase (§D12). */
+  coverage?: "full" | "degraded" | "none";
+  /** Extractors that could not run, and why — an empty result and an unavailable
+   * analyser must never be indistinguishable. */
+  degraded?: string[];
+  /** Resolved tool versions, stamped so every scorecard records which toolchain
+   * produced it (§D3). Silent version drift between the host that measured a
+   * rung and the image that ships it is otherwise undetectable. */
+  toolchain?: Record<string, string>;
+}
+
+/** One obligation family's funnel on one case. */
+export interface ReviewFamilyStats {
+  obligations?: number;
+  hypotheses?: number;
+  posted?: number;
+  matched?: number;
+  /** The family could not be measured here (e.g. `security` with no Opengrep on
+   * PATH). Reported as "not measured", never as "did not convert". */
+  notMeasured?: boolean;
+}
+
 export interface InstanceResult {
   instance_id: string;
   /** The run arm's axis label: a model id in `models` runs, the config/overlay
@@ -293,37 +428,8 @@ export interface InstanceResult {
    * touching no GitHub state, so `behavioral` alone would score it green.
    */
   markers?: { ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] };
-  /** PR-review grade (pr-review tier): the posted review scored against the gold
-   * set via LLM judge. `posted` = distinct findings the agent raised, `gold` =
-   * golden comments, `matched` = findings that matched a gold comment. `fbeta` is
-   * the F-beta at `beta` — β=1 (F1) by default, matching Martian's leaderboard;
-   * `EVAL_F_BETA` reweights (β=0.5 → precision 2×). */
-  review?: {
-    precision: number;
-    recall: number;
-    fbeta: number;
-    beta: number;
-    posted: number;
-    gold: number;
-    matched: number;
-    /** Findings the agent raised that matched no gold comment. */
-    falsePositives: { description: string; file?: string }[];
-    /** Gold comments the agent missed. */
-    falseNegatives: { description: string; file?: string; severity: string }[];
-    /** The judge's inspectable working (dashboard "judge" button): what it read,
-     * the findings it distilled, the gold set, the finding↔gold pairing, and its
-     * raw replies. Absent when the judge never ran. */
-    trace?: {
-      judgeModel: string;
-      reviewText: string;
-      findings: { description: string; file?: string; matchedGold: number | null }[];
-      gold: { description: string; severity: string; matchedFinding: number | null }[];
-      rawExtract?: string;
-      rawMatch?: string;
-      /** Whether the PR diff was fed to the judge (`--judge-with-diff`). */
-      usedDiff?: boolean;
-    };
-  };
+  /** PR-review grade (pr-review tier) — see {@link ReviewGradeResult}. */
+  review?: ReviewGradeResult;
   /** When `--runs N`: how many trials the mean review metrics aggregate. */
   reviewTrials?: number;
   /** When `--runs N` (N>1): how many non-errored trials this result aggregates,
